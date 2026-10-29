@@ -53,6 +53,35 @@ railway ssh --service grafana -- grep -c last_over_time \
   /etc/grafana/dashboards/passband-health.json
 ```
 
+## Draft PRs: CI runs when a PR is ready, not on every push
+
+Open every PR as a **draft**, and mark it ready for review only once it is
+done. `ci` (Rust) and `ci-passband` (Swift) skip draft PRs, and marking a PR
+ready starts a full run. This repo is private, so every CI minute is billed, and
+`ci-passband` runs on a macOS runner at 10x the Linux rate. A PR that pushes
+ten times while a draft costs one CI run instead of ten.
+
+That makes the draft stage your own responsibility to keep green:
+
+- **Run the checks yourself before marking a PR ready**, the same ones CI runs:
+  `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D
+  warnings`, and `cargo test --workspace` (or the changed crates' tests while
+  iterating, then the workspace once at the end). For client changes, run
+  `./passband/test.sh` where a Swift toolchain exists.
+- **Mark ready once, when the work is finished**, not as a way to get CI to
+  check work in progress. If CI then fails, fix it on the ready PR. Do not flip
+  it back to draft to dodge runs.
+- Pushes to `main` always run CI. Only PR runs are gated on draft state.
+- The checks the `main` ruleset requires are the two gate jobs, `ci-gate` and
+  `ci-passband-gate`. Their names must stay unique, because a ruleset matches a
+  check by job name alone, not by workflow. They always report, pass when the
+  real jobs passed or were correctly skipped, and fail otherwise. `deny`
+  (cargo-deny, `deny.toml`) runs with the Rust job: a new advisory or license
+  fails it, and an ignore needs a written reason.
+
+Human contributors can open non-draft PRs whenever they like; the rule exists
+for agents, which push often.
+
 ## Verifying against production
 
 Read state from the real services before believing a doc about them. Two

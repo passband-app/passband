@@ -13,15 +13,18 @@ pub mod error;
 pub mod features;
 pub mod gcal;
 pub mod gmail_budget;
+pub mod mail;
 pub mod mem;
 pub mod metrics;
 pub mod owner_clock;
 pub mod push;
+pub mod renotify;
 pub mod store;
 pub mod sync;
 pub mod text;
 pub mod timezone;
 pub mod tracking;
+pub mod translate;
 pub mod triage;
 pub mod types;
 

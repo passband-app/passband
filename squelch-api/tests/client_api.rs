@@ -1885,7 +1885,7 @@ async fn action_without_write_credential_is_403() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     let json = body_json(resp).await;
-    assert!(json["error"].as_str().unwrap().contains("--write"));
+    assert!(json["error"].as_str().unwrap().contains("squelchd auth"));
 }
 
 #[tokio::test]
@@ -8191,6 +8191,14 @@ async fn stats_advertise_drafts_v2() {
 }
 
 #[tokio::test]
+async fn stats_advertise_search_plain_order() {
+    let Harness { app, .. } = harness(|_, _| {});
+    let resp = app.oneshot(authed("GET", "/client/stats")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["search_plain_order"], true);
+}
+
+#[tokio::test]
 async fn a_forward_send_discards_the_forward_draft_it_consumed() {
     let (base, handle) = mock_gmail_seq(vec![
         (200, original_raw_response("<p>chart</p>")),
@@ -8703,7 +8711,7 @@ async fn forward_success_sends_a_new_conversation_carrying_the_original() {
     assert!(!mime.contains("References"), "{mime}");
     // The note, then the quoted block, in both alternatives. Read DECODED: a
     // forward's body parts ride quoted-printable, because what they carry is a
-    // stranger's mail (see gmail_write::qp_encode).
+    // stranger's mail (see write::mime::qp_encode).
     let (text, html) = forward_bodies(&mime);
     assert!(text.contains("worth a read"));
     assert_eq!(
@@ -9206,7 +9214,7 @@ impl CredentialStore for DeadCreds {
 async fn a_forward_whose_write_credential_is_dead_says_so_instead_of_blaming_gmail() {
     // The raw fetch runs on the WRITE token too, so a dead credential fails
     // inside it — before any send. Collapsing that into the fetch's 502 told the
-    // composer to blame Gmail when the fix is `squelchd auth --write`, which the
+    // composer to blame Gmail when the fix is `squelchd auth`, which the
     // client already knows how to say when it sees the 403.
     let (base, handle) = mock_gmail(0).await;
     let (state, store, acct) = state_with(|store, acct| {
@@ -9238,7 +9246,7 @@ async fn a_forward_whose_write_credential_is_dead_says_so_instead_of_blaming_gma
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     let json = body_json(resp).await;
     assert!(
-        json["error"].as_str().unwrap().contains("auth --write"),
+        json["error"].as_str().unwrap().contains("squelchd auth"),
         "the 403 names the fix: {json}"
     );
     handle.abort();
@@ -11089,6 +11097,103 @@ async fn search_fast_path_keeps_sent_mail_and_matching_diagnostics() {
     );
 }
 
+/// Plain ranked order: `include_sent` without `unfinished_first`. The owner's
+/// sent mail stays in the keyword corpus, done mail is NOT pushed behind
+/// unfinished mail, and offset paging walks every hit exactly once.
+#[tokio::test]
+async fn search_plain_order_keeps_sent_mail_without_status_groups() {
+    use squelch_core::types::AttentionStatus;
+    let Harness { app, .. } = harness(|store, acct| {
+        for (id, subject, done) in [
+            ("done-strict", "anjuna tickets", true),
+            ("open-partial", "tickets", false),
+            ("open-strict", "anjuna tickets", false),
+            ("done-partial", "tickets", true),
+        ] {
+            let id = store
+                .upsert_message(&msg(acct, id, id, subject, "Save your tickets below"))
+                .unwrap();
+            store
+                .set_triage(
+                    id,
+                    acct,
+                    50,
+                    Tier::Signal,
+                    Sensitivity::Normal,
+                    None,
+                    "",
+                    "",
+                    None,
+                )
+                .unwrap();
+            if done {
+                store
+                    .set_attention_status(acct, id, AttentionStatus::Done)
+                    .unwrap();
+            }
+        }
+        let mut sent = msg(
+            acct,
+            "sent-partial",
+            "sent-partial",
+            "tickets",
+            "Here are the tickets",
+        );
+        sent.is_sent = true;
+        store.upsert_message(&sent).unwrap();
+    });
+    let mut cursor = String::new();
+    let mut threads = Vec::new();
+    loop {
+        let uri = format!(
+            "/client/search?q=anjuna%20tickets&mode=keyword&include_sent=true&sort=best_match&limit=1{cursor}"
+        );
+        let response = app.clone().oneshot(authed("GET", &uri)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        for hit in json["items"].as_array().unwrap() {
+            threads.push(hit["thread_id"].as_str().unwrap().to_string());
+        }
+        match json["next_cursor"].as_str() {
+            Some(c) => {
+                assert!(!c.starts_with("recall:"), "keyword pages by offset");
+                cursor = format!("&cursor={c}");
+            }
+            None => break,
+        }
+        assert!(threads.len() <= 5);
+    }
+    assert_eq!(threads.len(), 5, "every hit served once: {threads:?}");
+    // Best match puts both strict hits first, done or not: no status groups.
+    let mut strict = threads[..2].to_vec();
+    strict.sort();
+    assert_eq!(strict, ["done-strict", "open-strict"], "{threads:?}");
+    assert!(
+        threads.contains(&"sent-partial".to_string()),
+        "the owner's sent mail stays in the plain-order corpus: {threads:?}"
+    );
+
+    // A filter-only listing in plain order keeps sent mail too.
+    let response = app
+        .clone()
+        .oneshot(authed(
+            "GET",
+            "/client/search?q=from:alice&mode=keyword&include_sent=true",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert!(
+        json["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hit| hit["thread_id"] == "sent-partial"),
+        "{json}"
+    );
+}
+
 // ---- compose attachments ----------------------------------------------------
 
 /// An authed upload: the bytes as the body, the metadata in the query and the
@@ -11980,6 +12085,106 @@ async fn grouped_recall_expands_without_repeating_hits_or_returning_done_early()
             27,
             "every recalled hit should be served in {mode}"
         );
+    }
+}
+
+/// Plain-order recall (`include_sent`, no `unfinished_first`) pages by the
+/// recall cursor, as grouped recall does: an offset into a pool that grows
+/// with the offset repeats and skips hits. Every hit is served once, the
+/// owner's sent mail among them, and done mail is NOT held back behind
+/// unfinished mail. A recall cursor without either flag is still refused.
+#[tokio::test]
+async fn plain_order_recall_pages_by_cursor_without_repeats_or_groups() {
+    use squelch_core::embed::StubEmbedder;
+    use squelch_core::types::AttentionStatus;
+    let store = SqliteStore::open_in_memory()
+        .unwrap()
+        .with_embedder(Arc::new(StubEmbedder::new(384)))
+        .unwrap();
+    let acct = store.ensure_account("me@example.com").unwrap();
+    let mut sent_id = 0;
+    for i in 0..27 {
+        let key = format!("recall-{i}");
+        let mut m = msg(acct, &key, &key, "anjuna tickets", "save tickets below");
+        m.is_sent = i == 4;
+        let id = store.upsert_message(&m).unwrap();
+        if i == 4 {
+            sent_id = id;
+        }
+        store
+            .set_triage(
+                id,
+                acct,
+                50,
+                Tier::Signal,
+                Sensitivity::Normal,
+                None,
+                "",
+                "",
+                None,
+            )
+            .unwrap();
+        if i % 3 == 0 {
+            store
+                .set_attention_status(acct, id, AttentionStatus::Done)
+                .unwrap();
+        }
+        let vector = store
+            .embedder()
+            .unwrap()
+            .embed("anjuna tickets save tickets below")
+            .unwrap();
+        store.upsert_message_vector(acct, id, &vector).unwrap();
+    }
+    let app = router(ApiState::new(Arc::new(store), acct, TOKEN));
+    for mode in ["hybrid", "semantic"] {
+        let mut cursor = String::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut order = Vec::new();
+        let mut last_cursor = None;
+        for _ in 0..12 {
+            let uri = format!(
+                "/client/search?q=anjuna%20tickets&mode={mode}&include_sent=true&limit=5{cursor}"
+            );
+            let response = app.clone().oneshot(authed("GET", &uri)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let page = body_json(response).await;
+            for item in page["items"].as_array().unwrap() {
+                assert!(
+                    seen.insert(item["id"].as_i64().unwrap()),
+                    "repeated hit in {mode}: {page}"
+                );
+                order.push(item["is_done"].as_bool().unwrap());
+            }
+            match page["next_cursor"].as_str() {
+                Some(next) => {
+                    assert!(next.starts_with("recall:"), "{mode}: {next}");
+                    last_cursor = Some(next.to_string());
+                    cursor = format!("&cursor={next}");
+                }
+                None => break,
+            }
+        }
+        assert_eq!(seen.len(), 27, "every recalled hit served in {mode}");
+        assert!(seen.contains(&sent_id), "sent mail is in the {mode} corpus");
+        let first_done = order.iter().position(|d| *d).unwrap();
+        assert!(
+            order[first_done..].iter().any(|d| !*d),
+            "{mode} held unfinished mail ahead of done mail: {order:?}"
+        );
+
+        // A caller sending neither flag still pages by offset, and is refused
+        // a recall cursor.
+        let c = last_cursor.expect("a 27-hit walk at 5 a page has a cursor");
+        let response = app
+            .clone()
+            .oneshot(authed(
+                "GET",
+                &format!("/client/search?q=anjuna%20tickets&mode={mode}&limit=5&cursor={c}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{mode}");
     }
 }
 
@@ -15409,4 +15614,195 @@ async fn json_gzips_when_asked_and_the_event_stream_never_does() {
         4096,
         "and arrives byte for byte"
     );
+}
+
+// --- GET /client/thread/{id} buys nothing; POST .../translate buys it -------
+
+#[tokio::test]
+async fn reading_a_thread_never_promotes_and_the_translate_post_does() {
+    let (state, store, acct) = common::state_with(|store, acct| {
+        let id = store
+            .upsert_message(&msg(acct, "g-fr", "t-fr", "Votre facture", "Bonjour"))
+            .unwrap();
+        store
+            .set_triage(
+                id,
+                acct,
+                40,
+                Tier::Signal,
+                Sensitivity::Normal,
+                None,
+                "",
+                "",
+                None,
+            )
+            .unwrap();
+        // An archive row: parked until somebody displays the thread.
+        store
+            .queue_translation(acct, id, "fr", true, chrono::Utc::now())
+            .unwrap();
+        // And an English neighbour, which carries no translation at all.
+        store
+            .upsert_message(&msg(acct, "g-en", "t-fr", "Re: Votre facture", "Thanks"))
+            .unwrap();
+    });
+    let poke = squelch_core::store::archive_surface::RefinePoke::new();
+    let app = router(state.with_refine_poke(poke.clone()));
+    let status_of = |store: &squelch_core::store::SqliteStore, id: i64| {
+        store.message_translations(acct, &[id]).unwrap()[0].status
+    };
+
+    // THE GET IS A READ, and the client prefetches through it: the row is
+    // served as `deferred` (a translation is available) and stays parked.
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/thread/t-fr"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let msgs = json["messages"].as_array().unwrap();
+    assert_eq!(msgs[0]["translation"]["status"], "deferred");
+    assert_eq!(msgs[0]["translation"]["source_lang"], "fr");
+    assert_eq!(msgs[0]["translation"]["source_language"], "French");
+    assert_eq!(msgs[0]["translation"]["content"], "");
+    assert_eq!(msgs[0]["translation"]["subject"], "");
+    assert!(
+        msgs[1].get("translation").is_none(),
+        "English mail has no key"
+    );
+    let id = msgs[0]["id"].as_i64().unwrap();
+    assert_eq!(
+        status_of(&store, id),
+        squelch_core::store::TranslationStatus::Deferred,
+        "reading spent nothing"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), poke.poked())
+            .await
+            .is_err(),
+        "a read does not wake the lane"
+    );
+
+    // THE POST is the reader displaying it: promoted, and the lane poked.
+    let resp = app
+        .clone()
+        .oneshot(authed("POST", "/client/thread/t-fr/translate"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["promoted"], 1);
+    tokio::time::timeout(std::time::Duration::from_millis(100), poke.poked())
+        .await
+        .expect("the refine lane was poked");
+    assert_eq!(
+        status_of(&store, id),
+        squelch_core::store::TranslationStatus::Pending
+    );
+
+    // Now the GET says translating.
+    let json = body_json(
+        app.clone()
+            .oneshot(authed("GET", "/client/thread/t-fr"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(json["messages"][0]["translation"]["status"], "pending");
+
+    // IDEMPOTENT: a second POST moves nothing and pokes nothing.
+    let resp = app
+        .clone()
+        .oneshot(authed("POST", "/client/thread/t-fr/translate"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["promoted"], 0);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), poke.poked())
+            .await
+            .is_err(),
+        "nothing moved, nothing poked"
+    );
+
+    // An unknown thread is a no-op, not an error.
+    let resp = app
+        .oneshot(authed("POST", "/client/thread/t-nope/translate"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["promoted"], 0);
+}
+
+#[tokio::test]
+async fn without_a_translator_nothing_promises_a_translation() {
+    // Translation off or no LLM: a queued row would never finish, so the
+    // reader is not told "Translating...", and the POST promotes nothing. A
+    // translation that already landed is still served.
+    let (state, store, acct) = common::state_with(|store, acct| {
+        let parked = store
+            .upsert_message(&msg(acct, "g-fr", "t-fr", "Votre facture", "Bonjour"))
+            .unwrap();
+        store
+            .queue_translation(acct, parked, "fr", true, chrono::Utc::now())
+            .unwrap();
+        let queued = store
+            .upsert_message(&msg(acct, "g-fr2", "t-fr", "Re: Votre facture", "Merci"))
+            .unwrap();
+        store
+            .queue_translation(acct, queued, "fr", false, chrono::Utc::now())
+            .unwrap();
+    });
+    let poke = squelch_core::store::archive_surface::RefinePoke::new();
+    let app = router(
+        state
+            .with_refine_poke(poke.clone())
+            .with_translate_active(false),
+    );
+    let json = body_json(
+        app.clone()
+            .oneshot(authed("GET", "/client/thread/t-fr"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let ids: Vec<i64> = json["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            assert!(m.get("translation").is_none(), "{m}");
+            m["id"].as_i64().unwrap()
+        })
+        .collect();
+    assert_eq!(ids.len(), 2);
+    let resp = app
+        .oneshot(authed("POST", "/client/thread/t-fr/translate"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["promoted"], 0);
+    let rows = store
+        .message_translations(acct, &ids)
+        .unwrap()
+        .into_iter()
+        .map(|t| t.status)
+        .collect::<Vec<_>>();
+    assert!(rows.contains(&squelch_core::store::TranslationStatus::Deferred));
+}
+
+#[tokio::test]
+async fn the_translate_post_needs_the_human_door_token() {
+    let (state, _store, _acct) = common::state_with(|_, _| {});
+    let resp = router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/client/thread/t-fr/translate")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }

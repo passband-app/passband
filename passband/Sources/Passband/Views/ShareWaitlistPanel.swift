@@ -88,14 +88,11 @@ struct ShareWaitlistPanel: View {
                 .textSelection(.enabled)
                 .padding(.vertical, Space.s2)
 
-            HStack(spacing: Space.s10) {
+            ModalButtons {
                 Button(copied ? "Copied" : "Copy link") { copy() }
                     .buttonStyle(.glass)
-                    .font(Typo.ui(12, weight: .medium))
                 Button("Open the waitlist") { openWaitlist() }
                     .buttonStyle(.glassProminent)
-                    .font(Typo.ui(12, weight: .semibold))
-                Spacer()
             }
         }
         .padding(Space.s20)

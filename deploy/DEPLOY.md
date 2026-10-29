@@ -128,7 +128,7 @@ fallbacks and log a one-line deprecation note to stderr — migrate off them.
 | `SQUELCH_CRED_BACKEND` | no | `keyring` (macOS) / `file` (elsewhere) | `keyring` (the macOS keychain, built on macOS only; refused elsewhere) or `file`. |
 | `SQUELCH_CREDENTIALS_PATH` | no | `~/.config/squelch/credentials.json` | Used only by the `file` backend. |
 | `SQUELCH_CLIENT_ID` / `SQUELCH_CLIENT_SECRET` | yes (OAuth) | — | Your GCP "Desktop app" OAuth client. |
-| `SQUELCH_RELAY_URL` | no | — | Base URL of your `squelch-relay`. Setting it is what SPAWNS the APNs pusher; unset, the daemon never talks to any relay. The read-tracking opens poller needs `SQUELCH_TRACK_URL` as well: with a relay and no tracking URL, the daemon pushes but never drains the relay's opens buffer (see `docs/TRACKING.md`). |
+| `SQUELCH_RELAY_URL` | no | — | Base URL of your `squelch-relay`. Setting it is what SPAWNS the APNs pusher; unset, the daemon never talks to any relay. The read-tracking opens poller needs `SQUELCH_TRACK_URL` as well, pointing at this same relay (same scheme, host and port): with a relay and no tracking URL, or a tracking URL somewhere else, the daemon pushes but never drains the relay's opens buffer (see `docs/TRACKING.md`). |
 | `SQUELCH_RELAY_TOKEN` | with a relay | — | Bearer the pusher presents to the relay — the value the relay validates as its own `SQUELCH_RELAY_AUTH_TOKEN`. Never logged. A self-hosted daemon needs that FULL token, because it also drains the read-tracking opens; the relay's push-only `SQUELCH_RELAY_PUSH_TOKEN` (what hosted tenants hold) pushes and gets a 401 from `/v1/opens`. |
 | `SQUELCH_RELAY_TOPIC` | no | relay's default | `apns-topic` (bundle id) override, forwarded verbatim; must be in the relay's allowlist. |
 | `SQUELCH_RELAY_APNS_ENV` | no | relay's default | `production` or `sandbox`. The FALLBACK only: each device registers the environment its own token was minted in (`sandbox` for Xcode and simulator builds, `production` for TestFlight and the App Store), and that always wins. This applies only to device rows that never declared one, typically from a client build older than the field. |
@@ -161,16 +161,16 @@ runs and no carrier API is contacted. See
 `squelchd auth --headless` binds a FIXED loopback port and prints a consent URL
 (plain `auth` uses an ephemeral port and expects a local browser); you forward
 that port from your laptop over SSH and complete consent in your local browser.
-The daemon needs BOTH credentials, stored in SEPARATE slots:
+One consent mints the Gmail credential and stores it in TWO SEPARATE slots:
 
-- **READ** (`gmail.readonly`) — used by the sync loop. Plain `auth`.
-- **WRITE** (`gmail.modify` + `gmail.send`) — used ONLY by human-door actions.
-  Stored in a distinct slot; sync/triage never touch it.
+- **READ** — used by the sync loop.
+- **WRITE** — used ONLY by human-door actions (archive, label, send). Sync and
+  triage never load it.
 
-`auth --write` mints BOTH, in two consent flows on the same forwarded port
-(write first, then read), so renewing the action credential can never leave sync
-running on a stale read token. On a fresh box one `auth --write` run is enough;
-plain `auth` is the read-only path.
+Both slots hold the same `gmail.modify` token, the only Gmail scope Passband
+asks for; what keeps the doors apart is which slot a code path can load. So one
+`squelchd auth` run is all a fresh box needs. `--write` is still accepted and
+changes nothing.
 
 No SSH access from the machine with the browser? `squelchd auth --export` on
 that machine and `--import` on the box move the credential over any copy-paste
@@ -179,7 +179,7 @@ channel instead — the walkthrough is in
 
 Run each as the `squelch` user so tokens land in the service's credentials file.
 
-### READ credential
+### The Gmail credential
 
 ```sh
 # On your laptop: forward the fixed port to the box.
@@ -193,24 +193,11 @@ sudo -u squelch --preserve-env=SQUELCH_CRED_BACKEND,SQUELCH_CREDENTIALS_PATH,SQU
 
 It prints a `https://accounts.google.com/...` URL. Open it in your LAPTOP
 browser; Google redirects to `http://127.0.0.1:8847/...`, which tunnels back to
-the box and completes the flow. You should see "Stored Read credentials ...".
+the box and completes the flow. It then offers the optional Google Calendar
+consent on the same port; answer no to skip it.
 
-### WRITE credential (and a fresh READ one)
-
-Repeat with `--write` in a fresh SSH session on the same port:
-
-```sh
-ssh -L 8847:127.0.0.1:8847 box
-sudo -u squelch env $(sudo cat /etc/squelch/env | grep -v '^#' | xargs) \
-  squelchd auth --write --headless --port 8847
-```
-
-This prints TWO consent URLs, one after the other — WRITE (1/2) then READ (2/2).
-Open each in your laptop browser as it appears; the second flow rebinds the same
-port, so the tunnel from the first still works.
-
-Both credentials now live in `/var/lib/squelch/credentials.json` in separate
-slots (`` and `#write`).
+The token now lives in `/var/lib/squelch/credentials.json` in its two separate
+slots, keyed `<account email>` (Read) and `<account email>#write` (Write).
 
 ---
 
@@ -374,8 +361,7 @@ sudo -u squelch env $(sudo cat /etc/squelch/env | grep -v '^#' | xargs) \
 ```
 
 It prints one `https://auth.passband.email/link?s=...` URL to open on any device,
-then polls until you finish consent. `--write` works the same way, two links in
-sequence.
+then polls until you finish consent.
 
 **Locally, before you push it anywhere**
 

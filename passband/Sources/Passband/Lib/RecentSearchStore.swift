@@ -21,30 +21,60 @@ final class RecentSearchStore {
     /// account. nil when there is no live account — nothing to read, nowhere to
     /// write, which is the Connect gate's state.
     private static let keyBase = "passband.search.recents"
-    private static var key: String? {
-        guard let id = AccountManager.shared.activeId else { return nil }
-        return AccountIndex.scopedKey(keyBase, id)
+    private static func key(for id: UUID?) -> String? {
+        id.map { AccountIndex.scopedKey(keyBase, $0) }
+    }
+
+    /// The account `queries` were read for. Writes go under ITS key, and only
+    /// while it is still the live account: an account switch commits the new
+    /// id before this store reloads, and a record in between would otherwise
+    /// write this account's ring under the next one's key.
+    /// Read by QuestionChats, which takes its account from here rather than
+    /// from the live id: the two must always describe the same mailbox.
+    private(set) var loadedFor: UUID?
+
+    /// The key to write under now, or nil when there is none: no live
+    /// account, or the ring in memory belongs to one that is no longer live.
+    private var writableKey: String? {
+        guard let id = AccountManager.shared.activeId, id == loadedFor else { return nil }
+        return Self.key(for: id)
     }
 
     /// Newest first. Read straight from views: @Observable means the empty
     /// state re-renders when a search is remembered under it.
     private(set) var queries: [String] = []
 
-    private init() { reload() }
+    /// The ring read back as searches and questions (`RecentEntry`), which is
+    /// what both shells draw.
+    var entries: [RecentEntry] { queries.map(RecentEntry.init(stored:)) }
+
+    /// The ring alone: QuestionChats prunes against this store, so touching
+    /// it from inside this one's first initialisation would recurse.
+    private init() {
+        loadedFor = AccountManager.shared.activeId
+        queries = Self.stored(for: loadedFor)
+    }
+
+    private static func stored(for id: UUID?) -> [String] {
+        key(for: id).flatMap { UserDefaults.standard.stringArray(forKey: $0) } ?? []
+    }
 
     /// Re-read for whatever account is live NOW. Called by the account switch
     /// AFTER the new id is committed, beside the other ledgers: this key is
     /// derived from that id, so reloading any earlier re-reads the account that
     /// just went away.
     func reload() {
-        queries = Self.key.flatMap { UserDefaults.standard.stringArray(forKey: $0) } ?? []
+        loadedFor = AccountManager.shared.activeId
+        queries = Self.stored(for: loadedFor)
+        // The chats are scoped the same way and change account with the ring.
+        QuestionChats.shared.reload()
     }
 
     /// Remember a query the reader has ACTED on. Callers pass the term the hits
     /// on screen were fetched for, never the live field text — see the panel's
     /// `remember()` and docs/SEARCH.md §4.2.
     func record(_ query: String) {
-        guard let key = Self.key else { return }
+        guard let key = writableKey else { return }
         let next = RecentSearchRing.adding(query, to: queries)
         // Nothing moved: the ring refused it, or it is already the newest.
         // Skipping the write keeps re-opening the same search from touching
@@ -52,6 +82,8 @@ final class RecentSearchStore {
         guard next != queries else { return }
         queries = next
         UserDefaults.standard.set(next, forKey: key)
+        // A question pushed off the end takes its saved chat with it.
+        QuestionChats.shared.prune()
     }
 
     /// Put a submitted search in the ring, which is the one rule both shells
@@ -67,13 +99,25 @@ final class RecentSearchStore {
         record(term)
     }
 
+    /// Put a question the agent was asked from the search field in the ring:
+    /// its FIRST message, the words the conversation began with. Called once
+    /// per conversation, when those words actually go to the agent; the
+    /// narrowings typed after it are the same question and are not lines.
+    func rememberQuestion(_ text: String) {
+        let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !words.isEmpty else { return }
+        record(RecentEntry(kind: .question, text: words).stored)
+    }
+
     /// Forget the lot. Search terms are the reader's own words about their own
     /// mail, so the list that keeps them has to have a way out that is not
     /// "delete the app" — the button is in the empty state's own header, beside
     /// what it clears.
     func clear() {
+        guard let key = writableKey else { return }
         queries = []
-        guard let key = Self.key else { return }
+        // The chats behind the questions are the same words and more.
+        QuestionChats.shared.clear()
         UserDefaults.standard.removeObject(forKey: key)
     }
 }

@@ -42,14 +42,58 @@ decision_enum!(ActionKind {
     Attend,
     Other
 });
+// `security_alert` is no longer offered to the model (agent-triage-v12 split
+// it into `account_change`, `app_grant` and `signin_receipt`); it stays so
+// stored decisions still deserialize.
 decision_enum!(AuthKind {
     Otp,
     PasswordReset,
     SignInLink,
     Verification,
     LoginAlert,
-    SecurityAlert
+    SecurityAlert,
+    AccountChange,
+    AppGrant,
+    SigninReceipt
 });
+impl AuthKind {
+    /// The one kind a client sees for a message, picked by priority across
+    /// `auth.kinds` (never `kinds[0]`). Codes and links the owner asked for
+    /// win, then setup, then the alerts, receipts last. Every place that
+    /// reads a sealed kind goes through this.
+    pub fn priority_pick(kinds: &[AuthKind]) -> Option<AuthKind> {
+        kinds.iter().copied().min_by_key(|kind| kind.priority())
+    }
+
+    fn priority(self) -> u8 {
+        match self {
+            AuthKind::Otp => 0,
+            AuthKind::SignInLink => 1,
+            AuthKind::PasswordReset => 2,
+            AuthKind::Verification => 3,
+            AuthKind::AccountChange => 4,
+            AuthKind::AppGrant => 5,
+            AuthKind::LoginAlert => 6,
+            AuthKind::SecurityAlert => 7,
+            AuthKind::SigninReceipt => 8,
+        }
+    }
+
+    /// The snake_case name stored in decision JSON.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthKind::Otp => "otp",
+            AuthKind::PasswordReset => "password_reset",
+            AuthKind::SignInLink => "sign_in_link",
+            AuthKind::Verification => "verification",
+            AuthKind::LoginAlert => "login_alert",
+            AuthKind::SecurityAlert => "security_alert",
+            AuthKind::AccountChange => "account_change",
+            AuthKind::AppGrant => "app_grant",
+            AuthKind::SigninReceipt => "signin_receipt",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct EvidenceRef {
@@ -61,10 +105,21 @@ pub struct EvidenceRef {
 pub struct AuthAssessment {
     pub kinds: Vec<AuthKind>,
     pub evidence: Vec<EvidenceRef>,
+    /// A takeover-class `account_change` (recovery email or phone, SIM or
+    /// number, 2FA off or moved, password, account email). Only meaningful
+    /// with `account_change`; validation normalizes it to false otherwise.
+    #[serde(default)]
+    pub critical: bool,
 }
 impl AuthAssessment {
     pub fn is_auth(&self) -> bool {
         !self.kinds.is_empty()
+    }
+    /// A takeover-class account change. `critical` is normalized at decision
+    /// time, and read through this so a stray flag beside another kind still
+    /// means nothing. `auth_fye_sql!` is the SQL form.
+    pub fn is_critical(&self) -> bool {
+        self.critical && self.kinds.contains(&AuthKind::AccountChange)
     }
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -80,6 +135,48 @@ pub struct SupportedTime {
     pub timezone: Option<String>,
     pub source_message_id: i64,
     pub interpreted_relative: bool,
+}
+/// What a [`SupportedTime`] value says, once read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatedTime {
+    /// A timestamp with an offset: one instant.
+    Instant(DateTime<Utc>),
+    /// A date and a time with NO offset: a local time, wherever the thing
+    /// happens. This is how the triage agent writes most timed events (the
+    /// zone name rides beside it in `timezone`), so a reader that only
+    /// understands offsets understands a quarter of them.
+    Local(chrono::NaiveDateTime),
+    /// A date with no time.
+    Day(chrono::NaiveDate),
+}
+
+impl SupportedTime {
+    /// Read `value`. THE ONE PARSER for a stated time: `ends` is validated
+    /// with it and smart clear reads every stored date with it, so the two
+    /// cannot disagree about what counts as a time. `None` for anything else
+    /// ("next Friday evening"), which a caller must treat as a time it cannot
+    /// read, never as no time at all.
+    pub fn stated(&self) -> Option<StatedTime> {
+        let value = self.value.trim();
+        if let Ok(at) = DateTime::parse_from_rfc3339(value) {
+            return Some(StatedTime::Instant(at.with_timezone(&Utc)));
+        }
+        // With a `T` between the date and the time, or a space: the same
+        // local time either way.
+        for format in [
+            "%Y-%m-%dT%H:%M:%S%.f",
+            "%Y-%m-%dT%H:%M",
+            "%Y-%m-%d %H:%M:%S%.f",
+            "%Y-%m-%d %H:%M",
+        ] {
+            if let Ok(local) = chrono::NaiveDateTime::parse_from_str(value, format) {
+                return Some(StatedTime::Local(local));
+            }
+        }
+        chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+            .ok()
+            .map(StatedTime::Day)
+    }
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AttentionFactors {
@@ -135,6 +232,16 @@ pub struct RelatedAttentionUpdate {
 pub struct RevisitRequest {
     pub at: DateTime<Utc>,
     pub reason: String,
+}
+/// The model's answer to a scheduled re-check: this message no longer needs
+/// anything from the owner. Only a `revisit:` job may apply it, and only past
+/// the store's rails (`store::sqlite::agent_triage::apply_done`); anywhere
+/// else it is recorded in the decision and ignored. `reason` is model-authored
+/// and untrusted: never logged, never put in a prompt.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DoneRequest {
+    pub reason: String,
+    pub evidence: Vec<EvidenceRef>,
 }
 
 decision_enum!(EventRecordKind {
@@ -255,6 +362,25 @@ impl RecordProposal {
         }
     }
 }
+impl MessageDecision {
+    /// Is this Reading message a PROMOTION rather than a piece to read? The
+    /// model's own `reading_kind` when it gave one. Decisions stored before
+    /// that field existed fall back to the kinds triage already gave them,
+    /// the same fallback the clients apply: content is editorial and not
+    /// promotional, so everything else is promotion only when it is
+    /// positively marked promotional. An older row with neither kind is
+    /// NEITHER here, which is the careful answer for a caller that clears
+    /// promotions.
+    pub fn is_reading_promotion(&self) -> bool {
+        match self.reading_kind {
+            Some(kind) => kind == ReadingKind::Promotion,
+            None => {
+                self.kinds.contains(&EmailKind::Promotional)
+                    && !self.kinds.contains(&EmailKind::Editorial)
+            }
+        }
+    }
+}
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MessageDecision {
     pub kinds: Vec<EmailKind>,
@@ -264,6 +390,12 @@ pub struct MessageDecision {
     /// client falls back to `kinds`.
     #[serde(default)]
     pub reading_kind: Option<ReadingKind>,
+    /// When the offer, sale or event a Reading message is about ENDS, and only
+    /// when the message itself says so. What lets smart clear clear an expired
+    /// promotion from a stored fact instead of a second model call. Defaults
+    /// for the reason `reading_kind` does: stored decisions predate it.
+    #[serde(default)]
+    pub ends: Option<SupportedTime>,
     pub summary: String,
     pub reason: String,
     pub auth: AuthAssessment,
@@ -274,11 +406,58 @@ pub struct MessageDecision {
     pub rule_exceptions: Vec<RuleException>,
     pub notification: NotificationAdvice,
     pub revisit: Option<RevisitRequest>,
+    /// Arrived after decisions were already stored, so it defaults (see
+    /// `reading_kind`).
+    #[serde(default)]
+    pub done: Option<DoneRequest>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One kind per message, by priority, never `kinds[0]`.
+    #[test]
+    fn the_client_kind_is_the_priority_pick() {
+        use AuthKind::*;
+        let order = [
+            Otp,
+            SignInLink,
+            PasswordReset,
+            Verification,
+            AccountChange,
+            AppGrant,
+            LoginAlert,
+            SecurityAlert,
+            SigninReceipt,
+        ];
+        for (i, &high) in order.iter().enumerate() {
+            for &low in &order[i + 1..] {
+                assert_eq!(AuthKind::priority_pick(&[low, high]), Some(high));
+                assert_eq!(AuthKind::priority_pick(&[high, low]), Some(high));
+            }
+        }
+        assert_eq!(AuthKind::priority_pick(&[]), None);
+        for kind in order {
+            assert_eq!(
+                serde_json::to_value(kind).unwrap(),
+                serde_json::json!(kind.as_str())
+            );
+        }
+    }
+
+    /// Stored v11 decisions carry `security_alert` and no `critical`.
+    #[test]
+    fn a_v11_auth_assessment_still_deserializes() {
+        let stored: AuthAssessment = serde_json::from_value(serde_json::json!({
+            "kinds": ["security_alert"],
+            "evidence": [{"message_id": 7, "location": "body"}],
+        }))
+        .unwrap();
+        assert_eq!(stored.kinds, vec![AuthKind::SecurityAlert]);
+        assert!(!stored.critical);
+        assert!(!stored.is_critical());
+    }
 
     /// Reconcile re-reads every stored decision_json, so an `event` record
     /// written before the calendar fields existed must still deserialize, with
@@ -318,6 +497,16 @@ mod tests {
         assert!(identity_refs.is_empty());
         assert_eq!(likelihood, None);
         assert_eq!(evidence.len(), 1);
+    }
+
+    /// Reconcile re-reads every stored decision_json, so a decision written
+    /// before `done` existed must still deserialize, with no done.
+    #[test]
+    fn a_decision_without_done_still_deserializes() {
+        let mut old = serde_json::to_value(MessageDecision::default()).unwrap();
+        old.as_object_mut().unwrap().remove("done").unwrap();
+        let decision: MessageDecision = serde_json::from_value(old).unwrap();
+        assert_eq!(decision.done, None);
     }
 
     #[test]

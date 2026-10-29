@@ -623,9 +623,8 @@ mod keychain {
 const KEYRING_UNAVAILABLE: &str = "the keyring credential backend is built for macOS only (the \
      keychain); on this platform set SQUELCH_CRED_BACKEND=file (or, with that variable unset, \
      credential_backend = \"file\" in the config file) and consent again, since tokens an \
-     earlier build kept in the OS keyring are not read by this one: `squelchd auth` (or \
-     `squelchd auth --write` if you had granted sending), then `squelchd auth --calendar` if \
-     you had granted calendar";
+     earlier build kept in the OS keyring are not read by this one: `squelchd auth`, then \
+     `squelchd auth --calendar` if you had granted calendar";
 
 /// The keyring entry for one slot, in the OS keyring: the one lookup of the
 /// default store `Entry::new` makes, and the installer only when it finds

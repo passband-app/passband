@@ -97,7 +97,7 @@ struct GroupPicker: View {
         }
         .buttonStyle(.plain)
         .background(
-            RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Palette.accentSoft.opacity(0))
+            RoundedRectangle(cornerRadius: Radius.row, style: .continuous).fill(Palette.accentSoft.opacity(0))
         )
         .hoverHighlight()
     }
@@ -118,7 +118,7 @@ private struct HoverHighlight: ViewModifier {
     func body(content: Content) -> some View {
         content
             .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
                     .fill(hovering ? Palette.accentSoft : .clear)
             )
             .onHover { hovering = $0 }

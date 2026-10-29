@@ -60,9 +60,9 @@ struct SentRow: View {
     /// The inbox rows' own numbers on either platform, so the page under the
     /// segmented control keeps its rhythm when it flips.
     #if os(macOS)
-        private static var hPadding: CGFloat { Space.scaled(11) }
-        private static var vPadding: CGFloat { Space.s6 }
-        private static let radius: CGFloat = 8
+        private static var hPadding: CGFloat { DeskRow.hPadding }
+        private static var vPadding: CGFloat { DeskRow.vPadding }
+        private static let radius: CGFloat = Radius.row
     #else
         private static var hPadding: CGFloat { PhoneRow.hPadding }
         private static var vPadding: CGFloat { PhoneRow.vPadding }
@@ -222,6 +222,9 @@ struct SentRow: View {
                 }
                 .layoutPriority(3)
             }
+            // Leading-anchored, like MailRow: a row that outgrows a very
+            // narrow list clips on the right rather than centring.
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
         }
     #endif
 }

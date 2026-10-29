@@ -20,7 +20,6 @@ struct RemindPalette: View {
     /// Pinned when the palette opens: every row is scored against ONE clock, so
     /// a list cannot re-rank itself under the cursor between keystrokes.
     @State private var opened = Date()
-    @Namespace private var paletteGlass
     @FocusState private var focused: Bool
 
     /// The rows on screen. STATE, not a computed property: SwiftUI reads a
@@ -35,7 +34,6 @@ struct RemindPalette: View {
             .keyContext(.modal)
             .keyBindings(.modal, bindings)
             .onAppear {
-                focused = true
                 refreshHits()
             }
     }
@@ -47,161 +45,54 @@ struct RemindPalette: View {
         selection = max(0, min(selection, max(0, hits.count - 1)))
     }
 
-    @ViewBuilder
     private var surface: some View {
-        #if os(macOS)
-            // Top-ANCHORED even though it sits near the middle: the list
-            // shrinks and grows as typing filters it, and a center-anchored
-            // card would breathe in both directions — the input line jumping
-            // under the cursor mid-word. The inset, not the anchor, is what
-            // puts it at the screen's visual center.
-            OverlayScrim(alignment: .top, topInset: 210, onDismiss: onClose) {
-                GlassEffectContainer(spacing: 8) {
-                    palette
-                        .frame(width: Typo.measure(560))
-                        .passbandGlass(
-                            .pane, cornerRadius: 20, tint: Palette.glassTintStrong,
-                            id: "remind", in: paletteGlass)
-                        .shadow(color: .black.opacity(0.32), radius: 46, y: 20)
-                }
-            }
-        #else
-            palette
-                // Clear of the sheet's grabber, which the header's own top
-                // padding was never measured against.
-                .padding(.top, Space.s8)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .background(Palette.canvas.ignoresSafeArea())
-                .presentationDetents([.large])
-        #endif
-    }
-
-    private var palette: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
-            input
-            Divider().overlay(Palette.hairline)
-            list
-            footer
-        }
-    }
-
-    private var header: some View {
-        HStack(spacing: Space.s8) {
-            Image(systemName: "bell.badge")
-                .font(Typo.ui(12, weight: .semibold))
-                .foregroundStyle(Palette.accent)
-            Text(rescheduling ? "Move the reminder" : "Remind me")
-                .font(Typo.ui(13, weight: .semibold))
-                .foregroundStyle(Palette.ink)
-            Text(target.subject)
-                .font(Typo.micro)
-                .foregroundStyle(Palette.inkFaintest)
-                .lineLimit(1)
-                .help("\(target.sender) · \(target.subject)")
-            Spacer(minLength: Space.s4)
+        PaletteShell(
+            focus: $focused,
+            glassID: "remind", icon: "bell.badge",
+            title: rescheduling ? "Move the reminder" : "Remind me",
+            subject: target.subject, subjectHelp: "\(target.sender) · \(target.subject)",
             // WHAT IT IS SET TO NOW, when there is one. A second `h` is a move,
             // not a first booking, and the row you are moving off is the one
             // fact the list itself cannot show.
-            if let current = target.remindAt, !current.isEmpty {
-                Text("now \(Fmt.remindChip(current))")
-                    .font(Typo.micro)
-                    .foregroundStyle(Palette.inkDim)
-                    .fixedSize()
+            current: target.remindAt.flatMap { $0.isEmpty ? nil : "now \(Fmt.remindChip($0))" },
+            isEmpty: hits.isEmpty,
+            emptyText:
+                "no time in “\(query)”. try a day (\"friday\", \"aug 30\"), a wait (\"in 3 hours\") or leave it empty for the usual ones.",
+            selection: selection, idAt: { hits[safe: $0]?.id },
+            verb: "set",
+            // The half of this that is not obvious: the mail goes away NOW.
+            note: "marks it done until then",
+            onClose: onClose
+        ) {
+            TextField("remind when...", text: $query)
+                .focused($focused)
+                .disabled(busy)
+                #if !os(macOS)
+                    // Return sets the highlighted row, which is what Enter does
+                    // through the keymap on the Mac. Without it the highlight on a
+                    // phone marks a row for a key that never arrives.
+                    .submitLabel(.done)
+                    .onSubmit {
+                        if let hit = hits[safe: selection] { Task { await apply(hit) } }
+                    }
+                #endif
+                .onChange(of: query) { _, _ in
+                    selection = 0
+                    refreshHits()
+                }
+        } rows: {
+            ForEach(Array(hits.enumerated()), id: \.element.id) { i, hit in
+                RemindRow(
+                    hit: hit, selected: i == selection,
+                    onHover: { selection = i },
+                    onPick: { Task { await apply(hit) } })
+                .id(hit.id)
+                .disabled(busy)
             }
         }
-        .padding(.horizontal, Space.s16)
-        .padding(.top, Space.s14)
-        .padding(.bottom, Space.s8)
     }
 
     private var rescheduling: Bool { !(target.remindAt ?? "").isEmpty }
-
-    private var input: some View {
-        TextField("remind when...", text: $query)
-            .textFieldStyle(.plain)
-            .font(Typo.ui(15))
-            .foregroundStyle(Palette.ink)
-            .focused($focused)
-            .autocorrectionDisabled()
-            .disabled(busy)
-            #if !os(macOS)
-                // Return sets the highlighted row, which is what Enter does
-                // through the keymap on the Mac. Without it the highlight on a
-                // phone marks a row for a key that never arrives.
-                .submitLabel(.done)
-                .onSubmit {
-                    if let hit = hits[safe: selection] { Task { await apply(hit) } }
-                }
-            #endif
-            .padding(.horizontal, Space.s16)
-            .padding(.top, Space.s4)
-            .padding(.bottom, Space.s12)
-            .onChange(of: query) { _, _ in
-                selection = 0
-                refreshHits()
-            }
-    }
-
-    private var list: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 1) {
-                    if hits.isEmpty {
-                        Text(
-                            "no time in “\(query)”. try a day (\"friday\", \"aug 30\"), a wait (\"in 3 hours\") or leave it empty for the usual ones."
-                        )
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaintest)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(Space.s14)
-                    } else {
-                        ForEach(Array(hits.enumerated()), id: \.element.id) { i, hit in
-                            RemindRow(
-                                hit: hit, selected: i == selection,
-                                onHover: { selection = i },
-                                onPick: { Task { await apply(hit) } })
-                            .id(hit.id)
-                            .disabled(busy)
-                        }
-                    }
-                }
-                .padding(.horizontal, Space.s8)
-                .padding(.vertical, Space.s6)
-            }
-            .frame(maxHeight: Space.scaled(230))
-            .onChange(of: selection) { _, i in
-                guard let hit = hits[safe: i] else { return }
-                withAnimation(.easeOut(duration: 0.1)) { proxy.scrollTo(hit.id, anchor: .center) }
-            }
-        }
-    }
-
-    private var footer: some View {
-        HStack(spacing: Space.s4) {
-            #if os(macOS)
-                Kbd("↑"); Kbd("↓")
-                Text("pick").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
-                Text("·").foregroundStyle(Palette.inkFaintest)
-                Kbd("↵")
-                Text("set").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
-                Text("·").foregroundStyle(Palette.inkFaintest)
-                Kbd("esc")
-                Text("cancel").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
-            #else
-                Text("tap to set").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
-            #endif
-            Spacer()
-            // The half of this that is not obvious: the mail goes away NOW.
-            Text("marks it done until then")
-                .font(Typo.micro)
-                .foregroundStyle(Palette.accent.opacity(0.8))
-        }
-        .padding(.horizontal, Space.s16)
-        .padding(.vertical, Space.s10)
-        .overlay(alignment: .top) { Hairline() }
-    }
 
     /// allowInInput is REQUIRED, not polish: the palette autofocuses its field,
     /// so the `editing && !allowInInput` guard would drop every binding — and
@@ -268,13 +159,9 @@ struct RemindRow: View {
     let onPick: () -> Void
 
     var body: some View {
-        // hoverFill off for the same reason the triage palette turns it off:
-        // the pointer MOVES the selection here, so the selection fill already
-        // follows it and a hover wash under it would double up.
-        ListRow(
-            selected: selected, tint: Palette.accent, hPadding: Space.s10, vPadding: Space.scaled(7),
-            hoverFill: false, onHoverChange: { if $0 { onHover() } }, action: onPick
-        ) { _, _ in
+        PaletteRow(
+            selected: selected, tint: Palette.accent, onHover: onHover, onPick: onPick
+        ) {
             HStack(spacing: Space.s10) {
                 Text(hit.label)
                     .font(Typo.ui(13, weight: .medium))

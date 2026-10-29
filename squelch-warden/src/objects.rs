@@ -1411,6 +1411,18 @@ fn daemon_env(config: &Config, name: &TenantName) -> Vec<EnvVar> {
         BROWSERBASE_API_KEY_KEY,
     ));
 
+    // Outbound read tracking, for every tenant: there is no switch here. The
+    // pixel points at the tenant's OWN vhost, whose Ingress already routes
+    // `/t/*` to this daemon ([`HUMAN_DOOR_PREFIXES`]), and a hosted pod never
+    // sleeps, so opens are recorded directly and never touch the relay's
+    // shared buffer. Built from [`Config::tenant_url`], the same helper the
+    // Ingress host comes from, so the pixel and the vhost cannot disagree.
+    // Sends stay untracked unless the user asks for tracking on each one.
+    env.push(plain(
+        "SQUELCH_TRACK_URL",
+        &config.tenant_url(name.as_str()),
+    ));
+
     // Which embedding weights the daemon loads, when the operator pinned one.
     // ABSENT unless set, so a warden with the knob unset builds the same pod a
     // warden that never heard of it did: the daemon ships its own pin, and this
@@ -1890,6 +1902,35 @@ mod tests {
                 "{relay_var} appears in an unconfigured pod"
             );
         }
+    }
+
+    /// Every tenant can track its sends, and the pixel is its own vhost: the
+    /// same host the Ingress routes `/t/*` for, never the relay, so a tenant
+    /// with a relay for push still records opens directly.
+    #[test]
+    fn every_tenant_mints_pixels_against_its_own_vhost() {
+        for relay in [
+            None,
+            Some("https://relay.squelch.sh"),
+            Some("https://relay.squelch.sh/"),
+        ] {
+            let mut c = test_config();
+            c.relay_url = relay.map(str::to_string);
+            let env = daemon_env_of(&c, "alice");
+            let track = env
+                .iter()
+                .find(|e| e.name == "SQUELCH_TRACK_URL")
+                .expect("tracking is rendered for every tenant");
+            let url = track.value.as_deref().unwrap();
+            assert_eq!(url, c.tenant_url("alice"));
+            // https with a scheme, or the daemon mints nothing.
+            assert!(url.starts_with("https://"));
+            if let Some(relay) = relay {
+                let origin = |u: &str| u.trim_end_matches('/').to_ascii_lowercase();
+                assert_ne!(origin(url), origin(relay), "the pixel is never the relay");
+            }
+        }
+        assert!(HUMAN_DOOR_PREFIXES.contains(&"/t"));
     }
 
     /// The push half of the env contract. A configured relay reaches the pod

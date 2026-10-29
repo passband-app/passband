@@ -12,6 +12,37 @@ updates itself, the phone comes through TestFlight, and the daemon is
 rolled onto hosted accounts or pulled as an image on a self-host box,
 so every note says which one it landed in.
 
+## 0.0.15 (2026-10-27)
+
+Tokyo Update
+
+### Mac
+
+- **Smart clear.** One press clears Reading mail that has run its course
+- **Auto-translate.** Mail in another language arrives with an English version
+- **Search a year back.** Find mail from before you joined Passband
+- **Auto-done.** Mail that is no longer important is cleared automatically
+- See opens under mail you sent
+- Search mail you wrote with `in:sent` and `from:me`
+- Login and security mail is better sorted
+- Security notices land in For Your Eyes, not Auth
+- Sealed mail opens full height
+- Instant account switching, and you stay on the same page
+- Much faster
+- Bug fixes
+
+### Daemon
+
+- Search reaches a year back
+- Translates mail in other languages
+- Smart clear
+- Closes event mail once the event is over
+- Treats breach and security notices as important mail, not sign-ins
+- Your agent works in your timezone
+- Your agent can search mail you sent
+- Faster and steadier
+- Bug fixes
+
 ## 0.0.14 (2026-10-08)
 
 Hands Free

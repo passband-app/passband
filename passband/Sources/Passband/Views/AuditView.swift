@@ -398,11 +398,11 @@ struct AuditSection: View {
         .padding(.horizontal, Space.scaled(7))
         .padding(.vertical, Space.scaled(5))
         .background(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.chip, style: .continuous)
                 .fill(Palette.canvas.opacity(0.65))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.chip, style: .continuous)
                 .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75)
         )
     }
@@ -711,7 +711,7 @@ private struct AuditRow: View {
 
     var body: some View {
         ListRow(
-            selected: open, cornerRadius: 8, hPadding: Space.scaled(11), vPadding: Space.scaled(7), action: onToggle
+            selected: open, cornerRadius: Radius.row, hPadding: Space.scaled(11), vPadding: Space.scaled(7), action: onToggle
         ) { _, _ in
             HStack(alignment: .top, spacing: Space.s10) {
                 // The gutter. Fixed width and leading-aligned so the times make

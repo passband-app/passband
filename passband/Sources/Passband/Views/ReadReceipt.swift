@@ -50,6 +50,17 @@ private enum ReceiptCopy {
     static let proxyCaveat =
         "Fetched by Gmail's image proxy, which sometimes loads images before "
         + "the recipient reads the message."
+    static let scannerCaveat =
+        "Probable scanners are automated fetches, usually security tools that "
+        + "load a message's images the moment it arrives. They are not counted "
+        + "as opens."
+
+    /// "3 opens", "1 open", or, when nothing but scanners fetched the pixel,
+    /// "1 probable scanner": never a zero that hides what happened.
+    static func count(opens: Int, scanners: Int) -> String {
+        if opens > 0 { return opens == 1 ? "1 open" : "\(opens) opens" }
+        return scanners == 1 ? "1 probable scanner" : "\(scanners) probable scanners"
+    }
 
     /// "just now" / "3h ago" — the chip's own phrasing, reused per row.
     static func age(_ open: MessageOpen) -> String {
@@ -58,46 +69,84 @@ private enum ReceiptCopy {
     }
 }
 
-/// The mark itself, rendered beside a sent message's header.
+/// "3 opens", under a sent message's datetime. Click for every open.
 ///
-/// The chip states the LATEST open, which is the answer to "did it land"; every
-/// recorded open is one click away, because "opened 4 times over two days" is a
-/// different fact from "opened", and the chip has no room for it.
-struct ReadReceiptMark: View {
+/// A count rather than the old "opened 3h ago" chip: the chip sat in a row of
+/// other chips and never said how many, and "opened 4 times over two days" is
+/// a different fact from "opened". The latest stamp and the proxy caveat ride
+/// in the tooltip; the full list is in the popover.
+struct OpensLink: View {
     /// Every recorded open, oldest first. Empty renders nothing.
     let opens: [MessageOpen]
+    /// Who the message went to, so the detail can say whose opens these are
+    /// when that is knowable. `nil` when the headers were never read.
+    var recipients: Recipients? = nil
+    /// The account's own address, left out of "sent to".
+    var me: String? = nil
+    /// The chat caption's one-point-smaller measure.
+    var compact = false
 
     @State private var detailOpen = false
+    @State private var hovering = false
+
+    /// Opens that may be a person: everything but probable scanners.
+    private var counted: [MessageOpen] { opens.filter { !$0.probableScanner } }
+    private var scanners: Int { opens.count - counted.count }
 
     var body: some View {
-        if let latest = opens.last {
+        if let latest = counted.last ?? opens.last {
             Button { detailOpen.toggle() } label: {
-                Chip(text: label(latest), tone: Palette.inkFaint, symbol: "eye")
+                HStack(spacing: Space.scaled(3)) {
+                    // Only scanners so far: the eye is struck through and the
+                    // line drops a shade, so it never reads as "opened".
+                    Image(systemName: counted.isEmpty ? "eye.slash" : "eye")
+                        .font(Typo.ui(compact ? 8 : 9, weight: .semibold))
+                    Text(ReceiptCopy.count(opens: counted.count, scanners: scanners))
+                        .font(Typo.num(compact ? 10 : 11))
+                        .underline(hovering)
+                }
+                .foregroundStyle(
+                    hovering || detailOpen
+                        ? Palette.inkDim
+                        : (counted.isEmpty ? Palette.inkFaintest : Palette.inkFaint))
+                .contentShape(Rectangle())
             }
-            // Plain: the chip already IS the button's shape, and a bordered
-            // style would staple a second pill around it.
             .buttonStyle(.plain)
+            .onHover { hovering = $0 }
+            #if os(macOS)
+                .pointerStyle(.link)
+            #endif
             .help(tooltip(latest))
-            // Downward: the mark sits in a message's header, so the space
-            // below it is the message body — the one direction with room.
+            .accessibilityLabel(
+                counted.isEmpty
+                    ? ReceiptCopy.count(opens: 0, scanners: scanners)
+                    : (counted.count == 1 ? "opened once" : "opened \(counted.count) times"))
+            // Downward: the line sits in a message's header, so the space
+            // below it is the message body, the one direction with room.
             .popover(isPresented: $detailOpen, arrowEdge: .bottom) {
-                OpensDetail(opens: opens)
+                OpensDetail(opens: opens, sentTo: sentTo)
             }
         }
     }
 
-    private func label(_ latest: MessageOpen) -> String {
-        let when = ReceiptCopy.age(latest)
-        return latest.viaProxy ? "opened (via proxy) \(when)" : "opened \(when)"
+    /// Everyone the message named except the account itself.
+    private var sentTo: [String] {
+        guard let recipients else { return [] }
+        let mine = Recipients.key(me ?? "")
+        var seen = Set<String>()
+        return recipients.all.filter { token in
+            let key = Recipients.key(token)
+            return !key.isEmpty && key != mine && seen.insert(key).inserted
+        }
     }
 
-    /// The tooltip carries the exact stamp and the count the chip collapses,
-    /// plus the caveat — the chip has no room to be honest at length.
+    /// The exact stamp of the latest open, plus the caveat when it applies.
     private func tooltip(_ latest: MessageOpen) -> String {
-        let head =
-            opens.count == 1
-            ? "opened \(Fmt.dateTime(latest.date))"
-            : "\(opens.count) opens · latest \(Fmt.dateTime(latest.date))"
+        if latest.probableScanner {
+            return "fetched by a probable scanner \(Fmt.dateTime(latest.date)). "
+                + ReceiptCopy.scannerCaveat
+        }
+        let head = "latest open \(Fmt.dateTime(latest.date))"
         guard latest.viaProxy else { return head }
         return head + ". " + ReceiptCopy.proxyCaveat
     }
@@ -113,18 +162,38 @@ struct ReadReceiptMark: View {
 private struct OpensDetail: View {
     /// Oldest first, as the wire carries them.
     let opens: [MessageOpen]
+    /// Who the message went to, the account itself left out. Empty when the
+    /// headers were never read.
+    let sentTo: [String]
 
     /// Newest first: the interesting end of the list, and the one the chip
     /// summarizes.
     private var newestFirst: [MessageOpen] { opens.reversed() }
     private var anyProxied: Bool { opens.contains(where: \.viaProxy) }
+    private var scanners: Int { opens.filter(\.probableScanner).count }
+
+    /// "2 opens · 1 probable scanner", each half only when it is non-zero.
+    private var heading: String {
+        let counted = opens.count - scanners
+        var parts: [String] = []
+        if counted > 0 { parts.append(ReceiptCopy.count(opens: counted, scanners: 0)) }
+        if scanners > 0 { parts.append(ReceiptCopy.count(opens: 0, scanners: scanners)) }
+        return parts.joined(separator: " · ")
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Space.scaled(9)) {
-            Text(opens.count == 1 ? "1 open" : "\(opens.count) opens")
+            Text(heading)
                 .font(Typo.sectionLabel)
                 .foregroundStyle(Palette.inkFaint)
                 .textCase(.uppercase)
+
+            if let who {
+                Text(who)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             // Capped and scrolled, the same way the debug inspector is: a pixel
             // that got fetched thirty times must not grow a popover taller than
@@ -141,16 +210,40 @@ private struct OpensDetail: View {
             }
             .frame(maxHeight: 240)
 
-            if anyProxied {
+            if anyProxied || scanners > 0 {
                 Hairline()
-                Text(ReceiptCopy.proxyCaveat)
-                    .font(Typo.micro)
-                    .foregroundStyle(Palette.inkFaintest)
-                    .fixedSize(horizontal: false, vertical: true)
+                if anyProxied {
+                    Text(ReceiptCopy.proxyCaveat)
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaintest)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if scanners > 0 {
+                    Text(ReceiptCopy.scannerCaveat)
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaintest)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
         .padding(Space.s14)
-        .frame(width: 300, alignment: .leading)
+        .frame(width: Typo.measure(300), alignment: .leading)
+    }
+
+    /// WHOSE OPENS THESE ARE, as far as the pixel can say. One pixel rides in
+    /// one copy of the mail, so with one recipient the opens are theirs (or a
+    /// forward's), and with several there is no telling which of them it was.
+    /// Saying so beats letting the reader assume.
+    private var who: String? {
+        let names = sentTo.map { SenderCache.resolved($0).displayName }
+        switch names.count {
+        case 0: return nil
+        case 1: return "Sent to \(names[0])."
+        case 2...3:
+            return "Sent to \(names.joined(separator: ", ")). The pixel can't tell which of them opened it."
+        default:
+            return "Sent to \(names.count) people. The pixel can't tell which of them opened it."
+        }
     }
 
     private func row(_ open: MessageOpen) -> some View {
@@ -158,12 +251,15 @@ private struct OpensDetail: View {
             HStack(spacing: Space.s6) {
                 Text(Fmt.dateTime(open.date))
                     .font(Typo.num(11))
-                    .foregroundStyle(Palette.ink)
+                    // A scanner's row is a footnote, not an open.
+                    .foregroundStyle(open.probableScanner ? Palette.inkFaint : Palette.ink)
                 Text(ReceiptCopy.age(open))
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
                 if open.viaProxy {
                     Chip(text: "via proxy", tone: Palette.inkFaintest)
+                } else if open.probableScanner {
+                    Chip(text: "probable scanner", tone: Palette.inkFaintest)
                 }
                 Spacer(minLength: 0)
             }

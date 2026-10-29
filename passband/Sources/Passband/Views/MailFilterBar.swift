@@ -44,7 +44,7 @@ struct MailFilterBar: View {
                 }
             }
             #if os(macOS)
-                Spacer(minLength: 8)
+                Spacer(minLength: Space.s8)
             #endif
             // The reminder lens is your own parked list, which the picker does
             // not narrow; a lit control there would claim it did.
@@ -53,7 +53,7 @@ struct MailFilterBar: View {
                 .opacity(reminders ? 0.4 : 1)
         }
         #if os(macOS)
-            .padding(.horizontal, Space.s24)
+            .padding(.horizontal, Space.page)
         #else
             // Trailing only: the lenses' own scroller reaches the screen's
             // leading edge and insets its content instead (`pillScroller`).
@@ -64,41 +64,50 @@ struct MailFilterBar: View {
     }
 }
 
-/// The pills scroll sideways on a phone, where five of them do not fit; on a
-/// Mac they sit in the bar as they are.
+/// The pills scroll sideways when they do not fit: always on a phone, where
+/// five of them never do, and on a Mac only when the list is narrow (the
+/// compose pane open beside it). A Mac with the room draws them as they are,
+/// with no scroller at all; squeezed, they used to WRAP inside their capsules
+/// ("Attachment / s") and then run under the picker.
 ///
 /// THE SCROLLER ENDS WHERE THE PICKER BEGINS. It used to draw past its own
 /// frame (`scrollClipDisabled`, so a pill could run out to the screen's edge),
 /// and the frame's other neighbour is the category picker, whose capsule has
 /// no fill: the fourth and fifth lenses were drawn straight through it. Now
-/// the scroller keeps to its frame and gets its bleed the honest way, by
-/// owning the leading edge of the screen and insetting what it scrolls. On
-/// the picker's side the last few points fade out, which is what says there
-/// are more lenses under there, and the inset on that side is the fade's
-/// width, so the last lens scrolls clear of it and stops.
+/// the scroller keeps to its frame and, on a phone, gets its bleed the honest
+/// way, by owning the leading edge of the screen and insetting what it
+/// scrolls. On the picker's side the last few points fade out, which is what
+/// says there are more lenses under there, and the inset on that side is the
+/// fade's width, so the last lens scrolls clear of it and stops.
 @MainActor @ViewBuilder private func pillScroller<C: View>(@ViewBuilder _ content: () -> C) -> some View {
     #if os(macOS)
-        content()
+        let pills = content()
+        ViewThatFits(in: .horizontal) {
+            pills
+            fadingScroller(pills)
+        }
     #else
-        ScrollView(.horizontal, showsIndicators: false) { content() }
+        fadingScroller(content())
             .contentMargins(.leading, Space.s16, for: .scrollContent)
-            .contentMargins(.trailing, pillFade, for: .scrollContent)
-            .mask {
-                HStack(spacing: 0) {
-                    Rectangle()
-                    LinearGradient(
-                        colors: [.black, .clear], startPoint: .leading, endPoint: .trailing
-                    )
-                    .frame(width: pillFade)
-                }
-            }
     #endif
 }
 
-#if !os(macOS)
-    /// How much of the scroller's trailing end dissolves.
-    private let pillFade: CGFloat = 22
-#endif
+@MainActor private func fadingScroller<C: View>(_ content: C) -> some View {
+    ScrollView(.horizontal, showsIndicators: false) { content }
+        .contentMargins(.trailing, pillFade, for: .scrollContent)
+        .mask {
+            HStack(spacing: 0) {
+                Rectangle()
+                LinearGradient(
+                    colors: [.black, .clear], startPoint: .leading, endPoint: .trailing
+                )
+                .frame(width: pillFade)
+            }
+        }
+}
+
+/// How much of the scroller's trailing end dissolves.
+private let pillFade: CGFloat = 22
 
 /// WHICH SITREP ZONES THE LIST SHOWS, a menu of every zone with a tick each.
 /// Unticking one (Shipments, say) hides its mail from all mail until it is
@@ -185,7 +194,9 @@ private struct FilterPill: View {
                     Image(systemName: active ? "\(icon).fill" : icon)
                         .font(Typo.ui(10))
                 }
-                Text(text).font(Typo.chip)
+                // Never wraps: a lens that runs out of room scrolls with
+                // the others (`pillScroller`) rather than folding in two.
+                Text(text).font(Typo.chip).lineLimit(1).fixedSize()
                 if let count {
                     Text("\(count)")
                         .font(Typo.num(10, weight: .semibold))
@@ -223,9 +234,14 @@ struct DayHeading: View {
             .foregroundStyle(Palette.inkFaint)
             .textCase(.uppercase)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, Space.scaled(11))
-            .padding(.top, first ? 4 : 16)
-            .padding(.bottom, Space.scaled(5))
+            #if os(macOS)
+                // The rows' padding, so the words sit on their text edge.
+                .padding(.horizontal, DeskRow.hPadding)
+            #else
+                .padding(.horizontal, Space.scaled(11))
+            #endif
+            .padding(.top, SectionLabelRhythm.top(first: first))
+            .padding(.bottom, SectionLabelRhythm.bottom)
             #if !os(macOS)
                 // A plain List pins section headers; without a ground the
                 // rows would scroll visibly under the words.

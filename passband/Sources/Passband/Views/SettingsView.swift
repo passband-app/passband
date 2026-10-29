@@ -60,8 +60,9 @@ struct SettingsView: View {
                 // RULES AND GROUPS ARE WHOLE PAGES, moved here off the rail with
                 // their own scrollers and their own key bar along the bottom.
                 // They take the height like the ledger and none of the pane's
-                // padding: each already sets its rows on the page gutter, and a
-                // key bar inset on both sides reads as a card with no card.
+                // padding: each already sets its rows' words on the page gutter
+                // (the same line the card panes' borders sit on), and a key bar
+                // inset on both sides reads as a card with no card.
                 if pagePane {
                     pane(prefs.settingsSection)
                         .padding(.top, Space.s8)
@@ -72,7 +73,7 @@ struct SettingsView: View {
                         }
                 } else if fullHeightPane {
                     pane(prefs.settingsSection)
-                        .padding(.horizontal, Space.scaled(22))
+                        .padding(.horizontal, Space.page)
                         .padding(.vertical, Space.scaled(18))
                         .frame(
                             maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -85,7 +86,11 @@ struct SettingsView: View {
                                 pane(prefs.settingsSection)
                             }
                         }
-                        .padding(.horizontal, Space.scaled(22))
+                        // ONE EDGE FOR EVERY SUB-PAGE: a card's border here, and
+                        // on Rules and Groups the rows' words (they inset
+                        // themselves through `DeskRow`), both on the page
+                        // gutter in from the pane's edge.
+                        .padding(.horizontal, Space.page)
                         .padding(.vertical, Space.scaled(18))
                         // 720 IS A READING MEASURE, not a layout habit: a
                         // column of labelled switches stops being scannable
@@ -160,6 +165,7 @@ struct SettingsView: View {
         case .mail:
             MailSection()
             SearchSection()
+            TranslationSection()
             SignatureSection()
             ReadTrackingSection()
         case .rules:
@@ -212,7 +218,9 @@ struct SettingsView: View {
                     Text(card.section.label)
                         .font(Typo.micro)
                         .foregroundStyle(Palette.inkFaintest)
-                        .padding(.leading, 2)
+                        // On the card's own text edge (SectionCard pads by
+                        // zonePadding), so crumb and card label share a line.
+                        .padding(.leading, Space.s16)
                     SettingsCardView(card: card, openPane: openPane)
                 }
             }
@@ -247,7 +255,7 @@ struct SettingsView: View {
                     Rectangle()
                         .fill(Palette.hairline)
                         .frame(height: 0.5)
-                        .padding(.horizontal, Space.scaled(11))
+                        .padding(.horizontal, DeskRow.hPadding)
                         .padding(.vertical, Space.s8)
                 }
                 ForEach(group, id: \.self) { section in
@@ -257,7 +265,11 @@ struct SettingsView: View {
             Spacer()
         }
         .frame(width: Typo.measure(158))
-        .padding(.horizontal, Space.s12)
+        // THE COLUMN STARTS ON THE PAGE GUTTER, the line the "Settings" title
+        // above it is set on. The rows' fill reaches out into this inset and
+        // their padding carries the icons, the search glass and the rule
+        // between the two groups the rest of the way: `DeskRow`'s two halves.
+        .padding(.horizontal, DeskRow.listInset)
         .padding(.vertical, Space.scaled(18))
     }
 
@@ -273,6 +285,9 @@ struct SettingsView: View {
         [.account, .rules, .groups],
         [.general, .mail, .assistant, .agents, .privacy, .audit],
     ]
+
+    /// The fixed icon slot a nav row and the search field both lead with.
+    private static var iconSlot: CGFloat { Space.scaled(18) }
 
     private func navRow(_ section: SettingsSection) -> some View {
         // Nothing is selected while a search is up, because nothing IS: the
@@ -292,19 +307,19 @@ struct SettingsView: View {
                 // lines and the column stops reading as a column.
                 Image(systemName: section.symbol)
                     .font(Typo.ui(12, weight: .medium))
-                    .frame(width: Space.scaled(18))
+                    .frame(width: Self.iconSlot)
                 Text(section.label)
                     .font(Typo.ui(12, weight: .medium))
             }
                 .foregroundStyle(active ? Palette.accent : Palette.inkFaint)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, Space.scaled(9))
+                .padding(.horizontal, DeskRow.hPadding)
                 .padding(.vertical, Space.s6)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
                 .fill(active ? Palette.accentSoft : .clear)
         )
     }
@@ -314,10 +329,13 @@ struct SettingsView: View {
     /// and answers it better: the panes are a filing system somebody else
     /// chose, and this one takes the word you already had.
     private var search: some View {
-        HStack(spacing: Space.s6) {
+        // The nav rows' slot, gap and padding, so the glass is centred over
+        // their icons and the placeholder starts where their labels do.
+        HStack(spacing: Space.s8) {
             Image(systemName: "magnifyingglass")
                 .font(Typo.ui(11, weight: .medium))
                 .foregroundStyle(Palette.inkFaintest)
+                .frame(width: Self.iconSlot)
             TextField("search settings", text: $query)
                 .textFieldStyle(.plain)
                 .font(Typo.ui(12))
@@ -344,14 +362,15 @@ struct SettingsView: View {
                 .help("Clear")
             }
         }
-        .padding(.horizontal, Space.s8)
+        .padding(.horizontal, DeskRow.hPadding)
         .padding(.vertical, Space.s6)
+        // A search field, so a capsule like the mail search (`fieldWell`).
         .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            Capsule(style: .continuous)
                 .fill(Palette.canvas.opacity(0.65))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            Capsule(style: .continuous)
                 .strokeBorder(
                     searchFocused ? Palette.accent.opacity(0.55) : Palette.hairlineStrong,
                     lineWidth: 0.75)
@@ -391,6 +410,7 @@ struct SettingsCardView: View {
         case .you: YouSection()
         case .mail: MailSection()
         case .search: SearchSection()
+        case .translation: TranslationSection()
         case .signature: SignatureSection()
         case .readTracking: ReadTrackingSection()
         // THE TWO EXCEPTIONS to "a result is the real control". Rules and
@@ -628,6 +648,12 @@ struct SearchSortPicker: View {
 ///
 /// STACKED ON THE PHONE. A 390pt line cannot hold a name and a four-way
 /// segmented control side by side, so the control drops under its label there.
+///
+/// AND ON A NARROW MAC CARD (the composer open beside Settings): side by side
+/// only while the label keeps `labelFloor` next to the control, otherwise the
+/// phone's arrangement. Stacked, a control still wider than the card (the
+/// Sound picker's five segments) scrolls sideways inside it rather than run
+/// out past the pane, where the page clips it.
 struct SettingsRow<Control: View>: View {
     let title: String
     var detail: String?
@@ -635,16 +661,32 @@ struct SettingsRow<Control: View>: View {
 
     var body: some View {
         #if os(iOS)
-            VStack(alignment: .leading, spacing: Space.s8) {
-                label
-                control
-            }
+            stacked(control)
         #else
-            HStack(alignment: .center, spacing: Space.scaled(18)) {
-                label
-                control
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: Space.scaled(18)) {
+                    // The fit test asks the label for its floor, not its
+                    // one-line width: a long detail line wraps beside the
+                    // control, as it always did, rather than stack the row.
+                    label
+                        .frame(minWidth: 0, idealWidth: Self.labelFloor, maxWidth: .infinity, alignment: .leading)
+                    control
+                }
+                stacked(
+                    ScrollView(.horizontal, showsIndicators: false) { control }
+                        .scrollBounceBehavior(.basedOnSize, axes: .horizontal))
             }
         #endif
+    }
+
+    /// The least a label keeps beside its control before the row stacks.
+    @MainActor private static var labelFloor: CGFloat { Typo.measure(120) }
+
+    private func stacked(_ control: some View) -> some View {
+        VStack(alignment: .leading, spacing: Space.s8) {
+            label
+            control
+        }
     }
 
     private var label: some View {
@@ -762,7 +804,7 @@ private struct DensityTile: View {
     /// grew with the setting, both pictures would change size on every flip and
     /// the comparison between them would be of two different windows.
     private static let size = CGSize(width: 156, height: 92)
-    private static let radius: CGFloat = 10
+    private static let radius: CGFloat = Radius.well
 
     private static let sample: [(name: String, line: String)] = [
         ("Maya Okafor", "Lunch on Thursday?"),
@@ -1078,6 +1120,123 @@ struct SearchSection: View {
     }
 }
 
+/// THE LANGUAGES THE OWNER READS, which the daemon leaves as written. Held by
+/// the daemon, because the daemon is what decides whether to translate, on
+/// mail that arrives while no app is open.
+///
+/// Saves the way ReadTrackingSection does: fire and wait, and the chips show
+/// the daemon's answer, so a failed write leaves the set where it really is.
+/// A daemon older than the setting draws a quiet hint, never an error.
+struct TranslationSection: View {
+    @Environment(AppStore.self) private var store
+    @State private var busy = false
+    @State private var error: String?
+
+    var body: some View {
+        SectionCard(label: "Translation") {
+            switch store.translateConfig {
+            case .loaded(let config) where config.active:
+                languages(config)
+            case .loaded:
+                SettingsHint(
+                    "Off. Translation needs the assistant's model configured on the daemon, so all mail is shown as written."
+                )
+            case .notOffered:
+                SettingsHint("Choosing languages needs a newer server.")
+            case .unreadable:
+                SettingsHint("Could not read this setting from the server.")
+                Button("try again") {
+                    Task { await store.refreshTranslateConfig() }
+                }
+                .buttonStyle(.plain)
+                .font(Typo.micro)
+                .foregroundStyle(Palette.accent)
+            case .unknown:
+                SettingsHint("checking the server…")
+            }
+            if let error {
+                Text(error).font(Typo.micro).foregroundStyle(Palette.danger)
+            }
+        }
+        // Keyed on the account, so a switch with the pane open reads the new
+        // daemon's set instead of leaving the card on "checking".
+        .task(id: store.epoch) { await store.refreshTranslateConfig() }
+    }
+
+    @ViewBuilder private func languages(_ config: TranslateConfig) -> some View {
+        SettingsRow(
+            title: "Languages I read",
+            detail: "Mail in these languages is shown as written. Everything else is translated to English."
+        ) {
+            addMenu(config)
+        }
+        if config.read_languages.isEmpty {
+            SettingsHint("None. Everything not in English is translated.")
+        } else {
+            FlowLayout(spacing: Space.s6) {
+                ForEach(config.read_languages, id: \.self) { code in
+                    chip(code, config)
+                }
+            }
+            // Adding a language is about mail to come; what was already
+            // translated keeps its strip, and saying so heads off "it didn't work".
+            SettingsHint("Mail already translated stays that way, with show original above it.")
+        }
+    }
+
+    private func addMenu(_ config: TranslateConfig) -> some View {
+        let addable = config.addable
+        return Menu {
+            ForEach(addable) { lang in
+                Button(lang.name) { save(config.read_languages + [lang.code]) }
+            }
+        } label: {
+            Label("Add language", systemImage: "plus")
+                .font(Typo.chip)
+        }
+        .menuStyle(.button)
+        .menuIndicator(.hidden)
+        .buttonStyle(.glass)
+        .controlSize(.small)
+        .fixedSize()
+        .disabled(busy || addable.isEmpty)
+    }
+
+    /// One chosen language. The whole chip is the remove button: the x says
+    /// what a tap does, and a separate tiny target would be a miss on the phone.
+    private func chip(_ code: String, _ config: TranslateConfig) -> some View {
+        let name = config.name(of: code)
+        return ChromeChip(
+            tone: Palette.ink,
+            help: "Remove \(name). Mail in it is translated when you open it.",
+            action: { save(config.read_languages.filter { $0 != code }) }
+        ) {
+            HStack(spacing: Space.s4) {
+                Text(name).font(Typo.chip)
+                Image(systemName: "xmark")
+                    .font(Typo.ui(8, weight: .bold))
+                    .foregroundStyle(Palette.inkFaint)
+            }
+        }
+        .disabled(busy)
+        .accessibilityLabel("Remove \(name)")
+    }
+
+    private func save(_ codes: [String]) {
+        guard !busy else { return }
+        busy = true
+        error = nil
+        Task {
+            do {
+                try await store.setReadLanguages(codes)
+            } catch {
+                self.error = errText(error, "could not save")
+            }
+            busy = false
+        }
+    }
+}
+
 /// The email signature, edited in the same live-markdown view the composers
 /// use, beside a preview rendered by the DAEMON's send-path renderer — the
 /// same function that builds the HTML half of every outgoing email, so the
@@ -1131,11 +1290,11 @@ struct SignatureSection: View {
                 .frame(height: Space.scaled(140))
                 .padding(Space.s8)
                 .background(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                         .fill(Palette.canvas.opacity(0.65))
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                         .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
         }
         .frame(maxWidth: .infinity)
@@ -1300,30 +1459,29 @@ struct AssistantSection: View {
             // different spender: this one runs unasked, on a search that looked
             // like a question (docs/SEARCH.md §6.5).
             //
-            // Mac only. The phone's search field still counts spaces and hands
-            // the whole query to the agent (MobileSearchView), so there is no
-            // lane there to configure and a picker that changed nothing would
-            // be worse than no picker.
-            #if os(macOS)
-                SectionCard(label: "Deeper search") {
-                    SettingsRow(title: "When", detail: prefs.deeperSearch.blurb) {
+            // ON BOTH SHELLS. The phone's search tab judges every settled query
+            // through the same policy as the Mac's panel (MobileSearchView), so
+            // it spends unasked too, and a lane with no off switch on the device
+            // running it would be the one thing worse than no lane. The pref is
+            // per device (UserDefaults), so each shell needs its own picker.
+            SectionCard(label: "Deeper search") {
+                SettingsRow(title: "When", detail: prefs.deeperSearch.blurb) {
+                    GlassSegmented(
+                        options: DeeperSearchChoice.allCases.map { ($0, $0.label) },
+                        selection: $prefs.deeperSearch)
+                }
+                if prefs.deeperSearch != .off {
+                    RowDivider()
+                    SettingsRow(
+                        title: "Model",
+                        detail: "Separate from the chat's, because this one runs on every question-shaped search."
+                    ) {
                         GlassSegmented(
-                            options: DeeperSearchChoice.allCases.map { ($0, $0.label) },
-                            selection: $prefs.deeperSearch)
-                    }
-                    if prefs.deeperSearch != .off {
-                        RowDivider()
-                        SettingsRow(
-                            title: "Model",
-                            detail: "Separate from the chat's, because this one runs on every question-shaped search."
-                        ) {
-                            GlassSegmented(
-                                options: AssistantModel.allCases.map { ($0, $0.shortLabel) },
-                                selection: $prefs.searchLaneModel)
-                        }
+                            options: AssistantModel.allCases.map { ($0, $0.shortLabel) },
+                            selection: $prefs.searchLaneModel)
                     }
                 }
-            #endif
+            }
         }
         .task { status = await AssistantKeyStore.statusAsync() }
     }
@@ -1372,6 +1530,8 @@ struct AssistantSection: View {
             text: $keyInput, editing: $editingKey
         )
         .onChange(of: keyInput) { _, _ in note = nil }
+        // The SettingsRow shape: what is true on the leading side, the
+        // control that changes it on the trailing one.
         HStack(spacing: Space.s10) {
             if busy {
                 Text("saving…").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
@@ -1380,10 +1540,6 @@ struct AssistantSection: View {
                 StatusDot(
                     color: Palette.positive,
                     label: "key set" + (status.provider.map { " · \($0.label)" } ?? ""))
-                Button("forget") { Task { await forgetKey() } }
-                    .buttonStyle(.plain)
-                    .font(Typo.micro)
-                    .foregroundStyle(Palette.danger)
             }
             switch note {
             case .ok(let text):
@@ -1392,6 +1548,13 @@ struct AssistantSection: View {
                 Text(text).font(Typo.micro).foregroundStyle(Palette.danger)
             case nil:
                 EmptyView()
+            }
+            Spacer(minLength: Space.s10)
+            if status.present {
+                Button("forget") { Task { await forgetKey() } }
+                    .buttonStyle(.plain)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.danger)
             }
         }
         SettingsHint(
@@ -1488,13 +1651,13 @@ struct AccountSection: View {
                 // set a flag into the void was worse than no button. Every other
                 // verb on this pane (rename, make active, remove) was already
                 // AccountManager and worked identically on both.
-                HStack(spacing: Space.s12) {
+                SettingsRow(
+                    title: "Another mailbox",
+                    detail: "One daemon per mailbox, each with its own rules and triage."
+                ) {
                     Button("Add Account…") { store.addAccountSheetOpen = true }
                         .buttonStyle(.glassProminent)
                         .tint(Palette.accent)
-                    Text("one daemon per mailbox, each with its own rules and triage")
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaintest)
                 }
                 .padding(.top, Space.s4)
                 // WHAT SWITCHES THEM differs, so the hint does. The Mac has nine
@@ -1517,13 +1680,13 @@ struct AccountSection: View {
             // anybody who changes their mind comes here.
             if store.shareAvailable {
                 SectionCard(label: "Invites") {
-                    HStack(spacing: Space.s12) {
+                    SettingsRow(
+                        title: "Invite a friend",
+                        detail: "Your friends get an invite from your own address."
+                    ) {
                         Button("Share Passband…") { store.openShareSheet(from: .settings) }
                             .buttonStyle(.glassProminent)
                             .tint(Palette.accent)
-                        Text("your friends get an invite from your own address")
-                            .font(Typo.micro)
-                            .foregroundStyle(Palette.inkFaintest)
                     }
                 }
             }
@@ -1533,7 +1696,10 @@ struct AccountSection: View {
             #if os(macOS)
                 if store.iosConnected == false {
                     SectionCard(label: "iPhone app") {
-                        HStack(spacing: Space.s12) {
+                        SettingsRow(
+                            title: "Passband for iPhone",
+                            detail: "In alpha on TestFlight."
+                        ) {
                             Button("Copy TestFlight Link") {
                                 NSPasteboard.general.clearContents()
                                 NSPasteboard.general.setString(
@@ -1541,9 +1707,6 @@ struct AccountSection: View {
                             }
                             .buttonStyle(.glassProminent)
                             .tint(Palette.accent)
-                            Text("Passband for iPhone is in alpha on TestFlight")
-                                .font(Typo.micro)
-                                .foregroundStyle(Palette.inkFaintest)
                         }
                     }
                 }
@@ -1630,7 +1793,7 @@ struct CredentialsEditor: View {
         }
         .padding(Space.s12)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.canvas.opacity(0.5))
         )
         .onAppear {

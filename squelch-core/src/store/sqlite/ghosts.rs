@@ -47,7 +47,7 @@
 //! after the last rebuild cannot serve facts from it.
 use super::*;
 use crate::triage::decision::{
-    EventChange, EventCommitment, EventLikelihood, EventRecordKind, MessageDecision,
+    EventChange, EventCommitment, EventLikelihood, EventRecordKind, MessageDecision, RecordProposal,
 };
 use crate::triage::ghost::{self, ESTIMATE_MINUTES, EventTime, GhostEstimate, GhostProposal};
 use crate::types::{GhostEvent, GhostMailState, GhostSource, GhostUserState};
@@ -1275,6 +1275,481 @@ impl SqliteStore {
         at: DateTime<Utc>,
     ) -> Result<bool> {
         self.patch_ghost_user(account, id, Some(end), None, at)
+    }
+}
+
+/// THE PAST-EVENT RE-CHECK (docs/CALENDAR.md §3.8): a day after a trip, a show
+/// or a booking is over, the triage agent is asked again about the mail that
+/// told the owner about it, and the agent decides whether it is done
+/// (`agent_triage::apply_done` holds the rails). This code only does the
+/// arithmetic on the model's own dates that says WHEN to ask: it never
+/// decides whether mail is still needed.
+///
+/// How long after an event's latest date its mail is asked about: "24 hours
+/// after a flight lands, I don't need to see any emails about that flight."
+const ASK_GRACE: chrono::Duration = chrono::Duration::hours(24);
+
+/// How many past-event re-checks (`revisit:event_ended:%` jobs) one message
+/// may ever be given. Their own count, not the revisit policy's lifetime cap,
+/// so the agent's own revisits on a busy booking thread cannot use up the ask
+/// after the event; the lifetime cap still bounds those.
+const EVENT_ASKS_PER_MESSAGE: i64 = 3;
+
+/// How much later than the last answered ask a message's ask time must move
+/// before it is asked again. Length guesses wobble between runs, and a
+/// re-extraction that nudges an end by a few hours is not news.
+const RE_ASK_AFTER: chrono::Duration = chrono::Duration::hours(24);
+
+/// The latest instant a ghost's drawn row says it lasts to, or None when its
+/// start does not resolve. The end is [`ghost::effective_end`] on the same
+/// inputs the listing gives it, except the kind's fixed default length: that
+/// is no date anybody gave, so an event with no end and no length counts from
+/// its start (the ask comes a day after it, and the model, if the moment has
+/// not passed, sets a later revisit). Travel, which has no default, counts
+/// from a day after it starts, since a flight lands within a day of leaving.
+fn ghost_latest(
+    start: &EventTime,
+    kind: EventRecordKind,
+    stated_end: Option<&EventTime>,
+    user_end: Option<&EventTime>,
+    history_minutes: Option<u32>,
+    estimate: Option<&GhostEstimate>,
+) -> Option<DateTime<Utc>> {
+    let first = start.latest_instant()?;
+    let end = ghost::effective_end(start, kind, stated_end, user_end, history_minutes, estimate)
+        .filter(|found| found.source != ghost::EndSource::Default)
+        .and_then(|found| found.end.latest_instant());
+    match end {
+        Some(end) => Some(end),
+        None if kind == EventRecordKind::Travel => first.checked_add_signed(ASK_GRACE),
+        None => Some(first),
+    }
+}
+
+/// [`ghost_latest`] from a ghost's stored row, read as
+/// [`SqliteStore::list_ghost_events`] reads it. Columns only, no decision
+/// JSON. None when the row is gone or its start does not resolve.
+fn stored_latest(conn: &Connection, account: AccountId, id: i64) -> Result<Option<DateTime<Utc>>> {
+    let row = conn
+        .query_row(
+            "SELECT g.kind,g.starts_at,g.ends_at,g.est_minutes,g.est_basis,
+                    g.user_end_minutes,g.user_end_days,p.minutes
+             FROM ghost_events g
+             LEFT JOIN event_duration_priors p
+               ON p.account_id=g.account_id AND p.venue_key=g.venue_key AND p.kind=g.kind
+             WHERE g.account_id=?1 AND g.id=?2",
+            params![account, id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<u32>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, Option<i64>>(5)?,
+                    r.get::<_, Option<i64>>(6)?,
+                    r.get::<_, Option<u32>>(7)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((kind, starts_at, ends_at, est_minutes, est_basis, minutes, days, history)) = row
+    else {
+        return Ok(None);
+    };
+    let Some(start) = starts_at.as_deref().and_then(EventTime::parse) else {
+        return Ok(None);
+    };
+    let stated = ends_at.as_deref().and_then(EventTime::parse);
+    let estimate = est_minutes.map(|minutes| GhostEstimate {
+        minutes,
+        basis: est_basis.unwrap_or_default(),
+    });
+    Ok(ghost_latest(
+        &start,
+        unlabel::<EventRecordKind>(&kind),
+        stated.as_ref(),
+        user_end(&start, minutes, days).as_ref(),
+        history,
+        estimate.as_ref(),
+    ))
+}
+
+/// The latest instant one RAW event record mentions, for the ask:
+/// [`ghost::record_latest`] (mixed precision, the end in its own zone, the
+/// model's raw length guess up to a month, travel a day past its start), or,
+/// where that cannot date it (a stay with no checkout and no length), its
+/// start. None only when the record has no start that resolves.
+fn record_ask_basis(record: &RecordProposal) -> Option<DateTime<Utc>> {
+    ghost::record_latest(record).or_else(|| match record {
+        RecordProposal::Event {
+            start: Some(start), ..
+        } => EventTime::resolve(&start.value, start.timezone.as_deref())?.latest_instant(),
+        _ => None,
+    })
+}
+
+/// The latest [`record_ask_basis`] over a ghost's ELIGIBLE sources' own
+/// records. The ghost's drawn end comes from one message; this is what makes
+/// a "check-in today" reminder wait for the checkout another message gave,
+/// even though laundering dropped that date-only end beside a timed start.
+fn sources_latest(conn: &Connection, account: AccountId, id: i64) -> Result<Option<DateTime<Utc>>> {
+    let mut statement = conn.prepare_cached(&format!(
+        "SELECT s.position,ed.decision_json FROM ghost_event_sources s
+         JOIN messages m ON m.account_id=s.account_id AND m.id=s.message_id
+         {ELIGIBLE_JOINS}
+         WHERE s.account_id=?1 AND s.ghost_id=?2 AND {ELIGIBLE}"
+    ))?;
+    let rows: Vec<(i64, Option<String>)> = statement
+        .query_map(params![account, id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    let mut latest: Option<DateTime<Utc>> = None;
+    for (position, decision) in rows {
+        let Some(decision) =
+            decision.and_then(|raw| serde_json::from_str::<MessageDecision>(&raw).ok())
+        else {
+            continue;
+        };
+        let records = ghost::laundered_records(&decision.records);
+        if let Some((record, _)) = usize::try_from(position).ok().and_then(|p| records.get(p)) {
+            latest = latest.max(record_ask_basis(record));
+        }
+    }
+    Ok(latest)
+}
+
+/// A scheduler candidate: message, content revision, its ledger's ask time
+/// and when its dates were last read, and whether it was ruled out then.
+type AskCandidate = (i64, i64, Option<String>, Option<String>, bool);
+
+impl SqliteStore {
+    /// Queue the past-event re-check (see [`ASK_GRACE`]) for every message
+    /// whose ask time has come, returning the message ids queued. Called from
+    /// the sync loop's poll tick, so the usual answer is nothing, from one
+    /// query on columns and, per candidate, the ghost rows' columns; decision
+    /// JSON is read only for a message that may be due and has changed since
+    /// it was last asked about.
+    ///
+    /// A CANDIDATE is mail that feeds a ghost, every ghost it feeds having an
+    /// owner (authenticated mail made it), a start that has passed, and the
+    /// owner actually going (`committed`, or marked going, and not
+    /// dismissed: a mass invite nobody accepted is left to the agent's own
+    /// revisit); that is `new` or `open` (reopened mail still closes after
+    /// its event) with no reminder pending or fired;
+    /// received, not spam, not the archive tier, never auto-done before, with
+    /// no own mail in its thread and nobody else's words in it
+    /// ([`super::agent_triage::foreign_words`]), and ELIGIBLE to feed a ghost.
+    /// These only avoid a model call that could not close anything: the
+    /// rails that protect the owner are in `apply_done`, at the answer.
+    ///
+    /// ITS ASK TIME is [`ASK_GRACE`] after the latest of: every ghost it
+    /// feeds's drawn end ([`ghost_latest`]), every eligible source's record
+    /// of those ghosts ([`sources_latest`]: a booking that feeds the outbound
+    /// and the return flight waits for the return), and its own records
+    /// ([`record_ask_basis`]: mail pooled into another trip's ghost waits for
+    /// its own dates). When that has come, one `revisit:event_ended:<ask
+    /// time>` job is queued now, as the agent's own revisit is
+    /// (`schedule_revisit`), unless revisits are off, the message has had
+    /// [`EVENT_ASKS_PER_MESSAGE`] of these, or a revisit is already queued or
+    /// running.
+    ///
+    /// ASKED MEANS ANSWERED: a message counts as asked at an ask time only
+    /// when a `revisit:` run for it (the agent's own revisit or this one)
+    /// committed a decision at or after that time (an `applied` row in
+    /// `agent_triage_runs`). A job a content revision bump dropped, or one
+    /// that failed for good, answered nothing, so it is asked again. Once
+    /// answered, mail whose dates move later is asked again only when its ask
+    /// time moves more than [`RE_ASK_AFTER`] past the answered one.
+    /// `event_revisit_asked` keeps the last ask time queued or answered, and
+    /// when its dates were last read, so a tick on mail already answered
+    /// whose dates have not changed reads no decision JSON. Mail ruled out
+    /// after that read (not eligible, or somebody else's words in its
+    /// thread) is kept there as `skipped`, and is read again only once its
+    /// dates or decision change.
+    pub(super) fn schedule_past_event_revisits(
+        &self,
+        account: AccountId,
+        now: DateTime<Utc>,
+        policy: &crate::config::RevisitPassConfig,
+    ) -> Result<Vec<i64>> {
+        // A lifetime of zero is revisits turned off, whoever's they are.
+        if !policy.enabled || policy.max_per_message_lifetime == 0 {
+            return Ok(Vec::new());
+        }
+        let mut conn = self.lock()?;
+        // Deferred: a tick with nothing due reads and never takes the write
+        // lock.
+        let tx = conn.transaction()?;
+        let now_key = sort_key(&EventTime::At(now.fixed_offset()));
+        // The cheap tests, on columns alone. A ghost whose start is after now
+        // is never due (every ask time is later than its start).
+        let candidates: Vec<AskCandidate> = tx
+            .prepare(&format!(
+                "SELECT DISTINCT m.id,a.revision,l.ask_at,l.asked_at,COALESCE(l.skipped,0)
+                 FROM ghost_event_sources s
+                 JOIN triage t ON t.account_id=s.account_id AND t.message_id=s.message_id
+                 JOIN messages m ON m.account_id=s.account_id AND m.id=s.message_id
+                 JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id
+                 LEFT JOIN event_revisit_asked l
+                   ON l.account_id=m.account_id AND l.message_id=m.id
+                 WHERE s.account_id=?1
+                   AND t.status IN ('new','open') AND t.remind_at IS NULL AND t.reminded_at IS NULL
+                   AND m.is_archive=0 AND m.is_sent=0 AND m.is_spam=0 AND a.access='allowed'
+                   AND NOT EXISTS(SELECT 1 FROM ghost_event_sources s2
+                       JOIN ghost_events g ON g.account_id=s2.account_id AND g.id=s2.ghost_id
+                       WHERE s2.account_id=m.account_id AND s2.message_id=m.id
+                         AND (g.owner_scope IS NULL OR g.starts_at IS NULL
+                              OR g.start_sort IS NULL OR g.start_sort>?2
+                              OR g.user_state IS 'dismissed'
+                              OR NOT (g.commitment='committed' OR g.user_state IS 'going')))
+                   AND NOT EXISTS(SELECT 1 FROM auto_done d
+                       WHERE d.account_id=m.account_id AND d.message_id=m.id)
+                   AND NOT EXISTS(SELECT 1 FROM messages me
+                       WHERE me.account_id=t.account_id AND me.id=t.message_id
+                         AND EXISTS(SELECT 1 FROM messages m WHERE m.account_id=me.account_id
+                             AND (m.id=me.id OR (me.thread_id!='' AND m.thread_id=me.thread_id))
+                             AND {own}))
+                 ORDER BY m.id",
+                own = super::OWN_MAIL,
+            ))?
+            .query_map(params![account, now_key], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let instant = |raw: &str| {
+            DateTime::parse_from_rfc3339(raw)
+                .ok()
+                .map(|at| at.with_timezone(&Utc))
+        };
+        // Per ghost, once per tick: its drawn latest, and its sources'.
+        let mut drawn: BTreeMap<i64, Option<DateTime<Utc>>> = BTreeMap::new();
+        let mut pooled: BTreeMap<i64, Option<DateTime<Utc>>> = BTreeMap::new();
+        let mut due: Vec<(i64, i64, DateTime<Utc>)> = Vec::new();
+        // Read and settled: the ask time to keep in the ledger (the one
+        // answered, or the last one queued), so the next tick takes the cheap
+        // path.
+        let mut settled_at: Vec<(i64, String)> = Vec::new();
+        // Read and ruled out by something only a change to its dates or
+        // decision could undo (not eligible, or somebody else's words in its
+        // thread, which more mail only adds to): kept as `skipped`, so the
+        // next tick does not read it all again.
+        let mut skipped: Vec<(i64, String)> = Vec::new();
+        {
+            let mut fed = tx.prepare(
+                "SELECT DISTINCT ghost_id FROM ghost_event_sources
+                 WHERE account_id=?1 AND message_id=?2",
+            )?;
+            let mut revisits = tx.prepare(
+                "SELECT COALESCE(SUM(trigger LIKE 'revisit:event_ended:%'),0),
+                        COALESCE(SUM(state IN ('queued','leased')),0)
+                 FROM agent_triage_jobs
+                 WHERE account_id=?1 AND message_id=?2 AND trigger LIKE 'revisit:%'",
+            )?;
+            // When a `revisit:` run for it last committed a decision: the
+            // newest answer to "is this still needed".
+            let mut answered = tx.prepare(concat!(
+                "SELECT r.completed_at FROM agent_triage_runs r, agent_triage_jobs j
+                 WHERE r.account_id=?1 AND r.message_id=?2 AND ",
+                revisit_answer_sql!("r", "j"),
+                " ORDER BY julianday(r.completed_at) DESC LIMIT 1"
+            ))?;
+            // Has anything its dates come from changed since it was asked: a
+            // ghost it feeds, or the decision of any source of one. Its own
+            // decision is a source's.
+            let mut changed = tx.prepare(
+                "SELECT EXISTS(SELECT 1 FROM ghost_event_sources s
+                     JOIN ghost_events g ON g.account_id=s.account_id AND g.id=s.ghost_id
+                     WHERE s.account_id=?1 AND s.message_id=?2
+                       AND (julianday(g.updated_at)>julianday(?3)
+                            OR EXISTS(SELECT 1 FROM ghost_event_sources s2
+                                JOIN agent_message_decisions d
+                                  ON d.account_id=s2.account_id AND d.message_id=s2.message_id
+                                WHERE s2.account_id=s.account_id AND s2.ghost_id=s.ghost_id
+                                  AND julianday(d.decided_at)>julianday(?3))))",
+            )?;
+            let mut stored = tx.prepare(&format!(
+                "SELECT {ELIGIBLE},ed.decision_json FROM messages m {ELIGIBLE_JOINS}
+                 WHERE m.account_id=?1 AND m.id=?2"
+            ))?;
+            'messages: for (message, revision, asked_raw, asked_at, was_skipped) in candidates {
+                let asked = asked_raw.as_deref().and_then(instant);
+                let ghosts: Vec<i64> = fed
+                    .query_map(params![account, message], |r| r.get(0))?
+                    .collect::<std::result::Result<_, _>>()?;
+                // The ghosts' drawn dates first, from columns: the steady
+                // state is mail whose event is not over yet, and the full ask
+                // time is never earlier than this one.
+                let mut latest: Option<DateTime<Utc>> = None;
+                for &id in &ghosts {
+                    let found = match drawn.get(&id) {
+                        Some(known) => *known,
+                        None => {
+                            let found = stored_latest(&tx, account, id)?;
+                            drawn.insert(id, found);
+                            found
+                        }
+                    };
+                    let Some(found) = found else {
+                        continue 'messages;
+                    };
+                    latest = latest.max(Some(found));
+                }
+                let Some(floor) = latest.and_then(|l| l.checked_add_signed(ASK_GRACE)) else {
+                    continue;
+                };
+                if floor > now {
+                    continue;
+                }
+                // Its own cap and anything in flight, from the job table.
+                let (asks, pending): (i64, i64) = revisits
+                    .query_row(params![account, message], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                if asks >= EVENT_ASKS_PER_MESSAGE || pending > 0 {
+                    continue;
+                }
+                // Ruled out before, and nothing its dates come from changed.
+                if was_skipped
+                    && let Some(asked_at) = asked_at.as_deref()
+                    && !changed
+                        .query_row(params![account, message, asked_at], |r| r.get::<_, bool>(0))?
+                {
+                    continue;
+                }
+                let answer: Option<DateTime<Utc>> = answered
+                    .query_row(params![account, message], |r| r.get::<_, String>(0))
+                    .optional()?
+                    .as_deref()
+                    .and_then(instant);
+                // Whether the ledger's ask has been answered.
+                let settled = |asked: DateTime<Utc>| answer.is_some_and(|answer| answer >= asked);
+                // The ledger's ask answered, this floor within reach of it,
+                // and nothing its dates come from changed since they were
+                // last read: the conclusion would be the same.
+                if let (Some(asked), Some(asked_at)) = (asked, asked_at.as_deref())
+                    && floor <= asked + RE_ASK_AFTER
+                    && settled(asked)
+                    && !changed
+                        .query_row(params![account, message, asked_at], |r| r.get::<_, bool>(0))?
+                {
+                    continue;
+                }
+                let floor_raw = floor.to_rfc3339();
+                let Some((eligible, decision)) = stored
+                    .query_row(params![account, message], |r| {
+                        Ok((r.get::<_, bool>(0)?, r.get::<_, Option<String>>(1)?))
+                    })
+                    .optional()?
+                else {
+                    skipped.push((message, floor_raw));
+                    continue;
+                };
+                let Some(decision) = decision
+                    .filter(|_| eligible)
+                    .and_then(|raw| serde_json::from_str::<MessageDecision>(&raw).ok())
+                else {
+                    skipped.push((message, floor_raw));
+                    continue;
+                };
+                for &id in &ghosts {
+                    let found = match pooled.get(&id) {
+                        Some(known) => *known,
+                        None => {
+                            let found = sources_latest(&tx, account, id)?;
+                            pooled.insert(id, found);
+                            found
+                        }
+                    };
+                    latest = latest.max(found);
+                }
+                for (record, _) in ghost::laundered_records(&decision.records) {
+                    latest = latest.max(record_ask_basis(record));
+                }
+                let Some(ask_at) = latest.and_then(|l| l.checked_add_signed(ASK_GRACE)) else {
+                    continue;
+                };
+                if ask_at > now {
+                    continue;
+                }
+                // Answered at or after this ask time: asked.
+                if answer.is_some_and(|answer| answer >= ask_at) {
+                    settled_at.push((message, ask_at.to_rfc3339()));
+                    continue;
+                }
+                // The last ask answered, and this one is no more than a
+                // wobble later (or earlier): the same question.
+                if let (Some(raw), Some(asked)) = (asked_raw.as_deref(), asked)
+                    && ask_at <= asked + RE_ASK_AFTER
+                    && settled(asked)
+                {
+                    settled_at.push((message, raw.to_string()));
+                    continue;
+                }
+                // Nobody else's words in its thread: a done could not rest
+                // on them (the rail is `apply_done`'s; this saves the call).
+                if super::agent_triage::foreign_words(&tx, account, message)?.is_some() {
+                    skipped.push((message, ask_at.to_rfc3339()));
+                    continue;
+                }
+                due.push((message, revision, ask_at));
+            }
+        }
+        if due.is_empty() && settled_at.is_empty() && skipped.is_empty() {
+            return Ok(Vec::new());
+        }
+        let at = now.to_rfc3339();
+        let mut queued = Vec::with_capacity(due.len());
+        {
+            // Exactly as `agent_triage::schedule_revisit` queues the agent's
+            // own revisit, due now.
+            let mut job = tx.prepare(
+                "INSERT INTO agent_triage_jobs(account_id,message_id,kind,trigger,input_revision,arrival_eligible,available_at)
+                 VALUES(?1,?2,'triage',?3,?4,0,?5) ON CONFLICT DO NOTHING",
+            )?;
+            let mut ledger = tx.prepare(
+                "INSERT INTO event_revisit_asked(account_id,message_id,ask_at,asked_at,skipped)
+                 VALUES(?1,?2,?3,?4,?5) ON CONFLICT(account_id,message_id)
+                 DO UPDATE SET ask_at=excluded.ask_at,asked_at=excluded.asked_at,
+                               skipped=excluded.skipped",
+            )?;
+            // Read and settled, so the next tick takes the cheap path.
+            for (message, ask) in settled_at {
+                ledger.execute(params![account, message, ask, at, false])?;
+            }
+            for (message, ask) in skipped {
+                ledger.execute(params![account, message, ask, at, true])?;
+            }
+            let mut asks = tx.prepare(
+                "SELECT COUNT(*) FROM agent_triage_jobs
+                 WHERE account_id=?1 AND message_id=?2 AND trigger LIKE 'revisit:event_ended:%'",
+            )?;
+            for (message, revision, ask_at) in due {
+                let ask = ask_at.to_rfc3339();
+                let trigger = format!("revisit:event_ended:{ask}");
+                let mut inserted = job.execute(params![account, message, trigger, revision, at])?;
+                if inserted == 0 {
+                    // This very question was put to this very content and
+                    // failed for good: ask again under its own trigger (the
+                    // table holds one job per trigger and revision). The cap
+                    // counts it.
+                    let n: i64 = asks.query_row(params![account, message], |r| r.get(0))?;
+                    inserted = job.execute(params![
+                        account,
+                        message,
+                        format!("{trigger}#{}", n + 1),
+                        revision,
+                        at
+                    ])?;
+                }
+                ledger.execute(params![account, message, ask, at, false])?;
+                if inserted == 1 {
+                    queued.push(message);
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(queued)
     }
 }
 
@@ -4278,6 +4753,7 @@ mod tests {
             auth: AuthAssessment {
                 kinds: vec![AuthKind::LoginAlert],
                 evidence: vec![],
+                critical: false,
             },
             ..ev.decision()
         };
@@ -4874,5 +5350,1156 @@ mod tests {
         step("rescued");
         assert_eq!(owner(), first_owner);
         assert_eq!(ghost_by(&store, g).title, "Show");
+    }
+
+    // ---- Zoned local times (the flight with no times) ----
+
+    /// A Tokyo-to-Los Angeles flight as the model writes it: naive local
+    /// times, each with its own zone.
+    fn zoned_flight(title: &str, refs: &[&str]) -> MessageDecision {
+        let mut record = Ev {
+            title,
+            refs,
+            kind: EventRecordKind::Travel,
+            location: None,
+            ..Default::default()
+        }
+        .record();
+        let at = |value: &str, zone: &str| {
+            Some(SupportedTime {
+                value: value.into(),
+                timezone: Some(zone.into()),
+                source_message_id: 0,
+                interpreted_relative: false,
+            })
+        };
+        if let RecordProposal::Event { start, end, .. } = &mut record {
+            *start = at("2026-10-19T21:30", "Asia/Tokyo");
+            *end = at("2026-10-19T14:45", "America/Los_Angeles");
+        }
+        decided(vec![record])
+    }
+
+    /// The stored columns, read raw: what every reader of the table sees.
+    fn stored_times(store: &SqliteStore, id: i64) -> (Option<String>, Option<String>) {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT starts_at,ends_at FROM ghost_events WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn a_zoned_local_start_and_end_are_stored_with_their_zones_offsets() {
+        let store = fixture();
+        mail(&store, 1, 1, "t1", 60);
+        decide(&store, 1, 1, &zoned_flight("Flight NH 106", &["PNR4XQ"]));
+        let g = &listed(&store, 1)[0];
+        assert_eq!(
+            stored_times(&store, g.id),
+            (
+                Some("2026-10-19T21:30:00+09:00".into()),
+                Some("2026-10-19T14:45:00-07:00".into())
+            )
+        );
+        assert_eq!(g.start, at("2026-10-19T21:30:00+09:00"));
+        assert_eq!(g.stated_end, Some(at("2026-10-19T14:45:00-07:00")));
+        assert_eq!(g.start_timezone.as_deref(), Some("Asia/Tokyo"));
+    }
+
+    /// A file store whose ghosts were built before the resolver: the zoned
+    /// times are in the stored decisions and missing from the ghost rows, as
+    /// the old projection left them. Returns the store's path and the ghosts.
+    fn store_with_timeless_ghosts(tag: &str) -> (std::path::PathBuf, Vec<i64>) {
+        let dir =
+            std::env::temp_dir().join(format!("squelch-ghost-times-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("store.sqlite3");
+        let store = SqliteStore::open(&path).unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO accounts(id,email,created_at) VALUES(1,'a@test',?1)",
+                [Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        mail(&store, 1, 1, "t1", 60);
+        mail(&store, 1, 2, "t2", 30);
+        decide(&store, 1, 1, &zoned_flight("Outbound", &["PNR4XQ"]));
+        decide(&store, 1, 2, &zoned_flight("Another trip", &["QZ7KMB"]));
+        let ids: Vec<i64> = listed(&store, 1).iter().map(|g| g.id).collect();
+        assert_eq!(ids.len(), 2);
+        store
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "UPDATE ghost_events SET starts_at=NULL,start_sort=NULL,start_timezone=NULL,ends_at=NULL",
+            )
+            .unwrap();
+        for id in &ids {
+            assert_eq!(stored_times(&store, *id), (None, None));
+        }
+        (path, ids)
+    }
+
+    fn marker(store: &SqliteStore) -> i64 {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM app_settings WHERE account_id=1 AND key=?1",
+                [super::super::migrate::GHOST_ZONED_TIMES_KEY],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn opening_the_store_rebuilds_timeless_ghosts_once() {
+        let (path, ids) = store_with_timeless_ghosts("once");
+        let store = SqliteStore::open(&path).unwrap();
+        for id in &ids {
+            assert_eq!(
+                stored_times(&store, *id),
+                (
+                    Some("2026-10-19T21:30:00+09:00".into()),
+                    Some("2026-10-19T14:45:00-07:00".into())
+                ),
+                "ghost {id}"
+            );
+        }
+        assert_eq!(
+            listed(&store, 1)[0].start_timezone.as_deref(),
+            Some("Asia/Tokyo")
+        );
+        assert_eq!(marker(&store), 1);
+        // Once: a later open leaves the ghosts as it finds them.
+        store
+            .lock()
+            .unwrap()
+            .execute_batch("UPDATE ghost_events SET starts_at=NULL,ends_at=NULL")
+            .unwrap();
+        drop(store);
+        let store = SqliteStore::open(&path).unwrap();
+        for id in &ids {
+            assert_eq!(stored_times(&store, *id), (None, None), "ghost {id}");
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_ghost_that_fails_to_rebuild_is_skipped_and_the_store_still_opens() {
+        let (path, ids) = store_with_timeless_ghosts("skip");
+        let (bad, good) = (ids[0], ids[1]);
+        SqliteStore::open(&path)
+            .unwrap()
+            .lock()
+            .unwrap()
+            .execute_batch(&format!(
+                "DELETE FROM app_settings WHERE key='{}';
+                 UPDATE ghost_events SET starts_at=NULL,start_sort=NULL,ends_at=NULL;
+                 CREATE TRIGGER fail_one BEFORE UPDATE ON ghost_events WHEN NEW.id={bad}
+                 BEGIN SELECT RAISE(ABORT,'no'); END;",
+                super::super::migrate::GHOST_ZONED_TIMES_KEY
+            ))
+            .unwrap();
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(stored_times(&store, bad), (None, None));
+        assert_eq!(
+            stored_times(&store, good),
+            (
+                Some("2026-10-19T21:30:00+09:00".into()),
+                Some("2026-10-19T14:45:00-07:00".into())
+            )
+        );
+        assert_eq!(marker(&store), 1, "one bad ghost does not retry forever");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    // ---- the past-event re-check scheduler ---------------------------------
+
+    use crate::config::RevisitPassConfig;
+
+    /// The ZIPAIR return: leaves Tokyo 2026-10-19 21:30 (12:30Z), lands in
+    /// Los Angeles at 14:45 (21:45Z). Its mail is asked about a day after it
+    /// lands.
+    const FLIGHT_ASK: &str = "2026-10-20T21:45:00Z";
+    /// Long after the flight: anything the scheduler would ever queue for it,
+    /// it queues by now.
+    const LATER: &str = "2026-11-30T00:00:00Z";
+    const NY: Option<&str> = Some("America/New_York");
+
+    fn utc(raw: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(raw)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+    fn minute_before(raw: &str) -> String {
+        (utc(raw) - chrono::Duration::minutes(1)).to_rfc3339()
+    }
+    fn schedule_with(
+        store: &SqliteStore,
+        account: AccountId,
+        now: &str,
+        policy: &RevisitPassConfig,
+    ) -> Vec<i64> {
+        store
+            .schedule_past_event_revisits(account, utc(now), policy)
+            .unwrap()
+    }
+    fn schedule(store: &SqliteStore, account: AccountId, now: &str) -> Vec<i64> {
+        schedule_with(store, account, now, &RevisitPassConfig::default())
+    }
+    fn sql(store: &SqliteStore, statement: &str) {
+        store.execute_batch_for_test(statement);
+    }
+    /// Every queued job: account, message, kind, trigger, input revision,
+    /// arrival eligibility, available_at, state.
+    #[allow(clippy::type_complexity)]
+    fn jobs(
+        store: &SqliteStore,
+    ) -> Vec<(AccountId, i64, String, String, i64, bool, String, String)> {
+        let conn = store.lock().unwrap();
+        let mut statement = conn
+            .prepare(
+                "SELECT account_id,message_id,kind,trigger,input_revision,arrival_eligible,
+                        available_at,state
+                 FROM agent_triage_jobs ORDER BY account_id,message_id,id",
+            )
+            .unwrap();
+        statement
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                ))
+            })
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    }
+    /// The triggers queued for `message`, oldest first.
+    fn triggers(store: &SqliteStore, message: i64) -> Vec<String> {
+        jobs(store)
+            .into_iter()
+            .filter(|job| job.1 == message)
+            .map(|job| job.3)
+            .collect()
+    }
+    fn ask(at: &str) -> String {
+        format!("revisit:event_ended:{}", utc(at).to_rfc3339())
+    }
+    /// Every queued revisit has run and the model kept the mail: the job is
+    /// completed with an `applied` run, at the time it was queued for.
+    fn complete_all(store: &SqliteStore) {
+        sql(
+            store,
+            "INSERT INTO agent_triage_runs(job_id,account_id,message_id,outcome,completed_at)
+                 SELECT id,account_id,message_id,'applied',available_at FROM agent_triage_jobs
+                 WHERE state IN ('queued','leased');
+             UPDATE agent_triage_jobs SET state='completed' WHERE state IN ('queued','leased')",
+        );
+    }
+    /// Every queued revisit ended WITHOUT an answer: completed by a content
+    /// revision bump (no run row), or failed for good after its attempts
+    /// (its runs, if any, never `applied`).
+    fn drop_all(store: &SqliteStore, state: &str) {
+        sql(
+            store,
+            &format!(
+                "INSERT INTO agent_triage_runs(job_id,account_id,message_id,outcome,completed_at)
+                     SELECT id,account_id,message_id,'stale',available_at FROM agent_triage_jobs
+                     WHERE state IN ('queued','leased');
+                 UPDATE agent_triage_jobs SET state='{state}' WHERE state IN ('queued','leased')"
+            ),
+        );
+    }
+    /// Mail `id` about the ZIPAIR flight, in `thread`.
+    fn flight_mail(store: &SqliteStore, account: AccountId, id: i64, thread: &str) {
+        mail(store, account, id, thread, 0);
+        decide(
+            store,
+            account,
+            id,
+            &zoned_flight("ZIPAIR ZG24", &["ZG24QX7"]),
+        );
+    }
+    fn ghost_of(store: &SqliteStore, message: i64) -> i64 {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT ghost_id FROM ghost_event_sources WHERE message_id=?1",
+                [message],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+    fn tz_time(value: &str, zone: Option<&str>) -> Option<SupportedTime> {
+        Some(SupportedTime {
+            value: value.into(),
+            timezone: zone.map(Into::into),
+            source_message_id: 0,
+            interpreted_relative: false,
+        })
+    }
+    /// An event record with these times and no length guess.
+    fn rec(
+        kind: EventRecordKind,
+        start: Option<SupportedTime>,
+        end: Option<SupportedTime>,
+        refs: &[&str],
+    ) -> RecordProposal {
+        let mut r = Ev {
+            title: "Thing",
+            refs,
+            kind,
+            location: None,
+            ..Default::default()
+        }
+        .record();
+        if let RecordProposal::Event {
+            start: s,
+            end: e,
+            duration_estimate,
+            ..
+        } = &mut r
+        {
+            *s = start;
+            *e = end;
+            *duration_estimate = None;
+        }
+        r
+    }
+
+    #[test]
+    fn a_landed_flights_mail_is_asked_about_a_day_after_it_lands() {
+        let store = fixture();
+        // The check-in mail and a promo for the same booking.
+        flight_mail(&store, 1, 1, "checkin");
+        flight_mail(&store, 1, 2, "promo");
+        assert_eq!(ghost_of(&store, 2), ghost_of(&store, 1), "one flight");
+        // The job is for the message's current content revision.
+        sql(
+            &store,
+            "UPDATE agent_message_state SET revision=3 WHERE message_id=2",
+        );
+        assert!(schedule(&store, 1, &minute_before(FLIGHT_ASK)).is_empty());
+        assert!(jobs(&store).is_empty());
+
+        assert_eq!(schedule(&store, 1, FLIGHT_ASK), vec![1, 2]);
+        let at = utc(FLIGHT_ASK).to_rfc3339();
+        let job = |id| {
+            (
+                1,
+                id,
+                "triage".to_string(),
+                ask(FLIGHT_ASK),
+                if id == 2 { 3 } else { 1 },
+                false,
+                at.clone(),
+                "queued".to_string(),
+            )
+        };
+        assert_eq!(jobs(&store), vec![job(1), job(2)]);
+        // The message's status is the model's to change, never this code's.
+        let status: String = store
+            .lock()
+            .unwrap()
+            .query_row("SELECT status FROM triage WHERE message_id=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "new");
+        // Queued already; then run, and kept: asked once per ask time.
+        assert!(schedule(&store, 1, FLIGHT_ASK).is_empty());
+        complete_all(&store);
+        assert!(schedule(&store, 1, LATER).is_empty(), "once");
+        assert_eq!(jobs(&store).len(), 2);
+    }
+
+    #[test]
+    fn a_stay_waits_for_the_checkout_another_message_gave() {
+        let store = fixture();
+        // The booking: check in at 15:00, check out on the 16th. Laundering
+        // drops the date-only end beside a timed start.
+        mail(&store, 1, 1, "booking", 0);
+        decide(
+            &store,
+            1,
+            1,
+            &decided(vec![rec(
+                EventRecordKind::Reservation,
+                tz_time("2026-09-14T15:00", NY),
+                tz_time("2026-09-16", None),
+                &["HOTEL1"],
+            )]),
+        );
+        // "Check in today", with the model's two-hour guess: newest, so it
+        // supplies the facts the calendar draws (over at 09-14 21:00Z).
+        mail(&store, 1, 2, "reminder", 0);
+        let mut reminder = rec(
+            EventRecordKind::Reservation,
+            tz_time("2026-09-14T15:00", NY),
+            None,
+            &["HOTEL1"],
+        );
+        if let RecordProposal::Event {
+            duration_estimate, ..
+        } = &mut reminder
+        {
+            *duration_estimate = Some(DurationEstimate {
+                minutes: 120,
+                basis: "check-in".into(),
+            });
+        }
+        decide(&store, 1, 2, &decided(vec![reminder]));
+        assert_eq!(ghost_of(&store, 2), ghost_of(&store, 1), "one stay");
+        assert!(
+            schedule(&store, 1, "2026-09-15T21:00:00Z").is_empty(),
+            "mid-stay"
+        );
+        // The 16th has ended everywhere at 09-17 12:00Z; a day after that.
+        let at = "2026-09-18T12:00:00Z";
+        assert!(schedule(&store, 1, &minute_before(at)).is_empty());
+        assert_eq!(schedule(&store, 1, at), vec![1, 2]);
+        assert_eq!(triggers(&store, 2), vec![ask(at)]);
+    }
+
+    #[test]
+    fn a_booking_pooled_into_another_trips_ghost_waits_for_its_own_dates() {
+        let store = fixture();
+        let september = rec(
+            EventRecordKind::Travel,
+            tz_time("2026-09-10T10:00", NY),
+            tz_time("2026-09-10T20:00", NY),
+            &["PNRSEP", "NH106"],
+        );
+        mail(&store, 1, 1, "a", 0);
+        decide(&store, 1, 1, &decided(vec![september.clone()]));
+        // A December hotel on the same booking reference, pooled into the
+        // September ghost as legacy data was (naive zoned times used to drop
+        // the start, so a shared key was enough). No checkout, no length.
+        mail(&store, 1, 2, "b", 0);
+        decide(
+            &store,
+            1,
+            2,
+            &decided(vec![rec(
+                EventRecordKind::Reservation,
+                tz_time("2026-12-20T10:00", Some("America/Los_Angeles")),
+                None,
+                &["PNRDEC", "NH106"],
+            )]),
+        );
+        let sept = ghost_of(&store, 1);
+        sql(
+            &store,
+            &format!(
+                "UPDATE ghost_event_sources SET ghost_id={sept} WHERE message_id=2;
+                 DELETE FROM ghost_events WHERE id<>{sept};"
+            ),
+        );
+        // The ghost still draws September: its facts are message 1's.
+        assert!(
+            schedule(&store, 1, "2026-09-12T12:00:00Z").is_empty(),
+            "a December trip is not asked about in September"
+        );
+        // Checks in 12-20 18:00Z; with no checkout, asked a day after.
+        let at = "2026-12-21T18:00:00Z";
+        assert!(schedule(&store, 1, &minute_before(at)).is_empty());
+        // The September mail waits with it: the ghost's pooled dates are
+        // all its sources' (later is the safe side of a wrong pool).
+        assert_eq!(schedule(&store, 1, at), vec![1, 2]);
+        assert_eq!(triggers(&store, 2), vec![ask(at)]);
+    }
+
+    #[test]
+    fn a_record_its_ghost_no_longer_holds_still_dates_its_own_mail() {
+        let store = fixture();
+        // One message about two legs; the return leg's source row is gone
+        // (the per-ghost source cap evicts the oldest), so only the
+        // message's own decision still says when it ends.
+        let mut both = zoned_flight("ZIPAIR ZG24", &["ZG24QX7"]);
+        both.records.push(rec(
+            EventRecordKind::Travel,
+            tz_time("2026-11-10T09:00", NY),
+            tz_time("2026-11-10T12:00", NY),
+            &["RETURN77"],
+        ));
+        mail(&store, 1, 1, "booking", 0);
+        decide(&store, 1, 1, &both);
+        assert_eq!(count(&store, "ghost_events"), 2, "the two legs");
+        sql(&store, "DELETE FROM ghost_event_sources WHERE position=1");
+        assert!(schedule(&store, 1, FLIGHT_ASK).is_empty());
+        // It lands 17:00Z; a day after that.
+        let at = "2026-11-11T17:00:00Z";
+        assert!(schedule(&store, 1, &minute_before(at)).is_empty());
+        assert_eq!(schedule(&store, 1, at), vec![1]);
+    }
+
+    #[test]
+    fn a_booking_that_feeds_a_later_flight_waits_for_it() {
+        let store = fixture();
+        // Message 1 books both legs; message 2 is about the first alone.
+        let mut both = zoned_flight("ZIPAIR ZG24", &["ZG24QX7"]);
+        both.records.push(rec(
+            EventRecordKind::Travel,
+            tz_time("2026-11-10T09:00", NY),
+            tz_time("2026-11-10T12:00", NY),
+            &["RETURN77"],
+        ));
+        mail(&store, 1, 1, "booking", 0);
+        decide(&store, 1, 1, &both);
+        flight_mail(&store, 1, 2, "checkin");
+        assert_eq!(count(&store, "ghost_events"), 2, "the two legs");
+        assert_eq!(schedule(&store, 1, FLIGHT_ASK), vec![2]);
+        assert!(schedule(&store, 1, &minute_before("2026-11-11T17:00:00Z")).is_empty());
+        assert_eq!(schedule(&store, 1, "2026-11-11T17:00:00Z"), vec![1]);
+    }
+
+    #[test]
+    fn a_stay_with_no_end_is_asked_about_a_day_after_check_in() {
+        let store = fixture();
+        // Check in 2026-10-03 20:00 -04:00 (10-04 00:00Z), no checkout, no
+        // length: the calendar draws the kind's two hours, which is nobody's
+        // date, so the ask counts from check-in. The model, if the stay is
+        // not over, keeps it and sets a later revisit.
+        mail(&store, 1, 1, "stay", 0);
+        decide(
+            &store,
+            1,
+            1,
+            &decided(vec![rec(
+                EventRecordKind::Reservation,
+                tz_time("2026-10-03T20:00:00-04:00", None),
+                None,
+                &["HOTEL9"],
+            )]),
+        );
+        let at = "2026-10-05T00:00:00Z";
+        assert!(schedule(&store, 1, &minute_before(at)).is_empty());
+        assert_eq!(schedule(&store, 1, at), vec![1]);
+        assert_eq!(triggers(&store, 1), vec![ask(at)]);
+    }
+
+    #[test]
+    fn travel_with_no_end_is_asked_about_two_days_after_it_leaves() {
+        let store = fixture();
+        mail(&store, 1, 1, "trip", 0);
+        decide(
+            &store,
+            1,
+            1,
+            &decided(vec![rec(
+                EventRecordKind::Travel,
+                tz_time("2026-10-03T20:00:00-04:00", None),
+                None,
+                &["TRIP1"],
+            )]),
+        );
+        // Leaves 10-04 00:00Z, lands within a day, asked a day after that.
+        let at = "2026-10-06T00:00:00Z";
+        assert!(schedule(&store, 1, &minute_before(at)).is_empty());
+        assert_eq!(schedule(&store, 1, at), vec![1]);
+    }
+
+    #[test]
+    fn mail_whose_dates_move_later_is_asked_again() {
+        let store = fixture();
+        flight_mail(&store, 1, 1, "checkin");
+        assert_eq!(schedule(&store, 1, FLIGHT_ASK), vec![1]);
+        complete_all(&store);
+        // The model kept it. The same dates ask nothing more.
+        assert!(schedule(&store, 1, "2026-10-21T00:00:00Z").is_empty());
+        // A delay notice: the flight now lands two days later.
+        let mut delayed = zoned_flight("ZIPAIR ZG24", &["ZG24QX7"]);
+        if let RecordProposal::Event { start, end, .. } = &mut delayed.records[0] {
+            *start = tz_time("2026-10-21T21:30", Some("Asia/Tokyo"));
+            *end = tz_time("2026-10-21T14:45", Some("America/Los_Angeles"));
+        }
+        decide(&store, 1, 1, &delayed);
+        let later = "2026-10-22T21:45:00Z";
+        assert!(schedule(&store, 1, &minute_before(later)).is_empty());
+        assert_eq!(schedule(&store, 1, later), vec![1]);
+        assert_eq!(triggers(&store, 1), vec![ask(FLIGHT_ASK), ask(later)]);
+        let asked: String = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT ask_at FROM event_revisit_asked WHERE message_id=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(asked, utc(later).to_rfc3339());
+        complete_all(&store);
+        assert!(schedule(&store, 1, LATER).is_empty());
+    }
+
+    /// The re-check has its own cap, [`EVENT_ASKS_PER_MESSAGE`]: the agent's
+    /// own revisits, however many, do not use it up (a busy booking thread
+    /// can spend the policy's lifetime before the trip ends), and three asks
+    /// that answered nothing are the last. A lifetime of zero is revisits off.
+    #[test]
+    fn the_rechecks_own_cap_bounds_the_asks() {
+        let store = fixture();
+        flight_mail(&store, 1, 1, "checkin");
+        // The policy's whole lifetime spent by the agent's own revisits,
+        // each answered before the flight landed.
+        for day in 1..=6 {
+            sql(
+                &store,
+                &format!(
+                    "INSERT INTO agent_triage_jobs(account_id,message_id,kind,trigger,input_revision,
+                         arrival_eligible,available_at,state)
+                     VALUES(1,1,'triage','revisit:2026-10-0{day}T00:00:00+00:00',1,0,
+                         '2026-10-0{day}T00:00:00+00:00','completed')"
+                ),
+            );
+        }
+        sql(
+            &store,
+            "INSERT INTO agent_triage_runs(job_id,account_id,message_id,outcome,completed_at)
+             SELECT id,1,1,'applied',available_at FROM agent_triage_jobs",
+        );
+        let none = RevisitPassConfig {
+            max_per_message_lifetime: 0,
+            ..RevisitPassConfig::default()
+        };
+        assert!(schedule_with(&store, 1, FLIGHT_ASK, &none).is_empty());
+        assert_eq!(
+            schedule(&store, 1, FLIGHT_ASK),
+            vec![1],
+            "not the lifetime's"
+        );
+        // Asked and never answered, three times over (content changes drop
+        // each one): the third is the last.
+        for (round, now) in [(2, "2026-10-21T00:00:00Z"), (3, "2026-10-22T00:00:00Z")] {
+            drop_all(&store, "completed");
+            sql(
+                &store,
+                &format!("UPDATE agent_message_state SET revision={round} WHERE message_id=1"),
+            );
+            assert_eq!(schedule(&store, 1, now), vec![1], "ask {round}");
+        }
+        drop_all(&store, "completed");
+        sql(
+            &store,
+            "UPDATE agent_message_state SET revision=4 WHERE message_id=1",
+        );
+        assert!(schedule(&store, 1, LATER).is_empty(), "a fourth");
+        let asks = triggers(&store, 1)
+            .into_iter()
+            .filter(|t| t.starts_with("revisit:event_ended:"))
+            .count();
+        assert_eq!(asks, 3);
+    }
+
+    /// ASKED MEANS ANSWERED. A re-check that a content revision bump dropped,
+    /// or that failed for good, answered nothing: the message is asked again
+    /// on a later tick (a failure at the same content under its own trigger,
+    /// since the table holds one job per trigger and revision).
+    #[test]
+    fn a_recheck_that_answered_nothing_is_asked_again() {
+        let store = fixture();
+        flight_mail(&store, 1, 1, "checkin");
+        // Long after the flight, and after every decision was written, so a
+        // tick with nothing changed takes the cheap path.
+        assert_eq!(schedule(&store, 1, "2099-01-01T00:00:00Z"), vec![1]);
+        // Dropped by a content change: asked again, at the new revision.
+        drop_all(&store, "completed");
+        sql(
+            &store,
+            "UPDATE agent_message_state SET revision=2 WHERE message_id=1",
+        );
+        assert_eq!(schedule(&store, 1, "2099-01-02T00:00:00Z"), vec![1]);
+        // Failed for good, same content: asked again under its own trigger.
+        drop_all(&store, "failed");
+        assert_eq!(schedule(&store, 1, "2099-01-03T00:00:00Z"), vec![1]);
+        assert_eq!(
+            triggers(&store, 1),
+            vec![
+                ask(FLIGHT_ASK),
+                ask(FLIGHT_ASK),
+                format!("{}#3", ask(FLIGHT_ASK))
+            ]
+        );
+        // Answered: nothing more.
+        complete_all(&store);
+        assert!(schedule(&store, 1, "2099-01-04T00:00:00Z").is_empty());
+        assert_eq!(triggers(&store, 1).len(), 3);
+    }
+
+    /// A length guess that moves the ask time by less than a day after it
+    /// was answered is a wobble, not news: nothing more. More than a day
+    /// later is asked again.
+    #[test]
+    fn an_answered_ask_is_not_repeated_for_a_wobble() {
+        let store = fixture();
+        flight_mail(&store, 1, 1, "checkin");
+        assert_eq!(schedule(&store, 1, FLIGHT_ASK), vec![1]);
+        // Answered right at its ask time.
+        complete_all(&store);
+        let landing = |end: &str| {
+            let mut moved = zoned_flight("ZIPAIR ZG24", &["ZG24QX7"]);
+            if let RecordProposal::Event { end: e, .. } = &mut moved.records[0] {
+                *e = tz_time(end, Some("America/Los_Angeles"));
+            }
+            moved
+        };
+        // Lands 23 hours later than it did.
+        decide(&store, 1, 1, &landing("2026-10-20T13:45"));
+        assert!(schedule(&store, 1, LATER).is_empty(), "a wobble");
+        // Lands 25 hours later than it did.
+        decide(&store, 1, 1, &landing("2026-10-20T15:45"));
+        assert_eq!(schedule(&store, 1, LATER), vec![1]);
+        assert_eq!(triggers(&store, 1)[1], ask("2026-10-21T22:45:00Z"));
+    }
+
+    /// History retention keeps what this pass reads. Once the answer's run is
+    /// past the retention window (slimmed, and every older run around it
+    /// gone), a wobble is still a wobble: the answer is found, and nothing is
+    /// paid for twice.
+    #[test]
+    fn an_answer_past_the_retention_window_still_counts() {
+        let store = fixture();
+        flight_mail(&store, 1, 1, "checkin");
+        assert_eq!(schedule(&store, 1, FLIGHT_ASK), vec![1]);
+        complete_all(&store);
+        // A quarter and more later, with the worker still running.
+        let pruned_at = utc(FLIGHT_ASK) + chrono::Duration::days(HISTORY_RETENTION_DAYS + 30);
+        sql(
+            &store,
+            &format!(
+                "UPDATE agent_triage_runs SET metadata_json='{{\"model_turns\":3}}';
+                 INSERT INTO agent_triage_runs(job_id,account_id,message_id,outcome,completed_at)
+                 VALUES(0,1,1,'applied','{}'),(0,1,1,'applied','{}')",
+                utc(FLIGHT_ASK).to_rfc3339(),
+                pruned_at.to_rfc3339()
+            ),
+        );
+        let (pruned, outcome) = store.prune_history(pruned_at);
+        outcome.unwrap();
+        assert_eq!((pruned.runs, pruned.runs_trimmed), (1, 1));
+        let mut moved = zoned_flight("ZIPAIR ZG24", &["ZG24QX7"]);
+        if let RecordProposal::Event { end, .. } = &mut moved.records[0] {
+            *end = tz_time("2026-10-20T13:45", Some("America/Los_Angeles"));
+        }
+        decide(&store, 1, 1, &moved);
+        assert!(schedule(&store, 1, LATER).is_empty(), "still answered");
+    }
+
+    #[test]
+    fn revisits_off_asks_nothing() {
+        let store = fixture();
+        flight_mail(&store, 1, 1, "checkin");
+        let off = RevisitPassConfig {
+            enabled: false,
+            ..RevisitPassConfig::default()
+        };
+        assert!(schedule_with(&store, 1, LATER, &off).is_empty());
+        assert!(jobs(&store).is_empty());
+        assert_eq!(schedule(&store, 1, LATER), vec![1]);
+    }
+
+    #[test]
+    fn a_revisit_already_queued_or_running_is_enough() {
+        let store = fixture();
+        flight_mail(&store, 1, 1, "checkin");
+        // The agent's own revisit, set for next week.
+        sql(
+            &store,
+            "INSERT INTO agent_triage_jobs(account_id,message_id,kind,trigger,input_revision,
+                 arrival_eligible,available_at)
+             VALUES(1,1,'triage','revisit:2026-10-27T00:00:00+00:00',1,0,
+                 '2026-10-27T00:00:00+00:00')",
+        );
+        assert!(schedule(&store, 1, FLIGHT_ASK).is_empty());
+        sql(&store, "UPDATE agent_triage_jobs SET state='leased'");
+        assert!(schedule(&store, 1, FLIGHT_ASK).is_empty());
+        // Any other job for the message is not a revisit.
+        sql(
+            &store,
+            "UPDATE agent_triage_jobs SET state='completed';
+             INSERT INTO agent_triage_jobs(account_id,message_id,kind,trigger,input_revision,
+                 arrival_eligible,available_at)
+             VALUES(1,1,'triage','ingest',1,0,'2026-10-01T00:00:00+00:00')",
+        );
+        assert_eq!(schedule(&store, 1, FLIGHT_ASK), vec![1]);
+    }
+
+    /// The agent's own revisit that ran after the ask time and kept the mail
+    /// IS the answer: the scheduler does not ask the same question again
+    /// (billed twice). One that ran before the ask time answered an earlier
+    /// question, so the message is still asked. Any other run's answer is
+    /// not a re-check's.
+    #[test]
+    fn the_agents_own_answer_after_the_ask_time_counts() {
+        let own = |at: &str, outcome: &str, trigger: &str| {
+            format!(
+                "INSERT INTO agent_triage_jobs(id,account_id,message_id,kind,trigger,input_revision,
+                     arrival_eligible,available_at,state)
+                 VALUES(90,1,1,'triage','{trigger}',1,0,'{at}','completed');
+                 INSERT INTO agent_triage_runs(job_id,account_id,message_id,outcome,completed_at)
+                 VALUES(90,1,1,'{outcome}','{at}');"
+            )
+        };
+        let after = "2026-10-21T00:00:00+00:00";
+        for (name, setup, asked) in [
+            (
+                "answered after",
+                own(after, "applied", "revisit:2026-10-21T00:00:00+00:00"),
+                false,
+            ),
+            (
+                "answered before",
+                own(
+                    "2026-10-20T21:00:00+00:00",
+                    "applied",
+                    "revisit:2026-10-20T21:00:00+00:00",
+                ),
+                true,
+            ),
+            (
+                "not applied",
+                own(after, "stale", "revisit:2026-10-21T00:00:00+00:00"),
+                true,
+            ),
+            ("not a revisit", own(after, "applied", "refresh"), true),
+        ] {
+            let store = fixture();
+            flight_mail(&store, 1, 1, "checkin");
+            sql(&store, &setup);
+            let queued = schedule(&store, 1, "2026-10-22T00:00:00Z");
+            assert_eq!(!queued.is_empty(), asked, "{name}");
+            if !asked {
+                // Settled in the ledger at the answered ask time, and quiet
+                // from then on.
+                let ledger: String = store
+                    .lock()
+                    .unwrap()
+                    .query_row(
+                        "SELECT ask_at FROM event_revisit_asked WHERE message_id=1",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(ledger, utc(FLIGHT_ASK).to_rfc3339(), "{name}");
+                assert!(schedule(&store, 1, LATER).is_empty(), "{name}");
+            }
+        }
+    }
+
+    /// Only events the owner is going to are asked about: committed, or
+    /// marked going, and never one the owner dismissed. A mass invite nobody
+    /// accepted is left to the agent's own revisit.
+    #[test]
+    fn only_events_the_owner_goes_to_are_asked_about() {
+        for (name, update, asked) in [
+            ("committed", "SELECT 1", true),
+            (
+                "invited",
+                "UPDATE ghost_events SET commitment='invited'",
+                false,
+            ),
+            (
+                "invited, marked going",
+                "UPDATE ghost_events SET commitment='invited',user_state='going'",
+                true,
+            ),
+            (
+                "committed, dismissed",
+                "UPDATE ghost_events SET user_state='dismissed'",
+                false,
+            ),
+        ] {
+            let store = fixture();
+            flight_mail(&store, 1, 1, "checkin");
+            sql(&store, update);
+            assert_eq!(!schedule(&store, 1, LATER).is_empty(), asked, "{name}");
+        }
+    }
+
+    /// RULED OUT ONCE, NOT RE-READ EVERY TICK. Mail with a stranger's words
+    /// in its thread is read, ruled out, and kept as `skipped`: removing the
+    /// stranger behind the scheduler's back (no date or decision changed)
+    /// leaves it skipped, so the tick did not read it again. Once its
+    /// decision changes it is read again, and now it is asked about.
+    #[test]
+    fn mail_ruled_out_is_read_again_only_when_its_dates_change() {
+        let store = fixture();
+        flight_mail(&store, 1, 1, "checkin");
+        sql(
+            &store,
+            "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body,auth_pass)
+             VALUES(9,1,'9','checkin','someone@elsewhere.example','re','2026-10-01T00:00:00+00:00','','',1)",
+        );
+        assert!(schedule(&store, 1, LATER).is_empty());
+        let skipped = |store: &SqliteStore| -> i64 {
+            store
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT skipped FROM event_revisit_asked WHERE account_id=1 AND message_id=1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(skipped(&store), 1);
+        sql(&store, "DELETE FROM messages WHERE id=9");
+        assert!(schedule(&store, 1, LATER).is_empty(), "not read again");
+        sql(
+            &store,
+            "UPDATE agent_message_decisions SET decided_at='2099-01-01T00:00:00+00:00' WHERE message_id=1",
+        );
+        assert_eq!(
+            schedule(&store, 1, LATER),
+            vec![1],
+            "read again once it changed"
+        );
+        assert_eq!(skipped(&store), 0);
+    }
+
+    /// Mail the rails would refuse is not asked about (each alone): own mail
+    /// in its thread, an earlier auto-done, a stranger's words in its thread,
+    /// its own sender unauthenticated. Another address of its own sender's
+    /// organisation is not a stranger.
+    #[test]
+    fn mail_whose_done_would_be_refused_is_not_asked_about() {
+        let reply = |from: &str, auth: &str| {
+            format!(
+                "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body,auth_pass)
+                 VALUES(9,1,'9','checkin','{from}','re','2026-10-01T00:00:00+00:00','','',{auth})"
+            )
+        };
+        for (name, setup, asked) in [
+            ("same organisation", reply("desk@venue.example", "1"), true),
+            (
+                "the owner wrote (sent mail, so its domain is no excuse)",
+                format!(
+                    "{}; UPDATE messages SET is_sent=1 WHERE id=9",
+                    reply("desk@venue.example", "1")
+                ),
+                false,
+            ),
+            (
+                "a stranger replied",
+                reply("someone@elsewhere.example", "1"),
+                false,
+            ),
+            ("an unauthenticated reply", reply(VENUE, "0"), false),
+            (
+                "unauthenticated itself",
+                "UPDATE messages SET auth_pass=0 WHERE id=1".into(),
+                false,
+            ),
+            (
+                "auto-done before",
+                "INSERT INTO auto_done(account_id,message_id,source,reason,done_at)
+                 VALUES(1,1,'agent_revisit','x','2026-10-01T00:00:00+00:00')"
+                    .into(),
+                false,
+            ),
+        ] {
+            let store = fixture();
+            flight_mail(&store, 1, 1, "checkin");
+            sql(&store, &setup);
+            assert_eq!(!schedule(&store, 1, LATER).is_empty(), asked, "{name}");
+        }
+    }
+
+    #[test]
+    fn mail_that_cannot_be_closed_is_not_asked_about() {
+        let store = fixture();
+        for id in 1..=11 {
+            flight_mail(&store, 1, id, &format!("t{id}"));
+        }
+        sql(
+            &store,
+            "UPDATE triage SET status='open' WHERE message_id=2;
+             UPDATE triage SET status='done' WHERE message_id=3;
+             UPDATE triage SET remind_at='2026-12-01T00:00:00+00:00' WHERE message_id=4;
+             UPDATE triage SET reminded_at='2026-10-01T00:00:00+00:00' WHERE message_id=5;
+             UPDATE messages SET is_sent=1 WHERE id=6;
+             UPDATE messages SET is_spam=1 WHERE id=7;
+             UPDATE messages SET is_archive=1 WHERE id=8;
+             UPDATE agent_message_state SET access='restricted' WHERE message_id=9;
+             UPDATE agent_message_state SET access='pending' WHERE message_id=10;
+             UPDATE agent_message_decisions
+                 SET decision_json=json_set(decision_json,'$.auth.kinds',json('[\"otp\"]'))
+                 WHERE message_id=11;",
+        );
+        assert_eq!(ghost_of(&store, 11), ghost_of(&store, 1), "one flight");
+        // Reopened mail (2) is still asked about: kept handy before the
+        // flight is not wanted after it.
+        assert_eq!(schedule(&store, 1, LATER), vec![1, 2]);
+    }
+
+    #[test]
+    fn mail_whose_event_has_no_owner_or_no_start_is_not_asked_about() {
+        let store = fixture();
+        // Three shows, each its own ghost.
+        for (id, refs) in [(1, "SHOW1"), (2, "SHOW2"), (3, "SHOW3")] {
+            mail(&store, 1, id, &format!("t{id}"), 0);
+            decide(
+                &store,
+                1,
+                id,
+                &decided(vec![rec(
+                    EventRecordKind::Ticket,
+                    tz_time("2026-10-03T20:00:00-04:00", None),
+                    None,
+                    &[refs],
+                )]),
+            );
+        }
+        // Message 3 is about a fourth show too, which on its own is over.
+        let mut both = decided(vec![
+            rec(
+                EventRecordKind::Ticket,
+                tz_time("2026-10-03T20:00:00-04:00", None),
+                None,
+                &["SHOW3"],
+            ),
+            rec(
+                EventRecordKind::Ticket,
+                tz_time("2026-10-01T20:00:00-04:00", None),
+                None,
+                &["SHOW4"],
+            ),
+        ]);
+        both.records[1] = {
+            let mut r = both.records[1].clone();
+            if let RecordProposal::Event { title, .. } = &mut r {
+                *title = "Other show".into();
+            }
+            r
+        };
+        decide(&store, 1, 3, &both);
+        assert_eq!(count(&store, "ghost_events"), 4);
+        let two = ghost_of(&store, 2);
+        let three: i64 = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT ghost_id FROM ghost_event_sources WHERE message_id=3 AND position=0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        sql(
+            &store,
+            &format!(
+                "UPDATE ghost_events SET owner_scope=NULL WHERE id={two};
+                 UPDATE ghost_events SET starts_at='not a time' WHERE id={three};"
+            ),
+        );
+        assert_eq!(schedule(&store, 1, LATER), vec![1]);
+        sql(
+            &store,
+            &format!("UPDATE ghost_events SET starts_at=NULL WHERE id={three}"),
+        );
+        complete_all(&store);
+        assert!(schedule(&store, 1, LATER).is_empty());
+    }
+
+    #[test]
+    fn an_event_that_has_not_started_asks_nothing() {
+        let store = fixture();
+        flight_mail(&store, 1, 1, "checkin");
+        // The flight leaves 10-19 12:30Z.
+        assert!(schedule(&store, 1, "2026-10-19T12:00:00Z").is_empty());
+        // A start the sort key puts after now is never read further.
+        sql(
+            &store,
+            "UPDATE ghost_events SET start_sort='2099-01-01T00:00:00Z'",
+        );
+        assert!(schedule(&store, 1, LATER).is_empty());
+    }
+
+    #[test]
+    fn another_accounts_past_flight_is_its_own_business() {
+        let store = fixture();
+        flight_mail(&store, 2, 1, "checkin");
+        assert!(schedule(&store, 1, LATER).is_empty());
+        assert!(jobs(&store).is_empty());
+        assert_eq!(schedule(&store, 2, LATER), vec![1]);
+        // Due now, which is long after its ask time.
+        assert_eq!(
+            jobs(&store),
+            vec![(
+                2,
+                1,
+                "triage".into(),
+                ask(FLIGHT_ASK),
+                1,
+                false,
+                utc(LATER).to_rfc3339(),
+                "queued".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn asked_mail_whose_dates_did_not_change_reads_no_decision() {
+        let store = fixture();
+        flight_mail(&store, 1, 1, "checkin");
+        assert_eq!(schedule(&store, 1, FLIGHT_ASK), vec![1]);
+        complete_all(&store);
+        // After every decision and ghost write: the dates are read once more,
+        // found the same, and stamped.
+        let read = "2099-01-01T00:00:00Z";
+        assert!(schedule(&store, 1, read).is_empty());
+        // A later date written behind the store's back (no decision or ghost
+        // write since) is not read: nothing its dates come from changed.
+        let mut later = zoned_flight("ZIPAIR ZG24", &["ZG24QX7"]);
+        if let RecordProposal::Event { end, .. } = &mut later.records[0] {
+            *end = tz_time("2026-10-25T14:45", Some("America/Los_Angeles"));
+        }
+        let json = serde_json::to_string(&later).unwrap().replace('\'', "''");
+        sql(
+            &store,
+            &format!(
+                "UPDATE agent_message_decisions SET decision_json='{json}' WHERE message_id=1"
+            ),
+        );
+        assert!(schedule(&store, 1, "2099-01-02T00:00:00Z").is_empty());
+        // A real write is.
+        sql(
+            &store,
+            "UPDATE agent_message_decisions SET decided_at='2099-01-03T00:00:00+00:00'",
+        );
+        assert_eq!(schedule(&store, 1, "2099-01-04T00:00:00Z"), vec![1]);
+        assert_eq!(
+            triggers(&store, 1)[1],
+            ask("2026-10-26T21:45:00Z"),
+            "the new date"
+        );
+    }
+
+    #[test]
+    fn the_asked_row_goes_with_its_message() {
+        let store = fixture();
+        flight_mail(&store, 1, 1, "checkin");
+        flight_mail(&store, 2, 2, "checkin");
+        assert_eq!(schedule(&store, 1, FLIGHT_ASK), vec![1]);
+        assert_eq!(schedule(&store, 2, FLIGHT_ASK), vec![2]);
+        assert_eq!(count(&store, "event_revisit_asked"), 2);
+        sql(&store, "DELETE FROM messages WHERE id=1");
+        assert_eq!(count(&store, "event_revisit_asked"), 1);
     }
 }

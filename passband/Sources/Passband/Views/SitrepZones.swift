@@ -60,11 +60,12 @@ struct CalendarZone: View {
                                         .font(Typo.num(10))
                                         .foregroundStyle(Palette.inkFaintest)
                                 }
-                                .padding(.horizontal, Space.scaled(7))
+                                .padding(.horizontal, RecordRowStyle.hPadding)
                                 .padding(.vertical, Space.scaled(5))
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(RecordRowStyle())
+                            .recordRowBleed()
                             .modifier(CalendarSeenMarker(account: accountScope, item: c.id))
                             .warmsThreadOnHover(c.thread_id)
                         }
@@ -330,7 +331,7 @@ private struct ShipmentCard: View {
         .padding(Space.scaled(9))
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.hairline.opacity(hovering && target != nil ? 0.85 : 0.5))
         )
         .contentShape(Rectangle())
@@ -525,29 +526,18 @@ struct BankingZone: View {
                                         .fixedSize()
                                 }
                             }
-                            .padding(.horizontal, Space.scaled(7))
+                            .padding(.horizontal, RecordRowStyle.hPadding)
                             .padding(.vertical, Space.scaled(5))
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(RecordRowStyle())
+                        .recordRowBleed()
                         .warmsThreadOnHover(r.thread_id)
                     }
                     if inWindow.count > Self.collapsed {
-                        Button {
-                            expanded.toggle()
-                        } label: {
-                            Text(
-                                expanded
-                                    ? "Show fewer"
-                                    : "Show \(inWindow.count - Self.collapsed) more"
-                            )
-                            .font(Typo.rowSub)
-                            .foregroundStyle(Palette.inkFaintest)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, Space.scaled(5))
-                            .contentShape(Rectangle())
+                        ZoneExpander(overflow: inWindow.count - Self.collapsed, expanded: expanded) {
+                            withAnimation(ZoneExpander.animation) { expanded.toggle() }
                         }
-                        .buttonStyle(RecordRowStyle())
                     }
                 }
             }
@@ -609,11 +599,12 @@ struct ReceiptsZone: View {
                                         .foregroundStyle(Palette.positive)
                                 }
                             }
-                            .padding(.horizontal, Space.scaled(7))
+                            .padding(.horizontal, RecordRowStyle.hPadding)
                             .padding(.vertical, Space.scaled(5))
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(RecordRowStyle())
+                        .recordRowBleed()
                         .warmsThreadOnHover(r.thread_id)
                     }
                 }
@@ -668,7 +659,8 @@ struct ReadingZone: View {
         // missing feature, not as "nothing this week".
         ZoneCard(
             symbol: "envelope.open", title: "Reading", count: senders.count,
-            subtitle: "newsletters, announcements, and offers"
+            subtitle: "newsletters, announcements, and offers",
+            trailing: actions
         ) {
             if senders.isEmpty {
                 EmptyNote("Nothing to read yet.")
@@ -676,6 +668,14 @@ struct ReadingZone: View {
                 grid
             }
         }
+    }
+
+    /// The zone's door, smart clear, on both platforms. Gone with the mail:
+    /// on an empty zone there is nothing for it to do. Not in the practice
+    /// inbox, whose senders are fixtures.
+    private var actions: AnyView? {
+        guard !senders.isEmpty, !RehearsalMode.isEnabled else { return nil }
+        return AnyView(ReadingActions())
     }
 
     /// NON-LAZY on purpose: a LazyVGrid rebuilds cards as they cross the
@@ -696,20 +696,34 @@ struct ReadingZone: View {
         }
     }
 
-    /// For-your-eyes' expander, so the two zones fold the same way.
+    /// The board's one expander, so every zone folds the same way.
     private func expander(_ overflow: Int) -> some View {
-        Button {
-            withAnimation(.smooth(duration: 0.28)) { expanded.toggle() }
-        } label: {
-            Text(expanded ? "show less" : "\(overflow) more")
-                .font(Typo.micro)
-                .foregroundStyle(Palette.inkFaint)
-                .padding(.horizontal, Space.scaled(11))
-                .padding(.vertical, Space.s4)
+        ZoneExpander(overflow: overflow, expanded: expanded) {
+            withAnimation(ZoneExpander.animation) { expanded.toggle() }
         }
-        .buttonStyle(.glass)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, Space.s10)
+    }
+}
+
+/// SMART CLEAR, in Reading's corner. A leaf of its own so the zone above
+/// stays free of closures and of the store's working flags:
+/// a smart clear starting must not re-measure every card in the grid.
+private struct ReadingActions: View {
+    @Environment(AppStore.self) private var store
+
+    var body: some View {
+        HStack(spacing: Space.s6) {
+            ZonePill(
+                symbol: "checkmark.rectangle.stack", label: "smart clear",
+                help: "Clear what has expired and what you never open. You can undo it.",
+                accessibilityName: "Smart clear",
+                working: store.smartClearWorking, workingLabel: "tidying up"
+            ) {
+                #if os(iOS)
+                    Haptics.tick()
+                #endif
+                Task { await store.runSmartClear() }
+            }
+        }
     }
 }
 
@@ -763,7 +777,9 @@ private struct ReadingCard: View {
             // Hero left as a FIXED square, text right: every card in the grid
             // keeps the same height whether or not its sender ships art.
             HStack(alignment: .top, spacing: Space.scaled(9)) {
-                ReadingHero(threadId: sender.latestThreadId, sender: sender.sender)
+                ReadingHero(
+                    threadId: sender.latestThreadId, sender: sender.sender,
+                    address: sender.address)
                 VStack(alignment: .leading, spacing: Space.s6) {
                     HStack(spacing: Space.s6) {
                         Text(SenderCache.resolved(sender.sender).displayName)
@@ -790,14 +806,14 @@ private struct ReadingCard: View {
             .padding(Space.scaled(9))
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .fill(
                         sender.isContent
                             ? Palette.readingContent.opacity(hovering ? 1 : 0.8)
                             : Palette.hairline.opacity(hovering ? 0.85 : 0.5))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .strokeBorder(
                         sender.rule != nil ? Palette.accent.opacity(0.35) : .clear,
                         lineWidth: 1)
@@ -805,6 +821,14 @@ private struct ReadingCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        // Only seen when a removal is ANIMATED, which is the smart clear
+        // sweep: the tile slides a little way off and fades instead of
+        // blinking out. An ordinary `e` is not animated and is unchanged.
+        .transition(
+            .asymmetric(
+                insertion: .opacity,
+                removal: .opacity.combined(with: .offset(x: 26)).combined(
+                    with: .scale(scale: 0.94))))
         .onHover { over in
             hovering = over
             // Nothing READS this during a render — only the `e` handler, at
@@ -823,6 +847,9 @@ private struct ReadingCard: View {
 private struct ReadingHero: View {
     let threadId: String
     let sender: String
+    /// The grouping address: keys the sender's art on disk, which is what
+    /// paints this card on its first frame after a relaunch or a cleared stack.
+    let address: String
     @State private var resolved: HeroCache.Hero?
 
     /// Side of the square thumb. SMALLER ON THE PHONE, because the card is: a
@@ -849,8 +876,11 @@ private struct ReadingHero: View {
 
     /// Falling back to the cache INSIDE the read keeps a recycled card from
     /// flashing empty: `@State` is gone the moment the card is dropped, the
-    /// cached hero is not, so it repaints on the very first frame.
-    private var hero: HeroCache.Hero? { resolved ?? HeroCache.shared.cached(threadId) }
+    /// cached hero is not, so it repaints on the very first frame. Before the
+    /// thread has a verdict that is the SENDER's last art, off disk.
+    private var hero: HeroCache.Hero? {
+        resolved ?? HeroCache.shared.cached(threadId, address: address)
+    }
 
     var body: some View {
         content
@@ -860,8 +890,12 @@ private struct ReadingHero: View {
                 // again costs a second body pass. The guard is INSIDE the task,
                 // not around it: a conditional modifier would change this view's
                 // identity as the verdict lands.
-                guard !HeroCache.shared.isResolved(threadId) else { return }
-                resolved = await HeroCache.shared.resolve(threadId)
+                // `learn` still files the warmer's verdict under this sender.
+                guard !HeroCache.shared.isResolved(threadId) else {
+                    HeroCache.shared.learn(threadId, address: address)
+                    return
+                }
+                resolved = await HeroCache.shared.resolve(threadId, address: address)
             }
     }
 
@@ -879,7 +913,12 @@ private struct ReadingHero: View {
                 // the neutral well when sampling failed — which must stay
                 // distinguishable from a white sample.
                 .background(hero.fill ?? Palette.canvas.opacity(0.7))
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                // DELIBERATE exception to `Radius.concentric`: the image takes
+                // the CARD's own radius rather than the ~2pt a concentric curve
+                // 9pt inside would give. A near-square thumbnail read as a
+                // pasted-in photo; one that echoes the card's corner reads as
+                // part of the card, which is the look we want here.
+                .clipShape(RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
         } else {
             // Zero in BOTH axes: a zero-height-only placeholder would still
             // collect the HStack's spacing and indent the text.
@@ -1056,15 +1095,53 @@ struct EmptyNote: View {
     }
 }
 
-/// A record row: no chrome at rest, a soft wash on hover.
+/// THE BOARD'S ONE "N MORE" FOLD: For your eyes, Reading and Billing all
+/// open and close their overflow with this, so the three read as the same
+/// gesture. A quiet glass pill on the leading edge, lowercase like the rest
+/// of the board's small print. The caller owns the state and the animation.
+struct ZoneExpander: View {
+    let overflow: Int
+    let expanded: Bool
+    let action: () -> Void
+
+    /// Shared so a button press and arrowing off the end open the same way.
+    static let animation: Animation = .smooth(duration: 0.28)
+
+    var body: some View {
+        Button(action: action) {
+            Text(expanded ? "show less" : "\(overflow) more")
+                .font(Typo.micro)
+                .foregroundStyle(Palette.inkFaint)
+                .padding(.horizontal, Space.scaled(11))
+                .padding(.vertical, Space.s4)
+        }
+        .buttonStyle(.glass)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, Space.s8)
+    }
+}
+
+/// A record row: no chrome at rest, a soft wash on hover. The wash is the
+/// board's one row hover (the For-your-eyes rows paint the same tone).
 struct RecordRowStyle: ButtonStyle {
     @State private var hovering = false
+
+    /// Room for the hover wash, which only a pointer raises. A phone has no
+    /// hover, so there it was pure inset, drawing every record a step inside
+    /// its zone's title: on iOS the words sit on the title's line.
+    static var hPadding: CGFloat {
+        #if os(macOS)
+            Space.scaled(7)
+        #else
+            0
+        #endif
+    }
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(hovering ? Palette.accentSoft.opacity(0.7) : .clear)
+                RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
+                    .fill(hovering ? Palette.hairline.opacity(SelectionTone.hover) : .clear)
             )
             .opacity(configuration.isPressed ? 0.7 : 1)
             .onHover { hovering = $0 }
@@ -1072,6 +1149,13 @@ struct RecordRowStyle: ButtonStyle {
 }
 
 extension View {
+    /// A sitrep record row pulled out by its own inset (DeskRow's idea): the
+    /// words land on the zone title's line and the hover wash spends the
+    /// card's padding instead of indenting the text.
+    func recordRowBleed() -> some View {
+        padding(.horizontal, -RecordRowStyle.hPadding)
+    }
+
     /// The pointer resting on a record is the likeliest next click: cache its
     /// thread and, a beat later, render its newest message, as a board row
     /// does (SitrepView's row hover). Without it a record opened cold.

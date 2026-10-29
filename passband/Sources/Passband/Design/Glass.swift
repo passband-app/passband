@@ -25,7 +25,7 @@ extension View {
     /// nil for a neutral pane.
     func passbandGlass(
         _ level: GlassLevel = .pane,
-        cornerRadius: CGFloat = 16,
+        cornerRadius: CGFloat = Radius.pane,
         tint: Color? = Palette.glassTint,
         interactive: Bool = false
     ) -> some View {
@@ -41,7 +41,7 @@ extension View {
     /// `GlassEffectContainer` and a shared `@Namespace`.
     func passbandGlass<ID: Hashable & Sendable>(
         _ level: GlassLevel = .pane,
-        cornerRadius: CGFloat = 16,
+        cornerRadius: CGFloat = Radius.pane,
         tint: Color? = Palette.glassTint,
         interactive: Bool = false,
         id: ID,
@@ -117,7 +117,7 @@ extension View {
         _ selected: Bool,
         hovering: Bool = false,
         tint: Color = Palette.accent,
-        cornerRadius: CGFloat = 9
+        cornerRadius: CGFloat = Radius.row
     ) -> some View {
         background(
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -227,7 +227,7 @@ struct ZoneCard<Content: View>: View {
         }
         .zonePadding()
         .frame(maxWidth: .infinity, alignment: .leading)
-        .passbandGlass(.pane, cornerRadius: 18, tint: tint?.opacity(0.12) ?? Palette.glassTint)
+        .passbandGlass(.pane, cornerRadius: Radius.pane, tint: tint?.opacity(0.12) ?? Palette.glassTint)
     }
 }
 
@@ -292,15 +292,44 @@ struct OverlayScrim<Content: View>: View {
     }
 }
 
+extension View {
+    /// THE FLOATING SHADOW: one lift for everything that hangs over the page
+    /// behind a scrim (modals, the palettes, the ask bar, the reveal panel),
+    /// so no overlay reads as nearer than another. Toasts have their own.
+    func overlayShadow() -> some View {
+        shadow(color: .black.opacity(0.28), radius: 40, y: 18)
+    }
+}
+
 /// A modal's glass card body.
-struct ModalCard<Content: View>: View {
+///
+/// THE RULES EVERY MODAL FOLLOWS, so two dialogs never disagree about where
+/// their words start or which button is the yes:
+///   - Words sit `Space.modal` in from the glass on every side. An
+///     EDITORIAL card may ask for more through `padding` (the guide's
+///     boundary card takes `Space.s32`): one deliberate number on the card,
+///     never a second padding stacked inside it.
+///   - A utility dialog's title is `Typo.modalTitle`. An EDITORIAL card (the
+///     guide's boundary card, What's New, the keymap, the inbox summary) may
+///     keep a serif display title, because it is a page, not a question.
+///   - Buttons go in a `ModalButtons` row: trailing, secondary (`.glass`)
+///     first, the primary (`.glassProminent`) last, nearest the corner.
+///   - `bottomEdge` is for a band that runs edge to edge under the padded
+///     body (the login code's countdown), and is the one thing not inset.
+struct ModalCard<Content: View, Edge: View>: View {
     var width: CGFloat = 460
     var tint: Color? = Palette.glassTint
+    /// Words in from the glass. `Space.modal` for a dialog; nil means that.
+    var padding: CGFloat? = nil
     @ViewBuilder var content: Content
+    @ViewBuilder var bottomEdge: Edge
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Space.s12) { content }
-            .padding(Space.scaled(18))
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: Space.s12) { content }
+                .padding(padding ?? Space.modal)
+            bottomEdge
+        }
             // A MEASURE ON THE MAC, A CEILING ON THE PHONE. Every card in this app
             // is sized to read well at a desk, and the narrowest of them is still
             // wider than a phone — so on iOS the number becomes the most it may
@@ -317,8 +346,324 @@ struct ModalCard<Content: View>: View {
                 .frame(maxWidth: Typo.measure(width))
                 .padding(.horizontal, Space.s12)
             #endif
-            .passbandGlass(.pane, cornerRadius: 20, tint: tint)
-            .shadow(color: .black.opacity(0.28), radius: 40, y: 18)
+            .passbandGlass(.pane, cornerRadius: Radius.modal, tint: tint)
+            .overlayShadow()
+    }
+}
+
+extension ModalCard where Edge == EmptyView {
+    init(
+        width: CGFloat = 460, tint: Color? = Palette.glassTint, padding: CGFloat? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.width = width
+        self.tint = tint
+        self.padding = padding
+        self.content = content()
+        self.bottomEdge = EmptyView()
+    }
+}
+
+/// A modal's button row. TRAILING, ALWAYS: secondary (`.glass`) first, the
+/// primary (`.glassProminent`) last, nearest the corner, which is where every
+/// Mac dialog keeps its default. `leading` is for a status that belongs on the
+/// same line (a "5 at a time" warning), never for a button.
+///
+/// The row sets the type; callers set only the style and tint.
+struct ModalButtons<Leading: View, Buttons: View>: View {
+    @ViewBuilder var leading: Leading
+    @ViewBuilder var buttons: Buttons
+
+    var body: some View {
+        HStack(spacing: Space.s8) {
+            leading
+            Spacer(minLength: 0)
+            buttons
+        }
+        .font(Typo.ui(12, weight: .medium))
+    }
+}
+
+extension ModalButtons where Leading == EmptyView {
+    init(@ViewBuilder buttons: () -> Buttons) {
+        self.leading = EmptyView()
+        self.buttons = buttons()
+    }
+}
+
+// MARK: - palettes
+
+/// THE PALETTE'S ONE TEXT EDGE. A palette's header, field, row words, empty
+/// state and footer all start `edge` in from the glass. Rows get there in two
+/// parts (the `DeskRow` arrangement): the list is inset `listInset` and each
+/// row pads `rowPadding`, so the selection fill reaches out past the words
+/// while the words stay on the line, and the fill's corner runs concentric
+/// with the palette's.
+///
+/// Computed, never stored: every one reads the density.
+@MainActor
+enum PaletteMetrics {
+    static var edge: CGFloat { Space.s16 }
+    static var rowPadding: CGFloat { Space.s10 }
+    static var listInset: CGFloat { edge - rowPadding }
+    static var rowVPadding: CGFloat { Space.scaled(7) }
+    static var rowRadius: CGFloat { Radius.concentric(Radius.modal, inset: listInset) }
+    /// A compact measure, resolved by the shell.
+    static let width: CGFloat = 560
+    /// Top-ANCHORED even though it sits near the middle: the list shrinks and
+    /// grows as typing filters it, and a center-anchored card would breathe
+    /// in both directions, the input line jumping under the cursor mid-word.
+    /// The inset, not the anchor, is what puts it at the screen's visual
+    /// center. The default for the short palettes (`h`, ⌘⇧L); a taller one
+    /// (the triage fix, with its detail line and longer list) passes its own
+    /// so it still lands on the screen instead of off the bottom of it.
+    static let topInset: CGFloat = 210
+    /// The least room kept between the palette's glass and the window's
+    /// bottom edge, so the footer and the shadow never meet it. The shell
+    /// shrinks the LIST to keep it, never the footer.
+    static var bottomMargin: CGFloat { Space.s24 }
+}
+
+/// One pickable palette row: the palette's selection fill and metrics around
+/// whatever the row shows.
+///
+/// hoverFill off: the pointer MOVES the selection here, so the selection fill
+/// already follows it and a hover wash under it would double up.
+struct PaletteRow<Content: View>: View {
+    let selected: Bool
+    var tint: Color = Palette.accent
+    let onHover: () -> Void
+    let onPick: () -> Void
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        ListRow(
+            selected: selected, cornerRadius: PaletteMetrics.rowRadius,
+            tint: tint, hPadding: PaletteMetrics.rowPadding,
+            vPadding: PaletteMetrics.rowVPadding,
+            hoverFill: false, onHoverChange: { if $0 { onHover() } }, action: onPick
+        ) { _, _ in content }
+    }
+}
+
+/// THE PALETTE SHELL, shared by the remind, send-later and triage-fix
+/// palettes: the scrim and placement, the glass, the header, the field, the
+/// filtered list with its empty state, and the key-hint footer. Each palette
+/// brings only what differs: its words, its rows, and what a pick does.
+///
+/// On the Mac it is a top-anchored command bar over a scrim; on a phone the
+/// caller presents it as a sheet, and the shell is the sheet's page.
+struct PaletteShell<Field: View, Rows: View>: View {
+    /// The field's focus. The caller puts `.focused` on its own field; the
+    /// shell is what raises it when the palette opens (see `body`).
+    let focus: FocusState<Bool>.Binding
+    /// The glass id, unique per palette.
+    let glassID: String
+    let icon: String
+    let title: String
+    /// The thing being acted on (an email's subject), faint, after the title.
+    var subject: String? = nil
+    var subjectHelp: String? = nil
+    /// What it is set to now, trailing: the one fact a move's list cannot show.
+    var current: String? = nil
+    /// A line under the header (the triage fix's current decision).
+    var detail: String? = nil
+    let isEmpty: Bool
+    let emptyText: String
+    /// The selected row's index and a way to its id, so the list follows the
+    /// keyboard.
+    let selection: Int
+    let idAt: (Int) -> AnyHashable?
+    /// A compact height the list may grow to before it scrolls. On the Mac it
+    /// is also capped by the window: a short window scrolls the list sooner
+    /// rather than push the footer off the bottom.
+    var listMaxHeight: CGFloat = 230
+    /// Points from the window's top to the glass (see `PaletteMetrics.topInset`).
+    var topInset: CGFloat = PaletteMetrics.topInset
+    /// The footer's verb: "↵ set", or "tap to set" on a phone.
+    let verb: String
+    /// The footer's trailing note: what a pick does that is not obvious.
+    let note: String
+    let onClose: () -> Void
+    @ViewBuilder var field: Field
+    @ViewBuilder var rows: Rows
+
+    @Namespace private var paletteGlass
+    /// The scrim's height, which is the window's: what the card may fill.
+    @State private var roomHeight: CGFloat = 0
+    /// The rows' natural height, so the list can be exactly that tall.
+    @State private var rowsHeight: CGFloat = 0
+
+    var body: some View {
+        shell
+            .onAppear {
+                // A TICK LATE. On the frame the palette appears its field is
+                // not in the window yet, and the reader's web view keeps the
+                // keyboard, so a same-frame focus is dropped and every key
+                // typed goes to the email underneath.
+                DispatchQueue.main.async { focus.wrappedValue = true }
+            }
+    }
+
+    @ViewBuilder
+    private var shell: some View {
+        #if os(macOS)
+            OverlayScrim(alignment: .top, topInset: topInset, onDismiss: onClose) {
+                GlassEffectContainer(spacing: 8) {
+                    palette
+                        .frame(width: Typo.measure(PaletteMetrics.width))
+                        .passbandGlass(
+                            .pane, cornerRadius: Radius.modal, tint: Palette.glassTintStrong,
+                            id: glassID, in: paletteGlass)
+                        .overlayShadow()
+                        // NEVER TALLER THAN THE WINDOW. The list is the one
+                        // flexible part (see `list`), so this squeezes it and
+                        // leaves the header, field and footer whole.
+                        //
+                        // OUTSIDE THE GLASS, top-aligned. A max-only frame
+                        // takes all the height it is offered up to the cap,
+                        // so wrapped INSIDE the glass it stretched the card
+                        // to the window with the content floating mid-card.
+                        // Out here the glass hugs the palette and the frame's
+                        // spare height is empty, untappable space over the scrim.
+                        .frame(
+                            maxHeight: roomHeight > 0
+                                ? max(0, roomHeight - topInset - PaletteMetrics.bottomMargin) : nil,
+                            alignment: .top)
+                }
+            }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { roomHeight = $0 }
+        #else
+            palette
+                // Clear of the sheet's grabber, which the header's own top
+                // padding was never measured against.
+                .padding(.top, Space.s8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .background(Palette.canvas.ignoresSafeArea())
+                // The keyboard is up the moment this opens (the field
+                // autofocuses), so the list has to be able to get out from
+                // under it.
+                .presentationDetents([.large])
+        #endif
+    }
+
+    private var palette: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            if let detail {
+                Text(detail)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkDim)
+                    .padding(.horizontal, PaletteMetrics.edge)
+                    .padding(.bottom, Space.s8)
+            }
+            field
+                .textFieldStyle(.plain)
+                .font(Typo.ui(15))
+                .foregroundStyle(Palette.ink)
+                .autocorrectionDisabled()
+                .padding(.horizontal, PaletteMetrics.edge)
+                .padding(.top, Space.s4)
+                .padding(.bottom, Space.s12)
+            Divider().overlay(Palette.hairline)
+            list
+                // Sized LAST: when the window caps the card, the list gives
+                // up the height, not the footer or the field.
+                .layoutPriority(-1)
+            footer
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: Space.s8) {
+            Image(systemName: icon)
+                .font(Typo.ui(12, weight: .semibold))
+                .foregroundStyle(Palette.accent)
+            Text(title)
+                .font(Typo.ui(13, weight: .semibold))
+                .foregroundStyle(Palette.ink)
+            if let subject {
+                Text(subject)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaintest)
+                    .lineLimit(1)
+                    .help(subjectHelp ?? subject)
+            }
+            Spacer(minLength: Space.s4)
+            if let current {
+                Text(current)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkDim)
+                    .fixedSize()
+            }
+        }
+        .padding(.horizontal, PaletteMetrics.edge)
+        .padding(.top, Space.s14)
+        .padding(.bottom, Space.s8)
+    }
+
+    private var list: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 1) {
+                    if isEmpty {
+                        Text(emptyText)
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkFaintest)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            // Row padding, so the sentence starts where a
+                            // row's words would.
+                            .padding(.horizontal, PaletteMetrics.rowPadding)
+                            .padding(.vertical, Space.s14)
+                    } else {
+                        rows
+                    }
+                }
+                .padding(.horizontal, PaletteMetrics.listInset)
+                .padding(.vertical, Space.s6)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                    rowsHeight = $0
+                }
+            }
+            // AS TALL AS THE ROWS, up to the cap. A ScrollView takes every
+            // point it is offered, so a cap alone left one row ("noon") alone
+            // in a 230pt well. Still a max, not a height, so a short window
+            // can squeeze it (see `layoutPriority` in `palette`).
+            .frame(maxHeight: rowsHeight > 0
+                ? min(rowsHeight, Space.scaled(listMaxHeight)) : Space.scaled(listMaxHeight))
+            .onChange(of: selection) { _, i in
+                guard let id = idAt(i) else { return }
+                withAnimation(.easeOut(duration: 0.1)) { proxy.scrollTo(id, anchor: .center) }
+            }
+        }
+    }
+
+    private var footer: some View {
+        HStack(spacing: Space.s4) {
+            // Three keycaps for three keys the phone does not have. There, the
+            // rows are the pick, the tap is the act, and pulling the sheet
+            // down is the cancel, all of it already visible.
+            #if os(macOS)
+                Kbd("↑"); Kbd("↓")
+                Text("pick").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
+                Text("·").foregroundStyle(Palette.inkFaintest)
+                Kbd("↵")
+                Text(verb).font(Typo.micro).foregroundStyle(Palette.inkFaintest)
+                Text("·").foregroundStyle(Palette.inkFaintest)
+                Kbd("esc")
+                Text("cancel").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
+            #else
+                Text("tap to \(verb)").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
+            #endif
+            Spacer()
+            Text(note)
+                .font(Typo.micro)
+                .foregroundStyle(Palette.accent.opacity(0.8))
+        }
+        .padding(.horizontal, PaletteMetrics.edge)
+        .padding(.vertical, Space.s10)
+        .overlay(alignment: .top) { Hairline() }
     }
 }
 

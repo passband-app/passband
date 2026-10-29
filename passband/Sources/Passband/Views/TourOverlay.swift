@@ -61,7 +61,9 @@ private struct PracticeBoundaryModal: View {
 
     var body: some View {
         OverlayScrim(onDismiss: {}) {
-            ModalCard(width: 580) {
+            // An EDITORIAL card, so a roomier margin than a dialog's: asked
+            // for once, here, rather than padded again inside the card.
+            ModalCard(width: 580, padding: Space.s32) {
                 VStack(alignment: .leading, spacing: Space.scaled(22)) {
                     Label("PASSBAND GUIDE", systemImage: "sparkles")
                         .font(Typo.sectionLabel)
@@ -99,7 +101,6 @@ private struct PracticeBoundaryModal: View {
                     }
                     .disabled(store.tour.veil != nil)
                 }
-                .padding(Space.s14)
             }
         }
         .keyContext(.modal)

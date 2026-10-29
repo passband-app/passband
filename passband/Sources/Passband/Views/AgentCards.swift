@@ -57,7 +57,7 @@ struct EmailCardList: View {
                 }
                 .buttonStyle(.plain)
                 .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                         .fill(Palette.hairline.opacity(0.35))
                 )
                 .help("Open this thread")

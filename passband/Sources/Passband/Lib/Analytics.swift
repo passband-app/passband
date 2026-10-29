@@ -107,7 +107,14 @@ enum Analytics {
         "search_deeper_started",
         "triage_corrected", "triage_digest", "rule_created", "rule_deleted",
         "notification_opened", "sealed_revealed",
+        // Smart re-notify (docs/RENOTIFY.md): a second banner posted, and
+        // tapped. A trigger word, a message count and one bool (a deadline
+        // was a reason); never who or what.
+        "renotify_shown", "renotify_opened",
         "shipment_cleared",
+        // Smart clear on the Reading zone: how much it cleared, split by the
+        // daemon's reason codes as counts, and whether it was taken back.
+        "smart_clear", "smart_clear_undone",
         "connect_succeeded", "connection_lost", "connection_restored",
         "account_added",
         "tour_started", "tour_completed", "tour_skipped", "whats_new_shown",
@@ -155,6 +162,9 @@ enum Analytics {
         "undo_fired", "assistant_asked",
         "triage_corrected", "triage_digest", "rule_created", "rule_deleted",
         "notification_opened", "sealed_revealed",
+        // Whether the second banner earns its interruption is the "does it
+        // work" question for re-notify, so both ride with the first banner's.
+        "renotify_shown", "renotify_opened",
         "connect_succeeded", "connection_lost", "connection_restored",
         "account_added",
         // Onboarding carries where it started from and the practice step it
@@ -242,10 +252,12 @@ enum Analytics {
             // makes the duplicate free, and naming it here is what keeps this
             // list readable as the vocabulary of THIS event.
             "rail", "settings", "nudge",
+            // renotify_* triggers: the daemon's closed Trigger set.
+            "client_online", "meeting_end",
             // feature_found / feature_kept sets: `FeatureSet`'s raw values, the
-            // discovery page's eight rows. Listed by hand like the undo kinds,
+            // discovery page's seven rows. Listed by hand like the undo kinds,
             // so a new set must land here too or its find trips the debug assert.
-            "clear", "flow", "later", "teach", "find", "read", "glance", "write",
+            "clear", "flow", "later", "teach", "find", "read", "sweep",
             // thread_opened sources (OpenSource): WHICH SURFACE the reader was
             // entered from. "sitrep", "emails" are MainViews above, "reading" a
             // triage kind, "reply" a compose kind; the rest are named here.

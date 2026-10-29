@@ -17,9 +17,16 @@
 # build — every other include_str! points inside its own crate and there is
 # no build.rs — so a change there is correctly not a reason to run this.
 #
-# Consequence, same as ci-passband: do NOT mark this check required in branch
-# protection. A path-skipped workflow reports no status at all, and a
-# required-but-absent check leaves non-Rust PRs stuck on "expected".
+# The path filter applies to pushes to main only. On a PR the workflow always
+# starts, a `changes` job decides whether the Rust work is needed, and the
+# `gate` job always reports a result. `gate` is the check branch protection
+# requires: it passes when the Rust jobs passed or were correctly skipped (no
+# Rust change, or a draft PR), and fails otherwise. Do not require `rust` or
+# `deny` directly; a skipped job is what a docs-only PR is supposed to get.
+#
+# `deny` (cargo-deny: advisories, licenses, banned and unknown sources) runs
+# with the Rust job, and weekly on a schedule, because a new RustSec advisory
+# lands against an unchanged Cargo.lock.
 #
 # WHAT IS DELIBERATELY ABSENT:
 #
@@ -33,14 +40,11 @@ name: ci
 
 on:
   pull_request:
-    paths:
-      - "squelch-*/**"
-      - "squelchd/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - ".github/workflows/ci.yml"
-      - "deploy/hosted/**"
+    # ready_for_review: a draft skips the Rust jobs, so marking it ready has
+    # to start a run. See "Draft PRs" in CLAUDE.md.
+    types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    - cron: "17 6 * * 1" # Mondays: cargo-deny against new advisories
   push:
     branches: [main]
     paths:
@@ -62,7 +66,59 @@ permissions:
   contents: read
 
 jobs:
+  # What this run has to do. On a push the workflow-level path filter has
+  # already decided; on a schedule only `deny` runs; on a PR the same path set
+  # is checked here, so the workflow (and `gate`) always reports.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read # paths-filter lists a PR's files through the API
+    outputs:
+      rust: ${{ steps.out.outputs.rust }}
+      deny: ${{ steps.out.outputs.deny }}
+    steps:
+      - id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            rust:
+              - "squelch-*/**"
+              - "squelchd/**"
+              - "Cargo.toml"
+              - "Cargo.lock"
+              - "rust-toolchain.toml"
+              - ".github/workflows/ci.yml"
+              - "deploy/hosted/**"
+            deny:
+              - "**/Cargo.toml"
+              - "Cargo.lock"
+              - "deny.toml"
+              - ".github/workflows/ci.yml"
+      - id: out
+        env:
+          EVENT: ${{ github.event_name }}
+          DRAFT: ${{ github.event.pull_request.draft }}
+          F_RUST: ${{ steps.filter.outputs.rust }}
+          F_DENY: ${{ steps.filter.outputs.deny }}
+        run: |
+          case "$EVENT" in
+            push) rust=true; deny=true ;;
+            schedule) rust=false; deny=true ;;
+            pull_request)
+              if [ "$DRAFT" = true ]; then rust=false; deny=false
+              else rust=$F_RUST; deny=$([ "$F_RUST" = true ] || [ "$F_DENY" = true ] && echo true || echo false)
+              fi ;;
+            *) rust=false; deny=false ;;
+          esac
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          echo "deny=$deny" >> "$GITHUB_OUTPUT"
+          echo "event=$EVENT draft=$DRAFT rust=$rust deny=$deny"
+
   rust:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     # squelch-control's store tests run against a real Postgres — the store IS
     # Postgres now, and a fake would test the fake. The container boots in
@@ -114,7 +170,7 @@ jobs:
             echo "$d: $(( $(date +%s) - start ))s, $(df -h / | tail -1 | awk '{print $4}') free"
           done
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # No-arg install reads rust-toolchain.toml — the pinned channel and its
       # clippy/rustfmt components — so the workflow never states a version the
@@ -126,7 +182,7 @@ jobs:
       # Caches ~/.cargo and target/ keyed on the lockfile; the ONNX (ort)
       # build under fastembed is the expensive part, and this is what keeps
       # it from recompiling on every PR.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       # `cargo test` links one binary per test target (fifty-odd here), each
       # carrying the whole dependency tree, ONNX included. mold links them in a
@@ -134,7 +190,7 @@ jobs:
       # of a ~3.5 min step, inside run-to-run noise, and costs 2 s to install.
       # make-default (the action's default) puts it on PATH as `ld`, so no
       # RUSTFLAGS change and the rust-cache key stays what it was.
-      - uses: rui314/setup-mold@v1
+      - uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
 
       # BEFORE clippy on purpose: a formatting diff is the cheapest possible
       # failure and there is no reason to spend a compile discovering it. The
@@ -144,7 +200,7 @@ jobs:
         run: cargo fmt --all --check
 
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       # --no-fail-fast so a red PR reports every failing binary, not the first.
       #
@@ -155,7 +211,7 @@ jobs:
       # Not cargo-nextest: it was tried (process per test) and the spawn cost
       # of 3,650 tests on binaries this large doubled the work instead.
       - name: test
-        run: cargo test --workspace --no-fail-fast -- --test-threads=8
+        run: cargo test --locked --workspace --no-fail-fast -- --test-threads=8
         env:
           SQUELCH_TEST_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
 
@@ -166,3 +222,31 @@ jobs:
         run: |
           df -h / | tail -1
           du -sh target 2>/dev/null || true
+
+  deny:
+    needs: changes
+    if: needs.changes.outputs.deny == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories bans licenses sources
+
+  # The required check. Always runs, and fails if any job it depends on
+  # failed or was cancelled; skipped counts as a pass.
+  gate:
+    # Unique check name: rulesets match the bare job name, and ci-passband
+    # also has a gate job.
+    name: ci-gate
+    if: always()
+    needs: [changes, rust, deny]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "needs: $RESULTS"
+          for r in $RESULTS; do
+            case "$r" in success|skipped) ;; *) exit 1 ;; esac
+          done

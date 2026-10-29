@@ -165,7 +165,7 @@ struct AccountPage: View {
         }
         .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .passbandGlass(.pane, cornerRadius: 18, tint: Palette.glassTint)
+        .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTint)
     }
 
     /// One glass pane, a row per settings pane, hairlines between: the
@@ -181,7 +181,7 @@ struct AccountPage: View {
         }
         .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .passbandGlass(.pane, cornerRadius: 18, tint: Palette.glassTint)
+        .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTint)
     }
 
     private func row(_ section: SettingsSection) -> some View {
@@ -237,6 +237,7 @@ struct AccountPage: View {
                 case .mail:
                     MailSection()
                     SearchSection()
+                    TranslationSection()
                     SignatureSection()
                     ReadTrackingSection()
                 // Not panes here: the phone pushes these two from `pages`, as
@@ -272,7 +273,7 @@ struct AccountPage: View {
     private func blurb(_ section: SettingsSection) -> String {
         switch section {
         case .general: "your name, theme, chime"
-        case .mail: "images, search order, signature, read tracking"
+        case .mail: "images, search, translation, signature, tracking"
         case .rules: "how each sender's mail is handled"
         case .groups: "people you write to together"
         case .assistant: "your own api key, and which model"

@@ -160,7 +160,6 @@ struct SchedulePalette: View {
     /// clock for every row, so the list cannot re-rank under the cursor.
     @State private var opened = Date()
     @State private var hits: [RemindHit] = []
-    @Namespace private var paletteGlass
     @FocusState private var focused: Bool
 
     private var composer: ComposeState? {
@@ -172,7 +171,6 @@ struct SchedulePalette: View {
             .keyContext(.modal)
             .keyBindings(.modal, bindings)
             .onAppear {
-                focused = true
                 refreshHits()
             }
             // The composer it was setting a time FOR went away underneath it
@@ -188,135 +186,42 @@ struct SchedulePalette: View {
         selection = max(0, min(selection, max(0, hits.count - 1)))
     }
 
-    @ViewBuilder
     private var surface: some View {
-        #if os(macOS)
-            OverlayScrim(alignment: .top, topInset: 210, onDismiss: onClose) {
-                GlassEffectContainer(spacing: 8) {
-                    palette
-                        .frame(width: Typo.measure(560))
-                        .passbandGlass(
-                            .pane, cornerRadius: 20, tint: Palette.glassTintStrong,
-                            id: "schedule", in: paletteGlass)
-                        .shadow(color: .black.opacity(0.32), radius: 46, y: 20)
-                }
-            }
-        #else
-            palette
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .background(Palette.canvas.ignoresSafeArea())
-                .presentationDetents([.large])
-                .presentationDragIndicator(.visible)
-        #endif
-    }
-
-    private var palette: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
-            input
-            Divider().overlay(Palette.hairline)
-            list
-            footer
-        }
-    }
-
-    private var header: some View {
-        HStack(spacing: Space.s8) {
-            Image(systemName: "clock")
-                .font(Typo.ui(12, weight: .semibold))
-                .foregroundStyle(Palette.accent)
-            Text(composer?.sendAt == nil ? "Send later" : "Move the send time")
-                .font(Typo.ui(13, weight: .semibold))
-                .foregroundStyle(Palette.ink)
-            Spacer(minLength: Space.s4)
+        PaletteShell(
+            focus: $focused,
+            glassID: "schedule", icon: "clock",
+            title: composer?.sendAt == nil ? "Send later" : "Move the send time",
             // What it is set to now, when this is a move: the one fact the
             // list itself cannot show.
-            if let current = composer?.sendAt {
-                Text("now \(ScheduleCopy.chip(current))")
-                    .font(Typo.micro)
-                    .foregroundStyle(Palette.inkDim)
-                    .fixedSize()
-            }
-        }
-        .padding(.horizontal, Space.s16)
-        .padding(.top, Space.s14)
-        .padding(.bottom, Space.s8)
-    }
-
-    private var input: some View {
-        TextField("send when...", text: $query)
-            .textFieldStyle(.plain)
-            .font(Typo.ui(15))
-            .foregroundStyle(Palette.ink)
-            .focused($focused)
-            .autocorrectionDisabled()
-            .padding(.horizontal, Space.s16)
-            .padding(.top, Space.s4)
-            .padding(.bottom, Space.s12)
-            .onChange(of: query) { _, _ in
-                selection = 0
-                refreshHits()
-            }
-    }
-
-    private var list: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 1) {
-                    if hits.isEmpty {
-                        Text(
-                            "no time in “\(query)”. try a day (\"friday\", \"aug 30\"), a wait (\"in 3 hours\") or leave it empty for the usual ones."
-                        )
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaintest)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(Space.s14)
-                    } else {
-                        ForEach(Array(hits.enumerated()), id: \.element.id) { i, hit in
-                            RemindRow(
-                                hit: hit, selected: i == selection,
-                                onHover: { selection = i },
-                                onPick: { apply(hit) })
-                            .id(hit.id)
-                        }
-                    }
-                }
-                .padding(.horizontal, Space.s8)
-                .padding(.vertical, Space.s6)
-            }
-            .frame(maxHeight: Space.scaled(230))
-            .onChange(of: selection) { _, i in
-                guard let hit = hits[safe: i] else { return }
-                withAnimation(.easeOut(duration: 0.1)) { proxy.scrollTo(hit.id, anchor: .center) }
-            }
-        }
-    }
-
-    private var footer: some View {
-        HStack(spacing: Space.s4) {
-            #if os(macOS)
-                Kbd("↑"); Kbd("↓")
-                Text("pick").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
-                Text("·").foregroundStyle(Palette.inkFaintest)
-                Kbd("↵")
-                Text("set").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
-                Text("·").foregroundStyle(Palette.inkFaintest)
-                Kbd("esc")
-                Text("cancel").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
-            #else
-                Text("tap to set").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
-            #endif
-            Spacer()
+            current: composer?.sendAt.map { "now \(ScheduleCopy.chip($0))" },
+            isEmpty: hits.isEmpty,
+            emptyText:
+                "no time in “\(query)”. try a day (\"friday\", \"aug 30\"), a wait (\"in 3 hours\") or leave it empty for the usual ones.",
+            selection: selection, idAt: { hits[safe: $0]?.id },
+            verb: "set",
             // The half of this that is not obvious: the daemon sends it, so a
             // closed laptop does not stop it.
-            Text("goes out then, even with Passband closed")
-                .font(Typo.micro)
-                .foregroundStyle(Palette.accent.opacity(0.8))
+            note: "goes out then, even with Passband closed",
+            onClose: onClose
+        ) {
+            TextField("send when...", text: $query)
+                .focused($focused)
+                .onChange(of: query) { _, _ in
+                    selection = 0
+                    refreshHits()
+                }
+        } rows: {
+            ForEach(Array(hits.enumerated()), id: \.element.id) { i, hit in
+                RemindRow(
+                    hit: hit, selected: i == selection,
+                    onHover: { selection = i },
+                    onPick: { apply(hit) })
+                .id(hit.id)
+            }
         }
-        .padding(.horizontal, Space.s16)
-        .padding(.vertical, Space.s10)
-        .overlay(alignment: .top) { Hairline() }
+        #if !os(macOS)
+            .presentationDragIndicator(.visible)
+        #endif
     }
 
     /// allowInInput for the remind palette's reason: the field has focus, and

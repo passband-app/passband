@@ -38,6 +38,9 @@ locals {
       "SLACK_ALERTS_WEBHOOK_URL",
       "BLACKBOX_BIFROST_CANARY_KEY",
       "BLACKBOX_CANARY_MODEL",
+      # Tailscale auth key (reusable, pre-approved, tag:passband-aws). Optional:
+      # bootstrap.sh skips Tailscale without it, and the stack never reads it.
+      "TS_AUTHKEY",
     ]
   }
 

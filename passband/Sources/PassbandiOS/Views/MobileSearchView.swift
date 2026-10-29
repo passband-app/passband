@@ -9,18 +9,22 @@
 // AND IT IS ALSO THE AGENT'S FIELD. A phone has one text field per screen, so
 // the field a person reaches for when they want to know something is this one,
 // whether what they type is "delta receipt" or "when does my flight leave".
-// COUNTING SPACES IS THE WHOLE CLASSIFIER: four of them (five words) and the
-// surface says it is asking the agent, and return sends it. Nothing about that
-// is clever, and that is the point — a model deciding which door you meant cost
-// a round trip, spent the user's own key on a keystroke, and was wrong in a way
-// nobody could predict. This rule is wrong in a way anybody can see and fix by
-// deleting a word. Worst case the search is agentic: a five-word lookup lands
-// on an agent that can search mail itself, which is a slower right answer rather
-// than a wrong one.
 //
-// UNDER FOUR SPACES IT IS PLAIN SEARCH, with the agent kept one tap away: the
-// first row above the hits offers the typed words to the agent. That row is a
-// deliberate tap, so unlike everything else here it DOES send.
+// THE DEEPER-SEARCH LANE, THE MAC'S RULE AND NOTHING ELSE (docs/SEARCH.md §5,
+// §6). Every settled query is judged by `SearchIntent.classify` with the daemon's diagnostics for
+// exactly those words, and `DeeperSearchPolicy.settled` decides what that
+// verdict may do, the same two calls and the same order as `SidePanel.judge`.
+// A question-shaped query (five words, a trailing "?", a question word, "my"),
+// or three-plus words no one message carries, mounts `DeeperSearchBand` above
+// the hits: under Automatic the lane starts by itself, under On request the
+// band offers a button.
+//
+// THE "ASK THE AGENT" ROW IS THE MAC PANEL'S ⌘↩ BUTTON (`askAgentButton`):
+// before a conversation it asks the lane (`requestDeeperSearch`, so the answer
+// lands in the band above the hits), and once there is one it opens that
+// conversation in the chat. Off in Settings, it does nothing, as on the Mac.
+// There is no space-counting rule: the phone used to hand any five-word query
+// to the chat, and the Mac never did. One field, one behaviour, both shells.
 //
 // WHAT IT SHARES WITH THE MAC'S PANEL, and does not re-implement: the fetch
 // itself (`SearchFetch`: partial matching, the unfinished-first order and the
@@ -42,13 +46,16 @@ import SwiftUI
 struct MobileSearchView: View {
     @Environment(AppStore.self) private var store
     @Environment(Prefs.self) private var prefs
+    /// This tab's stack, as the shell knows it: `active` is whether the search
+    /// tab is the one on screen, which is this shell's "panel open".
+    @Environment(ReaderTab.self) private var readerTab
 
-    /// ALWAYS HYBRID HERE, unlike the Mac. The Mac panel types in keyword
-    /// mode (`prefs.searchIncludeRelated`, off by default) because it keeps
-    /// embedding off the first-result path and gets meaning back from its
-    /// deeper-search lane (docs/SEARCH.md). The phone has no such lane, so
-    /// keyword-only would simply lose every related hit it has always had.
-    private static let related = true
+    /// THE MAC'S SETTING, read the same way: `prefs.searchIncludeRelated`,
+    /// hidden and off by default, so the panel types in keyword mode, keeps
+    /// embedding off the first-result path, and gets meaning back from the
+    /// deeper-search lane (docs/SEARCH.md). This used to be pinned to hybrid,
+    /// from when the phone had no lane; it has the Mac's now.
+    private var related: Bool { prefs.searchIncludeRelated }
 
     @State private var loading = false
     /// A page append is in flight. SEPARATE from `loading`: that one blanks the
@@ -70,12 +77,6 @@ struct MobileSearchView: View {
         SearchFetch.senders(fetchedSenders, stillMatching: store.search.query)
     }
 
-    /// Spaces that turn typing into a question. Four means five words, which is
-    /// past where a keyword lookup normally stops ("stripe payout receipt") and
-    /// into where a sentence starts. Counted RAW, so a double space counts
-    /// twice: a rule this cheap is worth more than a rule this exact.
-    private static let questionSpaces = 4
-
     /// How many hits get their thread pulled ahead of a tap. The head of the
     /// page only: search results are read and chosen from, not swept, so the
     /// rest can wait for a real tap, and warming all fifty would be a stampede
@@ -95,13 +96,14 @@ struct MobileSearchView: View {
     /// `fetchedQuery != nil` alone means only that SOME query was once
     /// answered.
     private var answered: Bool {
-        store.search.answers(term, sort: prefs.searchSort, related: Self.related)
+        store.search.answers(
+            term, sort: prefs.searchSort, related: related, plainOrder: store.searchPlainOrder)
     }
 
     /// The remembered queries, newest first. Read through the store rather than
     /// copied, so a search remembered by opening a hit is already in the list
     /// when the reader comes back and clears the field.
-    private var recents: [String] { RecentSearchStore.shared.queries }
+    private var recents: [RecentEntry] { RecentSearchStore.shared.entries }
 
     /// The resting tab has history to offer. Keyed on the FIELD being blank,
     /// the Mac's rule: mid-edit the hits belong to the previous query, and old
@@ -111,18 +113,29 @@ struct MobileSearchView: View {
         term.isEmpty && !recents.isEmpty
     }
 
-    /// Long enough to be a sentence, so this is a question. Trimmed first: the
-    /// space a person leaves before their next word must not flip the surface
-    /// one keystroke early.
-    private var agentMode: Bool {
-        term.count(where: { $0 == " " }) >= Self.questionSpaces
+    /// The Mac panel's own test (`SidePanel.bandMounted`): once a query has
+    /// been judged deeper, or a lane is going, and never under `off`.
+    private var bandMounted: Bool {
+        guard prefs.deeperSearch != .off, !term.isEmpty else { return false }
+        return store.search.laneStarted || store.search.lastVerdict?.isDeeper == true
+    }
+
+    /// What the explainer promises about questions, which the setting decides.
+    private var questionLine: String {
+        switch prefs.deeperSearch {
+        case .off: "A few words find a message. Turn on deeper search in Account to let the agent answer questions."
+        case .automatic: "A few words find a message. Ask a question and the agent reads your mail to answer it."
+        case .onRequest: "A few words find a message. Ask a question and the agent offers to answer it."
+        }
     }
 
     var body: some View {
         @Bindable var store = store
 
-        content
-            .background(Palette.canvas)
+        VStack(spacing: 0) {
+            content
+        }
+            .background(Palette.canvas.ignoresSafeArea())
             .navigationTitle("Search")
             .navigationBarTitleDisplayMode(.inline)
             // Bound STRAIGHT to the store, which is what makes a tab hop free:
@@ -136,22 +149,28 @@ struct MobileSearchView: View {
             // for the next keystroke. An array because `task(id:)` needs one
             // Equatable value.
             .task(id: [store.search.query, prefs.searchSort.rawValue,
-                       String(store.search.revision)]) {
+                       String(prefs.searchIncludeRelated), String(store.search.revision),
+                       String(store.searchPlainOrder)]) {
                 await runSearch()
             }
+            #if DEBUG
+                // `--fixture-scene recents-restore`: the tap on the history
+                // question, played once its chat has been staged.
+                .task {
+                    guard FixtureStage.on, let question = FixtureStage.tapsHistoryQuestion
+                    else { return }
+                    for _ in 0..<40 {
+                        if QuestionChats.shared.snapshot(forQuestion: question) != nil {
+                            reopen(question)
+                            return
+                        }
+                        try? await Task.sleep(for: .milliseconds(250))
+                    }
+                }
+            #endif
             .task(id: store.search.query) {
                 guard let found = await SearchFetch.senders(matching: store.search.query) else { return }
                 fetchedSenders = found
-            }
-            // Return is the send, and only in agent mode: under four spaces it
-            // is the search that has already run behind the debounce. The
-            // submit path CLEARS the field where the ask row does not: there
-            // were never results underneath a return-submitted question, so
-            // popping back onto the "press return" placeholder would read as
-            // the ask never happening — and return would fire it again.
-            .onSubmit(of: .search) {
-                guard agentMode else { return }
-                askAgent(clearingField: true)
             }
             // The chat is a PUSH, not a tab: back lands on the results that were
             // underneath the question, and the transcript survives either way
@@ -159,36 +178,117 @@ struct MobileSearchView: View {
             .navigationDestination(item: $ask) { ask in
                 MobileAgentView(initialQuestion: ask.text)
             }
+            // CLEARING THE FIELD ENDS THE CONVERSATION, as it does in the Mac
+            // panel: empty words are not a narrowing of anything.
+            .onChange(of: store.search.query) { _, query in
+                if query.trimmed.isEmpty { store.resetSearchLane() }
+            }
+            // LEAVING THE TAB IS CLOSING THE PANEL (`AppStore.closeSide`):
+            // the lane is HELD, not torn down, and coming back picks it up
+            // where it stopped (`openSearch`'s resume). Keyed on the tab rather
+            // than on this view's appearance, because opening a hit or pushing
+            // the chat also takes this view off screen, and neither is the
+            // reader walking away from the search.
+            .onChange(of: readerTab.active) { _, active in
+                if active {
+                    store.searchLane.resume()
+                } else {
+                    if store.preparingSearchEvidence { store.resetSearchLane(keepingVerdict: true) }
+                    store.searchLane.pause()
+                }
+            }
+            // OFF STOPS A RUNNING LANE, the moment it is picked (the Mac's
+            // ShellWatchers). Watched here because the picker is on the
+            // Account page, over this tab, which stays mounted under it.
+            .onChange(of: prefs.deeperSearch) { _, choice in
+                let move = DeeperSearchPolicy.preferenceChanged(
+                    to: choice, laneStarted: store.search.laneStarted)
+                if move == .stop { store.resetSearchLane(keepingVerdict: true) }
+            }
+    }
+
+    /// The lane's answer, drawn by the Mac's own band, AS THE FIRST ROW OF THE
+    /// RESULTS: as tall as the answer wants, and the screen scrolls past it to
+    /// the hits rather than the band scrolling inside a cap of its own.
+    private var band: some View {
+        DeeperSearchBand(expanded: false, openInChat: continueInChat)
+            .padding(.top, 8)
+    }
+
+    /// The query's words as the daemon parsed them: what a hit is lit with
+    /// when the daemon does not say which words matched (the Mac's `terms`).
+    private var terms: [String] {
+        store.search.diagnostics?.terms.map(\.text) ?? []
+    }
+
+    /// What sits under the agent's answer is the plain search, and says so:
+    /// the small caps every list header here uses, with a rule run out from
+    /// the label to the edge, so the agent's reading and the mail below it
+    /// never read as one block.
+    private var resultsHeader: some View {
+        HStack(spacing: 10) {
+            Text("All results")
+                .font(Typo.micro)
+                .foregroundStyle(Palette.inkFaint)
+                .textCase(.uppercase)
+                .tracking(0.6)
+                .fixedSize()
+                .accessibilityAddTraits(.isHeader)
+            Rectangle()
+                .fill(Palette.hairlineStrong)
+                .frame(height: 1)
+                .accessibilityHidden(true)
+        }
+        .padding(.top, 18)
+        .padding(.bottom, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - the three shapes
 
     @ViewBuilder
     private var content: some View {
-        if agentMode {
-            agentState
-        } else if showingRecents {
+        if showingRecents {
             recentList
         } else if store.search.hits.isEmpty {
             // The ask row rides above the empty states too, and especially
             // above "No matches" — that is the exact moment the words are worth
             // handing to something that can go look.
-            VStack(spacing: 0) {
-                if !term.isEmpty {
-                    askRow.padding(.horizontal, 16)
-                    Divider().overlay(Palette.hairline)
+            if bandMounted {
+                // The agent's answer first, at its full height, then the
+                // search under its own header, all in one scroll. No ask row
+                // while the band is up: the band is already the agent here.
+                ScrollView {
+                    VStack(spacing: 0) {
+                        band
+                        resultsHeader.padding(.horizontal, 16)
+                        emptySenders
+                        emptyState.frame(minHeight: 220)
+                    }
                 }
-                // Above "No matches" too: the name may be in nobody's subject
-                // or body and still be somebody who writes.
-                ForEach(senders) { sender in
-                    SenderRow(sender: sender) { show(sender) }
-                        .padding(.horizontal, 16)
-                    Divider().overlay(Palette.hairline)
+                .scrollDismissesKeyboard(.immediately)
+            } else {
+                VStack(spacing: 0) {
+                    if !term.isEmpty {
+                        askRow.padding(.horizontal, 16)
+                        Divider().overlay(Palette.hairline)
+                    }
+                    emptySenders
+                    emptyState
                 }
-                emptyState
             }
         } else {
             hitList
+        }
+    }
+
+    /// Above "No matches" too: the name may be in nobody's subject or body
+    /// and still be somebody who writes.
+    private var emptySenders: some View {
+        ForEach(senders) { sender in
+            SenderRow(sender: sender) { show(sender) }
+                .padding(.horizontal, 16)
+            Divider().overlay(Palette.hairline)
         }
     }
 
@@ -198,7 +298,15 @@ struct MobileSearchView: View {
             // Guarded on the term rather than assumed from the hits: clearing
             // the field empties them one render later, and an "Ask the agent"
             // row quoting nothing at all is a row in that gap.
-            if !term.isEmpty {
+            if bandMounted {
+                // No row inset: the band carries its own side margin, and
+                // inset twice it sat a step inside the header and the hits.
+                band
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets())
+                resultsHeader.plainRow()
+            } else if !term.isEmpty {
                 askRow.plainRow()
             }
             ForEach(senders) { sender in
@@ -220,18 +328,17 @@ struct MobileSearchView: View {
                 BandNote(error).plainRow()
             }
             ForEach(Array(hits.enumerated()), id: \.element.id) { i, hit in
-                // The Done / Not done split the Mac draws, from the same
-                // unfinished-first order: without the header the order reads
-                // as the sort preference being ignored halfway down.
-                //
                 // A LISTING (one sender's mail, operators and no words) is
-                // not split: it is one run in date order under one header.
+                // one run in date order under one header saying so.
                 if store.search.showsListing {
                     if i == 0 { StatusHeader(title: "Newest first").plainRow() }
-                } else if i == 0 || hit.is_done != hits[i - 1].is_done {
-                    StatusHeader(isDone: hit.is_done).plainRow()
                 }
-                HitRow(hit: hit) {
+                // NO DONE / NOT DONE HEADERS, on either shell (the Mac's
+                // `header(above:)` agrees): results are one ranked list. An
+                // older daemon still sends unfinished mail first until it is
+                // rolled to plain order (`AppStore.searchPlainOrder`); the
+                // labels do not wait for that.
+                HitRow(hit: hit, terms: terms) {
                     // OPENING A HIT IS WHERE A QUERY STOPS BEING KEYSTROKES,
                     // on this shell as on the Mac: the ring's one rule, called
                     // from the one gesture here that acts on the results.
@@ -292,11 +399,20 @@ struct MobileSearchView: View {
             .padding(.top, 14)
             .padding(.bottom, 4)
             .plainRow()
-            ForEach(Array(recents.enumerated()), id: \.offset) { _, query in
-                RecentRow(query: query) { store.search.query = query }
-                    .plainRow()
+            ForEach(Array(recents.enumerated()), id: \.offset) { _, entry in
+                RecentRow(entry: entry) {
+                    // A question goes back to the agent (its saved chat when
+                    // there is one); a search back in the field. The Mac's
+                    // recents do the same.
+                    if entry.kind == .question {
+                        reopen(entry.text)
+                    } else {
+                        store.search.query = entry.text
+                    }
+                }
+                .plainRow()
             }
-            Text("A few words find a message. Five or more and the agent takes it as a question.")
+            Text(questionLine)
                 .font(Typo.rowSub)
                 .foregroundStyle(Palette.inkFaintest)
                 .fixedSize(horizontal: false, vertical: true)
@@ -314,18 +430,30 @@ struct MobileSearchView: View {
     /// rather than filling a field: reaching past every hit for this row is
     /// already the deliberate act, and asking twice for one intention is the
     /// thing that made the old handoff feel like the app taking the wheel.
+    /// The Mac's two verbs on one row: with a conversation going it opens it
+    /// in the chat, and before one it asks the lane, whose answer the band
+    /// draws above the hits. Disabled exactly where the Mac's button is.
     private var askRow: some View {
-        Button { askAgent() } label: {
+        let opens = store.searchLaneHasConversation
+        let busy = store.searchLane.running || store.preparingSearchEvidence
+        let enabled = opens
+            ? (store.chatHoldsSearchLane || store.canExpandSearchLane) && !busy
+            : DeeperSearchPolicy.canRequest(
+                query: store.search.query, choice: prefs.deeperSearch, running: busy)
+        return Button {
+            if opens { continueInChat() } else { store.requestDeeperSearch() }
+        } label: {
             HStack(spacing: 11) {
-                Image(systemName: "sparkles")
+                Image(systemName: opens ? "arrow.up.left.and.arrow.down.right" : "sparkles")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Palette.accent)
                     .frame(width: 18)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Ask the agent")
+                    Text(opens ? "Open in chat" : busy ? "Searching…" : "Ask the agent")
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(Palette.ink)
-                    Text("“\(term)”")
+                    // Off says how to turn it on, as the Mac's help line does.
+                    Text(prefs.deeperSearch == .off ? "Turn on deeper search in Account" : "“\(term)”")
                         .font(Typo.rowSub)
                         .foregroundStyle(Palette.inkFaint)
                         .lineLimit(1)
@@ -340,31 +468,8 @@ struct MobileSearchView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-    }
-
-    /// Past four spaces, and the whole surface says so. NOTHING HERE IS
-    /// TAPPABLE, deliberately: a full screen that fires a run on contact would
-    /// spend the user's own key on the thumb that was reaching for the keyboard
-    /// dismiss. Return sends it, and shortening the line takes it back.
-    private var agentState: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "sparkles")
-                .font(.system(size: 28, weight: .light))
-                .foregroundStyle(Palette.accent)
-            Text("Asking the agent.")
-                .font(Typo.serif(24, weight: .medium))
-                .foregroundStyle(Palette.ink)
-            Text(
-                "Press return and it takes the question from here. Shorter than five words goes back to searching."
-            )
-                .font(Typo.rowSub)
-                .foregroundStyle(Palette.inkFaint)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: 300)
-        }
-        .padding(.horizontal, 24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.5)
     }
 
     /// The three things that can be true with nothing to show. Ordered by which
@@ -400,9 +505,7 @@ struct MobileSearchView: View {
                 // Says the second thing this field does, once, where a first
                 // visit will read it. Nobody discovers a field with two jobs by
                 // accident, and the rule is small enough to state outright.
-                Text(
-                    "A few words find a message. Five or more and the agent takes it as a question."
-                )
+                Text(questionLine)
                     .font(Typo.rowSub)
                     .foregroundStyle(Palette.inkFaint)
                     .multilineTextAlignment(.center)
@@ -425,17 +528,48 @@ struct MobileSearchView: View {
 
     // MARK: - the agent
 
-    /// Push the chat with these words. From the ask ROW the field keeps them:
-    /// back is a real destination there, and finding an emptied search after
-    /// asking a question would mean the results you were reading are gone too.
-    /// From RETURN in agent mode the field clears instead — there was nothing
-    /// underneath but the placeholder, so back should land on the tab at rest
-    /// rather than on a screen mid-sentence about a question already asked.
-    private func askAgent(clearingField: Bool = false) {
-        let question = term
-        guard !question.isEmpty else { return }
-        ask = AgentAsk(text: question)
-        if clearingField { store.search.query = "" }
+    /// THE BAND'S "CONTINUE IN CHAT", on a shell with no ⌘K bar: the chat
+    /// takes a copy of the lane's conversation (`AssistantSession.adopt`, the
+    /// Mac's `expandSearchLaneToChat` without the bar it opens) and is pushed
+    /// with nothing to send, so a follow-up there is a real follow-up. Already
+    /// holding this search, the chat is just shown, follow-ups and all.
+    private func continueInChat() {
+        if !store.chatHoldsSearchLane {
+            guard store.canExpandSearchLane else { return }
+            store.adoptSearchLaneIntoChat()
+        }
+        ask = AgentAsk(text: nil)
+    }
+
+    /// A QUESTION FROM HISTORY: the chat it had, pushed with nothing to send,
+    /// the way "continue in chat" pushes one. With no saved chat the store has
+    /// asked it again in the lane instead, which this screen already shows.
+    private func reopen(_ question: String) {
+        if store.openQuestionFromHistory(question) { ask = AgentAsk(text: nil) }
+    }
+
+    /// Keyword or question, for the query whose hits are now on screen: the
+    /// Mac panel's `judge`, line for line, because the rule about spending is
+    /// `DeeperSearchPolicy`'s and a rule spelled twice will disagree with
+    /// itself. Only for words still in the field: a lane started for words the
+    /// reader deleted would take the live ones as a "refinement".
+    private func judge(_ query: String) {
+        guard query == term else { return }
+        let verdict = SearchIntent.classify(query: query, diagnostics: store.search.diagnostics)
+        store.search.lastVerdict = verdict
+        switch DeeperSearchPolicy.settled(
+            verdict: verdict, choice: prefs.deeperSearch,
+            laneStarted: store.search.laneStarted)
+        {
+        case .nothing:
+            break
+        case .stop:
+            store.resetSearchLane(keepingVerdict: true)
+        case .refine:
+            store.refineDeeperSearch()
+        case .start(let trigger):
+            store.startDeeperSearch(trigger: trigger)
+        }
     }
 
     // MARK: - fetching
@@ -453,16 +587,9 @@ struct MobileSearchView: View {
             store.search.error = nil
             store.search.fetchedQuery = nil
             store.search.fetchedSort = nil
+            store.search.fetchedPlainOrder = nil
             store.search.diagnostics = nil
             store.search.nextCursor = nil
-            loading = false
-            return
-        }
-        // A question is not a search term. Returning BEFORE the sleep is what
-        // cancels the debounce: typing past the fourth space stops the network
-        // entirely rather than filing a lookup nobody will see. The hits stay
-        // in the store, so deleting a word back into search mode finds them.
-        guard !agentMode else {
             loading = false
             return
         }
@@ -473,12 +600,13 @@ struct MobileSearchView: View {
         // next visit instead of silently doing nothing until the reader edits
         // their query. Read at fetch time, not captured on mount.
         let sort = prefs.searchSort
-        let related = Self.related
+        let related = prefs.searchIncludeRelated
+        let plainOrder = store.searchPlainOrder
         let revision = store.search.revision
         // CLEARS `loading` on the way out: this is the path a cancelled
         // predecessor used to rely on someone else covering. The CURRENT task
         // owns the flag now; see the cancelled exits below.
-        guard !store.search.answers(query, sort: sort, related: related) else {
+        guard !store.search.answers(query, sort: sort, related: related, plainOrder: plainOrder) else {
             loading = false
             return
         }
@@ -491,13 +619,14 @@ struct MobileSearchView: View {
         // "searching…" blinked off mid-type and let the empty state through.
         guard !Task.isCancelled else { return }
         do {
-            let page = try await SearchFetch.page(query, sort: sort, related: related)
+            let page = try await SearchFetch.page(
+                query, sort: sort, related: related, plainOrder: plainOrder)
             // Re-check after the await, same as the catch does: a superseded
             // task landing late must not stamp `fetchedQuery` with a term that
             // is no longer in the field — the `answers` guard above would then
             // refuse to fetch the term that IS.
             guard !Task.isCancelled, term == query, revision == store.search.revision,
-                  related == Self.related else { return }
+                  related == prefs.searchIncludeRelated else { return }
             store.search.hits = page.items
             store.search.diagnostics = page.diagnostics
             store.search.nextCursor = page.next_cursor
@@ -505,10 +634,14 @@ struct MobileSearchView: View {
             store.search.fetchedQuery = query
             store.search.fetchedSort = sort
             store.search.fetchedRelated = related
+            store.search.fetchedPlainOrder = plainOrder
             store.search.fetchedRevision = revision
             for hit in page.items.prefix(Self.warmCount) {
                 ThreadPrefetch.shared.prefetch(hit.thread_id)
             }
+            // After the fetch, never mid-keystroke: past the debounce, with
+            // the daemon's diagnostics for exactly these words in hand.
+            judge(query)
         } catch {
             // Cancellation surfaces here too (URLError.cancelled mid-request):
             // that is a superseded task, not a failure, and writing an error
@@ -521,6 +654,7 @@ struct MobileSearchView: View {
             // with it: it belongs to a page set this view is no longer showing.
             store.search.fetchedQuery = nil
             store.search.fetchedSort = nil
+            store.search.fetchedPlainOrder = nil
             store.search.diagnostics = nil
             store.search.nextCursor = nil
         }
@@ -541,12 +675,16 @@ struct MobileSearchView: View {
         // not under whatever the preferences say now.
         let sort = store.search.fetchedSort
         let related = store.search.fetchedRelated ?? false
+        // And the plain-or-grouped ORDER, pinned the same way (SidePanel).
+        let plainOrder = store.search.fetchedPlainOrder ?? store.searchPlainOrder
         let revision = store.search.revision
         loadingMore = true
         defer { loadingMore = false }
         do {
-            let page = try await SearchFetch.page(query, cursor: cursor, sort: sort, related: related)
+            let page = try await SearchFetch.page(
+                query, cursor: cursor, sort: sort, related: related, plainOrder: plainOrder)
             guard query == store.search.fetchedQuery, store.search.nextCursor == cursor,
+                  plainOrder == store.search.fetchedPlainOrder,
                   sort == store.search.fetchedSort, related == store.search.fetchedRelated,
                   revision == store.search.revision else {
                 return
@@ -575,7 +713,9 @@ struct MobileSearchView: View {
 /// again" as a new destination — two identical questions are two questions.
 private struct AgentAsk: Hashable, Identifiable {
     let id = UUID()
-    let text: String
+    /// nil is the band handing over a conversation already adopted: the push
+    /// shows it and sends nothing.
+    let text: String?
 }
 
 // MARK: - one hit
@@ -587,12 +727,15 @@ private struct AgentAsk: Hashable, Identifiable {
 /// because a snippet cut to one is just a longer subject.
 private struct HitRow: View {
     let hit: SearchHit
+    /// The query's words, for a daemon too old to say which ones matched.
+    let terms: [String]
     let onOpen: () -> Void
 
     var body: some View {
         Button(action: onOpen) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(hit.subject)
+                // The matched words lit the Mac's way (`SearchHighlight`).
+                Text(SearchHighlight.paint(hit.subject, matches: hit.subject_matches ?? terms))
                     .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
@@ -608,7 +751,8 @@ private struct HitRow: View {
                 // The CLEANED excerpt, prepared once by `SearchFetch`: tracking
                 // links shown as their readable destination, footers dropped.
                 // The raw one only for a hit that somehow skipped that pass.
-                Text(hit.displaySnippet ?? hit.snippet)
+                Text(SearchHighlight.paint(
+                    hit.displaySnippet ?? hit.snippet, matches: hit.snippet_matches ?? terms))
                     .font(Typo.rowSub)
                     .foregroundStyle(Palette.inkFaintest)
                     .lineLimit(2)
@@ -622,17 +766,11 @@ private struct HitRow: View {
     }
 }
 
-// MARK: - the Done / Not done split
+// MARK: - list headers
 
-/// The small header the Mac puts between unfinished and finished hits. nil is
-/// an older daemon that does not say, which gets a plain "Results": unknown is
-/// not unfinished.
+/// A small-caps list header ("Newest first" over a sender's listing).
 private struct StatusHeader: View {
     let title: String
-
-    init(isDone: Bool?) {
-        title = isDone.map { $0 ? "Done" : "Not done" } ?? "Results"
-    }
 
     init(title: String) {
         self.title = title
@@ -707,17 +845,21 @@ private struct SenderRow: View {
 /// lists feel like one surface. The query is the reader's own words rendered
 /// as Text, never as markup, and it has been through UserDefaults.
 private struct RecentRow: View {
-    let query: String
+    let entry: RecentEntry
     let onRun: () -> Void
+
+    private var question: Bool { entry.kind == .question }
 
     var body: some View {
         Button(action: onRun) {
             HStack(spacing: 11) {
-                Image(systemName: "clock.arrow.circlepath")
+                // A question the agent was asked wears a chat bubble; a search
+                // the clock. The line is the words either way.
+                Image(systemName: question ? "bubble.left" : "clock.arrow.circlepath")
                     .font(.system(size: 14))
-                    .foregroundStyle(Palette.inkFaintest)
+                    .foregroundStyle(question ? Palette.accent : Palette.inkFaintest)
                     .frame(width: 18)
-                Text(query)
+                Text(entry.text)
                     .font(.system(size: 15))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
@@ -732,7 +874,7 @@ private struct RecentRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(query)
-        .accessibilityHint("Searches for this again")
+        .accessibilityLabel(question ? "Question: \(entry.text)" : entry.text)
+        .accessibilityHint(question ? "Asks the agent again" : "Searches for this again")
     }
 }

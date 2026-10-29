@@ -230,6 +230,17 @@ run_suite shipment-wire \
   Sources/Passband/Model/APIError.swift \
   Tests/ShipmentWireTests.swift
 
+# The last board on disk: no sealed or auth row ever reaches the file, only a
+# fresh board of this version is painted (the rest are deleted), and the file
+# is the owner's alone, out of backups, and gone with its account.
+run_suite board-file \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/APIError.swift \
+  Sources/Passband/Lib/PrivateFile.swift \
+  Sources/Passband/Lib/BoardFile.swift \
+  Tests/BoardFileTests.swift
+
 # Credential validation must never succeed against the fixture transport.
 run_suite credential-probe \
   Sources/Passband/Model/SubjectText.swift \
@@ -508,6 +519,17 @@ run_suite need-today \
 # typed wrong there fails at the only place it can still be seen — the client
 # read a decode error on a fire-and-forget POST as a failed request and reported
 # that it could not reach a spam folder it had just synced perfectly.
+# Auto-translate's wire (docs/TRANSLATION.md): every field tolerant, because
+# the notification extension decodes the same message, and which version of a
+# message the reader shows, under which frame key.
+run_suite translation-wire \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/TranslationRefresh.swift \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Lib/ThreadStyle.swift \
+  Sources/Passband/Lib/Quotes.swift \
+  Tests/TranslationWireTests.swift
+
 run_suite spam-wire \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/SubjectText.swift \
@@ -589,6 +611,36 @@ run_suite sealed-event \
   Sources/Passband/Lib/AuthLabels.swift \
   Sources/Passband/Model/EventBanner.swift \
   Tests/SealedEventTests.swift
+
+# Smart re-notify's banner (docs/RENOTIFY.md): the `renotify` frame beside
+# open_draft on the Mac stream, its freshness, its copy, an identity no first
+# banner can swallow or replace, and a tap that opens the first message.
+run_suite renotify-banner \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Sources/Passband/Lib/SenderIdentity.swift \
+  Sources/Passband/Lib/AuthLabels.swift \
+  Sources/Passband/Lib/AgentDraftLink.swift \
+  Sources/Passband/Model/EventBanner.swift \
+  Sources/Passband/Model/RenotifyBanner.swift \
+  Tests/RenotifyBannerTests.swift
+
+# What auth mail asks of the owner (docs/AUTH-MAIL-HANDLING.md, "Clients"): the
+# sealed row from both daemon versions, which kinds open a question and for
+# how long, explained alerts, new-device bursts, critical changes, and the move
+# of the old device-local ledger up to a daemon that keeps verdicts. Pure, so
+# the Auth page, the rail badge and the phone all count by the one copy.
+run_suite auth-policy \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Sources/Passband/Lib/SenderIdentity.swift \
+  Sources/Passband/Lib/AuthLabels.swift \
+  Sources/Passband/Lib/AuthPolicy.swift \
+  Tests/AuthPolicyTests.swift
 
 # Whether a search is a lookup or a question, what the setting lets that verdict
 # do, the single-slot queue that keeps the agent lane narrowing one need instead
@@ -680,12 +732,29 @@ run_suite recent-search-ring \
   Sources/Passband/Lib/RecentSearchRing.swift \
   Tests/RecentSearchRingTests.swift
 
+# The chat behind a question in search history, written down and read back:
+# every wire block (tool_use inputs with fields this app never heard of, too)
+# returns as itself and re-encodes to the bytes the provider was sent, and a
+# card or chip left mid-flight is settled before it is kept.
+run_suite conversation-snapshot \
+  Sources/Passband/Assistant/JSONValue.swift \
+  Sources/Passband/Assistant/Transcript.swift \
+  Sources/Passband/Assistant/ConversationSnapshot.swift \
+  Tests/ConversationSnapshotTests.swift
+
 # ⌘F in the reader: matches in a string, the cursor walking them across a
 # thread's messages (wrap, skip, the backwards step into an uncounted message),
 # and the session reconciling its text estimate with what a frame reports.
 run_suite find-in-thread \
   Sources/Passband/Lib/FindInThread.swift \
   Tests/FindInThreadTests.swift
+
+# The reader's dwell clock, driven by hand: paused time, pass-throughs, the
+# forgotten-window cap and which message a click is filed under. Pure, because
+# the numbers end up as reasons shown to somebody about a sender.
+run_suite attention-clock \
+  Sources/Passband/Lib/AttentionClock.swift \
+  Tests/AttentionClockTests.swift
 
 run_suite search-preview \
   Sources/Passband/Model/SubjectText.swift \
@@ -710,6 +779,13 @@ run_suite apns-environment \
 run_suite capability-probe \
   Sources/Passband/Model/APIError.swift \
   Tests/CapabilityProbeTests.swift
+
+# The smart clear receipt: the headline, one line per reason in good-news
+# terms, the plurals, and that the lines account for everything cleared even
+# when a newer daemon names a reason this build has no words for.
+run_suite smart-clear \
+  Sources/Passband/Lib/SmartClear.swift \
+  Tests/SmartClearTests.swift
 
 # An agent's draft asked onto the screen: the passband://draft link (untrusted,
 # from whatever opened the URL) and the event-stream frame that carries

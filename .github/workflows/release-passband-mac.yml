@@ -28,12 +28,21 @@ env:
 jobs:
   release-passband:
     runs-on: macos-26
+    # The signing and publishing secrets live in this GitHub environment,
+    # which only this workflow's own release tags may deploy to, and only
+    # admins may push those tags (tag ruleset). Another workflow or branch
+    # cannot read them.
+    environment: release-mac
     steps:
       # Full history: the build number is the commit count, and a shallow
       # clone would mint a tiny CFBundleVersion that breaks monotonicity.
-      - uses: actions/checkout@v4
+      # persist-credentials: false so GITHUB_TOKEN is not left in git's
+      # config; the one step that pushes (Publish appcast) brings its own
+      # token.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       # Two sources of truth have to agree with the tag: passband/VERSION
       # (what build.sh stamps into the app) and project.yml's macOS target
@@ -150,10 +159,35 @@ jobs:
 
       # The appcast lives on main; the tag checkout is detached, so commit it
       # from a fresh main. Pushing main redeploys the site with the new feed.
+      #
+      # main's ruleset requires a PR, and only repository admins and the
+      # passband-release GitHub App may bypass it, so the push uses a
+      # short-lived token for that App rather than GITHUB_TOKEN (which the
+      # ruleset rejects). Its client ID is the release-mac environment
+      # variable RELEASE_APP_CLIENT_ID and its private key the release-mac
+      # secret RELEASE_APP_PRIVATE_KEY; the App has Contents: write on this
+      # repo only, and the token is narrowed to that here.
+      - name: Release App token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          repositories: passband
+          permission-contents: write
+
       - name: Publish appcast
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # The App's bot account authors the commit, so the history shows
+          # which identity bypassed the ruleset.
+          APP_USER_ID=$(gh api "/users/${APP_SLUG}[bot]" --jq .id)
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${APP_USER_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${APP_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           cp passband-site/appcast.xml "$RUNNER_TEMP/appcast.xml"
           git checkout -- passband-site/appcast.xml
           git fetch origin main

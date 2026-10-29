@@ -106,7 +106,7 @@ struct SharePanel: View {
                     "Passband cannot send mail as you yet.",
                     detail:
                         "An invite is sent from your own mailbox, which needs the write "
-                        + "credential. Run `squelchd auth --write` on your daemon and come back."
+                        + "credential. Run `squelchd auth` on your daemon and come back."
                 )
             } else {
                 message(
@@ -160,11 +160,11 @@ struct SharePanel: View {
                     .frame(minHeight: Space.scaled(220), maxHeight: .infinity)
                     .padding(Space.s8)
                     .background(
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                             .fill(Palette.canvas.opacity(0.65))
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                             .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
             }
             .frame(maxHeight: .infinity)
@@ -207,18 +207,17 @@ struct SharePanel: View {
     }
 
     private var sendRow: some View {
-        HStack(spacing: Space.s10) {
+        ModalButtons {
             if recipients.count > Self.maxRecipients {
                 Text("\(Self.maxRecipients) at a time")
                     .font(Typo.micro)
                     .foregroundStyle(Palette.warn)
             }
-            Spacer()
+        } buttons: {
             Button(sending ? "sending" : sendLabel) {
                 Task { await send() }
             }
             .buttonStyle(.glassProminent)
-            .font(Typo.ui(12, weight: .semibold))
             .disabled(!canSend)
         }
     }

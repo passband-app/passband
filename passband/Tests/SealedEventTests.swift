@@ -36,6 +36,8 @@ struct SealedEventTests {
         """.utf8))
         expect(auth.isAuth && EventBanner.copy(for: auth).sound, "Login alerts carry explicit auth and sound even at low importance")
         aLoginCodeIsReadOutOfTheDaemonsSentenceAndNothingElse()
+        theReplayAfterAnOpenIsBacklog()
+        aPushAndALocalBannerForOneEventShareAnIdentity()
         aFocusHoldsThePanelBackOnlyWhenAskedTo()
         anOrdinaryEventDecodesWithNoSealedKey()
         aSealedEventCarriesItsKind()
@@ -48,6 +50,10 @@ struct SealedEventTests {
         anUnnamedSenderStillSaysSomething()
         authBannersOfOneMailboxShareAGroup()
         genericPushStillIdentifiesItsAccountAndEvent()
+        anAuthTapNeverRoutesToTheReader()
+        aDraftPushParsesOnlyItsOwnShape()
+        aDraftTapOpensTheDraftAndNothingElse()
+        aDraftBannerSaysWhoAndWhat()
         var taps = NotificationTapQueue<Int>()
         let account = UUID()
         taps.enqueue(91, accountId: account)
@@ -326,6 +332,57 @@ struct SealedEventTests {
         }
     }
 
+    /// The phone's open: events older than the connection (less a grace for
+    /// clock skew) were already pushed and are not bannered again; anything
+    /// at or after it is live; a stamp nobody can read is never backlog.
+    static func theReplayAfterAnOpenIsBacklog() {
+        let connected = EventBanner.eventDate("2026-10-27T15:00:00Z")!
+        expect(
+            EventBanner.isBacklog(createdAt: "2026-10-27T09:12:00Z", connectedAt: connected),
+            "mail from this morning, replayed on open, is backlog")
+        expect(
+            EventBanner.isBacklog(createdAt: "2026-10-27T14:59:30.250Z", connectedAt: connected),
+            "fractional-second stamps parse too")
+        expect(
+            !EventBanner.isBacklog(createdAt: "2026-10-27T14:59:50Z", connectedAt: connected),
+            "inside the skew grace is live")
+        expect(
+            !EventBanner.isBacklog(createdAt: "2026-10-27T15:00:05Z", connectedAt: connected),
+            "after the connection is live")
+        expect(
+            !EventBanner.isBacklog(createdAt: "not a date", connectedAt: connected),
+            "an unreadable stamp is bannered rather than lost")
+    }
+
+    /// The dedupe's key: the app's banner, an enriched push and a raw push for
+    /// one event must agree (case of the UUID included), different events or
+    /// accounts must not, and an auth banner (no event key) has none.
+    static func aPushAndALocalBannerForOneEventShareAnIdentity() {
+        let account = "6F9619FF-8B86-D011-B42D-00C04FC964FF"
+        let local: [AnyHashable: Any] = [
+            EventBanner.accountKey: account, EventBanner.eventKey: 41,
+            EventBanner.threadKey: "t1",
+        ]
+        let enriched: [AnyHashable: Any] = [
+            EventBanner.accountKey: account, EventBanner.eventKey: NSNumber(value: 41),
+        ]
+        let raw: [AnyHashable: Any] = ["event_id": "\(account.lowercased()):41"]
+        let other: [AnyHashable: Any] = [EventBanner.accountKey: account, EventBanner.eventKey: 42]
+        let elsewhere: [AnyHashable: Any] = [
+            EventBanner.accountKey: "11111111-2222-3333-4444-555555555555", EventBanner.eventKey: 41,
+        ]
+        let auth: [AnyHashable: Any] = [
+            EventBanner.accountKey: account, EventBanner.routeKey: EventBanner.authRoute,
+        ]
+        let id = EventBanner.eventIdentity(local)
+        expect(id != nil, "a local banner has an identity")
+        expect(EventBanner.eventIdentity(enriched) == id, "an enriched push matches its local banner")
+        expect(EventBanner.eventIdentity(raw) == id, "an unenriched push matches it too")
+        expect(EventBanner.eventIdentity(other) != id, "another event does not")
+        expect(EventBanner.eventIdentity(elsewhere) != id, "the same id in another account does not")
+        expect(EventBanner.eventIdentity(auth) == nil, "an auth banner is about no single event")
+    }
+
     static func expect(_ cond: Bool, _ what: String) {
         checks += 1
         if !cond {
@@ -394,4 +451,117 @@ struct SealedEventTests {
         expect(EventBanner.unresolvedPush("not-an-account:42") == nil, "invalid account is rejected")
     }
 
+
+    /// A tap on auth mail must never reach `getMessage` (the body, unaudited):
+    /// it opens the reveal when it names a message, else the Auth page.
+    static func anAuthTapNeverRoutesToTheReader() {
+        typealias K = EventBanner
+        // The Mac's live banner for an event marked is_auth.
+        let mac: [AnyHashable: Any] = [
+            K.threadKey: "t1", K.eventKey: 5, K.messageKey: 42, K.authKey: true,
+            K.senderKey: "noreply@github.com", K.accountKey: "x",
+        ]
+        expect(K.tapRoute(mac) == .reveal(messageId: 42, threadId: "t1", sender: "noreply@github.com"), "Mac auth banner reveals")
+        // The iOS extension's auth push: route auth plus the message id.
+        let ios: [AnyHashable: Any] = [
+            K.routeKey: K.authRoute, K.messageKey: 43, K.authKey: true, K.threadKey: "t2",
+            K.senderKey: "no-reply@accounts.google.com",
+        ]
+        expect(K.tapRoute(ios) == .reveal(messageId: 43, threadId: "t2", sender: "no-reply@accounts.google.com"), "iOS auth push reveals")
+        // A message id stored as a string still reveals.
+        let stringId: [AnyHashable: Any] = [K.messageKey: "44", K.authKey: true]
+        expect(K.tapRoute(stringId) == .reveal(messageId: 44, threadId: "", sender: ""), "string id")
+        // A legacy auth route with no message id: the Auth page, never a fetch.
+        let legacy: [AnyHashable: Any] = [K.routeKey: K.authRoute, K.accountKey: "x"]
+        expect(K.tapRoute(legacy) == .authPage, "legacy auth route opens the Auth page")
+        let flaggedNoId: [AnyHashable: Any] = [K.authKey: true, K.threadKey: "t3"]
+        expect(K.tapRoute(flaggedNoId) == .authPage, "auth without a message id opens the Auth page")
+        // Ordinary mail is unchanged.
+        let normal: [AnyHashable: Any] = [K.threadKey: "t4", K.messageKey: 45, K.authKey: false]
+        expect(K.tapRoute(normal) == .message(45), "normal mail opens the message")
+        expect(K.tapRoute([K.threadKey: "t5"]) == .thread("t5"), "thread-only")
+        expect(K.tapRoute([K.routeKey: K.testRoute, K.messageKey: 1]) == .test, "test banner opens nothing")
+        expect(K.tapRoute([K.routeKey: K.updateRoute]) == .update, "update banner")
+        let account = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        expect(
+            K.tapRoute(["event_id": "\(account.uuidString):9"])
+                == .event(.init(accountId: account, eventId: 9)), "an unresolved push resolves its event")
+    }
+
+    static func aDraftPushParsesOnlyItsOwnShape() {
+        typealias K = EventBanner
+        let account = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let a = account.uuidString
+        let good = K.draftPush("\(a):draft:12:1761600000")
+        expect(good == K.DraftPush(accountId: account, draftId: 12, created: 1_761_600_000), "the pusher's shape parses")
+        expect(K.draftPush("\(a.lowercased()):draft:12:1761600000")?.accountId == account, "a lowercased tag is the same account")
+        for bad in [
+            "\(a):draft:12", "\(a):draft:12:1761600000:9", "\(a):drafts:12:1761600000",
+            "\(a):Draft:12:1761600000", "\(a):draft:012:1761600000", "\(a):draft:12:01761600000",
+            "\(a):draft:+12:1761600000", "\(a):draft:-12:1761600000", "\(a):draft:0:1761600000",
+            "\(a):draft:12:0", "\(a):draft::1761600000", "\(a):draft:1 2:1761600000",
+            "\(a):draft:１２:1761600000", "not-a-uuid:draft:12:1761600000", "draft:12:1761600000",
+            "\(a):draft:1234567890123:1761600000", "\(a):42", "",
+        ] {
+            expect(K.draftPush(bad) == nil, "rejects \(bad)")
+        }
+        expect(K.draftPush(nil) == nil, "nil is nothing")
+        // An event push is not a draft push, and a draft push is not an event.
+        expect(K.draftPush("\(a):42") == nil, "an event id is not a draft")
+        expect(K.unresolvedPush("\(a):draft:12:1761600000") == nil, "a draft id never resolves as an event")
+        expect(K.unresolvedPush("\(a):draft:12") == nil, "nor does a shorter one")
+    }
+
+    static func aDraftTapOpensTheDraftAndNothingElse() {
+        typealias K = EventBanner
+        let account = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        // The raw push, unenriched: the relay's generic banner, tapped.
+        let raw: [AnyHashable: Any] = ["event_id": "\(account.uuidString):draft:7:1761600000"]
+        expect(K.tapRoute(raw) == .agentDraft(accountId: account, draftId: 7, created: 1_761_600_000), "raw push opens the draft")
+        // The extension's banner.
+        let enriched: [AnyHashable: Any] = [
+            K.routeKey: K.agentDraftRoute, K.accountKey: account.uuidString, K.draftKey: 7,
+            K.draftCreatedKey: 1_761_600_000,
+        ]
+        expect(K.tapRoute(enriched) == .agentDraft(accountId: account, draftId: 7, created: 1_761_600_000), "enriched banner opens the draft")
+        let strings: [AnyHashable: Any] = [
+            K.routeKey: K.agentDraftRoute, K.draftKey: "7", K.draftCreatedKey: "1761600000",
+        ]
+        expect(K.tapRoute(strings) == .agentDraft(accountId: nil, draftId: 7, created: 1_761_600_000), "string ids, no account")
+        // A draft route missing its binding opens no draft.
+        let unbound: [AnyHashable: Any] = [K.routeKey: K.agentDraftRoute, K.draftKey: 7]
+        if case .agentDraft = K.tapRoute(unbound) { expect(false, "no creation second, no draft") }
+        // Neither shape is an event, so neither is deduped as one.
+        expect(K.eventIdentity(raw) == nil, "a raw draft push is about no event")
+        expect(K.eventIdentity(enriched) == nil, "an enriched draft banner is about no event")
+    }
+
+    static func aDraftBannerSaysWhoAndWhat() {
+        typealias K = EventBanner
+        let newMail = K.agentDraftCopy(
+            to: "Maya Okafor <maya.okafor@example.com>, b@example.com", subject: "Vendor contract",
+            isReply: false, parentFrom: nil)
+        expect(newMail.title == "Your agent left a draft", "title")
+        expect(newMail.body == "To Maya Okafor: Vendor contract", "new mail names its first recipient: \(newMail.body)")
+        let reply = K.agentDraftCopy(
+            to: "", subject: "Re: Vendor contract", isReply: true, parentFrom: "Maya Okafor <maya@example.com>")
+        expect(reply.body == "Reply to Maya Okafor: Re: Vendor contract", "reply falls back to the parent: \(reply.body)")
+        // The agent's display name never reaches the lock screen, nor does a
+        // raw address, nor a reordering control, nor an unbounded subject.
+        let spoof = K.agentDraftCopy(
+            to: "\"Passband Security\" <x@evil.example>", subject: "Locked\u{202E}321 llac" + String(repeating: "x", count: 500),
+            isReply: false, parentFrom: nil)
+        expect(!spoof.body.contains("Passband Security"), "agent display name shown: \(spoof.body)")
+        expect(!spoof.body.contains("@"), "raw address shown: \(spoof.body)")
+        expect(!spoof.body.unicodeScalars.contains { $0.value == 0x202E }, "bidi override survived")
+        expect(spoof.body.count < 220, "subject not capped: \(spoof.body.count)")
+        let bare = K.agentDraftCopy(to: "", subject: "  ", isReply: false, parentFrom: nil)
+        expect(!bare.body.isEmpty, "never an empty body")
+        for copy in [newMail, reply, bare] {
+            expect(!copy.title.contains("\u{2014}") && !copy.body.contains("\u{2014}"), "no em dashes")
+        }
+        expect(K.draftSecond("2026-10-28T01:20:00Z") == 1_793_150_400, "plain stamp")
+        expect(K.draftSecond("2026-10-28T01:20:00.987Z") == 1_793_150_400, "fraction floors")
+        expect(K.draftSecond("yesterday") == nil, "unreadable stamp")
+    }
 }

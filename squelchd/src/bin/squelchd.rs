@@ -14,8 +14,8 @@ use chrono::{Duration, SecondsFormat};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use squelch_core::auth::{
     AuthFlowOptions, AuthScopes, ConsentBind, CredentialTransfer, DEFAULT_HEADLESS_PORT,
-    TransferCredential, decode_transfer, encode_transfer, printable, run_auth_flow,
-    run_broker_flow, run_export_flow, verify_transfer_credential,
+    TransferCredential, check_token_covers_slot, decode_transfer, encode_transfer, printable,
+    run_auth_flow, run_broker_flow, run_export_flow, verify_transfer_credential,
 };
 use squelch_core::config::{Config, CredentialBackend, OAuthClientConfig, Stage2CapSources};
 use squelch_core::credentials::{
@@ -57,10 +57,10 @@ enum Command {
     /// Authorize a Gmail account and store tokens in the configured backend
     /// (OS keyring, or a mode-0600 JSON file on headless hosts).
     ///
-    /// Plain `auth` mints only the READ credential (gmail.readonly) used by
-    /// sync. `--write` mints WRITE (gmail.modify + gmail.send) and re-mints
-    /// READ, as two consent flows into two distinct slots so the pair cannot
-    /// drift; sync/triage never touch the write one.
+    /// One Gmail consent (`gmail.modify`, the only Gmail scope Passband asks
+    /// for), stored in BOTH the Read slot used by sync and the Write slot used
+    /// by human-door actions; sync/triage never load the write one. Then an
+    /// optional Google Calendar consent.
     ///
     /// HEADLESS: `--headless [--port N]` prints the consent URL and binds a
     /// FIXED loopback port (default 8847) to forward with
@@ -193,18 +193,20 @@ struct ServeArgs {
 
 #[derive(Args)]
 struct AuthArgs {
-    /// Mint the WRITE credential (gmail.modify + gmail.send) AND re-mint the
-    /// read-only one, as two consent flows into two separate slots.
-    #[arg(long)]
+    /// Kept so existing scripts still run. Plain `auth` now fills the Write
+    /// slot too (one `gmail.modify` consent), so this changes nothing.
+    #[arg(long, hide = true)]
     write: bool,
 
     /// Mint the CALENDAR credential (calendar.events +
     /// calendar.calendarlist.readonly) into its own slot, and touch nothing
     /// else: the Read and Write credentials stay exactly as they are.
     ///
-    /// Optional, and only for the calendar page. Run plain `squelchd auth`
-    /// first: the consent is matched to this mailbox through the Gmail access
-    /// this OAuth client already has. Works with --headless, --broker and
+    /// Optional, and only for the calendar page. Plain `squelchd auth` already
+    /// offers this consent at the end while no calendar credential is stored;
+    /// this flag is for connecting it later. Run plain `squelchd auth` first:
+    /// the consent is matched to this mailbox through the Gmail access this
+    /// OAuth client already has. Works with --headless, --broker and
     /// --export. Conflicts with --write, which renews the Gmail pair, and with
     /// --import, where the blob decides what is stored.
     #[arg(long, conflicts_with_all = ["write", "import"])]
@@ -788,20 +790,100 @@ fn scope_word(scopes: AuthScopes) -> &'static str {
     }
 }
 
-/// Which credentials one `auth` invocation mints, in order. `--write` re-mints
-/// READ too so the pair cannot drift, but it stays two scope sets, two flows,
-/// two slots — the two-door split is never collapsed into one merged token.
+/// Which consents one `auth` invocation runs, in order. ONE Gmail consent
+/// (`gmail.modify`), with or without `--write`: the only Gmail scope covers
+/// reading and writing, so a second Gmail screen would ask for the same thing
+/// again. Its token fills both Gmail slots ([`gmail_slots`]).
 ///
-/// `--calendar` mints the Calendar credential ALONE. Calendar is an optional
+/// `--calendar` runs the Calendar consent ALONE. Calendar is an optional
 /// grant on top of a working mailbox, so asking for it must never re-run (and
-/// so never risk) the Gmail consents.
+/// so never risk) the Gmail consent.
 fn auth_plan(args: &AuthArgs) -> Vec<AuthScopes> {
     if args.calendar {
         vec![AuthScopes::Calendar]
-    } else if args.write {
-        vec![AuthScopes::Write, AuthScopes::Read]
     } else {
         vec![AuthScopes::Read]
+    }
+}
+
+/// The slots one consent's token is stored in. The Gmail consent fills Read
+/// AND Write with the one token: the slots stay separate so sync can only
+/// ever load Read, which is what keeps the two doors apart (token scope never
+/// did, since Google unions grants per project).
+fn gmail_slots(scopes: AuthScopes) -> Vec<CredentialKind> {
+    match scopes {
+        AuthScopes::Read | AuthScopes::Write => vec![CredentialKind::Read, CredentialKind::Write],
+        AuthScopes::Calendar => vec![CredentialKind::Calendar],
+    }
+}
+
+/// Whether a Gmail run (plain `auth` or `--write`) should end by OFFERING
+/// the optional calendar consent, so a new self-host is asked for calendar at
+/// setup even while the `calendar` hidden feature is off (sync calls nothing
+/// until it is on). Offered only while no calendar credential is stored, so
+/// a repair run does not ask again, and never on `--calendar`, which is that
+/// consent already.
+///
+/// NOT ON `--export`: the blob is printed only after every consent, so an
+/// abandoned optional screen would hold the Gmail tokens hostage for the full
+/// consent wait, and a blob carrying a Calendar entry is refused whole by an
+/// importer older than daemon 0.0.13. Export users add `--calendar`.
+///
+/// A third consent into the Calendar slot rather than more scopes on the
+/// Read consent, so the Read consent screen stays Gmail-only. What keeps the
+/// two doors apart is still which slot a code path loads (Google unions
+/// grants per project, so a later token may carry more than it asked for).
+fn wants_first_calendar(args: &AuthArgs, calendar_stored: bool) -> bool {
+    !args.calendar && !args.export && !args.import && !calendar_stored
+}
+
+/// A yes to "connect calendar now?": empty (Enter) or anything starting
+/// with y. Everything else, including a closed stdin, is a no.
+fn says_yes(answer: &str) -> bool {
+    let a = answer.trim().to_ascii_lowercase();
+    a.is_empty() || a.starts_with('y')
+}
+
+/// Ask before the optional calendar consent, and only when a person is at a
+/// terminal: a consent nobody opens waits out the full timeout, so with no
+/// terminal, or on a no, it is skipped with the command that connects it
+/// later.
+fn confirm_first_calendar() -> bool {
+    use std::io::{IsTerminal, Write};
+    let stdin = std::io::stdin();
+    if !stdin.is_terminal() {
+        eprintln!(
+            "\nsquelchd: Google Calendar is optional and not connected; run \
+             `squelchd auth --calendar` any time to connect it."
+        );
+        return false;
+    }
+    eprint!(
+        "\nsquelchd: your mailbox is set up. Also connect Google Calendar now, so Passband can \
+         put events from your mail beside your schedule? It is one more Google screen. [Y/n] "
+    );
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    if stdin.read_line(&mut answer).unwrap_or(0) == 0 || !says_yes(&answer) {
+        eprintln!("squelchd: skipped. Run `squelchd auth --calendar` any time to connect it.");
+        return false;
+    }
+    true
+}
+
+/// Run the optional calendar consent. NEVER fatal: the mailbox is fully set
+/// up by now, so an unticked box or a failed consent is a warning and a hint,
+/// and the run still succeeds.
+fn mint_first_calendar(run: impl FnOnce() -> Result<(), squelch_core::CoreError>) -> bool {
+    match run() {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!(
+                "squelchd: calendar was not connected ({e}). Your mailbox is set up; run \
+                 `squelchd auth --calendar` any time to connect it."
+            );
+            false
+        }
     }
 }
 
@@ -845,24 +927,6 @@ fn cmd_auth(
 
     let plan = auth_plan(args);
     let total = plan.len();
-    if total > 1 {
-        eprintln!(
-            "squelchd: --write renews BOTH credentials so they cannot drift apart; \
-             {total} separate Google consent screens are coming, one per credential."
-        );
-        if broker.is_some() {
-            eprintln!(
-                "squelchd: each flow prints its OWN consent link; open them one at a time, \
-                 as they appear."
-            );
-        } else if args.headless {
-            eprintln!(
-                "squelchd: both flows reuse loopback port {}, so a single SSH tunnel covers both.",
-                args.port
-            );
-        }
-    }
-
     for (i, scopes) in plan.iter().copied().enumerate() {
         let step = i + 1;
         eprintln!(
@@ -883,6 +947,24 @@ fn cmd_auth(
             return Err(e);
         }
     }
+    // Read AFTER the Gmail consents, so a keyring prompt can never stand in
+    // front of the screen that matters. Missing or unreadable both read as
+    // "not stored": the worst case is one optional offer made again.
+    let calendar_stored =
+        load_token_backend(backend, &creds_path, &email, CredentialKind::Calendar).is_ok();
+    if wants_first_calendar(args, calendar_stored) && confirm_first_calendar() {
+        mint_first_calendar(|| {
+            mint_credential(
+                &client,
+                &email,
+                backend,
+                &creds_path,
+                AuthScopes::Calendar,
+                args,
+                broker,
+            )
+        });
+    }
     Ok(())
 }
 
@@ -897,7 +979,6 @@ fn mint_credential(
     args: &AuthArgs,
     broker: Option<&str>,
 ) -> Result<(), squelch_core::CoreError> {
-    let kind = scopes.kind();
     println!(
         "Authorizing Google account: {email} [{}] via {:?} backend",
         scopes.label(),
@@ -920,7 +1001,15 @@ fn mint_credential(
             run_auth_flow(client, email, &opts)?
         }
     };
-    store_and_announce(backend, creds_path, email, kind, &token)?;
+    // Every slot checked before any is written, so a grant without
+    // gmail.modify stores nothing rather than a Write slot that cannot write.
+    let slots = gmail_slots(scopes);
+    for kind in &slots {
+        check_token_covers_slot(*kind, &token)?;
+    }
+    for kind in slots {
+        store_and_announce(backend, creds_path, email, kind, &token)?;
+    }
     if token.refresh_token.is_some() {
         println!("A refresh token was captured; squelch can renew access automatically.");
     } else {
@@ -1024,13 +1113,6 @@ fn cmd_auth_export(config: &Config, args: &AuthArgs) -> Result<(), squelch_core:
 
     let plan = auth_plan(args);
     let total = plan.len();
-    if total > 1 {
-        eprintln!(
-            "squelchd: --write exports BOTH credentials in one blob; {total} separate Google \
-             consent screens are coming, one per credential. Approve them as the SAME account."
-        );
-    }
-
     let mut account: Option<String> = None;
     let mut credentials: Vec<TransferCredential> = Vec::new();
     for (i, scopes) in plan.iter().copied().enumerate() {
@@ -1056,12 +1138,20 @@ fn cmd_auth_export(config: &Config, args: &AuthArgs) -> Result<(), squelch_core:
             )));
         }
         account = Some(mailbox);
-        credentials.push(TransferCredential {
-            kind: scopes.kind(),
-            token,
-        });
+        let slots = gmail_slots(scopes);
+        for kind in &slots {
+            check_token_covers_slot(*kind, &token)?;
+        }
+        for kind in slots {
+            credentials.push(TransferCredential {
+                kind,
+                token: token.clone(),
+            });
+        }
     }
 
+    // Slots, not consents: the one Gmail consent exports as Read and Write.
+    let total = credentials.len();
     let account = account.ok_or_else(|| other_err("no credential was authorized".to_string()))?;
     let blob = encode_transfer(&CredentialTransfer::new(account.clone(), credentials))?;
 
@@ -1758,6 +1848,10 @@ fn run_daemon(config: Config) -> Result<(), squelch_core::CoreError> {
         });
 
         spawn_statistics_refresh(store.clone());
+        // No history retention pass: `SqliteStore::prune_history` exists and
+        // is tested, but nothing schedules it. Run diagnostics and fast-lane
+        // assessments are kept until it is decided what the triage eval and
+        // cost work need from them (see `store/sqlite/retention.rs`).
 
         let mut engine = SyncEngine::new(store, creds, account_id, email, config);
         if let Some(e) = embedder {
@@ -1823,17 +1917,24 @@ fn report_tracking_posture(config: &Config) {
     }
 
     eprintln!("squelchd: read tracking enabled, pixel at {base}/t/{{token}}");
-    if config
+    match config
         .pusher
         .relay_url
         .as_deref()
         .map(str::trim)
-        .is_none_or(str::is_empty)
+        .filter(|u| !u.is_empty())
     {
-        eprintln!(
+        None => eprintln!(
             "squelchd:   no relay configured, so opens are recorded ONLY if that URL reaches THIS daemon's /t/ route. \
              If it points at a relay, opens will buffer there and never be collected."
-        );
+        ),
+        // Every hosted tenant: its own vhost serves the pixel, and the relay
+        // is held for iOS push alone.
+        Some(relay) if !squelch_core::tracking::pixel_lands_on_relay(base, relay) => eprintln!(
+            "squelchd:   the pixel is not on the configured relay, so opens are recorded ONLY if that URL reaches THIS daemon's /t/ route; \
+             the relay is used for push alone and its opens buffer is never drained from here."
+        ),
+        Some(_) => {}
     }
 }
 
@@ -2446,7 +2547,9 @@ fn cmd_serve(
             Some(pusher) => {
                 eprintln!("squelchd: APNs pusher enabled (relay configured)");
                 sync_metrics.set_apns_pusher_enabled(true);
-                let pusher = pusher.with_metrics(sync_metrics.clone());
+                let pusher = pusher
+                    .with_metrics(sync_metrics.clone())
+                    .with_draft_pings(api_state.subscribe_draft_pings());
                 let shutdown_rx = shutdown_rx.clone();
                 Some(tokio::spawn(async move {
                     pusher.run(pusher_wake, shutdown_rx).await
@@ -2489,7 +2592,7 @@ fn cmd_serve(
             }
             None => {
                 eprintln!(
-                    "squelchd: opens poller disabled (needs both SQUELCH_RELAY_URL / [pusher] relay_url and SQUELCH_TRACK_URL / [tracking] base_url)"
+                    "squelchd: opens poller disabled (needs SQUELCH_RELAY_URL / [pusher] relay_url, and SQUELCH_TRACK_URL / [tracking] base_url pointing at that relay)"
                 );
                 None
             }
@@ -2688,6 +2791,10 @@ fn cmd_serve(
         }
 
         spawn_statistics_refresh(store.clone());
+        // No history retention pass: `SqliteStore::prune_history` exists and
+        // is tested, but nothing schedules it. Run diagnostics and fast-lane
+        // assessments are kept until it is decided what the triage eval and
+        // cost work need from them (see `store/sqlite/retention.rs`).
 
         // SCHEDULED SEND fires here for the same reason the shredder runs
         // here: it sends on the WRITE credential (docs/SCHEDULED-SEND.md §4).
@@ -2713,6 +2820,18 @@ fn cmd_serve(
                 timing,
             ))
         };
+
+        // SMART RE-NOTIFY (docs/RENOTIFY.md). Always spawned, and idle unless
+        // the `renotify` hidden feature is on for this mailbox: the feature is
+        // read at every pass, so ticking it on the admin page needs no restart.
+        // Before the listener binds, so no Mac stream can open a session the
+        // sweep would then close while it is live.
+        squelch_api::close_stale_renotify_sessions(&api_state);
+        let renotify_handle = tokio::spawn(squelch_api::renotify_worker(
+            api_state.clone(),
+            shutdown_tx.subscribe(),
+            squelch_api::RenotifyTiming::daemon(),
+        ));
 
         // Bind BEFORE building the embedder: its first-run model download must
         // not leave the doors unreachable.
@@ -2905,6 +3024,9 @@ fn cmd_serve(
         if scheduled_handle.await.is_err() {
             eprintln!("squelchd: scheduled-send worker task join error");
         }
+        if renotify_handle.await.is_err() {
+            eprintln!("squelchd: renotify worker task join error");
+        }
         if let Some(handle) = metrics_handle {
             match handle.await {
                 Ok(Ok(())) => {}
@@ -3041,39 +3163,95 @@ mod tests {
         }
     }
 
-    /// Plain `auth` mints READ only; `--write` mints WRITE then READ. The
-    /// two-door split must survive as separate kinds, separate slots, and
-    /// non-overlapping scopes.
+    /// ONE Gmail consent (`gmail.modify`), with or without `--write`, on every
+    /// transport, and its token fills BOTH Gmail slots. The slots stay
+    /// separate: that is what keeps sync off the write path.
     #[test]
-    fn auth_plan_write_mints_both_credentials() {
-        let read_only = auth_plan(&AuthArgs {
-            write: false,
-            ..bare_auth_args()
-        });
-        assert_eq!(read_only, vec![AuthScopes::Read]);
-
-        // The plan is the scope sets, not the transport: a broker run mints the
-        // same two credentials into the same two slots, and an export packs the
-        // same two into one blob.
-        let both = auth_plan(&AuthArgs {
-            write: true,
-            broker: Some("https://auth.passband.email".to_string()),
-            ..bare_auth_args()
-        });
-        assert_eq!(both, vec![AuthScopes::Write, AuthScopes::Read]);
-        assert_eq!(both[0].kind(), CredentialKind::Write);
-        assert_eq!(both[1].kind(), CredentialKind::Read);
+    fn one_gmail_consent_fills_both_slots() {
+        for args in [
+            bare_auth_args(),
+            AuthArgs {
+                write: true,
+                ..bare_auth_args()
+            },
+            AuthArgs {
+                write: true,
+                broker: Some("https://auth.passband.email".to_string()),
+                ..bare_auth_args()
+            },
+        ] {
+            assert_eq!(auth_plan(&args), vec![AuthScopes::Read]);
+        }
+        assert_eq!(
+            gmail_slots(AuthScopes::Read),
+            vec![CredentialKind::Read, CredentialKind::Write]
+        );
+        assert_eq!(
+            gmail_slots(AuthScopes::Calendar),
+            vec![CredentialKind::Calendar]
+        );
         assert_ne!(
             CredentialKind::Write.slot_key("you@x.com"),
             CredentialKind::Read.slot_key("you@x.com"),
             "the two credentials must land in separate storage slots"
         );
-
-        let (write_scopes, read_scopes) = (both[0].scopes(), both[1].scopes());
-        assert!(
-            write_scopes.iter().all(|s| !read_scopes.contains(s)),
-            "write and read scope sets must not be merged into one consent"
+        assert_eq!(
+            AuthScopes::Read.scopes(),
+            vec![squelch_core::config::GMAIL_MODIFY_SCOPE.to_string()]
         );
+    }
+
+    /// A Gmail run offers the optional calendar consent while no calendar
+    /// credential is stored; never once one is, never on `--calendar` (that IS
+    /// the consent), and never on `--export` or `--import`.
+    #[test]
+    fn a_first_gmail_run_offers_calendar_once() {
+        let plain = bare_auth_args();
+        assert!(wants_first_calendar(&plain, false));
+        assert!(!wants_first_calendar(&plain, true), "already stored");
+        let write = AuthArgs {
+            write: true,
+            ..bare_auth_args()
+        };
+        assert!(wants_first_calendar(&write, false));
+        for args in [
+            AuthArgs {
+                calendar: true,
+                ..bare_auth_args()
+            },
+            AuthArgs {
+                export: true,
+                ..bare_auth_args()
+            },
+            AuthArgs {
+                import: true,
+                ..bare_auth_args()
+            },
+        ] {
+            assert!(!wants_first_calendar(&args, false));
+        }
+        // The Gmail plan is unchanged: calendar is never folded into it.
+        assert_eq!(auth_plan(&plain), vec![AuthScopes::Read]);
+        assert_eq!(auth_plan(&write), vec![AuthScopes::Read]);
+    }
+
+    /// Enter or a y is a yes; anything else is a no.
+    #[test]
+    fn the_calendar_offer_defaults_to_yes() {
+        for yes in ["", "\n", "y\n", "Y", "yes", " YES \n"] {
+            assert!(says_yes(yes), "{yes:?}");
+        }
+        for no in ["n\n", "no", "N", "later", "q"] {
+            assert!(!says_yes(no), "{no:?}");
+        }
+    }
+
+    /// The optional step swallows its failure, so a run whose mailbox is set
+    /// up never fails over calendar.
+    #[test]
+    fn a_failed_calendar_step_is_not_fatal() {
+        assert!(!mint_first_calendar(|| Err(other_err("unticked".into()))));
+        assert!(mint_first_calendar(|| Ok(())));
     }
 
     /// `--calendar` mints the Calendar credential and NOTHING ELSE: no Read
@@ -4409,5 +4587,184 @@ mod tests {
         let (status, body) = probe(app).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.split_whitespace().count(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // The agent door's writes, end to end: the real daemon router, the real
+    // send pipeline (ApiState::agent_mailer), and MCP over the wire. The
+    // halves are tested apart (squelch-mcp with a recording mailer,
+    // squelch-api's mailer called directly); this is the one place both run
+    // together, as an agent meets them. SECURITY.md §4c and §5.
+    // -----------------------------------------------------------------------
+
+    fn ingest_for_agent(store: &SqliteStore, account: AccountId, word: &str) -> i64 {
+        use squelch_core::sync::ingest::{RawFetched, ingest_with_rules};
+        let now = chrono::Utc::now();
+        let raw = RawFetched {
+            account_id: account,
+            gmail_msg_id: format!("m-{word}"),
+            gmail_thread_id: Some(format!("t-{word}")),
+            raw: format!(
+                "From: Pat <pat@example.com>\r\nTo: {AGENT_ACCOUNT}\r\nSubject: About {word}\r\nDate: {}\r\n\r\nNotes on {word}.",
+                now.to_rfc2822()
+            )
+            .into_bytes(),
+            internal_date: Some(now),
+            is_sent: false,
+            is_spam: false,
+            account_addr: AGENT_ACCOUNT.into(),
+        };
+        let message = ingest_with_rules(&raw, &Default::default(), now, &[], |_| false);
+        store.ingest_message(&message).expect("ingest")
+    }
+
+    /// Finish every queued agent job, restricting the messages in `restricted`.
+    fn assess_for_agent(store: &SqliteStore, account: AccountId, restricted: &[i64]) {
+        use squelch_core::store::agent_triage::{AgentCommitOutcome, AgentTriageStore as _};
+        use squelch_core::triage::decision::MessageDecision;
+        while let Some(job) = ["triage", "access"].into_iter().find_map(|kind| {
+            store
+                .claim_agent_job(account, kind, chrono::Utc::now(), 120)
+                .expect("claim")
+        }) {
+            let context = store.load_agent_context(&job).expect("context");
+            let mut decision = MessageDecision {
+                summary: "A meaningful update".into(),
+                ..Default::default()
+            };
+            decision.external_access.restricted = restricted.contains(&job.message_id);
+            decision.attention.show_in_fye = true;
+            decision.attention.summary = "An update worth reading".into();
+            decision.attention.relevant_message_ids = vec![job.message_id];
+            let sources = vec![context.message.source.clone()];
+            assert_eq!(
+                store
+                    .commit_agent_decision(&job, &context, &decision, &sources)
+                    .expect("commit"),
+                AgentCommitOutcome::Applied
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_agent_doors_writes_keep_their_guards_through_the_real_pipeline() {
+        use serde_json::json;
+        use squelch_core::agent_write::AgentWriteAccess;
+        use squelch_mcp::testing::wire::{Session, refused};
+
+        let (store, account, _m, app) = serve_router(&squelch_mcp::AgentDoorAuth::Open);
+        let visible = ingest_for_agent(&store, account, "lighthouse");
+        let restricted = ingest_for_agent(&store, account, "vaultcode");
+        assess_for_agent(&store, account, &[restricted]);
+
+        let read_only = [
+            "get_deadlines",
+            "get_inbox_updates",
+            "get_reading",
+            "get_shipments",
+            "get_thread",
+            "list_sender_rules",
+            "search_mail",
+            "set_sender_rule",
+        ];
+        let tools = |extra: &[&str]| {
+            let mut t: Vec<String> = read_only
+                .iter()
+                .chain(extra)
+                .map(|s| s.to_string())
+                .collect();
+            t.sort();
+            t
+        };
+
+        // An owner who never opened the setting: drafts, never sending.
+        let mut session = Session::open(app.clone(), "localhost", None).await;
+        assert_eq!(
+            session.tool_names().await,
+            tools(&["create_draft", "open_draft"])
+        );
+
+        // A reply to restricted mail is refused with the same answer as a
+        // message that does not exist, and the restricted text stays out.
+        for target in [restricted, 999_999] {
+            let (text, reply) = session
+                .tool(
+                    "create_draft",
+                    json!({"body": "Sounds good.", "reply_to_message_id": target}),
+                )
+                .await;
+            assert!(refused(&reply), "reply to {target}: {text}");
+            assert!(text.contains("not found"), "{text}");
+            assert!(!text.contains("vaultcode"), "{text}");
+        }
+        // Control: a reply to allowed mail is drafted, addressed to its sender.
+        let (text, reply) = session
+            .tool(
+                "create_draft",
+                json!({"body": "Sounds good.", "reply_to_message_id": visible}),
+            )
+            .await;
+        assert!(!refused(&reply), "control: {text}");
+        let (text, reply) = session
+            .tool(
+                "send_email",
+                json!({"body": "x", "to": "a@example.com", "subject": "x", "human_approved": true}),
+            )
+            .await;
+        assert!(
+            refused(&reply),
+            "send_email is not offered at drafts: {text}"
+        );
+
+        // Sending allowed: the outbound guard still blocks a secret anywhere
+        // in the composition, with no override, and never echoes it.
+        AgentWriteAccess::Send
+            .save(store.as_ref(), account)
+            .expect("save level");
+        let mut session = Session::open(app.clone(), "localhost", None).await;
+        assert_eq!(
+            session.tool_names().await,
+            tools(&["create_draft", "open_draft", "send_email"])
+        );
+        let key = "AKIAIOSFODNN7EXAMPLE";
+        for (field, value) in [
+            ("subject", format!("keys {key}")),
+            ("body", format!("use {key}")),
+        ] {
+            let mut args = json!({
+                "body": "hello", "to": "a@example.com", "subject": "hello", "human_approved": true
+            });
+            args[field] = json!(value);
+            let (text, reply) = session.tool("send_email", args).await;
+            assert!(refused(&reply), "{field}: {text}");
+            assert!(
+                text.contains("outbound guard blocked"),
+                "{field}: refused by the guard, not a missing credential: {text}"
+            );
+            assert!(
+                !text.contains(key),
+                "{field}: the guard echoed the secret: {text}"
+            );
+        }
+        // The guard's audit rows say what was blocked, never the secret.
+        let audit = store.list_audit(account, 100).expect("audit");
+        assert!(
+            audit
+                .iter()
+                .any(|e| e.detail.as_deref() == Some("blocked:guard")),
+            "control: the blocks were audited: {audit:?}"
+        );
+        for entry in &audit {
+            let row = format!("{:?} {:?} {:?}", entry.action, entry.target, entry.detail);
+            assert!(!row.contains(key), "audit row carries the secret: {row}");
+        }
+
+        let (text, reply) = session
+            .tool(
+                "send_email",
+                json!({"body": "Sounds good.", "reply_to_message_id": restricted, "human_approved": true}),
+            )
+            .await;
+        assert!(refused(&reply) && text.contains("not found"), "{text}");
     }
 }

@@ -66,7 +66,7 @@
         @ViewBuilder
         private var askBody: some View {
             Text("Connect your Google Calendar")
-                .font(Typo.ui(14, weight: .semibold))
+                .font(Typo.modalTitle)
                 .foregroundStyle(Palette.ink)
             Text("See your events beside the plans Passband finds in your mail.")
                 .font(Typo.rowSub)
@@ -89,8 +89,7 @@
             if let email = ask.email {
                 accountBox(label: "Pick this account when Google asks", email: email)
             }
-            HStack(spacing: Space.s8) {
-                Spacer(minLength: 0)
+            ModalButtons {
                 Button("Not now") { store.dismissCalendarConnect() }
                     .buttonStyle(.glass)
                 Button("Connect calendar") { store.confirmCalendarConnect() }
@@ -107,7 +106,7 @@
             HStack(spacing: Space.s8) {
                 WaitDots(tone: Palette.inkFaint)
                 Text("Finish in your browser")
-                    .font(Typo.ui(14, weight: .semibold))
+                    .font(Typo.modalTitle)
                     .foregroundStyle(Palette.ink)
             }
             Text("Google is asking for permission in your browser. This closes on its own once your calendar is connected.")
@@ -117,8 +116,7 @@
             if let email = ask.email {
                 accountBox(label: "Pick this account", email: email)
             }
-            HStack(spacing: Space.s8) {
-                Spacer(minLength: 0)
+            ModalButtons {
                 // Self-host asks the daemon for a fresh link: the first may
                 // have expired.
                 Button("Open Google again") { store.reopenCalendarConsent() }
@@ -146,7 +144,7 @@
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, Space.s10)
                     .padding(.vertical, Space.scaled(7))
-                    .background(Palette.hairline.opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
+                    .background(Palette.hairline.opacity(0.6), in: RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
             }
         }
     }

@@ -60,6 +60,10 @@ struct AskBar: View {
     private static let bottomAnchor = "askbar.bottom"
 
     var body: some View {
+        // NOT ON `PaletteShell`, though it shares its edge, glass and shadow:
+        // this is a chat that grows a transcript out of its own bottom edge,
+        // with the field moving under it, not a filtered list with a footer.
+        // Higher than the palettes' inset because the tray grows to 440.
         OverlayScrim(alignment: .top, topInset: 96, onDismiss: onClose) {
             GlassEffectContainer(spacing: 10) {
                 VStack(alignment: .leading, spacing: 0) {
@@ -73,9 +77,9 @@ struct AskBar: View {
                 }
                 .frame(width: Typo.measure(620))
                 .passbandGlass(
-                    .pane, cornerRadius: 20, tint: Palette.glassTintStrong,
+                    .pane, cornerRadius: Radius.modal, tint: Palette.glassTintStrong,
                     id: "askbar", in: askGlass)
-                .shadow(color: .black.opacity(0.34), radius: 50, y: 22)
+                .overlayShadow()
             }
         }
         .keyContext(.modal)
@@ -142,8 +146,8 @@ struct AskBar: View {
             }
             Kbd("esc")
         }
-        .padding(.horizontal, Space.s16)
-        .padding(.top, Space.scaled(13))
+        .padding(.horizontal, PaletteMetrics.edge)
+        .padding(.top, Space.s14)
         .padding(.bottom, Space.s8)
     }
 
@@ -167,11 +171,11 @@ struct AskBar: View {
                 .font(Typo.ui(11, weight: .semibold))
                 .foregroundStyle(canSubmit ? Palette.accent : Palette.inkFaintest)
         }
-        .padding(.horizontal, Space.s16)
+        .padding(.horizontal, PaletteMetrics.edge)
         // With a log above, the divider replaces the header as the top
         // neighbor and the row needs its own breathing room.
         .padding(.top, session.transcript.isEmpty ? 0 : Space.s12)
-        .padding(.bottom, Space.scaled(13))
+        .padding(.bottom, Space.s14)
     }
 
     private func submit() {
@@ -202,7 +206,7 @@ struct AskBar: View {
                     }
                     Color.clear.frame(height: 1).id(Self.bottomAnchor)
                 }
-                .padding(.horizontal, Space.s16)
+                .padding(.horizontal, PaletteMetrics.edge)
                 .padding(.vertical, Space.s12)
             }
             .frame(maxHeight: 440)
@@ -287,7 +291,7 @@ struct AskBar: View {
 
     private func userRow(_ text: String) -> some View {
         HStack(spacing: 0) {
-            Spacer(minLength: 56)
+            Spacer(minLength: Space.scaled(56))
             Text(text)
                 .font(Typo.row)
                 .foregroundStyle(Palette.ink)
@@ -296,7 +300,7 @@ struct AskBar: View {
                 .padding(.horizontal, Space.s10)
                 .padding(.vertical, Space.s6)
                 .background(
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                         .fill(Palette.accentSoft)
                 )
         }
@@ -385,11 +389,11 @@ struct AskBar: View {
         .padding(Space.s10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.accentSoft.opacity(0.6))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75)
         )
     }
@@ -447,7 +451,7 @@ struct AskBar: View {
             .frame(maxHeight: Space.scaled(140))
             .padding(Space.s8)
             .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .fill(Palette.canvas.opacity(0.6))
             )
         }

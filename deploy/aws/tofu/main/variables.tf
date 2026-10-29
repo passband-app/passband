@@ -344,7 +344,7 @@ variable "relay_uid" {
 }
 
 variable "bifrost_uid" {
-  description = "POSIX uid/gid Bifrost's EFS access point enforces. Bifrost runs as root (Dockerfile.bifrost), and the access point maps every operation to this id regardless, so any non-zero id works."
+  description = "POSIX uid/gid Bifrost's EFS access point enforces. Keep it 1000: deploy/aws/docker/Dockerfile.bifrost runs as the upstream image's appuser (1000:0), and its entrypoint checks that /app/data is writable by that uid."
   type        = number
   default     = 1000
 }

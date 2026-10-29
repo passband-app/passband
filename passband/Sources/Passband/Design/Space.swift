@@ -11,9 +11,15 @@
 //   - A value that is TUNED and must not move in compact (an odd 5pt row
 //     inset, a control's fixed height, anything aligned to something else):
 //     `Space.scaled(5)`, which is exact in compact and follows the same curve.
-//   - Optical constants stay literal: hairlines, border widths, corner radii,
-//     dot diameters, shadow offsets, anything in the brand renderers. They
-//     describe the ink, not the room around it.
+//   - Corner radii come from `Radius` (below): a ROLE per kind of container,
+//     not a number per view. They are NOT density-scaled; a card's corner is
+//     the same curve in compact and comfortable. A shape nested inside
+//     another takes `Radius.concentric(outer, inset:)` with the padding that
+//     actually separates them, so the two curves stay parallel.
+//   - Optical constants stay literal: hairlines, border widths, dot
+//     diameters, shadow offsets, anything in the brand renderers (Vignette,
+//     Phosphor, the Squelch drawings), and any radius derived from a size
+//     (height / 2, size * 0.24). They describe the ink, not the room around it.
 //
 // Every accessor reads `Prefs.shared.density`, so a view that uses one in its
 // body is observing the setting and re-lays itself out when it flips. The
@@ -36,6 +42,28 @@ enum Space {
     static var s24: CGFloat { scaled(24) }
     static var s32: CGFloat { scaled(32) }
 
+    /// THE PAGE GUTTER: the leading and trailing edge every page's title, its
+    /// content and its key-hint bar share, so switching tabs does not move the
+    /// text. A list whose selection fill bleeds past its words gets there in
+    /// two parts, container inset + row padding = `page`, which puts the WORDS
+    /// on this line and lets the fill reach out to the left of it.
+    static var page: CGFloat { s24 }
+
+    /// THE MODAL INSET: the room between a floating card's glass edge and its
+    /// words, on every side. `ModalCard` pads by it, and the cards that draw a
+    /// full-bleed band of their own (the reveal panel's banner, the login
+    /// code's countdown) inset their words by it, so every modal's text sits
+    /// the same distance in from its corner.
+    static var modal: CGFloat { scaled(18) }
+
+    /// THE SIDE-PANEL GUTTER: the edge a right-hand glass panel's title, its
+    /// fields, its row words and its footer share. Search / browse
+    /// (`SidePanel`), the composer (`ComposePane`) and the calendar's event
+    /// pane (`CalendarEventPane`, built on the composer's bones, through
+    /// `ComposeEdge`) are the same glass in the same place, so they keep
+    /// their words the same distance in.
+    static var panel: CGFloat { s16 }
+
     /// An off-ladder compact value on the same curve. For the tuned numbers
     /// the ladder would shift by a point; not a way around choosing a step.
     static func scaled(_ compact: CGFloat) -> CGFloat {
@@ -46,4 +74,46 @@ enum Space {
     /// than size between the two (a second line that only comfortable has
     /// room for). Sizes should come from the ladder, not from a branch on this.
     static var density: DensityChoice { Prefs.shared.density }
+}
+
+/// THE CORNER VOCABULARY: one radius per ROLE. Pick by what the shape IS, not
+/// by what looks right next to its neighbour, so two cards that do the same
+/// job round the same way on every page.
+///
+/// Constants on purpose: radii describe the ink, and do not follow density.
+/// Not a number: SEARCH FIELDS, segmented controls, filter pills and chips
+/// that hold one word are CAPSULES, the platform's control shape. A field that
+/// holds a value (a name, an address) is a `well`.
+enum Radius {
+    /// A glass pane: zone cards, section cards, the reader's chrome cards.
+    static let pane: CGFloat = 18
+    /// Something floating over the page: modals, palettes, the ask bar,
+    /// side panels, What's New and the ad card.
+    static let modal: CGFloat = 20
+    /// A corner toast (they stack, so they must match) and floating banners.
+    static let toast: CGFloat = 14
+    /// An inset well INSIDE a card: fields, option buttons, tiles, code
+    /// blocks, inline banners, an attachment chip with a thumbnail.
+    static let well: CGFloat = 10
+    /// A list row's selection and hover fill.
+    static let row: CGFloat = 8
+    /// Small things: non-capsule pills, keycaps, tooltips, tiny tiles.
+    static let chip: CGFloat = 6
+
+    /// The radius for a shape inset `inset` points inside one rounded at
+    /// `outer`, so the two curves run parallel. Pass the padding as actually
+    /// laid out (density-scaled), so it stays concentric in comfortable too.
+    static func concentric(_ outer: CGFloat, inset: CGFloat) -> CGFloat {
+        max(outer - inset, 2)
+    }
+
+    /// AN IMAGE nested in a rounded container: concentric where that still
+    /// leaves a visible curve, never rounder-than-nothing. A picture cut to a
+    /// near-square corner (comfortable's wider padding takes a concentric
+    /// curve down to 2pt) reads as pasted in; one that echoes its container
+    /// reads as part of it. `floor` is the least it keeps: `chip` for a small
+    /// thumbnail, `well` for a picture big enough to carry a card's curve.
+    static func image(in outer: CGFloat, inset: CGFloat, floor: CGFloat = chip) -> CGFloat {
+        max(concentric(outer, inset: inset), floor)
+    }
 }

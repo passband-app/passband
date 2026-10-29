@@ -216,7 +216,7 @@ private struct RecipientLineView: View {
                 .foregroundStyle(Palette.inkFaintest)
                 .lineLimit(1)
                 .fixedSize()
-                .frame(minWidth: 23, alignment: .trailing)
+                .frame(minWidth: Typo.measure(23), alignment: .trailing)
                 .layoutPriority(2)
 
             run

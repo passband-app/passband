@@ -13,6 +13,11 @@ import SwiftUI
 struct UpdateAlert: View {
     @ObservedObject private var updater = Updater.shared
 
+    // ONE card across every phase. The offer and the narration that follows
+    // it share a corner, an inset and a material (`ToastMetrics`), so pressing
+    // Update changes the words in the card rather than swapping it for a
+    // smaller, clearer one mid-download.
+
     var body: some View {
         Group {
             switch updater.phase {
@@ -75,10 +80,10 @@ struct UpdateAlert: View {
                 .buttonStyle(.glassProminent)
                 .font(Typo.ui(12, weight: .semibold))
         }
-        .padding(.horizontal, Space.scaled(15))
-        .padding(.vertical, Space.s12)
+        .padding(.horizontal, ToastMetrics.hPadding)
+        .padding(.vertical, ToastMetrics.vPadding)
         .frame(maxWidth: 520)
-        .passbandGlass(.pane, cornerRadius: 14, tint: Palette.glassTintStrong)
+        .toastGlass()
         .transition(.move(edge: .bottom).combined(with: .opacity))
         .accessibilityElement(children: .contain)
         .accessibilityLabel(title)
@@ -118,9 +123,7 @@ struct UpdateAlert: View {
                     .frame(width: Space.scaled(32), alignment: .trailing)
             }
         }
-        .padding(.horizontal, Space.s14)
-        .padding(.vertical, Space.scaled(9))
-        .passbandGlass(.chrome, cornerRadius: 12, tint: Palette.glassTint)
+        .toastSurface()
         .transition(.move(edge: .bottom).combined(with: .opacity))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(text)

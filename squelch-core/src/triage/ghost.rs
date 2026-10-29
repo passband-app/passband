@@ -12,11 +12,12 @@
 //! the mail stated; the model's guess stays in `estimate`, and
 //! [`effective_end`] reports which tier produced the end it returns.
 use super::decision::{
-    EventChange, EventCommitment, EventLikelihood, EventRecordKind, RecordProposal,
+    EventChange, EventCommitment, EventLikelihood, EventRecordKind, RecordProposal, SupportedTime,
 };
 use super::order_link::plain;
 use super::text::{truncate_chars, truncate_trimmed};
-use chrono::{DateTime, Duration, FixedOffset, NaiveDate};
+use chrono::{DateTime, Duration, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono_tz::Tz;
 use std::fmt;
 use std::ops::RangeInclusive;
 
@@ -113,9 +114,10 @@ pub enum EventTime {
     At(DateTime<FixedOffset>),
 }
 impl EventTime {
-    /// RFC3339 or `YYYY-MM-DD`, the two shapes a `SupportedTime` may hold
-    /// (the same test decision validation applies to other times). Anything
-    /// else is None.
+    /// RFC3339 or `YYYY-MM-DD`: the stored form (see the `Display` impl), and
+    /// the same test decision validation applies to other times. Anything else
+    /// is None. A time read from a decision goes through
+    /// [`EventTime::resolve`] instead, which also takes a zoned local time.
     pub fn parse(raw: &str) -> Option<Self> {
         let raw = raw.trim();
         if let Ok(at) = DateTime::parse_from_rfc3339(raw) {
@@ -125,8 +127,50 @@ impl EventTime {
             .ok()
             .map(Self::Date)
     }
+    /// A time as the model writes it into a decision: [`EventTime::parse`]'s
+    /// two shapes, or a NAIVE local date-time (`YYYY-MM-DDTHH:MM`, with
+    /// optional seconds and fraction) read in `timezone`. The model writes the
+    /// naive shape for most event times ("21:30 in Asia/Tokyo"), and reading
+    /// only the first two dropped them, leaving a flight with no times at all.
+    ///
+    /// The zone must be an IANA PLACE zone ([`iana_zone`]'s test): an
+    /// abbreviation names several offsets, so a naive time with no usable zone
+    /// is None, as before. A zone beside an RFC3339 value is ignored, because
+    /// the offset the mail gave is the fact. The two clock changes a year are
+    /// settled the same way every time: a local time that happens twice (the
+    /// autumn fold) is the earlier instant, and one that never happens (the
+    /// spring gap) is read one hour later, which is the wall clock a person
+    /// would see at that moment.
+    pub fn resolve(value: &str, timezone: Option<&str>) -> Option<Self> {
+        if let Some(time) = Self::parse(value) {
+            return Some(time);
+        }
+        let raw = value.trim();
+        let local = NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S%.f")
+            .or_else(|_| NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M"))
+            .ok()?;
+        let zone = place_tz(timezone?)?;
+        let at = zone.from_local_datetime(&local).earliest().or_else(|| {
+            zone.from_local_datetime(&(local + Duration::hours(1)))
+                .earliest()
+        })?;
+        Some(Self::At(at.fixed_offset()))
+    }
     pub fn has_clock(&self) -> bool {
         matches!(self, Self::At(_))
+    }
+    /// The latest instant this can mean. An instant is itself; a date is the
+    /// moment that date ends everywhere on Earth, 00:00 of the next day at
+    /// UTC-12 (12:00Z), because the mail gave no zone to end it in. None only
+    /// at the end of the calendar.
+    pub fn latest_instant(&self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::At(at) => Some(at.with_timezone(&Utc)),
+            Self::Date(day) => day
+                .succ_opt()?
+                .and_hms_opt(12, 0, 0)
+                .map(|noon| noon.and_utc()),
+        }
     }
     /// Is this strictly after `start`? Mixed precision is never "after": a
     /// date-only start pairs only with a date-only end, because comparing a
@@ -178,6 +222,17 @@ pub struct GhostProposal {
 
 /// Launder one record. None for anything but an `event`, and for an event with
 /// no usable title: a ghost nobody can name is not shown.
+/// An end as [`launder`] reads it: in its own zone, or the start's when it
+/// names none.
+fn resolve_end(end: &SupportedTime, start_zone: Option<&str>) -> Option<EventTime> {
+    let zone = end
+        .timezone
+        .as_deref()
+        .filter(|z| !z.trim().is_empty())
+        .or(start_zone);
+    EventTime::resolve(&end.value, zone)
+}
+
 pub fn launder(record: &RecordProposal) -> Option<GhostProposal> {
     let RecordProposal::Event {
         title,
@@ -196,16 +251,20 @@ pub fn launder(record: &RecordProposal) -> Option<GhostProposal> {
         return None;
     };
     let title = clean_title(title)?;
-    let start_time = start.as_ref().and_then(|t| EventTime::parse(&t.value));
-    let start_timezone = start
+    let start_zone = start.as_ref().and_then(|t| t.timezone.as_deref());
+    let start_time = start
         .as_ref()
+        .and_then(|t| EventTime::resolve(&t.value, start_zone));
+    let start_timezone = start_zone
         .filter(|_| start_time.is_some())
-        .and_then(|t| t.timezone.as_deref())
         .and_then(iana_zone);
+    // The end is read in its OWN zone, since a flight lands somewhere else,
+    // and in the start's when it names none. A zone it does name that is no
+    // place does not fall back: it said where the end is, just unusably.
     // An end with no start to be after is meaningless, so it goes too.
     let end = end
         .as_ref()
-        .and_then(|t| EventTime::parse(&t.value))
+        .and_then(|t| resolve_end(t, start_zone))
         .filter(|e| start_time.is_some_and(|s| e.is_after(&s)));
     let estimate = match (start_time, end) {
         (Some(EventTime::At(_)), None) => duration_estimate.as_ref().and_then(|d| {
@@ -252,11 +311,79 @@ pub fn launder(record: &RecordProposal) -> Option<GhostProposal> {
 /// and reloads records by it, so both sides must count the same way, and they
 /// do by both calling this.
 pub fn launder_events(records: &[RecordProposal]) -> Vec<GhostProposal> {
+    laundered_records(records)
+        .into_iter()
+        .map(|(_, proposal)| proposal)
+        .collect()
+}
+
+/// [`launder_events`] with each proposal's raw record beside it, counted the
+/// same way (it is the one definition), so a stored `position` finds the
+/// record the model wrote as well as what laundering kept of it.
+pub fn laundered_records(records: &[RecordProposal]) -> Vec<(&RecordProposal, GhostProposal)> {
     records
         .iter()
-        .filter_map(launder)
+        .filter_map(|record| launder(record).map(|proposal| (record, proposal)))
         .take(EVENTS_PER_MESSAGE)
         .collect()
+}
+
+/// The longest stretch a record's own duration guess is believed for, when
+/// scheduling the past-event re-check: a month, against the calendar's three
+/// days ([`ESTIMATE_MINUTES`]), because a ten-day trip drawn as three is a
+/// picture, and asked about on day four it is a wasted model call.
+const RECORD_ESTIMATE_CAP_MINUTES: i64 = 30 * 24 * 60;
+
+/// The latest instant a RAW event record mentions, for the past-event re-check:
+/// the latest of its start, its end and the model's own duration guess from a
+/// timed start (raw, up to [`RECORD_ESTIMATE_CAP_MINUTES`]), each at whatever precision the
+/// model gave ([`EventTime::latest_instant`]), the end in its own zone or the
+/// start's. Read from the record and not the laundered proposal, because
+/// laundering drops an end at another precision than the start, and "check-in
+/// 15:00, check-out the 16th" must count the 16th.
+///
+/// With no end after the start, travel ends a day after it starts at the
+/// least (a flight lands within a day of leaving), and a RESERVATION with no
+/// guess either is None: a stay with no checkout cannot be dated, and the
+/// kind's two-hour default would end a hotel on its first night (the
+/// re-check then asks a day after check-in, and the model says whether the
+/// stay is over). None too when the record has no start that resolves.
+pub fn record_latest(record: &RecordProposal) -> Option<DateTime<Utc>> {
+    let RecordProposal::Event {
+        start,
+        end,
+        duration_estimate,
+        event_kind,
+        ..
+    } = record
+    else {
+        return None;
+    };
+    let start = start.as_ref()?;
+    let start_zone = start.timezone.as_deref();
+    let start = EventTime::resolve(&start.value, start_zone)?;
+    let first = start.latest_instant()?;
+    let stated = end
+        .as_ref()
+        .and_then(|end| resolve_end(end, start_zone))
+        .and_then(|end| end.latest_instant())
+        .filter(|end| *end > first);
+    // A guess is minutes from a clock time, as laundering reads it; a date
+    // has none to count from.
+    let guessed = duration_estimate
+        .as_ref()
+        .filter(|d| d.minutes > 0 && start.has_clock())
+        .and_then(|d| {
+            first.checked_add_signed(Duration::minutes(
+                d.minutes.min(RECORD_ESTIMATE_CAP_MINUTES),
+            ))
+        });
+    let last = stated.max(guessed);
+    match (stated, event_kind) {
+        (None, EventRecordKind::Travel) => last.max(first.checked_add_signed(Duration::hours(24))),
+        (None, EventRecordKind::Reservation) => guessed,
+        _ => Some(last.unwrap_or(first)),
+    }
 }
 
 /// Who a record speaks for: the sender's [`organisation_domain`], or the full
@@ -335,7 +462,7 @@ fn psl_registrable_domain(address: &str) -> Option<String> {
 /// this: a ref is something the sender must know. Matching by thread and the
 /// invitation binding (`zones::invitation_is_bound`) require the identical
 /// address instead.
-fn organisation_domain(address: &str) -> Option<String> {
+pub(crate) fn organisation_domain(address: &str) -> Option<String> {
     if super::receipt_match::is_freemail_host(address) {
         return None;
     }
@@ -860,11 +987,15 @@ fn html_to_text(raw: &str) -> String {
 /// "EST" and "UTC" are not places: an abbreviation names several, and a fixed
 /// offset is wrong for half the year wherever it is read.
 pub(crate) fn iana_zone(raw: &str) -> Option<String> {
+    place_tz(raw).map(|tz| tz.name().to_string())
+}
+/// [`iana_zone`]'s test, keeping the zone itself for [`EventTime::resolve`].
+fn place_tz(raw: &str) -> Option<Tz> {
     let zone = plain(raw);
     if zone.chars().count() > TIMEZONE_CAP || !zone.contains('/') {
         return None;
     }
-    crate::timezone::place_zone(&zone).map(|tz| tz.name().to_string())
+    crate::timezone::place_zone(&zone)
 }
 
 /// A location reduced to the key duration priors are stored under: the part
@@ -1552,6 +1683,147 @@ mod tests {
         assert_eq!(EventTime::parse("Oct 3"), None);
     }
 
+    fn zoned(value: &str, zone: Option<&str>) -> Option<SupportedTime> {
+        Some(SupportedTime {
+            value: value.into(),
+            timezone: zone.map(Into::into),
+            source_message_id: 7,
+            interpreted_relative: false,
+        })
+    }
+    /// A record with these start and end, laundered.
+    fn launder_times(start: Option<SupportedTime>, end: Option<SupportedTime>) -> GhostProposal {
+        let mut record = event("Flight", &[]);
+        if let RecordProposal::Event {
+            start: s, end: e, ..
+        } = &mut record
+        {
+            *s = start;
+            *e = end;
+        }
+        launder(&record).unwrap()
+    }
+
+    #[test]
+    fn a_zoned_local_start_and_end_resolve_in_their_own_zones() {
+        // The flight that had no times: departs Tokyo, lands in Los Angeles
+        // "earlier" the same day by the wall clock.
+        let ghost = launder_times(
+            zoned("2026-10-19T21:30", Some("Asia/Tokyo")),
+            zoned("2026-10-19T14:45", Some("America/Los_Angeles")),
+        );
+        assert_eq!(ghost.start, Some(at("2026-10-19T21:30:00+09:00")));
+        assert_eq!(ghost.end, Some(at("2026-10-19T14:45:00-07:00")));
+        assert_eq!(ghost.start_timezone.as_deref(), Some("Asia/Tokyo"));
+        assert_eq!(
+            ghost.start.unwrap().to_string(),
+            "2026-10-19T21:30:00+09:00",
+            "stored as RFC3339 with the zone's offset"
+        );
+    }
+
+    #[test]
+    fn an_end_with_no_zone_is_read_in_the_starts_zone() {
+        let ghost = launder_times(
+            zoned("2026-10-19T19:00:00", Some("America/New_York")),
+            zoned("2026-10-19T22:30:00", None),
+        );
+        assert_eq!(ghost.end, Some(at("2026-10-19T22:30:00-04:00")));
+        let blank = launder_times(
+            zoned("2026-10-19T19:00:00", Some("America/New_York")),
+            zoned("2026-10-19T22:30:00", Some("  ")),
+        );
+        assert_eq!(blank.end, Some(at("2026-10-19T22:30:00-04:00")));
+        // A zone the end does name, but unusably, does not borrow the start's.
+        let junk = launder_times(
+            zoned("2026-10-19T19:00:00", Some("America/New_York")),
+            zoned("2026-10-19T22:30:00", Some("PDT")),
+        );
+        assert_eq!(junk.end, None);
+    }
+
+    #[test]
+    fn resolve_reads_naive_shapes_and_leaves_the_two_old_shapes_alone() {
+        let ny = Some("America/New_York");
+        for (raw, want) in [
+            ("2026-10-19T21:30", "2026-10-19T21:30:00-04:00"),
+            ("2026-10-19T21:30:15", "2026-10-19T21:30:15-04:00"),
+            (" 2026-10-19T21:30:15.250 ", "2026-10-19T21:30:15.250-04:00"),
+        ] {
+            assert_eq!(EventTime::resolve(raw, ny), Some(at(want)), "{raw}");
+        }
+        // RFC3339 keeps the offset the mail gave, whatever zone is beside it.
+        assert_eq!(
+            EventTime::resolve("2026-10-19T21:30:00+09:00", ny),
+            Some(at("2026-10-19T21:30:00+09:00"))
+        );
+        assert_eq!(
+            EventTime::resolve("2026-10-19T21:30:00Z", None),
+            Some(at("2026-10-19T21:30:00+00:00"))
+        );
+        // A date stays a date, zone or not.
+        let day = Some(EventTime::Date(
+            NaiveDate::from_ymd_opt(2026, 10, 19).unwrap(),
+        ));
+        assert_eq!(EventTime::resolve("2026-10-19", ny), day);
+        assert_eq!(EventTime::resolve("2026-10-19", None), day);
+        assert_eq!(EventTime::resolve("tomorrow at 9", ny), None);
+        assert_eq!(EventTime::resolve("2026-10-19T25:00", ny), None);
+    }
+
+    #[test]
+    fn a_naive_time_needs_a_place_zone() {
+        for zone in [
+            None,
+            Some("PDT"),
+            Some("EST"),
+            Some("UTC"),
+            Some("Etc/GMT+5"),
+            Some("Eastern Standard Time"),
+            Some("America/Nowhere"),
+            Some(""),
+        ] {
+            assert_eq!(
+                EventTime::resolve("2026-10-19T21:30", zone),
+                None,
+                "{zone:?}"
+            );
+        }
+        // And without one the record loses its start, and so its end, as before.
+        let ghost = launder_times(
+            zoned("2026-10-19T21:30", Some("PDT")),
+            zoned("2026-10-19T23:30", Some("America/Los_Angeles")),
+        );
+        assert_eq!(
+            (ghost.start, ghost.end, ghost.start_timezone),
+            (None, None, None)
+        );
+    }
+
+    #[test]
+    fn a_time_in_the_dst_fold_is_the_earlier_one_and_in_the_gap_an_hour_later() {
+        let ny = Some("America/New_York");
+        // 2026-11-01 01:30 happens twice in New York: EDT first, then EST.
+        assert_eq!(
+            EventTime::resolve("2026-11-01T01:30", ny),
+            Some(at("2026-11-01T01:30:00-04:00"))
+        );
+        // 2026-03-08 02:30 never happens there: the clock jumps 02:00 to 03:00.
+        assert_eq!(
+            EventTime::resolve("2026-03-08T02:30", ny),
+            Some(at("2026-03-08T03:30:00-04:00"))
+        );
+        // Either side of the gap is untouched.
+        assert_eq!(
+            EventTime::resolve("2026-03-08T01:59", ny),
+            Some(at("2026-03-08T01:59:00-05:00"))
+        );
+        assert_eq!(
+            EventTime::resolve("2026-03-08T03:00", ny),
+            Some(at("2026-03-08T03:00:00-04:00"))
+        );
+    }
+
     // ---- Laundering hardening (fix pass B2) ----
 
     /// One record with `edit` applied, laundered.
@@ -2138,5 +2410,237 @@ mod tests {
             .map(|e| e.source),
             Some(EndSource::Model)
         );
+    }
+    /// An event record of `kind` with these raw start and end values.
+    fn raw(
+        kind: EventRecordKind,
+        start: Option<(&str, Option<&str>)>,
+        end: Option<(&str, Option<&str>)>,
+    ) -> RecordProposal {
+        let t = |(value, zone): (&str, Option<&str>)| SupportedTime {
+            value: value.into(),
+            timezone: zone.map(Into::into),
+            source_message_id: 7,
+            interpreted_relative: false,
+        };
+        let mut record = event("Stay", &["H1"]);
+        if let RecordProposal::Event {
+            start: s,
+            end: e,
+            event_kind,
+            duration_estimate,
+            ..
+        } = &mut record
+        {
+            *s = start.map(t);
+            *e = end.map(t);
+            *event_kind = kind;
+            *duration_estimate = None;
+        }
+        record
+    }
+    /// [`raw`] with the model's duration guess.
+    fn guessed(record: RecordProposal, minutes: i64) -> RecordProposal {
+        let mut record = record;
+        if let RecordProposal::Event {
+            duration_estimate, ..
+        } = &mut record
+        {
+            *duration_estimate = Some(DurationEstimate {
+                minutes,
+                basis: "a guess".into(),
+            });
+        }
+        record
+    }
+    fn utc(raw: &str) -> Option<DateTime<Utc>> {
+        Some(
+            DateTime::parse_from_rfc3339(raw)
+                .unwrap()
+                .with_timezone(&Utc),
+        )
+    }
+    const NY: Option<&str> = Some("America/New_York");
+
+    #[test]
+    fn record_latest_counts_an_end_at_another_precision() {
+        // A timed check-in and a date-only checkout: the checkout, as the
+        // end of the 16th everywhere.
+        let stay = raw(
+            EventRecordKind::Reservation,
+            Some(("2026-09-14T15:00", NY)),
+            Some(("2026-09-16", None)),
+        );
+        assert_eq!(record_latest(&stay), utc("2026-09-17T12:00:00Z"));
+        // And the other way round: a date-only start, a timed end.
+        let show = raw(
+            EventRecordKind::Ticket,
+            Some(("2026-09-14", None)),
+            Some(("2026-09-16T23:00", NY)),
+        );
+        assert_eq!(record_latest(&show), utc("2026-09-17T03:00:00Z"));
+    }
+
+    #[test]
+    fn record_latest_reads_the_end_in_its_own_zone_or_the_starts() {
+        let flight = raw(
+            EventRecordKind::Travel,
+            Some(("2026-10-19T21:30", Some("Asia/Tokyo"))),
+            Some(("2026-10-19T14:45", Some("America/Los_Angeles"))),
+        );
+        assert_eq!(record_latest(&flight), utc("2026-10-19T21:45:00Z"));
+        let train = raw(
+            EventRecordKind::Travel,
+            Some(("2026-10-19T09:00", NY)),
+            Some(("2026-10-19T13:00", None)),
+        );
+        assert_eq!(record_latest(&train), utc("2026-10-19T17:00:00Z"));
+    }
+
+    #[test]
+    fn record_latest_ignores_an_end_before_the_start() {
+        let ticket = raw(
+            EventRecordKind::Ticket,
+            Some(("2026-10-03T20:00", NY)),
+            Some(("2026-10-03T18:00", NY)),
+        );
+        assert_eq!(record_latest(&ticket), utc("2026-10-04T00:00:00Z"));
+        // Travel with no usable end lands within a day of leaving.
+        let flight = raw(
+            EventRecordKind::Travel,
+            Some(("2026-10-03T20:00", NY)),
+            Some(("2026-10-03T18:00", NY)),
+        );
+        assert_eq!(record_latest(&flight), utc("2026-10-05T00:00:00Z"));
+        let open_ended = raw(
+            EventRecordKind::Travel,
+            Some(("2026-10-03T20:00", NY)),
+            None,
+        );
+        assert_eq!(record_latest(&open_ended), utc("2026-10-05T00:00:00Z"));
+    }
+
+    #[test]
+    fn record_latest_needs_a_start_that_resolves() {
+        let no_start = raw(
+            EventRecordKind::Travel,
+            None,
+            Some(("2026-10-03T20:00", NY)),
+        );
+        assert_eq!(record_latest(&no_start), None);
+        // An abbreviation names several offsets: no start, whatever the end.
+        let abbreviated = raw(
+            EventRecordKind::Travel,
+            Some(("2026-12-20T10:00", Some("PST"))),
+            Some(("2026-12-20T18:00", NY)),
+        );
+        assert_eq!(record_latest(&abbreviated), None);
+    }
+
+    #[test]
+    fn record_latest_takes_the_raw_guess_up_to_a_month() {
+        // Ten days, past the calendar's three-day clamp.
+        let trip = guessed(
+            raw(
+                EventRecordKind::Travel,
+                Some(("2026-10-03T15:00", NY)),
+                None,
+            ),
+            14_400,
+        );
+        assert_eq!(record_latest(&trip), utc("2026-10-13T19:00:00Z"));
+        // A short guess on travel still lands no sooner than a day after.
+        let hop = guessed(
+            raw(
+                EventRecordKind::Travel,
+                Some(("2026-10-03T15:00", NY)),
+                None,
+            ),
+            90,
+        );
+        assert_eq!(record_latest(&hop), utc("2026-10-04T19:00:00Z"));
+        // A year is believed for a month.
+        let year = guessed(
+            raw(
+                EventRecordKind::Ticket,
+                Some(("2026-10-03T15:00", NY)),
+                None,
+            ),
+            525_600,
+        );
+        assert_eq!(record_latest(&year), utc("2026-11-02T19:00:00Z"));
+        // A guess past a stated end wins; zero and less is no guess.
+        let show = guessed(
+            raw(
+                EventRecordKind::Ticket,
+                Some(("2026-10-03T15:00", NY)),
+                Some(("2026-10-03T16:00", NY)),
+            ),
+            240,
+        );
+        assert_eq!(record_latest(&show), utc("2026-10-03T23:00:00Z"));
+        let none = guessed(
+            raw(
+                EventRecordKind::Ticket,
+                Some(("2026-10-03T15:00", NY)),
+                None,
+            ),
+            0,
+        );
+        assert_eq!(record_latest(&none), utc("2026-10-03T19:00:00Z"));
+        let negative = guessed(
+            raw(
+                EventRecordKind::Ticket,
+                Some(("2026-10-03T15:00", NY)),
+                None,
+            ),
+            -60,
+        );
+        assert_eq!(record_latest(&negative), utc("2026-10-03T19:00:00Z"));
+    }
+
+    #[test]
+    fn record_latest_cannot_date_a_stay_with_no_checkout() {
+        let stay = raw(
+            EventRecordKind::Reservation,
+            Some(("2026-10-03T15:00", NY)),
+            None,
+        );
+        assert_eq!(record_latest(&stay), None);
+        let all_day = raw(
+            EventRecordKind::Reservation,
+            Some(("2026-10-03", None)),
+            None,
+        );
+        assert_eq!(record_latest(&all_day), None);
+        // With a guess, or a checkout, it can.
+        assert_eq!(
+            record_latest(&guessed(stay.clone(), 120)),
+            utc("2026-10-03T21:00:00Z")
+        );
+        let booked = raw(
+            EventRecordKind::Reservation,
+            Some(("2026-10-03T15:00", NY)),
+            Some(("2026-10-05", None)),
+        );
+        assert_eq!(record_latest(&booked), utc("2026-10-06T12:00:00Z"));
+    }
+
+    #[test]
+    fn record_latest_counts_no_guess_from_a_date() {
+        let day = guessed(
+            raw(EventRecordKind::Ticket, Some(("2026-10-03", None)), None),
+            600,
+        );
+        assert_eq!(record_latest(&day), utc("2026-10-04T12:00:00Z"));
+        let stay = guessed(
+            raw(
+                EventRecordKind::Reservation,
+                Some(("2026-10-03", None)),
+                None,
+            ),
+            4_320,
+        );
+        assert_eq!(record_latest(&stay), None);
     }
 }

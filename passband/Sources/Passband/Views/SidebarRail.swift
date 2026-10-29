@@ -41,7 +41,7 @@ struct SidebarRail: View {
     static let railWidth: CGFloat = 60
     static let iconWidth: CGFloat = 44
     static let iconHeight: CGFloat = 36
-    static let selectorRadius: CGFloat = 11
+    static let selectorRadius: CGFloat = Radius.well
     /// The space between a tile and the rail's edge, (60 - 44) / 2.
     static let sideGutter: CGFloat = (railWidth - iconWidth) / 2
 
@@ -483,7 +483,7 @@ struct PracticeRailFeedback: ViewModifier {
     func body(content: Content) -> some View {
         content
             .overlay {
-                RoundedRectangle(cornerRadius: SidebarRail.selectorRadius)
+                RoundedRectangle(cornerRadius: SidebarRail.selectorRadius, style: .continuous)
                     .strokeBorder(Palette.accent.opacity(highlighted ? 0.65 : 0), lineWidth: 1.5)
                     .allowsHitTesting(false)
             }
@@ -511,26 +511,30 @@ private struct PracticeRailShake: GeometryEffect {
     }
 }
 
-/// OPEN AUTH DECISIONS — how many sign-in alerts and resets are still waiting
-/// on "was this you?". Counted by `AuthDecisions.isOpen`, the same predicate the
-/// Auth page's rail lists by, so the number here is the number of cards there.
-/// Nothing drawn at zero: an empty badge is noise on the one icon that should
-/// only ever get loud for a reason.
+/// OPEN AUTH DECISIONS: how many questions are still waiting on "was this
+/// you?". Filtered by `AuthDecisions.isOpen` and grouped by `AuthPolicy.cards`,
+/// the same two the Auth page's rail lists by, so the number here is the number
+/// of decisions there, counted the same way the page's header counts them
+/// (a burst of new-device alerts is one, laid out for review or not). Danger-toned while a
+/// critical change is among them. Nothing drawn at zero: an empty badge is noise
+/// on the one icon that should only ever get loud for a reason.
 private struct AuthDecisionBadge: View {
     @Environment(AppStore.self) private var store
     private var decisions = AuthDecisions.shared
 
-    private var count: Int { store.sitrep.sealed.count { decisions.isOpen($0) } }
+    private var open: [SealedMeta] { store.sitrep.sealed.filter { decisions.isOpen($0) } }
 
     var body: some View {
-        let count = count
+        let open = open
+        let count = open.isEmpty ? 0 : AuthPolicy.cards(open).count
+        let critical = open.contains(where: \.isCritical)
         if count > 0 {
             Text(count > 9 ? "9+" : "\(count)")
                 .font(Typo.num(9, weight: .bold))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 4)
                 .frame(minWidth: 15, minHeight: 15)
-                .background(Capsule().fill(Palette.lock))
+                .background(Capsule().fill(critical ? Palette.danger : Palette.lock))
                 .frame(
                     width: SidebarRail.iconWidth, height: SidebarRail.iconHeight,
                     alignment: .topTrailing

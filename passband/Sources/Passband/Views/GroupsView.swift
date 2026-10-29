@@ -74,10 +74,12 @@ struct GroupsView: View {
         // middle. One real container means one frame, and the bar keeps its
         // natural height while the body takes what is left.
         VStack(spacing: 0) {
+            // Notes and the empty state on the line the rows' words take,
+            // which is the page gutter inside the settings pane.
             if groupsState.isLoading && groups.isEmpty {
-                BandNote("loading groups…")
+                BandNote("loading groups…").padding(.horizontal, DeskRow.listInset)
             } else if let error = groupsState.error, groups.isEmpty {
-                BandNote(error)
+                BandNote(error).padding(.horizontal, DeskRow.listInset)
             } else if groups.isEmpty {
                 empty
             } else {
@@ -121,7 +123,7 @@ struct GroupsView: View {
             .frame(maxWidth: Typo.measure(420), alignment: .leading)
         }
         .foregroundStyle(Palette.inkFaintest)
-        .padding(.horizontal, Space.scaled(22))
+        .padding(.horizontal, Space.page)
         .padding(.vertical, Space.s24)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -141,7 +143,7 @@ struct GroupsView: View {
                         .id(group.id)
                     }
                 }
-                .padding(.horizontal, Space.s10)
+                .padding(.horizontal, DeskRow.listInset)
                 .padding(.vertical, Space.s10)
 
                 // A mailbox with one group leaves this column almost entirely
@@ -155,7 +157,8 @@ struct GroupsView: View {
                         Text("for another").font(Typo.micro)
                     }
                     .foregroundStyle(Palette.inkFaintest)
-                    .padding(.horizontal, Space.s16)
+                    // Under the rows' words, on the page gutter.
+                    .padding(.horizontal, Space.page)
                     .padding(.top, Space.s2)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -509,9 +512,9 @@ struct GroupsView: View {
                     membersSection(group)
                     historySection
                 }
-                .padding(.horizontal, 16)
+                .padding(.horizontal, PhoneRow.gutter)
                 .padding(.top, Space.s8)
-                .padding(.bottom, 28)
+                .padding(.bottom, Space.scaled(28))
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .background(Palette.canvas)
@@ -627,7 +630,7 @@ struct GroupsView: View {
 
         var body: some View {
             ListRow(
-                selected: false, cornerRadius: 10, hPadding: Space.scaled(11), vPadding: Space.s10,
+                selected: false, cornerRadius: Radius.well, hPadding: Space.scaled(11), vPadding: Space.s10,
                 hoverFill: false, action: onOpen
             ) { _, _ in
                 HStack(spacing: Space.s12) {
@@ -695,7 +698,7 @@ private struct GroupRow: View {
     let onEdit: () -> Void
 
     var body: some View {
-        ListRow(selected: selected, cornerRadius: 8, hPadding: Space.s10, vPadding: Space.scaled(7), action: onSelect) {
+        ListRow(selected: selected, cornerRadius: Radius.row, hPadding: DeskRow.hPadding, vPadding: Space.scaled(7), action: onSelect) {
             _, _ in
             VStack(alignment: .leading, spacing: Space.scaled(3)) {
                 HStack(spacing: Space.s6) {
@@ -768,7 +771,7 @@ private struct GroupHistoryRow: View {
 
 
     var body: some View {
-        ListRow(selected: false, cornerRadius: 8, hPadding: Space.s10, vPadding: Space.scaled(7), action: onOpen) {
+        ListRow(selected: false, cornerRadius: Radius.row, hPadding: Space.s10, vPadding: Space.scaled(7), action: onOpen) {
             _, _ in
             HStack(spacing: Space.s10) {
                 VStack(alignment: .leading, spacing: Space.s2) {

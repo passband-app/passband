@@ -400,6 +400,7 @@ struct RefreshError { var message: String; var kind: ErrorKind }
     func isCurrent(_ e: Int) -> Bool { epoch == e }
     func refreshZones(force: Bool = false) async {}
     func noteBoardConfirmed() {}
+    func notePullLanded(epoch: Int) {}
     func pollScheduled() async {}
     func noteThreadArrival(thread: String, message: Int, sender: String) {}
 }
@@ -447,4 +448,13 @@ enum Analytics {
 @MainActor final class ImageWarmer {
     static let shared = ImageWarmer()
     func noteSitrepLanded() {}
+}
+
+/// The verdict ledger's view of sealed lists (Lib/AuthCode.swift): numbered
+/// fetches, stale lists dropped. Every list is fresh here.
+@MainActor final class AuthDecisions {
+    static let shared = AuthDecisions()
+    func beginListFetch() -> Int { 0 }
+    func isFresh(_ fetch: Int) -> Bool { true }
+    func listed(_ rows: [Int], fetch: Int) {}
 }

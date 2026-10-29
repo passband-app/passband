@@ -16,12 +16,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use squelch_core::CoreError;
 use squelch_core::config::{CACHE_READ_INPUT_MULT, CACHE_WRITE_INPUT_MULT};
+use squelch_core::mail::MailProvider;
 use squelch_core::store::{
     ActionMessageRef, ClientPlatform, Draft, DraftKey, FtsQuery, NewAuditEntry,
     OutboundAttachmentMeta, SearchDiagnostics, SearchFilter, SearchSort, SenderDigestRow,
     SitrepBand, SmartBlockMemo, SpamScope, SqliteStore, Store,
 };
-use squelch_core::sync::{LABEL_INBOX, LABEL_SPAM, decode_raw_b64url, parse_internal_date};
+use squelch_core::sync::{decode_raw_b64url, parse_internal_date};
 use squelch_core::triage::llm::Usage;
 use squelch_core::triage::rule_infer;
 use squelch_core::triage::rule_suggest;
@@ -29,18 +30,21 @@ use squelch_core::types::{
     AccountId, AttentionStatus, Disposition, GroupMode, SenderRule, ShredStats, Tier, TriageAxis,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::ApiError;
-use crate::gmail_write::{
-    ForwardParts, ForwardedOriginal, GmailWriteClient, MailAttachment, ReplyParts, SentRef,
-    WriteError, addrs_excluding, build_forward_rfc822, build_references, build_reply_rfc822,
-    cc_excluding, count_addrs, derive_reply_recipients, forward_subject, mark_inline, outbox_token,
-    parse_addr_list, parse_forwarded_original, reply_subject,
-};
 use crate::group_send;
 use crate::guard;
 use crate::state::ApiState;
+use crate::write::gmail::GmailWriteClient;
+use crate::write::mime::{
+    ForwardParts, ForwardedOriginal, MailAttachment, ReplyParts, addrs_excluding,
+    build_forward_rfc822, build_references, build_reply_rfc822, cc_excluding, count_addrs,
+    derive_reply_recipients, forward_subject, mark_inline, outbox_token, parse_addr_list,
+    parse_forwarded_original, reply_subject,
+};
+use crate::write::{MailWriter, SentRef, WriteError};
 
 /// Default page size when `limit` is omitted, and the hard ceiling we clamp to.
 const DEFAULT_LIMIT: u32 = 50;
@@ -623,8 +627,31 @@ pub async fn get_thread(
 ) -> Result<impl IntoResponse, ApiError> {
     // Sealed and nonexistent threads are the SAME NotFound. Each message carries
     // its server-sanitized `html`, null for plain-text-only mail.
+    //
+    // READING A THREAD BUYS NOTHING (docs/TRANSLATION.md): an archive thread's
+    // `deferred` translations are served AS `deferred`, with no text, and stay
+    // parked. The client prefetches threads through this very GET (search
+    // results, list hovers, the sitrep), so promoting here would spend on
+    // archive mail nobody opened. The reader that DISPLAYS the thread asks
+    // for them over `POST /client/thread/{id}/translate` instead.
+    //
+    // NO TRANSLATOR, NO PROMISE: without one (translation off, no LLM), a
+    // `pending` or `deferred` row would never finish, so it is not served and
+    // the reader shows the original alone. A finished translation still is.
+    let translate_active = state.translate_active;
     query(&state, move |store, account_id| {
-        let view = store.thread_view_with_html(account_id, &thread_id)?;
+        let mut view = store.thread_view_with_html(account_id, &thread_id)?;
+        if !translate_active {
+            for message in &mut view.messages {
+                if message
+                    .translation
+                    .as_ref()
+                    .is_some_and(|t| t.status == "pending" || t.status == "deferred")
+                {
+                    message.translation = None;
+                }
+            }
+        }
         // Memoized per distinct sender: a thread is usually two addresses
         // repeated, and each miss is a round trip to `contacts`. The store
         // compares under COLLATE NOCASE, so the memo key is lowercased to match.
@@ -692,6 +719,104 @@ pub async fn mark_thread_opened(
     })
     .await?;
     Ok(Json(json!({ "opened": opened })))
+}
+
+// --- POST /client/thread/{thread_id}/translate ------------------------------
+
+/// "I am showing this thread: translate it." Promotes the thread's `deferred`
+/// (archive-tier) translations to `pending` and wakes the refine lane, so the
+/// work starts now rather than at the lane's next interval.
+///
+/// A ROUTE OF ITS OWN for `mark_thread_opened`'s reason: the GET is also how
+/// the client warms threads it has not shown, and archive mail spends nothing
+/// unprompted (`messages.is_archive` in schema.sql). Only the reader
+/// displaying the thread knows a person is looking at it.
+///
+/// IDEMPOTENT: only `deferred` rows move, so a second call promotes nothing
+/// and pokes nothing. `promoted` says how many moved. Sealed mail may move
+/// too and is still never claimed by the pass, so this spends nothing on it.
+pub async fn translate_thread(
+    State(state): State<ApiState>,
+    Path(thread_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    if !state.translate_active {
+        // Nothing would ever work a promoted row.
+        return Ok(Json(json!({ "promoted": 0 })));
+    }
+    let poke = state.archive_surfacing.poke.clone();
+    let promoted = store_call(&state, move |store, account_id| {
+        store.promote_deferred_translations(account_id, &thread_id, Utc::now())
+    })
+    .await?;
+    if promoted > 0
+        && let Some(poke) = &poke
+    {
+        poke.poke();
+    }
+    Ok(Json(json!({ "promoted": promoted })))
+}
+
+// --- GET/POST /client/translate-config ---------------------------------------
+
+/// The "Languages I read" setting: the codes the owner reads, every code they
+/// could pick (with its English name), and whether a translator is configured
+/// at all, so the card can say so instead of offering a choice that does
+/// nothing.
+#[derive(Debug, Serialize)]
+pub struct TranslateConfigView {
+    active: bool,
+    read_languages: Vec<String>,
+    available: Vec<LanguageChoice>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LanguageChoice {
+    code: &'static str,
+    name: &'static str,
+}
+
+fn translate_config_view(active: bool, read_languages: Vec<String>) -> TranslateConfigView {
+    TranslateConfigView {
+        active,
+        read_languages,
+        available: squelch_core::translate::Lang::readable_choices()
+            .into_iter()
+            .map(|l| LanguageChoice {
+                code: l.code(),
+                name: l.english_name(),
+            })
+            .collect(),
+    }
+}
+
+pub async fn get_translate_config(
+    State(state): State<ApiState>,
+) -> Result<impl IntoResponse, ApiError> {
+    let active = state.translate_active;
+    let codes = store_call(&state, move |store, account_id| {
+        store.read_languages(account_id)
+    })
+    .await?;
+    Ok(Json(translate_config_view(active, codes)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TranslateConfigBody {
+    read_languages: Vec<String>,
+}
+
+/// Replaces the whole set. Unknown codes and English are dropped, and the
+/// response is the set as stored.
+pub async fn set_translate_config(
+    State(state): State<ApiState>,
+    Json(body): Json<TranslateConfigBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let active = state.translate_active;
+    let codes = store_call(&state, move |store, account_id| {
+        store.set_read_languages(account_id, &body.read_languages, Utc::now())
+    })
+    .await?;
+    Ok(Json(translate_config_view(active, codes)))
 }
 
 // --- GET /client/attachments/{id} -------------------------------------------
@@ -1227,9 +1352,20 @@ async fn discard_sent_attachments(state: &ApiState, draft_id: Option<i64>, ids: 
 
 #[derive(Debug, Deserialize)]
 pub struct SearchQuery {
-    /// Human search's status grouping; omitted by agent callers.
+    /// Human search's status grouping; omitted by agent callers. Older apps
+    /// also lean on it to bring the owner's sent mail into keyword mode, so it
+    /// keeps implying `include_sent`.
     #[serde(default)]
     unfinished_first: bool,
+    /// Human search's corpus, independent of order: the owner's own sent mail
+    /// alongside inbound, as hybrid/semantic already search. A client that
+    /// wants plain ranked order (`unfinished_first` off) sends this to keep
+    /// the corpus `unfinished_first=true` gave it. Advertised as
+    /// `search_plain_order` on `/client/stats`. It widens nothing beyond the
+    /// owner's own mail: sealed, spam and every readable filter apply as for
+    /// any other search.
+    #[serde(default)]
+    include_sent: bool,
     /// The raw query, operators included (`invoice from:jane after:2026-01-01`).
     /// Parsed exactly once, here, then threaded into the store as
     /// `(text, filter)`.
@@ -1496,10 +1632,18 @@ pub async fn search(
     };
 
     let unfinished_first = query.unfinished_first;
+    let include_sent = query.include_sent;
     let grouped_recall = unfinished_first && effective != SearchMode::Keyword;
-    if resume.is_some() && !grouped_recall {
+    // RECALL PAGES BY WHAT IT HAS SERVED, not by offset, for the app: both the
+    // grouped order and plain order (`include_sent` alone). The candidate pool
+    // grows with the offset, and a fused ranking over a bigger pool is not the
+    // same ranking, so an offset into it repeats and skips hits. The cursor
+    // carries the served ids and the pool size instead. Callers that send
+    // neither flag keep offset paging exactly as before.
+    let recall_paging = (unfinished_first || include_sent) && effective != SearchMode::Keyword;
+    if resume.is_some() && !recall_paging {
         return Err(ApiError::bad_request(
-            "recall cursor requires grouped recall",
+            "recall cursor requires unfinished_first or include_sent",
         ));
     }
     let k = recall_k(limit, offset, &filter);
@@ -1541,19 +1685,20 @@ pub async fn search(
         let started = std::time::Instant::now();
         let queue_ms = queued_at.elapsed().as_millis();
         let mut filter = filter;
-        filter.include_sent = effective != SearchMode::Keyword || unfinished_first;
+        filter.include_sent =
+            effective != SearchMode::Keyword || unfinished_first || include_sent;
         filter.unfinished_first = unfinished_first;
         let mut resume = resume.unwrap_or_default();
-        if grouped_recall {
+        if recall_paging {
             filter.exclude_ids = resume.seen.clone();
-            if resume.done { filter.done = Some(true); }
+            if grouped_recall && resume.done { filter.done = Some(true); }
         }
         let mut current_k = k.max(resume.k).max(resume.seen.len().saturating_add(limit as usize)).min(600);
         // The strict count worth sharing, and only when it answers the same
         // question the diagnostics ask: no operator predicates. With a `from:`
         // or a date bound the page counted a narrower set, and the two deserve
         // their own counts.
-        let page_limit = if grouped_recall { limit.min(600 - resume.seen.len() as u32) } else { limit };
+        let page_limit = if recall_paging { limit.min(600 - resume.seen.len() as u32) } else { limit };
         let mut counted_strict = None;
         let (items, window_full): (Vec<SearchItem>, bool) = loop {
             let (items, window_full): (Vec<SearchItem>, bool) = match effective {
@@ -1639,16 +1784,17 @@ pub async fn search(
             // A first page containing enough unfinished hits needs no larger pool.
             // Before crossing into done mail, exhaust the bounded recall window.
             let unfinished = items.iter().filter(|item| !item.hit.is_done).count();
-            if grouped_recall && window_full && current_k < 600
-                && (items.len() < limit as usize || (!resume.done && unfinished < limit as usize)) {
+            if recall_paging && window_full && current_k < 600
+                && (items.len() < limit as usize
+                    || (grouped_recall && !resume.done && unfinished < limit as usize)) {
                 current_k = (current_k * 2).max(current_k + limit as usize).min(600);
                 continue;
             }
             break (items, window_full);
         };
-        let recall_next = if grouped_recall && !items.is_empty() {
+        let recall_next = if recall_paging && !items.is_empty() {
             resume.k = current_k;
-            resume.done |= items.iter().any(|item| item.hit.is_done);
+            resume.done |= grouped_recall && items.iter().any(|item| item.hit.is_done);
             resume.seen.extend(items.iter().map(|item| item.hit.id));
             if resume.seen.len() < 600 && (items.len() == limit as usize || window_full) {
                 Some(resume.encode())
@@ -1660,7 +1806,7 @@ pub async fn search(
             account_id,
             &term,
             partial,
-            filter.include_sent,
+            filter.searches_sent(),
             counted_strict,
         )?;
         if queued_at.elapsed().as_millis() >= 250 {
@@ -1679,7 +1825,7 @@ pub async fn search(
     // sequence, and ranking is deterministic). A short page that served
     // NOTHING ends the walk even window-full: the same offset would rebuild
     // the same window and hand the client the same empty page forever.
-    let next = if grouped_recall {
+    let next = if recall_paging {
         recall_next
     } else {
         match next_cursor(items.len(), limit, offset) {
@@ -3513,6 +3659,11 @@ pub async fn markdown_preview(
 // --- GET /client/sealed ------------------------------------------------------
 
 /// Sealed METADATA only. No bodies here, ever.
+///
+/// `kind` is the one kind a client sees, picked by priority across the
+/// decision's kinds. `critical`, `verdict` and `explained_by` are always
+/// present (`false` / `null` when there is nothing to say), so a client can
+/// tell this daemon from one without verdicts by the key alone.
 #[derive(Debug, Serialize)]
 struct SealedMeta {
     id: i64,
@@ -3521,6 +3672,9 @@ struct SealedMeta {
     subject: String,
     kind: Option<String>,
     received_at: DateTime<Utc>,
+    critical: bool,
+    verdict: Option<squelch_core::types::AuthVerdict>,
+    explained_by: Option<i64>,
 }
 
 pub async fn list_sealed(State(state): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
@@ -3537,9 +3691,65 @@ pub async fn list_sealed(State(state): State<ApiState>) -> Result<impl IntoRespo
             subject: m.subject,
             kind: m.sealed_kind,
             received_at: m.received_at,
+            critical: m.critical,
+            verdict: m.verdict,
+            explained_by: m.explained_by,
         })
         .collect();
     Ok(Json(items))
+}
+
+// --- PUT /client/sealed/{message_id}/verdict --------------------------------
+
+/// `{"verdict": "mine" | "not_mine" | null}`. The key is required: a body
+/// that forgot it must not read as "clear my ruling".
+#[derive(Debug, Deserialize)]
+pub struct AuthVerdictBody {
+    #[serde(deserialize_with = "required_nullable")]
+    verdict: Option<squelch_core::types::AuthVerdict>,
+}
+
+/// The owner's ruling on one auth message ("That was me" / "Not me"), kept
+/// on the server so every client sees it. `null` clears it. A `not_mine`
+/// puts the message in FYE; a `mine` takes a critical change back out.
+/// 404 for a message that is not auth mail. A legacy sealed row (sealed by
+/// the old pipeline, no agent decision) takes a ruling and serves it back,
+/// but it never moves FYE: it has no decision or attention to place.
+/// Every write is audited. HUMAN DOOR ONLY.
+pub async fn put_sealed_verdict(
+    State(state): State<ApiState>,
+    Path(message_id): Path<i64>,
+    Json(body): Json<AuthVerdictBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let verdict = body.verdict;
+    store_call(&state, move |store, account_id| {
+        store.set_auth_verdict(account_id, message_id, verdict, Utc::now())
+    })
+    .await?;
+    // A ruling moves FYE and the shredder, so it leaves a row like a reveal
+    // does: the message id and the ruling, nothing from the mail. The ruling
+    // has landed by now, so a failed audit is logged rather than failing a
+    // request whose effect a retry would only repeat.
+    let entry = NewAuditEntry {
+        actor: state.audit_actor.to_string(),
+        action: "auth_verdict".to_string(),
+        target: Some(message_id.to_string()),
+        detail: Some(
+            verdict
+                .map_or("cleared", |verdict| verdict.as_str())
+                .to_string(),
+        ),
+    };
+    if let Err(error) = store_call(&state, move |store, account_id| {
+        store.append_audit(account_id, &entry)
+    })
+    .await
+    {
+        eprintln!(
+            "squelch-api: auth verdict on {message_id} landed but its audit row did not ({error:?})"
+        );
+    }
+    Ok(Json(json!({ "id": message_id, "verdict": verdict })))
 }
 
 // --- POST /client/sealed/{message_id}/reveal --------------------------------
@@ -3560,23 +3770,52 @@ struct RevealedSealed {
     html: Option<String>,
 }
 
+/// `?source=notification` on a reveal opened by tapping a notification.
+/// Absent (every older client) or `interactive` is the owner choosing to
+/// reveal on the Auth page or FYE.
+#[derive(Debug, Default, Deserialize)]
+pub struct RevealQuery {
+    #[serde(default)]
+    source: Option<String>,
+}
+
 pub async fn reveal_sealed(
     State(state): State<ApiState>,
     Path(message_id): Path<i64>,
+    Query(query): Query<RevealQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // The source rides on the audit row's detail. The Auth page's pairing
+    // reads a reveal as "the owner used this code", which a tap on an
+    // unsolicited code's banner is not, so notification reveals never
+    // explain an alert (`sealed_rows` skips them).
+    let detail = match query.source.as_deref() {
+        None | Some("interactive") => None,
+        Some("notification") => Some("notification".to_string()),
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "source must be notification or interactive",
+            ));
+        }
+    };
     let sealed = store_call(&state, move |store, account_id| {
-        // Audit BEFORE returning the body, recording only the message id so the
-        // log itself never leaks a secret.
+        // Membership FIRST, then the audit, then the body leaves: a reveal
+        // row means a real reveal of auth mail. The Auth page's pairing
+        // reads these rows as "the owner used this code", so a refused
+        // reveal of some other id must leave none (it would read as used if
+        // that message were later classified auth). The audit still lands
+        // before anything is returned, and a failed audit returns nothing.
+        // Only the message id is recorded, so the log never leaks a secret.
+        let body = store.sealed_body(account_id, message_id)?;
         store.append_audit(
             account_id,
             &NewAuditEntry {
                 actor: AUDIT_ACTOR.to_string(),
                 action: "reveal_sealed".to_string(),
                 target: Some(message_id.to_string()),
-                detail: None,
+                detail,
             },
         )?;
-        store.sealed_body(account_id, message_id)
+        Ok(body)
     })
     .await?;
 
@@ -3828,6 +4067,12 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
     // (serde default) and would overwrite its single new-message draft with a
     // forward, so the client must not write those shapes without this flag.
     body["drafts_v2"] = json!(true);
+    // And for search order: whether `include_sent` on GET /client/search
+    // exists, so the app can drop `unfinished_first` (plain ranked order)
+    // without losing the owner's sent mail from keyword results. Another
+    // silent failure: an old daemon ignores the key and keyword searches lose
+    // sent mail, so the client keeps `unfinished_first=true` without the flag.
+    body["search_plain_order"] = json!(true);
     // And for scheduled send: whether /client/scheduled (POST, GET, DELETE
     // /{id}, POST /{id}/now) exists. Not a silent failure this time but a
     // LOUD one: an old daemon 404s every one of those routes, so a schedule
@@ -4072,7 +4317,8 @@ pub async fn get_usage(
         state.stage2_price_out_per_mtok,
     );
 
-    // One entry per ledger category, priced by THREE arms. Stage-2 runs the
+    // One entry per ledger category, priced by FOUR arms (the fourth, smart
+    // done's own model, is marked where it sits). Stage-2 runs the
     // capable model and its prices. `notify` runs the fast lane's own small
     // model and ITS prices (docs/NOTIFY.md §11.5): it is the one category that
     // is neither, and folding it into the arm below would bill a Haiku call at
@@ -4104,11 +4350,25 @@ pub async fn get_usage(
                 state.stage2_price_in_per_mtok,
                 state.stage2_price_out_per_mtok,
             )
+        } else if name == squelch_core::translate::USAGE_CATEGORY {
+            (
+                state.translate_model.as_ref(),
+                state.translate_price_in_per_mtok,
+                state.translate_price_out_per_mtok,
+            )
         } else if squelch_core::metrics::runs_notify_model(name) {
             (
                 state.notify_model.as_ref(),
                 state.notify_price_in_per_mtok,
                 state.notify_price_out_per_mtok,
+            )
+        } else if name == squelch_core::metrics::SMART_CLEAR_USAGE_CATEGORY {
+            // THE FOURTH ARM: smart clear's pass runs its own mid-sized model.
+            // Left to fall through it would be labelled and billed as Stage-1.
+            (
+                state.smart_clear_model.as_ref(),
+                state.smart_clear_price_in_per_mtok,
+                state.smart_clear_price_out_per_mtok,
             )
         } else {
             (
@@ -4469,25 +4729,85 @@ async fn resolve_sender_done(state: &ApiState, sender: &str) {
     .await;
 }
 
-/// Resolve the WRITE-bound gmail client, or 403 with a hint if none configured.
-pub(crate) fn write_client(state: &ApiState) -> Result<GmailWriteClient, ApiError> {
-    match state.write_creds() {
+/// Resolve the account's WRITE-bound mail writer, or 403 with a hint if no
+/// write credential is configured.
+///
+/// THE WRITER IS THE ACCOUNT'S PROVIDER'S (`accounts.provider`, read on the
+/// first call and kept in [`ApiState::mail_provider`]). The credential is
+/// checked first, so a door with none configured answers exactly as it
+/// always has without touching the store. A provider this build does not know
+/// is refused, never written to as Gmail: see [`writer_unavailable`].
+pub(crate) async fn write_client(state: &ApiState) -> Result<Arc<dyn MailWriter>, ApiError> {
+    let Some(creds) = state.write_creds().cloned() else {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "write credential not configured; run `squelchd auth`",
+        ));
+    };
+    let provider = match state.mail_provider.get() {
+        Some(provider) => *provider,
+        None => {
+            // The inner `Result` is the provider read itself, mapped below
+            // rather than by the store's generic mapping (which would call an
+            // unknown provider the CALLER's 400).
+            let read = store_call(state, |store, account_id| {
+                Ok(store.account_provider(account_id))
+            })
+            .await?;
+            let provider = read.map_err(writer_unavailable)?;
+            *state.mail_provider.get_or_init(|| provider)
+        }
+    };
+    match provider {
         // Over the state's one shared HTTP client (see `ApiState::write_http`);
         // what is built per action is two `Arc` clones and a base URL.
-        Some(creds) => Ok(GmailWriteClient::with_http(
-            creds.clone(),
-            state.account_id,
-            state
-                .write_api_base()
-                .map(str::to_string)
-                .unwrap_or_else(|| squelch_core::sync::GMAIL_API_BASE.to_string()),
-            state.write_http(),
-        )
-        .with_budget(state.gmail_budget().cloned())),
-        None => Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "write credential not configured; run `squelchd auth --write`",
+        MailProvider::Gmail => Ok(Arc::new(
+            GmailWriteClient::with_http(
+                creds,
+                state.account_id,
+                state
+                    .write_api_base()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| squelch_core::sync::GMAIL_API_BASE.to_string()),
+                state.write_http(),
+            )
+            .with_budget(state.gmail_budget().cloned()),
         )),
+    }
+}
+
+/// Why the account has no writer although a write credential is configured.
+///
+/// - A provider this build does not know (a database a newer build set up):
+///   501, because this daemon cannot do it at all and an upgrade is the fix.
+///   Not the credential's 403, which would send the user to re-authorize, and
+///   not 503, which reads as "try again shortly".
+/// - Anything else (the door's own account row gone, the store failing): the
+///   opaque 500 every other store failure is.
+fn writer_unavailable(e: CoreError) -> ApiError {
+    match e {
+        CoreError::InvalidInput(m) => {
+            // The message names the stored value, which this code wrote: safe
+            // to log, and what makes the line useful.
+            eprintln!("squelch-api: no writer for this account: {m}");
+            ApiError::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "this account's mail provider is not supported by this build; upgrade squelchd",
+            )
+        }
+        _ => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+    }
+}
+
+/// The audit reason for a [`write_client`] refusal, by what refused: the
+/// credential (403, the reason every caller has always recorded), a provider
+/// this build cannot write to (501), or anything else (the store). Distinct so
+/// a store blip is not recorded as "re-authorize".
+pub(crate) fn write_refusal(e: &ApiError) -> &'static str {
+    match e.status {
+        StatusCode::FORBIDDEN => "rejected:no_write_credential",
+        StatusCode::NOT_IMPLEMENTED => "rejected:unsupported_provider",
+        _ => "failed:store",
     }
 }
 
@@ -4496,7 +4816,7 @@ fn write_error(e: &WriteError) -> ApiError {
     match e {
         WriteError::MissingCredential(_) => ApiError::new(
             StatusCode::FORBIDDEN,
-            "write credential not configured; run `squelchd auth --write`",
+            "write credential not configured; run `squelchd auth`",
         ),
         WriteError::Invalid(m) => ApiError::bad_request(m.clone()),
         // Nothing reached Gmail: the mailbox is in a quota hold. 503 so the
@@ -4553,7 +4873,7 @@ async fn guarded_action<F, Fut>(
     call: F,
 ) -> Result<(), ApiError>
 where
-    F: FnOnce(GmailWriteClient, ActionMessageRef) -> Fut,
+    F: FnOnce(Arc<dyn MailWriter>, ActionMessageRef) -> Fut,
     Fut: std::future::Future<Output = Result<(), WriteError>>,
 {
     let target = Some(message_id.to_string());
@@ -4567,10 +4887,10 @@ where
         return Err(err);
     }
 
-    let client = match write_client(state) {
+    let client = match write_client(state).await {
         Ok(c) => c,
         Err(e) => {
-            audit_action(state, action, target, "rejected:no_write_credential").await;
+            audit_action(state, action, target, write_refusal(&e)).await;
             return Err(e);
         }
     };
@@ -4668,15 +4988,7 @@ pub async fn action_not_spam(
         // NOT ResolveDone: this mail is arriving, not being handled. `clear_spam`
         // puts the attention row back to 'new' so it lands in the New band.
         OnSuccess::LeaveOpen,
-        |client, msg| async move {
-            client
-                .modify(
-                    &msg.gmail_msg_id,
-                    &[LABEL_INBOX.to_string()],
-                    &[LABEL_SPAM.to_string()],
-                )
-                .await
-        },
+        |client, msg| async move { client.not_spam(&msg.gmail_msg_id).await },
     )
     .await?;
 
@@ -4776,11 +5088,11 @@ pub struct SendBody {
     /// the rest of its To/Cc minus this account. Requires
     /// `reply_to_message_id` — there is no audience to widen without a parent —
     /// and absent means today's single-recipient reply, so every existing caller
-    /// is unchanged. See [`crate::gmail_write::derive_reply_recipients`].
+    /// is unchanged. See [`crate::write::mime::derive_reply_recipients`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) reply_all: bool,
     /// BLIND copies, comma-joined, for a send whose audience must not see each
-    /// other. Never derived from anything (see [`crate::gmail_write::ReplyParts`])
+    /// other. Never derived from anything (see [`crate::write::mime::ReplyParts`])
     /// and nothing ever will derive it — no header of a parent records who was
     /// blind-copied on it, which is what blind means, so absent and `""` are the
     /// same thing here, unlike `cc`. Filtered against `to`/`cc` before it
@@ -4864,7 +5176,7 @@ pub struct SendBody {
 /// outbox row the mail went out from (see [`fired`]), as its `send` row is.
 pub(crate) async fn echo_sent(
     state: &ApiState,
-    client: &GmailWriteClient,
+    client: &dyn MailWriter,
     target: Option<String>,
     sent: &SentRef,
     fire: Option<Fire<'_>>,
@@ -5128,7 +5440,7 @@ pub(crate) async fn guard_verdict(
 #[allow(clippy::too_many_arguments)]
 async fn finish_send(
     state: &ApiState,
-    client: &GmailWriteClient,
+    client: &dyn MailWriter,
     raw: &[u8],
     thread_id: Option<String>,
     resolve: Option<i64>,
@@ -5534,17 +5846,12 @@ pub(crate) async fn perform_send(
     let target = send_target(body);
     let message_id = fire.map(|f| f.message_id);
 
-    let client = match write_client(state) {
+    let client = match write_client(state).await {
         Ok(c) => c,
         Err(e) => {
-            audit_action(
-                state,
-                "send",
-                target,
-                &fired(fire, "rejected:no_write_credential"),
-            )
-            .await;
-            return Err(SendFailure::new("rejected:no_write_credential", e));
+            let reason = write_refusal(&e);
+            audit_action(state, "send", target, &fired(fire, reason)).await;
+            return Err(SendFailure::new(reason, e));
         }
     };
 
@@ -5552,7 +5859,7 @@ pub(crate) async fn perform_send(
         return forward_send(
             state,
             body,
-            &client,
+            &*client,
             target,
             original_id,
             owed,
@@ -5596,7 +5903,7 @@ pub(crate) async fn perform_send(
         && let Some(audience) = &audience
         && audience.mode == GroupMode::Individual
     {
-        return fan_out_send(state, body, audience, attachments).await;
+        return fan_out_send(state, client, body, audience, attachments).await;
     }
 
     let (parent, thread_id) = match body.reply_to_message_id {
@@ -5808,7 +6115,7 @@ pub(crate) async fn perform_send(
     let outcome = fired_outcome(fire, outcome);
     let result = finish_send(
         state,
-        &client,
+        &*client,
         &raw,
         thread_id,
         // A cold send has no target row to resolve.
@@ -5910,6 +6217,7 @@ fn frozen_addrs(body: &SendBody, mode: GroupMode) -> Vec<String> {
 /// recipients ARE the progress bar, so nothing else has to be plumbed.
 async fn fan_out_send(
     state: &ApiState,
+    client: Arc<dyn MailWriter>,
     body: &SendBody,
     audience: &group_send::GroupAudience,
     attachments: Vec<MailAttachment>,
@@ -5948,7 +6256,7 @@ async fn fan_out_send(
     plan.attachments = attachments;
     let recipients = plan.audience.addrs.len();
 
-    let group_send_id = match group_send::start(state, plan).await {
+    let group_send_id = match group_send::start(state, client, plan).await {
         Ok(id) => id,
         Err(e) => {
             if let Some((token, _)) = &tracker {
@@ -6002,7 +6310,7 @@ fn forward_raw_too_large(len: usize) -> bool {
 /// scheduled send is being fired (see [`fired`]).
 pub(crate) async fn read_forward_original(
     state: &ApiState,
-    client: &GmailWriteClient,
+    client: &dyn MailWriter,
     action: &'static str,
     target: Option<String>,
     original_id: i64,
@@ -6023,7 +6331,7 @@ pub(crate) async fn read_forward_original(
         // A DEAD WRITE CREDENTIAL IS NOT A GMAIL OUTAGE. The fetch runs on the
         // write token too, so an expired or revoked one fails HERE, before any
         // send — and collapsing it into the 502 tells the composer to blame
-        // Gmail when the fix is `squelchd auth --write`. Answer it with the same
+        // Gmail when the fix is `squelchd auth`. Answer it with the same
         // 403 every other write path answers it with, so the client's existing
         // "no write credential" handling fires.
         Err(e @ WriteError::MissingCredential(_)) => {
@@ -6153,7 +6461,7 @@ pub(crate) fn forward_original_kinds(original: &ForwardedOriginal) -> Vec<&'stat
 async fn forward_send(
     state: &ApiState,
     body: &SendBody,
-    client: &GmailWriteClient,
+    client: &dyn MailWriter,
     target: Option<String>,
     original_id: i64,
     owed: SendGuard,
@@ -6306,7 +6614,7 @@ pub async fn reply_recipients(
     Query(q): Query<ReplyRecipientsQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let msg = resolve_target(&state, message_id).await?;
-    let client = write_client(&state)?;
+    let client = write_client(&state).await?;
     let own = store_call(&state, |store, account_id| store.account_email(account_id)).await?;
     let headers = client
         .parent_headers(&msg.gmail_msg_id)
@@ -6647,9 +6955,13 @@ pub async fn run_shred_pass(state: &ApiState) -> Result<u32, ApiError> {
     if !enabled {
         return Ok(0);
     }
-    let Ok(client) = write_client(state) else {
+    let client = match write_client(state).await {
+        Ok(client) => client,
         // No write credential: nothing to do, and nothing to complain about.
-        return Ok(0);
+        Err(e) if e.status == StatusCode::FORBIDDEN => return Ok(0),
+        // Anything else is a failure the timer should see, like every other
+        // store error in this pass.
+        Err(e) => return Err(e),
     };
 
     let cutoff = Utc::now() - chrono::Duration::days(after_days);
@@ -7117,5 +7429,199 @@ mod send_split_tests {
             (f.reason, f.paced, f.maybe_sent),
             ("failed:gmail", false, true)
         );
+    }
+}
+
+/// Which writer [`write_client`] hands out: the account's provider's, and
+/// never Gmail's by default.
+#[cfg(test)]
+mod write_client_tests {
+    use super::*;
+    use squelch_core::credentials::{CredentialStore, OAuthToken};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    struct StubCreds;
+    #[async_trait::async_trait]
+    impl CredentialStore for StubCreds {
+        async fn token(&self, _account: AccountId) -> squelch_core::Result<OAuthToken> {
+            Ok(OAuthToken {
+                access_token: "WRITE-TOKEN".into(),
+                refresh_token: None,
+                expires_at: None,
+            })
+        }
+    }
+
+    /// A file-backed store with one account, so a second connection can set
+    /// its `accounts.provider` the way a newer build's setup would have.
+    struct Fixture {
+        dir: std::path::PathBuf,
+        store: Arc<SqliteStore>,
+        acct: AccountId,
+    }
+
+    impl Fixture {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "squelch-write-client-{}-{name}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let store = Arc::new(SqliteStore::open(dir.join("store.sqlite3")).unwrap());
+            let acct = store.ensure_account("me@example.com").unwrap();
+            Self { dir, store, acct }
+        }
+
+        fn set_provider(&self, provider: &str) {
+            rusqlite::Connection::open(self.dir.join("store.sqlite3"))
+                .unwrap()
+                .execute(
+                    "UPDATE accounts SET provider = ?1 WHERE id = ?2",
+                    rusqlite::params![provider, self.acct],
+                )
+                .unwrap();
+        }
+
+        fn state(&self) -> ApiState {
+            ApiState::new(self.store.clone(), self.acct, "probe-token")
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// A mock API that answers the first request with `{}` and returns it,
+    /// or `None` when nothing connected within half a second.
+    async fn mock_api() -> (String, tokio::task::JoinHandle<Option<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let accepted =
+                tokio::time::timeout(Duration::from_millis(500), listener.accept()).await;
+            let Ok(Ok((mut sock, _))) = accepted else {
+                return None;
+            };
+            let mut buf = vec![0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                  Content-Length: 2\r\nConnection: close\r\n\r\n{}",
+            )
+            .await
+            .unwrap();
+            sock.flush().await.unwrap();
+            Some(req)
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    #[tokio::test]
+    async fn a_gmail_account_gets_the_gmail_writer() {
+        let fx = Fixture::new("gmail");
+        let (base, handle) = mock_api().await;
+        let state = fx
+            .state()
+            .with_write_test_harness(Arc::new(StubCreds), base);
+        let writer = write_client(&state)
+            .await
+            .expect("a Gmail account has a writer");
+        writer.archive("gm-1").await.unwrap();
+        let req = handle.await.unwrap().expect("the archive reached the API");
+        // Gmail's archive, exactly: a label modify removing INBOX.
+        assert!(req.starts_with("POST /messages/gm-1/modify "), "{req}");
+        assert!(req.contains("\"removeLabelIds\":[\"INBOX\"]"), "{req}");
+    }
+
+    /// THE PROVIDER IS READ ONCE PER DOOR. After the first writer, a later
+    /// action neither pays a store call for it nor can fail on one: a store
+    /// hiccup must not fail a write the credential would have allowed.
+    #[tokio::test]
+    async fn the_provider_is_read_once_and_kept() {
+        let fx = Fixture::new("cached");
+        let state = fx
+            .state()
+            .with_write_test_harness(Arc::new(StubCreds), "http://127.0.0.1:9".into());
+        assert!(write_client(&state).await.is_ok());
+        // What a second read would now see: a provider this build refuses.
+        fx.set_provider("imap");
+        assert!(
+            write_client(&state.clone()).await.is_ok(),
+            "the cached read stands, on every clone of the state"
+        );
+    }
+
+    /// A refusal is audited as what refused, so a store failure is never
+    /// recorded as "re-authorize".
+    #[test]
+    fn a_refusal_is_audited_as_what_refused() {
+        let at = |status| ApiError::new(status, "x");
+        assert_eq!(
+            write_refusal(&at(StatusCode::FORBIDDEN)),
+            "rejected:no_write_credential"
+        );
+        assert_eq!(
+            write_refusal(&at(StatusCode::NOT_IMPLEMENTED)),
+            "rejected:unsupported_provider"
+        );
+        assert_eq!(
+            write_refusal(&at(StatusCode::INTERNAL_SERVER_ERROR)),
+            "failed:store"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_explicit_gmail_row_is_the_same_gmail_writer() {
+        let fx = Fixture::new("explicit-gmail");
+        fx.set_provider("gmail");
+        let (base, handle) = mock_api().await;
+        let state = fx
+            .state()
+            .with_write_test_harness(Arc::new(StubCreds), base);
+        write_client(&state)
+            .await
+            .unwrap()
+            .trash("gm-2")
+            .await
+            .unwrap();
+        let req = handle.await.unwrap().expect("the trash reached the API");
+        assert!(req.starts_with("POST /messages/gm-2/trash "), "{req}");
+    }
+
+    /// A database a newer build wrote (an `imap` account) must not have its
+    /// mail written to as Gmail by this one: refused, and nothing is sent.
+    #[tokio::test]
+    async fn a_provider_this_build_does_not_know_is_refused_not_treated_as_gmail() {
+        let fx = Fixture::new("unknown");
+        fx.set_provider("imap");
+        let (base, handle) = mock_api().await;
+        let state = fx
+            .state()
+            .with_write_test_harness(Arc::new(StubCreds), base);
+        let err = match write_client(&state).await {
+            Ok(_) => panic!("an unknown provider must not get a writer"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(handle.await.unwrap(), None, "nothing reached the API");
+    }
+
+    /// The credential is checked first, so a door without one answers with
+    /// the same 403 it always has, whatever the account's provider.
+    #[tokio::test]
+    async fn no_write_credential_is_still_the_403_whatever_the_provider() {
+        let fx = Fixture::new("no-creds");
+        fx.set_provider("imap");
+        let err = match write_client(&fx.state()).await {
+            Ok(_) => panic!("no credential, no writer"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert!(err.message.contains("squelchd auth`"));
     }
 }

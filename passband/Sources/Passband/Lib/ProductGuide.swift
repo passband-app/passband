@@ -76,7 +76,8 @@ enum ProductGuide {
                     + "Google Calendar, new, edited and deleted events, guests"
             case .readingMail:
                 "an open email: moving between messages and emails, done, skip, unsubscribe, "
-                    + "attachments, images, chat or email style, the contact card"
+                    + "attachments, images, chat or email style, the contact card, translated "
+                    + "mail, show original, languages you read"
             case .writingMail:
                 "reply, reply all, forward, new message, Cc and Bcc, send, undo send, send "
                     + "later, drafts, attachments, groups, signature, read tracking"
@@ -229,7 +230,7 @@ enum ProductGuide {
 
     private static let gettingAroundTail = """
         - Usage and Settings sit at the bottom of the rail and have no number key. ⌘, opens Settings.
-        - The ring just above them opens Discover: a list of the ways through mail (the basics, flow mode, reminders, search, teaching Passband, the at a glance cards, the reading stack, writing) with a short guide to each on the right. The ring fills clockwise as the user tries each one on their own mail, and a feature used on three separate days is marked a habit. Nothing ever empties it. Esc leaves the page.
+        - The ring just above them opens Discover: a list of the ways through mail (the basics, flow mode, reminders, search, teaching Passband, the reading stack, smart clear) with a short guide to each on the right. The ring fills clockwise as the user tries each one on their own mail, and a feature used on three separate days is marked a habit. Nothing ever empties it. Esc leaves the page.
 
         Moving:
         - ⌘[ goes back and ⌘] goes forward.
@@ -279,6 +280,10 @@ enum ProductGuide {
         Hover tricks:
         - Hover a package and press e to clear it until its next update. Right-click has "Clear this package".
         - Hover a Reading card and press e to mark everything from that sender done. That one cannot be undone.
+
+        Clearing out Reading (a pill at the top right of the Reading card, on the Mac):
+        - "smart clear" clears what has plainly run its course in one press: events that already happened, offers that ended, mail that is no longer current, promotions over a week old, and promotions from senders the user never opens or only glances at. It can take up to about 20 seconds. A receipt card at the bottom right then says how many emails were cleared and why, with an Undo button. Undo, or the u key, puts all of it back, and stays for 30 seconds.
+        - "View full list" on that receipt opens a page listing every email that was cleared: its subject, its sender and why. The undo timer is paused while that page is open. On it, u undoes everything, and Return or Esc confirms and goes back with the timer carrying on from where it stopped.
 
         Other things on the page:
         - Clicking the headline asks for a different one. The name in the greeting starts as the first name on the mailbox's Google profile (or the first part of the address when that is not available) and is changed in Settings > General > You.
@@ -366,6 +371,13 @@ enum ProductGuide {
         - Each message shows its To line; a caret reveals Cc and Bcc.
         - Clicking the subject copies it.
 
+        Mail in other languages:
+        - An email written in another language opens in English. A line above the message says "translated from French" (or whichever language it was), and "show original" beside it switches that one message to what the sender wrote. "show translation" switches it back. The subject at the top follows the message it came from.
+        - While the translation is still being written, the original shows with "translating from French…" above it, and the English takes its place when it is ready. If it has not arrived after about ten minutes, the line says "translation not ready yet · showing the original", and opening the thread again checks again.
+        - If Passband could not confirm that every detail carried over, the line also says the translation may be incomplete. Check the original for numbers, codes and links before acting on it.
+        - Search finds the email by the words of either version. A reply or a forward uses the original.
+        - Settings > Mail > Translation lists the languages you read. Mail in those is shown as written and not translated. Adding a language leaves mail already translated as it is, with "show original" still there; removing one means mail in it is translated when it is opened. With no languages listed, everything not in English is translated.
+
         Attachments and images:
         - Clicking an attachment card or an inline image previews it in Quick Look, where the arrow keys move between that message's attachments. The download arrow on a card saves the file.
         - Tracking pixels are removed from every email. If Settings > Mail > Remote images is set to "On demand", a bar on the email loads its images for that one email.
@@ -397,7 +409,7 @@ enum ProductGuide {
         Groups:
         - "groups" on the To line addresses a saved group. New messages only, not replies or forwards.
         - Groups are made in Settings > Groups (key {key:groups}): n new, e or Enter edit, x delete.
-        - On the iPhone, Groups is under the person icon at the top left of the Sitrep: + makes one, tap opens it, swipe a group to the left to edit or delete it.
+        - On the iPhone, Groups is in Settings (the person icon at the top left of the Sitrep, then Settings at the bottom): + makes one, tap opens it, swipe a group to the left to edit or delete it.
         - Each group is set to go out one way: To (one email, everyone sees the list), Bcc (one email, nobody sees anyone else) or Individually (a separate email per person).
 
         Sending:
@@ -422,7 +434,7 @@ enum ProductGuide {
 
         Signature and tracking:
         - The signature is set in Settings > Mail > Signature. It is added to new messages and replies as the draft starts, so it can be edited per email.
-        - "track opens" in the composer adds a tracking pixel to that one email. The default is Settings > Mail > Read tracking. A tracked message shows an "opened" chip once it has been opened.
+        - "track opens" in the composer adds a tracking pixel to that one email. The default is Settings > Mail > Read tracking. Once a tracked message has been opened, the thread shows "x opens" under its date; clicking it lists every open with its time, and says who the message went to. A fetch whose agent marks it as a machine (a security scanner loading images the moment the mail arrives) is listed as a "probable scanner", is not counted as an open and sends no banner; if only scanners have fetched it, the line says "1 probable scanner" instead of a count.
         """
 
     private static let mailList = """
@@ -500,7 +512,7 @@ enum ProductGuide {
 
         Managing them:
         - In Settings > Rules: j / k move, e or Enter or a click edits, x deletes (with undo).
-        - On the iPhone, Rules is under the person icon at the top left of the Sitrep: + makes one, tap a rule to edit it, swipe it to the left to delete it (with undo). Swiping a mail row to the left and choosing Tune writes a rule for that sender.
+        - On the iPhone, Rules is in Settings (the person icon at the top left of the Sitrep, then Settings at the bottom): + makes one, tap a rule to edit it, swipe it to the left to delete it (with undo). Swiping a mail row to the left and choosing Tune writes a rule for that sender.
         - Rules are grouped by what they do (allow, filter, mute) and then by domain.
         - A rule shapes mail from now on. It does not move mail already on the board. The exception is "Block sender", offered when unsubscribing from an email that has no unsubscribe link: it mutes that address and clears their open mail.
         - Rules live in Passband only. They never change anything in Gmail.
@@ -535,16 +547,17 @@ enum ProductGuide {
         - Subjects and bodies, by keyword and by meaning. Subject words count more, word forms match (password finds passwords), and a quoted phrase has to appear exactly.
         - Login codes and spam are not searchable.
         - Search covers the mail Passband has indexed. Where the older-mail archive is on, that includes up to a year of mail from before Passband was connected, added gradually in the background and listed with finished mail, and the assistant can say how far back search currently reaches.
-        - Unfinished mail is listed first, and the matching words are highlighted.
+        - Results are one list ranked by the search order setting, with the matching words highlighted, on the Mac and the iPhone.
 
         Finding a sender:
         - Typing a name or an email address lists up to three matching senders above the results, each with how many emails they have sent. Down arrow and Enter, Tab, or a click picks one.
-        - Picking a sender shows every email from them, newest first, in one list that is not split into Not done and Done. The field then reads from: and their address, and more words typed after it search within their mail.
+        - Picking a sender shows every email from them, newest first, in one list. The field then reads from: and their address, and more words typed after it search within their mail.
         - It works the same way in the phone's Search tab: tap the sender.
 
         Operators:
         - from: narrows to a sender. Typing from: opens a menu of the people who write to the user; the arrows pick and Enter or Tab accepts.
         - after: and before: narrow by date.
+        - in:sent (or from:me) narrows to mail the user wrote, and to: narrows to mail addressed to someone, by name or address. "in:sent to:dan" is everything the user sent Dan.
 
         Order:
         - A switch in the panel, also at Settings > Mail > Search. "Relevance + recency" ranks newer mail higher when matches are close. "Best match" ranks on the words alone.
@@ -558,10 +571,11 @@ enum ProductGuide {
         - When a search reads like a question ("where is the wifi password"), an agent reads the mail alongside the results and points at the answer with email cards and one line.
         - Settings > Assistant > Deeper search sets when it runs: Automatic, On request (a button to press) or Off. It has a model setting of its own.
         - "Open in chat", or ⌘Enter, continues the same question in this assistant with room for follow-ups.
+        - On the iPhone it works the same way in the Search tab, above the results, with the same setting under Assistant on the Account page. The expand arrow on it opens the conversation in the agent chat once it has finished. The Ask the agent row above the results does what the Mac's Ask agent button does: it asks the agent, then opens the conversation in the chat once there is one. With Deeper search off it is turned off, as on the Mac.
         """
 
     private static let loginCodes = """
-        Login codes, password resets, sign-in links and security alerts are kept \
+        Login codes, password resets, sign-in links, account changes, app access grants, sign-in receipts and security alerts are kept \
         apart from the rest of the mail, on the Auth page (key {key:auth}, or g on the Emails \
         page).
 
@@ -573,8 +587,19 @@ enum ProductGuide {
         - j / k move through the list. Filters: Everything, Last hour, Codes only, Risk.
         - r or Enter reveals. A login code shows its digits right there, and c copies it. Other kinds open a one-time reveal panel that is cleared when it closes.
         - Clicking a row opens the whole message in that reveal panel.
-        - Sign-in alerts and resets from the last week ask for a decision: "That was me" or "Not me".
         - The auto-shredder card can move old auth mail to Gmail's trash after a set number of days.
+
+        Needs a decision (the right of the Auth page; the top of the phone's login-codes page):
+        - Sign-in alerts, account changes (a new recovery phone, 2FA changed, a new SSH key or access token, a card added to a wallet), app access grants, password resets and sign-in links ask whether it was the user. Resets and sign-in links answer "I asked" or "I did not", app access "I allowed it" or "I didn't", and the rest "That was me" or "Not me".
+        - A question stays open for 7 days, or 14 for account changes, app access and security alerts.
+        - A critical change (recovery email or phone changed or removed, 2FA turned off or moved to a new device, password or account email changed, a phone number or SIM moved) is marked Critical, sorts first and stays open until it is answered or marked done. It asks even when the same email also holds a login code. Once the user's Passband server is updated, it also sits in For your eyes until it is answered or marked done.
+        - Once the user's Passband server is updated, a sign-in alert can be explained, and then asks nothing: by a login code or sign-in link from the same service that the user revealed in Passband just before it, or by Google's own "You shared some Google Account data with" receipt naming that service. Its row then says so. Account changes, app access, security alerts and critical changes are never explained away, and on an older server nothing is.
+        - When three or more services see a new sign-in within three days, they share one "New device?" card with "All me" and "Review each". Only sign-ins group this way: account changes and app access always get a card of their own.
+        - When more than six cards are open (a "New device?" card counts once), "Clear all" beside the count answers every one "That was me" after a confirmation. Critical changes are left open, to be answered one by one. Each cleared question can still be undone from its row.
+        - "Not me" opens the message. Once the user's Passband server is updated, it also puts the message in For your eyes, and an answer given on one device shows on the others; until then, answers stay on the device where they were given.
+        - An answer can be taken back: the answered row on the Auth page, and the reveal panel, say what was answered and offer Undo. The reveal panel also asks the question itself, so an alert opened from For your eyes can be answered right there.
+        - Login codes, verifications and sign-in receipts ("you shared Google Account data with X") do not ask, unless the same email is also a critical change: they are proof of something the user just did.
+        - Auth mail in For your eyes shows its summary and a lock. Opening it reveals it once in the same panel, with the same audit entry.
 
         Arrival:
         - Auth mail shows up within seconds, without waiting for triage. The Auth icon on the rail shows live codes counting down.
@@ -603,7 +628,7 @@ enum ProductGuide {
         Connecting an outside agent (Settings > Agents):
         - Passband has an MCP endpoint (Agent MCP) that Claude, OpenClaw, Hermes Agent, Muse, ChatGPT, Claude Code, Codex, Cursor, VS Code or Claude Desktop can connect to. The pane shows the address, a button that adds it where the agent has an install link (Claude, Cursor, VS Code) or copies the setup otherwise, and the setup snippet for each. Muse is set up by sending it a message, which the pane writes.
         - Such an agent can read ranked updates and whole threads, search mail, list bills, deadlines and packages, and set sender rules. It cannot archive, label or delete, and cannot see login codes. Unless the user changed the setting below, it can leave drafts and cannot send.
-        - "What your agent may write" sets whether it can write mail, per mailbox. "Read only": it cannot. "Drafts only" (the default): it can leave drafts, marked "from your agent" in the drafts list and in the composer when one is opened, for the user to read, edit and send. An agent can also ask Passband on the Mac to bring a draft it wrote up in the composer: Passband comes to the front with it, unless the user is in the middle of writing something in Passband, in which case nothing moves and a toast says the draft is waiting. A draft opened this way is sent with the send button, not ⌘Enter, so a keystroke meant for another app cannot send it. If the Mac app is not open, the agent gives a passband:// link that opens the draft. This never sends anything. "Send, with your approval": it can send from the user's address, and is told to show each message and wait for the user's go-ahead in its own chat first. Passband cannot check that it asked. It blocks anything that looks like a password or key, and every agent send is in the audit log.
+        - "What your agent may write" sets whether it can write mail, per mailbox. "Read only": it cannot. "Drafts only" (the default): it can leave drafts, marked "from your agent" in the drafts list and in the composer when one is opened, for the user to read, edit and send. An agent can also ask Passband on the Mac to bring a draft it wrote up in the composer: Passband comes to the front with it, unless the user is in the middle of writing something in Passband, in which case nothing moves and a toast says the draft is waiting. A draft opened this way is sent with the send button, not ⌘Enter, so a keystroke meant for another app cannot send it. If the Mac app is not open, the agent gives a passband:// link that opens the draft. When the agent asks for a review, a phone with Passband and notifications on also gets a notification, "Your agent left a draft", naming who it is to and the subject, at most once per draft and not for several drafts in quick succession; tapping it opens the draft in the composer on the phone, ready to read, edit and send with the send button. This never sends anything. "Send, with your approval": it can send from the user's address, and is told to show each message and wait for the user's go-ahead in its own chat first. Passband cannot check that it asked. It blocks anything that looks like a password or key, and every agent send is in the audit log.
         - Hosted Passband does not offer this yet. A self-hosted daemon does.
         """
 
@@ -628,7 +653,7 @@ enum ProductGuide {
         - While a new version is waiting, a down-arrow icon sits near the bottom of the sidebar. Clicking it brings the card back.
         - The Passband menu has "Check for Updates…". The installed version is printed at the bottom right of Settings.
         - Settings > General > Help has "What's new" for the release notes and "Practice inbox" to replay the tour.
-        - On the iPhone, "What's new" is under the person icon at the top left of the Sitrep, in General. It shows the iPhone's own release notes full screen: swipe left for the next page, right to go back, and the x at the top right closes it. The iPhone has no practice inbox.
+        - On the iPhone, "What's new" is in Settings (the person icon at the top left of the Sitrep, then Settings at the bottom), in General. It shows the iPhone's own release notes full screen: swipe left for the next page, right to go back, and the x at the top right closes it. The iPhone has no practice inbox.
 
         Usage and audit:
         - Usage, at the bottom of the rail: mail in and out, signal against noise, triage spend and assistant usage, over 7, 30 or 90 days.
@@ -649,7 +674,7 @@ enum ProductGuide {
     private static func whatsNewOnPhone(running: String?) -> String {
         let reopen =
             "The iPhone shows this once per version, full screen, a page per feature. To see it "
-            + "again, tap the person icon at the top left of the Sitrep, then General, then "
+            + "again, tap the person icon at the top left of the Sitrep, then Settings, then General, then "
             + "What's new."
         guard let running else {
             return "This build does not report its version, so there are no release notes to read. " + reopen

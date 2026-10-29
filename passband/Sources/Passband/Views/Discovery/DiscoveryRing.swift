@@ -1,4 +1,4 @@
-// THE DISCOVERY RING: eight arcs that fill CLOCKWISE FROM TWELVE as sets are
+// THE DISCOVERY RING: seven arcs that fill CLOCKWISE FROM TWELVE as sets are
 // unlocked. It says HOW MUCH, never WHICH: with three sets found the first
 // three arcs are lit, whichever three they are, so the ring reads as a ring
 // filling up rather than as a map with holes in it. It is still a picture, not
@@ -14,7 +14,7 @@
 //     Present, so the shape is a ring from day one, and quiet enough that it
 //     reads as one calm circle rather than as empty slots.
 //
-// ALL KEPT CLOSES THE LOOP: the gaps go, the eight arcs are one ring, and the
+// ALL KEPT CLOSES THE LOOP: the gaps go, the seven arcs are one ring, and the
 // centre lights. The one state with nothing more to say says so by being whole.
 //
 // FRESH (found, and the page not visited since) breathes on the NEWEST lit

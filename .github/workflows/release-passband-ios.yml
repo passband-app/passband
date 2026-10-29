@@ -57,9 +57,14 @@ concurrency:
 jobs:
   testflight:
     runs-on: macos-26
+    # The signing and publishing secrets live in this GitHub environment,
+    # which only this workflow's own release tags may deploy to, and only
+    # admins may push those tags (tag ruleset). Another workflow or branch
+    # cannot read them.
+    environment: release-ios
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # App Store Connect rejects a marketing version that ever goes
       # backwards, so keep the tag pinned to project.yml's iOS target — the

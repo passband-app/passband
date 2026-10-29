@@ -35,8 +35,8 @@ use axum::{
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use squelch_core::store::{MessageOpen, Store};
-use squelch_core::tracking::classify_user_agent;
+use squelch_core::store::{MessageOpen, OPEN_SCANNER, Store};
+use squelch_core::tracking::{classify_user_agent, notify_open};
 
 use crate::error::ApiError;
 use crate::handlers::{audit_action, store_call};
@@ -129,15 +129,23 @@ pub async fn tracking_pixel(
     let opened_at = Utc::now().timestamp();
 
     // The result is deliberately dropped: an unknown token, a known one, and a
-    // failed write must be indistinguishable from outside.
+    // failed write must be indistinguishable from outside. A new open wakes the
+    // banner and the phone exactly as one collected off the relay does; without
+    // this a daemon that serves its own pixel (every hosted tenant) recorded
+    // opens nobody was told about.
     let _ = store_call(&state, move |store, account_id| {
-        store.record_open(
+        let recorded = store.record_open(
             account_id,
             &token,
             opened_at,
             user_agent.as_deref(),
             classification,
-        )
+        )?;
+        // A probable scanner is recorded but wakes nobody.
+        if recorded && classification != OPEN_SCANNER {
+            notify_open(store, account_id, &token);
+        }
+        Ok(())
     })
     .await;
 

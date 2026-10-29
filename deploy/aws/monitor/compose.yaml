@@ -25,9 +25,38 @@ x-logging: &logging
     max-file: "3"
 
 services:
+  # One-shot, before prometheus and grafana: hands the EBS bind-mount data
+  # dirs to the users those images run as (nobody for prometheus, 472:0 for
+  # grafana; neither runs as root). The dirs were created root-owned by
+  # bootstrap.sh, and bootstrap.sh only runs on a fresh box, so the fix lives
+  # here, which every deploy refreshes. A no-op once ownership is right (the
+  # stat test), so a deploy does not re-walk the TSDB. Uses the prometheus
+  # image for its busybox; no network, and only the capabilities chown needs.
+  data-perms:
+    image: ${ECR_REGISTRY:?}/passband-prometheus:${IMAGE_TAG:?}
+    user: "0:0"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        [ "$$(stat -c %u:%g /data/prometheus)" = 65534:65534 ] || chown -R 65534:65534 /data/prometheus
+        [ "$$(stat -c %u:%g /data/grafana)" = 472:0 ] || chown -R 472:0 /data/grafana
+    network_mode: none
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    volumes:
+      - /data/prometheus:/data/prometheus
+      - /data/grafana:/data/grafana
+    restart: "no"
+    logging: *logging
+
   prometheus:
     image: ${ECR_REGISTRY:?}/passband-prometheus:${IMAGE_TAG:?}
     restart: unless-stopped
+    depends_on:
+      data-perms:
+        condition: service_completed_successfully
     env_file: /run/passband-monitor/prometheus.env
     volumes:
       # 30 days of TSDB (retention is set in the shared entrypoint.sh).
@@ -49,7 +78,10 @@ services:
     ports:
       - "3000:3000"
     depends_on:
-      - prometheus
+      data-perms:
+        condition: service_completed_successfully
+      prometheus:
+        condition: service_started
     logging: *logging
 
   blackbox:

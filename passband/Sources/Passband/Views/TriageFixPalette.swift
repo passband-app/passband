@@ -12,7 +12,6 @@ struct TriageFixPalette: View {
     @State private var selection = 0
     @State private var busy = false
     @State private var current: AgentMessageDecision?
-    @Namespace private var paletteGlass
     @FocusState private var focused: Bool
 
     private var hits: [TriageTarget] { TriageTargets.match(query) }
@@ -21,156 +20,51 @@ struct TriageFixPalette: View {
         surface
             .keyContext(.modal)
             .keyBindings(.modal, bindings)
-            .onAppear { focused = true }
             .task { current = try? await APIClient.shared.getAgentTriage(target.messageId).decision }
             .onChange(of: hits.count) { _, count in
                 selection = max(0, min(selection, max(0, count - 1)))
             }
     }
 
-    /// The palette itself. Same rows, same input, same apply — only the thing it
-    /// is mounted IN differs: a command bar hanging under the Mac's chrome, or
-    /// the phone's sheet, which brings its own scrim and its own dismissal.
-    @ViewBuilder
+    /// The palette itself. Same rows, same input, same apply: only the thing it
+    /// is mounted IN differs, a command bar on the Mac or the phone's sheet,
+    /// which brings its own scrim and its own dismissal (see `PaletteShell`).
     private var surface: some View {
-        #if os(macOS)
-            OverlayScrim(alignment: .top, topInset: 110, onDismiss: onClose) {
-                GlassEffectContainer(spacing: 8) {
-                    palette
-                        .frame(width: Typo.measure(560))
-                        .passbandGlass(
-                            .pane, cornerRadius: 20, tint: Palette.glassTintStrong,
-                            id: "palette", in: paletteGlass)
-                        .shadow(color: .black.opacity(0.32), radius: 46, y: 20)
-                }
-            }
-        #else
-            palette
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .background(Palette.canvas.ignoresSafeArea())
-                // The keyboard is up the moment this opens — the field autofocuses
-                // — so the list has to be able to get out from under it.
-                .presentationDetents([.large])
-        #endif
-    }
-
-    private var palette: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
-            wasRow
-            input
-            Divider().overlay(Palette.hairline)
-            list
-            footer
-        }
-    }
-
-    private var header: some View {
-        HStack(spacing: Space.s8) {
-            Image(systemName: "wand.and.sparkles")
-                .font(Typo.ui(12, weight: .semibold))
-                .foregroundStyle(Palette.accent)
-            Text("Fix triage")
-                .font(Typo.ui(13, weight: .semibold))
-                .foregroundStyle(Palette.ink)
-            Text(target.subject)
-                .font(Typo.micro)
-                .foregroundStyle(Palette.inkFaintest)
-                .lineLimit(1)
-                .help("\(target.sender) — \(target.subject)")
-            Spacer(minLength: Space.s4)
-        }
-        .padding(.horizontal, Space.s16)
-        .padding(.top, Space.s14)
-        .padding(.bottom, Space.s8)
-    }
-
-    /// Display only the current authoritative decision, never legacy tiers.
-    @ViewBuilder
-    private var wasRow: some View {
-        if let current {
-            Text((current.kinds + current.destinations).joined(separator: " · ")
-                .replacingOccurrences(of: "_", with: " "))
-                .font(Typo.micro)
-                .foregroundStyle(Palette.inkDim)
-                .padding(.horizontal, Space.s16)
-                .padding(.bottom, Space.s8)
-        }
-    }
-
-    private var input: some View {
-        TextField("Change placement, kind, or agent access…", text: $query)
-            .textFieldStyle(.plain)
-            .font(Typo.ui(15))
-            .foregroundStyle(Palette.ink)
-            .focused($focused)
-            .autocorrectionDisabled()
-            .disabled(busy)
-            .padding(.horizontal, Space.s16)
-            .padding(.bottom, Space.s12)
-            .onChange(of: query) { _, _ in selection = 0 }
-    }
-
-    private var list: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 1) {
-                    if hits.isEmpty {
-                        Text(
-                            "nothing matches “\(query)”. these are the only values the triage pipeline itself uses — anything else could not be learned from."
-                        )
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaintest)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(Space.s14)
-                    } else {
-                        ForEach(Array(hits.enumerated()), id: \.element.id) { i, hit in
-                            TargetRow(
-                                target: hit, selected: i == selection,
-                                onHover: { selection = i },
-                                onPick: { Task { await apply(hit) } })
-                            .id(hit.id)
-                            .disabled(busy)
-                        }
-                    }
-                }
-                .padding(.horizontal, Space.s8)
-                .padding(.vertical, Space.s6)
-            }
-            .frame(maxHeight: Space.scaled(300))
-            .onChange(of: selection) { _, i in
-                guard let hit = hits[safe: i] else { return }
-                withAnimation(.easeOut(duration: 0.1)) { proxy.scrollTo(hit.id, anchor: .center) }
+        PaletteShell(
+            focus: $focused,
+            glassID: "palette", icon: "wand.and.sparkles", title: "Fix triage",
+            subject: target.subject, subjectHelp: "\(target.sender) · \(target.subject)",
+            // Display only the current authoritative decision, never legacy tiers.
+            detail: current.map {
+                ($0.kinds + $0.destinations).joined(separator: " · ")
+                    .replacingOccurrences(of: "_", with: " ")
+            },
+            isEmpty: hits.isEmpty,
+            emptyText:
+                "nothing matches “\(query)”. these are the only values the triage pipeline itself uses, so anything else could not be learned from.",
+            selection: selection, idAt: { hits[safe: $0]?.id },
+            listMaxHeight: 300,
+            // Higher than the short palettes, as it always opened: its detail
+            // line and longer list need the room below.
+            topInset: 110,
+            verb: "apply",
+            note: "stored to refine triage",
+            onClose: onClose
+        ) {
+            TextField("Change placement, kind, or agent access…", text: $query)
+                .focused($focused)
+                .disabled(busy)
+                .onChange(of: query) { _, _ in selection = 0 }
+        } rows: {
+            ForEach(Array(hits.enumerated()), id: \.element.id) { i, hit in
+                TargetRow(
+                    target: hit, selected: i == selection,
+                    onHover: { selection = i },
+                    onPick: { Task { await apply(hit) } })
+                .id(hit.id)
+                .disabled(busy)
             }
         }
-    }
-
-    private var footer: some View {
-        HStack(spacing: Space.s4) {
-            // Three keycaps for three keys the phone does not have. There, the
-            // rows are the pick, the tap is the apply, and pulling the sheet down
-            // is the cancel — all of it already visible.
-            #if os(macOS)
-                Kbd("↑"); Kbd("↓")
-                Text("pick").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
-                Text("·").foregroundStyle(Palette.inkFaintest)
-                Kbd("↵")
-                Text("apply").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
-                Text("·").foregroundStyle(Palette.inkFaintest)
-                Kbd("esc")
-                Text("cancel").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
-            #else
-                Text("tap to apply").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
-            #endif
-            Spacer()
-            Text("stored to refine triage")
-                .font(Typo.micro)
-                .foregroundStyle(Palette.accent.opacity(0.8))
-        }
-        .padding(.horizontal, Space.s16)
-        .padding(.vertical, Space.s10)
-        .overlay(alignment: .top) { Hairline() }
     }
 
     /// allowInInput is REQUIRED, not polish: the palette autofocuses its field,
@@ -234,12 +128,7 @@ private struct TargetRow: View {
     }
 
     var body: some View {
-        // hoverFill off: the pointer MOVES the selection here, so the selection
-        // fill is already following it — a hover wash under it would double up.
-        ListRow(
-            selected: selected, tint: axisTone, hPadding: Space.s10, vPadding: Space.scaled(7),
-            hoverFill: false, onHoverChange: { if $0 { onHover() } }, action: onPick
-        ) { _, _ in
+        PaletteRow(selected: selected, tint: axisTone, onHover: onHover, onPick: onPick) {
             HStack(spacing: Space.s10) {
                 Chip(text: target.axis.chipLabel, tone: axisTone, filled: true)
                     .frame(width: Typo.measure(68), alignment: .leading)

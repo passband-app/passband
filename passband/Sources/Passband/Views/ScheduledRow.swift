@@ -65,9 +65,9 @@ struct ScheduledRow: View {
 
     /// SentRow's numbers on either platform: the two are one list.
     #if os(macOS)
-        private static var hPadding: CGFloat { Space.scaled(11) }
-        private static var vPadding: CGFloat { Space.s6 }
-        private static let radius: CGFloat = 8
+        private static var hPadding: CGFloat { DeskRow.hPadding }
+        private static var vPadding: CGFloat { DeskRow.vPadding }
+        private static let radius: CGFloat = Radius.row
     #else
         private static var hPadding: CGFloat { PhoneRow.hPadding }
         private static var vPadding: CGFloat { PhoneRow.vPadding }
@@ -95,16 +95,18 @@ struct ScheduledRow: View {
                 .phoneRow(mark: mark(cells.stamp.tone), when: cells.when)
             }
         }
-
-        /// What state it is in, where a sent row shows who it went to.
-        private func mark(_ tone: ScheduledRowCopy.Tone) -> CompositionSummary<Text>.PhoneMark {
-            switch tone {
-            case .quiet: .init(symbol: "clock", tint: Palette.inkFaint)
-            case .busy: .init(symbol: "paperplane", tint: Palette.accent)
-            case .danger: .init(symbol: "exclamationmark", tint: Palette.danger)
-            }
-        }
     #endif
+
+    /// What state it is in, where a sent row shows who it went to. The tone
+    /// depends on the row's state only (never on the clock), so the Mac reads
+    /// it outside its TimelineView.
+    private func mark<T: View>(_ tone: ScheduledRowCopy.Tone) -> CompositionSummary<T>.Mark {
+        switch tone {
+        case .quiet: .init(symbol: "clock", tint: Palette.inkFaint)
+        case .busy: .init(symbol: "paperplane", tint: Palette.accent)
+        case .danger: .init(symbol: "exclamationmark", tint: Palette.danger)
+        }
+    }
 
     #if os(macOS)
         private var desktopGuts: some View {
@@ -130,6 +132,7 @@ struct ScheduledRow: View {
                         .foregroundStyle(color(cell.tone))
                 }
             }
+            .deskMark(mark(ScheduledRowCopy.trailing(row, now: .now).tone))
         }
     #endif
 

@@ -61,6 +61,60 @@ fn tables_exist(conn: &Connection, tables: &[&str]) -> Result<bool> {
     Ok(n as usize == tables.len())
 }
 
+/// Every stored `unknown` and `scanner` open is relabelled with TODAY'S
+/// classifier, in BOTH directions: a scanner recorded before the label existed
+/// stops counting, and a person's open hidden by a marker that has since been
+/// removed comes back. `proxied` is left alone. Idempotent, one savepoint (one
+/// commit, not one per row), and only rows whose label changes are written.
+/// The table is small (capped per token, retired with its tracker), so this
+/// runs on every open of the store rather than behind a version flag.
+fn relabel_scanner_opens(conn: &Connection) -> Result<()> {
+    if !has_columns(conn, "message_opens", &["user_agent", "classification"])? {
+        return Ok(());
+    }
+    let rows: Vec<(i64, Option<String>, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, user_agent, classification FROM message_opens
+             WHERE classification IN ('unknown', 'scanner')",
+        )?;
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    let changes: Vec<(i64, &str)> = rows
+        .into_iter()
+        .filter_map(|(id, ua, was)| {
+            let now = crate::tracking::classify_user_agent(ua.as_deref());
+            // `proxied` is never written here: only these two labels move.
+            let now = if now == crate::store::OPEN_SCANNER {
+                crate::store::OPEN_SCANNER
+            } else {
+                crate::store::OPEN_UNKNOWN
+            };
+            (now != was).then_some((id, now))
+        })
+        .collect();
+    if changes.is_empty() {
+        return Ok(());
+    }
+    conn.execute_batch("SAVEPOINT relabel_scanner_opens")?;
+    let applied = changes.iter().try_for_each(|(id, label)| {
+        conn.execute(
+            "UPDATE message_opens SET classification = ?1 WHERE id = ?2",
+            rusqlite::params![label, id],
+        )
+        .map(|_| ())
+    });
+    match applied {
+        Ok(()) => conn.execute_batch("RELEASE relabel_scanner_opens")?,
+        Err(e) => {
+            let _ = conn
+                .execute_batch("ROLLBACK TO relabel_scanner_opens; RELEASE relabel_scanner_opens");
+            return Err(e.into());
+        }
+    }
+    Ok(())
+}
+
 /// Additive, idempotent migrations for pre-existing DBs. New tables and most
 /// indexes are handled by `CREATE ... IF NOT EXISTS` in `schema.sql`; this seam
 /// carries new COLUMNS on an existing table, plus any index that NAMES such a
@@ -68,7 +122,16 @@ fn tables_exist(conn: &Connection, tables: &[&str]) -> Result<bool> {
 /// and the rare index that has to be dropped.
 pub(super) fn migrate(conn: &Connection) -> Result<()> {
     retire_records_destination(conn)?;
+    relabel_scanner_opens(conn)?;
     retire_preference_retriage(conn)?;
+    // The account's mail provider. 'gmail' on every pre-existing row, which is
+    // the honest reading: Gmail was the only provider this daemon ever had.
+    add_column_if_missing(
+        conn,
+        "accounts",
+        "provider",
+        "TEXT NOT NULL DEFAULT 'gmail'",
+    )?;
     add_column_if_missing(conn, "messages", "list_unsubscribe", "TEXT")?;
     add_column_if_missing(
         conn,
@@ -340,6 +403,21 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     if add_column_if_missing(conn, "triage", "opened_at", "TEXT")? {
         stamp_open_ledger_start(conn)?;
     }
+    // HOW LONG IT WAS READ AND HOW MANY LINKS WERE FOLLOWED. Zero on every
+    // pre-existing row, and that zero is not a measurement: no client reported
+    // either before these columns existed. So the dwell ledger dates itself
+    // exactly as the open ledger above does, keyed off `dwell_ms` alone so the
+    // stamp is written once even if an open is interrupted between the two
+    // columns. The floor is compared against `opened_at`, not `received_at`:
+    // what matters is whether the OPEN happened where dwell could be reported.
+    if add_column_if_missing(conn, "triage", "dwell_ms", "INTEGER NOT NULL DEFAULT 0")? {
+        stamp_dwell_ledger_start(conn)?;
+    }
+    add_column_if_missing(conn, "triage", "link_clicks", "INTEGER NOT NULL DEFAULT 0")?;
+    // WHO RESOLVED A ROW, when it was not a person. NULL on every pre-existing
+    // row and NOT backfilled: nothing recorded it before, and guessing would
+    // hand an undo rows it never took.
+    add_column_if_missing(conn, "triage", "resolved_by", "TEXT")?;
 
     // AND THE SWEEP'S INDEX, HERE rather than in schema.sql, for the reason
     // spelled out at that file's `idx_triage_remind_at` note: it runs before this
@@ -745,7 +823,7 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
 
-    // ---- ONE-SHOT: the normalized sent-recipient index ---------------------
+    // ---- EVERY OPEN: the normalized sent-recipient index -------------------
     //
     // `message_recipients` arrives empty on an existing DB while `to_addrs` has
     // been filling for months, so without this a send group opens on a mailbox
@@ -756,8 +834,11 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // Self-triggering and idempotent: the candidate predicate is "sent, has
     // recipients, has no index rows", so a completed pass matches nothing. It
     // runs under one commit, so an interrupted one starts over on the next
-    // open rather than resuming. No done-flag and no `added_*` gate — a plain
-    // re-run is free.
+    // open rather than resuming. No done-flag, no watermark and no `added_*`
+    // gate, on purpose: a re-ingest whose raw does not parse clears a stored
+    // message's index rows while its columns keep their text, and only a pass
+    // over every sent row puts them back. The candidates come from two indexes,
+    // so that pass is close to free (see the function).
     backfill_message_recipients(conn)?;
 
     // ---- THE FTS INDEX'S OPTIONS CHANGED ----------------------------------
@@ -798,6 +879,22 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     }
 
     create_shipment_order_links(conn)?;
+
+    // See the function: ghosts built before `EventTime::resolve` lost every
+    // zoned local time, so each is rebuilt once from its stored decisions.
+    rebuild_ghosts_for_zoned_times(conn);
+
+    // `skipped` came after the table's first form; a database a pre-release
+    // build opened has the table without it. Guarded, like the rest, on the
+    // table existing.
+    if tables_exist(conn, &["event_revisit_asked"])? {
+        add_column_if_missing(
+            conn,
+            "event_revisit_asked",
+            "skipped",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+    }
 
     // Guarded on table existence — migration unit tests build partial schemas.
     if !tables_exist(conn, &["triage", "deadlines", "messages"])? {
@@ -1136,9 +1233,11 @@ pub(super) fn normalize_fts_sql(sql: &str) -> String {
 /// exists, so the old definition would live forever on every mailbox that
 /// predates those lines.
 ///
-/// Refilling from `messages(subject, body)` is exact, not approximate: the
-/// message upsert writes the FTS row from those same two columns, so this
-/// reproduces the index rather than reinterpreting it.
+/// Refilling from `messages(subject, body)` plus the served translation is
+/// exact, not approximate: every FTS writer goes through the same
+/// `translations::FTS_ROW_SELECT`, so this reproduces the index rather than
+/// reinterpreting it. The translation columns (`tsubject`, `tbody`) arrived
+/// this way: a column list that differs from `schema.sql`'s is a rebuild.
 ///
 /// THE TRIGGER IS ANY DIFFERENCE AT ALL between the CREATE text in
 /// `sqlite_master` — what SQLite itself stored when the table was made — and
@@ -1201,12 +1300,21 @@ pub(super) fn rebuild_fts_if_stale(conn: &Connection) -> Result<()> {
     // `IF NOT EXISTS` rides along in the canonical text and is a no-op one
     // statement after the DROP; stripping it would mean editing the string,
     // which is how the two copies started drifting in the first place.
+    // The refill is the store's own FTS row SELECT, translations included.
+    // A partial schema (the migration unit tests build them) may lack
+    // `message_translations`; its rows then refill with no translation, which
+    // is what such a mailbox has.
+    let refill = if tables_exist(conn, &["message_translations"])? {
+        super::translations::FTS_ROW_SELECT.to_string()
+    } else {
+        "SELECT id, subject, body, NULL, NULL FROM messages m".to_string()
+    };
     let batch = format!(
         "BEGIN IMMEDIATE;
          DROP TABLE messages_fts;
          {canonical};
-         INSERT INTO messages_fts(rowid, subject, body)
-             SELECT id, subject, body FROM messages;
+         INSERT INTO messages_fts(rowid, subject, body, tsubject, tbody)
+             {refill};
          COMMIT;"
     );
     if let Err(e) = conn.execute_batch(&batch) {
@@ -1247,6 +1355,26 @@ pub(super) fn rebuild_fts_if_stale(conn: &Connection) -> Result<()> {
 /// `INSERT OR IGNORE`, so a re-run cannot move a stamp that is already the
 /// truth - which would restart the clock and hide the number for another month.
 fn stamp_open_ledger_start(conn: &Connection) -> Result<()> {
+    stamp_ledger_start(conn, OPEN_LEDGER_SINCE_KEY)
+}
+
+/// Record, per existing account, the moment the DWELL ledger started running.
+///
+/// The same lie the open ledger guards against, one column over. A mailbox
+/// that has been recording opens for months has, the instant `dwell_ms` is
+/// added, a pile of opened mail with zero dwell and zero clicks. Read naively
+/// that says its owner glances at everything for no time at all and never
+/// follows a link, which would rank every newsletter they actually read as a
+/// purge candidate. So dwell and click statistics count only mail OPENED at or
+/// after this stamp (`attention::dwell_ledger_since`); an account created
+/// later has reported dwell since it existed and falls back to `created_at`.
+fn stamp_dwell_ledger_start(conn: &Connection) -> Result<()> {
+    stamp_ledger_start(conn, DWELL_LEDGER_SINCE_KEY)
+}
+
+/// The shared body of the two ledger stamps: one `app_settings` row per
+/// existing account, written once.
+fn stamp_ledger_start(conn: &Connection, key: &str) -> Result<()> {
     // BOTH TABLES OR NEITHER. In production this is never false: `schema.sql`
     // creates both and runs in full before this function does. It is false only
     // in the migration suite, which builds deliberately partial old schemas to
@@ -1258,7 +1386,7 @@ fn stamp_open_ledger_start(conn: &Connection) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO app_settings(account_id, key, value)
          SELECT id, ?1, ?2 FROM accounts",
-        rusqlite::params![OPEN_LEDGER_SINCE_KEY, Utc::now().to_rfc3339()],
+        rusqlite::params![key, Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }
@@ -1388,9 +1516,35 @@ fn clear_stale_no_extractor_markers(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// ONE-SHOT (and re-runnable): fill `message_recipients` from the recipient
-/// display strings already on disk, under one commit, so an open that dies
-/// halfway leaves nothing and the next one does it all again.
+/// Sent mail by account, which [`backfill_message_recipients`] reads its
+/// candidates from: the account and the row id are all it needs, so nothing
+/// else is carried.
+const SENT_INDEX_SQL: &str = "CREATE INDEX IF NOT EXISTS idx_messages_sent
+     ON messages(account_id) WHERE is_sent = 1";
+
+/// [`backfill_message_recipients`]' candidates: sent mail with recipients
+/// stored and no index rows. The sent rows lacking index rows are found from
+/// `idx_messages_sent` and `message_recipients`' key alone, and only they are
+/// fetched from the table. Pinned both ways: without the `INDEXED BY` a store
+/// with no `sqlite_stat1` is free to walk the table for `is_sent` again, and
+/// the `CROSS JOIN` keeps the fetch a rowid lookup per candidate whatever the
+/// statistics say.
+pub(super) const RECIPIENTS_CANDIDATES_SQL: &str = "SELECT m.id, m.account_id,
+        COALESCE(m.to_addrs, ''), COALESCE(m.cc_addrs, ''), COALESCE(m.bcc_addrs, '')
+     FROM messages s INDEXED BY idx_messages_sent
+     CROSS JOIN messages m ON m.id = s.id
+     WHERE s.is_sent = 1
+       AND NOT EXISTS (
+           SELECT 1 FROM message_recipients r
+           WHERE r.account_id = s.account_id AND r.message_id = s.id)
+       AND (m.to_addrs IS NOT NULL OR m.cc_addrs IS NOT NULL)
+       AND (COALESCE(m.to_addrs, '') != ''
+            OR COALESCE(m.cc_addrs, '') != ''
+            OR COALESCE(m.bcc_addrs, '') != '')";
+
+/// EVERY OPEN: fill `message_recipients` from the recipient display strings
+/// already on disk for any sent row that has none, under one commit, so an
+/// open that dies halfway leaves nothing and the next one does it all again.
 ///
 /// Local and parse-only — no network, unlike the recipients sweep in the sync
 /// engine that produced those strings in the first place. Rows with no
@@ -1402,34 +1556,38 @@ fn clear_stale_no_extractor_markers(conn: &Connection) -> Result<()> {
 /// one. Pre-split rows carry all three in `to_addrs` already (it held To+Cc+Bcc
 /// mashed together), and the concatenation below is a no-op on them.
 ///
-/// EMPTY strings ("looked, and the headers named nobody") yield no rows and
-/// therefore stay candidates forever. That is a handful of rows parsing to
-/// nothing on each open, which is cheaper than a done-flag per account for a
-/// table this seam scans once.
+/// EMPTY strings ("looked, and the headers named nobody") are not candidates.
+/// A stored string that parses to no address yields no rows and so stays one,
+/// read again on each open: a handful of rows at most.
+///
+/// THE CANDIDATES COME FROM TWO INDEXES, never the table. `is_sent` and the
+/// recipient columns sit after the bodies, so a predicate on them reads past
+/// every row's overflow chain: 38-50 ms of every open at 50k messages, and a
+/// read of the whole table on a cold file, to find nothing. The sent mail
+/// lacking index rows is read from `idx_messages_sent` and the recipient
+/// index's own key, and only those rows are fetched.
+///
+/// THE INDEX IS BUILT HERE, beside its one reader, the first time an open
+/// finds it missing. That one build reads the table, as every open used to,
+/// and holds the write lock while it does. NEVER A REASON NOT TO START: a
+/// build that fails (a sibling process holding the lock past the busy
+/// timeout) skips the heal for this open, and the next open builds it.
 fn backfill_message_recipients(conn: &Connection) -> Result<()> {
     if !tables_exist(conn, &["messages", "message_recipients"])?
         || !has_columns(
             conn,
             "messages",
-            &["to_addrs", "cc_addrs", "bcc_addrs", "is_sent"],
+            &["account_id", "to_addrs", "cc_addrs", "bcc_addrs", "is_sent"],
         )?
     {
         return Ok(());
     }
+    if let Err(error) = conn.execute(SENT_INDEX_SQL, []) {
+        eprintln!("squelch: sent index not built, recipients backfill skipped: {error}");
+        return Ok(());
+    }
     let rows: Vec<(i64, i64, String, String, String)> = conn
-        .prepare(
-            "SELECT m.id, m.account_id, COALESCE(m.to_addrs, ''),
-                    COALESCE(m.cc_addrs, ''), COALESCE(m.bcc_addrs, '')
-             FROM messages m
-             WHERE m.is_sent = 1
-               AND (m.to_addrs IS NOT NULL OR m.cc_addrs IS NOT NULL)
-               AND (COALESCE(m.to_addrs, '') != ''
-                    OR COALESCE(m.cc_addrs, '') != ''
-                    OR COALESCE(m.bcc_addrs, '') != '')
-               AND NOT EXISTS (
-                   SELECT 1 FROM message_recipients r
-                   WHERE r.account_id = m.account_id AND r.message_id = m.id)",
-        )?
+        .prepare(RECIPIENTS_CANDIDATES_SQL)?
         .query_map([], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })?
@@ -1450,6 +1608,129 @@ fn backfill_message_recipients(conn: &Connection) -> Result<()> {
     }
     tx.commit()?;
     Ok(())
+}
+
+/// The `app_settings` key marking an account whose ghosts have been rebuilt
+/// by [`rebuild_ghosts_for_zoned_times`].
+pub(super) const GHOST_ZONED_TIMES_KEY: &str = "ghost_zoned_times_rebuilt";
+
+/// ONE-TIME: rebuild every ghost so it reads the event times its stored
+/// decisions already hold.
+///
+/// The model writes most event times as a local time and a zone
+/// (`2026-10-19T21:30` in `Asia/Tokyo`), and the projection read only RFC3339
+/// and bare dates, so it dropped those starts and then their ends: a flight
+/// ghost with no times at all. The decisions kept the values, so
+/// [`ghosts::rebuild`], which re-derives a ghost's facts from its assigned
+/// records' stored decisions through the fixed `launder`, restores them. It
+/// assigns nothing new, which is enough: a record that fed no ghost for want
+/// of a start is matched the next time its message is decided.
+///
+/// GATED BY A MARKER per account in `app_settings`, since there is no column
+/// to add and so no "the column was absent" signal. The marker is written for
+/// every account in the same transaction as the rebuilds, under `BEGIN
+/// IMMEDIATE` with the marker read inside it, so squelchd and squelch-mcp
+/// opening one file do not both run it. An account created later has no
+/// marker and has its ghosts rebuilt once on the next open, which is harmless:
+/// a rebuild of a ghost built by the fixed code changes nothing that matters.
+///
+/// NEVER A REASON NOT TO START. One ghost that fails to rebuild is rolled back
+/// to its own savepoint, logged by id and error kind (never its title or
+/// place), and skipped for good; anything that fails the whole pass rolls it
+/// back to retry on the next open. Ghosts number tens to hundreds an account,
+/// so one pass is cheap.
+fn rebuild_ghosts_for_zoned_times(conn: &Connection) {
+    match rebuild_ghosts_once(conn) {
+        Ok((0, _)) => {}
+        Ok((rebuilt, skipped)) => eprintln!(
+            "squelch: migration rebuilt {rebuilt} ghost(s) to read zoned event times ({skipped} skipped)"
+        ),
+        Err(error) => {
+            eprintln!(
+                "squelch: ghost time rebuild failed ({}); will retry next open",
+                ghosts::error_kind(&error)
+            );
+            if !conn.is_autocommit() {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+        }
+    }
+}
+
+/// The body of [`rebuild_ghosts_for_zoned_times`]: (rebuilt, skipped).
+fn rebuild_ghosts_once(conn: &Connection) -> Result<(usize, usize)> {
+    // Every table `ghosts::rebuild` reads or writes. The migration suite
+    // builds partial schemas on purpose; production always has them all.
+    if !tables_exist(
+        conn,
+        &[
+            "accounts",
+            "app_settings",
+            "ghost_events",
+            "ghost_event_sources",
+            "ghost_event_keys",
+            "agent_message_decisions",
+            "agent_message_state",
+            "messages",
+        ],
+    )? {
+        return Ok((0, 0));
+    }
+    let pending = |conn: &Connection| -> Result<Vec<i64>> {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM accounts WHERE NOT EXISTS(
+                 SELECT 1 FROM app_settings s WHERE s.account_id=accounts.id AND s.key=?1)
+             ORDER BY id",
+        )?;
+        Ok(stmt
+            .query_map([GHOST_ZONED_TIMES_KEY], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?)
+    };
+    // The converged state, on every open after the first: one indexed read,
+    // no write lock.
+    if pending(conn)?.is_empty() {
+        return Ok((0, 0));
+    }
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let now = Utc::now().to_rfc3339();
+    let (mut rebuilt, mut skipped) = (0, 0);
+    // Re-read under the lock: another handle may have done it meanwhile.
+    for account in pending(conn)? {
+        let ids: Vec<i64> = {
+            let mut stmt =
+                conn.prepare("SELECT id FROM ghost_events WHERE account_id=?1 ORDER BY id")?;
+            stmt.query_map([account], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for id in ids {
+            conn.execute_batch("SAVEPOINT ghost_time_rebuild")?;
+            match ghosts::rebuild(conn, account, id, &now) {
+                Ok(()) => {
+                    conn.execute_batch("RELEASE ghost_time_rebuild")?;
+                    rebuilt += 1;
+                }
+                // The transaction itself is gone (see `ghosts::guarded`):
+                // nothing after this could commit as one, so stop.
+                Err(error) if conn.is_autocommit() => return Err(error),
+                Err(error) => {
+                    eprintln!(
+                        "squelch: ghost time rebuild skipped account {account} ghost {id} ({})",
+                        ghosts::error_kind(&error)
+                    );
+                    conn.execute_batch(
+                        "ROLLBACK TO ghost_time_rebuild; RELEASE ghost_time_rebuild",
+                    )?;
+                    skipped += 1;
+                }
+            }
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO app_settings(account_id, key, value) VALUES(?1, ?2, ?3)",
+            params![account, GHOST_ZONED_TIMES_KEY, now],
+        )?;
+    }
+    conn.execute_batch("COMMIT")?;
+    Ok((rebuilt, skipped))
 }
 
 /// Re-run [`banking::sanitize_institution`] over every stored institution,

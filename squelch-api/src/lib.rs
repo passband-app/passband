@@ -15,7 +15,6 @@ mod console;
 mod devices;
 mod error;
 mod events;
-pub mod gmail_write;
 mod group_send;
 mod groups;
 pub mod guard;
@@ -25,6 +24,7 @@ mod invite_mail;
 pub mod limits;
 mod markdown;
 mod pair;
+mod renotify;
 mod scheduled_send;
 mod serve;
 mod sharing;
@@ -37,6 +37,7 @@ mod unsub_fetch;
 mod unsub_html;
 mod unsub_job;
 pub mod unsubscribe;
+pub mod write;
 
 pub use assistant::AssistantRelay;
 pub use auth::{DEVICE_AUTH_CONCURRENCY, require_bearer};
@@ -49,6 +50,10 @@ pub use http_metrics::{ROUTE_CLASSES, record_http_metrics};
 pub use limits::{
     LONG_REQUEST_TIMEOUT, REQUEST_TIMEOUT, ROUTE_CEILINGS, RequestCeiling, RequestTimeouts,
     STORE_CALL_SLOTS, UPSTREAM_REQUEST_TIMEOUT, route_ceiling,
+};
+/// Smart re-notify's worker and its pass (issue #625).
+pub use renotify::{
+    PassOutcome, RenotifyTiming, close_stale_renotify_sessions, renotify_worker, run_renotify_pass,
 };
 /// The scheduled-send worker and its pass. Exported for the daemon for the
 /// same reason as the shredder: it sends on the WRITE credential.
@@ -124,6 +129,21 @@ fn client_router(state: ApiState) -> Router {
             "/client/v2/messages/{message_id}/opened",
             post(triage::opened),
         )
+        // "This is how long I looked, and how many links I followed." HUMAN
+        // DOOR ONLY for the reason `/opened` is: it is a statement about what
+        // a PERSON did, which an agent cannot make. Counts only, never a URL.
+        .route(
+            "/client/v2/messages/{message_id}/attention",
+            post(triage::attention),
+        )
+        // "Clean Reading out for me", and its exact undo. HUMAN DOOR ONLY,
+        // like every write and more than most: it resolves mail in bulk on
+        // the owner's say-so, which no agent may borrow.
+        .route("/client/v2/reading/smart_clear", post(triage::smart_clear))
+        .route(
+            "/client/v2/reading/smart_clear/{batch_id}/undo",
+            post(triage::smart_clear_undo),
+        )
         .route(
             "/client/v2/messages/{message_id}/corrections",
             post(triage::correct),
@@ -153,6 +173,18 @@ fn client_router(state: ApiState) -> Router {
         .route(
             "/client/thread/{thread_id}/opened",
             post(handlers::mark_thread_opened),
+        )
+        // "Translate what I am showing." The GET serves an archive thread's
+        // translations as `deferred` and buys nothing, for the same prefetch
+        // reason; the reader displaying the thread asks here. HUMAN DOOR ONLY.
+        .route(
+            "/client/thread/{thread_id}/translate",
+            post(handlers::translate_thread),
+        )
+        // "Languages I read": mail in them is never translated.
+        .route(
+            "/client/translate-config",
+            get(handlers::get_translate_config).post(handlers::set_translate_config),
         )
         .route("/client/attachments/{id}", get(handlers::get_attachment))
         // FILES ON THEIR WAY OUT (see the handlers' header). The upload carries
@@ -247,6 +279,12 @@ fn client_router(state: ApiState) -> Router {
             "/client/sealed/{message_id}/reveal",
             post(handlers::reveal_sealed),
         )
+        // The owner's "That was me / Not me" on one auth message. Human door
+        // only: the agent door never reads or writes a verdict.
+        .route(
+            "/client/sealed/{message_id}/verdict",
+            put(handlers::put_sealed_verdict),
+        )
         .route(
             "/client/shredder",
             get(handlers::get_shredder).post(handlers::set_shredder),
@@ -323,6 +361,13 @@ fn client_router(state: ApiState) -> Router {
         // Human door only — the agent door gains no access to the event log.
         .route("/client/events", get(events::events_stream))
         .route("/client/events/{id}", get(events::get_event))
+        // Smart re-notify: the app's tap report and the habit stats. Human
+        // door only, and 404 with the `renotify` feature off.
+        .route(
+            "/client/renotify/{id}/opened",
+            post(renotify::renotify_opened),
+        )
+        .route("/client/renotify/stats", get(renotify::renotify_stats))
         // Push-device registration. Human door only — the agent door never
         // learns a device exists.
         .route("/client/devices", post(devices::register_device))

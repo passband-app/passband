@@ -66,12 +66,12 @@ const CAL_LIST: &str = "https://www.googleapis.com/auth/calendar.calendarlist.re
 /// What a consent that left every box checked reports back, the way Google
 /// spells a scope set: space delimited, in one string.
 fn full_grant() -> String {
-    format!("{READONLY} {MODIFY} {SEND}")
+    MODIFY.to_string()
 }
 
 /// A calendar consent with every box left checked.
 fn calendar_grant() -> String {
-    format!("{READONLY} {MODIFY} {SEND} {CAL_EVENTS} {CAL_LIST}")
+    format!("{MODIFY} {CAL_EVENTS} {CAL_LIST}")
 }
 
 /// One tenant as the mock warden holds it: the identity it minted (which never
@@ -1079,17 +1079,18 @@ async fn signup_provisions_a_tenant_and_hands_back_a_pairing_code() {
     // The consent URL is the mock's authorize endpoint, asking for all three
     // grants in ONE consent: hosted Passband ships the actions, and the daemon's
     // write path has no other way to be filled. The optional name-and-photo
-    // scope rides along; the mock below grants only the three, which is the
-    // unticked-box case, and the signup still completes.
+    // scope and both calendar scopes ride along; the mock below grants only
+    // the three, which is the unticked-box case, and the signup still
+    // completes.
     assert!(consent_url.contains("/authorize"), "{consent_url}");
     let asked = query_param(&consent_url, "scope");
     assert_eq!(
         asked.split(' ').collect::<Vec<_>>(),
         vec![
-            READONLY,
             MODIFY,
-            SEND,
-            squelch_core::config::GOOGLE_PROFILE_SCOPE
+            squelch_core::config::GOOGLE_PROFILE_SCOPE,
+            CAL_EVENTS,
+            CAL_LIST,
         ],
         "{consent_url}"
     );
@@ -1101,7 +1102,7 @@ async fn signup_provisions_a_tenant_and_hands_back_a_pairing_code() {
     assert_eq!(query_param(&consent_url, "access_type"), "offline");
     assert_eq!(query_param(&consent_url, "prompt"), "consent");
     // Incremental, so a later grant never loses an earlier one; and signup
-    // names no account and asks for no calendar.
+    // names no account.
     assert_eq!(query_param(&consent_url, "include_granted_scopes"), "true");
     assert_eq!(query_param(&consent_url, "login_hint"), "");
 
@@ -1938,16 +1939,16 @@ async fn the_form_refuses_bad_input_without_leaving_the_page() {
     assert!(rec.create_bodies.is_empty());
 }
 
-/// A consent that left a box unchecked provisions NOTHING. Whichever of the
-/// three is missing, the answer is the same page, the invite is handed back, and
+/// A consent that left the Gmail box unchecked provisions NOTHING, including a
+/// LEGACY read/send grant without modify. The answer is the same page, the invite is handed back, and
 /// no half-capable tenant is created.
 #[tokio::test]
 async fn a_partial_consent_provisions_nothing_and_says_so() {
     for partial in [
         READONLY.to_string(),
-        format!("{READONLY} {MODIFY}"),
+        SEND.to_string(),
         format!("{READONLY} {SEND}"),
-        format!("{MODIFY} {SEND}"),
+        format!("{CAL_EVENTS} {CAL_LIST}"),
         String::new(),
     ] {
         let h = Harness::new().await;
@@ -1957,7 +1958,7 @@ async fn a_partial_consent_provisions_nothing_and_says_so() {
         let (status, body) = h.run_signup("ada", &invite).await;
         assert_eq!(status, StatusCode::OK, "{partial:?} -> {body}");
         // ONE wording, whichever box it was, and it names what is needed.
-        assert!(body.contains("all three Gmail permissions"), "{body}");
+        assert!(body.contains("needs its Gmail permission"), "{body}");
         assert!(body.contains("has not been used"), "{body}");
         assert!(body.contains("Nothing was set up"), "{body}");
 
@@ -1988,6 +1989,38 @@ async fn a_wider_grant_than_we_asked_for_is_accepted() {
     let (status, body) = h.run_signup("ada", &invite).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("Your mailbox is ready"), "{body}");
+}
+
+/// SIGNUP CARRIES CALENDAR EVEN WITH THE FEATURE OFF. A REGRESSION GUARD, not
+/// proof of the request (the consent-URL assertions above are that): it fails
+/// if someone later adds a feature gate to signup's install. A new tenant has no
+/// `calendar` feature row, and a signup that granted calendar still provisions
+/// and seals the whole grant: the reconnect pipeline's feature gate is for a
+/// calendar-only consent, not for signup. The daemon holds the scope unused
+/// until the feature turns on, and then needs no second trip through Google.
+#[tokio::test]
+async fn a_signup_that_grants_calendar_keeps_it_with_the_feature_off() {
+    let h = Harness::new().await;
+    h.rec.lock().unwrap().granted_scope = Some(calendar_grant());
+
+    let invite = h.invite_code.clone();
+    let (status, body) = h.run_signup("ada", &invite).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Your mailbox is ready"), "{body}");
+
+    let slots = last_installed_slots(&h, "ada");
+    let read = &slots["slots"][MAILBOX];
+    assert_eq!(read, &slots["slots"][format!("{MAILBOX}#write")]);
+    let recorded: Vec<&str> = read["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(recorded, vec![MODIFY, CAL_EVENTS, CAL_LIST]);
+    // One token, no separate calendar slot: the same shape a calendar
+    // reconnect installs.
+    assert!(slots["slots"].get(format!("{MAILBOX}#calendar")).is_none());
 }
 
 /// With the Bifrost trio configured, signup mints TWO virtual keys per tenant
@@ -2238,9 +2271,9 @@ async fn the_landing_page_states_the_grant() {
     let h = Harness::new().await;
     let (status, _, body) = h.get("/", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("gmail.readonly"), "{body}");
     assert!(body.contains("gmail.modify"), "{body}");
-    assert!(body.contains("gmail.send"), "{body}");
+    assert!(!body.contains("gmail.readonly"), "{body}");
+    assert!(!body.contains("gmail.send"), "{body}");
     assert!(body.contains(".passband.test"), "{body}");
 
     let (status, _, body) = h.get("/healthz", None).await;
@@ -2877,9 +2910,14 @@ async fn a_reconnect_asks_google_for_a_replacement_refresh_token() {
     // And the full Gmail set: a replacement that covered less than the original
     // would leave the mailbox half readable.
     let scope = query_param(&consent, "scope");
-    for want in ["gmail.readonly", "gmail.modify", "gmail.send"] {
-        assert!(scope.contains(want), "scope {scope} is missing {want}");
-    }
+    assert!(
+        !scope.contains("gmail.readonly") && !scope.contains("gmail.send"),
+        "{scope}"
+    );
+    assert!(
+        scope.contains("gmail.modify"),
+        "scope {scope} is missing gmail.modify"
+    );
     assert!(!scope.contains("calendar"), "{scope}");
 }
 
@@ -2976,7 +3014,7 @@ fn last_installed_slots(h: &Harness, label: &str) -> Value {
     serde_json::from_str(&h.open_with_tenant_identity(label, &armor)).unwrap()
 }
 
-/// THE CALENDAR CONSENT URL, every parameter: the three Gmail scopes, the
+/// THE CALENDAR CONSENT URL, every parameter: the Gmail scope, the
 /// optional profile scope and both calendar scopes in one ask, offline, forced consent, incremental, PKCE, the
 /// callback, and the hint as `login_hint`.
 #[tokio::test]
@@ -2992,9 +3030,7 @@ async fn the_calendar_consent_url_carries_every_parameter() {
             .split(' ')
             .collect::<Vec<_>>(),
         vec![
-            READONLY,
             MODIFY,
-            SEND,
             squelch_core::config::GOOGLE_PROFILE_SCOPE,
             CAL_EVENTS,
             CAL_LIST
@@ -3084,7 +3120,7 @@ async fn a_granted_calendar_consent_installs_through_the_reconnect_pipeline() {
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
-    assert_eq!(recorded, vec![READONLY, MODIFY, SEND, CAL_EVENTS, CAL_LIST]);
+    assert_eq!(recorded, vec![MODIFY, CAL_EVENTS, CAL_LIST]);
     assert!(slots["slots"].get(format!("{MAILBOX}#calendar")).is_none());
 
     assert_eq!(job_purposes(&h).await, vec!["calendar"]);
@@ -3293,23 +3329,24 @@ async fn an_unticked_calendar_installs_nothing() {
     assert!(job_purposes(&h).await.is_empty(), "nothing queued");
 }
 
-/// The Gmail floor still holds on the calendar flow: a consent missing any
-/// one Gmail scope is refused as a reconnect's is, calendar granted or not.
+/// The Gmail floor still holds on the calendar flow: a consent missing
+/// gmail.modify is refused as a reconnect's is, calendar granted or not, and
+/// a legacy read+send grant does not stand in for it.
 #[tokio::test]
 async fn a_calendar_consent_missing_a_gmail_scope_is_refused() {
     let h = Harness::new().await;
     h.complete_signup("ada").await;
     let installs = h.rec.lock().unwrap().credential_puts.len();
-    for missing in [READONLY, MODIFY, SEND] {
-        let granted: Vec<&str> = [READONLY, MODIFY, SEND, CAL_EVENTS, CAL_LIST]
-            .into_iter()
-            .filter(|s| *s != missing)
-            .collect();
-        h.rec.lock().unwrap().granted_scope = Some(granted.join(" "));
+    for granted in [
+        format!("{CAL_EVENTS} {CAL_LIST}"),
+        format!("{READONLY} {SEND} {CAL_EVENTS} {CAL_LIST}"),
+    ] {
+        let missing = MODIFY;
+        h.rec.lock().unwrap().granted_scope = Some(granted);
         let (status, body) = h.run_reconnect_with(&calendar_link()).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(
-            body.contains("Passband needs all three Gmail permissions"),
+            body.contains("Passband needs its Gmail permission"),
             "missing {missing}: {body}"
         );
         assert!(body.contains("Nothing changed"), "{body}");

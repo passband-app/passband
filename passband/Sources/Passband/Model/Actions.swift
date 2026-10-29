@@ -50,7 +50,7 @@ enum Actions {
         } catch {
             restore()
             if let api = error as? APIError, api.kind == .forbidden {
-                store.pushToast("no write credential · run squelchd auth --write", .error)
+                store.pushToast("no write credential · run squelchd auth", .error)
             } else {
                 store.pushToast(errText(error, "archive failed"), .error)
             }
@@ -85,7 +85,7 @@ enum Actions {
         } catch {
             restore()
             if let api = error as? APIError, api.kind == .forbidden {
-                store.pushToast("no write credential · run squelchd auth --write", .error)
+                store.pushToast("no write credential · run squelchd auth", .error)
             } else {
                 store.pushToast(errText(error, "could not move it out of spam"), .error)
             }
@@ -257,7 +257,7 @@ enum Actions {
             }
         } catch {
             if let api = error as? APIError, api.kind == .forbidden {
-                store.pushToast("no write credential · run squelchd auth --write", .error)
+                store.pushToast("no write credential · run squelchd auth", .error)
             } else {
                 store.pushToast(errText(error, "label failed"), .error)
             }

@@ -298,6 +298,9 @@ Introduce a versioned human API and explicitly advertise its version/capabilitie
 | `GET /client/v2/feed?destination=records` | Aggregate of typed Calendar, Shipping, Billing, and Receipt facts; no generic fallback |
 | `GET /client/v2/messages/{message_id}` | Human message plus thread context/focus target; pending/restricted supported |
 | `POST /client/v2/messages/{message_id}/opened` | Exact displayed-message acknowledgement, independent of done state |
+| `POST /client/v2/messages/{message_id}/attention` | Additive, clamped dwell time and link-click counts for one message; always `204` for a well-formed report; never written for mail known to be kept close: auth, restricted, or legacy sealed. Written for mail whose access is still pending, which every reader then leaves out until it is assessed (see TRIAGE-OPERATIONS.md) |
+| `POST /client/v2/reading/smart_clear` | Mark expired and plainly unwanted open Reading mail done as one batch, message-scoped, stamped in `triage.resolved_by` |
+| `POST /client/v2/reading/smart_clear/{batch_id}/undo` | Reopen exactly the rows of that batch nobody has touched since |
 | `POST /client/v2/attention/{item_id}/actions` | Versioned done/snooze/reminder and undo operations |
 | `POST /client/v2/messages/{message_id}/corrections` | Field-scoped kind/placement/access corrections; thread attention corrections explicitly identify the thread/item |
 | `GET /client/v2/triage/{message_id}` | Processing state, current decision, reasons, rule exceptions, versions and rank breakdown |
@@ -337,7 +340,7 @@ access_body_chars = 8000  # the access check's cap; links shortened, quotes kept
 # explicit byte/token and attachment limits selected with the provider adapter
 
 [notify]
-min_importance = 50
+min_importance = 40
 fast_timeout_secs = 8
 fast_concurrency = 4
 freshness_window_secs = 900

@@ -38,7 +38,8 @@ pinned to `noopener noreferrer`.
 - HTML never crosses the agent door; MCP serves flattened text only.
 - `body_html` is **baked at ingest** — a sanitizer change does not retroactively fix
   stored mail. Delete the `sync_state` `history` row and restart `squelchd` to
-  re-ingest (triage is preserved).
+  re-ingest (triage is preserved). The `sync_cursor` row needs no edit: for a
+  Gmail account the `history` row is the cursor (`store/sqlite/sync_cursor.rs`).
 
 ## 2. Rendering sandbox
 
@@ -175,6 +176,21 @@ refuses it before the handler is reached).
   per `Lib/ImageSniff.swift`, never svg), redirects re-guarded per hop, files named `sha256(url)`
   and a manifest holding **no URLs** — a directory listing the reader's mail URLs
   would be a readable index of their correspondence.
+- `Model/HeroCache.swift:HeroDisk` keeps the Reading cards' rendered 108px
+  thumbnails across launches and account switches, by the same rule: files named
+  `sha256(hero src)`, and an index from `sha256(lowercased sender address)` to the
+  last one that sender sent, holding **no URLs and no addresses**. Fetching it
+  still goes through `HeroBytes` (ephemeral, no cookies, empty referrer) behind
+  the remote-images pref, and painting from it is gated on the same pref.
+  **Residual risks, accepted:** the hashes are unsalted, so someone holding the
+  file can CONFIRM a guessed sender or url, though not list them; `ImageStore`
+  accepts the same exposure. The sender index trusts free-text `From`: a forged
+  mail that carries art can file that art under a real sender, and that sender's
+  card paints it on its first frame (and whenever its own fetch fails) until
+  their next real mail replaces it. It cannot ERASE a sender's art, because a
+  verdict of "no art" never unlinks; and it cannot outlast the real sender's
+  next resolve. Closing it would need the daemon to expose each message's
+  `auth_pass` to the client.
 - **`cid:` references are the local mirror of all this.** `Lib/CidImages.swift`
   matches each `<img src="cid:…">` against this message's own attachment rows by
   normalized Content-ID (§1 keeps the scheme so there is something to match) and
@@ -227,8 +243,9 @@ Model summaries, notification text, reasons, and evidence locations must not quo
 credentials. This is a model-output requirement; it is not a claim that arbitrary
 model output can be proven secret-free by a string filter.
 
-**Enforcement.** `store/sqlite/messages.rs:external_message_allowed_conn` checks the
-current assessment and source provenance under the store lock. External whole-thread
+**Enforcement.** `store/sqlite/messages.rs:external_messages_allowed_conn` checks the
+current assessment and source provenance, of one message or of a set at once, under
+the store lock. External whole-thread
 reads require the thread's sources to be allowed. MCP and dedicated
 `/client/agent/` routes use these checks for messages and derived results. Search
 rehydrates results under the same guard instead of releasing stale cached snippets.
@@ -304,8 +321,8 @@ row does not exist yet, which is a different thing from "pending" on live mail:
   the vec0 index unchanged. The prefilter is a necessary condition and
   authorizes nothing: each
   leg's list is then cut to what the AUTHORITY allows
-  (`external_message_allowed_conn`, with its recursive check of every source a
-  decision consumed, plus `thread_guard_and_subject`) BEFORE the legs are fused,
+  (`external_messages_allowed_conn`, with its recursive check of every source a
+  decision consumed, plus the thread guard `thread_allowed_with_conn`) BEFORE the legs are fused,
   and every hit is rehydrated through the same authority on the way out. Which
   readable rows come back is therefore decided over readable mail alone. Their
   order is too at the vector leg and in the fusion; at the keyword leg it is
@@ -592,8 +609,18 @@ to these rules:
   that asked for it on its own authenticated event stream
   (`GET /client/events?opens=1`) receives an unpersisted, dated `open_draft`
   frame. Nothing is stored or replayed, and the app drops a frame more than a
-  minute old, so a Mac that wakes from sleep has no window thrown at it. The
-  phone never asks and is never told.
+  minute old, so a Mac that wakes from sleep has no window thrown at it.
+- The phone is told by push, ONCE PER DRAFT. The same request hands a
+  `DraftPing` (draft id + creation second) to the APNs pusher over a second
+  in-memory channel (`ApiState::draft_pings`); it is not an event, is never
+  persisted, and is tried once. The relay sees `"<tag>:draft:<id>:<created>"`
+  and `kind: "draft"`, which picks a fixed fallback line and can carry no
+  text of its own; no subject, recipient or body crosses it. The phone's
+  service extension resolves the draft from its own daemon and opens it only
+  if the daemon says an agent wrote it at that second. A tap opens the
+  composer; nothing on the phone sends without the owner pressing send.
+  Asking again for the same draft never buzzes the phone again
+  (`ApiState::draft_pinged`).
 - Only a draft an agent wrote can be named. The mailer refuses any other id
   with the same `not found` as an unknown one, and the app checks
   `from_agent` AGAIN against the daemon's own draft list before opening
@@ -817,7 +844,7 @@ pre-echo status quo. The read-back is also capped at **5s**
 (`ECHO_FETCH_TIMEOUT_SECS`): the client's POST timeout is 15s and `action_send` has
 already made two serial Gmail calls, so bookkeeping may not spend the rest of that
 budget. Keep the echo's failures audited and swallowed; keep it out of core's write
-surface (the fetch lives in `squelch-api/src/gmail_write.rs`, core takes bytes).
+surface (the fetch lives in `squelch-api/src/write/gmail.rs`, core takes bytes).
 
 **Scheduled send (audit contract).** The outbox door audits under three actions of
 its own, target = the message a reply or forward is about (`schedule`) or the row id
@@ -882,6 +909,49 @@ the call goes out.
   (`squelch-api/src/assistant.rs`) relays with a daemon-held credential and streams
   the bytes back, human door only, and 404s when no gateway is configured. The
   conversation body is treated like mail content and logged in neither direction.
+- **Saved chats on disk.** The conversation behind a question in search history is
+  the one place the client keeps a transcript at rest
+  (`passband/Sources/Passband/Lib/QuestionChats.swift`): one file per account under
+  Application Support's `Passband/QuestionChats`, excluded from backup, 0600 in a
+  0700 directory on the Mac and under complete file protection on the phone. A chat
+  expires 30 days after it was last saved, goes when its question leaves history,
+  and the file is deleted when history is cleared or the account is removed. A
+  restored chat is re-sanitized (no card comes back live) and is refused if its
+  history names a tool the chat no longer offers.
+- **The last board on disk.** The client also keeps at rest the board a launch
+  paints before the daemon answers
+  (`passband/Sources/Passband/Lib/BoardFile.swift`): the bands' rows (subject,
+  sender, the triage's one-line summary and preview), the calendar and shipment
+  cards, the hero's headline, the head of each mail page, and the ids (ids only)
+  of the threads that hold auth mail, so the prefetch fence is up before the
+  sealed list is fetched again. It is written through the same code as the
+  saved chats (`PrivateFile.swift`): one file per account under Application
+  Support's `Passband/Boards`, excluded from backup, written atomically, 0600 in
+  a 0700 directory on the Mac, complete file protection on the phone, contents
+  never logged. NEVER on disk: the sealed list and the banking and receipt cards
+  (the amounts and balances extracted from that mail), which the persisted type
+  has no place for, and auth mail by every signal there is for it, since a
+  preview can be the code. A row goes when its decision names an auth kind
+  (feed rows), when its zone is `auth` (mail-page rows, which carry no
+  decision), or when its thread is one the store fences (the sealed list, the
+  bands' auth rows), and every other row and card of that thread goes with it.
+  So does a mail-page row triage has not placed yet: the newest mail is where a
+  code that just arrived sits. A page is cut at its first such row rather than
+  holed. The rules run on the way in and again on the way back out, so a file
+  written any other way still cannot paint auth mail. Billing and receipt mail
+  is otherwise mail like any other: its rows on a mail page are kept. The
+  headline is kept only for the band it was written about, and not when a band
+  row was taken out. Only what the daemon has answered for this session is
+  written: never a board still repainted from disk or a switch, never a page
+  that has not loaded since, and nothing after the credentials are
+  re-validated in Settings until the next account change. A band that is
+  nothing but auth mail is not written at all, and the file goes. A board the daemon last answered for more than a
+  week ago is not painted and is deleted, by the read that finds it or by the
+  launch sweep, which also deletes the board of every account no longer on the
+  install. The file goes when the account is removed, when the same daemon is
+  connected again or re-validated (the credentials may open another mailbox),
+  and whenever the daemon refuses the saved credentials. Never written for the
+  practice inbox.
 
 **What a maintainer must not break.**
 - **Prompt injection is the standing threat, and the gate is the answer to it.**
@@ -1504,8 +1574,9 @@ permission is requested. Google's Places API is not used.
 `squelchd auth --calendar` stores its token in its own credential slot
 (`CredentialKind::Calendar`). Google unions grants per Cloud project and the consent
 asks with `include_granted_scopes`, so that token carries EVERYTHING this OAuth
-client was granted for the account, Gmail scopes included (`gmail.modify` and
-`gmail.send` if `squelchd auth --write` was ever run). Asking for less cannot
+client was granted for the account, Gmail scopes included (`gmail.modify`, the
+one Gmail scope since 2026-10-27; legacy grants may also carry `gmail.readonly`
+and `gmail.send`). Asking for less cannot
 narrow it; only a separate Cloud project could. What keeps calendar code away from
 mail is the slot and the code paths: the calendar loop loads only the Calendar slot
 (or, without one, the Read slot when it records `calendar.events`) and only calls

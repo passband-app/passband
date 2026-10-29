@@ -1,5 +1,5 @@
-// Client-side 2FA code extraction, auth-mail copy, and the device-local
-// "needs a decision" ledger.
+// Client-side 2FA code extraction, auth-mail copy, and the "needs a decision"
+// ledger (server-backed, with a device-local fallback for older daemons).
 //
 // "Present, don't read": a login code's body is auto-revealed (audited
 // server-side) and the code pulled out here, so the human never opens the mail.
@@ -103,6 +103,9 @@ extension AuthCopy {
         case .loginAlert: "exclamationmark.shield.fill"
         case .securityAlert: "exclamationmark.shield.fill"
         case .verification: "checkmark.seal.fill"
+        case .accountChange: "lock.shield.fill"
+        case .appGrant: "app.connected.to.app.below.fill"
+        case .signinReceipt: "person.crop.circle.badge.checkmark"
         case .unknown, nil: "key.fill"
         }
     }
@@ -110,47 +113,30 @@ extension AuthCopy {
 
 // MARK: - decisions ledger
 
-/// The human's verdict on a sign-in alert or password reset. Device-local by
-/// design: there is no server field (/client/sealed is read-only metadata), so
-/// decisions live in UserDefaults and do not follow the user to another machine.
-/// They are also per ACCOUNT — the map is keyed by message id, which is one
-/// daemon's SQLite int.
-enum AuthVerdict: String, Sendable {
-    case mine
-    case notMine = "not-mine"
-}
-
+/// The owner's verdicts on auth mail, and THE `isOpen` every surface counts by.
+///
+/// SERVER-BACKED where the daemon can be (docs/AUTH-MAIL-HANDLING.md,
+/// "Verdicts"): a verdict is read off the `/client/sealed` row and written with
+/// `PUT /client/sealed/{id}/verdict`, optimistically, and rolled back if the
+/// write fails. A daemon without that route (older, or rolled back) keeps the
+/// old behaviour: the verdict lives in this device's UserDefaults, per ACCOUNT
+/// (the map is keyed by message id, which is one daemon's SQLite int). The
+/// first sealed list from a daemon that keeps verdicts uploads what the local
+/// ledger holds for still-open listed messages, then empties the ledger. The
+/// rules themselves are pure and tested (Lib/AuthPolicy.swift).
 @MainActor
 @Observable
 final class AuthDecisions {
     static let shared = AuthDecisions()
 
-    /// Kinds that ask the human a question rather than handing them a code.
-    static let decisionKinds: Set<SealedKind> = [
-        .loginAlert, .securityAlert, .passwordReset, .magicLink,
-    ]
-
-    /// How long an unruled alert stays a question. A sign-in from three weeks
-    /// ago is history, not a decision, and counting it would pin the rail badge
-    /// on a number nobody can work down.
-    static let openWindow: TimeInterval = 7 * 24 * 3600
-
-    static func needsDecision(_ kind: SealedKind?) -> Bool {
-        guard let kind else { return false }
-        return decisionKinds.contains(kind)
-    }
-
-    /// THE definition of an open decision, shared by the Auth page's rail and
-    /// the badge on the Auth rail button so the two can never disagree.
+    /// THE definition of an open decision, shared by the Auth page's rail, the
+    /// badge on the Auth rail button and the phone, so none can disagree.
     func isOpen(_ m: SealedMeta, now: Date = Date()) -> Bool {
-        guard Self.needsDecision(m.kind), decision(m.id) == nil,
-            let received = Fmt.date(m.received_at)
-        else { return false }
-        return now.timeIntervalSince(received) <= Self.openWindow
+        AuthPolicy.isOpen(m, verdict: decision(m), now: now)
     }
 
     /// Base name of the stored map; the live key is this scoped to the account.
-    /// nil when there is no live account — nothing to read, nowhere to write.
+    /// nil when there is no live account: nothing to read, nowhere to write.
     private static let keyBase = "passband.auth-decisions"
     private static var key: String? {
         guard let id = AccountManager.shared.activeId else { return nil }
@@ -159,41 +145,241 @@ final class AuthDecisions {
     /// Cap the stored map so it cannot grow without bound.
     private static let cap = 300
 
-    private var store: [String: String] = [:]
+    /// The device-local ledger: the whole store on an old daemon, and on a new
+    /// one only what is still waiting to be uploaded.
+    private var local: [Int: AuthVerdict] = [:]
+    /// Writes no sealed list has confirmed yet, shown in place of the row's
+    /// own verdict so a card does not flicker back between the PUT and the
+    /// list that carries it (`AuthPolicy.settle`).
+    private var pending: [Int: AuthPolicy.PendingWrite] = [:]
+    /// The last sealed list by id, for `decision` and the "still listed?"
+    /// test a failed PUT needs. A dictionary because `decision` runs once per
+    /// message on every redraw of every surface that counts open questions,
+    /// and a linear search here made those redraws quadratic in auth mail.
+    @ObservationIgnored private var lastRowsById: [Int: SealedMeta] = [:]
+    /// Numbers every sealed-list fetch as it STARTS (`beginListFetch`).
+    @ObservationIgnored private var fetchSeq = 0
+    /// The newest fetch number whose list was applied.
+    @ObservationIgnored private var appliedFetch = 0
+    /// Ids the migration already tried this session, so a refusal is not
+    /// retried on every poll.
+    @ObservationIgnored private var migrationTried: Set<Int> = []
+    @ObservationIgnored private var migrating = false
 
     private init() { reload() }
 
     /// Re-read the ledger for whatever account is live NOW. Called by the
-    /// account switch, AFTER the new id is committed — this key is derived
-    /// from it, so reloading any earlier would re-read the account that just
-    /// went away.
+    /// account switch, AFTER the new id is committed: this key is derived from
+    /// it, so reloading any earlier would re-read the account that just went
+    /// away. In-flight bookkeeping belongs to the old daemon and is dropped.
     func reload() {
-        store =
+        let raw =
             Self.key.flatMap { UserDefaults.standard.dictionary(forKey: $0) as? [String: String] }
             ?? [:]
+        var next: [Int: AuthVerdict] = [:]
+        for (k, v) in raw {
+            if let id = Int(k), let verdict = AuthVerdict(stored: v) { next[id] = verdict }
+        }
+        local = next
+        pending = [:]
+        lastRowsById = [:]
+        daemonKeepsVerdicts = false
+        migrationTried = []
+        migrating = false
     }
 
-    /// The recorded verdict for a message, or nil while it is still open.
-    func decision(_ id: Int) -> AuthVerdict? {
-        guard let raw = store[String(id)] else { return nil }
-        return AuthVerdict(rawValue: raw)
+    /// Whether the daemon keeps verdicts, read off the last SEALED LIST only
+    /// (a row there carries `critical`). Never off a meta built from a feed
+    /// row or a notification, which says nothing about the daemon.
+    private(set) var daemonKeepsVerdicts = false
+
+    /// The verdict for a message, or nil while it is still open.
+    func decision(_ m: SealedMeta) -> AuthVerdict? {
+        if let p = pending[m.id] { return p.verdict }
+        if daemonKeepsVerdicts {
+            // The listed row is the truth; a meta built elsewhere may lag it.
+            let row = lastRowsById[m.id] ?? m
+            if let v = row.serverVerdict { return v }
+        }
+        // On a new daemon this is a verdict still waiting to be uploaded; on an
+        // old one it is the only copy there is.
+        return local[m.id]
     }
 
-    /// Record a verdict. Asymmetric by design: `mine` just resolves the card,
-    /// while `notMine` starts an investigation — the caller opens the message.
-    func set(_ id: Int, _ verdict: AuthVerdict) {
-        // No live account = no key to write under. Nothing can be showing a
-        // decision card in that state either.
+    /// Record a verdict (nil clears it: Undo). Asymmetric by design: `mine`
+    /// just resolves the card, while `notMine` starts an investigation, and
+    /// the caller opens the message.
+    func set(_ m: SealedMeta, _ verdict: AuthVerdict?) {
+        setAll([m], verdict)
+    }
+
+    /// The same for several at once ("All me" on a burst): every PUT, then ONE
+    /// sealed refresh, rather than a list fetch per member.
+    func setAll(_ ms: [SealedMeta], _ verdict: AuthVerdict?) {
+        guard Self.key != nil, !ms.isEmpty else { return }
+        for m in ms { pending[m.id] = .init(verdict: verdict, acceptedAfterFetch: nil) }
+        enqueue(ms, verdict)
+    }
+
+    /// Verdict writes run ONE AT A TIME, in tap order: "That was me" then a
+    /// quick Undo must reach the server in that order, or the server could end
+    /// on the answer the owner took back. Rare enough that one queue for all
+    /// messages costs nothing.
+    @ObservationIgnored private var writeChain: Task<Void, Never>?
+
+    private func enqueue(_ ms: [SealedMeta], _ verdict: AuthVerdict?) {
+        let epoch = AppStore.shared.epoch
+        let previous = writeChain
+        writeChain = Task { @MainActor in
+            await previous?.value
+            var accepted = false
+            var failed = 0
+            var firstError: Error?
+            for m in ms {
+                // BEFORE each send as well as after it: an account switch
+                // between the tap and this task would hand the old daemon's
+                // message id to the new one, a verdict on an unrelated message.
+                guard AppStore.shared.isCurrent(epoch) else { return }
+                switch await write(m, verdict, epoch: epoch) {
+                case .accepted: accepted = true
+                case .kept: break
+                case .failed(let error):
+                    failed += 1
+                    if firstError == nil { firstError = error }
+                }
+            }
+            guard AppStore.shared.isCurrent(epoch) else { return }
+            // ONE toast for the batch: a "Clear all" over a hundred questions
+            // with the daemon down must not stack a hundred of them.
+            if let firstError {
+                let what = failed == 1 ? "could not save that answer" : "could not save \(failed) answers"
+                AppStore.shared.pushToast(errText(firstError, what), .error)
+            }
+            guard accepted else { return }
+            await SitrepPoller.shared.refreshSealed()
+        }
+    }
+
+    private enum WriteOutcome {
+        /// The server took it.
+        case accepted
+        /// No verdict route: this device keeps it, or the account moved on.
+        case kept
+        /// Rolled back; the caller says so once for the whole batch.
+        case failed(Error)
+    }
+
+    /// One PUT and its outcome.
+    private func write(_ m: SealedMeta, _ verdict: AuthVerdict?, epoch: Int) async -> WriteOutcome {
+        do {
+            try await APIClient.shared.putSealedVerdict(m.id, verdict: verdict?.rawValue)
+            guard AppStore.shared.isCurrent(epoch) else { return .kept }
+            // Only a list fetched from here on can confirm it.
+            // (Keeping `resent`, so a disagreeing list resends only once.)
+            if pending[m.id]?.verdict == verdict { pending[m.id]?.acceptedAfterFetch = fetchSeq }
+            // Any local copy is superseded by the server's.
+            writeLocal { $0.removeValue(forKey: m.id) }
+            return .accepted
+        } catch let error as APIError
+            where AuthPolicy.fallsBackToLedger(
+                status: error.status,
+                stillListed: !daemonKeepsVerdicts || lastRowsById[m.id] != nil)
+        {
+            // No verdict route (an older daemon, or one rolled back under
+            // us): this device keeps it, quietly.
+            guard AppStore.shared.isCurrent(epoch) else { return .kept }
+            writeLocal { map in
+                if let verdict { map[m.id] = verdict } else { map.removeValue(forKey: m.id) }
+            }
+            pending.removeValue(forKey: m.id)
+            return .kept
+        } catch {
+            guard AppStore.shared.isCurrent(epoch) else { return .kept }
+            // Only roll back the intent this write carried: a later tap
+            // (an Undo queued behind it) owns `pending` now.
+            if pending[m.id]?.verdict == verdict { pending.removeValue(forKey: m.id) }
+            return .failed(error)
+        }
+    }
+
+    /// Number a sealed-list fetch as it starts. The poller calls this before
+    /// the request and hands the number back with the rows (`listed`).
+    func beginListFetch() -> Int {
+        fetchSeq += 1
+        return fetchSeq
+    }
+
+    /// Whether a list from fetch number `fetch` is newer than the last one
+    /// applied. The poller drops a stale one rather than painting it.
+    func isFresh(_ fetch: Int) -> Bool { fetch > appliedFetch }
+
+    /// Every sealed list the poller takes in, with the number its fetch got:
+    /// settles confirmed writes and, on a daemon that keeps verdicts, moves the
+    /// local ledger up to it.
+    func listed(_ rows: [SealedMeta], fetch: Int) {
+        appliedFetch = max(appliedFetch, fetch)
+        lastRowsById = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        // An empty list says nothing either way; keep what the last one said.
+        if !rows.isEmpty {
+            let keeps = rows.contains(where: \.speaksVerdicts)
+            if keeps != daemonKeepsVerdicts { daemonKeepsVerdicts = keeps }
+        }
+        if !pending.isEmpty {
+            let settled = AuthPolicy.settle(pending, rows: rows, fetch: fetch)
+            if settled.pending != pending { pending = settled.pending }
+            // A later list disagreed with an accepted write: send the latest
+            // intent once more, through the same queue.
+            for id in settled.resend {
+                guard let write = pending[id], let row = rows.first(where: { $0.id == id }) else { continue }
+                enqueue([row], write.verdict)
+            }
+        }
+        guard !migrating,
+            let plan = AuthPolicy.migration(
+                local: local.filter { !migrationTried.contains($0.key) }, rows: rows)
+        else { return }
+        writeLocal { map in for id in plan.drop { map.removeValue(forKey: id) } }
+        guard !plan.upload.isEmpty else { return }
+        migrating = true
+        let epoch = AppStore.shared.epoch
+        Task { @MainActor in
+            defer { if AppStore.shared.isCurrent(epoch) { migrating = false } }
+            for item in plan.upload {
+                guard AppStore.shared.isCurrent(epoch) else { return }
+                migrationTried.insert(item.id)
+                do {
+                    try await APIClient.shared.putSealedVerdict(item.id, verdict: item.verdict.rawValue)
+                } catch {
+                    // Kept locally and still shown; tried again next session.
+                    continue
+                }
+                guard AppStore.shared.isCurrent(epoch) else { return }
+                // Shown from `pending` until a later list carries it.
+                pending[item.id] = .init(verdict: item.verdict, acceptedAfterFetch: fetchSeq)
+                writeLocal { $0.removeValue(forKey: item.id) }
+            }
+            await SitrepPoller.shared.refreshSealed()
+        }
+    }
+
+    /// Change the local ledger and persist it (or remove the key once empty).
+    private func writeLocal(_ change: (inout [Int: AuthVerdict]) -> Void) {
         guard let key = Self.key else { return }
-        var next = store
-        next[String(id)] = verdict.rawValue
+        var next = local
+        change(&next)
+        guard next != local else { return }
         // Keys are message ids, so numeric order is arrival order: dropping the
         // lowest keys evicts the oldest decisions first.
         if next.count > Self.cap {
-            let keys = next.keys.sorted { (Int($0) ?? 0) < (Int($1) ?? 0) }
-            for k in keys.prefix(next.count - Self.cap) { next.removeValue(forKey: k) }
+            for k in next.keys.sorted().prefix(next.count - Self.cap) { next.removeValue(forKey: k) }
         }
-        store = next
-        UserDefaults.standard.set(next, forKey: key)
+        local = next
+        if next.isEmpty {
+            UserDefaults.standard.removeObject(forKey: key)
+        } else {
+            UserDefaults.standard.set(
+                Dictionary(uniqueKeysWithValues: next.map { (String($0.key), $0.value.stored) }),
+                forKey: key)
+        }
     }
 }

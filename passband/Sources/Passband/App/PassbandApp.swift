@@ -101,6 +101,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// should describe the install by the next session, not the next update.
     func applicationDidBecomeActive(_ notification: Notification) {
         AppStore.shared.identifyPerson()
+        AppStore.shared.attentionResume()
+    }
+
+    /// Another app came forward. An email left open behind it is not being
+    /// read, and the dwell clock must not go on counting it. The reader pauses
+    /// on `scenePhase` too, but on the Mac that follows the WINDOW, and has
+    /// been seen to stay `.active` under another app's window; this is the
+    /// app-level answer, and pausing twice is a no-op.
+    func applicationDidResignActive(_ notification: Notification) {
+        AppStore.shared.attentionPause()
     }
 
     /// ⌘Q INSIDE A SEND HOLD. TEMPORARY: this goes away once the send hold
@@ -112,6 +122,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         MainActor.assumeIsolated {
             let store = AppStore.shared
+            // The email on screen at ⌘Q: close its dwell stint and put the
+            // report on the wire. NOT waited for, and not a reason to delay
+            // quit; if the process ends first, one reading's worth of
+            // telemetry is lost, which is the right price.
+            store.attentionBlur()
             // An OPEN composer that was typed into gets its last save too:
             // `flush` is a no-op for an untouched one, so a quit with nothing
             // new to keep still terminates at once. Both are flushed before

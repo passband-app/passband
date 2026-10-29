@@ -105,12 +105,13 @@ would rather not. Full reasoning: `deploy/hosted/SETUP.md` §6.
 
 ### One consent, both slots (decided 2026-08-10)
 
-Hosted signup asks for `gmail.readonly`, `gmail.modify` and `gmail.send` in **one**
-consent screen and seals the resulting grant into **both** credential slots — Read
+Hosted signup asks for `gmail.modify` (until 2026-10-27: `gmail.readonly`,
+`gmail.modify` and `gmail.send`) in **one** consent screen and seals the resulting grant into **both** credential slots — Read
 for the sync loop, Write for human-door actions. The two-slot split is a code-path
 guarantee (sync never touches the Write slot), not a claim about two grants.
 The same screen also asks for `userinfo.profile` (name and photo), which is
-optional: the signup floor is the three Gmail scopes and nothing else.
+optional: the signup floor is `gmail.modify` and nothing else (the one Gmail
+scope since 2026-10-27; it replaced `gmail.readonly` + `gmail.modify` + `gmail.send`).
 
 The reason is that hosted has no second consent screen. Self-host can run
 `squelchd auth --write` later and get the action credential whenever it wants;

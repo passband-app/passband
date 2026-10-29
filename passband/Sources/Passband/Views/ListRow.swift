@@ -18,7 +18,7 @@ import SwiftUI
 struct ListRow<Content: View>: View {
     let selected: Bool
     /// Matches the row's selection paint; each list states its own.
-    var cornerRadius: CGFloat = 9
+    var cornerRadius: CGFloat = Radius.row
     /// The selection tint — semantic per list (auth is `lock`, browse is the
     /// tier colour, triage targets are the axis colour).
     var tint: Color = Palette.accent
@@ -46,7 +46,7 @@ struct ListRow<Content: View>: View {
 
     init(
         selected: Bool,
-        cornerRadius: CGFloat = 9,
+        cornerRadius: CGFloat = Radius.row,
         tint: Color = Palette.accent,
         hPadding: CGFloat = Space.scaled(11),
         vPadding: CGFloat = Space.s6,

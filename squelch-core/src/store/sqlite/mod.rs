@@ -52,6 +52,273 @@ macro_rules! own_mail_sql {
 }
 const OWN_MAIL: &str = own_mail_sql!();
 
+/// SQL predicate for mail that is KNOWN to be kept close, over a `messages m`
+/// row and its `triage t` row: what the product calls sealed. True when ANY
+/// of these holds:
+///
+/// - the stored decision is AUTH mail (`auth.kinds` is not empty): a login
+///   code, a reset link, a sign-in alert. The membership the Auth page reads
+///   (`sealed_messages`).
+/// - the stored decision RESTRICTS external access, or a person's correction
+///   does, or the access assessment came back `restricted`. The refusing half
+///   of what the agent door reads (`messages::external_messages_allowed_conn`).
+/// - the retired `triage.sensitivity` column says so. NOTHING IN THE AGENT
+///   PIPELINE WRITES IT ANY MORE (ingest always writes `normal`), so on its
+///   own it guards only unmigrated legacy rows and rows a person sealed
+///   through the compatibility endpoint. A guard that reads only this column
+///   guards nothing arriving today.
+///
+/// "KNOWN" IS THE WORD THAT MATTERS. Mail whose access assessment is still
+/// PENDING is not in here: nobody has said anything about it yet. Whether
+/// that counts as kept close depends on who is asking, and there are exactly
+/// two answers, so there are exactly two macros and the second is built from
+/// this one ([`sealed_mail_sql!`]). Neither is ever written out by hand.
+///
+/// Correlated subqueries rather than joins, so it drops into any statement
+/// that has `m` and `t` (including an `UPDATE triage AS t`); each is a
+/// primary-key probe. A macro for the reason [`own_mail_sql!`] is.
+macro_rules! known_sealed_mail_sql {
+    () => {
+        "(COALESCE(t.sensitivity,'normal')!='normal' \
+          OR EXISTS(SELECT 1 FROM agent_message_decisions sealed_d \
+                    WHERE sealed_d.account_id=m.account_id AND sealed_d.message_id=m.id \
+                      AND (json_array_length(sealed_d.decision_json,'$.auth.kinds')>0 \
+                           OR COALESCE(json_extract(sealed_d.decision_json,'$.external_access.restricted'),0))) \
+          OR EXISTS(SELECT 1 FROM agent_message_state sealed_s \
+                    WHERE sealed_s.account_id=m.account_id AND sealed_s.message_id=m.id \
+                      AND sealed_s.access='restricted') \
+          OR EXISTS(SELECT 1 FROM agent_triage_corrections sealed_c \
+                    WHERE sealed_c.account_id=m.account_id AND sealed_c.message_id=m.id \
+                      AND sealed_c.field='external_access' AND sealed_c.value_json='true'))"
+    };
+}
+
+/// SQL predicate for mail a READER must leave out: [`known_sealed_mail_sql!`],
+/// OR mail whose access assessment is still pending.
+///
+/// THE STRICT ANSWER, for everything that counts, scores or sweeps: the
+/// per-sender Reading statistics, and smart done's scan and write. Unassessed
+/// mail might be a login code, so it does not count for its sender and is not
+/// swept until triage has said what it is. That costs nothing lasting: it
+/// corrects itself the moment the decision commits.
+///
+/// THE ONE CALLER THAT USES THE LOOSER MACRO INSTEAD is the attention WRITE
+/// (`record_message_attention`), and the asymmetry is deliberate. A report
+/// refused is lost for good, and mail opened in its first moments, before
+/// triage has reached it, is exactly when dwell is real. A report accepted
+/// onto a row that later turns out to be a login code harms nothing, BECAUSE
+/// every reader goes through this macro and drops that row once its decision
+/// lands (`tests::smart_clear_guards::dwell_reported_before_an_auth_decision_
+/// reaches_no_statistic`). Writers may be generous only as long as readers
+/// are strict; a new reader of `dwell_ms` or `link_clicks` owes this macro.
+macro_rules! sealed_mail_sql {
+    () => {
+        concat!(
+            "(",
+            known_sealed_mail_sql!(),
+            " OR EXISTS(SELECT 1 FROM agent_message_state pending_s \
+                        WHERE pending_s.account_id=m.account_id AND pending_s.message_id=m.id \
+                          AND pending_s.access='pending'))"
+        )
+    };
+}
+
+/// Auth mail, over alias `d` (the message's `agent_message_decisions` row,
+/// LEFT JOINed): its decision names an auth kind. The Rust form is
+/// `AuthAssessment::is_auth`.
+macro_rules! auth_mail_sql {
+    () => {
+        "(COALESCE(json_array_length(d.decision_json,'$.auth.kinds'),0)>0)"
+    };
+}
+
+/// A takeover-class account change that holds FYE, over alias `d` and the
+/// message alias `$m`: `critical` beside `account_change`, from a sender
+/// that did not explicitly fail authentication (`auth_pass = 0`; NULL, never
+/// evaluated, still counts). A spoof of the service's own address is not a
+/// critical change. A look-alike domain passes for itself, which is the
+/// prompt's to catch. The Rust form is `AuthAssessment::is_critical` plus
+/// the same `auth_pass` test (`SealedMessage::critical` is this value).
+macro_rules! auth_critical_sql {
+    ($m:literal) => {
+        concat!(
+            "(json_extract(d.decision_json,'$.auth.critical')=1 AND EXISTS(SELECT 1 FROM \
+               json_each(d.decision_json,'$.auth.kinds') WHERE value='account_change') \
+             AND COALESCE(",
+            $m,
+            ".auth_pass,1)!=0)"
+        )
+    };
+}
+
+/// AN AUTH MESSAGE THAT HOLDS FYE, over aliases `d` (decision), `v`
+/// (`auth_verdicts`, LEFT JOINed on the same message) and the message alias
+/// `$m`: the owner said "Not me", or it is a critical account change
+/// ([`auth_critical_sql!`]) they have not ruled on. A "That was me" lets go.
+/// Only meaningful where `auth_mail_sql!` holds. The same predicate decides
+/// FYE membership (through [`auth_fye_threads_cte!`]), spares a message from
+/// thread-wide sweeps ([`holds_fye_triage_sql!`]) and keeps it from the
+/// shredder.
+macro_rules! auth_fye_sql {
+    ($m:literal) => {
+        concat!(
+            "(COALESCE(v.verdict='not_mine',",
+            auth_critical_sql!($m),
+            ",0))"
+        )
+    };
+}
+
+/// The key a message's thread is grouped by: its thread id, or the message
+/// alone when it has none.
+macro_rules! thread_key_sql {
+    ($m:literal) => {
+        concat!(
+            "(CASE WHEN ",
+            $m,
+            ".thread_id='' THEN '#'||",
+            $m,
+            ".id ELSE ",
+            $m,
+            ".thread_id END)"
+        )
+    };
+}
+
+/// An answered revisit: an `applied` run (`$r`, of `agent_triage_runs`) of a
+/// `revisit:` job (`$j`, of `agent_triage_jobs`). The ghost-event revisit pass
+/// reads the newest one per message as "already answered", and asks the
+/// model again (a billed run) when it finds none; history retention keeps
+/// that newest one for it (`retention.rs`). One definition, so the reader and
+/// what is kept for it cannot drift apart.
+macro_rules! revisit_answer_sql {
+    ($r:literal, $j:literal) => {
+        concat!(
+            $r,
+            ".outcome='applied' AND ",
+            $j,
+            ".id=",
+            $r,
+            ".job_id AND ",
+            $j,
+            ".account_id=",
+            $r,
+            ".account_id AND ",
+            $j,
+            ".trigger LIKE 'revisit:%'"
+        )
+    };
+}
+
+/// THE AUTH ARM OF FYE MEMBERSHIP, thread-level, as two CTEs to put after a
+/// query's `WITH`: `auth_fye_threads(account_id, thread_key, id)` holds, per
+/// thread, the newest not-done auth message that [`auth_fye_sql!`] holds for.
+/// A thread qualifies when ANY of its auth messages does, so a critical
+/// change is not lost behind the sign-in alert Gmail threads after it, and
+/// that message is the one the FYE row shows. LEFT JOIN it on
+/// `thread_key_sql!` of the outer message (or the attention row's thread).
+///
+/// COMPUTED ONCE PER QUERY, from the few rows that can qualify: decisions
+/// flagged critical (`idx_decisions_critical`, a partial index on exactly
+/// that expression, kept in step with `schema.sql`; the plan test
+/// `auth_fye_threads_read_the_critical_index` fails if they drift) and "Not
+/// me" verdicts. Never a per-row subquery: the
+/// sitrep inventory and the stats run it over the whole window.
+///
+/// DRIVEN FROM THOSE FEW ROWS, PINNED: `auth_hold CROSS JOIN messages`, so
+/// each held message is one rowid probe. Left to choose, a store with
+/// statistics (every store, from the first pass a minute after the daemon
+/// starts) ran it the other way round for as long as `auth_verdicts` is
+/// empty, which on most stores is always: ANALYZE writes no row for an empty
+/// table, the planner took the union for a large one, and it scanned every
+/// message in the store, each probed into an automatic index built over the
+/// union. That was 300 ms on a 50k store, in every read that carries this
+/// CTE, where pinned it is a fraction of a millisecond. The window function
+/// keeps the CTE from being flattened into an outer query, so the pin holds
+/// in every reader. `auth_fye_threads_drive_from_the_held_messages` pins the
+/// plan, with and without statistics.
+///
+/// NO REVISION CHECK: it reads the message's standing decision, so a
+/// critical change or a "Not me" stays in FYE through a body heal or a
+/// re-fetch (which bump the state revision) until the re-triage lands, the
+/// way the sweeps and the shredder read it.
+///
+/// ONE DEFINITION for the FYE list, the sitrep's placement and Standing
+/// band, and the stats tiers, so they cannot drift
+/// (`auth_fye_list_and_placement_agree` pins that they do). The owner's
+/// thread pin and a fired reminder still win, applied by each caller exactly
+/// as for all FYE mail.
+macro_rules! auth_fye_threads_cte {
+    () => {
+        concat!(
+            "auth_hold AS (
+               SELECT account_id, message_id FROM agent_message_decisions
+                WHERE CASE WHEN json_valid(decision_json) THEN json_extract(decision_json,'$.auth.critical') END = 1
+               UNION
+               SELECT account_id, message_id FROM auth_verdicts WHERE verdict='not_mine'),
+             auth_fye_threads AS (
+               SELECT account_id, thread_key, id FROM (
+                 SELECT fm.account_id, ",
+            thread_key_sql!("fm"),
+            " AS thread_key, fm.id,
+                   ROW_NUMBER() OVER (PARTITION BY fm.account_id, ",
+            thread_key_sql!("fm"),
+            " ORDER BY fm.received_at DESC, fm.id DESC) AS pick
+                 FROM auth_hold h
+                 CROSS JOIN messages fm ON fm.account_id=h.account_id AND fm.id=h.message_id
+                 JOIN agent_message_decisions d ON d.account_id=fm.account_id AND d.message_id=fm.id
+                 LEFT JOIN auth_verdicts v ON v.account_id=fm.account_id AND v.message_id=fm.id
+                 LEFT JOIN triage ft ON ft.account_id=fm.account_id AND ft.message_id=fm.id
+                 WHERE fm.is_sent=0 AND fm.is_spam=0 AND fm.is_archive=0
+                   AND COALESCE(ft.status,'new')!='done' AND ",
+            auth_mail_sql!(),
+            " AND ",
+            auth_fye_sql!("fm"),
+            ") WHERE pick=1)"
+        )
+    };
+}
+
+/// A message that holds its place against thread-wide sweeps, correlated to
+/// the `triage` row being updated: [`auth_fye_sql!`], an auth message ruled
+/// "Not me" or an unruled critical change. Done on ANOTHER message of the
+/// thread (the Auth page archiving the sign-in alert beside it, a reminder,
+/// an unsubscribe) must not clear it; a ruling, or done on the message
+/// itself, does.
+macro_rules! holds_fye_triage_sql {
+    () => {
+        concat!(
+            "EXISTS(SELECT 1 FROM agent_message_decisions d \
+               JOIN messages hm ON hm.account_id=d.account_id AND hm.id=d.message_id \
+               LEFT JOIN auth_verdicts v ON v.account_id=d.account_id AND v.message_id=d.message_id \
+             WHERE d.account_id=triage.account_id AND d.message_id=triage.message_id \
+               AND CASE WHEN json_valid(d.decision_json) THEN ",
+            auth_mail_sql!(),
+            " AND ",
+            auth_fye_sql!("hm"),
+            " ELSE 0 END)"
+        )
+    };
+}
+
+/// Auth Page membership, over `m`, `t` (triage), `s` (agent_message_state)
+/// and `d`: the agent classified it as auth, or it is an unmigrated legacy
+/// row the old pipeline sealed. `triage.sensitivity` alone is never the
+/// test: the agent pipeline no longer writes it.
+macro_rules! sealed_membership_sql {
+    () => {
+        "(json_array_length(COALESCE(d.decision_json,'{}'),'$.auth.kinds')>0 \
+          OR (s.message_id IS NULL AND t.sensitivity='sealed'))"
+    };
+}
+
+/// The `auth_verdicts` join [`auth_fye_sql!`] reads, onto messages `m`.
+macro_rules! auth_verdict_join_sql {
+    () => {
+        " LEFT JOIN auth_verdicts v ON v.account_id=m.account_id AND v.message_id=m.id "
+    };
+}
+
 pub(crate) mod agent_budget;
 /// An archive row nobody has assessed, over aliases `m` (messages) and `a`
 /// (its `agent_message_state`, LEFT JOINed): stored to be found, never
@@ -112,9 +379,9 @@ macro_rules! archive_askable_sql {
 /// THE EXTERNAL SEARCH PREFILTER, over alias `m`: a cheap NECESSARY condition
 /// for an external reader to be shown a row, written so a recall leg can carry
 /// it in its own WHERE. IT AUTHORIZES NOTHING. The authority is
-/// `messages::external_message_allowed_conn` plus
-/// `messages::thread_guard_and_subject`, and every candidate that passes this
-/// still goes through both before a field of it leaves the store.
+/// `messages::external_messages_allowed_conn` plus the thread guard
+/// (`messages::thread_allowed_with_conn`), and every candidate that passes
+/// this still goes through both before a field of it leaves the store.
 ///
 /// What it is for: a row an external reader cannot be shown must not take a
 /// place in a recall window, or which readable rows come back (and in what
@@ -200,14 +467,20 @@ mod migrate;
 mod notify;
 mod outbound;
 pub mod people;
+pub mod reading_senders;
+mod renotify;
+mod retention;
 mod rules;
 mod scheduled;
 mod search;
 mod senders;
+pub mod smart_clear;
 mod specialists;
+mod sync_cursor;
 #[cfg(test)]
 mod tests;
 mod tracking;
+mod translations;
 mod triage_stages;
 mod zones;
 
@@ -216,6 +489,7 @@ pub use self::agent_triage::{
     ARCHIVE_SURFACE_CAP, AccessProgress, ArchiveAccessCaps, BACKGROUND_BUDGET_KEY,
 };
 use self::migrate::migrate;
+pub use self::retention::{HISTORY_RETENTION_DAYS, HistoryPruned};
 pub use self::search::{EXTERNAL_RECALL_MAX, ExternalSearchMode};
 
 use std::path::Path;
@@ -254,6 +528,12 @@ use crate::types::{
 /// `migrate::stamp_open_ledger_start`.
 pub(crate) const OPEN_LEDGER_SINCE_KEY: &str = "opened_ledger_since";
 
+/// `app_settings` key recording when this account's dwell ledger started: the
+/// first open on which `triage.dwell_ms` existed. Dwell and click statistics
+/// count only mail opened at or after it. See
+/// `migrate::stamp_dwell_ledger_start`.
+pub(crate) const DWELL_LEDGER_SINCE_KEY: &str = "dwell_ledger_since";
+
 // schema.sql stays beside `store/mod.rs`; this file is `store/sqlite/mod.rs`.
 const SCHEMA: &str = include_str!("../schema.sql");
 
@@ -275,6 +555,24 @@ const CACHE_SIZE_KIB_NEGATED: i64 = -32_000;
 /// The WAL is truncated to this after a checkpoint: 64 MB. See
 /// [`SqliteStore::set_pragmas`].
 const JOURNAL_SIZE_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
+
+/// Compiled statements the store's connection keeps for `prepare_cached`.
+/// rusqlite's default is 16, and the store has more than twice that many
+/// cached statements (the job claim, the message reads, the listings, the
+/// access walks, ...), so at 16 they would evict each other. A compiled
+/// statement here is 8 to 40 KB (`StatementStatus::MemUsed`), so a full cache
+/// is one to three megabytes.
+///
+/// WHAT THE CACHE DOES NOT DO: stop the recompiling. SQLite marks a statement
+/// whose plan looked at a bound value (an integer `col=?`, a `LIMIT ?`) as
+/// expired when it is bound again, and rusqlite clears the bindings when it
+/// takes a statement back, so a cached one is still compiled once per call.
+/// An uncached one was compiled twice (at prepare, and again after binding),
+/// which is what caching saves: the job claim 207 us to 126 us. Ending the
+/// recompile takes the query planner stability guarantee
+/// (`SQLITE_DBCONFIG_ENABLE_QPSG`), which changes how every statement is
+/// planned and is measured and argued separately.
+const STATEMENT_CACHE_CAPACITY: usize = 64;
 
 /// Rows `ANALYZE` samples per index (`PRAGMA analysis_limit`). LARGE, so a
 /// table under it is scanned in full and the statistics say what the data
@@ -339,6 +637,34 @@ pub struct SqliteStore {
     /// lagged or missed broadcast costs only latency, which is why send errors
     /// are ignored.
     event_tx: RwLock<Option<tokio::sync::broadcast::Sender<i64>>>,
+    /// The inventory half of the last `stats()`, and the [`WriteToken`] it was
+    /// read at, so a poll that finds nothing written since reuses it
+    /// (`attention::InventoryMemo`).
+    inventory_memo: Mutex<Option<attention::InventoryMemo>>,
+}
+
+/// Whether anything has been written to the file since a read: this
+/// connection's count of rows inserted, updated or deleted
+/// (`sqlite3_total_changes`, every statement including triggers and those
+/// rolled back) and `PRAGMA data_version`, which moves when ANOTHER
+/// connection commits (`squelchd token`, `pair`, a standalone `squelch-mcp`).
+/// Equal tokens mean the same data. Unequal ones may not (a rolled-back
+/// write, an update to the same value), which only costs a recompute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct WriteToken {
+    changes: u64,
+    data_version: i64,
+}
+
+impl WriteToken {
+    pub(super) fn of(conn: &Connection) -> Result<Self> {
+        Ok(Self {
+            changes: conn.total_changes(),
+            data_version: conn
+                .prepare_cached("PRAGMA data_version")?
+                .query_row([], |r| r.get(0))?,
+        })
+    }
 }
 
 impl SqliteStore {
@@ -421,13 +747,17 @@ impl SqliteStore {
     ///   big sort is certain) would hold every key in heap: on a memory-capped
     ///   tenant pod that is an OOM kill during open, on every restart.
     ///
-    /// `foreign_keys=ON`, the one other per-connection setting, is applied by
-    /// `schema.sql`'s first line through `execute_batch(SCHEMA)` in `init`.
+    /// Not a pragma but set here with them: the statement cache's capacity,
+    /// [`STATEMENT_CACHE_CAPACITY`]. `foreign_keys=ON`, the one other
+    /// per-connection setting, is applied by `schema.sql`'s first line through
+    /// `execute_batch(SCHEMA)` in `init`.
     fn set_pragmas(conn: &Connection) -> Result<()> {
         conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
         let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
         conn.pragma_update(None, "cache_size", CACHE_SIZE_KIB_NEGATED)?;
         conn.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT_BYTES)?;
+        // Not a pragma, but per connection like them.
+        conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
         Ok(())
     }
 
@@ -443,6 +773,7 @@ impl SqliteStore {
             conn: Mutex::new(conn),
             embedder: RwLock::new(None),
             event_tx: RwLock::new(None),
+            inventory_memo: Mutex::new(None),
         })
     }
 
@@ -594,6 +925,18 @@ impl SqliteStore {
         self.lock().unwrap().execute_batch(sql).unwrap();
     }
 
+    /// One integer off the store's connection, for a test outside this
+    /// module that has to read a row no store method returns.
+    #[cfg(test)]
+    pub(crate) fn query_i64_for_test(&self, sql: &str) -> Option<i64> {
+        use rusqlite::OptionalExtension;
+        self.lock()
+            .unwrap()
+            .query_row(sql, [], |r| r.get(0))
+            .optional()
+            .unwrap()
+    }
+
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.conn
             .lock()
@@ -683,7 +1026,7 @@ impl SqliteStore {
     /// `sensitivity = 'sealed'` as a denial (docs/SECURITY.md §4); what gates
     /// them is the confirm flag and audit ladder in squelch-api's
     /// `guarded_action`. The access authority for the agent door is
-    /// `messages.rs:external_message_allowed_conn` (via `thread_guard_and_subject`
+    /// `messages.rs:external_messages_allowed_conn` (via `thread_allowed_with_conn`
     /// / [`Self::external_thread_allowed`]), which this lookup does NOT apply, so
     /// never hand its result to an agent-facing path.
     pub fn action_message_ref(
@@ -860,6 +1203,16 @@ fn dt_opt(r: &rusqlite::Row<'_>, i: usize) -> rusqlite::Result<Option<DateTime<U
         Some(s) => parse_col_dt(i, &s).map(Some),
         None => Ok(None),
     }
+}
+
+/// A COUNT or SUM column as `u64`. rusqlite 0.41 no longer reads `u64`
+/// directly (SQLite integers are signed), so read `i64` and refuse a negative
+/// rather than let it wrap.
+fn count(r: &rusqlite::Row<'_>, i: usize) -> rusqlite::Result<u64> {
+    let n: i64 = r.get(i)?;
+    u64::try_from(n).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(i, rusqlite::types::Type::Integer, Box::new(e))
+    })
 }
 
 fn parse_col_dt(i: usize, s: &str) -> rusqlite::Result<DateTime<Utc>> {
@@ -1275,6 +1628,26 @@ impl Store for SqliteStore {
         self.set_sync_state(account_id, mailbox, state)
     }
 
+    fn account_provider(&self, account_id: AccountId) -> Result<crate::mail::MailProvider> {
+        self.account_provider(account_id)
+    }
+
+    fn sync_cursor(&self, account_id: AccountId) -> Result<Option<crate::mail::SyncCursor>> {
+        self.sync_cursor(account_id)
+    }
+
+    fn set_sync_cursor(
+        &self,
+        account_id: AccountId,
+        cursor: &crate::mail::SyncCursor,
+    ) -> Result<()> {
+        self.set_sync_cursor(account_id, cursor)
+    }
+
+    fn has_message(&self, account_id: AccountId, provider_msg_id: &str) -> Result<bool> {
+        self.has_message(account_id, provider_msg_id)
+    }
+
     fn inbox_unread(&self, account_id: AccountId) -> Result<Option<InboxUnread>> {
         self.inbox_unread(account_id)
     }
@@ -1389,6 +1762,15 @@ impl Store for SqliteStore {
         self.fire_due_reminders(account_id, now)
     }
 
+    fn schedule_past_event_revisits(
+        &self,
+        account_id: AccountId,
+        now: DateTime<Utc>,
+        policy: &crate::config::RevisitPassConfig,
+    ) -> Result<Vec<i64>> {
+        self.schedule_past_event_revisits(account_id, now, policy)
+    }
+
     fn resolve_sender(&self, account_id: AccountId, sender_addr: &str) -> Result<usize> {
         self.resolve_sender(account_id, sender_addr)
     }
@@ -1399,6 +1781,16 @@ impl Store for SqliteStore {
 
     fn sealed_body(&self, account_id: AccountId, message_id: i64) -> Result<SealedBody> {
         self.sealed_body(account_id, message_id)
+    }
+
+    fn set_auth_verdict(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        verdict: Option<crate::types::AuthVerdict>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.set_auth_verdict(account_id, message_id, verdict, now)
     }
 
     fn sent_listing(
@@ -1718,6 +2110,15 @@ impl Store for SqliteStore {
         self.stage1_usage_since(account_id, since_day)
     }
 
+    fn category_usage_since(
+        &self,
+        account_id: AccountId,
+        since_day: &str,
+        category: &str,
+    ) -> Result<Stage2Usage> {
+        self.category_usage_since(account_id, since_day, category)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn extract_bump_usage(
         &self,
@@ -1867,5 +2268,81 @@ impl Store for SqliteStore {
     /// embedder, including one attached late in the background.
     fn embedder(&self) -> Option<std::sync::Arc<dyn crate::embed::Embedder>> {
         SqliteStore::embedder(self)
+    }
+
+    fn queue_translation(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        source_lang: &str,
+        deferred: bool,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.queue_translation(account_id, message_id, source_lang, deferred, now)
+    }
+
+    fn claim_translations(
+        &self,
+        account_id: AccountId,
+        now: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<crate::store::TranslationJob>> {
+        self.claim_translations(account_id, now, limit)
+    }
+
+    fn record_translation(
+        &self,
+        job: &crate::store::TranslationJob,
+        write: &crate::store::TranslationWrite<'_>,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.record_translation(job, write, now)
+    }
+
+    fn read_languages(&self, account_id: AccountId) -> Result<Vec<String>> {
+        self.read_languages(account_id)
+    }
+
+    fn set_read_languages(
+        &self,
+        account_id: AccountId,
+        codes: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<String>> {
+        self.set_read_languages(account_id, codes, now)
+    }
+
+    fn promote_deferred_translations(
+        &self,
+        account_id: AccountId,
+        thread_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<usize> {
+        self.promote_deferred_translations(account_id, thread_id, now)
+    }
+
+    fn message_translations(
+        &self,
+        account_id: AccountId,
+        message_ids: &[i64],
+    ) -> Result<Vec<crate::store::MessageTranslation>> {
+        self.message_translations(account_id, message_ids)
+    }
+
+    fn upsert_translation_vector(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        embedding: &[f32],
+    ) -> Result<()> {
+        self.upsert_translation_vector(account_id, message_id, embedding)
+    }
+
+    fn translations_missing_vectors(
+        &self,
+        account_id: AccountId,
+        limit: usize,
+    ) -> Result<Vec<crate::store::MissingVector>> {
+        self.translations_missing_vectors(account_id, limit)
     }
 }

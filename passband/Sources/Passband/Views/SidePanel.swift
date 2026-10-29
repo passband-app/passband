@@ -32,8 +32,8 @@ struct SidePanel: View {
                 // near the traffic lights. EXPANDED it spans the whole window
                 // and covers the rail, so its leading edge lands in the strip
                 // the buttons own and the title draws underneath them.
-                .padding(.leading, expanded ? TopBar.dotsClearance : Space.s16)
-                .padding(.trailing, Space.s16)
+                .padding(.leading, expanded ? TopBar.dotsClearance : Space.panel)
+                .padding(.trailing, Space.panel)
                 .padding(.vertical, Space.scaled(13))
                 .overlay(alignment: .bottom) { Hairline() }
 
@@ -102,7 +102,7 @@ struct SearchView: View {
     /// copied into `@State`, so a search remembered while the panel is open
     /// (opening a hit does exactly that) is on screen the moment the field is
     /// cleared again.
-    private var recents: [String] { RecentSearchStore.shared.queries }
+    private var recents: [RecentEntry] { RecentSearchStore.shared.entries }
 
     /// THE EMPTY STATE HAS SOMETHING TO SAY: nothing has been typed, and there
     /// is history to offer. Keyed on the field being blank rather than on the
@@ -135,7 +135,8 @@ struct SearchView: View {
     /// nothing rather than "no matches." at a question nobody asked.
     private var answered: Bool {
         store.search.answers(
-            store.search.query.trimmed, sort: prefs.searchSort, related: prefs.searchIncludeRelated)
+            store.search.query.trimmed, sort: prefs.searchSort, related: prefs.searchIncludeRelated,
+            plainOrder: store.searchPlainOrder)
     }
 
     var body: some View {
@@ -143,7 +144,11 @@ struct SearchView: View {
         let expanded = store.search.expanded
 
         VStack(alignment: .leading, spacing: 0) {
-            Field(label: "") {
+            // Its words on the panel's TEXT EDGE (`PanelRow`): the capsule on
+            // the gutter, the words `hitPadding` in, where the recents, the
+            // section headers and the hits' avatars start, so typing the
+            // first letter does not move the column.
+            Field(label: "", capsule: true, inset: PanelRow.hitPadding) {
                 HStack(spacing: Space.s8) {
                     TextField("search mail…", text: $store.search.query)
                         .textFieldStyle(.plain)
@@ -165,7 +170,7 @@ struct SearchView: View {
                     .animation(.easeInOut(duration: 0.16), value: loading)
                 }
             }
-            .padding(.horizontal, Space.s16)
+            .padding(.horizontal, Space.panel)
             .padding(.top, Space.s12)
             .padding(.bottom, Space.s8)
 
@@ -179,7 +184,7 @@ struct SearchView: View {
             if focused, let fragment = FromOperator.fragment(in: store.search.query) {
                 SenderSuggestions(query: $store.search.query, fragment: fragment)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, Space.s16)
+                    .padding(.horizontal, Space.panel)
                     .padding(.bottom, Space.s8)
             }
 
@@ -193,12 +198,12 @@ struct SearchView: View {
                 Spacer(minLength: Space.s8)
                 if expanded { askAgentButton }
             }
-            .padding(.horizontal, Space.s16)
+            .padding(.horizontal, Space.panel)
             .padding(.bottom, Space.s10)
 
             if !expanded {
                 HStack { Spacer(); askAgentButton }
-                    .padding(.horizontal, Space.s16)
+                    .padding(.horizontal, Space.panel)
                     .padding(.bottom, Space.s10)
             }
 
@@ -228,17 +233,20 @@ struct SearchView: View {
             // throwing the scroll offset away (see the note above).
             if showingRecents {
                 RecentSearches(
-                    queries: recents, armed: store.search.index,
+                    entries: recents, armed: store.search.index,
                     onRun: { run($0) }, onClear: { clearRecents() }
                 )
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, Space.s16)
+                // The hits' envelope (`PanelRow.hitInset`), so the recents
+                // and the hits that replace them share one fill edge and one
+                // text edge.
+                .padding(.horizontal, PanelRow.hitInset)
             }
             HStack(alignment: .top, spacing: 0) {
                 if bandMounted && expanded {
                     ScrollView {
                         DeeperSearchBand(expanded: true)
-                            .padding(.leading, Space.s16)
+                            .padding(.leading, Space.panel)
                             .padding(.top, Space.s14)
                             .padding(.bottom, Space.s14)
                     }
@@ -288,7 +296,8 @@ struct SearchView: View {
         // screen until the reader edits their query. An array because tuples do
         // not conform to Equatable and `task(id:)` needs one value.
         .task(id: [store.search.query, prefs.searchSort.rawValue,
-                   String(prefs.searchIncludeRelated), String(store.search.revision)]) {
+                   String(prefs.searchIncludeRelated), String(store.search.revision),
+                   String(store.searchPlainOrder)]) {
             await runSearch()
         }
         .task(id: store.search.query) {
@@ -347,6 +356,13 @@ struct SearchView: View {
                         ForEach(Array(senders.enumerated()), id: \.element.id) { i, sender in
                             SenderRow(
                                 sender: sender, selected: i == senderIndex,
+                                // The rule under a row gives way to the
+                                // selection fill on either side of it.
+                                // The last one's neighbour is the first hit
+                                // (or that hit's header).
+                                ruled: i != senderIndex && i + 1 != senderIndex
+                                    && !(i == senders.count - 1
+                                        && (store.search.index == 0 || header(above: 0) != nil)),
                                 // Tab takes the armed row, or the first.
                                 tabTakes: i == max(0, senderIndex)
                             ) { show(sender) }
@@ -358,7 +374,11 @@ struct SearchView: View {
                         // so opening a hit costs the results nothing.
                         HitRow(
                             hit: hit, terms: terms,
-                            selected: i == store.search.index, expanded: expanded
+                            selected: i == store.search.index, expanded: expanded,
+                            // No rule against the selection fill, above or
+                            // below it, and none under a row a header follows.
+                            ruled: i != store.search.index && i + 1 != store.search.index
+                                && header(above: i + 1) == nil
                         ) {
                             store.search.index = i
                             senderIndex = -1
@@ -379,8 +399,11 @@ struct SearchView: View {
                     if loadingMore { BandNote("loading more…") }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, expanded && bandMounted ? Space.s8 : Space.s16)
-                .padding(.trailing, Space.s16)
+                // `PanelRow.hitInset`: the fill on the panel gutter, the
+                // words `hitPadding` inside it. Beside the expanded band the
+                // band column is the margin, so the fill sits just off it.
+                .padding(.leading, expanded && bandMounted ? Space.s8 : PanelRow.hitInset)
+                .padding(.trailing, PanelRow.hitInset)
                 .padding(.bottom, Space.s14)
             }
             .onAppear {
@@ -419,19 +442,20 @@ struct SearchView: View {
             .tracking(1)
             .foregroundStyle(Palette.inkDim)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, Space.s14)
+            // Inside the list's inset, so on the rows' word edge (the
+            // avatars' leading edge).
+            .padding(.horizontal, PanelRow.hitPadding)
             .padding(.top, Space.s14)
             .padding(.bottom, Space.s6)
     }
 
-    /// The header that goes above hit `i`, if one does. A ranked search is
-    /// split where the status turns over; a listing is one run in date order,
-    /// so it gets one header saying which way the dates go.
+    /// The header that goes above hit `i`, if one does: only a listing gets
+    /// one, saying which way its dates run. A ranked search is ONE list, with
+    /// no Done / Not done split; an older daemon still sends unfinished mail
+    /// first until it is rolled to plain order (`AppStore.searchPlainOrder`),
+    /// and the labels do not wait for that.
     private func header(above i: Int) -> String? {
-        let hits = store.search.hits
-        if store.search.showsListing { return i == 0 ? "Newest first" : nil }
-        guard i == 0 || hits[i].is_done != hits[i - 1].is_done else { return nil }
-        return hits[i].is_done.map { $0 ? "Done" : "Not done" } ?? "Results"
+        store.search.showsListing && i == 0 ? "Newest first" : nil
     }
 
     /// The band as the STRIP draws it: above the hits, and never allowed to
@@ -478,8 +502,8 @@ struct SearchView: View {
             // field, a hit opens, and the bare bar expands the panel into
             // fullscreen previews.
             KeyBinding("Enter", enterDescription, allowInInput: true) {
-                if showingRecents, let query = recents[safe: store.search.index] {
-                    run(query)
+                if showingRecents, let entry = recents[safe: store.search.index] {
+                    run(entry)
                 } else if let sender = senders[safe: senderIndex] {
                     show(sender)
                 } else if store.search.index >= 0 {
@@ -585,7 +609,19 @@ struct SearchView: View {
     /// Run a remembered query: it goes into the FIELD, the way accepting a
     /// sender does, and the panel's own debounced task does the rest. Nothing
     /// is opened — the reader may want to narrow it first.
-    private func run(_ query: String) {
+    private func run(_ entry: RecentEntry) {
+        // A question goes back to the agent; a search goes back in the field.
+        // Its saved chat comes back in the ⌘K bar when there is one; without
+        // one, it is asked again.
+        if entry.kind == .question {
+            if store.openQuestionFromHistory(entry.text) {
+                store.askBarOpen = true
+            } else {
+                focused = true
+            }
+            return
+        }
+        let query = entry.text
         store.search.query = query
         // Disarm on the way: the armed row belonged to the recents list, and
         // leaving the index at 2 would point at hit row 2 the moment results
@@ -601,9 +637,10 @@ struct SearchView: View {
         // before a trip to Settings and rebuilt after one.
         let sort = prefs.searchSort
         let related = prefs.searchIncludeRelated
+        let plainOrder = store.searchPlainOrder
         let revision = store.search.revision
         let sameRanking = term == store.search.fetchedQuery && sort == store.search.fetchedSort
-            && related == store.search.fetchedRelated
+            && related == store.search.fetchedRelated && plainOrder == store.search.fetchedPlainOrder
         let selectedID = sameRanking ? store.search.hits[safe: store.search.index]?.id : nil
         // A bare operator (`from:` with the menu opening under it) is not a
         // search yet: the daemon would drop the valueless token and 400 the
@@ -614,6 +651,7 @@ struct SearchView: View {
             store.search.error = nil
             store.search.fetchedQuery = nil
             store.search.fetchedSort = nil
+            store.search.fetchedPlainOrder = nil
             store.search.diagnostics = nil
             store.search.nextCursor = nil
             // AND NOTHING IS ARMED. The index outlives the hits it was counted
@@ -634,7 +672,7 @@ struct SearchView: View {
         // predecessor used to rely on someone else covering (backspace inside
         // the debounce window lands here). The CURRENT task owns the flag now;
         // see the cancelled exits below.
-        guard !store.search.answers(term, sort: sort, related: related) else {
+        guard !store.search.answers(term, sort: sort, related: related, plainOrder: plainOrder) else {
             loading = false
             return
         }
@@ -653,7 +691,8 @@ struct SearchView: View {
             // PARTIAL, mode by preference, unfinished first and snippets
             // cleaned: all of that is `SearchFetch`, shared with the phone. The
             // agent's own searches never go through it.
-            let page = try await SearchFetch.page(term, sort: sort, related: related)
+            let page = try await SearchFetch.page(
+                term, sort: sort, related: related, plainOrder: plainOrder)
             // AND AGAIN AFTER THE AWAIT, which the iOS twin has always done
             // (`MobileSearchView`). A response landing in the window between
             // `task(id:)` cancelling this task and URLSession noticing resolves
@@ -674,6 +713,7 @@ struct SearchView: View {
             store.search.fetchedQuery = term
             store.search.fetchedSort = sort
             store.search.fetchedRelated = related
+            store.search.fetchedPlainOrder = plainOrder
             store.search.fetchedRevision = revision
             // Warm the head of the page only. Search rows are read and chosen
             // from, not swept, so the rest can wait for a real click — and the
@@ -697,6 +737,7 @@ struct SearchView: View {
             // resurrecting a stale error over stale hits.
             store.search.fetchedQuery = nil
             store.search.fetchedSort = nil
+            store.search.fetchedPlainOrder = nil
             // The diagnostics go with the query they described: judging the
             // next search on the last one's counts is exactly the mistake
             // pairing them prevents.
@@ -761,12 +802,18 @@ struct SearchView: View {
         // way to serve it.
         let sort = store.search.fetchedSort
         let related = store.search.fetchedRelated ?? false
+        // And the ORDER, for the same reason: page 2 of a grouped ranking asked
+        // in plain order skips hits. A flip mid-scroll re-fetches page 1
+        // through `runSearch` (`answers` keys on it).
+        let plainOrder = store.search.fetchedPlainOrder ?? store.searchPlainOrder
         let revision = store.search.revision
         loadingMore = true
         defer { loadingMore = false }
         do {
-            let page = try await SearchFetch.page(term, cursor: cursor, sort: sort, related: related)
+            let page = try await SearchFetch.page(
+                term, cursor: cursor, sort: sort, related: related, plainOrder: plainOrder)
             guard term == store.search.fetchedQuery, store.search.nextCursor == cursor,
+                  plainOrder == store.search.fetchedPlainOrder,
                   sort == store.search.fetchedSort, sort == prefs.searchSort,
                   related == store.search.fetchedRelated, related == prefs.searchIncludeRelated,
                   revision == store.search.revision else {
@@ -795,6 +842,8 @@ struct SearchView: View {
 private struct SenderRow: View {
     let sender: SenderHit
     let selected: Bool
+    /// Draws the rule under the row (`HitRule`).
+    let ruled: Bool
     /// This is the row Tab would take, so it is the one that says so.
     let tabTakes: Bool
     let onShow: () -> Void
@@ -804,7 +853,14 @@ private struct SenderRow: View {
     }
 
     var body: some View {
-        Button(action: onShow) {
+        // The shared row envelope, as every other list draws its selection.
+        // hoverFill off: this list never washed on hover, and the keys, not
+        // the pointer, walk it.
+        ListRow(
+            selected: selected, hPadding: PanelRow.hitPadding, vPadding: PanelRow.vPadding,
+            hoverFill: false, action: onShow
+        ) { _, _ in
+            // One line, so centred alignment IS the name's line.
             HStack(spacing: Space.s10) {
                 // Sender strings are email-derived: rendered as Text only,
                 // never as markup.
@@ -829,21 +885,21 @@ private struct SenderRow: View {
                     .fixedSize()
                 if tabTakes { Kbd("tab") }
             }
-            .padding(.vertical, Space.scaled(7))
-            .padding(.leading, Space.s16)
-            .padding(.trailing, Space.s12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .background(selected ? Palette.accentSoft : Color.clear)
-        .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairline).frame(height: 0.5) }
-        .overlay {
-            if selected { Rectangle().strokeBorder(Palette.accent.opacity(0.6), lineWidth: 1) }
-        }
+        .overlay(alignment: .bottom) { if ruled { HitRule() } }
         .accessibilityElement(children: .combine)
         .accessibilityHint("Shows all mail from this sender, newest first")
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// THE RULE BETWEEN RESULTS, under the avatar-and-words column: it starts on
+/// the avatars' edge and stops on the dates', so it never runs into the
+/// relevance bar or past the selection fill's rounded corners.
+private struct HitRule: View {
+    var body: some View {
+        Hairline().padding(.horizontal, PanelRow.hitPadding)
     }
 }
 
@@ -852,38 +908,45 @@ private struct HitRow: View {
     let terms: [String]
     let selected: Bool
     let expanded: Bool
+    /// Draws the rule under the row (`HitRule`).
+    var ruled = true
     let onOpen: () -> Void
 
     var body: some View {
-        Button(action: onOpen) {
-            HStack(alignment: .top, spacing: Space.s10) {
+        // Read here: the guide's closure is not main-actor isolated.
+        let nameLine = Typo.size(12) * 0.35
+        // The shared row envelope (see SenderRow), on the same grid.
+        ListRow(
+            selected: selected, hPadding: PanelRow.hitPadding, vPadding: PanelRow.vPadding,
+            hoverFill: false, action: onOpen
+        ) { _, _ in
+            // The avatar sits on the SENDER'S LINE, its centre on the name,
+            // not centred on the two-line row nor hung from its top edge.
+            HStack(alignment: .firstTextBaseline, spacing: Space.s10) {
                 Avatar(sender: hit.from_name.map { "\($0) <\(hit.from_addr)>" } ?? hit.from_addr,
                        size: 26)
-                    .padding(.top, 1)
+                    // THE NOT-DONE BAR rides on the avatar, so it is the
+                    // avatar's height on the avatar's centre wherever the
+                    // avatar sits (the name line). Drawn from the row it was
+                    // centred on the two-line row and hung a few points low.
+                    // It reaches back out to s4 from the row's leading edge.
+                    .overlay(alignment: .leading) {
+                        if hit.is_done == false {
+                            RoundedRectangle(cornerRadius: 1)
+                                .fill(Palette.accentInk)
+                                .frame(width: 2)
+                                .offset(x: Space.s4 - PanelRow.hitPadding)
+                        }
+                    }
+                    .alignmentGuide(.firstTextBaseline) { d in
+                        d[VerticalAlignment.center] + nameLine
+                    }
                     .accessibilityHidden(true)
                 columns
             }
-            .padding(.vertical, Space.scaled(11))
-            .padding(.leading, Space.s16)
-            .padding(.trailing, Space.s12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .background(selected ? Palette.accentSoft : Color.clear)
-        .overlay(alignment: .leading) {
-            if hit.is_done == false {
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(Palette.accentInk)
-                    .frame(width: 2)
-                    .padding(.vertical, Space.s14)
-                    .padding(.leading, Space.s4)
-            }
-        }
-        .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairline).frame(height: 0.5) }
-        .overlay {
-            if selected { Rectangle().strokeBorder(Palette.accent.opacity(0.6), lineWidth: 1) }
-        }
+        .overlay(alignment: .bottom) { if ruled { HitRule() } }
         .accessibilityElement(children: .combine)
         .accessibilityValue(hit.is_done.map { $0 ? "Done" : "Not done" } ?? "")
         .accessibilityAddTraits(selected ? .isSelected : [])
@@ -927,29 +990,19 @@ private struct HitRow: View {
     // Long subjects truncate instead of switching that row to a stacked layout.
     private var columns: some View {
         HStack(alignment: .firstTextBaseline, spacing: expanded ? Space.scaled(18) : Space.s12) {
-            sender.frame(width: expanded ? 160 : 104, alignment: .leading)
+            sender.frame(width: Typo.measure(expanded ? 160 : 104), alignment: .leading)
             VStack(alignment: .leading, spacing: Space.scaled(3)) {
                 subject
                 preview.lineLimit(expanded ? 1 : 2)
             }
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-            date.frame(width: expanded ? 80 : 72, alignment: .trailing)
+            date.frame(width: Typo.measure(expanded ? 80 : 72), alignment: .trailing)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func highlight(_ text: String, matches: [String]) -> AttributedString {
-        var attr = AttributedString(text)
-        for term in matches where !term.isEmpty {
-            var from = attr.startIndex
-            while from < attr.endIndex,
-                let range = attr[from...].range(of: term, options: .caseInsensitive) {
-                attr[range].backgroundColor = Palette.searchMatch
-                attr[range].foregroundColor = Palette.searchMatchInk
-                from = range.upperBound
-            }
-        }
-        return attr
+        SearchHighlight.paint(text, matches: matches)
     }
 }
 
@@ -987,7 +1040,7 @@ struct BrowseView: View {
                     .foregroundStyle(Palette.inkFaintest)
                     .frame(width: Typo.measure(92), alignment: .trailing)
             }
-            .padding(.horizontal, Space.s16)
+            .padding(.horizontal, Space.panel)
             .padding(.vertical, Space.scaled(11))
 
             if browseState.isLoading {
@@ -1009,7 +1062,7 @@ struct BrowseView: View {
                                 .id(u.id)
                             }
                         }
-                        .padding(.horizontal, Space.s12)
+                        .padding(.horizontal, PanelRow.listInset)
                         .padding(.bottom, Space.s14)
                     }
                     .onChange(of: index) { _, i in
@@ -1060,8 +1113,8 @@ private struct BrowseRow: View {
         // hoverFill off: this list has never washed on hover, and 500 rows of
         // tracking area is not the place to start.
         ListRow(
-            selected: selected, cornerRadius: 7, tint: Palette.tierColor(update.tier),
-            hPadding: Space.scaled(9), vPadding: Space.scaled(5), hoverFill: false, action: onSelect
+            selected: selected, cornerRadius: Radius.row, tint: Palette.tierColor(update.tier),
+            hPadding: PanelRow.hPadding, vPadding: Space.scaled(5), hoverFill: false, action: onSelect
         ) { _, _ in
             HStack(spacing: Space.s8) {
                 Circle()
@@ -1070,12 +1123,12 @@ private struct BrowseRow: View {
                 Text("\(update.importance)")
                     .font(Typo.num(11, weight: .semibold))
                     .foregroundStyle(Palette.importanceColor(update.importance))
-                    .frame(width: Space.scaled(24), alignment: .trailing)
+                    .frame(width: Typo.measure(24), alignment: .trailing)
                 Text(SenderCache.resolved(update.senderString).displayName)
                     .font(Typo.ui(11, weight: .medium))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
-                    .frame(width: 116, alignment: .leading)
+                    .frame(width: Typo.measure(116), alignment: .leading)
                 Text(update.one_line)
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkDim)
@@ -1084,7 +1137,7 @@ private struct BrowseRow: View {
                 Text(Fmt.relAge(update.surfaced_at))
                     .font(Typo.num(10))
                     .foregroundStyle(Palette.inkFaintest)
-                    .frame(width: Space.scaled(28), alignment: .trailing)
+                    .frame(width: Typo.measure(28), alignment: .trailing)
             }
         }
         .overlay(alignment: .leading) {

@@ -85,7 +85,15 @@ data:
   # silently upgrade every tenant's daemon on any pod restart. The warden
   # refuses to start without one. Changing this value and applying is what a
   # daemon rollout IS; the roller does the rest.
-  SQUELCH_WARDEN_IMAGE: "ghcr.io/passband-app/squelchd:daemon-0.0.13"
+  #
+  # FLOOR: every warden from the release that renders SQUELCH_TRACK_URL (read
+  # tracking on every tenant) pairs only with a daemon tag that has the
+  # same-origin opens-poller gate (`pixel_lands_on_relay`), the SAME tag as the
+  # warden image. Never roll this below it while that warden runs: an older
+  # daemon given both SQUELCH_TRACK_URL and SQUELCH_RELAY_URL starts the opens
+  # poller against the shared relay, and the push-only bearer becomes the only
+  # lock. Bump this and the warden images together, as a release always does.
+  SQUELCH_WARDEN_IMAGE: "ghcr.io/passband-app/squelchd:daemon-0.0.14"
   # Everything below is a default, restated so this file is the one place an
   # operator has to look. See squelch-warden/README.md.
   SQUELCH_WARDEN_TENANT_NAMESPACE: "tenants"
@@ -104,7 +112,7 @@ data:
   # The Secret holding the Google web client every tenant daemon refreshes with,
   # in the tenant namespace. Without it a tenant pod exits at boot; see
   # google-oauth-client.example.yaml.
-  SQUELCH_WARDEN_OAUTH_SECRET_NAME: "google-oauth-client"
+  SQUELCH_WARDEN_OAUTH_SECRET_NAME: "google-oauth-client-2"
   # The LLM gateway, which is how a hosted tenant gets model triage at all. With
   # this set, every tenant pod sends its Anthropic-wire traffic to Bifrost's
   # /anthropic route with a per-tenant virtual key the control plane mints at
@@ -165,6 +173,14 @@ data:
   # `squelch-control llm sync` covers it (DEFAULT_LLM_MODELS lists Haiku in
   # both spellings); moving the notify model is a daemon code-default change
   # plus a roll until the warden grows the passthrough.
+  #
+  # AND A FOURTH, the same way: smart clear (docs/TRIAGE-OPERATIONS.md, "Smart
+  # done") runs `claude-sonnet-5` by its own code default and qualifies it to
+  # `anthropic/claude-sonnet-5` itself. DEFAULT_LLM_MODELS lists it in both
+  # spellings and the live allow-list carried both on 2026-10-05; it does NOT
+  # carry `claude-sonnet-5-5`. If the gateway drops it, a press answers
+  # `model: "skipped_failed"` and clears on stored facts alone. Degraded, not
+  # dark.
   SQUELCH_WARDEN_LLM_STAGE1_MODEL: "anthropic/claude-opus-5-5"
   SQUELCH_WARDEN_LLM_STAGE2_MODEL: "anthropic/claude-opus-5-5"
   # The APNs relay, which is how a hosted tenant's iPhone gets a push at all.
@@ -202,7 +218,7 @@ data:
   # image itself has to be new enough to know these names: an older warden
   # ignores them and renders no relay env at all.
   SQUELCH_WARDEN_RELAY_URL: "https://relay.squelch.sh"
-  SQUELCH_WARDEN_RELAY_SECRET_NAME: "apns-relay"
+  SQUELCH_WARDEN_RELAY_SECRET_NAME: "apns-relay-2"
   SQUELCH_WARDEN_RELAY_TOPIC: "app.passband.client.ios"
   # The automatic unsubscribe's browser rung needs NO entry here. Every tenant
   # pod references the Secret `browserbase` (key `api-key`) in the tenant

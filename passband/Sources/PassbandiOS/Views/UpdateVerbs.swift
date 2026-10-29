@@ -120,17 +120,22 @@ extension UpdateVerbs {
     /// trailing edge is where a thumb flicks without looking.
     var isSpamPage: Bool { AppStore.shared.mailMode == .spam }
 
-    /// Trailing edge (drag LEFT): the resolve. Done leads because it is the one
-    /// verb a triage run repeats, and it is what a full swipe commits.
-    var trailingVerbs: [SwipeVerb] {
-        let done =
-            finished
+    /// Done alone, or nothing on a finished row: the whole rail of an auth
+    /// row in For your eyes, which opens only in the reveal.
+    var doneVerbs: [SwipeVerb] {
+        finished
             ? []
             : [
                 SwipeVerb(
                     title: "Done", symbol: "checkmark", tint: Palette.positive,
                     destructive: true, run: { self.done(via: .swipe) })
             ]
+    }
+
+    /// Trailing edge (drag LEFT): the resolve. Done leads because it is the one
+    /// verb a triage run repeats, and it is what a full swipe commits.
+    var trailingVerbs: [SwipeVerb] {
+        let done = doneVerbs
         if isSpamPage { return done }
         return done + [
             SwipeVerb(title: "Tune", symbol: "slider.horizontal.3", tint: Palette.accent, run: tune)
@@ -230,10 +235,14 @@ extension View {
     /// A `List` row wearing the app's skin rather than the system's: no
     /// separator, no grey selection slab, no inset chrome — the row's own glass
     /// and padding are the whole visual.
-    func plainRow() -> some View {
-        listRowBackground(Color.clear)
+    /// `bleed` is for a row drawn with `PhoneRow.hPadding` inside it (an
+    /// `UpdateRow`, a `SentRow`): its words land on the screen's gutter, the
+    /// same line the headings above it sit on, instead of a padding further in.
+    func plainRow(bleed: Bool = false) -> some View {
+        let side = bleed ? PhoneRow.bleed : 14
+        return listRowBackground(Color.clear)
             .listRowSeparator(.hidden)
-            .listRowInsets(EdgeInsets(top: 1, leading: 14, bottom: 1, trailing: 14))
+            .listRowInsets(EdgeInsets(top: 1, leading: side, bottom: 1, trailing: side))
     }
 
     /// The native rails, built from the SAME verb arrays the hand-rolled

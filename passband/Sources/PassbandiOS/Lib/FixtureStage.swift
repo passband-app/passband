@@ -26,8 +26,15 @@
             return args[safe: i + 1]
         }
 
-        /// `sitrep` (the default), `records`, `mail` or `search`.
+        /// `sitrep` (the default), `records`, `calendar`, `mail` or `search`.
         static var tab: String? { value("--fixture-tab") }
+        /// Turns the hidden `calendar` feature on over a staged week of plans
+        /// (FixtureCalendar), so the bar reads Sitrep, Calendar, Mail.
+        static let calendar = args.contains("--fixture-calendar")
+        /// The calendar's mode for a screenshot: `--fixture-calendar-mode
+        /// month|week|day`. Scene `calendar-detail` pushes the likely ghost.
+        static var calendarMode: String? { value("--fixture-calendar-mode") }
+        static var calendarDetail: String? { scene == "calendar-detail" ? "g:2" : nil }
         /// What to raise once the board has loaded; see `stage`.
         static var scene: String? { value("--fixture-scene") }
         /// Where a What's New vignette's clock is stopped, in seconds into its
@@ -58,6 +65,7 @@
 
         /// Boot onto the fixture mailbox, then raise the scene asked for.
         static func boot(_ store: AppStore) async {
+            if calendar { await RehearsalAPI.shared.stage(timeline: FixtureCalendar.feed()) }
             await store.enterPractice()
             await store.warmPractice()
             guard let scene else { return }
@@ -83,6 +91,25 @@
                     store.openThread(first.thread_id, queue: store.sitrep.standing, from: .sitrep)
                     Task { await openReply(on: first.id, store) }
                 }
+            // MAIL IN FRENCH, which the practice inbox does not have: the
+            // reader's translation strip. `translated` is an HTML message
+            // shown in English, `translated-incomplete` one whose fact check
+            // failed, `translated-pending` one still being written (it stays
+            // pending, so the reader's backoff runs out), `translated-deferred`
+            // archive mail the reader asks to translate on open (it stays
+            // deferred under any read until the ask), and
+            // `translated-all` the three in one thread, where the pending one
+            // lands on the reader's third refetch.
+            case let scene where scene.hasPrefix("translated"):
+                let kind: RehearsalAPI.TranslationFixture.Scene =
+                    switch scene {
+                    case "translated-incomplete": .incomplete
+                    case "translated-pending": .pending
+                    case "translated-deferred": .deferred
+                    case "translated-all": .all
+                    default: .done
+                    }
+                if let first { Task { await stageTranslated(first, kind, store) } }
             case let chain where chain.hasPrefix("chain"):
                 if let first { Task { await stageChain(first, scene: chain, store) } }
             // THE READER ON A READING STACK, and the checkmark's hold on it.
@@ -116,6 +143,25 @@
                 }
             case "compose":
                 store.openComposeNew()
+            // THE DEEPER-SEARCH BAND on the phone's search tab (launch with
+            // `--fixture-tab search`). "thursday?" is question-shaped by its
+            // "?" and is also a literal substring of Alex's "Dinner on
+            // Thursday?", which is all the practice search matches on, so the
+            // band sits over one real hit. The practice API sends no
+            // diagnostics, so the no-strict-hits trigger cannot be staged here.
+            // SEARCH HISTORY with a question in it: wants `--fixture-tab search`.
+            // `recents-restore` also keeps a chat behind the question and taps
+            // it (MobileSearchView plays the tap: the push is its own state).
+            case "recents", "recents-restore":
+                RecentSearchStore.shared.record("delta receipt")
+                RecentSearchStore.shared.rememberQuestion(Self.historyQuestion)
+                RecentSearchStore.shared.record("from:maya@studio.example")
+                if scene == "recents-restore" {
+                    QuestionChats.shared.save(
+                        Self.historyChat, forKey: QuestionChats.key(forQuestion: Self.historyQuestion))
+                }
+            case "search-lane":
+                store.search.query = "thursday?"
             case "accounts":
                 AccountDoor.shared.pane = .picker
             // THE SENT PAGE, which the practice mailbox leaves empty: nothing
@@ -151,6 +197,22 @@
                         smart_block: SmartBlockProposal(
                             rule: "Only show receipts and account notices.",
                             keeps: "receipts", drops: "promotions")))
+            // SMART CLEAR'S RECEIPT over the sitrep, and its full list as the
+            // sheet the receipt's link raises. Staged straight onto the store:
+            // the press itself refuses the practice inbox. The clock is an
+            // hour long so a screenshot never races it.
+            case "smart-clear", "smart-clear-list":
+                store.smartClearReceipt = FixtureSmartClear.receipt()
+                if scene == "smart-clear-list" { store.openSmartClearList() }
+            // THE COMPOSER'S TRASH, asked: a message with words in it (an
+            // empty one closes without asking), then the confirm.
+            case "compose-discard":
+                store.openComposeNew()
+                store.compose?.subject = "Lunch on Thursday"
+                Task {
+                    try? await Task.sleep(for: .milliseconds(900))
+                    store.askDiscardCompose()
+                }
             case "clear":
                 SitrepPoller.shared.stop()
                 store.sitrep.standing = []
@@ -241,10 +303,67 @@
             await store.refreshSent(force: true)
         }
 
+        /// The question in the staged search history.
+        static let historyQuestion = "when does my flight to Denver leave"
+
+        /// The question to tap once its chat is saved (`recents-restore`).
+        static var tapsHistoryQuestion: String? {
+            scene == "recents-restore" ? historyQuestion : nil
+        }
+
+        /// A finished conversation for that question, as a run would have left
+        /// it: a search, a read, an answer with a card, and a follow-up.
+        private static var historyChat: ConversationSnapshot {
+            let card = EmailCard(
+                threadId: "t-flight", subject: "Your trip to Denver: confirmation K7PQ2M",
+                sender: "United Airlines", date: "Oct 24",
+                snippet: "UA 1423 departs SFO Thu Oct 30 at 7:05 AM, arrives DEN 10:38 AM.")
+            let items: [ChatItem] = [
+                ChatItem(id: 1, kind: .user, text: historyQuestion),
+                ChatItem(
+                    id: 2, kind: .tool,
+                    tool: ToolActivity(
+                        useId: "tu1", name: "search_mail", summary: "Searched \"flight Denver\"",
+                        state: .ok)),
+                ChatItem(id: 3, kind: .emails, emails: [card]),
+                ChatItem(
+                    id: 4, kind: .assistant,
+                    text: "Thursday, October 30 at 7:05 AM from SFO (UA 1423)."),
+                ChatItem(id: 5, kind: .user, text: "and the return?"),
+                ChatItem(
+                    id: 6, kind: .assistant,
+                    text: "Sunday, November 2 at 6:20 PM from DEN, landing SFO at 8:01 PM."),
+            ]
+            let history: [Wire.MessageParam] = [
+                .init(role: "user", content: .text(historyQuestion)),
+                .init(
+                    role: "assistant",
+                    content: .blocks([
+                        .toolUse(id: "tu1", name: "search_mail", input: ["query": .string("flight Denver")])
+                    ])),
+                .init(
+                    role: "user",
+                    content: .blocks([.toolResult(toolUseId: "tu1", content: "[]", isError: false)])),
+                .init(role: "assistant", content: .blocks([.text(items[3].text)])),
+                .init(role: "user", content: .text("and the return?")),
+                .init(role: "assistant", content: .blocks([.text(items[5].text)])),
+            ]
+            return ConversationSnapshot(
+                transcript: items, history: history, askedThreadIds: [nil, nil], nextItemId: 6)
+        }
+
         /// The newest card's rail, pulled out for a screenshot (`chain-swipe`).
         static var railOut: Bool { scene == "chain-swipe" }
         /// The composer's recipient fields, already open (`chain-recipients`).
         static var recipientsOpen: Bool { scene == "chain-recipients" }
+        /// The first contact card the reader mounts, opened by itself
+        /// (`chain-contact`). Handed out ONCE: the sender's name, avatar and
+        /// every recipient each carry a card, and only one can be up.
+        private static var contactCardOwed = scene == "chain-contact"
+        static func takeContactCard() -> Bool {
+            defer { contactCardOwed = false }
+            return contactCardOwed
+        }
 
         /// Every door the composer has, open: the fixture daemon advertises
         /// none of them, and a composer staged without its paperclip, clock
@@ -263,6 +382,42 @@
             store.inlineReply?.recipients = set
             store.inlineReply?.seededRecipients = set
             store.inlineReply?.recipientsStated = true
+        }
+
+        private static func longChain(
+            opener: ClientMessage, mine: ClientMessage, theirs: ClientMessage
+        ) -> [ClientMessage] {
+            let paragraph =
+                "<p>Picking this back up with the notes from today. The vendor confirmed the "
+                + "revised timeline, the budget line moved into the second quarter, and the "
+                + "review is now on the calendar for the week after next.</p>"
+            return (0..<30).map { i in
+                var m = i.isMultiple(of: 2) ? theirs : mine
+                m.id = 9100 + i
+                if i.isMultiple(of: 3) {
+                    m = opener
+                    m.id = 9100 + i
+                    let count = [2, 24, 6, 40, 3][i / 3 % 5]
+                    m.html = "<p>Round \(i + 1).</p>" + String(repeating: paragraph, count: count)
+                } else {
+                    m.content = "Message \(i + 1). " + m.content
+                }
+                return m
+            }
+        }
+
+        /// A thread in French under a real practice thread's id, staged in the
+        /// fixture daemon (so the reader's refetches see it too) and in the
+        /// prefetch cache, in the same order `stageChain` explains.
+        private static func stageTranslated(
+            _ first: AttentionUpdate, _ kind: RehearsalAPI.TranslationFixture.Scene,
+            _ store: AppStore
+        ) async {
+            let versions = RehearsalAPI.TranslationFixture.versions(kind, threadId: first.thread_id)
+            guard let opening = versions.first else { return }
+            await RehearsalAPI.shared.stage(thread: versions)
+            store.openThread(first.thread_id, queue: store.sitrep.standing, from: .sitrep)
+            ThreadPrefetch.shared.note(first.thread_id, opening)
         }
 
         /// A CONVERSATION, which the practice mailbox does not have: every
@@ -309,12 +464,19 @@
             // a seeded reader is a different (and rarer) path than the load
             // every practice thread takes. This way the reader mounts empty,
             // and its own load finds the conversation waiting.
+            // `chain-long`: THIRTY MESSAGES, the long thread a phone has to
+            // land on and hold while every card above it measures. Every
+            // third one is a long html email, so the guesses are wrong by
+            // thousands of points, which is what a real chain does.
+            let messages =
+                scene == "chain-long"
+                ? longChain(opener: opener, mine: mine, theirs: theirs) : [opener, mine, theirs]
             store.openThread(first.thread_id, queue: store.sitrep.standing, from: .sitrep)
             ThreadPrefetch.shared.note(
                 first.thread_id,
                 ClientThreadView(
                     cache_allowed: true, thread_id: real.thread_id, subject: real.subject,
-                    messages: [opener, mine, theirs]))
+                    messages: messages))
             switch scene {
             case "chain-reply", "chain-recipients": await openReply(on: 9002, store)
             case "chain-replyall": await openReply(on: 9002, replyAll: true, store)
@@ -524,5 +686,139 @@
                     sent_at: ago(20), mode: .bcc, reached: 3, group_size: 3, failed: 0, opens: 2),
             ],
         ]
+    }
+#endif
+
+#if DEBUG
+    /// The receipt `smart-clear` stages: a batch with an undo, across the
+    /// reasons the copy has words for, with rows for the full list.
+    enum FixtureSmartClear {
+        @MainActor
+        static func receipt() -> AppStore.SmartClearReceipt {
+            let now = Date()
+            func ago(_ days: Double) -> String {
+                ISO8601DateFormatter().string(from: now.addingTimeInterval(-days * 86400))
+            }
+            let items = [
+                SmartClearItem(
+                    id: 91001, reason: "event_passed", sender: "events@citylights.example",
+                    senderName: "City Lights", subject: "Last call: rooftop film night", receivedAt: ago(9)),
+                SmartClearItem(
+                    id: 91002, reason: "offer_ended", sender: "deals@brightly.example",
+                    senderName: "Brightly", subject: "48 hours only: 30% off everything", receivedAt: ago(12)),
+                SmartClearItem(
+                    id: 91003, reason: "offer_ended", sender: "hello@northwind.example",
+                    senderName: "Northwind", subject: "Your weekend code expires Sunday", receivedAt: ago(16)),
+                SmartClearItem(
+                    id: 91004, reason: "stale_promo", sender: "news@paperco.example",
+                    senderName: "PaperCo", subject: "New arrivals for fall", receivedAt: ago(21)),
+                SmartClearItem(
+                    id: 91005, reason: "stale_promo", sender: "news@paperco.example",
+                    senderName: "PaperCo", subject: "The notebook edit", receivedAt: ago(28)),
+                SmartClearItem(
+                    id: 91006, reason: "ignored_sender", sender: "digest@forum.example",
+                    senderName: "", subject: "Your weekly forum digest", receivedAt: ago(5)),
+            ]
+            var byReason: [String: Int] = [:]
+            for item in items { byReason[item.reason, default: 0] += 1 }
+            return AppStore.SmartClearReceipt(
+                batchId: "fixture", cleared: items.count, senders: 5, byReason: byReason,
+                messageIds: items.map(\.id), modelNote: nil, createdAt: now,
+                clock: SmartClearClock(startedAt: now, lasting: 3600), items: items)
+        }
+    }
+#endif
+
+#if DEBUG
+    import Foundation
+
+    /// A week of plans around today, in the device's zone: real events on two
+    /// calendars, and ghosts from mail in every band, so a screenshot shows
+    /// each fill, a guessed end, a trip across days, a fold and a cancellation.
+    enum FixtureCalendar {
+        static func feed(now: Date = Date()) -> TimelineFeed {
+            let cal = Calendar.current
+            let today = cal.startOfDay(for: now)
+            let iso = ISO8601DateFormatter()
+            iso.timeZone = cal.timeZone
+            iso.formatOptions = [.withInternetDateTime]
+            func at(_ day: Int, _ hour: Int, _ minute: Int = 0) -> String {
+                let d = cal.date(byAdding: .day, value: day, to: today)!
+                return iso.string(from: cal.date(bySettingHour: hour, minute: minute, second: 0, of: d)!)
+            }
+            func date(_ day: Int) -> String {
+                let d = cal.date(byAdding: .day, value: day, to: today)!
+                let c = cal.dateComponents([.year, .month, .day], from: d)
+                return String(format: "%04d-%02d-%02d", c.year!, c.month!, c.day!)
+            }
+            let zone = cal.timeZone.identifier
+            let work = "#4285F4", home = "#33B679", family = "#E67C73"
+            func event(
+                _ id: String, _ title: String, _ start: String, _ end: String?, allDay: Bool = false,
+                calendar: String = "Work", color: String = work, place: String? = nil,
+                response: TimelineSelfResponse? = nil, guests: [TimelineGuest]? = nil
+            ) -> TimelineEvent {
+                TimelineEvent(
+                    id: id, calendar_id: calendar.lowercased(), calendar_name: calendar, title: title,
+                    start: start, end: end, all_day: allDay, start_timezone: zone, location: place,
+                    status: .confirmed, self_response: response, busy: true, organizer: nil,
+                    html_link: "https://calendar.google.com/", color: color, editable: true,
+                    description: nil, guests: guests, guests_truncated: false, guest_editable: true)
+            }
+            func ghost(
+                _ id: Int, _ kind: GhostKind, _ title: String, _ start: String, end: String? = nil,
+                allDay: Bool = false, estimated: Bool = false, place: String? = nil,
+                commitment: GhostCommitment, state: GhostState = .ghost, mail: GhostMailState = .live,
+                band: GhostBand? = nil, reason: String? = nil, message: Int = 3
+            ) -> TimelineGhost {
+                TimelineGhost(
+                    id: id, kind: kind, title: title, start: start, start_timezone: zone,
+                    all_day: allDay, end: end, end_estimated: estimated,
+                    end_source: estimated ? .model : (end == nil ? nil : .stated),
+                    estimate: estimated ? GhostEstimate(minutes: 120, basis: "dinner for four at 7:30") : nil,
+                    location: place, commitment: commitment, state: state, mail_state: mail,
+                    verified: true,
+                    likelihood: band.map { GhostLikelihood(band: $0, reason: reason) },
+                    sources: [GhostSource(message_id: message, thread_id: "practice-\(message)", role: .created)],
+                    matched_event: nil)
+            }
+            let events = [
+                event("e1", "Yoga", at(-2, 7, 30), at(-2, 8, 30), calendar: "Personal", color: home),
+                event("e2", "Standup", at(0, 9, 30), at(0, 9, 45)),
+                event("e3", "Lunch with Priya", at(0, 12, 30), at(0, 13, 30), calendar: "Personal", color: home,
+                      place: "Tartine Manufactory"),
+                event("e4", "Design review", at(0, 16), at(0, 17), place: "Room 4B", response: .needsAction,
+                      guests: [
+                          TimelineGuest(email: "sam@studio.example", name: "Sam Ortiz", response: .accepted, organizer: true),
+                          TimelineGuest(email: "jamie@example.com", name: "Jamie", response: .pending, isSelf: true),
+                      ]),
+                event("e5", "Mom's birthday", date(1), date(1), allDay: true, calendar: "Family", color: family),
+                event("e6", "1:1 with Sam", at(1, 10), at(1, 10, 30)),
+                event("e7", "Dinner with the Denver team", at(3, 19), at(3, 21), place: "Tavernetta"),
+                event("e8", "Dentist", at(9, 8, 30), at(9, 9, 30), calendar: "Personal", color: home),
+            ]
+            let ghosts = [
+                ghost(1, .reservation, "Dinner at Nopa", at(0, 19, 30), end: at(0, 21, 30), estimated: true,
+                      place: "Nopa, 560 Divisadero", commitment: .committed, message: 4),
+                ghost(2, .invite, "Climbing at Mission Cliffs", at(1, 18), place: "Mission Cliffs",
+                      commitment: .invited, band: .likely, reason: "they asked twice and you said probably"),
+                ghost(3, .invite, "Book club", at(1, 20), commitment: .invited, band: .maybe),
+                ghost(4, .travel, "Denver trip", date(2), end: date(4), allDay: true, commitment: .committed),
+                ghost(5, .travel, "UA 1532 SFO to DEN", at(2, 7, 5), end: at(2, 10, 40),
+                      place: "SFO Terminal 3", commitment: .committed, message: 6),
+                ghost(6, .invite, "Founders mixer", at(3, 18), commitment: .invited, band: .unlikely),
+                ghost(7, .proposal, "Coffee with Alex", at(4, 9), commitment: .proposed,
+                      state: .cancelled, mail: .cancelled, band: .likely),
+                ghost(8, .ticket, "Japanese Breakfast", at(6, 20), end: at(6, 23), estimated: true,
+                      place: "The Fillmore", commitment: .committed, message: 7),
+            ]
+            return TimelineFeed(
+                ghosts: ghosts, events: events,
+                calendar: TimelineCalendarStatus(granted: true, synced_at: iso.string(from: now)),
+                calendars: [
+                    TimelineCalendar(id: "work", name: "Work", color: work, primary: true, writable: true, can_invite: true),
+                    TimelineCalendar(id: "personal", name: "Personal", color: home, primary: false, writable: true),
+                ])
+        }
     }
 #endif

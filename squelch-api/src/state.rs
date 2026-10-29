@@ -9,6 +9,7 @@ use squelch_core::store::SqliteStore;
 use squelch_core::triage::fye_headline::HeadlineClient;
 use squelch_core::triage::rule_infer::RuleInferClient;
 use squelch_core::triage::rule_suggest::RuleSuggestClient;
+use squelch_core::triage::smart_clear::SmartClearClient;
 use squelch_core::triage::unsub_page::UnsubPageClient;
 use squelch_core::types::AccountId;
 
@@ -100,6 +101,27 @@ pub struct ApiState {
     /// the whole ratio between a small model and a capable one.
     pub(crate) notify_price_in_per_mtok: f64,
     pub(crate) notify_price_out_per_mtok: f64,
+    /// The configured SMART CLEAR model id and its per-MTok prices: the label
+    /// and the fourth pricing arm on `/client/usage`'s `smart_clear` category.
+    /// Its own numbers for the reason the notify lane has its own: it runs a
+    /// model that is neither stage's and not the notify model either.
+    pub(crate) smart_clear_model: Arc<str>,
+    pub(crate) smart_clear_price_in_per_mtok: f64,
+    pub(crate) smart_clear_price_out_per_mtok: f64,
+    /// The TRANSLATE model and its per-MTok prices (docs/TRANSLATION.md),
+    /// which `/client/usage` costs the `translate` category with. Its own arm
+    /// for the notify arm's reason: it is neither Stage-1's model nor the
+    /// notify model, so either one's prices would misreport it.
+    pub(crate) translate_model: Arc<str>,
+    pub(crate) translate_price_in_per_mtok: f64,
+    pub(crate) translate_price_out_per_mtok: f64,
+    /// Whether a translator will ever work a queued translation (translation
+    /// on and an LLM configured, [`squelch_core::config::Config::translation_active`]).
+    /// Without one, `GET /client/thread/{id}` serves no `pending` or
+    /// `deferred` translation (nothing would ever finish it, and the reader
+    /// would say "Translating..." for good), and the translate POST promotes
+    /// nothing. Default `true`, matching `[translate].enabled`.
+    pub(crate) translate_active: bool,
     /// Manual-refresh signal shared with the Gmail sync loop, fired by
     /// `POST /client/refresh`. `None` when no sync loop is wired in, which the
     /// endpoint reports as `triggered: false` rather than faking a poke.
@@ -141,6 +163,18 @@ pub struct ApiState {
     /// clone of the state, rather than on the mailer: it rations the owner's
     /// screen, of which there is one per mailbox however many mailers exist.
     pub(crate) draft_open_clock: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    /// Smart re-notify (issue #625, [`crate::renotify`]): how it behaves, the
+    /// channel its banners reach the Mac on, and the wake the event stream
+    /// pokes when a Mac arrives. See the module for the contract.
+    pub(crate) renotify: crate::renotify::RenotifyShared,
+    /// The same requests, for the owner's PHONE: handed to the APNs pusher
+    /// (see [`squelch_core::push::DraftPing`]), which pushes them to every
+    /// registered iPhone. Not durable either, for the same reason as
+    /// `draft_opens`; with no pusher running (no relay configured) a send
+    /// finds no receiver and is simply the answer "no phone was told".
+    pub(crate) draft_pings: tokio::sync::broadcast::Sender<squelch_core::push::DraftPing>,
+    /// What the phone has already been told; see [`DraftPingLedger`].
+    pub(crate) draft_pinged: Arc<std::sync::Mutex<DraftPingLedger>>,
     /// The daemon's shutdown signal. An SSE stream is infinite and axum's
     /// graceful shutdown waits for open connections, so without this one
     /// resident client would hold squelchd open forever.
@@ -255,6 +289,12 @@ pub struct ApiState {
     /// The mailbox's Gmail quota budget, shared with the sync engines. `None`
     /// when no daemon wired one (tests); the write door is then unpaced.
     pub(crate) gmail_budget: Option<Arc<squelch_core::gmail_budget::GmailBudget>>,
+    /// The account's mail provider once `handlers::write_client` has read it.
+    /// It cannot change under a running door (nothing writes the column yet),
+    /// so after the first successful read no write action pays a store call
+    /// for it, or can fail on one. Shared by every clone of the state; a
+    /// failed read is not cached.
+    pub(crate) mail_provider: Arc<std::sync::OnceLock<squelch_core::mail::MailProvider>>,
     /// THE ESCAPE HATCH, from `[console] allow_insecure_cookie` /
     /// `SQUELCH_CONSOLE_ALLOW_INSECURE_COOKIE`: the operator's declaration that
     /// this console is served over plain http on an origin that is not loopback.
@@ -307,6 +347,17 @@ pub struct ApiState {
     /// daily cap the usage ledger cannot see (timeouts report no usage) and
     /// cannot see in time (two calls racing the same ledger read).
     pub(crate) fye_headline_attempts: Arc<std::sync::Mutex<(String, u32)>>,
+    /// The model behind smart clear's "has this expired" pass. `None` (no key,
+    /// every test harness) means a press clears on stored facts alone and
+    /// says so. See [`squelch_core::triage::smart_clear`].
+    pub(crate) smart_clear: Option<SmartClearClient>,
+    /// Smart clear model passes ATTEMPTED today, as (UTC day, count): the half
+    /// of the daily cap the usage ledger cannot see, exactly as
+    /// `fye_headline_attempts` is for the headline.
+    pub(crate) smart_clear_attempts: Arc<std::sync::Mutex<(String, u32)>>,
+    /// A smart clear press is in flight. One at a time: the second answers
+    /// 429 without touching the store (see `triage::smart_clear`).
+    pub(crate) smart_clear_running: Arc<std::sync::atomic::AtomicBool>,
     /// The hosted assistant relay: forwards the Passband app's Anthropic-shaped
     /// streaming request to the gateway with a daemon-held credential. `None`
     /// (no gateway + assistant key configured, and every test harness) means
@@ -567,6 +618,24 @@ impl ApiState {
                 .price_in_per_mtok,
             notify_price_out_per_mtok: squelch_core::config::NotifyConfig::default()
                 .price_out_per_mtok,
+            smart_clear_model: {
+                let s = squelch_core::config::SmartClearConfig::default();
+                Arc::from(s.model.as_str())
+            },
+            smart_clear_price_in_per_mtok: squelch_core::config::SmartClearConfig::default()
+                .price_in_per_mtok,
+            smart_clear_price_out_per_mtok: squelch_core::config::SmartClearConfig::default()
+                .price_out_per_mtok,
+            translate_model: Arc::from(
+                squelch_core::config::TranslateConfig::default()
+                    .model
+                    .as_str(),
+            ),
+            translate_price_in_per_mtok: squelch_core::config::TranslateConfig::default()
+                .price_in_per_mtok,
+            translate_price_out_per_mtok: squelch_core::config::TranslateConfig::default()
+                .price_out_per_mtok,
+            translate_active: true,
             refresh: None,
             event_listeners: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             spam_refresh: None,
@@ -574,6 +643,9 @@ impl ApiState {
             event_notifier: None,
             draft_opens: tokio::sync::broadcast::channel(16).0,
             draft_open_clock: Arc::new(std::sync::Mutex::new(None)),
+            renotify: crate::renotify::RenotifyShared::default(),
+            draft_pings: tokio::sync::broadcast::channel(16).0,
+            draft_pinged: Default::default(),
             shutdown: None,
             scheduled_wake: Arc::new(tokio::sync::Notify::new()),
             worker_clock_skew: chrono::Duration::zero(),
@@ -602,6 +674,7 @@ impl ApiState {
             audit_actor: crate::handlers::ACTION_ACTOR,
             sync_metrics: None,
             gmail_budget: None,
+            mail_provider: Arc::new(std::sync::OnceLock::new()),
             console_allow_insecure_cookie: false,
             console_signin_limiter: Arc::new(std::sync::Mutex::new(
                 ConsoleRateLimiter::per_minute(crate::console::CONSOLE_SIGNIN_REQUESTS_PER_MINUTE),
@@ -611,6 +684,9 @@ impl ApiState {
             fye_headline: None,
             fye_headline_cache: Arc::new(std::sync::Mutex::new(None)),
             fye_headline_attempts: Arc::new(std::sync::Mutex::new((String::new(), 0))),
+            smart_clear: None,
+            smart_clear_attempts: Arc::new(std::sync::Mutex::new((String::new(), 0))),
+            smart_clear_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             assistant: None,
             sharing: None,
             features: Features::none(),
@@ -763,6 +839,14 @@ impl ApiState {
     /// replays and holds the connection, it just never goes live.
     ///
     /// [`SqliteStore::attach_event_notifier`]: squelch_core::store::SqliteStore::attach_event_notifier
+    /// The APNs pusher's end of the agent door's draft review requests (see
+    /// [`squelch_core::push::Pusher::with_draft_pings`]).
+    pub fn subscribe_draft_pings(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<squelch_core::push::DraftPing> {
+        self.draft_pings.subscribe()
+    }
+
     pub fn with_event_notifier(mut self, tx: tokio::sync::broadcast::Sender<i64>) -> Self {
         self.event_notifier = Some(tx);
         self
@@ -773,6 +857,13 @@ impl ApiState {
     /// stream otherwise keeps the server from finishing its drain.
     pub fn with_shutdown(mut self, shutdown: tokio::sync::watch::Receiver<bool>) -> Self {
         self.shutdown = Some(shutdown);
+        self
+    }
+
+    /// Smart re-notify's tunables (`[renotify]`). Whether it runs at all is
+    /// the `renotify` hidden feature.
+    pub fn with_renotify_config(mut self, config: squelch_core::config::RenotifyConfig) -> Self {
+        self.renotify = crate::renotify::RenotifyShared::new(config);
         self
     }
 
@@ -997,6 +1088,29 @@ impl ApiState {
         self
     }
 
+    /// Attach smart clear's model. `None` keeps
+    /// `/client/v2/reading/smart_clear` clearing on stored facts alone.
+    pub fn with_smart_clear(mut self, client: Option<SmartClearClient>) -> Self {
+        self.smart_clear = client;
+        self
+    }
+
+    /// Set the SMART CLEAR model + its per-MTok prices, which `/client/usage`
+    /// costs the `smart_clear` category with. See
+    /// [`ApiState::with_notify_config`] for why each model that is not a
+    /// stage's gets its own entry point.
+    pub fn with_smart_clear_config(
+        mut self,
+        model: impl Into<String>,
+        price_in_per_mtok: f64,
+        price_out_per_mtok: f64,
+    ) -> Self {
+        self.smart_clear_model = Arc::from(model.into().as_str());
+        self.smart_clear_price_in_per_mtok = price_in_per_mtok;
+        self.smart_clear_price_out_per_mtok = price_out_per_mtok;
+        self
+    }
+
     /// The small model that reads an unsubscribe page when a job needs one.
     /// `None` (no key, every test harness) leaves the no-model rule: done only
     /// when the page says so, and one action only when it is the obvious one.
@@ -1148,6 +1262,27 @@ impl ApiState {
         self
     }
 
+    /// Set the TRANSLATE model + its per-MTok prices, which `/client/usage`
+    /// costs the `translate` category with.
+    pub fn with_translate_config(
+        mut self,
+        model: impl Into<String>,
+        price_in_per_mtok: f64,
+        price_out_per_mtok: f64,
+    ) -> Self {
+        self.translate_model = Arc::from(model.into().as_str());
+        self.translate_price_in_per_mtok = price_in_per_mtok;
+        self.translate_price_out_per_mtok = price_out_per_mtok;
+        self
+    }
+
+    /// Whether a translator exists to finish queued translations (see the
+    /// field). `from_config` sets it from the config.
+    pub fn with_translate_active(mut self, active: bool) -> Self {
+        self.translate_active = active;
+        self
+    }
+
     /// TEST HOOK: run the scheduled-send worker's clock `skew` ahead of the
     /// wall clock (see `worker_clock_skew`). Never used in production.
     #[doc(hidden)]
@@ -1213,7 +1348,7 @@ impl ApiState {
     /// for every clone of this state. See the field.
     pub(crate) fn write_http(&self) -> reqwest::Client {
         self.write_http
-            .get_or_init(crate::gmail_write::GmailWriteClient::build_http)
+            .get_or_init(crate::write::gmail::GmailWriteClient::build_http)
             .clone()
     }
 
@@ -1302,6 +1437,19 @@ impl ApiState {
                 cfg.notify.price_in_per_mtok,
                 cfg.notify.price_out_per_mtok,
             )
+            .with_renotify_config(cfg.renotify.clone())
+            // Smart clear's own model and prices, for the same reason.
+            .with_smart_clear_config(
+                cfg.smart_clear.model.clone(),
+                cfg.smart_clear.price_in_per_mtok,
+                cfg.smart_clear.price_out_per_mtok,
+            )
+            .with_translate_config(
+                cfg.translate.model.clone(),
+                cfg.translate.price_in_per_mtok,
+                cfg.translate.price_out_per_mtok,
+            )
+            .with_translate_active(cfg.translation_active())
             .with_tracking_base_url(cfg.tracking.base_url.clone())
             .with_console_allow_insecure_cookie(cfg.console.allow_insecure_cookie)
             // The poller's retirement cap doubles as the listing's suppression
@@ -1317,6 +1465,9 @@ impl ApiState {
             .with_rule_suggestion(RuleSuggestClient::from_config(cfg))
             // The sitrep headline: same key, same notify model.
             .with_fye_headline(HeadlineClient::from_config(cfg))
+            // Smart clear's expiry pass: same key, its OWN model
+            // (`[smart_clear]`), billed under its own ledger category.
+            .with_smart_clear(SmartClearClient::from_config(cfg))
             // The unsubscribe page reader rides the same key and the notify
             // model, billed under its own ledger category.
             .with_unsub_page_reader(UnsubPageClient::from_config(cfg))
@@ -1381,7 +1532,7 @@ impl ApiState {
             Err(_) => {
                 eprintln!(
                     "squelch-api: no OAuth client configured; action endpoints will return 403 \
-                     (set client_id/client_secret and run `squelchd auth --write`)"
+                     (set client_id/client_secret and run `squelchd auth`)"
                 );
                 state
             }
@@ -1392,4 +1543,18 @@ impl ApiState {
     pub fn account_id(&self) -> AccountId {
         self.account_id
     }
+}
+
+/// The phone's side of the agent door's review requests: which drafts it was
+/// already told about, and when. ONE PUSH PER DRAFT (asking again may bring a
+/// draft up on the Mac again, never buzz the phone again), and a buzz budget of
+/// its own, much tighter than the Mac's five-second clock: an agent looping
+/// over `create_draft open:true` must not be able to ring the owner's phone
+/// once per draft it can hold. Both lists are bounded.
+#[derive(Debug, Default)]
+pub(crate) struct DraftPingLedger {
+    /// `(draft id, created)`, oldest first.
+    pub(crate) told: std::collections::VecDeque<(i64, i64)>,
+    /// When each push in the last hour went out, oldest first.
+    pub(crate) sent_at: std::collections::VecDeque<std::time::Instant>,
 }

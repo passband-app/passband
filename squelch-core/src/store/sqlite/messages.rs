@@ -46,6 +46,63 @@ fn bump_unsub_violation_conn(
     Ok(())
 }
 
+/// A stored ISO 639-1 code as the reader names it ("French"), the code
+/// itself for one no detection would have written.
+fn language_name(code: &str) -> String {
+    crate::translate::Lang::from_code(code)
+        .map(|l| l.english_name().to_string())
+        .unwrap_or_else(|| code.to_string())
+}
+
+/// The human door's translation off a thread row whose columns from `at` are
+/// `source_lang, status, subject, body, body_html, missing_facts`. The join
+/// admits `deferred`, `pending`, `done` and `incomplete` only; `deferred` and
+/// `pending` carry no text (the reader shows the original and says it is
+/// translating), and `missing_facts` rides only on `incomplete`.
+///
+/// `deferred` IS SERVED AS ITSELF, never as `pending`: reading a thread buys
+/// nothing (the client prefetches through this read), so a deferred row tells
+/// the reader a translation is available, and only the reader DISPLAYING the
+/// thread asks for it, over `POST /client/thread/{id}/translate`.
+fn client_translation(
+    r: &rusqlite::Row<'_>,
+    at: usize,
+) -> rusqlite::Result<Option<crate::types::ClientTranslation>> {
+    let Some(code) = r.get::<_, Option<String>>(at)? else {
+        return Ok(None);
+    };
+    let status: String = r.get(at + 1)?;
+    let ready = status == "done" || status == "incomplete";
+    let text = |i: usize| -> rusqlite::Result<String> {
+        Ok(if ready {
+            r.get::<_, Option<String>>(i)?.unwrap_or_default()
+        } else {
+            String::new()
+        })
+    };
+    let missing_facts = if status == "incomplete" {
+        r.get::<_, Option<String>>(at + 5)?
+            .and_then(|m| serde_json::from_str::<Vec<String>>(&m).ok())
+            .filter(|m| !m.is_empty())
+    } else {
+        None
+    };
+    Ok(Some(crate::types::ClientTranslation {
+        source_language: language_name(&code),
+        source_lang: code,
+        subject: text(at + 2)?,
+        content: text(at + 3)?,
+        html: if ready {
+            r.get::<_, Option<String>>(at + 4)?
+                .filter(|h| !h.is_empty())
+        } else {
+            None
+        },
+        missing_facts,
+        status,
+    }))
+}
+
 /// Upsert a message + FTS + Sent-derived contacts against an explicit
 /// connection/transaction handle. Shared by [`SqliteStore::upsert_message`] and
 /// the transactional [`Store::ingest_message`] path so both stay in sync.
@@ -144,12 +201,10 @@ fn upsert_message_conn(
         |r| r.get(0),
     )?;
 
-    // Keep the FTS index in sync.
-    conn.execute("DELETE FROM messages_fts WHERE rowid=?1", params![id])?;
-    conn.execute(
-        "INSERT INTO messages_fts(rowid, subject, body) VALUES(?1,?2,?3)",
-        params![id, msg.subject, msg.body],
-    )?;
+    // Keep the FTS index in sync: the row just written, plus its served
+    // translation when one exists (a re-sighting of translated mail must not
+    // drop the English from the index).
+    super::translations::refresh_fts_conn(conn, id)?;
 
     // The sender directory, for the search field's `from:` menu. Inbound and
     // non-spam only: sent mail's From is the user, and spam is a structural
@@ -276,6 +331,67 @@ fn insert_attachments_conn(
     Ok(())
 }
 
+/// [`external_messages_allowed_conn`]: whether EVERY message of account `?1`
+/// named in the JSON array `?2` may go out the agent door. Each message's
+/// current assessment is checked, and so is every source its decision
+/// consumed, transitively. The check fails closed: on a message that does not
+/// exist, an assessment that is unknown, pending or restricted, an owner's
+/// seal (an `external_access` correction), or a source whose revision has
+/// moved since the decision read it.
+///
+/// ONE WALK FOR THE WHOLE SET. Each condition is "no bad message (or stale
+/// edge) anywhere in what this message depends on", so "all of these are
+/// allowed" is the same question asked of the union of their dependencies.
+/// A thread's siblings mostly depend on each other, so the guard over a
+/// ten-message thread walks the thread once instead of ten times.
+///
+/// PINNED ORDER. `CROSS JOIN` keeps the walk's row outside each join onto
+/// `agent_decision_sources`, which is then a seek on its primary key. Without
+/// `sqlite_stat1` the planner is free to reach the table first by `account_id`
+/// alone and probe the walk from it (`queue_dependent_refreshes` measured what
+/// that costs). `agent_triage::tests::set_access_check_seeks_every_table`
+/// pins the plan.
+pub(super) const EXTERNAL_MESSAGES_ALLOWED_SQL: &str =
+    "WITH RECURSIVE dependencies(message_id) AS (
+         SELECT value FROM json_each(?2)
+         UNION
+         SELECT d.source_message_id FROM dependencies p
+         CROSS JOIN agent_decision_sources d ON d.account_id=?1 AND d.message_id=p.message_id
+     )
+     SELECT EXISTS(SELECT 1 FROM json_each(?2))
+       AND NOT EXISTS(
+         SELECT 1 FROM dependencies p
+         LEFT JOIN messages m ON m.id=p.message_id AND m.account_id=?1
+         LEFT JOIN agent_message_state a ON a.message_id=p.message_id AND a.account_id=?1
+         WHERE m.id IS NULL OR a.access IS NULL OR a.access!='allowed'
+           OR EXISTS(SELECT 1 FROM agent_triage_corrections c WHERE c.account_id=?1
+               AND c.message_id=p.message_id AND c.field='external_access' AND c.value_json='true')
+       )
+       AND NOT EXISTS(
+         SELECT 1 FROM dependencies p
+         CROSS JOIN agent_decision_sources d ON d.account_id=?1 AND d.message_id=p.message_id
+         LEFT JOIN agent_message_state a ON a.message_id=d.source_message_id AND a.account_id=?1
+         WHERE a.revision IS NULL OR a.revision!=d.source_revision
+       )";
+
+/// May every one of `message_ids` go out the agent door? See
+/// [`EXTERNAL_MESSAGES_ALLOWED_SQL`]. An empty set is NOT allowed, here and in
+/// the statement itself: a caller that ends up asking about nothing has lost
+/// track of what it is serving.
+pub(super) fn external_messages_allowed_conn(
+    conn: &Connection,
+    account_id: AccountId,
+    message_ids: &[i64],
+) -> Result<bool> {
+    if message_ids.is_empty() {
+        return Ok(false);
+    }
+    let seeds = serde_json::to_string(message_ids).map_err(|e| CoreError::Other(e.into()))?;
+    Ok(conn
+        .prepare_cached(EXTERNAL_MESSAGES_ALLOWED_SQL)?
+        .query_row(params![account_id, seeds], |row| row.get(0))?)
+}
+
 /// Check the current assessment and every consumed source. Unknown assessments
 /// and changed sources fail closed, including dependencies of derived summaries.
 pub(super) fn external_message_allowed_conn(
@@ -283,32 +399,7 @@ pub(super) fn external_message_allowed_conn(
     account_id: AccountId,
     message_id: i64,
 ) -> Result<bool> {
-    Ok(conn.query_row(
-        "WITH RECURSIVE dependencies(message_id) AS (
-             SELECT ?2
-             UNION
-             SELECT d.source_message_id FROM agent_decision_sources d
-             JOIN dependencies p ON p.message_id=d.message_id
-             WHERE d.account_id=?1
-         )
-         SELECT EXISTS(SELECT 1 FROM messages WHERE account_id=?1 AND id=?2)
-           AND NOT EXISTS(
-             SELECT 1 FROM dependencies d
-             LEFT JOIN messages m ON m.id=d.message_id AND m.account_id=?1
-             LEFT JOIN agent_message_state a ON a.message_id=d.message_id AND a.account_id=?1
-             WHERE m.id IS NULL OR a.access IS NULL OR a.access!='allowed'
-               OR EXISTS(SELECT 1 FROM agent_triage_corrections c WHERE c.account_id=?1
-                   AND c.message_id=d.message_id AND c.field='external_access' AND c.value_json='true')
-           )
-           AND NOT EXISTS(
-             SELECT 1 FROM agent_decision_sources d
-             JOIN dependencies p ON p.message_id=d.message_id
-             LEFT JOIN agent_message_state a ON a.message_id=d.source_message_id AND a.account_id=?1
-             WHERE d.account_id=?1 AND (a.revision IS NULL OR a.revision!=d.source_revision)
-           )",
-        params![account_id, message_id],
-        |row| row.get(0),
-    )?)
+    external_messages_allowed_conn(conn, account_id, &[message_id])
 }
 
 /// The thread's messages as an external reader may count them: everything but
@@ -330,6 +421,95 @@ const EXTERNAL_THREAD_SUBJECT_SQL: &str = concat!(
     " ORDER BY m.received_at ASC LIMIT 1"
 );
 
+/// [`EXTERNAL_THREAD_IDS_SQL`]: the siblings the thread guard asks about.
+pub(super) fn external_thread_ids_conn(
+    conn: &Connection,
+    account_id: AccountId,
+    thread_id: &str,
+) -> Result<Vec<i64>> {
+    Ok(conn
+        .prepare_cached(EXTERNAL_THREAD_IDS_SQL)?
+        .query_map(params![account_id, thread_id], |row| row.get::<_, i64>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// THE THREAD GUARD, as one walk: may every sibling of `thread_id` that an
+/// external reader counts ([`EXTERNAL_THREAD_IDS_SQL`]), and every one of
+/// `also`, go out the agent door? A thread with no such sibling is not found.
+/// [`thread_guard_and_subject`] is this with nothing else to ask about; the
+/// listings and the per-message reads that also guard the message's thread
+/// pass their own messages in `also`, so the guard has one definition however
+/// it is asked.
+pub(super) fn thread_allowed_with_conn(
+    conn: &Connection,
+    account_id: AccountId,
+    thread_id: &str,
+    also: &[i64],
+) -> Result<bool> {
+    let mut ids = external_thread_ids_conn(conn, account_id, thread_id)?;
+    if ids.is_empty() {
+        return Ok(false);
+    }
+    ids.extend_from_slice(also);
+    external_messages_allowed_conn(conn, account_id, &ids)
+}
+
+/// Judges the rows of one listing the way the agent door serves them, under
+/// the lock the caller holds: a row passes when its thread passes the guard
+/// together with the ids `half` names for that thread (`None` refuses the
+/// thread outright: the listings use it for attention read at a revision that
+/// has moved), and the row's own messages are allowed.
+///
+/// A thread with one row is one walk. A thread with more is judged once and
+/// each of its rows then walks its own messages alone: "all of A and B" is
+/// "all of A" and "all of B". A judge is for one lock hold; a verdict kept
+/// past it would answer for a store that may have changed since.
+pub(super) struct ListingJudge {
+    repeated: std::collections::HashMap<String, Option<bool>>,
+}
+
+impl ListingJudge {
+    /// A judge for rows in these threads, one entry per row.
+    pub(super) fn new<'a>(threads: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut rows: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for thread in threads {
+            *rows.entry(thread).or_default() += 1;
+        }
+        Self {
+            repeated: rows
+                .into_iter()
+                .filter(|&(_, rows)| rows > 1)
+                .map(|(thread, _)| (thread.to_string(), None))
+                .collect(),
+        }
+    }
+
+    pub(super) fn allowed(
+        &mut self,
+        conn: &Connection,
+        account_id: AccountId,
+        thread: &str,
+        own: &[i64],
+        half: impl Fn(&str) -> Result<Option<Vec<i64>>>,
+    ) -> Result<bool> {
+        let Some(verdict) = self.repeated.get_mut(thread) else {
+            let Some(mut ids) = half(thread)? else {
+                return Ok(false);
+            };
+            ids.extend_from_slice(own);
+            return thread_allowed_with_conn(conn, account_id, thread, &ids);
+        };
+        let thread_ok = match *verdict {
+            Some(known) => known,
+            None => *verdict.insert(match half(thread)? {
+                None => false,
+                Some(ids) => thread_allowed_with_conn(conn, account_id, thread, &ids)?,
+            }),
+        };
+        Ok(thread_ok && external_messages_allowed_conn(conn, account_id, own)?)
+    }
+}
+
 /// External full-thread reads require every sibling to be allowed, except an
 /// unassessed archive sibling, which is omitted instead (see
 /// `archive_unassessed_sql!`). A thread of nothing but those is not found.
@@ -339,17 +519,8 @@ pub(super) fn thread_guard_and_subject(
     account_id: AccountId,
     thread_id: &str,
 ) -> Result<String> {
-    let mut stmt = conn.prepare(EXTERNAL_THREAD_IDS_SQL)?;
-    let ids = stmt
-        .query_map(params![account_id, thread_id], |row| row.get::<_, i64>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    if ids.is_empty() {
+    if !thread_allowed_with_conn(conn, account_id, thread_id, &[])? {
         return Err(CoreError::NotFound);
-    }
-    for id in ids {
-        if !external_message_allowed_conn(conn, account_id, id)? {
-            return Err(CoreError::NotFound);
-        }
     }
     conn.query_row(
         EXTERNAL_THREAD_SUBJECT_SQL,
@@ -359,6 +530,10 @@ pub(super) fn thread_guard_and_subject(
     .optional()?
     .ok_or(CoreError::NotFound)
 }
+
+/// Rows per store lock in [`SqliteStore::external_listing_allowed`]: about
+/// 8 ms of checks on 8-11 message threads, with or without statistics.
+const LISTING_CHECK_CHUNK: usize = 64;
 
 /// The most access checks one thread open asks for, live and archive together.
 const THREAD_ACCESS_BATCH: usize = 8;
@@ -535,15 +710,14 @@ pub(super) fn external_contributor_allowed_conn(
     account_id: AccountId,
     message_id: i64,
 ) -> Result<bool> {
-    if !external_message_allowed_conn(conn, account_id, message_id)? {
+    let thread: Option<String> = conn
+        .prepare_cached("SELECT thread_id FROM messages WHERE account_id=?1 AND id=?2")?
+        .query_row(params![account_id, message_id], |r| r.get(0))
+        .optional()?;
+    let Some(thread) = thread else {
         return Ok(false);
-    }
-    let thread: String = conn.query_row(
-        "SELECT thread_id FROM messages WHERE account_id=?1 AND id=?2",
-        params![account_id, message_id],
-        |r| r.get(0),
-    )?;
-    Ok(thread_guard_and_subject(conn, account_id, &thread).is_ok())
+    };
+    thread_allowed_with_conn(conn, account_id, &thread, &[message_id])
 }
 
 impl SqliteStore {
@@ -579,7 +753,8 @@ impl SqliteStore {
             "UPDATE triage
                 SET stage1_model_used = NULL, model_used = NULL, needs_stage2 = 0,
                     extractor_model_used = NULL, retriage_at = ?3,
-                    status = 'new', surfaced_at = NULL, resolved_at = NULL
+                    status = 'new', surfaced_at = NULL, resolved_at = NULL,
+                    resolved_by = NULL
               WHERE account_id = ?1 AND message_id = ?2",
             params![account_id, message_id, now],
         )?;
@@ -616,6 +791,41 @@ impl SqliteStore {
             Err(CoreError::NotFound) => Ok(false),
             Err(error) => Err(error),
         }
+    }
+
+    /// An agent door's own second look at a listing it is about to serve: for
+    /// each `(message, decision source, thread)`, may the message and the
+    /// message whose decision the row shows go out (what `agent_access_allowed`
+    /// asks), and may their thread (what [`Self::external_thread_allowed`]
+    /// asks)? One answer per row, in order, judged by [`ListingJudge`].
+    ///
+    /// One lock per [`LISTING_CHECK_CHUNK`] rows rather than two lock round
+    /// trips per row, so the store is held for one chunk at a time, and the
+    /// thread yields between chunks so a writer waiting on the mutex (which
+    /// is not fair) usually gets in.
+    pub fn external_listing_allowed(
+        &self,
+        account_id: AccountId,
+        items: &[(i64, i64, &str)],
+    ) -> Result<Vec<bool>> {
+        let mut allowed = Vec::with_capacity(items.len());
+        for (at, chunk) in items.chunks(LISTING_CHECK_CHUNK).enumerate() {
+            if at > 0 {
+                std::thread::yield_now();
+            }
+            let conn = self.lock()?;
+            let mut judge = ListingJudge::new(chunk.iter().map(|row| row.2));
+            for &(message_id, decision_source, thread_id) in chunk {
+                allowed.push(judge.allowed(
+                    &conn,
+                    account_id,
+                    thread_id,
+                    &[message_id, decision_source],
+                    |_| Ok(Some(Vec::new())),
+                )?);
+            }
+        }
+        Ok(allowed)
     }
 
     /// May a human client keep this thread in its on-disk cache? Stricter than
@@ -676,23 +886,41 @@ impl SqliteStore {
         // AND NO UNASSESSED ARCHIVE ROW, for the reason on
         // `archive_unassessed_sql`: the guard above let the thread through
         // without looking at those rows, so this select is what keeps them in.
+        //
+        // THE TRANSLATION IS JOINED HERE, in the one query that reads the
+        // body under the guard above, so it can reach no reader the body
+        // could not (docs/TRANSLATION.md, invariant 5). Served statuses only.
         let mut stmt = conn.prepare(concat!(
-            "SELECT m.id, m.from_addr, m.from_name, m.received_at, m.body
+            "SELECT m.id, m.from_addr, m.from_name, m.received_at, m.body,
+                    tr.source_lang, tr.subject, tr.body, tr.status
              FROM messages m
              LEFT JOIN agent_message_state a
                ON a.account_id=m.account_id AND a.message_id=m.id
+             LEFT JOIN message_translations tr
+               ON tr.message_id=m.id AND tr.account_id=m.account_id
+              AND tr.status IN ('done','incomplete')
              WHERE m.account_id=?1 AND m.thread_id=?2 AND m.is_spam = 0 AND NOT ",
             archive_unassessed_sql!(),
             " ORDER BY m.received_at ASC"
         ))?;
         let messages = stmt
             .query_map(params![account_id, thread_id], |r| {
+                let translation = match r.get::<_, Option<String>>(5)? {
+                    Some(code) => Some(crate::types::ExternalTranslation {
+                        source_language: language_name(&code),
+                        subject: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                        content: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                        status: r.get(8)?,
+                    }),
+                    None => None,
+                };
                 Ok(SanitizedMessage {
                     id: r.get(0)?,
                     from_addr: r.get(1)?,
                     from_name: r.get(2)?,
                     received_at: dt(r, 3)?,
                     content: r.get(4)?,
+                    translation,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -770,10 +998,15 @@ impl SqliteStore {
                     (m.is_sent = 1
                      OR (TRIM(COALESCE(m.from_addr, '')) != ''
                          AND LOWER(TRIM(COALESCE(m.from_addr, ''))) =
-                             LOWER(TRIM(COALESCE(a.email, ''))))) AS authored_by_account
+                             LOWER(TRIM(COALESCE(a.email, ''))))) AS authored_by_account,
+                    tr.source_lang, tr.status, tr.subject, tr.body, tr.body_html,
+                    tr.missing_facts
              FROM messages m
              LEFT JOIN triage t ON t.message_id = m.id
              LEFT JOIN accounts a ON a.id = m.account_id
+             LEFT JOIN message_translations tr
+               ON tr.message_id = m.id AND tr.account_id = m.account_id
+              AND tr.status IN ('deferred','pending','done','incomplete')
              WHERE m.account_id=?1 AND m.thread_id=?2
              ORDER BY m.received_at ASC",
         )?;
@@ -821,14 +1054,18 @@ impl SqliteStore {
                     attention_open: r.get::<_, Option<String>>(8)?.map(|s| s != "done"),
                     one_line: r.get::<_, Option<String>>(9)?.filter(|s| !s.is_empty()),
                     auth_pass: r.get::<_, Option<bool>>(10)?,
+                    translation: client_translation(r, 17)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         drop(stmt);
 
         for m in &mut messages {
-            // ALWAYS present on the wire ([] when none). No sealed guard needed:
-            // the whole view 404s any thread containing a sealed message.
+            // ALWAYS present on the wire ([] when none). No sealed guard: this
+            // is the HUMAN thread view, which serves sealed and restricted
+            // threads to their owner by design
+            // (`human_can_read_restricted_thread_with_html`). The audited
+            // reveal is the Auth page's door, not this view's gate.
             m.attachments = load_client_attachments_conn(&conn, account_id, m.id)?;
         }
         if messages.is_empty() {
@@ -1269,6 +1506,12 @@ impl SqliteStore {
                  status=CASE WHEN excluded.status='done' THEN 'done' ELSE triage.status END,
                  resolved_at=CASE WHEN excluded.status='done'
                      THEN excluded.resolved_at ELSE triage.resolved_at END,
+                 -- A re-ingest that resolves the row is its own resolution and
+                 -- replaces `resolved_at`, so whatever sweep had resolved it
+                 -- before no longer owns it. One that leaves the status alone
+                 -- leaves the provenance alone too.
+                 resolved_by=CASE WHEN excluded.status='done'
+                     THEN NULL ELSE triage.resolved_by END,
                  -- WRITTEN ONCE, ON FIRST INSERT, AND NEVER AGAIN — not even to
                  -- a fresher stamp, and not conditioned on `PROCESSED` like the
                  -- verdict columns. Notify eligibility is a fact about when we
@@ -1380,6 +1623,47 @@ impl SqliteStore {
             &triaged.attachments,
             !archive,
         )?;
+        // 7b. TRANSLATION: a message detected as not English is queued in this
+        //     same transaction (docs/TRANSLATION.md), `deferred` on the archive
+        //     tier, which spends nothing until its thread is opened. Never for
+        //     spam, sent, the account's own or sealed mail, whatever the caller
+        //     carried: the stored row is asked, with the same authorship test
+        //     the human thread view uses and the same sealed predicate as the
+        //     Auth page. A row that exists is kept (a re-ingest must not throw
+        //     away a translation it paid for), unless THIS ingest made the
+        //     message spam or own mail: then the row is closed here, at the
+        //     event, its served text dropped. A heal replaced the text the row
+        //     was translated from, so it starts over.
+        //
+        //     Only NEWLY ARRIVED mail holds its triage for the translation; a
+        //     backfill is triaged on the original at once and re-triaged when
+        //     the English lands. Over the day's translate budget, nothing
+        //     holds, and a backfilled message waits `deferred` for its reader.
+        if heal.is_some() {
+            super::translations::drop_translation_conn(&tx, id)?;
+        }
+        if super::translations::is_untranslatable_conn(&tx, id)? {
+            super::translations::close_if_untranslatable_conn(
+                &tx,
+                triaged.message.account_id,
+                id,
+                Utc::now(),
+            )?;
+        } else if let Some(lang) = triaged.translate_lang
+            && !triaged.message.is_spam
+            && !triaged.message.is_sent
+        {
+            let arrival = triaged.foreground_triage && heal.is_none();
+            super::translations::queue_translation_conn(
+                &tx,
+                triaged.message.account_id,
+                id,
+                lang.code(),
+                archive || (!arrival && triaged.translate_over_budget),
+                arrival && !triaged.translate_over_budget,
+                Utc::now(),
+            )?;
+        }
         // 8. THE AGENT'S BOOKKEEPING, last, over the row as it now stands: it
         //    re-reads the message, and a changed content snapshot is what
         //    advances the revision and queues the work. The trigger names the
@@ -1415,14 +1699,7 @@ impl SqliteStore {
     }
 
     pub(super) fn is_known_contact(&self, account_id: AccountId, addr: &str) -> Result<bool> {
-        let conn = self.lock()?;
-        let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM contacts
-             WHERE account_id=?1 AND addr=?2 COLLATE NOCASE AND sent_count > 0",
-            params![account_id, addr],
-            |r| r.get(0),
-        )?;
-        Ok(n > 0)
+        is_known_contact_conn(&*self.lock()?, account_id, addr)
     }
 
     pub(super) fn sync_state(
@@ -1717,32 +1994,53 @@ impl SqliteStore {
         // still exactly what the Auth page's decision rail exists for.
         // Done (archived from the Auth page, or marked done anywhere) leaves the
         // list: it is how the page and its rail badge let go of dealt-with mail.
+        use crate::triage::auth_pairing::{AuthMailRow, explained_by, explainer_window};
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT m.id, m.account_id, m.thread_id, m.from_addr, m.subject,
-                    m.received_at, CASE WHEN s.message_id IS NOT NULL THEN CASE json_extract(d.decision_json,'$.auth.kinds[0]') WHEN 'sign_in_link' THEN 'magic_link' ELSE json_extract(d.decision_json,'$.auth.kinds[0]') END ELSE t.sealed_kind END
-             FROM messages m
-             LEFT JOIN triage t ON t.message_id = m.id AND t.account_id=m.account_id
-             LEFT JOIN agent_message_state s ON s.message_id=m.id AND s.account_id=m.account_id
-             LEFT JOIN agent_message_decisions d ON d.message_id=m.id AND d.account_id=m.account_id
-             WHERE m.account_id = ?1 AND (json_array_length(COALESCE(d.decision_json,'{}'),'$.auth.kinds')>0 OR (s.message_id IS NULL AND t.sensitivity='sealed'))
-               AND COALESCE(t.status,'new')!='done'
-             ORDER BY m.received_at DESC",
-        )?;
-        let out = stmt
-            .query_map(params![account_id], |r| {
-                Ok(SealedMessage {
-                    id: r.get(0)?,
-                    account_id: r.get(1)?,
-                    thread_id: r.get(2)?,
-                    from_addr: r.get(3)?,
-                    subject: r.get(4)?,
-                    received_at: dt(r, 5)?,
-                    sealed_kind: r.get(6)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(out)
+        let open = sealed_rows(&conn, account_id, "COALESCE(t.status,'new')!='done'", &[])?;
+        // Done rows are read for pairing only, and only inside the window of
+        // an open alert that could be explained: the code the owner archived
+        // a minute after using it still explains the sign-in beside it. The
+        // windows are merged so a burst costs one query, not one per alert.
+        let mut windows: Vec<(DateTime<Utc>, DateTime<Utc>)> = open
+            .iter()
+            .filter(|(_, row)| row.explainable())
+            .map(|(_, row)| explainer_window(row.received_at))
+            .collect();
+        windows.sort();
+        let mut merged: Vec<(DateTime<Utc>, DateTime<Utc>)> = Vec::new();
+        for (from, to) in windows {
+            match merged.last_mut() {
+                Some(last) if from <= last.1 => last.1 = last.1.max(to),
+                _ => merged.push((from, to)),
+            }
+        }
+        let mut done: Vec<AuthMailRow> = Vec::new();
+        for (from, to) in merged {
+            done.extend(
+                sealed_rows(
+                    &conn,
+                    account_id,
+                    "COALESCE(t.status,'new')='done' AND m.received_at BETWEEN ?2 AND ?3",
+                    &[from.to_rfc3339(), to.to_rfc3339()],
+                )?
+                .into_iter()
+                .map(|(_, row)| row),
+            );
+        }
+        let pairing: Vec<AuthMailRow> = open
+            .iter()
+            .map(|(_, row)| row.clone())
+            .chain(done)
+            .collect();
+        let explained = explained_by(&pairing);
+        Ok(open
+            .into_iter()
+            .zip(explained)
+            .map(|((mut m, _), explained_by)| {
+                m.explained_by = explained_by;
+                m
+            })
+            .collect())
     }
 
     pub(super) fn sealed_body(&self, account_id: AccountId, message_id: i64) -> Result<SealedBody> {
@@ -1750,13 +2048,17 @@ impl SqliteStore {
         let conn = self.lock()?;
         let row = conn
             .query_row(
-                "SELECT m.id, m.account_id, m.thread_id, m.from_addr, m.from_name,
-                        m.subject, m.received_at, CASE WHEN s.message_id IS NOT NULL THEN CASE json_extract(d.decision_json,'$.auth.kinds[0]') WHEN 'sign_in_link' THEN 'magic_link' ELSE json_extract(d.decision_json,'$.auth.kinds[0]') END ELSE t.sealed_kind END, m.body, m.body_html
+                concat!(
+                    "SELECT m.id, m.account_id, m.thread_id, m.from_addr, m.from_name,
+                        m.subject, m.received_at, s.message_id IS NOT NULL,
+                        json_extract(d.decision_json,'$.auth'), t.sealed_kind, m.body, m.body_html
                  FROM messages m
                  LEFT JOIN triage t ON t.message_id = m.id AND t.account_id=m.account_id
-             LEFT JOIN agent_message_state s ON s.message_id=m.id AND s.account_id=m.account_id
-             LEFT JOIN agent_message_decisions d ON d.message_id=m.id AND d.account_id=m.account_id
-                 WHERE m.account_id = ?1 AND m.id = ?2 AND (json_array_length(COALESCE(d.decision_json,'{}'),'$.auth.kinds')>0 OR (s.message_id IS NULL AND t.sensitivity='sealed'))",
+                 LEFT JOIN agent_message_state s ON s.message_id=m.id AND s.account_id=m.account_id
+                 LEFT JOIN agent_message_decisions d ON d.message_id=m.id AND d.account_id=m.account_id
+                 WHERE m.account_id = ?1 AND m.id = ?2 AND ",
+                    sealed_membership_sql!()
+                ),
                 params![account_id, message_id],
                 |r| {
                     Ok(SealedBody {
@@ -1767,14 +2069,61 @@ impl SqliteStore {
                         from_name: r.get(4)?,
                         subject: r.get(5)?,
                         received_at: dt(r, 6)?,
-                        sealed_kind: r.get(7)?,
-                        body: r.get(8)?,
-                        body_html: r.get(9)?,
+                        sealed_kind: SealedAuth::read(
+                            r.get(7)?,
+                            r.get::<_, Option<String>>(8)?.as_deref(),
+                            r.get(9)?,
+                        )
+                        .wire_kind,
+                        body: r.get(10)?,
+                        body_html: r.get(11)?,
                     })
                 },
             )
             .optional()?;
         row.ok_or(CoreError::NotFound)
+    }
+
+    pub(super) fn set_auth_verdict(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        verdict: Option<crate::types::AuthVerdict>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        // Same membership as the Auth page: a ruling on mail that is not auth
+        // would move FYE for a message the page never offered a question on.
+        let member: bool = conn.query_row(
+            concat!(
+                "SELECT EXISTS(SELECT 1 FROM messages m
+                 LEFT JOIN triage t ON t.message_id = m.id AND t.account_id=m.account_id
+                 LEFT JOIN agent_message_state s ON s.message_id=m.id AND s.account_id=m.account_id
+                 LEFT JOIN agent_message_decisions d ON d.message_id=m.id AND d.account_id=m.account_id
+                 WHERE m.account_id = ?1 AND m.id = ?2 AND ",
+                sealed_membership_sql!(),
+                ")"
+            ),
+            params![account_id, message_id],
+            |r| r.get(0),
+        )?;
+        if !member {
+            return Err(CoreError::NotFound);
+        }
+        match verdict {
+            Some(verdict) => conn.execute(
+                "INSERT INTO auth_verdicts(account_id, message_id, verdict, decided_at)
+                 VALUES(?1, ?2, ?3, ?4)
+                 ON CONFLICT(account_id, message_id) DO UPDATE SET
+                 verdict=excluded.verdict, decided_at=excluded.decided_at",
+                params![account_id, message_id, verdict.as_str(), now.to_rfc3339()],
+            )?,
+            None => conn.execute(
+                "DELETE FROM auth_verdicts WHERE account_id=?1 AND message_id=?2",
+                params![account_id, message_id],
+            )?,
+        };
+        Ok(())
     }
 
     /// The STORED `is_sent` column, which every served surface reinterprets as
@@ -1816,7 +2165,8 @@ impl SqliteStore {
                     m.received_at,
                     (SELECT COUNT(*) FROM message_opens o
                      JOIN send_trackers st ON st.token = o.token
-                     WHERE st.account_id = m.account_id AND st.message_id = m.id) AS opens,
+                     WHERE st.account_id = m.account_id AND st.message_id = m.id
+                       AND o.classification != 'scanner') AS opens,
                     COALESCE(m.cc_addrs, ''), COALESCE(m.bcc_addrs, '')
              FROM messages m
              WHERE m.account_id = ?1
@@ -1948,7 +2298,12 @@ impl SqliteStore {
         cc_addrs: &str,
         bcc_addrs: &str,
     ) -> Result<bool> {
-        let conn = self.lock()?;
+        let mut conn = self.lock()?;
+        // ONE TRANSACTION for the columns and the index rows derived from them.
+        // In autocommit, a process killed partway left new columns over old or
+        // partial index rows, which the open-time backfill cannot see: it
+        // heals a sent row with NO index rows, never one with some.
+        let tx = conn.transaction()?;
         // BCC IS DROPPED FOR ANYTHING NOT SENT, here in SQL rather than only in
         // the caller: a `Bcc:` header on received mail is the sender's leak or a
         // forgery, and this is the one writer a network sweep drives. To and Cc
@@ -1957,7 +2312,7 @@ impl SqliteStore {
         //
         // Writing "" is meaningful: it takes the row out of the backfill queue
         // as "looked, and the headers named nobody".
-        let n = conn.execute(
+        let n = tx.execute(
             "UPDATE messages
                 SET to_addrs = ?3,
                     cc_addrs = ?4,
@@ -1973,7 +2328,7 @@ impl SqliteStore {
         // group history joins against, and an inbound row in it would credit a
         // group with mail it never received. Re-read from the row rather than
         // trusted from the caller, for the same reason the Bcc gate is in SQL.
-        let is_sent: bool = conn.query_row(
+        let is_sent: bool = tx.query_row(
             "SELECT is_sent = 1 FROM messages WHERE account_id = ?1 AND id = ?2",
             params![account_id, message_id],
             |r| r.get(0),
@@ -1986,8 +2341,162 @@ impl SqliteStore {
             let joined =
                 crate::sync::ingest::join_recipient_lists(&[to_addrs, cc_addrs, bcc_addrs]);
             let addrs = crate::sync::ingest::parse_stored_recipients(&joined);
-            Self::sync_message_recipients_conn(&conn, account_id, message_id, &addrs)?;
+            Self::sync_message_recipients_conn(&tx, account_id, message_id, &addrs)?;
         }
+        tx.commit()?;
         Ok(true)
     }
+}
+
+/// [`SqliteStore::is_known_contact`] for a caller already holding the
+/// connection: the one definition of "the owner has written to this address",
+/// so a read that asks it for many senders under one lock cannot drift from
+/// the floor triage applies.
+pub(super) fn is_known_contact_conn(
+    conn: &Connection,
+    account_id: AccountId,
+    addr: &str,
+) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM contacts
+             WHERE account_id=?1 AND addr=?2 COLLATE NOCASE AND sent_count > 0",
+        params![account_id, addr],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// What the Auth page reads off one sealed row's decision: the kinds (for
+/// pairing), whether it is critical, and the one kind a client sees.
+pub(super) struct SealedAuth {
+    pub kinds: Vec<crate::triage::decision::AuthKind>,
+    pub critical: bool,
+    pub wire_kind: Option<String>,
+}
+
+impl SealedAuth {
+    /// `assessed` is whether the agent pipeline owns the row (it has an
+    /// `agent_message_state`); a legacy row keeps its stored `sealed_kind`.
+    /// Kinds this binary does not know are skipped rather than failing the
+    /// page: a newer daemon's decision is still auth mail.
+    pub fn read(assessed: bool, auth_json: Option<&str>, legacy: Option<String>) -> Self {
+        use crate::triage::decision::AuthKind;
+        if !assessed {
+            let kinds = legacy
+                .as_deref()
+                .and_then(crate::types::SealedKind::parse)
+                .map(AuthKind::from)
+                .into_iter()
+                .collect();
+            return Self {
+                kinds,
+                critical: false,
+                wire_kind: legacy,
+            };
+        }
+        #[derive(serde::Deserialize, Default)]
+        struct Raw {
+            #[serde(default)]
+            kinds: Vec<serde_json::Value>,
+            #[serde(default)]
+            critical: bool,
+        }
+        let raw: Raw = auth_json
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default();
+        let kinds: Vec<AuthKind> = raw
+            .kinds
+            .into_iter()
+            .filter_map(|kind| serde_json::from_value(kind).ok())
+            .collect();
+        let critical = crate::triage::decision::AuthAssessment {
+            kinds: kinds.clone(),
+            evidence: Vec::new(),
+            critical: raw.critical,
+        }
+        .is_critical();
+        let wire_kind = AuthKind::priority_pick(&kinds)
+            .map(|kind| crate::types::SealedKind::from(kind).as_str().to_owned());
+        Self {
+            kinds,
+            critical,
+            wire_kind,
+        }
+    }
+}
+
+/// The Auth page's rows (`sealed_membership_sql!`) matching `filter`, newest
+/// first, each with what the pairing reads off it. `filter` is SQL over the
+/// same aliases; `extra` binds from `?2`.
+fn sealed_rows(
+    conn: &rusqlite::Connection,
+    account_id: AccountId,
+    filter: &str,
+    extra: &[String],
+) -> Result<Vec<(SealedMessage, crate::triage::auth_pairing::AuthMailRow)>> {
+    let sql = format!(
+        "{} AND {filter} ORDER BY m.received_at DESC, m.id DESC",
+        concat!(
+            "SELECT m.id, m.account_id, m.thread_id, m.from_addr, m.subject, m.received_at,
+                    s.message_id IS NOT NULL, json_extract(d.decision_json,'$.auth'), t.sealed_kind,
+                    v.verdict, m.auth_pass,
+                    (SELECT MIN(al.ts) FROM audit_log al WHERE al.account_id=m.account_id
+                           AND al.action='reveal_sealed' AND al.target=CAST(m.id AS TEXT)
+                           AND al.detail IS NOT 'notification')
+             FROM messages m
+             LEFT JOIN triage t ON t.message_id = m.id AND t.account_id=m.account_id
+             LEFT JOIN agent_message_state s ON s.message_id=m.id AND s.account_id=m.account_id
+             LEFT JOIN agent_message_decisions d ON d.message_id=m.id AND d.account_id=m.account_id",
+            auth_verdict_join_sql!(),
+            "WHERE m.account_id = ?1 AND ",
+            sealed_membership_sql!()
+        )
+    );
+    let mut params: Vec<&dyn rusqlite::ToSql> = vec![&account_id];
+    params.extend(extra.iter().map(|value| value as &dyn rusqlite::ToSql));
+    // Cached: the done-row read runs once per merged alert window.
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt
+        .query_map(params.as_slice(), |r| {
+            let auth = SealedAuth::read(
+                r.get(6)?,
+                r.get::<_, Option<String>>(7)?.as_deref(),
+                r.get(8)?,
+            );
+            let verdict = r
+                .get::<_, Option<String>>(9)?
+                .as_deref()
+                .and_then(crate::types::AuthVerdict::parse);
+            let auth_pass: Option<bool> = r.get(10)?;
+            // Effective, as FYE reads it (`auth_critical_sql!`): a sender
+            // that explicitly failed authentication makes no critical change.
+            let critical = auth.critical && auth_pass != Some(false);
+            let message = SealedMessage {
+                id: r.get(0)?,
+                account_id: r.get(1)?,
+                thread_id: r.get(2)?,
+                from_addr: r.get(3)?,
+                subject: r.get(4)?,
+                received_at: dt(r, 5)?,
+                sealed_kind: auth.wire_kind,
+                critical,
+                verdict,
+                explained_by: None,
+            };
+            let pairing = crate::triage::auth_pairing::AuthMailRow {
+                id: message.id,
+                from_addr: message.from_addr.clone(),
+                subject: message.subject.clone(),
+                received_at: message.received_at,
+                kinds: auth.kinds,
+                critical,
+                auth_pass: auth_pass == Some(true),
+                revealed_at: dt_opt(r, 11)?,
+                not_mine: verdict == Some(crate::types::AuthVerdict::NotMine),
+                ruled: verdict.is_some(),
+            };
+            Ok((message, pairing))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
 }

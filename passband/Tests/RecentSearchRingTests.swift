@@ -22,6 +22,7 @@ struct RecentSearchRingTests {
         aLongQueryIsRefusedNotTruncated()
         anOlderListHealsOnTheWayPast()
         identityIsWhatTheDaemonWouldDo()
+        questionsAreTheirOwnLines()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -125,6 +126,31 @@ struct RecentSearchRingTests {
             print(
                 "FAIL adding(\(query.debugDescription), to: \(ring)) = \(got), expected \(expected)"
             )
+        }
+    }
+
+    /// A question round-trips through the stored string, an older line reads
+    /// as a search, and "x" the question is a different line from "x" the
+    /// search, so asking never knocks the search out of the ring.
+    static func questionsAreTheirOwnLines() {
+        let asked = RecentEntry(kind: .question, text: "when is my flight")
+        checks += 1
+        if RecentEntry(stored: asked.stored) != asked {
+            failures += 1
+            print("FAIL a question did not round-trip: \(asked.stored.debugDescription)")
+        }
+        checks += 1
+        if RecentEntry(stored: "delta receipt") != RecentEntry(kind: .search, text: "delta receipt") {
+            failures += 1
+            print("FAIL an unmarked line should read as a search")
+        }
+        different(RecentEntry(kind: .question, text: "flight").stored, "flight")
+        var ring = RecentSearchRing.adding("flight", to: [])
+        ring = RecentSearchRing.adding(RecentEntry(kind: .question, text: "flight").stored, to: ring)
+        checks += 1
+        if ring.count != 2 {
+            failures += 1
+            print("FAIL the question replaced the search: \(ring)")
         }
     }
 

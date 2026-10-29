@@ -77,10 +77,12 @@ struct RulesView: View {
         // middle. One real container means one frame, and the bar keeps its
         // natural height while the body takes what is left.
         VStack(spacing: 0) {
+            // Notes and the empty state on the line the rows' words take,
+            // which is the page gutter inside the settings pane.
             if rulesState.isLoading && rules.isEmpty {
-                BandNote("loading rules…")
+                BandNote("loading rules…").padding(.horizontal, DeskRow.listInset)
             } else if let error = rulesState.error {
-                BandNote(error)
+                BandNote(error).padding(.horizontal, DeskRow.listInset)
             } else if rules.isEmpty {
                 VStack(alignment: .leading, spacing: Space.s6) {
                     HStack(spacing: Space.s4) {
@@ -92,7 +94,7 @@ struct RulesView: View {
                     }
                     .foregroundStyle(Palette.inkFaintest)
                 }
-                .padding(.horizontal, Space.scaled(22))
+                .padding(.horizontal, Space.page)
                 .padding(.vertical, Space.s24)
                 .frame(maxWidth: .infinity, alignment: .leading)
             } else {
@@ -121,7 +123,7 @@ struct RulesView: View {
                                 }
                             }
                         }
-                        .padding(.horizontal, Space.scaled(18))
+                        .padding(.horizontal, DeskRow.listInset)
                         .padding(.bottom, Space.s10)
                     }
                     .onChange(of: index) { _, i in
@@ -410,7 +412,7 @@ struct RulesView: View {
 
         var body: some View {
             ListRow(
-                selected: false, cornerRadius: 10, hPadding: Space.scaled(11), vPadding: Space.s10,
+                selected: false, cornerRadius: Radius.well, hPadding: Space.scaled(11), vPadding: Space.s10,
                 hoverFill: false, action: onOpen
             ) { _, _ in
                 HStack(alignment: .top, spacing: Space.s10) {
@@ -508,7 +510,7 @@ private struct RuleSectionHeader: View {
                 .fill(Palette.hairline)
                 .frame(height: 1)
         }
-        .padding(.horizontal, Space.scaled(11))
+        .padding(.horizontal, DeskRow.hPadding)
         .padding(.top, Space.scaled(18))
         .padding(.bottom, Space.s6)
         .help(disposition.hint)
@@ -533,7 +535,13 @@ private struct DomainHeaderRow: View {
                 .foregroundStyle(Palette.inkFaintest)
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, Space.scaled(11))
+        // On the rows' text edge: the Mac's rows pad by `DeskRow`, the phone's
+        // (PhoneRuleRow) by 11.
+        #if os(macOS)
+            .padding(.horizontal, DeskRow.hPadding)
+        #else
+            .padding(.horizontal, Space.scaled(11))
+        #endif
         .padding(.top, Space.scaled(7))
         .padding(.bottom, Space.s2)
     }
@@ -571,7 +579,7 @@ private struct RuleRow: View {
 
     var body: some View {
         ListRow(
-            selected: selected, cornerRadius: 8, hPadding: Space.scaled(11), vPadding: Space.scaled(7), action: onOpen
+            selected: selected, cornerRadius: Radius.row, hPadding: DeskRow.hPadding, vPadding: Space.scaled(7), action: onOpen
         ) { selected, _ in
             HStack(spacing: Space.scaled(9)) {
                 if row.nested {
@@ -795,7 +803,7 @@ struct RuleEditor: View {
                 Avatar(sender: sender, size: 30)
                 VStack(alignment: .leading, spacing: Space.s2) {
                     Text(resolved.displayName)
-                        .font(Typo.zoneTitle)
+                        .font(Typo.modalTitle)
                         .foregroundStyle(Palette.ink)
                         .lineLimit(1)
                     if resolved.displayName.lowercased() != SenderID.address(sender) {
@@ -809,7 +817,7 @@ struct RuleEditor: View {
         } else {
             VStack(alignment: .leading, spacing: Space.scaled(3)) {
                 Text(title)
-                    .font(Typo.zoneTitle)
+                    .font(Typo.modalTitle)
                     .foregroundStyle(Palette.ink)
                 subtitle
             }
@@ -1006,7 +1014,7 @@ struct RuleEditor: View {
     /// the buttons on the right. A reason save is shut takes the hints' place
     /// rather than stacking another line on the card.
     private var footer: some View {
-        HStack(spacing: Space.s8) {
+        ModalButtons {
             if let blocked {
                 Text(blocked)
                     .font(Typo.micro)
@@ -1022,7 +1030,7 @@ struct RuleEditor: View {
                     }
                 #endif
             }
-            Spacer(minLength: Space.s8)
+        } buttons: {
             Button("cancel", action: dismiss).buttonStyle(.glass)
             Button(saving ? "saving…" : (mode == .edit ? "update rule" : "save rule")) {
                 Task { await save() }
@@ -1144,7 +1152,7 @@ struct RuleEditor: View {
             ForEach(Array(rules.enumerated()), id: \.element.id) { i, rule in
                 if i > 0 { Hairline() }
                 ListRow(
-                    selected: false, cornerRadius: 8, hPadding: Space.s10, vPadding: Space.scaled(7),
+                    selected: false, cornerRadius: Radius.row, hPadding: Space.s10, vPadding: Space.scaled(7),
                     action: { openExisting(rule) }
                 ) { _, _ in
                     HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
@@ -1170,11 +1178,11 @@ struct RuleEditor: View {
             }
         }
         .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.canvas.opacity(0.3))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(Palette.hairline, lineWidth: 0.75)
         )
     }
@@ -1261,7 +1269,7 @@ struct RuleEditor: View {
             if let key = request.draftKey { store.ruleDrafts[key] = nil }
             onClose()
         } catch let apiError as APIError where apiError.kind == .forbidden {
-            error = "no write credential · run squelchd auth --write"
+            error = "no write credential · run squelchd auth"
             saving = false
         } catch {
             self.error = errText(error, "save failed")

@@ -20,25 +20,17 @@ struct ShareNudgeModal: View {
 
     var body: some View {
         if nudge.showingNudge {
-            ZStack {
-                // The scrim. Tappable, and tapping it is "not now": a modal with
-                // no way out but a button is a modal people learn to resent.
-                Rectangle()
-                    .fill(.black.opacity(0.28))
-                    .ignoresSafeArea()
-                    .onTapGesture { dismiss() }
-
-                card
-            }
-            .transition(.opacity)
-            .animation(Motion.toast, value: nudge.showingNudge)
+            // The scrim is tappable, and tapping it is "not now": a modal with
+            // no way out but a button is a modal people learn to resent.
+            OverlayScrim(onDismiss: dismiss) { card }
+                .animation(Motion.toast, value: nudge.showingNudge)
         }
     }
 
     private var card: some View {
-        VStack(alignment: .leading, spacing: Space.s14) {
+        ModalCard(width: 380, tint: Palette.glassTintStrong) {
             Text("You've been using Passband for 2 weeks!")
-                .font(Typo.ui(14, weight: .semibold))
+                .font(Typo.modalTitle)
                 .foregroundStyle(Palette.ink)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -50,19 +42,13 @@ struct ShareNudgeModal: View {
             .foregroundStyle(Palette.inkDim)
             .fixedSize(horizontal: false, vertical: true)
 
-            HStack(spacing: Space.s10) {
-                Spacer()
+            ModalButtons {
                 Button("Not now") { dismiss() }
                     .buttonStyle(.glass)
-                    .font(Typo.ui(12, weight: .medium))
                 Button("Share Passband") { share() }
                     .buttonStyle(.glassProminent)
-                    .font(Typo.ui(12, weight: .semibold))
             }
         }
-        .padding(Space.scaled(18))
-        .frame(maxWidth: Typo.measure(380))
-        .passbandGlass(.pane, cornerRadius: 14, tint: Palette.glassTintStrong)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Share Passband with friends")
     }

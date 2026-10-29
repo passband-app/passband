@@ -130,7 +130,7 @@ struct DiscoveryLayer: View {
                 momentCard(set)
             }
         }
-        .padding(20)
+        .padding(Space.s20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
         .animation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.5, dampingFraction: 0.84), value: presenter.moment)
         // THE MOMENT IS THE BOARD'S. It only arrives on the sitrep, and a
@@ -167,6 +167,9 @@ struct DiscoveryLayer: View {
             // A finished walk has its own moment on the sitrep, and it is very
             // often the thing that just found flow mode. One at a time.
             && store.walkFinished == nil
+            // Same for a smart clear's receipt: it is the thing that just found
+            // Sweep, and it shares this corner until its undo runs out.
+            && store.smartClearReceipt == nil
             // The corner belongs to one card at a time, and an ad or an
             // update that got there first keeps it.
             && !AgentNudge.othersShowing(store) && !AgentNudge.shared.showingNudge
@@ -211,7 +214,7 @@ private struct DiscoveryMomentHost: View {
             // still is the frame that explains the gesture, and a loop caught
             // mid-way (a stack already cleared) is an empty box.
             DiscoveryMoment(set: set, live: live && hovering)
-                .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: Radius.pane, style: .continuous))
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }

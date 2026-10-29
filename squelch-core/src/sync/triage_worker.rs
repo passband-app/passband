@@ -107,7 +107,7 @@ impl<S: Store> StoreEvidence<'_, S> {
                 return Ok(EvidenceResult {
                     source_message_ids: messages.iter().map(|m| m.id).collect(),
                     data: serde_json::json!({"messages": messages, "attention": context.attention,
-                        "user_corrections": context.corrections, "previous_decision": context.previous_decision}),
+                        "user_corrections": context.corrections, "previous_decision": fed_back(context.previous_decision)}),
                     thread_revisions: revisions,
                 });
             }
@@ -204,6 +204,19 @@ impl<S: Store> StoreEvidence<'_, S> {
     }
 }
 
+/// A stored decision as the agent may read it back: without its `done`,
+/// whose reason is model-authored and untrusted and never goes into a prompt
+/// (`store::sqlite::agent_triage::apply_done`). The human door still serves
+/// the stored decision whole.
+fn fed_back(
+    decision: Option<crate::triage::decision::MessageDecision>,
+) -> Option<crate::triage::decision::MessageDecision> {
+    decision.map(|decision| crate::triage::decision::MessageDecision {
+        done: None,
+        ..decision
+    })
+}
+
 /// The agent's starting context. `clock` is this run's "now" in the owner's
 /// zone (#526): fixed once per run, so a zone that changes mid-run cannot
 /// change an answer already given.
@@ -230,7 +243,7 @@ fn snapshot(
         initial: serde_json::json!({
             "message": context.message,
             "thread": siblings,
-            "previous_decision": context.previous_decision,
+            "previous_decision": fed_back(context.previous_decision.clone()),
             "attention": context.attention,
             "sender_preferences": context.matched_rules,
             "sender_is_contact": context.sender_is_contact,
@@ -601,10 +614,16 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// lane's rung. The end returned is the account's: a longer cooldown a
     /// sibling opened wins, and the job is deferred to that, not to this
     /// failure's own.
+    ///
+    /// A 429 (`throttled`) never takes the immediate first rung: with no
+    /// `retry-after` it is most often a rate limit the tenants of one host
+    /// share, and every one of them retrying in the same instant would walk
+    /// straight back into it. It starts at the second rung, jittered.
     pub(super) fn open_cooldown(
         &self,
         retry_after: Option<std::time::Duration>,
         rejected: bool,
+        throttled: bool,
         start: JobStart,
         investigation: bool,
     ) -> (DateTime<Utc>, i64) {
@@ -640,7 +659,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         let seconds = if rejected {
             throttle_cooldown_secs(None, u32::MAX, outage, jitter)
         } else {
-            throttle_cooldown_secs(retry_after, strikes, outage, jitter)
+            // One rung up the ladder, so its waits climb 15, 30, 60 ... from
+            // the first. A provider's own number is still believed as is.
+            let rung = if throttled && retry_after.is_none() {
+                strikes.saturating_add(1)
+            } else {
+                strikes
+            };
+            throttle_cooldown_secs(retry_after, rung, outage, jitter)
         };
         let until = now + ChronoDuration::seconds(seconds as i64);
         let previous = self
@@ -673,6 +699,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// flag, are reset where that lane's model answers: the access lane's
     /// fast model answering says nothing about the investigation model.
     fn note_provider_success(&self) {
+        // The gateway answered: the translate pass's release cap may now
+        // charge a row that keeps failing alone.
+        self.note_gateway_answer();
         let until = self.agent_retry_after.load(Ordering::Relaxed);
         if until > 0 && until <= Utc::now().timestamp() {
             let _ = self.agent_retry_after.compare_exchange(
@@ -721,7 +750,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             }
             // `until` is the account's stand-off, a sibling's longer one
             // included: the job is deferred to what will actually admit it.
-            let (until, wait) = self.open_cooldown(error.retry_after, rejected, start, !access);
+            let throttled = error.kind == "http_429";
+            let (until, wait) =
+                self.open_cooldown(error.retry_after, rejected, throttled, start, !access);
             eprintln!(
                 "squelch: triage provider unavailable ({}); queued work retained, retrying in {}s",
                 error.kind, wait
@@ -849,8 +880,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// verdict, not `max_attempts` tries at it. Two in a row with nothing
     /// answered since the first are as likely the provider's slow quarter
     /// hour as the message, and a job failed for that needs a person to
-    /// re-triage it; the ordinary attempts, with their growing waits, leave
-    /// it pending and mostly outlast the incident (deadlines never pause the
+    /// re-triage it; the ordinary attempts leave it pending, and with each
+    /// run's own deadline between them, waits at most five minutes apart
+    /// still span a slow spell of several minutes (deadlines never pause the
     /// account, see `is_provider_outage`). "Answered since" is the
     /// account's one flag: raised when an investigation answers (this run's
     /// own earlier turn included), lowered by every timeout, never raised
@@ -875,7 +907,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         }
         let timed_out_twice = answered_since_last_timeout
             && job.last_error.as_deref() == Some(crate::triage::agent::AGENT_TIMEOUT);
-        let next = next_attempt_wait(job.attempts, self.config.triage.agent.max_attempts);
+        let next = next_attempt_wait(
+            job.attempts,
+            self.config.triage.agent.max_attempts,
+            !is_local_failure(code),
+        );
         let wait = match next {
             Some(wait) if !crate::triage::llm::is_content_refusal(code) && !timed_out_twice => wait,
             _ => {
@@ -1104,18 +1140,59 @@ pub(super) fn doubling_backoff_secs(base: u64, step: u32, cap: u64) -> u64 {
     base.saturating_mul(1u64 << step.min(63)).min(cap)
 }
 
-/// A job's wait before its next attempt, after `attempts` of them: 30 s,
-/// 60 s, 120 s, ... up to an hour. The retry's wait, and the hand-back's.
+/// `0` on the first step, then `base` doubling per step up to `cap`: a
+/// transient failure is retried at once, and only a failure that repeats
+/// backs off.
+pub(super) fn immediate_then_doubling_secs(base: u64, step: u32, cap: u64) -> u64 {
+    match step {
+        0 => 0,
+        _ => doubling_backoff_secs(base, step - 1, cap),
+    }
+}
+
+/// The longest any LLM retry waits: the retry ladder's cap.
+pub(super) const RETRY_CEILING_SECS: u64 = 300;
+
+/// A job's wait before its next attempt after a failed MODEL call, after
+/// `attempts` of them: at once after the first, then 15 s, 30 s, 60 s, ...
+/// up to five minutes. A rescue push rides on these jobs, so a blip must not
+/// hold one for minutes.
 pub(super) fn retry_backoff_secs(attempts: u32) -> u64 {
+    immediate_then_doubling_secs(15, attempts.saturating_sub(1), RETRY_CEILING_SECS)
+}
+
+/// The wait after a failure that is not the model's (the store was busy, the
+/// context changed under the run, a run was dropped at shutdown): 30 s, 60 s,
+/// 120 s, ... up to an hour. A busy store or a crash loop is not helped by
+/// retrying at once, and a job must not spend its attempts in seconds on one.
+pub(super) fn local_retry_backoff_secs(attempts: u32) -> u64 {
     doubling_backoff_secs(15, attempts, 3600)
 }
 
-/// The first rung of the cooldown after a throttle (429) or a server error
-/// (5xx, 529, a transport failure): short, and spread over a window, as is
-/// every wait the ladder yields, so the tenants of one host, each with its
-/// own engine seeing the same provider (and told the same `retry-after`),
-/// do not all come back in the same second. The cooldown doubles for every
-/// probe that fails in turn, `15, 30, 60, ...`, up to
+/// The failures [`local_retry_backoff_secs`] spaces out: the store's and the
+/// worker's own, never a model call's.
+pub(super) fn is_local_failure(code: &str) -> bool {
+    matches!(
+        code,
+        "context_unavailable"
+            | "budget_unavailable"
+            | "context_changed"
+            | "commit_failed"
+            | "notify_context_unavailable"
+            | "notify_decision_unavailable"
+            | "notify_completion_unavailable"
+            | "notify_store_unavailable"
+    )
+}
+
+/// The second rung of the cooldown after a throttle (429) or a server error
+/// (5xx, 529, a transport failure). The first failure after a success
+/// retries AT ONCE (no cooldown, no jitter): most of these are one dropped
+/// connection, and a rescue push waits on the answer. From the second probe
+/// on, the wait is spread over a window so the tenants of one host, each
+/// with its own engine seeing the same provider (and told the same
+/// `retry-after`), do not all come back in the same second, and doubles for
+/// every probe that fails in turn, `0, 15, 30, 60, ...`, up to
 /// [`AgentConfig::outage_retry_secs`], and starts over at the first success.
 ///
 /// [`AgentConfig::outage_retry_secs`]: crate::triage::agent_config::AgentConfig::outage_retry_secs
@@ -1156,10 +1233,12 @@ pub(super) fn throttle_cooldown_secs(
     let asked = retry_after
         .filter(|asked| !asked.is_zero())
         .map(|asked| asked.as_secs().clamp(1, ceiling));
-    let rung = doubling_backoff_secs(THROTTLE_COOLDOWN_SECS, strikes, ceiling);
+    let rung = immediate_then_doubling_secs(THROTTLE_COOLDOWN_SECS, strikes, ceiling);
     let wait = match (asked, strikes) {
         (Some(asked), 0) => asked,
         (Some(asked), _) => asked.max(rung),
+        // The first failure with no number from the provider: retry now.
+        (None, 0) => return 0,
         (None, _) => rung,
     };
     // The jitter rides UNDER the ceiling, not over it: at the terminal rung
@@ -1214,7 +1293,7 @@ impl<S: AgentTriageStore> Drop for ClaimGuard<'_, S> {
         if !self.armed {
             return;
         }
-        match next_attempt_wait(self.job.attempts, self.max_attempts) {
+        match next_attempt_wait(self.job.attempts, self.max_attempts, false) {
             None => {
                 self.metrics.record_agent(AgentVerdict::Failed);
                 let _ = self.store.fail_agent_job(self.job, INTERRUPTED);
@@ -1239,13 +1318,24 @@ impl<S: AgentTriageStore> Drop for ClaimGuard<'_, S> {
 
 /// What a job that has made `attempts` of its `max_attempts` gets next:
 /// the wait before another, on the ladder, or `None` when the allowance is
-/// spent. The one rule the retry and the hand-back share.
-pub(super) fn next_attempt_wait(attempts: i64, max_attempts: u32) -> Option<ChronoDuration> {
+/// spent. The one rule the retry and the hand-back share. `model` picks the
+/// ladder: a failed model call's (at once, then up to five minutes) or a
+/// local failure's (see [`local_retry_backoff_secs`]).
+pub(super) fn next_attempt_wait(
+    attempts: i64,
+    max_attempts: u32,
+    model: bool,
+) -> Option<ChronoDuration> {
     if attempts >= i64::from(max_attempts) {
         return None;
     }
     let attempts = u32::try_from(attempts).unwrap_or(u32::MAX);
-    Some(ChronoDuration::seconds(retry_backoff_secs(attempts) as i64))
+    let secs = if model {
+        retry_backoff_secs(attempts)
+    } else {
+        local_retry_backoff_secs(attempts)
+    };
+    Some(ChronoDuration::seconds(secs as i64))
 }
 /// The `last_error` of a job failed by [`ClaimGuard`]: dropped on its last
 /// allowed attempt.
@@ -1279,7 +1369,7 @@ const _: () = assert!(
 );
 
 /// Provider failures describe shared availability, not a permanently bad email.
-fn is_provider_outage(kind: &str) -> bool {
+pub(super) fn is_provider_outage(kind: &str) -> bool {
     crate::triage::llm::is_config_failure(kind)
         || matches!(kind, "transport" | "http_429")
         || kind
@@ -1400,17 +1490,17 @@ mod cooldown_tests {
 
     /// On the first failure the provider's `retry-after` is believed between
     /// a second and the ceiling, the jitter riding on it so the tenants told
-    /// the same number spread out; without one the stand-off is short and
-    /// spread.
+    /// the same number spread out; without one there is no stand-off at all,
+    /// and the second failure's is short and spread.
     #[test]
     fn a_throttle_cooldown_is_what_the_provider_asked_or_a_short_spread_wait() {
         let secs = |s| Some(std::time::Duration::from_secs(s));
         assert_eq!(throttle_cooldown_secs(secs(7), 0, CEILING, 0), 7);
-        // Zero (a past HTTP-date) is no number: the first rung.
-        assert_eq!(
-            throttle_cooldown_secs(secs(0), 0, CEILING, 0),
-            THROTTLE_COOLDOWN_SECS
-        );
+        // Zero (a past HTTP-date) is no number: the first rung, which is
+        // an immediate retry, jitter or no jitter.
+        assert_eq!(throttle_cooldown_secs(secs(0), 0, CEILING, 0), 0);
+        assert_eq!(throttle_cooldown_secs(secs(0), 0, CEILING, 15), 0);
+        assert_eq!(throttle_cooldown_secs(None, 0, CEILING, 15), 0);
         // Past the ceiling, the ceiling: the provider's number is honoured in
         // full up to it, jitter or no jitter.
         assert_eq!(throttle_cooldown_secs(secs(99_999), 0, CEILING, 0), CEILING);
@@ -1419,19 +1509,40 @@ mod cooldown_tests {
         assert_eq!(throttle_cooldown_secs(secs(295), 0, CEILING, 0), 295);
         assert_eq!(throttle_cooldown_secs(secs(295), 0, CEILING, 15), CEILING);
         assert_eq!(throttle_cooldown_secs(secs(290), 0, CEILING, 15), CEILING);
-        // Without a number, every value in the spread is reachable, and a
-        // jitter past the room is held to it.
+        // Without a number, the second failure's every value in the spread
+        // is reachable, and a jitter past the room is held to it.
         let spread =
             THROTTLE_COOLDOWN_SECS..=THROTTLE_COOLDOWN_SECS + THROTTLE_COOLDOWN_JITTER_SECS;
         let seen: std::collections::BTreeSet<u64> = (0..=THROTTLE_COOLDOWN_JITTER_SECS)
-            .map(|jitter| throttle_cooldown_secs(None, 0, CEILING, jitter))
+            .map(|jitter| throttle_cooldown_secs(None, 1, CEILING, jitter))
             .collect();
         assert_eq!(seen.len() as u64, THROTTLE_COOLDOWN_JITTER_SECS + 1);
         assert!(seen.iter().all(|wait| spread.contains(wait)));
         assert_eq!(
-            throttle_cooldown_secs(None, 0, CEILING, 999),
+            throttle_cooldown_secs(None, 1, CEILING, 999),
             THROTTLE_COOLDOWN_SECS + THROTTLE_COOLDOWN_JITTER_SECS
         );
+    }
+
+    /// A failed model call is retried at once, then on a ladder capped at
+    /// five minutes; a local failure (a busy store, a dropped run) keeps the
+    /// long ladder, so it cannot spend a job's attempts in seconds.
+    #[test]
+    fn model_failures_retry_at_once_and_local_ones_wait() {
+        let model: Vec<i64> = (1..=7)
+            .map(|n| next_attempt_wait(n, 99, true).unwrap().num_seconds())
+            .collect();
+        assert_eq!(model, [0, 15, 30, 60, 120, 240, 300]);
+        let local: Vec<i64> = (1..=4)
+            .map(|n| next_attempt_wait(n, 99, false).unwrap().num_seconds())
+            .collect();
+        assert_eq!(local, [30, 60, 120, 240]);
+        assert_eq!(next_attempt_wait(6, 99, false).unwrap().num_seconds(), 960);
+        assert_eq!(next_attempt_wait(6, 6, true), None);
+        assert!(is_local_failure("context_unavailable"));
+        assert!(is_local_failure("notify_store_unavailable"));
+        assert!(!is_local_failure("transport"));
+        assert!(!is_local_failure(crate::triage::agent::AGENT_TIMEOUT));
     }
 
     /// The jitter is drawn from the clock's milliseconds and the account,
@@ -1460,11 +1571,11 @@ mod cooldown_tests {
             .map(|strikes| throttle_cooldown_secs(None, strikes, CEILING, 0))
             .collect();
         // The terminal rung leaves the jitter its room below the ceiling.
-        assert_eq!(rungs, [15, 30, 60, 120, 240, 285, 285, 285]);
-        // The jitter rides on top of every rung, the terminal one included,
-        // so tenants at the ceiling still spread.
-        assert_eq!(throttle_cooldown_secs(None, 3, CEILING, 15), 135);
-        assert_eq!(throttle_cooldown_secs(None, 5, CEILING, 15), 300);
+        assert_eq!(rungs, [0, 15, 30, 60, 120, 240, 285, 285]);
+        // The jitter rides on top of every rung after the first, the
+        // terminal one included, so tenants at the ceiling still spread.
+        assert_eq!(throttle_cooldown_secs(None, 4, CEILING, 15), 135);
+        assert_eq!(throttle_cooldown_secs(None, 6, CEILING, 15), 300);
         let at_ceiling: std::collections::BTreeSet<u64> = (0..=THROTTLE_COOLDOWN_JITTER_SECS)
             .map(|jitter| throttle_cooldown_secs(None, 9, CEILING, jitter))
             .collect();
@@ -1475,7 +1586,8 @@ mod cooldown_tests {
         assert_eq!(throttle_cooldown_secs(secs(60), 0, CEILING, 0), 60);
         assert_eq!(throttle_cooldown_secs(secs(60), 1, CEILING, 0), 60);
         assert_eq!(throttle_cooldown_secs(secs(60), 2, CEILING, 0), 60);
-        assert_eq!(throttle_cooldown_secs(secs(60), 3, CEILING, 0), 120);
+        assert_eq!(throttle_cooldown_secs(secs(60), 3, CEILING, 0), 60);
+        assert_eq!(throttle_cooldown_secs(secs(60), 4, CEILING, 0), 120);
         // ...and a long one is believed up to the ceiling, on any strike.
         assert_eq!(throttle_cooldown_secs(secs(1800), 0, CEILING, 0), CEILING);
         assert_eq!(throttle_cooldown_secs(secs(1800), 5, CEILING, 0), CEILING);
@@ -1685,6 +1797,55 @@ mod budget_tests {
             !queued.contains(&ids[0]),
             "unseen oldest sibling remains unqueued"
         );
+    }
+
+    /// A stored `done` is never fed back to the agent: its reason is
+    /// model-authored, so a later run's starting context and a thread read
+    /// carry the previous decision without it. The rest of it stays.
+    #[test]
+    fn a_stored_done_reason_never_reaches_the_agent() {
+        let (store, account, ids) = evidence_fixture();
+        let stored = crate::triage::decision::MessageDecision {
+            summary: "Kept summary".into(),
+            done: Some(crate::triage::decision::DoneRequest {
+                reason: "PLANTED-DONE-REASON".into(),
+                evidence: vec![],
+            }),
+            ..Default::default()
+        };
+        let raw = serde_json::to_string(&stored).unwrap().replace('\'', "''");
+        let mut batch = String::new();
+        for id in &ids {
+            batch.push_str(&format!(
+                "INSERT INTO agent_message_decisions(account_id,message_id,revision,decision_json,decided_at)
+                 VALUES({account},{id},1,'{raw}','2026-10-01T00:00:00+00:00');"
+            ));
+        }
+        store.execute_batch_for_test(&batch);
+        let job = read_job(account, ids[0]);
+        let context = store.load_agent_context(&job).unwrap();
+        // The store still holds it (the owner's door serves it).
+        assert!(context.previous_decision.as_ref().unwrap().done.is_some());
+        let snapshot = snapshot(&context, &job, 8, &utc_clock());
+        let initial = snapshot.initial.to_string();
+        assert!(initial.contains("Kept summary"), "{initial}");
+        assert!(!initial.contains("PLANTED-DONE-REASON"), "{initial}");
+        assert!(snapshot.initial["previous_decision"]["done"].is_null());
+        let reader = StoreEvidence {
+            store: &store,
+            account,
+            limit: 8,
+            sources: std::sync::Mutex::new(Vec::new()),
+        };
+        let read = reader
+            .read(&EvidenceRequest::ReadThread {
+                thread_id: "thread".into(),
+            })
+            .unwrap()
+            .data
+            .to_string();
+        assert!(read.contains("Kept summary"), "{read}");
+        assert!(!read.contains("PLANTED-DONE-REASON"), "{read}");
     }
 
     #[test]

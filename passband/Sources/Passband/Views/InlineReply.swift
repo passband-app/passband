@@ -376,18 +376,31 @@ struct InlineReply: View {
                 onContentHeight: { bodyHeight = $0 }
             )
             .frame(height: editorHeight)
-            .padding(Space.s8)
+            .padding(.horizontal, Self.wellPadding)
+            .padding(.vertical, Space.s8)
             .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .fill(Palette.canvas.opacity(0.65))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .strokeBorder(
                         dropTargeted ? Palette.accent : Palette.hairlineStrong,
                         lineWidth: dropTargeted ? 1.5 : 0.75))
             .animation(.easeOut(duration: 0.12), value: dropTargeted)
+            // THE TYPED TEXT ON THE MAIL'S BODY EDGE. The well is pulled
+            // out by its own padding and the text view's inset, so the
+            // words land on `gutter` (where every message body above starts)
+            // and the fill bleeds out to the left of them, toward the
+            // column's edge.
+            .padding(.leading, -(Self.wellPadding + Self.editorTextInset))
         }
+
+        private static var wellPadding: CGFloat { Space.s6 }
+        /// MarkdownTextView's own text inset: its container inset (2) plus
+        /// AppKit's default line-fragment padding (5). The composer pane's
+        /// editor subtracts the same 7.
+        private static let editorTextInset: CGFloat = 7
     #endif
 
     /// The composer's own inset. The Mac's is the reader column's 22, so the
@@ -407,7 +420,7 @@ struct InlineReply: View {
         /// address line to send button, fits between the reader's header and
         /// a raised keyboard. Past it the editor grows with the text.
         private static var editorFloor: CGFloat { Space.scaled(92) }
-        private static var cardRadius: CGFloat { 18 }
+        private static var cardRadius: CGFloat { Radius.pane }
     #endif
 
     #if os(macOS)

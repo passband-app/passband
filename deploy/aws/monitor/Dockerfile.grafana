@@ -5,11 +5,12 @@
 # points, templates and dashboard provider are the SAME files Railway bakes
 # (deploy/monitoring/grafana/**, the single source of truth); only the
 # datasource is laid over with the AWS one, whose URL is the compose service
-# name. Root user for parity with Railway's image (bind-mounted data dir).
+# name. Runs as the image's own user (472, group 0), unlike Railway's root
+# image: compose.yaml's data-perms one-shot hands /data/grafana to 472:0
+# before this starts.
 # Pinned by the multi-arch index digest (fetched from Docker Hub 2026-10-23):
 # the tag is for humans, the digest is what is pulled. Bump both together.
-FROM grafana/grafana:12.2.0@sha256:74144189b38447facf737dfd0f3906e42e0776212bf575dc3334c3609183adf7
-USER root
+FROM grafana/grafana:13.2.4@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
 # Same reason as the root Dockerfile.grafana: must outlast repeat_interval in
 # provisioning/alerting/policies.yml.
 ENV GF_UNIFIED_ALERTING_NOTIFICATION_LOG_RETENTION=54w

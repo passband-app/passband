@@ -227,9 +227,9 @@ private struct LoginCodeCard: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, Space.s8)
                         .background(
-                            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                                 .fill(copied ? Palette.positive : Palette.lock))
-                        .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .contentShape(RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
                 }
                 Button(action: onDismiss) {
                     Text("Dismiss")
@@ -238,16 +238,16 @@ private struct LoginCodeCard: View {
                         .padding(.horizontal, Space.s14)
                         .padding(.vertical, Space.s8)
                         .background(
-                            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                                 .fill(Palette.ink.opacity(0.1)))
-                        .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .contentShape(RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
                 }
             }
             .buttonStyle(.plain)
         }
         .padding(Space.s16)
         .frame(width: 300)
-        .passbandGlass(.pane, cornerRadius: 22, tint: Palette.lockSoft.opacity(0.9))
+        .passbandGlass(.pane, cornerRadius: Radius.modal, tint: Palette.lockSoft.opacity(0.9))
         // Room for the glass's own shadow: the window has none, because a
         // window shadow is cut to the frame and this card has round corners.
         .padding(Space.s20)

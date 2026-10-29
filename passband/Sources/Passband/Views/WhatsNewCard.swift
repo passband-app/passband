@@ -60,7 +60,7 @@ struct WhatsNewCard: View {
     private var onLast: Bool { page >= pageCount - 1 }
 
     private static let width: CGFloat = 580
-    private static let radius: CGFloat = 20
+    private static let radius: CGFloat = Radius.modal
     /// A feature page's picture, the stage's 2:1 across the card.
     private static let artHeight: CGFloat = (width * VignetteClock.canvas.height / VignetteClock.canvas.width).rounded()
     /// Every page of a walk is this tall, so Next changes what the card says
@@ -108,7 +108,7 @@ struct WhatsNewCard: View {
                 .padding(.horizontal, Space.s12)
             #endif
             .passbandGlass(.pane, cornerRadius: Self.radius, tint: Palette.glassTint)
-            .shadow(color: .black.opacity(0.28), radius: 40, y: 18)
+            .overlayShadow()
         }
         .keyContext(.modal)
         .keyBindings(.modal, [
@@ -204,7 +204,7 @@ struct WhatsNewCard: View {
                     .textCase(.uppercase)
                     .foregroundStyle(Palette.accent)
                     .lineLimit(1)
-                Spacer(minLength: 8)
+                Spacer(minLength: Space.s8)
                 Text(headliner.surfaces.map(\.label).joined(separator: " · "))
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaint)
@@ -302,7 +302,7 @@ struct WhatsNewCard: View {
                                 .font(Typo.ui(13, weight: .semibold))
                                 .foregroundStyle(Palette.ink)
                                 .lineLimit(1)
-                            Spacer(minLength: 8)
+                            Spacer(minLength: Space.s8)
                             Text(Self.longDate(note.date))
                                 .font(Typo.micro)
                                 .foregroundStyle(Palette.inkFaintest)
@@ -388,15 +388,12 @@ struct WhatsNewCard: View {
             LinearGradient(colors: [.clear, .black.opacity(0.28)], startPoint: .center, endPoint: .bottom)
                 .allowsHitTesting(false)
 
-            Text("NEW IN PASSBAND \(note.version)")
-                .font(Typo.ui(9, weight: .bold).width(.expanded))
-                .tracking(0.6)
-                .foregroundStyle(.white.opacity(0.92))
-                .padding(.horizontal, Space.scaled(9))
-                .padding(.vertical, Space.scaled(5))
-                .background(.black.opacity(0.32), in: Capsule())
-                .overlay(Capsule().strokeBorder(Color(hex: 0x82BAF5).opacity(0.45), lineWidth: 0.5))
-                .padding(Space.s14)
+            // The capsule's edge on the text column (28) below it, so the
+            // pill and the title start on one line; the bottom inset is the
+            // strip's own.
+            HeroPill(text: "NEW IN PASSBAND \(note.version)")
+                .padding(.leading, Space.scaled(28))
+                .padding(.bottom, Space.s14)
         }
         .frame(height: 112)
         .frame(maxWidth: .infinity)
@@ -451,7 +448,7 @@ struct WhatsNewCard: View {
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
             }
-            Spacer(minLength: 10)
+            Spacer(minLength: Space.s10)
             if page > 0 {
                 Button("Back") { go(to: page - 1) }
                     .buttonStyle(.plain)
@@ -643,12 +640,12 @@ private struct KeyedLine: View {
                         .padding(.horizontal, Space.s6)
                         .frame(minWidth: 21, minHeight: 21)
                         .background(
-                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            RoundedRectangle(cornerRadius: Radius.chip, style: .continuous)
                                 .fill(Palette.ink.opacity(0.06)))
                         // EVEN all round, and a soft shadow beneath rather
                         // than a lit top edge.
                         .overlay(
-                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            RoundedRectangle(cornerRadius: Radius.chip, style: .continuous)
                                 .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
                         .shadow(color: .black.opacity(0.12), radius: 0.5, y: 1)
                 }

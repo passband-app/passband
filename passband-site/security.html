@@ -291,8 +291,9 @@ stale assessment denies external access until a current allowed decision exists.
 Model summaries, notification text, reasons, and evidence locations must not quote
 credentials. This is a model-output requirement; it is not a claim that arbitrary
 model output can be proven secret-free by a string filter.</p>
-<p><strong>Enforcement.</strong> <code>store/sqlite/messages.rs:external_message_allowed_conn</code> checks the
-current assessment and source provenance under the store lock. External whole-thread
+<p><strong>Enforcement.</strong> <code>store/sqlite/messages.rs:external_messages_allowed_conn</code> checks the
+current assessment and source provenance, of one message or of a set at once, under
+the store lock. External whole-thread
 reads require the thread&#39;s sources to be allowed. MCP and dedicated
 <code>/client/agent/</code> routes use these checks for messages and derived results. Search
 rehydrates results under the same guard instead of releasing stale cached snippets.
@@ -486,7 +487,7 @@ pre-echo status quo. The read-back is also capped at <strong>5s</strong>
 (<code>ECHO_FETCH_TIMEOUT_SECS</code>): the client&#39;s POST timeout is 15s and <code>action_send</code> has
 already made two serial Gmail calls, so bookkeeping may not spend the rest of that
 budget. Keep the echo&#39;s failures audited and swallowed; keep it out of core&#39;s write
-surface (the fetch lives in <code>squelch-api/src/gmail_write.rs</code>, core takes bytes).</p>
+surface (the fetch lives in <code>squelch-api/src/write/gmail.rs</code>, core takes bytes).</p>
 <h2>6. The embedded assistant</h2>
 <blockquote>
 <p>The dedicated <code>/client/agent/</code> read routes and source checks in §4 supersede

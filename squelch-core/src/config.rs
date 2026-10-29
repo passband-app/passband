@@ -90,36 +90,38 @@ pub fn mcp_allowed_hosts() -> Vec<String> {
     hosts
 }
 
-/// The READ scope. This is all the sync daemon + triage ever REQUEST, and that
-/// much is a hard invariant, hence a `const`. See [`WRITE_SCOPES`] for the
-/// separate, opt-in action credential.
+/// THE ONE GMAIL SCOPE every consent requests (since 2026-10-27). Google
+/// describes it as "read, compose, and send emails": it covers reading,
+/// labels, archiving and sending, and not permanent deletion. One scope
+/// instead of three means one restricted permission on the consent screen
+/// and one to justify in verification. It is the only Gmail scope declared on
+/// the Cloud project's consent screen.
 ///
-/// What Google ISSUES is a different question. Grants are unioned per Cloud
-/// project: with incremental authorization an access token also covers every
-/// scope the user has already granted the project, even when those grants came
-/// from a different client. So once a user has run `squelchd auth --write`, the
-/// token behind the read credential carries modify+send too, and is capable of
-/// more than readonly however narrow the request was.
-///
-/// The consequence, stated plainly: token scope is defense in depth here, not
-/// the thing that enforces the two-door split. What enforces it is that the
-/// agent door exposes no write tools, that [`WRITE_SCOPES`] credentials are
-/// loaded only by human-door action handlers, and that sealed rows are absent
-/// from every serving query. See `docs/SECURITY.md` §4.
-pub const GMAIL_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
-
-/// The WRITE scopes: requested ONLY by `squelchd auth --write`, loaded ONLY by
-/// human-door action endpoints, never by sync/triage. Deliberately a separate
-/// constant from [`GMAIL_READONLY_SCOPE`] so the two can never be conflated.
+/// Token scope does not enforce the two-door split and never could: Google
+/// unions grants per Cloud project, so an access token covers every scope the
+/// user ever granted the project. What enforces it is that the agent door
+/// exposes no write tools, that the Write credential is loaded only by
+/// human-door action handlers, and that sealed rows are absent from every
+/// serving query. See `docs/SECURITY.md` §4.
 pub const GMAIL_MODIFY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.modify";
+
+/// The Gmail scopes a consent asks for: [`GMAIL_MODIFY_SCOPE`] alone.
+pub const GMAIL_SCOPES: &[&str] = &[GMAIL_MODIFY_SCOPE];
+
+/// LEGACY, NEVER REQUESTED. Credentials minted before 2026-10-27 carry
+/// `gmail.readonly` (the old Read consent) and `gmail.send` (the old Write
+/// consent, beside modify). A stored or imported token is still accepted on
+/// them: `gmail.readonly` satisfies the Read slot. Nothing asks Google for
+/// either any more, and neither is declared on the consent screen.
+pub const GMAIL_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
 pub const GMAIL_SEND_SCOPE: &str = "https://www.googleapis.com/auth/gmail.send";
 
-/// Convenience: the full set of scopes for the write credential.
-pub const WRITE_SCOPES: &[&str] = &[GMAIL_MODIFY_SCOPE, GMAIL_SEND_SCOPE];
+/// What the WRITE credential needs: [`GMAIL_MODIFY_SCOPE`], which also sends.
+pub const WRITE_SCOPES: &[&str] = &[GMAIL_MODIFY_SCOPE];
 
-/// The OPTIONAL calendar grant. Requested only by the hosted calendar consent
-/// (`/reconnect?calendar=1`, beside the three Gmail scopes) and by `squelchd
-/// auth --calendar`; never REQUIRED by any flow, so a person who unticks it at
+/// The OPTIONAL calendar grant. Requested by hosted signup, the hosted
+/// calendar consent (`/reconnect?calendar=1`, beside the Gmail scope) and
+/// `squelchd auth` (its optional calendar step, or `--calendar`); never REQUIRED by any flow, so a person who unticks it at
 /// Google keeps a working mailbox and simply has no calendar.
 ///
 /// "Calendar is granted" means a token's recorded scopes include
@@ -369,7 +371,9 @@ impl Default for SyncConfig {
 #[serde(default)]
 pub struct NotifyConfig {
     /// Fast-model importance at or above which a message qualifies for a push.
-    /// All model-assessed auth qualifies regardless of importance. Default 50.
+    /// All model-assessed auth qualifies regardless of importance. Default 40:
+    /// over-notifying beats burying mail in FYE, so actionable automated
+    /// notices (the prompts' 40-59 band) push too.
     /// Env: `SQUELCH_NOTIFY_MIN_IMPORTANCE`.
     pub min_importance: u8,
     /// THE FIRST-SIGHT TEST: mail whose `Date:` header is older than this when
@@ -470,7 +474,7 @@ impl NotifyConfig {
 impl Default for NotifyConfig {
     fn default() -> Self {
         Self {
-            min_importance: 50,
+            min_importance: 40,
             freshness_window_secs: 900,
             rescue_window_secs: 3600,
             fast_enabled: true,
@@ -488,6 +492,106 @@ impl Default for NotifyConfig {
             price_in_per_mtok: 1.0,
             price_out_per_mtok: 5.0,
         }
+    }
+}
+
+/// The model behind smart clear's one question (`[smart_clear]`): has what this
+/// Reading mail is about already expired? See [`crate::triage::smart_clear`].
+///
+/// ITS OWN MODEL AND ITS OWN PRICES, the fourth pair in the ledger. It is not
+/// the notify model (too small to do date arithmetic over sixty summaries
+/// reliably) and not Stage-1's (far more than the question needs), so both
+/// cost estimators price its category off the two numbers here. Change the
+/// model and these prices move with it, or the estimate drifts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SmartClearConfig {
+    /// The model asked. Default `claude-sonnet-5`, which the hosted gateway's
+    /// allow-list carries in both spellings (verified 2026-10-05; it does NOT
+    /// carry `claude-sonnet-5-5`). Qualified with the gateway's provider
+    /// prefix at call time, like every other model here.
+    pub model: String,
+    /// Reasoning depth, sent as `output_config.effort`. Default `low`: the
+    /// question is date arithmetic, and the owner is waiting on the answer.
+    pub effort: Option<String>,
+    /// USD per million input tokens for `model`. Default 2.0, the list price
+    /// of `claude-sonnet-5` (Anthropic first-party API rates as of
+    /// 2026-09-25).
+    pub price_in_per_mtok: f64,
+    /// USD per million output tokens for `model`. Default 10.0, same source.
+    pub price_out_per_mtok: f64,
+}
+
+impl Default for SmartClearConfig {
+    fn default() -> Self {
+        Self {
+            model: "claude-sonnet-5".to_string(),
+            effort: Some("low".to_string()),
+            // claude-sonnet-5 per-MTok (input / output).
+            price_in_per_mtok: 2.0,
+            price_out_per_mtok: 10.0,
+        }
+    }
+}
+
+/// Auto-translate (docs/TRANSLATION.md): mail in another language is
+/// translated to English in the refine lane. ON by default and file-only: the
+/// feature takes hold when the daemon version rolls, so there is deliberately
+/// no env var and no warden knob behind any of this.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TranslateConfig {
+    /// Whether the translate pass runs at all. Detection at ingest is local and
+    /// free, so this gates only the model spend. Default `true`.
+    pub enabled: bool,
+    /// The model that translates. Qualified with the gateway's provider prefix
+    /// at call time, never here (see
+    /// [`crate::triage::llm::qualify_gateway_model`]). Default
+    /// `claude-sonnet-5`, which every tenant's Bifrost allow-list already
+    /// carries.
+    pub model: String,
+    /// USD per million input tokens for `model`, for the usage estimators
+    /// (`metrics::estimate_cost_usd` and `/client/usage`), which price the
+    /// `translate` ledger category here rather than letting it fall through
+    /// to the Stage-1 arm. Default 2.0, Claude Sonnet 5's list price.
+    pub price_in_per_mtok: f64,
+    /// USD per million output tokens for `model`. Default 10.0, Claude
+    /// Sonnet 5's list price.
+    pub price_out_per_mtok: f64,
+    /// Per-account-per-day spend cap in US dollars, priced at
+    /// [`Self::price_in_per_mtok`] / [`Self::price_out_per_mtok`] from the
+    /// `translate` usage ledger: a runaway guard on the tenant's LLM key,
+    /// which translation shares with triage. Each message's cost is
+    /// ESTIMATED before its call to decide whether it fits what is left
+    /// today, and the day's spend is SETTLED from the usage the provider
+    /// actually reported. Over it, live rows stay `pending` until the next
+    /// UTC day (and triage does not wait for them), backfill rows are queued
+    /// `deferred`. No `app_settings` override. Default 0.50: at Sonnet 5's
+    /// prices, roughly a hundred short messages a day, or twenty of 5,000
+    /// characters.
+    pub daily_budget_usd: f64,
+}
+
+impl Default for TranslateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: "claude-sonnet-5".to_string(),
+            price_in_per_mtok: 2.0,
+            price_out_per_mtok: 10.0,
+            daily_budget_usd: 0.50,
+        }
+    }
+}
+
+impl Config {
+    /// Whether a translator will ever work a queued row: translation is on
+    /// and an LLM is configured. The same two facts
+    /// [`crate::translate::TranslateClient::from_config`] needs. The human
+    /// door asks it so it never tells the reader "Translating..." about a
+    /// row nothing will translate.
+    pub fn translation_active(&self) -> bool {
+        self.translate.enabled && self.stage2.resolve_llm().is_some()
     }
 }
 
@@ -627,6 +731,91 @@ pub struct TrackingConfig {
     /// `https://track.example.com`); the pixel is `{base_url}/t/{token}`.
     /// Env: `SQUELCH_TRACK_URL`. `None` => tracking is off for every send.
     pub base_url: Option<String>,
+}
+
+/// Smart re-notify's tunables (issue #625, docs/RENOTIFY.md). WHETHER it runs
+/// is the `renotify` hidden feature ([`crate::features::RENOTIFY`]), per
+/// tenant; this is only HOW. Every field is in minutes or a count, and every
+/// one has an env override, because hosted has no config file to edit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct RenotifyConfig {
+    /// How long the Mac app must have been disconnected for its next
+    /// connection to count as the owner arriving. Default 120.
+    /// Env: `SQUELCH_RENOTIFY_MIN_OFFLINE_MINS`.
+    pub min_offline_mins: u64,
+    /// How long the connection must then stay up before the banner fires, in
+    /// SECONDS: lets the app's own replay land first and drops a wake that
+    /// sleeps again at once. Default 30. Env: `SQUELCH_RENOTIFY_SETTLE_SECS`.
+    pub online_settle_secs: u64,
+    /// Minutes after a meeting ends before its window opens. Default 3.
+    /// Env: `SQUELCH_RENOTIFY_MEETING_END_DELAY_MINS`.
+    pub meeting_end_delay_mins: u64,
+    /// How long that window stays open. Default 10.
+    /// Env: `SQUELCH_RENOTIFY_MEETING_END_WINDOW_MINS`.
+    pub meeting_end_window_mins: u64,
+    /// A timed event longer than this is a block, not a meeting: its end is no
+    /// trigger. Default 240. Env: `SQUELCH_RENOTIFY_MAX_MEETING_MINS`.
+    pub max_meeting_mins: u64,
+    /// Hold when a meeting starts within this many minutes. Default 15.
+    /// Env: `SQUELCH_RENOTIFY_MEETING_GUARD_MINS`.
+    pub meeting_guard_mins: u64,
+    /// The working day in the owner's zone, `[start, end)` hours. Defaults 7
+    /// and 20. Env: `SQUELCH_RENOTIFY_WORK_START_HOUR`,
+    /// `SQUELCH_RENOTIFY_WORK_END_HOUR`.
+    pub work_start_hour: u32,
+    pub work_end_hour: u32,
+    /// Banners per local day. Default 4. Env: `SQUELCH_RENOTIFY_DAILY_BUDGET`.
+    pub daily_budget: u32,
+    /// Messages one banner names. Default 3. Env: `SQUELCH_RENOTIFY_MAX_ITEMS`.
+    pub max_items: usize,
+    /// Re-notifies per message, ever. Default 2.
+    /// Env: `SQUELCH_RENOTIFY_MAX_PER_MESSAGE`.
+    pub max_per_message: u32,
+    /// The first notification must be at least this old. Default 30.
+    /// Env: `SQUELCH_RENOTIFY_MIN_AGE_MINS`.
+    pub min_age_mins: u64,
+    /// ... and at most this old. Default 4320 (three days).
+    /// Env: `SQUELCH_RENOTIFY_MAX_AGE_MINS`.
+    pub max_age_mins: u64,
+    /// Wait after a re-notify before the same message may come again, doubled
+    /// per re-notify already spent on it. Default 180.
+    /// Env: `SQUELCH_RENOTIFY_COOLDOWN_MINS`.
+    pub cooldown_mins: u64,
+    /// Mail in For your eyes with a due date comes back this many minutes
+    /// before it, opened or not. Default 1440 (a day).
+    /// Env: `SQUELCH_RENOTIFY_DUE_LEAD_MINS`.
+    pub due_lead_mins: u64,
+    /// ... and stays eligible this long after it. Default 720.
+    /// Env: `SQUELCH_RENOTIFY_DUE_GRACE_MINS`.
+    pub due_grace_mins: u64,
+    /// The hour a date-only due date is read as, in the owner's zone.
+    /// Default 17. Env: `SQUELCH_RENOTIFY_DUE_DAY_HOUR`.
+    pub due_day_hour: u32,
+}
+
+impl Default for RenotifyConfig {
+    fn default() -> Self {
+        Self {
+            min_offline_mins: 120,
+            online_settle_secs: 30,
+            meeting_end_delay_mins: 3,
+            meeting_end_window_mins: 10,
+            max_meeting_mins: 240,
+            meeting_guard_mins: 15,
+            work_start_hour: 7,
+            work_end_hour: 20,
+            daily_budget: 4,
+            max_items: 3,
+            max_per_message: 2,
+            min_age_mins: 30,
+            max_age_mins: 4320,
+            cooldown_mins: 180,
+            due_lead_mins: 1440,
+            due_grace_mins: 720,
+            due_day_hour: 17,
+        }
+    }
 }
 
 /// Prometheus scrape-endpoint config; see [`crate::metrics`].
@@ -1291,7 +1480,8 @@ impl Default for Stage1Config {
 /// Known drift: the daily ledger holds one cache_creation total, so rows
 /// written before the 1-hour TTL (at 1.25x) are re-priced at 2x here, and so
 /// would every row if a gateway dropped the `ttl` field. The per-TTL split
-/// is stored per run in `agent_triage_runs.metadata_json.usage[].cache_creation`;
+/// is stored per run in `agent_triage_runs.metadata_json.usage[].cache_creation`,
+/// for every run (nothing schedules `store/sqlite/retention.rs`'s pruning);
 /// pricing from it needs a ledger column, which is a follow-up.
 pub const CACHE_WRITE_INPUT_MULT: f64 = 2.0;
 pub const CACHE_READ_INPUT_MULT: f64 = 0.05;
@@ -1874,6 +2064,8 @@ pub struct Config {
     /// first-sight freshness test, and the rescue ceiling a late verdict has to
     /// beat.
     pub notify: NotifyConfig,
+    /// Smart clear's model pass: which model, at what effort, at what price.
+    pub smart_clear: SmartClearConfig,
     /// Scheduled re-evaluation: how often triage looks at its own past verdicts.
     pub revisit: RevisitPassConfig,
     /// APNs pusher: the blind relay's URL + bearer. Absent `relay_url` means the
@@ -1890,6 +2082,10 @@ pub struct Config {
     /// BYOK carrier APIs. No credentials anywhere means no carrier is ever
     /// polled, which is the default.
     pub carriers: CarriersConfig,
+    /// Auto-translate. Defaults only; read from the `[translate]` table.
+    pub translate: TranslateConfig,
+    /// Smart re-notify's tunables; whether it runs is a hidden feature.
+    pub renotify: RenotifyConfig,
 }
 
 impl Default for Config {
@@ -1909,12 +2105,15 @@ impl Default for Config {
             sync: SyncConfig::default(),
             embed: EmbedConfig::default(),
             notify: NotifyConfig::default(),
+            smart_clear: SmartClearConfig::default(),
             revisit: RevisitPassConfig::default(),
             pusher: PusherConfig::default(),
             tracking: TrackingConfig::default(),
             metrics: MetricsConfig::default(),
             console: ConsoleConfig::default(),
             carriers: CarriersConfig::default(),
+            translate: TranslateConfig::default(),
+            renotify: RenotifyConfig::default(),
         }
     }
 }
@@ -2116,6 +2315,75 @@ impl Config {
         env_override(
             "SQUELCH_NOTIFY_MIN_IMPORTANCE",
             &mut self.notify.min_importance,
+        );
+        for (name, slot) in [
+            (
+                "SQUELCH_RENOTIFY_MIN_OFFLINE_MINS",
+                &mut self.renotify.min_offline_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_SETTLE_SECS",
+                &mut self.renotify.online_settle_secs,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MEETING_END_DELAY_MINS",
+                &mut self.renotify.meeting_end_delay_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MEETING_END_WINDOW_MINS",
+                &mut self.renotify.meeting_end_window_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MAX_MEETING_MINS",
+                &mut self.renotify.max_meeting_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MEETING_GUARD_MINS",
+                &mut self.renotify.meeting_guard_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MIN_AGE_MINS",
+                &mut self.renotify.min_age_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MAX_AGE_MINS",
+                &mut self.renotify.max_age_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_COOLDOWN_MINS",
+                &mut self.renotify.cooldown_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_DUE_LEAD_MINS",
+                &mut self.renotify.due_lead_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_DUE_GRACE_MINS",
+                &mut self.renotify.due_grace_mins,
+            ),
+        ] {
+            env_override(name, slot);
+        }
+        env_override(
+            "SQUELCH_RENOTIFY_WORK_START_HOUR",
+            &mut self.renotify.work_start_hour,
+        );
+        env_override(
+            "SQUELCH_RENOTIFY_WORK_END_HOUR",
+            &mut self.renotify.work_end_hour,
+        );
+        env_override(
+            "SQUELCH_RENOTIFY_DAILY_BUDGET",
+            &mut self.renotify.daily_budget,
+        );
+        env_override(
+            "SQUELCH_RENOTIFY_MAX_PER_MESSAGE",
+            &mut self.renotify.max_per_message,
+        );
+        env_override("SQUELCH_RENOTIFY_MAX_ITEMS", &mut self.renotify.max_items);
+        env_override(
+            "SQUELCH_RENOTIFY_DUE_DAY_HOUR",
+            &mut self.renotify.due_day_hour,
         );
         // The two notify WINDOWS, both reachable without editing a config file
         // inside a container image. The freshness one never had an override at
@@ -4000,10 +4268,10 @@ archive_access_daily_cap = 9
     #[test]
     fn notify_defaults_match_the_squelch_line_and_env_overrides_the_threshold() {
         let _g = ENV_LOCK.lock().unwrap();
-        // The default threshold IS the TUI's starting squelch line (50), so
-        // "notified" and "above the line" mean the same thing to a user.
+        // 40, not the TUI's squelch line (50): the notify prompts' 40-59 band
+        // is "an automated notice you may want to act on", and that pushes.
         let c = Config::default();
-        assert_eq!(c.notify.min_importance, 50);
+        assert_eq!(c.notify.min_importance, 40);
         assert_eq!(c.notify.freshness_window_secs, 900);
         // The rescue ceiling: an hour from FIRST SIGHT, not from the sender's
         // `Date:`.
@@ -4018,6 +4286,31 @@ archive_access_daily_cap = 9
         // not the notify threshold; they must not alias.
         assert_eq!(c.default_min_importance, 0);
         unsafe { std::env::remove_var("SQUELCH_NOTIFY_MIN_IMPORTANCE") }
+    }
+
+    /// `[smart_clear]` reads from the file and from nowhere else: like
+    /// `[translate]`, it takes hold at the daemon roll, so no env var moves it.
+    #[test]
+    fn the_smart_clear_section_reads_from_toml_only() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // A config that predates the section has the defaults.
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.smart_clear.model, "claude-sonnet-5");
+        let c: Config =
+            toml::from_str("[smart_clear]\nmodel = \"from-the-file\"\nprice_in_per_mtok = 1.5\n")
+                .unwrap();
+        assert_eq!(c.smart_clear.model, "from-the-file");
+        assert_eq!(c.smart_clear.price_in_per_mtok, 1.5);
+        assert_eq!(
+            c.smart_clear.price_out_per_mtok, 10.0,
+            "unnamed keys default"
+        );
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe { std::env::set_var("SQUELCH_SMART_CLEAR_MODEL", "from-the-env") }
+        let mut env = c.clone();
+        env.apply_env_overrides();
+        unsafe { std::env::remove_var("SQUELCH_SMART_CLEAR_MODEL") }
+        assert_eq!(env.smart_clear.model, "from-the-file");
     }
 
     /// THE FAST LANE'S DEFAULTS, asserted one by one because two of them are
@@ -4198,7 +4491,7 @@ archive_access_daily_cap = 9
         assert_eq!(cfg.notify.freshness_window_secs, 900);
         // A config that predates the feature has no [notify] table at all.
         let cfg: Config = toml::from_str("squelch_level = 1\n").unwrap();
-        assert_eq!(cfg.notify.min_importance, 50);
+        assert_eq!(cfg.notify.min_importance, 40);
         assert_eq!(cfg.notify.rescue_window_secs, 3600);
     }
 

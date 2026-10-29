@@ -7,6 +7,7 @@
 pub mod access;
 pub mod agent;
 pub mod agent_config;
+pub mod auth_pairing;
 pub mod calendar;
 pub mod condense;
 pub mod context;
@@ -27,7 +28,9 @@ pub mod receipt_match;
 pub mod rule_infer;
 pub mod rule_suggest;
 pub mod rules;
+pub mod sender_fatigue;
 pub mod shipment;
+pub mod smart_clear;
 pub(crate) mod text;
 pub mod unsub_agent;
 pub mod unsub_page;

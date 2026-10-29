@@ -40,9 +40,12 @@ struct UsageView: View {
             }
             ScrollView {
                 content
-                    .padding(.horizontal, Space.s24)
+                    .padding(.horizontal, Space.page)
                     .padding(.vertical, Space.scaled(18))
-                    .frame(maxWidth: 980, alignment: .leading)
+                    // Capped on the type's curve, like the settings panes: the
+                    // cards hold charts with labelled axes, so the cap is a
+                    // measure and grows with the text in comfortable.
+                    .frame(maxWidth: Typo.measure(980), alignment: .leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -76,7 +79,7 @@ struct UsageView: View {
 
     @ViewBuilder private var content: some View {
         if let series {
-            VStack(alignment: .leading, spacing: Space.s14) {
+            VStack(alignment: .leading, spacing: Space.s16) {
                 if !page.isLoading, let error = page.error {
                     Text(error).font(Typo.micro).foregroundStyle(Palette.danger)
                 }
@@ -85,7 +88,7 @@ struct UsageView: View {
                 mailCard(series)
                 signalCard(series)
                 spendCard(series)
-                HStack(alignment: .top, spacing: Space.s14) {
+                HStack(alignment: .top, spacing: Space.s16) {
                     categoryCard(series)
                     assistantCard.frame(width: Typo.measure(280))
                 }
@@ -123,7 +126,7 @@ struct UsageView: View {
 
     private func tiles(_ s: UsageSeries) -> some View {
         let versus = "vs prior \(s.days) days"
-        return HStack(alignment: .top, spacing: Space.s12) {
+        return HStack(alignment: .top, spacing: Space.s16) {
             StatTile(
                 label: "Received", value: UsageText.count(s.received),
                 delta: deltaLabel(s.receivedDelta, upIsGood: nil), versus: versus,
@@ -147,6 +150,9 @@ struct UsageView: View {
                 spark: s.spend.map(\.total), tint: Palette.accent,
                 sub: s.costPerEmail.map { "\(Fmt.fmtCost($0)) per email" } ?? "no priced calls")
         }
+        // ONE HEIGHT FOR THE ROW: each tile fills it (`StatTile`), so a tile
+        // with a shorter line never ends above its neighbours.
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     /// A tile's delta, toned by direction × whether up is good — and left
@@ -507,7 +513,7 @@ struct UsageView: View {
             .foregroundStyle(Palette.inkFaint.opacity(0.6))
             .lineStyle(StrokeStyle(lineWidth: 1))
             .annotation(
-                position: .trailing, alignment: .top, spacing: 8,
+                position: .trailing, alignment: .top, spacing: Space.s8,
                 overflowResolution: .init(x: .fit(to: .plot), y: .fit(to: .plot))
             ) { view }
     }
@@ -585,7 +591,7 @@ private struct ChartCard<Plot: View, Table: View>: View {
         }
         .zonePadding()
         .frame(maxWidth: .infinity, alignment: .leading)
-        .passbandGlass(.pane, cornerRadius: 18, tint: Palette.glassTint)
+        .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTint)
     }
 }
 
@@ -626,10 +632,10 @@ private struct ChartReadout: View {
         .padding(.horizontal, Space.scaled(9))
         .padding(.vertical, Space.scaled(7))
         .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.readerBackground)
+            RoundedRectangle(cornerRadius: Radius.chip, style: .continuous).fill(Palette.readerBackground)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.chip, style: .continuous)
                 .strokeBorder(Palette.hairlineStrong, lineWidth: 0.5)
         )
         .shadow(color: .black.opacity(0.14), radius: 8, y: 3)
@@ -655,10 +661,15 @@ private struct StatTile: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Space.s4) {
-            Text(label).font(Typo.micro).foregroundStyle(Palette.inkFaint)
+            Text(label).font(Typo.micro).foregroundStyle(Palette.inkFaint).lineLimit(1)
+            // ONE LINE, ALWAYS: a figure broken over two lines ("$12." /
+            // "34") reads as two numbers. A narrow tile shrinks it a little
+            // instead.
             Text(value)
                 .font(Typo.ui(22, weight: .semibold))
                 .foregroundStyle(Palette.ink)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
             HStack(spacing: Space.s4) {
                 if let delta {
                     Text(delta.text).font(Typo.num(11, weight: .semibold)).foregroundStyle(delta.tone)
@@ -675,10 +686,11 @@ private struct StatTile: View {
                 Text(sub).font(Typo.micro).foregroundStyle(Palette.inkFaintest).lineLimit(1)
             }
         }
-        .padding(.horizontal, Space.s14)
-        .padding(.vertical, Space.s12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .passbandGlass(.pane, cornerRadius: 14, tint: Palette.glassTint)
+        // A standalone pane in the page's column, so it pads like one: its
+        // label sits on the same line as the cards' labels below it.
+        .zonePadding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTint)
     }
 }
 

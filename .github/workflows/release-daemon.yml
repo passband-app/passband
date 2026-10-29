@@ -47,7 +47,7 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify tag matches workspace version
         run: |
           VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
@@ -56,13 +56,18 @@ jobs:
 
   squelchd-image:
     runs-on: ubuntu-latest
+    # Deploys to the release-daemon environment, limited to daemon-* tags,
+    # which only admins may push (tag ruleset). Holds no secrets today; it
+    # is where any future publishing secret goes, and the deployment log
+    # records every image publish.
+    environment: release-daemon
     needs: verify
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -75,14 +80,14 @@ jobs:
       # pin stale. latest must be explicit: type=semver used to imply it, and
       # the self-host docs tell people to pull :latest.
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository_owner }}/squelchd
           tags: |
             type=ref,event=tag
             type=raw,value=latest
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: squelchd/Dockerfile
@@ -98,13 +103,18 @@ jobs:
   # registry gap was.
   warden-image:
     runs-on: ubuntu-latest
+    # Deploys to the release-daemon environment, limited to daemon-* tags,
+    # which only admins may push (tag ruleset). Holds no secrets today; it
+    # is where any future publishing secret goes, and the deployment log
+    # records every image publish.
+    environment: release-daemon
     needs: verify
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -112,14 +122,14 @@ jobs:
 
       # Same scheme as squelchd: image tag == git tag, plus latest.
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository_owner }}/squelch-warden
           tags: |
             type=ref,event=tag
             type=raw,value=latest
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: Dockerfile.warden
@@ -137,27 +147,32 @@ jobs:
   # somewhere Railway is not.
   control-image:
     runs-on: ubuntu-latest
+    # Deploys to the release-daemon environment, limited to daemon-* tags,
+    # which only admins may push (tag ruleset). Holds no secrets today; it
+    # is where any future publishing secret goes, and the deployment log
+    # records every image publish.
+    environment: release-daemon
     needs: verify
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository_owner }}/squelch-control
           tags: |
             type=ref,event=tag
             type=raw,value=latest
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: Dockerfile.control

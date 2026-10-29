@@ -152,6 +152,13 @@ enum AccountIndex {
         "passband.thread-style",
         // The tag of the profile photo held for this account (AccountPhotos).
         "passband.account-photo-tag",
+        // Whether this phone's push token is registered with that account's
+        // daemon (PushRegistration.covers); gone with the account.
+        "passband.push.covered",
+        // Search history (RecentSearchStore): the reader's own words about
+        // their mail, questions to the agent among them. Removing the account
+        // takes them with it.
+        "passband.search.recents",
     ]
 
     /// The per-account name for one of those keys. Derived in ONE place so a
@@ -257,6 +264,11 @@ enum AccountIndex {
         for base in scopedDefaultsKeys {
             defaults.removeObject(forKey: scopedKey(base, id))
         }
+        // Not a default, but per-account all the same: the saved chats behind
+        // that account's search-history questions (mail content, on disk).
+        QuestionChats.forget(account: id)
+        // And its last board (BoardFile.swift), mail content on disk too.
+        BoardFile.forget(account: id)
     }
 
     // MARK: - orphaned keychain slots

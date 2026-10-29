@@ -1,0 +1,56 @@
+# Secret scan on every PR and every push to main. This stands in for GitHub
+# secret scanning and push protection, which a private repo on the Team plan
+# does not get without buying Secret Protection.
+#
+# It scans the whole history, not just the PR's commits. That takes a few
+# seconds and needs no logic for working out which commits are new.
+# Findings that were reviewed and are not credentials live in
+# .gitleaksignore. For a new test fixture, put `gitleaks:allow` in a comment
+# on that line instead.
+#
+# There is deliberately no path filter. That makes this the one workflow that
+# reports on every PR, so it can be made a required check later without
+# leaving PRs stuck on "expected".
+#
+# Not gitleaks/gitleaks-action: it needs a license key for repos owned by an
+# org. The release binary is pinned and checked against its checksum instead.
+
+name: gitleaks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: gitleaks-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$tarball"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
+
+      - name: Scan history
+        run: |
+          "$RUNNER_TEMP/gitleaks" git --no-banner --redact --verbose \
+            --log-opts="HEAD" .

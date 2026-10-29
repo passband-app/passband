@@ -135,6 +135,9 @@ struct Fixture {
     readable: i64,
     /// A message the agent may NOT read.
     restricted: i64,
+    /// The state the mailer and router were built from, for reaching the
+    /// channels a running daemon wires elsewhere (the pusher's draft pings).
+    state: squelch_api::ApiState,
 }
 
 async fn fixture(access: AgentWriteAccess, with_write_credential: bool) -> Fixture {
@@ -156,7 +159,8 @@ async fn fixture(access: AgentWriteAccess, with_write_credential: bool) -> Fixtu
     };
     Fixture {
         mailer: state.agent_mailer(),
-        app: router(state),
+        app: router(state.clone()),
+        state,
         store,
         acct,
         gmail,
@@ -828,6 +832,74 @@ async fn open_draft_reaches_a_listening_mac_and_says_so() {
     let rows = audit_details(&f);
     assert!(rows.contains(&("agent".into(), "draft.open".into(), "ok:no_mac".into())));
     assert!(rows.contains(&("agent".into(), "draft.open".into(), "ok:mac".into())));
+}
+
+/// With a pusher running, a review request also goes to the phone, as the
+/// draft's id and creation second, and only ONCE per draft: asking again may
+/// bring it up on the Mac again but never buzzes the phone again.
+#[tokio::test]
+async fn open_draft_tells_the_phone_once_per_draft() {
+    let f = fixture(AgentWriteAccess::Drafts, false).await;
+    let created = f.mailer.create_draft(compose("hello")).await.unwrap();
+    let stored = f
+        .store
+        .draft_by_id(f.acct, created.draft_id)
+        .unwrap()
+        .unwrap();
+
+    // A pusher but no phone it can route to (an untagged row): not told,
+    // and the draft not marked, so a phone that registers later still is.
+    let mut pings = f.state.subscribe_draft_pings();
+    f.store
+        .upsert_device(f.acct, &"aa".repeat(32), "ios", None, None)
+        .unwrap();
+    let no_phone = f.mailer.open_draft(created.draft_id).await.unwrap();
+    assert!(!no_phone.on_phone);
+    assert!(pings.try_recv().is_err());
+
+    f.store
+        .upsert_device(
+            f.acct,
+            &"bb".repeat(32),
+            "ios",
+            Some("3F2A9C1E-7B44-4D0A-9E21-8C5B6D0F1A32"),
+            None,
+        )
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+    let told = f.mailer.open_draft(created.draft_id).await.unwrap();
+    assert!(told.on_phone);
+    assert!(!told.on_mac);
+    let ping = pings.try_recv().expect("a draft ping");
+    assert_eq!(ping.draft_id, created.draft_id);
+    assert_eq!(ping.created, stored.created_at.timestamp());
+
+    tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+    let again = f.mailer.open_draft(created.draft_id).await.unwrap();
+    assert!(!again.on_phone, "one push per draft");
+    assert!(pings.try_recv().is_err());
+
+    // A SECOND draft right after is inside the phone's own spacing: the Mac
+    // may still be asked, the phone is not, and the draft stays untold.
+    let second = f.mailer.create_draft(compose("again")).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+    let spaced = f.mailer.open_draft(second.draft_id).await.unwrap();
+    assert!(!spaced.on_phone, "the phone's buzz budget is its own");
+    assert!(pings.try_recv().is_err());
+
+    let rows = audit_details(&f);
+    assert!(rows.contains(&("agent".into(), "draft.open".into(), "ok:phone".into())));
+}
+
+/// An agent may not reorder text on the owner's screen.
+#[tokio::test]
+async fn a_bidi_override_in_a_subject_is_refused() {
+    let f = fixture(AgentWriteAccess::Drafts, false).await;
+    for bad in ["Locked\u{202E}lla", "a\u{2066}b\u{2069}"] {
+        let mut c = compose("hello");
+        c.subject = Some(bad.into());
+        assert!(f.mailer.create_draft(c).await.is_err(), "{bad:?}");
+    }
 }
 
 /// A connection that did not ask (an older Mac app, the phone) is not "a Mac

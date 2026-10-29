@@ -1,4 +1,6 @@
-// Auth mail: login codes, password resets, sign-in alerts, verifications.
+// Auth mail: login codes, password resets, sign-in alerts, account changes, app
+// grants, sign-in receipts, verifications. Which of them ask the owner a
+// question, for how long, and how they group is Lib/AuthPolicy.swift.
 // Metadata only — a body is never fetched to render the list. Reveal is always a
 // human action and writes a server-side audit row, so this page never reveals on
 // load; digits appear immediately only for codes the arrival flow already
@@ -11,8 +13,9 @@ struct AuthView: View {
 
     /// Newer than this counts as live and heads the list.
     private static let liveWindow: TimeInterval = 60 * 60
-    /// Cards in the decision rail before it stops growing.
-    private static let maxDecisionCards = 6
+    /// Cards in the decision rail before it stops growing; past it, the
+    /// header offers "Clear all".
+    private static let maxDecisionCards = AuthPolicy.clearAllAbove
 
     enum Filter: String, CaseIterable, Identifiable {
         case all, live, codes, risk
@@ -37,18 +40,59 @@ struct AuthView: View {
     @State private var codes: [Int: String?] = [:]
     /// Ids archived from this page, hidden optimistically (the list is a poll).
     @State private var archived: Set<Int> = []
+    /// Member ids of bursts the owner asked to "Review each": keyed by member,
+    /// so a burst stays laid out as its members are answered or age out.
+    @State private var expandedBursts: Set<Int> = []
 
     private var decisions = AuthDecisions.shared
 
     private var visible: [SealedMeta] {
         store.sitrep.sealed.filter { !archived.contains($0.id) }
     }
+    /// For the key bindings, which run on a keypress, not per frame. Drawing
+    /// reads the `Derived` snapshot instead.
     private var shown: [SealedMeta] { visible.filter { matches($0, filter) } }
     private var focus: SealedMeta? { shown[safe: index] }
-    private var live: [SealedMeta] { shown.filter { age($0.received_at) <= Self.liveWindow } }
-    private var archive: [SealedMeta] { shown.filter { age($0.received_at) > Self.liveWindow } }
-    private var openDecisions: [SealedMeta] {
-        visible.filter { decisions.isOpen($0) }
+
+    /// Everything the page derives from the sealed list, built ONCE per body.
+    /// These used to be computed properties read from every row: each row's
+    /// `shown.firstIndex(of:)` re-filtered the whole list, so a redraw was
+    /// quadratic in auth mail, and scrolling a long list stuttered.
+    private struct Derived {
+        var visible: [SealedMeta]
+        var shown: [SealedMeta]
+        var live: [SealedMeta]
+        var archive: [SealedMeta]
+        var openDecisions: [SealedMeta]
+        /// Counted COLLAPSED, the rule the rail's badge uses too: a burst is
+        /// one decision ("All me") whether or not it is laid out for review.
+        var decisionCards: [AuthPolicy.Card]
+        /// A row's position in `shown`, for selection and j/k.
+        var indexById: [Int: Int]
+        /// Every listed message by id, for the "explained by" lookup.
+        var byId: [Int: SealedMeta]
+        var focus: SealedMeta?
+    }
+
+    private func derive() -> Derived {
+        let all = store.sitrep.sealed
+        let visible = all.filter { !archived.contains($0.id) }
+        let shown = visible.filter { matches($0, filter) }
+        var live: [SealedMeta] = []
+        var archive: [SealedMeta] = []
+        for m in shown {
+            if age(m.received_at) <= Self.liveWindow { live.append(m) } else { archive.append(m) }
+        }
+        let now = Date()
+        let open = visible.filter { decisions.isOpen($0, now: now) }
+        var indexById: [Int: Int] = [:]
+        for (i, m) in shown.enumerated() { indexById[m.id] = i }
+        return Derived(
+            visible: visible, shown: shown, live: live, archive: archive,
+            openDecisions: open, decisionCards: AuthPolicy.cards(open),
+            indexById: indexById,
+            byId: Dictionary(all.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }),
+            focus: shown[safe: index])
     }
 
     /// Seconds since an ISO stamp; huge when missing/invalid (=> treated old).
@@ -62,18 +106,19 @@ struct AuthView: View {
         case .live: age(m.received_at) <= Self.liveWindow
         case .codes: AuthCode.isCodeKind(m.kind)
         // The ones that mean someone may be trying to get in.
-        case .risk: AuthDecisions.needsDecision(m.kind)
+        case .risk: AuthPolicy.asksQuestion(m)
         case .all: true
         }
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        let d = derive()
+        return VStack(spacing: 0) {
             RoutedHeader(title: "Auth", subtitle: "codes, alerts & resets") {
                 HStack(spacing: Space.s12) {
                     StatusDot(
                         color: Palette.lock,
-                        label: "\(live.count) live · \(openDecisions.count) awaiting you",
+                        label: "\(d.live.count) live · \(d.decisionCards.count) awaiting you",
                         tone: Palette.inkFaint, size: 5)
                     HStack(spacing: Space.scaled(3)) {
                         Kbd("j")
@@ -88,10 +133,10 @@ struct AuthView: View {
             }
 
             HStack(alignment: .top, spacing: Space.s16) {
-                mainColumn
-                rail
+                mainColumn(d)
+                rail(d)
             }
-            .padding(.horizontal, Space.scaled(22))
+            .padding(.horizontal, Space.page)
             .padding(.vertical, Space.s16)
         }
         .keyBindings(.modal, bindings)
@@ -102,18 +147,30 @@ struct AuthView: View {
         }
         .onChange(of: store.authQueue.count) { _, _ in seedFromArrivals() }
         .onAppear { seedFromArrivals() }
-        .onChange(of: shown.count) { _, count in
+        .onChange(of: d.shown.count) { _, count in
             index = max(0, min(index, max(0, count - 1)))
         }
-        .onChange(of: focus?.id) { _, _ in copied = false }
+        .onChange(of: d.focus?.id) { _, _ in copied = false }
+        // A page kept across an account switch must not carry the old
+        // mailbox's state: a reveal open over the switch would reveal the same
+        // int on the NEW daemon.
+        .onChange(of: store.epoch) { _, _ in
+            revealing = nil
+            expandedBursts = []
+            archived = []
+            codes = [:]
+        }
     }
 
     // MARK: - main column
 
-    private var mainColumn: some View {
+    private func mainColumn(_ d: Derived) -> some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: Space.s14) {
-                if let focus {
+            // A plain stack of three children; the rows' stack below is the
+            // lazy one, so only the rows on screen are built and a page holding
+            // hundreds of auth messages scrolls like one holding ten.
+            VStack(alignment: .leading, spacing: Space.s16) {
+                if let focus = d.focus {
                     FocusPanel(
                         meta: focus,
                         code: codes[focus.id] ?? nil,
@@ -148,7 +205,7 @@ struct AuthView: View {
                         .foregroundStyle(filter == f ? Palette.accent : Palette.inkFaint)
                     }
                     Spacer(minLength: Space.s6)
-                    Text("\(shown.count) of \(visible.count) shown")
+                    Text("\(d.shown.count) of \(d.visible.count) shown")
                         .font(Typo.micro)
                         .foregroundStyle(Palette.inkFaintest)
                 }
@@ -158,12 +215,12 @@ struct AuthView: View {
                     // a material, so there is nothing here to morph — and a
                     // container re-coordinates its descendants every time a
                     // hovered row redraws, which is a cost with no matching gain.
-                    VStack(spacing: 1) {
-                        section("Live · last hour", rows: live)
-                        section("Archive", rows: archive)
+                    LazyVStack(spacing: 1) {
+                        section("Live · last hour", rows: d.live, d)
+                        section("Archive", rows: d.archive, d)
                     }
                     .onChange(of: index) { _, i in
-                        guard let m = shown[safe: i] else { return }
+                        guard let m = d.shown[safe: i] else { return }
                         withAnimation(Motion.scrollFollow) {
                             proxy.scrollTo(m.id, anchor: .center)
                         }
@@ -175,7 +232,7 @@ struct AuthView: View {
     }
 
     @ViewBuilder
-    private func section(_ label: String, rows: [SealedMeta]) -> some View {
+    private func section(_ label: String, rows: [SealedMeta], _ d: Derived) -> some View {
         if !rows.isEmpty {
             Text(label)
                 .font(Typo.sectionLabel)
@@ -185,9 +242,12 @@ struct AuthView: View {
                 .padding(.top, Space.s10)
                 .padding(.bottom, Space.s4)
             ForEach(rows) { m in
-                let i = shown.firstIndex(of: m) ?? 0
+                let i = d.indexById[m.id] ?? 0
                 AuthRow(
                     meta: m, selected: i == index, code: codes[m.id] ?? nil,
+                    explained: explainedNote(m, d),
+                    answered: answeredLine(m),
+                    onUndo: { decisions.set(m, nil) },
                     onSelect: {
                         index = i
                         revealing = m
@@ -197,40 +257,43 @@ struct AuthView: View {
         }
     }
 
+    /// "You said: That was me", on a row that asked and was answered, beside
+    /// its Undo.
+    private func answeredLine(_ m: SealedMeta) -> String? {
+        guard AuthPolicy.offersAnswer(m), let v = decisions.decision(m) else { return nil }
+        return AuthPolicy.answeredLine(m, v)
+    }
+
+    /// The quiet line on a row an earlier code, link or receipt explains.
+    private func explainedNote(_ m: SealedMeta, _ d: Derived) -> String? {
+        guard AuthPolicy.isExplained(m), let by = m.explained_by else { return nil }
+        let explainer = d.byId[by]
+        return AuthPolicy.explainedNote(
+            explainer: explainer,
+            service: explainer.map { SenderCache.resolved($0.sender).displayName })
+    }
+
     // MARK: - rail
 
-    private var rail: some View {
-        VStack(spacing: Space.s12) {
+    private func rail(_ d: Derived) -> some View {
+        VStack(spacing: Space.s16) {
             VStack(alignment: .leading, spacing: Space.scaled(9)) {
-                HStack {
-                    Text("Needs a decision")
-                        .font(Typo.zoneTitle)
-                        .foregroundStyle(Palette.ink)
-                    Spacer()
-                    Text("\(openDecisions.count) open")
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaintest)
-                }
-                if openDecisions.isEmpty {
+                AuthDecisionHeader(
+                    open: d.openDecisions, cardCount: d.decisionCards.count,
+                    showsClearAll: AuthPolicy.showsClearAll(d.decisionCards))
+                if d.openDecisions.isEmpty {
                     EmptyNote(
-                        "nothing to rule on. sign-in alerts and reset requests show up here.")
+                        "nothing to rule on. sign-in alerts, account changes and reset requests show up here.")
                 } else {
-                    ForEach(openDecisions.prefix(Self.maxDecisionCards)) { m in
-                        DecisionCard(
-                            meta: m,
-                            onMine: { decisions.set(m.id, .mine) },
-                            onNotMine: {
-                                // Not a dismissal: record the verdict, then open
-                                // the message so the human can act on it.
-                                decisions.set(m.id, .notMine)
-                                revealing = m
-                            })
-                    }
+                    AuthDecisionStack(
+                        open: d.openDecisions, limit: Self.maxDecisionCards,
+                        expanded: $expandedBursts,
+                        onNotMine: { m in revealing = m })
                 }
             }
             .zonePadding()
             .frame(maxWidth: .infinity, alignment: .leading)
-            .passbandGlass(.pane, cornerRadius: 18, tint: Palette.lockSoft.opacity(0.7))
+            .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.lockSoft.opacity(0.7))
 
             ShredderCard()
         }
@@ -275,7 +338,7 @@ struct AuthView: View {
 
     private func copy() {
         guard let focus, let code = codes[focus.id] ?? nil else { return }
-        if Clip.copy(code, flashing: $copied) { Discovery.note(.codeCopied) }
+        Clip.copy(code, flashing: $copied)
     }
 
     private func archiveFocused(_ m: SealedMeta) async {
@@ -370,7 +433,7 @@ private struct FocusPanel: View {
         }
         .zonePadding()
         .frame(maxWidth: .infinity, alignment: .leading)
-        .passbandGlass(.pane, cornerRadius: 20, tint: Palette.lockSoft.opacity(0.8))
+        .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.lockSoft.opacity(0.8))
     }
 
     private var digits: some View {
@@ -382,11 +445,11 @@ private struct FocusPanel: View {
                         .foregroundStyle(Palette.ink)
                         .frame(width: Space.scaled(40), height: Space.scaled(52))
                         .background(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                                 .fill(Palette.lockSoft)
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                                 .strokeBorder(Palette.lock.opacity(0.35), lineWidth: 1))
                 }
             } else {
@@ -396,7 +459,7 @@ private struct FocusPanel: View {
                         .foregroundStyle(Palette.inkFaintest)
                         .frame(width: Space.scaled(40), height: Space.scaled(52))
                         .background(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                                 .fill(Palette.hairline.opacity(0.5)))
                 }
             }
@@ -468,6 +531,11 @@ private struct AuthRow: View {
     let meta: SealedMeta
     let selected: Bool
     let code: String?
+    /// "explained by your GitHub sign-in", on an alert that needs no ruling.
+    let explained: String?
+    /// "You said: That was me", with its Undo, once the row's question is answered.
+    let answered: String?
+    let onUndo: () -> Void
     /// Focus the row AND open the mail. One click, because the mail is what a
     /// row on this page is FOR — a click that only moved a cursor left the page
     /// looking inert, and the second click that used to open it was undiscoverable.
@@ -480,7 +548,7 @@ private struct AuthRow: View {
 
     var body: some View {
         ListRow(
-            selected: selected, cornerRadius: 8, tint: Palette.lock,
+            selected: selected, cornerRadius: Radius.row, tint: Palette.lock,
             hPadding: Space.s10, vPadding: Space.s6, action: onSelect
         ) { _, _ in
             HStack(spacing: Space.scaled(9)) {
@@ -491,17 +559,42 @@ private struct AuthRow: View {
                     .lineLimit(1)
                     .frame(width: Typo.measure(150), alignment: .leading)
                     .help(meta.sender)
-                Text(meta.subject)
-                    .font(Typo.rowSub)
-                    .foregroundStyle(Palette.inkDim)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .help(meta.subject)
+                HStack(spacing: Space.s6) {
+                    Text(meta.subject)
+                        .font(Typo.rowSub)
+                        .foregroundStyle(Palette.inkDim)
+                        .lineLimit(1)
+                        .help(meta.subject)
+                    if let explained {
+                        Label(explained, systemImage: "checkmark.circle")
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkFaintest)
+                            .lineLimit(1)
+                            .layoutPriority(1)
+                    }
+                    if let answered {
+                        Text(answered)
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkFaint)
+                            .lineLimit(1)
+                            .layoutPriority(1)
+                        Button("Undo", action: onUndo)
+                            .buttonStyle(.glass)
+                            .controlSize(.mini)
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkDim)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 if let code, !code.isEmpty {
                     // Already revealed this session — no reason to ask twice.
                     Text(code)
                         .font(Typo.mono(12, weight: .semibold))
                         .foregroundStyle(Palette.lock)
+                } else if meta.isCritical {
+                    Chip(
+                        text: AuthCopy.label(meta.kind), tone: Palette.danger,
+                        symbol: "exclamationmark.triangle.fill")
                 } else {
                     Chip(
                         text: AuthCopy.label(meta.kind), tone: Palette.inkFaint,
@@ -513,54 +606,6 @@ private struct AuthRow: View {
                     .frame(width: Space.scaled(30), alignment: .trailing)
             }
         }
-    }
-}
-
-/// A sign-in alert / reset request awaiting the human's verdict.
-private struct DecisionCard: View {
-    let meta: SealedMeta
-    let onMine: () -> Void
-    let onNotMine: () -> Void
-
-    private var isReset: Bool { meta.kind == .passwordReset }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: Space.s8) {
-            HStack(spacing: Space.scaled(7)) {
-                Avatar(sender: meta.sender, size: 18)
-                Text(SenderCache.resolved(meta.sender).displayName)
-                    .font(Typo.ui(11, weight: .semibold))
-                    .foregroundStyle(Palette.ink)
-                    .lineLimit(1)
-                Spacer(minLength: Space.s4)
-                Text(Fmt.relAge(meta.received_at))
-                    .font(Typo.num(10))
-                    .foregroundStyle(Palette.inkFaintest)
-            }
-            // Subject only — the body is sealed and this card never fetches it.
-            Text(meta.subject)
-                .font(Typo.micro)
-                .foregroundStyle(Palette.inkDim)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: Space.scaled(7)) {
-                Button(isReset ? "I asked" : "That was me", action: onMine)
-                    .buttonStyle(.glassProminent)
-                    .tint(Palette.accent)
-                    .font(Typo.micro)
-                Button(isReset ? "I did not" : "Not me", action: onNotMine)
-                    .buttonStyle(.glass)
-                    .foregroundStyle(Palette.danger)
-                    .font(Typo.micro)
-            }
-            .controlSize(.small)
-        }
-        .padding(Space.s10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Palette.hairline.opacity(0.5))
-        )
     }
 }
 
@@ -606,7 +651,7 @@ private struct ShredderCard: View {
                     if !stats.write_ready {
                         Label {
                             Text(
-                                "Needs the write credential — run `squelchd auth --write`. Nothing can be shredded until then."
+                                "Needs the write credential — run `squelchd auth`. Nothing can be shredded until then."
                             )
                         } icon: {
                             Image(systemName: "exclamationmark.shield")
@@ -643,7 +688,7 @@ private struct ShredderCard: View {
                 }
                 .zonePadding()
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .passbandGlass(.pane, cornerRadius: 18, tint: Palette.glassTint)
+                .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTint)
             }
         }
         .task { await load() }

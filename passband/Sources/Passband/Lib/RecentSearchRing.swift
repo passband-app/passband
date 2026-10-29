@@ -72,3 +72,40 @@ enum RecentSearchRing {
         return next
     }
 }
+
+/// ONE LINE OF THE RING, read back: a search, or a question the agent was
+/// asked from the search field. The ring itself stays a list of strings (its
+/// fold and its tests do not care what a line means); a question is stored
+/// with a mark no keyboard types in front of it, and read back off it here.
+/// A line with no mark is a search, which is every line an older build wrote.
+struct RecentEntry: Hashable, Sendable {
+    enum Kind: Sendable { case search, question }
+
+    let kind: Kind
+    /// The words, as typed: the query, or the FIRST message the agent got.
+    let text: String
+
+    /// U+0001 then a word: a control character survives UserDefaults and is
+    /// not whitespace, so the ring's identity keeps "x" the search apart from
+    /// "x" the question.
+    static let questionMark = "\u{1}ask "
+
+    init(kind: Kind, text: String) {
+        self.kind = kind
+        self.text = text
+    }
+
+    init(stored: String) {
+        if stored.hasPrefix(Self.questionMark) {
+            kind = .question
+            text = String(stored.dropFirst(Self.questionMark.count))
+        } else {
+            kind = .search
+            text = stored
+        }
+    }
+
+    var stored: String {
+        kind == .question ? Self.questionMark + text : text
+    }
+}

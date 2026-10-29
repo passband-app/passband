@@ -1,7 +1,7 @@
 # Google OAuth verification
 
-Passband requests two **restricted** Gmail scopes (and, optionally, two
-sensitive Google Calendar scopes; see the table below). Until Google verifies the
+Passband requests one **restricted** Gmail scope, `gmail.modify` (and, optionally, the
+Google Calendar pair, one sensitive and one not; see the table below). Until Google verifies the
 project, consent is capped at 100 Google accounts, forever, and nothing else
 moves that number. This is the record of what the submission says, what it is
 blocked on, and what a reviewer will find if they look.
@@ -83,14 +83,12 @@ finding.
 
 | Scope | Class |
 |---|---|
-| `https://www.googleapis.com/auth/gmail.readonly` | Restricted |
-| `https://www.googleapis.com/auth/gmail.modify` | Restricted |
-| `https://www.googleapis.com/auth/gmail.send` | Sensitive |
+| `https://www.googleapis.com/auth/gmail.modify` | Restricted. **The only Gmail scope** (since 2026-10-27) |
 | `https://www.googleapis.com/auth/userinfo.email` | Sensitive |
 | `https://www.googleapis.com/auth/userinfo.profile` | Non-sensitive |
 | `openid` | — |
-| `https://www.googleapis.com/auth/calendar.events` | Sensitive (confirm at filing). **Optional**: requested only by the calendar grant |
-| `https://www.googleapis.com/auth/calendar.calendarlist.readonly` | Sensitive (confirm at filing). **Optional**: requested only by the calendar grant |
+| `https://www.googleapis.com/auth/calendar.events` | Sensitive (as the Cloud console classes it, 2026-10-27). **Optional**: requested at hosted signup and by the calendar grant |
+| `https://www.googleapis.com/auth/calendar.calendarlist.readonly` | Non-sensitive (as the Cloud console classes it, 2026-10-27). **Optional**: requested at hosted signup and by the calendar grant |
 
 `userinfo.profile` is requested and never required: it feeds the account's name
 and photo in the client (`squelch-core/src/sync/profile.rs`), read through the
@@ -103,15 +101,19 @@ The constants are pinned in `squelch-core/src/config.rs` and re-pinned in
 `squelch-control/tests/signup_flow.rs`. Keep this table and those constants in
 agreement.
 
-The two calendar scopes are never part of signup and never required. They are
-asked for only when the user chooses to connect a calendar: on hosted by
-`signup.passband.app/reconnect?calendar=1`, which asks for the three Gmail
-scopes again plus these two in one consent, and on self-host by `squelchd auth
+The two calendar scopes are never required. Hosted signup asks for them
+beside the Gmail scopes (since 2026-10-27, even while the calendar feature is
+off for that tenant), so they appear on the signup consent screen a reviewer
+sees. Existing hosted tenants are asked at
+`signup.passband.app/reconnect?calendar=1`, which asks for the Gmail
+scopes again plus these two in one consent, and self-host by `squelchd auth
 --calendar`. A user who unticks them at Google keeps a working mailbox and
 nothing is installed. Every grant flow sends `include_granted_scopes=true`, so
-a later Gmail reconnect does not drop a calendar grant made earlier. Per
-`docs/CALENDAR.md` §8, calendar is filed as an amendment after the Gmail
-submission, once the feature exists to demonstrate.
+a later Gmail reconnect does not drop a calendar grant made earlier.
+`docs/CALENDAR.md` §8 planned to file calendar as an amendment after the Gmail
+submission. Now that signup asks for it, the reviewer sees these scopes on the
+first consent screen, so they belong in the Gmail submission itself, with the
+calendar feature shown in the demo video.
 
 ### Justifications
 
@@ -120,7 +122,7 @@ limited scopes aren't sufficient." Every one of them names the narrower scope
 Google will ask about and says why it does not work, because the rejection is
 otherwise automatic.
 
-**`gmail.readonly`**
+**`gmail.modify`** (the only Gmail scope requested)
 
 > Passband is an email client. It reads the user's messages to display them,
 > thread them, and search them, and to run the triage that is the product's
@@ -132,41 +134,26 @@ otherwise automatic.
 > deadlines, package tracking numbers, and one-time verification codes from and
 > surfaces as cards.
 >
-> `gmail.metadata` is not sufficient: it returns headers and labels with no
-> body and no snippet. An email client that cannot render a message is not an
-> email client, and every triage and extraction feature above would be
-> impossible. `gmail.addons.current.message.readonly` is not applicable, as
-> Passband is a native macOS and iOS application, not a Gmail add-on.
-
-**`gmail.modify`**
-
-> Passband writes back exactly the decisions the user or their own triage rules
-> made: archive a message (remove the `INBOX` label), add or remove a user
-> label, mark read or unread, and return a thread to the inbox at a time the
-> user asked for. These are `users.messages.modify` calls and there is no
-> narrower scope that permits them.
+> Passband then writes back exactly the decisions the user or their own triage
+> rules made: archive a message (remove the `INBOX` label), add or remove a
+> user label, mark read or unread, and return a thread to the inbox at a time
+> the user asked for. These are `users.messages.modify` calls, and no narrower
+> scope permits them. And it sends the mail the user writes in it: replies,
+> forwards, new messages, and invitations the user chooses to share from their
+> own address, always user-initiated from the composer.
 >
-> `gmail.labels` is not sufficient: it governs label *definitions* — creating,
-> renaming, and deleting labels — and cannot apply or remove a label on a
-> message, which is the only thing Passband does with it. Archiving in
-> particular is the removal of the `INBOX` label from a message and is
-> unreachable without `gmail.modify`.
+> One scope covers all three, so Passband requests only `gmail.modify`.
+> Requesting `gmail.readonly` and `gmail.send` beside it would add nothing the
+> grant does not already cover. `gmail.metadata` is not sufficient: it returns
+> headers and labels with no body. `gmail.labels` governs label *definitions*
+> and cannot apply a label to a message, so it cannot archive.
+> `gmail.addons.current.message.*` is not applicable: Passband is a native
+> macOS and iOS application, not a Gmail add-on.
 >
 > Passband deliberately does **not** request `https://mail.google.com/`, which
 > would additionally grant permanent deletion and full IMAP/SMTP access. It
-> never deletes a message and has no code path that can. It also does not
-> request any `gmail.settings` scope.
-
-**`gmail.send`**
-
-> Passband sends the mail the user writes in it: replies, forwards, new
-> messages, and invitations the user chooses to share from their own address.
-> Sending is always user-initiated from the composer.
->
-> `gmail.send` is already the narrowest scope that can send. `gmail.compose` is
-> broader, not narrower — it additionally grants create, update, and delete over
-> the user's drafts, which Passband does not need and does not want. This is the
-> minimal choice, not a fallback from one.
+> never deletes a message permanently and has no code path that can. It does
+> not request `gmail.compose` or any `gmail.settings` scope.
 
 **`calendar.events`** (optional)
 
@@ -217,18 +204,19 @@ reviewer needs one continuous frame proving that client ID granted that consent.
    client's `client_id`, consent screen showing **Passband**. Approve. This is
    the second client under the same project and the reviewer should see it
    exists rather than discover it.
-4. **`gmail.readonly` in use.** The app after first sync: the triaged inbox,
+4. **`gmail.modify` reading.** The app after first sync: the triaged inbox,
    open a thread and scroll it, run a search that returns results, show an
    extracted card (deadline or shipment) next to the message it came from.
-5. **`gmail.modify` in use.** Archive a message and show it leave the inbox.
+5. **`gmail.modify` changing mail.** Archive a message and show it leave the inbox.
    Apply a label and show it on the message. Park a thread for later and show it
    return. Then show the same messages in **Gmail's own web interface** so the
    reviewer sees the change actually landed on Google's side.
-6. **`gmail.send` in use.** Compose a message, send it, and show it arrive in
+6. **`gmail.modify` sending.** Compose a message, send it, and show it arrive in
    the recipient's mailbox and in the sender's Gmail Sent folder.
-7. **Calendar (amendment only).** Once filed: the connect card in the app, the
-   consent screen showing the calendar permissions beside Gmail's, and the
-   calendar page showing real events next to ones found in mail.
+7. **Calendar.** Signup asks for it (since 2026-10-27), so it is in this
+   submission: the signup consent screen showing the calendar permissions
+   beside Gmail's, and the calendar page (feature on for the demo account)
+   showing real events next to ones found in mail.
 8. **Revocation.** `myaccount.google.com/permissions`, showing Passband listed
    and revocable. Not required, but it answers the question a reviewer is paid
    to ask.

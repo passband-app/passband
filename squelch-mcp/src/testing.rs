@@ -197,3 +197,133 @@ impl StubJwks {
             .store(delay.as_millis() as u64, Ordering::SeqCst);
     }
 }
+
+/// An MCP client session over the real streamable HTTP transport, for tests
+/// that must meet the agent door the way an agent does: JSON-RPC posted to
+/// [`crate::MCP_PATH`] on a router, with the session id the server issues.
+/// The raw response text is returned alongside the parsed message, so a test
+/// can check everything the transport put on the wire, not only the result.
+pub mod wire {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use serde_json::{Value, json};
+    use tower::ServiceExt as _;
+
+    pub struct Session {
+        app: axum::Router,
+        host: String,
+        bearer: Option<String>,
+        id: String,
+        next: u64,
+    }
+
+    impl Session {
+        /// `initialize` + `notifications/initialized` against `app`, sending
+        /// `host` as the Host header and `bearer` (if any) as the credential.
+        pub async fn open(app: axum::Router, host: &str, bearer: Option<&str>) -> Self {
+            let mut session = Self {
+                app,
+                host: host.to_owned(),
+                bearer: bearer.map(str::to_owned),
+                id: String::new(),
+                next: 1,
+            };
+            let resp = session
+                .post(
+                    json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{
+                    "protocolVersion":"2025-06-18","capabilities":{},
+                    "clientInfo":{"name":"wire-test","version":"1"}}}),
+                )
+                .await;
+            assert_eq!(resp.status(), StatusCode::OK, "initialize");
+            session.id = resp
+                .headers()
+                .get("mcp-session-id")
+                .expect("the stateful transport issues a session id")
+                .to_str()
+                .unwrap()
+                .to_owned();
+            drop(body_text(resp).await);
+            let resp = session
+                .post(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+                .await;
+            assert!(resp.status().is_success(), "initialized: {}", resp.status());
+            session
+        }
+
+        async fn post(&self, body: Value) -> axum::response::Response {
+            let mut b = Request::builder()
+                .method("POST")
+                .uri(crate::MCP_PATH)
+                .header(header::HOST, &self.host)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::ACCEPT, "application/json, text/event-stream");
+            if !self.id.is_empty() {
+                b = b.header("mcp-session-id", &self.id);
+            }
+            if let Some(t) = &self.bearer {
+                b = b.header(header::AUTHORIZATION, format!("Bearer {t}"));
+            }
+            self.app
+                .clone()
+                .oneshot(b.body(Body::from(body.to_string())).unwrap())
+                .await
+                .unwrap()
+        }
+
+        /// One JSON-RPC request: the raw response text and the parsed reply.
+        pub async fn call(&mut self, method: &str, params: Value) -> (String, Value) {
+            let id = self.next;
+            self.next += 1;
+            let resp = self
+                .post(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
+                .await;
+            assert_eq!(resp.status(), StatusCode::OK, "{method}");
+            let text = body_text(resp).await;
+            let message = text
+                .lines()
+                .filter_map(|l| l.strip_prefix("data:"))
+                .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
+                .find(|m| m["id"] == json!(id))
+                .or_else(|| serde_json::from_str::<Value>(&text).ok())
+                .unwrap_or_else(|| panic!("{method}: no JSON-RPC reply in {text:?}"));
+            (text, message)
+        }
+
+        /// `tools/call`: the raw text and the reply.
+        pub async fn tool(&mut self, name: &str, arguments: Value) -> (String, Value) {
+            self.call("tools/call", json!({"name": name, "arguments": arguments}))
+                .await
+        }
+
+        /// The offered tool names, sorted.
+        pub async fn tool_names(&mut self) -> Vec<String> {
+            let (_, listed) = self.call("tools/list", json!({})).await;
+            let mut names: Vec<String> = listed["result"]["tools"]
+                .as_array()
+                .expect("tools")
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_owned())
+                .collect();
+            names.sort();
+            names
+        }
+    }
+
+    /// Whether a `tools/call` reply refused: a JSON-RPC error, or a tool
+    /// result flagged `isError`.
+    pub fn refused(reply: &Value) -> bool {
+        reply.get("error").is_some() || reply["result"]["isError"] == json!(true)
+    }
+
+    async fn body_text(resp: axum::response::Response) -> String {
+        let bytes = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            axum::body::to_bytes(resp.into_body(), usize::MAX),
+        )
+        .await
+        .expect("response body completes")
+        .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+}

@@ -56,7 +56,7 @@ struct RulePatternSuggestions: View {
                 }
                 .buttonStyle(.plain)
                 .background(
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.concentric(Radius.well, inset: Space.s4), style: .continuous)
                         .fill(i == index ? Palette.accentSoft : .clear)
                 )
             }
@@ -83,11 +83,11 @@ struct RulePatternSuggestions: View {
         }
         .padding(rows.isEmpty ? 0 : Space.s4)
         .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(rows.isEmpty ? .clear : Palette.canvas.opacity(0.85))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(
                     rows.isEmpty ? .clear : Palette.hairlineStrong, lineWidth: 0.75))
         .keyBindings(.modal, rows.isEmpty ? [] : bindings)

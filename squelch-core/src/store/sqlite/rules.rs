@@ -13,16 +13,38 @@ use super::*;
 /// plus a sort of one sender's mail is the cheap plan, and pinning it means a
 /// missing index is a loud prepare error, not a silent walk, statistics or no.
 /// `tests::attention::rule_digest_seeks_the_nocase_sender_index` pins it.
-pub(crate) const SENDER_RULE_DIGEST_SQL: &str =
-    "SELECT m.subject, t.tier, t.status, t.opened_at IS NOT NULL, t.category
+///
+/// `status` IS THE OWNER'S, NOT A SWEEP'S. The rule suggester reads `done` and
+/// unopened as "cleared without opening" and tells its model so in trusted
+/// context. A row smart clear resolved (`resolved_by` set) was not cleared by
+/// anybody, so it is reported as the open row it was until the owner says
+/// otherwise. Likewise a row the triage agent's re-check closed (the
+/// `auto_done` ledger) and nobody has touched since (its `resolved_at` is
+/// still the ledger's `done_at`) reads as `new`: the owner did not clear it.
+///
+/// NOT KEPT-CLOSE MAIL, by `sealed_mail_sql!` and not by the retired
+/// `sensitivity` column this statement used to read alone: the subjects here
+/// go to a model, and a login code's subject ("Your code is 123456") is the
+/// one thing in the mailbox that must not. The strict form, so mail whose
+/// access is still unassessed stays out too.
+pub(crate) const SENDER_RULE_DIGEST_SQL: &str = concat!(
+    "SELECT m.subject, t.tier,
+            CASE WHEN t.resolved_by IS NOT NULL THEN 'open'
+                 WHEN t.status = 'done' AND EXISTS(SELECT 1 FROM auto_done l
+                     WHERE l.account_id = t.account_id AND l.message_id = t.message_id
+                       AND l.done_at = t.resolved_at)
+                 THEN 'new' ELSE t.status END,
+            t.opened_at IS NOT NULL, t.category
      FROM messages m INDEXED BY idx_messages_from_nocase
      JOIN triage t ON t.message_id = m.id
      WHERE m.account_id = ?1
        AND m.from_addr = ?2 COLLATE NOCASE
        AND m.is_sent = 0 AND m.is_spam = 0 AND m.is_archive = 0
-       AND t.sensitivity = 'normal'
-     ORDER BY m.received_at DESC
-     LIMIT ?3";
+       AND NOT ",
+    sealed_mail_sql!(),
+    " ORDER BY m.received_at DESC
+     LIMIT ?3"
+);
 
 /// Validate a sender-rule write, on the path of every door. A FILTERED rule with
 /// an empty `want_text` is a contradiction (there is no standing instruction to
@@ -62,6 +84,34 @@ fn map_pattern_conflict(e: rusqlite::Error) -> CoreError {
 // for one click. A decision in flight when the rule lands still goes stale on
 // its preference fingerprint and re-runs under the new rule; that is bounded
 // by the worker's concurrency, not by the mailbox.
+
+/// [`SqliteStore::list_sender_rules`] for a caller already holding the
+/// connection. The ORDER is part of the contract: `match_sender_rule` takes the
+/// first match, so every reader that asks "which rule governs this address"
+/// has to walk the same list.
+pub(super) fn list_sender_rules_conn(
+    conn: &Connection,
+    account_id: AccountId,
+) -> Result<Vec<SenderRule>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, account_id, match_pattern, want_text, disposition, updated_at
+             FROM sender_rules WHERE account_id=?1 ORDER BY updated_at DESC",
+    )?;
+    let out = stmt
+        .query_map(params![account_id], |r| {
+            Ok(SenderRule {
+                id: r.get(0)?,
+                account_id: r.get(1)?,
+                match_pattern: r.get(2)?,
+                want_text: r.get(3)?,
+                disposition: Disposition::parse(&r.get::<_, String>(4)?)
+                    .unwrap_or(Disposition::Surface),
+                updated_at: dt(r, 5)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(out)
+}
 
 impl SqliteStore {
     pub(super) fn set_sender_rule(
@@ -178,25 +228,7 @@ impl SqliteStore {
     }
 
     pub(super) fn list_sender_rules(&self, account_id: AccountId) -> Result<Vec<SenderRule>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, account_id, match_pattern, want_text, disposition, updated_at
-             FROM sender_rules WHERE account_id=?1 ORDER BY updated_at DESC",
-        )?;
-        let out = stmt
-            .query_map(params![account_id], |r| {
-                Ok(SenderRule {
-                    id: r.get(0)?,
-                    account_id: r.get(1)?,
-                    match_pattern: r.get(2)?,
-                    want_text: r.get(3)?,
-                    disposition: Disposition::parse(&r.get::<_, String>(4)?)
-                        .unwrap_or(Disposition::Surface),
-                    updated_at: dt(r, 5)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(out)
+        list_sender_rules_conn(&*self.lock()?, account_id)
     }
 
     pub(super) fn sender_rule_digest(

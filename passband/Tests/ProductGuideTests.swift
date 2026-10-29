@@ -275,6 +275,9 @@ struct ProductGuideTests {
         let receipts = ProductGuide.settings(matching: "disable read receipts")
         expect(receipts.contains("Read tracking"), "\"disable read receipts\" finds read tracking")
         expect(!receipts.contains("Nothing matched"), "also as a match")
+        let french = ProductGuide.settings(matching: "how do I stop translating french")
+        expect(french.contains("Languages I read"), "\"stop translating french\" finds the languages card")
+        expect(french.contains("Mail > Translation"), "and says which pane it is on")
         // A card named after its own section is said once, not "Mail > Mail".
         let images = ProductGuide.settings(matching: "pictures")
         expect(images.contains("Remote images"), "\"pictures\" finds remote images")

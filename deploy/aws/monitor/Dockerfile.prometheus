@@ -3,12 +3,13 @@
 #
 # Mirrors the root Dockerfile.prometheus (which Railway builds until cutover)
 # with the AWS prometheus.yml swapped in; the entrypoint is the shared one.
-# Root user for parity with Railway's image: the data dir is a bind mount
-# from the EBS volume, owned by root.
+# Runs as the image's own user (nobody, 65534), unlike Railway's root image:
+# compose.yaml's data-perms one-shot hands /data/prometheus to nobody before
+# this starts, and the base image already gives nobody /etc/prometheus, where
+# entrypoint.sh writes web.yml and the password file.
 # Pinned by the multi-arch index digest (fetched from Docker Hub 2026-10-23):
 # the tag is for humans, the digest is what is pulled. Bump both together.
-FROM prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996
-USER root
+FROM prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
 COPY deploy/aws/monitor/prometheus/prometheus.yml /etc/prometheus/prometheus.yml
 COPY deploy/monitoring/prometheus/entrypoint.sh /entrypoint.sh
 # Carried here, not run here: the box's bin/up copies this file out of the

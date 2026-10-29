@@ -2071,7 +2071,7 @@ fn timeline_bound(raw: Option<&str>) -> Result<Option<DateTime<chrono::FixedOffs
 /// is the model's own guess as stored, served even when a stronger tier wins
 /// so the client can say what it was overruled by. A date-only ghost with no
 /// stated or corrected end has no end at all (`end`, `end_source` null).
-fn ghost_view(
+pub(crate) fn ghost_view(
     ghost: &squelch_core::types::GhostEvent,
     now: DateTime<chrono::FixedOffset>,
 ) -> serde_json::Value {
@@ -6747,6 +6747,14 @@ pub struct UnsubscribeBody {
     /// exactly that response.
     #[serde(default)]
     auto: bool,
+    /// Required with `auto`, like every other route that acts on the user's
+    /// behalf (docs/SECURITY.md §6): with `auto` the daemon itself visits the
+    /// sender's site and may submit its form, which cannot be undone from
+    /// here. Not required without it: that answer is a link the person opens
+    /// in their own browser, which is the confirmation, and it is what every
+    /// older client asks for.
+    #[serde(default)]
+    confirm: bool,
 }
 
 pub async fn unsubscribe(
@@ -6755,6 +6763,11 @@ pub async fn unsubscribe(
 ) -> Result<impl IntoResponse, ApiError> {
     let message_id = body.message_id;
     let target = Some(message_id.to_string());
+
+    if body.auto && !body.confirm {
+        audit_action(&state, "unsubscribe", target, "rejected:confirm").await;
+        return Err(ApiError::bad_request(CONFIRM_HINT));
+    }
 
     // `None` => missing OR sealed, indistinguishable, both 404.
     let fields = store_call(&state, move |store, account_id| {

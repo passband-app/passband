@@ -87,14 +87,24 @@ Security Admission at `restricted`), `cert-manager`. Manifests applied from
 
 ## How many tenants fit
 
-**Thirty, and this box's quota is meant to be the file in the repo.**
-`70-tenant-limits.yaml` is the record of the `tenants` ResourceQuota on
-`carrier`, every line sized to admit at least thirty tenants at what
-`15-warden-config.yaml` makes a tenant ask for (100m / 384Mi / 256Mi
-ephemeral requested, 1000m / 1Gi / 1Gi allowed, a 10Gi claim, four Secrets).
-The box matches the record after the apply that follows a merge, and only
-`kubectl diff` says whether it does right now; a change to the quota is a
-change to that file, merged, then applied:
+**Thirty today, sixty on the shared embedder, and this box's quota is meant to
+be the file in the repo.** `70-tenant-limits.yaml` is the record of the
+`tenants` ResourceQuota on `carrier`, and it is sized for both of the shapes
+the warden can give a tenant from `15-warden-config.yaml`:
+
+| | In-process (today) | Shared embedder |
+|---|---|---|
+| `SQUELCH_WARDEN_EMBED_URL` | unset | `http://squelch-embed:8850` |
+| A tenant requests | 100m / 384Mi / 256Mi ephemeral | 40m / 128Mi / 256Mi ephemeral |
+| A tenant may use | 1000m / 1Gi / 1Gi | 1000m / 512Mi / 1Gi |
+| Also in the namespace | the model seed pod while it runs | the `squelch-embed` pod for good (200m / 320Mi, one pod slot), and the seed pod |
+| Memory admits | **30** (11520 / 384; 29 with either other pod up) | 87 ((11520 - 320) / 128) |
+| What binds | `requests.memory` | **`pods` / `persistentvolumeclaims` at 60**, on purpose |
+
+Both shapes keep a 10Gi claim and four Secrets. The box matches the record
+after the apply that follows a merge, and only `kubectl diff` says whether it
+does right now; a change to the quota is a change to that file, merged, then
+applied:
 
 ```sh
 kubectl diff -f deploy/hosted/70-tenant-limits.yaml   # exit 1: it differs
@@ -120,16 +130,19 @@ patch itself had three lines that would have bound before memory: `limits.cpu:
 200Gi` at a 10Gi claim plus the model seed's 2Gi is nineteen, and
 `count/secrets: "100"` less the eight the namespace can hold of its own, at
 four a tenant, is twenty-three. None had refused anyone yet; the thirteenth
-signup would have been the first. The file carries 40, 392Gi and 200, and takes
-`requests.cpu` from 3 to 4 so that cpu, which the patch had tied with memory at
-exactly thirty, stays out of the way of any pod shaped unlike a tenant; so the
-first diff is expected to show those four lines plus the `last-applied-
-configuration` annotation that carries the file, and anything else in it was
-changed on the box since the patch was recorded and is the thing to reconcile
-first. A unit test in the warden
-(`the_committed_quota_lets_memory_bind_before_any_count_line`) divides every
-line of the committed file by what the committed ConfigMap makes a tenant ask
-for and fails CI when any admits fewer than the memory line does, so a raise
+signup would have been the first. The file now carries `requests.cpu: "4"`,
+`requests.ephemeral-storage: 24Gi`, `limits.cpu: "96"`, `limits.memory:
+49152Mi`, `limits.ephemeral-storage: 96Gi`, `requests.storage: 602Gi`,
+`persistentvolumeclaims: "61"`, `pods: "62"` and `count/secrets: "400"`, with
+`requests.memory` unchanged at 11520Mi, so the first diff is expected to show
+every line but memory moving, plus the `last-applied-configuration`
+annotation that carries the file; anything else in it was changed on the box
+since the patch was recorded and is the thing to reconcile first. A unit test
+in the warden (`the_committed_quota_lets_memory_bind_before_any_count_line`)
+divides every line of the committed file by what the committed ConfigMap
+makes a tenant ask for, in both shapes, with the seed pod and the shared
+embedder charged, and fails CI when a line binds before memory in-process, or
+when anything but the three disk lines does on the shared embedder. A raise
 that moves one line and not the others fails there instead of at a signup.
 
 ALL the lines move together, not just memory. At 16 GB the old floor-sized
@@ -140,10 +153,52 @@ from five to twenty and nothing else.
 
 **Memory arithmetic.** 15985 MiB of machine, less about 1200 for k3s,
 containerd, journald and litestream, less about 400 for the pods that are not
-tenants, leaves about 14 GiB. Thirty tenants at 384Mi is 11520Mi, which leaves
-real room for the fact that 384Mi is the p50 of a tenant at rest, not its peak:
-tenant pods read 300-500 MB with the ONNX session resident (2026-08-26
-measurements). It is deliberately not the ~36 the division allows.
+tenants and not in `tenants`, leaves about 14 GiB. `requests.memory: 11520Mi`
+is sized to that and does not move between the two shapes. In-process, thirty
+tenants at 384Mi is 11520Mi, which leaves real room for the fact that 384Mi is
+the p50 of a tenant at rest, not its peak: tenant pods read 300-500 MB with
+the ONNX session resident (2026-08-26 measurements). It is deliberately not
+the ~36 the division allows. On the shared embedder a tenant has no session:
+the Rust side is 25-40 MB and the binary's pages about 30 MB more, so 40-80 MB
+a pod, and 128Mi is that with headroom. The embedder pod's 320Mi comes off the
+top, leaving 87 tenants by memory.
+
+**On the shared embedder, disk is the gate, and it is provisional.** Sixty,
+not eighty-seven, on purpose. Every tenant's mailbox is a SQLite file on the
+tenant volume (50 GB, "The volume"); `local-path` enforces no claim size, so a
+10Gi claim is a label and not a bound; nobody has measured what a tenant
+actually occupies; and the archive tier can grow one tenant's database to
+about 4 GB, which at sixty is several times the volume. So `pods` (62, less
+the seed and embedder pods) and `persistentvolumeclaims` (61, less the seed's)
+both admit sixty, `requests.storage` follows the claims line, and every other
+line clears eighty-seven so that raising the gate later is those three lines
+and nothing else. Measure before raising them:
+
+```sh
+ssh carrier 'df -h / <local-path storage dir>; sudo du -sh <local-path storage dir>/pvc-* | sort -h'
+```
+
+where the storage directory is what `--default-local-storage-path` points at
+("k3s" above; `/var/lib/rancher/k3s/storage` on a k3s without the flag). The
+per-claim sizes, their growth over a month and the volume's free space are
+what say how many more fit. A cancelled tenant keeps its claim, so it spends a
+slot of this gate, which is right: its file is still on the disk.
+
+**Turning the shared embedder on or off is a roll, not a quota change.** The
+order is `SETUP.md` §10b, and the quota in this file comes last there, after
+the fleet has rolled and the light shape has been measured for a week: the
+memory line is the same in both shapes, so applying it is not what turns the
+service on, it is what lets the fleet grow past thirty, and 128Mi / 512Mi rest
+on August numbers until that week says otherwise. That makes the merge that
+brought the sixty-tenant numbers the one exception to "merged, then applied":
+until §10b step 9, `kubectl diff` on this file is expected to differ, and the
+apply at step 9 is the one the `Tenants quota changed on the box` alert should
+announce. Turning it OFF on a fleet
+that grew past thirty cannot complete: at 384Mi the thirty-first tenant to roll
+back is refused by memory, its rollout never finishes, and the roller halts on
+it. And turning it off comes before any daemon image below `daemon-0.0.15`,
+never alongside: the floor is beside `SQUELCH_WARDEN_IMAGE` in
+`15-warden-config.yaml`.
 
 **The quota is the only refusal on this box.** k3s reserves nothing for itself
 by default, so the scheduler sees all 15985 MiB as allocatable and would admit
@@ -161,11 +216,11 @@ is Ready, insert their `tenants` row in control's Postgres, then
 `squelch-control llm mint <label>` and `share mint <label>`, and revoke the two
 orphaned VKs control logged. They then sign in to Passband with Google as normal.
 
-The next raise is RAM again (CPU and RAM only, see "The box") or the
-daemon-side embedder unload, measured for a week. Raise it off
-`container_memory_working_set_bytes` and the quota alert, not off wanting one
-more tenant. Existing tenants take a changed bound the way they take any
-pod-shape change: see "Shipping a tenant-shape change".
+The next raise in-process is RAM again (CPU and RAM only, see "The box"); the
+bigger one is the shared embedder, then disk measured for a month. Raise off
+`container_memory_working_set_bytes`, `df` and the quota alert, not off
+wanting one more tenant. Existing tenants take a changed bound the way they
+take any pod-shape change: see "Shipping a tenant-shape change".
 
 ## Railway
 

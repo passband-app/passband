@@ -1019,6 +1019,22 @@ impl SqliteStore {
         from: DateTime<FixedOffset>,
         to: DateTime<FixedOffset>,
     ) -> Result<Vec<GhostEvent>> {
+        self.ghost_events_containing(account, from, to, None)
+    }
+
+    /// [`Self::list_ghost_events`], keeping only ghosts whose title or place
+    /// contains at least one of `needles` (lowercase; matched against the
+    /// ASCII-lowercased text, so a superset of any word test on it). The
+    /// listing cap then counts candidates only, so a search is not cut short
+    /// by ghosts that could never match. `None` filters nothing.
+    pub(crate) fn ghost_events_containing(
+        &self,
+        account: AccountId,
+        from: DateTime<FixedOffset>,
+        to: DateTime<FixedOffset>,
+        needles: Option<&[String]>,
+    ) -> Result<Vec<GhostEvent>> {
+        use rusqlite::types::Value;
         if to <= from {
             return Ok(Vec::new());
         }
@@ -1028,6 +1044,25 @@ impl SqliteStore {
         let pad = chrono::Duration::days(2);
         let low = sort_key(&EventTime::At(from - pad));
         let high = sort_key(&EventTime::At(to + pad));
+        let mut bound: Vec<Value> =
+            vec![Value::Integer(account), Value::Text(low), Value::Text(high)];
+        let containing = match needles {
+            None => String::new(),
+            Some(needles) => {
+                let text = "lower(g.title||' '||COALESCE(g.location,''))";
+                let any: Vec<String> = needles
+                    .iter()
+                    .map(|needle| {
+                        bound.push(Value::Text(needle.clone()));
+                        format!("instr({text},?{})>0", bound.len())
+                    })
+                    .collect();
+                if any.is_empty() {
+                    return Ok(Vec::new());
+                }
+                format!("AND ({})", any.join(" OR "))
+            }
+        };
         let mut statement = conn.prepare(&format!(
             "SELECT g.id,g.kind,g.title,g.starts_at,g.start_timezone,g.ends_at,g.est_minutes,
                     g.est_basis,g.location,g.commitment,g.mail_state,g.likelihood_band,
@@ -1038,14 +1073,14 @@ impl SqliteStore {
              LEFT JOIN event_duration_priors p
                ON p.account_id=g.account_id AND p.venue_key=g.venue_key AND p.kind=g.kind
              WHERE g.account_id=?1 AND g.start_sort IS NOT NULL
-               AND g.start_sort>=?2 AND g.start_sort<=?3
+               AND g.start_sort>=?2 AND g.start_sort<=?3 {containing}
                AND EXISTS(SELECT 1 FROM messages m {ELIGIBLE_JOINS}
                    WHERE m.account_id=g.account_id AND m.id=g.supplier_message_id AND {ELIGIBLE})
              ORDER BY g.start_sort,g.id
              LIMIT {LIST_CAP}"
         ))?;
         let rows = statement
-            .query_map(params![account, low, high], |r| {
+            .query_map(rusqlite::params_from_iter(bound), |r| {
                 let starts_at: String = r.get(3)?;
                 let kind: String = r.get(1)?;
                 let commitment: String = r.get(9)?;

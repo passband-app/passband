@@ -31,6 +31,18 @@ use crate::triage::ghost::EventTime;
 use chrono::FixedOffset;
 use std::collections::{HashMap, HashSet};
 
+/// One event calendar search matched: its search key, how many terms it
+/// matched, and what ordering it needs, without the full row.
+#[derive(Debug, Clone)]
+pub struct EventMatch {
+    pub key: i64,
+    pub matched: usize,
+    pub start: EventTime,
+    pub end: Option<EventTime>,
+    /// The owner's RSVP is a no.
+    pub declined: bool,
+}
+
 /// Events one timeline listing returns at most: the ones NEAREST now, and the
 /// listing says when it cut.
 pub const LIST_CAP: usize = 5000;
@@ -483,6 +495,145 @@ impl SqliteStore {
         Ok((near.into_iter().map(|(_, e)| e).collect(), truncated))
     }
 
+    /// Calendar search's events (docs/CALENDAR.md §10.1): every event of a
+    /// calendar being read that the word index matches for at least
+    /// `min_matched` of `terms`, with how many it matched and its times. A term matches a
+    /// word it begins, after porter stemming ("dinners" finds "Dinner").
+    /// `addresses` lets a term match the organizer's or a guest's address;
+    /// without it that column is never queried.
+    pub fn calendar_search_events(
+        &self,
+        account: AccountId,
+        terms: &[String],
+        addresses: bool,
+        min_matched: usize,
+    ) -> Result<Vec<EventMatch>> {
+        let columns = if addresses {
+            ""
+        } else {
+            "{title place notes people} : "
+        };
+        let conn = self.lock()?;
+        // One index read per term, counted here. The FTS table drives the
+        // join (CROSS JOIN), as `messages_fts` does: the planner must not
+        // walk every key and probe MATCH per row.
+        let mut counts: std::collections::HashMap<i64, usize> = Default::default();
+        {
+            let mut stmt = conn.prepare_cached(
+                "SELECT k.id FROM calendar_search_fts f
+                 CROSS JOIN calendar_search_keys k ON k.id=f.rowid
+                 WHERE calendar_search_fts MATCH ?1 AND k.account_id=?2",
+            )?;
+            for term in terms {
+                // Each plural form as a prefix. Terms are alphanumeric
+                // words, so quoting is all they need.
+                let any: Vec<String> = crate::gcal::search::forms(term)
+                    .iter()
+                    .map(|f| format!("\"{}\"*", f.replace('"', "")))
+                    .collect();
+                let expr = format!("{columns}({})", any.join(" OR "));
+                for id in stmt.query_map(params![expr, account], |r| r.get::<_, i64>(0))? {
+                    *counts.entry(id?).or_default() += 1;
+                }
+            }
+        }
+        let wanted: Vec<(i64, usize)> = counts
+            .into_iter()
+            .filter(|(_, n)| *n >= min_matched.max(1))
+            .collect();
+        if wanted.is_empty() {
+            return Ok(Vec::new());
+        }
+        // What ordering needs, for every match in one read: the full rows
+        // are read only for the page served ([`Self::calendar_events_by_key`]).
+        let matched: std::collections::HashMap<i64, usize> = wanted.iter().copied().collect();
+        let ids = serde_json::to_string(&wanted.iter().map(|(id, _)| id).collect::<Vec<_>>())
+            .map_err(|e| CoreError::InvalidInput(e.to_string()))?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT k.id,e.starts_at,e.ends_at,e.self_response
+             FROM json_each(?1) j
+             CROSS JOIN calendar_search_keys k ON k.id=j.value
+             JOIN calendar_events e ON e.account_id=k.account_id AND e.calendar_id=k.calendar_id
+                  AND e.event_id=k.event_id
+             JOIN calendar_calendars c ON c.account_id=e.account_id AND c.calendar_id=e.calendar_id
+             WHERE k.account_id=?2 AND c.selected=1",
+        )?;
+        let rows = stmt
+            .query_map(params![ids, account], |r| {
+                let id: i64 = r.get(0)?;
+                let starts_at: String = r.get(1)?;
+                let ends_at: Option<String> = r.get(2)?;
+                let response: Option<String> = r.get(3)?;
+                Ok((id, starts_at, ends_at, response))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, starts_at, ends_at, response)| {
+                Some(EventMatch {
+                    key: id,
+                    matched: matched[&id],
+                    start: EventTime::parse(&starts_at)?,
+                    end: ends_at.as_deref().and_then(EventTime::parse),
+                    declined: response.as_deref().and_then(SelfResponse::parse)
+                        == Some(SelfResponse::Declined),
+                })
+            })
+            .collect())
+    }
+
+    /// The events behind search keys, each with its key and calendar. A key
+    /// whose event is gone, or whose calendar is no longer read, is skipped.
+    /// Guests stay empty until [`Self::calendar_fill_guests`].
+    pub fn calendar_events_by_key(
+        &self,
+        account: AccountId,
+        keys: &[i64],
+    ) -> Result<Vec<(i64, SyncedEvent)>> {
+        let conn = self.lock()?;
+        let sql = format!(
+            "SELECT {EVENT_COLUMNS}
+             FROM calendar_search_keys k
+             JOIN calendar_events e ON e.account_id=k.account_id AND e.calendar_id=k.calendar_id
+                  AND e.event_id=k.event_id
+             JOIN calendar_calendars c ON c.account_id=e.account_id AND c.calendar_id=e.calendar_id
+             WHERE k.id=?1 AND k.account_id=?2 AND c.selected=1"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let mut found = Vec::with_capacity(keys.len());
+        for key in keys {
+            if let Some(Some((_, event))) = stmt
+                .query_row(params![key, account], synced_event)
+                .optional()?
+            {
+                found.push((*key, event));
+            }
+        }
+        Ok(found)
+    }
+
+    /// Read each event's guests into it, in Google's order.
+    pub fn calendar_fill_guests(
+        &self,
+        account: AccountId,
+        events: &mut [&mut SyncedEvent],
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        let mut guests = conn.prepare_cached(
+            "SELECT email,name,response,is_organizer,is_self FROM calendar_event_guests
+             WHERE account_id=?1 AND calendar_id=?2 AND event_id=?3 ORDER BY position",
+        )?;
+        for event in events.iter_mut() {
+            event.row.guests = guests
+                .query_map(
+                    params![account, event.calendar_id, event.row.event_id],
+                    |r| guest(r, 0),
+                )?
+                .collect::<std::result::Result<_, _>>()?;
+        }
+        Ok(())
+    }
+
     /// One stored event of a calendar being read, with its calendar's name,
     /// colour and role. None when there is no such event, or its calendar is
     /// no longer read.
@@ -851,6 +1002,157 @@ fn synced_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<(bool, SyncedE
     )))
 }
 
+/// Calendar search's index row for one event (schema.sql, CALENDAR SEARCH),
+/// replaced whole from what is being stored. Called only by [`upsert_event`],
+/// the one way an event is written; deletes are the trigger's.
+fn index_event(
+    tx: &Connection,
+    account: AccountId,
+    calendar_id: &str,
+    row: &EventRow,
+) -> Result<()> {
+    let guests: Vec<(&str, Option<&str>)> = row
+        .guests
+        .iter()
+        .take(MAX_GUESTS)
+        .map(|g| (g.email.as_str(), g.name.as_deref()))
+        .collect();
+    index_parts(
+        tx,
+        account,
+        calendar_id,
+        &row.event_id,
+        [
+            row.summary.as_deref(),
+            row.location.as_deref(),
+            row.description.as_deref(),
+        ],
+        row.organizer_email.as_deref(),
+        &guests,
+    )
+}
+
+/// The index row itself, from an event's parts: every address is cut out of
+/// the free text and filed under `addresses` with the organizer's, the
+/// guests' and any name that is itself an address
+/// ([`crate::gcal::search::split_addresses`]), so the agent door, which never
+/// queries that column, cannot match a word of one. Shared by
+/// [`index_event`] and [`reindex_calendar_search`], so a reindex files text
+/// exactly as a write does.
+fn index_parts(
+    tx: &Connection,
+    account: AccountId,
+    calendar_id: &str,
+    event_id: &str,
+    [title, place, notes]: [Option<&str>; 3],
+    organizer: Option<&str>,
+    guests: &[(&str, Option<&str>)],
+) -> Result<()> {
+    use crate::gcal::search::{has_address, split_addresses};
+    tx.execute(
+        "INSERT INTO calendar_search_keys(account_id,calendar_id,event_id) VALUES(?1,?2,?3)
+         ON CONFLICT(account_id,calendar_id,event_id) DO NOTHING",
+        params![account, calendar_id, event_id],
+    )?;
+    let id: i64 = tx.query_row(
+        "SELECT id FROM calendar_search_keys WHERE account_id=?1 AND calendar_id=?2 AND event_id=?3",
+        params![account, calendar_id, event_id],
+        |r| r.get(0),
+    )?;
+    let mut addresses: Vec<String> = organizer.map(str::to_owned).into_iter().collect();
+    let mut clean = |text: Option<&str>| -> String {
+        let (kept, found) = split_addresses(text.unwrap_or(""));
+        addresses.extend(found);
+        kept
+    };
+    let (title, place, notes) = (clean(title), clean(place), clean(notes));
+    let mut people = Vec::new();
+    for (email, name) in guests {
+        addresses.push((*email).to_owned());
+        match name {
+            Some(name) if has_address(name) => addresses.push((*name).to_owned()),
+            Some(name) => people.push(*name),
+            None => {}
+        }
+    }
+    tx.execute("DELETE FROM calendar_search_fts WHERE rowid=?1", [id])?;
+    tx.execute(
+        "INSERT INTO calendar_search_fts(rowid,title,place,notes,people,addresses)
+         VALUES(?1,?2,?3,?4,?5,?6)",
+        params![
+            id,
+            title,
+            place,
+            notes,
+            people.join(" "),
+            addresses.join(" ")
+        ],
+    )?;
+    Ok(())
+}
+
+/// Rebuild calendar search's index from every stored event, in ONE
+/// transaction (the caller's). Used at open when the index is out of step.
+pub(super) fn reindex_calendar_search(tx: &Connection) -> Result<()> {
+    tx.execute("DELETE FROM calendar_search_fts", [])?;
+    tx.execute("DELETE FROM calendar_search_keys", [])?;
+    type Event = (
+        i64,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let events: Vec<Event> = tx
+        .prepare(
+            "SELECT account_id,calendar_id,event_id,summary,location,description,organizer_email
+             FROM calendar_events",
+        )?
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    let mut guests = tx.prepare(
+        "SELECT email,name FROM calendar_event_guests
+         WHERE account_id=?1 AND calendar_id=?2 AND event_id=?3 ORDER BY position",
+    )?;
+    for (account, calendar_id, event_id, summary, location, description, organizer) in &events {
+        let list: Vec<(String, Option<String>)> = guests
+            .query_map(params![account, calendar_id, event_id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        let list: Vec<(&str, Option<&str>)> = list
+            .iter()
+            .map(|(e, n)| (e.as_str(), n.as_deref()))
+            .collect();
+        index_parts(
+            tx,
+            *account,
+            calendar_id,
+            event_id,
+            [
+                summary.as_deref(),
+                location.as_deref(),
+                description.as_deref(),
+            ],
+            organizer.as_deref(),
+            &list,
+        )?;
+    }
+    Ok(())
+}
+
 fn upsert_event(
     tx: &Connection,
     account: AccountId,
@@ -922,5 +1224,6 @@ fn upsert_event(
             ],
         )?;
     }
+    index_event(tx, account, calendar_id, row)?;
     Ok(())
 }

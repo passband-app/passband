@@ -127,7 +127,7 @@
                     .frame(maxHeight: .infinity)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { visibleHeight = $0 }
                     MonthFooter(
-                        loading: !store.calendarLoaded, canCreate: store.calendarCanCreate,
+                        loading: store.calendarFeed == nil && !store.calendarLoaded, canCreate: store.calendarCanCreate,
                         drafting: drafting, week: true)
                 }
                 .frame(width: width, height: geo.size.height, alignment: .topLeading)

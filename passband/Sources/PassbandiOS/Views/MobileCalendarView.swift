@@ -62,13 +62,16 @@ struct MobileCalendarView: View {
 
     /// Kept across launches, like the Mac's mode: the way you like to look at
     /// your week is not a choice to make again every morning.
-    @AppStorage("phoneCalendarMode") private var mode: PhoneCalendarMode = .week
+    /// Month the first time; after that, whatever was on screen last.
+    @AppStorage("phoneCalendarMode") private var mode: PhoneCalendarMode = .month
     /// Folds opened, by day: "u" + day for unlikely, "e" + day for earlier.
     @State private var openFolds: Set<String> = []
     /// The direction the strip last moved, for the slide.
     @State private var stepForward = true
     @State private var memo = MobileCalendarMemo()
     @State private var kicked = false
+    /// A search hit's detail, pushed once the store has turned to its day.
+    @State private var searched: String?
     #if DEBUG
         /// A screenshot's push (`--fixture-scene calendar-detail`).
         @State private var fixtureDetail: String?
@@ -93,6 +96,8 @@ struct MobileCalendarView: View {
                         .padding(.horizontal, 16)
                     MobileMonthPager(
                         items: items, place: place, now: now, calendar: cal,
+                        create: store.calendarCanCreate
+                            ? { day in store.openEventEditor(day: day, now: now) } : nil,
                         open: { day in
                             Haptics.tick()
                             withAnimation(.snappy) {
@@ -107,7 +112,11 @@ struct MobileCalendarView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 20) {
                         MobileCalendarStatus()
-                        content(items: items, model: model, week: week, place: place, now: now, cal: cal)
+                        content(
+                            items: items, model: model, week: week, place: place, now: now, cal: cal,
+                            scrollToFirstEvent: {
+                                proxy.scrollTo(MobileDayTimeline.firstEventAnchor, anchor: .top)
+                            })
                     }
                     .padding(.horizontal, 16)
                     .padding(.top, 4)
@@ -125,6 +134,7 @@ struct MobileCalendarView: View {
                         withAnimation(.snappy) { proxy.scrollTo(day, anchor: .top) }
                     }
                 }
+
               }
               }
             }
@@ -178,6 +188,21 @@ struct MobileCalendarView: View {
         .navigationDestination(for: MobileCalendarRoute.self) { route in
             MobileEventPage(id: route.id)
         }
+        // A HIT FROM SEARCH (MobileSearchView's Events block): the store has
+        // turned to its day and named the item in `calendarSearchOpen`, a
+        // one-shot ask written only by `openCalendarSearchHit`: the day's
+        // hours, and the detail pushed over them. NOT `calendarMonthItem`,
+        // which every save also sets (`landEvent`), so reading it pushed a
+        // second page after each edit. Moving the place is what fetches that
+        // month, so the page finds the row once the feed lands. `initial`
+        // because the tab may mount on it.
+        .navigationDestination(item: $searched) { id in MobileEventPage(id: id) }
+        .onChange(of: store.calendarSearchOpen, initial: true) { _, id in
+            guard let id else { return }
+            store.calendarSearchOpen = nil
+            mode = .day
+            searched = id
+        }
         // THE EVENT SHEET, on the store's own editor: what "+" opens, and the
         // detail's Edit from a page pushed on this stack.
         .sheet(item: editorBinding) { request in
@@ -189,6 +214,11 @@ struct MobileCalendarView: View {
                 if FixtureStage.on {
                     if let staged = FixtureStage.calendarMode.flatMap(PhoneCalendarMode.init(rawValue:)) {
                         mode = staged
+                    }
+                    if let offset = FixtureStage.calendarDay,
+                       let day = Calendar.current.date(
+                           byAdding: .day, value: offset, to: Calendar.current.startOfDay(for: Date())) {
+                        store.selectCalendarDay(day, open: false, now: Date())
                     }
                     try? await Task.sleep(for: .seconds(1.5))
                     fixtureDetail = FixtureStage.calendarDetail
@@ -268,7 +298,7 @@ struct MobileCalendarView: View {
     @ViewBuilder
     private func content(
         items: [AgendaItem], model: MonthModel, week: MonthWeek?, place: MonthPlace, now: Date,
-        cal: Calendar
+        cal: Calendar, scrollToFirstEvent: @escaping () -> Void
     ) -> some View {
         switch mode {
         case .month:
@@ -292,7 +322,14 @@ struct MobileCalendarView: View {
                     stepForward = forward
                     Haptics.tick()
                     withAnimation(.snappy) { store.moveCalendarMonth(.days(forward ? 1 : -1), now: now) }
-                })
+                },
+                create: store.calendarCanCreate
+                    ? { start in
+                        Haptics.tick()
+                        store.openEventEditor(
+                            day: place.day, startMinutes: start, endMinutes: min(1440, start + 60), now: now)
+                    } : nil,
+                scrollToFirstEvent: scrollToFirstEvent)
         }
     }
 
@@ -863,11 +900,38 @@ private struct MobileEventPage: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     let id: String
+    /// A destructive answer was given and its delete is (or is about to be)
+    /// out. Cleared when the write settles.
+    @State private var answered = false
 
     private var item: AgendaItem? {
         guard let feed = store.calendarFeed else { return nil }
         return Agenda.items(feed, calendar: .current).first { $0.id == id }
     }
+
+    /// The question is this page's while it is about this page's event.
+    private var deleteWording: DeleteWording? {
+        guard let ask = store.calendarDeleteAsk, ask.epoch == store.epoch, Agenda.itemId(ask.event) == id
+        else { return nil }
+        return EventGuests.deleteWording(ask.event, feed: store.calendarFeed)
+    }
+
+    /// THE QUESTION STAYS ASKED UNTIL IT IS SETTLED, as on the Mac: a delete
+    /// answered here is out, and only `eventDeleted` clears the question (a
+    /// failure leaves it up and the dialog comes back). SwiftUI writes false
+    /// to this binding right after a button's action, before the delete's
+    /// task has even started, so an answered question must not read that as
+    /// "cancel": `answered` is set synchronously by the destructive buttons.
+    private var deleteAsked: Binding<Bool> {
+        Binding(
+            get: { deleteWording != nil && !store.calendarWriting },
+            set: { shown in
+                guard !shown, !answered, store.calendarDeleteAsk != nil, !store.calendarWriting else { return }
+                store.cancelDeleteEvent()
+            })
+    }
+
+    private func sentence(_ s: String) -> String { s.prefix(1).uppercased() + s.dropFirst() }
 
     var body: some View {
         let item = item
@@ -884,8 +948,41 @@ private struct MobileEventPage: View {
         .navigationBarTitleDisplayMode(.inline)
         // Mail opened from "Mail behind it" comes back here, not to the list.
         .readerHost()
+        // THE DELETE QUESTION, asked where Delete was pressed: the store's
+        // own (`askDeleteEvent`), worded by `EventGuests.deleteWording`, with
+        // "tell guests" only where Google may tell them. Nothing is undone.
+        .confirmationDialog(
+            deleteWording?.title ?? "", isPresented: deleteAsked, titleVisibility: .visible
+        ) {
+            if let ask = store.calendarDeleteAsk, let words = deleteWording {
+                if let tell = words.tell {
+                    Button(sentence(tell), role: .destructive) {
+                        answered = true
+                        Task { await store.deleteEvent(ask.event, tellGuests: true) }
+                    }
+                }
+                Button(sentence(words.quiet), role: .destructive) {
+                    answered = true
+                    Task { await store.deleteEvent(ask.event) }
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                answered = false
+                store.cancelDeleteEvent()
+            }
+        } message: {
+            Text(deleteWording?.detail ?? "")
+        }
+        .onChange(of: store.calendarWriting) { _, writing in
+            if !writing { answered = false }
+        }
         .onChange(of: item == nil) { _, gone in
-            if gone { dismiss() }
+            guard gone else { return }
+            // Gone under an open question (deleted elsewhere, say): the
+            // question goes with the page, or every later "+" would be
+            // refused by a question nobody can see.
+            if deleteWording != nil, !store.calendarWriting { store.cancelDeleteEvent() }
+            dismiss()
         }
     }
 }
@@ -936,6 +1033,14 @@ private struct MobileDayTimeline: View {
     let now: Date
     let calendar: Calendar
     let step: (_ forward: Bool) -> Void
+    /// A tap on an empty stretch of the hours: a new event there, an hour
+    /// long, starting on the half hour above the finger. Nil where nothing
+    /// can be created (no writable calendar, the practice inbox).
+    var create: ((_ startMinutes: Int) -> Void)?
+    /// Brings `firstEventAnchor` to the top of the list. Called by the mark
+    /// itself as it appears, so it runs once the day's hours are laid out,
+    /// whether the day was picked in the month, stepped to, or launched into.
+    var scrollToFirstEvent: () -> Void = {}
 
     @State private var showUnlikely = false
 
@@ -956,8 +1061,12 @@ private struct MobileDayTimeline: View {
             if !column.night.isEmpty {
                 nightLine
             }
-            hoursWell
-                .simultaneousGesture(swipe)
+            // The mark beside the hours, in their frame.
+            ZStack(alignment: .topLeading) {
+                hoursWell
+                    .simultaneousGesture(swipe)
+                firstEventMark
+            }
             if !column.unlikely.isEmpty {
                 unlikelyFold
             }
@@ -1036,10 +1145,59 @@ private struct MobileDayTimeline: View {
 
     // MARK: the hours
 
+    /// What the day scrolls to when it opens (`MobileCalendarView`).
+    static let firstEventAnchor = "day-first-event"
+    /// Hours of the well always on screen when a day opens, so a first
+    /// event inside them needs no scroll and the all-day chips stay in view.
+    static let opensOnScreen = 4.0
+    /// How much of the hours above the first event the scroll keeps.
+    static let leadHours = 1.5
+
+    /// A mark an hour and a half above the day's first timed event, when that
+    /// event starts too far down the well to be seen as the day opens. No
+    /// mark (no scroll) for a day whose first event is near the top, or with
+    /// no timed event at all.
+    @ViewBuilder private var firstEventMark: some View {
+        if let first = column.blocks.map(\.segment.lo).min() {
+            let top = CGFloat(first) * height
+            if top > CGFloat(Self.opensOnScreen) * Self.hourHeight {
+                // A spacer, then the mark, in a stack: the mark's OWN frame
+                // starts at the hour. An offset moves only the drawing, and a
+                // padded mark was found by `scrollTo` at the padding's top
+                // (both seen in the simulator, where the day scrolled only to
+                // its top).
+                VStack(spacing: 0) {
+                    Color.clear
+                        .frame(width: 1, height: max(0, top - CGFloat(Self.leadHours) * Self.hourHeight))
+                    Color.clear
+                        .frame(width: 1, height: 1)
+                        .id(Self.firstEventAnchor)
+                        .onAppear {
+                            // The next turn of the run loop: the list's own
+                            // layout pass has to have placed the mark first.
+                            DispatchQueue.main.async { scrollToFirstEvent() }
+                        }
+                }
+                .accessibilityHidden(true)
+            }
+        }
+    }
+
     private var hoursWell: some View {
         GeometryReader { geo in
             let lane = max(0, geo.size.width - Self.gutter - 4)
             ZStack(alignment: .topLeading) {
+                // The empty hours, under everything: a tap here is a new
+                // event at that time. Blocks sit above it and take their own.
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { point in
+                        guard let create else { return }
+                        let hours = max(0, Double(point.y) / Double(Self.hourHeight))
+                        let minutes = MonthGrid.dayFromHour * 60 + Int(hours * 2) * 30
+                        // An hour long, always: the last start is 11pm.
+                        create(min(23 * 60, minutes))
+                    }
                 // The hour lines, each labelled in the gutter. Midnight closes
                 // the well without a label of its own.
                 ForEach(0...hours, id: \.self) { i in
@@ -1217,6 +1375,8 @@ private struct MobileMonthGrid: View {
     let month: Date
     let now: Date
     let calendar: Calendar
+    /// Press and hold a day: a new event on it.
+    var create: ((Date) -> Void)?
     let open: (Date) -> Void
 
     static let numberBand: CGFloat = 24
@@ -1322,6 +1482,12 @@ private struct MobileMonthGrid: View {
             Rectangle().fill(Palette.hairline).frame(width: 0.5)
         }
         .accessibilityLabel(accessibility(day, spans: spans, isToday: isToday))
+        .contextMenu {
+            if let create {
+                Button { create(day.day) } label: { Label("New event", systemImage: "plus") }
+            }
+            Button { open(day.day) } label: { Label("Open day", systemImage: "clock") }
+        }
     }
 
     private func spanBar(_ bar: SpanSegment, cellWidth: CGFloat) -> some View {
@@ -1397,6 +1563,7 @@ private struct MobileMonthPager: View {
     let place: MonthPlace
     let now: Date
     let calendar: Calendar
+    var create: ((Date) -> Void)?
     let open: (Date) -> Void
 
     /// Pages are ABSOLUTE month numbers (year * 12 + month), never offsets
@@ -1410,12 +1577,13 @@ private struct MobileMonthPager: View {
 
     init(
         items: [AgendaItem], place: MonthPlace, now: Date, calendar: Calendar,
-        open: @escaping (Date) -> Void
+        create: ((Date) -> Void)? = nil, open: @escaping (Date) -> Void
     ) {
         self.items = items
         self.place = place
         self.now = now
         self.calendar = calendar
+        self.create = create
         self.open = open
         // Seeded here, not in onAppear: a page-style TabView can ignore (or
         // write back over) a selection changed before its first layout.
@@ -1443,7 +1611,8 @@ private struct MobileMonthPager: View {
                 // The grid builds its own month, in its own body: only the
                 // pages the pager realises pay for MonthGrid.build.
                 MobileMonthGrid(
-                    items: items, month: month(number), now: now, calendar: calendar, open: open
+                    items: items, month: month(number), now: now, calendar: calendar,
+                    create: create, open: open
                 )
                 .tag(number)
             }

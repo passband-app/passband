@@ -24,6 +24,7 @@ COPY squelch-tui ./squelch-tui
 COPY squelch-api ./squelch-api
 COPY squelch-relay ./squelch-relay
 COPY squelchd ./squelchd
+COPY squelch-embed ./squelch-embed
 COPY squelch-broker ./squelch-broker
 # Hosted control plane + VPS provisioner. Neither ships in THIS image, but both
 # are workspace members and cargo refuses to resolve the workspace without them.

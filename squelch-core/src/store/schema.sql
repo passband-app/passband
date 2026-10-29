@@ -1042,9 +1042,13 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 -- back. `account_id` is a vec0 METADATA column so KNN queries can constrain by
 -- account in the WHERE clause.
 --
--- SECURITY: SEALED MESSAGES ARE NEVER INSERTED HERE — the embed-at-write path is
--- gated on `sensitivity='normal'`, so sealed content is absent from the vector
--- space entirely. `semantic_search` re-excludes sealed rows anyway.
+-- SECURITY: SEALED MESSAGES ARE NEVER INSERTED HERE. Every write is gated on
+-- `embeddable_mail_sql!` (store/sqlite/mod.rs): not spam, not known sealed (an
+-- auth decision, a restriction, the retired `triage.sensitivity` column), and
+-- either decided with access settled or the owner's own mail. A vector whose
+-- message becomes sealed (or undecided again) is deleted at that event, and a
+-- sweep at every store open deletes any left from before the gate
+-- (`purge_forbidden_vectors_conn`). The read side re-checks access anyway.
 --
 -- DIMENSION: float[384] matches BGE-small-en-v1.5, and the store asserts the
 -- configured embedder matches at attach time. Changing it means editing this
@@ -2186,6 +2190,52 @@ CREATE TABLE IF NOT EXISTS calendar_places (
     cleaned_at     TEXT NOT NULL,
     PRIMARY KEY(account_id, raw)
 );
+
+-- CALENDAR SEARCH (docs/CALENDAR.md §10.1): a word index over the synced
+-- events, for the search box, the assistant and Agent MCP. `calendar_search_keys`
+-- gives each event a stable integer id, because `calendar_events` has none (an
+-- implicit rowid can be renumbered by VACUUM), and that id is the FTS rowid.
+-- Written in ONE place, `upsert_event`, inside the event's own transaction and
+-- after its guests; deleted with the event by the trigger below, whichever path
+-- deletes it. `people` is guest names, `addresses` every address the event
+-- holds: the organizer's and guests', a name that is an address, and each one
+-- found in the title, place or description (cut out of those columns). The
+-- agent door's queries never name `addresses`. NOT STEMMED: porter would store
+-- "meeting" as "meet" and a half-typed "meetin" would find nothing; plurals
+-- are folded in the query instead (`gcal::search::forms`). An UPDATE drops the
+-- row (the trigger), so an older daemon that edits events leaves the index
+-- out of step, never stale, and the open after it reindexes.
+CREATE TABLE IF NOT EXISTS calendar_search_keys (
+    id          INTEGER PRIMARY KEY,
+    account_id  INTEGER NOT NULL,
+    calendar_id TEXT NOT NULL,
+    event_id    TEXT NOT NULL,
+    UNIQUE(account_id, calendar_id, event_id)
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS calendar_search_fts USING fts5(
+    title, place, notes, people, addresses,
+    tokenize = 'unicode61', prefix = '2 3'
+);
+CREATE TRIGGER IF NOT EXISTS calendar_search_drops_an_edited_event
+AFTER UPDATE ON calendar_events BEGIN
+    DELETE FROM calendar_search_fts WHERE rowid IN (
+        SELECT id FROM calendar_search_keys
+        WHERE account_id = OLD.account_id AND calendar_id = OLD.calendar_id
+          AND event_id = OLD.event_id);
+    DELETE FROM calendar_search_keys
+    WHERE account_id = OLD.account_id AND calendar_id = OLD.calendar_id
+      AND event_id = OLD.event_id;
+END;
+CREATE TRIGGER IF NOT EXISTS calendar_search_follows_event
+AFTER DELETE ON calendar_events BEGIN
+    DELETE FROM calendar_search_fts WHERE rowid IN (
+        SELECT id FROM calendar_search_keys
+        WHERE account_id = OLD.account_id AND calendar_id = OLD.calendar_id
+          AND event_id = OLD.event_id);
+    DELETE FROM calendar_search_keys
+    WHERE account_id = OLD.account_id AND calendar_id = OLD.calendar_id
+      AND event_id = OLD.event_id;
+END;
 
 -- A CORRESPONDENT'S TIMEZONE (docs/CALENDAR.md §7), inferred at ingest and
 -- served on the contact card. HUMAN-DOOR ONLY. `addr` is COLLATE NOCASE in

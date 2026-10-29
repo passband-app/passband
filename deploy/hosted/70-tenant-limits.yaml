@@ -1,13 +1,18 @@
 # What one tenant may take, and what all tenants together may take.
 #
-# THESE ARE THE NUMBERS `carrier` IS MEANT TO RUN: thirty tenants on 4 vCPU / 16
-# GB (deploy/hosted/PRODUCTION.md, "How many tenants fit"). This file is the
+# THESE ARE THE NUMBERS `carrier` IS MEANT TO RUN on 4 vCPU / 16 GB
+# (deploy/hosted/PRODUCTION.md, "How many tenants fit"), in BOTH of the states
+# the warden can render a tenant in: thirty tenants embedding in-process
+# (SQUELCH_WARDEN_EMBED_URL unset, today), and sixty on the shared embedder
+# (65-embed.yaml, the knob set), where the gate is a deliberate, provisional one
+# on disk rather than memory. This file is the
 # record of that box's quota: `kubectl diff -f` says whether the box matches it
 # right now, and `kubectl apply -f` makes it so, so a change to the quota is a
 # change to this file, merged, then applied. SIZE THESE TO YOUR BOX BEFORE
 # APPLYING THEM ANYWHERE ELSE: the arithmetic is in the ResourceQuota below,
 # worked for this box and for the 2 vCPU / 4 GB floor in SETUP.md (five
-# tenants), and a quota bigger than the box is a quota that refuses nobody.
+# tenants in-process), and a quota bigger than the box is a quota that refuses
+# nobody.
 #
 # The warden already puts requests and limits on both containers of every tenant
 # pod, so nothing here is what bounds a tenant the warden created. These two
@@ -38,7 +43,8 @@ spec:
   limits:
     - type: Container
       # What a container gets when it asks for nothing. Matches the warden's
-      # own defaults, so a tenant pod is unaffected by this file. Anything else
+      # own in-process defaults (a tenant on the shared embedder asks for less,
+      # explicitly), so a tenant pod is unaffected by this file. Anything else
       # that lands here without resources of its own now costs a whole tenant
       # slot out of the quota below - `60-models.yaml`'s seed pod is the one in
       # this repo, and it should carry its own `resources`.
@@ -86,25 +92,42 @@ spec:
     #
     #    15985  the whole machine, all of which is offered to pods today
     #    -1200  k3s, containerd, journald, litestream: outside every pod
-    #     -400  the pods that are not tenants - CoreDNS, metrics-server,
-    #           kube-state-metrics, node-exporter, the Prometheus agent, the
-    #           warden, the roller's job while a roll runs
-    #   ~14385  about 14 GiB left for tenant pods
+    #     -400  the pods that are not tenants and not in this namespace -
+    #           CoreDNS, metrics-server, kube-state-metrics, node-exporter,
+    #           the Prometheus agent, the warden, the roller's job while a
+    #           roll runs
+    #   ~14385  about 14 GiB left for this namespace
     #
-    # At the warden's 100m/384Mi (`15-warden-config.yaml`) that is THIRTY
-    # tenants: 30 x 384Mi is 11520Mi, which deliberately leaves room under the
-    # ~36 the division allows, because 384Mi is the p50 of a tenant at rest and
-    # not its peak (tenant pods read 300-500 MB with the ONNX session
-    # resident). Raise it off a week of container_memory_working_set_bytes,
-    # not off wanting a thirty-first tenant.
+    # 11520Mi of that is this line, and it does not move between the two
+    # states, because it is sized to the box and not to a tenant. What moves
+    # is what a tenant asks for, and so how many fit:
+    #
+    #   IN-PROCESS (SQUELCH_WARDEN_EMBED_URL unset). The warden's 100m/384Mi:
+    #   11520 / 384 is THIRTY tenants, which deliberately leaves room under
+    #   the ~36 the division allows, because 384Mi is the p50 of a tenant at
+    #   rest and not its peak (tenant pods read 300-500 MB with the ONNX
+    #   session resident). Twenty-nine while the model seed pod (32Mi) or the
+    #   shared embedder (320Mi, applied ahead of the knob) is up.
+    #
+    #   SHARED EMBEDDER (the knob set). The squelch-embed pod takes 320Mi and
+    #   one pod slot for good, and a tenant asks 40m/128Mi: (11520 - 320) / 128
+    #   is EIGHTY-SEVEN tenants by memory. It is NOT what binds. `pods` and
+    #   `persistentvolumeclaims` below gate at SIXTY on purpose, because disk is
+    #   the constraint nobody has measured yet (see `pods`). 128Mi is the
+    #   measured 40-80 MB of a daemon without ORT plus headroom; raise or lower
+    #   it off a week of container_memory_working_set_bytes on the service, not
+    #   off wanting an eighty-eighth tenant.
     #
     # The same sum on the 2 vCPU / 4 GB floor (3814 MiB real): 3814 - 1200 -
-    # 372 leaves about 2.2 GiB, which is FIVE tenants (5 x 384Mi = 1920Mi
-    # fits, 6 x 384Mi = 2304Mi does not). The rest of that file, by the rules
-    # on the lines below: `requests.cpu: "2"`, `requests.ephemeral-storage:
-    # 5Gi`, `limits.cpu: "8"`, `limits.memory: 7680Mi`,
-    # `limits.ephemeral-storage: 20Gi`, `pods` and `persistentvolumeclaims:
-    # "10"`, `requests.storage: 92Gi`, `count/secrets: "60"`. The storage line
+    # 372 leaves about 2.2 GiB, so `requests.memory: 1920Mi`, which is FIVE
+    # tenants in-process (5 x 384Mi = 1920Mi fits, 6 x 384Mi = 2304Mi does
+    # not; four while the seed pod or the shared embedder is up) and twelve
+    # by memory on the shared embedder ((1920 - 320) / 128). The rest of that
+    # file, by the rules on the lines below: `requests.cpu: "2"`,
+    # `requests.ephemeral-storage: 5Gi`, `limits.cpu: "16"`, `limits.memory:
+    # 7680Mi`, `limits.ephemeral-storage: 20Gi`, `pods: "12"` and
+    # `persistentvolumeclaims: "11"` (ten tenants, the disk gate there too),
+    # `requests.storage: 102Gi`, `count/secrets: "70"`. The storage line
     # follows the claims line by the rule below; on a disk where the claim is
     # honest, size the claims line to the disk first (SETUP.md, "Tenant data
     # on a block volume"). Divide YOUR box the same way before applying this
@@ -118,74 +141,111 @@ spec:
     # `systemReserved`) is what makes the scheduler a second gate; it is
     # written but not applied here, so do not size this line as if it were.
     #
-    # Every line below admits MORE than the thirty memory allows (twenty-nine
-    # while the model seed pod is up, which takes its 32Mi off this line and
-    # its bit off every other), so memory is what binds and a full quota
-    # always means the box is full, not that one ceiling was raised without
-    # the others. The cpu lines are forty
-    # tenants' worth (the patch had them at exactly thirty, a tie memory lost
-    # to any pod asking for more cpu per memory than a tenant, which the seed
-    # pod and a debug pod both do); CPU is compressible, the node's 4 vCPU is
-    # the scheduler's gate, and these lines only have to stay out of the way.
-    # That a line was raised without the others has happened twice:
-    # 2026-09-28, memory alone was raised and cpu, ephemeral storage, pods and
-    # PVCs all bound first; and the patch that fixed it set `limits.cpu` to 12
-    # and left `requests.storage` at 200Gi, which would have refused the
-    # thirteenth and the twentieth tenant (see those lines). A test in the
-    # warden (`the_committed_quota_lets_memory_bind_before_any_count_line`)
-    # now divides every line here by what the warden's ConfigMap asks for a
-    # tenant and fails CI when any admits fewer than the memory line.
+    # Every line below admits MORE tenants than memory does in EITHER state,
+    # with the seed pod and the shared embedder both up, except the three disk
+    # lines (`pods`, `persistentvolumeclaims`, `requests.storage`), which admit
+    # sixty in both: above the thirty memory allows in-process, below the
+    # eighty-seven it allows on the shared embedder. So in-process a full
+    # quota means the box is full; on the shared embedder it means the
+    # provisional disk gate is reached, and the next move is a measurement,
+    # not a raise. Every other line clears eighty-seven, so lifting the disk
+    # gate later is those three lines and nothing else. That a line was
+    # raised without the others has happened twice: 2026-09-28, memory alone
+    # was raised and cpu, ephemeral storage, pods and PVCs all bound first;
+    # and the patch that fixed it set `limits.cpu` to 12 and left
+    # `requests.storage` at 200Gi, which would have refused the thirteenth and
+    # the twentieth tenant (see those lines). A test in the warden
+    # (`the_committed_quota_lets_memory_bind_before_any_count_line`) divides
+    # every line here by what the warden's ConfigMap asks for a tenant, in
+    # both states, and fails CI when one binds where this comment says it
+    # does not.
+    #
+    # CPU is compressible, the node's 4 vCPU is the scheduler's gate, and the
+    # cpu lines only have to stay out of the way: 4 cores of requests is
+    # thirty-seven tenants at 100m and ninety-four at 40m, after the shared
+    # embedder's 200m and the seed pod's 10m.
     requests.cpu: "4"
     requests.memory: 11520Mi
-    requests.ephemeral-storage: 8Gi
+    # 256Mi a tenant in both states (its /tmp and logs; the embedder changes
+    # nothing here): 24Gi is ninety-five tenants after the two other pods' 48Mi.
+    # A reservation against the 80 GB root disk, where images and logs live.
+    requests.ephemeral-storage: 24Gi
     # Limits may oversubscribe, because tenants are idle most of the time and a
-    # sync burst is short. Memory limits not much past 4x requests on one node,
-    # which is what 46080Mi against 11520Mi is. CPU limits are a different
+    # sync burst is short. Memory limits are a little past 4x requests on one
+    # node, which is what 49152Mi against 11520Mi is: forty-seven tenants at
+    # the in-process 1Gi limit and ninety-four at the shared embedder's 512Mi,
+    # after its 768Mi and the seed pod's 128Mi. CPU limits are a different
     # thing: the kernel throttles a pod at its limit and kills nothing, so the
     # sum against 4 vCPU is no promise, and the line only has to admit more
-    # than thirty tenants at the warden's 1000m limit each (the 12 the patch
-    # before this file carried would have refused the thirteenth signup).
-    limits.cpu: "40"
-    limits.memory: 46080Mi
-    limits.ephemeral-storage: 32Gi
+    # than eighty-seven tenants at the warden's 1000m limit each, after the
+    # shared embedder's 2000m (the 12 the patch before this file carried would
+    # have refused the thirteenth signup).
+    limits.cpu: "96"
+    limits.memory: 49152Mi
+    # 1Gi a tenant, plus the two other pods' 128Mi each: ninety-five.
+    limits.ephemeral-storage: 96Gi
     # The mail: a claim at the warden's 10Gi (`SQUELCH_WARDEN_STORAGE_SIZE`)
-    # for every one of the forty claim slots below but the model seed's, plus
-    # the seed's 2Gi: 39 x 10Gi + 2Gi.
-    # A claim's size is nominal on local-path, which enforces nothing, and the
-    # volume behind it is 50 GB (PRODUCTION.md), so this line is a ceiling on
-    # claims, not disk; the disk is the volume, watched by the "carrier disk
-    # high" alert and grown online when it says so (SETUP.md). It is sized to
-    # the claims line and not to the thirty memory
-    # admits because a cancelled tenant keeps its claim: a claim that cannot
-    # bind is a tenant that never comes up, and at 200Gi, the patch's value,
-    # this would have refused the twentieth.
-    requests.storage: 392Gi
-    persistentvolumeclaims: "40"
+    # for every one of the sixty-one claim slots below but the model seed's,
+    # plus the seed's 2Gi: 60 x 10Gi + 2Gi.
+    # A claim's size is nominal on local-path, which enforces nothing, so this
+    # line is a ceiling on claims, not disk, and it is sized to the claims line
+    # and never to the disk: 602Gi is a number no disk on this box has, and
+    # that is the honest reading of a claim size local-path ignores. The disk
+    # is the volume (PRODUCTION.md, "The volume"), watched by the "carrier disk
+    # high" alert and grown online when it says so (SETUP.md). It follows the
+    # claims line and not what memory admits because a cancelled tenant keeps
+    # its claim: a claim that cannot bind is a tenant that never comes up, and
+    # at 200Gi, the patch's value, this would have refused the twentieth.
+    requests.storage: 602Gi
+    persistentvolumeclaims: "61"
     # Blunt ceilings on how much can exist here at all. One tenant is one pod
-    # and one claim (its Deployment recreates, so never two pods at once), and
+    # and one claim (its Deployment recreates, so never two pods at once);
     # `60-models.yaml`'s seed takes one claim for good and one pod while it
-    # runs; so these are tenant counts too, but not the ones that bind:
-    # `requests.memory` above refuses the thirty-first signup long before these
-    # refuse the fortieth. The room between thirty and forty is what a
-    # cancelled tenant's kept claim and two kept Secrets live in (DELETE keeps
-    # the mail: squelch-warden/src/objects.rs). Raise the memory line, not
-    # these.
-    pods: "40"
+    # runs, and `65-embed.yaml`'s shared embedder one pod for good (it
+    # recreates too) and no claim. So both lines are SIXTY TENANTS: 62 pods
+    # less those two, 61 claims less the seed's.
+    #
+    # THE PROVISIONAL GATE, ON DISK. In-process these never bind (memory
+    # refuses the thirty-first signup first, and the room between thirty and
+    # sixty is what a cancelled tenant's kept claim and two kept Secrets live
+    # in). On the shared embedder memory would admit eighty-seven, and these
+    # stop it at sixty deliberately: every tenant's mail is a SQLite file on
+    # one disk, `local-path` enforces no claim size, nobody has measured what
+    # a tenant actually occupies, and the archive tier can grow one tenant's
+    # database to about 4 GB. Sixty at that worst case is 240 GB, several
+    # times the tenant volume, which is why this is a gate to measure at and
+    # not a number to trust. A claim slot is spent by a cancelled tenant too (DELETE keeps the
+    # mail: squelch-warden/src/objects.rs), which is right here: its file is
+    # still on the disk.
+    #
+    # Before raising either, measure, on the node:
+    #
+    #     df -h /  <the local-path storage directory>
+    #     du -sh <the local-path storage directory>/pvc-*  | sort -h
+    #
+    # (local-path's directory is `/var/lib/rancher/k3s/storage` unless k3s was
+    # started with `--default-local-storage-path`, which on carrier points it at
+    # the tenant volume; PRODUCTION.md, "k3s".) The per-claim sizes, their
+    # growth over a month and the free space say what a tenant costs and how
+    # many more fit; raise `pods`, `persistentvolumeclaims` and
+    # `requests.storage` together off that, never one alone.
+    pods: "62"
     # One tenant is FOUR Secrets (identity, credential, LLM key, share token:
     # `SECRETS_PER_TENANT` in squelch-warden/src/objects.rs), on top of the
     # namespace's own, which the warden's quota test counts: the ones the
     # warden's config carries a name for (set in its ConfigMap or defaulted in
     # config.rs: the wildcard certificate, the OAuth client, the APNs relay,
-    # the Browserbase key and a pull secret if set), a successor beside each
-    # of the three that rotate under a new name, and the private key
-    # cert-manager keeps beside the certificate while renewing (eight on
-    # carrier, all at once). So this is at least four times `pods`, plus two
-    # for every claim slot beyond the pod slots (a cancelled tenant keeps
-    # two), plus those, or it is the line that binds; the slack above that is
-    # what a pending signup's identity Secret, held up to a day with no pod,
-    # lives in. At 100, the patch's value, it would have refused the
-    # twenty-fourth tenant, or the certificate's renewal, whichever asked
-    # next, while memory
-    # still had room for thirty. The warden's test holds this file to that
-    # arithmetic.
-    count/secrets: "200"
+    # the Browserbase key and a pull secret if set), the shared embedder's
+    # token, a successor beside each of the three that rotate under a new name,
+    # and the private key cert-manager keeps beside the certificate while
+    # renewing (nine on carrier, all at once). So this is at least four times
+    # `pods`, plus two for every claim slot beyond the pod slots (a cancelled
+    # tenant keeps two), plus those, or it is the line that binds; and like
+    # every line but the three disk ones it must clear eighty-seven tenants, so
+    # that the disk gate is the only thing to move when it moves: 400 is
+    # ninety-seven. The slack above that is what a pending signup's identity
+    # Secret, held up to a day with no pod, lives in. At 100, the patch's
+    # value, it would have refused the twenty-fourth tenant, or the
+    # certificate's renewal, whichever asked next, while memory still had room
+    # for thirty. The warden's test holds this file to that arithmetic.
+    count/secrets: "400"

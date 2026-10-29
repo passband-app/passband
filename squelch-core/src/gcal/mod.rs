@@ -37,6 +37,7 @@
 pub mod client;
 pub mod own;
 pub mod place;
+pub mod search;
 pub mod sync;
 pub mod write;
 

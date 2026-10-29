@@ -1,0 +1,63 @@
+[package]
+name = "squelch-embed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# One crate, two halves. The `protocol` module (wire types and the constants both
+# ends must agree on) is always built and depends on serde alone, so squelch-core
+# links it with `default-features = false` and gains nothing heavy. The `server`
+# feature is the shared per-node embedding service (docs/EMBED-SERVICE.md): it
+# links fastembed and axum and, deliberately, NOT squelch-core, so the binary every
+# hosted tenant's mail text flows through opens no store, holds no credential and
+# has no Gmail or LLM client to call.
+[features]
+default = ["server"]
+server = [
+    "dep:fastembed",
+    "dep:hf-hub",
+    "dep:axum",
+    "dep:tokio",
+    "dep:hyper-util",
+    "dep:tower",
+    "dep:serde_json",
+    "dep:squelch-httpauth",
+]
+
+[lib]
+name = "squelch_embed"
+path = "src/lib.rs"
+
+[[bin]]
+name = "squelch-embed"
+path = "src/bin/squelch-embed.rs"
+required-features = ["server"]
+
+[dependencies]
+serde = { workspace = true }
+# Everything below is the server, optional so the protocol-only build stays
+# serde alone.
+#
+# The same fastembed line, features and all, that squelch-core embeds with:
+# what this service returns lands in the same `message_vecs` as what a daemon
+# computed locally, so the model, the ORT build and the tokenizer path must be
+# the daemon's.
+fastembed = { workspace = true, optional = true }
+# Already in the tree under fastembed. Named so the startup check can ask the
+# baked cache for every file the session reads BEFORE fastembed gets the chance
+# to fetch a missing one. No features: no downloader of its own.
+hf-hub = { version = "0.5", default-features = false, optional = true }
+axum = { version = "0.8", optional = true }
+tokio = { workspace = true, optional = true }
+# The accept loop: hyper's connection builder with a timer, so a header-read
+# timeout exists. `axum::serve` has no way to set one (squelch-api's serve.rs
+# has the long version).
+hyper-util = { version = "0.1", features = ["server", "server-auto", "server-graceful", "http1", "tokio", "service"], optional = true }
+tower = { version = "0.5", features = ["util"], optional = true }
+serde_json = { workspace = true, optional = true }
+# Constant-time bearer compare and the `Authorization` parse, shared with the
+# other doors. A leaf crate whose only dependency is `subtle`.
+squelch-httpauth = { path = "../squelch-httpauth", optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

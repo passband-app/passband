@@ -15,11 +15,11 @@
 // title stops writing it. The title still reads itself on a new event
 // ("Dinner with Sam fri 7pm" fills the day and the time, `EventForm.retitled`).
 //
-// NO GUESTS HERE YET. Inviting makes Google email real people, and the rules
-// for when it may (`EventGuests`) deserve their own pass on a phone. An
-// edited event keeps the guests it has; the save controls on offer still
-// come from the plan, so "save and tell guests" appears exactly when the Mac
-// would show it.
+// GUESTS ARE THE MAC'S RULES. Whether the line is a field, closed (and why),
+// or absent is `EventGuests.plan`; the controls it offers are the only ones
+// drawn, and only a control that says so ("Add and invite 2", "Save and tell
+// guests") makes Google email anyone. Typing an address never invites: the
+// button does.
 
 import SwiftUI
 
@@ -81,6 +81,7 @@ struct MobileEventSheet: View {
                             Text(EventForm.summary(when, now: now, calendar: cal))
                         }
                     }
+                    guests(draft, plan: plan)
                     Section {
                         TextField("Place", text: field(\.location))
                         if store.calendarWritable.count > 1 || request.event == nil {
@@ -212,6 +213,53 @@ struct MobileEventSheet: View {
             if controls.contains(.close) {
                 Button("Close", role: .cancel) { store.closeEventEditor() }
             }
+        }
+    }
+
+    // MARK: guests
+
+    /// The guests line, as the plan has it: a field on your own calendar,
+    /// the reason it is closed elsewhere, nothing on a daemon too old to
+    /// invite.
+    @ViewBuilder
+    private func guests(_ draft: EventDraft, plan: GuestPlan) -> some View {
+        switch plan.access {
+        case .field:
+            Section {
+                TextField("Add guests by email", text: field(\.guests), axis: .vertical)
+                    .keyboardType(.emailAddress)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+            } footer: {
+                // The email keyboard has no comma on its first layer: say how
+                // addresses are separated, or a space reads as one bad address.
+                Text(
+                    plan.after == 0
+                        ? "Separate addresses with commas or new lines."
+                        : "Separate addresses with commas or new lines. Google emails "
+                            + (plan.after == 1 ? "your guest" : "your \(plan.after) guests")
+                            + " only when you press the button that says so.")
+            }
+        case .closed(let bar):
+            Section {
+                // Who is on it, read-only: whoever "Save and tell guests"
+                // would email.
+                if let event = request.event, let names = EventGuests.names(event) {
+                    Text(names)
+                        .font(Typo.ui(14))
+                        .foregroundStyle(Palette.ink)
+                }
+                Text(bar.text)
+                    .font(Typo.ui(13))
+                    .foregroundStyle(Palette.inkFaint)
+                if plan.silent {
+                    Text(EventGuests.silentLine)
+                        .font(Typo.ui(13))
+                        .foregroundStyle(Palette.inkFaint)
+                }
+            }
+        case .none:
+            EmptyView()
         }
     }
 

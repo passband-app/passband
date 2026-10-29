@@ -1,0 +1,249 @@
+# The shared embedding service: one squelch-embed pod for the node, which every
+# tenant daemon posts its texts to instead of loading its own ONNX session
+# (docs/EMBED-SERVICE.md). A Deployment, a Service and a NetworkPolicy, all in
+# `tenants`, because that is where the warden's RBAC already reaches and where
+# Pod Security Admission already enforces `restricted` (§5 has why not a
+# namespace of its own).
+#
+# WHAT IT COSTS. One of the namespace quota's pods and 320Mi of its
+# requests.memory (200m CPU, 768Mi limit), out of `70-tenant-limits.yaml`, for
+# as long as it runs. While tenants still embed in-process (the knob unset) the
+# quota admits 29 tenants beside this pod, not 30, so on a fleet at that cap it
+# is refused at admission; check `kubectl -n tenants describe resourcequota
+# tenants` first (Used memory at most 11200Mi). What it saves is the 300-500 MB
+# of session every tenant pod carries now, once the fleet is pointed at it.
+# Measured on the built image (linux/arm64, release, 768Mi cap, 2 CPUs) under
+# six concurrent 8-text backfills plus four query streams: 290 MB peak, 257 MB
+# after, about 15 texts a second. That run predates the end of cross-request
+# batching; a forward pass is still at most one request's 8 texts, which is
+# what the memory peak comes from, so the peak holds and the throughput is
+# unremeasured.
+#
+# The pod runs as uid 10003, not the tenants' 10001 or the warden's 10002, so
+# on a node where user namespaces are off a tenant process and this one are
+# still different users.
+#
+# ORDER: deploy/hosted/SETUP.md section 10b is the runbook and the one place the
+# steps live. In short: token Secret, apply this file and wait for "session
+# ready", turn on the scrape (the "Embedding service down" alert arms as soon as
+# this Deployment exists), check a NON-tenant pod is refused (from a namespace
+# with no policy, e.g. `default`, aimed at
+# squelch-embed.tenants.svc.cluster.local:8850, and only a name that RESOLVES
+# and then TIMES OUT counts: a failed lookup or a fast refusal proves nothing,
+# and a probe run inside `tenants` is blocked by its own default-deny), then
+# suspend the roller, set SQUELCH_WARDEN_EMBED_URL in `15-warden-config.yaml`,
+# restart the warden, move the owner's own tenant with
+# `cexec "squelch-control reconcile <label>"` (control runs on AWS ECS; `cexec`
+# is in deploy/aws/CUTOVER.md), and only then verify with a real POST from
+# inside that tenant (its egress rule exists only once the warden renders it).
+# The daemon image has bash and no curl:
+#
+#   kubectl -n tenants exec deploy/<tenant> -c squelchd -- bash -c '
+#     body="{\"texts\":[\"hello\"]}"
+#     exec 3<>/dev/tcp/squelch-embed/8850
+#     printf "POST /embed HTTP/1.1\r\nHost: squelch-embed\r\nContent-Type: application/json\r\nAuthorization: Bearer %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" \
+#       "$SQUELCH_EMBED_TOKEN" "${#body}" "$body" >&3
+#     head -c 300 <&3'
+#
+# `HTTP/1.1 200` and a body starting `{"dims":384` is the answer. Then unsuspend
+# the roller and it walks the rest of the fleet one tenant per tick.
+#
+# TOKEN ROTATION has no rolling path yet, and it is an open follow-up: an
+# in-place edit of the Secret is no drift the roller sees, and `kubectl rollout
+# restart` on tenants is forbidden (SETUP.md 6c). Treat the token as set once,
+# until the warden renders a renamed Secret the way the relay's works.
+#
+# The image tag is NOT the fleet's moving tag: it is the release that first
+# shipped this image, and it moves only when the model contract or the server
+# changes, never as part of a daemon roll (ROLLOUT.md's pin table). The node
+# pulls it with no credentials, so the GHCR package must be PUBLIC; a new
+# package starts private, and SETUP.md §10b step 1 has the one-time settings
+# and the anonymous pull that proves them.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: squelch-embed
+  namespace: tenants
+  labels:
+    app.kubernetes.io/name: squelch-embed
+    app.kubernetes.io/part-of: passband
+spec:
+  replicas: 1
+  # Recreate, so a rollout never holds two sessions (and two quota slots) at
+  # once. The cost is a few seconds of 503 while the new pod loads, which the
+  # daemon treats exactly like a 429: search degrades to keyword results,
+  # ingest is unaffected, backfill retries.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: squelch-embed
+  template:
+    metadata:
+      # NOT `app.kubernetes.io/managed-by: squelch-warden`. That label is what
+      # the NetworkPolicy below admits callers by, and what the warden's sweep
+      # selects tenant objects with; this pod must carry neither meaning.
+      labels:
+        app.kubernetes.io/name: squelch-embed
+        app.kubernetes.io/part-of: passband
+    spec:
+      # The tenant pod's posture (squelch-warden `objects::deployment`), field
+      # for field: no API token, no service-link env, its own user namespace,
+      # a fixed high uid, the runtime's seccomp profile.
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # Per-pod user namespace, as SQUELCH_WARDEN_USER_NAMESPACES "on" gives
+      # every tenant. Remove only if the pod fails with a hostUsers error, the
+      # same condition that flag is for.
+      hostUsers: false
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10003
+        runAsGroup: 10003
+        fsGroup: 10003
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: squelch-embed
+          # Must match the daemon-* tag that first ships this image (the
+          # release-daemon workflow's embed-image job). Pinned, never :latest.
+          image: ghcr.io/passband-app/squelch-embed:daemon-0.0.15
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8850
+              name: http
+            - containerPort: 9464
+              name: metrics
+          env:
+            # Optional: a missing Secret means no auth, not a pod that cannot
+            # start. Tenants read the same Secret (also optional) once the
+            # warden renders it.
+            - name: SQUELCH_EMBED_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: squelch-embed-token
+                  key: token
+                  optional: true
+          # Requests cover the weights plus one batch of scratch; the limit is
+          # the arena's high-water mark with room, without letting a bug take
+          # the node (§2). Ephemeral storage is the 64Mi /tmp and the logs.
+          resources:
+            requests:
+              cpu: 200m
+              memory: 320Mi
+              ephemeral-storage: 16Mi
+            limits:
+              cpu: 2000m
+              memory: 768Mi
+              ephemeral-storage: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          # All three on the metrics port, which the kubelet reaches and no
+          # Service carries. /healthz is 503 until the session is built, so
+          # the startup probe gives the weights a minute to load before the
+          # liveness probe starts counting.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 10
+            failureThreshold: 6
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # The only writable path. Sized, because an emptyDir with no
+        # sizeLimit is the node's free space. Nothing in the service writes
+        # here; it exists for the runtime's own scratch and $HOME.
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+---
+# The work port only. 9464 is absent on purpose, as on a tenant's Service: the
+# monitoring agent scrapes the pod directly and nothing else needs it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: squelch-embed
+  namespace: tenants
+  labels:
+    app.kubernetes.io/name: squelch-embed
+    app.kubernetes.io/part-of: passband
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: squelch-embed
+  ports:
+    - name: http
+      port: 8850
+      targetPort: http
+      protocol: TCP
+---
+# Who may reach the service, and that it may reach nothing.
+#
+# Ingress: tenant daemons, on 8850, and the monitoring agent, on 9464. Tenant
+# pods are selected by `app.kubernetes.io/managed-by: squelch-warden`, the label
+# the warden puts on every tenant pod template (`objects::labels`); a pod
+# selector with no namespace selector means this namespace only. The agent
+# peer is the same namespace-AND-pod pair a tenant's own policy uses for 9464.
+#
+# Egress: none at all, not even DNS. The weights are baked into the image, so
+# the service has nothing to dial, and a compromised embedder holding every
+# tenant's text in flight cannot ship it anywhere.
+#
+# The kubelet's probes are not listed: this cluster's CNI exempts
+# node-originated traffic, which is why SQUELCH_WARDEN_NODE_CIDR is commented
+# out in 15-warden-config.yaml. On a cluster where tenants need that rule, this
+# policy needs the same one, an ipBlock of the node's address to port 9464.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: squelch-embed
+  namespace: tenants
+  labels:
+    app.kubernetes.io/name: squelch-embed
+    app.kubernetes.io/part-of: passband
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: squelch-embed
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/managed-by: squelch-warden
+      ports:
+        - port: 8850
+          protocol: TCP
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus-agent
+      ports:
+        - port: 9464
+          protocol: TCP
+  egress: []

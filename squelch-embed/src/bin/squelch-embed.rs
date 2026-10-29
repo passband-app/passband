@@ -46,6 +46,12 @@ fn main() -> ExitCode {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL_DIR));
     let token = match std::env::var("SQUELCH_EMBED_TOKEN") {
+        // The example Secret's placeholder is long enough to pass the length
+        // check, so it is refused by name.
+        Ok(t) if t.contains("REPLACE_ME") => {
+            log.line("SQUELCH_EMBED_TOKEN is still the example placeholder; refusing to start");
+            return ExitCode::from(2);
+        }
         Ok(t) if t.trim().len() >= MIN_TOKEN_LEN => Some(Arc::<str>::from(t.trim())),
         Ok(_) => {
             log.line(&format!(

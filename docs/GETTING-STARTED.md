@@ -272,14 +272,16 @@ consent screen is Microsoft's and asks for mail read/write, send, your
 profile, and offline access, once for both reading and writing. `--broker`
 and calendar are Gmail-only.
 
-Until Passband's own Entra app ships in the build, bring one: in the Azure
+The build ships Passband's own Entra app, so there is nothing to register.
+To use your own instead (a work tenant that blocks unverified apps, say): in the Azure
 portal, App registrations, New registration; supported account types
 "Accounts in any organizational directory and personal Microsoft accounts";
 platform "Mobile and desktop applications" with redirect URI
 `http://127.0.0.1` (Entra ignores the port on a loopback redirect, and
 squelchd's listener picks one); delegated Graph permissions `Mail.ReadWrite`,
 `Mail.Send`, `User.Read` and `offline_access`. No client secret. Put its
-Application (client) ID in the config as `microsoft_client_id = "..."`.
+Application (client) ID in the config as `microsoft_client_id = "..."`, which
+overrides the built-in one.
 
 A daemon's database belongs to one provider: the first boot marks the
 account, and a later config that disagrees is refused. Details, and what is

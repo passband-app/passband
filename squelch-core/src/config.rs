@@ -1303,9 +1303,8 @@ pub const MICROSOFT_TOKEN_URL: &str = "https://login.microsoftonline.com/common/
 
 /// PASSBAND'S OWN ENTRA APP, built in so a self-host needs no Azure portal
 /// visit: a public client (no secret), so shipping its id in the binary gives
-/// nothing away. Empty until the app is registered; `microsoft_client_id` in
-/// the config file overrides it either way.
-pub const PASSBAND_MICROSOFT_CLIENT_ID: &str = "";
+/// nothing away. `microsoft_client_id` in the config file overrides it.
+pub const PASSBAND_MICROSOFT_CLIENT_ID: &str = "ac4b9805-c059-4564-a201-58d100df8067";
 
 /// The Graph scopes an Outlook consent asks for, in one consent stored in
 /// both mail slots (as Gmail's `gmail.modify` is): read and move mail, send
@@ -4505,12 +4504,11 @@ archive_access_daily_cap = 9
             client.client_secret.is_empty(),
             "a Google secret must never reach Microsoft"
         );
-        // No id configured and none built in: a named error, not Google.
+        // No id configured: Passband's own Entra app, still public.
         c.microsoft_client_id = None;
-        if PASSBAND_MICROSOFT_CLIENT_ID.is_empty() {
-            let err = c.oauth_client().unwrap_err().to_string();
-            assert!(err.contains("microsoft_client_id"), "{err}");
-        }
+        let client = c.oauth_client().unwrap();
+        assert_eq!(client.client_id, PASSBAND_MICROSOFT_CLIENT_ID);
+        assert!(client.client_secret.is_empty());
     }
 
     #[test]

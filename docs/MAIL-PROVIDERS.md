@@ -256,9 +256,10 @@ decides every endpoint, scope set and identity check:
   calendar consent and its first-run offer, and calendar credentials in the
   API state, so a Microsoft token is never offered to Google.
 - **The client id** is `PASSBAND_MICROSOFT_CLIENT_ID`, built in (a public
-  client's id is not a secret), overridden by `microsoft_client_id`. It is
-  EMPTY until Passband's Entra app is registered, and until then an Outlook
-  daemon needs `microsoft_client_id`.
+  client's id is not a secret), overridden by `microsoft_client_id`. The
+  built-in app is registered as multi-tenant plus personal accounts, a
+  "Mobile and desktop" platform with redirect `http://127.0.0.1`, and the
+  four delegated scopes above.
 
 ### Still open
 

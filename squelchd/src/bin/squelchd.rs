@@ -300,15 +300,16 @@ struct AuthArgs {
     /// Prompts for the host, port, TLS mode (implicit TLS, STARTTLS, or none
     /// for a server on this machine only), username and app password (not
     /// echoed), logs in and lists the folders, and only then stores
-    /// anything: the password in the credential backend like a token, the
-    /// rest with the account in the database. With no terminal, the answers
+    /// anything: the server and the password together in the credential
+    /// backend, sealed like a token. With no terminal, the answers
     /// are read one per line from stdin in that order.
     #[arg(long, conflicts_with_all = ["write", "calendar", "export", "import", "headless"])]
     imap: bool,
 
     /// With --imap: a PEM CA to trust on top of the public roots, for a
-    /// server whose certificate a private CA signed. Stored with the account.
-    /// Verification is never turned off.
+    /// server whose certificate a private CA signed. Read once, now: the
+    /// certificate is sealed in the credential slot with the password, so the
+    /// file can go. Verification is never turned off.
     #[arg(long, value_name = "PATH", requires = "imap")]
     ca_file: Option<PathBuf>,
 }
@@ -1086,13 +1087,38 @@ fn parse_imap_tls(answer: &str) -> Option<squelch_core::mail::imap::ImapTls> {
 fn cmd_auth_imap(config: &Config, args: &AuthArgs) -> Result<(), squelch_core::CoreError> {
     use squelch_core::mail::MailProvider;
     use squelch_core::mail::imap::{
-        IMAP_ACCOUNT_SETTING, ImapAccountConfig, ImapPassword, ImapServer, ImapSource, ImapTls,
-        plaintext_allowed,
+        ImapAccountConfig, ImapCredential, ImapPassword, ImapServer, ImapSource, ImapTls,
+        parse_ca_pem, plaintext_allowed,
     };
     let email = config.require_account_email()?;
     let backend = config.credential_backend;
     ensure_backend(backend)?;
     let creds_path = config.resolve_credentials_path();
+
+    // Refused before anything is asked: an account that is not IMAP already
+    // and has mail, a cursor or a Google grant stays what it is.
+    let store = SqliteStore::open(&config.db_path)?;
+    let account_id = store.ensure_account(&email)?;
+    imap_setup_allowed(&store, account_id, &email, config)?;
+
+    // The CA is read ONCE, here: its bytes go into the sealed slot with the
+    // password, so nothing later written to this path can change whom the
+    // daemon trusts with it.
+    let ca_pem = match &args.ca_file {
+        Some(p) => {
+            let pem = std::fs::read(p).map_err(|e| {
+                squelch_core::CoreError::InvalidInput(format!("--ca-file {}: {e}", p.display()))
+            })?;
+            parse_ca_pem(&pem)?;
+            Some(String::from_utf8(pem).map_err(|_| {
+                squelch_core::CoreError::InvalidInput(format!(
+                    "--ca-file {} is not a PEM file",
+                    p.display()
+                ))
+            })?)
+        }
+        None => None,
+    };
 
     eprintln!("squelchd: setting up {email} on an IMAP server (read only for now)");
     let host = ask("IMAP host", None)?;
@@ -1128,27 +1154,24 @@ fn cmd_auth_imap(config: &Config, args: &AuthArgs) -> Result<(), squelch_core::C
         eprintln!();
         pw?
     };
-    let ca_file = match &args.ca_file {
-        Some(p) => Some(std::fs::canonicalize(p).map_err(|e| {
-            squelch_core::CoreError::InvalidInput(format!("--ca-file {}: {e}", p.display()))
-        })?),
-        None => None,
-    };
-    let account = ImapAccountConfig {
-        server: ImapServer {
-            host,
-            port,
-            tls,
-            username,
+    let credential = ImapCredential {
+        config: ImapAccountConfig {
+            server: ImapServer {
+                host,
+                port,
+                tls,
+                username,
+            },
+            ca_pem,
         },
-        ca_file,
+        password: ImapPassword::new(password),
     };
 
     // THE TEST LOGIN, before anything is stored.
     let source = ImapSource::from_config(
         0,
-        &account,
-        ImapPassword::new(password.clone()),
+        &credential.config,
+        credential.password.clone(),
         Arc::new(NoLocations),
         Arc::new(squelch_core::mail::SourceRefusals::default()),
     )?;
@@ -1157,39 +1180,68 @@ fn cmd_auth_imap(config: &Config, args: &AuthArgs) -> Result<(), squelch_core::C
         .build()
         .map_err(|e| other_err(format!("tokio runtime: {e}")))?;
     let roles = runtime.block_on(source.check_login())?;
+    let server = &credential.config.server;
     eprintln!(
         "squelchd: logged in to {}:{} as {}; folders:",
-        account.server.host, account.server.port, account.server.username
+        server.host, server.port, server.username
     );
     for (role, folder) in &roles {
         eprintln!("  {role:<9} {}", folder.as_deref().unwrap_or("(none)"));
     }
 
-    let store = SqliteStore::open(&config.db_path)?;
-    let account_id = store.ensure_account(&email)?;
-    // An account that already syncs Gmail keeps Gmail ids and a Gmail
-    // cursor; turning it into an IMAP one under the same rows would mix two
-    // id spaces. A fresh database is the way to switch.
-    if store.account_provider(account_id)? == MailProvider::Gmail
-        && store.sync_cursor(account_id)?.is_some()
-    {
-        return Err(squelch_core::CoreError::InvalidInput(format!(
-            "{email} already syncs from Gmail in {}; set up IMAP in a fresh database",
-            config.db_path.display()
-        )));
-    }
-    squelch_core::credentials::store_imap_password_backend(
+    squelch_core::credentials::store_imap_slot_backend(
         backend,
         &creds_path,
         &email,
-        &password,
+        &credential.to_slot()?,
     )?;
-    store.set_app_setting(account_id, IMAP_ACCOUNT_SETTING, &account.to_json()?)?;
+    // A config an earlier build left in the database is superseded: the
+    // slot is the only place a connection reads.
+    store.delete_app_setting(account_id, squelch_core::mail::imap::IMAP_ACCOUNT_SETTING)?;
     store.set_account_provider(account_id, MailProvider::Imap)?;
     println!(
-        "Stored: the IMAP password in the {backend:?} backend, the server with account {email}. \
+        "Stored: the IMAP server and password together in the {backend:?} backend for {email}. \
          `squelchd serve` now syncs it over IMAP."
     );
+    Ok(())
+}
+
+/// May `squelchd auth --imap` turn this account into an IMAP one? Always,
+/// when it is one already (a new password or server). Otherwise only when it
+/// holds nothing of another provider's: no message rows (their ids are
+/// Gmail's), no cursor, and no Google grant in any credential slot, which
+/// would be left behind as a live grant nothing uses. A fresh database is
+/// the way to switch.
+fn imap_setup_allowed(
+    store: &SqliteStore,
+    account_id: AccountId,
+    email: &str,
+    config: &Config,
+) -> Result<(), squelch_core::CoreError> {
+    use squelch_core::credentials::{CredentialKind, load_token_backend};
+    use squelch_core::mail::MailProvider;
+    if store.account_provider(account_id)? == MailProvider::Imap {
+        return Ok(());
+    }
+    let refuse = |what: &str| {
+        Err(squelch_core::CoreError::InvalidInput(format!(
+            "{email} {what} in {}; set up IMAP in a fresh database",
+            config.db_path.display()
+        )))
+    };
+    if store.account_has_messages(account_id)? || store.sync_cursor(account_id)?.is_some() {
+        return refuse("already has mail synced from Gmail");
+    }
+    let path = config.resolve_credentials_path();
+    for kind in [
+        CredentialKind::Read,
+        CredentialKind::Write,
+        CredentialKind::Calendar,
+    ] {
+        if load_token_backend(config.credential_backend, &path, email, kind).is_ok() {
+            return refuse("has a Google sign-in stored");
+        }
+    }
     Ok(())
 }
 
@@ -4988,5 +5040,81 @@ mod tests {
             )
             .await;
         assert!(refused(&reply) && text.contains("not found"), "{text}");
+    }
+
+    /// `auth --imap` ONLY TURNS A CLEAN ACCOUNT INTO AN IMAP ONE (security
+    /// review 9, correctness L7): one with any message row, a cursor, or a
+    /// Google grant in any slot is refused, so Gmail ids and IMAP ids never
+    /// share an account and no grant is orphaned. An IMAP account may always
+    /// redo its setup.
+    #[test]
+    fn imap_setup_is_refused_for_an_account_with_anything_of_gmail() {
+        use squelch_core::credentials::{CredentialKind, StoredToken, store_token_file};
+        use squelch_core::mail::MailProvider;
+        let dir = std::env::temp_dir().join(format!(
+            "squelchd-imap-guard-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = Config::default();
+        config.db_path = dir.join("db.sqlite");
+        config.credential_backend = squelch_core::config::CredentialBackend::File;
+        config.credentials_path = Some(dir.join("creds.json"));
+        let fresh = |email: &str| {
+            let store = SqliteStore::open(&config.db_path).unwrap();
+            let id = store.ensure_account(email).unwrap();
+            (store, id)
+        };
+
+        let (store, a) = fresh("clean@x.org");
+        assert!(imap_setup_allowed(&store, a, "clean@x.org", &config).is_ok());
+
+        let (store, b) = fresh("mail@x.org");
+        store
+            .upsert_message(&squelch_core::types::NewMessage {
+                account_id: b,
+                gmail_msg_id: "g1".into(),
+                thread_id: "t1".into(),
+                from_addr: "a@x.org".into(),
+                from_name: None,
+                subject: "s".into(),
+                received_at: chrono::Utc::now(),
+                snippet: String::new(),
+                body: String::new(),
+                body_html: None,
+                is_sent: false,
+                is_spam: false,
+                to_addrs: None,
+                cc_addrs: None,
+                bcc_addrs: None,
+                list_unsubscribe: None,
+                list_unsub_one_click: false,
+                auth_pass: None,
+            })
+            .unwrap();
+        let err = imap_setup_allowed(&store, b, "mail@x.org", &config).unwrap_err();
+        assert!(err.to_string().contains("already has mail"), "{err}");
+
+        let (store, c) = fresh("granted@x.org");
+        store_token_file(
+            &config.resolve_credentials_path(),
+            "granted@x.org",
+            CredentialKind::Calendar,
+            &StoredToken {
+                access_token: "a".into(),
+                refresh_token: Some("r".into()),
+                expires_at: None,
+                scopes: None,
+            },
+        )
+        .unwrap();
+        let err = imap_setup_allowed(&store, c, "granted@x.org", &config).unwrap_err();
+        assert!(err.to_string().contains("Google sign-in"), "{err}");
+
+        // Already IMAP (with mail): setting it up again is allowed.
+        store.set_account_provider(b, MailProvider::Imap).unwrap();
+        assert!(imap_setup_allowed(&store, b, "mail@x.org", &config).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

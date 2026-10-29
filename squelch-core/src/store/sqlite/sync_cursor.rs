@@ -30,6 +30,21 @@ impl SqliteStore {
         MailProvider::parse(&stored)
     }
 
+    /// Does the account hold any message at all? `squelchd auth --imap`
+    /// refuses to turn an account with mail into an IMAP one: its rows carry
+    /// another provider's ids.
+    pub fn account_has_messages(&self, account_id: AccountId) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT 1 FROM messages WHERE account_id = ?1 LIMIT 1",
+                params![account_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
     /// Set which provider an account is. `squelchd auth --imap` is the only
     /// writer, and it writes LAST, once the server config and the password
     /// are stored, so an account never reads as IMAP without them.

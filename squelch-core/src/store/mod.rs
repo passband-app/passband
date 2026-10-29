@@ -3027,6 +3027,9 @@ pub trait Store:
     /// Upsert one `app_settings` value for `(account_id, key)`.
     fn set_app_setting(&self, account_id: AccountId, key: &str, value: &str) -> Result<()>;
 
+    /// Delete one `app_settings` value; absent is not an error.
+    fn delete_app_setting(&self, account_id: AccountId, key: &str) -> Result<()>;
+
     /// Read the daily-cap overrides in ONE query. A cap is `None` when no row
     /// exists OR the stored value does not parse as an integer in `1..=100000`.
     fn stage2_cap_overrides(&self, account_id: AccountId) -> Result<Stage2CapOverrides>;

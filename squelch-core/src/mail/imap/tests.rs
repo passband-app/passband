@@ -2102,3 +2102,34 @@ async fn live_a_lookalike_message_id_never_satisfies_a_lookup() {
     assert!(locs.message_locations(1, &id).unwrap().is_empty());
     let _ = other.logout().await;
 }
+
+// ---- the credential slot (security review 5) -------------------------------
+
+/// The slot carries the server and the CA's bytes with the password, reads
+/// back whole, and never shows the password in `Debug`; a bare password (an
+/// earlier build's slot) reads as the legacy shape, never as a config.
+#[test]
+fn the_credential_slot_holds_where_the_password_goes() {
+    let c = ImapCredential {
+        config: ImapAccountConfig {
+            server: server("imap.example.org", ImapTls::Implicit),
+            ca_pem: Some("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n".into()),
+        },
+        password: ImapPassword::new("s3cret-app-pw"),
+    };
+    assert!(!format!("{c:?}").contains("s3cret"));
+    let text = c.to_slot().unwrap();
+    match ImapCredential::from_slot(&text) {
+        StoredImapSlot::Credential(back) => {
+            assert_eq!(back.config, c.config);
+            assert_eq!(back.password.0, "s3cret-app-pw");
+        }
+        StoredImapSlot::LegacyPassword(_) => panic!("read as legacy"),
+    }
+    assert!(matches!(
+        ImapCredential::from_slot("just-a-password"),
+        StoredImapSlot::LegacyPassword(p) if p.0 == "just-a-password"
+    ));
+    // A CA that is not a certificate is refused at setup, by its bytes.
+    assert!(parse_ca_pem(b"not a pem").is_err());
+}

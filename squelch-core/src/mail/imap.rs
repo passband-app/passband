@@ -113,56 +113,137 @@ pub struct ImapServer {
     pub username: String,
 }
 
-/// The `app_settings` key an IMAP account's [`ImapAccountConfig`] is stored
-/// under, as JSON. Written by `squelchd auth --imap` only.
+/// THE LEGACY HOME of an IMAP account's server config: an `app_settings` key
+/// in plain SQLite, as the first phase-2 builds wrote it. Read once, to move
+/// it into the credential slot ([`ImapCredential::from_legacy`]), then
+/// deleted. Nothing writes it any more.
 pub const IMAP_ACCOUNT_SETTING: &str = "imap_account";
 
-/// Everything about an IMAP account but its password: what `squelchd auth
-/// --imap` stores with the account (the password goes to the credential
-/// store) and what the engine builds the source from.
+/// Everything about an IMAP account but its password: where it connects and
+/// whom it trusts there.
+///
+/// KEPT IN THE CREDENTIAL SLOT WITH THE PASSWORD (security review 5), never
+/// in the database: whatever decides where the password is sent must be as
+/// hard to change as the password is to read, or a database writer could
+/// point `host` at its own server, add a CA for it, and collect the password
+/// at the next start.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImapAccountConfig {
     #[serde(flatten)]
     pub server: ImapServer,
     /// A PEM CA to trust IN ADDITION to the public web PKI, for a server
     /// whose certificate a private CA signed (the Dovecot test bed, a home
-    /// server). Verification is never off: this adds one trust anchor the
-    /// owner named, it does not accept an unverified chain.
+    /// server). The certificate itself, read once at setup, never a path a
+    /// later write could swap. Verification is never off: this adds one
+    /// trust anchor the owner named, it does not accept an unverified chain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ca_file: Option<std::path::PathBuf>,
+    pub ca_pem: Option<String>,
 }
 
 impl ImapAccountConfig {
-    pub fn to_json(&self) -> Result<String> {
-        serde_json::to_string(self).map_err(|e| CoreError::Other(e.into()))
-    }
-
-    pub fn from_json(s: &str) -> Result<Self> {
-        serde_json::from_str(s)
-            .map_err(|e| CoreError::InvalidInput(format!("stored imap account config: {e}")))
-    }
-
-    /// The extra trust anchors `ca_file` names, read now.
+    /// The extra trust anchors `ca_pem` holds.
     fn extra_roots(&self) -> Result<Vec<CertificateDer<'static>>> {
-        use tokio_rustls::rustls::pki_types::pem::PemObject;
-        let Some(path) = &self.ca_file else {
-            return Ok(Vec::new());
-        };
-        let pem = std::fs::read(path).map_err(|e| {
-            CoreError::InvalidInput(format!("imap ca file {}: {e}", path.display()))
-        })?;
-        let roots: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&pem)
-            .collect::<std::result::Result<_, _>>()
-            .map_err(|e| {
-                CoreError::InvalidInput(format!("imap ca file {}: {e:?}", path.display()))
-            })?;
-        if roots.is_empty() {
-            return Err(CoreError::InvalidInput(format!(
-                "imap ca file {} holds no certificate",
-                path.display()
-            )));
+        match &self.ca_pem {
+            None => Ok(Vec::new()),
+            Some(pem) => parse_ca_pem(pem.as_bytes()),
         }
-        Ok(roots)
+    }
+}
+
+/// The certificates in a PEM CA file's bytes; at least one, or an error.
+pub fn parse_ca_pem(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>> {
+    use tokio_rustls::rustls::pki_types::pem::PemObject;
+    let roots: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(pem)
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| CoreError::InvalidInput(format!("imap ca certificate: {e:?}")))?;
+    if roots.is_empty() {
+        return Err(CoreError::InvalidInput(
+            "imap ca certificate: the file holds no certificate".into(),
+        ));
+    }
+    Ok(roots)
+}
+
+/// WHAT AN IMAP ACCOUNT'S CREDENTIAL SLOT HOLDS: the server config and the
+/// password, sealed together. `Debug` redacts the password.
+#[derive(Debug, Clone)]
+pub struct ImapCredential {
+    pub config: ImapAccountConfig,
+    pub password: ImapPassword,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SlotV1 {
+    v: u32,
+    #[serde(flatten)]
+    config: ImapAccountConfig,
+    password: String,
+}
+
+/// The phase-2-step-3 `app_settings` shape: a CA by PATH.
+#[derive(Deserialize)]
+struct LegacyConfig {
+    #[serde(flatten)]
+    server: ImapServer,
+    #[serde(default)]
+    ca_file: Option<std::path::PathBuf>,
+}
+
+/// A slot as read: the current shape, or a bare password from a build that
+/// kept the server in `app_settings`.
+#[derive(Debug)]
+pub enum StoredImapSlot {
+    Credential(ImapCredential),
+    LegacyPassword(ImapPassword),
+}
+
+impl ImapCredential {
+    /// The slot's text. Never logged: it holds the password.
+    pub fn to_slot(&self) -> Result<String> {
+        serde_json::to_string(&SlotV1 {
+            v: 1,
+            config: self.config.clone(),
+            password: self.password.0.clone(),
+        })
+        .map_err(|_| CoreError::Other(anyhow::anyhow!("imap credential: could not encode")))
+    }
+
+    /// Read a slot's text. Errors never carry it.
+    pub fn from_slot(text: &str) -> StoredImapSlot {
+        match serde_json::from_str::<SlotV1>(text) {
+            Ok(slot) if slot.v == 1 => StoredImapSlot::Credential(ImapCredential {
+                config: slot.config,
+                password: ImapPassword(slot.password),
+            }),
+            _ => StoredImapSlot::LegacyPassword(ImapPassword(text.to_string())),
+        }
+    }
+
+    /// The one-time move from the legacy layout: the server from the old
+    /// `app_settings` JSON, and the CA file it names read NOW, into a
+    /// credential to seal. The caller stores it and deletes the setting.
+    pub fn from_legacy(password: ImapPassword, setting_json: &str) -> Result<Self> {
+        let legacy: LegacyConfig = serde_json::from_str(setting_json)
+            .map_err(|e| CoreError::InvalidInput(format!("stored imap account config: {e}")))?;
+        let ca_pem = match &legacy.ca_file {
+            None => None,
+            Some(path) => {
+                let pem = std::fs::read(path).map_err(|e| {
+                    CoreError::InvalidInput(format!("imap ca file {}: {e}", path.display()))
+                })?;
+                parse_ca_pem(&pem)?;
+                Some(String::from_utf8(pem).map_err(|_| {
+                    CoreError::InvalidInput(format!("imap ca file {} is not PEM", path.display()))
+                })?)
+            }
+        };
+        Ok(Self {
+            config: ImapAccountConfig {
+                server: legacy.server,
+                ca_pem,
+            },
+            password,
+        })
     }
 }
 
@@ -1134,7 +1215,7 @@ impl ImapSource {
     }
 
     /// A source for a stored account ([`ImapAccountConfig`]), trusting its
-    /// `ca_file` on top of the web PKI.
+    /// `ca_pem` on top of the web PKI.
     pub fn from_config(
         account_id: AccountId,
         config: &ImapAccountConfig,

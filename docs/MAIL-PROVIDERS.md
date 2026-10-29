@@ -31,11 +31,16 @@ hash and cannot be turned back into a place to fetch from.
 **Setting up an IMAP account** (self-host, read only until SMTP lands):
 `squelchd auth --imap [--ca-file PEM]` prompts for host, TLS mode, port,
 username and app password, logs in and lists the folders, and only then
-stores: the password in the credential backend's `<email>#imap` slot (the same
-keyring entry or sealed file the OAuth tokens use), the server as JSON in
-`app_settings` under `imap_account`, and `accounts.provider = 'imap'` last.
-An IMAP account never touches Google: the engine builds its source from those
-two, and the profile fetch, calendar sync and shredder are skipped for it.
+stores: the server (host, port, TLS mode, username, and the CA certificate's
+bytes, never its path) together with the password in the credential backend's
+`<email>#imap` slot (the same keyring entry or sealed file the OAuth tokens
+use), then `accounts.provider = 'imap'` last. Nothing about where the password
+is sent lives in the database, so a database writer cannot redirect it. It is
+refused for an account that already has mail, a cursor or a Google grant. A
+slot from an earlier phase-2 build (password only, server in `app_settings`
+under `imap_account`) is moved into the slot at the next start and the setting
+deleted. An IMAP account never touches Google: the profile fetch, calendar
+sync and shredder are skipped for it.
 
 `MailSource` is derived from what the engine actually asked Gmail for:
 

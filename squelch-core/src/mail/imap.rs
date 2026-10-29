@@ -664,6 +664,10 @@ pub struct FolderRoles {
     pub all: Option<String>,
     /// Every selectable folder, for the archive window's walk.
     pub selectable: Vec<String>,
+    /// The hierarchy delimiter LIST gave INBOX (`"."`, `"/"`), if any: where
+    /// a folder the writer creates goes on a server that keeps every folder
+    /// under INBOX (phase 3). Never read by sync.
+    pub delimiter: Option<String>,
 }
 
 impl FolderRoles {
@@ -702,6 +706,30 @@ impl FolderRoles {
         out
     }
 
+    /// THE PREFIX A NEW FOLDER NEEDS (phase 3's `CREATE`): `INBOX.` on a
+    /// server whose personal namespace is INBOX's children (Courier, Cyrus
+    /// without altnamespace), which refuses a top-level `CREATE`. Inferred
+    /// from LIST, since NAMESPACE is not parsed: at least one folder besides
+    /// INBOX, and every one of them under `INBOX<delimiter>`. `None` is the
+    /// top level.
+    pub fn create_prefix(&self) -> Option<String> {
+        let d = self.delimiter.as_deref().filter(|d| !d.is_empty())?;
+        let prefix = format!("{INBOX}{d}");
+        let mut others = self
+            .selectable
+            .iter()
+            .filter(|n| !n.eq_ignore_ascii_case(INBOX))
+            .peekable();
+        others.peek()?;
+        others
+            .all(|n| {
+                n.len() > prefix.len()
+                    && n.is_char_boundary(prefix.len())
+                    && n[..prefix.len()].eq_ignore_ascii_case(&prefix)
+            })
+            .then_some(prefix)
+    }
+
     /// The folders the archive window walks: every selectable folder but
     /// junk, trash and drafts (Gmail's `-in:draft` plus its default exclusion
     /// of spam and trash), and with `filed_only` the inbox and sent folder too.
@@ -734,8 +762,20 @@ const WATCHED: [Folder; 3] = [Folder::Inbox, Folder::Sent, Folder::Spam];
 
 /// Resolve roles from one `LIST` reply: `SPECIAL-USE` attributes (RFC 6154)
 /// win; a folder named like the role is the fallback, first match in the
-/// order given.
+/// order given, and only then a child of INBOX named like it (`INBOX.Sent`,
+/// `INBOX/Trash`: the personal namespace of Courier and Cyrus), so a server
+/// with SPECIAL-USE, or with the role's name at the top level, resolves
+/// exactly as it always has.
+#[cfg(test)]
 pub(crate) fn resolve_roles(names: &[(String, Vec<String>)]) -> FolderRoles {
+    resolve_roles_in(names, None)
+}
+
+/// [`resolve_roles`] with the hierarchy delimiter LIST gave INBOX.
+pub(crate) fn resolve_roles_in(
+    names: &[(String, Vec<String>)],
+    delimiter: Option<String>,
+) -> FolderRoles {
     // A folder that cannot be opened (`\Noselect`, `\NonExistent`) never
     // holds a role (review N4): STATUS on it answers NO forever.
     let selectable = |attrs: &[String]| {
@@ -756,13 +796,33 @@ pub(crate) fn resolve_roles(names: &[(String, Vec<String>)]) -> FolderRoles {
             .find(|(_, attrs)| attrs.iter().any(|a| a.eq_ignore_ascii_case(attr)))
             .map(|(n, _)| n.clone())
     };
+    // `INBOX.<c>` or `INBOX/<c>`, whatever the delimiter: on a server whose
+    // delimiter is the other one it is still a top-level folder of that name.
+    let inbox_child = |n: &str, c: &str| {
+        n.len() == INBOX.len() + 1 + c.len()
+            && n.is_char_boundary(INBOX.len())
+            && n.is_char_boundary(INBOX.len() + 1)
+            && n[..INBOX.len()].eq_ignore_ascii_case(INBOX)
+            && matches!(&n[INBOX.len()..INBOX.len() + 1], "." | "/")
+            && n[INBOX.len() + 1..].eq_ignore_ascii_case(c)
+    };
     let by_name = |candidates: &[&str]| {
-        candidates.iter().find_map(|c| {
-            names
-                .iter()
-                .find(|(n, _)| n.eq_ignore_ascii_case(c))
-                .map(|(n, _)| n.clone())
-        })
+        candidates
+            .iter()
+            .find_map(|c| {
+                names
+                    .iter()
+                    .find(|(n, _)| n.eq_ignore_ascii_case(c))
+                    .map(|(n, _)| n.clone())
+            })
+            .or_else(|| {
+                candidates.iter().find_map(|c| {
+                    names
+                        .iter()
+                        .find(|(n, _)| inbox_child(n, c))
+                        .map(|(n, _)| n.clone())
+                })
+            })
     };
     let pick = |attr: &str, fallback: &[&str]| by_attr(attr).or_else(|| by_name(fallback));
     FolderRoles {
@@ -776,6 +836,7 @@ pub(crate) fn resolve_roles(names: &[(String, Vec<String>)]) -> FolderRoles {
         archive: pick("\\Archive", &["Archive"]),
         all: pick("\\All", &["All Mail", "[Gmail]/All Mail"]),
         selectable: names.iter().map(|(n, _)| n.clone()).collect(),
+        delimiter,
     }
 }
 
@@ -2160,20 +2221,27 @@ pub async fn list_folder_roles(session: &mut ImapSession) -> Result<FolderRoles>
 }
 
 async fn list_roles(session: &mut ImapSession) -> Result<FolderRoles> {
-    let names: Vec<(String, Vec<String>)> = session
+    let listed: Vec<(String, Option<String>, Vec<String>)> = session
         .list(Some(""), Some("*"))
         .await
         .map_err(imap_err("list"))?
         .map_ok(|n| {
             (
                 n.name().to_string(),
+                n.delimiter().map(str::to_string),
                 n.attributes().iter().map(attr_text).collect(),
             )
         })
         .try_collect()
         .await
         .map_err(imap_err("list"))?;
-    Ok(resolve_roles(&names))
+    let delimiter = listed
+        .iter()
+        .find(|(n, _, _)| n.eq_ignore_ascii_case(INBOX))
+        .or_else(|| listed.first())
+        .and_then(|(_, d, _)| d.clone());
+    let names: Vec<(String, Vec<String>)> = listed.into_iter().map(|(n, _, a)| (n, a)).collect();
+    Ok(resolve_roles_in(&names, delimiter))
 }
 
 /// IMAP's `SEARCH` date (`DD-Mon-YYYY`, English month).

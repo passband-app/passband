@@ -124,6 +124,89 @@ fn a_server_with_no_junk_folder_watches_two() {
     assert_eq!(roles.watched().len(), 2);
 }
 
+/// AN INBOX.-NAMESPACE SERVER (Courier, Cyrus without altnamespace) with no
+/// SPECIAL-USE: every role is a child of INBOX, found by its last path
+/// component, and a new folder goes under `INBOX.`.
+#[test]
+fn an_inbox_namespace_server_resolves_its_roles_under_inbox() {
+    let listed = names(&[
+        ("INBOX", &[]),
+        ("INBOX.Sent Messages", &[]),
+        ("INBOX.Trash", &[]),
+        ("INBOX.Spam", &[]),
+        ("INBOX.Drafts", &[]),
+        ("INBOX.Projects", &[]),
+    ]);
+    let roles = resolve_roles_in(&listed, Some(".".into()));
+    assert_eq!(roles.sent.as_deref(), Some("INBOX.Sent Messages"));
+    assert_eq!(roles.trash.as_deref(), Some("INBOX.Trash"));
+    assert_eq!(roles.junk.as_deref(), Some("INBOX.Spam"));
+    assert_eq!(roles.drafts.as_deref(), Some("INBOX.Drafts"));
+    assert_eq!(roles.archive, None);
+    assert_eq!(roles.create_prefix().as_deref(), Some("INBOX."));
+    // A "/" server the same way; Junk and Archive by name too.
+    let roles = resolve_roles_in(
+        &names(&[
+            ("INBOX", &[]),
+            ("INBOX/Sent", &[]),
+            ("INBOX/Junk", &[]),
+            ("INBOX/Archive", &[]),
+        ]),
+        Some("/".into()),
+    );
+    assert_eq!(roles.sent.as_deref(), Some("INBOX/Sent"));
+    assert_eq!(roles.junk.as_deref(), Some("INBOX/Junk"));
+    assert_eq!(roles.archive.as_deref(), Some("INBOX/Archive"));
+    assert_eq!(roles.create_prefix().as_deref(), Some("INBOX/"));
+    // Deeper is not a role: INBOX.Clients.Trash is somebody's folder.
+    let roles = resolve_roles_in(
+        &names(&[("INBOX", &[]), ("INBOX.Clients.Trash", &[])]),
+        Some(".".into()),
+    );
+    assert_eq!(roles.trash, None);
+}
+
+/// THE OLD ANSWERS STAND: SPECIAL-USE wins over an INBOX child, and a
+/// top-level folder named like the role wins over one too. A server with
+/// top-level folders creates at the top level.
+#[test]
+fn special_use_and_top_level_names_still_win_over_inbox_children() {
+    let listed = names(&[
+        ("INBOX", &[]),
+        ("INBOX.Sent", &[]),
+        ("Gesendet", &["\\Sent"]),
+        ("INBOX.Trash", &[]),
+        ("Trash", &[]),
+        ("Archive", &[]),
+    ]);
+    let roles = resolve_roles_in(&listed, Some(".".into()));
+    assert_eq!(roles.sent.as_deref(), Some("Gesendet"));
+    assert_eq!(roles.trash.as_deref(), Some("Trash"));
+    assert_eq!(roles.archive.as_deref(), Some("Archive"));
+    assert_eq!(roles.create_prefix(), None);
+    // Same roles with or without the delimiter: sync never reads it.
+    let plain = resolve_roles(&listed);
+    assert_eq!(
+        (
+            plain.sent,
+            plain.trash,
+            plain.junk,
+            plain.archive,
+            plain.all
+        ),
+        (
+            roles.sent,
+            roles.trash,
+            roles.junk,
+            roles.archive,
+            roles.all
+        )
+    );
+    // Only INBOX: nothing to infer a namespace from.
+    let roles = resolve_roles_in(&names(&[("INBOX", &[])]), Some(".".into()));
+    assert_eq!(roles.create_prefix(), None);
+}
+
 #[test]
 fn the_cursor_round_trips_and_refuses_what_it_did_not_write() {
     let mut c = ImapCursor {

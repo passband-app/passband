@@ -210,24 +210,6 @@ enum SideView: Equatable, Sendable {
 /// and two numbers drifting apart would leave a seam or a covered strip.
 let sidePanelWidth: CGFloat = 460
 
-/// Everything the sitrep's zones render, held here rather than in the zones: a
-/// view's `@State` dies on unmount, so the last good answer is already on screen
-/// when the dashboard re-mounts and the refresh happens UNDERNEATH it — rows are
-/// only ever replaced by newer rows, never cleared first. `loadedAt` keeps that
-/// honest in the other direction (see `refreshZones`).
-struct SitrepZoneCache: Sendable {
-    var calendar: [CalendarUpdate] = []
-    var shipments: [Shipment] = []
-    var banking: [BankingRecord] = []
-    var receipts: [Receipt] = []
-    var reading: [ReadingSender] = []
-    /// Whether the reading fetch has ANSWERED for this account. An empty
-    /// `reading` means "nothing to read" only once it has; before that it
-    /// means nobody has asked yet, and the quiet board must not take the one
-    /// for the other.
-    var readingLoaded = false
-}
-
 /// The search panel's state, held OUT of the panel: SwiftUI discards a view's
 /// `@State` on unmount, and parking it here is what makes `/` resumable — same
 /// query, same hits, same selection, no refetch and no empty flash.
@@ -659,7 +641,10 @@ final class AppStore {
     /// The hero's sentence about what For-your-eyes is ABOUT, written by the
     /// daemon's small model (`/client/v2/fye/headline`). nil until it answers,
     /// and on a daemon with no model, where the hero keeps its own line.
-    var fyeHeadline: String?
+    /// The board file keeps it, so a new one schedules a save.
+    var fyeHeadline: String? {
+        didSet { if fyeHeadline != oldValue { scheduleBoardSave() } }
+    }
     /// The board `fyeHeadline` was written for (see `headlineKey`). The hero
     /// keeps showing the last sentence while a newer board's is on its way:
     /// a line a few seconds stale reads better than one that flips to the
@@ -769,18 +754,13 @@ final class AppStore {
     // MARK: selection slice — stable by message id
     var selectedId: Int?
 
-    // MARK: sitrep zones — see SitrepZoneCache
-    var zones = SitrepZoneCache() {
-        didSet {
-            scheduleBoardSave()
-            // A zone pass writes each zone apart; only Reading's moves this.
-            guard zones.reading != oldValue.reading else { return }
-            noteReadingThreads()
-        }
-    }
+    // MARK: sitrep zones, see SitrepZones
+    /// A `let`, so reading `store.zones` tracks nothing: a view tracks only
+    /// the zones it reads through it. Its hooks are set in `init`.
+    let zones = SitrepZones()
     /// Every thread a Reading sender's window holds, which is what makes a
     /// thread "reading mail" for the reader (`ThreadViewer.isReadingMail`).
-    /// STORED, rebuilt when the zones change and written only when the set
+    /// STORED, rebuilt when the Reading zone changes and written only when the set
     /// does: the reader asked it several times a body, and each was a walk
     /// of every sender's every item.
     private(set) var readingThreadIds: Set<String> = []
@@ -1730,6 +1710,10 @@ final class AppStore {
         // Keyed by `authThreadIds`, which the feed rows' own decisions feed
         // too, so a blank sealed list cannot reopen the door.
         ThreadPrefetch.shared.refuses = { AppStore.shared.authThreadIds.contains($0) }
+        // The board file keeps the calendar and the shipments, so those two
+        // schedule a save; Reading's threads are kept as a set for the reader.
+        zones.onPersistedChange = { [weak self] in self?.scheduleBoardSave() }
+        zones.onReadingChange = { [weak self] in self?.noteReadingThreads() }
         // A conversation that belongs to a question in search history is saved
         // whenever one of its runs ends; see `saveQuestionChat`.
         assistant.onRunEnded = { [weak self] in self?.saveQuestionChat(from: $0) }
@@ -2791,7 +2775,7 @@ final class AppStore {
         bands.sealed = []
         return BoardSnapshot(
             sitrep: bands, stats: stats, fyeHeadline: fyeHeadline, fyeHeadlineKey: fyeHeadlineKey,
-            zones: zones,
+            zones: zones.value,
             // The head of each page: the scroll refills the rest, and the
             // head is what the refresh behind the repaint merges into. ONLY
             // from a daemon that pages by arrival. One that pages by cursor
@@ -2820,7 +2804,7 @@ final class AppStore {
         if kept.stats != nil { statsEpoch = epoch }
         fyeHeadline = kept.fyeHeadline
         fyeHeadlineKey = kept.fyeHeadlineKey
-        zones = kept.zones
+        zones.replace(with: kept.zones)
         mailPages = kept.mailPages.mapValues { Loadable(value: $0, error: nil, isLoading: false) }
         mailKeyset = kept.mailKeyset
         selectedId = kept.selectedId
@@ -3097,7 +3081,7 @@ final class AppStore {
         stats = nil
         fyeHeadline = nil
         fyeHeadlineKey = nil
-        zones = SitrepZoneCache()
+        zones.replace(with: SitrepZoneCache())
         // AND THE TTL STAMP, which no longer rides inside the struct above.
         // Left standing, it vouches for the rows just thrown away: the new
         // account's first refreshes are skipped as "still fresh", and the
@@ -3783,12 +3767,12 @@ final class AppStore {
     private enum ZoneAnswer: Sendable {
         case shipments([Shipment]?)
         case reading([ReadingSender]?)
-        case records(AgentFeed?)
+        case records(RecordsFeedZones?)
     }
 
     private func performZoneRefresh() async {
         let e = epoch
-        // Five independent fetches racing in one group, each zone written the
+        // Three independent fetches racing in one group, each zone written the
         // moment ITS fetch answers — completion order, not a fixed await
         // order, which is what actually keeps one wedged endpoint riding out
         // its timeout from holding every later zone's paint hostage. Every
@@ -3803,33 +3787,30 @@ final class AppStore {
             }
             group.addTask { .reading(await ReadingFeed.load()) }
             group.addTask {
-                .records(try? await APIClient.shared.getFeed(destination: "records", limit: 1000))
+                // Derived HERE, off the main actor: three walks over up to
+                // a thousand records, every 45 seconds.
+                guard let feed = try? await APIClient.shared.getFeed(destination: "records", limit: 1000)
+                else { return .records(nil) }
+                return .records(RecordsFeedZones(feed))
             }
             for await answer in group {
                 guard e == epoch else {
                     group.cancelAll()
                     return
                 }
-                // ASSIGN ONLY ON CHANGE, every one: `zones` is one observed
-                // property, so any assignment re-renders every zone card and
-                // the board, and most passes find the same rows they found
-                // 45 seconds ago.
+                // ASSIGN ONLY ON CHANGE, every one: most passes find the
+                // rows they found 45 seconds ago, and an equal write still
+                // runs the zone's hooks (a board save, the reading threads).
                 switch answer {
                 case .shipments(let rows?):
                     if rows != zones.shipments { zones.shipments = rows }
                 case .reading(let rows?):
                     if rows != zones.reading { zones.reading = rows }
                     if !zones.readingLoaded { zones.readingLoaded = true }
-                case .records(let feed?):
-                    // Derived off the feed ONCE, off the main actor would be
-                    // better still; the three walks are over up to a thousand
-                    // records.
-                    let receipts = feed.receipts
-                    let banking = feed.banking
-                    let calendar = feed.calendar
-                    if receipts != zones.receipts { zones.receipts = receipts }
-                    if banking != zones.banking { zones.banking = banking }
-                    if calendar != zones.calendar { zones.calendar = calendar }
+                case .records(let records?):
+                    if records.receipts != zones.receipts { zones.receipts = records.receipts }
+                    if records.banking != zones.banking { zones.banking = records.banking }
+                    if records.calendar != zones.calendar { zones.calendar = records.calendar }
                 case .shipments, .reading, .records: missed = true
                 }
             }

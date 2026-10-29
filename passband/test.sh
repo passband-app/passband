@@ -260,6 +260,18 @@ run_suite board-file \
   Sources/Passband/Lib/BoardFile.swift \
   Tests/BoardFileTests.swift
 
+# The sitrep's zones: one observed property per zone, and a write to one
+# never invalidates another's readers.
+run_suite zone-store \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Sources/Passband/Lib/SenderIdentity.swift \
+  Sources/Passband/Lib/Reading.swift \
+  Sources/Passband/Model/ZoneStore.swift \
+  Tests/ZoneStoreTests.swift
+
 # Credential validation must never succeed against the fixture transport.
 run_suite credential-probe \
   Sources/Passband/Model/SubjectText.swift \

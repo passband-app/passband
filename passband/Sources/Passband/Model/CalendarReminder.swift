@@ -216,15 +216,22 @@ extension EventBanner {
         "passband.calendar.\(account.uuidString).\(fire)"
     }
 
-    /// The banner: title = the event's title, subtitle = "in 1 hr · The
-    /// Greek Theatre", body = the line (nothing when there is none).
+    /// The banner: title = the event's title, subtitle = "8pm · The Greek
+    /// Theatre", body = the line (nothing when there is none).
+    ///
+    /// THE CLOCK TIME, NOT "in 1 hr": a banner sits on the lock screen, and
+    /// a countdown read forty minutes later is wrong while a start time never
+    /// goes stale. The countdown is only the fallback for a start that cannot
+    /// be read.
     static func calendarReminderCopy(
-        _ signal: CalendarReminderSignal, now: Date = Date()
+        _ signal: CalendarReminderSignal, now: Date = Date(), zone: TimeZone = .current
     ) -> ReminderCopy {
         let title = flatten(stripBidi(signal.item.title ?? ""), max: 80)
-        let lead = reminderLead(
-            start: signal.item.start, allDay: signal.item.all_day, leadMinutes: signal.lead_minutes,
-            now: now)
+        let lead =
+            reminderClock(start: signal.item.start, allDay: signal.item.all_day, zone: zone)
+            ?? reminderLead(
+                start: signal.item.start, allDay: signal.item.all_day, leadMinutes: signal.lead_minutes,
+                now: now)
         let place = flatten(stripBidi(signal.item.place ?? ""), max: 60)
         let subtitle = [lead, place.isEmpty ? nil : place].compactMap { $0 }.joined(separator: " · ")
         return ReminderCopy(
@@ -234,6 +241,20 @@ extension EventBanner {
             threadIdentifier: calendarGroup,
             // Time-bound by definition: it chimes.
             sound: true)
+    }
+
+    /// "8pm", "8:30pm", or "Today" for an all-day event; nil when the start
+    /// cannot be read.
+    static func reminderClock(start: String, allDay: Bool, zone: TimeZone) -> String? {
+        if allDay { return "Today" }
+        guard let date = eventDate(start) else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        let parts = calendar.dateComponents([.hour, .minute], from: date)
+        guard let hour = parts.hour, let minute = parts.minute else { return nil }
+        let twelve = hour % 12 == 0 ? 12 : hour % 12
+        let half = hour < 12 ? "am" : "pm"
+        return minute == 0 ? "\(twelve)\(half)" : String(format: "%d:%02d%@", twelve, minute, half)
     }
 
     /// "in 10 min", "in 1 hr", "in 1 hr 30 min", "Starting now", or "Today"

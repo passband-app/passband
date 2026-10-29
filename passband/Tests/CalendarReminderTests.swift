@@ -127,9 +127,23 @@ struct CalendarReminderTests {
 
     static func theBannersWords() {
         let s = CalendarReminderSignal.parse(contract)!
-        let copy = EventBanner.calendarReminderCopy(s, now: hourBefore)
+        let pacific = TimeZone(identifier: "America/Los_Angeles")!
+        let copy = EventBanner.calendarReminderCopy(s, now: hourBefore, zone: pacific)
         expect(copy.title == "Phoebe Bridgers", "title")
-        expect(copy.subtitle == "in 1 hr · The Greek Theatre", "subtitle: \(copy.subtitle)")
+        expect(copy.subtitle == "8pm · The Greek Theatre", "subtitle: \(copy.subtitle)")
+        let eastern = TimeZone(identifier: "America/New_York")!
+        expect(
+            EventBanner.calendarReminderCopy(s, now: hourBefore, zone: eastern).subtitle == "11pm · The Greek Theatre",
+            "the device's own zone")
+        expect(
+            EventBanner.reminderClock(start: "2026-10-30T08:30:00-07:00", allDay: false, zone: pacific) == "8:30am",
+            "minutes shown")
+        expect(
+            EventBanner.reminderClock(start: "2026-10-30T12:05:00-07:00", allDay: false, zone: pacific) == "12:05pm",
+            "noon hour")
+        expect(
+            EventBanner.reminderClock(start: "2026-10-30T00:00:00-07:00", allDay: false, zone: pacific) == "12am",
+            "midnight")
         expect(copy.body == "Your 2 tickets are in the Ticketmaster email", "body")
         expect(copy.sound && copy.threadIdentifier == "passband.calendar", "chimes, grouped")
 
@@ -157,7 +171,7 @@ struct CalendarReminderTests {
         let bare = CalendarReminderSignal(
             calendar_reminder: 3,
             item: .init(kind: .ghost, id: "4", title: "  ", start: "2026-10-30", all_day: true))
-        let bareCopy = EventBanner.calendarReminderCopy(bare, now: hourBefore)
+        let bareCopy = EventBanner.calendarReminderCopy(bare, now: hourBefore, zone: pacific)
         expect(bareCopy.subtitle == "Today", "all day, no place: \(bareCopy.subtitle)")
         expect(bareCopy.title == "Untitled event" && bareCopy.body.isEmpty, "fallback title, empty body")
 
@@ -166,7 +180,7 @@ struct CalendarReminderTests {
             calendar_reminder: 3,
             item: .init(kind: .event, calendar_id: "c", id: "e", title: "Show\u{202E}woh", start: "garbage", place: "Hall\nB"),
             lead_minutes: 10, line: "Bring\u{2066} ID\nand cash")
-        let sneakyCopy = EventBanner.calendarReminderCopy(sneaky, now: hourBefore)
+        let sneakyCopy = EventBanner.calendarReminderCopy(sneaky, now: hourBefore, zone: pacific)
         expect(sneakyCopy.title == "Showwoh", "bidi stripped from the title: \(sneakyCopy.title)")
         expect(sneakyCopy.subtitle == "in 10 min · Hall B", "place flattened: \(sneakyCopy.subtitle)")
         expect(sneakyCopy.body == "Bring ID and cash", "line flattened: \(sneakyCopy.body)")

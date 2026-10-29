@@ -165,6 +165,9 @@ impl SqliteStore {
             &format!("UPDATE triage SET {column}=?3 WHERE account_id=?1 AND message_id=?2"),
             params![account_id, message_id, to_value],
         )?;
+        // The retired column still reads as sealed (`known_sealed_mail_sql!`):
+        // a row sealed here loses its vectors here.
+        super::search::purge_forbidden_vectors_conn(&tx, Some(message_id))?;
 
         let original_s = original.to_string();
         tx.execute(

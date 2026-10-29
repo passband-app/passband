@@ -103,23 +103,17 @@ enum ProductGuide {
         }
     }
 
-    /// THE TOPICS ON OFFER for this mailbox. The calendar topic only while
-    /// the Calendar page is (`AppStore.calendarPageAvailable`, handed in):
-    /// a guide that described a page the rail does not have would have the
-    /// assistant send somebody looking for it. With the page off, this is
-    /// the list from before the calendar existed, byte for byte, and so is
-    /// everything else the guide says.
-    static func topics(calendar: Bool) -> [Topic] {
-        calendar ? Topic.allCases : Topic.allCases.filter { $0 != .calendar }
-    }
+    /// THE TOPICS ON OFFER: every one. (The calendar topic was once offered
+    /// only while the Calendar page was; the page is unconditional now.)
+    static var topics: [Topic] { Topic.allCases }
 
     /// The `topic` parameter's description: every topic on offer and what it
     /// covers, built from the enum so a topic added above is offered without
     /// a second edit. This IS sent with every request, which is why each line
     /// is short.
-    static func topicIndex(calendar: Bool) -> String {
+    static var topicIndex: String {
         "Which page of the guide to read. "
-            + topics(calendar: calendar).map { "\($0.rawValue): \($0.covers)." }.joined(separator: " ")
+            + topics.map { "\($0.rawValue): \($0.covers)." }.joined(separator: " ")
     }
 
     // MARK: - the system prompt's share
@@ -147,27 +141,22 @@ enum ProductGuide {
     /// iPhone app is numbered on its own line and keeps its own release notes
     /// (Lib/PhoneReleaseNotes.swift), so "what's new" there is a different
     /// table read against a different version.
-    ///
-    /// `calendar` is whether the Calendar page is on for this mailbox: it
-    /// puts the page into the getting-around list. The calendar topic itself
-    /// is asked for only while it is on (`topics(calendar:)`).
-    static func text(_ topic: Topic, runningVersion: String?, onPhone: Bool = false, calendar: Bool = false) -> String {
-        keyed(page(topic, runningVersion: runningVersion, onPhone: onPhone, calendar: calendar), calendar: calendar)
+    static func text(_ topic: Topic, runningVersion: String?, onPhone: Bool = false) -> String {
+        keyed(page(topic, runningVersion: runningVersion, onPhone: onPhone))
     }
 
     /// THE DIGIT THAT OPENS A PAGE IS NEVER WRITTEN IN THE PROSE. A topic
     /// says "the Emails page (key {key:emails})" and the number is put in
-    /// here, from the Navigate row of the table the `?` sheet draws for this
-    /// mailbox (`ShortcutCatalog.groups(calendar:)`): Emails is 2 with the
-    /// Calendar page off and 3 with it on, and the guide says whichever the
-    /// sheet does. With the page off the text is main's, byte for byte.
+    /// here, from the Navigate row of the table the `?` sheet draws
+    /// (`ShortcutCatalog.groups`), so the guide says whichever digit the
+    /// sheet does.
     ///
     /// A name the row does not have is left as written, braces and all, so
     /// the suite's "no brace left in any topic" check catches a page renamed
     /// in one place only.
-    static func keyed(_ text: String, calendar: Bool) -> String {
+    static func keyed(_ text: String) -> String {
         guard text.contains("{key:") else { return text }
-        guard let row = ShortcutCatalog.groups(calendar: calendar).first(where: { $0.title == "Navigate" })?.items.first
+        guard let row = ShortcutCatalog.groups.first(where: { $0.title == "Navigate" })?.items.first
         else { return text }
         var out = text
         for (name, key) in zip(row.desc.components(separatedBy: " · "), row.keys) {
@@ -176,9 +165,9 @@ enum ProductGuide {
         return out
     }
 
-    private static func page(_ topic: Topic, runningVersion: String?, onPhone: Bool, calendar: Bool) -> String {
+    private static func page(_ topic: Topic, runningVersion: String?, onPhone: Bool) -> String {
         switch topic {
-        case .gettingAround: gettingAround(calendar: calendar)
+        case .gettingAround: gettingAround
         case .sitrep: sitrep
         case .calendar: Self.calendar
         case .readingMail: readingMail
@@ -187,7 +176,7 @@ enum ProductGuide {
         case .triage: triage
         case .senderRules: senderRules
         case .reminders: reminders
-        case .search: search
+        case .search: search + "\n\n" + searchEvents
         case .loginCodes: loginCodes
         case .assistant: assistant
         case .appAndAccounts: appAndAccounts
@@ -195,28 +184,25 @@ enum ProductGuide {
         }
     }
 
-    /// The pages on the number keys, in rail order, Calendar second while
-    /// it is on (`CalendarGate.numbered`'s rule, restated: this file stands
-    /// alone under test). Numbered when the text is built, so a page added
-    /// renumbers the ones after it here exactly as it does on the rail.
-    private static func numberedPages(calendar: Bool) -> String {
-        var pages = [
+    /// The pages on the number keys, in rail order (`MainView.mainViews`,
+    /// restated: this file stands alone under test). Numbered when the text
+    /// is built, so a page added renumbers the ones after it here exactly as
+    /// it does on the rail.
+    private static var numberedPages: String {
+        let pages = [
             "Sitrep: the home board. What needs the user, what there is to read, and today's records.",
+            "Calendar: events guessed from mail and, once connected, Google Calendar. ⇧C also "
+                + "opens it. See the calendar topic.",
             "Emails: every message in one list, plus sent and spam.",
             "Auth: login codes, password resets and security alerts.",
             "Rules: sender rules. A pane in Settings, not on the rail; the key opens Settings > Rules.",
             "Groups: named sets of recipients. A pane in Settings, not on the rail; the key opens Settings > Groups.",
         ]
-        if calendar {
-            pages.insert(
-                "Calendar: events guessed from mail and, once connected, Google Calendar. ⇧C also "
-                    + "opens it. See the calendar topic.", at: 1)
-        }
         return pages.enumerated().map { "- \($0.offset + 1) \($0.element)" }.joined(separator: "\n")
     }
 
-    private static func gettingAround(calendar: Bool) -> String {
-        gettingAroundHead + numberedPages(calendar: calendar) + "\n" + gettingAroundTail
+    private static var gettingAround: String {
+        gettingAroundHead + numberedPages + "\n" + gettingAroundTail
     }
 
     private static let gettingAroundHead = """
@@ -294,14 +280,14 @@ enum ProductGuide {
         """
 
     private static let calendar = """
-        The Calendar page is on for this mailbox. Passband turns it on per mailbox from \
-        its side, and there is no setting for it in the app. It is second on the rail: \
-        key {key:calendar}, or ⇧C from anywhere. Emails is then key {key:emails}, Auth {key:auth}, Rules {key:rules} and Groups {key:groups}. \
-        It is on the Mac only; the iPhone has no Calendar page yet.
+        The Calendar page is second on the rail: key {key:calendar}, or ⇧C from \
+        anywhere. Emails is key {key:emails}, Auth {key:auth}, Rules {key:rules} and Groups {key:groups}. \
+        On the iPhone it is the middle tab, between Sitrep and Mail.
 
         What is on it:
         - Events guessed from mail (invitations, bookings, plans in a thread), drawn solid, striped or outlined by how likely they are. They need no permission.
         - Real events from Google Calendar, once it is connected, in each calendar's own colour.
+        - Opening an event shows a picture when there is one (a photo from the mail behind it, else Apple's street view or a map of the venue) and its place as the venue's name with the street address under it, tidied from what a booking service wrote. On the iPhone, tapping the place asks whether to open it in Apple Maps or Google Maps.
         - Connecting: the "Connect calendar" card or button opens Google's consent screen. Unticking calendar there leaves the mailbox working and simply connects no calendar.
 
         Views:
@@ -333,7 +319,15 @@ enum ProductGuide {
         - When the draft has guests, only the button invites them: a click on the control that names them, such as "add and invite 2". ⌘↵ never does, however much of the pane has been clicked or typed in, and plain Enter never saves an event with guests. The line above the button says so.
         - If an email is open when the assistant drafts, the email stays open and the draft waits on the Calendar page; it appears when that email is closed or the user goes to the page. It never closes mail the user is writing: with something typed in a composer or a reply, the assistant is told to wait, and a draft already waiting stays out of sight until that mail is sent or closed.
         - A draft is made only while the assistant's bar is open. Starting a new chat or switching mailbox while it is working drafts nothing.
-        - The assistant cannot read the calendar, and it cannot edit or delete events. If an event is already open with unsaved changes, it asks the user to finish or close that one first.
+        - The assistant can search the calendar (events, and bookings from mail not on it yet, seeing guests by name only), but it cannot edit or delete events. If an event is already open with unsaved changes, it asks the user to finish or close that one first.
+        """
+
+    /// The search page with the Calendar page on: the same page, and how
+    /// events show up in it. Off, the page is `search` alone, byte for byte.
+    private static let searchEvents = """
+        Events:
+        - Words that match the calendar list up to three events under Events, between the senders and the mail: coming up first, soonest first, then past ones. "N more events" shows the rest. A booking found in mail that is not on the calendar yet, or an invitation marked going, also shows, saying "from mail". Other invitations do not. Down arrow and Enter, or a click, opens one on the Calendar page.
+        - in:calendar searches events only, and lists them all.
         """
 
     private static let readingMail = """
@@ -740,17 +734,13 @@ enum ProductGuide {
 
     /// The `?` overlay's table, as text. Key caps separated by a space, the
     /// way the overlay sets them side by side.
-    ///
-    /// `calendar`: the table as the overlay draws it for this mailbox
-    /// (`ShortcutCatalog.groups(calendar:)`), so the calendar's keys are
-    /// recited only where the page is on.
-    static func shortcuts(calendar: Bool = false) -> String {
+    static var shortcuts: String {
         var lines = [
             "Passband keyboard shortcuts, grouped by where they work. A single letter only "
                 + "fires when no text field has focus, and a capital letter means Shift. "
                 + "Pressing ? shows this same list in the app."
         ]
-        for group in ShortcutCatalog.groups(calendar: calendar) {
+        for group in ShortcutCatalog.groups {
             lines.append("")
             lines.append(group.title)
             for item in group.items {

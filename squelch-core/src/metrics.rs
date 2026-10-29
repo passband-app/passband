@@ -446,7 +446,10 @@ pub struct SyncMetrics {
     /// never built). A GAUGE, and the series that explains a pod's memory
     /// sawtooth: the session is 85-90% of a tenant daemon's RSS, so a graph of
     /// memory next to this one reads as cause and effect instead of a mystery.
-    /// Written by [`crate::embed::LazyEmbedder`] on each load and unload.
+    /// Written by [`crate::embed::LazyEmbedder`] on each load and unload. A
+    /// daemon using the shared embedding service (`SQUELCH_EMBED_URL`) builds
+    /// no session and never writes it, so it reads 0 for the life of the
+    /// process, which is the truth about this process's memory.
     embedder_loaded: AtomicU64,
 
     /// 1 when the APNs pusher task was spawned at startup, else 0. Together
@@ -1515,6 +1518,7 @@ pub fn runs_notify_model(category: &str) -> bool {
         || category == crate::triage::access::USAGE_CATEGORY
         || category == crate::triage::unsub_page::USAGE_CATEGORY
         || category == crate::triage::unsub_agent::USAGE_CATEGORY
+        || category == crate::gcal::place::USAGE_CATEGORY
 }
 
 /// Estimated spend for a ledger rollup, costed exactly as `/client/usage` does.
@@ -2696,6 +2700,7 @@ mod tests {
             RULE_SUGGEST_USAGE_CATEGORY,
             FYE_HEADLINE_USAGE_CATEGORY,
             crate::triage::access::USAGE_CATEGORY,
+            crate::gcal::place::USAGE_CATEGORY,
         ] {
             assert!(
                 (estimate_cost_usd(&one_mtok_in(category), &config) - expected).abs() < 1e-9,

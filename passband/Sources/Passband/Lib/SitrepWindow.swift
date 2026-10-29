@@ -3,8 +3,8 @@
 // banking card held its latest 8 rows forever, some a week stale (issue #82).
 //
 // The seen-stamp belongs to the SURFACE, not the app. The zone reports its own
-// lifecycle (the Mac mounts it on the sitrep page, the phone on the Quick Look
-// tab — one zone, so both platforms get the right signal for free), and the
+// lifecycle (the Mac mounts it on the sitrep page, the phone under its sitrep
+// board — one zone, so both platforms get the right signal for free), and the
 // stamp advances only while one is on screen: at appearance, at disappearance,
 // and when the app resigns active or terminates WITH one showing. A session
 // spent entirely in Mail clears nothing, because nothing was seen.

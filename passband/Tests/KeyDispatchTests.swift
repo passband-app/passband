@@ -190,10 +190,10 @@ struct KeyDispatchTests {
 
     /// ⇧C, as RootView binds it (`PageKeys.calendar`, the same function):
     /// EXACT CASE, DECLINING, in the GLOBAL set. The exact pass reaches global
-    /// before the fold reaches the surface, so while the page is offered ⇧C
-    /// opens it over a surface's `c` (compose, which ⇧C used to reach through
-    /// the fold). With the gate closed it is asked, declines, and the fold
-    /// hands ⇧C to `c` exactly as before.
+    /// before the fold reaches the surface, so ⇧C opens the calendar over a
+    /// surface's `c` (compose, which ⇧C used to reach through the fold). While
+    /// a sign-in code is on screen (`offered` says no) it is asked, declines,
+    /// and the fold hands ⇧C to `c` exactly as before.
     static func theCalendarKeyTakesShiftCOnlyWhenOffered() {
         let registry = KeyRegistry.shared
         var offered = true
@@ -212,7 +212,7 @@ struct KeyDispatchTests {
             equal(press("c"), ["compose"], "plain c still composes")
             offered = false
             equal(press("C"), ["calendar", "compose"],
-                  "gate closed: asked, declines, and shift+c folds to c as it did before")
+                  "a code on screen: asked, declines, and shift+c folds to c as it did before")
             equal(press("C", editing: true), [], "a capital C typed into a field is just typed")
         }
         // EXACT CASE is what keeps a bare `c` from reaching it through the
@@ -227,40 +227,35 @@ struct KeyDispatchTests {
 
     /// THE DIGITS, as RootView binds them (`PageKeys.digits`, the same
     /// function): one DECLINING binding per digit in the GLOBAL set, each
-    /// asking for the page order when it is pressed. So
-    /// the gate opening renumbers without anything re-registering, and the
-    /// extra digit (6) passes on to whatever else binds it while the calendar
-    /// is not offered.
+    /// asking for the page order when it is pressed. Sitrep 1, Calendar 2,
+    /// Emails 3 ("make calendar 2, all mail 3, etc"), and a digit past the
+    /// order passes on to whatever else binds it.
     static func theDigitsAreAskedAtKeyTime() {
         let registry = KeyRegistry.shared
-        let base = ["sitrep", "emails", "auth", "rules", "groups"]
-        var offered = false
+        let order = ["sitrep", "calendar", "emails", "auth", "rules", "groups"]
+        var asked = 0
         func pages() -> [String] {
-            var out = base
-            if offered { out.insert("calendar", at: 1) }
-            return out
+            asked += 1
+            return order
         }
         var under: [String] = []
         let below = registry.register(
             .global,
-            box: KeyRegistry.BindingsBox([KeyBinding("6", "an older six") { under.append("older six") }]))
+            box: KeyRegistry.BindingsBox([KeyBinding("7", "an older seven") { under.append("older seven") }]))
         // Registered after it, so asked first.
         let digits = registry.register(
             .global,
             box: KeyRegistry.BindingsBox(
-                PageKeys.digits(count: base.count + 1, pages: pages, go: { ran.append($0) })))
+                PageKeys.digits(count: order.count + 1, pages: pages, go: { ran.append($0) })))
         stage([[]]) {
-            equal(press("2"), ["emails"], "gate closed: 2 is emails, as it always was")
-            equal(press("5"), ["groups"], "and 5 is groups")
-            equal(press("6"), [], "6 opens no page")
-            equal(under, ["older six"], "and passes on to whatever else binds it")
-            offered = true
-            under = []
-            equal(press("1"), ["sitrep"], "offered: sitrep is still 1")
+            equal(press("1"), ["sitrep"], "sitrep is 1")
             equal(press("2"), ["calendar"], "calendar is 2")
             equal(press("3"), ["emails"], "all mail is 3")
             equal(press("6"), ["groups"], "and groups is 6")
+            equal(asked, 4, "the order is asked at each press, not when bound")
             equal(under, [], "held, not passed on")
+            equal(press("7"), [], "7 opens no page")
+            equal(under, ["older seven"], "and passes on to whatever else binds it")
             equal(press("2", editing: true), [], "a 2 typed into a field is just typed")
         }
         registry.unregister(digits)

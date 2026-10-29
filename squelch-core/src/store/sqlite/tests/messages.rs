@@ -1764,14 +1764,17 @@ fn ingest_message_fresh_re_reads_a_recent_row_as_a_new_content_revision() {
         ("triage".into(), "heal".into(), 2, "queued".into())
     );
     assert!(after.iter().all(|j| j.0 != "notification"), "{after:?}");
-    // The stale vector goes; the backfill re-embeds from the real text.
+    // The stale vector goes. The backfill re-embeds from the real text once
+    // the queued re-triage decides it: new content is undecided content, and
+    // undecided inbound mail reaches no embedder (`embeddable_mail_sql!`).
     assert_eq!(vec_count_for(&store, id), 0);
     assert!(
-        store
+        !store
             .messages_missing_vectors(acct, 10)
             .unwrap()
             .iter()
-            .any(|m| m.message_id == id)
+            .any(|m| m.message_id == id),
+        "not owed a vector until the heal's re-triage lands"
     );
     // A re-read is not an arrival: the stamp the row already carried stands.
     let stamp: Option<String> = store

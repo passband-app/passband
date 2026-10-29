@@ -94,6 +94,14 @@ echo "==> packaging $ARCHIVE"
 rm -f "$ARCHIVE"
 ditto -c -k --keepParent "$APP" "$ARCHIVE"
 
+# The symbols for exactly this binary, kept beside the archive. Named so no
+# `Passband-*.zip` glob (make-appcast.sh, the release workflow's feed) can
+# take it for an app archive.
+SYMBOLS="build/symbols-$STEM.dSYM.zip"
+rm -f "$SYMBOLS"
+ditto -c -k --keepParent build/Passband.app.dSYM "$SYMBOLS"
+echo "==> symbols: $SYMBOLS"
+
 echo "==> verifying Gatekeeper acceptance"
 spctl -a -vvv -t exec "$APP"
 

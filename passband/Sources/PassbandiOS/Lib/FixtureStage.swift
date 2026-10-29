@@ -26,14 +26,20 @@
             return args[safe: i + 1]
         }
 
-        /// `sitrep` (the default), `records`, `calendar`, `mail` or `search`.
+        /// `sitrep` (the default), `calendar`, `mail` or `search`.
         static var tab: String? { value("--fixture-tab") }
-        /// Turns the hidden `calendar` feature on over a staged week of plans
-        /// (FixtureCalendar), so the bar reads Sitrep, Calendar, Mail.
+        /// Stages a week of plans on the calendar (FixtureCalendar) and a
+        /// granted Google Calendar. Without it the calendar tab is the
+        /// practice inbox's: empty, and offering nothing.
         static let calendar = args.contains("--fixture-calendar")
         /// The calendar's mode for a screenshot: `--fixture-calendar-mode
-        /// month|week|day`. Scene `calendar-detail` pushes the likely ghost.
+        /// month|week|day`. Scene `calendar-detail` pushes the likely ghost;
+        /// `calendar-connect` raises the Google Calendar connect card, which
+        /// practice never offers on its own.
         static var calendarMode: String? { value("--fixture-calendar-mode") }
+        /// The day the calendar opens on, in days from today:
+        /// `--fixture-calendar-day 3` (the day with only an evening dinner).
+        static var calendarDay: Int? { value("--fixture-calendar-day").flatMap(Int.init) }
         static var calendarDetail: String? { scene == "calendar-detail" ? "g:2" : nil }
         /// What to raise once the board has loaded; see `stage`.
         static var scene: String? { value("--fixture-scene") }
@@ -162,6 +168,14 @@
                 }
             case "search-lane":
                 store.search.query = "thursday?"
+            // The Events block: wants `--fixture-calendar --fixture-tab
+            // search`. `calendar-search` is "dinner" (two plans, one of them
+            // a ghost, beside the mail); `calendar-search-only` is the
+            // events-only listing.
+            case "calendar-search":
+                store.search.query = "dinner"
+            case "calendar-search-only":
+                store.search.query = "in:calendar sam"
             case "accounts":
                 AccountDoor.shared.pane = .picker
             // THE SENT PAGE, which the practice mailbox leaves empty: nothing

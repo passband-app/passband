@@ -28,7 +28,11 @@ settings:
     ALWAYS_SEARCH_USER_PATHS: NO
     CLANG_ENABLE_MODULES: YES
     ENABLE_USER_SCRIPT_SANDBOXING: NO
+    # Debug unoptimized; Release optimized for size, the Xcode default. It
+    # governs C and Objective-C only, of which there is none today: 0 cost
+    # nothing yet, but would have shipped unoptimized the first C file added.
     GCC_OPTIMIZATION_LEVEL: 0
+    GCC_OPTIMIZATION_LEVEL[config=Release]: s
 
 targets:
   Passband:

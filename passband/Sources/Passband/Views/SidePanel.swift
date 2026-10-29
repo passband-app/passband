@@ -84,11 +84,51 @@ struct SearchView: View {
     /// the hits by everything that resumes a search, so the sender rows get an
     /// index of their own and `move` walks the two as one column.
     @State private var senderIndex = -1
+    /// The calendar's answer to the field (docs/CALENDAR.md §10.1), as last
+    /// fetched, and the query it answered: rows for a query the field no
+    /// longer holds are not drawn.
+    @State private var fetchedEvents: [AgendaItem] = []
+    @State private var eventsTotal = 0
+    @State private var eventsQuery: String?
+    /// The field text `eventsQuery` was asked from (with `in:calendar` and
+    /// all), which is what opening one of its rows remembers.
+    @State private var eventsField: String?
+    /// The limit `eventsQuery` was fetched under.
+    @State private var eventsLimit = 0
+    /// "N more" was taken: the block shows every fetched row.
+    @State private var eventsExpanded = false
+    /// The armed row of the Events block, -1 for none. Its own index for the
+    /// reason `senderIndex` has one; the "N more" row counts as the last.
+    @State private var eventIndex = -1
 
     /// The senders offered above the hits: who the words in the field could be
     /// naming. Picking one lists everything they have sent, newest first.
     private var senders: [SenderHit] {
         SearchFetch.senders(fetchedSenders, stillMatching: store.search.query)
+    }
+
+    /// The field asks for events only (`in:calendar`): no mail search runs.
+    private var eventsOnly: Bool {
+        CalendarSearch.eventsOnly(store.search.query)
+    }
+
+    /// The Events block as drawn: nothing while the Calendar page is not
+    /// this mailbox's or the field asks the calendar nothing. While a new
+    /// answer is on its way the last one stays, so the block does not vanish
+    /// and the list jump on every keystroke; it is replaced when the answer
+    /// lands. Events only lists every fetched row.
+    private var eventBlock: CalendarSearch.Block {
+        guard !showingRecents, eventsQuery != nil,
+              CalendarSearch.eventQuery(store.search.query.trimmed) != nil
+        else { return CalendarSearch.Block(shown: [], more: 0) }
+        return CalendarSearch.block(fetchedEvents, total: eventsTotal, expanded: eventsExpanded || eventsOnly)
+    }
+
+    /// How many rows of the arrow column the block holds: its events, and
+    /// "N more" when there is one.
+    private var eventEntries: Int {
+        let block = eventBlock
+        return block.shown.count + (block.more > 0 ? 1 : 0)
     }
 
     /// The terms the on-screen hits were actually fetched for — the live query
@@ -192,23 +232,35 @@ struct SearchView: View {
                 // A listing has no ranking to choose between: it is date order
                 // whatever the picker says, so the picker stands down rather
                 // than offer a switch that does nothing.
+                // Events only has its one order too (by time).
                 SearchSortPicker()
-                    .disabled(store.search.showsListing)
-                    .opacity(store.search.showsListing ? 0.4 : 1)
+                    .disabled(store.search.showsListing || eventsOnly)
+                    .opacity(store.search.showsListing || eventsOnly ? 0.4 : 1)
                 Spacer(minLength: Space.s8)
                 if expanded { askAgentButton }
             }
             .padding(.horizontal, Space.panel)
             .padding(.bottom, Space.s10)
 
-            if !expanded {
+            // Events only runs no mail search, so there is nothing for the
+            // mail agent to go deeper on (the phone hides its ask row too).
+            if !expanded && !eventsOnly {
                 HStack { Spacer(); askAgentButton }
                     .padding(.horizontal, Space.panel)
                     .padding(.bottom, Space.s10)
             }
 
             if let error = store.search.error { BandNote(error) }
-            if answered && store.search.hits.isEmpty { BandNote("no matches.") }
+            if eventsOnly {
+                if CalendarSearch.eventQuery(store.search.query.trimmed) == nil {
+                    BandNote(CalendarSearch.emptyNote(store.search.query))
+                } else if eventsQuery == CalendarSearch.eventQuery(store.search.query.trimmed),
+                          fetchedEvents.isEmpty {
+                    BandNote("no events.")
+                }
+            } else if answered && store.search.hits.isEmpty && eventBlock.shown.isEmpty {
+                BandNote("no matches.")
+            }
 
             // THE STRIP IS TOO NARROW FOR TWO COLUMNS (460pt), so there the
             // lane is a band ABOVE the hits; expanded, it becomes the left
@@ -266,6 +318,8 @@ struct SearchView: View {
         .onChange(of: store.search.query) { _, query in
             store.search.index = -1
             senderIndex = -1
+            eventIndex = -1
+            eventsExpanded = false
             if query.trimmed.isEmpty {
                 store.resetSearchLane()
             }
@@ -301,11 +355,61 @@ struct SearchView: View {
             await runSearch()
         }
         .task(id: store.search.query) {
+            // Events only asks no sender directory: its words name events.
+            if eventsOnly {
+                fetchedSenders = []
+                senderIndex = -1
+                return
+            }
             guard let found = await SearchFetch.senders(matching: store.search.query) else { return }
             // A different list under an armed row is a different row armed.
             if found != fetchedSenders { senderIndex = -1 }
             fetchedSenders = found
         }
+        .task(id: [store.search.query, String(eventsExpanded)]) {
+            await runEventSearch()
+        }
+    }
+
+    /// The Events block's fetch, beside the mail search and never waiting on
+    /// it. Debounced like it; a superseded fetch writes nothing. Expanding
+    /// ("N more") or events only asks again for the whole list. A FAILURE
+    /// (an older daemon's 404 included) clears the block and leaves
+    /// `eventsQuery` unset, so the next pass asks again rather than reading
+    /// the blip as "no events"; it is never an error over the mail results.
+    private func runEventSearch() async {
+        let field = store.search.query.trimmed
+        guard let asked = CalendarSearch.eventQuery(field) else {
+            clearEvents()
+            return
+        }
+        // In hand already, unless the list now wants more than was asked.
+        let limit = CalendarSearch.limit(eventsOnly: eventsOnly, expanded: eventsExpanded)
+        guard asked != eventsQuery || limit > eventsLimit else { return }
+        try? await Task.sleep(for: SearchFetch.debounce)
+        guard !Task.isCancelled else { return }
+        let page: CalendarSearchPage
+        do {
+            page = try await APIClient.shared.calendarSearch(asked, limit: limit)
+        } catch {
+            guard !Task.isCancelled else { return }
+            clearEvents()
+            return
+        }
+        guard !Task.isCancelled, asked == CalendarSearch.eventQuery(store.search.query.trimmed) else { return }
+        fetchedEvents = CalendarSearch.items(page, calendar: .current)
+        eventsTotal = page.total
+        eventsQuery = asked
+        eventsField = field
+        eventsLimit = limit
+    }
+
+    private func clearEvents() {
+        fetchedEvents = []
+        eventsTotal = 0
+        eventsQuery = nil
+        eventsField = nil
+        eventsLimit = 0
     }
 
     private func focusField() {
@@ -362,11 +466,37 @@ struct SearchView: View {
                                 // (or that hit's header).
                                 ruled: i != senderIndex && i + 1 != senderIndex
                                     && !(i == senders.count - 1
-                                        && (store.search.index == 0 || header(above: 0) != nil)),
+                                        && (store.search.index == 0 || header(above: 0) != nil
+                                            || eventEntries > 0)),
                                 // Tab takes the armed row, or the first.
                                 tabTakes: i == max(0, senderIndex)
                             ) { show(sender) }
                         }
+                    }
+                    // WHAT THE CALENDAR HOLDS for these words (docs/CALENDAR.md
+                    // §10.1): a block of its own, by time, because an event's
+                    // date is when it happens and a hit's is when it arrived.
+                    let block = eventBlock
+                    if eventEntries > 0 {
+                        sectionHeader("Events").id(Self.eventsAnchor)
+                        ForEach(Array(block.shown.enumerated()), id: \.element.id) { i, item in
+                            EventSearchRow(
+                                item: item, selected: i == eventIndex,
+                                ruled: i != eventIndex && i + 1 != eventIndex
+                                    && !(i == eventEntries - 1 && (store.search.index == 0 || header(above: 0) != nil))
+                            ) {
+                                eventIndex = i
+                                openEvent(item)
+                            }
+                            .id(Self.eventRowId(i))
+                        }
+                        if block.more > 0 {
+                            MoreEventsRow(count: block.more, selected: eventIndex == block.shown.count) {
+                                expandEvents()
+                            }
+                            .id(Self.eventRowId(block.shown.count))
+                        }
+                        if let cut = block.cut { BandNote(cut) }
                     }
                     ForEach(Array(store.search.hits.enumerated()), id: \.element.id) { i, hit in
                         if let title = header(above: i) { sectionHeader(title) }
@@ -382,6 +512,7 @@ struct SearchView: View {
                         ) {
                             store.search.index = i
                             senderIndex = -1
+                            eventIndex = -1
                             open()
                         }
                         .id(hit.id)
@@ -430,10 +561,25 @@ struct SearchView: View {
                     proxy.scrollTo(Self.sendersAnchor, anchor: .top)
                 }
             }
+            // Each row its own anchor, so arrowing down a long list (events
+            // only, or an expanded block) keeps the armed row in view; the
+            // first row brings the header with it.
+            .onChange(of: eventIndex) { _, i in
+                guard i >= 0 else { return }
+                withAnimation(Motion.scrollFollow) {
+                    if i == 0 {
+                        proxy.scrollTo(Self.eventsAnchor, anchor: .top)
+                    } else {
+                        proxy.scrollTo(Self.eventRowId(i), anchor: .center)
+                    }
+                }
+            }
         }
     }
 
     private static let sendersAnchor = "senders"
+    private static let eventsAnchor = "events"
+    private static func eventRowId(_ i: Int) -> String { "event-\(i)" }
 
     private func sectionHeader(_ title: String) -> some View {
         Text(title)
@@ -493,6 +639,7 @@ struct SearchView: View {
     private var bindings: [KeyBinding] {
         [
             KeyBinding("Enter", "ask agent", meta: true, allowInInput: true) {
+                guard !eventsOnly else { return }
                 store.requestDeeperSearch()
             },
             KeyBinding("ArrowDown", "next hit", allowInInput: true) { move(1) },
@@ -506,6 +653,8 @@ struct SearchView: View {
                     run(entry)
                 } else if let sender = senders[safe: senderIndex] {
                     show(sender)
+                } else if eventIndex >= 0 {
+                    if let item = eventBlock.shown[safe: eventIndex] { openEvent(item) } else { expandEvents() }
                 } else if store.search.index >= 0 {
                     open()
                 } else if store.search.expanded, answered, !store.search.hits.isEmpty {
@@ -542,6 +691,9 @@ struct SearchView: View {
     /// at -1, so an unarmed empty state falls through to the expand test.
     private var enterDescription: String {
         if senders.indices.contains(senderIndex) { return "show this sender's mail" }
+        if eventIndex >= 0 {
+            return eventBlock.shown.indices.contains(eventIndex) ? "open in calendar" : "show more events"
+        }
         if store.search.index >= 0 { return showingRecents ? "search this" : "open thread" }
         if store.search.expanded, answered, !store.search.hits.isEmpty { return "open first result" }
         return canExpand ? "expand previews" : "nothing to open"
@@ -549,21 +701,41 @@ struct SearchView: View {
 
     /// Floor -1, not 0: ArrowUp from the top row disarms back to the bar.
     ///
-    /// The sender rows and the hits are ONE COLUMN to the arrows, senders
-    /// first, though they are armed by two indices (see `senderIndex`). The
-    /// position is worked out across both and written back to whichever list
-    /// it lands in, so exactly one row is ever armed.
+    /// The sender rows, the Events block and the hits are ONE COLUMN to the
+    /// arrows, in that order, though they are armed by three indices (see
+    /// `senderIndex`, `eventIndex`). The position is worked out across all of
+    /// them and written back to whichever list it lands in, so exactly one row
+    /// is ever armed.
     private func move(_ delta: Int) {
         guard !showingRecents else {
             store.search.index = max(-1, min(rowCount - 1, store.search.index + delta))
             return
         }
         let offered = senders.count
+        let events = eventEntries
         let at = senders.indices.contains(senderIndex) ? senderIndex
-            : store.search.index >= 0 ? offered + store.search.index : -1
-        let to = max(-1, min(offered + rowCount - 1, at + delta))
+            : (0..<events).contains(eventIndex) ? offered + eventIndex
+            : store.search.index >= 0 ? offered + events + store.search.index : -1
+        let to = max(-1, min(offered + events + rowCount - 1, at + delta))
         senderIndex = to < offered ? to : -1
-        store.search.index = to < offered ? -1 : to - offered
+        eventIndex = (offered..<offered + events).contains(to) ? to - offered : -1
+        store.search.index = to < offered + events ? -1 : to - offered - events
+    }
+
+    /// Open one event of the block on the Calendar page. Opening is where a
+    /// query stops being keystrokes, as it is for a hit.
+    private func openEvent(_ item: AgendaItem) {
+        // The words these rows answered, not the mail fetch's (which events
+        // only never makes, and which may still be on an older term).
+        if let field = eventsField { RecentSearchStore.shared.rememberEventSearch(field) }
+        store.openCalendarSearchHit(item)
+    }
+
+    /// "N more": the block shows every row, asking the daemon for the whole
+    /// list (`runEventSearch` is keyed on this), and the arm stays on the row
+    /// that took the place of "N more".
+    private func expandEvents() {
+        eventsExpanded = true
     }
 
     /// List everything from one sender: the completed operator goes into the
@@ -646,7 +818,12 @@ struct SearchView: View {
         // search yet: the daemon would drop the valueless token and 400 the
         // empty query, and that refusal is not something to show a reader who
         // is halfway through typing a sender.
-        guard !term.isEmpty, !FromOperator.awaitingValue(in: term) else {
+        // EVENTS ONLY (`in:calendar`) is no mail search at all: nothing goes
+        // to `/client/search` (which would read the operator as a word), and
+        // with no hits judged, no deeper-search lane starts.
+        let calendarOnly = CalendarSearch.eventsOnly(term)
+        guard !term.isEmpty, !FromOperator.awaitingValue(in: term), !calendarOnly else {
+            if calendarOnly { store.resetSearchLane() }
             store.search.hits = []
             store.search.error = nil
             store.search.fetchedQuery = nil
@@ -890,6 +1067,96 @@ private struct SenderRow: View {
         .overlay(alignment: .bottom) { if ruled { HitRule() } }
         .accessibilityElement(children: .combine)
         .accessibilityHint("Shows all mail from this sender, newest first")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// One row of the Events block: the calendar's mark in its colour (a ghost
+/// drawn in the agenda's own language for how real it is, so a likely plan is
+/// striped here as it is on the page), the title, and when and where in the
+/// user's zone. A past event reads dimmer; a ghost says it came from mail.
+private struct EventSearchRow: View {
+    let item: AgendaItem
+    let selected: Bool
+    let ruled: Bool
+    let onOpen: () -> Void
+
+    var body: some View {
+        let now = Date()
+        let past = CalendarSearch.isPast(item, now: now)
+        ListRow(
+            selected: selected, hPadding: PanelRow.hitPadding, vPadding: PanelRow.vPadding,
+            hoverFill: false, action: onOpen
+        ) { _, _ in
+            HStack(spacing: Space.s10) {
+                // A swatch the avatars' width, not an edge bar: the row's
+                // colour is a mark beside the words, as the agenda draws it.
+                AgendaMark(
+                    fill: item.fill, estimated: item.endEstimated, thin: item.cancelled,
+                    hue: ChipColors.inks(item).edge, cornerRadius: 4
+                )
+                .frame(width: 14, height: 14)
+                .frame(width: 26)
+                .opacity(past ? 0.55 : 1)
+                .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: Space.s2) {
+                    // Event text is the user's (or a sender's): plain Text only.
+                    Text(item.title)
+                        .font(Typo.ui(12, weight: .medium))
+                        .foregroundStyle(past ? Palette.inkDim : Palette.ink)
+                        .strikethrough(item.cancelled)
+                        .lineLimit(1)
+                    Text(CalendarSearch.label(item, now: now, calendar: .current))
+                        .font(Typo.ui(11))
+                        .foregroundStyle(Palette.inkDim)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: Space.s8)
+                if item.isGhost {
+                    Text("from mail")
+                        .font(Typo.ui(11))
+                        .foregroundStyle(Palette.inkDim)
+                        .fixedSize()
+                } else if past {
+                    Text("past")
+                        .font(Typo.ui(11))
+                        .foregroundStyle(Palette.inkDim)
+                        .fixedSize()
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .overlay(alignment: .bottom) { if ruled { HitRule() } }
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Opens this event in the calendar")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// "N more events": opens the rest of the block in place.
+private struct MoreEventsRow: View {
+    let count: Int
+    let selected: Bool
+    let onExpand: () -> Void
+
+    var body: some View {
+        ListRow(
+            selected: selected, hPadding: PanelRow.hitPadding, vPadding: PanelRow.vPadding,
+            hoverFill: false, action: onExpand
+        ) { _, _ in
+            HStack(spacing: Space.s10) {
+                Image(systemName: "plus")
+                    .font(Typo.ui(10, weight: .semibold))
+                    .foregroundStyle(Palette.inkDim)
+                    .frame(width: 26)
+                    .accessibilityHidden(true)
+                Text(CalendarSearch.moreLabel(count))
+                    .font(Typo.ui(11))
+                    .foregroundStyle(Palette.inkDim)
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }

@@ -1,7 +1,14 @@
-// THE CALENDAR TAB. Behind the hidden `calendar` feature, it takes the bar's
-// second slot (Quick Look's records move under the sitrep's board, see
-// MobileSitrepView) because a calendar is somewhere you live and records are
-// somewhere you look one fact up.
+// THE CALENDAR TAB, the bar's second slot for every mailbox (Quick Look's
+// records sit under the sitrep's board, see MobileSitrepView) because a
+// calendar is somewhere you live and records are somewhere you look one fact
+// up.
+//
+// NOT CONNECTED, IT ASKS. The first visit for an account that has not granted
+// Google Calendar raises the Mac's own connect card over the tab (mounted by
+// MobileShell, raised there on `calendarOffer == .card`), once per account;
+// after that the inline card at the top of the list offers it, and its
+// Connect raises the same card. Until then the tab shows the plans found in
+// mail.
 //
 // THE SHAPE IS A PHONE'S, NOT A SMALLER MAC. The Mac opens on a month of
 // top-down cells, which needs about 78 points a column; a phone has about 50,
@@ -62,13 +69,16 @@ struct MobileCalendarView: View {
 
     /// Kept across launches, like the Mac's mode: the way you like to look at
     /// your week is not a choice to make again every morning.
-    @AppStorage("phoneCalendarMode") private var mode: PhoneCalendarMode = .week
+    /// Month the first time; after that, whatever was on screen last.
+    @AppStorage("phoneCalendarMode") private var mode: PhoneCalendarMode = .month
     /// Folds opened, by day: "u" + day for unlikely, "e" + day for earlier.
     @State private var openFolds: Set<String> = []
     /// The direction the strip last moved, for the slide.
     @State private var stepForward = true
     @State private var memo = MobileCalendarMemo()
     @State private var kicked = false
+    /// A search hit's detail, pushed once the store has turned to its day.
+    @State private var searched: String?
     #if DEBUG
         /// A screenshot's push (`--fixture-scene calendar-detail`).
         @State private var fixtureDetail: String?
@@ -109,7 +119,11 @@ struct MobileCalendarView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 20) {
                         MobileCalendarStatus()
-                        content(items: items, model: model, week: week, place: place, now: now, cal: cal)
+                        content(
+                            items: items, model: model, week: week, place: place, now: now, cal: cal,
+                            scrollToFirstEvent: {
+                                proxy.scrollTo(MobileDayTimeline.firstEventAnchor, anchor: .top)
+                            })
                     }
                     .padding(.horizontal, 16)
                     .padding(.top, 4)
@@ -127,6 +141,7 @@ struct MobileCalendarView: View {
                         withAnimation(.snappy) { proxy.scrollTo(day, anchor: .top) }
                     }
                 }
+
               }
               }
             }
@@ -180,6 +195,21 @@ struct MobileCalendarView: View {
         .navigationDestination(for: MobileCalendarRoute.self) { route in
             MobileEventPage(id: route.id)
         }
+        // A HIT FROM SEARCH (MobileSearchView's Events block): the store has
+        // turned to its day and named the item in `calendarSearchOpen`, a
+        // one-shot ask written only by `openCalendarSearchHit`: the day's
+        // hours, and the detail pushed over them. NOT `calendarMonthItem`,
+        // which every save also sets (`landEvent`), so reading it pushed a
+        // second page after each edit. Moving the place is what fetches that
+        // month, so the page finds the row once the feed lands. `initial`
+        // because the tab may mount on it.
+        .navigationDestination(item: $searched) { id in MobileEventPage(id: id) }
+        .onChange(of: store.calendarSearchOpen, initial: true) { _, id in
+            guard let id else { return }
+            store.calendarSearchOpen = nil
+            mode = .day
+            searched = id
+        }
         // THE EVENT SHEET, on the store's own editor: what "+" opens, and the
         // detail's Edit from a page pushed on this stack.
         .sheet(item: editorBinding) { request in
@@ -192,8 +222,21 @@ struct MobileCalendarView: View {
                     if let staged = FixtureStage.calendarMode.flatMap(PhoneCalendarMode.init(rawValue:)) {
                         mode = staged
                     }
+                    if let offset = FixtureStage.calendarDay,
+                       let day = Calendar.current.date(
+                           byAdding: .day, value: offset, to: Calendar.current.startOfDay(for: Date())) {
+                        store.selectCalendarDay(day, open: false, now: Date())
+                    }
                     try? await Task.sleep(for: .seconds(1.5))
                     fixtureDetail = FixtureStage.calendarDetail
+                    // The connect card, staged straight onto the store: the
+                    // practice inbox never offers it (`calendarOffer` is
+                    // `.none` in practice), and a screenshot needs the ask.
+                    if FixtureStage.scene == "calendar-connect" {
+                        store.calendarConnectAsk = CalendarConnectAsk(
+                            route: .link("https://example.invalid/reconnect?calendar=1"),
+                            email: "you@example.com", epoch: store.epoch)
+                    }
                     // The sheet, staged straight onto the store: the
                     // practice inbox never offers "+" (nothing can be saved).
                     if FixtureStage.scene == "calendar-new" {
@@ -270,7 +313,7 @@ struct MobileCalendarView: View {
     @ViewBuilder
     private func content(
         items: [AgendaItem], model: MonthModel, week: MonthWeek?, place: MonthPlace, now: Date,
-        cal: Calendar
+        cal: Calendar, scrollToFirstEvent: @escaping () -> Void
     ) -> some View {
         switch mode {
         case .month:
@@ -300,7 +343,8 @@ struct MobileCalendarView: View {
                         Haptics.tick()
                         store.openEventEditor(
                             day: place.day, startMinutes: start, endMinutes: min(1440, start + 60), now: now)
-                    } : nil)
+                    } : nil,
+                scrollToFirstEvent: scrollToFirstEvent)
         }
     }
 
@@ -808,9 +852,10 @@ private struct MobileCalendarStatus: View {
                     card(
                         "Waiting for Google to finish connecting your calendar.",
                         button: "Show again", renewing: wait.renewing, dots: true)
-                } else if store.calendarOffer != .none {
-                    // The Mac's first-visit card is a modal of its own; a
-                    // phone says the same thing in the list, once per visit.
+                } else if store.calendarOffer != .none, !store.calendarCardUp {
+                    // The first-visit card (MobileShell's overlay) says all
+                    // of this itself while it is up; after it, the list says
+                    // it here on every visit, and Connect raises the card.
                     card(
                         "Showing plans found in your mail. Connect Google Calendar to add your events.",
                         button: "Connect", renewing: false, dots: false)
@@ -1008,6 +1053,10 @@ private struct MobileDayTimeline: View {
     /// long, starting on the half hour above the finger. Nil where nothing
     /// can be created (no writable calendar, the practice inbox).
     var create: ((_ startMinutes: Int) -> Void)?
+    /// Brings `firstEventAnchor` to the top of the list. Called by the mark
+    /// itself as it appears, so it runs once the day's hours are laid out,
+    /// whether the day was picked in the month, stepped to, or launched into.
+    var scrollToFirstEvent: () -> Void = {}
 
     @State private var showUnlikely = false
 
@@ -1028,8 +1077,12 @@ private struct MobileDayTimeline: View {
             if !column.night.isEmpty {
                 nightLine
             }
-            hoursWell
-                .simultaneousGesture(swipe)
+            // The mark beside the hours, in their frame.
+            ZStack(alignment: .topLeading) {
+                hoursWell
+                    .simultaneousGesture(swipe)
+                firstEventMark
+            }
             if !column.unlikely.isEmpty {
                 unlikelyFold
             }
@@ -1107,6 +1160,44 @@ private struct MobileDayTimeline: View {
     }
 
     // MARK: the hours
+
+    /// What the day scrolls to when it opens (`MobileCalendarView`).
+    static let firstEventAnchor = "day-first-event"
+    /// Hours of the well always on screen when a day opens, so a first
+    /// event inside them needs no scroll and the all-day chips stay in view.
+    static let opensOnScreen = 4.0
+    /// How much of the hours above the first event the scroll keeps.
+    static let leadHours = 1.5
+
+    /// A mark an hour and a half above the day's first timed event, when that
+    /// event starts too far down the well to be seen as the day opens. No
+    /// mark (no scroll) for a day whose first event is near the top, or with
+    /// no timed event at all.
+    @ViewBuilder private var firstEventMark: some View {
+        if let first = column.blocks.map(\.segment.lo).min() {
+            let top = CGFloat(first) * height
+            if top > CGFloat(Self.opensOnScreen) * Self.hourHeight {
+                // A spacer, then the mark, in a stack: the mark's OWN frame
+                // starts at the hour. An offset moves only the drawing, and a
+                // padded mark was found by `scrollTo` at the padding's top
+                // (both seen in the simulator, where the day scrolled only to
+                // its top).
+                VStack(spacing: 0) {
+                    Color.clear
+                        .frame(width: 1, height: max(0, top - CGFloat(Self.leadHours) * Self.hourHeight))
+                    Color.clear
+                        .frame(width: 1, height: 1)
+                        .id(Self.firstEventAnchor)
+                        .onAppear {
+                            // The next turn of the run loop: the list's own
+                            // layout pass has to have placed the mark first.
+                            DispatchQueue.main.async { scrollToFirstEvent() }
+                        }
+                }
+                .accessibilityHidden(true)
+            }
+        }
+    }
 
     private var hoursWell: some View {
         GeometryReader { geo in

@@ -1228,7 +1228,10 @@ pub fn default_embed_cache_dir() -> PathBuf {
 /// to `cache_dir`). `model` and `dims` MUST agree with each other and with the
 /// `message_vecs` vec0 `float[N]` in `store/schema.sql` — the store asserts this
 /// at open time, and changing `dims` means resetting the db.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is written by hand so `token` never reaches a `{:?}` (of this, or
+/// of the [`Config`] that holds it).
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EmbedConfig {
     /// fastembed model, written as a full `model_code`. Default:
@@ -1298,6 +1301,52 @@ pub struct EmbedConfig {
     /// not at 5. Anything at or above the ten-minute default is unaffected by
     /// the rounding.
     pub idle_unload_secs: u64,
+    /// Base URL of the shared per-node embedding service
+    /// (docs/EMBED-SERVICE.md), e.g. `http://squelch-embed:8850`. Env:
+    /// `SQUELCH_EMBED_URL`, which the warden renders on hosted tenants.
+    ///
+    /// THIS IS THE WHOLE SWITCH, and it is exclusive. `None` (the default, and
+    /// every self-hosted daemon) embeds in-process exactly as before. `Some`
+    /// sends text to the service and builds NO local ONNX session, ever: not
+    /// at startup, not as a fallback when the service is down. A daemon that
+    /// quietly loaded a local model whenever the service blinked would be a
+    /// pod quietly costing the 300-500 MB this exists to remove. With a URL,
+    /// `model`, `dims` and `max_tokens` must still equal the service's (they
+    /// decide which vector space the store is in) and a disagreement refuses
+    /// to build the embedder; `cache_dir` and `idle_unload_secs` are unused.
+    pub url: Option<String>,
+    /// Bearer token presented to the embedding service. Env:
+    /// `SQUELCH_EMBED_TOKEN`. Optional: absent sends no `Authorization`
+    /// header. Secret material, NEVER logged; prefer the env var over
+    /// config.toml.
+    pub token: Option<String>,
+}
+
+impl std::fmt::Debug for EmbedConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            model,
+            dims,
+            cache_dir,
+            max_chars,
+            max_tokens,
+            backfill_batch,
+            idle_unload_secs,
+            url,
+            token,
+        } = self;
+        f.debug_struct("EmbedConfig")
+            .field("model", model)
+            .field("dims", dims)
+            .field("cache_dir", cache_dir)
+            .field("max_chars", max_chars)
+            .field("max_tokens", max_tokens)
+            .field("backfill_batch", backfill_batch)
+            .field("idle_unload_secs", idle_unload_secs)
+            .field("url", url)
+            .field("token", &token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl Default for EmbedConfig {
@@ -1310,6 +1359,8 @@ impl Default for EmbedConfig {
             max_tokens: crate::embed::DEFAULT_EMBED_MAX_TOKENS,
             backfill_batch: 8,
             idle_unload_secs: 600,
+            url: None,
+            token: None,
         }
     }
 }
@@ -1360,7 +1411,90 @@ impl EmbedConfig {
 #[derive(Debug, Clone)]
 pub struct OAuthClientConfig {
     pub client_id: String,
+    /// Google's Desktop client secret. EMPTY, and never sent, for
+    /// [`OAuthIssuer::Microsoft`]: an Entra "Mobile and desktop" app is a
+    /// public client, has no secret, and its token endpoint refuses a request
+    /// that presents one.
     pub client_secret: String,
+    /// Whose identity platform mints and refreshes this client's tokens.
+    pub issuer: OAuthIssuer,
+}
+
+/// The identity platform behind an [`OAuthClientConfig`]: which authorize
+/// and token endpoints a consent and every refresh talk to. Picked from the
+/// daemon's `provider`, never from anything a token or blob says about itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OAuthIssuer {
+    /// Google (Gmail).
+    #[default]
+    Google,
+    /// The Microsoft identity platform v2.0 (Outlook), on the `common`
+    /// tenant, which serves personal accounts and work or school ones alike.
+    Microsoft,
+}
+
+/// Microsoft's authorize endpoint (`common` tenant).
+pub const MICROSOFT_AUTH_URL: &str =
+    "https://login.microsoftonline.com/common/oauth2/v2.0/authorize";
+/// Microsoft's token endpoint (`common` tenant).
+pub const MICROSOFT_TOKEN_URL: &str = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
+
+/// PASSBAND'S OWN ENTRA APP, built in so a self-host needs no Azure portal
+/// visit: a public client (no secret), so shipping its id in the binary gives
+/// nothing away. `microsoft_client_id` in the config file overrides it.
+pub const PASSBAND_MICROSOFT_CLIENT_ID: &str = "ac4b9805-c059-4564-a201-58d100df8067";
+
+/// The Graph scopes an Outlook consent asks for, in one consent stored in
+/// both mail slots (as Gmail's `gmail.modify` is): read and move mail, send
+/// it, name the account, and `offline_access`, without which Microsoft issues
+/// no refresh token at all and the credential dies within the hour. Plus
+/// `Calendars.ReadWrite`, asked up front so Outlook calendar (not built yet)
+/// needs no second consent; mail never requires it.
+pub const OUTLOOK_MAIL_READWRITE_SCOPE: &str = "https://graph.microsoft.com/Mail.ReadWrite";
+pub const OUTLOOK_MAIL_SEND_SCOPE: &str = "https://graph.microsoft.com/Mail.Send";
+pub const OUTLOOK_MAIL_READ_SCOPE: &str = "https://graph.microsoft.com/Mail.Read";
+pub const OUTLOOK_USER_READ_SCOPE: &str = "https://graph.microsoft.com/User.Read";
+pub const OUTLOOK_OFFLINE_SCOPE: &str = "offline_access";
+pub const OUTLOOK_CALENDAR_SCOPE: &str = "https://graph.microsoft.com/Calendars.ReadWrite";
+pub const OUTLOOK_SCOPES: &[&str] = &[
+    OUTLOOK_MAIL_READWRITE_SCOPE,
+    OUTLOOK_MAIL_SEND_SCOPE,
+    OUTLOOK_USER_READ_SCOPE,
+    OUTLOOK_CALENDAR_SCOPE,
+    OUTLOOK_OFFLINE_SCOPE,
+];
+/// What a mail-slot refresh asks for: the consent minus calendar. Microsoft
+/// refuses a refresh that names a scope the user never granted, so a token
+/// consented before calendar was added must still refresh.
+pub const OUTLOOK_MAIL_SCOPES: &[&str] = &[
+    OUTLOOK_MAIL_READWRITE_SCOPE,
+    OUTLOOK_MAIL_SEND_SCOPE,
+    OUTLOOK_USER_READ_SCOPE,
+    OUTLOOK_OFFLINE_SCOPE,
+];
+
+impl OAuthIssuer {
+    pub fn auth_url(self) -> &'static str {
+        match self {
+            OAuthIssuer::Google => "https://accounts.google.com/o/oauth2/v2/auth",
+            OAuthIssuer::Microsoft => MICROSOFT_AUTH_URL,
+        }
+    }
+
+    pub fn token_url(self) -> &'static str {
+        match self {
+            OAuthIssuer::Google => "https://oauth2.googleapis.com/token",
+            OAuthIssuer::Microsoft => MICROSOFT_TOKEN_URL,
+        }
+    }
+
+    /// The company, for messages.
+    pub fn name(self) -> &'static str {
+        match self {
+            OAuthIssuer::Google => "Google",
+            OAuthIssuer::Microsoft => "Microsoft",
+        }
+    }
 }
 
 /// Importance scores (0-100) assigned by the Stage-1 rules engine per rung.
@@ -2036,6 +2170,14 @@ pub struct Config {
     pub client_secret: Option<String>,
     /// The single Gmail account this v0 instance manages. Also the keyring key.
     pub account_email: Option<String>,
+    /// Which kind of mailbox `account_email` is: `"gmail"` (the default) or
+    /// `"outlook"` (Outlook.com, Hotmail, Microsoft 365, over Graph). Decides
+    /// the OAuth client and endpoints, and binds the account's
+    /// `accounts.provider` row on first boot. Config file only.
+    pub provider: crate::mail::MailProvider,
+    /// The Entra app (client) id an Outlook daemon authorizes as, when not
+    /// Passband's built-in one. A public client: there is no secret.
+    pub microsoft_client_id: Option<String>,
 
     /// Path to the SQLite store.
     pub db_path: PathBuf,
@@ -2094,6 +2236,8 @@ impl Default for Config {
             client_id: None,
             client_secret: None,
             account_email: None,
+            provider: crate::mail::MailProvider::Gmail,
+            microsoft_client_id: None,
             db_path: default_db_path(),
             credential_backend: CredentialBackend::default(),
             credentials_path: None,
@@ -2460,6 +2604,13 @@ impl Config {
             // Same rule again: an exported-but-empty var leaves the Google
             // button off the page rather than rendering one that points at "".
             ("SQUELCH_CONSOLE_SSO_URL", &mut self.console.sso_url),
+            // ---- The shared embedding service ------------------------------
+            // Same rule again, and here it decides where the model runs: an
+            // exported-but-empty URL must leave the daemon embedding in-process
+            // rather than pointing it at "" and building no embedder at all.
+            // The token is never echoed anywhere.
+            ("SQUELCH_EMBED_URL", &mut self.embed.url),
+            ("SQUELCH_EMBED_TOKEN", &mut self.embed.token),
         ] {
             if let Ok(v) = std::env::var(name) {
                 let v = v.trim();
@@ -2713,12 +2864,16 @@ impl Config {
     /// Fetch OAuth client credentials, erroring with a helpful message if the
     /// user hasn't set up their GCP client yet.
     pub fn oauth_client(&self) -> Result<OAuthClientConfig, CoreError> {
+        if self.provider == crate::mail::MailProvider::Outlook {
+            return self.microsoft_client();
+        }
         let client_id = self.client_id.clone().filter(|s| !s.is_empty());
         let client_secret = self.client_secret.clone().filter(|s| !s.is_empty());
         match (client_id, client_secret) {
             (Some(client_id), Some(client_secret)) => Ok(OAuthClientConfig {
                 client_id,
                 client_secret,
+                issuer: OAuthIssuer::Google,
             }),
             _ => Err(CoreError::Credential(format!(
                 "missing OAuth client credentials. Create a Google Cloud \"Desktop app\" \
@@ -2729,6 +2884,34 @@ impl Config {
                     .unwrap_or_else(|| "~/.config/squelch/config.toml".to_string())
             ))),
         }
+    }
+
+    /// The Outlook client: `microsoft_client_id`, else Passband's built-in
+    /// app. A Google `client_secret` left in the config is ignored rather
+    /// than sent, because Microsoft refuses a public client that presents one.
+    fn microsoft_client(&self) -> Result<OAuthClientConfig, CoreError> {
+        let client_id = self
+            .microsoft_client_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(PASSBAND_MICROSOFT_CLIENT_ID)
+            .to_string();
+        if client_id.is_empty() {
+            return Err(CoreError::Credential(format!(
+                "provider = \"outlook\" needs an Entra app: this build has no built-in one, so \
+                 register a \"Mobile and desktop applications\" app (see docs/GETTING-STARTED.md, \
+                 Outlook) and set microsoft_client_id in {}.",
+                Self::default_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "~/.config/squelch/config.toml".to_string())
+            )));
+        }
+        Ok(OAuthClientConfig {
+            client_id,
+            client_secret: String::new(),
+            issuer: OAuthIssuer::Microsoft,
+        })
     }
 
     /// The configured account email, erroring helpfully if unset.
@@ -2858,6 +3041,22 @@ pub fn mirror_env_pairs_to_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The embedding service's bearer token is secret material: no debug
+    /// print of the embed section, or of the whole config, carries it.
+    #[test]
+    fn the_embed_token_never_reaches_a_debug_print() {
+        let mut config = Config::default();
+        config.embed.url = Some("http://squelch-embed:8850".into());
+        config.embed.token = Some("s3cret-embed-token-value".into());
+        for shown in [format!("{:?}", config.embed), format!("{config:?}")] {
+            assert!(!shown.contains("s3cret"), "{shown}");
+            assert!(shown.contains("<redacted>"), "{shown}");
+            assert!(shown.contains("squelch-embed:8850"), "{shown}");
+        }
+        config.embed.token = None;
+        assert!(format!("{:?}", config.embed).contains("token: None"));
+    }
     use std::sync::Mutex;
 
     /// Tests that touch process-wide env must not run concurrently.
@@ -3606,6 +3805,50 @@ archive_access_daily_cap = 9
         assert_eq!(c.embed.idle_unload_secs, 600, "blank is unset, not zero");
         unsafe {
             std::env::remove_var("SQUELCH_EMBED_IDLE_UNLOAD_SECS");
+        }
+    }
+
+    /// The daemon half of the warden's `SQUELCH_WARDEN_EMBED_URL`: the two
+    /// variables a hosted pod is rendered with. Absent is in-process embedding,
+    /// which is self-host and every daemon before this existed.
+    #[test]
+    fn env_names_the_embed_service() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let c = Config::default();
+        assert!(c.embed.url.is_none(), "no URL => local embedder");
+        assert!(c.embed.token.is_none());
+
+        // SAFETY: guarded by ENV_LOCK so no other test reads env concurrently.
+        unsafe {
+            std::env::set_var("SQUELCH_EMBED_URL", "  http://squelch-embed:8850\n");
+            std::env::set_var("SQUELCH_EMBED_TOKEN", "s3cret");
+        }
+        let mut c: Config = toml::from_str("[embed]\nurl = \"http://from-file:8850\"\n").unwrap();
+        assert_eq!(c.embed.url.as_deref(), Some("http://from-file:8850"));
+        c.apply_env_overrides();
+        assert_eq!(c.embed.url.as_deref(), Some("http://squelch-embed:8850"));
+        assert_eq!(c.embed.token.as_deref(), Some("s3cret"));
+
+        // Exported but blank is "unset": it must neither clear a configured URL
+        // nor turn a self-hosted daemon into one with no embedder.
+        for blank in ["", "   ", "\n\t "] {
+            unsafe {
+                std::env::set_var("SQUELCH_EMBED_URL", blank);
+                std::env::set_var("SQUELCH_EMBED_TOKEN", blank);
+            }
+            let mut c = Config::default();
+            c.apply_env_overrides();
+            assert!(c.embed.url.is_none(), "{blank:?}");
+            assert!(c.embed.token.is_none(), "{blank:?}");
+
+            let mut c: Config =
+                toml::from_str("[embed]\nurl = \"http://from-file:8850\"\n").unwrap();
+            c.apply_env_overrides();
+            assert_eq!(c.embed.url.as_deref(), Some("http://from-file:8850"));
+        }
+        unsafe {
+            std::env::remove_var("SQUELCH_EMBED_URL");
+            std::env::remove_var("SQUELCH_EMBED_TOKEN");
         }
     }
 
@@ -4535,6 +4778,34 @@ archive_access_daily_cap = 9
     fn oauth_client_errors_when_missing() {
         let c = Config::default();
         assert!(c.oauth_client().is_err());
+    }
+
+    #[test]
+    fn an_outlook_daemon_gets_a_public_microsoft_client() {
+        let mut c: Config = toml::from_str(
+            "provider = \"outlook\"\nmicrosoft_client_id = \" abc-123 \"\nclient_secret = \"google-secret\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.provider, crate::mail::MailProvider::Outlook);
+        let client = c.oauth_client().unwrap();
+        assert_eq!(client.issuer, OAuthIssuer::Microsoft);
+        assert_eq!(client.client_id, "abc-123");
+        assert!(
+            client.client_secret.is_empty(),
+            "a Google secret must never reach Microsoft"
+        );
+        // No id configured: Passband's own Entra app, still public.
+        c.microsoft_client_id = None;
+        let client = c.oauth_client().unwrap();
+        assert_eq!(client.client_id, PASSBAND_MICROSOFT_CLIENT_ID);
+        assert!(client.client_secret.is_empty());
+    }
+
+    #[test]
+    fn the_provider_defaults_to_gmail_and_refuses_strangers() {
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.provider, crate::mail::MailProvider::Gmail);
+        assert!(toml::from_str::<Config>("provider = \"exchange-ews\"\n").is_err());
     }
 
     #[test]

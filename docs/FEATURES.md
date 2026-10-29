@@ -55,19 +55,19 @@ Two consequences worth knowing:
    drawn from `KNOWN`, so this is required even for a flag only the apps read.
 
    ```rust
-   pub const CALENDAR: &str = "calendar";
+   pub const RENOTIFY: &str = "renotify";
 
    pub const KNOWN: &[Feature] = &[Feature {
-       key: CALENDAR,
-       summary: "The Calendar page: events from mail, a Google Calendar connection, and creating \
-                 and editing events.",
+       key: RENOTIFY,
+       summary: "Smart re-notify: a second banner for mail that still needs handling, when the \
+                 Mac comes online or a meeting ends.",
    }];
    ```
 
 2. **Gate the daemon** wherever it matters. In an API handler:
 
    ```rust
-   if !state.features().enabled(features::CALENDAR) {
+   if !state.features().enabled(features::RENOTIFY) {
        return Err(ApiError::not_found());
    }
    ```
@@ -80,9 +80,9 @@ Two consequences worth knowing:
    feature's own code is fine) and check it where the UI would appear:
 
    ```swift
-   extension HiddenFeature { static let calendar = HiddenFeature(key: "calendar") }
+   extension HiddenFeature { static let renotify = HiddenFeature(key: "renotify") }
 
-   if store.hasFeature(.calendar) { CalendarRailTile() }
+   if store.hasFeature(.renotify) { RenotifySettingsRow() }
    ```
 
 4. **Ship.** The control plane deploys from `main` and the box appears on
@@ -97,7 +97,7 @@ underscores, at most 48 characters.
 Pin it on the daemon you are pointed at:
 
 ```sh
-SQUELCH_FEATURES=calendar,agent_send squelchd serve
+SQUELCH_FEATURES=renotify,agent_send squelchd serve
 ```
 
 Pinned keys are on regardless of any control plane, and the app learns them the
@@ -108,12 +108,26 @@ hosted pod sets the variable, so it is not a way around the admin page.
 
 Tick "Everyone" to turn a feature on for the whole fleet, new signups included.
 When it has settled, delete the flag: the `KNOWN` entry, the constant, and every
-check on it, in the daemon and the apps. Leftover rows in the two tables are
-harmless and saving the admin page does not touch them.
+check on it, in the daemon and the apps, and add the key to `RETIRED` in
+`squelch-core/src/features.rs` (a test there fails if a `KNOWN` key is ever a
+retired one). Leftover rows in the two tables are harmless and saving the admin
+page does not touch them. (With no users yet, a launch can skip the "Everyone"
+step and go straight to deleting the flag, as `calendar` did.)
 
 **Never reuse a key.** Those leftover rows are still served to daemons, so a
 retired key given to a new feature arrives already switched on for whoever had
 the old one, which after an "Everyone" launch is the whole fleet.
+
+## Retired keys
+
+These were hidden features and have launched. Do not give their keys to anything
+new. Any `tenant_features` or `feature_defaults` rows for them are leftovers:
+still stored, still served on `GET /tenant/features` and in `/client/stats`
+`features`, and read by nothing.
+
+| Key | What it was | Retired |
+|---|---|---|
+| `calendar` | The Calendar page, the timeline, and the Google Calendar connection (docs/CALENDAR.md §11) | 2026-10, launched for everyone |
 
 ## What this is not
 

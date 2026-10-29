@@ -2,7 +2,7 @@
 
 use super::super::migrate::{
     canonical_fts_create, create_shipment_order_links, migrate, normalize_fts_sql,
-    rebuild_fts_if_stale,
+    rebuild_fts_if_stale, reindex_calendar_search_if_stale,
 };
 use super::super::*;
 use super::support::*;
@@ -2462,6 +2462,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
                 "description",
                 "guests_truncated",
                 "organizer_unreadable",
+                "from_gmail",
             ]
         );
         assert_eq!(
@@ -2501,7 +2502,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
     {
         let upgraded = SqliteStore::open(&path).unwrap();
         let conn = upgraded.lock().unwrap();
-        assert_eq!(columns(&conn, "calendar_events").len(), 22);
+        assert_eq!(columns(&conn, "calendar_events").len(), 23);
         assert_eq!(columns(&conn, "calendar_event_guests").len(), 9);
         assert!(index_exists(&conn));
         let mail: i64 = conn
@@ -2548,7 +2549,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
     {
         let conn = reopened.lock().unwrap();
         assert_eq!(columns(&conn, "calendar_calendars").len(), 15);
-        assert_eq!(columns(&conn, "calendar_events").len(), 22);
+        assert_eq!(columns(&conn, "calendar_events").len(), 23);
         // A store from before guests was synced one attendee at a time: its
         // tokens are forgotten, so the next pass reads every calendar in full
         // with the new parameters.
@@ -2600,7 +2601,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
     let reopened = SqliteStore::open(&path).unwrap();
     {
         let conn = reopened.lock().unwrap();
-        assert_eq!(columns(&conn, "calendar_events").len(), 22);
+        assert_eq!(columns(&conn, "calendar_events").len(), 23);
         let sync: (Option<String>, Option<String>) = conn
             .query_row(
                 "SELECT sync_token, full_synced_at FROM calendar_calendars",
@@ -2612,6 +2613,37 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
             sync,
             (None, None),
             "the organizer mark alone forgets the tokens"
+        );
+    }
+    drop(reopened);
+    // And one from before the Gmail mark: that column alone forgets the
+    // tokens too, so the next pass rereads with `eventType` in the mask.
+    let reopened = SqliteStore::open(&path).unwrap();
+    reopened
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "ALTER TABLE calendar_events DROP COLUMN from_gmail;
+             UPDATE calendar_calendars SET sync_token='minted-before-gmail',
+                    full_synced_at='2026-10-03T00:00:00+00:00';",
+        )
+        .unwrap();
+    drop(reopened);
+    let reopened = SqliteStore::open(&path).unwrap();
+    {
+        let conn = reopened.lock().unwrap();
+        assert_eq!(columns(&conn, "calendar_events").len(), 23);
+        let sync: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT sync_token, full_synced_at FROM calendar_calendars",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            sync,
+            (None, None),
+            "the Gmail mark alone forgets the tokens"
         );
     }
     drop(reopened);
@@ -2648,6 +2680,7 @@ fn an_events_guests_are_stored_with_it_and_go_with_it() {
         start_timezone: None,
         organizer_email: None,
         organizer_unreadable: false,
+        from_gmail: false,
         organizer_self: true,
         self_response: None,
         transparent: false,
@@ -2783,6 +2816,116 @@ fn an_events_guests_are_stored_with_it_and_go_with_it() {
         })
         .unwrap();
     assert_eq!(left, 0);
+}
+
+/// The card's places: a location wants one only when it is long, shown and
+/// not yet answered under the current prompt; upcoming first; one answer per
+/// location text, scoped by account; pruned once no event holds the text.
+#[test]
+fn calendar_places_are_pending_stored_and_pruned_by_location() {
+    use crate::gcal::{CalendarMeta, EventItem, EventRow, PRIMARY};
+    use crate::triage::ghost::EventTime;
+    let (store, acct) = store();
+    let other = store.ensure_account("other@example.com").unwrap();
+    let now: DateTime<Utc> = "2026-10-05T12:00:00Z".parse().unwrap();
+    let tock = "Dingles Public House, Tock is now part of the Resy network. Explore more";
+    let soon = "Harbor Tavern, 12 Water St, Portland. Book again on our app today";
+    let past = "Old Spot, 1 Elm St. This venue now takes bookings through a new app";
+    let event = |id: &str, location: Option<&str>, start: &str| EventRow {
+        event_id: id.into(),
+        ical_uid: None,
+        tentative: false,
+        summary: Some("Dinner".into()),
+        location: location.map(str::to_string),
+        start: EventTime::parse(start).unwrap(),
+        end: None,
+        start_timezone: None,
+        organizer_email: None,
+        organizer_unreadable: false,
+        from_gmail: false,
+        organizer_self: true,
+        self_response: None,
+        transparent: false,
+        html_link: None,
+        updated_at: None,
+        color_id: None,
+        description: None,
+        guests: Vec::new(),
+        guests_truncated: false,
+    };
+    for account in [acct, other] {
+        store
+            .calendar_set_selection(account, &[CalendarMeta::primary_only()])
+            .unwrap();
+    }
+    for row in [
+        event("a", Some(tock), "2026-10-28T20:15:00-04:00"),
+        event("b", Some(tock), "2026-11-04T20:15:00-04:00"),
+        event("c", Some(soon), "2026-10-06T19:00:00-04:00"),
+        event("d", Some(past), "2026-09-01T19:00:00-04:00"),
+        event("e", Some("Zoom"), "2026-10-07T19:00:00-04:00"),
+        event("f", None, "2026-10-08T19:00:00-04:00"),
+    ] {
+        store.calendar_put_event(acct, PRIMARY, &row).unwrap();
+    }
+    // One per text, the soonest upcoming first, then the past; a short
+    // location makes no call.
+    assert_eq!(
+        store.calendar_places_pending(acct, now, 10).unwrap(),
+        vec![soon.to_string(), tock.to_string(), past.to_string()]
+    );
+    assert_eq!(
+        store.calendar_places_pending(acct, now, 1).unwrap(),
+        vec![soon]
+    );
+    assert!(
+        store
+            .calendar_places_pending(other, now, 10)
+            .unwrap()
+            .is_empty()
+    );
+
+    let dingles = crate::gcal::place::Place {
+        name: Some("Dingles Public House".to_string()),
+        address: Some("165 Main St".to_string()),
+    };
+    store
+        .calendar_place_put(acct, tock, Some(&dingles), now)
+        .unwrap();
+    store.calendar_place_put(acct, past, None, now).unwrap();
+    assert_eq!(
+        store.calendar_places_pending(acct, now, 10).unwrap(),
+        vec![soon]
+    );
+    let places = store.calendar_places(acct).unwrap();
+    assert_eq!(places.get(tock), Some(&Some(dingles.clone())));
+    assert_eq!(places.get(past), Some(&None));
+    assert!(store.calendar_places(other).unwrap().is_empty());
+
+    // An answer under an older prompt is served, and asked again.
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE calendar_places SET prompt_version='old' WHERE raw=?1",
+            [tock],
+        )
+        .unwrap();
+    assert_eq!(
+        store.calendar_places_pending(acct, now, 10).unwrap(),
+        vec![soon.to_string(), tock.to_string()]
+    );
+    assert!(store.calendar_places(acct).unwrap().contains_key(tock));
+
+    // Pruned only once no event holds the text.
+    store
+        .calendar_apply_page(acct, PRIMARY, &[EventItem::Remove("a".into())], now)
+        .unwrap();
+    assert_eq!(store.calendar_places_prune(acct).unwrap(), 0);
+    store.calendar_remove_event(acct, PRIMARY, "b").unwrap();
+    store.calendar_remove_event(acct, PRIMARY, "d").unwrap();
+    assert_eq!(store.calendar_places_prune(acct).unwrap(), 2);
+    assert!(store.calendar_places(acct).unwrap().is_empty());
 }
 
 /// The per-connection tuning `set_pragmas` applies on every open, asserted on a
@@ -3198,4 +3341,163 @@ fn migrate_gives_every_preexisting_account_the_gmail_provider() {
         })
         .unwrap();
     assert_eq!(provider, "gmail");
+}
+
+/// Calendar search's index (schema.sql, CALENDAR SEARCH) holds exactly one
+/// row per stored event, whichever path writes or deletes it, and a store
+/// whose index is out of step (events written before it existed, or by an
+/// older daemon) is rebuilt at open.
+#[test]
+fn calendar_search_index_follows_every_write_and_is_rebuilt_when_stale() {
+    use crate::gcal::search::{Audience, CalendarQuery, search};
+    use crate::gcal::{CalendarMeta, EventItem, EventRow, PRIMARY};
+    use crate::triage::ghost::EventTime;
+    let (store, acct) = store();
+    let now = Utc::now();
+    store
+        .calendar_set_selection(acct, &[CalendarMeta::primary_only()])
+        .unwrap();
+    let event = |id: &str, title: &str| EventRow {
+        event_id: id.into(),
+        ical_uid: None,
+        tentative: false,
+        summary: Some(title.into()),
+        location: None,
+        start: EventTime::At((now + chrono::Duration::days(2)).fixed_offset()),
+        end: None,
+        start_timezone: None,
+        organizer_email: None,
+        organizer_unreadable: false,
+        organizer_self: true,
+        self_response: None,
+        transparent: false,
+        html_link: None,
+        updated_at: None,
+        color_id: None,
+        description: None,
+        from_gmail: false,
+        guests: Vec::new(),
+        guests_truncated: false,
+    };
+    let counts = || -> (i64, i64, i64) {
+        let conn = store.lock().unwrap();
+        let n = |sql: &str| conn.query_row(sql, [], |r| r.get(0)).unwrap();
+        (
+            n("SELECT COUNT(*) FROM calendar_events"),
+            n("SELECT COUNT(*) FROM calendar_search_keys"),
+            n("SELECT COUNT(*) FROM calendar_search_fts"),
+        )
+    };
+    let titles = |q: &str| -> Vec<String> {
+        search(
+            &store,
+            acct,
+            &CalendarQuery::parse(q).unwrap(),
+            Audience::Owner,
+            true,
+            now,
+            50,
+        )
+        .unwrap()
+        .hits
+        .into_iter()
+        .map(|h| match h {
+            crate::gcal::search::CalendarHit::Event(e) => e.row.summary.unwrap_or_default(),
+            crate::gcal::search::CalendarHit::Ghost(g) => g.title,
+        })
+        .collect()
+    };
+    let page = |items: Vec<EventItem>| {
+        store
+            .calendar_apply_page(acct, PRIMARY, &items, now)
+            .unwrap();
+    };
+    page(vec![
+        EventItem::Upsert(Box::new(event("a", "Pottery class"))),
+        EventItem::Upsert(Box::new(event("b", "Dentist"))),
+    ]);
+    assert_eq!(counts(), (2, 2, 2));
+    assert_eq!(titles("pottery"), ["Pottery class"]);
+
+    // Rewritten: the old words go, the new ones come, no second row.
+    page(vec![EventItem::Upsert(Box::new(event(
+        "a",
+        "Ceramics class",
+    )))]);
+    assert_eq!(counts(), (2, 2, 2));
+    assert!(titles("pottery").is_empty());
+    assert_eq!(titles("ceramics"), ["Ceramics class"]);
+
+    // Every delete path: a removal in a page, the user's own delete, a
+    // full sync's sweep.
+    page(vec![EventItem::Remove("a".into())]);
+    assert_eq!(counts(), (1, 1, 1));
+    assert!(titles("ceramics").is_empty());
+    store
+        .calendar_put_event(acct, PRIMARY, &event("c", "Flight"))
+        .unwrap();
+    assert_eq!(counts(), (2, 2, 2));
+    store.calendar_remove_event(acct, PRIMARY, "c").unwrap();
+    assert_eq!(counts(), (1, 1, 1));
+    let seen = std::collections::HashSet::new();
+    store
+        .calendar_finish_sync(acct, PRIMARY, Some("tok"), now, Some((&seen, false)))
+        .unwrap();
+    assert_eq!(counts(), (0, 0, 0));
+
+    // Stale: an older daemon wrote events and kept no index.
+    page(vec![EventItem::Upsert(Box::new(event(
+        "d",
+        "Yoga retreat",
+    )))]);
+    {
+        let conn = store.lock().unwrap();
+        conn.execute_batch("DELETE FROM calendar_search_fts; DELETE FROM calendar_search_keys;")
+            .unwrap();
+    }
+    assert!(titles("yoga").is_empty());
+    reindex_calendar_search_if_stale(&store.lock().unwrap()).unwrap();
+    assert_eq!(counts(), (1, 1, 1));
+    assert_eq!(titles("yoga"), ["Yoga retreat"]);
+
+    // An older daemon EDITS an event in place: the old words must not keep
+    // matching under the new title, and the open after it reindexes.
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE calendar_events SET summary='Running club' WHERE event_id='d'",
+            [],
+        )
+        .unwrap();
+    assert!(titles("yoga").is_empty());
+    reindex_calendar_search_if_stale(&store.lock().unwrap()).unwrap();
+    assert_eq!(counts(), (1, 1, 1));
+    assert_eq!(titles("runni"), ["Running club"]);
+    assert!(titles("yoga").is_empty());
+
+    // An index built with another definition (porter, before 2026-10-28) is
+    // recreated and refilled.
+    {
+        let conn = store.lock().unwrap();
+        conn.execute_batch(
+            "DROP TABLE calendar_search_fts;
+             CREATE VIRTUAL TABLE calendar_search_fts USING fts5(
+                 title, place, notes, people, addresses,
+                 tokenize = 'porter unicode61', prefix = '2 3');",
+        )
+        .unwrap();
+    }
+    reindex_calendar_search_if_stale(&store.lock().unwrap()).unwrap();
+    let sql: String = store
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name='calendar_search_fts'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!sql.contains("porter"), "{sql}");
+    assert_eq!(titles("runni"), ["Running club"]);
 }

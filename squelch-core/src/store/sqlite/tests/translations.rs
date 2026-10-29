@@ -770,6 +770,7 @@ fn a_heal_drops_the_translation_its_vector_and_its_index_row() {
         .ingest(&store);
     store.claim_translations(acct, Utc::now(), 10).unwrap();
     translate_row(&store, id, "Your invoice", "Hello Marie, your invoice");
+    settle_decided(&store, acct, &[id]);
     let v = crate::embed::StubEmbedder::new(384)
         .embed("Your invoice Hello Marie")
         .unwrap();
@@ -812,6 +813,8 @@ fn the_vector_legs_take_the_nearer_of_the_two_vectors() {
         .subject("Weekend plans")
         .body("Hiking in the mountains this weekend with the dog")
         .ingest(&store);
+    // Decided and not sealed, or no embedder may read either of them.
+    settle_decided(&store, acct, &[fr, decoy]);
     for (id, text) in [
         (
             fr,
@@ -843,6 +846,30 @@ fn the_vector_legs_take_the_nearer_of_the_two_vectors() {
         "Your electricity bill payment is due",
     );
     translate_row(&store, fr, s, b);
+    // The English landing is new content: the message awaits re-triage, and
+    // its vectors went with the old snapshot.
+    assert_eq!(vec_count_for(&store, fr), 0, "undecided again: no vector");
+    assert!(
+        store
+            .translations_missing_vectors(acct, 10)
+            .unwrap()
+            .is_empty()
+    );
+    // Re-decided, not sealed: owed both again.
+    settle_decided(&store, acct, &[fr]);
+    store
+        .upsert_message_vector(
+            acct,
+            fr,
+            &embedder
+                .embed(&message_embed_text(
+                    "Votre facture",
+                    FRENCH_BODY,
+                    DEFAULT_EMBED_MAX_CHARS,
+                ))
+                .unwrap(),
+        )
+        .unwrap();
     assert_eq!(
         store.translations_missing_vectors(acct, 10).unwrap().len(),
         1,
@@ -880,6 +907,9 @@ fn the_vector_legs_take_the_nearer_of_the_two_vectors() {
             .map(|c| c.id)
             .collect()
     };
+    // Neither readable at the agent door yet: the leg's subject is the access
+    // prefilter over vectors that exist, not the embedders' gate.
+    store.execute_batch_for_test("UPDATE agent_message_state SET access='pending'");
     store
         .lock()
         .unwrap()

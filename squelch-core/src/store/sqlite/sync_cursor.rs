@@ -30,6 +30,40 @@ impl SqliteStore {
         MailProvider::parse(&stored)
     }
 
+    /// Does the account hold any message at all? `squelchd auth --imap`
+    /// refuses to turn an account with mail into an IMAP one: its rows carry
+    /// another provider's ids.
+    pub fn account_has_messages(&self, account_id: AccountId) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT 1 FROM messages WHERE account_id = ?1 LIMIT 1",
+                params![account_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Set which provider an account is. `squelchd auth --imap` is the only
+    /// writer, and it writes LAST, once the server config and the password
+    /// are stored, so an account never reads as IMAP without them.
+    pub fn set_account_provider(
+        &self,
+        account_id: AccountId,
+        provider: MailProvider,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "UPDATE accounts SET provider = ?1 WHERE id = ?2",
+            params![provider.as_str(), account_id],
+        )?;
+        if n == 0 {
+            return Err(CoreError::NotFound);
+        }
+        Ok(())
+    }
+
     pub(super) fn sync_cursor(&self, account_id: AccountId) -> Result<Option<SyncCursor>> {
         let conn = self.lock()?;
         if provider_conn(&conn, account_id)?.as_deref() == Some(MailProvider::Gmail.as_str()) {
@@ -98,10 +132,53 @@ impl SqliteStore {
     pub(super) fn has_message(&self, account_id: AccountId, provider_msg_id: &str) -> Result<bool> {
         let conn = self.lock()?;
         Ok(conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM messages WHERE account_id = ?1 AND gmail_msg_id = ?2)",
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE account_id = ?1 AND gmail_msg_id = ?2
+                AND is_spam = 0 AND is_archive = 0)",
             params![account_id, provider_msg_id],
             |r| r.get(0),
         )?)
+    }
+}
+
+impl SqliteStore {
+    /// HOLD THE ACCOUNT TO THE PROVIDER ITS DAEMON IS CONFIGURED FOR, once at
+    /// startup, before anything syncs or writes.
+    ///
+    /// A stored provider that matches is the steady state. A fresh account
+    /// (still the column's `'gmail'` default, and nothing ever synced: no
+    /// message, no cursor in either table) takes the configured one: this is
+    /// how an Outlook daemon's first boot marks its account. Anything else is
+    /// refused, because a mailbox does not change provider: syncing a Gmail
+    /// database's account as Outlook (or the reverse) would key Graph's ids
+    /// against Gmail's rows and hand one company's token to the other's API.
+    pub fn bind_account_provider(&self, account_id: AccountId, wanted: MailProvider) -> Result<()> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let stored = provider_conn(&tx, account_id)?.ok_or(CoreError::NotFound)?;
+        if stored == wanted.as_str() {
+            return Ok(());
+        }
+        let untouched: bool = tx.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM messages WHERE account_id = ?1)
+                AND NOT EXISTS(SELECT 1 FROM sync_cursor WHERE account_id = ?1)
+                AND NOT EXISTS(SELECT 1 FROM sync_state WHERE account_id = ?1 AND mailbox = ?2)",
+            params![account_id, LEGACY_GMAIL_CURSOR_KEY],
+            |r| r.get(0),
+        )?;
+        if stored == MailProvider::Gmail.as_str() && untouched {
+            tx.execute(
+                "UPDATE accounts SET provider = ?2 WHERE id = ?1",
+                params![account_id, wanted.as_str()],
+            )?;
+            tx.commit()?;
+            return Ok(());
+        }
+        Err(CoreError::InvalidInput(format!(
+            "this database's account syncs as {stored:?}, but the config says provider = {:?}. \
+             A mailbox cannot change provider: point db_path at a fresh database for the other \
+             account, or set provider back.",
+            wanted.as_str()
+        )))
     }
 }
 

@@ -701,3 +701,101 @@ pub(super) fn plan(conn: &rusqlite::Connection, sql: &str) -> Vec<String> {
         .map(|line| line.unwrap())
         .collect()
 }
+
+// ---- decisions, for the embedders' sealed gate ----------------------------
+
+/// A triage decision for `id`, `adjust`ed, committed through the worker's
+/// own path (claim, context, commit), so every hook a real decision runs
+/// runs. The caller's store must hold no other claimable triage job.
+pub(super) fn commit_decision(
+    store: &SqliteStore,
+    acct: AccountId,
+    id: i64,
+    adjust: impl FnOnce(&mut crate::triage::decision::MessageDecision),
+) {
+    use crate::store::agent_triage::{AgentCommitOutcome, AgentTriageStore};
+    // A trigger of its own per call: a job is unique per trigger and revision,
+    // and a re-triage of unchanged content is a second job, not the first.
+    static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    store
+        .enqueue_agent_triage(acct, id, &format!("test:{run}"), false)
+        .unwrap();
+    let job = store
+        .claim_agent_job(acct, "triage", Utc::now() + chrono::Duration::hours(1), 60)
+        .unwrap()
+        .expect("a triage job waits");
+    assert_eq!(job.message_id, id, "another message's job was claimable");
+    let context = store.load_agent_context(&job).unwrap();
+    let mut decision = crate::triage::decision::MessageDecision {
+        kinds: vec![crate::triage::decision::EmailKind::General],
+        summary: "A note".into(),
+        reason: "Ordinary mail".into(),
+        ..Default::default()
+    };
+    adjust(&mut decision);
+    assert_eq!(
+        store
+            .commit_agent_decision(
+                &job,
+                &context,
+                &decision,
+                std::slice::from_ref(&context.message.source)
+            )
+            .unwrap(),
+        AgentCommitOutcome::Applied
+    );
+}
+
+/// An ordinary, NOT sealed decision written straight into the tables, access
+/// settled `allowed`, for fixtures whose subject is ranking or snippets and
+/// that need several rows decided at once. The sealed-gate tests use
+/// [`commit_decision`].
+pub(super) fn settle_decided(store: &SqliteStore, acct: AccountId, ids: &[i64]) {
+    let conn = store.lock().unwrap();
+    for id in ids {
+        conn.execute(
+            "INSERT INTO agent_message_state(account_id,message_id,content_snapshot,revision,access)
+             VALUES(?1,?2,'',1,'allowed') ON CONFLICT(account_id,message_id) DO UPDATE SET access='allowed'",
+            params![acct, id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO agent_message_decisions(account_id,message_id,revision,decision_json,decided_at)
+             VALUES(?1,?2,(SELECT revision FROM agent_message_state WHERE account_id=?1 AND message_id=?2),
+                    '{\"kinds\":[\"general\"]}',?3)",
+            params![acct, id, Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+    }
+}
+
+/// Every non-spam message with no vector, as the drain selected them BEFORE
+/// the sealed gate: for fixtures about ranking and snippets, which plant
+/// vectors raw. Never the subject of a gate test.
+pub(super) fn unvectored(
+    store: &SqliteStore,
+    acct: AccountId,
+    limit: i64,
+) -> Vec<crate::store::MissingVector> {
+    let conn = store.lock().unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT m.id, m.subject, m.body FROM messages m
+             JOIN triage t ON t.message_id = m.id
+             WHERE m.account_id = ?1 AND m.is_spam = 0
+               AND NOT EXISTS (SELECT 1 FROM message_vecs v WHERE v.message_id = m.id)
+             ORDER BY m.received_at DESC LIMIT ?2",
+        )
+        .unwrap();
+    stmt.query_map(params![acct, limit], |r| {
+        Ok(crate::store::MissingVector {
+            message_id: r.get(0)?,
+            subject: r.get(1)?,
+            body: r.get(2)?,
+        })
+    })
+    .unwrap()
+    .map(|r| r.unwrap())
+    .collect()
+}

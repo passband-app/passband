@@ -254,6 +254,43 @@ is already set up, open **Settings**, go to **Account**, and press
 
 If Test fails, jump to troubleshooting below; the error text names the cause.
 
+## Outlook instead of Gmail
+
+Outlook.com, Hotmail and Microsoft 365 mailboxes sync over Microsoft Graph.
+Skip step 1 (no Google client) and put two lines in the daemon's config file,
+`~/.config/squelch/config.toml` for the user squelchd runs as, on every
+machine that runs `squelchd auth` (the export laptop too):
+
+```toml
+provider = "outlook"
+```
+
+`account_email` is optional for Outlook: `squelchd auth` saves whatever
+address Microsoft names for the account you sign in with. Mail goes out as
+that account's primary address; to send as an `@outlook.com` alias, make it
+primary at account.live.com/names/manage (it can take hours to reach
+Outlook). There is no environment variable for `provider`; it is a
+config-file key.
+Then run step 3 as written, without the two `SQUELCH_CLIENT_*` variables. The
+consent screen is Microsoft's and asks for mail read/write, send, calendar,
+your profile, and offline access, once for both reading and writing. `--broker`
+is Gmail-only, and the calendar view is not built for Outlook yet.
+
+The build ships Passband's own Entra app, so there is nothing to register.
+To use your own instead (a work tenant that blocks unverified apps, say): in the Azure
+portal, App registrations, New registration; supported account types
+"Accounts in any organizational directory and personal Microsoft accounts";
+platform "Mobile and desktop applications" with redirect URI
+`http://127.0.0.1` (Entra ignores the port on a loopback redirect, and
+squelchd's listener picks one); delegated Graph permissions `Mail.ReadWrite`,
+`Mail.Send`, `Calendars.ReadWrite`, `User.Read` and `offline_access`. No client secret. Put its
+Application (client) ID in the config as `microsoft_client_id = "..."`, which
+overrides the built-in one.
+
+A daemon's database belongs to one provider: the first boot marks the
+account, and a later config that disagrees is refused. Details, and what is
+not built yet, are in [MAIL-PROVIDERS.md](MAIL-PROVIDERS.md#outlook-microsoft-graph).
+
 ## 6. Optional extras
 
 **The console.** The daemon serves a small web console for itself at
@@ -292,11 +329,9 @@ ever load the Read slot, and the agent door has no write tools at all. (Older
 versions of this guide said to export again with `--write`; that flag is still
 accepted and changes nothing.)
 
-**Google Calendar.** The calendar is a hidden feature, off until you turn it on:
-start squelchd with `SQUELCH_FEATURES=calendar` (in the compose file's
-`environment`, or on the command line) and the app shows a Calendar page on its
-next stats poll. Without it the calendar routes answer 404 and the calendar sync
-calls Google for nothing.
+**Google Calendar.** Every daemon serves the calendar; there is nothing to turn
+on. (Older guides said to set `SQUELCH_FEATURES=calendar`; that key is retired
+and does nothing now.)
 
 The app's calendar page has a Connect button. On your own
 daemon it asks squelchd to run the Google consent itself: the daemon hands the app

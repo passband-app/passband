@@ -469,6 +469,7 @@ mod tests {
         let client = squelch_core::config::OAuthClientConfig {
             client_id: "id".into(),
             client_secret: "secret".into(),
+            issuer: Default::default(),
         };
         let consent =
             LoopbackConsent::begin(&client, AuthScopes::Calendar, 8847, Some("me@x.com")).unwrap();

@@ -111,7 +111,10 @@ jobs:
             'Existing installs get this via auto-update. New installs: unzip and drag' \
             'to Applications, or `brew install --cask passband-app/tap/passband`.' \
             >> "$NOTES"
+          # The dSYM rides on THIS repo's release only, never the public
+          # mirror below: it is for symbolicating crashes, not for downloads.
           gh release create "$GITHUB_REF_NAME" "passband/build/Passband-$VERSION.zip" \
+            "passband/build/symbols-Passband-$VERSION.dSYM.zip" \
             --title "Passband $VERSION" \
             --notes-file "$NOTES"
 

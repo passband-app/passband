@@ -1062,7 +1062,7 @@ struct ThreadViewer: View {
                             // and then thrown away by the pass that named it.
                             FrameHeights.shared.using(width: width)
                         }
-                        .readerColumn()
+                        .readerColumn(clearing: radioClearance)
                         // The column itself, as a scroll target: see `holdNewest`.
                         .id(Self.columnId)
                         // INSIDE the scroll content deliberately: an overlay on the
@@ -1386,7 +1386,7 @@ struct ThreadViewer: View {
                         if !isReadingMail {
                             StyleRadio(style: style, ready: styleReady) { chooseStyle($0) }
                                 .padding(.top, Space.s10)
-                                .padding(.trailing, Space.s12)
+                                .padding(.trailing, StyleRadio.cornerInset)
                         }
                     }
                 #endif
@@ -1701,6 +1701,19 @@ struct ThreadViewer: View {
         let declared = FrameHeights.shared.width
         let column = declared > 0 ? declared : Self.columnWidth - Self.columnPadding * 2
         return bodyWidth(column: column, style: style)
+    }
+
+    /// HOW FAR THE MAIL HAS TO STAY FROM THE READER'S TRAILING EDGE so the
+    /// floating card / chat switch never sits on a card's date. A wide window
+    /// clears it for free (the column is capped and centred), but a narrow one,
+    /// say with the search panel open beside it, used to run the first card's
+    /// date straight under the switch. Zero when the switch is not drawn.
+    private var radioClearance: CGFloat {
+        #if os(macOS)
+            isReadingMail ? 0 : StyleRadio.footprint + Space.s8
+        #else
+            0
+        #endif
     }
 
     /// The mail's measure. The dismissible gutter is defined as the complement
@@ -3427,17 +3440,28 @@ struct ReaderBackdrop: View {
 /// and a height taken at any other width is a card that arrives and then
 /// snaps to its real size — the flicker the height memory exists to prevent.
 private struct ReaderColumn: ViewModifier {
+    /// Room the column must leave at the reader's edges for something floating
+    /// in a corner (the reader's card / chat switch). Applied OUTSIDE the
+    /// capped measure, so a window wide enough to centre the column with that
+    /// much to spare lays out exactly as it would without it, and the Reading
+    /// peek, which passes nothing, keeps the reader's width there. Symmetric so
+    /// the column stays centred under the header.
+    var clearing: CGFloat = 0
+
     func body(content: Content) -> some View {
         content
             .padding(.horizontal, ThreadViewer.columnPadding)
             .padding(.vertical, Space.s4)
             .frame(maxWidth: ThreadViewer.columnWidth)
+            .padding(.horizontal, max(0, clearing - ThreadViewer.columnPadding))
             .frame(maxWidth: .infinity)
     }
 }
 
 extension View {
-    fileprivate func readerColumn() -> some View { modifier(ReaderColumn()) }
+    fileprivate func readerColumn(clearing: CGFloat = 0) -> some View {
+        modifier(ReaderColumn(clearing: clearing))
+    }
 }
 
 #if os(macOS)
@@ -4149,6 +4173,14 @@ private struct StyleRadio: View {
     private var slot: CGFloat { axis == .horizontal ? Space.scaled(30) : Space.scaled(26) }
     private var gap: CGFloat { Space.s2 }
     private var pad: CGFloat { Space.scaled(3) }
+
+    /// Where the Mac's floating control sits in from the reader's edge.
+    static var cornerInset: CGFloat { Space.s12 }
+    /// How much of the reader's width the floating (vertical) control covers,
+    /// counted from the reader's trailing edge. The reader's column keeps clear
+    /// of it (`ThreadViewer.radioClearance`), so it is derived from the same
+    /// numbers the control is drawn with rather than measured.
+    static var footprint: CGFloat { cornerInset + Space.scaled(26) + Space.scaled(3) * 2 }
 
     /// ONE layout, chosen per axis. `AnyLayout` rather than an `if` around two
     /// stacks on purpose: an `if` is two view identities, and the slots would

@@ -486,6 +486,7 @@ final class AssistantSession {
         activeAskEmail = nil
         transcript.removeAll()
         history.removeAll()
+        elidedResults = 0
         // A new conversation has no earlier email to have switched away from.
         askedThreadIds.removeAll()
         rollbackMark = 0
@@ -515,6 +516,7 @@ final class AssistantSession {
         clear()
         transcript = other.transcript
         history = other.history
+        elidedResults = 0
         askedThreadIds = other.askedThreadIds
         rollbackMark = history.count
         nextItemId = other.nextItemId
@@ -545,6 +547,7 @@ final class AssistantSession {
         clear()
         transcript = snapshot.transcript
         history = snapshot.history
+        elidedResults = 0
         askedThreadIds = snapshot.askedThreadIds
         rollbackMark = history.count
         nextItemId = max(nextItemId, snapshot.nextItemId, snapshot.transcript.map(\.id).max() ?? 0)
@@ -661,12 +664,12 @@ final class AssistantSession {
 
         // Declared before the first failure exit so every ending can report what
         // the run actually spent — a failed ask still costs the user money.
-        var inputTokens = 0
+        var prompt = PromptTokens()
         var outputTokens = 0
         func fail(_ message: String) {
             end(
                 gen, error: message, model: model, transport: transport,
-                inputTokens: inputTokens, outputTokens: outputTokens)
+                prompt: prompt, outputTokens: outputTokens)
         }
 
         // The BYOK gates, byok only: a relayed ask needs no local key — the
@@ -687,8 +690,6 @@ final class AssistantSession {
             }
         }
 
-        let encoder = JSONEncoder()
-
         for _ in 0..<Self.maxTurns {
             guard alive(gen) else { return }
             // PAUSE BOUNDARY 1 OF 2: before the next provider request. Together
@@ -703,11 +704,7 @@ final class AssistantSession {
 
             let body: Data
             do {
-                body = try encoder.encode(
-                    Wire.Request(
-                        model: model.rawValue, max_tokens: Self.maxTokens, system: system(pin),
-                        tools: lane.definitions(calendar: AppStore.shared.calendarPageAvailable),
-                        messages: history))
+                body = try requestBody(model: model, pin: pin)
             } catch {
                 fail(errorText(error))
                 return
@@ -736,7 +733,7 @@ final class AssistantSession {
             }
             guard alive(gen) else { return }
 
-            inputTokens += turn.inputTokens
+            prompt += turn.prompt
             outputTokens += turn.outputTokens
 
             if let fatal = turn.fatal {
@@ -846,7 +843,7 @@ final class AssistantSession {
             }
 
             finish(
-                gen, model: model, transport: transport, inputTokens: inputTokens,
+                gen, model: model, transport: transport, prompt: prompt,
                 outputTokens: outputTokens, wroteText: turn.assistantItem != nil)
             return
         }
@@ -872,7 +869,7 @@ final class AssistantSession {
         /// (with `[:]`) and still gets answered — see `execute`.
         var malformed: Set<String> = []
         var stopReason: String?
-        var inputTokens = 0
+        var prompt = PromptTokens()
         var outputTokens = 0
         var sawStop = false
         var fatal: String?
@@ -893,8 +890,8 @@ final class AssistantSession {
 
     private func absorb(_ event: AnthropicStreamEvent, into turn: inout TurnState) {
         switch event {
-        case .messageStart(let inputTokens):
-            turn.inputTokens = inputTokens
+        case .messageStart(let input, let cacheWrite, let cacheRead):
+            turn.prompt = PromptTokens(input: input, cacheWrite: cacheWrite, cacheRead: cacheRead)
 
         case .textDelta(let index, let text):
             guard !text.isEmpty else { return }
@@ -1084,7 +1081,7 @@ final class AssistantSession {
     /// A clean end: citations, then the ledger. One ask, tokens summed across
     /// its turns.
     private func finish(
-        _ gen: Int, model: AssistantModel, transport: AssistantTransport, inputTokens: Int,
+        _ gen: Int, model: AssistantModel, transport: AssistantTransport, prompt: PromptTokens,
         outputTokens: Int, wroteText: Bool
     ) {
         guard alive(gen) else { return }
@@ -1100,7 +1097,7 @@ final class AssistantSession {
         }
         let picked = pickCitations()
         if !picked.isEmpty { append(.citations, citations: picked) }
-        recordUsage(model: model, transport: transport, inputTokens: inputTokens,
+        recordUsage(model: model, transport: transport, prompt: prompt,
             outputTokens: outputTokens)
     }
 
@@ -1110,14 +1107,14 @@ final class AssistantSession {
     /// number the user decides on. Guarded on having spent something, so the
     /// paths that die before the first request don't inflate the ask count.
     private func recordUsage(
-        model: AssistantModel, transport: AssistantTransport, inputTokens: Int, outputTokens: Int
+        model: AssistantModel, transport: AssistantTransport, prompt: PromptTokens, outputTokens: Int
     ) {
-        guard inputTokens + outputTokens > 0 else { return }
+        guard prompt.total + outputTokens > 0 else { return }
         // THE LANE RIDES ALONG so the Usage page can tell a question somebody
         // typed from a search that ran itself. Same tally either way: it is one
         // key, one budget, and one bill.
         AssistantUsageLedger.record(
-            model: model, transport: transport, lane: lane, inputTokens: inputTokens,
+            model: model, transport: transport, lane: lane, prompt: prompt,
             outputTokens: outputTokens)
     }
 
@@ -1140,7 +1137,7 @@ final class AssistantSession {
     /// copy forgets the broken exchange.
     private func end(
         _ gen: Int, error: String, model: AssistantModel, transport: AssistantTransport,
-        inputTokens: Int, outputTokens: Int
+        prompt: PromptTokens, outputTokens: Int
     ) {
         guard alive(gen) else { return }
         if history.count > rollbackMark { history.removeSubrange(rollbackMark...) }
@@ -1160,7 +1157,7 @@ final class AssistantSession {
         // be a turn the next one has to be told it switched away from.
         if !askedThreadIds.isEmpty { askedThreadIds.removeLast() }
         append(.error, text: error)
-        recordUsage(model: model, transport: transport, inputTokens: inputTokens,
+        recordUsage(model: model, transport: transport, prompt: prompt,
             outputTokens: outputTokens)
     }
 
@@ -1223,13 +1220,36 @@ final class AssistantSession {
         return errText(error, "something went wrong")
     }
 
+    // MARK: - request body
+
+    /// How many of the history's oldest tool results the requests prune (see
+    /// `Wire.elisions`). Kept so the pruned prefix stays the same from one
+    /// request to the next; back to zero whenever the history is replaced.
+    /// The history itself is never pruned: it is what a saved question keeps.
+    private var elidedResults = 0
+
+    /// The body of the next request, exactly as it is sent: the history
+    /// pruned to its budget, the system prompt in its stable and changing
+    /// blocks, and the keys sorted so the same request is the same bytes.
+    private func requestBody(model: AssistantModel, pin: PinnedContext) throws -> Data {
+        elidedResults = Wire.elisions(for: history, already: elidedResults)
+        return try Wire.Request.encoder().encode(
+            Wire.Request(
+                model: model.rawValue, max_tokens: Self.maxTokens, system: system(pin),
+                tools: lane.definitions(calendar: AppStore.shared.calendarPageAvailable),
+                messages: Wire.pruned(history, eliding: elidedResults)))
+    }
+
     // MARK: - system prompt
 
     /// Built per request, because the date is part of it: an agent that thinks
     /// it is still last month reads "due Friday" wrong. The email on screen is
     /// part of it too, but it arrives as the RUN's copy rather than off the
     /// live property — the pin may move between requests, the question may not.
-    private func system(_ pin: PinnedContext) -> String {
+    /// TWO BLOCKS, for the prompt cache: everything that holds for the whole
+    /// conversation, then what does not (the time, the open email, the local
+    /// hits), so a new minute or a new pin re-sends only the second.
+    private func system(_ pin: PinnedContext) -> [Wire.SystemBlock] {
         // The weekday, the time and the zone too, not just the date: "tonight",
         // "this Friday" and "in 3 hours" need all three, and they match what
         // the daemon's agents are told (#526).
@@ -1241,11 +1261,12 @@ final class AssistantSession {
         // every mail-derived line inside data markers — are asserted in
         // test.sh rather than reasoned about here.
         if lane == .search {
-            return SearchLanePrompt.system(today: today, hits: pin.hits)
+            let prompt = SearchLanePrompt.blocks(today: today, hits: pin.hits)
+            return [.stable(prompt.stable), .volatile(prompt.volatile)]
         }
-        return """
+        let stable = """
             You are the user's personal inbox assistant, embedded in a macOS app called \
-            Passband. Today is \(today). You answer questions about their email, and you \
+            Passband. You answer questions about their email, and you \
             can act on it with their confirmation.\(Self.helpIntro)
 
             Rules:
@@ -1316,8 +1337,8 @@ final class AssistantSession {
             - create_sender_rule writes only Passband's local triage rules, never the
               mailbox. It changes what gets surfaced from here on; it moves no mail.
             - When the user asks you to write but not send, use save_draft.\(Self.calendarTools)
-            \(openEmailBlock(pin))
             """
+        return [.stable(stable), .volatile("Today is \(today).\n\(openEmailBlock(pin))")]
     }
 
     /// THE POINTER, NOT THE GUIDE. How Passband works is a few thousand tokens
@@ -1448,21 +1469,22 @@ enum AssistantUsageLedger {
     /// Fold one completed ask (summed across its tool-loop turns) into the tally.
     static func record(
         model: AssistantModel, transport: AssistantTransport, lane: Lane = .chat,
-        inputTokens: Int, outputTokens: Int
+        prompt: PromptTokens, outputTokens: Int
     ) {
         let current = read()
         let next: [String: Any] = [
             "asks": current.asks + 1,
             "relayAsks": current.relayAsks + (transport == .relay ? 1 : 0),
             "searchAsks": current.searchAsks + (lane == .search ? 1 : 0),
-            "inputTokens": current.inputTokens + inputTokens,
+            // EVERY prompt token sent, cached or not, as before caching.
+            "inputTokens": current.inputTokens + prompt.total,
             "outputTokens": current.outputTokens + outputTokens,
             // Dollars are BYOK-ONLY. A relayed ask spends the plan's monthly
             // budget, which Passband meters server-side; pricing it here at
             // provider rates would invent a number nobody is paying.
             "estimatedCost": current.estimatedCost
                 + (transport == .byok
-                    ? price(model, inputTokens: inputTokens, outputTokens: outputTokens)
+                    ? price(model, inputAtFullRate: prompt.billedAtInputRate, outputTokens: outputTokens)
                     : 0),
             "lastModel": model.rawValue,
             "lastAt": ISO8601DateFormatter().string(from: Date()),
@@ -1474,7 +1496,15 @@ enum AssistantUsageLedger {
     private static func price(
         _ model: AssistantModel, inputTokens: Int, outputTokens: Int
     ) -> Double {
-        Double(inputTokens) / 1_000_000 * model.rates.input
+        price(model, inputAtFullRate: Double(inputTokens), outputTokens: outputTokens)
+    }
+
+    /// The same, for a prompt already weighed for caching
+    /// (`PromptTokens.billedAtInputRate`).
+    private static func price(
+        _ model: AssistantModel, inputAtFullRate: Double, outputTokens: Int
+    ) -> Double {
+        inputAtFullRate / 1_000_000 * model.rates.input
             + Double(outputTokens) / 1_000_000 * model.rates.output
     }
 }

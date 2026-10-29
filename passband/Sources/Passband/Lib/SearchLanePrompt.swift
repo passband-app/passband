@@ -61,10 +61,22 @@ enum SearchLanePrompt {
     /// a line.
     static let subjectCap = 120
 
-    /// The whole system prompt, rebuilt per request (the date is in it).
+    /// The whole system prompt as one string: the two blocks below, in order.
     static func system(today: String, hits: [Hit]) -> String {
-        """
-        You are the search lane inside Passband, a macOS email app. Today is \(today). \
+        let prompt = blocks(today: today, hits: hits)
+        return prompt.stable + "\n\n" + prompt.volatile
+    }
+
+    /// The system prompt in the two blocks a request sends: what holds for the
+    /// whole lane (and carries the cache breakpoint), then what changes per
+    /// request or per search, the time and the local hits.
+    static func blocks(today: String, hits: [Hit]) -> (stable: String, volatile: String) {
+        (stable: stable, volatile: "Today is \(today).\n\(hitsBlock(hits))")
+    }
+
+    /// Everything in the lane's prompt that is the same on every request.
+    static let stable = """
+        You are the search lane inside Passband, a macOS email app. \
         The person is SEARCHING THEIR MAILBOX, not chatting: they typed words into a \
         search field, and a results list beside you is already showing the mail those \
         words matched. You are here for the search the list cannot answer, where the \
@@ -96,11 +108,9 @@ enum SearchLanePrompt {
         search, never a new topic. Take the new words as a correction to the words \
         before them, keep what you have already read, and look again. Do not start \
         over, and do not ask what they meant.
-        \(hitsBlock(hits))
 
         \(AgentPrompt.trust)
         """
-    }
 
     /// The text block a refinement is delivered as, appended to the same user
     /// message that carries a turn's tool results.

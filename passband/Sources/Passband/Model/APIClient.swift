@@ -666,6 +666,20 @@ actor APIClient {
             query: ["from": Self.rfc3339Local(from), "to": to.map(Self.rfc3339Local)])
     }
 
+    /// `GET /client/calendar/search` (docs/CALENDAR.md §10.1): the events and
+    /// ghosts behind the search panel's Events block. Behind the calendar
+    /// feature, so a 404 is "no calendar here" and the block stays away.
+    func calendarSearch(_ q: String, limit: Int = 20) async throws -> CalendarSearchPage {
+        try await get("/client/calendar/search", query: ["q": q, "limit": String(limit)])
+    }
+
+    /// `GET /client/agent/calendar/search`: the same search under the agent
+    /// view (nobody's address, ghosts only from mail the agent may read),
+    /// handed to the assistant as it came.
+    func agentCalendarSearch(_ q: String, limit: Int) async throws -> JSONValue {
+        try await get("/client/agent/calendar/search", query: ["q": q, "limit": String(limit)])
+    }
+
     /// `POST /client/timeline/refresh`: ask the calendar sync to run now. A
     /// daemon without the sync answers 404 and one inside its throttle 202;
     /// both are fine, so the caller ignores the outcome.

@@ -691,6 +691,7 @@ final class AppStore {
     private func noteStats() {
         let open = CalendarGate.pageAvailable(timeline: stats?.timeline, feature: hasFeature(.calendar))
         if open != calendarPageAvailable { calendarPageAvailable = open }
+        warmCalendarIfDue()
         let email = stats?.account_email
         if email != accountEmail { accountEmail = email }
         let spam = stats?.spam
@@ -745,7 +746,9 @@ final class AppStore {
     /// describes the one just left; anything that must not mix two accounts
     /// (the calendar grant and its consent link, `calendarAccess`) reads
     /// `stats` only while this is the live epoch.
-    var statsEpoch: Int?
+    var statsEpoch: Int? {
+        didSet { warmCalendarIfDue() }
+    }
     var lastRefresh: Date? {
         // `derive` reads only whether there has been one (`daemonDown`).
         didSet { if (oldValue == nil) != (lastRefresh == nil) { noteSyncStatus() } }
@@ -799,6 +802,10 @@ final class AppStore {
     /// A load has finished at least once (success or failure) for this
     /// account, so an empty feed can be told from one still on its way.
     var calendarLoaded = false
+    /// The account whose calendar was last warmed (`warmCalendarIfDue`):
+    /// its saved feed shown and a fresh one asked for, once per account per
+    /// session. Cleared with the rest of the page's state.
+    var calendarWarmedFor: UUID?
     /// Agenda or month, and where the month is. Kept here, not in the page,
     /// for the session: the page is unmounted every time you leave it, and
     /// coming back should land where you were. `calendarPlace` nil is today.
@@ -810,6 +817,11 @@ final class AppStore {
     /// showing. Escape closes them in that order (`calendarMonthBack`).
     var calendarDayOpen = false
     var calendarMonthItem: String?
+    /// A search hit to open, ONE SHOT (the phone's Events block). Written only
+    /// by `openCalendarSearchHit` and cleared by the phone's calendar as it
+    /// pushes the detail. Its own field because `calendarMonthItem` is also set
+    /// by every event save (`landEvent`), which must not push a page.
+    var calendarSearchOpen: String?
     /// The connect card, while it is up. Its own property, apart from the
     /// feed: `modalOverlayOpen` reads it, and the whole shell reads that.
     var calendarConnectAsk: CalendarConnectAsk?
@@ -1977,6 +1989,8 @@ final class AppStore {
         // any of an account no longer here. Behind the paint, not in front of
         // it on the queue.
         BoardFile.sweep(keeping: Set(index.accounts.map(\.id)))
+        let accounts = Set(index.accounts.map(\.id))
+        Task.detached(priority: .utility) { await CalendarDisk.shared.sweep(keeping: accounts) }
     }
 
     /// Take a `passband://` URL the OS handed us. Never acted on here — it is
@@ -2071,7 +2085,10 @@ final class AppStore {
                         // other refusal (a captive portal's page, a build the
                         // daemon is too old for) leaves it for a launch that
                         // can reach the daemon.
-                        if (error as? APIError)?.kind == .unauthorized { discardBoardFile(accountId) }
+                        if (error as? APIError)?.kind == .unauthorized {
+                            discardBoardFile(accountId)
+                            Task { await CalendarDisk.shared.forget(accountId) }
+                        }
                         if behindBoard { refuseBoardFromDisk() }
                         connStatus = .error
                         connError = Self.connectErrorText(error)
@@ -2208,6 +2225,8 @@ final class AppStore {
             // mailbox behind the same host. The one on disk too.
             boardSnapshots[account.id] = nil
             discardBoardFile(account.id)
+            let replaced = account.id
+            Task { await CalendarDisk.shared.forget(replaced) }
             // Arriving from the Connect gate the feeds are down, so this is a
             // no-op and the `.connected` transition below is what raises them
             // — the same route the single-account build took. Kept as a
@@ -2278,6 +2297,8 @@ final class AppStore {
             // these credentials.
             boardWritesRefusedEpoch = epoch
             discardBoardFile(account.id)
+            let revalidated = account.id
+            Task { await CalendarDisk.shared.forget(revalidated) }
             #if os(iOS)
                 await PushRegistration.shared.registerAndSync()
             #endif
@@ -2849,7 +2870,8 @@ final class AppStore {
     /// True only while `restorePersistedBoard` assigns the board from disk.
     @ObservationIgnored private var paintingFromDisk = false
     /// An epoch under which nothing is written to disk (`revalidate`).
-    @ObservationIgnored private var boardWritesRefusedEpoch: Int?
+    /// Also obeyed by the calendar's saved feed (`refreshCalendar`).
+    @ObservationIgnored var boardWritesRefusedEpoch: Int?
     /// Something on the board changed since the last write.
     @ObservationIgnored private var boardDirty = true
     /// The last write: whose, under which epoch, and what.

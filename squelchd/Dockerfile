@@ -80,6 +80,7 @@ COPY squelch-control ./squelch-control
 COPY squelch-warden ./squelch-warden
 COPY squelch-eval ./squelch-eval
 COPY squelchd ./squelchd
+COPY squelch-embed ./squelch-embed
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder

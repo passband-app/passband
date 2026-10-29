@@ -2918,7 +2918,12 @@ async fn a_reconnect_asks_google_for_a_replacement_refresh_token() {
         scope.contains("gmail.modify"),
         "scope {scope} is missing gmail.modify"
     );
-    assert!(!scope.contains("calendar"), "{scope}");
+    // Calendar asked for again, optional, as signup asks it: a REVOKED grant
+    // leaves `include_granted_scopes` nothing to keep, and the install replaces
+    // the whole credentials file, so a Gmail-only repair would disconnect the
+    // calendar (oauth.rs, `Flow::Reconnect`).
+    assert!(scope.contains("calendar.events"), "{scope}");
+    assert!(scope.contains("calendar.calendarlist.readonly"), "{scope}");
 }
 
 /// THE CUSTODY CHECK, from the cluster's side. If the store and the warden ever
@@ -3056,18 +3061,26 @@ async fn the_calendar_consent_url_carries_every_parameter() {
     unique.dedup();
     assert_eq!(keys.len(), unique.len(), "{keys:?}");
 
-    // A plain reconnect with a hint: the hint rides along, calendar does not.
+    // A plain reconnect with a hint: the hint rides along, and it asks for
+    // the same scopes as the calendar consent (calendar optional in both).
+    // What `calendar=1` changes is the CALLBACK: a calendar consent that comes
+    // back without calendar, or for a tenant without the feature, installs
+    // nothing, where a reconnect installs the repaired mailbox either way.
     let (plain, _) = h
         .start_reconnect_with(&format!("hint={}", urlencode(MAILBOX)))
         .await;
     assert_eq!(query_param(&plain, "login_hint"), MAILBOX);
-    assert!(!query_param(&plain, "scope").contains("calendar"));
+    assert_eq!(
+        query_param(&plain, "scope"),
+        query_param(&consent, "scope"),
+        "a reconnect asks for calendar too"
+    );
     assert_eq!(query_param(&plain, "include_granted_scopes"), "true");
-    // `calendar` means calendar only when it says exactly 1.
     for not_calendar in ["calendar=0", "calendar=true", "calendar=", "Calendar=1"] {
         let (c, _) = h.start_reconnect_with(not_calendar).await;
-        assert!(
-            !query_param(&c, "scope").contains("calendar"),
+        assert_eq!(
+            query_param(&c, "scope"),
+            query_param(&consent, "scope"),
             "{not_calendar}"
         );
     }

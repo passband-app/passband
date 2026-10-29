@@ -99,6 +99,16 @@ final class RecentSearchStore {
         record(term)
     }
 
+    /// Put a search whose EVENTS were acted on (a row of the Events block
+    /// opened) in the ring: the field text those rows answered, which events
+    /// only (`in:calendar`) never fetches mail for. The same rule as
+    /// `remember`: what was answered, not the live field.
+    func rememberEventSearch(_ field: String) {
+        let words = field.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !words.isEmpty else { return }
+        record(words)
+    }
+
     /// Put a question the agent was asked from the search field in the ring:
     /// its FIRST message, the words the conversation began with. Called once
     /// per conversation, when those words actually go to the agent; the

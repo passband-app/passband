@@ -82,6 +82,25 @@ run_suite agenda \
   Sources/Passband/Lib/Agenda.swift \
   Tests/AgendaTests.swift
 
+# The search panel's Events block: which query goes to which search
+# (`in:calendar`, the mail-only operators), the wire it reads, three rows
+# then "N more", and each row's day, time and place in the user's zone.
+run_suite calendar-search \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Lib/CalendarSearch.swift \
+  Tests/CalendarSearchTests.swift
+
+# The calendar's disk cache: a saved feed comes back whole for its account
+# only, a file that will not read is dropped, and forget deletes it.
+run_suite calendar-disk \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/PrivateFile.swift \
+  Sources/Passband/Model/CalendarDisk.swift \
+  Tests/CalendarDiskTests.swift
+
 # The month view's arithmetic: the grid's days in the user's calendar, what
 # each cell lists and what folds into "+N more", spans and their lanes, the
 # unlikely counts, the day column's hours (the night cap, 7am, past midnight,

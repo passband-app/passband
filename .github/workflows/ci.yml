@@ -91,6 +91,8 @@ jobs:
               - "rust-toolchain.toml"
               - ".github/workflows/ci.yml"
               - "deploy/hosted/**"
+              # squelch-embed's tests read it, and the image builds from it.
+              - "Dockerfile.embed"
             deny:
               - "**/Cargo.toml"
               - "Cargo.lock"

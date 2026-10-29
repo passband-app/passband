@@ -77,6 +77,39 @@ struct MobileSearchView: View {
         SearchFetch.senders(fetchedSenders, stillMatching: store.search.query)
     }
 
+    /// THE EVENTS BLOCK (docs/CALENDAR.md §10.1), the Mac panel's, with the
+    /// same rules (`CalendarSearch`): its own fetch beside the mail search,
+    /// three rows and "N more", and `in:calendar` for events alone. Only
+    /// while the Calendar tab is on the bar, since a row opens there.
+    @State private var fetchedEvents: [AgendaItem] = []
+    @State private var eventsTotal = 0
+    /// The event query `fetchedEvents` answers, and the limit it was asked at.
+    @State private var eventsQuery: String?
+    @State private var eventsLimit = 0
+    /// The field text `eventsQuery` was asked from, which opening a row
+    /// remembers; and the event query whose fetch last failed, so the empty
+    /// state says nothing rather than "No events." or "searching" forever.
+    @State private var eventsField: String?
+    @State private var eventsFailed: String?
+    /// "N more" tapped, for this query.
+    @State private var eventsExpanded = false
+
+    /// The field asks for events only (`in:calendar`): no mail search runs.
+    private var eventsOnly: Bool {
+        store.calendarPageAvailable && CalendarSearch.eventsOnly(store.search.query)
+    }
+
+    /// The block as drawn: nothing while the Calendar tab is off the bar or
+    /// the field asks the calendar nothing. While a new answer is on its way
+    /// the last one stays (no vanish and jump on every keystroke) until it is
+    /// replaced. Events only lists every row.
+    private var eventBlock: CalendarSearch.Block {
+        guard store.calendarPageAvailable, !showingRecents, eventsQuery != nil,
+              CalendarSearch.eventQuery(term) != nil
+        else { return CalendarSearch.Block(shown: [], more: 0) }
+        return CalendarSearch.block(fetchedEvents, total: eventsTotal, expanded: eventsExpanded || eventsOnly)
+    }
+
     /// How many hits get their thread pulled ahead of a tap. The head of the
     /// page only: search results are read and chosen from, not swept, so the
     /// rest can wait for a real tap, and warming all fifty would be a stampede
@@ -169,9 +202,18 @@ struct MobileSearchView: View {
                 }
             #endif
             .task(id: store.search.query) {
+                // Events only asks no sender directory: its words name events.
+                if eventsOnly {
+                    fetchedSenders = []
+                    return
+                }
                 guard let found = await SearchFetch.senders(matching: store.search.query) else { return }
                 fetchedSenders = found
             }
+            .task(id: [store.search.query, String(store.calendarPageAvailable), String(eventsExpanded)]) {
+                await runEventSearch()
+            }
+            .onChange(of: CalendarSearch.eventQuery(term)) { _, _ in eventsExpanded = false }
             // The chat is a PUSH, not a tab: back lands on the results that were
             // underneath the question, and the transcript survives either way
             // because the session lives on the store.
@@ -250,7 +292,7 @@ struct MobileSearchView: View {
     private var content: some View {
         if showingRecents {
             recentList
-        } else if store.search.hits.isEmpty {
+        } else if store.search.hits.isEmpty && eventBlock.shown.isEmpty {
             // The ask row rides above the empty states too, and especially
             // above "No matches" — that is the exact moment the words are worth
             // handing to something that can go look.
@@ -269,7 +311,7 @@ struct MobileSearchView: View {
                 .scrollDismissesKeyboard(.immediately)
             } else {
                 VStack(spacing: 0) {
-                    if !term.isEmpty {
+                    if !term.isEmpty, !eventsOnly {
                         askRow.padding(.horizontal, 16)
                         Divider().overlay(Palette.hairline)
                     }
@@ -306,12 +348,13 @@ struct MobileSearchView: View {
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets())
                 resultsHeader.plainRow()
-            } else if !term.isEmpty {
+            } else if !term.isEmpty, !eventsOnly {
                 askRow.plainRow()
             }
             ForEach(senders) { sender in
                 SenderRow(sender: sender) { show(sender) }.plainRow()
             }
+            events
             // A failed refresh does NOT drop the hits already read, so the
             // error has to ride above them rather than replace them — see
             // the empty state, which carries the same line when there is
@@ -483,6 +526,34 @@ struct MobileSearchView: View {
                     .font(Typo.rowSub)
                     .foregroundStyle(Palette.warn)
                     .multilineTextAlignment(.center)
+            } else if eventsOnly {
+                let asked = CalendarSearch.eventQuery(term)
+                if asked == nil {
+                    Text("Search your calendar.")
+                        .font(Typo.serif(22, weight: .medium))
+                        .foregroundStyle(Palette.ink)
+                    Text(CalendarSearch.usesMailOperator(term)
+                         ? CalendarSearch.mailOperatorNote.prefix(1).uppercased()
+                            + CalendarSearch.mailOperatorNote.dropFirst()
+                         : "Type what to look for after in:calendar.")
+                        .font(Typo.rowSub)
+                        .foregroundStyle(Palette.inkFaint)
+                        .multilineTextAlignment(.center)
+                } else if asked == eventsQuery {
+                    // Answered, and the answer was none.
+                    Text("No events.")
+                        .font(Typo.serif(22, weight: .medium))
+                        .foregroundStyle(Palette.ink)
+                    Text("Nothing on your calendar, or planned in your mail, carries those words.")
+                        .font(Typo.rowSub)
+                        .foregroundStyle(Palette.inkFaint)
+                        .multilineTextAlignment(.center)
+                } else if asked != eventsFailed {
+                    // Still on its way. A failed fetch says nothing at all.
+                    Text("searching…")
+                        .font(Typo.rowSub)
+                        .foregroundStyle(Palette.inkFaintest)
+                }
             } else if loading {
                 Text("searching…")
                     .font(Typo.rowSub)
@@ -515,6 +586,93 @@ struct MobileSearchView: View {
         }
         .padding(.horizontal, 24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - events
+
+    /// The block's rows, under their own small-caps header so a plan never
+    /// reads as a message. A tap opens the Calendar tab on the row's day.
+    @ViewBuilder
+    private var events: some View {
+        let block = eventBlock
+        if !block.shown.isEmpty {
+            StatusHeader(title: "Events").plainRow()
+            ForEach(block.shown) { item in
+                EventRow(item: item) { open(item) }.plainRow()
+            }
+            if block.more > 0 {
+                MoreEventsRow(count: block.more) {
+                    withAnimation(.snappy) { eventsExpanded = true }
+                }
+                .plainRow()
+            }
+            if let cut = block.cut {
+                Text(cut)
+                    .font(Typo.rowSub)
+                    .foregroundStyle(Palette.inkFaintest)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+                    .plainRow()
+            }
+            // A listing heads its own run ("Newest first").
+            if !store.search.hits.isEmpty, !store.search.showsListing {
+                StatusHeader(title: "Mail").plainRow()
+            }
+        }
+    }
+
+    /// The Calendar tab, turned to the row's day, its hours on screen and the
+    /// row's detail pushed over them (MobileCalendarView answers). The route
+    /// is asked even when the store already names the calendar: this shell
+    /// hears the ask, not the value.
+    private func open(_ item: AgendaItem) {
+        Haptics.tick()
+        // The words these rows answered, not the mail fetch's (which events
+        // only never makes, and which may still be on an older term).
+        if let field = eventsField { RecentSearchStore.shared.rememberEventSearch(field) }
+        store.setView(.calendar)
+        store.openCalendarSearchHit(item)
+    }
+
+    /// The block's fetch, the Mac panel's: beside the mail search, never
+    /// waiting on it, debounced like it, and a superseded fetch writes
+    /// nothing. Expanding or events only asks for the whole list. A FAILURE
+    /// (an older daemon's 404) clears the block and leaves `eventsQuery`
+    /// unset, so the next pass asks again instead of reading it as none.
+    private func runEventSearch() async {
+        let field = term
+        guard store.calendarPageAvailable, let asked = CalendarSearch.eventQuery(field) else {
+            clearEvents()
+            return
+        }
+        let limit = CalendarSearch.limit(eventsOnly: eventsOnly, expanded: eventsExpanded)
+        guard asked != eventsQuery || limit > eventsLimit else { return }
+        try? await Task.sleep(for: SearchFetch.debounce)
+        guard !Task.isCancelled else { return }
+        let page: CalendarSearchPage
+        do {
+            page = try await APIClient.shared.calendarSearch(asked, limit: limit)
+        } catch {
+            guard !Task.isCancelled else { return }
+            clearEvents()
+            eventsFailed = asked
+            return
+        }
+        guard !Task.isCancelled, asked == CalendarSearch.eventQuery(term) else { return }
+        fetchedEvents = CalendarSearch.items(page, calendar: .current)
+        eventsTotal = page.total
+        eventsQuery = asked
+        eventsField = store.search.query.trimmingCharacters(in: .whitespacesAndNewlines)
+        eventsLimit = limit
+        eventsFailed = nil
+    }
+
+    private func clearEvents() {
+        fetchedEvents = []
+        eventsTotal = 0
+        eventsQuery = nil
+        eventsField = nil
+        eventsLimit = 0
     }
 
     // MARK: - one sender's mail
@@ -582,7 +740,11 @@ struct MobileSearchView: View {
         // A bare operator (`from:`) is not a search yet: the daemon drops the
         // valueless token and refuses the empty query, and that refusal is not
         // something to show a reader halfway through typing a sender.
-        guard !query.isEmpty, !FromOperator.awaitingValue(in: query) else {
+        // EVENTS ONLY (`in:calendar`) is no mail search at all: nothing goes
+        // to `/client/search`, and with no hits judged no lane starts.
+        let calendarOnly = store.calendarPageAvailable && CalendarSearch.eventsOnly(query)
+        guard !query.isEmpty, !FromOperator.awaitingValue(in: query), !calendarOnly else {
+            if calendarOnly { store.resetSearchLane() }
             store.search.hits = []
             store.search.error = nil
             store.search.fetchedQuery = nil
@@ -786,6 +948,94 @@ private struct StatusHeader: View {
             .padding(.top, 14)
             .padding(.bottom, 2)
             .accessibilityAddTraits(.isHeader)
+    }
+}
+
+// MARK: - one event
+
+/// One row of the Events block, shaped like the sender rows around it (a mark,
+/// two lines, a chevron) so the results read as one list: the calendar's mark
+/// in its colour, a ghost drawn in the agenda's own language for how real it
+/// is, the title, and when and where in the user's zone. A past event reads
+/// dimmer; a ghost says it came from mail. Event text is the user's or a
+/// sender's: plain Text only.
+private struct EventRow: View {
+    let item: AgendaItem
+    let onOpen: () -> Void
+
+    var body: some View {
+        let now = Date()
+        let past = CalendarSearch.isPast(item, now: now)
+        Button(action: onOpen) {
+            HStack(spacing: 11) {
+                AgendaMark(
+                    fill: item.fill, estimated: item.endEstimated, thin: item.cancelled,
+                    hue: ChipColors.inks(item).edge, cornerRadius: 4)
+                    .frame(width: 14, height: 14)
+                    .frame(width: 18)
+                    .opacity(past ? 0.55 : 1)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.title)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(past ? Palette.inkDim : Palette.ink)
+                        .strikethrough(item.cancelled, color: Palette.inkFaint)
+                        .lineLimit(1)
+                    Text(CalendarSearch.label(item, now: now, calendar: .current))
+                        .font(Typo.rowSub)
+                        .foregroundStyle(Palette.inkFaint)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 6)
+                if item.isGhost {
+                    Text("from mail")
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaint)
+                        .fixedSize()
+                } else if past {
+                    Text("past")
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaint)
+                        .fixedSize()
+                }
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Palette.inkFaintest)
+                    .accessibilityHidden(true)
+            }
+            .padding(.vertical, 11)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Opens this event in the calendar")
+    }
+}
+
+/// "N more events": the rest of the block, in place.
+private struct MoreEventsRow: View {
+    let count: Int
+    let onExpand: () -> Void
+
+    var body: some View {
+        Button(action: onExpand) {
+            HStack(spacing: 11) {
+                Image(systemName: "plus")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Palette.inkFaint)
+                    .frame(width: 18)
+                    .accessibilityHidden(true)
+                Text(CalendarSearch.moreLabel(count))
+                    .font(Typo.rowSub)
+                    .foregroundStyle(Palette.inkFaint)
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 11)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 

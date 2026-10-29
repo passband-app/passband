@@ -225,8 +225,8 @@ impl Drop for WorkerExit<'_> {
             q.lanes.iter_mut().flat_map(|l| l.drain(..)).collect()
         };
         for job in jobs {
-            let _ = job.reply.send(Err(Failure::Stopped));
             self.metrics.record(job.lane, Outcome::Error);
+            let _ = job.reply.send(Err(Failure::Stopped));
         }
         self.shared.died.send_replace(true);
     }
@@ -388,8 +388,8 @@ fn sweep(shared: &Shared, q: &mut Queues, lane: Lane, metrics: &Metrics) {
     for job in jobs {
         if job.reply.is_closed() || shared.expired(&job, now) {
             q.waiting[i] -= job.texts.len();
-            let _ = job.reply.send(Err(Failure::Expired));
             metrics.record(lane, Outcome::Abandoned);
+            let _ = job.reply.send(Err(Failure::Expired));
         } else {
             q.lanes[i].push_back(job);
         }
@@ -428,8 +428,8 @@ fn next_job(shared: &Shared, metrics: &Metrics) -> Option<Job> {
                     continue;
                 }
                 if shared.expired(&job, now) {
-                    let _ = job.reply.send(Err(Failure::Expired));
                     metrics.record(lane, Outcome::Abandoned);
+                    let _ = job.reply.send(Err(Failure::Expired));
                     continue;
                 }
                 metrics.observe_queue_wait(lane, now.saturating_duration_since(job.enqueued));
@@ -471,19 +471,25 @@ fn run(session: &mut dyn Session, job: Job, metrics: &Metrics, log: &Log) {
         }
     };
 
-    let outcome = match vectors {
-        Some(vectors) => match reply.send(Ok(vectors)) {
-            Ok(()) => Outcome::Ok,
-            Err(_) => Outcome::Abandoned,
-        },
+    // Every outcome is counted BEFORE the reply goes out, so anyone who has
+    // seen the reply (a caller, a test, an operator correlating a 500) finds
+    // it in the metrics already.
+    match vectors {
+        Some(vectors) if reply.is_closed() => {
+            drop(vectors);
+            metrics.record(lane, Outcome::Abandoned);
+        }
+        Some(vectors) => {
+            metrics.record(lane, Outcome::Ok);
+            let _ = reply.send(Ok(vectors));
+        }
         None => {
             // A caller that has gone gets nothing either way; it is still a
             // failed request, which is what an operator is counting.
+            metrics.record(lane, Outcome::Error);
             let _ = reply.send(Err(Failure::Inference));
-            Outcome::Error
         }
-    };
-    metrics.record(lane, outcome);
+    }
 }
 
 #[cfg(test)]

@@ -3087,7 +3087,8 @@ fn cmd_serve(
                 sync_metrics.set_apns_pusher_enabled(true);
                 let pusher = pusher
                     .with_metrics(sync_metrics.clone())
-                    .with_draft_pings(api_state.subscribe_draft_pings());
+                    .with_draft_pings(api_state.subscribe_draft_pings())
+                    .with_calendar_pings(api_state.subscribe_calendar_pings());
                 let shutdown_rx = shutdown_rx.clone();
                 Some(tokio::spawn(async move {
                     pusher.run(pusher_wake, shutdown_rx).await
@@ -3376,6 +3377,15 @@ fn cmd_serve(
             squelch_api::RenotifyTiming::daemon(),
         ));
 
+        // CALENDAR REMINDERS (docs/CALENDAR.md, "Reminders and tickets").
+        // Always spawned, and idle while the `calendar` hidden feature is off
+        // or the owner turned reminders off: both are read at every pass.
+        let calendar_remind_handle = tokio::spawn(squelch_api::calendar_remind_worker(
+            api_state.clone(),
+            shutdown_tx.subscribe(),
+            squelch_api::CalendarRemindTiming::daemon(),
+        ));
+
         // Bind BEFORE building the embedder: its first-run model download must
         // not leave the doors unreachable.
         let app = build_serve_router(
@@ -3580,6 +3590,9 @@ fn cmd_serve(
         }
         if renotify_handle.await.is_err() {
             eprintln!("squelchd: renotify worker task join error");
+        }
+        if calendar_remind_handle.await.is_err() {
+            eprintln!("squelchd: calendar reminder worker task join error");
         }
         if let Some(handle) = metrics_handle {
             match handle.await {

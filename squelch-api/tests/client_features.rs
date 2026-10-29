@@ -202,6 +202,12 @@ fn calendar_routes() -> Vec<(&'static str, &'static str, Value)> {
         ("POST", "/client/timeline/refresh", Value::Null),
         ("POST", "/client/calendar/connect", Value::Null),
         ("GET", "/client/calendar/people?name=steven", Value::Null),
+        ("GET", "/client/calendar/reminders/settings", Value::Null),
+        (
+            "PUT",
+            "/client/calendar/reminders/settings",
+            json!({ "enabled": true }),
+        ),
         ("POST", "/client/calendar/events", json!({ "title": 7 })),
         (
             "PATCH",

@@ -882,6 +882,7 @@ async fn a_first_sync_reads_the_window_in_full_and_serves_every_field() {
             "start",
             "start_timezone",
             "status",
+            "tickets",
             "title"
         ]
     );
@@ -918,6 +919,8 @@ async fn a_first_sync_reads_the_window_in_full_and_serves_every_field() {
             "guests_truncated": false,
             "guest_editable": false,
             "from_gmail": false,
+            // No booking mail is linked to it.
+            "tickets": null,
         })
     );
     // The all-day ones: dates, the INCLUSIVE last day as the end (Google
@@ -1922,6 +1925,7 @@ async fn a_ghost_names_the_real_event_it_duplicates_and_near_misses_name_none() 
             "start",
             "start_timezone",
             "state",
+            "tickets",
             "title",
             "verified"
         ]
@@ -2676,9 +2680,12 @@ async fn send(
     (status, body_json(resp).await, cache)
 }
 
-/// The served event with this id, if any.
+/// The served event with this id, if any, without `tickets`: like `place`,
+/// a timeline-only field the write's answer does not carry.
 async fn served(w: &World, id: &str) -> Option<Value> {
-    w.events().await.into_iter().find(|e| e["id"] == id)
+    let mut event = w.events().await.into_iter().find(|e| e["id"] == id)?;
+    event.as_object_mut()?.remove("tickets");
+    Some(event)
 }
 
 /// The newest audit rows, as (action, target, detail).
@@ -6352,4 +6359,270 @@ async fn only_mail_events_triage_committed_to_or_the_user_is_going_to_are_search
     assert_eq!(resp.status(), StatusCode::OK);
     let body = search(&w.app, "/client/calendar/search", "gala").await;
     assert_eq!(hit_titles(&body), ["ghost:Gala dinner"], "{body}");
+}
+
+// --- calendar reminders ------------------------------------------------------
+
+/// A fake model that answers every call with `answer`, keeping each request
+/// body whole (read to its `Content-Length`).
+async fn spawn_remind_model(answer: Value) -> (String, Arc<Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies: Arc<Mutex<Vec<String>>> = Arc::default();
+    let seen = bodies.clone();
+    let body = json!({
+        "content": [{ "type": "text", "text": answer.to_string() }],
+        "stop_reason": "end_turn",
+        "usage": { "input_tokens": 900, "output_tokens": 40 }
+    })
+    .to_string();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let body = body.clone();
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                let mut raw = Vec::new();
+                let mut buf = vec![0u8; 65536];
+                loop {
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    raw.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&raw).into_owned();
+                    if let Some(head_end) = text.find("\r\n\r\n") {
+                        let length = text[..head_end]
+                            .lines()
+                            .find_map(|l| {
+                                let (k, v) = l.split_once(':')?;
+                                k.eq_ignore_ascii_case("content-length")
+                                    .then(|| v.trim().parse::<usize>().ok())?
+                            })
+                            .unwrap_or(0);
+                        if raw.len() >= head_end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                seen.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&raw).into_owned());
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    (format!("http://{addr}"), bodies)
+}
+
+/// The next `calendar_reminder` frame's data on an SSE body.
+async fn next_reminder(body: &mut axum::body::Body, buf: &mut String) -> Option<Value> {
+    use http_body_util::BodyExt;
+    let deadline = tokio::time::Instant::now() + StdDuration::from_secs(2);
+    loop {
+        while let Some(end) = buf.find("\n\n") {
+            let raw = buf[..end].to_string();
+            buf.drain(..end + 2);
+            if raw.lines().any(|l| l == "event: calendar_reminder") {
+                let data: String = raw
+                    .lines()
+                    .filter_map(|l| l.strip_prefix("data:"))
+                    .map(str::trim_start)
+                    .collect();
+                return Some(serde_json::from_str(&data).unwrap());
+            }
+        }
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(left, body.frame()).await {
+            Err(_) | Ok(None) => return None,
+            Ok(Some(chunk)) => {
+                if let Some(data) = chunk.unwrap().data_ref() {
+                    buf.push_str(std::str::from_utf8(data).unwrap());
+                }
+            }
+        }
+    }
+}
+
+/// End to end: a synced event and the booking mail matched to it are planned
+/// once by the model (which reads the guest COUNT, never a guest), the
+/// reminder fires once with the model's laundered line to the Mac's stream
+/// and the phone's pusher, the phone fetches the same frame by id, and the
+/// timeline's tickets button is the plan's pick on the event and its ghost.
+#[tokio::test]
+async fn an_event_is_planned_once_fires_once_and_serves_its_tickets() {
+    use squelch_api::{RemindOutcome, run_fire_pass, run_plan_pass};
+    use squelch_core::config::Stage2Provider;
+    use squelch_core::gcal::remind::{RemindClient, USAGE_CATEGORY};
+    let (url, bodies) = spawn_remind_model(json!({
+        "remind": true,
+        "lead_minutes": 55,
+        "line": "Your booking is in\u{202E} the Alice email",
+        "open": {"mail": 1, "attachment": 1},
+        "ticket": {"mail": 1, "attachment": 1},
+        "same_as": [4],
+    }))
+    .await;
+    let door_state: Arc<Mutex<Option<squelch_api::ApiState>>> = Arc::default();
+    let keep = door_state.clone();
+    let w = world_with("remind", GRANTED, move |state, _| {
+        let state = state.with_calendar_reminders(Some(RemindClient::new(
+            reqwest::Client::new(),
+            url,
+            "sk-test",
+            Stage2Provider::Anthropic,
+            "claude-haiku-4-5",
+            None,
+        )));
+        *keep.lock().unwrap() = Some(state.clone());
+        state
+    })
+    .await;
+    let state = door_state.lock().unwrap().clone().unwrap();
+
+    let start = minute(Utc::now() + Duration::minutes(50));
+    let mut dinner = timed("dinner", "Dinner at Dingles", start, 90);
+    dinner["attendees"] = json!([
+        {"email": "me@example.com", "self": true, "responseStatus": "accepted"},
+        {"email": "friend@example.com", "displayName": "Dana Friend",
+         "responseStatus": "accepted"},
+    ]);
+    w.google().full.insert(PRIMARY.into(), vec![vec![dinner]]);
+    let message = seed_ghost(&w.store, w.acct, "g1", "Dinner at Dingles", rfc(start));
+    let pdf = w
+        .store
+        .insert_attachment(
+            w.acct,
+            message,
+            "booking.pdf",
+            "application/pdf",
+            3,
+            Some(b"pdf"),
+        )
+        .unwrap();
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+
+    // Planned once, nearest first, billed under its own line.
+    assert_eq!(
+        run_plan_pass(&state, Utc::now()).await.unwrap(),
+        RemindOutcome::Planned {
+            asked: 1,
+            stored: 1
+        }
+    );
+    {
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 1);
+        let sent = &bodies[0];
+        assert!(sent.contains("Dinner at Dingles"));
+        assert!(sent.contains("booking.pdf"));
+        assert!(sent.contains("Other guests: 1"));
+        assert!(!sent.contains("friend@example.com"), "no guest address");
+        assert!(!sent.contains("Dana Friend"), "no guest name");
+        assert!(!sent.contains("alice@example.com"), "no sender address");
+        assert!(!sent.contains("details"), "no mail body");
+    }
+    let billed = w
+        .store
+        .list_usage_by_category(w.acct, 1)
+        .unwrap()
+        .into_iter()
+        .find(|(c, _)| c == USAGE_CATEGORY)
+        .map(|(_, days)| days.iter().map(|d| d.calls).sum::<u64>());
+    assert_eq!(billed, Some(1));
+    // A current plan is not asked about again.
+    assert_eq!(
+        run_plan_pass(&state, Utc::now()).await.unwrap(),
+        RemindOutcome::Planned {
+            asked: 0,
+            stored: 0
+        }
+    );
+    assert_eq!(bodies.lock().unwrap().len(), 1);
+
+    // A Mac listening, and the phone's pusher.
+    let resp = w
+        .app
+        .clone()
+        .oneshot(authed("GET", "/client/events?opens=1"))
+        .await
+        .unwrap();
+    let mut sse = resp.into_body();
+    let mut buf = String::new();
+    let mut pings = state.subscribe_calendar_pings();
+
+    // 55 snaps to 60, and the event is 50 minutes out: due now.
+    let now = Utc::now();
+    let RemindOutcome::Fired(ids) = run_fire_pass(&state, now).await.unwrap() else {
+        panic!("a fire pass");
+    };
+    assert_eq!(ids.len(), 1);
+    let id = ids[0];
+    let frame = next_reminder(&mut sse, &mut buf).await.expect("a frame");
+    assert_eq!(frame["calendar_reminder"], id);
+    assert_eq!(frame["at"], now.timestamp());
+    assert_eq!(frame["lead_minutes"], 60);
+    // The model's line, bidi override gone.
+    assert_eq!(frame["line"], "Your booking is in the Alice email");
+    assert_eq!(frame["item"]["kind"], "event");
+    assert_eq!(frame["item"]["id"], "dinner");
+    assert_eq!(frame["item"]["calendar_id"], "primary");
+    assert_eq!(frame["item"]["title"], "Dinner at Dingles");
+    assert_eq!(frame["open"]["message_id"], message);
+    assert_eq!(frame["open"]["attachment_id"], pdf);
+    assert_eq!(frame["ticket"]["filename"], "booking.pdf");
+    assert_eq!(frame["ticket"]["kind"], "reservation");
+    let ping = pings.try_recv().expect("a ping for the phone");
+    assert_eq!(ping.fire_id, id);
+    assert_eq!(ping.fired, now.timestamp());
+
+    // The phone's fetch is the same frame.
+    let fetched = get(&w.app, &format!("/client/calendar/reminders/{id}")).await;
+    assert_eq!(fetched, frame);
+    let resp = w
+        .app
+        .clone()
+        .oneshot(authed(
+            "GET",
+            &format!("/client/calendar/reminders/{}", id + 1),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Once per start.
+    assert_eq!(
+        run_fire_pass(&state, Utc::now()).await.unwrap(),
+        RemindOutcome::Fired(Vec::new())
+    );
+    assert!(pings.try_recv().is_err());
+
+    // The tickets button: the plan's pick, on the event and on its ghost.
+    let body = w.timeline().await;
+    let tickets = json!({
+        "message_id": message,
+        "thread_id": "t-g1",
+        "kind": "reservation",
+        "attachment": {"id": pdf, "filename": "booking.pdf", "mime": "application/pdf"},
+    });
+    assert_eq!(body["events"][0]["tickets"], tickets);
+    assert_eq!(body["ghosts"][0]["matched_event"]["id"], "dinner");
+    assert_eq!(body["ghosts"][0]["tickets"], tickets);
+
+    // Nothing of it on the agent door.
+    let resp = w
+        .app
+        .clone()
+        .oneshot(authed(
+            "GET",
+            &format!("/client/agent/calendar/reminders/{id}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }

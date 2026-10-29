@@ -2193,9 +2193,19 @@ pub async fn get_timeline(
         Some(calendar) => calendar.granted().await,
         None => false,
     };
-    let (ghosts, events, calendars, status, places, owned) =
+    let (ghosts, events, calendars, status, places, owned, reminders) =
         store_call(&state, move |store, account_id| {
             let ghosts = store.list_ghost_events(account_id, from, to)?;
+            // What the tickets button reads: the reminder plans, the owner's
+            // zone, and the mail of the ghosts whose mail may hold tickets.
+            let reminders = (
+                store.owner_zone(account_id)?.zone,
+                store.calendar_reminder_plans(account_id)?,
+                store.calendar_linked_mail(
+                    account_id,
+                    &squelch_core::gcal::remind::mail_ids(&ghosts, true),
+                )?,
+            );
             if !granted {
                 return Ok((
                     ghosts,
@@ -2204,6 +2214,7 @@ pub async fn get_timeline(
                     Default::default(),
                     Default::default(),
                     Vec::new(),
+                    reminders,
                 ));
             }
             let (events, cut) = store.list_calendar_events(account_id, from, to, now)?;
@@ -2217,64 +2228,49 @@ pub async fn get_timeline(
                 .collect();
             let places = store.calendar_places(account_id)?;
             let owned = store.calendar_owned(account_id)?;
-            Ok((ghosts, events, calendars, status, places, owned))
+            Ok((ghosts, events, calendars, status, places, owned, reminders))
         })
         .await?;
-    // The display match, computed here and never stored, so it can never go
-    // stale and never changes a ghost.
-    let mut matched = squelch_core::gcal::match_ghosts(
-        ghosts.iter().map(|g| (g.title.as_str(), &g.start)),
-        &events,
+    // The tickets button (docs/CALENDAR.md, "Reminders and tickets"): the
+    // current reminder plan's pick, else the fallback from the linked mail.
+    // Linked by the same `link_ghosts` as `matched_event` below.
+    use squelch_core::gcal::remind;
+    let (zone, plans, linked_mail) = reminders;
+    let built = remind::build(
+        &remind::Input {
+            ghosts: &ghosts,
+            events: &events,
+            owned: &owned,
+            places: &places,
+            mail: &linked_mail,
+            plans: &plans,
+        },
+        zone,
+        now,
     );
-    // Two more ways a ghost is the same thing as an event: Passband made the
-    // event for it and keeps it (gcal/own.rs), whatever its time or title
-    // now; or Gmail made the event from the same mail, which titles it its
-    // own way (`own::same_event`: the same start and a distinctive word).
-    use squelch_core::gcal::own::{self, OwnState};
-    // Indexed once, so each ghost looks up rather than scans.
-    let position: std::collections::HashMap<(&str, &str), usize> = events
-        .iter()
-        .enumerate()
-        .map(|(i, e)| ((e.calendar_id.as_str(), e.row.event_id.as_str()), i))
-        .collect();
-    let bound_to: std::collections::HashMap<i64, (&str, &str)> = owned
+    let tickets_of = |item: Option<&remind::Item>| match item {
+        Some(item) => remind::tickets_json(remind::tickets(item, plans.get(&item.key)).as_ref()),
+        None => serde_json::Value::Null,
+    };
+    // The display match (`gcal::link_ghosts`): computed here and never
+    // stored, so it can never go stale and never changes a ghost. The
+    // calendar reminders link mail to events by the same function.
+    let matched = squelch_core::gcal::link_ghosts(&ghosts, &events, &owned);
+    use squelch_core::gcal::own::OwnState;
+    let mine: std::collections::HashSet<(&str, &str)> = owned
         .iter()
         .filter(|o| o.state == OwnState::Owned)
-        .map(|o| (o.ghost_id, (o.calendar_id.as_str(), o.event_id.as_str())))
+        .map(|o| (o.calendar_id.as_str(), o.event_id.as_str()))
         .collect();
-    let mine: std::collections::HashSet<(&str, &str)> = bound_to.values().copied().collect();
-    // Gmail's events by start (an instant in UTC, or a date), the only ones
-    // `same_event` can match.
-    let start_key = |t: &squelch_core::triage::ghost::EventTime| match t {
-        squelch_core::triage::ghost::EventTime::At(at) => (Some(at.with_timezone(&Utc)), None),
-        squelch_core::triage::ghost::EventTime::Date(day) => (None, Some(*day)),
-    };
-    let mut gmail_at: std::collections::HashMap<_, Vec<usize>> = Default::default();
-    for (i, e) in events.iter().enumerate() {
-        if e.row.from_gmail {
-            gmail_at.entry(start_key(&e.row.start)).or_default().push(i);
-        }
-    }
-    for (ghost, slot) in ghosts.iter().zip(matched.iter_mut()) {
-        let bound = bound_to
-            .get(&ghost.id)
-            .and_then(|key| position.get(key).copied());
-        if bound.is_some() {
-            *slot = bound;
-        } else if slot.is_none() {
-            *slot = gmail_at.get(&start_key(&ghost.start)).and_then(|at| {
-                at.iter()
-                    .copied()
-                    .find(|&i| own::same_event(ghost, &events[i].row))
-            });
-        }
-    }
     let now = now.with_timezone(from.offset());
     let ghosts: Vec<_> = ghosts
         .iter()
         .zip(matched)
-        .map(|(g, matched)| {
+        .enumerate()
+        .map(|(i, (g, matched))| {
             let mut view = ghost_view(g, now);
+            // A ghost that is an event's shares its tickets.
+            view["tickets"] = tickets_of(built.ghost_item(i));
             view["matched_event"] = match matched.map(|i| &events[i]) {
                 Some(event) => {
                     json!({ "calendar_id": event.calendar_id, "id": event.row.event_id })
@@ -2290,8 +2286,10 @@ pub async fn get_timeline(
         .unwrap_or_default();
     let events: Vec<_> = events
         .iter()
-        .map(|e| {
+        .enumerate()
+        .map(|(i, e)| {
             let mut view = calendar_event_view(e, &account_email);
+            view["tickets"] = tickets_of(built.events.get(i));
             // The card's place (gcal/place.rs), once the model has made one
             // of this location: its name and street address, each null when
             // the location gives none (both null: it names no place), and the

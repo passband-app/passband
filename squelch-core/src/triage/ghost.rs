@@ -883,6 +883,17 @@ fn clean_title(raw: &str) -> Option<String> {
 /// character ends it, which keeps "doors 7, show 8" a phrase.
 fn note(raw: &str) -> String {
     let text = plain(raw);
+    if mail_shaped(&text) {
+        return String::new();
+    }
+    truncate_trimmed(&text, NOTE_CAP)
+}
+
+/// [`note`]'s drop test, over text already [`plain`]: a URL or a bare host,
+/// an `@`, or a run of 6 or more digits counted across the separators a
+/// number is printed with. Also the calendar reminder line's
+/// ([`crate::gcal::remind`]), which a stranger's invitation can steer.
+pub(crate) fn mail_shaped(text: &str) -> bool {
     let mut run = 0;
     let digits = text.chars().any(|c| {
         if c.is_numeric() {
@@ -892,10 +903,7 @@ fn note(raw: &str) -> String {
         }
         run >= 6
     });
-    if digits || text.contains('@') || text.split(' ').any(|t| url_core(t).is_some()) {
-        return String::new();
-    }
-    truncate_trimmed(&text, NOTE_CAP)
+    digits || text.contains('@') || text.split(' ').any(|t| url_core(t).is_some())
 }
 
 /// A location is display text, except that every URL in it (a meeting link,

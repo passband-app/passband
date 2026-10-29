@@ -2257,6 +2257,37 @@ CREATE TABLE IF NOT EXISTS calendar_places (
     PRIMARY KEY(account_id, raw)
 );
 
+-- CALENDAR REMINDERS (gcal/remind.rs, docs/CALENDAR.md "Reminders and
+-- tickets"): the small model's plan for one item, `e:<calendar>/<event>` or
+-- `g:<ghost id>`, made for one `version` (a hash of what it read) under one
+-- prompt. `plan_json` holds whether to remind, the lead, the laundered line,
+-- what a tap opens, the tickets pick and the ghosts it said are the same
+-- thing, all held to the input in code. Pruned when the item is gone or over.
+-- HUMAN DOOR ONLY.
+CREATE TABLE IF NOT EXISTS calendar_reminders (
+    account_id     INTEGER NOT NULL,
+    item_key       TEXT NOT NULL,
+    version        TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    plan_json      TEXT NOT NULL,
+    planned_at     TEXT NOT NULL,
+    PRIMARY KEY(account_id, item_key)
+);
+-- Each reminder that fired: once per item per start (`start_key`, the start
+-- as a UTC instant or a date), so a moved event can fire again. `frame` is
+-- the `calendar_reminder` frame as sent, which the phone fetches by `id`
+-- (`GET /client/calendar/reminders/{id}`). `fired_at` is Unix seconds. Kept 7
+-- days. HUMAN DOOR ONLY.
+CREATE TABLE IF NOT EXISTS calendar_reminder_fires (
+    id         INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL,
+    item_key   TEXT NOT NULL,
+    start_key  TEXT NOT NULL,
+    fired_at   INTEGER NOT NULL,
+    frame      TEXT NOT NULL,
+    UNIQUE(account_id, item_key, start_key)
+);
+
 -- CALENDAR SEARCH (docs/CALENDAR.md §10.1): a word index over the synced
 -- events, for the search box, the assistant and Agent MCP. `calendar_search_keys`
 -- gives each event a stable integer id, because `calendar_events` has none (an

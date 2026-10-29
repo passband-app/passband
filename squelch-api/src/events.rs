@@ -130,6 +130,12 @@ fn renotify_frame(payload: &str) -> SseEvent {
     SseEvent::default().event("renotify").data(payload)
 }
 
+/// A calendar reminder ([`crate::calendar_remind`]), as an SSE frame. Like
+/// [`renotify_frame`]: no `id:`, and a payload an [`Event`] decoder rejects.
+fn calendar_reminder_frame(payload: &str) -> SseEvent {
+    SseEvent::default().event("calendar_reminder").data(payload)
+}
+
 /// Send every event past `cursor`, oldest first, in bounded batches. `None`
 /// means the connection is over (client hung up, or a store read failed — a
 /// failed read ends the stream rather than retrying, since the client reconnects
@@ -179,6 +185,7 @@ async fn pump(
 
 /// Drive one connection until the client leaves or the notifier closes.
 /// `_anchor` keeps a fallback channel alive for its duration; see [`subscribe`].
+#[allow(clippy::too_many_arguments)] // one receiver per frame kind a Mac takes
 async fn run(
     state: ApiState,
     start: i64,
@@ -186,6 +193,7 @@ async fn run(
     _anchor: Option<broadcast::Sender<i64>>,
     mut opens: Option<broadcast::Receiver<i64>>,
     mut banners: Option<broadcast::Receiver<Arc<str>>>,
+    mut reminders: Option<broadcast::Receiver<Arc<str>>>,
     tx: mpsc::Sender<Result<SseEvent, Infallible>>,
 ) {
     // Replay first — a no-op for a live-only connection.
@@ -224,6 +232,15 @@ async fn run(
             Some(banner) = next_banner(&mut banners) => {
                 if let Some(payload) = banner
                     && tx.send(Ok(renotify_frame(&payload))).await.is_err()
+                {
+                    return;
+                }
+            }
+            // A calendar reminder, for a Mac stream. A lag is a missed
+            // banner on the Mac; the phone was pinged on its own.
+            Some(reminder) = next_banner(&mut reminders) => {
+                if let Some(payload) = reminder
+                    && tx.send(Ok(calendar_reminder_frame(&payload))).await.is_err()
                 {
                     return;
                 }
@@ -316,6 +333,8 @@ pub async fn events_stream(
     // Both are inert with the feature off: no banner is ever sent, and no
     // session is written.
     let banners = mac.then(|| state.renotify.frames.subscribe());
+    // Calendar reminders reach a Mac stream too, whatever `renotify` says.
+    let reminders = mac.then(|| state.calendar_remind.frames.subscribe());
     let session = if mac {
         let platform = headers
             .get(CLIENT_HEADER)
@@ -341,7 +360,7 @@ pub async fn events_stream(
         // reconnect.
         tokio::select! {
             _ = shutting_down(shutdown) => {}
-            _ = run(pump_state, start, wake, anchor, opens, banners, tx) => {}
+            _ = run(pump_state, start, wake, anchor, opens, banners, reminders, tx) => {}
         }
     });
 

@@ -535,6 +535,7 @@ mod agent_triage;
 mod attention;
 mod audit;
 mod calendar;
+pub mod calendar_remind;
 mod contacts;
 pub mod device_tokens;
 mod drafts;

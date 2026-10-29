@@ -37,6 +37,7 @@
 pub mod client;
 pub mod own;
 pub mod place;
+pub mod remind;
 pub mod search;
 pub mod sync;
 pub mod write;
@@ -872,6 +873,65 @@ pub fn match_ghosts<'a>(
             })
         })
         .collect()
+}
+
+/// THE ONE LINK between ghosts and events, for the timeline's
+/// `matched_event` and the calendar reminders' linked mail
+/// ([`remind`]): for each ghost, the index in `events` of the event it is.
+/// Three ways, strongest first:
+///
+/// 1. Passband made the event for it and keeps it ([`own`], an `owned`
+///    binding), whatever its time or title now, when that event is listed.
+/// 2. The display match ([`match_ghosts`]): the same start and a title match.
+/// 3. Gmail made the event from the same mail and titled it its own way
+///    ([`own::same_event`]): the same start and a distinctive word.
+///
+/// Computed when asked and never stored, so it cannot go stale and changes
+/// no ghost.
+pub fn link_ghosts(
+    ghosts: &[crate::types::GhostEvent],
+    events: &[SyncedEvent],
+    owned: &[own::Owned],
+) -> Vec<Option<usize>> {
+    let mut matched = match_ghosts(ghosts.iter().map(|g| (g.title.as_str(), &g.start)), events);
+    // Indexed once, so each ghost looks up rather than scans.
+    let position: std::collections::HashMap<(&str, &str), usize> = events
+        .iter()
+        .enumerate()
+        .map(|(i, e)| ((e.calendar_id.as_str(), e.row.event_id.as_str()), i))
+        .collect();
+    let bound_to: std::collections::HashMap<i64, (&str, &str)> = owned
+        .iter()
+        .filter(|o| o.state == own::OwnState::Owned)
+        .map(|o| (o.ghost_id, (o.calendar_id.as_str(), o.event_id.as_str())))
+        .collect();
+    // Gmail's events by start (an instant in UTC, or a date), the only ones
+    // `same_event` can match.
+    let start_key = |t: &EventTime| match t {
+        EventTime::At(at) => (Some(at.with_timezone(&Utc)), None),
+        EventTime::Date(day) => (None, Some(*day)),
+    };
+    let mut gmail_at: std::collections::HashMap<_, Vec<usize>> = Default::default();
+    for (i, e) in events.iter().enumerate() {
+        if e.row.from_gmail {
+            gmail_at.entry(start_key(&e.row.start)).or_default().push(i);
+        }
+    }
+    for (ghost, slot) in ghosts.iter().zip(matched.iter_mut()) {
+        let bound = bound_to
+            .get(&ghost.id)
+            .and_then(|key| position.get(key).copied());
+        if bound.is_some() {
+            *slot = bound;
+        } else if slot.is_none() {
+            *slot = gmail_at.get(&start_key(&ghost.start)).and_then(|at| {
+                at.iter()
+                    .copied()
+                    .find(|&i| own::same_event(ghost, &events[i].row))
+            });
+        }
+    }
+    matched
 }
 
 #[cfg(test)]

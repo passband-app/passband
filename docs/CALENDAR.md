@@ -977,7 +977,10 @@ input in code:
 **Failure:** no model, a timeout or a refusal stores nothing, and the next pass
 asks again within the caps. If an event is 30 minutes out and has never had a
 plan, it gets the fallback: a 30-minute reminder with no line, opening the
-fallback ticket (below) if there is one.
+fallback ticket (below) if there is one. Only an item worth it gets the
+fallback: one with linked mail, or a timed one the user is busy for. With no
+model every item is unplanned, and a fallback for everything would buzz for
+each holiday and focus block.
 
 Stored in `calendar_reminders`, keyed by account and item (`e:<calendar>/<event>`
 or `g:<ghost id>`), and pruned when the item is gone or over.
@@ -1010,14 +1013,16 @@ The frame:
           "end": null, "all_day": false, "place": "The Greek Theatre"},
  "lead_minutes": 60, "line": "Your 2 tickets are in the Ticketmaster email",
  "open": {"message_id": 41, "thread_id": "t41", "attachment_id": 9},
- "ticket": {"message_id": 41, "thread_id": "t41", "attachment_id": 9,
-            "filename": "tickets.pdf", "mime": "application/pdf"}}
+ "ticket": {"message_id": 41, "thread_id": "t41", "kind": "ticket",
+            "attachment_id": 9, "filename": "tickets.pdf",
+            "mime": "application/pdf"}}
 ```
 
 A ghost's `item` is `{"kind": "ghost", "id": <ghost id>, ...}`.
 
-The banner reads: title = the event's title; subtitle = "in 1 hr · The Greek
-Theatre"; body = the line. Tapping it shows `open` (an attachment in Quick
+The banner reads: title = the event's title; subtitle = "8pm · The Greek
+Theatre" (the start in the device's zone, "Today" for all-day; a countdown
+would go stale on the lock screen); body = the line. Tapping it shows `open` (an attachment in Quick
 Look, mail in the reader), else the event's card. When there is a `ticket`,
 the notification carries a "Show tickets" action. Analytics:
 `calendar_reminder_shown`, `calendar_reminder_opened`.
@@ -1038,6 +1043,49 @@ phone), mail in the reader.
 
 A per-event lead the user picks, snooze, travel time from where the user is,
 and leaving out events Google's own app already reminds about.
+
+#### As built (daemon, 2026-10-29)
+
+Where the build settled something the design left open, or differs from it:
+
+- **The planner runs in the reminder worker, not after a sync pass**
+  (`squelch-api/src/calendar_remind.rs`). One worker: a fire pass every 30
+  seconds, a plan pass first on every tenth (5 minutes) and at start. A sync
+  pass only runs with a calendar grant, and committed ghosts are reminded
+  without one. Events are read only while calendar is granted, as the
+  timeline serves them. The worker idles while the `calendar` hidden
+  feature is off, like every route it depends on.
+- **A ghost from mail that failed authentication is never reminded**, not
+  only kept from linking mail: its title would otherwise reach the lock
+  screen on a stranger's say-so.
+- **A ghost the event's current plan names in `same_as` is that event's**:
+  it is not reminded on its own (one banner, not two), and its tickets are
+  the event's.
+- **Numbering.** The prompt numbers mail from 1: the linked mail first
+  (newest first, at most 6), then each candidate booking's mail (at most 2
+  each), listed under that booking; attachments from 1 within their mail (at
+  most 6, only non-inline ones with bytes stored: an `image/*` part with a
+  Content-ID is inline). A pick of a booking's mail counts only when the
+  answer also names that booking in `same_as`; otherwise it is null. At most
+  6 candidates, nearest the event's start.
+- **Lead ties go to the longer lead** (45 becomes 60). An all-day item's
+  frame has `lead_minutes: null`.
+- **The version** also folds in the ghost's kind for a ghost item, and a
+  ghost's "answer" is `going` (the user said so) or `booked` (committed).
+- **No current plan, any reason** (never planned, the event changed since,
+  an older prompt): the 30-minute fallback with no line. A plan that says
+  `remind: false` never fires.
+- **`kind` on a pick** is the kind of the ghost the mail came from when that
+  is ticket, travel or reservation, else `ticket`.
+- **Trash.** The store keeps no trash state for a message, so "never
+  trashed" is not checked; spam, sent, sealed and unreviewed mail are.
+- **The frame's `ticket`** also carries `kind`. Times are the owner's zone
+  with its offset (a date for all-day); `place` is the card's place name,
+  else its address, else the raw location (null when the card says it names
+  no place).
+- **The preference** is the `app_settings` row `calendar_reminders` (`0` is
+  off), `GET`/`PUT /client/calendar/reminders/settings` `{"enabled": bool}`,
+  human door, behind the `calendar` feature.
 
 ## 6. Scheduling from the sitrep
 

@@ -328,11 +328,16 @@ async fn timeline_serves_every_field_with_the_right_end_tier() {
             "start",
             "start_timezone",
             "state",
+            // The tickets button: a ticket's own mail, with no attachment.
+            "tickets",
             "title",
             "verified"
         ]
     );
     assert_eq!(s["matched_event"], Value::Null);
+    assert_eq!(s["tickets"]["message_id"], s["sources"][0]["message_id"]);
+    assert_eq!(s["tickets"]["kind"], "ticket");
+    assert_eq!(s["tickets"]["attachment"], Value::Null);
     // The whole body: ghosts beside the real events and the calendar status,
     // which with no grant is empty and says so.
     let mut top: Vec<_> = body.as_object().unwrap().keys().cloned().collect();

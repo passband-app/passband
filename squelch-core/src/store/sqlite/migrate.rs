@@ -2019,10 +2019,10 @@ pub(super) fn reindex_calendar_search_if_stale(conn: &Connection) -> Result<()> 
             |r| r.get(0),
         )
         .optional()?;
-    if let (Some(stored), Some(canonical)) = (stored, canonical_calendar_search_create()) {
-        if normalize_fts_sql(&stored) != normalize_fts_sql(canonical) {
-            conn.execute_batch(&format!("DROP TABLE calendar_search_fts; {canonical};"))?;
-        }
+    if let (Some(stored), Some(canonical)) = (stored, canonical_calendar_search_create())
+        && normalize_fts_sql(&stored) != normalize_fts_sql(canonical)
+    {
+        conn.execute_batch(&format!("DROP TABLE calendar_search_fts; {canonical};"))?;
     }
     let events = count("SELECT COUNT(*) FROM calendar_events")?;
     let keys = count(

@@ -29,6 +29,7 @@ struct AnthropicStreamTests {
         errorEvent()
         messageDeltaWithoutUsage()
         inputSurvivesReencoding()
+        cachedPromptTokens()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -276,5 +277,25 @@ struct AnthropicStreamTests {
         checks += 1
         failures += 1
         print("FAIL (line \(line)): \(label)")
+    }
+
+    /// With prompt caching on, input_tokens is only the uncached remainder;
+    /// the cached part arrives as writes and reads, and both are kept.
+    static func cachedPromptTokens() {
+        var acc = AnthropicStreamAccumulator()
+        equal(
+            acc.feed(
+                #"{"type":"message_start","message":{"id":"msg_02","type":"message","role":"assistant","model":"claude-opus-5","content":[],"usage":{"input_tokens":3,"cache_creation_input_tokens":3765,"cache_read_input_tokens":5644,"output_tokens":1}}}"#
+            ),
+            [.messageStart(inputTokens: 3, cacheWriteTokens: 3765, cacheReadTokens: 5644)],
+            "message_start carries the cache writes and reads beside the uncached input")
+
+        let prompt = PromptTokens(input: 3, cacheWrite: 3765, cacheRead: 5644)
+        equal(prompt.total, 9412, "every prompt token sent is counted, however it was billed")
+        equal(prompt.billedAtInputRate, 3 + 3765 * 1.25 + 5644 * 0.1,
+            "and priced as writes at 1.25x and reads at 0.1x of the input rate")
+        var sum = PromptTokens(input: 1, cacheWrite: 2, cacheRead: 3)
+        sum += PromptTokens(input: 10, cacheWrite: 20, cacheRead: 30)
+        equal(sum, PromptTokens(input: 11, cacheWrite: 22, cacheRead: 33), "turns sum field by field")
     }
 }

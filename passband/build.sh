@@ -67,7 +67,9 @@ SWIFT_FLAGS=(
 )
 
 case "$MODE" in
-  release) SWIFT_FLAGS+=(-O -whole-module-optimization) ;;
+  # -g so there are symbols to keep in a dSYM (the binary is stripped of them
+  # below); dead_strip so code nothing reaches is not linked at all.
+  release) SWIFT_FLAGS+=(-O -whole-module-optimization -g -Xlinker -dead_strip) ;;
   preview) SWIFT_FLAGS+=(-Onone -whole-module-optimization) ;;
   *)       SWIFT_FLAGS+=(-Onone -g) ;;
 esac
@@ -90,6 +92,25 @@ done < <(find "$SRC_DIR" -name '*.swift' -not -path "$RES_DIR/*" | sort)
 echo "    ${#SOURCES[@]} source files"
 
 xcrun swiftc "${SWIFT_FLAGS[@]}" -o "$APP/Contents/MacOS/Passband" "${SOURCES[@]}"
+
+# THE SYMBOLS LEAVE THE BUNDLE. With -g the driver writes Passband.dSYM next
+# to the binary, inside Contents/MacOS, where it would ship ~55 MB of debug
+# symbols to every install. It goes to build/Passband.app.dSYM
+# (build-release.sh packages it), and the binary is stripped of local symbols
+# before it is signed. The dSYM keeps the binary's UUID, which is what
+# symbolicates a crash from the shipped build.
+if [ "$MODE" = release ]; then
+  DSYM="build/Passband.app.dSYM"
+  echo "==> splitting symbols into $DSYM"
+  rm -rf "$DSYM"
+  mv "$APP/Contents/MacOS/Passband.dSYM" "$DSYM"
+  xcrun strip -x "$APP/Contents/MacOS/Passband"
+  # A -g compile has been seen to leave its module beside this script
+  # (Passband-1.swiftmodule and friends, with absolute paths inside). Nothing
+  # reads them; they must not end up in a commit.
+  rm -f Passband-[0-9]*.swiftmodule Passband-[0-9]*.swiftdoc \
+    Passband-[0-9]*.swiftsourceinfo Passband-[0-9]*.abi.json
+fi
 
 echo "==> assembling bundle"
 # Info.plist with the build-setting placeholders resolved.

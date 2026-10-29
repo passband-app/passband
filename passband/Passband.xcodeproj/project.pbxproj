@@ -566,6 +566,7 @@
 		F1FF61C094DEFA61E3BB3114 /* SmartClearReceipt.swift in Sources */ = {isa = PBXBuildFile; fileRef = A97E96827F6F661BD0999CFE /* SmartClearReceipt.swift */; };
 		F203E4786137371093270AB6 /* MinimapGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EF8CFFF47055FF070BD9E8F /* MinimapGeometry.swift */; };
 		F20F889E8EACBA347A96080A /* MailFilterBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2ED74225D223B07573FEE0C /* MailFilterBar.swift */; };
+		F27B7D70DC2D785BD9A21B6E /* ZoneStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEA9BAB65F7E2A6FA183B053 /* ZoneStore.swift */; };
 		F3193F08328E9F5CC6BFCE27 /* RecipientField.swift in Sources */ = {isa = PBXBuildFile; fileRef = 327BC236C39F192198AFEF7D /* RecipientField.swift */; };
 		F364D1469A2AA0C9E4B38DED /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 78527CBD27E00907F26B9E79 /* Security.framework */; };
 		F3892526DCB5A77DCE1C4A2F /* ShareNudgeModal.swift in Sources */ = {isa = PBXBuildFile; fileRef = F35D517CCBF21D1292E154AB /* ShareNudgeModal.swift */; };
@@ -583,6 +584,7 @@
 		F9F36612D66761810087A60E /* MobileCalendarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 319FFCBAD56A911D2F0BE7E6 /* MobileCalendarView.swift */; };
 		FA53DECE01289F91363AC331 /* UpdateRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92398A24BE2068AEBF3FA312 /* UpdateRow.swift */; };
 		FB0306D6A270C6C086EF253F /* SitrepPoller.swift in Sources */ = {isa = PBXBuildFile; fileRef = A31EE886D87910F0348A94AB /* SitrepPoller.swift */; };
+		FC5C91B8281CBB90CA936E18 /* ZoneStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEA9BAB65F7E2A6FA183B053 /* ZoneStore.swift */; };
 		FE0C7D234C91B0DFCC7F4106 /* Opener.swift in Sources */ = {isa = PBXBuildFile; fileRef = 070286D5016F78C93DC49070 /* Opener.swift */; };
 		FE1D72F2A5B29E3F9DB0B1BC /* ComposeSubmit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35991F651C60388C6D9BBEDF /* ComposeSubmit.swift */; };
 		FEB7C74E205F4F17326C887D /* FrameHeightFile.swift in Sources */ = {isa = PBXBuildFile; fileRef = C98AD3FDFC5C4EB6D72C43F5 /* FrameHeightFile.swift */; };
@@ -945,6 +947,7 @@
 		FA2F8E5310BCCF203247E428 /* AccountPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountPage.swift; sourceTree = "<group>"; };
 		FCA6DBA73DEBD1CB392DE3A5 /* RehearsalMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RehearsalMode.swift; sourceTree = "<group>"; };
 		FDDBA0B71BDDC46E844D2856 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		FEA9BAB65F7E2A6FA183B053 /* ZoneStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZoneStore.swift; sourceTree = "<group>"; };
 		FEEC9A829B1F0FD2F3A0F6DF /* SessionReplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionReplay.swift; sourceTree = "<group>"; };
 		FF2D98A36AEF64366DD338AB /* MarkdownTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownTextView.swift; sourceTree = "<group>"; };
 		FF4D8746B664E116C3036411 /* SchedulePalette.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SchedulePalette.swift; sourceTree = "<group>"; };
@@ -1266,6 +1269,7 @@
 				D179CAC9853B13A5FBFD968E /* Updater.swift */,
 				22634771F8C0BE048B034866 /* WhatsNew.swift */,
 				6C9F46E8DA615783DD2BEAF6 /* WireTypes.swift */,
+				FEA9BAB65F7E2A6FA183B053 /* ZoneStore.swift */,
 			);
 			path = Model;
 			sourceTree = "<group>";
@@ -1900,6 +1904,7 @@
 				454262AEF38CC6F59CEB4989 /* WhatsNew.swift in Sources */,
 				CF34A69E15DFE9980A622162 /* WhatsNewCard.swift in Sources */,
 				6F3982A3598CCC296C35C2E6 /* WireTypes.swift in Sources */,
+				F27B7D70DC2D785BD9A21B6E /* ZoneStore.swift in Sources */,
 				126B9D58B8378EDF351CDE33 /* Zoom.swift in Sources */,
 				7F7E9564A2FD9B4B4169D26B /* ZoomSteps.swift in Sources */,
 			);
@@ -2179,6 +2184,7 @@
 				F7F2772B8DCFEA19D81F022E /* WhatsNewCard.swift in Sources */,
 				77F44BF6BF388F358070F3CC /* WhatsNewWalk.swift in Sources */,
 				B91230E83D52E90A46495F77 /* WireTypes.swift in Sources */,
+				FC5C91B8281CBB90CA936E18 /* ZoneStore.swift in Sources */,
 				4844BB010D4C2DFAD56727F5 /* ZoomSteps.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -2337,6 +2343,7 @@
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_OPTIMIZATION_LEVEL = 0;
+				"GCC_OPTIMIZATION_LEVEL[config=Release]" = s;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"DEBUG=1",
@@ -2484,6 +2491,7 @@
 				GCC_C_LANGUAGE_STANDARD = gnu11;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_OPTIMIZATION_LEVEL = 0;
+				"GCC_OPTIMIZATION_LEVEL[config=Release]" = s;
 				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
 				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
 				GCC_WARN_UNDECLARED_SELECTOR = YES;

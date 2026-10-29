@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["squelch-core", "squelch-httpauth", "squelch-ratelimit", "squelch-mcp", "squelch-tui", "squelch-api", "squelch-relay", "squelch-broker", "squelch-control", "squelch-warden", "squelchd", "squelch-embed"]
+members = ["squelch-core", "squelch-httpauth", "squelch-ratelimit", "squelch-mcp", "squelch-tui", "squelch-api", "squelch-relay", "squelch-broker", "squelch-control", "squelch-warden", "squelchd", "squelch-embed", "squelch-eval"]
 
 [workspace.package]
 version = "0.0.14"

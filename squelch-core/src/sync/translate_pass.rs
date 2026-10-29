@@ -445,6 +445,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             self.vectors_dirty.store(true, Ordering::Relaxed);
             return;
         };
+        // A remote embedder's backoff window, exactly as for a message.
+        if !self.embed_backoff.may_call(tokio::time::Instant::now()) {
+            self.vectors_dirty.store(true, Ordering::Relaxed);
+            return;
+        }
         let account_id = self.account_id;
         let store = self.store.clone();
         let result = tokio::task::spawn_blocking(move || {
@@ -453,10 +458,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         })
         .await;
         match &result {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => eprintln!(
-                "squelch: translation embed failed for message {message_id} (recoverable via backfill): {e}"
-            ),
+            Ok(Ok(())) => self.embed_backoff.succeeded(),
+            Ok(Err(e)) => {
+                if !self.embed_backoff_opened(e) {
+                    eprintln!(
+                        "squelch: translation embed failed for message {message_id} (recoverable via backfill): {e}"
+                    );
+                }
+            }
             Err(e) => eprintln!(
                 "squelch: translation embed task join error for message {message_id}: {e}"
             ),

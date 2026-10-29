@@ -7,6 +7,7 @@
 //! account's `provider` row; Gmail ([`crate::mail::gmail`]) is the only one.
 //! Tokens, headers and bodies are NEVER logged; ingest seals first (SECURITY.md).
 
+mod embed_backoff;
 pub mod html;
 pub mod ingest;
 pub mod notify_lane;
@@ -732,6 +733,10 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// [`SyncEngine::with_vectors_dirty`] hands one flag to every engine over
     /// one store.
     vectors_dirty: Arc<AtomicBool>,
+    /// The window during which a remote embedder is not called after a
+    /// transient failure. Never opens for a local embedder. See
+    /// [`embed_backoff`].
+    embed_backoff: embed_backoff::EmbedBackoff,
     /// Shared cooldown after provider failure. Rejected configuration must not
     /// trigger one request per queued message or consume message retry attempts.
     agent_retry_after: AtomicI64,
@@ -898,6 +903,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             archive_pace: ArchivePace::default(),
             archive: ArchiveRun::default(),
             vectors_dirty: Arc::new(AtomicBool::new(true)),
+            embed_backoff: embed_backoff::EmbedBackoff::default(),
             agent_retry_after: AtomicI64::new(0),
             agent_throttle_strikes: AtomicU32::new(0),
             agent_access_strikes: AtomicU32::new(0),
@@ -3446,9 +3452,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     }
 
     /// Embed `text` off the async runtime and write the vector for
-    /// `message_id`. No-op without an embedder. A failure logs a redacted
-    /// one-liner (id + error kind, never body) and never propagates — the
-    /// backfill pass recovers the vector, so ingest must not block on it.
+    /// `message_id`. No-op without an embedder, and inside a remote embedder's
+    /// backoff window ([`embed_backoff`]), which is what keeps a down
+    /// embedding service from costing mail ingest a timeout per message. A
+    /// failure logs a redacted one-liner (id + error kind, never body) and
+    /// never propagates — the backfill pass recovers the vector, so ingest
+    /// must not block on it.
     async fn embed_and_store(&self, message_id: i64, text: String) {
         let Some(embedder) = self.embedder() else {
             // No vector written: the drain owes this row one once an embedder
@@ -3456,6 +3465,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             self.vectors_dirty.store(true, Ordering::Relaxed);
             return;
         };
+        if !self.embed_backoff.may_call(tokio::time::Instant::now()) {
+            // Same debt, same payer: the drain, once the window closes.
+            self.vectors_dirty.store(true, Ordering::Relaxed);
+            return;
+        }
         let account_id = self.account_id;
         let store = self.store.clone();
         // ONNX inference is CPU-bound; keep it off the poll loop.
@@ -3465,10 +3479,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         })
         .await;
         match &result {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => eprintln!(
-                "squelch: embed failed for message {message_id} (recoverable via backfill): {e}"
-            ),
+            Ok(Ok(())) => self.embed_backoff.succeeded(),
+            Ok(Err(e)) => {
+                if !self.embed_backoff_opened(e) {
+                    eprintln!(
+                        "squelch: embed failed for message {message_id} (recoverable via backfill): {e}"
+                    );
+                }
+            }
             Err(e) => eprintln!("squelch: embed task join error for message {message_id}: {e}"),
         }
         // Anything but a written vector is a row the drain owes.
@@ -3491,6 +3509,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // round after an embedder is attached is the one to pay them.
             return;
         };
+        if !self.embed_backoff.may_call(tokio::time::Instant::now()) {
+            // Inside a remote embedder's backoff window. Before the query, not
+            // after: the query walks the account, and the answer would only be
+            // thrown away. The flag stays standing for the round after.
+            return;
+        }
         // Lowered BEFORE the first query, not after the last: a failure that
         // lands on the poll lane while this drain is between awaits raises it
         // again, and a clear at the end would erase that. The guard raises it
@@ -3580,9 +3604,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             .await;
 
             match result {
-                Ok(Ok(())) => total += n,
+                Ok(Ok(())) => {
+                    self.embed_backoff.succeeded();
+                    total += n;
+                }
                 Ok(Err(e)) => {
-                    eprintln!("squelch: vector backfill batch failed ({e}); stopping pass");
+                    if !self.embed_backoff_opened(&e) {
+                        eprintln!("squelch: vector backfill batch failed ({e}); stopping pass");
+                    }
                     return None;
                 }
                 Err(e) => {
@@ -3601,6 +3630,22 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // here still delays the next `history.list`.
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    /// Record a failed embed against the backoff, and say so when it opened a
+    /// window: one line per window rather than one per message, carrying the
+    /// error (a status or a transport class, never text). `false` means the
+    /// error was not a transient remote one and the caller logs it as before.
+    fn embed_backoff_opened(&self, e: &CoreError) -> bool {
+        let Some(delay) = self.embed_backoff.failed(e, tokio::time::Instant::now()) else {
+            return false;
+        };
+        eprintln!(
+            "squelch: {e}; embedding paused for {} s (mail sync unaffected; missing \
+             vectors are filled in by the backfill afterwards)",
+            delay.as_secs()
+        );
+        true
     }
 
     async fn trim_after_drain(total: usize) {
@@ -12510,6 +12555,64 @@ mod tests {
         assert!(
             first.vectors_dirty.load(Ordering::Relaxed),
             "a raise on the sweeps engine lands on the sync engine's flag"
+        );
+    }
+
+    /// docs/EMBED-SERVICE.md §3: a remote embedder answering 503 opens a
+    /// backoff window, and inside it neither ingest nor the vector drain calls
+    /// it again. Ingest still completes (the row is owed to the drain), which
+    /// is the half that keeps mail sync from slowing down.
+    #[tokio::test]
+    async fn a_full_embedding_service_is_not_asked_again_inside_the_window() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::AtomicUsize;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let asked = Arc::new(AtomicUsize::new(0));
+        let count = asked.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                count.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 503 X\r\nretry-after: 1\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                );
+            }
+        });
+        let remote = tokio::task::spawn_blocking(move || {
+            let settings = crate::config::EmbedConfig::default().settings();
+            crate::embed::RemoteEmbedder::new(&url, None, &settings, 1000).unwrap()
+        })
+        .await
+        .unwrap();
+
+        let (store, acct) = store_at_cursor(None);
+        let eng = engine(store, acct, "http://127.0.0.1:9").with_embedder(Arc::new(remote));
+        eng.vectors_dirty.store(false, Ordering::Relaxed);
+
+        eng.embed_and_store(1, "hello there".to_string()).await;
+        assert_eq!(asked.load(Ordering::SeqCst), 1, "the first embed asks");
+        assert!(eng.vectors_dirty.load(Ordering::Relaxed), "and is owed");
+        assert!(!eng.embed_backoff.may_call(tokio::time::Instant::now()));
+
+        eng.vectors_dirty.store(false, Ordering::Relaxed);
+        eng.embed_and_store(2, "hello again".to_string()).await;
+        assert!(
+            eng.vectors_dirty.load(Ordering::Relaxed),
+            "skipped inside the window, so still owed"
+        );
+        eng.backfill_missing_vectors().await;
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            1,
+            "nothing asks again until the window closes"
+        );
+        assert!(
+            eng.vectors_dirty.load(Ordering::Relaxed),
+            "a drain that did not run leaves the debt standing"
         );
     }
 }

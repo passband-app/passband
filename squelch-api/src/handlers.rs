@@ -4733,39 +4733,36 @@ async fn resolve_sender_done(state: &ApiState, sender: &str) {
 /// write credential is configured.
 ///
 /// THE WRITER IS THE ACCOUNT'S PROVIDER'S (`accounts.provider`, read on the
-/// first call and kept in [`ApiState::mail_provider`]). The credential is
-/// checked first, so a door with none configured answers exactly as it
-/// always has without touching the store. A provider this build does not know
-/// is refused, never written to as Gmail: see [`writer_unavailable`].
+/// first call and kept in [`ApiState::mail_provider`]). A provider this build
+/// does not know, or cannot write to yet (IMAP, issue #575 phase 2), is
+/// refused with a 501 whether or not a write credential is configured: the
+/// credential is Gmail OAuth, and "run `squelchd auth`" would send an IMAP
+/// user to the wrong fix. See [`writer_unavailable`].
+///
+/// A Gmail door with no credential answers exactly the 403 it always has;
+/// the only new effect on that path is the (cached) provider read, and a
+/// failed read leaves it the 403 too.
 pub(crate) async fn write_client(state: &ApiState) -> Result<Arc<dyn MailWriter>, ApiError> {
     let Some(creds) = state.write_creds().cloned() else {
-        return Err(ApiError::new(
+        let no_credential = ApiError::new(
             StatusCode::FORBIDDEN,
             "write credential not configured; run `squelchd auth`",
-        ));
+        );
+        return Err(match account_provider(state).await {
+            Ok(MailProvider::Gmail) => no_credential,
+            Ok(MailProvider::Imap) => imap_has_no_writer(),
+            // A provider this build does not know: the 501, as with a
+            // credential.
+            Err(e) if e.status == StatusCode::NOT_IMPLEMENTED => e,
+            // The read itself failed (the store): the credential is still
+            // what is missing.
+            Err(_) => no_credential,
+        });
     };
-    let provider = match state.mail_provider.get() {
-        Some(provider) => *provider,
-        None => {
-            // The inner `Result` is the provider read itself, mapped below
-            // rather than by the store's generic mapping (which would call an
-            // unknown provider the CALLER's 400).
-            let read = store_call(state, |store, account_id| {
-                Ok(store.account_provider(account_id))
-            })
-            .await?;
-            let provider = read.map_err(writer_unavailable)?;
-            *state.mail_provider.get_or_init(|| provider)
-        }
-    };
-    match provider {
+    match account_provider(state).await? {
         // Over the state's one shared HTTP client (see `ApiState::write_http`);
         // what is built per action is two `Arc` clones and a base URL.
-        // Read only in phase 2 (issue #575): no SMTP writer yet, so the door
-        // answers 501 for an IMAP account exactly as for an unknown provider.
-        MailProvider::Imap => Err(writer_unavailable(CoreError::InvalidInput(
-            "mail provider \"imap\" has no write path in this build".into(),
-        ))),
+        MailProvider::Imap => Err(imap_has_no_writer()),
         MailProvider::Gmail => Ok(Arc::new(
             GmailWriteClient::with_http(
                 creds,
@@ -4781,7 +4778,32 @@ pub(crate) async fn write_client(state: &ApiState) -> Result<Arc<dyn MailWriter>
     }
 }
 
-/// Why the account has no writer although a write credential is configured.
+/// The account's mail provider, read once per door and kept in
+/// [`ApiState::mail_provider`]; a failed read is not cached.
+async fn account_provider(state: &ApiState) -> Result<MailProvider, ApiError> {
+    if let Some(provider) = state.mail_provider.get() {
+        return Ok(*provider);
+    }
+    // The inner `Result` is the provider read itself, mapped below rather
+    // than by the store's generic mapping (which would call an unknown
+    // provider the CALLER's 400).
+    let read = store_call(state, |store, account_id| {
+        Ok(store.account_provider(account_id))
+    })
+    .await?;
+    let provider = read.map_err(writer_unavailable)?;
+    Ok(*state.mail_provider.get_or_init(|| provider))
+}
+
+/// Read only in phase 2 (issue #575): no SMTP writer yet, so the door answers
+/// 501 for an IMAP account exactly as for an unknown provider.
+fn imap_has_no_writer() -> ApiError {
+    writer_unavailable(CoreError::InvalidInput(
+        "mail provider \"imap\" has no write path in this build".into(),
+    ))
+}
+
+/// Why the account has no writer.
 ///
 /// - A provider this build does not know (a database a newer build set up):
 ///   501, because this daemon cannot do it at all and an upgrade is the fix.
@@ -7634,17 +7656,64 @@ mod write_client_tests {
         assert_eq!(handle.await.unwrap(), None, "nothing reached the API");
     }
 
-    /// The credential is checked first, so a door without one answers with
-    /// the same 403 it always has, whatever the account's provider.
-    #[tokio::test]
-    async fn no_write_credential_is_still_the_403_whatever_the_provider() {
-        let fx = Fixture::new("no-creds");
-        fx.set_provider("imap");
-        let err = match write_client(&fx.state()).await {
+    fn refused(r: Result<Arc<dyn MailWriter>, ApiError>) -> ApiError {
+        match r {
             Ok(_) => panic!("no credential, no writer"),
             Err(e) => e,
-        };
+        }
+    }
+
+    /// GMAIL WITHOUT A WRITE CREDENTIAL IS UNCHANGED, to the byte: the same
+    /// 403, the same text, the same audit reason, whether the row says gmail
+    /// or (as on a database from before the column) nothing was ever set,
+    /// and on a second call answered from the cached provider.
+    #[tokio::test]
+    async fn gmail_without_a_write_credential_is_the_same_403() {
+        for provider in [None, Some("gmail")] {
+            let fx = Fixture::new("no-creds-gmail");
+            if let Some(p) = provider {
+                fx.set_provider(p);
+            }
+            let state = fx.state();
+            for _ in 0..2 {
+                let err = refused(write_client(&state).await);
+                assert_eq!(err.status, StatusCode::FORBIDDEN);
+                assert_eq!(
+                    err.message,
+                    "write credential not configured; run `squelchd auth`"
+                );
+                assert_eq!(write_refusal(&err), "rejected:no_write_credential");
+            }
+        }
+    }
+
+    /// AN IMAP ACCOUNT IS NOT SENT TO GMAIL OAUTH: without a write
+    /// credential it gets the provider's 501, audited as such, not the 403
+    /// that says to run `squelchd auth`. So does a provider this build does
+    /// not know.
+    #[tokio::test]
+    async fn a_non_gmail_account_without_a_write_credential_gets_the_provider_refusal() {
+        for provider in ["imap", "outlook"] {
+            let fx = Fixture::new("no-creds-other");
+            fx.set_provider(provider);
+            let err = refused(write_client(&fx.state()).await);
+            assert_eq!(err.status, StatusCode::NOT_IMPLEMENTED, "{provider}");
+            assert!(!err.message.contains("squelchd auth"), "{}", err.message);
+            assert_eq!(write_refusal(&err), "rejected:unsupported_provider");
+        }
+    }
+
+    /// A provider read that fails (the account row gone) does not turn the
+    /// missing credential into a store error: still the 403.
+    #[tokio::test]
+    async fn a_failed_provider_read_leaves_the_no_credential_403() {
+        let fx = Fixture::new("no-creds-gone");
+        let db = rusqlite::Connection::open(fx.dir.join("store.sqlite3")).unwrap();
+        db.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+        db.execute("DELETE FROM accounts WHERE id = ?1", [fx.acct])
+            .unwrap();
+        let err = refused(write_client(&fx.state()).await);
         assert_eq!(err.status, StatusCode::FORBIDDEN);
-        assert!(err.message.contains("squelchd auth`"));
+        assert_eq!(write_refusal(&err), "rejected:no_write_credential");
     }
 }

@@ -1,0 +1,41 @@
+# The shared embedding service's bearer token: one fleet-wide value, read by
+# the squelch-embed pod (65-embed.yaml) and, once the warden renders it, by
+# every tenant daemon as SQUELCH_EMBED_TOKEN.
+#
+# DO NOT apply this file as it stands, and do not commit a filled-in copy.
+# Create the Secret from the command line so the value never reaches a file:
+#
+#     kubectl -n tenants create secret generic squelch-embed-token \
+#       --from-literal=token="$(openssl rand -base64 32)"
+#
+# Nobody needs to read it back: both ends take it from this Secret.
+#
+# WHAT IT IS WORTH, honestly (docs/EMBED-SERVICE.md §4): nothing against a
+# compromised tenant, which holds the token like every other tenant. The
+# NetworkPolicy is the boundary. The token is the belt under it for the day
+# the CNI is not enforcing policy, when something that is not a tenant lands on
+# the pod network: it gets a 401 instead of an embedding service. One value for
+# the fleet, never per tenant, because a per-tenant credential would hand the
+# service the durable tenant identity it is otherwise never told.
+#
+# Optional on both sides. Without it the service starts unauthenticated and
+# says so in its log; a tenant provisioned before it existed still boots. Once
+# it exists, both ends must have it: create it, restart the service
+# (`kubectl -n tenants rollout restart deploy/squelch-embed`), and roll the
+# tenants, in that order, accepting that a tenant still on the old env gets
+# 401s (and degrades to keyword search) until it rolls.
+#
+# Rotating it is the same three steps with a replaced value. There is no grace
+# period and no second accepted token.
+#
+# It lands in `tenants` and so spends one of that namespace's `count/secrets`
+# (70-tenant-limits.yaml).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: squelch-embed-token
+  namespace: tenants
+type: Opaque
+stringData:
+  # 32 characters minimum. The service refuses to start below that.
+  token: REPLACE_ME_WITH_openssl_rand_base64_32

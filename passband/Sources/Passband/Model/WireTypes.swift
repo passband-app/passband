@@ -1781,16 +1781,26 @@ struct CalendarSearchPage: Decodable, Sendable, Hashable {
     }
 
     /// LENIENT PER ITEM, as the timeline is: a row that does not decode
-    /// costs that row, not the block.
+    /// (a null, a number, an object with neither key) costs that row, not
+    /// the block. Each element goes through `Lossy`, which always decodes,
+    /// so one bad element cannot fail the array.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        items = (try c.decodeIfPresent([CalendarSearchItem].self, forKey: .items) ?? [])
+        items = ((try? c.decodeIfPresent([Lossy].self, forKey: .items)) ?? [])
+            .compactMap(\.item)
             .filter { $0.event != nil || $0.ghost != nil }
         total = (try? c.decodeIfPresent(Int.self, forKey: .total)) ?? items.count
         granted = (try? c.decodeIfPresent(Bool.self, forKey: .granted)) ?? false
     }
 
     private enum CodingKeys: String, CodingKey { case items, total, granted }
+
+    private struct Lossy: Decodable {
+        let item: CalendarSearchItem?
+        init(from decoder: Decoder) throws {
+            item = try? CalendarSearchItem(from: decoder)
+        }
+    }
 }
 
 /// One hit: `{"event": ...}` or `{"ghost": ...}`. Both nil when the row did

@@ -23,6 +23,9 @@ struct CalendarSearchTests {
         rowsKeepTheDaemonsOrder()
         theBlockShowsThreeThenTheRest()
         rowsSayWhenAndWhere()
+        nMoreCountsWhatExpandingShows()
+        mailOperatorsAreNamed()
+        oneBadElementCostsOnlyItself()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -98,7 +101,7 @@ struct CalendarSearchTests {
             page(#"{"items":[\#(event),\#(ghost),\#(past),\#(event.replacingOccurrences(of: "e1", with: "e2"))]}"#),
             calendar: cal)
         let shut = CalendarSearch.block(rows, total: 12, expanded: false)
-        expect(shut.shown.count == 3 && shut.more == 9, "three, and the daemon's count of the rest")
+        expect(shut.shown.count == 3 && shut.more == 9, "three, and the count expanding will show")
         let open = CalendarSearch.block(rows, total: 12, expanded: true)
         expect(open.shown.count == 4 && open.more == 0, "expanded shows what came back")
         let small = CalendarSearch.block(Array(rows.prefix(2)), total: 2, expanded: false)
@@ -116,5 +119,43 @@ struct CalendarSearchTests {
         expect(CalendarSearch.label(rows[1], now: now, calendar: cal) == "Sat Nov 14 · all day", "all day")
         expect(CalendarSearch.label(rows[2], now: now, calendar: cal) == "Sep 12, 2025 · 9am", "another year")
         expect(CalendarSearch.day(rows[0], calendar: cal) == cal.startOfDay(for: rows[0].start), "opens on its day")
+    }
+
+    /// "N more" is what expanding draws, and expanding asks for at most the
+    /// list's limit: 20 fetched of 45 says 42 more; of 80, 47 more (50 - 3).
+    static func nMoreCountsWhatExpandingShows() {
+        let one = CalendarSearch.items(page(#"{"items":[\#(event)]}"#), calendar: cal)[0]
+        let rows = (0..<20).map { _ in one }
+        expect(CalendarSearch.block(rows, total: 45, expanded: false).more == 42, "45 total: all reachable")
+        expect(CalendarSearch.block(rows, total: 80, expanded: false).more == 47, "80 total: only 50 reachable")
+        let fifty = (0..<50).map { _ in one }
+        let cut = CalendarSearch.block(fifty, total: 80, expanded: true)
+        expect(cut.shown.count == 50 && cut.more == 0, "expanded shows the fifty")
+        expect(cut.cut == "Showing 50 of 80. Add words to narrow it.", "and says where it stops: \(cut.cut ?? "nil")")
+        expect(CalendarSearch.block(fifty, total: 50, expanded: true).cut == nil, "no cut when it is all")
+        expect(CalendarSearch.block(rows, total: 45, expanded: true).cut == nil,
+            "no cut while the whole list is still on its way")
+        expect(CalendarSearch.limit(eventsOnly: false, expanded: false) == CalendarSearch.fetchLimit
+            && CalendarSearch.limit(eventsOnly: false, expanded: true) == CalendarSearch.listLimit
+            && CalendarSearch.limit(eventsOnly: true, expanded: false) == CalendarSearch.listLimit,
+            "expanding or events only asks for the whole list")
+        let label = CalendarSearch.cutLine(shown: 50, total: 80)
+        expect(!label.contains("\u{2014}"), "no em dash")
+    }
+
+    static func mailOperatorsAreNamed() {
+        expect(CalendarSearch.emptyNote("in:calendar from:sam")
+            == "from:, to: and in:sent search mail, not your calendar.", "from: is named")
+        expect(CalendarSearch.emptyNote("in:calendar TO:dan") == CalendarSearch.mailOperatorNote, "any case")
+        expect(CalendarSearch.emptyNote("in:calendar") == "type what to look for in your calendar.", "no words")
+        expect(!CalendarSearch.usesMailOperator("in:calendar dinner"), "words are not operators")
+    }
+
+    /// A null, a number, an object with neither key: each costs only itself.
+    static func oneBadElementCostsOnlyItself() {
+        let p = page(#"{"items":[null,\#(event),42,{},"x",\#(ghost)],"total":2}"#)
+        expect(p.items.count == 2, "two good rows survive: \(p.items.count)")
+        let notArray = page(#"{"items":{"event":1},"total":0}"#)
+        expect(notArray.items.isEmpty, "an items that is not a list is an empty page, not a throw")
     }
 }

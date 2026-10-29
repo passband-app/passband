@@ -86,6 +86,11 @@ struct MobileSearchView: View {
     /// The event query `fetchedEvents` answers, and the limit it was asked at.
     @State private var eventsQuery: String?
     @State private var eventsLimit = 0
+    /// The field text `eventsQuery` was asked from, which opening a row
+    /// remembers; and the event query whose fetch last failed, so the empty
+    /// state says nothing rather than "No events." or "searching" forever.
+    @State private var eventsField: String?
+    @State private var eventsFailed: String?
     /// "N more" tapped, for this query.
     @State private var eventsExpanded = false
 
@@ -94,11 +99,13 @@ struct MobileSearchView: View {
         store.calendarPageAvailable && CalendarSearch.eventsOnly(store.search.query)
     }
 
-    /// The block as drawn: nothing while the Calendar tab is off the bar, or
-    /// while the rows answer an older query. Events only lists every row.
+    /// The block as drawn: nothing while the Calendar tab is off the bar or
+    /// the field asks the calendar nothing. While a new answer is on its way
+    /// the last one stays (no vanish and jump on every keystroke) until it is
+    /// replaced. Events only lists every row.
     private var eventBlock: CalendarSearch.Block {
-        guard store.calendarPageAvailable, !showingRecents,
-              let asked = eventsQuery, asked == CalendarSearch.eventQuery(term)
+        guard store.calendarPageAvailable, !showingRecents, eventsQuery != nil,
+              CalendarSearch.eventQuery(term) != nil
         else { return CalendarSearch.Block(shown: [], more: 0) }
         return CalendarSearch.block(fetchedEvents, total: eventsTotal, expanded: eventsExpanded || eventsOnly)
     }
@@ -195,10 +202,15 @@ struct MobileSearchView: View {
                 }
             #endif
             .task(id: store.search.query) {
+                // Events only asks no sender directory: its words name events.
+                if eventsOnly {
+                    fetchedSenders = []
+                    return
+                }
                 guard let found = await SearchFetch.senders(matching: store.search.query) else { return }
                 fetchedSenders = found
             }
-            .task(id: [store.search.query, String(store.calendarPageAvailable)]) {
+            .task(id: [store.search.query, String(store.calendarPageAvailable), String(eventsExpanded)]) {
                 await runEventSearch()
             }
             .onChange(of: CalendarSearch.eventQuery(term)) { _, _ in eventsExpanded = false }
@@ -515,15 +527,33 @@ struct MobileSearchView: View {
                     .foregroundStyle(Palette.warn)
                     .multilineTextAlignment(.center)
             } else if eventsOnly {
-                Text(CalendarSearch.eventQuery(term) == nil ? "Search your calendar." : "No events.")
-                    .font(Typo.serif(22, weight: .medium))
-                    .foregroundStyle(Palette.ink)
-                Text(CalendarSearch.eventQuery(term) == nil
-                     ? "Type what to look for after in:calendar."
-                     : "Nothing on your calendar, or planned in your mail, carries those words.")
-                    .font(Typo.rowSub)
-                    .foregroundStyle(Palette.inkFaint)
-                    .multilineTextAlignment(.center)
+                let asked = CalendarSearch.eventQuery(term)
+                if asked == nil {
+                    Text("Search your calendar.")
+                        .font(Typo.serif(22, weight: .medium))
+                        .foregroundStyle(Palette.ink)
+                    Text(CalendarSearch.usesMailOperator(term)
+                         ? CalendarSearch.mailOperatorNote.prefix(1).uppercased()
+                            + CalendarSearch.mailOperatorNote.dropFirst()
+                         : "Type what to look for after in:calendar.")
+                        .font(Typo.rowSub)
+                        .foregroundStyle(Palette.inkFaint)
+                        .multilineTextAlignment(.center)
+                } else if asked == eventsQuery {
+                    // Answered, and the answer was none.
+                    Text("No events.")
+                        .font(Typo.serif(22, weight: .medium))
+                        .foregroundStyle(Palette.ink)
+                    Text("Nothing on your calendar, or planned in your mail, carries those words.")
+                        .font(Typo.rowSub)
+                        .foregroundStyle(Palette.inkFaint)
+                        .multilineTextAlignment(.center)
+                } else if asked != eventsFailed {
+                    // Still on its way. A failed fetch says nothing at all.
+                    Text("searching…")
+                        .font(Typo.rowSub)
+                        .foregroundStyle(Palette.inkFaintest)
+                }
             } else if loading {
                 Text("searching…")
                     .font(Typo.rowSub)
@@ -576,6 +606,14 @@ struct MobileSearchView: View {
                 }
                 .plainRow()
             }
+            if let cut = block.cut {
+                Text(cut)
+                    .font(Typo.rowSub)
+                    .foregroundStyle(Palette.inkFaintest)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+                    .plainRow()
+            }
             // A listing heads its own run ("Newest first").
             if !store.search.hits.isEmpty, !store.search.showsListing {
                 StatusHeader(title: "Mail").plainRow()
@@ -589,31 +627,52 @@ struct MobileSearchView: View {
     /// hears the ask, not the value.
     private func open(_ item: AgendaItem) {
         Haptics.tick()
-        RecentSearchStore.shared.remember(store.search)
+        // The words these rows answered, not the mail fetch's (which events
+        // only never makes, and which may still be on an older term).
+        if let field = eventsField { RecentSearchStore.shared.rememberEventSearch(field) }
         store.setView(.calendar)
         store.openCalendarSearchHit(item)
     }
 
     /// The block's fetch, the Mac panel's: beside the mail search, never
     /// waiting on it, debounced like it, and a superseded fetch writes
-    /// nothing. A failure (an older daemon's 404) is an empty block.
+    /// nothing. Expanding or events only asks for the whole list. A FAILURE
+    /// (an older daemon's 404) clears the block and leaves `eventsQuery`
+    /// unset, so the next pass asks again instead of reading it as none.
     private func runEventSearch() async {
-        guard store.calendarPageAvailable, let asked = CalendarSearch.eventQuery(term) else {
-            fetchedEvents = []
-            eventsTotal = 0
-            eventsQuery = nil
+        let field = term
+        guard store.calendarPageAvailable, let asked = CalendarSearch.eventQuery(field) else {
+            clearEvents()
             return
         }
-        let limit = eventsOnly ? CalendarSearch.listLimit : CalendarSearch.fetchLimit
+        let limit = CalendarSearch.limit(eventsOnly: eventsOnly, expanded: eventsExpanded)
         guard asked != eventsQuery || limit > eventsLimit else { return }
         try? await Task.sleep(for: SearchFetch.debounce)
         guard !Task.isCancelled else { return }
-        let page = (try? await APIClient.shared.calendarSearch(asked, limit: limit)) ?? CalendarSearchPage()
+        let page: CalendarSearchPage
+        do {
+            page = try await APIClient.shared.calendarSearch(asked, limit: limit)
+        } catch {
+            guard !Task.isCancelled else { return }
+            clearEvents()
+            eventsFailed = asked
+            return
+        }
         guard !Task.isCancelled, asked == CalendarSearch.eventQuery(term) else { return }
         fetchedEvents = CalendarSearch.items(page, calendar: .current)
         eventsTotal = page.total
         eventsQuery = asked
+        eventsField = store.search.query.trimmingCharacters(in: .whitespacesAndNewlines)
         eventsLimit = limit
+        eventsFailed = nil
+    }
+
+    private func clearEvents() {
+        fetchedEvents = []
+        eventsTotal = 0
+        eventsQuery = nil
+        eventsField = nil
+        eventsLimit = 0
     }
 
     // MARK: - one sender's mail

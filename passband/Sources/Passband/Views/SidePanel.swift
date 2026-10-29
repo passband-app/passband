@@ -90,6 +90,9 @@ struct SearchView: View {
     @State private var fetchedEvents: [AgendaItem] = []
     @State private var eventsTotal = 0
     @State private var eventsQuery: String?
+    /// The field text `eventsQuery` was asked from (with `in:calendar` and
+    /// all), which is what opening one of its rows remembers.
+    @State private var eventsField: String?
     /// The limit `eventsQuery` was fetched under.
     @State private var eventsLimit = 0
     /// "N more" was taken: the block shows every fetched row.
@@ -110,11 +113,13 @@ struct SearchView: View {
     }
 
     /// The Events block as drawn: nothing while the Calendar page is not
-    /// this mailbox's, or while the rows answer an older query. Events only
-    /// lists every fetched row.
+    /// this mailbox's or the field asks the calendar nothing. While a new
+    /// answer is on its way the last one stays, so the block does not vanish
+    /// and the list jump on every keystroke; it is replaced when the answer
+    /// lands. Events only lists every fetched row.
     private var eventBlock: CalendarSearch.Block {
-        guard store.calendarPageAvailable, !showingRecents,
-              let asked = eventsQuery, asked == CalendarSearch.eventQuery(store.search.query.trimmed)
+        guard store.calendarPageAvailable, !showingRecents, eventsQuery != nil,
+              CalendarSearch.eventQuery(store.search.query.trimmed) != nil
         else { return CalendarSearch.Block(shown: [], more: 0) }
         return CalendarSearch.block(fetchedEvents, total: eventsTotal, expanded: eventsExpanded || eventsOnly)
     }
@@ -237,7 +242,9 @@ struct SearchView: View {
             .padding(.horizontal, Space.panel)
             .padding(.bottom, Space.s10)
 
-            if !expanded {
+            // Events only runs no mail search, so there is nothing for the
+            // mail agent to go deeper on (the phone hides its ask row too).
+            if !expanded && !eventsOnly {
                 HStack { Spacer(); askAgentButton }
                     .padding(.horizontal, Space.panel)
                     .padding(.bottom, Space.s10)
@@ -246,7 +253,7 @@ struct SearchView: View {
             if let error = store.search.error { BandNote(error) }
             if eventsOnly {
                 if CalendarSearch.eventQuery(store.search.query.trimmed) == nil {
-                    BandNote("type what to look for in your calendar.")
+                    BandNote(CalendarSearch.emptyNote(store.search.query))
                 } else if eventsQuery == CalendarSearch.eventQuery(store.search.query.trimmed),
                           fetchedEvents.isEmpty {
                     BandNote("no events.")
@@ -348,40 +355,61 @@ struct SearchView: View {
             await runSearch()
         }
         .task(id: store.search.query) {
+            // Events only asks no sender directory: its words name events.
+            if eventsOnly {
+                fetchedSenders = []
+                senderIndex = -1
+                return
+            }
             guard let found = await SearchFetch.senders(matching: store.search.query) else { return }
             // A different list under an armed row is a different row armed.
             if found != fetchedSenders { senderIndex = -1 }
             fetchedSenders = found
         }
-        .task(id: [store.search.query, String(store.calendarPageAvailable)]) {
+        .task(id: [store.search.query, String(store.calendarPageAvailable), String(eventsExpanded)]) {
             await runEventSearch()
         }
     }
 
     /// The Events block's fetch, beside the mail search and never waiting on
-    /// it. Debounced like it; a superseded fetch writes nothing. A failure
-    /// (an older daemon's 404 included) is an empty block, never an error
-    /// over the mail results.
+    /// it. Debounced like it; a superseded fetch writes nothing. Expanding
+    /// ("N more") or events only asks again for the whole list. A FAILURE
+    /// (an older daemon's 404 included) clears the block and leaves
+    /// `eventsQuery` unset, so the next pass asks again rather than reading
+    /// the blip as "no events"; it is never an error over the mail results.
     private func runEventSearch() async {
-        guard store.calendarPageAvailable,
-              let asked = CalendarSearch.eventQuery(store.search.query.trimmed)
-        else {
-            fetchedEvents = []
-            eventsTotal = 0
-            eventsQuery = nil
+        let field = store.search.query.trimmed
+        guard store.calendarPageAvailable, let asked = CalendarSearch.eventQuery(field) else {
+            clearEvents()
             return
         }
-        // In hand already, unless events only now wants more than was asked.
-        let limit = eventsOnly ? CalendarSearch.listLimit : CalendarSearch.fetchLimit
+        // In hand already, unless the list now wants more than was asked.
+        let limit = CalendarSearch.limit(eventsOnly: eventsOnly, expanded: eventsExpanded)
         guard asked != eventsQuery || limit > eventsLimit else { return }
         try? await Task.sleep(for: SearchFetch.debounce)
         guard !Task.isCancelled else { return }
-        let page = (try? await APIClient.shared.calendarSearch(asked, limit: limit)) ?? CalendarSearchPage()
+        let page: CalendarSearchPage
+        do {
+            page = try await APIClient.shared.calendarSearch(asked, limit: limit)
+        } catch {
+            guard !Task.isCancelled else { return }
+            clearEvents()
+            return
+        }
         guard !Task.isCancelled, asked == CalendarSearch.eventQuery(store.search.query.trimmed) else { return }
         fetchedEvents = CalendarSearch.items(page, calendar: .current)
         eventsTotal = page.total
         eventsQuery = asked
+        eventsField = field
         eventsLimit = limit
+    }
+
+    private func clearEvents() {
+        fetchedEvents = []
+        eventsTotal = 0
+        eventsQuery = nil
+        eventsField = nil
+        eventsLimit = 0
     }
 
     private func focusField() {
@@ -460,12 +488,15 @@ struct SearchView: View {
                                 eventIndex = i
                                 openEvent(item)
                             }
+                            .id(Self.eventRowId(i))
                         }
                         if block.more > 0 {
                             MoreEventsRow(count: block.more, selected: eventIndex == block.shown.count) {
                                 expandEvents()
                             }
+                            .id(Self.eventRowId(block.shown.count))
                         }
+                        if let cut = block.cut { BandNote(cut) }
                     }
                     ForEach(Array(store.search.hits.enumerated()), id: \.element.id) { i, hit in
                         if let title = header(above: i) { sectionHeader(title) }
@@ -530,10 +561,17 @@ struct SearchView: View {
                     proxy.scrollTo(Self.sendersAnchor, anchor: .top)
                 }
             }
+            // Each row its own anchor, so arrowing down a long list (events
+            // only, or an expanded block) keeps the armed row in view; the
+            // first row brings the header with it.
             .onChange(of: eventIndex) { _, i in
                 guard i >= 0 else { return }
                 withAnimation(Motion.scrollFollow) {
-                    proxy.scrollTo(Self.eventsAnchor, anchor: .top)
+                    if i == 0 {
+                        proxy.scrollTo(Self.eventsAnchor, anchor: .top)
+                    } else {
+                        proxy.scrollTo(Self.eventRowId(i), anchor: .center)
+                    }
                 }
             }
         }
@@ -541,6 +579,7 @@ struct SearchView: View {
 
     private static let sendersAnchor = "senders"
     private static let eventsAnchor = "events"
+    private static func eventRowId(_ i: Int) -> String { "event-\(i)" }
 
     private func sectionHeader(_ title: String) -> some View {
         Text(title)
@@ -600,6 +639,7 @@ struct SearchView: View {
     private var bindings: [KeyBinding] {
         [
             KeyBinding("Enter", "ask agent", meta: true, allowInInput: true) {
+                guard !eventsOnly else { return }
                 store.requestDeeperSearch()
             },
             KeyBinding("ArrowDown", "next hit", allowInInput: true) { move(1) },
@@ -685,12 +725,15 @@ struct SearchView: View {
     /// Open one event of the block on the Calendar page. Opening is where a
     /// query stops being keystrokes, as it is for a hit.
     private func openEvent(_ item: AgendaItem) {
-        remember()
+        // The words these rows answered, not the mail fetch's (which events
+        // only never makes, and which may still be on an older term).
+        if let field = eventsField { RecentSearchStore.shared.rememberEventSearch(field) }
         store.openCalendarSearchHit(item)
     }
 
-    /// "N more": the block shows every fetched row, and the arm stays on the
-    /// row that took the place of "N more".
+    /// "N more": the block shows every row, asking the daemon for the whole
+    /// list (`runEventSearch` is keyed on this), and the arm stays on the row
+    /// that took the place of "N more".
     private func expandEvents() {
         eventsExpanded = true
     }
@@ -1049,7 +1092,7 @@ private struct EventSearchRow: View {
                 // A swatch the avatars' width, not an edge bar: the row's
                 // colour is a mark beside the words, as the agenda draws it.
                 AgendaMark(
-                    fill: item.fill, thin: item.cancelled,
+                    fill: item.fill, estimated: item.endEstimated, thin: item.cancelled,
                     hue: ChipColors.inks(item).edge, cornerRadius: 4
                 )
                 .frame(width: 14, height: 14)

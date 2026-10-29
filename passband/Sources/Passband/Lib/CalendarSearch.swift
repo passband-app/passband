@@ -69,20 +69,58 @@ enum CalendarSearch {
         }
     }
 
-    /// What the block draws: the rows on show, and how many more the daemon
-    /// has (`total` counts past its own limit, so "N more" is the truth even
-    /// when the rest were not fetched). Expanded shows every fetched row.
+    /// What the block draws: the rows on show, how many more expanding will
+    /// show, and (expanded, when the daemon has more than the list's limit)
+    /// the line saying where the list stops.
     struct Block: Equatable, Sendable {
         let shown: [AgendaItem]
         let more: Int
+        var cut: String? = nil
     }
 
+    /// Collapsed: the first three, and "N more" counting what expanding will
+    /// actually draw, which is at most `listLimit` rows (expanding fetches
+    /// that many): a `total` of 45 says "42 more", a total of 80 "47 more".
+    /// Expanded: every fetched row, and a cut line when `total` runs past
+    /// them.
     static func block(_ items: [AgendaItem], total: Int, expanded: Bool) -> Block {
-        let shown = expanded ? items : Array(items.prefix(blockCap))
-        // Never fewer than the fetched rows left out: a daemon whose total
-        // undercounts must not hide rows behind "0 more".
-        let more = max(max(total, items.count) - shown.count, 0)
-        return Block(shown: shown, more: expanded ? 0 : more)
+        // A daemon whose total undercounts must not hide fetched rows.
+        let known = max(total, items.count)
+        if expanded {
+            let cut = known > items.count && items.count >= listLimit
+                ? cutLine(shown: items.count, total: known) : nil
+            return Block(shown: items, more: 0, cut: cut)
+        }
+        let shown = Array(items.prefix(blockCap))
+        let reachable = max(min(known, listLimit), items.count)
+        return Block(shown: shown, more: max(reachable - shown.count, 0))
+    }
+
+    /// The end of a list the daemon cut: "Showing 50 of 80. Add words to
+    /// narrow it."
+    static func cutLine(shown: Int, total: Int) -> String {
+        "Showing \(shown) of \(total). Add words to narrow it."
+    }
+
+    /// The limit a fetch asks for: the block's, or the whole list's once it
+    /// is expanded or the field asks for events only.
+    static func limit(eventsOnly: Bool, expanded: Bool) -> Int {
+        eventsOnly || expanded ? listLimit : fetchLimit
+    }
+
+    /// Whether the field holds an operator only mail has (`from:`, `to:`,
+    /// `in:sent`), which the calendar cannot answer.
+    static func usesMailOperator(_ query: String) -> Bool {
+        scope(query).text.lowercased().split(separator: " ")
+            .contains { token in mailOnly.contains { token.hasPrefix($0) } }
+    }
+
+    static let mailOperatorNote = "from:, to: and in:sent search mail, not your calendar."
+
+    /// What an events-only field with nothing to ask says: a mail operator
+    /// is named as such, anything else asks for words.
+    static func emptyNote(_ query: String) -> String {
+        usesMailOperator(query) ? mailOperatorNote : "type what to look for in your calendar."
     }
 
     /// "1 more event", "4 more events".

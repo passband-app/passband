@@ -97,11 +97,69 @@ fn a_content_digest_is_bound_once_per_account() {
     let a = store.ensure_account("a@x.org").unwrap();
     let b = store.ensure_account("b@x.org").unwrap();
     assert_eq!(store.content_digest(a, "imap:1").unwrap(), None);
-    store.record_content_digest(a, "imap:1", "first").unwrap();
-    store.record_content_digest(a, "imap:1", "second").unwrap();
+    store
+        .record_content_digest(a, "imap:1", "h1:first")
+        .unwrap();
+    store
+        .record_content_digest(a, "imap:1", "h1:second")
+        .unwrap();
     assert_eq!(
         store.content_digest(a, "imap:1").unwrap().as_deref(),
-        Some("first")
+        Some("h1:first")
     );
     assert_eq!(store.content_digest(b, "imap:1").unwrap(), None);
+}
+
+/// AMENDMENT J: a body-bound digest an earlier build recorded reads as none
+/// (a legacy id) and gives way to the first header digest recorded.
+#[test]
+fn a_legacy_digest_reads_as_none_and_gives_way_once() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    let a = store.ensure_account("a@x.org").unwrap();
+    store
+        .record_content_digest(a, "imap:1", "0123abcd")
+        .unwrap();
+    assert_eq!(store.content_digest(a, "imap:1").unwrap(), None);
+    store.record_content_digest(a, "imap:1", "h1:new").unwrap();
+    store
+        .record_content_digest(a, "imap:1", "h1:later")
+        .unwrap();
+    assert_eq!(
+        store.content_digest(a, "imap:1").unwrap().as_deref(),
+        Some("h1:new")
+    );
+}
+
+/// AMENDMENT J RULE 1: locations come back in the order their PLACE was
+/// recorded, and re-recording the same place keeps its turn.
+#[test]
+fn locations_come_back_first_recorded_first() {
+    use crate::mail::imap::MessageLocation;
+    let store = SqliteStore::open_in_memory().unwrap();
+    let a = store.ensure_account("a@x.org").unwrap();
+    let loc = |folder: &str, uid| MessageLocation {
+        folder: folder.into(),
+        uidvalidity: 1,
+        uid,
+        message_id: None,
+    };
+    store
+        .record_message_locations(a, &[("imap:1".into(), loc("Sent", 4))])
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    store
+        .record_message_locations(a, &[("imap:1".into(), loc("INBOX", 9))])
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    // Sent seen again at the same place: still first.
+    store
+        .record_message_locations(a, &[("imap:1".into(), loc("Sent", 4))])
+        .unwrap();
+    let folders: Vec<String> = store
+        .message_locations(a, "imap:1")
+        .unwrap()
+        .into_iter()
+        .map(|l| l.folder)
+        .collect();
+    assert_eq!(folders, ["Sent", "INBOX"]);
 }

@@ -542,6 +542,16 @@ fn two_walks_merge_per_folder_and_never_step_back() {
             .folders
             .contains_key("spam")
     );
+    // A walk that DROPPED its folder (the role went away) wins over the
+    // other walk carrying the old entry along unmoved.
+    let mut dropped = since.clone();
+    dropped.folders.remove("sent");
+    let carried = since.clone();
+    assert!(
+        !merge_cursor_values(Some(&since), &carried, &dropped)
+            .folders
+            .contains_key("sent")
+    );
 }
 
 #[test]
@@ -918,7 +928,7 @@ async fn live_the_change_feed_walks_each_folder_and_proves_an_idle_mailbox() {
 
 #[tokio::test]
 #[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
-async fn live_a_rebuilt_folder_expires_the_cursor() {
+async fn live_a_rebuilt_sent_folder_is_relisted_not_a_catch_up() {
     let user = fresh_user("reset");
     let mut other = other_client(&user).await;
     append(&mut other, "Sent", &mail(Some("s1@dev.test"), "s1"), None).await;
@@ -929,19 +939,41 @@ async fn live_a_rebuilt_folder_expires_the_cursor() {
     other.delete("Sent").await.unwrap();
     other.create("Sent").await.unwrap();
     append(&mut other, "Sent", &mail(Some("s1@dev.test"), "s1"), None).await;
-    assert!(matches!(
-        src.changes(&start, Folder::Sent).await,
-        Err(ChangesError::Expired)
-    ));
+    // MATRIX 19: not an Expired (whose catch-up re-fetches all of INBOX):
+    // the Sent walk is Sent's own window under its new position.
+    let old_v = ImapCursor::decode(&start).unwrap().folders["sent"].uidvalidity;
+    let sent = src
+        .changes(&start, Folder::Sent)
+        .await
+        .expect("a Sent reset is handled in the walk");
+    assert_eq!(sent.ids, vec![stable_id_for_message_id("s1@dev.test")]);
+    assert!(!sent.mailbox_unchanged);
+    let after = ImapCursor::decode(&sent.cursor).unwrap();
+    assert_ne!(after.folders["sent"].uidvalidity, old_v);
+    // And from there it is an ordinary walk.
+    let again = src.changes(&sent.cursor, Folder::Sent).await.unwrap();
+    assert!(again.ids.is_empty());
     // INBOX's own position is still good, and says the mailbox moved.
     let inbox = src.changes(&start, Folder::Inbox).await.unwrap();
     assert!(!inbox.mailbox_unchanged);
 
-    // A role that resolves to another folder is a reset too (Amendment D).
+    // A role that resolves to another folder is a reset too (Amendment D),
+    // handled the same way.
     let mut moved = ImapCursor::decode(&start).unwrap();
     moved.folders.get_mut("sent").unwrap().mailbox = "Old Sent".into();
+    let w = src
+        .changes(&moved.encode(), Folder::Sent)
+        .await
+        .expect("relisted");
+    assert_eq!(
+        ImapCursor::decode(&w.cursor).unwrap().folders["sent"].mailbox,
+        "Sent"
+    );
+    // INBOX alone still expires: its reset IS the catch-up.
+    let mut inbox_reset = ImapCursor::decode(&start).unwrap();
+    inbox_reset.folders.get_mut("inbox").unwrap().uidvalidity = 1;
     assert!(matches!(
-        src.changes(&moved.encode(), Folder::Sent).await,
+        src.changes(&inbox_reset.encode(), Folder::Inbox).await,
         Err(ChangesError::Expired)
     ));
     let _ = other.logout().await;
@@ -1936,6 +1968,7 @@ fn short_timeouts() -> Timeouts {
         login: Duration::from_millis(500),
         stall: Duration::from_millis(300),
         idle_reissue: IDLE_REISSUE,
+        roles_relist: ROLES_RELIST,
     }
 }
 
@@ -2073,7 +2106,10 @@ fn one_row(locs: &Arc<MemLocations>, id: &str) {
 }
 
 /// THE SIZE IS ASKED BEFORE THE BODY (security review 4): a message over the
-/// bound is refused without the body ever being requested.
+/// bound is refused without the body ever being requested. And refused as a
+/// message the engine steps over (`Undecodable`, Gmail's answer for the same
+/// bound), never an error (matrix row 20): an error fails the whole tick, the
+/// next tick lists the same UID, and nothing behind it ever arrives.
 #[tokio::test]
 async fn an_oversized_message_is_refused_before_its_body_is_fetched() {
     let (port, log, server) = fetch_server(|tag, cmd| {
@@ -2087,8 +2123,16 @@ async fn an_oversized_message_is_refused_before_its_body_is_fetched() {
     let locs = Arc::new(MemLocations::default());
     one_row(&locs, "imap:big");
     let src = dev_source_for_port(port, locs);
-    let err = src.fetch_raw("imap:big", Urgency::Live).await.unwrap_err();
-    assert!(err.to_string().contains("64MB"), "{err}");
+    let m = src
+        .fetch_raw("imap:big", Urgency::Live)
+        .await
+        .expect("an oversized message is skipped, not a failed fetch");
+    match &m.raw {
+        RawBody::Undecodable(why) => {
+            assert!(why.contains("64MB") && why.contains("300000000"), "{why}")
+        }
+        _ => panic!("not refused as undecodable"),
+    }
     let cmds = log.lock().unwrap().clone();
     assert!(
         !cmds.iter().any(|c| c.contains("BODY.PEEK[]")),
@@ -2167,44 +2211,92 @@ fn dev_source_for_port(port: u16, locs: Arc<MemLocations>) -> ImapSource {
 // ---- Amendment I: content-bound identity -----------------------------------
 
 #[test]
-fn the_content_digest_ignores_delivery_and_sees_content() {
+fn the_header_digest_ignores_delivery_and_the_body_and_sees_the_headers() {
     // The self-sent pair: trace headers and address spelling differ, the
     // message does not.
-    assert_eq!(
-        content_digest_of_raw(SENT_COPY),
-        content_digest_of_raw(INBOX_COPY)
-    );
+    assert_eq!(header_digest(SENT_COPY), header_digest(INBOX_COPY));
     let a = mail(Some("same@x.org"), "hello");
+    // The body is not identity (Amendment J): a rewritten body is the same
+    // message as far as the id goes.
     let mut body_changed = a.clone();
     let n = body_changed.len();
     body_changed[n - 3] = b'X';
-    assert_ne!(
-        content_digest_of_raw(&a),
-        content_digest_of_raw(&body_changed)
-    );
+    assert_eq!(header_digest(&a), header_digest(&body_changed));
     // Reply-To is in the set: a spoof that only redirects replies differs.
     let with_reply_to = String::from_utf8(a.clone()).unwrap().replacen(
         "\r\n\r\n",
         "\r\nReply-To: evil@x.org\r\n\r\n",
         1,
     );
-    assert_ne!(
-        content_digest_of_raw(&a),
-        content_digest_of_raw(with_reply_to.as_bytes())
-    );
-    // The split is where BODY[TEXT] starts.
+    assert_ne!(header_digest(&a), header_digest(with_reply_to.as_bytes()));
+    // So are From and Subject.
+    let from_changed =
+        String::from_utf8(a.clone())
+            .unwrap()
+            .replacen("From: a@x.org", "From: b@x.org", 1);
+    assert_ne!(header_digest(&a), header_digest(from_changed.as_bytes()));
+    // ONE FUNCTION FOR EVERY PATH (review N6): the whole raw message and the
+    // HEADER.FIELDS subset a fetch returns digest the same.
     let at = a.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
-    assert_eq!(
-        content_digest_of_raw(&a),
-        content_digest(&a[..at], &a[at..])
-    );
+    assert_eq!(header_digest(&a), header_digest(&a[..at]));
     // A distinct id is never the known one, and is stable.
     let known = stable_id_for_message_id("same@x.org");
-    let d = content_digest_of_raw(&body_changed);
+    let d = header_digest(with_reply_to.as_bytes());
     let other = distinct_stable_id(&known, Some("same@x.org"), &d);
     assert_ne!(other, known);
     assert!(other.starts_with(STABLE_ID_PREFIX));
     assert_eq!(other, distinct_stable_id(&known, Some("same@x.org"), &d));
+    assert!(d.starts_with(DIGEST_PREFIX));
+}
+
+/// REVIEW N6: bare-LF headers over a CRLF body used to split at the body's
+/// first CRLFCRLF, so the raw digest and the HEADER.FIELDS digest differed
+/// and every MOVE of such a message read as a collision.
+#[test]
+fn the_header_digest_does_not_care_about_line_endings() {
+    let lf_headers = b"From: a@x.org\nTo: me@dev.test\nSubject: s\n\
+        Date: Mon, 26 Oct 2026 09:00:00 +0000\nMessage-ID: <eol@x.org>\n\n\
+        para one\r\n\r\npara two\r\n";
+    let crlf_subset = b"From: a@x.org\r\nTo: me@dev.test\r\nSubject: s\r\n\
+        Date: Mon, 26 Oct 2026 09:00:00 +0000\r\n\r\n";
+    assert_eq!(header_digest(lf_headers), header_digest(crlf_subset));
+    // None of the fields at all: the subset reply ("\r\n") and the whole
+    // message agree too.
+    let bare = b"X-Thing: 1\r\n\r\nbody\r\n";
+    assert_eq!(header_digest(bare), header_digest(b"\r\n"));
+}
+
+/// MATRIX 16b: the INBOX copy of a self-sent message re-encoded in transit
+/// (quoted-printable where the Sent copy is 8bit) is the same message.
+#[test]
+fn a_reencoded_self_sent_copy_has_the_same_digest() {
+    let sent = "From: me@dev.test\r\nTo: me@dev.test\r\nSubject: Cafe\r\n\
+        Date: Mon, 26 Oct 2026 09:00:00 +0000\r\nMessage-ID: <s16b@x.org>\r\n\
+        Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n\
+        Caf\u{e9} cr\u{e8}me\r\n";
+    let inbox = "Delivered-To: me@dev.test\r\nFrom: me@dev.test\r\nTo: me@dev.test\r\n\
+        Subject: Cafe\r\nDate: Mon, 26 Oct 2026 09:00:00 +0000\r\nMessage-ID: <s16b@x.org>\r\n\
+        Content-Type: text/plain; charset=utf-8\r\n\
+        Content-Transfer-Encoding: quoted-printable\r\n\r\nCaf=C3=A9 cr=C3=A8me\r\n";
+    assert_eq!(
+        header_digest(sent.as_bytes()),
+        header_digest(inbox.as_bytes())
+    );
+}
+
+/// The Message-ID `< a@b >` (and one folded mid-id) is the id of `<a@b>`.
+#[test]
+fn whitespace_inside_the_brackets_is_not_part_of_the_id() {
+    assert_eq!(
+        normalize_message_id("< a@B.org >").as_deref(),
+        Some("a@b.org")
+    );
+    assert_eq!(
+        normalize_message_id("<abc\r\n def@x.org>").as_deref(),
+        Some("abcdef@x.org")
+    );
+    let (id, _) = stable_id_for_header_block(b"Message-ID: < sp@x.org >\r\n\r\n");
+    assert_eq!(id, stable_id_for_message_id("sp@x.org"));
 }
 
 fn spoof(mid: &str) -> Vec<u8> {
@@ -2866,4 +2958,303 @@ async fn live_a_kicked_command_session_is_replaced_inside_the_next_walk() {
     assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
     assert_eq!(src.connects(), 2);
     let _ = other.logout().await;
+}
+
+// ---- fix round 3: Amendment J (first-seen wins, header-only digest) -------
+
+/// A multipart whose declared boundary and References are the knobs.
+fn multipart(boundary: &str, references: &str) -> Vec<u8> {
+    format!(
+        "From: alice@x.org\r\nTo: me@dev.test\r\nSubject: Invoice\r\n\
+         Date: Mon, 26 Oct 2026 09:00:00 +0000\r\nMessage-ID: <n1@x.org>\r\n\
+         References: {references}\r\nMIME-Version: 1.0\r\n\
+         Content-Type: multipart/alternative; boundary=\"{boundary}\"\r\n\r\n\
+         preamble\r\n--B\r\nContent-Type: text/plain\r\n\r\nPAY NOW to evil\r\n\
+         --A\r\nContent-Type: text/plain\r\n\r\nyour invoice is attached\r\n--A--\r\n--B--\r\n"
+    )
+    .into_bytes()
+}
+
+/// REVIEW N1: the original sender re-sends the message with identical digest
+/// fields and identical body text, but a different declared MIME boundary
+/// (so the body now SAYS something else) and different References (so it
+/// would re-key the thread). Same id, and under first-seen-wins the
+/// original's location stands: every fetch of the id reads the ORIGINAL
+/// bytes, so the stored row, its body and its thread are untouched.
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_a_resend_under_a_known_id_never_replaces_the_original_bytes() {
+    let user = fresh_user("resend");
+    let mut other = other_client(&user).await;
+    let original = multipart("A", "<root@x.org>");
+    append(&mut other, INBOX, &original, None).await;
+    let (src, locs) = live(&user);
+    let id = stable_id_for_message_id("n1@x.org");
+    assert_eq!(
+        src.list(inbox_listing(), None, Urgency::Live)
+            .await
+            .unwrap(),
+        vec![id.clone()]
+    );
+    let first = src.fetch_raw(&id, Urgency::Live).await.unwrap();
+    assert_eq!(raw_of(&first), original);
+    let cursor = src.current_cursor().await.unwrap();
+
+    let resend = multipart("B", "<other-thread@evil.example>");
+    append(&mut other, INBOX, &resend, None).await;
+    let walk = src.changes(&cursor, Folder::Inbox).await.unwrap();
+    // The same message as far as identity goes ...
+    assert_eq!(walk.ids, vec![id.clone()]);
+    // ... and its re-ingest reads the first copy, whatever the second holds.
+    let m = src.fetch_raw(&id, Urgency::Live).await.unwrap();
+    assert_eq!(raw_of(&m), original);
+    assert_eq!(m.thread_id, None);
+    let rows = locs.message_locations(1, &id).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].folder.as_str(), rows[0].uid), (INBOX, 1));
+    // A re-listing of the whole folder does not move it either.
+    src.list(inbox_listing(), None, Urgency::Live)
+        .await
+        .unwrap();
+    let m = src.fetch_raw(&id, Urgency::Live).await.unwrap();
+    assert_eq!(raw_of(&m), original);
+    let _ = other.logout().await;
+}
+
+/// MATRIX 16b: a self-sent message whose INBOX copy was re-encoded in transit
+/// (quoted-printable; the Sent copy is 8bit) is ONE id with both locations.
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_a_reencoded_self_sent_copy_is_one_id() {
+    let user = fresh_user("cte");
+    let mut other = other_client(&user).await;
+    let sent = "From: me@dev.test\r\nTo: me@dev.test\r\nSubject: Cafe creme\r\n\
+        Date: Mon, 26 Oct 2026 09:00:00 +0000\r\nMessage-ID: <s16b@dev.test>\r\n\
+        MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\
+        Content-Transfer-Encoding: 8bit\r\n\r\nCaf\u{e9} cr\u{e8}me\r\n";
+    let inbox = "Return-Path: <me@dev.test>\r\nDelivered-To: me@dev.test\r\n\
+        From: me@dev.test\r\nTo: me@dev.test\r\nSubject: Cafe creme\r\n\
+        Date: Mon, 26 Oct 2026 09:00:00 +0000\r\nMessage-ID: <s16b@dev.test>\r\n\
+        MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\
+        Content-Transfer-Encoding: quoted-printable\r\n\r\nCaf=C3=A9 cr=C3=A8me\r\n";
+    let (src, locs) = live(&user);
+    let start = src.current_cursor().await.unwrap();
+    append(&mut other, "Sent", sent.as_bytes(), None).await;
+    append(&mut other, INBOX, inbox.as_bytes(), None).await;
+    let s = src.changes(&start, Folder::Sent).await.unwrap();
+    let i = src.changes(&start, Folder::Inbox).await.unwrap();
+    let id = stable_id_for_message_id("s16b@dev.test");
+    assert_eq!(s.ids, vec![id.clone()]);
+    assert_eq!(i.ids, vec![id.clone()]);
+    let rows = locs.message_locations(1, &id).unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    let m = src.fetch_raw(&id, Urgency::Live).await.unwrap();
+    assert!(m.placement.in_inbox && m.placement.in_sent);
+    // First seen first: the Sent copy is the bytes.
+    assert_eq!(raw_of(&m), sent.as_bytes());
+    let _ = other.logout().await;
+}
+
+/// MATRIX 15: a spoof that arrives FIRST owns the plain id, so the real
+/// message gets the distinct id, and with it its own thread: before, both
+/// threaded on the shared Message-ID, so the real bank mail sat inside the
+/// attacker's thread under the attacker's subject.
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_the_later_of_two_messages_sharing_a_message_id_is_its_own_thread() {
+    let user = fresh_user("spooffirst");
+    let mut other = other_client(&user).await;
+    let (src, _) = live(&user);
+    let start = src.current_cursor().await.unwrap();
+    append(&mut other, INBOX, &spoof("sf-1@bank.example"), None).await;
+    let w1 = src.changes(&start, Folder::Inbox).await.unwrap();
+    let plain = stable_id_for_message_id("sf-1@bank.example");
+    assert_eq!(w1.ids, vec![plain.clone()]);
+    let real = mail(Some("sf-1@bank.example"), "Your statement");
+    append(&mut other, INBOX, &real, None).await;
+    let w2 = src.changes(&w1.cursor, Folder::Inbox).await.unwrap();
+    assert_eq!(w2.ids.len(), 1);
+    let distinct = w2.ids[0].clone();
+    assert_ne!(distinct, plain);
+    let m = src.fetch_raw(&distinct, Urgency::Live).await.unwrap();
+    assert_eq!(raw_of(&m), real);
+    assert_eq!(m.thread_id.as_deref(), Some(distinct.as_str()));
+    // The first-seen one is ordinary mail: threaded by ingest.
+    let s = src.fetch_raw(&plain, Urgency::Live).await.unwrap();
+    assert_eq!(raw_of(&s), spoof("sf-1@bank.example"));
+    assert_eq!(s.thread_id, None);
+    let _ = other.logout().await;
+}
+
+/// MATRIX 20: a message over the ingest bound is stepped over: the walk
+/// lists it, its fetch says Undecodable (never downloaded, never an error),
+/// and the mail behind it arrives.
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_an_oversized_message_does_not_block_the_mail_behind_it() {
+    let user = fresh_user("big");
+    let mut other = other_client(&user).await;
+    let (src, _) = live(&user);
+    let start = src.current_cursor().await.unwrap();
+    let mut big = mail(Some("big@x.org"), "big").to_vec();
+    big.truncate(big.len() - 2);
+    let line = [b'A'; 998];
+    while big.len() < (MAX_RAW_BYTES as usize) + 1024 * 1024 {
+        big.extend_from_slice(&line);
+        big.extend_from_slice(b"\r\n");
+    }
+    append(&mut other, INBOX, &big, None).await;
+    drop(big);
+    append(&mut other, INBOX, &mail(Some("after@x.org"), "after"), None).await;
+    let w = src.changes(&start, Folder::Inbox).await.unwrap();
+    let (big_id, after_id) = (
+        stable_id_for_message_id("big@x.org"),
+        stable_id_for_message_id("after@x.org"),
+    );
+    let mut want = vec![big_id.clone(), after_id.clone()];
+    want.sort();
+    assert_eq!(w.ids, want);
+    let m = src.fetch_raw(&big_id, Urgency::Live).await.unwrap();
+    assert!(
+        matches!(&m.raw, RawBody::Undecodable(why) if why.contains("64MB")),
+        "an oversized message is skipped"
+    );
+    let a = src.fetch_raw(&after_id, Urgency::Live).await.unwrap();
+    assert!(matches!(a.raw, RawBody::Bytes(_)));
+    let _ = other.logout().await;
+}
+
+// ---- fix round 3: roles (review N4, N5) -----------------------------------
+
+#[test]
+fn a_folder_that_cannot_be_opened_never_holds_a_role() {
+    let roles = resolve_roles(&names(&[
+        ("INBOX", &[]),
+        ("Sent", &["\\Noselect", "\\Sent"]),
+        ("Sent Items", &[]),
+        ("Junk", &["\\NonExistent"]),
+    ]));
+    assert_eq!(roles.sent.as_deref(), Some("Sent Items"));
+    assert_eq!(roles.junk, None);
+    assert!(!roles.selectable.contains(&"Sent".to_string()));
+}
+
+/// A server for the role tests: LIST names Sent when `listed`, STATUS on
+/// Sent answers NO when `refuse`.
+async fn role_server(
+    listed: Arc<std::sync::atomic::AtomicBool>,
+    refuse: Arc<std::sync::atomic::AtomicBool>,
+) -> (u16, tokio::task::JoinHandle<()>) {
+    let (port, _, server) = scripted_server(true, move |tag, cmd| {
+        let sent = cmd.contains("\"SENT\"");
+        let reply = if cmd.starts_with("LIST") {
+            let mut r = "* LIST () \"/\" INBOX\r\n".to_string();
+            if listed.load(Ordering::Relaxed) {
+                r.push_str("* LIST (\\Sent) \"/\" Sent\r\n");
+            }
+            format!("{r}{tag} OK done\r\n")
+        } else if let Some(r) = login_ok(tag, cmd) {
+            r
+        } else if cmd.starts_with("STATUS") && sent && refuse.load(Ordering::Relaxed) {
+            format!("{tag} NO [UNAVAILABLE] try later\r\n")
+        } else if cmd.starts_with("STATUS") {
+            status_reply(tag, cmd)
+        } else if cmd.starts_with("EXAMINE") {
+            let v = if sent { 5 } else { 7 };
+            format!(
+                "* 0 EXISTS\r\n* OK [UIDVALIDITY {v}] ok\r\n* OK [UIDNEXT 1] ok\r\n\
+                 {tag} OK [READ-ONLY] done\r\n"
+            )
+        } else if cmd.starts_with("UID SEARCH") {
+            format!("* SEARCH\r\n{tag} OK done\r\n")
+        } else {
+            format!("{tag} OK done\r\n")
+        };
+        Say::Reply(reply)
+    })
+    .await;
+    (port, server)
+}
+
+/// REVIEW N4: a role folder LIST still names but that refuses STATUS (a
+/// lock timeout, UNAVAILABLE) was read as gone: the cursor lost its entry
+/// and the next walk sent the engine to a full catch-up, every tick for a
+/// persistent refusal. It is a retryable error now; after a few in a row it
+/// is left unwatched, without a catch-up.
+#[tokio::test]
+async fn a_listed_folder_that_refuses_status_is_retried_not_dropped() {
+    use std::sync::atomic::AtomicBool;
+    let (listed, refuse) = (
+        Arc::new(AtomicBool::new(true)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let (port, server) = role_server(listed.clone(), refuse.clone()).await;
+    let src = scripted_source(port, "pw");
+    let cursor = catch_up(&src).await;
+    refuse.store(true, Ordering::Relaxed);
+    for attempt in 1..REFUSALS_BEFORE_ABSENT {
+        match src.changes(&cursor, Folder::Sent).await {
+            Err(ChangesError::Other(e)) => assert!(!is_session_broken(&e), "{e}"),
+            Err(ChangesError::Expired) => panic!("refusal {attempt} read as a reset"),
+            Ok(c) => panic!("refusal {attempt} read as success: {:?}", c.ids),
+        }
+    }
+    // Persistent: unwatched for the session, the walk goes on, no Expired.
+    let w = src.changes(&cursor, Folder::Sent).await.expect("given up");
+    assert!(
+        !ImapCursor::decode(&w.cursor)
+            .unwrap()
+            .folders
+            .contains_key("sent")
+    );
+    // A transient one that clears is just a retry.
+    let src2 = scripted_source(port, "pw");
+    refuse.store(false, Ordering::Relaxed);
+    let cursor = catch_up(&src2).await;
+    refuse.store(true, Ordering::Relaxed);
+    assert!(matches!(
+        src2.changes(&cursor, Folder::Sent).await,
+        Err(ChangesError::Other(_))
+    ));
+    refuse.store(false, Ordering::Relaxed);
+    let w = src2.changes(&cursor, Folder::Sent).await.unwrap();
+    assert_eq!(
+        ImapCursor::decode(&w.cursor).unwrap().folders["sent"].uidvalidity,
+        5
+    );
+    assert_eq!(src.connects(), 1);
+    server.abort();
+}
+
+/// REVIEW N5: a role folder that appears (recreated in another client) after
+/// login was invisible until the session dropped, which poll traffic never
+/// lets happen. The roles are listed again periodically.
+#[tokio::test]
+async fn a_role_folder_that_appears_later_is_picked_up_without_a_new_login() {
+    use std::sync::atomic::AtomicBool;
+    let (listed, refuse) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let (port, server) = role_server(listed.clone(), refuse).await;
+    let src = scripted_source(port, "pw").with_timeouts(Timeouts {
+        roles_relist: Duration::from_millis(200),
+        ..short_timeouts()
+    });
+    let cursor = src.current_cursor().await.unwrap();
+    assert!(
+        !ImapCursor::decode(&cursor)
+            .unwrap()
+            .folders
+            .contains_key("sent")
+    );
+    listed.store(true, Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let w = src.changes(&cursor, Folder::Sent).await.unwrap();
+    assert_eq!(
+        ImapCursor::decode(&w.cursor).unwrap().folders["sent"].mailbox,
+        "Sent"
+    );
+    assert_eq!(src.connects(), 1);
+    server.abort();
 }

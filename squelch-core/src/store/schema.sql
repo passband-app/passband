@@ -911,14 +911,15 @@ CREATE TABLE IF NOT EXISTS imap_locations (
     PRIMARY KEY(account_id, msg_id, folder)
 );
 
--- WHAT EACH IMAP ID IS (Amendment I, `crate::mail::imap::content_digest`):
--- sha256 of the canonical headers plus Reply-To and the exact body text, one
--- per stable id, recorded the first time the message's bytes are read and
--- never replaced. A later sighting under the same id (a MOVE, a self-sent
--- twin, or someone reusing the Message-ID) shares it only if its digest
--- matches; a mismatch is a different message with an id of its own. A new
--- table rather than a column on `imap_locations`, whose rows are per folder
--- and come and go with moves: what a message IS does not.
+-- WHAT EACH IMAP ID IS (Amendment J, `crate::mail::imap::header_digest`):
+-- "h1:" + sha256 of the canonical headers plus Reply-To (never the body),
+-- one per stable id, recorded at first sight and never replaced. A later
+-- sighting under the same id whose digest differs is a different message
+-- with an id of its own. A value without the "h1:" prefix is an Amendment I
+-- (body-bound) digest from an earlier build: read as none, and replaced by
+-- the first header digest recorded. A new table rather than a column on
+-- `imap_locations`, whose rows are per folder and come and go with moves:
+-- what a message IS does not.
 CREATE TABLE IF NOT EXISTS imap_digests (
     account_id  INTEGER NOT NULL,
     msg_id      TEXT NOT NULL,

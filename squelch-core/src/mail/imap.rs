@@ -25,15 +25,18 @@
 //! holds for an IMAP account, and it survives a `MOVE` between folders, which
 //! a UID does not.
 //!
-//! AN ID IS BOUND TO ITS CONTENT (Amendment I). A Message-ID is chosen by the
-//! sender, so anyone who has seen one can send a new message reusing it. Each
-//! id therefore has a [`content_digest`] (canonical headers plus Reply-To, and
-//! the exact body text), recorded the first time its bytes are read. A later
-//! sighting of a known id at a new place must match it to share the id
-//! ([`bind_identities`]); one that does not is another message with an id of
-//! its own ([`distinct_stable_id`]), so a stored row is never overwritten with
-//! a stranger's content. `fetch_raw` returns only bytes that match, and
-//! placement counts only the copies that match.
+//! FIRST SEEN WINS (Amendment J). A Message-ID is chosen by the sender, so
+//! anyone who has seen one can send a new message reusing it. Two rules keep
+//! that from touching a stored message:
+//! - an id's location is never replaced while it still holds, and fetches
+//!   prefer the earliest-recorded live location, so whatever a later copy
+//!   holds, its bytes are never read under an id whose original still exists
+//!   ([`ImapSource::bind_and_record`]);
+//! - each id has a HEADER-ONLY [`header_digest`] (From/To/Cc, Date, Subject,
+//!   Reply-To), recorded at first sight; a sighting whose digest differs is
+//!   another message, with an id ([`distinct_stable_id`]) and a thread of its
+//!   own. The body is not part of it: a copy re-encoded or re-wrapped in
+//!   transit is still the same message.
 //!
 //! THE LOCATION TABLE ([`MessageLocations`], the store's `imap_locations`)
 //! records every folder and UID each id was seen at. `fetch_raw` and
@@ -505,6 +508,8 @@ pub(crate) struct Timeouts {
     /// The longest one IDLE round runs before `DONE` and a fresh `IDLE`
     /// (RFC 2177 says at most 29 minutes; contract §8 says 25).
     pub idle_reissue: Duration,
+    /// How often a session lists its folders again ([`ROLES_RELIST`]).
+    pub roles_relist: Duration,
 }
 
 impl Default for Timeouts {
@@ -514,6 +519,7 @@ impl Default for Timeouts {
             login: Duration::from_secs(60),
             stall: Duration::from_secs(120),
             idle_reissue: IDLE_REISSUE,
+            roles_relist: ROLES_RELIST,
         }
     }
 }
@@ -682,6 +688,20 @@ const WATCHED: [Folder; 3] = [Folder::Inbox, Folder::Sent, Folder::Spam];
 /// win; a folder named like the role is the fallback, first match in the
 /// order given.
 pub(crate) fn resolve_roles(names: &[(String, Vec<String>)]) -> FolderRoles {
+    // A folder that cannot be opened (`\Noselect`, `\NonExistent`) never
+    // holds a role (review N4): STATUS on it answers NO forever.
+    let selectable = |attrs: &[String]| {
+        !attrs.iter().any(|a| {
+            a.eq_ignore_ascii_case("\\Noselect") || a.eq_ignore_ascii_case("\\NonExistent")
+        })
+    };
+    let all = names;
+    let names: Vec<(String, Vec<String>)> = all
+        .iter()
+        .filter(|(_, attrs)| selectable(attrs))
+        .cloned()
+        .collect();
+    let names = names.as_slice();
     let by_attr = |attr: &str| {
         names
             .iter()
@@ -707,15 +727,7 @@ pub(crate) fn resolve_roles(names: &[(String, Vec<String>)]) -> FolderRoles {
         drafts: pick("\\Drafts", &["Drafts"]),
         archive: pick("\\Archive", &["Archive"]),
         all: pick("\\All", &["All Mail", "[Gmail]/All Mail"]),
-        selectable: names
-            .iter()
-            .filter(|(_, attrs)| {
-                !attrs.iter().any(|a| {
-                    a.eq_ignore_ascii_case("\\Noselect") || a.eq_ignore_ascii_case("\\NonExistent")
-                })
-            })
-            .map(|(n, _)| n.clone())
-            .collect(),
+        selectable: names.iter().map(|(n, _)| n.clone()).collect(),
     }
 }
 
@@ -749,7 +761,11 @@ pub fn normalize_message_id(value: &str) -> Option<String> {
         (Some(a), Some(b)) if b > a => &v[a + 1..b],
         _ => v.trim_matches(|c| c == '<' || c == '>'),
     };
-    let inner = inner.trim();
+    // No whitespace survives (review N7): a Message-ID has none, and a
+    // header written `< a@b >` or folded mid-id is the same id as `<a@b>`,
+    // for the stable id and for the search alike.
+    let inner: String = inner.chars().filter(|c| !c.is_whitespace()).collect();
+    let inner = inner.as_str();
     if inner.is_empty() {
         return None;
     }
@@ -777,7 +793,7 @@ pub fn stable_id_for_message_id(normalized: &str) -> String {
 /// The headers a message without a Message-ID is identified by
 /// ([`canonical_header_id`]). Asked for in every id fetch so no second
 /// round trip is needed.
-const ID_HEADER_FIELDS: &str = "MESSAGE-ID FROM TO CC DATE SUBJECT";
+const ID_HEADER_FIELDS: &str = "MESSAGE-ID FROM TO CC DATE SUBJECT REPLY-TO";
 
 /// THE ID OF MAIL WITHOUT A MESSAGE-ID (Amendment E): a hash of what the
 /// author wrote, never of what delivery added. A self-sent copy in INBOX
@@ -799,10 +815,14 @@ pub fn canonical_header_id(header: &[u8]) -> String {
 }
 
 /// The canonical header set as text (Amendment E), with Reply-To when
-/// `reply_to` (the content digest's set, Amendment I). `None` when nothing in
-/// the block parses.
+/// `reply_to` (the identity digest's set, Amendment J). `None` when nothing
+/// in the block parses.
 fn canonical_header_text(header: &[u8], reply_to: bool) -> Option<String> {
     let m = mail_parser::MessageParser::default().parse_headers(header)?;
+    Some(canonical_of(Some(&m), reply_to))
+}
+
+fn canonical_of(m: Option<&mail_parser::Message<'_>>, reply_to: bool) -> String {
     let addrs = |a: Option<&mail_parser::Address<'_>>| {
         let mut v: Vec<String> = a
             .map(|a| {
@@ -819,52 +839,67 @@ fn canonical_header_text(header: &[u8], reply_to: bool) -> Option<String> {
     };
     let mut canonical = format!(
         "imap-canonical-v1\nfrom:{}\nto:{}\ncc:{}\ndate:{}\nsubject:{}\n",
-        addrs(m.from()),
-        addrs(m.to()),
-        addrs(m.cc()),
-        m.date()
+        addrs(m.and_then(|m| m.from())),
+        addrs(m.and_then(|m| m.to())),
+        addrs(m.and_then(|m| m.cc())),
+        m.and_then(|m| m.date())
             .map(|d| d.to_timestamp().to_string())
             .unwrap_or_default(),
-        m.subject().map(str::trim).unwrap_or_default(),
+        m.and_then(|m| m.subject())
+            .map(str::trim)
+            .unwrap_or_default(),
     );
     if reply_to {
-        canonical.push_str(&format!("reply-to:{}\n", addrs(m.reply_to())));
+        canonical.push_str(&format!(
+            "reply-to:{}\n",
+            addrs(m.and_then(|m| m.reply_to()))
+        ));
     }
-    Some(canonical)
+    canonical
 }
 
-/// The headers the content digest is taken over, as `HEADER.FIELDS` names.
+/// The headers the identity digest is taken over, as `HEADER.FIELDS` names.
 const DIGEST_HEADER_FIELDS: &str = "FROM TO CC DATE SUBJECT REPLY-TO";
 
-/// THE CONTENT DIGEST (Amendment I): what a re-sighting of a known id must
-/// match to share it. sha256 of the canonical header set plus Reply-To, then
-/// the exact `BODY[TEXT]` bytes. Delivery trace headers are not in the set,
-/// so a self-sent copy in INBOX and Sent and a message MOVEd between folders
-/// keep one digest; a different message reusing a Message-ID does not.
-pub fn content_digest(header: &[u8], text: &[u8]) -> String {
-    let mut h = Sha256::new();
-    h.update(b"imap-content-v1\n");
-    match canonical_header_text(header, true) {
-        Some(c) => h.update(c.as_bytes()),
-        None => h.update(header),
-    }
-    h.update(b"\n--text--\n");
-    h.update(text);
-    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+/// What every [`header_digest`] starts with. A digest recorded without it
+/// is an Amendment I (body-bound) one from an earlier build: read as none.
+pub(crate) const DIGEST_PREFIX: &str = "h1:";
+
+/// Where a raw message's header block ends: after the EARLIEST empty line,
+/// CRLF or bare LF (review N6), or the whole of it.
+fn header_block(raw: &[u8]) -> &[u8] {
+    let crlf = raw.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4);
+    let lf = raw.windows(2).position(|w| w == b"\n\n").map(|i| i + 2);
+    let end = match (crlf, lf) {
+        (Some(a), Some(b)) => a.min(b),
+        (a, b) => a.or(b).unwrap_or(raw.len()),
+    };
+    &raw[..end]
 }
 
-/// [`content_digest`] of a whole message, split where `BODY[TEXT]` starts:
-/// after the first empty line.
-pub fn content_digest_of_raw(raw: &[u8]) -> String {
-    let split = raw
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|i| i + 4)
-        .or_else(|| raw.windows(2).position(|w| w == b"\n\n").map(|i| i + 2));
-    match split {
-        Some(at) => content_digest(&raw[..at], &raw[at..]),
-        None => content_digest(raw, b""),
+/// THE IDENTITY DIGEST (Amendment J): what a re-sighting of a known id must
+/// match to share it. HEADERS ONLY: the canonical set (From/To/Cc addresses,
+/// Date as UTC, trimmed Subject) plus Reply-To, taken from PARSED values, so
+/// the one function serves a `HEADER.FIELDS` fetch and a whole raw message
+/// alike, whatever their line endings (review N6). Never the body: a copy
+/// whose transfer encoding, footer or MIME layout was rewritten in transit
+/// (matrix 16b, review N2) is still the same message. What stops a re-send
+/// from replacing a stored message is not the digest but first-seen-wins
+/// (see [`ImapSource::bind_and_record`]).
+///
+/// A block in which nothing parses digests as an empty set, the same as a
+/// `HEADER.FIELDS` reply holding none of the fields.
+pub fn header_digest(header_or_raw: &[u8]) -> String {
+    let block = header_block(header_or_raw);
+    let parsed = mail_parser::MessageParser::default().parse_headers(block);
+    let canonical = canonical_of(parsed.as_ref(), true);
+    let digest = Sha256::digest(format!("imap-header-digest-v1\n{canonical}").as_bytes());
+    let mut out = String::with_capacity(DIGEST_PREFIX.len() + 64);
+    out.push_str(DIGEST_PREFIX);
+    for b in digest {
+        out.push_str(&format!("{b:02x}"));
     }
+    out
 }
 
 /// The id a message gets when it reuses a known id's Message-ID (or, with
@@ -1007,6 +1042,9 @@ pub(crate) fn merge_cursor_values(
     for key in keys {
         let base = since.and_then(|s| s.folders.get(key));
         let pick = match (a.folders.get(key), b.folders.get(key)) {
+            // One side DROPPED a folder `since` had (its role went away) and
+            // the other merely carried it along unmoved: the drop stands.
+            (Some(x), None) | (None, Some(x)) if base == Some(x) => continue,
             (Some(x), None) | (None, Some(x)) => x,
             (Some(x), Some(y)) => match (Some(x) != base, Some(y) != base) {
                 (true, false) => x,
@@ -1159,7 +1197,24 @@ struct Conn {
     /// locked means a caller was dropped mid-command and the stream is
     /// somewhere in a response: the session is retired, not reused.
     busy: bool,
+    /// When the roles were last listed (review N5).
+    roles_at: tokio::time::Instant,
+    /// How often [`Conn::maybe_refresh_roles`] lists them again.
+    roles_relist: Duration,
+    /// Role folders that LIST still names but that refuse STATUS, and how
+    /// many times in a row (review N4).
+    refused: std::collections::HashMap<String, u32>,
 }
+
+/// How many refusals in a row before a listed role folder is treated as not
+/// there for the rest of the session (review N4). Below it, a refusal is a
+/// retryable error: a lock timeout or `UNAVAILABLE` is not a deleted folder.
+const REFUSALS_BEFORE_ABSENT: u32 = 3;
+
+/// How often a session lists its folders again, at the most (review N5): a
+/// role folder recreated in another client is noticed within this, or at the
+/// next catch-up, without waiting for the session to drop.
+const ROLES_RELIST: Duration = Duration::from_secs(10 * 60);
 
 impl Conn {
     /// `EXAMINE` (read-only) a folder and return its `UIDVALIDITY`, or `None`
@@ -1204,7 +1259,31 @@ impl Conn {
     /// `NO`, and the roles this session resolved at login would keep naming
     /// it for as long as the session lives.
     async fn refresh_roles(&mut self) -> Result<()> {
-        self.roles = list_roles(&mut self.session).await?;
+        let mut roles = list_roles(&mut self.session).await?;
+        // A folder that kept refusing STATUS stays out of its role.
+        for given_up in self
+            .refused
+            .iter()
+            .filter(|(_, n)| **n >= REFUSALS_BEFORE_ABSENT)
+            .map(|(f, _)| f)
+        {
+            for role in [&mut roles.sent, &mut roles.junk] {
+                if role.as_deref() == Some(given_up.as_str()) {
+                    *role = None;
+                }
+            }
+        }
+        self.roles = roles;
+        self.roles_at = tokio::time::Instant::now();
+        Ok(())
+    }
+
+    /// List the roles again if the last listing is older than
+    /// `roles_relist` (review N5).
+    async fn maybe_refresh_roles(&mut self) -> Result<()> {
+        if self.roles_at.elapsed() >= self.roles_relist {
+            self.refresh_roles().await?;
+        }
         Ok(())
     }
 
@@ -1212,18 +1291,49 @@ impl Conn {
     /// has no folder. A role folder that answers `NO` sends the roles to be
     /// listed again and the role is asked once more, so a folder renamed or
     /// recreated is followed and one that is gone reads as no folder.
+    ///
+    /// ONLY A LIST SAYS A FOLDER IS GONE (review N4): a role folder that
+    /// answers NO while LIST still names it is a retryable error, not a
+    /// missing folder, until it has refused [`REFUSALS_BEFORE_ABSENT`] times
+    /// in a row; then it is left out of its role for this session.
     async fn role_status(&mut self, folder: Folder) -> Result<Option<(String, FolderPos)>> {
         let Some(name) = self.roles.folder(folder).map(str::to_string) else {
             return Ok(None);
         };
         if let Some(pos) = self.status(&name).await? {
+            self.refused.remove(&name);
             return Ok(Some((name, pos)));
         }
         self.refresh_roles().await?;
-        let Some(name) = self.roles.folder(folder).map(str::to_string) else {
+        let Some(now_name) = self.roles.folder(folder).map(str::to_string) else {
             return Ok(None);
         };
-        Ok(self.status(&name).await?.map(|pos| (name, pos)))
+        if now_name != name
+            && let Some(pos) = self.status(&now_name).await?
+        {
+            self.refused.remove(&now_name);
+            return Ok(Some((now_name, pos)));
+        }
+        // Still listed, still refused.
+        let n = {
+            let n = self.refused.entry(now_name.clone()).or_insert(0);
+            *n += 1;
+            *n
+        };
+        if n >= REFUSALS_BEFORE_ABSENT && folder != Folder::Inbox {
+            if n == REFUSALS_BEFORE_ABSENT {
+                eprintln!(
+                    "squelch: imap folder {now_name:?} refuses STATUS; leaving it unwatched \
+                     until the next login"
+                );
+            }
+            self.refresh_roles().await?;
+            return Ok(None);
+        }
+        Err(net_err(
+            "status",
+            "the server refused STATUS on a folder it still lists; retrying",
+        ))
     }
 
     /// One folder's position as `STATUS` reports it now, or `None` if the
@@ -1268,9 +1378,14 @@ struct Seen {
     id: String,
     loc: MessageLocation,
     internal_date: Option<DateTime<Utc>>,
-    /// The content digest, when binding this sighting had to read it
-    /// ([`bind_identities`]): recorded with the location.
-    digest: Option<String>,
+    /// The identity digest ([`header_digest`]) of this copy, from the same
+    /// header fetch that gave its id.
+    digest: String,
+    /// Binding decided this sighting's location may be recorded (rule 1:
+    /// never over a location of the same id that still holds).
+    keep_loc: bool,
+    /// Binding decided this sighting's digest is the id's, to record.
+    new_digest: bool,
 }
 
 /// An IMAP mailbox's read side.
@@ -1513,6 +1628,9 @@ impl ImapSource {
             selected: None,
             calls: 0,
             busy: false,
+            roles_at: tokio::time::Instant::now(),
+            roles_relist: self.timeouts.roles_relist,
+            refused: std::collections::HashMap::new(),
         })
     }
 
@@ -1667,16 +1785,45 @@ impl ImapSource {
     }
 
     fn record(&self, seen: &[Seen]) -> Result<()> {
-        for s in seen {
-            if let Some(d) = &s.digest {
-                self.locations
-                    .record_content_digest(self.account_id, &s.id, d)?;
-            }
+        for s in seen.iter().filter(|s| s.new_digest) {
+            self.locations
+                .record_content_digest(self.account_id, &s.id, &s.digest)?;
         }
-        let rows: Vec<(String, MessageLocation)> =
-            seen.iter().map(|s| (s.id.clone(), s.loc.clone())).collect();
+        let rows: Vec<(String, MessageLocation)> = seen
+            .iter()
+            .filter(|s| s.keep_loc)
+            .map(|s| (s.id.clone(), s.loc.clone()))
+            .collect();
         self.locations
             .record_message_locations(self.account_id, &rows)
+    }
+
+    /// BIND, CHECK AND RECORD one batch of sightings (Amendment J): the ids
+    /// ([`bind`]), then, for a sighting that would replace a location of the
+    /// same id in the same folder, whether that location still holds (one
+    /// `EXAMINE` and one `UID FETCH` per folder, and only when there is such
+    /// a sighting, which is rare), then the store. The store calls run
+    /// outside the IMAP lock.
+    async fn bind_and_record(&self, seen: Vec<Seen>) -> Result<Vec<Seen>> {
+        let (mut seen, conflicts) = bind(self.locations.as_ref(), self.account_id, seen)?;
+        if !conflicts.is_empty() {
+            let still = self
+                .with_conn(|c| Box::pin(async move { still_there(c, conflicts).await }))
+                .await?;
+            for s in &mut seen {
+                if s.keep_loc
+                    && still
+                        .iter()
+                        .any(|(id, folder)| *id == s.id && *folder == s.loc.folder)
+                {
+                    // The first-seen copy is still there: it stays the one
+                    // this id reads, whatever this later copy holds.
+                    s.keep_loc = false;
+                }
+            }
+        }
+        self.record(&seen)?;
+        Ok(seen)
     }
 
     /// The roles as of the current connection (connecting if needed).
@@ -1834,26 +1981,35 @@ async fn stable_ids(
                     message_id,
                 },
                 internal_date: f.internal_date().map(|d| d.with_timezone(&Utc)),
-                digest: None,
+                digest: header_digest(h),
+                keep_loc: false,
+                new_digest: false,
             });
         }
     }
     Ok(out)
 }
 
+/// One message's bytes as `fetch_body` read them.
+enum Body {
+    Bytes(Vec<u8>, Option<DateTime<Utc>>),
+    /// Over the ingest bound: never downloaded. The size the server gave.
+    TooBig(u64, Option<DateTime<Utc>>),
+}
+
 /// One message's bytes by UID in the open folder, or `None` if the UID is
 /// gone. `BODY.PEEK[]`: `\Seen` is not touched.
 ///
 /// THE SIZE IS ASKED FIRST, on its own (security review 4): a message over
-/// the 64 MB ingest bound is refused before a byte of it is downloaded, and
-/// the bound is checked again on what actually arrived, so a server that
-/// understates the size gains nothing.
-async fn fetch_body(
-    session: &mut ImapSession,
-    uid: u32,
-) -> Result<Option<(Vec<u8>, Option<DateTime<Utc>>)>> {
+/// the 64 MB ingest bound is never downloaded, and the bound is checked again
+/// on what actually arrived, so a server that understates the size gains
+/// nothing. An oversized message is [`Body::TooBig`], NOT an error (matrix
+/// row 20): the engine fails a whole tick on a fetch error, and the next tick
+/// would list the same UID, so one big message would stop every message
+/// behind it for good.
+async fn fetch_body(session: &mut ImapSession, uid: u32) -> Result<Option<Body>> {
     let stream = session
-        .uid_fetch(uid.to_string(), "(UID RFC822.SIZE)")
+        .uid_fetch(uid.to_string(), "(UID INTERNALDATE RFC822.SIZE)")
         .await
         .map_err(imap_err("fetch size"))?;
     let Some(sized) = collect_fetches(stream, &[uid], "fetch size")
@@ -1863,8 +2019,9 @@ async fn fetch_body(
     else {
         return Ok(None);
     };
-    if sized.size.is_some_and(|s| s > MAX_RAW_BYTES) {
-        return Err(too_big());
+    let received = sized.internal_date().map(|d| d.with_timezone(&Utc));
+    if let Some(size) = sized.size.filter(|s| *s > MAX_RAW_BYTES) {
+        return Ok(Some(Body::TooBig(u64::from(size), received)));
     }
     // A partial fetch one byte past the bound: a server keeping to RFC 3501
     // cannot send more, and one byte over is how "too big" shows.
@@ -1883,15 +2040,14 @@ async fn fetch_body(
         return Ok(None);
     };
     let body = f.body().unwrap_or_default();
+    let received = f
+        .internal_date()
+        .map(|d| d.with_timezone(&Utc))
+        .or(received);
     if body.len() > MAX_RAW_BYTES as usize {
-        return Err(too_big());
+        return Ok(Some(Body::TooBig(body.len() as u64, received)));
     }
-    let received = f.internal_date().map(|d| d.with_timezone(&Utc));
-    Ok(Some((body.to_vec(), received)))
-}
-
-fn too_big() -> CoreError {
-    CoreError::InvalidInput("raw message exceeds the 64MB ingest bound".to_string())
+    Ok(Some(Body::Bytes(body.to_vec(), received)))
 }
 
 /// Is `uid` still in the open folder?
@@ -1905,11 +2061,8 @@ async fn uid_exists(session: &mut ImapSession, uid: u32) -> Result<bool> {
         .is_empty())
 }
 
-/// The [`content_digest`] of the message at `uid` in `folder`, if the folder
-/// is still at `uidvalidity` and the UID is there. Header fields and
-/// `BODY.PEEK[TEXT]`, the text capped one byte past the ingest bound (the
-/// digest of an oversized message covers its first bytes: deterministic, and
-/// ingest refuses it anyway).
+/// The [`header_digest`] of the message at `uid` in `folder`, if the folder
+/// is still at `uidvalidity` and the UID is there. Headers only.
 async fn location_digest(
     c: &mut Conn,
     folder: &str,
@@ -1923,10 +2076,7 @@ async fn location_digest(
         .session
         .uid_fetch(
             uid.to_string(),
-            format!(
-                "(UID BODY.PEEK[HEADER.FIELDS ({DIGEST_HEADER_FIELDS})] BODY.PEEK[TEXT]<0.{}>)",
-                MAX_RAW_BYTES + 1
-            ),
+            format!("(UID BODY.PEEK[HEADER.FIELDS ({DIGEST_HEADER_FIELDS})])"),
         )
         .await
         .map_err(imap_err("fetch digest"))?;
@@ -1934,18 +2084,7 @@ async fn location_digest(
         .await?
         .into_iter()
         .next()
-        .map(|f| content_digest(f.header().unwrap_or_default(), text_section(&f))))
-}
-
-/// `BODY[TEXT]`, whole or partial (`BODY[TEXT]<0>`), from a fetch.
-fn text_section(f: &Fetch) -> &[u8] {
-    f.text()
-        .or_else(|| {
-            f.section(&async_imap::imap_proto::SectionPath::Full(
-                async_imap::imap_proto::MessageSection::Text,
-            ))
-        })
-        .unwrap_or_default()
+        .map(|f| header_digest(f.header().unwrap_or_default())))
 }
 
 /// Same folder, same `UIDVALIDITY`, same UID: the very copy already known.
@@ -1953,69 +2092,119 @@ fn same_place(a: &MessageLocation, b: &MessageLocation) -> bool {
     a.folder == b.folder && a.uidvalidity == b.uidvalidity && a.uid == b.uid
 }
 
-/// A RE-SIGHTING MUST PROVE IT IS THE SAME MESSAGE (Amendment I). `seen` was
-/// just listed in its folder. A sighting of an id nobody has seen, or of a
-/// place already on record, passes as it is: the common case costs nothing.
-/// Any other sighting of a known id (a move, a self-sent twin, or a stranger
-/// reusing the Message-ID) has its digest read and compared with the id's:
-/// equal, it is that message at a new place; different, it is another
-/// message and gets [`distinct_stable_id`], so the stored row is never
-/// overwritten with its content.
+/// A recorded location a sighting would replace, if it no longer holds.
+struct Conflict {
+    id: String,
+    old: MessageLocation,
+}
+
+/// WHICH ID EACH SIGHTING IS, AND WHETHER ITS LOCATION MAY BE RECORDED
+/// (Amendment J). Store reads only; no IMAP.
 ///
-/// The id's digest is the recorded one, or, before any body was fetched, the
-/// digest of the earliest place still holding it (recorded then, so it
-/// cannot drift).
-async fn bind_identities(
-    c: &mut Conn,
+/// - The id: a sighting whose [`header_digest`] differs from the digest its
+///   id is bound to is ANOTHER message reusing the Message-ID, and gets
+///   [`distinct_stable_id`]. An id seen for the first time is bound to this
+///   sighting's digest. A legacy id (rows, but no digest recorded: rule 4)
+///   is bound only when this sighting IS its first-recorded place.
+/// - The location (rule 1, first-seen wins): a folder with no row for the id
+///   takes this one (a self-sent pair, a MOVE into another folder). A
+///   folder whose row is at another place keeps that row while it still
+///   holds: the [`Conflict`]s returned are for the caller to check against
+///   the server ([`still_there`]). In a batch the lowest UID of an id in a
+///   folder is first.
+fn bind(
     locs: &dyn MessageLocations,
     account: AccountId,
-    seen: Vec<Seen>,
-) -> Result<Vec<Seen>> {
-    // First sightings in this batch, so a duplicate WITHIN it is checked too.
-    let mut first_here: std::collections::HashMap<String, MessageLocation> =
+    mut seen: Vec<Seen>,
+) -> Result<(Vec<Seen>, Vec<Conflict>)> {
+    seen.sort_by(|a, b| (&a.loc.folder, a.loc.uid).cmp(&(&b.loc.folder, b.loc.uid)));
+    let mut batch_digest: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
-    let mut out = Vec::with_capacity(seen.len());
-    for mut s in seen {
-        let rows = locs.message_locations(account, &s.id)?;
-        if rows.iter().any(|r| same_place(r, &s.loc)) {
-            out.push(s);
-            continue;
-        }
-        let earlier = first_here.get(&s.id).cloned();
-        if rows.is_empty() && earlier.is_none() {
-            first_here.insert(s.id.clone(), s.loc.clone());
-            out.push(s);
-            continue;
-        }
-        let mut reference = locs.content_digest(account, &s.id)?;
-        if reference.is_none() {
-            // Oldest first: the place the id was bound at.
-            for r in earlier.iter().chain(rows.iter().rev()) {
-                if let Some(d) = location_digest(c, &r.folder, r.uidvalidity, r.uid).await? {
-                    locs.record_content_digest(account, &s.id, &d)?;
-                    reference = Some(d);
-                    break;
+    let mut placed: HashSet<(String, String)> = HashSet::new();
+    let mut conflicts = Vec::new();
+    for s in &mut seen {
+        s.keep_loc = false;
+        s.new_digest = false;
+        let mut rows = locs.message_locations(account, &s.id)?;
+        let reference = match locs.content_digest(account, &s.id)? {
+            Some(d) => Some(d),
+            None => batch_digest.get(&s.id).cloned(),
+        };
+        match reference {
+            Some(d) if d != s.digest => {
+                s.id = distinct_stable_id(&s.id, s.loc.message_id.as_deref(), &s.digest);
+                rows = locs.message_locations(account, &s.id)?;
+                // A distinct id is a hash of this digest: it is its own.
+                if locs.content_digest(account, &s.id)?.is_none()
+                    && !batch_digest.contains_key(&s.id)
+                {
+                    s.new_digest = true;
                 }
             }
+            Some(_) => {}
+            None if rows.is_empty() => s.new_digest = true,
+            // Legacy (rule 4): bound by its first-recorded place only.
+            None => s.new_digest = rows.first().is_some_and(|r| same_place(r, &s.loc)),
         }
-        let Some(reference) = reference else {
-            // Every earlier place is gone and nothing was ever read: this
-            // copy is the only one there is, and it binds the id.
-            first_here.insert(s.id.clone(), s.loc.clone());
-            out.push(s);
+        if s.new_digest {
+            batch_digest
+                .entry(s.id.clone())
+                .or_insert_with(|| s.digest.clone());
+        }
+        if !placed.insert((s.id.clone(), s.loc.folder.clone())) {
+            // A second copy in the same folder in this batch: the first is it.
+            continue;
+        }
+        match rows.iter().find(|r| r.folder == s.loc.folder) {
+            None => s.keep_loc = true,
+            Some(r) if same_place(r, &s.loc) => s.keep_loc = true,
+            Some(r) => {
+                s.keep_loc = true;
+                conflicts.push(Conflict {
+                    id: s.id.clone(),
+                    old: r.clone(),
+                });
+            }
+        }
+    }
+    Ok((seen, conflicts))
+}
+
+/// Which conflicting recorded locations still hold: same `UIDVALIDITY`, UID
+/// still there. As `(id, folder)`.
+async fn still_there(c: &mut Conn, conflicts: Vec<Conflict>) -> Result<Vec<(String, String)>> {
+    let mut by_folder: BTreeMap<String, Vec<Conflict>> = BTreeMap::new();
+    for k in conflicts {
+        by_folder.entry(k.old.folder.clone()).or_default().push(k);
+    }
+    let mut out = Vec::new();
+    for (folder, ks) in by_folder {
+        let Some(validity) = c.examine(&folder).await? else {
             continue;
         };
-        let Some(digest) =
-            location_digest(c, &s.loc.folder.clone(), s.loc.uidvalidity, s.loc.uid).await?
-        else {
-            // Gone between the listing and now.
+        let uids: Vec<u32> = ks
+            .iter()
+            .filter(|k| k.old.uidvalidity == validity)
+            .map(|k| k.old.uid)
+            .collect();
+        if uids.is_empty() {
             continue;
-        };
-        if digest != reference {
-            s.id = distinct_stable_id(&s.id, s.loc.message_id.as_deref(), &digest);
         }
-        s.digest = Some(digest);
-        out.push(s);
+        let stream = c
+            .session
+            .uid_fetch(uid_set(&uids), "(UID)")
+            .await
+            .map_err(imap_err("fetch uid"))?;
+        let present: HashSet<u32> = collect_fetches(stream, &uids, "fetch uid")
+            .await?
+            .into_iter()
+            .filter_map(|f| f.uid)
+            .collect();
+        for k in ks {
+            if k.old.uidvalidity == validity && present.contains(&k.old.uid) {
+                out.push((k.id, folder.clone()));
+            }
+        }
     }
     Ok(out)
 }
@@ -2025,11 +2214,12 @@ async fn bind_identities(
 /// folder.
 ///
 /// EXACT, NOT A SUBSTRING (security review 2): `SEARCH HEADER` matches any
-/// header CONTAINING the text, so the search is for `<id>` with its brackets,
-/// each hit's Message-ID is read back and must normalize to exactly
-/// `message_id`, and when the id has a recorded digest the hit's must match
-/// it too. The LOWEST matching UID wins: a lookalike delivered later sits
-/// above the real one, never below it.
+/// header CONTAINING the text, so each hit's Message-ID is read back and must
+/// normalize to exactly `message_id`, and when the id has a recorded digest
+/// the hit's must match it too. The LOWEST matching UID wins: a lookalike
+/// delivered later sits above the real one, never below it. The search is
+/// for the bare id, without brackets, so a header written `< a@b >` is found
+/// (review N7): the read-back is what makes it exact.
 async fn find_by_message_id(
     c: &mut Conn,
     folders: &[String],
@@ -2038,7 +2228,7 @@ async fn find_by_message_id(
 ) -> Result<Vec<MessageLocation>> {
     // The value goes inside a quoted string: refuse anything that could end
     // it or the command early.
-    if message_id.contains(['"', '\\', '\r', '\n', '<', '>']) {
+    if message_id.contains(['"', '\\', '\r', '\n']) {
         return Ok(Vec::new());
     }
     let mut out = Vec::new();
@@ -2048,7 +2238,7 @@ async fn find_by_message_id(
         };
         let hits = search(
             &mut c.session,
-            format!("HEADER Message-ID \"<{message_id}>\""),
+            format!("HEADER Message-ID \"{message_id}\""),
         )
         .await?;
         if hits.is_empty() {
@@ -2058,7 +2248,7 @@ async fn find_by_message_id(
             .session
             .uid_fetch(
                 uid_set(&hits),
-                "(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])",
+                format!("(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID {DIGEST_HEADER_FIELDS})])"),
             )
             .await
             .map_err(imap_err("fetch message-id"))?;
@@ -2071,27 +2261,19 @@ async fn find_by_message_id(
                         .into_iter()
                         .find_map(|v| normalize_message_id(&v))
                         .is_some_and(|m| m == message_id)
+                        && expected.is_none_or(|want| header_digest(h) == want)
                 })
             })
             .filter_map(|f| f.uid)
             .collect();
         exact.sort_unstable();
-        for uid in exact {
-            if let Some(want) = expected
-                && location_digest(c, folder, uidvalidity, uid)
-                    .await?
-                    .as_deref()
-                    != Some(want)
-            {
-                continue;
-            }
+        if let Some(uid) = exact.first() {
             out.push(MessageLocation {
                 folder: folder.clone(),
                 uidvalidity,
-                uid,
+                uid: *uid,
                 message_id: Some(message_id.to_string()),
             });
-            break;
         }
     }
     Ok(out)
@@ -2294,11 +2476,48 @@ enum Walk {
     Expired,
     /// The role has no folder on this server, now or at the cursor.
     NoFolder,
+    /// The role's folder went away (a LIST says so): its entry leaves the
+    /// cursor, and nothing else changes.
+    Gone,
     Moved {
         pos: FolderPos,
         seen: Vec<Seen>,
         mailbox_unchanged: bool,
     },
+}
+
+/// How far back a reset non-INBOX folder is listed again: the engine's
+/// default backfill window, the one its catch-up would have used.
+const RESET_RELIST_DAYS: i64 = 30;
+
+/// A NON-INBOX WATCHED FOLDER RESET (matrix row 19): a new `UIDVALIDITY`, a
+/// role now on another folder, or one gained. Handled HERE rather than as
+/// [`ChangesError::Expired`], whose catch-up re-fetches the whole INBOX
+/// window, for a Sent folder another client recreated. The walk is the
+/// folder's window listing under its new position (snapshot first, as for a
+/// listing): ids are stable, so a message already stored is the same id, and
+/// first-seen-wins (Amendment J rule 1) means its re-ingest reads the bytes
+/// it was stored from. A role with no folder now is [`Walk::Gone`].
+async fn reset_walk(c: &mut Conn, folder: Folder) -> Result<Walk> {
+    let Some((name, snapshot)) = c.role_status(folder).await? else {
+        return Ok(Walk::Gone);
+    };
+    let Some(validity) = c.examine(&name).await? else {
+        return Ok(Walk::Gone);
+    };
+    let since = Utc::now() - chrono::Duration::days(RESET_RELIST_DAYS);
+    let uids = search(&mut c.session, format!("SINCE {}", imap_date(since))).await?;
+    let seen = stable_ids(&mut c.session, &name, validity, &uids).await?;
+    eprintln!(
+        "squelch: imap folder {name:?} was reset; re-listing its last {RESET_RELIST_DAYS} days \
+         ({} message(s)) instead of a full catch-up",
+        seen.len()
+    );
+    Ok(Walk::Moved {
+        pos: snapshot,
+        seen,
+        mailbox_unchanged: false,
+    })
 }
 
 /// Does every folder the poll lane walks, other than `skip`, stand exactly
@@ -2341,7 +2560,6 @@ impl MailSource for ImapSource {
         cap: Option<usize>,
         _urgency: Urgency,
     ) -> Result<Vec<String>> {
-        let (locs, account) = (self.locations.clone(), self.account_id);
         let (seen, snapshot) = match listing {
             Listing::Folder {
                 folder,
@@ -2349,6 +2567,13 @@ impl MailSource for ImapSource {
             } => {
                 self.with_conn(|c| {
                     Box::pin(async move {
+                        // An INBOX listing starts a backfill or a catch-up:
+                        // the folders as they are now (review N5).
+                        if folder == Folder::Inbox {
+                            c.refresh_roles().await?;
+                        } else {
+                            c.maybe_refresh_roles().await?;
+                        }
                         // THE SNAPSHOT FIRST (Amendment G): anything that lands
                         // after it is above its `last_uid`, so the next walk
                         // finds it whether or not this search does.
@@ -2376,8 +2601,6 @@ impl MailSource for ImapSource {
                             uids.truncate(cap);
                         }
                         let seen = stable_ids(&mut c.session, &name, validity, &uids).await?;
-                        let mut seen = bind_identities(c, locs.as_ref(), account, seen).await?;
-                        seen.sort_unstable_by(|a, b| b.loc.uid.cmp(&a.loc.uid));
                         Ok((seen, Some((folder, snapshot))))
                     })
                 })
@@ -2414,7 +2637,7 @@ impl MailSource for ImapSource {
                 // for the whole walk. Between folders, anyone can run.
                 let mut seen = Vec::new();
                 for folder in folders {
-                    let (locs, query) = (locs.clone(), query.clone());
+                    let query = query.clone();
                     let found = self
                         .with_conn(|c| {
                             Box::pin(async move {
@@ -2422,9 +2645,7 @@ impl MailSource for ImapSource {
                                     return Ok(Vec::new());
                                 };
                                 let uids = search(&mut c.session, query).await?;
-                                let ids =
-                                    stable_ids(&mut c.session, &folder, validity, &uids).await?;
-                                bind_identities(c, locs.as_ref(), account, ids).await
+                                stable_ids(&mut c.session, &folder, validity, &uids).await
                             })
                         })
                         .await?;
@@ -2434,11 +2655,15 @@ impl MailSource for ImapSource {
                             .filter(|s| s.internal_date.is_some_and(|d| d >= from && d < to)),
                     );
                 }
-                seen.sort_by(|a, b| b.internal_date.cmp(&a.internal_date));
                 (seen, None)
             }
         };
-        self.record(&seen)?;
+        let mut seen = self.bind_and_record(seen).await?;
+        match snapshot {
+            // Newest first: UIDs ascend with arrival in a folder.
+            Some(_) => seen.sort_unstable_by(|a, b| b.loc.uid.cmp(&a.loc.uid)),
+            None => seen.sort_by(|a, b| b.internal_date.cmp(&a.internal_date)),
+        }
         if let Some((folder, snapshot)) = snapshot
             && let Ok(mut snaps) = self.snapshots.lock()
         {
@@ -2519,28 +2744,32 @@ impl MailSource for ImapSource {
         };
         let key = role_key(folder);
         let start_for_walk = start.clone();
-        let (locs, account) = (self.locations.clone(), self.account_id);
         let walk = self
             .with_conn(|c| {
                 Box::pin(async move {
                     let start = start_for_walk;
+                    c.maybe_refresh_roles().await?;
                     let name = c.roles.folder(folder).map(str::to_string);
                     let (name, pos) = match (name, start.folders.get(key)) {
                         (None, None) => return Ok(Walk::NoFolder),
                         (Some(name), Some(pos)) if name == pos.mailbox => (name, pos.clone()),
                         // The role gained, lost or changed its folder: the
                         // position means nothing in the new one.
-                        _ => return Ok(Walk::Expired),
+                        _ if folder == Folder::Inbox => return Ok(Walk::Expired),
+                        _ => return reset_walk(c, folder).await,
                     };
-                    let Some(now) = c.status(&name).await? else {
-                        // Gone (correctness H2): list the roles again, so the
-                        // catch-up this sends the engine to sees the folders
-                        // as they are now, not as they were at login.
-                        c.refresh_roles().await?;
-                        return Ok(Walk::Expired);
+                    let now = match c.role_status(folder).await? {
+                        Some((n, now)) if n == name => now,
+                        // Gone (correctness H2), or the role moved to another
+                        // folder: the roles were just listed again.
+                        _ if folder == Folder::Inbox => return Ok(Walk::Expired),
+                        _ => return reset_walk(c, folder).await,
                     };
                     if now.uidvalidity != pos.uidvalidity {
-                        return Ok(Walk::Expired);
+                        if folder == Folder::Inbox {
+                            return Ok(Walk::Expired);
+                        }
+                        return reset_walk(c, folder).await;
                     }
                     let mut last_uid = pos.last_uid.max(now.last_uid);
                     let mut seen = Vec::new();
@@ -2557,8 +2786,7 @@ impl MailSource for ImapSource {
                                 .filter(|u| *u > pos.last_uid)
                                 .collect();
                         last_uid = last_uid.max(uids.last().copied().unwrap_or(0));
-                        let ids = stable_ids(&mut c.session, &name, pos.uidvalidity, &uids).await?;
-                        seen = bind_identities(c, locs.as_ref(), account, ids).await?;
+                        seen = stable_ids(&mut c.session, &name, pos.uidvalidity, &uids).await?;
                     }
                     let mailbox_unchanged = seen.is_empty()
                         && pos.unchanged_at(&now)
@@ -2584,12 +2812,24 @@ impl MailSource for ImapSource {
                 cursor: since.clone(),
                 mailbox_unchanged: false,
             }),
+            Walk::Gone => {
+                let mut cursor = start;
+                cursor.folders.remove(key);
+                Ok(Changes {
+                    ids: Vec::new(),
+                    cursor: cursor.encode(),
+                    mailbox_unchanged: false,
+                })
+            }
             Walk::Moved {
                 pos,
                 seen,
                 mailbox_unchanged,
             } => {
-                self.record(&seen).map_err(ChangesError::Other)?;
+                let seen = self
+                    .bind_and_record(seen)
+                    .await
+                    .map_err(ChangesError::Other)?;
                 let mut ids: Vec<String> = seen.into_iter().map(|s| s.id).collect();
                 ids.sort_unstable();
                 ids.dedup();
@@ -2631,8 +2871,11 @@ impl MailSource for ImapSource {
                         c,
                         rows,
                         expected,
-                        |(bytes, _): &(Vec<u8>, _)| {
-                            (!bytes.is_empty()).then(|| content_digest_of_raw(bytes))
+                        |b: &Body| match b {
+                            Body::Bytes(bytes, _) if !bytes.is_empty() => {
+                                Some(header_digest(bytes))
+                            }
+                            _ => None,
                         },
                         |s, uid| Box::pin(fetch_body(s, uid)),
                     )
@@ -2643,16 +2886,36 @@ impl MailSource for ImapSource {
             })
             .await?;
         self.settle(id, &resolved)?;
+        let mut thread_id = None;
         let (raw, received_at) = match resolved.got {
-            Some((bytes, received)) if !bytes.is_empty() => (RawBody::Bytes(bytes), received),
-            Some((_, received)) => (RawBody::Missing, received),
+            Some(Body::Bytes(bytes, received)) if !bytes.is_empty() => {
+                // A DISTINCT id (another message that reused a Message-ID,
+                // Amendment J rule 3) is its own thread: keyed on its
+                // Message-ID like ordinary mail, it would land inside the
+                // thread of the message it collided with (matrix row 15).
+                // Ordinary mail is `None`, threaded by ingest (Amendment B).
+                if stable_id_for_header_block(header_block(&bytes)).0 != id {
+                    thread_id = Some(id.to_string());
+                }
+                (RawBody::Bytes(bytes), received)
+            }
+            Some(Body::Bytes(_, received)) => (RawBody::Missing, received),
+            // Exactly what Gmail's decoder answers for the same bound: the
+            // engine logs it (id and this text, never content) and steps
+            // over the message on every lane.
+            Some(Body::TooBig(size, received)) => (
+                RawBody::Undecodable(format!(
+                    "raw message exceeds the 64MB ingest bound ({size} bytes)"
+                )),
+                received,
+            ),
             // Seen once, gone from every watched folder now: nothing to
             // ingest, which is not an error for the batch it is in.
             None => (RawBody::Missing, None),
         };
         Ok(FetchedMessage {
             id: id.to_string(),
-            thread_id: None,
+            thread_id,
             raw,
             received_at,
             placement,
@@ -3039,26 +3302,33 @@ impl ImapSource {
     }
 }
 
-/// The in-memory [`MessageLocations`] the unit and live tests use.
+/// The in-memory [`MessageLocations`] the unit and live tests use, with
+/// the store's semantics: rows in the order their place was recorded, and
+/// the first header digest recorded stands.
+#[cfg(test)]
+type MemRows =
+    std::collections::HashMap<(AccountId, String), BTreeMap<String, (u64, MessageLocation)>>;
+
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct MemLocations(
-    std::sync::Mutex<
-        std::collections::HashMap<(AccountId, String), BTreeMap<String, MessageLocation>>,
-    >,
+    std::sync::Mutex<MemRows>,
     std::sync::Mutex<std::collections::HashMap<(AccountId, String), String>>,
+    AtomicU64,
 );
 
 #[cfg(test)]
 impl MessageLocations for MemLocations {
     fn message_locations(&self, a: AccountId, id: &str) -> Result<Vec<MessageLocation>> {
-        Ok(self
+        let mut rows: Vec<(u64, MessageLocation)> = self
             .0
             .lock()
             .unwrap()
             .get(&(a, id.to_string()))
             .map(|m| m.values().cloned().collect())
-            .unwrap_or_default())
+            .unwrap_or_default();
+        rows.sort_by_key(|(seq, _)| *seq);
+        Ok(rows.into_iter().map(|(_, l)| l).collect())
     }
     fn record_message_locations(
         &self,
@@ -3069,10 +3339,15 @@ impl MessageLocations for MemLocations {
         for (id, loc) in seen {
             let rows = map.entry((a, id.clone())).or_default();
             let mut loc = loc.clone();
+            let prev = rows.get(&loc.folder).cloned();
             if loc.message_id.is_none() {
-                loc.message_id = rows.get(&loc.folder).and_then(|r| r.message_id.clone());
+                loc.message_id = prev.as_ref().and_then(|(_, r)| r.message_id.clone());
             }
-            rows.insert(loc.folder.clone(), loc);
+            let seq = match prev {
+                Some((seq, r)) if same_place(&r, &loc) => seq,
+                _ => self.2.fetch_add(1, Ordering::Relaxed),
+            };
+            rows.insert(loc.folder.clone(), (seq, loc));
         }
         Ok(())
     }
@@ -3083,14 +3358,20 @@ impl MessageLocations for MemLocations {
         Ok(())
     }
     fn content_digest(&self, a: AccountId, id: &str) -> Result<Option<String>> {
-        Ok(self.1.lock().unwrap().get(&(a, id.to_string())).cloned())
-    }
-    fn record_content_digest(&self, a: AccountId, id: &str, digest: &str) -> Result<()> {
-        self.1
+        Ok(self
+            .1
             .lock()
             .unwrap()
-            .entry((a, id.to_string()))
-            .or_insert_with(|| digest.to_string());
+            .get(&(a, id.to_string()))
+            .filter(|d| d.starts_with(DIGEST_PREFIX))
+            .cloned())
+    }
+    fn record_content_digest(&self, a: AccountId, id: &str, digest: &str) -> Result<()> {
+        let mut map = self.1.lock().unwrap();
+        let e = map.entry((a, id.to_string())).or_default();
+        if !e.starts_with(DIGEST_PREFIX) {
+            *e = digest.to_string();
+        }
         Ok(())
     }
 }

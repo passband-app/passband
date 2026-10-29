@@ -237,16 +237,22 @@ struct SenderSignalLine: View {
 
     var body: some View {
         if let line = message.senderLine {
+            // One row per signal, each truncated on its own, so a long name
+            // claim can never push "Replies go to ..." out of sight.
             HStack(alignment: .firstTextBaseline, spacing: Space.s4) {
                 if line.warning {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: compact ? 9 : 10, weight: .semibold))
+                        .font(Typo.ui(compact ? 9 : 10, weight: .semibold))
                         .accessibilityHidden(true)
                 }
-                Text(line.text)
-                    .font(Typo.ui(compact ? 10 : 11))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                VStack(alignment: .leading, spacing: 1) {
+                    ForEach(Array(line.parts.enumerated()), id: \.offset) { _, part in
+                        Text(part)
+                            .font(Typo.ui(compact ? 10 : 11))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
             }
             .foregroundStyle(line.warning ? Palette.warn : Palette.inkFaint)
             .help(line.text)

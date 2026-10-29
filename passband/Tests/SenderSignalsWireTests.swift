@@ -20,6 +20,9 @@ struct SenderSignalsWireTests {
         aMangledValueCostsNothingButTheLine()
         onlyTheScamShapesWarn()
         theMostAlarmingPartLeads()
+        theDaemonsWarnCallWins()
+        oneBadFieldKeepsTheRest()
+        bidiAndLengthAreCleaned()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -81,6 +84,28 @@ struct SenderSignalsWireTests {
         expect(
             text == "Name claims billing@bank.example · Replies go to pay@elsewhere.example · Sent by relay@evil.example · via sendgrid.net",
             "order: \(text)")
-        expect(!text.contains("—"), "no em dash in copy")
+        expect(all.line(senderKnown: false)?.parts.count == 4, "one row per signal")
+    }
+
+    static func theDaemonsWarnCallWins() {
+        let quietContact = message(#","sender_known":false,"sender_signals_warn":false,"sender_signals":{"reply_to":"pay@elsewhere.example"}"#)
+        expect(quietContact?.senderLine?.warning == false, "the daemon said quiet")
+        let warned = message(#","sender_known":true,"sender_signals_warn":true,"sender_signals":{"reply_to":"pay@elsewhere.example"}"#)
+        expect(warned?.senderLine?.warning == true, "the daemon said warn")
+    }
+
+    static func oneBadFieldKeepsTheRest() {
+        let m = message(#","sender_signals":{"via":5,"name_spoof":"support@paypal.com","reply_to":["x"]}"#)
+        expect(m?.sender_signals?.name_spoof == "support@paypal.com", "the good field survives")
+        expect(m?.sender_signals?.via == nil, "the bad one is dropped")
+        expect(m?.senderLine?.warning == true, "and the warning still shows")
+    }
+
+    static func bidiAndLengthAreCleaned() {
+        let s = SenderSignals(reply_to: "a\u{200B}b@x.example", name_spoof: "pay@bank.com\u{202E}gro.live")
+        let parts = s.line(senderKnown: false)?.parts ?? []
+        expect(parts.allSatisfy { !$0.unicodeScalars.contains { $0.value == 0x202E || $0.value == 0x200B } }, "format characters stripped: \(parts)")
+        let long = SenderSignals(via: String(repeating: "a", count: 600))
+        expect((long.line(senderKnown: false)?.parts.first?.count ?? 0) < 300, "capped")
     }
 }

@@ -406,14 +406,24 @@ struct ClientMessage: Codable, Sendable, Identifiable, Hashable, SenderStringCon
     /// notification extension decodes this type and must never fail a push
     /// over a line it does not draw.
     @LenientOptional var sender_signals: SenderSignals? = nil
+    /// The daemon's call on whether `sender_signals` is a WARNING (a name
+    /// claim, or replies routed elsewhere by someone who is not a trusted
+    /// contact). ABSENT on a daemon that predates it, which falls back to the
+    /// local rule in `senderLine`.
+    var sender_signals_warn: Bool?
 
     var attachmentList: [Attachment] { attachments ?? [] }
 
-    /// The line the reader draws under the From line, or nil for none. A
-    /// stranger is anyone the daemon has not vouched for, including an older
-    /// daemon that does not say: the reply-to warning errs toward showing.
+    /// The lines the reader draws under the From line, or nil for none. The
+    /// daemon decides warning versus quiet (`sender_signals_warn`); an older
+    /// daemon that does not say falls back to "anyone it has not vouched for
+    /// is a stranger", which errs toward warning.
     var senderLine: SenderSignals.Line? {
-        sender_signals?.line(senderKnown: sender_known ?? false)
+        guard let line = sender_signals?.line(senderKnown: sender_known ?? false) else {
+            return nil
+        }
+        guard let warn = sender_signals_warn else { return line }
+        return SenderSignals.Line(parts: line.parts, warning: warn)
     }
 
     /// The translation the reader may show INSTEAD of the original: one that
@@ -482,10 +492,60 @@ struct SenderSignals: Codable, Sendable, Hashable {
     /// An address written inside the display name that is not the real one.
     var name_spoof: String?
 
-    /// One line of text and whether it is drawn as a warning.
+    init(
+        sender: String? = nil, via: String? = nil, reply_to: String? = nil,
+        envelope_domain: String? = nil, name_spoof: String? = nil
+    ) {
+        self.sender = sender
+        self.via = via
+        self.reply_to = reply_to
+        self.envelope_domain = envelope_domain
+        self.name_spoof = name_spoof
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sender, via, reply_to, envelope_domain, name_spoof
+    }
+
+    /// FIELD BY FIELD, like `ClientTranslation`: one mistyped value (a number,
+    /// a future array) costs that value, never the name-claim warning beside
+    /// it.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func field(_ k: CodingKeys) -> String? { (try? c.decodeIfPresent(String.self, forKey: k)) ?? nil }
+        sender = field(.sender)
+        via = field(.via)
+        reply_to = field(.reply_to)
+        envelope_domain = field(.envelope_domain)
+        name_spoof = field(.name_spoof)
+    }
+
+    /// One row per signal, and whether they are drawn as a warning. `text`
+    /// joins them for the tooltip and VoiceOver.
     struct Line: Equatable, Sendable {
-        let text: String
+        let parts: [String]
         let warning: Bool
+        var text: String { parts.joined(separator: " · ") }
+    }
+
+    /// A value safe to draw: bidi overrides and zero-width characters
+    /// removed (an attacker's display name must not reorder the rest of the
+    /// line), control characters dropped, and capped at an address's length.
+    static func clean(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let scalars = raw.unicodeScalars.filter { s in
+            switch s.value {
+            case 0x00AD, 0x200B...0x200F, 0x202A...0x202E, 0x2060...0x2064,
+                 0x2066...0x2069, 0xFEFF:
+                return false
+            default:
+                return !CharacterSet.controlCharacters.contains(s)
+            }
+        }
+        let cleaned = String(String.UnicodeScalarView(scalars))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return nil }
+        return cleaned.count > 254 ? String(cleaned.prefix(254)) + "…" : cleaned
     }
 
     /// What the reader says, most alarming first, or nil when there is
@@ -496,18 +556,18 @@ struct SenderSignals: Codable, Sendable, Hashable {
     func line(senderKnown: Bool) -> Line? {
         var parts: [String] = []
         var warning = false
-        if let spoof = name_spoof, !spoof.isEmpty {
+        if let spoof = Self.clean(name_spoof) {
             parts.append("Name claims \(spoof)")
             warning = true
         }
-        if let replyTo = reply_to, !replyTo.isEmpty {
+        if let replyTo = Self.clean(reply_to) {
             parts.append("Replies go to \(replyTo)")
             if !senderKnown { warning = true }
         }
-        if let sender, !sender.isEmpty { parts.append("Sent by \(sender)") }
-        if let via, !via.isEmpty { parts.append("via \(via)") }
+        if let sender = Self.clean(sender) { parts.append("Sent by \(sender)") }
+        if let via = Self.clean(via) { parts.append("via \(via)") }
         guard !parts.isEmpty else { return nil }
-        return Line(text: parts.joined(separator: " · "), warning: warning)
+        return Line(parts: parts, warning: warning)
     }
 }
 

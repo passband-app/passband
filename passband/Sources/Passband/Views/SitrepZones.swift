@@ -550,8 +550,9 @@ struct BankingZone: View {
         // THE SEEN-SIGNAL. The stamp belongs to this zone, not to the app: the
         // Mac mounts it on the sitrep page, the phone on the Quick Look tab, and
         // a session spent entirely in Mail must not clear a card nobody looked
-        // at. Appearance and disappearance are both reported — the window's
-        // clearing rides on them.
+        // at. Showing and hiding are both reported (the window's clearing
+        // rides on them), as the page shows and hides rather than as it
+        // mounts: the board is kept mounted behind other pages.
         .onPageShown { SitrepWindow.shared.surfaceAppeared() }
         .onPageHidden { SitrepWindow.shared.surfaceDisappeared() }
     }

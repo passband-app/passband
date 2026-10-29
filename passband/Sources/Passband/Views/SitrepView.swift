@@ -777,6 +777,9 @@ struct GreetingLine: View {
                 editing ? [KeyBinding("Escape", "cancel", allowInInput: true) { close() }] : []
             )
         #endif
+        // The board is kept mounted behind other pages: an editor left open
+        // there would keep the keyboard on a field nobody can see.
+        .onPageHidden { if editing { close() } }
     }
 
     private func label(_ text: String) -> some View {

@@ -130,7 +130,7 @@ final class KeyRegistry {
     private var sets: [RegisteredSet] = []
     /// Context stack: the topmost context is the only one that receives keys
     /// (plus "global", which always sees them last). Views push/pop as they
-    /// mount. Entries carry a token so an out-of-order pop removes the right one.
+    /// come on and go off screen (PagePresence). Entries carry a token so an out-of-order pop removes the right one.
     private var contextStack: [(token: UUID, context: KeyContext)] = [
         (UUID(), .list)
     ]
@@ -451,7 +451,7 @@ extension View {
         modifier(KeyBindingsModifier(context: context, bindings: bindings))
     }
 
-    /// Push a KeyContext while mounted. Pair with `.keyBindings(context, …)`.
+    /// Push a KeyContext while on screen. Pair with `.keyBindings(context, …)`.
     func keyContext(_ context: KeyContext) -> some View {
         modifier(KeyContextModifier(context: context))
     }

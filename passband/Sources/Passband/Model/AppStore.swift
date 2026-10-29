@@ -2088,7 +2088,6 @@ final class AppStore {
                         // can reach the daemon.
                         if (error as? APIError)?.kind == .unauthorized {
                             discardBoardFile(accountId)
-                            FrameHeightStore.shared.forget(account: accountId)
                             Task { await CalendarDisk.shared.forget(accountId) }
                         }
                         if behindBoard { refuseBoardFromDisk() }

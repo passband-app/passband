@@ -42,27 +42,45 @@ struct FrameHeightFileTests {
     }
 
     static func sample() -> FrameHeightFile {
-        var file = FrameHeightFile(build: "2200", width: 640, metrics: "14.0/14.0/9.0/12.0")
-        file.record("101", height: 812, signature: 7, at: 1)
-        file.record("102.chat", height: 120, signature: 9, at: 2)
+        var file = FrameHeightFile(build: "2200", metrics: "14.0/14.0/9.0/12.0")
+        file.record(FrameHeightFile.slot("101", width: 640, viewport: 800), height: 812, signature: 7, at: 1)
+        file.record(
+            FrameHeightFile.slot("102.chat", width: 640, viewport: 800), height: 120,
+            signature: 0xaf63_bf4c_8601_bb45, at: 2)
+        file.record(FrameHeightFile.slot("103", width: 640, viewport: 800), height: 50, signature: .max, at: 3)
         return file
     }
 
     static func aHeightAnswersOnlyItsOwnQuestion() {
         let file = sample()
-        check(file.holds(build: "2200", width: 640, metrics: "14.0/14.0/9.0/12.0"), "same conditions: held")
-        check(file.holds(build: "2200", width: 640.4, metrics: "14.0/14.0/9.0/12.0"),
-            "a width within half a point is the same column")
-        check(!file.holds(build: "2201", width: 640, metrics: "14.0/14.0/9.0/12.0"), "another build: not held")
-        check(!file.holds(build: "2200", width: 720, metrics: "14.0/14.0/9.0/12.0"), "another width: not held")
-        check(!file.holds(build: "2200", width: 640, metrics: "15.0/16.0/10.0/13.0"), "another density: not held")
+        check(file.holds(build: "2200", metrics: "14.0/14.0/9.0/12.0"), "same build and density: held")
+        check(!file.holds(build: "2201", metrics: "14.0/14.0/9.0/12.0"), "another build: not held")
+        check(!file.holds(build: "2200", metrics: "15.0/16.0/10.0/13.0"), "another density: not held")
+        var other = file
+        other.version = FrameHeightFile.currentVersion + 1
+        check(!other.holds(build: "2200", metrics: "14.0/14.0/9.0/12.0"), "another version: not held")
 
-        check(file.height("101", signature: 7) == 812, "the height for this document")
-        check(file.height("101", signature: 8) == nil, "a changed document has no height")
-        check(file.height("103", signature: 7) == nil, "an unmeasured key has none")
+        let here = FrameHeightFile.slot("101", width: 640, viewport: 800)
+        check(file.height(here, signature: 7) == 812, "the height for this document at this size")
+        check(file.height(here, signature: 8) == nil, "a changed document has no height")
+        check(file.height(FrameHeightFile.slot("101", width: 520, viewport: 800), signature: 7) == nil,
+            "a narrower column has no height")
+        check(file.height(FrameHeightFile.slot("101", width: 640, viewport: 1100), signature: 7) == nil,
+            "a taller window has no height (a vh body is a different size)")
+        check(FrameHeightFile.slot("101", width: 640.3, viewport: 799.8) == here,
+            "a fraction of a point is the same column")
+        check(file.height(FrameHeightFile.slot("999", width: 640, viewport: 800), signature: 7) == nil,
+            "an unmeasured key has none")
+
+        var both = file
+        both.record(FrameHeightFile.slot("101", width: 520, viewport: 800), height: 990, signature: 7, at: 4)
+        check(both.height(here, signature: 7) == 812 && both.height(
+            FrameHeightFile.slot("101", width: 520, viewport: 800), signature: 7) == 990,
+            "two column widths keep their own heights side by side")
         var zero = file
-        zero.record("104", height: 0, signature: 1, at: 3)
-        check(zero.height("104", signature: 1) == nil, "a zero height is never filed")
+        zero.record(FrameHeightFile.slot("104", width: 640, viewport: 800), height: 0, signature: 1, at: 3)
+        check(zero.height(FrameHeightFile.slot("104", width: 640, viewport: 800), signature: 1) == nil,
+            "a zero height is never filed")
     }
 
     static func theSignatureIsTheDocument() {
@@ -72,6 +90,10 @@ struct FrameHeightFileTests {
         check(a != FrameHeightFile.signature(html: html, allowRemote: false),
             "remote images off is another document")
         check(a != FrameHeightFile.signature(html: html + " ", allowRemote: true), "one byte more is another")
+        check(a != FrameHeightFile.signature(html: html, allowRemote: true, extra: "true;7|cid1|true|image/png|99"),
+            "other attachments or trackers are another document")
+        check(FrameHeightFile.signature(html: html, allowRemote: true, extra: "x")
+            == FrameHeightFile.signature(html: html, allowRemote: true, extra: "x"), "and the same ones the same")
         // Pinned, so a change to the hash (which would orphan every file on
         // disk silently) is a decision, not an accident.
         check(FrameHeightFile.signature(html: "", allowRemote: false) == 0xaf63_bf4c_8601_bb45,
@@ -79,13 +101,19 @@ struct FrameHeightFileTests {
     }
 
     static func theFileStaysUnderItsCap() {
-        var file = FrameHeightFile(build: "1", width: 600, metrics: "m")
-        for i in 0..<(FrameHeightFile.capacity + 25) {
+        var file = FrameHeightFile(build: "1", metrics: "m")
+        for i in 0..<FrameHeightFile.capacity {
+            file.record("\(i)", height: 100, signature: 1, at: Double(i))
+        }
+        // The oldest measured, but read just now: it outlasts the ones nobody opens.
+        file.touch("0", at: 1_000_000)
+        for i in FrameHeightFile.capacity..<(FrameHeightFile.capacity + 25) {
             file.record("\(i)", height: 100, signature: 1, at: Double(i))
         }
         check(file.heights.count == FrameHeightFile.capacity, "the file holds no more than its cap")
-        check(file.heights["0"] == nil && file.heights["24"] == nil, "the oldest measured go first")
-        check(file.heights["25"] != nil && file.heights["\(FrameHeightFile.capacity + 24)"] != nil,
+        check(file.heights["0"] != nil, "a height just used stays")
+        check(file.heights["1"] == nil && file.heights["25"] == nil, "the least recently used go first")
+        check(file.heights["26"] != nil && file.heights["\(FrameHeightFile.capacity + 24)"] != nil,
             "and the newest stay")
     }
 

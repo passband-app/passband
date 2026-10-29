@@ -53,6 +53,9 @@ struct EmailsView: View {
     @Environment(\.pageIsActive) private var pageActive
     /// When the page last left the screen, for `trimOnReturn`.
     @State private var leftAt: Date?
+    /// Bumped to rebuild the list's scroll at the top (a return after
+    /// `trimOnReturn`).
+    @State private var scrollEpoch = 0
     private var index: Int {
         get { cursor.index }
         nonmutating set { cursor.index = newValue }
@@ -236,8 +239,9 @@ struct EmailsView: View {
         // Only on screen: a page kept behind another refreshed nothing before
         // it was kept, and shouldn't now. A visit remounts it, which refreshes.
         .background { if pageActive { MailRefreshKeeper(mode: mode, reminders: reminders) } }
-        // ASK FOR THE SPAM FOLDER ON ENTRY, and only on entry. Keyed on the mode
-        // alone rather than on the poll tick: the daemon does not track that
+        // ASK FOR THE SPAM FOLDER ON ENTRY, and only on entry: a switch to
+        // the spam page, or a return to Emails while on it. Not on the poll
+        // tick: the daemon does not track that
         // folder, so this is a real Gmail round trip and it costs one per visit
         // instead of one every ten seconds.
         .task(id: SpamVisit(mode: mode, onScreen: pageActive)) {
@@ -274,7 +278,14 @@ struct EmailsView: View {
         // (`trimMailToHead`). A quick return keeps the scroll: that is what
         // keeping the page mounted is for.
         .onPageShown {
-            if leftAt.map({ Date().timeIntervalSince($0) >= Self.trimOnReturn }) ?? true {
+            if let left = leftAt, Date().timeIntervalSince(left) >= Self.trimOnReturn {
+                // Back to the top with the head: a scroll left deep in rows
+                // that are no longer loaded would land on the footer and ask
+                // for them all again.
+                store.trimMailToHead(mode)
+                resetCursor()
+                scrollEpoch &+= 1
+            } else if leftAt == nil {
                 store.trimMailToHead(mode)
             }
             leftAt = nil
@@ -294,11 +305,19 @@ struct EmailsView: View {
         .onChange(of: store.mailFilter) { _, _ in resetCursor() }
         .onChange(of: Prefs.shared.mailHiddenZones) { _, _ in resetCursor() }
         // Jump to (and highlight) a hand-off target from the sitrep rails.
+        // ON SCREEN ONLY: the page is kept mounted behind the board, where the
+        // selection moves with every `e` and every open, and a highlight
+        // following it there would be waiting, live under the verb keys, on a
+        // row nobody picked. A hand-off (`viewInEmails`) routes here and sets
+        // the selection in one go, so it arrives with the page on screen.
         .onChange(of: store.selectedId) { _, id in
-            guard let id, let i = rows.firstIndex(where: { $0.id == id }) else { return }
+            guard pageActive, let id, let i = rows.firstIndex(where: { $0.id == id }) else { return }
             kbActive = true
             index = i
         }
+        // And the highlight goes out with the page, as it did when leaving
+        // unmounted it: a return finds the row the cursor was on, unarmed.
+        .onPageHidden { kbActive = false }
     }
 
     // MARK: - the lists
@@ -506,6 +525,7 @@ struct EmailsView: View {
                     .padding(.horizontal, DeskRow.listInset)
                     .padding(.vertical, Space.s10)
                 }
+                .id(scrollEpoch)
                 // Follow the KEYBOARD selection only. Both pages key their rows
                 // on the message id, so one scroll target serves both. A leaf,
                 // like the prefetch, so the cursor stays out of this body.

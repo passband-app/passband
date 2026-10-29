@@ -145,6 +145,11 @@ final class FrameMeasurer {
             + newestFirst.filter { $0.readyTranslation != nil }.map {
                 Job(shown: $0.presented(original: true), key: style.frameKey(for: $0, original: true))
             }
+        // THE COLUMN AND WINDOW THIS PASS MEASURES AT, taken once: a height is
+        // filed under them, and the pass stops if the column moves under it
+        // (below), as it does for a density flip.
+        let column = Double(FrameHeights.shared.width)
+        let viewport = Double(self.viewportHeight)
         let jobs = versions.filter { job in
             guard let html = job.shown.html, !html.isEmpty else { return false }
             // AUTHORITATIVE, not merely present: a height a live frame put
@@ -154,7 +159,8 @@ final class FrameMeasurer {
             // Measured on an earlier launch, for exactly this document at
             // this width and density: filed without a WebKit load.
             if let kept = FrameHeightStore.shared.height(
-                job.key, signature: FrameHeightFile.signature(html: html, allowRemote: allowRemote))
+                job.key, width: column, viewport: viewport,
+                signature: Self.signature(job.shown, html: html, allowRemote: allowRemote))
             {
                 FrameHeights.shared.set(job.key, kept, authoritative: true)
                 return false
@@ -187,6 +193,14 @@ final class FrameMeasurer {
                     self.finish()
                     return
                 }
+                // And the column: the reader declared a new width while this
+                // document was being drawn at the old one (a side panel
+                // opened), so its height answers a question nobody is asking.
+                // The reader's own pass for the new width follows.
+                guard abs(Double(FrameHeights.shared.width) - column) <= 0.5 else {
+                    self.finish()
+                    return
+                }
                 if height > 0 {
                     FrameHeights.shared.set(job.key, height, authoritative: true)
                     // Kept for the next launch only when it SETTLED: a number
@@ -194,8 +208,8 @@ final class FrameMeasurer {
                     // to keep.
                     if measured.settled, let html = job.shown.html {
                         FrameHeightStore.shared.record(
-                            job.key, height: height,
-                            signature: FrameHeightFile.signature(html: html, allowRemote: allowRemote))
+                            job.key, width: column, viewport: viewport, height: height,
+                            signature: Self.signature(job.shown, html: html, allowRemote: allowRemote))
                     }
                     misses = 0
                 } else {
@@ -322,7 +336,13 @@ final class FrameMeasurer {
         let started = ContinuousClock.now
         while ContinuousClock.now - started < Self.deadline {
             let height = await pull(view)
-            if height > 0, height == previous { return (height, true) }
+            if height > 0, height == previous {
+                // SETTLED, and worth keeping only if every image drew: a host
+                // that failed (offline, a dead link, a missing cid part) gives
+                // a broken glyph and a height without the picture, fine for
+                // now and wrong to keep for the next launch.
+                return (height, await allImagesDrawn(view))
+            }
             // The script defines the function before the navigation finishes,
             // and an empty body is still 28 points of padding — so a document
             // answering zero is a document that did not run it. Three of those
@@ -337,6 +357,29 @@ final class FrameMeasurer {
         // Out of time with a number that was still moving: the last one it
         // said beats nothing, and beats a guess.
         return (max(0, previous), false)
+    }
+
+    /// Whether every image in the document loaded. A failed one is
+    /// `complete` with no natural size.
+    private func allImagesDrawn(_ view: WKWebView) async -> Bool {
+        await withCheckedContinuation { continuation in
+            view.evaluateJavaScript(
+                "Array.prototype.every.call(document.images, function(i){ return !i.complete || i.naturalWidth > 0 })"
+            ) { value, _ in
+                continuation.resume(returning: (value as? Bool) ?? false)
+            }
+        }
+    }
+
+    /// The document a height belongs to, for `FrameHeightFile`: everything the
+    /// prepared body is made from (see `prepare`) and the remote-image switch.
+    static func signature(_ message: ClientMessage, html: String, allowRemote: Bool) -> UInt64 {
+        let parts = message.attachmentList.map {
+            "\($0.id)|\(String(describing: $0.content_id))|\($0.downloadable)|\(String(describing: $0.mime))|\(String(describing: $0.size))"
+        }
+        return FrameHeightFile.signature(
+            html: html, allowRemote: allowRemote,
+            extra: "\(message.allowsTrackers);" + parts.joined(separator: ";"))
     }
 
     /// What the document says it is right now. The injected script defines
@@ -513,16 +556,18 @@ final class FrameHeightStore {
 
     private var account: UUID?
     private var file: FrameHeightFile?
+    /// Accounts whose file was deleted this session: never read back from
+    /// disk, since the delete is queued and may not have run yet.
+    private var forgotten: Set<UUID> = []
     private var save: Task<Void, Never>?
     private static let saveDelay: Duration = .seconds(3)
     private static let writer = DispatchQueue(label: "app.passband.frame-heights", qos: .utility)
 
-    /// The question every height on file must have been asked under.
-    private var conditions: (build: String, width: Double, metrics: String) {
+    /// The build and the reader metrics every height on file was taken under.
+    private var conditions: (build: String, metrics: String) {
         let m = ReaderMetrics.current
         return (
             Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "",
-            Double(FrameHeights.shared.width),
             "\(m.bodyFont)/\(m.cardPadding)/\(m.bubblePaddingV)/\(m.bubblePaddingH)"
         )
     }
@@ -534,31 +579,33 @@ final class FrameHeightStore {
         if active != account {
             flush()
             account = active
-            file = FrameHeightFile.load(account: active)
+            file = forgotten.contains(active) ? nil : FrameHeightFile.load(account: active)
         }
         return active
     }
 
-    func height(_ key: String, signature: UInt64) -> CGFloat? {
-        guard current() != nil, let file else { return nil }
+    func height(_ key: String, width: Double, viewport: Double, signature: UInt64) -> CGFloat? {
+        guard width > 0, current() != nil, let held = file else { return nil }
         let c = conditions
-        guard c.width > 0, file.holds(build: c.build, width: c.width, metrics: c.metrics) else {
-            return nil
-        }
-        return file.height(key, signature: signature).map { CGFloat($0) }
+        guard held.holds(build: c.build, metrics: c.metrics) else { return nil }
+        let slot = FrameHeightFile.slot(key, width: width, viewport: viewport)
+        guard let height = held.height(slot, signature: signature) else { return nil }
+        // Used, so it outlasts the ones nobody opens. Written with the next
+        // change rather than on its own.
+        file?.touch(slot, at: Date().timeIntervalSince1970)
+        return CGFloat(height)
     }
 
-    func record(_ key: String, height: CGFloat, signature: UInt64) {
-        guard current() != nil else { return }
+    func record(_ key: String, width: Double, viewport: Double, height: CGFloat, signature: UInt64) {
+        guard width > 0, current() != nil else { return }
         let c = conditions
-        guard c.width > 0 else { return }
-        if file?.holds(build: c.build, width: c.width, metrics: c.metrics) != true {
-            // Taken under other conditions: none of it answers this one.
-            file = FrameHeightFile(build: c.build, width: c.width, metrics: c.metrics)
+        if file?.holds(build: c.build, metrics: c.metrics) != true {
+            // Taken under another build or density: none of it answers this.
+            file = FrameHeightFile(build: c.build, metrics: c.metrics)
         }
         file?.record(
-            key, height: Double(height), signature: signature,
-            at: Date().timeIntervalSince1970)
+            FrameHeightFile.slot(key, width: width, viewport: viewport), height: Double(height),
+            signature: signature, at: Date().timeIntervalSince1970)
         guard save == nil else { return }
         save = Task { [weak self] in
             try? await Task.sleep(for: Self.saveDelay)
@@ -575,13 +622,14 @@ final class FrameHeightStore {
         Self.writer.async { try? FrameHeightFile.write(file, account: account) }
     }
 
-    /// An account removed or reconnected: its heights go with it.
+    /// An account removed or reconnected: its heights go with it. Queued
+    /// behind any write already on its way, and never read back this session.
     func forget(account id: UUID) {
+        forgotten.insert(id)
         if id == account {
             save?.cancel()
             save = nil
             file = nil
-            account = nil
         }
         Self.writer.async { FrameHeightFile.forget(account: id) }
     }

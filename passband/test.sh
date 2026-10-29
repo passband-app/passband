@@ -611,6 +611,7 @@ run_suite sender-identity \
 # PageKeys.swift rides along: the digits and ⇧C exactly as RootView binds them.
 run_suite key-dispatch \
   Sources/Passband/Keys/KeyDispatch.swift \
+  Sources/Passband/Views/PagePresence.swift \
   Sources/Passband/Keys/PageKeys.swift \
   Tests/KeyDispatchTests.swift
 

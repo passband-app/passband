@@ -1,7 +1,7 @@
 // WHETHER A PAGE IS THE ONE ON SCREEN, apart from whether it is mounted.
 //
 // The Sitrep and Emails pages stay mounted across rail navigation (RootView's
-// `routedBody`): building Emails again on every visit was ~400 ms before it
+// `RoutedPages`): building Emails again on every visit was ~400 ms before it
 // appeared, measured, and it lost the scroll and the cursor each time. A kept
 // page is drawn at zero opacity and takes no clicks, but it is still mounted,
 // so everything that used to mean "on screen" by being mounted has to ask this

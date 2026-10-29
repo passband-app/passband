@@ -68,6 +68,11 @@
 # re-applies all five objects, one label at a time. See
 # `squelch-warden/README.md`, "What the drift report cannot see".
 #
+# `SQUELCH_WARDEN_EMBED_URL` is the exception that proves the rule: it adds a
+# NetworkPolicy rule too, but it also moves the Deployment (two env vars, the
+# volumes, the default bounds), so every tenant drifts, and the reconcile that
+# converges it re-applies the NetworkPolicy first. A roll delivers both halves.
+#
 # A bad value here is a warden that refuses to start and a roll Job that fails,
 # never a tenant rendered from something half-valid: every entry is validated at
 # boot by both processes, and the table of refusals is a test.
@@ -277,10 +282,20 @@ data:
   # renders, so unlike the ingress and storage knobs above a change here does
   # reach existing tenants: the roller converges them one per tick, each as an
   # ordinary pod restart, once rule 2 has been followed.
-  SQUELCH_WARDEN_CPU_REQUEST: "100m"
+  #
+  # THREE OF THEM ARE DELIBERATELY NOT RESTATED, the one exception to "every
+  # default restated": the CPU request and the memory request and limit. Their
+  # default depends on SQUELCH_WARDEN_EMBED_URL below. Unset, it is 100m /
+  # 384Mi / 1Gi, the in-process ONNX shape above; set, it is 40m / 128Mi /
+  # 512Mi, a daemon with no session (the constants in config.rs say why). An
+  # entry here is EXPLICIT and wins in both states, so restating today's values
+  # would pin every tenant at 384Mi on the shared embedder too, and the quota in
+  # 70-tenant-limits.yaml would be sized for a fleet that never arrives.
+  # Uncomment one only to pin a number for both states, and redo the quota.
+  # SQUELCH_WARDEN_CPU_REQUEST: "100m"
   SQUELCH_WARDEN_CPU_LIMIT: "1000m"
-  SQUELCH_WARDEN_MEMORY_REQUEST: "384Mi"
-  SQUELCH_WARDEN_MEMORY_LIMIT: "1Gi"
+  # SQUELCH_WARDEN_MEMORY_REQUEST: "384Mi"
+  # SQUELCH_WARDEN_MEMORY_LIMIT: "1Gi"
   SQUELCH_WARDEN_EPHEMERAL_REQUEST: "256Mi"
   SQUELCH_WARDEN_EPHEMERAL_LIMIT: "1Gi"
   SQUELCH_WARDEN_TMP_SIZE: "512Mi"
@@ -350,6 +365,61 @@ data:
   # tenant per run, so the fleet catches up at the CronJob's schedule times the
   # number of tenants: four tenants on the */5 schedule is about twenty minutes.
   SQUELCH_WARDEN_MODEL_PVC: "squelch-models"
+  # The shared embedding service (65-embed.yaml, docs/EMBED-SERVICE.md). Set,
+  # every tenant daemon posts its texts to it instead of loading its own ONNX
+  # session, and the warden renders each tenant with: SQUELCH_EMBED_URL (this
+  # value), SQUELCH_EMBED_TOKEN (an OPTIONAL reference to the Secret
+  # `squelch-embed-token`, key `token`; embed-token.example.yaml), one more
+  # egress rule (to the squelch-embed pods, TCP 8850), and NO model volume:
+  # SQUELCH_WARDEN_MODEL_PVC above is ignored while this is set, because a
+  # daemon with no session has no weights to seed. Unset, all of that is absent
+  # and every tenant embeds in-process exactly as before.
+  #
+  # The value is `http://<Service>:8850` and nothing else. Plain http on
+  # purpose, and only because the Service is in this cluster: the warden
+  # refuses https, a public host, an IP literal, another namespace, a path,
+  # and a missing port (without `:8850` it is port 80, which nothing serves).
+  #
+  # ORDER, and each step waits for the one before:
+  #
+  #   1. Apply 70-tenant-limits.yaml (the shared pod needs its quota share),
+  #      the token Secret if you want one (embed-token.example.yaml), then
+  #      `kubectl apply -f 65-embed.yaml`, and wait for Ready:
+  #        kubectl -n tenants rollout status deploy/squelch-embed
+  #        kubectl -n tenants logs deploy/squelch-embed   # "session ready: ..."
+  #   2. Suspend the roller, so ONE tenant takes the change first:
+  #        kubectl -n warden patch cronjob squelch-warden-roll -p '{"spec":{"suspend":true}}'
+  #   3. Uncomment this line, apply this file, restart the warden (rule 2), and
+  #      move one tenant onto it by hand: `squelch-control reconcile <label>`.
+  #      A reconcile applies the tenant's NetworkPolicy BEFORE its Deployment,
+  #      so the pod never comes up on the URL without the rule to reach it.
+  #   4. From INSIDE THAT TENANT'S POD, a real POST: the command is step 3 of
+  #      65-embed.yaml, and `HTTP/1.1 200` with `{"dims":384` is the answer.
+  #      Not before step 3: until the warden renders the egress rule the POST
+  #      times out, which is the tenant's own policy working. Then the other
+  #      half, that a pod which is NOT a tenant is refused (same place).
+  #   5. Unsuspend the roller (`"suspend":false`). It walks the rest of the
+  #      fleet onto the render one tenant per tick, policy first each time.
+  #
+  # A tenant rolled onto a URL nothing answers builds no local session and
+  # embeds nothing (search degrades to keywords, ingest is unaffected) until
+  # the service answers, which is why step 1 comes first.
+  #
+  # THE LIGHTER SHAPE IT IMPLIES. With this set, a tenant's DEFAULT requests
+  # drop to 40m CPU / 128Mi memory with a 512Mi limit (the three resource
+  # entries above are left out of this file so that the default applies), the
+  # shared pod takes 320Mi and one pod slot from the tenants quota, and
+  # 70-tenant-limits.yaml carries the arithmetic for both states. Apply that
+  # file before this one.
+  #
+  # ROLLBACK is this line commented out again and a warden restart. The roller
+  # walks every tenant back to local embedding at 384Mi, model volume and all.
+  # Nothing re-embeds in either direction: the service runs the same model, so
+  # its vectors and a local session's are the same space. Check the quota
+  # first: at 384Mi the box holds thirty, so a fleet that grew past that on the
+  # service cannot all roll back, and the roller halts on the first tenant the
+  # quota refuses.
+  # SQUELCH_WARDEN_EMBED_URL: "http://squelch-embed:8850"
   # How long a tenant daemon holds its idle ONNX embedding session before
   # dropping it and handing the heap back. Unset, the daemon's own default (600)
   # applies; this is the OFF SWITCH (0 = never unload) if the reaper misbehaves.

@@ -310,7 +310,7 @@ enum AgentTools {
                 "message_id": message.id,
                 "from": message.from_name ?? message.from_addr,
                 "date": message.received_at,
-                "text": message.content,
+                "text": Wire.cappedThreadText(message.content),
             ])
         }
         return ok(

@@ -773,6 +773,14 @@ run_suite conversation-snapshot \
   Sources/Passband/Assistant/ConversationSnapshot.swift \
   Tests/ConversationSnapshotTests.swift
 
+# The assistant's request body: two prompt-cache breakpoints and no more, the
+# same request as the same bytes (tool schemas are dictionaries), and the
+# history pruned for a request without breaking a tool_use/tool_result pair.
+run_suite assistant-request \
+  Sources/Passband/Assistant/JSONValue.swift \
+  Sources/Passband/Assistant/Transcript.swift \
+  Tests/AssistantRequestTests.swift
+
 # ⌘F in the reader: matches in a string, the cursor walking them across a
 # thread's messages (wrap, skip, the backwards step into an uncounted message),
 # and the session reconciling its text estimate with what a frame reports.

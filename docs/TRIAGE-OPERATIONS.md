@@ -257,8 +257,12 @@ to 15 seconds of jitter so a fleet rejected together does not probe together.
 A rate limit, a server error or a transport failure (a connection refused, the
 client's own timeout) stands it off for the `retry-after` the provider sent
 when it sent one (a second to `outage_retry_secs`, with up to 15 seconds of
-jitter riding under that ceiling: the ceiling is the longest wait), otherwise
-15 to 30 seconds; every probe that fails in turn doubles that wait, up to
+jitter riding under that ceiling: the ceiling is the longest wait). Without
+one, the first server error or transport failure after a success opens no
+cooldown at all (one probe retries at once), and a 429 waits 15 to 30
+seconds (a rate limit the host's tenants share must not be retried by all of
+them in the same instant); every probe that fails in turn doubles the wait,
+from 15 seconds, up to
 `outage_retry_secs`, and a `retry-after` shorter than the rung reached no
 longer shortens it, so a throttle that is not lifting is probed as the outage
 it is. After the cooldown, one investigation probes recovery; a successful
@@ -275,9 +279,13 @@ the same run, or another investigation: the message is what is slow, and every
 timed-out attempt is a billed request that re-sends the same context), while a
 provider answering nothing, or a process that has not yet seen it answer,
 leaves the job to its ordinary attempts, pending rather than failed. An access-call deadline
-consumes retry attempts in the usual way. Their uncertain spend is not refunded. A run dropped at
-shutdown hands its job back at once, due after the retry ladder's wait for the
-attempt it took and keeping that attempt (a job dropped on its last allowed
+consumes retry attempts in the usual way. Their uncertain spend is not refunded. A job whose model call failed for any other reason (a deadline, an empty
+answer) retries at once, then after 15 s, 30 s, 60 s and so on, never more than
+five minutes apart; a failure of the store or the worker itself (a busy
+database, a context that changed under the run) waits 30 s, 60 s and so on up
+to an hour, so a busy spell cannot spend a job's attempts in seconds. A run
+dropped at shutdown hands its job back at once, due after that local ladder's
+wait for the attempt it took and keeping that attempt (a job dropped on its last allowed
 attempt is failed instead); a process
 that dies outright, or a run
 whose last write the store refused, holds the lease (the run's deadline and

@@ -28,6 +28,7 @@ pub struct Candidate {
     subject: String,
     body: String,
     is_known_contact: bool,
+    is_bulk: bool,
     sender_preferences: Option<String>,
 }
 
@@ -50,6 +51,7 @@ impl Candidate {
             subject: message.subject.clone(),
             body: crate::text::truncate_chars(&message.body, cfg.max_body_chars.saturating_add(1)),
             is_known_contact: context.sender_is_contact,
+            is_bulk: message.is_bulk,
             sender_preferences: if context.matched_rules.is_empty() {
                 None
             } else {
@@ -100,6 +102,7 @@ pub fn candidate(
             cfg.max_body_chars.saturating_add(1),
         ),
         is_known_contact: known_contact(&triaged.message.from_addr),
+        is_bulk: triaged.message.list_unsubscribe.is_some(),
         sender_preferences,
     })
 }
@@ -243,6 +246,7 @@ impl<S: Store + 'static> NotifyLane<S> {
             subject,
             body,
             is_known_contact,
+            is_bulk,
             sender_preferences,
         } = c;
 
@@ -322,6 +326,7 @@ impl<S: Store + 'static> NotifyLane<S> {
             subject: &subject,
             body: &body,
             is_known_contact,
+            is_bulk,
             sender_preferences: sender_preferences.as_deref(),
         };
         let outcome = tokio::time::timeout(

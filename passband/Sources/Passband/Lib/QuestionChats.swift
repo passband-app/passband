@@ -297,25 +297,8 @@ final class QuestionChats {
     ) {
         guard !forgotten.withLock({ $0.contains(id) }) else { return }
         do {
-            let data = try SavedChat.fileBytes(entries)
-            var dir = directory()
-            #if os(macOS)
-                try FileManager.default.createDirectory(
-                    at: dir, withIntermediateDirectories: true,
-                    attributes: [.posixPermissions: 0o700])
-                try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
-            #else
-                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            #endif
-            var values = URLResourceValues()
-            values.isExcludedFromBackup = true
-            try? dir.setResourceValues(values)
-            #if os(iOS)
-                try data.write(to: url, options: [.atomic, .completeFileProtection])
-            #else
-                try data.write(to: url, options: .atomic)
-                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-            #endif
+            // The protections are `PrivateFile`'s, shared with the last board.
+            try PrivateFile.write(SavedChat.fileBytes(entries), to: url, in: directory())
         } catch {
             log.error("question chats not written: \(error.localizedDescription, privacy: .public)")
         }

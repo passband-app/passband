@@ -340,7 +340,7 @@ access_body_chars = 8000  # the access check's cap; links shortened, quotes kept
 # explicit byte/token and attachment limits selected with the provider adapter
 
 [notify]
-min_importance = 50
+min_importance = 40
 fast_timeout_secs = 8
 fast_concurrency = 4
 freshness_window_secs = 900

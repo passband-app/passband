@@ -471,7 +471,7 @@ final class Notifier {
     func drainPendingTap() {
         let store = AppStore.shared
         guard !deliveringTap, !store.switching, !store.accountActionsBlocked,
-            let tap = tapQueue.take(connected: store.connStatus == .connected)
+            let tap = tapQueue.take(connected: store.connStatus == .connected && store.connectionVerified)
         else { return }
         guard let account = tap.accountId ?? AccountManager.shared.activeId,
             AccountManager.shared.accounts.contains(where: { $0.id == account })

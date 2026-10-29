@@ -1608,7 +1608,7 @@ fn open_account_store(
     let account_id = store.ensure_account(&email)?;
     // Before anything syncs or writes: the account is the provider the config
     // says, or this refuses (a mailbox never changes provider).
-    store.bind_account_provider(account_id, config.provider)?;
+    store.bind_account_provider(account_id, config.mail_provider())?;
     Ok((store, account_id))
 }
 
@@ -1911,7 +1911,7 @@ fn run_daemon(config: Config) -> Result<(), squelch_core::CoreError> {
     let account_id = store.ensure_account(&email)?;
     // Before anything syncs or writes: the account is the provider the config
     // says, or this refuses (a mailbox never changes provider).
-    store.bind_account_provider(account_id, config.provider)?;
+    store.bind_account_provider(account_id, config.mail_provider())?;
 
     // Attach the embedder to both the store (query-side) and the engine
     // (write-side); `None` keeps everything working without vector recall.
@@ -2428,7 +2428,7 @@ fn cmd_serve(
     let account_id = store.ensure_account(&email)?;
     // Before anything syncs or writes: the account is the provider the config
     // says, or this refuses (a mailbox never changes provider).
-    store.bind_account_provider(account_id, config.provider)?;
+    store.bind_account_provider(account_id, config.mail_provider())?;
     let store = Arc::new(store);
 
     let backend = config.credential_backend;

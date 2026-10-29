@@ -1401,7 +1401,7 @@ impl ApiState {
         // any credential is attached, or an Outlook token would be handed to a
         // Gmail writer on a fresh database.
         let account_id = store.ensure_account(account_email)?;
-        store.bind_account_provider(account_id, cfg.provider)?;
+        store.bind_account_provider(account_id, cfg.mail_provider())?;
         let state = Self::from_env(store, account_email)?
             .with_stage2_prices(cfg.stage2.price_in_per_mtok, cfg.stage2.price_out_per_mtok)
             .with_agent_triage(cfg.triage.clone())

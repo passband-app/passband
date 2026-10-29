@@ -233,11 +233,15 @@ pub(crate) fn refresh_stored_token_detailed_at(
     use oauth2::{AuthUrl, ClientId, ClientSecret, RefreshToken, TokenResponse, TokenUrl};
 
     let oauth = BasicClient::new(ClientId::new(client.client_id.clone()));
-    // A public client (Microsoft) presents no secret; its endpoint refuses one.
+    // Microsoft: a public app presents no secret (its endpoint refuses one);
+    // a confidential one (the hosted app) presents its secret in the body.
     let oauth = match client.issuer {
         crate::config::OAuthIssuer::Google => {
             oauth.set_client_secret(ClientSecret::new(client.client_secret.clone()))
         }
+        crate::config::OAuthIssuer::Microsoft if !client.client_secret.is_empty() => oauth
+            .set_client_secret(ClientSecret::new(client.client_secret.clone()))
+            .set_auth_type(oauth2::AuthType::RequestBody),
         crate::config::OAuthIssuer::Microsoft => oauth,
     };
     let oauth = oauth

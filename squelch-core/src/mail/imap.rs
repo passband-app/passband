@@ -155,6 +155,26 @@ pub struct ImapAccountConfig {
     /// trust anchor the owner named, it does not accept an unverified chain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_pem: Option<String>,
+    /// Where the account SENDS (phase 3, contract §1), set by `squelchd auth
+    /// --imap`. `None` in a slot written before sending existed: such an
+    /// account reads fine and every write is refused until setup is run
+    /// again. It is kept here, sealed with the password, for the same reason
+    /// the IMAP server is: whatever decides where the password goes must be as
+    /// hard to change as the password is to read. `ca_pem` covers it too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smtp: Option<SmtpServer>,
+}
+
+/// An account's SMTP submission server. Everything here is safe to log. The
+/// username is the IMAP one; the password is the IMAP one unless the slot
+/// holds a separate [`ImapCredential::smtp_password`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmtpServer {
+    pub host: String,
+    pub port: u16,
+    /// The same three modes and the same rule as IMAP (contract §9):
+    /// `Implicit` for 465, `StartTls` for 587, `Plain` for loopback only.
+    pub tls: ImapTls,
 }
 
 impl ImapAccountConfig {
@@ -187,6 +207,9 @@ pub fn parse_ca_pem(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>> {
 pub struct ImapCredential {
     pub config: ImapAccountConfig,
     pub password: ImapPassword,
+    /// A separate SMTP password, when the user gave one at setup. `None`
+    /// means SMTP logs in with [`Self::password`].
+    pub smtp_password: Option<ImapPassword>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -195,6 +218,8 @@ struct SlotV1 {
     #[serde(flatten)]
     config: ImapAccountConfig,
     password: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    smtp_password: Option<String>,
 }
 
 /// The phase-2-step-3 `app_settings` shape: a CA by PATH.
@@ -221,6 +246,7 @@ impl ImapCredential {
             v: 1,
             config: self.config.clone(),
             password: self.password.0.clone(),
+            smtp_password: self.smtp_password.as_ref().map(|p| p.0.clone()),
         })
         .map_err(|_| CoreError::Other(anyhow::anyhow!("imap credential: could not encode")))
     }
@@ -231,6 +257,7 @@ impl ImapCredential {
             Ok(slot) if slot.v == 1 => StoredImapSlot::Credential(ImapCredential {
                 config: slot.config,
                 password: ImapPassword(slot.password),
+                smtp_password: slot.smtp_password.map(ImapPassword),
             }),
             _ => StoredImapSlot::LegacyPassword(ImapPassword(text.to_string())),
         }
@@ -258,9 +285,17 @@ impl ImapCredential {
             config: ImapAccountConfig {
                 server: legacy.server,
                 ca_pem,
+                smtp: None,
             },
             password,
+            smtp_password: None,
         })
+    }
+
+    /// The password SMTP logs in with: the separate one if setup stored one,
+    /// else the IMAP password (contract §1).
+    pub fn smtp_login_password(&self) -> &ImapPassword {
+        self.smtp_password.as_ref().unwrap_or(&self.password)
     }
 }
 
@@ -271,6 +306,12 @@ pub struct ImapPassword(String);
 impl ImapPassword {
     pub fn new(secret: impl Into<String>) -> Self {
         Self(secret.into())
+    }
+
+    /// The secret itself, for the one place that has to hand it to a server:
+    /// the SMTP login (squelch-api's `write::smtp`). Never format it.
+    pub fn expose_secret(&self) -> &str {
+        &self.0
     }
 }
 
@@ -295,7 +336,7 @@ enum Stream {
 /// session. Progress is any byte read, or a write accepted, so a large FETCH
 /// over a slow link never trips it: only silence does. `None` for the IDLE
 /// connection, which is silent by design and bounded by its own deadline.
-struct Transport {
+pub struct Transport {
     stream: Stream,
     stall: Option<Duration>,
     /// When the stream last moved (or the timer was first needed).
@@ -538,7 +579,10 @@ fn set_keepalive(tcp: &TcpStream) {
     let _ = socket2::SockRef::from(tcp).set_tcp_keepalive(&ka);
 }
 
-type ImapSession = Session<Transport>;
+/// An authenticated IMAP session over this module's transport (TLS policy,
+/// stall timer and all). Public for the write door, which opens its own
+/// ([`ImapSource::open_writer_session`]).
+pub type ImapSession = Session<Transport>;
 
 /// Is `host` this machine, by its literal spelling? The connect also checks
 /// the address it actually reached ([`ImapSource::connect_tcp`]), so a
@@ -609,7 +653,7 @@ fn imap_err(context: &'static str) -> impl FnOnce(async_imap::error::Error) -> C
 
 /// The folders a source watches or skips, resolved per connection.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct FolderRoles {
+pub struct FolderRoles {
     pub sent: Option<String>,
     pub junk: Option<String>,
     pub trash: Option<String>,
@@ -1017,7 +1061,8 @@ pub(crate) fn parse_header_block(header: &[u8]) -> Vec<(String, String)> {
     out
 }
 
-fn header_values(header: &[u8], name: &str) -> Vec<String> {
+/// Every value of header `name` in a header block, unfolded, in order.
+pub fn header_values(header: &[u8], name: &str) -> Vec<String> {
     parse_header_block(header)
         .into_iter()
         .filter(|(n, _)| n.eq_ignore_ascii_case(name))
@@ -1644,6 +1689,14 @@ impl std::fmt::Debug for ImapSource {
     }
 }
 
+/// THE TLS POLICY an account's connections are made under, IMAP and SMTP
+/// alike (contract §9): the public web PKI plus the account's own `ca_pem`,
+/// rustls on ring, verification always on. Public for the SMTP half of the
+/// write door, so both protocols trust exactly the same anchors.
+pub fn tls_client_config(config: &ImapAccountConfig) -> Result<Arc<ClientConfig>> {
+    tls_config(&config.extra_roots()?)
+}
+
 fn tls_config(extra_roots: &[CertificateDer<'static>]) -> Result<Arc<ClientConfig>> {
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -2021,6 +2074,38 @@ impl ImapSource {
         }
         self.record(&seen)?;
         Ok(seen)
+    }
+
+    /// THE WRITE DOOR'S CONNECTION (phase 3): a fresh session, secured and
+    /// logged in exactly as the source's own are (the same TLS policy,
+    /// loopback rule, timeouts and stall timer), with this login's folder
+    /// roles. It is the caller's alone: never the source's command session,
+    /// which only ever `EXAMINE`s. A refused login is not counted in
+    /// [`SourceRefusals::auth`], which is the sync's health signal.
+    ///
+    /// This crate issues no write command on it: squelch-core stays
+    /// write-free, and every state change is squelch-api's `write::imap`.
+    pub async fn open_writer_session(&self) -> Result<(ImapSession, FolderRoles)> {
+        let (mut session, _caps) = self.open_session(Some(self.timeouts.stall), false).await?;
+        let roles = list_roles(&mut session).await?;
+        Ok((session, roles))
+    }
+
+    /// Record a location this account's own writer just put a message at (a
+    /// sent message's copy in Sent), with the copy's identity digest when the
+    /// id has none yet. First-seen rules still hold: an id already located
+    /// keeps its earlier location as the one fetches prefer.
+    pub fn record_own_copy(&self, id: &str, raw: &[u8], loc: MessageLocation) -> Result<()> {
+        if self
+            .locations
+            .content_digest(self.account_id, id)?
+            .is_none()
+        {
+            self.locations
+                .record_content_digest(self.account_id, id, &header_digest(raw))?;
+        }
+        self.locations
+            .record_message_locations(self.account_id, &[(id.to_string(), loc)])
     }
 
     /// The roles as of the current connection (connecting if needed).

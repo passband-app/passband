@@ -1292,8 +1292,10 @@ fn cmd_auth_imap(config: &Config, args: &AuthArgs) -> Result<(), squelch_core::C
                 username,
             },
             ca_pem,
+            smtp: None,
         },
         password: ImapPassword::new(password),
+        smtp_password: None,
     };
 
     // THE TEST LOGIN, before anything is stored.

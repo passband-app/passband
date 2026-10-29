@@ -2491,8 +2491,10 @@ fn the_credential_slot_holds_where_the_password_goes() {
         config: ImapAccountConfig {
             server: server("imap.example.org", ImapTls::Implicit),
             ca_pem: Some("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n".into()),
+            smtp: None,
         },
         password: ImapPassword::new("s3cret-app-pw"),
+        smtp_password: None,
     };
     assert!(!format!("{c:?}").contains("s3cret"));
     let text = c.to_slot().unwrap();

@@ -441,6 +441,25 @@ struct AgendaTests {
         var nothing = raw
         nothing.place = ""
         expect(shown(nothing) == nil, "a place of nothing hides the line")
+
+        // The new keys must survive the hand-written decoder, not just the
+        // memberwise init.
+        let wire = """
+            {"id":"p","calendar_id":"primary","start":"2026-10-06T19:00:00-07:00","all_day":false,
+             "location":"Dingles Public House, Tock is now part of the Resy network.",
+             "place":"Dingles Public House","from_gmail":true,"passband_owned":true}
+            """
+        let decoded = try? JSONDecoder().decode(TimelineEvent.self, from: Data(wire.utf8))
+        expect(decoded?.place == "Dingles Public House", "place decodes")
+        expect(decoded?.from_gmail == true, "from_gmail decodes")
+        expect(decoded?.passband_owned == true, "passband_owned decodes")
+        let bad = """
+            {"id":"p","calendar_id":"primary","start":"2026-10-06T19:00:00-07:00","all_day":false,
+             "place":7,"from_gmail":"yes"}
+            """
+        let lenient = try? JSONDecoder().decode(TimelineEvent.self, from: Data(bad.utf8))
+        expect(lenient != nil && lenient?.place == nil && lenient?.from_gmail == nil,
+               "a bad new key costs only itself")
     }
 
     static func earlierTodayFoldsAndTodayAlwaysExists() {

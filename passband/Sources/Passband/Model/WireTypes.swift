@@ -1843,6 +1843,9 @@ extension TimelineEvent {
         guests = (try? c.decodeIfPresent([OneGuest].self, forKey: .guests))?.compactMap(\.value)
         guests_truncated = try? c.decodeIfPresent(Bool.self, forKey: .guests_truncated)
         guest_editable = try? c.decodeIfPresent(Bool.self, forKey: .guest_editable)
+        place = try? c.decodeIfPresent(String.self, forKey: .place)
+        from_gmail = try? c.decodeIfPresent(Bool.self, forKey: .from_gmail)
+        passband_owned = try? c.decodeIfPresent(Bool.self, forKey: .passband_owned)
     }
 
     private struct OneGuest: Decodable {

@@ -330,8 +330,9 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-side svg { width: 17pt; height: 17pt; }
 .pb-side .pb-side-gap { flex: 1; }
 .pb-side hr { width: 22pt; height: 0; margin: 4pt 0; border: 0; border-top: 1px solid var(--hair-strong); }
-.pb-side .pb-me { width: 26pt; height: 26pt; margin-top: 5pt; border-radius: 50%; background: #24384F;
-  color: #A9CBF0; font-size: 13pt; font-weight: 600; }
+.pb-side .pb-me { width: 26pt; height: 26pt; margin-top: 5pt; border-radius: 50%; overflow: hidden;
+  display: block; box-shadow: inset 0 0 0 0.5pt rgba(255, 255, 255, 0.12); }
+.pb-side .pb-me svg { display: block; width: 100%; height: 100%; }
 .pb-page { padding: 0 24pt 0; display: grid; grid-template-columns: minmax(0, 1fr) 306pt;
   column-gap: 18pt; align-items: start; }
 .pb-dash-hero { grid-column: 1 / -1; padding: 4pt 4pt 34pt; }
@@ -1421,6 +1422,36 @@ function ZoneHead({ glyph, title, count, sub }: {
   );
 }
 
+// Sam's profile photo: an illustrated stand-in, not a real face, so the mock
+// keeps to invented people the way it keeps to invented brands.
+function MePortrait() {
+  return (
+    <svg viewBox="0 0 64 64" aria-hidden="true">
+      <defs>
+        <linearGradient id="me-bg" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#A9C2AC" />
+          <stop offset="1" stopColor="#7F9C86" />
+        </linearGradient>
+        <linearGradient id="me-skin" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#E8BC98" />
+          <stop offset="1" stopColor="#D6A27E" />
+        </linearGradient>
+      </defs>
+      <rect width="64" height="64" fill="url(#me-bg)" />
+      <path d="M8 66c1-13 10-19 24-19s23 6 24 19z" fill="#2E4A6B" />
+      <path d="M25 46c2 4 5 6 7 6s5-2 7-6z" fill="#E6E0D6" />
+      <rect x="27" y="36" width="10" height="12" rx="4" fill="#C99271" />
+      <ellipse cx="32" cy="28" rx="11" ry="13" fill="url(#me-skin)" />
+      <path d="M20 27c-1-10 5-16 13-16 7 0 12 5 12 12 0 3-1 5-1 5-1-5-4-8-9-9-4 2-10 3-15 8z" fill="#3B2A22" />
+      <ellipse cx="21" cy="29" rx="1.6" ry="2.6" fill="#D49C78" />
+      <ellipse cx="43" cy="29" rx="1.6" ry="2.6" fill="#D49C78" />
+      <circle cx="28" cy="29" r="1.1" fill="#3B2A22" />
+      <circle cx="36" cy="29" r="1.1" fill="#3B2A22" />
+      <path d="M29 35c2 1.4 4 1.4 6 0" stroke="#9E5F48" strokeWidth="1.2" fill="none" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 // The app's avatar palette, dark halves (Palette.avatarPalette).
 const AVATAR = {
   blue: ["#24384F", "#A9CBF0"], green: ["#22392E", "#9AD3B6"], rust: ["#442C26", "#EBA894"],
@@ -1586,7 +1617,7 @@ function AppMock() {
         <span className="up"><Glyph name="update" /></span>
         <span><Glyph name="pulse" /></span>
         <span><Glyph name="gear" /></span>
-        <span className="pb-me">S</span>
+        <span className="pb-me" aria-label="Sam"><MePortrait /></span>
       </nav>
 
       <div className="pb-page">

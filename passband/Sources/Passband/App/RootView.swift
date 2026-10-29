@@ -691,22 +691,8 @@ struct MainShell: View {
         return nil
     }
 
-    @ViewBuilder
     private var routedBody: some View {
-        switch store.activeView {
-        case .sitrep: SitrepView()
-        // `route(to:)` never lands here with the gate closed; the shell's
-        // watcher sends an open page back to the sitrep if it closes.
-        case .calendar: RoutedHost(view: .calendar) { CalendarPage() }.id(pageWorld)
-        case .emails: EmailsView().id(pageWorld)
-        case .auth: RoutedHost(view: .auth) { AuthView() }.id(pageWorld)
-        case .usage: UsageView().id(pageWorld)
-        case .settings: SettingsView().id(pageWorld)
-        case .process: RoutedHost(view: .process) { ProcessView() }.id(pageWorld)
-        case .discovery:
-            DiscoveryView()
-                .transition(reduceMotion ? .opacity : .move(edge: .leading).combined(with: .opacity))
-        }
+        RoutedPages(pageWorld: pageWorld, reduceMotion: reduceMotion)
     }
 
     /// A PAGE IS MOUNTED PER ACCOUNT WORLD. An account switch keeps the page
@@ -963,6 +949,61 @@ extension AppStore.ThreadFlight {
         switch self {
         case .departing, .departingDown, .departingTrailing: true
         case .settled, .entering: false
+        }
+    }
+}
+
+/// THE ROUTED PAGES. Sitrep and Emails are KEPT MOUNTED across rail
+/// navigation, drawn only while active (`keptPage`, PagePresence): building
+/// Emails again on every visit was ~400 ms before it appeared, and the visit
+/// lost the scroll and the cursor. Every other page is mounted only while it
+/// is the active one, as before.
+///
+/// Emails is mounted from its first visit, not at launch, and only for the
+/// account world it was visited in: a switch while another page is on screen
+/// drops it, so the switch does not pay for building a page nobody is
+/// looking at.
+private struct RoutedPages: View {
+    @Environment(AppStore.self) private var store
+    let pageWorld: Int
+    let reduceMotion: Bool
+    /// The account world the kept Emails page belongs to.
+    @State private var emailsWorld: Int?
+
+    private var onEmails: Bool { store.activeView == .emails }
+    private var keepEmails: Bool { onEmails || emailsWorld == pageWorld }
+
+    var body: some View {
+        ZStack {
+            SitrepView().keptPage(active: store.activeView == .sitrep)
+            if keepEmails {
+                EmailsView().id(pageWorld).keptPage(active: onEmails)
+            }
+            otherPage
+        }
+        .onChange(of: onEmails, initial: true) { _, now in
+            if now { emailsWorld = pageWorld }
+        }
+        .onChange(of: pageWorld) { _, world in
+            emailsWorld = onEmails ? world : nil
+        }
+    }
+
+    @ViewBuilder
+    private var otherPage: some View {
+        switch store.activeView {
+        case .sitrep, .emails: EmptyView()
+        // `route(to:)` never lands here with the gate closed; the shell's
+        // watcher sends an open page back to the sitrep if it closes.
+        case .calendar: RoutedHost(view: .calendar) { CalendarPage() }.id(pageWorld).zIndex(1)
+        case .auth: RoutedHost(view: .auth) { AuthView() }.id(pageWorld).zIndex(1)
+        case .usage: UsageView().id(pageWorld).zIndex(1)
+        case .settings: SettingsView().id(pageWorld).zIndex(1)
+        case .process: RoutedHost(view: .process) { ProcessView() }.id(pageWorld).zIndex(1)
+        case .discovery:
+            DiscoveryView()
+                .transition(reduceMotion ? .opacity : .move(edge: .leading).combined(with: .opacity))
+                .zIndex(1)
         }
     }
 }

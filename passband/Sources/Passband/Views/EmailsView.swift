@@ -47,6 +47,12 @@ struct EmailsView: View {
     /// ("3m", a deadline or reminder chip) used to ride on the redraw every
     /// poll brought, when the header read the stats.
     @State private var minute = Date()
+    /// Whether this is the page on screen. The shell keeps Emails mounted
+    /// behind other pages (PagePresence), so a visit is this turning true, not
+    /// a mount.
+    @Environment(\.pageIsActive) private var pageActive
+    /// When the page last left the screen, for `trimOnReturn`.
+    @State private var leftAt: Date?
     private var index: Int {
         get { cursor.index }
         nonmutating set { cursor.index = newValue }
@@ -227,20 +233,22 @@ struct EmailsView: View {
         // a body that reads it re-evaluates every poll —
         // every loaded row's worth of view values, for a fetch that usually
         // finds nothing new. The leaf's body is a zero-size rectangle.
-        .background { MailRefreshKeeper(mode: mode, reminders: reminders) }
+        // Only on screen: a page kept behind another refreshed nothing before
+        // it was kept, and shouldn't now. A visit remounts it, which refreshes.
+        .background { if pageActive { MailRefreshKeeper(mode: mode, reminders: reminders) } }
         // ASK FOR THE SPAM FOLDER ON ENTRY, and only on entry. Keyed on the mode
         // alone rather than on the poll tick: the daemon does not track that
         // folder, so this is a real Gmail round trip and it costs one per visit
         // instead of one every ten seconds.
-        .task(id: mode) {
-            guard mode == .spam else { return }
+        .task(id: SpamVisit(mode: mode, onScreen: pageActive)) {
+            guard mode == .spam, pageActive else { return }
             await store.refreshSpamFolder()
         }
         // Pull the thread for the row the cursor rests on, DEBOUNCED so sweeping
         // a long list fires one request for the row you stop on rather than
         // one per row you pass. Covers everything past the bounded head-warm.
         // In a LEAF so that only it, not this body, depends on the cursor.
-        .background { CursorPrefetch(cursor: cursor, rowAt: { cursorRow(at: $0) }) }
+        .background { if pageActive { CursorPrefetch(cursor: cursor, rowAt: { cursorRow(at: $0) }) } }
         // ONE HANDLER for the cursor's bound and the outbox's shifts, in that
         // order: re-anchor to the row it was on (a poll that adds or drops an
         // outbox row shifts every position under it, and the next Enter / `s`
@@ -261,9 +269,17 @@ struct EmailsView: View {
             index = ScheduledCursor.follow(
                 index, old: old.outbox, new: new.outbox, count: new.count)
         }
-        // Back to the head on re-entry, so rows deep in the scroll are not
-        // served from an afternoon ago (`trimMailToHead`).
-        .onAppear { store.trimMailToHead(mode) }
+        // Back to the head on a first visit, or a return after a while, so
+        // rows deep in the scroll are not served from an afternoon ago
+        // (`trimMailToHead`). A quick return keeps the scroll: that is what
+        // keeping the page mounted is for.
+        .onPageShown {
+            if leftAt.map({ Date().timeIntervalSince($0) >= Self.trimOnReturn }) ?? true {
+                store.trimMailToHead(mode)
+            }
+            leftAt = nil
+        }
+        .onPageHidden { leftAt = Date() }
         // A mode switch replaces every row, so the cursor cannot keep its index —
         // it would land on an unrelated email, and the verbs act on the highlight.
         // Flipping the lens replaces them just as completely.
@@ -1003,4 +1019,17 @@ private struct MailRefreshKeeper: View {
                 }
             }
     }
+}
+
+/// The spam folder is asked for on each VISIT to the spam page: a mode switch
+/// to it, or a return to Emails while on it.
+private struct SpamVisit: Equatable {
+    var mode: MailMode
+    var onScreen: Bool
+}
+
+extension EmailsView {
+    /// How long the page can be away before a return goes back to the head
+    /// of the list rather than where it was.
+    static let trimOnReturn: TimeInterval = 10 * 60
 }

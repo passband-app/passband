@@ -392,22 +392,26 @@ private struct KeyBindingsModifier: ViewModifier {
         // the view's current state, and the box is a plain non-observable
         // reference, so writing to it cannot re-enter the render.
         box.bindings = bindings
+        // Registered while ON SCREEN, not merely mounted: a page the shell
+        // keeps mounted behind another must not answer its keys (PagePresence).
         return
             content
-            .onAppear {
+            .onPageShown {
                 if token == nil { token = KeyRegistry.shared.register(context, box: box) }
             }
-            .onDisappear {
+            .onPageHidden {
                 if let token { KeyRegistry.shared.unregister(token) }
                 token = nil
             }
     }
 }
 
-/// Pushes a KeyContext while the view is mounted, so its bindings capture keys
-/// above the layer beneath. CRITICAL: attach this only to CONDITIONALLY-MOUNTED
-/// views (modals, panels, the thread viewer). An always-mounted push pins the
-/// context on the stack forever and permanently gates out the list keymap.
+/// Pushes a KeyContext while the view is on screen, so its bindings capture
+/// keys above the layer beneath. CRITICAL: attach this only to views that
+/// LEAVE the screen (modals, panels, the thread viewer, a page). An
+/// always-present push pins the context on the stack forever and permanently
+/// gates out the list keymap. A page the shell keeps mounted leaves the screen
+/// when another page is active, and pops its context then (PagePresence).
 private struct KeyContextModifier: ViewModifier {
     let context: KeyContext
     @State private var token: UUID?
@@ -415,8 +419,8 @@ private struct KeyContextModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .environment(\.keyContext, context)
-            .onAppear { if token == nil { token = KeyRegistry.shared.pushContext(context) } }
-            .onDisappear {
+            .onPageShown { if token == nil { token = KeyRegistry.shared.pushContext(context) } }
+            .onPageHidden {
                 if let token { KeyRegistry.shared.popContext(token) }
                 token = nil
             }

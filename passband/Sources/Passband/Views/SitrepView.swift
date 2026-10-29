@@ -74,6 +74,10 @@ final class SitrepCursor {
 struct SitrepView: View {
     @Environment(AppStore.self) private var store
     @Environment(Prefs.self) private var prefs
+    /// Whether the board is the page on screen. The shell keeps the sitrep
+    /// mounted behind other pages (PagePresence), so a visit is this turning
+    /// true, not a mount; what a visit does follows it.
+    @Environment(\.pageIsActive) private var pageActive
 
     /// How many of the top rows are worth a pre-rendered frame. Bounded by
     /// WebFramePool's prerendered tier; each is a live content process.
@@ -174,7 +178,10 @@ struct SitrepView: View {
                 // every poll), and asking for it always made the whole board
                 // a reader of them.
                 empty: store.sitrep.standing.isEmpty ? emptyHero : nil)
-                .task(id: store.headlineKey) { await store.refreshFyeHeadline() }
+                .task(id: HeadlineAsk(key: store.headlineKey, onScreen: pageActive)) {
+                    guard pageActive else { return }
+                    await store.refreshFyeHeadline()
+                }
                 .padding(.horizontal, Space.page)
                 .padding(.bottom, Space.scaled(18))
 
@@ -243,8 +250,11 @@ struct SitrepView: View {
         }
         // The window shell draws the scene (it runs under the rail and the
         // traffic lights), so the sitrep only says whether it should.
-        .onChange(of: quiet, initial: true) { _, q in QuietBoard.shared.isQuiet = q }
-        .onDisappear { QuietBoard.shared.isQuiet = false }
+        .onChange(of: quiet, initial: true) { _, q in
+            if pageActive { QuietBoard.shared.isQuiet = q }
+        }
+        .onPageShown { QuietBoard.shared.isQuiet = quiet }
+        .onPageHidden { QuietBoard.shared.isQuiet = false }
         #if os(macOS)
             // The end of a Space walk: the bottom of the list, celebrated.
             .overlay {
@@ -272,20 +282,23 @@ struct SitrepView: View {
         .keyBindings(.sitrep, bindings)
         // Refreshes underneath what is already on screen — rows are never
         // cleared first, so a revisit paints instantly and updates in place.
-        .task { await store.refreshZones() }
+        .task(id: pageActive) {
+            guard pageActive else { return }
+            await store.refreshZones()
+        }
         // Warm the visible top-10 immediately and trickle the collapsed
         // remainder, so a long list never stampedes the daemon. Prefetch dedupes
         // in-flight and fresh entries, so re-runs are near-free. The top rows
         // go one step further and get their newest message RENDERED into a
         // parked frame (FramePrewarmer), so the click is a pool hit.
-        .onChange(of: threadIds) { _, ids in Self.warmBoard(ids) }
-        .onAppear { Self.warmBoard(threadIds) }
+        .onChange(of: threadIds) { _, ids in if pageActive { Self.warmBoard(ids) } }
+        .onPageShown { Self.warmBoard(threadIds) }
         // AND KEPT WARM. The warm above ran once per list change, and a
         // cached thread goes stale after its TTL — so a board left open for a
         // few minutes and then clicked paid the round trip the prefetch
         // exists to remove. A zero-size leaf watches the poll heartbeat so
         // this body does not have to.
-        .background { BoardWarmKeeper(threadIds: threadIds) }
+        .background { if pageActive { BoardWarmKeeper(threadIds: threadIds) } }
         .onChange(of: visible.count) { _, count in
             cursor.index = max(0, min(cursor.index, max(0, count - 1)))
         }
@@ -302,13 +315,19 @@ struct SitrepView: View {
         // arm on the repaint and chime when the daemon answered. The flag is
         // a key so a snapshot that turns out to be current still arms, on the
         // answer that confirms it.
+        //
+        // AND SPENT ONLY ON SCREEN. The board is kept mounted behind Emails,
+        // so the last email cleared there empties it out of sight; the chime
+        // waits for the return, as it did when the return was a remount.
         .onChange(
-            of: [ranked.isEmpty && readingSenders.isEmpty, quiet, store.boardIsSnapshot], initial: true
+            of: [
+                ranked.isEmpty && readingSenders.isEmpty, quiet, store.boardIsSnapshot, pageActive,
+            ], initial: true
         ) { _, now in
             if now[2] { return }
             if !now[0] {
                 QuietBoard.shared.armed = true
-            } else if now[1], QuietBoard.shared.armed {
+            } else if now[1], now[3], QuietBoard.shared.armed {
                 QuietBoard.shared.armed = false
                 ClearChime.play()
             }
@@ -1686,4 +1705,10 @@ private struct FlowModeButton: View {
             help: "Walk through For your eyes one email at a time (Space)",
             accessibilityName: "Flow mode", action: action)
     }
+}
+
+/// The headline is asked for when the board's key moves, and on a visit.
+private struct HeadlineAsk: Equatable {
+    var key: String?
+    var onScreen: Bool
 }

@@ -260,6 +260,13 @@ run_suite board-file \
   Sources/Passband/Lib/BoardFile.swift \
   Tests/BoardFileTests.swift
 
+# Measured email heights kept across launches: answered only for the exact
+# document, width, type and build, capped, and kept like the board file.
+run_suite frame-height-file \
+  Sources/Passband/Lib/PrivateFile.swift \
+  Sources/Passband/Lib/FrameHeightFile.swift \
+  Tests/FrameHeightFileTests.swift
+
 # Credential validation must never succeed against the fixture transport.
 run_suite credential-probe \
   Sources/Passband/Model/SubjectText.swift \

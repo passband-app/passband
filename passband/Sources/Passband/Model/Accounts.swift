@@ -269,6 +269,8 @@ enum AccountIndex {
         QuestionChats.forget(account: id)
         // And its last board (BoardFile.swift), mail content on disk too.
         BoardFile.forget(account: id)
+        // And its measured email heights (FrameHeightFile.swift).
+        Task { @MainActor in FrameHeightStore.shared.forget(account: id) }
         // And its saved calendar (CalendarDisk.swift).
         Task { await CalendarDisk.shared.forget(id) }
     }

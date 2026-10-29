@@ -92,6 +92,9 @@ private struct CalendarSeenMarker: ViewModifier {
     let account: String
     let item: Int
     @Environment(\.scenePhase) private var scenePhase
+    /// The board is kept mounted behind other pages, where a row still
+    /// reports itself scrolled into view (PagePresence).
+    @Environment(\.pageIsActive) private var pageActive
     @State private var visible = false
 
     func body(content: Content) -> some View {
@@ -101,10 +104,11 @@ private struct CalendarSeenMarker: ViewModifier {
                 markSeen()
             }
             .onChange(of: scenePhase) { _, _ in markSeen() }
+            .onChange(of: pageActive) { _, _ in markSeen() }
     }
 
     private func markSeen() {
-        guard visible, scenePhase == .active else { return }
+        guard visible, pageActive, scenePhase == .active else { return }
         CalendarVisibility.shared.markSeen(account: account, item: item)
     }
 }
@@ -548,8 +552,8 @@ struct BankingZone: View {
         // a session spent entirely in Mail must not clear a card nobody looked
         // at. Appearance and disappearance are both reported — the window's
         // clearing rides on them.
-        .onAppear { SitrepWindow.shared.surfaceAppeared() }
-        .onDisappear { SitrepWindow.shared.surfaceDisappeared() }
+        .onPageShown { SitrepWindow.shared.surfaceAppeared() }
+        .onPageHidden { SitrepWindow.shared.surfaceDisappeared() }
     }
 
     private func institutionLabel(_ r: BankingRecord) -> String {

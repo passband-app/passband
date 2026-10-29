@@ -486,6 +486,10 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
   width: 1.5rem; height: 1.5rem; border-radius: 0.4rem; background: #fff;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.08); }}
 .mark svg {{ display: block; }}
+/* One block of the same width in every provider button, centered: the marks
+   line up in one column and the arrows in another, whichever name is longer. */
+.choice {{ display: inline-grid; grid-template-columns: 1.5rem 1fr auto; align-items: center;
+  column-gap: 0.6rem; width: 15rem; max-width: 100%; text-align: left; }}
 .auth :is(a.button, button):is(:hover, :focus-visible) .arrow {{ transform: translateX(3px); }}
 /* The form: slots cut into one rig, each with its label engraved in it, and
    the submit as the rig's last slot rather than a button sitting under it. */
@@ -706,7 +710,7 @@ pub fn signup_form_with(
   aria-describedby="label-hint" maxlength="{max}" autocomplete="off" autocapitalize="off" spellcheck="false"{label_focus} required><span class="domain">.{domain}</span></label>
 <span class="sr" id="label-hint">{min} to {max} lowercase letters, numbers or hyphens.</span>
 </div>
-<button type="submit" name="provider" value="google">{google_mark}Continue with Google <span class="arrow" aria-hidden="true">→</span></button>
+<button type="submit" name="provider" value="google"><span class="choice">{google_mark}<span>Continue with Google</span><span class="arrow" aria-hidden="true">→</span></span></button>
 {outlook_button}</form>
 <details>
 <summary>{consent_summary}</summary>
@@ -729,7 +733,7 @@ pub fn signup_form_with(
             },
             outlook_button = if outlook {
                 format!(
-                    r#"<button type="submit" name="provider" value="microsoft" class="quiet">{MICROSOFT_MARK}Continue with Microsoft <span class="arrow" aria-hidden="true">→</span></button>
+                    r#"<button type="submit" name="provider" value="microsoft" class="quiet"><span class="choice">{MICROSOFT_MARK}<span>Continue with Microsoft</span><span class="arrow" aria-hidden="true">→</span></span></button>
 "#
                 )
             } else {

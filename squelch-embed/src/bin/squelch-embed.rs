@@ -11,7 +11,8 @@
 //! Both listeners bind before the session loads, so the kubelet's probe gets a
 //! 503 rather than a refused connection while the weights come off disk. A
 //! session that cannot be built exits the process non-zero, with the reason,
-//! and so does an inference thread that dies after it was built.
+//! and so does an inference thread that dies after it was built. A panic is
+//! logged as a location, never its message (`log::install_panic_hook`).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -31,6 +32,9 @@ const MIN_TOKEN_LEN: usize = 32;
 
 fn main() -> ExitCode {
     let log = Log::stderr();
+    // First, before anything that could panic: the default hook prints the
+    // panic message, which can be a tenant's text.
+    squelch_embed::log::install_panic_hook(log.clone());
 
     if let Some(arg) = std::env::args().nth(1) {
         if arg == "--version" {

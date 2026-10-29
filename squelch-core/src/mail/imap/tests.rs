@@ -1136,6 +1136,12 @@ async fn live_the_archive_window_is_exact_at_its_edges() {
         .unwrap();
     // Newest first: zone (23:00Z), in (12:00Z), edge-from (00:00Z).
     assert_eq!(filed, ids(&["zone@x.org", "in@x.org", "edge-from@x.org"]));
+    // CORRECTNESS L4: the walk takes the command session once per folder
+    // (plus once for the folder list), never once for the whole walk, so
+    // the poll lane can run between folders.
+    let walked = src.roles().await.unwrap().window_folders(false).len() as u64;
+    assert!(walked >= 3, "INBOX, Sent, Archive at least");
+    let calls_before = src.command_calls().await;
     let mut all = src
         .list(
             Listing::Window {
@@ -1148,6 +1154,7 @@ async fn live_the_archive_window_is_exact_at_its_edges() {
         )
         .await
         .unwrap();
+    assert_eq!(src.command_calls().await - calls_before, walked + 1);
     all.sort();
     let mut want = ids(&[
         "zone@x.org",

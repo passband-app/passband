@@ -1588,6 +1588,13 @@ impl ImapSource {
             .await
     }
 
+    /// How many times the command session has been taken, on the current
+    /// login (each `with_conn` is one).
+    #[cfg(test)]
+    pub(crate) async fn command_calls(&self) -> u64 {
+        self.conn.lock().await.as_ref().map_or(0, |c| c.calls)
+    }
+
     /// Successful logins so far.
     #[cfg(test)]
     pub(crate) fn connects(&self) -> u64 {
@@ -2271,42 +2278,53 @@ impl MailSource for ImapSource {
                 to,
                 filed_only,
             } => {
-                let seen = self
+                // SINCE/BEFORE compare the date part of INTERNALDATE in its
+                // own zone (RFC 3501), so the search is a day wider than the
+                // window on each side and the exact edge is the INTERNALDATE
+                // filter below.
+                let query = format!(
+                    "SINCE {} BEFORE {}",
+                    imap_date(from - chrono::Duration::days(1)),
+                    imap_date(to + chrono::Duration::days(2))
+                );
+                let folders: Vec<String> = self
                     .with_conn(|c| {
                         Box::pin(async move {
-                            // SINCE/BEFORE compare the date part of INTERNALDATE
-                            // in its own zone (RFC 3501), so the search is a day
-                            // wider than the window on each side and the exact
-                            // edge is the INTERNALDATE filter below.
-                            let query = format!(
-                                "SINCE {} BEFORE {}",
-                                imap_date(from - chrono::Duration::days(1)),
-                                imap_date(to + chrono::Duration::days(2))
-                            );
-                            let folders: Vec<String> = c
-                                .roles
+                            Ok(c.roles
                                 .window_folders(filed_only)
                                 .into_iter()
                                 .map(str::to_string)
-                                .collect();
-                            let mut all = Vec::new();
-                            for folder in folders {
-                                let Some(validity) = c.examine(&folder).await? else {
-                                    continue;
-                                };
-                                let uids = search(&mut c.session, query.clone()).await?;
-                                let seen =
-                                    stable_ids(&mut c.session, &folder, validity, &uids).await?;
-                                let seen = bind_identities(c, locs.as_ref(), account, seen).await?;
-                                all.extend(seen.into_iter().filter(|s| {
-                                    s.internal_date.is_some_and(|d| d >= from && d < to)
-                                }));
-                            }
-                            all.sort_by(|a, b| b.internal_date.cmp(&a.internal_date));
-                            Ok(all)
+                                .collect())
                         })
                     })
                     .await?;
+                // ONE FOLDER PER LOCK (correctness L4): the archive walk's
+                // window crosses every folder, and holding the command
+                // session for all of them would keep the poll lane waiting
+                // for the whole walk. Between folders, anyone can run.
+                let mut seen = Vec::new();
+                for folder in folders {
+                    let (locs, query) = (locs.clone(), query.clone());
+                    let found = self
+                        .with_conn(|c| {
+                            Box::pin(async move {
+                                let Some(validity) = c.examine(&folder).await? else {
+                                    return Ok(Vec::new());
+                                };
+                                let uids = search(&mut c.session, query).await?;
+                                let ids =
+                                    stable_ids(&mut c.session, &folder, validity, &uids).await?;
+                                bind_identities(c, locs.as_ref(), account, ids).await
+                            })
+                        })
+                        .await?;
+                    seen.extend(
+                        found
+                            .into_iter()
+                            .filter(|s| s.internal_date.is_some_and(|d| d >= from && d < to)),
+                    );
+                }
+                seen.sort_by(|a, b| b.internal_date.cmp(&a.internal_date));
                 (seen, None)
             }
         };

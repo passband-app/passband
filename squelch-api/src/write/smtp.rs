@@ -627,15 +627,37 @@ pub fn with_submission_headers(
 }
 
 /// A fresh `Message-ID` for a send the composer did not give one: 24 bytes
-/// of OS entropy as hex at the scheduled send's host, so both look alike.
-pub fn mint_message_id() -> Option<String> {
+/// of OS entropy as hex at the ACCOUNT's domain (amendment A1), the right-hand
+/// side a server and a recipient expect of the sender. A domain that is not
+/// plain dotted letters, digits and hyphens (an address with no `@`, a
+/// literal) falls back to the scheduled send's host.
+pub fn mint_message_id(account: &str) -> Option<String> {
     use base64::Engine as _;
     let token = squelch_core::tracking::mint_token().ok()?;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(token)
         .ok()?;
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    Some(format!("<{hex}@passband.app>"))
+    Some(format!("<{hex}@{}>", message_id_domain(account)))
+}
+
+/// The right-hand side [`mint_message_id`] uses for `account`.
+fn message_id_domain(account: &str) -> String {
+    let domain = account.rsplit_once('@').map(|(_, d)| d).unwrap_or("");
+    let plain = !domain.is_empty()
+        && domain.len() <= 253
+        && domain.contains('.')
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        });
+    if plain {
+        domain.to_ascii_lowercase()
+    } else {
+        "passband.app".to_string()
+    }
 }
 
 #[cfg(test)]

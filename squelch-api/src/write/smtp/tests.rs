@@ -117,14 +117,31 @@ fn missing_from_date_and_message_id_are_added_and_present_ones_kept() {
 }
 
 #[test]
-fn a_minted_message_id_is_48_hex_at_passband() {
-    let id = mint_message_id().unwrap();
+fn a_minted_message_id_is_48_hex_at_the_account_domain() {
+    let id = mint_message_id("Me@Example.ORG").unwrap();
     let bare = id
         .trim_start_matches('<')
-        .trim_end_matches("@passband.app>");
-    assert_eq!(bare.len(), 48);
+        .trim_end_matches("@example.org>");
+    assert_eq!(bare.len(), 48, "{id}");
     assert!(bare.chars().all(|c| c.is_ascii_hexdigit()));
-    assert_ne!(id, mint_message_id().unwrap());
+    assert_ne!(id, mint_message_id("me@example.org").unwrap());
+}
+
+#[test]
+fn an_unusable_account_domain_falls_back_to_passband_app() {
+    for account in [
+        "no-at-sign",
+        "me@",
+        "me@localhost",
+        "me@[127.0.0.1]",
+        "me@exa mple.org",
+        "me@-bad.org",
+        "me@a..b",
+        "me@x\"y.org",
+    ] {
+        let id = mint_message_id(account).unwrap();
+        assert!(id.ends_with("@passband.app>"), "{account}: {id}");
+    }
 }
 
 // ---- a scripted SMTP server --------------------------------------------------

@@ -10,7 +10,7 @@
 //! LOOK, THEN APPEND (contract §2). Some servers file a copy of everything
 //! submitted into Sent on their own (Gmail, Fastmail, iCloud); most leave it
 //! to the client. After SMTP accepts the message the writer looks in Sent for
-//! its exact `Message-ID` for about five seconds, and only if it never shows
+//! its exact `Message-ID` for about 1.5 seconds (amendment A2), and only if it never shows
 //! APPENDs the saved copy, `\Seen`. The saved copy keeps its `Bcc` header;
 //! the transmitted one never had it ([`super::smtp::transmitted_copy`]).
 //! Either way the copy's location is recorded, so the echo finds it under
@@ -41,17 +41,17 @@ pub const IMAP_NO_SMTP: &str = "run `squelchd auth --imap` again to enable sendi
 pub const MAX_SEND_RAW_BYTES: usize =
     crate::handlers::MAX_OUTBOUND_ATTACHMENT_BYTES * 78 / 57 + 2 * 1024 * 1024;
 
-/// How long the writer waits between looks in Sent for a server's own copy:
-/// one at once (most servers that save do it before they answer the final
-/// dot), then a short backoff, about 5 s in all (contract §2).
-const LOOK_SCHEDULE: [Duration; 7] = [
+/// How long the writer waits before each look in Sent for a server's own
+/// copy: looks at 0, 0.25, 0.5, 1.0 and 1.5 s after SMTP accepted it
+/// (amendment A2), then the APPEND. A server that files its copy later than
+/// that ends up with two in Sent; Passband still shows one row, since both
+/// have the same stable id. Accepted: the send's answer waits on this.
+const LOOK_SCHEDULE: [Duration; 5] = [
     Duration::ZERO,
     Duration::from_millis(250),
+    Duration::from_millis(250),
     Duration::from_millis(500),
-    Duration::from_millis(750),
-    Duration::from_millis(1000),
-    Duration::from_millis(1250),
-    Duration::from_millis(1250),
+    Duration::from_millis(500),
 ];
 
 /// The bound on one IMAP step of the Sent copy (EXAMINE, SEARCH, FETCH); the
@@ -316,7 +316,7 @@ impl MailWriter for ImapWriter {
                 "the message is too large to send".into(),
             ));
         }
-        let minted = smtp::mint_message_id()
+        let minted = smtp::mint_message_id(&self.from)
             .ok_or_else(|| WriteError::Transport("could not mint a Message-ID".into()))?;
         let saved = smtp::with_submission_headers(raw, &self.from, chrono::Utc::now(), &minted);
         let message_id = smtp::first_header(&saved, "Message-ID")

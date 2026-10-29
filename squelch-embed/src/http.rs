@@ -3,8 +3,15 @@
 //! (`GET /healthz`, `GET /metrics`), which no Service carries.
 //!
 //! Order of checks on `POST /embed`, cheapest refusal first: the bearer token
-//! (before a byte of body is read), the body (size, read deadline, shape),
-//! readiness, the lane's share. Only then does a request wait for the worker.
+//! (before a byte of body is read), a body-reading permit, the body (size,
+//! read deadline, shape), readiness, the lane's share. Only then does a
+//! request wait for the worker.
+//!
+//! WHAT A FLOOD CAN HOLD, bounded at each step: [`MAX_CONNECTIONS`] open
+//! connections (past that the accept loop stops accepting and the kernel's
+//! backlog holds the rest), [`BODY_PERMITS`] bodies being read and parsed at
+//! once, each at most [`protocol::MAX_BODY_BYTES`] (past that a request is a
+//! 429 before its body is read), and the lane shares in the queue.
 //!
 //! NO PEER ADDRESS REACHES A HANDLER. The accept loop below hands axum the
 //! connection without its `SocketAddr`, so no handler, log line or metric here
@@ -28,6 +35,7 @@ use hyper_util::server::conn::auto::Builder;
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 
 use crate::coalescer::{Coalescer, Failure, Lane, Refused};
 use crate::log::Log;
@@ -45,6 +53,20 @@ use crate::protocol::{self, EmbedRequest, EmbedResponse, ErrorResponse};
 /// it).
 pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Request bodies read and parsed at once. With [`protocol::MAX_BODY_BYTES`]
+/// that is 8 MiB of buffers at most, against a pod limit sized for the
+/// session; the queue behind it holds far fewer requests than this anyway.
+pub const BODY_PERMITS: usize = 32;
+
+/// `Retry-After`, in seconds, on a 429 for want of a body permit: a body
+/// read takes milliseconds, so the wait is short.
+pub const BODY_RETRY_AFTER_SECS: u64 = 1;
+
+/// Connections open at once, per listener. Every caller is a tenant pod with
+/// a small pool, so this is far over real use and only stops a flood from
+/// holding a task and a socket per connection without bound.
+pub const MAX_CONNECTIONS: usize = 256;
+
 #[derive(Clone)]
 pub struct AppState {
     pub coalescer: Coalescer,
@@ -52,6 +74,8 @@ pub struct AppState {
     /// `None` means no authentication (the startup log says so).
     pub token: Option<Arc<str>>,
     pub log: Log,
+    /// [`BODY_PERMITS`] of them, shared by every request on the work port.
+    pub body_permits: Arc<Semaphore>,
 }
 
 impl AppState {
@@ -66,6 +90,7 @@ impl AppState {
             metrics,
             token,
             log,
+            body_permits: Arc::new(Semaphore::new(BODY_PERMITS)),
         }
     }
 }
@@ -128,6 +153,12 @@ async fn embed(State(s): State<AppState>, headers: HeaderMap, body: Body) -> Res
         return error(StatusCode::UNAUTHORIZED, protocol::ERR_UNAUTHORIZED);
     }
 
+    // Held across the read and the parse, which is where a body costs
+    // memory; released before the request waits for the worker.
+    let Ok(permit) = s.body_permits.clone().try_acquire_owned() else {
+        s.metrics.record(LaneLabel::None, Outcome::QueueFull);
+        return too_many(BODY_RETRY_AFTER_SECS);
+    };
     let read = axum::body::to_bytes(body, protocol::MAX_BODY_BYTES);
     let bytes = match tokio::time::timeout(READ_TIMEOUT, read).await {
         Ok(Ok(bytes)) => bytes,
@@ -146,6 +177,7 @@ async fn embed(State(s): State<AppState>, headers: HeaderMap, body: Body) -> Res
         return error(StatusCode::BAD_REQUEST, protocol::ERR_BAD_REQUEST);
     };
     drop(bytes);
+    drop(permit);
 
     let n = texts.len();
     let lane = (n > 0).then(|| Lane::of(n));
@@ -212,9 +244,10 @@ async fn metrics(State(s): State<AppState>) -> Response {
 }
 
 /// Serve `app` on `listener` until `shutdown` resolves, then let in-flight
-/// requests finish. The accept loop from squelch-api's `serve.rs`, with two
-/// differences: the header-read timeout is [`READ_TIMEOUT`], and the peer
-/// address is dropped at accept rather than handed to the router.
+/// requests finish. The accept loop from squelch-api's `serve.rs`, with three
+/// differences: the header-read timeout is [`READ_TIMEOUT`], the peer
+/// address is dropped at accept rather than handed to the router, and at most
+/// [`MAX_CONNECTIONS`] connections are open at once.
 ///
 /// HTTP/1 only, because hyper's HTTP/2 server has no header-read timeout and
 /// nothing speaks h2c to this service.
@@ -223,6 +256,17 @@ pub async fn serve(
     app: Router,
     shutdown: impl Future<Output = ()>,
     log: Log,
+) -> io::Result<()> {
+    serve_with_limit(listener, app, shutdown, log, MAX_CONNECTIONS).await
+}
+
+/// [`serve`] with another connection cap, for the test that fills it.
+pub(crate) async fn serve_with_limit(
+    listener: TcpListener,
+    app: Router,
+    shutdown: impl Future<Output = ()>,
+    log: Log,
+    max_connections: usize,
 ) -> io::Result<()> {
     let mut builder = Builder::new(TokioExecutor::new()).http1_only();
     builder
@@ -235,7 +279,18 @@ pub async fn serve(
         .local_addr()
         .map_or_else(|_| "?".to_string(), |a| a.to_string());
 
+    let open = Arc::new(Semaphore::new(max_connections));
+
     loop {
+        // A permit BEFORE accepting: at the cap, connections wait in the
+        // kernel's backlog rather than each holding a task here.
+        let permit = tokio::select! {
+            permit = open.clone().acquire_owned() => match permit {
+                Ok(p) => p,
+                Err(_) => break,
+            },
+            () = &mut shutdown => break,
+        };
         let stream = tokio::select! {
             accepted = listener.accept() => match accepted {
                 // The peer address is discarded here, on purpose (module docs).
@@ -261,6 +316,7 @@ pub async fn serve(
         let conn = graceful.watch(conn);
         tokio::spawn(async move {
             let _ = conn.await;
+            drop(permit);
         });
     }
 
@@ -402,6 +458,57 @@ mod tests {
             assert_eq!(error_word(&resp), protocol::ERR_BAD_REQUEST);
         }
         assert!(h.fake.seen().is_empty());
+    }
+
+    /// 256 KiB, not the 1 MiB it was: a body past it is refused unparsed.
+    #[tokio::test]
+    async fn a_body_over_256_kib_is_refused() {
+        let h = harness(None).await;
+        let just_over = format!(
+            "{{\"texts\":[\"{}\"]}}",
+            "a".repeat(protocol::MAX_BODY_BYTES)
+        );
+        let medium = format!("{{\"texts\":[\"{}\"]}}", "a".repeat(300 * 1024));
+        for body in [just_over, medium] {
+            let (status, _, resp) = call(work_router(h.state.clone()), post(body, None)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(error_word(&resp), protocol::ERR_BAD_REQUEST);
+        }
+        assert!(h.fake.seen().is_empty());
+        // A worst-case single text at the per-text bound still fits.
+        let worst = body_for(&[&"\u{1}".repeat(protocol::MAX_CHARS_PER_TEXT)]);
+        assert!(worst.len() <= protocol::MAX_BODY_BYTES);
+        let (status, _, _) = call(work_router(h.state.clone()), post(worst, None)).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// With every body permit taken, a request is a 429 before a byte of its
+    /// body is read, and is counted on no lane.
+    #[tokio::test]
+    async fn no_body_permit_is_429_retry_after_one() {
+        let h = harness(None).await;
+        let held = h
+            .state
+            .body_permits
+            .clone()
+            .try_acquire_many_owned(BODY_PERMITS as u32)
+            .unwrap();
+        let (status, headers, body) =
+            call(work_router(h.state.clone()), post(body_for(&["a"]), None)).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(error_word(&body), protocol::ERR_QUEUE_FULL);
+        assert_eq!(headers[header::RETRY_AFTER], "1");
+        assert!(h.fake.seen().is_empty());
+        let out = h.state.metrics.render(h.state.coalescer.depth());
+        assert!(
+            out.contains("squelch_embed_requests_total{lane=\"none\",outcome=\"queue_full\"} 1"),
+            "{out}"
+        );
+
+        drop(held);
+        let (status, _, _) = call(work_router(h.state.clone()), post(body_for(&["a"]), None)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(h.state.body_permits.available_permits(), BODY_PERMITS);
     }
 
     /// A dead inference thread is a 500 for whoever was queued and a 503 for
@@ -776,6 +883,49 @@ mod tests {
                 .unwrap()
                 .contains("squelch_embed_requests_total")
         );
+    }
+
+    /// At the connection cap the accept loop stops accepting: a further
+    /// connection is not served until one of the open ones closes.
+    #[tokio::test]
+    async fn the_connection_cap_holds_the_next_connection_until_one_closes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let h = harness(None).await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve_with_limit(
+            listener,
+            work_router(h.state.clone()),
+            async {
+                let _ = stop_rx.await;
+            },
+            h.state.log.clone(),
+            1,
+        ));
+
+        // The one slot: connected, and idle.
+        let idle = tokio::net::TcpStream::connect(addr).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut next = tokio::net::TcpStream::connect(addr).await.unwrap();
+        next.write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut out = String::new();
+        let early =
+            tokio::time::timeout(Duration::from_millis(300), next.read_to_string(&mut out)).await;
+        assert!(early.is_err(), "served past the cap: {out}");
+
+        drop(idle);
+        tokio::time::timeout(Duration::from_secs(5), next.read_to_string(&mut out))
+            .await
+            .expect("served once the slot frees")
+            .unwrap();
+        assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+
+        stop_tx.send(()).unwrap();
+        server.await.unwrap().unwrap();
     }
 
     /// The real listener: binds, answers, and stops on shutdown.

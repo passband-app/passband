@@ -36,8 +36,19 @@ pub const MAX_TEXTS_PER_CALL: usize = 8;
 /// daemon already truncates ingest text to `embed.max_chars` (1000).
 pub const MAX_CHARS_PER_TEXT: usize = 8192;
 
-/// Largest request body the server accepts, in bytes.
-pub const MAX_BODY_BYTES: usize = 1024 * 1024;
+/// Largest request body the server accepts, in bytes. One text at
+/// [`MAX_CHARS_PER_TEXT`] always fits, at its worst JSON escaping (six bytes a
+/// character); a full call of such texts may not, and the daemon splits a call
+/// that would not fit rather than send it.
+pub const MAX_BODY_BYTES: usize = 256 * 1024;
+
+/// The longest one text can be on the wire: every character a control
+/// character JSON escapes as `\u00XX`, plus its quotes and comma.
+pub const MAX_TEXT_WIRE_BYTES: usize = MAX_CHARS_PER_TEXT * 6 + 3;
+
+// Room for one worst-case text and the `{"texts":[]}` around it, so a single
+// text is never a request the server refuses for size.
+const _: () = assert!(MAX_TEXT_WIRE_BYTES + 16 <= MAX_BODY_BYTES);
 
 /// The daemon's whole-request timeout for an INTERACTIVE call: exactly one
 /// text (a search query, one message at ingest) and the `/healthz` probe.
@@ -128,13 +139,21 @@ mod tests {
     }
 
     /// The server gives up on a request before the daemon does, so no pass
-    /// is ever spent on a caller that has already timed out.
+    /// is ever spent on a caller that has already timed out, and a body that
+    /// fits one text is never refused for size.
     #[test]
-    fn deadlines_sit_under_the_client_timeouts() {
+    fn deadlines_sit_under_the_client_timeouts_and_a_text_fits_a_body() {
         assert_eq!(INTERACTIVE_TIMEOUT, Duration::from_secs(5));
         assert_eq!(BACKFILL_TIMEOUT, Duration::from_secs(30));
         assert_eq!(INTERACTIVE_DEADLINE, Duration::from_millis(4500));
         assert_eq!(BACKFILL_DEADLINE, Duration::from_secs(28));
+        assert_eq!(MAX_BODY_BYTES, 256 * 1024);
+        let worst = EmbedRequest {
+            texts: vec!["\u{1}".repeat(MAX_CHARS_PER_TEXT)],
+        };
+        let wire = serde_json::to_vec(&worst).unwrap().len();
+        assert!(wire <= MAX_TEXT_WIRE_BYTES + 16, "{wire}");
+        assert!(wire <= MAX_BODY_BYTES, "{wire}");
     }
 
     #[test]

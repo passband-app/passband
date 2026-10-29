@@ -1,6 +1,7 @@
 //! THE IMAP ACCOUNT'S WRITER (issue #575 phase 3): send over SMTP, then make
-//! sure Sent holds exactly one copy. Folder moves, flags and the lookups are
-//! phase 3 step 2; until then they answer 501.
+//! sure Sent holds exactly one copy; folder moves and flags ([`ops`]) on the
+//! copies the source verified as the id's own; and the lookups through the
+//! source's guarded resolve. `find_scheduled_send` is still 501 (step 3).
 //!
 //! IMAP work happens on a session of the writer's own, opened by
 //! squelch-core ([`ImapSource::open_writer_session`]) under the source's TLS
@@ -19,10 +20,19 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
 use futures::TryStreamExt;
+use squelch_core::CoreError;
 use squelch_core::mail::imap::{
-    ImapCredential, ImapSession, ImapSource, MessageLocation, header_values, normalize_message_id,
-    stable_id_for_message_id,
+    FolderRoles, ImapCredential, ImapSession, ImapSource, MessageLocation, header_block,
+    header_values, normalize_message_id, stable_id_for_message_id,
+};
+use squelch_core::mail::{MailSource, RawBody, Urgency};
+
+mod ops;
+use ops::{
+    LabelPlan, LiveMailbox, Move, WriteMailbox, apply_flags, move_strategy, plan_labels, plan_move,
+    run_move,
 };
 
 use super::smtp::{self, SmtpEndpoint, SmtpError, SmtpTimeouts};
@@ -67,6 +77,9 @@ pub struct ImapWriter {
     from: String,
     timeouts: SmtpTimeouts,
     look_schedule: Vec<Duration>,
+    /// Tests only: act as if the server had no MOVE, so the COPY + UID
+    /// EXPUNGE path runs against a real one.
+    without_move: bool,
 }
 
 impl ImapWriter {
@@ -87,7 +100,15 @@ impl ImapWriter {
             from: from.into(),
             timeouts: SmtpTimeouts::default(),
             look_schedule: LOOK_SCHEDULE.to_vec(),
+            without_move: false,
         })
+    }
+
+    /// Pretend the server lacks MOVE, for the tests.
+    #[cfg(test)]
+    pub(crate) fn without_move(mut self) -> Self {
+        self.without_move = true;
+        self
     }
 
     /// Shorter waits, for the tests.
@@ -95,6 +116,66 @@ impl ImapWriter {
     pub(crate) fn with_look_schedule(mut self, schedule: Vec<Duration>) -> Self {
         self.look_schedule = schedule;
         self
+    }
+
+    async fn open_session(&self) -> Result<(ImapSession, FolderRoles), WriteError> {
+        tokio::time::timeout(IMAP_STEP, self.source.open_writer_session())
+            .await
+            .map_err(|_| WriteError::Transport("imap login timed out".into()))?
+            .map_err(core_write_error)
+    }
+
+    /// EVERY COPY A WRITE MAY TOUCH (contract §5): the id's locations whose
+    /// headers and body are the id's own, by the source's guarded resolve.
+    /// None at all is the 404 Gmail gives a message it does not have.
+    async fn targets(&self, msg_id: &str) -> Result<Vec<MessageLocation>, WriteError> {
+        match self.source.verified_locations(msg_id).await {
+            Ok(locs) if !locs.is_empty() => Ok(locs),
+            Ok(_) | Err(CoreError::NotFound) => Err(not_found()),
+            Err(e) => Err(core_write_error(e)),
+        }
+    }
+
+    /// Verify, log in, carry the plan out, record where moved copies went,
+    /// log out.
+    async fn apply(&self, msg_id: &str, plan: LabelPlan) -> Result<(), WriteError> {
+        let locs = self.targets(msg_id).await?;
+        let (mut session, mut roles) = self.open_session().await?;
+        let caps = LiveMailbox::read_caps(&mut session).await;
+        let (moved, out) = match caps {
+            Ok(mut caps) => {
+                caps.mv &= !self.without_move;
+                let mut mb = LiveMailbox { session, caps };
+                let r = apply_plan(&mut mb, &mut roles, &locs, &plan).await;
+                session = mb.session;
+                r
+            }
+            Err(e) => (Vec::new(), Err(e)),
+        };
+        let _ = tokio::time::timeout(Duration::from_secs(5), session.logout()).await;
+        for (from, to) in moved {
+            // A miss here is the next sighting's to put right.
+            if self.source.note_moved(msg_id, &from, to).is_err() {
+                eprintln!("squelch-api: imap: could not record where a moved message went");
+            }
+        }
+        out
+    }
+
+    /// The id's bytes as the source's guarded fetch serves them, and when the
+    /// server received them.
+    async fn verified_raw(
+        &self,
+        msg_id: &str,
+    ) -> Result<(Vec<u8>, Option<chrono::DateTime<chrono::Utc>>), WriteError> {
+        match self.source.fetch_raw(msg_id, Urgency::Live).await {
+            Ok(m) => match m.raw {
+                RawBody::Bytes(b) => Ok((b, m.received_at)),
+                _ => Err(not_found()),
+            },
+            Err(CoreError::NotFound) => Err(not_found()),
+            Err(e) => Err(core_write_error(e)),
+        }
     }
 
     fn not_built(op: &str) -> WriteError {
@@ -124,6 +205,72 @@ fn smtp_write_error(e: SmtpError) -> WriteError {
             status: 503,
             message: m,
         },
+    }
+}
+
+/// What a write on a message with no verified copy gets: Gmail's 404.
+fn not_found() -> WriteError {
+    WriteError::Api {
+        status: 404,
+        message: "no copy of this message on the mail server".into(),
+    }
+}
+
+/// A core error from the writer's IMAP side. A refused login is one fixed
+/// line (core's own, which never carries the server's text).
+fn core_write_error(e: CoreError) -> WriteError {
+    match e {
+        CoreError::Credential(m) => WriteError::Api {
+            status: 401,
+            message: m,
+        },
+        CoreError::NotFound => not_found(),
+        e => WriteError::Transport(e.to_string()),
+    }
+}
+
+/// THE ORDER (contract §4-§6): the move planned and the server's ability to
+/// move checked FIRST, so a refusal (no Junk, no Trash, no MOVE nor UIDPLUS)
+/// sends no command at all; then the flags on every verified copy; then the
+/// move. Each copy moved is handed back, with any failure after it.
+pub(crate) async fn apply_plan(
+    mb: &mut dyn WriteMailbox,
+    roles: &mut FolderRoles,
+    locs: &[MessageLocation],
+    plan: &LabelPlan,
+) -> (
+    Vec<(MessageLocation, Option<MessageLocation>)>,
+    Result<(), WriteError>,
+) {
+    let mv = match plan.mv.map(|m| plan_move(m, roles, locs)).transpose() {
+        Ok(mv) => mv.flatten(),
+        Err(e) => return (Vec::new(), Err(e)),
+    };
+    let strategy = match mv.as_ref().map(|_| move_strategy(mb.caps())).transpose() {
+        Ok(s) => s,
+        Err(e) => return (Vec::new(), Err(e)),
+    };
+    if let Err(e) = apply_flags(mb, locs, &plan.add_flags, &plan.remove_flags).await {
+        return (Vec::new(), Err(e));
+    }
+    match (mv, strategy) {
+        (Some(mv), Some(strategy)) => run_move(mb, roles, mv, strategy).await,
+        _ => (Vec::new(), Ok(())),
+    }
+}
+
+/// A parent's threading and recipient headers from its raw bytes, as the
+/// wire has them (unfolded), the way Gmail's metadata gives them.
+fn parent_headers_of(raw: &[u8]) -> ParentHeaders {
+    let head = header_block(raw);
+    let one = |name: &str| header_values(head, name).into_iter().next();
+    ParentHeaders {
+        message_id: one("Message-ID"),
+        references: one("References"),
+        reply_to: one("Reply-To"),
+        from: one("From"),
+        to: one("To"),
+        cc: one("Cc"),
     }
 }
 
@@ -172,6 +319,73 @@ pub(crate) async fn look_then_append(
     ))
 }
 
+/// The lowest-UID copy in `folder` whose `Message-ID` is EXACTLY
+/// `message_id` (normalized, bare), or `None`. The folder is `EXAMINE`d
+/// afresh (a server shows a session what arrived in its open folder only
+/// when the view is re-synced), searched, and every hit read back: `SEARCH
+/// HEADER` matches any header CONTAINING the text.
+pub(crate) async fn exact_message_id_hit(
+    session: &mut ImapSession,
+    folder: &str,
+    message_id: &str,
+) -> Result<Option<MessageLocation>, String> {
+    // It goes inside a quoted string: refuse anything that could end it.
+    if message_id.contains(['"', '\\', '\r', '\n']) || message_id.is_empty() {
+        return Ok(None);
+    }
+    tokio::time::timeout(IMAP_STEP, async {
+        let mbox = match session.examine(folder).await {
+            Ok(m) => m,
+            Err(async_imap::error::Error::No(_)) => return Ok(None),
+            Err(e) => return Err(e.to_string()),
+        };
+        let uidvalidity = mbox.uid_validity.ok_or("no UIDVALIDITY")?;
+        let hits = session
+            .uid_search(format!("HEADER Message-ID \"{message_id}\""))
+            .await
+            .map_err(|e| e.to_string())?;
+        if hits.is_empty() {
+            return Ok(None);
+        }
+        let mut uids: Vec<u32> = hits.into_iter().collect();
+        uids.sort_unstable();
+        let set = uids
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let fetches: Vec<_> = session
+            .uid_fetch(set, "(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect()
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut exact: Vec<u32> = fetches
+            .iter()
+            .filter(|f| {
+                f.header().is_some_and(|h| {
+                    header_values(h, "Message-ID")
+                        .into_iter()
+                        .find_map(|v| normalize_message_id(&v))
+                        .is_some_and(|m| m == message_id)
+                })
+            })
+            .filter_map(|f| f.uid)
+            .filter(|u| uids.contains(u))
+            .collect();
+        exact.sort_unstable();
+        Ok(exact.first().map(|&uid| MessageLocation {
+            folder: folder.to_string(),
+            uidvalidity,
+            uid,
+            message_id: Some(message_id.to_string()),
+        }))
+    })
+    .await
+    .unwrap_or_else(|_| Err(format!("imap search in {folder:?} timed out")))
+}
+
 /// The live [`SentFolder`]: the writer's own session, opened on first use
 /// and again after an error broke it.
 struct LiveSent<'a> {
@@ -206,62 +420,9 @@ impl LiveSent<'_> {
 #[async_trait::async_trait]
 impl SentFolder for LiveSent<'_> {
     async fn look(&mut self, message_id: &str) -> Result<Option<MessageLocation>, String> {
-        // It goes inside a quoted string: refuse anything that could end it.
-        if message_id.contains(['"', '\\', '\r', '\n']) || message_id.is_empty() {
-            return Ok(None);
-        }
         let (session, sent) = self.session().await?;
         let sent = sent.clone();
-        let out = tokio::time::timeout(IMAP_STEP, async {
-            // EXAMINE afresh on every look: a server shows a session what
-            // arrived in its open folder only when the view is re-synced.
-            let mbox = session.examine(&sent).await.map_err(|e| e.to_string())?;
-            let uidvalidity = mbox.uid_validity.ok_or("no UIDVALIDITY")?;
-            let hits = session
-                .uid_search(format!("HEADER Message-ID \"{message_id}\""))
-                .await
-                .map_err(|e| e.to_string())?;
-            if hits.is_empty() {
-                return Ok(None);
-            }
-            let mut uids: Vec<u32> = hits.into_iter().collect();
-            uids.sort_unstable();
-            let set = uids
-                .iter()
-                .map(u32::to_string)
-                .collect::<Vec<_>>()
-                .join(",");
-            let fetches: Vec<_> = session
-                .uid_fetch(set, "(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
-                .await
-                .map_err(|e| e.to_string())?
-                .try_collect()
-                .await
-                .map_err(|e| e.to_string())?;
-            // EXACT, NOT A SUBSTRING: `SEARCH HEADER` matches any header
-            // containing the text, so each hit is read back.
-            let mut exact: Vec<u32> = fetches
-                .iter()
-                .filter(|f| {
-                    f.header().is_some_and(|h| {
-                        header_values(h, "Message-ID")
-                            .into_iter()
-                            .find_map(|v| normalize_message_id(&v))
-                            .is_some_and(|m| m == message_id)
-                    })
-                })
-                .filter_map(|f| f.uid)
-                .collect();
-            exact.sort_unstable();
-            Ok(exact.first().map(|&uid| MessageLocation {
-                folder: sent.clone(),
-                uidvalidity,
-                uid,
-                message_id: Some(message_id.to_string()),
-            }))
-        })
-        .await
-        .unwrap_or_else(|_| Err("imap look in Sent timed out".to_string()));
+        let out = exact_message_id_hit(session, &sent, message_id).await;
         if out.is_err() {
             self.session = None;
         }
@@ -286,24 +447,36 @@ impl SentFolder for LiveSent<'_> {
 
 #[async_trait::async_trait]
 impl MailWriter for ImapWriter {
-    async fn modify(&self, _: &str, _: &[String], _: &[String]) -> Result<(), WriteError> {
-        Err(Self::not_built("modify"))
+    /// The label table ([`ops::plan_labels`]), checked whole before any
+    /// command is sent.
+    async fn modify(
+        &self,
+        msg_id: &str,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<(), WriteError> {
+        let plan = plan_labels(add, remove)?;
+        self.apply(msg_id, plan).await
     }
 
-    async fn archive(&self, _: &str) -> Result<(), WriteError> {
-        Err(Self::not_built("archive"))
+    async fn archive(&self, msg_id: &str) -> Result<(), WriteError> {
+        self.apply(msg_id, LabelPlan::moving(Move::Archive)).await
     }
 
-    async fn not_spam(&self, _: &str) -> Result<(), WriteError> {
-        Err(Self::not_built("not_spam"))
+    async fn not_spam(&self, msg_id: &str) -> Result<(), WriteError> {
+        self.apply(msg_id, LabelPlan::moving(Move::NotSpam)).await
     }
 
-    async fn trash(&self, _: &str) -> Result<(), WriteError> {
-        Err(Self::not_built("trash"))
+    /// To `\Trash`; refused where there is none. Never a delete.
+    async fn trash(&self, msg_id: &str) -> Result<(), WriteError> {
+        self.apply(msg_id, LabelPlan::moving(Move::Trash)).await
     }
 
-    async fn parent_headers(&self, _: &str) -> Result<ParentHeaders, WriteError> {
-        Err(Self::not_built("parent_headers"))
+    /// From the verified copy's own bytes ([`Self::verified_raw`]): a
+    /// lookalike's `Reply-To` never picks a reply's audience.
+    async fn parent_headers(&self, msg_id: &str) -> Result<ParentHeaders, WriteError> {
+        let (raw, _) = self.verified_raw(msg_id).await?;
+        Ok(parent_headers_of(&raw))
     }
 
     /// SEND (contract §7): add what Gmail used to (From, Date, Message-ID),
@@ -370,12 +543,42 @@ impl MailWriter for ImapWriter {
         })
     }
 
-    async fn fetch_raw(&self, _: &str) -> Result<FetchedRaw, WriteError> {
-        Err(Self::not_built("fetch_raw"))
+    async fn fetch_raw(&self, msg_id: &str) -> Result<FetchedRaw, WriteError> {
+        let (raw, received) = self.verified_raw(msg_id).await?;
+        Ok(FetchedRaw {
+            raw_b64: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw),
+            thread_id: None,
+            internal_date: received.map(|t| t.timestamp_millis().to_string()),
+        })
     }
 
-    async fn find_by_rfc822_msgid(&self, _: &str) -> Result<Option<String>, WriteError> {
-        Err(Self::not_built("find_by_rfc822_msgid"))
+    /// An EXACT `Message-ID` hit in Sent, then `\All` (contract §8), as the
+    /// stable id ingest gives that Message-ID. A miss is `None`; a folder
+    /// that could not be searched is `Err`, never a miss.
+    async fn find_by_rfc822_msgid(&self, msgid: &str) -> Result<Option<String>, WriteError> {
+        let Some(mid) = normalize_message_id(msgid) else {
+            return Err(WriteError::Invalid("not a Message-ID".into()));
+        };
+        let (mut session, roles) = self.open_session().await?;
+        let mut out = Ok(None);
+        for folder in [roles.sent.as_deref(), roles.all.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            match exact_message_id_hit(&mut session, folder, &mid).await {
+                Ok(Some(_)) => {
+                    out = Ok(Some(stable_id_for_message_id(&mid)));
+                    break;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    out = Err(WriteError::Transport(e));
+                    break;
+                }
+            }
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(5), session.logout()).await;
+        out
     }
 
     async fn find_scheduled_send(

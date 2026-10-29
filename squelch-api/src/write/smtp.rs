@@ -651,7 +651,9 @@ fn message_id_domain(account: &str) -> String {
             !label.is_empty()
                 && !label.starts_with('-')
                 && !label.ends_with('-')
-                && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
         });
     if plain {
         domain.to_ascii_lowercase()

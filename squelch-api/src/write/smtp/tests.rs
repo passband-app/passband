@@ -119,9 +119,7 @@ fn missing_from_date_and_message_id_are_added_and_present_ones_kept() {
 #[test]
 fn a_minted_message_id_is_48_hex_at_the_account_domain() {
     let id = mint_message_id("Me@Example.ORG").unwrap();
-    let bare = id
-        .trim_start_matches('<')
-        .trim_end_matches("@example.org>");
+    let bare = id.trim_start_matches('<').trim_end_matches("@example.org>");
     assert_eq!(bare.len(), 48, "{id}");
     assert!(bare.chars().all(|c| c.is_ascii_hexdigit()));
     assert_ne!(id, mint_message_id("me@example.org").unwrap());

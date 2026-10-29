@@ -131,6 +131,7 @@ fn smtp_failures_keep_the_maybe_sent_distinction() {
 struct MemLocations {
     rows: Mutex<HashMap<String, Vec<MessageLocation>>>,
     digests: Mutex<HashMap<String, String>>,
+    prints: Mutex<HashMap<String, BodyPrint>>,
 }
 
 impl MessageLocations for MemLocations {
@@ -152,18 +153,24 @@ impl MessageLocations for MemLocations {
         _: squelch_core::types::AccountId,
         rows: &[(String, MessageLocation)],
     ) -> squelch_core::Result<()> {
+        // The store's semantics: one place per (id, folder), the latest.
         let mut m = self.rows.lock().unwrap();
         for (id, l) in rows {
-            m.entry(id.clone()).or_default().push(l.clone());
+            let v = m.entry(id.clone()).or_default();
+            v.retain(|o| o.folder != l.folder);
+            v.push(l.clone());
         }
         Ok(())
     }
     fn forget_message_location(
         &self,
         _: squelch_core::types::AccountId,
-        _: &str,
-        _: &str,
+        msg_id: &str,
+        folder: &str,
     ) -> squelch_core::Result<()> {
+        if let Some(v) = self.rows.lock().unwrap().get_mut(msg_id) {
+            v.retain(|o| o.folder != folder);
+        }
         Ok(())
     }
     fn content_digest(
@@ -182,22 +189,29 @@ impl MessageLocations for MemLocations {
         self.digests
             .lock()
             .unwrap()
-            .insert(msg_id.into(), digest.into());
+            .entry(msg_id.into())
+            .or_insert_with(|| digest.into());
         Ok(())
     }
     fn body_print(
         &self,
         _: squelch_core::types::AccountId,
-        _: &str,
+        msg_id: &str,
     ) -> squelch_core::Result<Option<BodyPrint>> {
-        Ok(None)
+        Ok(self.prints.lock().unwrap().get(msg_id).cloned())
     }
     fn record_body_print(
         &self,
         _: squelch_core::types::AccountId,
-        _: &str,
-        _: &BodyPrint,
+        msg_id: &str,
+        print: &BodyPrint,
     ) -> squelch_core::Result<()> {
+        // First writer wins, as in the store.
+        self.prints
+            .lock()
+            .unwrap()
+            .entry(msg_id.into())
+            .or_insert_with(|| print.clone());
         Ok(())
     }
 }
@@ -514,4 +528,358 @@ async fn live_a_refused_smtp_login_says_one_fixed_line() {
         .unwrap_err();
     assert!(!format!("{err} {err:?}").contains("xyzzy"));
     assert!(matches!(err, WriteError::Api { status: 401, .. }));
+}
+
+/// Amendment A2: looks at 0, 0.25, 0.5, 1.0 and 1.5 s, and no later.
+#[test]
+fn the_sent_looks_end_by_one_and_a_half_seconds() {
+    let mut at = Duration::ZERO;
+    let mut times = Vec::new();
+    for w in LOOK_SCHEDULE {
+        at += w;
+        times.push(at.as_millis());
+    }
+    assert_eq!(times, vec![0, 250, 500, 1000, 1500]);
+}
+
+// ---- live: folder moves and flags (phase 3 step 2) ------------------------------
+
+/// One message of the test mailbox as Dovecot itself reports it (`doveadm
+/// fetch`), never through the code under test.
+#[derive(Debug, Clone)]
+struct Dove {
+    uid: u32,
+    flags: String,
+    copy: String,
+}
+
+fn dove(user: &str, folder: &str) -> Vec<Dove> {
+    let out = std::process::Command::new("docker")
+        .args([
+            "exec",
+            "squelch-imap-dev",
+            "/dovecot/bin/doveadm",
+            "fetch",
+            "-u",
+            user,
+            "uid flags hdr.x-test-copy",
+            "mailbox",
+            folder,
+        ])
+        .output()
+        .expect("docker exec doveadm");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut rows: Vec<Dove> = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        let v = v.trim().to_string();
+        match k.trim() {
+            "uid" => rows.push(Dove {
+                uid: v.parse().unwrap(),
+                flags: String::new(),
+                copy: String::new(),
+            }),
+            "flags" => rows.last_mut().unwrap().flags = v,
+            "hdr.x-test-copy" => rows.last_mut().unwrap().copy = v,
+            _ => {}
+        }
+    }
+    rows
+}
+
+fn copies_tagged(user: &str, folder: &str, tag: &str) -> Vec<Dove> {
+    dove(user, folder)
+        .into_iter()
+        .filter(|d| d.copy == tag)
+        .collect()
+}
+
+/// A message whose identity headers are fixed and whose body and
+/// `X-Test-Copy` (a header outside the identity digest) are `tag`'s.
+fn test_message(me: &str, mid: &str, tag: &str) -> Vec<u8> {
+    format!(
+        "From: Someone <someone@dev.test>\r\nTo: {me}\r\nDate: Tue, 1 Sep 2026 10:00:00 +0000\r\n\
+         Subject: step2 subject\r\nMessage-ID: <{mid}>\r\nX-Test-Copy: {tag}\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\r\nthe {tag} body\r\n"
+    )
+    .into_bytes()
+}
+
+/// APPEND `raw` to `folder` with `flags` (as `(\Seen)`), and where it landed:
+/// a fresh user's folder has one writer, so UIDNEXT before is its UID.
+async fn place(
+    source: &ImapSource,
+    folder: &str,
+    raw: &[u8],
+    flags: Option<&str>,
+) -> MessageLocation {
+    let (mut s, _) = source.open_writer_session().await.unwrap();
+    let st = s.status(folder, "(UIDNEXT UIDVALIDITY)").await.unwrap();
+    s.append(folder, flags, None, raw).await.unwrap();
+    let _ = s.logout().await;
+    let mid = smtp::first_header(raw, "Message-ID").and_then(|v| normalize_message_id(&v));
+    MessageLocation {
+        folder: folder.into(),
+        uidvalidity: st.uid_validity.unwrap(),
+        uid: st.uid_next.unwrap(),
+        message_id: mid,
+    }
+}
+
+/// A live writer on a fresh user, the id of a message with Message-ID
+/// `mid`, and the user's address.
+fn live_writer(tag: &str) -> (ImapWriter, Arc<MemLocations>, String) {
+    let me = fresh_user(tag);
+    let credential = dev_credential(&me, ImapTls::StartTls, 10587);
+    let locs = Arc::new(MemLocations::default());
+    let writer = dev_writer(&credential, &me, locs.clone());
+    (writer, locs, me)
+}
+
+/// Put the original copy of `mid` into each of `folders` and record them
+/// under its id, the way a sync would have; bind the id's print from them.
+async fn original_in(writer: &ImapWriter, me: &str, mid: &str, folders: &[&str]) -> String {
+    let id = stable_id_for_message_id(mid);
+    let raw = test_message(me, mid, "original");
+    for f in folders {
+        let loc = place(&writer.source, f, &raw, None).await;
+        writer.source.record_own_copy(&id, &raw, loc).unwrap();
+    }
+    let verified = writer.source.verified_locations(&id).await.unwrap();
+    assert_eq!(verified.len(), folders.len(), "{verified:?}");
+    id
+}
+
+/// An unrelated message already flagged `\Deleted` in `folder`, as another
+/// client leaves one before it expunges: no write may remove it.
+async fn deleted_bystander(writer: &ImapWriter, me: &str, folder: &str) {
+    let raw = test_message(me, &format!("bystander-{folder}@dev.test"), "bystander");
+    place(&writer.source, folder, &raw, Some("(\\Deleted)")).await;
+}
+
+fn assert_bystanders(me: &str, folders: &[&str]) {
+    for f in folders {
+        let b = copies_tagged(me, f, "bystander");
+        assert_eq!(b.len(), 1, "the \\Deleted bystander in {f} was expunged");
+        assert!(b[0].flags.contains("\\Deleted"), "{:?}", b[0]);
+    }
+}
+
+fn rows_of(locs: &MemLocations, id: &str) -> Vec<MessageLocation> {
+    locs.rows
+        .lock()
+        .unwrap()
+        .get(id)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Archive (the bed has \Archive), trash and not-spam, by MOVE and by COPY +
+/// UID EXPUNGE, each verified with doveadm, the id's place recorded from
+/// COPYUID, and every pre-existing `\Deleted` message still there.
+async fn moves_round_trip(without_move: bool) {
+    let (mut writer, locs, me) = live_writer(if without_move { "copymv" } else { "move" });
+    if without_move {
+        writer = writer.without_move();
+    }
+    let folders = ["INBOX", "Archive", "Junk", "Trash"];
+    for f in folders {
+        deleted_bystander(&writer, &me, f).await;
+    }
+
+    // Archive: INBOX -> Archive.
+    let a = original_in(&writer, &me, "arch@dev.test", &["INBOX"]).await;
+    writer.archive(&a).await.unwrap();
+    assert!(copies_tagged(&me, "INBOX", "original").is_empty());
+    let in_archive = copies_tagged(&me, "Archive", "original");
+    assert_eq!(in_archive.len(), 1);
+    let rows = rows_of(&locs, &a);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(
+        (rows[0].folder.as_str(), rows[0].uid),
+        ("Archive", in_archive[0].uid)
+    );
+    // Archiving again is nothing to do.
+    writer.archive(&a).await.unwrap();
+    assert_eq!(copies_tagged(&me, "Archive", "original").len(), 1);
+    // +INBOX brings it back from the archive.
+    writer.modify(&a, &["INBOX".into()], &[]).await.unwrap();
+    assert_eq!(copies_tagged(&me, "INBOX", "original").len(), 1);
+    assert!(copies_tagged(&me, "Archive", "original").is_empty());
+
+    // +SPAM then not spam: INBOX -> Junk -> INBOX.
+    writer
+        .modify(&a, &["SPAM".into()], &["INBOX".into()])
+        .await
+        .unwrap();
+    assert_eq!(copies_tagged(&me, "Junk", "original").len(), 1);
+    assert!(copies_tagged(&me, "INBOX", "original").is_empty());
+    writer.not_spam(&a).await.unwrap();
+    assert_eq!(copies_tagged(&me, "INBOX", "original").len(), 1);
+    assert!(copies_tagged(&me, "Junk", "original").is_empty());
+
+    // Trash: INBOX -> Trash, never a delete.
+    writer.trash(&a).await.unwrap();
+    assert!(copies_tagged(&me, "INBOX", "original").is_empty());
+    let trashed = copies_tagged(&me, "Trash", "original");
+    assert_eq!(trashed.len(), 1);
+    assert!(!trashed[0].flags.contains("\\Deleted"), "{:?}", trashed[0]);
+
+    assert_bystanders(&me, &folders);
+}
+
+#[tokio::test]
+#[ignore = "needs scripts/imap-dev.sh start"]
+async fn live_moves_by_move_keep_every_deleted_bystander() {
+    moves_round_trip(false).await;
+}
+
+#[tokio::test]
+#[ignore = "needs scripts/imap-dev.sh start"]
+async fn live_moves_by_copy_and_uid_expunge_keep_every_deleted_bystander() {
+    moves_round_trip(true).await;
+}
+
+/// READ, UNREAD AND STAR on BOTH copies of a self-sent message (INBOX and
+/// Sent), as Dovecot reports the flags; a bad label in the same request
+/// changes nothing.
+#[tokio::test]
+#[ignore = "needs scripts/imap-dev.sh start"]
+async fn live_flags_land_on_the_inbox_and_sent_copies() {
+    let (writer, _, me) = live_writer("flags");
+    deleted_bystander(&writer, &me, "INBOX").await;
+    deleted_bystander(&writer, &me, "Sent").await;
+    let id = original_in(&writer, &me, "self@dev.test", &["INBOX", "Sent"]).await;
+    let flags = |f: &str| copies_tagged(&me, f, "original")[0].flags.clone();
+
+    writer.modify(&id, &[], &["UNREAD".into()]).await.unwrap();
+    writer.modify(&id, &["STARRED".into()], &[]).await.unwrap();
+    for f in ["INBOX", "Sent"] {
+        assert!(flags(f).contains("\\Seen"), "{f}: {}", flags(f));
+        assert!(flags(f).contains("\\Flagged"), "{f}: {}", flags(f));
+    }
+    writer
+        .modify(&id, &["UNREAD".into()], &["STARRED".into()])
+        .await
+        .unwrap();
+    for f in ["INBOX", "Sent"] {
+        assert!(!flags(f).contains("\\Seen"), "{f}: {}", flags(f));
+        assert!(!flags(f).contains("\\Flagged"), "{f}: {}", flags(f));
+    }
+    // Validated whole: STARRED is not applied next to a label IMAP lacks.
+    let err = writer
+        .modify(&id, &["STARRED".into(), "IMPORTANT".into()], &[])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, WriteError::Invalid(m) if m.contains("IMPORTANT")),
+        "{err}"
+    );
+    for f in ["INBOX", "Sent"] {
+        assert!(!flags(f).contains("\\Flagged"), "{f}: {}", flags(f));
+    }
+    // Trash takes both copies.
+    writer.trash(&id).await.unwrap();
+    assert_eq!(copies_tagged(&me, "Trash", "original").len(), 2);
+    assert!(copies_tagged(&me, "INBOX", "original").is_empty());
+    assert!(copies_tagged(&me, "Sent", "original").is_empty());
+    assert_bystanders(&me, &["INBOX", "Sent"]);
+}
+
+/// A LOOKALIKE (phase 2 F1: the same Message-ID and identity headers over
+/// another body) recorded under the id is never the copy acted on: archive
+/// leaves it in INBOX, a star goes on the original only, trash takes the
+/// original only, and the reads serve the original's bytes.
+#[tokio::test]
+#[ignore = "needs scripts/imap-dev.sh start"]
+async fn live_a_lookalike_is_never_the_copy_acted_on() {
+    let (writer, locs, me) = live_writer("lookalike");
+    let mid = "twin@dev.test";
+    let id = original_in(&writer, &me, mid, &["Junk"]).await;
+    // The lookalike lands in INBOX and a sighting records it under the id.
+    let fake = test_message(&me, mid, "lookalike");
+    let at = place(&writer.source, "INBOX", &fake, None).await;
+    locs.record_message_locations(1, &[(id.clone(), at)])
+        .unwrap();
+    assert_eq!(rows_of(&locs, &id).len(), 2);
+
+    let verified = writer.source.verified_locations(&id).await.unwrap();
+    assert_eq!(verified.len(), 1, "{verified:?}");
+    assert_eq!(verified[0].folder, "Junk");
+
+    let raw =
+        squelch_core::mail::gmail::decode_raw_b64url(&writer.fetch_raw(&id).await.unwrap().raw_b64)
+            .unwrap();
+    assert!(String::from_utf8_lossy(&raw).contains("the original body"));
+
+    // Archive takes the INBOX copy, and the id has none that is its own.
+    writer.archive(&id).await.unwrap();
+    assert_eq!(copies_tagged(&me, "INBOX", "lookalike").len(), 1);
+    assert!(copies_tagged(&me, "Archive", "lookalike").is_empty());
+
+    writer.modify(&id, &["STARRED".into()], &[]).await.unwrap();
+    assert!(
+        copies_tagged(&me, "Junk", "original")[0]
+            .flags
+            .contains("\\Flagged")
+    );
+    assert!(
+        !copies_tagged(&me, "INBOX", "lookalike")[0]
+            .flags
+            .contains("\\Flagged")
+    );
+
+    writer.trash(&id).await.unwrap();
+    assert_eq!(copies_tagged(&me, "Trash", "original").len(), 1);
+    assert!(copies_tagged(&me, "Trash", "lookalike").is_empty());
+    assert_eq!(copies_tagged(&me, "INBOX", "lookalike").len(), 1);
+}
+
+/// The lookups: parent headers from the verified copy, an exact Message-ID
+/// in Sent (a Message-ID CONTAINING it is not a hit), and a miss is `None`.
+#[tokio::test]
+#[ignore = "needs scripts/imap-dev.sh start"]
+async fn live_lookups_read_the_verified_copy_and_search_exactly() {
+    let (writer, _, me) = live_writer("lookups");
+    let id = original_in(&writer, &me, "parent@dev.test", &["Sent"]).await;
+    let h = writer.parent_headers(&id).await.unwrap();
+    assert_eq!(h.message_id.as_deref(), Some("<parent@dev.test>"));
+    assert_eq!(h.from.as_deref(), Some("Someone <someone@dev.test>"));
+    assert_eq!(h.to.as_deref(), Some(me.as_str()));
+
+    assert_eq!(
+        writer
+            .find_by_rfc822_msgid("<parent@dev.test>")
+            .await
+            .unwrap(),
+        Some(id)
+    );
+    let longer = test_message(&me, "xparent@dev.test.example", "other");
+    place(&writer.source, "Sent", &longer, None).await;
+    assert_eq!(
+        writer
+            .find_by_rfc822_msgid("<arent@dev.test>")
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        writer
+            .find_by_rfc822_msgid("<nowhere@dev.test>")
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(matches!(
+        writer
+            .modify("imap:unknown", &["STARRED".into()], &[])
+            .await,
+        Err(WriteError::Api { status: 404, .. })
+    ));
 }

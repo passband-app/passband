@@ -54,6 +54,10 @@ use crate::text::truncate_chars;
 /// response that is not one.
 const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
+/// How long an idle pooled connection is kept. Must stay under the service's
+/// header-read timeout (10 s), which is also its idle keep-alive close.
+const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Longest `Retry-After` honoured. The header is a floor on the sync engine's
 /// backoff (`sync::embed_backoff_delay`), and a floor nobody bounded is a
 /// service that can switch a fleet's embedding off for a day with one header.
@@ -92,7 +96,7 @@ impl Timeouts {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("embedding service: {what}")]
 pub struct RemoteEmbedError {
-    /// Worth retrying later without changing anything: 429, 503 and other 5xx,
+    /// Worth retrying later without changing anything: 408, 429, 503 and other 5xx,
     /// a timeout, a refused or failed connection. The sync engine backs off on
     /// these. Anything else (400, 401, a response in the wrong vector space) is
     /// PERMANENT: retrying it sends the same request to the same refusal.
@@ -207,6 +211,11 @@ impl RemoteEmbedder {
             // send it somewhere nobody configured, and an inherited
             // HTTP(S)_PROXY would route an in-cluster call through a proxy that
             // then holds every tenant's mail.
+            // Under the service's 10 s header-read timeout, which also closes
+            // idle keep-alive connections: a pooled socket kept longer than
+            // that is one the server has already hung up on, and the next
+            // request after a quiet spell would fail on it.
+            .pool_idle_timeout(POOL_IDLE_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .build()
@@ -416,7 +425,12 @@ fn status_error(resp: &Response) -> RemoteEmbedError {
         .and_then(|v| v.trim().parse::<u64>().ok())
         .map(|s| Duration::from_secs(s).min(MAX_RETRY_AFTER));
     let what = format!("HTTP {}", status.as_u16());
-    if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+    // 408 is the service's body-read deadline: a slow or stalled upload, not a
+    // malformed one, so it goes with the load statuses.
+    if status == StatusCode::TOO_MANY_REQUESTS
+        || status == StatusCode::REQUEST_TIMEOUT
+        || status.is_server_error()
+    {
         RemoteEmbedError::transient(what, retry_after)
     } else {
         RemoteEmbedError::permanent(what)
@@ -662,6 +676,7 @@ mod tests {
     fn statuses_are_classified_for_backoff() {
         for (status, transient) in [
             (429, true),
+            (408, true),
             (503, true),
             (500, true),
             (502, true),

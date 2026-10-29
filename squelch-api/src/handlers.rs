@@ -4795,12 +4795,19 @@ async fn account_provider(state: &ApiState) -> Result<MailProvider, ApiError> {
     Ok(*state.mail_provider.get_or_init(|| provider))
 }
 
+/// What an IMAP account's write attempt is told, in phase 2.
+pub(crate) const IMAP_READ_ONLY: &str =
+    "this is an IMAP account: sending mail and mail actions are not supported for IMAP yet";
+
 /// Read only in phase 2 (issue #575): no SMTP writer yet, so the door answers
-/// 501 for an IMAP account exactly as for an unknown provider.
+/// 501 for an IMAP account, as for an unknown provider (and audited the same,
+/// `rejected:unsupported_provider`). Its own text, though: "upgrade squelchd"
+/// would send an IMAP user after a fix that does not exist yet.
 fn imap_has_no_writer() -> ApiError {
-    writer_unavailable(CoreError::InvalidInput(
-        "mail provider \"imap\" has no write path in this build".into(),
-    ))
+    eprintln!(
+        "squelch-api: no writer for this account: mail provider \"imap\" has no write path in this build"
+    );
+    ApiError::new(StatusCode::NOT_IMPLEMENTED, IMAP_READ_ONLY)
 }
 
 /// Why the account has no writer.
@@ -7700,6 +7707,14 @@ mod write_client_tests {
             assert_eq!(err.status, StatusCode::NOT_IMPLEMENTED, "{provider}");
             assert!(!err.message.contains("squelchd auth"), "{}", err.message);
             assert_eq!(write_refusal(&err), "rejected:unsupported_provider");
+            // IMAP is told IMAP writes are not supported yet; only a provider
+            // this build does not know is told to upgrade.
+            if provider == "imap" {
+                assert_eq!(err.message, IMAP_READ_ONLY);
+                assert!(!err.message.contains("upgrade"), "{}", err.message);
+            } else {
+                assert!(err.message.contains("upgrade squelchd"), "{}", err.message);
+            }
         }
     }
 

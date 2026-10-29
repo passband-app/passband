@@ -1582,6 +1582,127 @@ async fn live_the_unread_count_is_fresh_when_inbox_is_open() {
     let _ = other.logout().await;
 }
 
+/// What the engine does on `ChangesError::Expired`: list INBOX and Sent,
+/// then take the cursor.
+async fn catch_up(src: &ImapSource) -> SyncCursor {
+    for folder in [Folder::Inbox, Folder::Sent] {
+        src.list(
+            Listing::Folder {
+                folder,
+                within_days: None,
+            },
+            None,
+            Urgency::Window,
+        )
+        .await
+        .unwrap();
+    }
+    src.current_cursor().await.expect("the catch-up's cursor")
+}
+
+/// One poll tick from `cursor`, the way the engine runs it: INBOX then Sent.
+/// `None` is a tick that went to a catch-up.
+/// A walk that broke its session (Dovecot hangs up a session whose open
+/// folder is deleted or renamed) is tried once more, on a new login, the way
+/// the engine's next tick would.
+async fn tick(src: &ImapSource, cursor: &SyncCursor) -> Option<(Vec<String>, SyncCursor)> {
+    async fn walk(src: &ImapSource, cursor: &SyncCursor, f: Folder) -> Option<Changes> {
+        for attempt in 0..2 {
+            match src.changes(cursor, f).await {
+                Ok(w) => return Some(w),
+                Err(ChangesError::Expired) => return None,
+                Err(ChangesError::Other(e)) if attempt == 0 && is_session_broken(&e) => {
+                    eprintln!("{f:?} walk broke its session ({e}); next tick");
+                }
+                Err(ChangesError::Other(e)) => panic!("{f:?} walk: {e}"),
+            }
+        }
+        unreachable!()
+    }
+    let inbox = walk(src, cursor, Folder::Inbox).await?;
+    let sent = walk(src, cursor, Folder::Sent).await?;
+    let mut ids = inbox.ids.clone();
+    ids.extend(sent.ids.clone());
+    Some((ids, src.merge_cursors(cursor, &inbox.cursor, &sent.cursor)))
+}
+
+/// Poll until the ticks stop asking for a catch-up; panics if they never do.
+async fn converge(src: &ImapSource, mut cursor: SyncCursor) -> SyncCursor {
+    for _ in 0..3 {
+        match tick(src, &cursor).await {
+            Some((_, next)) => return next,
+            None => cursor = catch_up(src).await,
+        }
+    }
+    panic!("still expiring after three catch-ups: the same failure forever");
+}
+
+/// CORRECTNESS H2: a watched folder deleted or renamed in another client.
+/// The session's roles used to be resolved once per login, so the catch-up
+/// the expiry sent the engine to failed ("a watched folder vanished
+/// mid-sync") on the same session, the same way, forever. Now the roles are
+/// listed again, the gone folder drops out of (or is re-resolved in) the
+/// cursor, polling resumes, and INBOX mail still arrives.
+///
+/// The bed's folders are `auto = subscribe`, so Dovecot recreates Sent and
+/// Junk (with a new UIDVALIDITY) the moment they are next touched: this is
+/// the "re-resolved" leg. A folder that stays gone, as on a server without
+/// auto-created folders, is [`a_watched_folder_that_stays_gone_drops_out_of_the_cursor`].
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_a_deleted_or_renamed_watched_folder_does_not_wedge_sync() {
+    let user = fresh_user("vanish");
+    let mut other = other_client(&user).await;
+    append(&mut other, "Sent", &mail(Some("s1@x.org"), "s1"), None).await;
+    append(&mut other, "Junk", &mail(Some("j1@x.org"), "j1"), None).await;
+    let (src, _) = live(&user);
+    let cursor = catch_up(&src).await;
+    let _ = other.logout().await;
+
+    // Sent deleted.
+    doveadm(&["mailbox", "delete", "-u", &user, "Sent"]);
+    let cursor = converge(&src, cursor).await;
+    let mut other = other_client(&user).await;
+    append(
+        &mut other,
+        INBOX,
+        &mail(Some("after-sent@x.org"), "a"),
+        None,
+    )
+    .await;
+    let (ids, _) = tick(&src, &cursor).await.expect("no further catch-up");
+    assert_eq!(ids, vec![stable_id_for_message_id("after-sent@x.org")]);
+
+    // Junk renamed: the catch-up's cursor must not fail on the old name.
+    doveadm(&["mailbox", "rename", "-u", &user, "Junk", "OldJunk"]);
+    let cursor = src
+        .current_cursor()
+        .await
+        .expect("no vanished-folder error");
+    let decoded = ImapCursor::decode(&cursor).unwrap();
+    assert!(
+        decoded
+            .folders
+            .get("spam")
+            .is_none_or(|p| p.mailbox != "Junk" || p.uidvalidity != 0),
+        "{decoded:?}"
+    );
+    let cursor = converge(&src, cursor).await;
+    append(
+        &mut other,
+        INBOX,
+        &mail(Some("after-junk@x.org"), "b"),
+        None,
+    )
+    .await;
+    let (ids, cursor) = tick(&src, &cursor).await.expect("no further catch-up");
+    assert_eq!(ids, vec![stable_id_for_message_id("after-junk@x.org")]);
+    // Settled: the next tick finds nothing and expires nothing.
+    let (ids, _) = tick(&src, &cursor).await.expect("still no catch-up");
+    assert!(ids.is_empty());
+    let _ = other.logout().await;
+}
+
 fn doveadm(args: &[&str]) {
     let out = std::process::Command::new("docker")
         .args(["exec", "squelch-imap-dev", "doveadm"])
@@ -2509,5 +2630,73 @@ async fn refused_idle_logins_back_off_and_count_once() {
     src.wait_for_change(None, Duration::from_secs(2)).await;
     assert!(counts.connections.load(Ordering::Relaxed) <= tries + 1);
     assert_eq!(src.refusals.auth.load(Ordering::Relaxed), 1);
+    server.abort();
+}
+
+/// CORRECTNESS H2, the leg the bed cannot show (its folders are recreated
+/// on access): Sent is deleted and STAYS gone, so STATUS and EXAMINE answer
+/// NO and LIST no longer has it. The expiry's catch-up used to fail on the
+/// session's cached roles ("a watched folder vanished mid-sync"), forever.
+#[tokio::test]
+async fn a_watched_folder_that_stays_gone_drops_out_of_the_cursor() {
+    use std::sync::atomic::AtomicBool;
+    let gone = Arc::new(AtomicBool::new(false));
+    let lists = Arc::new(AtomicU64::new(0));
+    let (g, l) = (gone.clone(), lists.clone());
+    let (port, _, server) = scripted_server(true, move |tag, cmd| {
+        let gone = g.load(Ordering::Relaxed);
+        let sent = cmd.contains("\"SENT\"");
+        let reply = if cmd.starts_with("LIST") {
+            l.fetch_add(1, Ordering::Relaxed);
+            let mut r = "* LIST () \"/\" INBOX\r\n".to_string();
+            if !gone {
+                r.push_str("* LIST (\\Sent) \"/\" Sent\r\n");
+            }
+            format!("{r}{tag} OK done\r\n")
+        } else if cmd.starts_with("LOGIN") {
+            format!("{tag} OK logged in\r\n")
+        } else if cmd.starts_with("CAPABILITY") {
+            format!("* CAPABILITY IMAP4rev1\r\n{tag} OK done\r\n")
+        } else if (cmd.starts_with("STATUS") || cmd.starts_with("EXAMINE")) && sent && gone {
+            format!("{tag} NO [NONEXISTENT] Mailbox doesn't exist: Sent\r\n")
+        } else if cmd.starts_with("STATUS") {
+            let (name, v) = if sent { ("Sent", 5) } else { ("INBOX", 7) };
+            format!("* STATUS {name} (UIDVALIDITY {v} UIDNEXT 1)\r\n{tag} OK done\r\n")
+        } else if cmd.starts_with("EXAMINE") {
+            let v = if sent { 5 } else { 7 };
+            format!(
+                "* 0 EXISTS\r\n* OK [UIDVALIDITY {v}] ok\r\n* OK [UIDNEXT 1] ok\r\n\
+                 {tag} OK [READ-ONLY] done\r\n"
+            )
+        } else if cmd.starts_with("UID SEARCH") {
+            format!("* SEARCH\r\n{tag} OK done\r\n")
+        } else {
+            format!("{tag} OK done\r\n")
+        };
+        Say::Reply(reply)
+    })
+    .await;
+    let src = scripted_source(port, "pw");
+    let cursor = catch_up(&src).await;
+    assert!(
+        ImapCursor::decode(&cursor)
+            .unwrap()
+            .folders
+            .contains_key("sent")
+    );
+
+    gone.store(true, Ordering::Relaxed);
+    let cursor = converge(&src, cursor).await;
+    let decoded = ImapCursor::decode(&cursor).unwrap();
+    assert!(!decoded.folders.contains_key("sent"), "{decoded:?}");
+    assert!(decoded.folders.contains_key("inbox"));
+    // Settled: polling goes on, on the same session, without re-listing
+    // folders every tick.
+    let lists_then = lists.load(Ordering::Relaxed);
+    for _ in 0..3 {
+        tick(&src, &cursor).await.expect("no further catch-up");
+    }
+    assert_eq!(lists.load(Ordering::Relaxed), lists_then);
+    assert_eq!(src.connects(), 1);
     server.abort();
 }

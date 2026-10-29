@@ -1117,6 +1117,33 @@ impl Conn {
         Ok(())
     }
 
+    /// List the folders again and take the roles from that (correctness H2):
+    /// a role folder the user deleted or renamed in another client answers
+    /// `NO`, and the roles this session resolved at login would keep naming
+    /// it for as long as the session lives.
+    async fn refresh_roles(&mut self) -> Result<()> {
+        self.roles = list_roles(&mut self.session).await?;
+        Ok(())
+    }
+
+    /// The folder a role is on now and its position, or `None` if the role
+    /// has no folder. A role folder that answers `NO` sends the roles to be
+    /// listed again and the role is asked once more, so a folder renamed or
+    /// recreated is followed and one that is gone reads as no folder.
+    async fn role_status(&mut self, folder: Folder) -> Result<Option<(String, FolderPos)>> {
+        let Some(name) = self.roles.folder(folder).map(str::to_string) else {
+            return Ok(None);
+        };
+        if let Some(pos) = self.status(&name).await? {
+            return Ok(Some((name, pos)));
+        }
+        self.refresh_roles().await?;
+        let Some(name) = self.roles.folder(folder).map(str::to_string) else {
+            return Ok(None);
+        };
+        Ok(self.status(&name).await?.map(|pos| (name, pos)))
+    }
+
     /// One folder's position as `STATUS` reports it now, or `None` if the
     /// server refuses it (the folder is gone).
     async fn status(&mut self, folder: &str) -> Result<Option<FolderPos>> {
@@ -2205,15 +2232,16 @@ impl MailSource for ImapSource {
             } => {
                 self.with_conn(|c| {
                     Box::pin(async move {
-                        let Some(name) = c.roles.folder(folder).map(str::to_string) else {
-                            // No such folder on this server (no Junk, say): an
-                            // empty listing, the same as an empty folder.
-                            return Ok((Vec::new(), Some((folder, None))));
-                        };
                         // THE SNAPSHOT FIRST (Amendment G): anything that lands
                         // after it is above its `last_uid`, so the next walk
                         // finds it whether or not this search does.
-                        let snapshot = c.status(&name).await?;
+                        let Some((name, snapshot)) = c.role_status(folder).await? else {
+                            // No such folder on this server (no Junk, say, or
+                            // a Sent folder deleted elsewhere): an empty
+                            // listing, the same as an empty folder.
+                            return Ok((Vec::new(), Some((folder, None))));
+                        };
+                        let snapshot = Some(snapshot);
                         let Some(validity) = c.examine(&name).await? else {
                             return Ok((Vec::new(), Some((folder, None))));
                         };
@@ -2314,20 +2342,22 @@ impl MailSource for ImapSource {
         let folders = self
             .with_conn(|c| {
                 Box::pin(async move {
-                    let watched: Vec<(Folder, String)> = c
-                        .roles
-                        .watched()
-                        .into_iter()
-                        .map(|(f, n)| (f, n.to_string()))
-                        .collect();
                     let mut folders = BTreeMap::new();
-                    for (folder, name) in watched {
+                    for folder in WATCHED {
                         let key = role_key(folder);
-                        let pos = match snaps.get(key) {
-                            Some(snap) if snap.mailbox == name => snap.clone(),
-                            _ => c.status(&name).await?.ok_or_else(|| {
-                                net_err("status", "a watched folder vanished mid-sync")
-                            })?,
+                        let snap = snaps
+                            .get(key)
+                            .filter(|snap| c.roles.folder(folder) == Some(snap.mailbox.as_str()));
+                        let pos = match snap {
+                            Some(snap) => snap.clone(),
+                            // A role folder gone since (deleted or renamed in
+                            // another client, correctness H2) is re-resolved,
+                            // or left out: `changes` reads a role with no
+                            // entry and no folder as nothing to walk.
+                            None => match c.role_status(folder).await? {
+                                Some((_, pos)) => pos,
+                                None => continue,
+                            },
                         };
                         folders.insert(key.to_string(), pos);
                     }
@@ -2375,6 +2405,10 @@ impl MailSource for ImapSource {
                         _ => return Ok(Walk::Expired),
                     };
                     let Some(now) = c.status(&name).await? else {
+                        // Gone (correctness H2): list the roles again, so the
+                        // catch-up this sends the engine to sees the folders
+                        // as they are now, not as they were at login.
+                        c.refresh_roles().await?;
                         return Ok(Walk::Expired);
                     };
                     if now.uidvalidity != pos.uidvalidity {

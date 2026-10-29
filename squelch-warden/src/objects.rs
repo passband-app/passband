@@ -4091,15 +4091,15 @@ mod tests {
         let ctx = embed_pod()
             .security_context
             .expect("a pod security context");
-        assert_eq!(ctx.run_as_user, Some(10002));
-        assert_eq!(ctx.run_as_group, Some(10002));
-        assert_eq!(ctx.fs_group, Some(10002));
+        assert_eq!(ctx.run_as_user, Some(10003));
+        assert_eq!(ctx.run_as_group, Some(10003));
+        assert_eq!(ctx.fs_group, Some(10003));
         assert_ne!(ctx.run_as_user, Some(crate::config::DEFAULT_RUN_AS));
         let user = DOCKERFILE
             .lines()
             .find_map(|l| l.strip_prefix("USER "))
             .expect("Dockerfile.embed sets USER");
-        assert_eq!(user.trim(), "10002:10002");
+        assert_eq!(user.trim(), "10003:10003");
     }
 
     /// The tenant side and `65-embed.yaml` are one contract, read from both

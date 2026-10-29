@@ -91,9 +91,10 @@ the code on the branch; the file named is where to look.
   panic message, and a message built from a request (an index, a slice, a
   failed parse) could carry text. A test drives a panic with a canary in it
   and fails if the canary reaches the line the hook writes.
-- **The process runs as uid 10002**, not the tenants' 10001, in both
-  `Dockerfile.embed` and `65-embed.yaml`, so where user namespaces are off a
-  tenant daemon and the embedder are still different users on the node.
+- **The process runs as uid 10003**, not the tenants' 10001 or the warden's
+  10002, in both `Dockerfile.embed` and `65-embed.yaml`, so where user
+  namespaces are off a tenant daemon and the embedder are still different
+  users on the node.
 - **Timeouts on the server are header read and body read, 10 s each, and
   nothing on the write side.** hyper's server has no write timeout to set. A
   caller that stops reading its response holds a connection task; it cannot

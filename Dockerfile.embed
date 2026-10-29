@@ -145,7 +145,7 @@ ENV SQUELCH_EMBED_MODEL_DIR=/models \
 # with any tenant pod. 65-embed.yaml runs it as the same uid, and a warden test
 # keeps the two equal. Numeric so runAsNonRoot can verify it without an
 # /etc/passwd entry.
-USER 10002:10002
+USER 10003:10003
 
 # 8850 is the work (POST /embed), 9464 is /healthz and /metrics.
 EXPOSE 8850 9464

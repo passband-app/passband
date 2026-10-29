@@ -845,9 +845,9 @@ seals through the agent pipeline with the legacy column still `normal`),
 - **Caches nothing, and dedups nothing.** A content-keyed shortcut is a
   cross-tenant oracle on latency: tenant B would learn that tenant A received a
   byte-identical message.
-- **Runs as its own uid.** 10002, not the tenants' 10001, so where user
-  namespaces are off a tenant process and the embedder are still different
-  users on the node.
+- **Runs as its own uid.** 10003, not the tenants' 10001 or the warden's
+  10002, so where user namespaces are off a tenant process and the embedder
+  are still different users on the node.
 - **Is never told a tenant's name.** No tenant name or account id is in the
   path, a header or the body (`EmbedRequest` is `deny_unknown_fields`, one
   field). The bearer token is one fleet-wide value, deliberately not per tenant.

@@ -24,6 +24,7 @@ fn roles() -> FolderRoles {
         archive: Some("Archive".into()),
         all: None,
         selectable: s(&["INBOX", "Sent", "Junk", "Trash", "Archive"]),
+        delimiter: None,
     }
 }
 
@@ -133,6 +134,8 @@ struct Scripted {
     next_uid: u32,
     /// A command (its first words) the server answers NO to.
     fail: Option<&'static str>,
+    /// UIDs no longer in their folder (`UID SEARCH UID` finds nothing).
+    gone: Vec<u32>,
     log: Vec<String>,
 }
 
@@ -147,6 +150,7 @@ impl Scripted {
             relisted: roles(),
             next_uid: 100,
             fail: None,
+            gone: Vec::new(),
             log: Vec::new(),
         }
     }
@@ -219,11 +223,15 @@ impl WriteMailbox for Scripted {
     async fn uid_expunge(&mut self, uid: u32) -> Result<(), WriteError> {
         self.say(format!("UID EXPUNGE {uid}"))
     }
-    async fn create_archive(&mut self, special_use: bool) -> Result<(), WriteError> {
+    async fn uid_present(&mut self, uid: u32) -> Result<bool, WriteError> {
+        self.say(format!("UID SEARCH UID {uid}"))?;
+        Ok(!self.gone.contains(&uid))
+    }
+    async fn create_archive(&mut self, name: &str, special_use: bool) -> Result<(), WriteError> {
         self.say(if special_use {
-            "CREATE Archive (USE (\\Archive))".into()
+            format!("CREATE {name} (USE (\\Archive))")
         } else {
-            "CREATE Archive".into()
+            format!("CREATE {name}")
         })
     }
     async fn list_roles(&mut self) -> Result<FolderRoles, WriteError> {
@@ -489,6 +497,219 @@ async fn all_mail_is_the_archive_where_there_is_no_archive() {
         mb.log,
         s(&["SELECT INBOX", "UID MOVE 5 All Mail", "UNSELECT"])
     );
+}
+
+/// A VIRTUAL \All (Dovecot's, for search) refuses the save: not Gmail's,
+/// so Archive is CREATEd and the INBOX copy moves there instead (correctness
+/// review F3). The next archive's roles have the folder, which wins over
+/// \All: \All is not tried again.
+#[tokio::test]
+async fn an_all_mail_that_refuses_the_move_falls_back_to_a_created_archive() {
+    let mut mb = Scripted::new(ALL);
+    mb.fail = Some("UID MOVE 5 All Mail");
+    mb.relisted.all = Some("All Mail".into());
+    let mut r0 = roles();
+    r0.archive = None;
+    r0.all = Some("All Mail".into());
+    let (moved, r) = run(
+        &mut mb,
+        &mut r0,
+        &[loc("INBOX", 5)],
+        LabelPlan::moving(Move::Archive),
+    )
+    .await;
+    r.unwrap();
+    assert_eq!(
+        mb.log,
+        s(&[
+            "SELECT INBOX",
+            "UID MOVE 5 All Mail",
+            "UNSELECT",
+            "CREATE Archive (USE (\\Archive))",
+            "LIST",
+            "SELECT INBOX",
+            "UID MOVE 5 Archive",
+            "UNSELECT",
+        ])
+    );
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved[0].1.as_ref().unwrap().folder, "Archive");
+    assert_eq!(r0.archive.as_deref(), Some("Archive"));
+    // The next one goes straight to Archive.
+    mb.log.clear();
+    mb.fail = None;
+    let (_, r) = run(
+        &mut mb,
+        &mut r0,
+        &[loc("INBOX", 6)],
+        LabelPlan::moving(Move::Archive),
+    )
+    .await;
+    r.unwrap();
+    assert_eq!(
+        mb.log,
+        s(&["SELECT INBOX", "UID MOVE 6 Archive", "UNSELECT"])
+    );
+
+    // COPY + UID EXPUNGE servers the same: a refused COPY flags nothing.
+    let mut mb = Scripted::new(COPY_ONLY);
+    mb.fail = Some("UID COPY 5 All Mail");
+    let mut r0 = roles();
+    r0.archive = None;
+    r0.all = Some("All Mail".into());
+    let (_, r) = run(
+        &mut mb,
+        &mut r0,
+        &[loc("INBOX", 5)],
+        LabelPlan::moving(Move::Archive),
+    )
+    .await;
+    r.unwrap();
+    let deleted_at = mb
+        .log
+        .iter()
+        .position(|c| c.contains("Deleted"))
+        .expect("flagged after the copy that worked");
+    let copy_at = mb
+        .log
+        .iter()
+        .position(|c| c == "UID COPY 5 Archive")
+        .expect("copied to Archive");
+    assert!(copy_at < deleted_at, "{:?}", mb.log);
+    assert_eq!(
+        mb.log.iter().filter(|c| c.contains("Deleted")).count(),
+        1,
+        "{:?}",
+        mb.log
+    );
+}
+
+/// A move into \All that fails any other way (the SELECT, a broken
+/// stream) is not a refusal: nothing is created, the error stands.
+#[tokio::test]
+async fn an_all_mail_failure_that_is_not_a_refusal_creates_nothing() {
+    let mut mb = Scripted::new(ALL);
+    mb.fail = Some("SELECT INBOX");
+    let mut r0 = roles();
+    r0.archive = None;
+    r0.all = Some("All Mail".into());
+    let (_, r) = run(
+        &mut mb,
+        &mut r0,
+        &[loc("INBOX", 5)],
+        LabelPlan::moving(Move::Archive),
+    )
+    .await;
+    assert!(r.is_err());
+    assert!(
+        !mb.log.iter().any(|c| c.starts_with("CREATE")),
+        "{:?}",
+        mb.log
+    );
+}
+
+/// AN INBOX.-NAMESPACE SERVER (Courier, Cyrus): the archive is created
+/// under `INBOX.`, the prefix LIST shows every folder has.
+#[tokio::test]
+async fn an_inbox_namespace_server_creates_inbox_dot_archive() {
+    let ns = FolderRoles {
+        sent: Some("INBOX.Sent".into()),
+        trash: Some("INBOX.Trash".into()),
+        selectable: s(&["INBOX", "INBOX.Sent", "INBOX.Trash"]),
+        delimiter: Some(".".into()),
+        ..FolderRoles::default()
+    };
+    let mut mb = Scripted::new(COPY_ONLY);
+    mb.validity.insert("INBOX.Archive".into(), 7);
+    mb.relisted = FolderRoles {
+        archive: Some("INBOX.Archive".into()),
+        ..ns.clone()
+    };
+    let mut r0 = ns.clone();
+    let (_, r) = run(
+        &mut mb,
+        &mut r0,
+        &[loc("INBOX", 5)],
+        LabelPlan::moving(Move::Archive),
+    )
+    .await;
+    r.unwrap();
+    assert_eq!(mb.log[0], "CREATE INBOX.Archive");
+    assert!(mb.log.contains(&"UID COPY 5 INBOX.Archive".to_string()));
+
+    // Nothing but INBOX to infer from: the top-level CREATE is refused, and
+    // the one under INBOX (by LIST's delimiter) is made.
+    let mut mb = Scripted::new(COPY_ONLY);
+    mb.fail = Some("CREATE Archive");
+    mb.relisted = FolderRoles {
+        archive: Some("INBOX.Archive".into()),
+        ..ns.clone()
+    };
+    let mut r0 = FolderRoles {
+        selectable: s(&["INBOX"]),
+        delimiter: Some(".".into()),
+        ..FolderRoles::default()
+    };
+    let (_, r) = run(
+        &mut mb,
+        &mut r0,
+        &[loc("INBOX", 5)],
+        LabelPlan::moving(Move::Archive),
+    )
+    .await;
+    r.unwrap();
+    assert_eq!(
+        &mb.log[..2],
+        &s(&["CREATE Archive", "CREATE INBOX.Archive"])[..]
+    );
+}
+
+/// TRASHING A COPY THAT IS ALREADY GONE is done, not a 502: on a \All
+/// server the All Mail copy goes with the INBOX one, and a server may
+/// answer NO to a MOVE of the UID it no longer has. A refusal of a UID that
+/// is still there is still the error.
+#[tokio::test]
+async fn trashing_a_copy_that_is_already_gone_succeeds() {
+    let mut mb = Scripted::new(ALL);
+    mb.fail = Some("UID MOVE 6 Trash");
+    mb.gone = vec![6];
+    let mut r0 = roles();
+    r0.all = Some("All Mail".into());
+    let (moved, r) = run(
+        &mut mb,
+        &mut r0,
+        &[loc("INBOX", 5), loc("All Mail", 6)],
+        LabelPlan::moving(Move::Trash),
+    )
+    .await;
+    r.unwrap();
+    assert_eq!(moved.len(), 2, "both copies' old places are forgotten");
+    assert!(moved[1].1.is_none());
+    assert!(mb.log.contains(&"UID SEARCH UID 6".to_string()));
+
+    let mut mb = Scripted::new(ALL);
+    mb.fail = Some("UID MOVE 6 Trash");
+    let (_, r) = run(
+        &mut mb,
+        &mut r0,
+        &[loc("All Mail", 6)],
+        LabelPlan::moving(Move::Trash),
+    )
+    .await;
+    assert!(r.is_err(), "still there: the refusal stands");
+    // An archive never reads a vanished copy as done.
+    let mut mb = Scripted::new(ALL);
+    mb.fail = Some("UID MOVE 5 Archive");
+    mb.gone = vec![5];
+    let (_, r) = run(
+        &mut mb,
+        &mut roles(),
+        &[loc("INBOX", 5)],
+        LabelPlan::moving(Move::Archive),
+    )
+    .await;
+    assert!(r.is_err());
+    assert!(!mb.log.iter().any(|c| c.starts_with("UID SEARCH")));
 }
 
 /// FLAGS ON EVERY VERIFIED COPY, then the move, which takes only the copy

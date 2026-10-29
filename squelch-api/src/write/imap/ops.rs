@@ -212,8 +212,10 @@ pub(crate) trait WriteMailbox: Send {
     async fn uid_copy(&mut self, uid: u32, target: &str) -> Result<NewPlace, WriteError>;
     /// `UID EXPUNGE uid`: that one UID, and only when it is `\Deleted`.
     async fn uid_expunge(&mut self, uid: u32) -> Result<(), WriteError>;
-    /// `CREATE "Archive"`, with `USE (\Archive)` when `special_use`.
-    async fn create_archive(&mut self, special_use: bool) -> Result<(), WriteError>;
+    /// Is `uid` still in the selected folder (`UID SEARCH UID uid`)?
+    async fn uid_present(&mut self, uid: u32) -> Result<bool, WriteError>;
+    /// `CREATE name`, with `USE (\Archive)` when `special_use`.
+    async fn create_archive(&mut self, name: &str, special_use: bool) -> Result<(), WriteError>;
     /// The folder roles, listed afresh.
     async fn list_roles(&mut self) -> Result<FolderRoles, WriteError>;
 }
@@ -265,33 +267,78 @@ pub(crate) async fn apply_flags(
     Ok(())
 }
 
+/// Why a [`move_one`] did not go through.
+#[derive(Debug)]
+pub(crate) enum MoveFail {
+    /// The server answered the MOVE (or the COPY) itself `NO`/`BAD`: nothing
+    /// was done, so another target may be tried.
+    Refused(WriteError),
+    /// Anything else (the SELECT, the flagging after a COPY, a broken
+    /// stream): what happened is not known, so nothing more is tried.
+    Other(WriteError),
+}
+
+impl From<MoveFail> for WriteError {
+    fn from(f: MoveFail) -> Self {
+        match f {
+            MoveFail::Refused(e) | MoveFail::Other(e) => e,
+        }
+    }
+}
+
+/// The server's `NO`/`BAD` to the move command itself, from what the
+/// mailbox calls it ([`imap_failed`]'s 502).
+fn refused_or_other(e: WriteError) -> MoveFail {
+    match e {
+        WriteError::Api { status: 502, .. } => MoveFail::Refused(e),
+        e => MoveFail::Other(e),
+    }
+}
+
 /// MOVE ONE COPY to `target` by `strategy`, and say where it landed when the
 /// server told (`COPYUID`). The UIDVALIDITY is checked at `SELECT`: the UID
 /// that was verified is the UID that moves.
+///
+/// `gone_ok` (trash): a refused move of a UID that is no longer in its
+/// folder is the move already done, by someone else or by the server (a
+/// Gmail-style `\All` copy goes when its INBOX copy is trashed), not a 502.
 pub(crate) async fn move_one(
     mb: &mut dyn WriteMailbox,
     loc: &MessageLocation,
     target: &str,
     strategy: MoveStrategy,
-) -> Result<Option<MessageLocation>, WriteError> {
-    if mb.select(&loc.folder).await? != Some(loc.uidvalidity) {
+    gone_ok: bool,
+) -> Result<Option<MessageLocation>, MoveFail> {
+    if mb.select(&loc.folder).await.map_err(MoveFail::Other)? != Some(loc.uidvalidity) {
         let _ = mb.leave(&loc.folder).await;
-        return Err(moved_under_us());
+        return Err(MoveFail::Other(moved_under_us()));
     }
     let moved = async {
         match strategy {
-            MoveStrategy::Move => mb.uid_move(loc.uid, target).await,
+            MoveStrategy::Move => mb.uid_move(loc.uid, target).await.map_err(refused_or_other),
             MoveStrategy::CopyThenUidExpunge => {
-                let place = mb.uid_copy(loc.uid, target).await?;
+                let place = mb
+                    .uid_copy(loc.uid, target)
+                    .await
+                    .map_err(refused_or_other)?;
                 // The copy is made: from here a failure leaves the message in
                 // both folders, never in neither.
-                mb.store(loc.uid, true, &[DELETED]).await?;
-                mb.uid_expunge(loc.uid).await?;
+                mb.store(loc.uid, true, &[DELETED])
+                    .await
+                    .map_err(MoveFail::Other)?;
+                mb.uid_expunge(loc.uid).await.map_err(MoveFail::Other)?;
                 Ok(place)
             }
         }
     }
     .await;
+    let moved = match moved {
+        Err(MoveFail::Refused(e)) if gone_ok => match mb.uid_present(loc.uid).await {
+            Ok(false) => Ok(None),
+            _ => Err(MoveFail::Refused(e)),
+        },
+        other => other,
+    };
     // Out of the folder whatever happened. A failure to leave after the move
     // went through does not undo it: the session is dropped afterwards.
     let left = mb.leave(&loc.folder).await;
@@ -307,11 +354,12 @@ pub(crate) async fn move_one(
     }))
 }
 
-/// THE ARCHIVE FOLDER (contract §3): `\Archive`, else `\All`, else a folder
-/// named `Archive` CREATEd once (with `USE (\Archive)` where the server
-/// takes it), the roles listed again after. A CREATE the server refuses
-/// (it raced another client, say) still re-lists: an `Archive` that exists
-/// is used.
+/// THE ARCHIVE FOLDER (contract §3): `\Archive`, else `\All`, else one
+/// created ([`create_archive_folder`]). A `\All` that refuses the move (a
+/// virtual all-mail view, which Dovecot offers for search and never takes
+/// a save into) is not Gmail's: [`run_move`] then creates the folder and
+/// moves there. That is remembered by the server, not by Passband: the next
+/// write's LIST has an archive folder, which wins over `\All`.
 pub(crate) async fn archive_folder(
     mb: &mut dyn WriteMailbox,
     roles: &mut FolderRoles,
@@ -319,7 +367,32 @@ pub(crate) async fn archive_folder(
     if let Some(a) = roles.archive.clone().or_else(|| roles.all.clone()) {
         return Ok(a);
     }
-    let created = mb.create_archive(mb.caps().create_special_use).await;
+    create_archive_folder(mb, roles).await
+}
+
+/// A folder named `Archive` CREATEd once (with `USE (\Archive)` where the
+/// server takes it), under the personal namespace's prefix where every
+/// folder is under INBOX (`INBOX.Archive`; [`FolderRoles::create_prefix`]),
+/// and the roles listed again after. A top-level CREATE refused on a server
+/// with a delimiter is tried once more under INBOX (an INBOX.-namespace
+/// server with nothing but INBOX yet). A CREATE the server refuses (it raced
+/// another client, say) still re-lists: an `Archive` that exists is used.
+pub(crate) async fn create_archive_folder(
+    mb: &mut dyn WriteMailbox,
+    roles: &mut FolderRoles,
+) -> Result<String, WriteError> {
+    let special_use = mb.caps().create_special_use;
+    let prefix = roles.create_prefix();
+    let first = format!("{}{ARCHIVE_NAME}", prefix.as_deref().unwrap_or(""));
+    let mut created = mb.create_archive(&first, special_use).await;
+    if created.is_err()
+        && prefix.is_none()
+        && let Some(d) = roles.delimiter.clone().filter(|d| !d.is_empty())
+    {
+        created = mb
+            .create_archive(&format!("INBOX{d}{ARCHIVE_NAME}"), special_use)
+            .await;
+    }
     *roles = mb.list_roles().await?;
     match roles.archive.clone() {
         Some(a) => Ok(a),
@@ -439,20 +512,39 @@ pub(crate) async fn run_move(
     Result<(), WriteError>,
 ) {
     let mut done = Vec::new();
-    let target = match plan.target {
-        Target::Folder(f) => f,
+    // `into_all`: the archive is the all-mail view, which may refuse it.
+    let (mut target, mut into_all) = match plan.target {
+        Target::Folder(f) => (f, false),
         Target::Archive => match archive_folder(mb, roles).await {
-            Ok(f) => f,
+            Ok(f) => {
+                let into_all = roles.archive.as_deref() != Some(f.as_str());
+                (f, into_all)
+            }
             Err(e) => return (done, Err(e)),
         },
     };
+    let gone_ok = roles.trash.as_deref() == Some(target.as_str());
     for loc in plan.sources {
         if loc.folder == target {
             continue;
         }
-        match move_one(mb, &loc, &target, strategy).await {
+        let mut moved = move_one(mb, &loc, &target, strategy, gone_ok).await;
+        if into_all && matches!(moved, Err(MoveFail::Refused(_))) {
+            // NOT GMAIL'S \All (correctness review F3): it took nothing,
+            // so the archive is a folder of its own, made now.
+            into_all = false;
+            match create_archive_folder(mb, roles).await {
+                Ok(f) if roles.all.as_deref() != Some(f.as_str()) => {
+                    target = f;
+                    moved = move_one(mb, &loc, &target, strategy, gone_ok).await;
+                }
+                Ok(_) => {}
+                Err(e) => return (done, Err(e)),
+            }
+        }
+        match moved {
             Ok(to) => done.push((loc, to)),
-            Err(e) => return (done, Err(e)),
+            Err(e) => return (done, Err(e.into())),
         }
     }
     (done, Ok(()))
@@ -470,6 +562,13 @@ fn imap_failed(what: &str) -> WriteError {
         status: 502,
         message: format!("the mail server refused {what}"),
     }
+}
+
+/// The connection broke while a command's answer was read.
+fn imap_broken(what: &str) -> WriteError {
+    WriteError::Transport(format!(
+        "the connection to the mail server broke during {what}"
+    ))
 }
 
 fn timed_out(what: &str) -> WriteError {
@@ -533,11 +632,13 @@ impl LiveMailbox {
                 .map_err(|_| imap_failed(what))?;
             let mut place: NewPlace = None;
             loop {
+                // A stream that broke mid-answer is not a refusal: what the
+                // server did is not known (see [`MoveFail`]).
                 let resp = session
                     .read_response()
                     .await
-                    .map_err(|_| imap_failed(what))?
-                    .ok_or_else(|| imap_failed(what))?;
+                    .map_err(|_| imap_broken(what))?
+                    .ok_or_else(|| imap_broken(what))?;
                 let (status, outcome, done) = match resp.parsed() {
                     Response::Done {
                         tag: t,
@@ -636,11 +737,20 @@ impl WriteMailbox for LiveMailbox {
         self.ok("UID EXPUNGE", format!("UID EXPUNGE {uid}")).await
     }
 
-    async fn create_archive(&mut self, special_use: bool) -> Result<(), WriteError> {
+    async fn uid_present(&mut self, uid: u32) -> Result<bool, WriteError> {
+        let hits = tokio::time::timeout(STEP, self.session.uid_search(format!("UID {uid}")))
+            .await
+            .map_err(|_| timed_out("SEARCH"))?
+            .map_err(|_| imap_failed("SEARCH"))?;
+        Ok(hits.contains(&uid))
+    }
+
+    async fn create_archive(&mut self, name: &str, special_use: bool) -> Result<(), WriteError> {
+        let n = quoted(name).ok_or_else(|| imap_failed("CREATE"))?;
         let command = if special_use {
-            format!("CREATE \"{ARCHIVE_NAME}\" (USE (\\Archive))")
+            format!("CREATE {n} (USE (\\Archive))")
         } else {
-            format!("CREATE \"{ARCHIVE_NAME}\"")
+            format!("CREATE {n}")
         };
         self.ok("CREATE", command).await
     }

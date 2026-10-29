@@ -4807,29 +4807,35 @@ fn imap_no_smtp() -> ApiError {
     ApiError::new(StatusCode::FORBIDDEN, IMAP_NO_SMTP)
 }
 
+/// What an IMAP write is told when the sealed slot could not be read (a
+/// locked keychain, a credentials file that would not open): a retry, not a
+/// setup step. Audited `failed:store` ([`write_refusal`]).
+pub(crate) const IMAP_CREDENTIAL_UNREADABLE: &str =
+    "couldn't read the stored credential; try again";
+
 /// The account's IMAP credential, read from its sealed slot (a blocking
-/// keyring or file read). `Ok(None)`: there is no slot, or no SMTP in it.
+/// keyring or file read). `Ok(None)`: there is no slot, or no SMTP in it
+/// (the 403). A slot that is there but could not be read is the 503
+/// [`IMAP_CREDENTIAL_UNREADABLE`] (security review F4): telling the user to
+/// re-run setup over a locked keychain sends them the wrong way.
 async fn imap_credential(state: &ApiState) -> Result<Option<ImapCredential>, ApiError> {
     let Some(slot) = state.imap_write.clone() else {
         return Ok(None);
     };
     tokio::task::spawn_blocking(move || {
-        let text = match squelch_core::credentials::load_imap_slot_backend(
+        let text = match squelch_core::credentials::find_imap_slot_backend(
             slot.backend,
             &slot.credentials_path,
             &slot.account_email,
         ) {
-            Ok(t) => t,
-            // No slot, or one that cannot be opened: what is missing is the
-            // credential. Core's line names no secret.
-            Err(CoreError::Credential(m)) => {
-                eprintln!("squelch-api: imap write credential: {m}");
-                return Ok(None);
-            }
-            Err(_) => {
+            Ok(Some(t)) => t,
+            Ok(None) => return Ok(None),
+            // Core's line names no secret.
+            Err(e) => {
+                eprintln!("squelch-api: imap write credential: {e}");
                 return Err(ApiError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal error",
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    IMAP_CREDENTIAL_UNREADABLE,
                 ));
             }
         };
@@ -5322,6 +5328,85 @@ pub struct SendBody {
     pub(crate) attachment_ids: Vec<i64>,
 }
 
+/// [`echo_sent`]'s fetch back of a message the writer did not hand over:
+/// the bytes, the thread and the server's date, or `None` once the failure
+/// is audited.
+async fn echo_fetch(
+    state: &ApiState,
+    client: &dyn MailWriter,
+    target: &Option<String>,
+    fire: Option<Fire<'_>>,
+    gmail_msg_id: &str,
+    sent: &SentRef,
+) -> Option<(Vec<u8>, Option<String>, Option<DateTime<Utc>>)> {
+    let echo_audit = |detail: &str| fired(fire, detail);
+    // TIMEOUT BUDGET: the Swift client's POST timeout is 15s and `action_send` has
+    // already spent two serial Gmail calls (parent headers, then the send) before
+    // getting here. The echo is bookkeeping, so it may not spend what is left —
+    // past 5s it gives up and the reply lands on the next backfill instead.
+    let fetched = match tokio::time::timeout(
+        Duration::from_secs(ECHO_FETCH_TIMEOUT_SECS),
+        client.fetch_raw(gmail_msg_id),
+    )
+    .await
+    {
+        Ok(Ok(f)) => f,
+        Ok(Err(e)) => {
+            eprintln!("squelch-api: echo of sent message {gmail_msg_id} failed to fetch: {e}");
+            audit_action(
+                state,
+                "send.echo",
+                target.clone(),
+                &echo_audit("failed:fetch"),
+            )
+            .await;
+            return None;
+        }
+        Err(_elapsed) => {
+            eprintln!("squelch-api: echo of sent message {gmail_msg_id} timed out");
+            audit_action(
+                state,
+                "send.echo",
+                target.clone(),
+                &echo_audit("failed:fetch"),
+            )
+            .await;
+            return None;
+        }
+    };
+    let raw = match decode_raw_b64url(&fetched.raw_b64) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!("squelch-api: echo of sent message {gmail_msg_id} failed to decode: {e}");
+            audit_action(
+                state,
+                "send.echo",
+                target.clone(),
+                &echo_audit("failed:fetch"),
+            )
+            .await;
+            return None;
+        }
+    };
+    // A `format=raw` read that carried no `raw` field decodes to zero bytes, which
+    // would ingest as a message with no headers and no body. Nothing to echo.
+    if raw.is_empty() {
+        eprintln!("squelch-api: echo of sent message {gmail_msg_id} returned no bytes");
+        audit_action(
+            state,
+            "send.echo",
+            target.clone(),
+            &echo_audit("failed:fetch"),
+        )
+        .await;
+        return None;
+    }
+
+    let thread_id = fetched.thread_id.clone().or_else(|| sent.thread_id.clone());
+    let internal_date = parse_internal_date(fetched.internal_date.as_deref());
+    Some((raw, thread_id, internal_date))
+}
+
 /// ECHO the just-sent message into the local store so the thread view shows the
 /// reply without waiting for the next Sent poll: fetch it back `format=raw` on
 /// the write token, decode, ingest with `is_sent: true`.
@@ -5351,46 +5436,13 @@ pub(crate) async fn echo_sent(
         }
     };
 
-    // TIMEOUT BUDGET: the Swift client's POST timeout is 15s and `action_send` has
-    // already spent two serial Gmail calls (parent headers, then the send) before
-    // getting here. The echo is bookkeeping, so it may not spend what is left —
-    // past 5s it gives up and the reply lands on the next backfill instead.
-    let fetched = match tokio::time::timeout(
-        Duration::from_secs(ECHO_FETCH_TIMEOUT_SECS),
-        client.fetch_raw(&gmail_msg_id),
-    )
-    .await
-    {
-        Ok(Ok(f)) => f,
-        Ok(Err(e)) => {
-            eprintln!("squelch-api: echo of sent message {gmail_msg_id} failed to fetch: {e}");
-            audit_action(state, "send.echo", target, &echo_audit("failed:fetch")).await;
-            return None;
-        }
-        Err(_elapsed) => {
-            eprintln!("squelch-api: echo of sent message {gmail_msg_id} timed out");
-            audit_action(state, "send.echo", target, &echo_audit("failed:fetch")).await;
-            return None;
-        }
+    // THE WRITER'S OWN COPY, when it handed one back (an IMAP send): those
+    // are the bytes it saved, Bcc and all, which no fetch could return (the
+    // copy a fetch prefers is the delivered one). Nothing to fetch.
+    let (raw, thread_id, internal_date) = match sent.raw.clone() {
+        Some(raw) if !raw.is_empty() => (raw, sent.thread_id.clone(), Some(Utc::now())),
+        _ => echo_fetch(state, client, &target, fire, &gmail_msg_id, sent).await?,
     };
-    let raw = match decode_raw_b64url(&fetched.raw_b64) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            eprintln!("squelch-api: echo of sent message {gmail_msg_id} failed to decode: {e}");
-            audit_action(state, "send.echo", target, &echo_audit("failed:fetch")).await;
-            return None;
-        }
-    };
-    // A `format=raw` read that carried no `raw` field decodes to zero bytes, which
-    // would ingest as a message with no headers and no body. Nothing to echo.
-    if raw.is_empty() {
-        eprintln!("squelch-api: echo of sent message {gmail_msg_id} returned no bytes");
-        audit_action(state, "send.echo", target, &echo_audit("failed:fetch")).await;
-        return None;
-    }
-
-    let thread_id = fetched.thread_id.clone().or_else(|| sent.thread_id.clone());
-    let internal_date = parse_internal_date(fetched.internal_date.as_deref());
     // Kept back for the log line; the closure takes ownership of the id itself.
     let log_id = gmail_msg_id.clone();
     let ingested = store_call(state, move |store, account_id| {
@@ -5638,6 +5690,7 @@ async fn finish_send(
             Ok(SendOutcome::Sent {
                 echo_message_id,
                 thread_id,
+                warning: sent.warning,
             })
         }
         Err(e) => {
@@ -5666,6 +5719,10 @@ pub(crate) enum SendOutcome {
     Sent {
         echo_message_id: Option<i64>,
         thread_id: Option<String>,
+        /// What the sender should know about mail that DID go (an IMAP
+        /// send whose Sent copy could not be saved). On the wire only when
+        /// there is one, so Gmail's answer is the bytes it always was.
+        warning: Option<String>,
     },
     /// An `individual` group fan-out, handed to its job (the `202`).
     Sending {
@@ -5682,11 +5739,18 @@ impl SendOutcome {
             SendOutcome::Sent {
                 echo_message_id,
                 thread_id,
-            } => json!({
-                "status": "sent",
-                "echo_message_id": echo_message_id,
-                "thread_id": thread_id,
-            }),
+                warning,
+            } => {
+                let mut v = json!({
+                    "status": "sent",
+                    "echo_message_id": echo_message_id,
+                    "thread_id": thread_id,
+                });
+                if let Some(w) = warning {
+                    v["warning"] = json!(w);
+                }
+                v
+            }
             SendOutcome::Sending {
                 group_send_id,
                 recipients,
@@ -5977,10 +6041,51 @@ pub async fn action_send(
         SendGuard::Settled
     };
 
-    let outcome = perform_send(&state, &body, attachments, owed, None).await?;
+    let outcome = if matches!(account_provider(&state).await, Ok(MailProvider::Imap)) {
+        detached_send(state, body, attachments, owed).await?
+    } else {
+        // Gmail's path is as it was: in the request. (It has the same latent
+        // shape, a cut after `messages.send` returned; a much shorter window,
+        // and Gmail files Sent itself.)
+        perform_send(&state, &body, attachments, owed, None).await?
+    };
     // 200 for a fan-out too, as it always has been: the Groups page reads
     // `status: "sending"`, not the code.
     Ok(Json(outcome.to_json()))
+}
+
+/// AN IMAP SEND OUTLIVES ITS REQUEST (correctness review F2): run on its own
+/// task, which the handler awaits. A client that gives up (Passband's 15 s
+/// idle) drops the handler's future, and with an inline send that cancels
+/// whatever was next: after SMTP accepted the mail, the Sent copy, the audit
+/// and the echo, so the user sees a failure for mail that went and sends it
+/// again. On a task, the send finishes and settles whoever is listening.
+async fn detached_send(
+    state: ApiState,
+    body: SendBody,
+    attachments: Vec<MailAttachment>,
+    owed: SendGuard,
+) -> Result<SendOutcome, ApiError> {
+    detach(async move {
+        perform_send(&state, &body, attachments, owed, None)
+            .await
+            .map_err(ApiError::from)
+    })
+    .await
+}
+
+/// Run `work` on its own task and await it: dropping the returned future
+/// stops the waiting, never the work.
+async fn detach<T: Send + 'static>(
+    work: impl std::future::Future<Output = Result<T, ApiError>> + Send + 'static,
+) -> Result<T, ApiError> {
+    tokio::spawn(work).await.unwrap_or_else(|_| {
+        eprintln!("squelch-api: a detached send task failed");
+        Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal error",
+        ))
+    })
 }
 
 /// Everything a send does once it has been validated and judged: resolve the
@@ -7561,10 +7666,23 @@ mod send_split_tests {
         let sent = SendOutcome::Sent {
             echo_message_id: None,
             thread_id: Some("t1".into()),
+            warning: None,
         };
         assert_eq!(
             sent.to_json(),
             json!({"status": "sent", "echo_message_id": null, "thread_id": "t1"})
+        );
+        // A warning (an IMAP send with no Sent copy) is one more key, and
+        // only then.
+        let warned = SendOutcome::Sent {
+            echo_message_id: Some(4),
+            thread_id: None,
+            warning: Some("sent, but the copy in Sent could not be saved".into()),
+        };
+        assert_eq!(
+            warned.to_json(),
+            json!({"status": "sent", "echo_message_id": 4, "thread_id": null,
+                   "warning": "sent, but the copy in Sent could not be saved"})
         );
         let sending = SendOutcome::Sending {
             group_send_id: 7,
@@ -7899,6 +8017,54 @@ mod write_client_tests {
                 assert!(!write_ready(&state).await);
             }
         }
+    }
+
+    /// A CLIENT THAT GIVES UP DOES NOT CANCEL AN IMAP SEND (correctness
+    /// review F2): the handler's future is dropped mid-send (hyper does
+    /// this when the connection closes), and the work behind it, the part
+    /// after SMTP accepted the mail, still runs to its end.
+    #[tokio::test]
+    async fn dropping_a_detached_send_midway_lets_it_finish() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let finished = Arc::new(AtomicBool::new(false));
+        let done = finished.clone();
+        let waiting = detach(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            done.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        // The client hangs up 50 ms in.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), waiting)
+                .await
+                .is_err()
+        );
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(finished.load(Ordering::SeqCst), "the send was cancelled");
+    }
+
+    /// A SLOT THAT COULD NOT BE READ IS NOT A MISSING ONE (security review
+    /// F4): a credentials file that will not open is the 503 that says try
+    /// again, audited `failed:store`, not the 403 that sends the user to
+    /// setup. (A locked keychain takes the same arm.)
+    #[tokio::test]
+    async fn an_unreadable_imap_slot_is_a_retry_not_the_setup_403() {
+        let fx = Fixture::new("imap-unreadable");
+        fx.set_provider("imap");
+        std::fs::write(
+            fx.dir.join("credentials.json"),
+            b"{ this is not a credentials file",
+        )
+        .unwrap();
+        let state = fx.imap_state();
+        let err = refused(write_client(&state).await);
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            err.message,
+            "couldn't read the stored credential; try again"
+        );
+        assert_eq!(write_refusal(&err), "failed:store");
+        assert!(!write_ready(&state).await);
     }
 
     /// A4: an IMAP account's write errors carry the writer's words, at

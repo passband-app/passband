@@ -49,6 +49,14 @@ use squelch_core::features::Feature;
 /// accounts through `login.live.com`.
 /// `font-src 'self'` admits exactly one file, [`NEWSREADER`], served by this
 /// same origin: the landing page's serif, and still nothing a third party sees.
+/// The providers' sign-in marks, inline: markup rather than a fetch, so the
+/// `default-src 'none'` CSP needs nothing new. Each sits on a small white
+/// tile (`.mark`), which is how the Google G keeps its colors on a dark
+/// button, and the Microsoft squares sit on the same tile so the two buttons
+/// read as a pair. Decorative: the button's text names the provider.
+pub(crate) const GOOGLE_MARK: &str = r##"<span class="mark" aria-hidden="true"><svg viewBox="0 0 48 48" width="16" height="16"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg></span>"##;
+pub(crate) const MICROSOFT_MARK: &str = r##"<span class="mark" aria-hidden="true"><svg viewBox="0 0 21 21" width="14" height="14"><rect x="0" y="0" width="10" height="10" fill="#F25022"/><rect x="11" y="0" width="10" height="10" fill="#7FBA00"/><rect x="0" y="11" width="10" height="10" fill="#00A4EF"/><rect x="11" y="11" width="10" height="10" fill="#FFB900"/></svg></span>"##;
+
 const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self' https://accounts.google.com https://login.microsoftonline.com https://login.live.com; frame-ancestors 'none'; base-uri 'none'";
 
 /// Escape text for HTML.
@@ -472,6 +480,12 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
 .auth :is(a.button, button):active {{ transform: translateY(0) scale(0.995); }}
 .auth :is(a.button, button):focus-visible {{ outline: 2px solid var(--rig-lit); outline-offset: 3px; }}
 .auth .arrow {{ transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1); }}
+/* A provider's mark: one white tile, the same size on every button, so the
+   brand colors read on the dark primary and the outlined secondary alike. */
+.mark {{ display: inline-flex; align-items: center; justify-content: center; flex: none;
+  width: 1.5rem; height: 1.5rem; border-radius: 0.4rem; background: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.08); }}
+.mark svg {{ display: block; }}
 .auth :is(a.button, button):is(:hover, :focus-visible) .arrow {{ transform: translateX(3px); }}
 /* The form: slots cut into one rig, each with its label engraved in it, and
    the submit as the rig's last slot rather than a button sitting under it. */
@@ -498,6 +512,8 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
 .auth .rig button:is(:hover, :focus-visible) {{ transform: none; box-shadow: none;
   background: linear-gradient(180deg, transparent, var(--slot-rule)); }}
 .auth .rig button:focus-visible {{ outline-offset: -3px; }}
+/* A second provider is its own row, ruled off like every slot above it. */
+.auth .rig button + button {{ border-top: 1px solid var(--slot-rule); }}
 /* The username slot: the input and its domain on one line, the domain in the
    placeholder's grey riding right behind what is typed. See [`signup_form`]
    for why this needs no script. */
@@ -690,10 +706,10 @@ pub fn signup_form_with(
   aria-describedby="label-hint" maxlength="{max}" autocomplete="off" autocapitalize="off" spellcheck="false"{label_focus} required><span class="domain">.{domain}</span></label>
 <span class="sr" id="label-hint">{min} to {max} lowercase letters, numbers or hyphens.</span>
 </div>
-<button type="submit" name="provider" value="google">Continue with Google <span class="arrow" aria-hidden="true">→</span></button>
+<button type="submit" name="provider" value="google">{google_mark}Continue with Google <span class="arrow" aria-hidden="true">→</span></button>
 {outlook_button}</form>
 <details>
-<summary>Google will ask to read, change, and send your Gmail, and optionally for your calendar.</summary>
+<summary>{consent_summary}</summary>
 <ul>
 <li><strong>Read</strong>: mail triage.</li>
 <li><strong>Change</strong>: archiving, labeling and moving to trash, never permanent deletion.</li>
@@ -705,11 +721,19 @@ pub fn signup_form_with(
             error_html = error_html,
             links_html = links_html,
             mailboxes = if outlook { "Gmail or Outlook" } else { "Gmail" },
-            outlook_button = if outlook {
-                r#"<button type="submit" name="provider" value="microsoft" class="quiet">Continue with Microsoft <span class="arrow" aria-hidden="true">→</span></button>
-"#
+            google_mark = GOOGLE_MARK,
+            consent_summary = if outlook {
+                "Google or Microsoft will ask to read, change, and send your mail, and for your calendar."
             } else {
-                ""
+                "Google will ask to read, change, and send your Gmail, and optionally for your calendar."
+            },
+            outlook_button = if outlook {
+                format!(
+                    r#"<button type="submit" name="provider" value="microsoft" class="quiet">{MICROSOFT_MARK}Continue with Microsoft <span class="arrow" aria-hidden="true">→</span></button>
+"#
+                )
+            } else {
+                String::new()
             },
             outlook_note = if outlook {
                 r#"<p>With Microsoft, Outlook asks once to read, change, and send your mail and to view and edit your calendar (<code>Mail.ReadWrite</code>, <code>Mail.Send</code>, <code>Calendars.ReadWrite</code>), plus your profile and staying signed in. Your Microsoft refresh token is stored encrypted the same way.</p>

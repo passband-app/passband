@@ -332,10 +332,10 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-side hr { width: 22pt; height: 0; margin: 4pt 0; border: 0; border-top: 1px solid var(--hair-strong); }
 .pb-side .pb-me { width: 26pt; height: 26pt; margin-top: 5pt; border-radius: 50%; overflow: hidden;
   display: block; box-shadow: inset 0 0 0 0.5pt rgba(255, 255, 255, 0.12); }
-.pb-side .pb-me svg { display: block; width: 100%; height: 100%; }
+.pb-side .pb-me { object-fit: cover; }
 .pb-page { padding: 0 24pt 0; display: grid; grid-template-columns: minmax(0, 1fr) 306pt;
   column-gap: 18pt; align-items: start; }
-.pb-dash-hero { grid-column: 1 / -1; padding: 4pt 4pt 34pt; }
+.pb-dash-hero { grid-column: 1 / -1; padding: 20pt 4pt 34pt; }
 .pb-dash-hero small { display: block; font-size: 10pt; font-weight: 500; letter-spacing: 0.12em;
   text-transform: uppercase; color: var(--accent); margin-bottom: 2pt; }
 .pb-dash-hero b { position: relative; display: inline-block; font-family: var(--serif); font-weight: 500;
@@ -1422,36 +1422,6 @@ function ZoneHead({ glyph, title, count, sub }: {
   );
 }
 
-// Sam's profile photo: an illustrated stand-in, not a real face, so the mock
-// keeps to invented people the way it keeps to invented brands.
-function MePortrait() {
-  return (
-    <svg viewBox="0 0 64 64" aria-hidden="true">
-      <defs>
-        <linearGradient id="me-bg" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stopColor="#A9C2AC" />
-          <stop offset="1" stopColor="#7F9C86" />
-        </linearGradient>
-        <linearGradient id="me-skin" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stopColor="#E8BC98" />
-          <stop offset="1" stopColor="#D6A27E" />
-        </linearGradient>
-      </defs>
-      <rect width="64" height="64" fill="url(#me-bg)" />
-      <path d="M8 66c1-13 10-19 24-19s23 6 24 19z" fill="#2E4A6B" />
-      <path d="M25 46c2 4 5 6 7 6s5-2 7-6z" fill="#E6E0D6" />
-      <rect x="27" y="36" width="10" height="12" rx="4" fill="#C99271" />
-      <ellipse cx="32" cy="28" rx="11" ry="13" fill="url(#me-skin)" />
-      <path d="M20 27c-1-10 5-16 13-16 7 0 12 5 12 12 0 3-1 5-1 5-1-5-4-8-9-9-4 2-10 3-15 8z" fill="#3B2A22" />
-      <ellipse cx="21" cy="29" rx="1.6" ry="2.6" fill="#D49C78" />
-      <ellipse cx="43" cy="29" rx="1.6" ry="2.6" fill="#D49C78" />
-      <circle cx="28" cy="29" r="1.1" fill="#3B2A22" />
-      <circle cx="36" cy="29" r="1.1" fill="#3B2A22" />
-      <path d="M29 35c2 1.4 4 1.4 6 0" stroke="#9E5F48" strokeWidth="1.2" fill="none" strokeLinecap="round" />
-    </svg>
-  );
-}
-
 // The app's rail: Sitrep, Calendar, Mail and Login codes on the digit keys,
 // then the discovery ring, a hairline, and the account's own group.
 function Rail({ on }: { on: "sitrep" | "calendar" }) {
@@ -1467,7 +1437,7 @@ function Rail({ on }: { on: "sitrep" | "calendar" }) {
       <span className="up"><Glyph name="update" /></span>
       <span><Glyph name="pulse" /></span>
       <span><Glyph name="gear" /></span>
-      <span className="pb-me" aria-label="Sam"><MePortrait /></span>
+      <img className="pb-me" src="/sam.jpg" alt="" />
     </nav>
   );
 }
@@ -1909,12 +1879,13 @@ const CAL_CSS = `
 .pb-day > header { display: flex; align-items: baseline; justify-content: space-between; padding: 0 4pt 2pt;
   font-size: 11.5pt; font-weight: 500; color: #818c9a; white-space: nowrap; gap: 4pt; }
 .pb-day.out > header { color: #46515d; }
+.pb-day.out .pb-ev { filter: brightness(0.7) saturate(0.6); }
 .pb-day > header small { font-size: 9.5pt; color: var(--faintest); transition: color 0.4s ease; }
 .pb-day::after { content: ""; position: absolute; inset: 1pt; border-radius: 9pt; pointer-events: none;
   box-shadow: inset 0 0 0 1pt rgba(155, 178, 205, 0); transition: box-shadow 0.4s ease; }
 .pb-day.sel::after { box-shadow: inset 0 0 0 1pt rgba(155, 178, 205, 0.85); }
 .pb-ev { --fill: #3c3c3c; --ink: #b9b9b9; --edge: #6a6a6a;
-  display: block; height: 19pt; line-height: 19pt; padding: 0 6pt; border-radius: 5pt;
+  display: block; height: 19pt; line-height: 19pt; padding: 0 5pt; border-radius: 5pt;
   font-size: 10.5pt; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   background: var(--fill); color: #eef1f6; transition: opacity 0.45s ease, box-shadow 0.45s ease; }
 .pb-ev span { font-weight: 500; color: var(--ink); margin-right: 4pt; }
@@ -1938,15 +1909,15 @@ const CAL_CSS = `
 .pb-evpane { min-width: 0; padding-top: 2pt; }
 .pb-evpane > header { display: flex; align-items: center; gap: 6pt; padding: 0 2pt 10pt; font-size: 14pt;
   font-weight: 600; color: var(--dim); }
-.pb-evcard { border-radius: 14pt; padding: 12pt; background: #2b3038; animation: pb-cal-in 0.45s ease both; }
+.pb-evcard { border-radius: 16pt; padding: 18pt; background: #2b3038; animation: pb-cal-in 0.45s ease both; }
 @keyframes pb-cal-in { from { opacity: 0; transform: translateY(5pt); } }
-.pb-evsec { padding: 6pt; margin: -6pt; transition: opacity 0.45s ease, box-shadow 0.45s ease; border-radius: 10pt; }
-.pb-evkind { display: flex; align-items: center; gap: 6pt; font-size: 10.5pt; color: var(--dim); padding-bottom: 9pt; }
+.pb-evsec { padding: 11pt; margin: -11pt; transition: opacity 0.45s ease, box-shadow 0.45s ease; border-radius: 10pt; }
+.pb-evkind { display: flex; align-items: center; gap: 6pt; font-size: 10.5pt; color: var(--dim); padding-bottom: 11pt; }
 .pb-evkind i { width: 9pt; height: 9pt; border-radius: 2.5pt; box-shadow: inset 0 0 0 1pt var(--accent); }
 .pb-evkind i.on { background: var(--positive); box-shadow: none; }
 .pb-evkind small { margin-left: auto; font-size: 10pt; color: var(--faintest); }
-.pb-flyer { position: relative; height: 112pt; border-radius: 9pt; overflow: hidden; margin-bottom: 10pt; }
-.pb-flyer svg { display: block; width: 100%; height: 100%; }
+.pb-flyer { position: relative; border-radius: 9pt; overflow: hidden; margin-bottom: 12pt; }
+.pb-flyer img { display: block; width: 100%; height: auto; }
 .pb-flyer em { position: absolute; left: 7pt; bottom: 7pt; font-style: normal; font-size: 9.5pt; font-weight: 600;
   padding: 2pt 7pt; border-radius: 99pt; background: rgba(0, 0, 0, 0.45); color: #fff; }
 .pb-evtitle { font-size: 16pt; font-weight: 700; line-height: 1.15; }
@@ -1955,7 +1926,7 @@ const CAL_CSS = `
   border-radius: 8pt; background: var(--accent); color: #fff; font-size: 11pt; font-weight: 600;
   transition: box-shadow 0.45s ease; }
 .pb-tickets svg { width: 12pt; height: 12pt; }
-.pb-evfacts { display: grid; grid-template-columns: 62pt minmax(0, 1fr); gap: 7pt 8pt; margin-top: 11pt; font-size: 11pt; }
+.pb-evfacts { display: grid; grid-template-columns: 62pt minmax(0, 1fr); gap: 8pt 8pt; margin-top: 13pt; font-size: 11pt; }
 .pb-evfacts dt { color: var(--faint); }
 .pb-evfacts dd { margin: 0; color: var(--ink); }
 .pb-likely { display: flex; align-items: center; gap: 5pt; font-weight: 600; }
@@ -1964,7 +1935,7 @@ const CAL_CSS = `
 .pb-likely i.on { background: var(--positive); box-shadow: none; }
 .pb-reason { margin-top: 3pt; font-weight: 400; color: var(--dim); line-height: 1.35; }
 .pb-reason small { display: block; font-size: 9.5pt; color: var(--faintest); margin-top: 2pt; }
-.pb-evsec.mail { margin-top: 5pt; }
+.pb-evsec.mail { margin-top: 3pt; }
 .pb-behind { margin-top: 0; padding: 9pt 10pt 4pt; border-radius: 11pt; background: #252a31; }
 .pb-behind > b { display: block; font-size: 10.5pt; font-weight: 500; color: var(--dim); padding-bottom: 6pt; }
 .pb-brow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 8pt; padding: 5pt 4pt; border-radius: 7pt;
@@ -1976,41 +1947,40 @@ const CAL_CSS = `
 .pb-evkeys kbd { font: 600 9pt/1 var(--mono); padding: 2pt 5pt; margin-right: 4pt; border-radius: 4pt;
   background: #383c42; color: var(--dim); }
 
-/* THE REMINDER, off the window's top right, where the Mac shows one. */
-.pb-remind { --pt: calc(100cqw / 1040); position: absolute; right: 22pt; top: -30pt; z-index: 4; width: 330pt;
-  padding: 11pt 12pt; border-radius: 18pt; display: grid; grid-template-columns: 30pt minmax(0, 1fr) auto;
-  gap: 2pt 10pt; font-size: 11.5pt; line-height: 1.3; color: var(--ink);
-  background: rgba(44, 48, 58, 0.9); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
-  box-shadow: inset 0 0 0 0.75pt rgba(130, 186, 245, 0.35), 0 24pt 60pt -12pt rgba(0, 0, 0, 0.75),
-    0 0 50pt -14pt rgba(78, 155, 234, 0.5);
+/* THE REMINDER, as the iPhone shows it: the system's own banner, dark
+   material, the app icon, title, time, and the line the model wrote. Hung off
+   the window's top right. */
+.pb-remind { --pt: calc(100cqw / 1040); position: absolute; right: 22pt; top: -34pt; z-index: 4; width: 350pt;
+  padding: 12pt 14pt 13pt 12pt; border-radius: 24pt; display: grid; grid-template-columns: 38pt minmax(0, 1fr) auto;
+  column-gap: 11pt; align-items: start; font-family: var(--sans); font-size: 13pt; line-height: 1.28; color: #f5f5f7;
+  background: rgba(46, 46, 50, 0.72); -webkit-backdrop-filter: blur(24px) saturate(1.8); backdrop-filter: blur(24px) saturate(1.8);
+  box-shadow: inset 0 0 0 0.5pt rgba(255, 255, 255, 0.14), 0 24pt 60pt -12pt rgba(0, 0, 0, 0.75),
+    0 0 50pt -14pt rgba(78, 155, 234, 0.45);
   opacity: 0; transform: translateY(-16pt) scale(0.97); pointer-events: none;
   transition: opacity 0.4s ease, transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1); }
-.pb-remind img { grid-row: 1 / span 3; width: 30pt; height: 30pt; padding: 7pt 4pt; border-radius: 8pt;
-  background: #0e141d; box-sizing: border-box; object-fit: contain; }
-.pb-remind b { font-weight: 700; }
-.pb-remind time { font-size: 10pt; color: var(--faint); }
-.pb-remind small { grid-column: 2 / -1; font-size: 10.5pt; color: var(--dim); }
-.pb-remind p { grid-column: 2 / -1; margin: 1pt 0 0; }
-.pb-remind span { grid-column: 2 / -1; justify-self: start; margin-top: 7pt; padding: 4pt 11pt; border-radius: 99pt;
-  background: rgba(255, 255, 255, 0.12); font-size: 11pt; font-weight: 600; }
+.pb-remind img { grid-row: 1 / span 3; align-self: center; width: 38pt; height: 38pt; border-radius: 9pt; }
+.pb-remind b { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pb-remind time { font-size: 11.5pt; color: rgba(235, 235, 245, 0.55); padding-left: 8pt; }
+.pb-remind small { grid-column: 2 / -1; font-size: 13pt; font-weight: 600; }
+.pb-remind p { grid-column: 2 / -1; margin: 0; }
 
 /* WHAT THE TOUR DOES TO THE PICTURE. As on the sitrep: the rest steps back
    and the part the caption is about keeps its light, ringed and glowing. */
 .pb-calshot[data-focus] .pb-ev { opacity: 0.3; }
 .pb-calshot[data-focus] .pb-evsec { opacity: 0.3; }
 .pb-calshot:is([data-focus="plans"], [data-focus="behind"], [data-focus="remind"]) .pb-ev.night,
-.pb-calshot[data-focus="unlikely"] .pb-ev.frost { opacity: 1; }
+.pb-calshot[data-focus="unlikely"] .pb-ev.summit { opacity: 1; }
 .pb-calshot:is([data-focus="plans"], [data-focus="unlikely"], [data-focus="remind"]) .pb-evsec.top,
 .pb-calshot[data-focus="behind"] .pb-evsec.mail { opacity: 1; }
 .pb-calshot[data-focus="plans"] .pb-ev.night,
-.pb-calshot[data-focus="unlikely"] .pb-ev.frost {
+.pb-calshot[data-focus="unlikely"] .pb-ev.summit {
   box-shadow: inset 0 0 0 1pt rgba(130, 186, 245, 0.9), 0 0 22pt -4pt rgba(78, 155, 234, 0.8); }
 .pb-calshot[data-focus="plans"] .pb-evsec.top,
 .pb-calshot[data-focus="behind"] .pb-behind {
   box-shadow: inset 0 0 0 1pt rgba(130, 186, 245, 0.75), 0 0 44pt -8pt rgba(78, 155, 234, 0.65); }
 .pb-calshot[data-focus="behind"] .pb-brow.update { background: rgba(78, 155, 234, 0.2); }
 .pb-calshot[data-focus="unlikely"] .pb-ev.fold { max-height: 19pt; opacity: 1; margin-top: 0; }
-.pb-calshot[data-focus="unlikely"] .pb-day.frostday > header small { color: var(--accent-ink); }
+.pb-calshot[data-focus="unlikely"] .pb-day.summitday > header small { color: var(--accent-ink); }
 .pb-calshot[data-focus="remind"] .pb-remind { opacity: 1; transform: none; }
 .pb-calshot[data-focus="remind"] .pb-tickets { box-shadow: 0 0 0 1pt rgba(130, 186, 245, 0.6), 0 0 28pt -4pt rgba(78, 155, 234, 0.9); }
 
@@ -2024,40 +1994,43 @@ const CAL_CSS_RESOLVED = CAL_CSS.replace(/(-?\d*\.?\d+)pt\b/g, "calc($1 * var(--
 type Chip = { t?: string; name: string; hue: string; kind?: "maybe" | "likely" | "thin" | "fold"; id?: string };
 // November 2026, Sunday first, as the app lays it out: five weeks, the last
 // running into December. Index 0 is Sunday November 1.
+// November 2026, Sunday first, as the app lays it out: five weeks, the last
+// running into December. Index 0 is Sunday November 1. A working month, with
+// one night out.
 const CAL_DAYS: Array<{ label: string; out?: boolean; unlikely?: number; chips: Chip[] }> = [
-  { label: "Nov 1", chips: [{ t: "10am", name: "Brunch with Priya", hue: "red" }] },
-  { label: "2", chips: [{ t: "12pm", name: "Design review", hue: "purple" }] },
-  { label: "3", chips: [{ name: "Election Day", hue: "brown" }] },
-  { label: "4", chips: [] },
-  { label: "5", chips: [{ t: "6pm", name: "Climbing", hue: "teal" }] },
-  { label: "6", chips: [] },
-  { label: "7", chips: [{ t: "7pm", name: "Ana's birthday", hue: "green", kind: "maybe" }] },
+  { label: "Nov 1", chips: [{ t: "10am", name: "Long run", hue: "teal" }] },
+  { label: "2", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "2pm", name: "1:1 Jamie", hue: "purple" }] },
+  { label: "3", chips: [{ name: "Election Day", hue: "brown" }, { t: "11am", name: "Pipeline", hue: "red" }] },
+  { label: "4", chips: [{ t: "10am", name: "Design crit", hue: "purple" }, { t: "3pm", name: "Interview", hue: "green" }] },
+  { label: "5", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "1pm", name: "Priya", hue: "red" }, { t: "4pm", name: "Security", hue: "gray" }] },
+  { label: "6", chips: [{ t: "4pm", name: "Demo day", hue: "teal" }] },
+  { label: "7", chips: [] },
   { label: "8", chips: [] },
-  { label: "9", chips: [{ t: "12pm", name: "Design review", hue: "purple" }] },
-  { label: "10", chips: [] },
-  { label: "11", unlikely: 1, chips: [{ name: "Veterans Day", hue: "brown" }] },
-  { label: "12", chips: [{ t: "7pm", name: "Book club", hue: "gray" }] },
-  { label: "13", chips: [] },
-  { label: "14", unlikely: 1, chips: [{ t: "9pm", name: "Frost Open Air", hue: "purple", kind: "fold", id: "frost" }] },
+  { label: "9", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "1pm", name: "Board prep", hue: "red" }] },
+  { label: "10", chips: [{ t: "11am", name: "Pipeline", hue: "red" }, { t: "4pm", name: "Investors", hue: "red" }] },
+  { label: "11", unlikely: 1, chips: [{ name: "Veterans Day", hue: "brown" }, { t: "9am", name: "Cost Summit", hue: "gray", kind: "fold", id: "summit" }, { t: "10am", name: "Design crit", hue: "purple" }] },
+  { label: "12", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "2pm", name: "Acme call", hue: "teal" }] },
+  { label: "13", chips: [{ t: "12pm", name: "Team lunch", hue: "green" }] },
+  { label: "14", chips: [] },
   { label: "15", chips: [] },
-  { label: "16", chips: [{ t: "12pm", name: "Design review", hue: "purple" }] },
-  { label: "17", chips: [] },
-  { label: "18", chips: [] },
-  { label: "19", chips: [{ t: "2:30pm", name: "Dr. Ortiz", hue: "teal" }] },
-  { label: "20", chips: [{ t: "10pm", name: "Night Shift x Long Wave", hue: "purple", kind: "maybe", id: "night" }] },
+  { label: "16", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "2pm", name: "1:1 Jamie", hue: "purple" }] },
+  { label: "17", chips: [{ t: "10am", name: "Board", hue: "red" }, { t: "3pm", name: "Hiring", hue: "green" }] },
+  { label: "18", chips: [{ t: "10am", name: "Design crit", hue: "purple" }, { t: "5pm", name: "Demo", hue: "teal" }] },
+  { label: "19", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "2:30pm", name: "Dr. Ortiz", hue: "teal" }] },
+  { label: "20", chips: [{ t: "10am", name: "Roadmap", hue: "purple" }, { t: "10pm", name: "Endzeit x Non Series", hue: "purple", kind: "maybe", id: "night" }] },
   { label: "21", chips: [] },
-  { label: "22", chips: [{ t: "10am", name: "Long run", hue: "teal" }] },
-  { label: "23", chips: [{ t: "12pm", name: "Design review", hue: "purple" }] },
-  { label: "24", chips: [] },
+  { label: "22", chips: [] },
+  { label: "23", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "3pm", name: "Offsite prep", hue: "green" }] },
+  { label: "24", chips: [{ t: "11am", name: "Pipeline", hue: "red" }] },
   { label: "25", chips: [{ t: "8:05am", name: "SFO to JFK", hue: "gray", kind: "likely" }] },
-  { label: "26", chips: [{ name: "Thanksgiving", hue: "brown" }, { t: "4pm", name: "Dinner at Mom's", hue: "green" }] },
+  { label: "26", chips: [{ name: "Thanksgiving", hue: "brown" }, { t: "4pm", name: "Mom's", hue: "green" }] },
   { label: "27", chips: [] },
   { label: "28", chips: [] },
   { label: "29", chips: [{ t: "6:40pm", name: "JFK to SFO", hue: "gray", kind: "likely" }] },
-  { label: "30", chips: [{ t: "12pm", name: "Design review", hue: "purple" }] },
-  { label: "Dec 1", out: true, chips: [] },
-  { label: "Dec 2", out: true, chips: [] },
-  { label: "Dec 3", out: true, chips: [{ name: "Trash day", hue: "gray" }] },
+  { label: "30", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "2pm", name: "1:1 Jamie", hue: "purple" }] },
+  { label: "Dec 1", out: true, chips: [{ t: "11am", name: "Pipeline", hue: "red" }] },
+  { label: "Dec 2", out: true, chips: [{ t: "10am", name: "Design crit", hue: "purple" }] },
+  { label: "Dec 3", out: true, chips: [{ t: "9:30", name: "Standup", hue: "purple" }] },
   { label: "Dec 4", out: true, unlikely: 1, chips: [] },
   { label: "Dec 5", out: true, chips: [] },
 ];
@@ -2068,42 +2041,10 @@ const CAL_TOUR: Array<{ key: string; title: string; line: ReactNode }> = [
   { key: "behind", title: "When plans change, the event keeps up",
     line: "Every email about an event stays attached to it. A corrected lineup or a new start time lands on the event, not at the bottom of your inbox." },
   { key: "unlikely", title: "Not every invite is a plan",
-    line: "The party a promoter sent to ten thousand people folds away as unlikely. It is there if you want it, and out of the way if you don't." },
+    line: "The summit a vendor sent to everyone on its list folds away as unlikely. It is there if you want it, and out of the way if you don't." },
   { key: "remind", title: "Reminders that know the event",
     line: "Passband picks the moment, an hour before doors or ten minutes before a call, and says what will help. Tap to see your tickets." },
 ];
-
-// The invitation's flyer, as the card shows a picture from the mail.
-function Flyer() {
-  return (
-    <svg viewBox="0 0 280 112" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
-      <defs>
-        <filter id="fly-grain">
-          <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch" />
-          <feColorMatrix values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.55 0" />
-          <feComposite in2="SourceGraphic" operator="in" />
-        </filter>
-        <linearGradient id="fly-bg" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#1aa36f" />
-          <stop offset="1" stopColor="#067a50" />
-        </linearGradient>
-      </defs>
-      <rect width="280" height="112" fill="url(#fly-bg)" />
-      <rect width="280" height="112" filter="url(#fly-grain)" />
-      <g fill="#eafff4" fontFamily="'Helvetica Neue', Arial, sans-serif" fontWeight="700">
-        <text x="10" y="14" fontSize="6.5" fontWeight="500">Long Wave presents</text>
-        <text x="9" y="38" fontSize="25" letterSpacing="-1.4">Night Shift</text>
-        <text x="9" y="58" fontSize="17" letterSpacing="-0.9">Label Showcase</text>
-        <text x="270" y="22" fontSize="9" textAnchor="end" letterSpacing="-0.3">Friday,</text>
-        <text x="270" y="32" fontSize="9" textAnchor="end" letterSpacing="-0.3">November 20</text>
-        <text x="270" y="42" fontSize="9" textAnchor="end" letterSpacing="-0.3">2026</text>
-        <text x="9" y="86" fontSize="22" letterSpacing="-1.2">OKTAV</text>
-        <text x="108" y="86" fontSize="22" letterSpacing="-1.2">PALE ENGINE</text>
-        <text x="270" y="108" fontSize="22" letterSpacing="-1.2" textAnchor="end">MIRA SOL</text>
-      </g>
-    </svg>
-  );
-}
 
 const TICKET_PATH = "M2 5.2V3.5h12v1.7a1.6 1.6 0 0 0 0 3.2v1.7a1.6 1.6 0 0 0 0 3.2v-.8H2v.8a1.6 1.6 0 0 0 0-3.2V8.4a1.6 1.6 0 0 0 0-3.2Z";
 
@@ -2114,28 +2055,28 @@ function EventPane({ focus }: { focus: string | undefined }) {
   if (focus === "unlikely") {
     return (
       <div className="pb-evpane">
-        <header>‹ Sat Nov 14</header>
-        <div className="pb-evcard" key="frost">
+        <header>‹ Wed Nov 11</header>
+        <div className="pb-evcard" key="summit">
           <div className="pb-evsec top">
             <div className="pb-evkind"><i />Invitation, from your mail<small>not on your calendar</small></div>
-            <div className="pb-evtitle">Frost Open Air</div>
-            <div className="pb-evtime">Sat Nov 14, 9pm to 4am</div>
+            <div className="pb-evtitle">Cloud Cost Summit</div>
+            <div className="pb-evtime">Wed Nov 11, 9am to 5pm</div>
             <dl className="pb-evfacts">
               <dt>Likelihood</dt>
               <dd>
                 <span className="pb-likely"><i className="thin" />Unlikely</span>
                 <div className="pb-reason">
-                  “a promoter's mass mailing, and the user hasn't opened their mail since spring”
+                  “a vendor's mass mailing, and the user has never registered for one of their events”
                   <small>the triage model's words</small>
                 </div>
               </dd>
-              <dt>Place</dt><dd>Oakland</dd>
+              <dt>Place</dt><dd>Online</dd>
             </dl>
           </div>
           <div className="pb-evsec mail">
             <div className="pb-behind">
               <b>Mail behind it</b>
-              <div className="pb-brow"><b>Frost Open Air: tickets on sale</b><small>Pulse Collective, Oct 19</small><em>first</em></div>
+              <div className="pb-brow"><b>Last call: Cloud Cost Summit seats</b><small>Stackwise, Oct 19</small><em>first</em></div>
             </div>
           </div>
           <div className="pb-evkeys"><span><kbd>↵</kbd>open mail</span><span><kbd>y</kbd>going</span><span><kbd>x</kbd>dismiss</span></div>
@@ -2154,8 +2095,8 @@ function EventPane({ focus }: { focus: string | undefined }) {
             {going ? "Going, from your mail" : "Invitation, from your mail"}
             <small>{going ? "on your calendar" : "not on your calendar"}</small>
           </div>
-          <div className="pb-flyer"><Flyer /><em>From the mail</em></div>
-          <div className="pb-evtitle">Night Shift x Long Wave</div>
+          <div className="pb-flyer"><img src="/endzeit-flyer.jpg" alt="" /></div>
+          <div className="pb-evtitle">Endzeit x Non Series</div>
           <div className="pb-evtime">Fri Nov 20, 10pm to Sat 6am</div>
           {going && (
             <span className="pb-tickets">
@@ -2172,7 +2113,7 @@ function EventPane({ focus }: { focus: string | undefined }) {
                 <>
                   <span className="pb-likely"><i />Maybe</span>
                   <div className="pb-reason">
-                    “a mailing-list invite, though the user has a history with Long Wave events”
+                    “mass mailing-list invite, though the user has a history with Endzeit events”
                     <small>the triage model's words</small>
                   </div>
                 </>
@@ -2184,9 +2125,9 @@ function EventPane({ focus }: { focus: string | undefined }) {
         <div className="pb-evsec mail">
           <div className="pb-behind">
             <b>Mail behind it</b>
-            <div className="pb-brow"><b>Night Shift x Long Wave, November 20</b><small>Long Wave, Oct 23</small><em>first</em></div>
-            <div className="pb-brow update"><b>A correction on the Night Shift lineup</b><small>Long Wave, Oct 24</small><em>update</em></div>
-            {going && <div className="pb-brow"><b>Your 2 tickets for Night Shift</b><small>Long Wave Tickets, Oct 26</small><em>tickets</em></div>}
+            <div className="pb-brow"><b>Endzeit x Non Series, November 20</b><small>Endzeit, Oct 23</small><em>first</em></div>
+            <div className="pb-brow update"><b>A correction on the Non Series lineup</b><small>Endzeit, Oct 23</small><em>update</em></div>
+            {going && <div className="pb-brow"><b>Your tickets: Endzeit x Non Series</b><small>Endzeit, Oct 26</small><em>tickets</em></div>}
           </div>
         </div>
         {!going && <div className="pb-evkeys"><span><kbd>↵</kbd>open mail</span><span><kbd>y</kbd>going</span><span><kbd>x</kbd>dismiss</span></div>}
@@ -2196,12 +2137,12 @@ function EventPane({ focus }: { focus: string | undefined }) {
 }
 
 function CalMock({ focus }: { focus: string | undefined }) {
-  const selected = focus === "unlikely" ? 13 : 19;
+  const selected = focus === "unlikely" ? 10 : 19;
   return (
     <div
       className="pb-app"
       role="img"
-      aria-label="The Passband calendar, November. An invitation found in the mail sits on Friday the 20th as a maybe, with its flyer, the reason it is a maybe, and the two emails behind it, one of them a lineup correction. Saturday the 14th holds one unlikely event, folded away."
+      aria-label="The Passband calendar, November. A working month: standups, reviews, a board meeting, two flights. An Endzeit invitation found in the mail sits on Friday the 20th as a maybe, with its flyer, the reason it is a maybe, and the two emails behind it, one of them a lineup correction. Wednesday the 11th holds one unlikely event, folded away."
     >
       <div className="pb-app-bar">
         <div className="pb-lights" aria-hidden="true"><i /><i /><i /></div>
@@ -2220,7 +2161,7 @@ function CalMock({ focus }: { focus: string | undefined }) {
           {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => <div key={d} className="pb-wd">{d}</div>)}
           {CAL_DAYS.map((day, i) => (
             <div key={day.label}
-              className={`pb-day${day.out ? " out" : ""}${i === selected ? " sel" : ""}${i === 13 ? " frostday" : ""}`}>
+              className={`pb-day${day.out ? " out" : ""}${i === selected ? " sel" : ""}${i === 10 ? " summitday" : ""}`}>
               <header>{day.label}{day.unlikely ? <small>{day.unlikely} unlikely</small> : null}</header>
               {day.chips.map((c) => (
                 <div key={c.name}
@@ -2237,17 +2178,16 @@ function CalMock({ focus }: { focus: string | undefined }) {
   );
 }
 
-// The reminder the Mac shows an hour before doors. The line is the kind the
+// The reminder an hour before doors. The line is the kind the
 // reminder model writes: short, no links, no codes.
 function RemindBanner() {
   return (
     <div className="pb-remind" aria-hidden="true">
-      <img src="/mark.svg" alt="" />
-      <b>Night Shift x Long Wave</b>
+      <img src="/icon-180.png" alt="" />
+      <b>Endzeit x Non Series</b>
       <time>now</time>
-      <small>in 1 hr · Downtown San Francisco</small>
-      <p>Doors at 10. Your 2 tickets are in the Long Wave email.</p>
-      <span>Show tickets</span>
+      <small>In 1 hr · Downtown San Francisco</small>
+      <p>Doors at 10. Tap to see your tickets in the Endzeit email.</p>
     </div>
   );
 }

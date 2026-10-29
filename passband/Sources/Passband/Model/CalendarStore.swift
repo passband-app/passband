@@ -264,7 +264,10 @@ extension AppStore {
                 calendarFeed = feed
                 // What the page paints first next launch or switch back.
                 // Never a practice feed: it would land under the real account.
-                if !RehearsalMode.isEnabled, let id = AccountManager.shared.activeId {
+                // Nor anything after the credentials were re-validated, until
+                // the next account change (SECURITY.md §6, as the board).
+                if !RehearsalMode.isEnabled, boardWritesRefusedEpoch != epoch,
+                   let id = AccountManager.shared.activeId {
                     Task.detached(priority: .utility) { await CalendarDisk.shared.save(feed, for: id) }
                 }
             }

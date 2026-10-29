@@ -94,6 +94,7 @@ run_suite calendar-search \
 run_suite calendar-disk \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/PrivateFile.swift \
   Sources/Passband/Model/CalendarDisk.swift \
   Tests/CalendarDiskTests.swift
 

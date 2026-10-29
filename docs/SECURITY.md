@@ -952,6 +952,20 @@ the call goes out.
   connected again or re-validated (the credentials may open another mailbox),
   and whenever the daemon refuses the saved credentials. Never written for the
   practice inbox.
+- **The last calendar on disk.** The client keeps the calendar feed it last
+  loaded for each account, so the Calendar page paints before the daemon
+  answers (`passband/Sources/Passband/Model/CalendarDisk.swift`): events
+  (titles, places, descriptions, guests and their addresses), ghosts and the
+  calendars' names. Kept by the board's rules: written through
+  `PrivateFile.swift`, one file per account (named by a hash of the account
+  id) under Application Support's `Passband/CalendarCache`, contents never
+  logged; not painted and deleted a week after it was saved; swept at launch
+  with the boards (stale, or an account no longer on the install); deleted
+  when the account is removed, when the same daemon is connected again or
+  re-validated (and nothing written again under that epoch), when the daemon
+  refuses the saved credentials, and when the `calendar` feature turns off;
+  never written for the practice inbox. Only what the daemon answered is
+  written.
 
 **What a maintainer must not break.**
 - **Prompt injection is the standing threat, and the gate is the answer to it.**

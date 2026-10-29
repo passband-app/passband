@@ -1989,6 +1989,8 @@ final class AppStore {
         // any of an account no longer here. Behind the paint, not in front of
         // it on the queue.
         BoardFile.sweep(keeping: Set(index.accounts.map(\.id)))
+        let accounts = Set(index.accounts.map(\.id))
+        Task.detached(priority: .utility) { await CalendarDisk.shared.sweep(keeping: accounts) }
     }
 
     /// Take a `passband://` URL the OS handed us. Never acted on here — it is
@@ -2083,7 +2085,10 @@ final class AppStore {
                         // other refusal (a captive portal's page, a build the
                         // daemon is too old for) leaves it for a launch that
                         // can reach the daemon.
-                        if (error as? APIError)?.kind == .unauthorized { discardBoardFile(accountId) }
+                        if (error as? APIError)?.kind == .unauthorized {
+                            discardBoardFile(accountId)
+                            Task { await CalendarDisk.shared.forget(accountId) }
+                        }
                         if behindBoard { refuseBoardFromDisk() }
                         connStatus = .error
                         connError = Self.connectErrorText(error)
@@ -2220,6 +2225,8 @@ final class AppStore {
             // mailbox behind the same host. The one on disk too.
             boardSnapshots[account.id] = nil
             discardBoardFile(account.id)
+            let replaced = account.id
+            Task { await CalendarDisk.shared.forget(replaced) }
             // Arriving from the Connect gate the feeds are down, so this is a
             // no-op and the `.connected` transition below is what raises them
             // — the same route the single-account build took. Kept as a
@@ -2290,6 +2297,8 @@ final class AppStore {
             // these credentials.
             boardWritesRefusedEpoch = epoch
             discardBoardFile(account.id)
+            let revalidated = account.id
+            Task { await CalendarDisk.shared.forget(revalidated) }
             #if os(iOS)
                 await PushRegistration.shared.registerAndSync()
             #endif
@@ -2426,8 +2435,6 @@ final class AppStore {
         }
         await AccountManager.shared.remove(id)
         boardSnapshots[id] = nil
-        // The saved calendar is the account's, and goes with it.
-        await CalendarDisk.shared.forget(id)
         // The saved headline can name people and plans from the mailbox just
         // forgotten. It is keyed by board, so it could never show for another
         // account, but it should not outlive the account either.
@@ -2863,7 +2870,8 @@ final class AppStore {
     /// True only while `restorePersistedBoard` assigns the board from disk.
     @ObservationIgnored private var paintingFromDisk = false
     /// An epoch under which nothing is written to disk (`revalidate`).
-    @ObservationIgnored private var boardWritesRefusedEpoch: Int?
+    /// Also obeyed by the calendar's saved feed (`refreshCalendar`).
+    @ObservationIgnored var boardWritesRefusedEpoch: Int?
     /// Something on the board changed since the last write.
     @ObservationIgnored private var boardDirty = true
     /// The last write: whose, under which epoch, and what.

@@ -1,7 +1,9 @@
 // The calendar's disk cache (Model/CalendarDisk.swift): what the Calendar page
 // paints before the daemon answers. A feed saved for an account comes back
-// whole for that account only, a file that will not read is dropped, and
-// forgetting an account deletes its feed.
+// whole for that account only, a file that will not read is dropped, a feed a
+// week old is not painted, forgetting an account deletes its feed, and the
+// launch sweep keeps only the accounts still here. On the Mac the file is the
+// owner's alone (SECURITY.md §6).
 
 import Foundation
 
@@ -81,9 +83,33 @@ struct CalendarDiskTests {
 
         // Forget deletes it.
         await disk.save(feed, for: me)
+        #if os(macOS)
+        let perms = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.posixPermissions] as? Int
+        check(perms == 0o600, "the owner's alone: \(String(describing: perms))")
+        let dirPerms = (try? FileManager.default.attributesOfItem(atPath: dir.path))?[.posixPermissions] as? Int
+        check(dirPerms == 0o700, "in a directory that is too: \(String(describing: dirPerms))")
+        #endif
         await disk.forget(me)
         check(await disk.feed(for: me) == nil, "forgotten")
         check(!FileManager.default.fileExists(atPath: file.path), "and the file is gone")
+
+        // A week old: not painted, and deleted by the read that finds it.
+        let weekAgo = Date().addingTimeInterval(-CalendarDisk.maxAge - 60)
+        await disk.save(feed, for: me, now: weekAgo)
+        check(await disk.feed(for: me) == nil, "a week-old feed is not painted")
+        check(!FileManager.default.fileExists(atPath: file.path), "and is deleted")
+        await disk.save(feed, for: me, now: Date().addingTimeInterval(-CalendarDisk.maxAge + 3600))
+        check(await disk.feed(for: me) == feed, "six days and change is still painted")
+
+        // The launch sweep: an account no longer here goes, a stray file goes,
+        // the live account's fresh feed stays.
+        await disk.save(feed, for: other)
+        try? Data("half a write".utf8).write(to: dir.appendingPathComponent(".tmp-123"))
+        await disk.sweep(keeping: [me])
+        check(await disk.feed(for: me) == feed, "the sweep keeps a live account's feed")
+        check(await disk.feed(for: other) == nil, "and deletes a removed account's")
+        let left = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        check(left.count == 1, "and anything else: \(left)")
 
         if failures > 0 {
             print("calendar-disk: \(failures) of \(checks) checks failed")

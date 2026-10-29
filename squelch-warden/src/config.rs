@@ -889,6 +889,25 @@ impl Config {
             None => None,
             Some(raw) => Some(canonical_embed_url(&raw, &namespace)?),
         };
+        let embed_model = env_value_var(get, "SQUELCH_WARDEN_EMBED_MODEL")?;
+        // With the shared embedder, the model is the service's, not a choice.
+        // A daemon pinned to anything else refuses to build its embedder and
+        // runs keyword-only, every tenant at once; refuse here, where one
+        // operator sees it, rather than there, in every pod's log. Compared
+        // as written: the daemon accepts aliases, but the fleet's pin should
+        // name the one model code the service runs.
+        if embed_url.is_some()
+            && let Some(model) = &embed_model
+            && model != squelch_embed::protocol::MODEL_CODE
+        {
+            return Err(ConfigError::invalid(format!(
+                "SQUELCH_WARDEN_EMBED_MODEL `{model}` is not the shared embedder's model `{}`, \
+                 and SQUELCH_WARDEN_EMBED_URL is set: every tenant would refuse the service. \
+                 Unset SQUELCH_WARDEN_EMBED_MODEL or set it to `{}`",
+                squelch_embed::protocol::MODEL_CODE,
+                squelch_embed::protocol::MODEL_CODE
+            )));
+        }
         // The DEFAULT shape follows the embedder. A daemon that posts its texts
         // to the shared service has no ONNX session to rest at 384Mi with, so
         // the constants that describe it are the lighter ones; an explicit
@@ -976,7 +995,7 @@ impl Config {
             pull_secret: optional_name_var(get, "SQUELCH_WARDEN_IMAGE_PULL_SECRET")?,
             user_namespaces,
             model_pvc: optional_name_var(get, "SQUELCH_WARDEN_MODEL_PVC")?,
-            embed_model: env_value_var(get, "SQUELCH_WARDEN_EMBED_MODEL")?,
+            embed_model,
             node_cidr,
             http_readiness,
             run_as,
@@ -2240,6 +2259,41 @@ mod tests {
             "bge small".to_string(),
         );
         assert!(load(&vars).is_err());
+    }
+
+    /// With the shared embedder, the fleet's model pin must be the
+    /// service's model: anything else would have every tenant refuse it.
+    #[test]
+    fn the_embedding_model_must_be_the_services_when_the_url_is_set() {
+        let mut vars = required();
+        vars.insert(
+            "SQUELCH_WARDEN_EMBED_URL".to_string(),
+            "http://squelch-embed:8850".to_string(),
+        );
+        vars.insert(
+            "SQUELCH_WARDEN_EMBED_MODEL".to_string(),
+            "Qdrant/bge-small-en-v1.5-onnx-Q".to_string(),
+        );
+        let err = load(&vars).unwrap_err().to_string();
+        assert!(err.contains("SQUELCH_WARDEN_EMBED_MODEL"), "{err}");
+        assert!(err.contains(squelch_embed::protocol::MODEL_CODE), "{err}");
+
+        // The service's own code, or no pin at all, is fine.
+        vars.insert(
+            "SQUELCH_WARDEN_EMBED_MODEL".to_string(),
+            squelch_embed::protocol::MODEL_CODE.to_string(),
+        );
+        assert!(load(&vars).is_ok());
+        vars.remove("SQUELCH_WARDEN_EMBED_MODEL");
+        assert!(load(&vars).is_ok());
+
+        // Without the URL the pin is the daemon's own business, as before.
+        let mut vars = required();
+        vars.insert(
+            "SQUELCH_WARDEN_EMBED_MODEL".to_string(),
+            "Qdrant/bge-small-en-v1.5-onnx-Q".to_string(),
+        );
+        assert!(load(&vars).is_ok());
     }
 
     /// The token is the one value that must never appear in a diagnostic, and

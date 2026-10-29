@@ -1,9 +1,10 @@
-# Every daemon tag (daemon-X.Y.Z) builds three images and pushes them to GHCR:
+# Every daemon tag (daemon-X.Y.Z) builds four images and pushes them to GHCR:
 # squelchd
 # (self-hosting is `docker compose up` + env vars, no Rust toolchain on the
 # box), squelch-warden and squelch-control (the hosted planes, so a rebuilt node
 # pulls a tag instead of a human rebuilding it by hand — see
-# deploy/hosted/PRODUCTION.md).
+# deploy/hosted/PRODUCTION.md), and squelch-embed (the hosted shared embedding
+# service, amd64 + arm64 like squelchd and for the same reason).
 #
 # ARCHITECTURES DIFFER PER IMAGE, on purpose:
 #
@@ -183,3 +184,49 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/squelch-control:buildcache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/squelch-control:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
+
+  # The shared per-node embedding service (docs/EMBED-SERVICE.md), weights
+  # baked in. Released on the daemon's tag because the two must agree on the
+  # model and squelch-embed/src/protocol.rs is one file both build from; what
+  # runs it is deploy/hosted/65-embed.yaml, pinned to one of these tags.
+  embed-image:
+    runs-on: ubuntu-latest
+    # Deploys to the release-daemon environment, limited to daemon-* tags,
+    # which only admins may push (tag ruleset). Holds no secrets today; it
+    # is where any future publishing secret goes, and the deployment log
+    # records every image publish.
+    environment: release-daemon
+    needs: verify
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Same scheme as squelchd: image tag == git tag, plus latest.
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/squelch-embed
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile.embed
+          # Both arches, like squelchd: Dockerfile.embed cross-compiles the
+          # binary and fetches the weights in a native stage, so neither half
+          # needs emulation.
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/squelch-embed:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/squelch-embed:buildcache,mode=max,image-manifest=true,oci-mediatypes=true

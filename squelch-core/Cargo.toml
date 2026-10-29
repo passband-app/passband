@@ -30,11 +30,17 @@ toml = { workspace = true }
 tiny_http = { workspace = true }
 webbrowser = { workspace = true }
 url = { workspace = true }
-# `blocking` for the consent-broker flow only: `squelchd auth` runs before any
-# runtime exists (the loopback flow already blocks on a TcpListener there), so
-# the broker's register/poll calls are on the same synchronous path. Everything
+# `blocking` for two synchronous callers. The consent-broker flow: `squelchd
+# auth` runs before any runtime exists (the loopback flow already blocks on a
+# TcpListener there), so the broker's register/poll calls are on the same
+# synchronous path. And `embed::RemoteEmbedder`, which implements the sync
+# `Embedder` trait and is only ever called under `spawn_blocking`. Everything
 # else in this crate uses the async client.
 reqwest = { workspace = true, features = ["blocking"] }
+# The wire contract with the shared embedding service (docs/EMBED-SERVICE.md),
+# and nothing else: `default-features = false` drops the `server` half, so this
+# links serde types and constants, not a second copy of the service.
+squelch-embed = { path = "../squelch-embed", default-features = false }
 mail-parser = { workspace = true }
 base64 = { workspace = true }
 ammonia = "4"

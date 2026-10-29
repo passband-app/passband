@@ -88,6 +88,9 @@ pub fn test_config() -> Config {
         llm_stage1_daily_cap: None,
         llm_stage2_daily_cap: None,
         embed_idle_unload_secs: None,
+        // Unset, so every tenant embeds in-process like a warden that never
+        // heard of the shared service: the tests that point at it set it.
+        embed_url: None,
         // Unset, so the agent door is unpublished: the tests that publish it
         // set it themselves.
         mcp_oauth_issuer: None,

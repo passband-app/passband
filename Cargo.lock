@@ -4846,6 +4846,7 @@ dependencies = [
  "sha2 0.10.9",
  "socket2",
  "sqlite-vec",
+ "squelch-embed",
  "squelch-httpauth",
  "thiserror 2.0.21",
  "tiny_http",
@@ -4855,6 +4856,21 @@ dependencies = [
  "webbrowser",
  "whatlang",
  "zerocopy 0.7.35",
+]
+
+[[package]]
+name = "squelch-embed"
+version = "0.0.14"
+dependencies = [
+ "axum",
+ "fastembed",
+ "hf-hub",
+ "hyper-util",
+ "serde",
+ "serde_json",
+ "squelch-httpauth",
+ "tokio",
+ "tower",
 ]
 
 [[package]]
@@ -4946,6 +4962,7 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "sha2 0.10.9",
+ "squelch-embed",
  "squelch-httpauth",
  "thiserror 2.0.21",
  "tokio",

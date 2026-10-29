@@ -273,6 +273,41 @@ fn allow(store: &SqliteStore, id: i64) {
     ));
 }
 
+/// Commit a triage decision for `id`, the way the worker does, `adjust`ed.
+/// Inbound mail is embedded only once decided (`embeddable_mail_sql!`).
+fn decide(
+    store: &SqliteStore,
+    acct: AccountId,
+    id: i64,
+    adjust: impl FnOnce(&mut crate::triage::decision::MessageDecision),
+) {
+    use crate::store::agent_triage::{AgentCommitOutcome, AgentTriageStore};
+    let job = store
+        .claim_agent_job(acct, "triage", Utc::now() + chrono::Duration::hours(1), 60)
+        .unwrap()
+        .expect("a triage job waits");
+    assert_eq!(job.message_id, id);
+    let context = store.load_agent_context(&job).unwrap();
+    let mut decision = crate::triage::decision::MessageDecision {
+        kinds: vec![crate::triage::decision::EmailKind::Bill],
+        summary: "An electricity bill".into(),
+        reason: "A bill".into(),
+        ..Default::default()
+    };
+    adjust(&mut decision);
+    assert_eq!(
+        store
+            .commit_agent_decision(
+                &job,
+                &context,
+                &decision,
+                std::slice::from_ref(&context.message.source)
+            )
+            .unwrap(),
+        AgentCommitOutcome::Applied
+    );
+}
+
 fn billed(store: &SqliteStore, acct: AccountId) -> (u64, u64) {
     store
         .list_usage_by_category(acct, 2)
@@ -305,16 +340,15 @@ async fn french_mail_is_translated_indexed_and_served_to_both_doors() {
     assert_eq!(hits.iter().map(|h| h.id).collect::<Vec<_>>(), vec![id]);
     assert!(hits[0].snippet.contains("Payment is due") || hits[0].snippet.contains("electricity"));
 
-    // SEMANTIC: the translation's vector was written by the pass itself.
-    let vecs = count(
-        &store,
-        &format!("SELECT COUNT(*) FROM message_translation_vecs WHERE message_id={id}"),
-    );
-    assert_eq!(vecs, 1);
-    let near = store
-        .semantic_search(acct, "electricity bill payment due Friday", 1)
-        .unwrap();
-    assert_eq!(near[0].0, id);
+    // SEMANTIC, NOT YET: the message is undecided (it could still be a login
+    // code), so neither its text nor its English has reached the embedder.
+    let vecs = |store: &SqliteStore| {
+        count(
+            store,
+            &format!("SELECT COUNT(*) FROM message_translation_vecs WHERE message_id={id}"),
+        )
+    };
+    assert_eq!(vecs(&store), 0, "undecided mail reaches no embedder");
 
     // THE READER: the English beside the original.
     let thread = "thr-fr1".to_string();
@@ -342,6 +376,15 @@ async fn french_mail_is_translated_indexed_and_served_to_both_doors() {
         mcp.messages[0].translation.as_ref().unwrap().subject,
         "Your electricity bill"
     );
+
+    // SEMANTIC, ONCE DECIDED: a non-sealed decision lets the drain embed both.
+    decide(&store, acct, id, |_| {});
+    eng.backfill_missing_vectors().await;
+    assert_eq!(vecs(&store), 1);
+    let near = store
+        .semantic_search(acct, "electricity bill payment due Friday", 1)
+        .unwrap();
+    assert_eq!(near[0].0, id);
 
     // TRIAGE CONTEXT: the English rides along, outside the content snapshot.
     let before = count(
@@ -505,6 +548,7 @@ async fn the_drain_embeds_a_translation_that_landed_without_a_vector() {
     let (eng, store, acct) = engine(Some(backend.clone()));
     let id = land(&eng, acct, "fr1", false, false);
     assert!(eng.translate_pass().await);
+    decide(&store, acct, id, |_| {});
     store.execute_batch_for_test(&format!(
         "DELETE FROM message_translation_vecs WHERE message_id={id}"
     ));
@@ -520,6 +564,39 @@ async fn the_drain_embeds_a_translation_that_landed_without_a_vector() {
             .is_empty()
     );
     assert!(!eng.vectors_dirty.load(Ordering::Relaxed));
+}
+
+/// THE SEALED GATE ON THE TRANSLATION PATH: live mail is translated before
+/// its first triage, so the English of a login code exists while nothing has
+/// said what it is. Neither it nor the original reaches an embedder, then or
+/// after the decision says auth.
+#[tokio::test]
+async fn the_english_of_mail_that_may_be_sealed_reaches_no_embedder() {
+    let backend = Scripted::new(Answer::French);
+    let (eng, store, acct) = engine(Some(backend.clone()));
+    let id = land(&eng, acct, "fr1", false, false);
+    assert!(eng.translate_pass().await);
+    assert_eq!(status(&store, id).unwrap().0, "done");
+    let vecs = |store: &SqliteStore| {
+        (
+            count(
+                store,
+                &format!("SELECT COUNT(*) FROM message_vecs WHERE message_id={id}"),
+            ),
+            count(
+                store,
+                &format!("SELECT COUNT(*) FROM message_translation_vecs WHERE message_id={id}"),
+            ),
+        )
+    };
+    assert_eq!(vecs(&store), (0, 0), "undecided");
+    eng.backfill_missing_vectors().await;
+    assert_eq!(vecs(&store), (0, 0), "the drain waits for a decision");
+    decide(&store, acct, id, |d| {
+        d.auth.kinds = vec![crate::triage::decision::AuthKind::Otp]
+    });
+    eng.backfill_missing_vectors().await;
+    assert_eq!(vecs(&store), (0, 0), "auth: never");
 }
 
 #[tokio::test]

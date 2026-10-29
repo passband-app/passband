@@ -1,16 +1,196 @@
 # One embedding session per node
 
-Status: designed 2026-08-26, **not built**; the build trigger is §9. The design
-record for the change that makes hosted tenant count independent of the ONNX
-Runtime session: one embedder per node, shared by every tenant, instead of one
-per tenant pod. Written now and built later because the Phase 1 daemon work
-(idle unload, heap trim) buys headroom, and these decisions are cheaper to argue
-about before there is code.
+Status: designed 2026-08-26; **built 2026-10-28 on branch `better-scaling`, not
+yet rolled out**. The rollout is `deploy/hosted/SETUP.md` §10b. The design record
+for the change that makes hosted tenant count independent of the ONNX Runtime
+session: one embedder per node, shared by every tenant, instead of one per
+tenant pod. Sections 1 to 9 below are the design as argued in August, kept as
+written; where the build differs, the next section says so and the code wins.
+
+## As built
+
+What shipped differs from §1 to §9 in these places. Each was checked against
+the code on the branch; the file named is where to look.
+
+- **Fleet objects are operator-applied YAML, not warden objects.** §5 had the
+  warden build `embed_deployment`, `embed_service` and `embed_network_policy`
+  as typed structs. They are `deploy/hosted/65-embed.yaml` instead, applied by
+  hand once, like the monitoring stack. The warden renders only the tenant
+  side: `SQUELCH_EMBED_URL`, `SQUELCH_EMBED_TOKEN` (Secret
+  `squelch-embed-token`, key `token`, optional) and one egress rule per tenant
+  (pod selector `app.kubernetes.io/name: squelch-embed`, TCP 8850). The RBAC
+  file is still untouched, which was §5's point.
+- **The operator knob is `SQUELCH_WARDEN_EMBED_URL`, unset by default.** Unset,
+  every tenant embeds in-process exactly as before, which is also what every
+  self-host daemon does. The validator allows `http://` because the host must
+  be in-cluster: a single-label Service name, `*.svc` or `*.svc.cluster.local`.
+  Public hostnames and IP literals are refused.
+- **A tenant pod is lighter when the knob is set.** The warden stops mounting
+  and copying the model PVC (`SQUELCH_WARDEN_MODEL_PVC` has nothing to seed),
+  and the DEFAULT tenant resources drop to 128Mi request, 512Mi limit, 40m CPU
+  request. Explicit `SQUELCH_WARDEN_*` resource knobs still win.
+- **The quota is provisional at 60 tenants.** `requests.memory` stays
+  `11520Mi`. Knob unset, that is 30 tenants at 384Mi; set, it is `(11520 - 320)
+  / 128 = 87` by memory, but the `pods` and `persistentvolumeclaims` lines in
+  `70-tenant-limits.yaml` deliberately gate at 60, because the 80 GB disk is
+  the unmeasured line now: `local-path` does not enforce a PVC's size, and the
+  archive tier can grow one tenant's database to about 4 GB.
+- **No cross-request batching. One forward pass per request.** §2's "Two
+  lanes" had a 10 ms coalescing window that merged waiting requests into one
+  pass, and it is gone (`squelch-embed/src/coalescer.rs`, which keeps the name
+  and is now a two-lane queue in front of one worker). Merging was a side
+  channel between tenants: a pass pads every text to the longest one in it, so
+  how long tenant B's request took said something about the token length of
+  whatever tenant A's text it was batched with, and when. Now a pass holds one
+  request's texts and nothing else. Queue wait still tells a caller, coarsely,
+  that someone else is embedding; it no longer carries another request's
+  length. The interactive lane is served strictly
+  first: whenever a search or a single-message ingest is waiting, it is the
+  next pass. The memory bound is unchanged, since a request is at most
+  `protocol::MAX_TEXTS_PER_CALL` (8) texts and a pass was never bigger than
+  that. Throughput under load is unremeasured since the change.
+- **Every queued request has a deadline, under the client's.** 4.5 s
+  interactive and 25 s backfill (see `INTERACTIVE_DEADLINE` and
+  `BACKFILL_DEADLINE` in `squelch-embed/src/protocol.rs`), each just under the
+  daemon's own 5 s and 30 s timeouts, which `RemoteEmbedder` takes from the
+  same file. The deadline is for a request's pass to START: one still queued
+  at it is dropped unrun and counted `abandoned`, and a caller still waiting
+  is answered 429, so its daemon backs off rather than timing out.
+  Expired and hung-up entries are swept when a request arrives, before the
+  lane is judged full, so a lane cannot refuse new work on behalf of callers
+  that have already left.
+- **Lane shares are 16 texts interactive and 96 backfill** (see
+  `INTERACTIVE_SHARE` and `BACKFILL_SHARE` in `coalescer.rs`), down from §2's
+  64 and 192. They are sized to what one worker can start inside a lane's
+  deadline: anything queued past that would only expire.
+- **The front door is bounded before the queue.** A body is at most 256 KiB
+  (`protocol::MAX_BODY_BYTES`, down from 1 MiB), about 32 bodies are read and
+  parsed at once (`BODY_PERMITS` in `http.rs`; past that a 429 with
+  `Retry-After: 1`, counted `queue_full` on lane `none`), and about 256
+  connections may be open per listener (`MAX_CONNECTIONS`, same file; past it
+  the accept loop stops accepting and the kernel's backlog holds the rest).
+  Those three are what a flood can hold, whoever sends it.
+- **`outcome` gained `not_ready`, `unauthorized` and `abandoned`**
+  (`squelch-embed/src/metrics.rs`). §4 listed `ok`, `rejected`, `queue_full`,
+  `error`. `abandoned` counts a request whose caller hung up, or whose deadline
+  passed, before its pass ran (skipped, never run), or whose caller hung up
+  before its vectors came back.
+- **`lane` gained `none`**, for a request refused before it has a shape: a 401
+  (decided before the body is read), a 429 for want of a body permit, or a body
+  that does not parse or carries no texts.
+- **Status codes.** An oversized body is a 400 `bad_request`, not a 413, and a
+  body that takes longer than 10 s to arrive is a 408 (`squelch-embed/src/http.rs`).
+  A 401 `unauthorized` exists because the token does. Every error body is one
+  closed word from `protocol.rs`.
+- **A dead worker takes the pod out of service.** If the inference thread
+  dies outside the guarded pass, `/healthz` goes back to 503, the readiness probe takes the pod out of
+  the Service, every request still queued gets a 500, and the process exits
+  non-zero so the kubelet restarts it. A pod that answers `/healthz` 200 with
+  no worker behind it is the failure this prevents.
+- **A panic logs a fixed word, the thread name and a source location, never
+  its payload.**
+  The process installs its own panic hook, because the default one prints the
+  panic message, and a message built from a request (an index, a slice, a
+  failed parse) could carry text. A test drives a panic with a canary in it
+  and fails if the canary reaches the line the hook writes.
+- **The process runs as uid 10003**, not the tenants' 10001 or the warden's
+  10002, in both `Dockerfile.embed` and `65-embed.yaml`, so where user
+  namespaces are off a tenant daemon and the embedder are still different
+  users on the node.
+- **Timeouts on the server are header read and body read, 10 s each, and
+  nothing on the write side.** hyper's server has no write timeout to set. A
+  caller that stops reading its response holds a connection task; it cannot
+  hold a queue slot, because the batch has already run. The same 10 s timer
+  closes an idle keep-alive connection. The server is HTTP/1 only, because
+  hyper's HTTP/2 server has no header-read timeout.
+- **`/healthz` is on both ports.** §2 put it on 9464 only. It is also on 8850,
+  because the daemon's one startup probe goes through the Service, which carries
+  only 8850. The kubelet's probes use 9464.
+- **Weights are fetched by `curl` in `Dockerfile.embed`, not by the binary.**
+  A native build stage pulls the five files fastembed reads from
+  `Xenova/bge-small-en-v1.5` at pinned revision `ea104dac`, checks each against
+  a pinned sha256, and lays them out as the hf-hub cache. The binary refuses to
+  start if any file is missing and never downloads (`session.rs`), and a test
+  keeps the Dockerfile's file list in step with the session's. Moving the
+  revision is a re-embed decision, not a bump.
+- **Startup refusals.** The service refuses a `SQUELCH_EMBED_TOKEN` shorter than
+  32 characters or still holding the example Secret's placeholder, and refuses
+  to start with `HF_HOME` set (fastembed would read it in place of the baked
+  cache).
+- **Backoff opens on more than 429 and 503.** `squelch-core/src/sync/embed_backoff.rs`
+  opens a window on any transient failure: 408, 429, 503 and other 5xx, a
+  timeout, a refused or failed connection. 5 s doubling to 5 min, `Retry-After`
+  as a floor (capped at 5 min where it is parsed), reset on the first success.
+  The service sends `Retry-After: 2` from the interactive lane and `10` from
+  backfill. The window covers ingest, the translation embed and the vector
+  drain; inside it ingest stores the message and leaves the vector to the
+  drain. A permanent failure from the service (400, 401, a response in another
+  vector space) opens the window too, straight at the 5 min cap: retrying it
+  sooner sends the same request to the same refusal, and every tenant of a
+  fleet with a wrong token doing that every tick is a flood of 401s. Local
+  embedder errors never open a window and keep the retry-next-tick behaviour.
+- **The client is pinned to the configured host** (`squelch-core/src/embed/remote.rs`).
+  Redirects are disabled and proxy environment variables are ignored, because
+  either would send mail text somewhere nobody configured. The pooled idle
+  timeout is 5 s, under the server's 10 s idle close.
+- **The client cuts each text to the service's limit**, `protocol::MAX_CHARS_PER_TEXT`
+  (8192 characters), not the daemon's `embed.max_chars`, so a query and the
+  mail it is searching for are cut the same way on both sides of the wire.
+- **The token stays out of debug output.** `EmbedConfig`'s `Debug` prints the
+  token as redacted, so a config dumped into a log or a panic carries no
+  secret.
+- **The warden refuses a model the service is not.** With
+  `SQUELCH_WARDEN_EMBED_URL` set, a `SQUELCH_WARDEN_EMBED_MODEL` that is not
+  `protocol::MODEL_CODE` is refused at boot: a daemon told one model and given
+  another's vectors would search the wrong space.
+- **`RemoteEmbedder::new` refuses a daemon in another vector space.** Besides
+  the per-response `dims` check from §3, construction refuses a daemon whose
+  `embed.model`, `embed.dims` or `embed.max_tokens` disagrees with
+  `squelch_embed::protocol`, and a test pins the daemon's defaults to those
+  constants.
+- **The Deployment is `strategy: Recreate`**, so a rollout never holds two
+  sessions (or two quota slots). The cost is a few seconds of 503, which tenants
+  treat as a transient failure.
+- **Sealed mail reaches no embedder, by a gate on the decision, not the
+  retired column.** §4 as first written described a `sensitivity == Normal`
+  gate that the triage rewrite (`4b7099de`, 2026-09-17) had already retired:
+  ingest always stores `Sensitivity::Normal`, and for a while the only embed
+  gate was provider spam, so login codes were embedded like any other mail.
+  The gate as built is `embeddable_mail_sql!`
+  (`squelch-core/src/store/sqlite/mod.rs`): not spam, not known sealed (an auth
+  decision, a restriction by the model or a person, the legacy column), and
+  either a stored decision for the message's CURRENT content with access
+  settled, or the owner's own mail once its access check has settled and did
+  not restrict it. Own mail whose access check never runs (archive-tier rows,
+  and every own message on a daemon with no model key) therefore never gets a
+  vector, and loses any it had at first open: deliberate, see SETUP.md 10b.
+  "Current" is exact: the decision's revision must equal the
+  message's content revision (`agent_message_state.revision`), so a decision
+  made about an earlier version of the text does not let the new version
+  through. It is asked before any text leaves for an embedder (ingest, the
+  drain, the translation path) and again under the store lock at the write.
+  Because only the triage model decides auth, and it runs after ingest,
+  inbound mail is not embedded at ingest at all: the drain embeds it once a
+  decision that does not seal it lands. Mail whose triage is delayed (run cap,
+  spent budget, model failing or not configured) or never happens (unpromoted
+  archive rows, `source_access`-only rows) has no vector; keyword search still
+  finds it. Vectors of mail that is sealed, or undecided again after a content
+  change, are deleted at the event and by a sweep at every store open
+  (`purge_forbidden_vectors_conn`); the sweep is a scan of the vectors table,
+  about 30 ms at 2,499 vectors and about 1 s at 100k. A restriction that is
+  lifted, and an access commit that clears a message, mark the store for the
+  drain, so that mail gets its vector back without waiting for something else
+  to wake the drain. The LLM gateway is NOT gated this way and cannot be:
+  triage has to read a message to decide it is auth. `docs/SECURITY.md` §4d is
+  the full statement. Same gate, same behaviour on self-host, where a daemon
+  with no model key therefore embeds none of its inbound mail.
 
 ## 1. Why
 
-Every hosted tenant runs its own `squelchd` pod on `carrier` (Hetzner CPX21, 3
-shared vCPU, 3.8 GB, 80 GB, no swap). Each embeds mail for semantic recall with
+Every hosted tenant runs its own `squelchd` pod on `carrier` (Hetzner, 4 shared
+vCPU, 16 GB, 80 GB root; resized from a CPX21 on 2026-09-28). The numbers in
+this section were measured in August on the old box, 3 shared vCPU and 3.8 GB
+with no swap, and the arithmetic below is about that box. Each embeds mail for semantic recall with
 fastembed over ONNX Runtime, `bge-small-en-v1.5` at 384 dimensions, weights
 pinned to `Xenova/bge-small-en-v1.5` fp32.
 
@@ -64,6 +244,11 @@ line leaves the capacity arithmetic** and what is left is storage, the PVC cap
 and 3 vCPU of Gmail poll loops.
 
 ## 2. Shape
+
+> Superseded where "As built" above says otherwise: no coalescing window and
+> no cross-request batching, a 256 KiB body limit, lane shares of 16 and 96
+> texts, and a client cut at `MAX_CHARS_PER_TEXT` rather than `max_chars`.
+> The rest of this section is the design record.
 
 ### The unit: a new crate and its own image
 
@@ -289,18 +474,26 @@ the sync engine (5 s, doubling to a few minutes, reset on success), with
 ## 4. Security
 
 Be blunt about what this is. **`squelch-embed` is a process we operate that sees
-the subject and body text of every hosted tenant's normal-sensitivity mail, in
-flight, in one address space.** That widens the hosted trust story and belongs in
+the subject and body text of hosted tenants' decided, non-sealed mail and their
+own sent mail, in flight, in one address space.** That widens the hosted trust story and belongs in
 `docs/SECURITY.md`, not only here. It is not new **in kind**: Bifrost already
 sees every message Stage 2 triages, and `docs/HOSTED.md` says so. This is a
 second such component with a narrower job.
 
-**The sealed-content invariant is unchanged, structurally.** The gate is in the
-store's embed-at-write path (`sensitivity == Normal`, in `SyncEngine::ingest_one`
-and `messages_missing_vectors`), not in the embedder. Sealed text is never handed
-to an `Embedder` of any kind, so it never reaches the wire. Nothing here touches
-that gate, and nothing here may: an embedder that filtered its own input would be
-a second gate to keep in step with the first.
+**The sealed-content invariant is structural, and store-side.** The gate is
+`embeddable_mail_sql!` (`squelch-core/src/store/sqlite/mod.rs`), asked at
+ingest, in `messages_missing_vectors` and `translations_missing_vectors`, on the
+translation path, and again at the write, not in the embedder. Sealed is the
+triage decision (auth, restricted), a person's restriction or the legacy
+`triage.sensitivity` column, never the column alone, and inbound mail is not
+embedded until a decision says it is not sealed (the owner's own mail is the one
+undecided class let through). Sealed text is never handed to an `Embedder` of
+any kind, so it never reaches the wire; an existing vector of mail that becomes
+sealed is deleted at that event and by the sweep at store open. Nothing here may
+touch that gate from the embedder's side: an embedder that filtered its own
+input would be a second gate to keep in step with the first. The LLM gateway is
+the other process that sees hosted mail, and it does read sealed mail, because
+triage is what decides auth.
 
 **What the service must not do**, each a testable claim:
 
@@ -367,8 +560,9 @@ is in-cluster, and a URL with a public host is refused outright.
 
 **What `docs/SECURITY.md` gains.** A subsection under §4: hosted mail text
 reaches two processes we operate, the LLM gateway and the embedding service;
-sealed mail reaches neither, enforced for both at the same store-side
-`sensitivity == Normal` gate; the embedding service logs nothing, stores nothing,
+sealed mail reaches the embedding service never (the store-side
+`embeddable_mail_sql!` gate) and the gateway always (triage must read it to
+decide it is auth); the embedding service logs nothing, stores nothing,
 caches nothing, is never told a tenant's name, and cannot reach the network;
 self-host reaches neither.
 
@@ -435,7 +629,11 @@ open.
 sets no `SQUELCH_EMBED_URL`, builds its own `FastEmbedder` exactly as today, and
 never talks to anything of ours. One user on one machine already has one session,
 which is the shape this design is trying to reach; there is nothing to share.
-`docs/GETTING-STARTED.md` does not change and self-host gains no new knob.
+`docs/GETTING-STARTED.md` does not change and self-host gains no new knob. The
+sealed gate is the same store-side predicate on both (§4): a self-host
+in-process embedder never reads sealed or undecided inbound mail either, and a
+self-host with no model configured triages nothing, so its inbound mail gets
+no vectors and is found by keyword search only.
 
 ## 7. Capacity model
 

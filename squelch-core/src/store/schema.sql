@@ -1042,9 +1042,13 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 -- back. `account_id` is a vec0 METADATA column so KNN queries can constrain by
 -- account in the WHERE clause.
 --
--- SECURITY: SEALED MESSAGES ARE NEVER INSERTED HERE — the embed-at-write path is
--- gated on `sensitivity='normal'`, so sealed content is absent from the vector
--- space entirely. `semantic_search` re-excludes sealed rows anyway.
+-- SECURITY: SEALED MESSAGES ARE NEVER INSERTED HERE. Every write is gated on
+-- `embeddable_mail_sql!` (store/sqlite/mod.rs): not spam, not known sealed (an
+-- auth decision, a restriction, the retired `triage.sensitivity` column), and
+-- either decided with access settled or the owner's own mail. A vector whose
+-- message becomes sealed (or undecided again) is deleted at that event, and a
+-- sweep at every store open deletes any left from before the gate
+-- (`purge_forbidden_vectors_conn`). The read side re-checks access anyway.
 --
 -- DIMENSION: float[384] matches BGE-small-en-v1.5, and the store asserts the
 -- configured embedder matches at attach time. Changing it means editing this

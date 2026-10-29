@@ -26,6 +26,7 @@ COPY squelch-broker ./squelch-broker
 COPY squelch-control ./squelch-control
 COPY squelch-warden ./squelch-warden
 COPY squelchd ./squelchd
+COPY squelch-embed ./squelch-embed
 COPY squelch-relay ./squelch-relay
 
 RUN cargo build --release --locked -p squelch-relay

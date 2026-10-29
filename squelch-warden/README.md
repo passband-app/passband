@@ -351,16 +351,17 @@ holds even for a tenant reconciled by hand.
 | `SQUELCH_WARDEN_MCP_OAUTH_ISSUER` | unset | Publishes the agent door with OAuth. The AuthKit issuer, an `https://` origin with no port and no path (e.g. `https://example.authkit.app`). Passed on as `SQUELCH_MCP_OAUTH_ISSUER`, with `SQUELCH_MCP_PUBLIC_URL=https://<label>.<base domain>/mcp`, and adds `/mcp` and `/.well-known/oauth-protected-resource` to every tenant Ingress. Unset renders exactly what a warden without it did. Set it LAST; see SETUP.md, "Publishing the agent door". |
 | `SQUELCH_WARDEN_STORAGE_CLASS` | `local-path` | k3s's built-in provisioner. |
 | `SQUELCH_WARDEN_STORAGE_SIZE` | `10Gi` | Per-tenant volume. |
-| `SQUELCH_WARDEN_CPU_REQUEST` | `100m` | Tenant daemon container. |
+| `SQUELCH_WARDEN_CPU_REQUEST` | `100m` | Tenant daemon container. `40m` by default with `SQUELCH_WARDEN_EMBED_URL` set. |
 | `SQUELCH_WARDEN_CPU_LIMIT` | `1000m` | Tenant daemon container. |
-| `SQUELCH_WARDEN_MEMORY_REQUEST` | `384Mi` | Tenant daemon container. What a daemon that has embedded anything actually rests at; the constant in `config.rs` carries the measurements and why a low one gets a neighbour OOM-killed. |
-| `SQUELCH_WARDEN_MEMORY_LIMIT` | `1Gi` | Tenant daemon container. Past it, OOM-killed and restarted. |
+| `SQUELCH_WARDEN_MEMORY_REQUEST` | `384Mi` | Tenant daemon container. What a daemon that has embedded anything actually rests at; the constant in `config.rs` carries the measurements and why a low one gets a neighbour OOM-killed. `128Mi` by default with `SQUELCH_WARDEN_EMBED_URL` set: no ONNX session. |
+| `SQUELCH_WARDEN_MEMORY_LIMIT` | `1Gi` | Tenant daemon container. Past it, OOM-killed and restarted. `512Mi` by default with `SQUELCH_WARDEN_EMBED_URL` set. |
 | `SQUELCH_WARDEN_EPHEMERAL_REQUEST` | `256Mi` | `/tmp` plus logs. The mailbox is a PV and does not count. |
 | `SQUELCH_WARDEN_EPHEMERAL_LIMIT` | `1Gi` | What stops a tenant filling the node's root filesystem. |
 | `SQUELCH_WARDEN_TMP_SIZE` | `512Mi` | `sizeLimit` on the pod's `/tmp` emptyDir. |
 | `SQUELCH_WARDEN_USER_NAMESPACES` | `on` | `hostUsers: false`. Turn off only if the cluster cannot do it. |
-| `SQUELCH_WARDEN_MODEL_PVC` | unset | Shared pre-seeded embedding weights; see SETUP.md step 10. |
+| `SQUELCH_WARDEN_MODEL_PVC` | unset | Shared pre-seeded embedding weights; see SETUP.md step 10. Ignored while `SQUELCH_WARDEN_EMBED_URL` is set. |
 | `SQUELCH_WARDEN_EMBED_MODEL` | unset | Fleet-wide embedding model, passed on as `SQUELCH_EMBED_MODEL`. Unset means the daemon's own pin. Reseed `SQUELCH_WARDEN_MODEL_PVC` with the new weights BEFORE moving it: a model the volume does not hold is a cold download on every tenant, which is the readiness failure the warden warns about at boot. |
+| `SQUELCH_WARDEN_EMBED_URL` | unset | The shared embedding service (`deploy/hosted/65-embed.yaml`), exactly `http://<Service>:8850` for a Service in the tenant namespace: plain http is allowed because the host must be in-cluster, so https, public hosts, IP literals, paths and a missing port are refused. Set, every tenant gets `SQUELCH_EMBED_URL`, an optional `SQUELCH_EMBED_TOKEN` reference (Secret `squelch-embed-token`, key `token`), one egress rule to the `squelch-embed` pods on TCP 8850, no model volume, and lighter DEFAULT bounds (40m CPU request, 128Mi / 512Mi memory; explicit values win). Unset renders exactly what a warden without it did. The roller delivers it; see `15-warden-config.yaml` for the order. |
 | `SQUELCH_WARDEN_EMBED_IDLE_UNLOAD_SECS` | unset | Passed on as `SQUELCH_EMBED_IDLE_UNLOAD_SECS`: seconds before a tenant daemon drops its idle embedding session. Unset keeps the daemon's default; `0` never unloads. |
 | `SQUELCH_WARDEN_IMAGE_PULL_SECRET` | unset | For a private squelchd image. |
 | `SQUELCH_WARDEN_RELAY_URL` | unset | APNs relay, passed on as `SQUELCH_RELAY_URL`. https only, and no `@`, `?` or `#`. Unset means no hosted iOS push. |

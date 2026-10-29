@@ -1,8 +1,15 @@
 //! On-box semantic embeddings for recall ("what did I say I'd send X").
 //!
-//! SECURITY INVARIANT: sealed (auth/2FA) content is NEVER embedded. The gate is
-//! the store's embed-at-write path (`sensitivity == Normal`), not this module —
-//! sealed text is structurally absent from the vector space. See docs/SECURITY.md.
+//! SECURITY INVARIANT: sealed content (an auth decision, a restriction by the
+//! model or a person, the retired `triage.sensitivity` column) is NEVER
+//! embedded, and nothing inbound is embedded until a stored decision says it
+//! is not sealed; the owner's own mail is the one class embedded undecided.
+//! The gate is the store's `embeddable_mail_sql!` (`store/sqlite/mod.rs`),
+//! asked at ingest, by the drain and by the translation path before any text
+//! is handed over, and again under the store lock at the write; not this
+//! module. See docs/SECURITY.md §4d. That holds for [`RemoteEmbedder`] exactly
+//! as for the local ones: it is handed only what that gate already let
+//! through, so sealed text never reaches the wire either.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -12,9 +19,11 @@ use crate::text::truncate_chars;
 
 mod fastembed_impl;
 mod lazy;
+mod remote;
 
 pub use fastembed_impl::{DEFAULT_MODEL_CODE, FastEmbedder};
 pub use lazy::{LazyEmbedder, ReapOutcome};
+pub use remote::{MAX_RETRY_AFTER, RemoteEmbedError, RemoteEmbedder, remote_failure};
 
 /// Turns text into a fixed-dimension embedding vector. CPU-bound; callers run it
 /// under `spawn_blocking` so ingest never stalls on it. `dims()` MUST match the

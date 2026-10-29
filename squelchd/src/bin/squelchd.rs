@@ -22,7 +22,7 @@ use squelch_core::credentials::{
     CredentialKind, CredentialStore, ensure_backend, load_token_backend, store_for_backend,
     store_token_backend, store_tokens_backend, write_private,
 };
-use squelch_core::embed::{Embedder, LazyEmbedder, ReapOutcome};
+use squelch_core::embed::{EmbedSettings, Embedder, LazyEmbedder, ReapOutcome, RemoteEmbedder};
 use squelch_core::metrics::SyncMetrics;
 use squelch_core::store::sqlite::device_tokens::PAIRING_TTL_SECS;
 use squelch_core::store::{SqliteStore, Store};
@@ -579,20 +579,79 @@ fn mailbox_engine(
     SyncEngine::new(store, creds, account_id, email, config).with_gmail_budget(budget.clone())
 }
 
+/// What [`build_embedder`] built: an in-process session, or the shared
+/// per-node embedding service (docs/EMBED-SERVICE.md). Kept apart rather than
+/// erased to `Arc<dyn Embedder>` at once because the two need different upkeep:
+/// a local session has a reaper to put it down when idle, and the remote one
+/// has nothing to put down. [`Self::spawn_upkeep`] is where that difference
+/// lives, so neither call site can spawn a reaper for the wrong arm.
+enum BuiltEmbedder {
+    /// The concrete [`LazyEmbedder`], because the reaper needs the unload
+    /// method and the trait deliberately does not carry it: unloading is a
+    /// property of THIS embedder, not of embedding.
+    Local(Arc<LazyEmbedder>),
+    /// `embed.url` was set. No ONNX session exists in this process.
+    Remote(Arc<RemoteEmbedder>),
+}
+
+impl BuiltEmbedder {
+    /// The embedder for the store and the sync engine.
+    fn embedder(&self) -> Arc<dyn Embedder> {
+        match self {
+            Self::Local(e) => e.clone(),
+            Self::Remote(e) => e.clone(),
+        }
+    }
+
+    /// Start what this embedder needs running for the life of the daemon. On
+    /// the runtime, once per build. The local arm spawns the idle reaper; the
+    /// remote arm spawns nothing, because idle unload is the problem the
+    /// shared service deletes rather than tunes.
+    fn spawn_upkeep(&self, idle_unload_secs: u64, shutdown: tokio::sync::watch::Receiver<bool>) {
+        match self {
+            Self::Local(e) => spawn_embedder_reaper(e.clone(), idle_unload_secs, shutdown),
+            Self::Remote(_) => {}
+        }
+    }
+}
+
 /// Build the semantic-recall embedder. `None` on failure — search then degrades
 /// to keyword-only.
 ///
-/// The concrete [`LazyEmbedder`] rather than `Arc<dyn Embedder>`, because the
-/// reaper in [`spawn_embedder_reaper`] needs the unload method and the trait
-/// deliberately does not carry it: unloading is a property of THIS embedder, not
-/// of embedding. Attach sites coerce.
-fn build_embedder(config: &Config, metrics: Option<Arc<SyncMetrics>>) -> Option<Arc<LazyEmbedder>> {
-    let built = LazyEmbedder::new(&config.embed.settings()).map(|e| match metrics {
+/// THE ONE PLACE THE LOCAL/REMOTE CHOICE IS MADE, for both call sites. With
+/// `embed.url` (`SQUELCH_EMBED_URL`) set, a [`RemoteEmbedder`] is built and
+/// [`LazyEmbedder::new`] is never called: no session, no weights read, and NO
+/// FALLBACK to one when the service is unreachable, because a daemon that
+/// quietly loaded a model whenever the service blinked would quietly cost the
+/// 300-500 MB the service exists to remove. Unset, this is the in-process
+/// embedder exactly as before.
+///
+/// Blocking: the local arm loads (and on a first run downloads) the model, the
+/// remote arm makes its one `/healthz` attempt. Callers on a runtime come
+/// through `spawn_blocking`.
+fn build_embedder(config: &Config, metrics: Option<Arc<SyncMetrics>>) -> Option<BuiltEmbedder> {
+    build_embedder_with(config, metrics, LazyEmbedder::new)
+}
+
+/// [`build_embedder`] with the local session's constructor passed in, so a test
+/// can prove the remote arm never reaches it. Production passes
+/// [`LazyEmbedder::new`] and nothing else.
+fn build_embedder_with(
+    config: &Config,
+    metrics: Option<Arc<SyncMetrics>>,
+    local: impl FnOnce(&EmbedSettings) -> Result<LazyEmbedder, squelch_core::CoreError>,
+) -> Option<BuiltEmbedder> {
+    if let Some(url) = config.embed.url.as_deref() {
+        // `squelchd_embedder_loaded` is left alone on this arm, at 0, which
+        // is the truth: no session is resident in this process.
+        return build_remote_embedder(config, url).map(BuiltEmbedder::Remote);
+    }
+    let built = local(&config.embed.settings()).map(|e| match metrics {
         Some(m) => e.with_metrics(m),
         None => e,
     });
     match built {
-        Ok(e) => Some(Arc::new(e)),
+        Ok(e) => Some(BuiltEmbedder::Local(Arc::new(e))),
         Err(e) => {
             eprintln!(
                 "squelch: embedder unavailable ({e}); semantic recall disabled \
@@ -601,6 +660,38 @@ fn build_embedder(config: &Config, metrics: Option<Arc<SyncMetrics>>) -> Option<
             None
         }
     }
+}
+
+/// The remote arm of [`build_embedder_with`]: construct, then ONE `/healthz`
+/// attempt, whose outcome is logged and otherwise ignored. A service that is
+/// down still yields the embedder: search degrades to keyword-only per query
+/// until it answers, ingest skips vectors the drain fills in later, and the
+/// caller's readiness settles on the attempt rather than on its result. `None`
+/// only for a configuration that can never work (a bad URL, or a daemon in a
+/// different vector space from the service), with the reason on stderr.
+fn build_remote_embedder(config: &Config, url: &str) -> Option<Arc<RemoteEmbedder>> {
+    let built = RemoteEmbedder::new(url, config.embed.token.as_deref(), &config.embed.settings());
+    let embedder = match built {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!(
+                "squelchd: embedding service not used ({e}); semantic recall disabled \
+                 and no local model is loaded (keyword search + triage unaffected)"
+            );
+            return None;
+        }
+    };
+    // The URL is an in-cluster address with no credentials in it (the
+    // constructor refuses userinfo); the token is never printed.
+    match embedder.probe() {
+        Ok(()) => eprintln!("squelchd: embedding service at {} is ready", url.trim()),
+        Err(e) => eprintln!(
+            "squelchd: embedding service at {} is not ready yet ({e}); search is \
+             keyword-only until it answers, and mail sync is unaffected",
+            url.trim()
+        ),
+    }
+    Some(Arc::new(embedder))
 }
 
 /// How often the reaper looks. A minute is far below any sane idle window and
@@ -1822,7 +1913,7 @@ fn run_daemon(config: Config) -> Result<(), squelch_core::CoreError> {
     // loaded/unloaded gauge would have no reader.
     let embedder = build_embedder(&config, None);
     if let Some(e) = &embedder {
-        store = store.with_embedder(e.clone() as Arc<dyn Embedder>)?;
+        store = store.with_embedder(e.embedder())?;
     }
     let store = Arc::new(store);
     // Read off config before the engine takes ownership of it below.
@@ -1855,8 +1946,8 @@ fn run_daemon(config: Config) -> Result<(), squelch_core::CoreError> {
 
         let mut engine = SyncEngine::new(store, creds, account_id, email, config);
         if let Some(e) = embedder {
-            spawn_embedder_reaper(e.clone(), idle_unload_secs, shutdown_rx.clone());
-            engine = engine.with_embedder(e as Arc<dyn Embedder>);
+            e.spawn_upkeep(idle_unload_secs, shutdown_rx.clone());
+            engine = engine.with_embedder(e.embedder());
         }
         engine.run(shutdown_rx).await
     })?;
@@ -2002,6 +2093,13 @@ fn report_metrics_posture(config: &Config) {
 ///   egress to the model host, a corrupt cache) leaves a daemon that syncs,
 ///   serves both doors and searches by keyword. Refusing to call that ready
 ///   would take a working mailbox down over a degraded search index.
+///   With `SQUELCH_EMBED_URL` set there is no model to wait for, and settled
+///   means the one `/healthz` attempt against the shared embedding service
+///   resolved, either way, inside the client's timeouts. A service that is down
+///   or still building its session leaves this daemon READY: answering 503
+///   would pull every tenant out of its Service over a node-wide search
+///   degradation and stop the fleet roller on the first one (see below), and
+///   the daemon recovers by itself once the service answers.
 ///
 /// ## What this does NOT catch, and why it is left that way
 ///
@@ -2914,18 +3012,25 @@ fn cmd_serve(
             // same reason the metrics server takes one: it must not depend on
             // where in this block the sync engine took the original.
             let reaper_shutdown = shutdown_tx.subscribe();
-            eprintln!(
-                "squelchd: initializing semantic-recall embedder in the background \
-                 (first run downloads the model; the server is already serving, \
-                 search is keyword-only until the embedder is ready)"
-            );
+            if config.embed.url.is_some() {
+                eprintln!(
+                    "squelchd: semantic recall uses the shared embedding service \
+                     (SQUELCH_EMBED_URL); no local model is loaded"
+                );
+            } else {
+                eprintln!(
+                    "squelchd: initializing semantic-recall embedder in the background \
+                     (first run downloads the model; the server is already serving, \
+                     search is keyword-only until the embedder is ready)"
+                );
+            }
             tokio::spawn(async move {
                 let built =
                     tokio::task::spawn_blocking(move || build_embedder(&config, Some(sync_metrics)))
                         .await;
                 match built {
                     Ok(Some(embedder)) => {
-                        match store.attach_embedder(embedder.clone() as Arc<dyn Embedder>) {
+                        match store.attach_embedder(embedder.embedder()) {
                             Ok(_) => eprintln!(
                                 "squelchd: embedder ready — semantic + hybrid search now enabled"
                             ),
@@ -2934,10 +3039,11 @@ fn cmd_serve(
                             ),
                         }
                         // Spawned even when the attach failed, and especially
-                        // then: an embedder nobody can reach still loaded a
-                        // session at construction, and this is what puts that
-                        // 250 MB down instead of holding it until restart.
-                        spawn_embedder_reaper(embedder, idle_unload_secs, reaper_shutdown);
+                        // then: a local embedder nobody can reach still loaded
+                        // a session at construction, and its reaper is what
+                        // puts that 250 MB down instead of holding it until
+                        // restart. A remote one spawns nothing.
+                        embedder.spawn_upkeep(idle_unload_secs, reaper_shutdown);
                     }
                     Ok(None) => { /* build_embedder already logged the reason */ }
                     Err(e) => eprintln!(
@@ -2947,6 +3053,9 @@ fn cmd_serve(
                 // Every arm above, including the ones that gave up: this is the
                 // last step of startup, and readiness waits on it having
                 // HAPPENED rather than on it having worked. See [`Readiness`].
+                // With a remote embedder "happened" is one `/healthz` attempt
+                // inside `build_embedder`, so this lands in milliseconds (or
+                // the client's timeouts) whether the service answered or not.
                 // The sync engine's first backfill waits on this same call for
                 // the same reason: an init that failed is one to stop waiting
                 // for, not one to wait out.
@@ -3045,6 +3154,46 @@ fn cmd_serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// docs/EMBED-SERVICE.md §3: with a URL, the local session's constructor
+    /// is never called, not on success, not when the service is down, not when
+    /// the remote config is refused. Without one, it is the only thing asked.
+    #[test]
+    fn a_configured_embed_url_never_builds_a_local_session() {
+        let never = |_: &EmbedSettings| -> Result<LazyEmbedder, squelch_core::CoreError> {
+            panic!("a local embedding session was built with SQUELCH_EMBED_URL set")
+        };
+        // Nothing listening: the probe fails and the embedder is still built.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut config = Config::default();
+        config.embed.url = Some(format!("http://127.0.0.1:{port}"));
+        let built = build_embedder_with(&config, None, never);
+        assert!(matches!(built, Some(BuiltEmbedder::Remote(_))));
+        assert_eq!(built.unwrap().embedder().dims(), 384);
+
+        // A daemon in another vector space gets no embedder, and still no
+        // local one.
+        config.embed.dims = 768;
+        assert!(build_embedder_with(&config, None, never).is_none());
+        config.embed.dims = 384;
+        config.embed.url = Some("ftp://nope".into());
+        assert!(build_embedder_with(&config, None, never).is_none());
+
+        // No URL: today's path, through the local constructor.
+        let mut asked = false;
+        let built = build_embedder_with(&Config::default(), None, |_| {
+            asked = true;
+            Err(squelch_core::CoreError::InvalidInput(
+                "no weights in a test".into(),
+            ))
+        });
+        assert!(asked, "the local arm builds the session");
+        assert!(built.is_none());
+    }
     use squelch_core::credentials::{FileCredentialStore, StoredToken};
 
     const BROKER: &str = "https://auth.passband.email";

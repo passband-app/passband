@@ -111,7 +111,69 @@ actor RehearsalAPI {
             stagedSent = sent
             stagedScheduled = scheduled
         }
+
+        /// A timeline, and the stats that go with it (a granted Google
+        /// Calendar, so no connect card). The lesson never claims one; only the phone's
+        /// screenshot harness stages this (`--fixture-calendar`).
+        private var stagedTimeline: TimelineFeed?
+        func stage(timeline: TimelineFeed) {
+            stagedTimeline = timeline
+        }
+
+        /// `/client/calendar/search`'s shape, written for the stand-in below.
+        private struct StagedSearchHit: Encodable {
+            var event: TimelineEvent?
+            var ghost: TimelineGhost?
+        }
+        private struct StagedSearchPage: Encodable {
+            var items: [StagedSearchHit]
+            var total: Int
+            var granted: Bool
+        }
+
+        /// Self-contained on purpose: the rehearsal suite compiles this file
+        /// without the calendar's own rules.
+        private func stagedCalendarSearch(_ q: String, limit: Int) -> StagedSearchPage {
+            let words = q.lowercased().split(separator: " ").map(String.init).filter { !$0.contains(":") }
+            let now = Date()
+            let iso = ISO8601DateFormatter()
+            let day = DateFormatter()
+            day.dateFormat = "yyyy-MM-dd"
+            func instant(_ raw: String?) -> Date? {
+                guard let raw else { return nil }
+                return iso.date(from: raw) ?? day.date(from: raw).map { $0.addingTimeInterval(86_399) }
+            }
+            func hits(_ text: String) -> Bool {
+                let lower = text.lowercased()
+                return !words.isEmpty && words.allSatisfy { lower.contains($0) }
+            }
+            var found: [(start: Date, end: Date, hit: StagedSearchHit)] = []
+            for event in stagedTimeline?.events ?? [] where hits("\(event.title ?? "") \(event.location ?? "")") {
+                guard let start = instant(event.start) else { continue }
+                found.append((start, instant(event.end) ?? start, StagedSearchHit(event: event)))
+            }
+            for ghost in stagedTimeline?.ghosts ?? [] where hits("\(ghost.title) \(ghost.location ?? "")") {
+                guard let start = instant(ghost.start) else { continue }
+                found.append((start, instant(ghost.end) ?? start, StagedSearchHit(ghost: ghost)))
+            }
+            // Upcoming soonest first, then past, most recent first.
+            let upcoming = found.filter { $0.end > now }.sorted { $0.start < $1.start }
+            let past = found.filter { $0.end <= now }.sorted { $0.start > $1.start }
+            let ordered = (upcoming + past).map(\.hit)
+            return StagedSearchPage(items: Array(ordered.prefix(limit)), total: ordered.count, granted: true)
+        }
     #endif
+
+    private func withStagedCalendar(_ stats: StoreStats) -> StoreStats {
+        #if DEBUG
+            guard stagedTimeline != nil else { return stats }
+            var out = stats
+            out.calendar = CalendarAccess(granted: true)
+            return out
+        #else
+            return stats
+        #endif
+    }
 
     /// Confirm the saved rule, not the editor's requested/default disposition,
     /// actually governs and suppresses this sample after specificity is resolved.
@@ -200,7 +262,7 @@ actor RehearsalAPI {
                 // is not stubbed here: every practice save would fail
                 // silently under a "kept in drafts" toast.
                 drafts_v2: true)
-            data = try encode(stats)
+            data = try encode(withStagedCalendar(stats))
         case ("GET", "/client/updates"):
             var rows = query["band"].map { bandRows($0) } ?? allUpdates()
             if let tier = query["tier"] { rows = rows.filter { $0.tier.rawValue == tier } }
@@ -295,6 +357,13 @@ actor RehearsalAPI {
                 data = try encode(["items": stagedSent])
             case ("GET", "/client/scheduled") where !stagedScheduled.isEmpty:
                 data = try encode(stagedScheduled)
+            case ("GET", "/client/timeline") where stagedTimeline != nil:
+                data = try encode(stagedTimeline)
+            // The Events block over the staged timeline, in the daemon's
+            // order: a crude stand-in for its matching (every word in the
+            // title or place), enough for a screenshot of the block.
+            case ("GET", "/client/calendar/search") where stagedTimeline != nil:
+                data = try encode(stagedCalendarSearch(query["q"] ?? "", limit: query["limit"].flatMap(Int.init) ?? 20))
         #endif
         case ("GET", "/client/sent"):
             data = try json(["items": []])

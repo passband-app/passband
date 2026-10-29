@@ -834,12 +834,12 @@ struct EventDraftTests {
     }
 
     /// A write's answer is the session's that sent it (fix round 1, C4): the
-    /// gate closing bumps the session, an account switch the epoch, and
-    /// either one leaves the answer nobody's.
+    /// calendar state being dropped bumps the session, an account switch the
+    /// epoch, and either one leaves the answer nobody's.
     static func anAnswerAfterTheGateClosedIsNobodys() {
         let sent = CalendarWriteTicket(epoch: 3, session: 7)
         expect(sent.lands(live: CalendarWriteTicket(epoch: 3, session: 7)), "nothing dropped since: it lands")
-        expect(!sent.lands(live: CalendarWriteTicket(epoch: 3, session: 8)), "the gate closed meanwhile: dropped")
+        expect(!sent.lands(live: CalendarWriteTicket(epoch: 3, session: 8)), "the state was dropped meanwhile: dropped")
         expect(!sent.lands(live: CalendarWriteTicket(epoch: 4, session: 7)), "another account: dropped")
         expect(!sent.lands(live: CalendarWriteTicket(epoch: 3, session: 9)),
                "closed and reopened: still dropped, the reopened page is a new session")

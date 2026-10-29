@@ -89,6 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the system to carry off, and this clears the ones it never took.
         NotificationIcon.purgeRoot()
         Analytics.start()
+        SessionReplay.shared.start()
         // The boot view never passes through route(to:), so its screen event
         // is recorded here or not at all.
         Analytics.screen(AppStore.shared.activeView.rawValue)
@@ -261,7 +262,7 @@ struct PassbandCommands: Commands {
             // menu's ability to advertise them.
             // Calendar rides second when it is offered, and takes the 2:
             // same list as the rail, from the same gate.
-            ForEach(MainView.railViews(calendar: store.calendarPageAvailable), id: \.view) { row in
+            ForEach(MainView.railViews, id: \.view) { row in
                 Button(row.view.label) { store.setView(row.view) }
                     .disabled(blocked)
             }

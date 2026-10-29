@@ -358,6 +358,29 @@ pub const MONITORING_NAMESPACE: &str = "monitoring";
 /// which is also what its own Deployment selects on.
 pub const MONITORING_POD_LABEL: (&str, &str) = ("app.kubernetes.io/name", "prometheus-agent");
 
+/// The shared embedding service's pod label, which is what a tenant's egress
+/// rule selects when [`crate::config::Config::embed_url`] is set.
+///
+/// Hardcoded, for [`MONITORING_NAMESPACE`]'s reason: the pods on the other side
+/// are installed from this repo (`deploy/hosted/65-embed.yaml`), and its pod
+/// template's labels and this value are one contract, which a test reads that
+/// file to hold. Distinct from a tenant's own `app.kubernetes.io/name`
+/// (`squelchd`), so the rule can never select another tenant.
+pub const EMBED_POD_LABEL: (&str, &str) = ("app.kubernetes.io/name", "squelch-embed");
+
+/// The port the shared embedding service serves `/embed` on. The service's own
+/// constant, so this file and the binary cannot disagree.
+pub const EMBED_PORT: i32 = squelch_embed::protocol::PORT as i32;
+
+/// The fleet-wide bearer for the shared embedding service, read by the service
+/// and by every tenant as an OPTIONAL `SQUELCH_EMBED_TOKEN`
+/// (`deploy/hosted/embed-token.example.yaml`). One Secret for the fleet, never
+/// one per tenant: a per-tenant credential would hand the service the durable
+/// tenant identity it is otherwise never told (`docs/EMBED-SERVICE.md` §4).
+pub const EMBED_TOKEN_SECRET_NAME: &str = "squelch-embed-token";
+/// Data key in [`EMBED_TOKEN_SECRET_NAME`].
+pub const EMBED_TOKEN_KEY: &str = "token";
+
 /// The auto-applied label Kubernetes puts on every namespace, which is how a
 /// `namespaceSelector` names one without the warden needing to label it.
 pub const NAMESPACE_NAME_LABEL: &str = "kubernetes.io/metadata.name";
@@ -964,6 +987,97 @@ pub fn network_policy(config: &Config, name: &TenantName) -> NetworkPolicy {
         });
     }
 
+    let mut egress = vec![
+        // CoreDNS, and only CoreDNS. A tenant that could reach any
+        // resolver could exfiltrate over DNS to one it chose.
+        NetworkPolicyEgressRule {
+            to: Some(vec![NetworkPolicyPeer {
+                namespace_selector: Some(LabelSelector {
+                    match_labels: Some(BTreeMap::from([(
+                        NAMESPACE_NAME_LABEL.to_string(),
+                        DNS_NAMESPACE.to_string(),
+                    )])),
+                    ..Default::default()
+                }),
+                pod_selector: Some(LabelSelector {
+                    match_labels: Some(BTreeMap::from([(
+                        "k8s-app".to_string(),
+                        "kube-dns".to_string(),
+                    )])),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]),
+            ports: Some(vec![
+                NetworkPolicyPort {
+                    port: Some(IntOrString::Int(53)),
+                    protocol: Some("UDP".to_string()),
+                    ..Default::default()
+                },
+                NetworkPolicyPort {
+                    port: Some(IntOrString::Int(53)),
+                    protocol: Some("TCP".to_string()),
+                    ..Default::default()
+                },
+            ]),
+        },
+        // Gmail, Anthropic, the relay, the one-time weights download.
+        NetworkPolicyEgressRule {
+            to: Some(vec![NetworkPolicyPeer {
+                ip_block: Some(IPBlock {
+                    cidr: "0.0.0.0/0".to_string(),
+                    except: Some(
+                        BLOCKED_EGRESS_CIDRS
+                            .iter()
+                            .map(|c| (*c).to_string())
+                            .collect(),
+                    ),
+                }),
+                ..Default::default()
+            }]),
+            ports: Some(vec![NetworkPolicyPort {
+                port: Some(IntOrString::Int(443)),
+                protocol: Some("TCP".to_string()),
+                ..Default::default()
+            }]),
+        },
+    ];
+    // The shared embedding service, when the operator pointed the fleet at it,
+    // and ABSENT otherwise so the policy is byte-identical to one a warden
+    // without the feature rendered.
+    //
+    // A POD selector, not the Service's ClusterIP, and not because of the
+    // 10.0.0.0/8 `except` above: rules are additive, and an `except` subtracts
+    // from its own `ipBlock` only. It is kube-proxy: the Service address is
+    // DNAT'd to a backend pod in nat/PREROUTING before k3s's kube-router
+    // evaluates policy in filter/FORWARD, so the destination a rule sees is
+    // already the pod, and a rule naming 10.43.x.x would match nothing. For
+    // the same reason the port is the pod's (the Service's targetPort), which
+    // `65-embed.yaml` keeps equal to the Service port.
+    //
+    // No namespace selector: a bare pod selector is this namespace, which is
+    // where `65-embed.yaml` puts the service. The DNS rule above is what lets
+    // the daemon resolve the Service name in the first place.
+    if config.embed_url.is_some() {
+        egress.push(NetworkPolicyEgressRule {
+            to: Some(vec![NetworkPolicyPeer {
+                pod_selector: Some(LabelSelector {
+                    match_labels: Some(BTreeMap::from([(
+                        EMBED_POD_LABEL.0.to_string(),
+                        EMBED_POD_LABEL.1.to_string(),
+                    )])),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]),
+            ports: Some(vec![NetworkPolicyPort {
+                port: Some(IntOrString::Int(EMBED_PORT)),
+                protocol: Some("TCP".to_string()),
+                ..Default::default()
+            }]),
+        });
+    }
+
     NetworkPolicy {
         metadata: meta(config, name, name.as_str().to_string()),
         spec: Some(NetworkPolicySpec {
@@ -973,61 +1087,7 @@ pub fn network_policy(config: &Config, name: &TenantName) -> NetworkPolicy {
             }),
             policy_types: Some(vec!["Ingress".to_string(), "Egress".to_string()]),
             ingress: Some(ingress),
-            egress: Some(vec![
-                // CoreDNS, and only CoreDNS. A tenant that could reach any
-                // resolver could exfiltrate over DNS to one it chose.
-                NetworkPolicyEgressRule {
-                    to: Some(vec![NetworkPolicyPeer {
-                        namespace_selector: Some(LabelSelector {
-                            match_labels: Some(BTreeMap::from([(
-                                NAMESPACE_NAME_LABEL.to_string(),
-                                DNS_NAMESPACE.to_string(),
-                            )])),
-                            ..Default::default()
-                        }),
-                        pod_selector: Some(LabelSelector {
-                            match_labels: Some(BTreeMap::from([(
-                                "k8s-app".to_string(),
-                                "kube-dns".to_string(),
-                            )])),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    }]),
-                    ports: Some(vec![
-                        NetworkPolicyPort {
-                            port: Some(IntOrString::Int(53)),
-                            protocol: Some("UDP".to_string()),
-                            ..Default::default()
-                        },
-                        NetworkPolicyPort {
-                            port: Some(IntOrString::Int(53)),
-                            protocol: Some("TCP".to_string()),
-                            ..Default::default()
-                        },
-                    ]),
-                },
-                // Gmail, Anthropic, the relay, the one-time weights download.
-                NetworkPolicyEgressRule {
-                    to: Some(vec![NetworkPolicyPeer {
-                        ip_block: Some(IPBlock {
-                            cidr: "0.0.0.0/0".to_string(),
-                            except: Some(
-                                BLOCKED_EGRESS_CIDRS
-                                    .iter()
-                                    .map(|c| (*c).to_string())
-                                    .collect(),
-                            ),
-                        }),
-                        ..Default::default()
-                    }]),
-                    ports: Some(vec![NetworkPolicyPort {
-                        port: Some(IntOrString::Int(443)),
-                        protocol: Some("TCP".to_string()),
-                        ..Default::default()
-                    }]),
-                },
-            ]),
+            egress: Some(egress),
         }),
     }
 }
@@ -1263,7 +1323,21 @@ pub fn deployment_for(
         },
     ];
 
-    if let Some(model_pvc) = &config.model_pvc {
+    // The weights volume, only for a daemon that will load them. With the
+    // shared embedder configured the daemon builds no session, so there is
+    // nothing to seed and the mount is dropped even if `model_pvc` is still
+    // set: one knob decides where embedding happens, and a second that still
+    // named the volume must not quietly put the copy back.
+    //
+    // Nothing in SEED_SCRIPT changes for it. The weights half runs only when
+    // `/models` exists (`if [ -d /models ] && ...`), and the image has no such
+    // directory, so a pod with no models mount skips it entirely; the
+    // credentials half, guard and all, is the same constant either way.
+    if let Some(model_pvc) = config
+        .model_pvc
+        .as_ref()
+        .filter(|_| config.embed_url.is_none())
+    {
         volumes.push(Volume {
             name: "models".to_string(),
             persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
@@ -1525,6 +1599,26 @@ fn daemon_env_for(config: &Config, name: &TenantName, provider: MailProvider) ->
     // exists only so the fleet can be moved off it without cutting an image.
     if let Some(model) = &config.embed_model {
         env.push(plain("SQUELCH_EMBED_MODEL", model));
+    }
+
+    // The shared embedding service, when the operator pointed the fleet at it.
+    // ABSENT rather than empty when unset, for the LLM block's reason: the env
+    // is then byte-identical to a warden's that never heard of the service, and
+    // the daemon embeds in-process exactly as it did. Set, the daemon builds no
+    // ONNX session of its own and posts its texts here instead.
+    //
+    // The token is the fleet Secret's, by reference, and OPTIONAL for the relay
+    // token's reason: a missing Secret must leave the variable unset rather than
+    // hold every tenant in CreateContainerConfigError at once. Unset, the daemon
+    // sends no bearer, which is right against a service started without one and
+    // a 401 (keyword search, not an outage) against one started with it.
+    if let Some(url) = &config.embed_url {
+        env.push(plain("SQUELCH_EMBED_URL", url));
+        env.push(from_optional_secret(
+            "SQUELCH_EMBED_TOKEN",
+            EMBED_TOKEN_SECRET_NAME.to_string(),
+            EMBED_TOKEN_KEY,
+        ));
     }
 
     // The control plane's origin, behind the console's "Continue with Google"
@@ -1986,12 +2080,15 @@ mod tests {
         }
 
         // Same claim for the relay block: no URL, no token reference, no
-        // topic, and never the APNs environment.
+        // topic, and never the APNs environment. And for the shared embedder:
+        // unset, the daemon embeds in-process and hears nothing of it.
         for relay_var in [
             "SQUELCH_RELAY_URL",
             "SQUELCH_RELAY_TOKEN",
             "SQUELCH_RELAY_TOPIC",
             "SQUELCH_RELAY_APNS_ENV",
+            "SQUELCH_EMBED_URL",
+            "SQUELCH_EMBED_TOKEN",
         ] {
             assert!(
                 env.iter().all(|e| e.name != relay_var),
@@ -3356,6 +3453,223 @@ mod tests {
         }
     }
 
+    /// The shared embedder's URL, as the loader would hand it over.
+    const EMBED_URL: &str = "http://squelch-embed:8850";
+
+    /// A warden pointed at the shared embedder, still holding a model PVC: the
+    /// state of a fleet mid-cutover, and the one where the volume must go.
+    fn embedder_configs() -> (Config, Config) {
+        let mut local = test_config();
+        local.model_pvc = Some("squelch-models".to_string());
+        let remote = Config {
+            embed_url: Some(EMBED_URL.to_string()),
+            ..local.clone()
+        };
+        (local, remote)
+    }
+
+    /// Unset, nothing of the shared embedder is anywhere in a tenant: no
+    /// variable, no rule, and the weights volume exactly where it was. With
+    /// [`the_shared_embedder_is_the_only_difference_its_url_makes`] this is the
+    /// byte-identical-when-unset claim.
+    #[test]
+    fn no_embed_url_means_no_embed_variable_no_embed_rule_and_the_volume_stays() {
+        let (local, _) = embedder_configs();
+        assert!(local.embed_url.is_none());
+        let pod = tenant_deployment(&local)
+            .spec
+            .unwrap()
+            .template
+            .spec
+            .unwrap();
+        let mut containers = pod.init_containers.clone().unwrap();
+        containers.extend(pod.containers.clone());
+        for container in &containers {
+            for e in container.env.iter().flatten() {
+                assert!(
+                    !matches!(e.name.as_str(), "SQUELCH_EMBED_URL" | "SQUELCH_EMBED_TOKEN"),
+                    "{} carries {} with no embed URL configured",
+                    container.name,
+                    e.name
+                );
+            }
+        }
+        assert!(pod.volumes.unwrap().iter().any(|v| v.name == "models"));
+        let seed = &pod.init_containers.unwrap()[0];
+        assert!(
+            seed.volume_mounts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|m| m.name == "models" && m.mount_path == MODELS_DIR)
+        );
+
+        let egress = network_policy(&local, &name())
+            .spec
+            .unwrap()
+            .egress
+            .unwrap();
+        assert_eq!(egress.len(), 2);
+        for rule in &egress {
+            for peer in rule.to.iter().flatten() {
+                let selected = peer
+                    .pod_selector
+                    .as_ref()
+                    .and_then(|s| s.match_labels.as_ref())
+                    .and_then(|l| l.get(EMBED_POD_LABEL.0))
+                    .map(String::as_str);
+                assert_ne!(selected, Some(EMBED_POD_LABEL.1));
+            }
+        }
+    }
+
+    /// Set, the URL changes exactly four things about a tenant and nothing
+    /// else: two variables, one egress rule, and the weights volume gone from
+    /// the pod and from the seeder. Strip those four from the render and what
+    /// is left is the unset render, field for field.
+    #[test]
+    fn the_shared_embedder_is_the_only_difference_its_url_makes() {
+        let (local, remote) = embedder_configs();
+
+        // The Deployment.
+        let shut = serde_json::to_value(tenant_deployment(&local)).unwrap();
+        let open = serde_json::to_value(tenant_deployment(&remote)).unwrap();
+        assert_ne!(open, shut, "the URL has to change the pod");
+        let mut stripped = open.clone();
+        let pod = &mut stripped["spec"]["template"]["spec"];
+
+        let env = pod["containers"][0]["env"].as_array_mut().unwrap();
+        let added: Vec<serde_json::Value> = env
+            .iter()
+            .filter(|e| e["name"].as_str().unwrap().starts_with("SQUELCH_EMBED_"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            added,
+            vec![
+                serde_json::json!({ "name": "SQUELCH_EMBED_URL", "value": EMBED_URL }),
+                serde_json::json!({
+                    "name": "SQUELCH_EMBED_TOKEN",
+                    "valueFrom": { "secretKeyRef": {
+                        "name": "squelch-embed-token", "key": "token", "optional": true,
+                    } },
+                }),
+            ],
+            "the URL verbatim and the token by optional reference, never inline"
+        );
+        env.retain(|e| !e["name"].as_str().unwrap().starts_with("SQUELCH_EMBED_"));
+
+        // The volume and the seeder's mount of it are what the unset render
+        // has and this one does not, so they are put back to compare.
+        let shut_pod = &shut["spec"]["template"]["spec"];
+        let models: Vec<serde_json::Value> = shut_pod["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|v| v["name"] == "models")
+            .cloned()
+            .collect();
+        assert_eq!(models.len(), 1);
+        assert!(
+            pod["volumes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|v| v["name"] != "models")
+        );
+        pod["volumes"].as_array_mut().unwrap().extend(models);
+        let seed_mounts = pod["initContainers"][0]["volumeMounts"]
+            .as_array_mut()
+            .unwrap();
+        assert!(seed_mounts.iter().all(|m| m["name"] != "models"));
+        seed_mounts.push(serde_json::json!({
+            "name": "models", "mountPath": MODELS_DIR, "readOnly": true,
+        }));
+        assert_eq!(stripped, shut);
+
+        // The NetworkPolicy: one rule appended, the rest untouched.
+        let shut = serde_json::to_value(network_policy(&local, &name())).unwrap();
+        let open = serde_json::to_value(network_policy(&remote, &name())).unwrap();
+        let mut stripped = open.clone();
+        let egress = stripped["spec"]["egress"].as_array_mut().unwrap();
+        let rule = egress.pop().unwrap();
+        assert_eq!(
+            rule,
+            serde_json::json!({
+                "to": [{ "podSelector": { "matchLabels": {
+                    "app.kubernetes.io/name": "squelch-embed",
+                } } }],
+                "ports": [{ "port": 8850, "protocol": "TCP" }],
+            }),
+            "a pod selector in this namespace on the service's port: no ClusterIP, \
+             no namespace selector"
+        );
+        assert_eq!(stripped, shut);
+
+        // The other three objects never hear of it.
+        for (set, unset) in [
+            (
+                serde_json::to_value(service(&remote, &name())).unwrap(),
+                serde_json::to_value(service(&local, &name())).unwrap(),
+            ),
+            (
+                serde_json::to_value(ingress(&remote, &name())).unwrap(),
+                serde_json::to_value(ingress(&local, &name())).unwrap(),
+            ),
+            (
+                serde_json::to_value(data_pvc(&remote, &name())).unwrap(),
+                serde_json::to_value(data_pvc(&local, &name())).unwrap(),
+            ),
+        ] {
+            assert_eq!(set, unset);
+        }
+    }
+
+    /// The seeder still runs on the shared embedder, because the credentials
+    /// half is not optional, and it runs the SAME constant: nothing about the
+    /// guard that fails the pod on an empty hash depends on the embedder. The
+    /// weights half is skipped because there is no `/models` to find.
+    #[test]
+    fn the_seeder_still_installs_the_credential_on_the_shared_embedder() {
+        let (_, remote) = embedder_configs();
+        let pod = tenant_deployment(&remote)
+            .spec
+            .unwrap()
+            .template
+            .spec
+            .unwrap();
+        let inits = pod.init_containers.unwrap();
+        assert_eq!(inits.len(), 1);
+        let seed = &inits[0];
+        assert_eq!(seed.name, "seed");
+        assert_eq!(seed.args.clone().unwrap(), vec![SEED_SCRIPT.to_string()]);
+        let mounts: Vec<(&str, &str)> = seed
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|m| (m.name.as_str(), m.mount_path.as_str()))
+            .collect();
+        assert_eq!(
+            mounts,
+            vec![("data", DATA_DIR), ("credential", CREDENTIAL_SEED_DIR)]
+        );
+
+        // The credential guard, ahead of the comparison it protects.
+        let guard = "[ -n \"$want\" ] || { echo 'squelch-seed: no credential file to seed from' >&2; exit 1; }";
+        assert!(SEED_SCRIPT.starts_with("set -eu\n"));
+        let guarded = SEED_SCRIPT.find(guard).expect("the empty-hash guard");
+        let compared = SEED_SCRIPT.find("if [ \"$want\" != \"$have\" ]").unwrap();
+        assert!(guarded < compared);
+        // And the only door into the weights half is the mount this pod lacks.
+        let weights = SEED_SCRIPT
+            .find("if [ -d /models ] && mkdir -p /data/.local/share/squelch/models; then")
+            .expect("the weights half is gated on the mount");
+        assert_eq!(SEED_SCRIPT.matches("/models/*").count(), 1);
+        assert!(SEED_SCRIPT.find("/models/*").unwrap() > weights);
+        assert!(compared < weights);
+    }
+
     #[test]
     fn the_ingress_uses_the_wildcard_certificate() {
         let c = test_config();
@@ -3699,6 +4013,12 @@ mod tests {
     /// The model volume and its seed pod, `deploy/hosted/60-models.yaml`: the
     /// one claim and the one pod in the namespace that are not a tenant's.
     const MODELS: &str = include_str!("../../deploy/hosted/60-models.yaml");
+    /// The shared embedding service, `deploy/hosted/65-embed.yaml`: the one
+    /// Deployment in the namespace that is not a tenant's, and the other end of
+    /// the egress rule and the env vars the embed URL renders.
+    const EMBED: &str = include_str!("../../deploy/hosted/65-embed.yaml");
+    /// The fleet token for it, `deploy/hosted/embed-token.example.yaml`.
+    const EMBED_TOKEN: &str = include_str!("../../deploy/hosted/embed-token.example.yaml");
     /// The certificates, `deploy/hosted/40-wildcard-certificate.yaml`: each
     /// one in the tenant namespace is a Secret there, plus a private key
     /// beside it while cert-manager renews.
@@ -3792,6 +4112,10 @@ mod tests {
         let named: std::collections::BTreeSet<&str> = rotating
             .into_iter()
             .chain([config.tls_secret.as_str()])
+            // The shared embedder's token: one fixed name, rotated in place,
+            // and counted whether or not the URL is set, because the runbook
+            // creates it before the knob.
+            .chain([EMBED_TOKEN_SECRET_NAME])
             .chain(config.pull_secret.as_deref())
             .chain(certificates.iter().map(|certificate| {
                 certificate["spec"]["secretName"]
@@ -3868,6 +4192,209 @@ mod tests {
             _ => data.get(name).cloned(),
         })
         .expect("the committed ConfigMap loads")
+    }
+
+    /// The value the committed ConfigMap carries, commented out, for
+    /// `SQUELCH_WARDEN_EMBED_URL`: what an operator uncomments.
+    fn committed_embed_url() -> String {
+        const KEY: &str = "# SQUELCH_WARDEN_EMBED_URL: ";
+        let lines: Vec<&str> = WARDEN_CONFIG
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(KEY))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "one commented embed URL entry in the ConfigMap"
+        );
+        lines[0].trim_matches('"').to_string()
+    }
+
+    /// [`committed_config`] with that one line uncommented, which is the whole
+    /// of the change the runbook makes: the shared-embedder state.
+    fn committed_config_on_the_shared_embedder() -> Config {
+        let config_map: ConfigMap = committed(WARDEN_CONFIG, "ConfigMap");
+        let mut data = config_map.data.unwrap_or_default();
+        assert!(
+            !data.contains_key("SQUELCH_WARDEN_EMBED_URL"),
+            "the committed ConfigMap already sets the embed URL; this test's two states \
+             are now one"
+        );
+        data.insert(
+            "SQUELCH_WARDEN_EMBED_URL".to_string(),
+            committed_embed_url(),
+        );
+        Config::from_source(&|name| match name {
+            "SQUELCH_WARDEN_TOKEN" => Some(crate::testing::TEST_TOKEN.to_string()),
+            _ => data.get(name).cloned(),
+        })
+        .expect("the committed ConfigMap loads with its embed URL uncommented")
+    }
+
+    /// The shared embedder's pod, as `65-embed.yaml` templates it.
+    fn embed_pod() -> PodSpec {
+        let deployment: Deployment = committed(EMBED, "Deployment");
+        deployment.spec.unwrap().template.spec.unwrap()
+    }
+
+    /// The shared embedder runs as a uid of its own, not the tenants'
+    /// (`DEFAULT_RUN_AS`): every tenant's text passes through it, and a uid it
+    /// shared with a tenant pod is one a tenant escape would not have to
+    /// change. The manifest and the image's `USER` agree, so the pod runs as
+    /// what the image was built to run as.
+    #[test]
+    fn the_embedder_runs_as_its_own_uid_and_the_image_agrees() {
+        const DOCKERFILE: &str = include_str!("../../Dockerfile.embed");
+        let ctx = embed_pod()
+            .security_context
+            .expect("a pod security context");
+        assert_eq!(ctx.run_as_user, Some(10003));
+        assert_eq!(ctx.run_as_group, Some(10003));
+        assert_eq!(ctx.fs_group, Some(10003));
+        assert_ne!(ctx.run_as_user, Some(crate::config::DEFAULT_RUN_AS));
+        let user = DOCKERFILE
+            .lines()
+            .find_map(|l| l.strip_prefix("USER "))
+            .expect("Dockerfile.embed sets USER");
+        assert_eq!(user.trim(), "10003:10003");
+        // Nor the warden's, whose pod holds an API token.
+        const WARDEN_DOCKERFILE: &str = include_str!("../../Dockerfile.warden");
+        const WARDEN_POD: &str = include_str!("../../deploy/hosted/20-warden.yaml");
+        let warden_user = WARDEN_DOCKERFILE
+            .lines()
+            .find_map(|l| l.strip_prefix("USER "))
+            .expect("Dockerfile.warden sets USER");
+        assert_ne!(warden_user.trim(), user.trim());
+        assert!(!WARDEN_POD.contains("runAsUser: 10003"));
+    }
+
+    /// The tenant side and `65-embed.yaml` are one contract, read from both
+    /// ends: the label the egress rule selects is the pod's, the port it opens
+    /// is the one the container and the Service serve, the Secret the tenant
+    /// references is the one the service reads, the service admits callers by
+    /// a label every tenant pod carries, and the URL the ConfigMap offers
+    /// names that Service on that port and loads.
+    #[test]
+    fn the_tenant_side_matches_the_committed_embed_service() {
+        let documents = documents(EMBED);
+        let deployment: Deployment = one(&documents, "Deployment");
+        let service: Service = one(&documents, "Service");
+        let policy: NetworkPolicy = one(&documents, "NetworkPolicy");
+        let c = committed_config_on_the_shared_embedder();
+        let tenant_pod = tenant_deployment(&c).spec.unwrap().template.spec.unwrap();
+
+        for namespace in [
+            deployment.metadata.namespace.as_deref(),
+            service.metadata.namespace.as_deref(),
+            policy.metadata.namespace.as_deref(),
+        ] {
+            assert_eq!(
+                namespace,
+                Some(c.namespace.as_str()),
+                "the egress rule has no namespace selector"
+            );
+        }
+
+        // The label.
+        let spec = deployment.spec.unwrap();
+        let template_labels = spec.template.metadata.unwrap().labels.unwrap();
+        assert_eq!(
+            template_labels.get(EMBED_POD_LABEL.0).map(String::as_str),
+            Some(EMBED_POD_LABEL.1)
+        );
+        // Not a tenant: the sweep selects on this label and so does the
+        // service's own ingress rule.
+        assert!(!template_labels.contains_key("app.kubernetes.io/managed-by"));
+        assert_ne!(
+            Some(EMBED_POD_LABEL.1),
+            selector_labels(&name())
+                .get(EMBED_POD_LABEL.0)
+                .map(String::as_str),
+            "the rule would select tenants"
+        );
+        assert_eq!(
+            service.spec.as_ref().unwrap().selector.as_ref().unwrap()[EMBED_POD_LABEL.0],
+            EMBED_POD_LABEL.1
+        );
+
+        // The port, on the container and through the Service.
+        let pod = spec.template.spec.unwrap();
+        let container = &pod.containers[0];
+        let http = container
+            .ports
+            .iter()
+            .flatten()
+            .find(|p| p.name.as_deref() == Some("http"))
+            .expect("the container names its work port");
+        assert_eq!(http.container_port, EMBED_PORT);
+        let service_ports = service.spec.unwrap().ports.unwrap();
+        assert_eq!(service_ports.len(), 1, "the work port only");
+        assert_eq!(service_ports[0].port, EMBED_PORT);
+        assert_eq!(
+            service_ports[0].target_port,
+            Some(IntOrString::String("http".to_string())),
+            "the egress rule opens the POD port, so it must stay the Service port"
+        );
+
+        // The token Secret, both ends, and the example's name.
+        let token = container
+            .env
+            .iter()
+            .flatten()
+            .find(|e| e.name == "SQUELCH_EMBED_TOKEN")
+            .and_then(|e| e.value_from.clone())
+            .and_then(|v| v.secret_key_ref)
+            .expect("the service reads its token from the Secret");
+        assert_eq!(token.name, EMBED_TOKEN_SECRET_NAME);
+        assert_eq!(token.key, EMBED_TOKEN_KEY);
+        assert_eq!(token.optional, Some(true));
+        let example: Secret = committed(EMBED_TOKEN, "Secret");
+        assert_eq!(
+            example.metadata.name.as_deref(),
+            Some(EMBED_TOKEN_SECRET_NAME)
+        );
+        assert!(example.string_data.unwrap().contains_key(EMBED_TOKEN_KEY));
+
+        // The service admits tenants by a label every tenant pod carries, on
+        // the port the tenant's rule opens.
+        let admits_tenants = policy
+            .spec
+            .unwrap()
+            .ingress
+            .unwrap()
+            .into_iter()
+            .find(|rule| {
+                rule.ports
+                    .iter()
+                    .flatten()
+                    .any(|p| p.port == Some(IntOrString::Int(EMBED_PORT)))
+            })
+            .expect("an ingress rule on the work port");
+        let peer = &admits_tenants.from.unwrap()[0];
+        assert!(peer.namespace_selector.is_none());
+        let wanted = peer.pod_selector.clone().unwrap().match_labels.unwrap();
+        let tenant_labels = labels(&name());
+        for (key, value) in &wanted {
+            assert_eq!(
+                tenant_labels.get(key),
+                Some(value),
+                "a tenant pod lacks `{key}`"
+            );
+        }
+        let rendered = tenant_pod.containers[0]
+            .env
+            .iter()
+            .flatten()
+            .find(|e| e.name == "SQUELCH_EMBED_URL")
+            .and_then(|e| e.value.clone());
+        assert_eq!(rendered, c.embed_url);
+
+        // The URL the ConfigMap offers: that Service, that port.
+        let service_name = service.metadata.name.unwrap();
+        assert_eq!(
+            c.embed_url.as_deref(),
+            Some(format!("http://{service_name}:{EMBED_PORT}").as_str())
+        );
     }
 
     /// A memory or storage quantity in MiB: bytes, or any of the binary and
@@ -3981,12 +4508,24 @@ mod tests {
     /// which would have refused the thirteenth, the twentieth and the
     /// twenty-fourth tenant while memory still had room for thirty.
     ///
+    /// TWO STATES, because the warden renders two tenant shapes from one
+    /// ConfigMap: in-process embedding (the committed file) and the shared
+    /// embedder (the same file with its commented `SQUELCH_WARDEN_EMBED_URL`
+    /// uncommented, which lightens the default tenant). The rule holds in the
+    /// first with no exception. In the second, the three disk lines (`pods`,
+    /// `persistentvolumeclaims`, `requests.storage`) are the file's deliberate,
+    /// provisional gate below memory, and are held instead to never binding
+    /// in-process; every other line still has to clear memory there, so that
+    /// lifting the disk gate later is those three lines alone.
+    ///
     /// What one tenant charges each line is read off the pod the warden
-    /// renders from the committed ConfigMap ([`charge`]), a claim is
+    /// renders from the config ([`charge`]), a claim is
     /// `SQUELCH_WARDEN_STORAGE_SIZE`, and the Secrets are
-    /// [`SECRETS_PER_TENANT`]. The namespace's own pod and claim, the model
-    /// seed's, are charged to every line they touch while the seed runs, and
-    /// its own Secrets ([`shared_secrets`]) to the secrets line.
+    /// [`SECRETS_PER_TENANT`]. The namespace's own pods are charged to every
+    /// line they touch: the model seed's (and its claim) in every state, and
+    /// the shared embedder's both in its own state and in-process, because the
+    /// runbook applies it before the knob and both must fit at once. Its own
+    /// Secrets ([`shared_secrets`]) go to the secrets line.
     ///
     /// The same file's LimitRange is checked first: a container the ConfigMap
     /// sizes past its `max`, or under its `min`, or a claim outside its
@@ -3994,18 +4533,97 @@ mod tests {
     /// fleet-wide on the next roll.
     #[test]
     fn the_committed_quota_lets_memory_bind_before_any_count_line() {
-        let c = committed_config();
-        let pod = tenant_deployment(&c).spec.unwrap().template.spec.unwrap();
+        let in_process = committed_config();
+        let shared = committed_config_on_the_shared_embedder();
+        assert!(in_process.embed_url.is_none());
+        assert!(shared.embed_url.is_some());
+        // The two states differ in the tenant's shape and in nothing else this
+        // test reads: same claim, same names.
+        assert_eq!(in_process.storage_size, shared.storage_size);
+        assert_eq!(shared_secrets(&in_process), shared_secrets(&shared));
+        assert_eq!(in_process.daemon_resources.memory_request, "384Mi");
+        assert_eq!(shared.daemon_resources.memory_request, "128Mi");
+
+        let models = documents(MODELS);
+        let seed_pods: Vec<PodSpec> = of_kind::<Pod>(&models, "Pod")
+            .into_iter()
+            .map(|pod| pod.spec.unwrap())
+            .collect();
+        let with_embedder: Vec<PodSpec> = seed_pods.iter().cloned().chain([embed_pod()]).collect();
+
+        let mut by_memory = BTreeMap::new();
+        for (state, config, others, exempt) in [
+            ("in-process, seed pod up", &in_process, &seed_pods, &[][..]),
+            (
+                "in-process, shared embedder applied ahead of the knob",
+                &in_process,
+                &with_embedder,
+                &[][..],
+            ),
+            (
+                "shared embedder",
+                &shared,
+                &with_embedder,
+                &["pods", "persistentvolumeclaims", "requests.storage"][..],
+            ),
+        ] {
+            let (memory, admitted) = quota_admits(state, config, others);
+            for (dimension, admits) in &admitted {
+                if exempt.contains(dimension) {
+                    continue;
+                }
+                assert!(
+                    *admits > memory,
+                    "{state}: `{dimension}` admits {admits} tenants, not more than the {memory} \
+                     memory does: it would refuse a signup while the box still has room"
+                );
+            }
+            by_memory.insert(state, (memory, admitted));
+        }
+
+        // The disk gate: never what binds in-process, and one number across
+        // its three lines on the shared embedder.
+        let (in_process_memory, _) = &by_memory["in-process, seed pod up"];
+        let (_, shared_lines) = &by_memory["shared embedder"];
+        let gate: Vec<u64> = shared_lines
+            .iter()
+            .filter(|(dimension, _)| {
+                ["pods", "persistentvolumeclaims", "requests.storage"].contains(dimension)
+            })
+            .map(|(_, admits)| *admits)
+            .collect();
+        assert_eq!(gate.len(), 3);
+        assert!(
+            gate.iter().all(|admits| *admits == gate[0]),
+            "the disk lines gate at different tenant counts: {gate:?}"
+        );
+        assert!(
+            gate[0] > *in_process_memory,
+            "the disk gate ({}) binds before memory ({in_process_memory}) in-process",
+            gate[0]
+        );
+        println!("the disk gate on the shared embedder: {} tenants", gate[0]);
+    }
+
+    /// What each line of the committed quota admits for one config, with
+    /// `others` (pods that are not tenants) charged first: the memory line's
+    /// count, and every other line's. Checks the LimitRange and the two
+    /// count rules on the way, which hold whatever memory says.
+    fn quota_admits(
+        state: &str,
+        c: &Config,
+        others: &[PodSpec],
+    ) -> (u64, Vec<(&'static str, u64)>) {
+        let pod = tenant_deployment(c).spec.unwrap().template.spec.unwrap();
         let limits = documents(TENANT_LIMITS);
         let limit_range: LimitRange = one(&limits, "LimitRange");
         let quota: ResourceQuota = one(&limits, "ResourceQuota");
         let models = documents(MODELS);
-        let other_pods: Vec<Pod> = of_kind(&models, "Pod");
         let other_claims: Vec<PersistentVolumeClaim> = of_kind(&models, "PersistentVolumeClaim");
 
-        // The LimitRange: every container of the pod inside the Container
-        // entry's bounds with its request under its limit, and the claim
-        // inside the PersistentVolumeClaim entry's.
+        // The LimitRange: every container of the tenant pod and of the other
+        // pods inside the Container entry's bounds with its request under its
+        // limit, and the claim inside the PersistentVolumeClaim entry's.
         let items = limit_range.spec.unwrap().limits;
         let entry = |type_: &str| -> &LimitRangeItem {
             items
@@ -4022,15 +4640,22 @@ mod tests {
         for (name, parse) in resources {
             let floor = quantity(container_entry.min.as_ref(), name, parse).unwrap_or(0);
             let ceiling = quantity(container_entry.max.as_ref(), name, parse).unwrap_or(u64::MAX);
-            for container in pod.init_containers.iter().flatten().chain(&pod.containers) {
-                let (request, limit) = settled(container, container_entry, name, parse);
-                let (request, limit) = (request.unwrap_or(0), limit.unwrap_or(u64::MAX));
-                assert!(
-                    floor <= request && request <= limit && limit <= ceiling,
-                    "the {} container's {name} {request}..{limit} is outside the LimitRange's \
-                     {floor}..{ceiling} or inverted",
-                    container.name
-                );
+            for spec in std::iter::once(&pod).chain(others) {
+                for container in spec
+                    .init_containers
+                    .iter()
+                    .flatten()
+                    .chain(&spec.containers)
+                {
+                    let (request, limit) = settled(container, container_entry, name, parse);
+                    let (request, limit) = (request.unwrap_or(0), limit.unwrap_or(u64::MAX));
+                    assert!(
+                        floor <= request && request <= limit && limit <= ceiling,
+                        "{state}: the {} container's {name} {request}..{limit} is outside the \
+                         LimitRange's {floor}..{ceiling} or inverted",
+                        container.name
+                    );
+                }
             }
         }
         let claim_entry = entry("PersistentVolumeClaim");
@@ -4053,18 +4678,10 @@ mod tests {
         };
         let count = |key: &str| line(key).parse::<u64>().unwrap();
         // What the namespace's own pods and claims take off each line.
-        let others = |limits: bool, name: &str, parse: fn(&str) -> u64| -> u64 {
-            other_pods
+        let charged = |limits: bool, name: &str, parse: fn(&str) -> u64| -> u64 {
+            others
                 .iter()
-                .map(|other| {
-                    charge(
-                        other.spec.as_ref().unwrap(),
-                        container_entry,
-                        limits,
-                        name,
-                        parse,
-                    )
-                })
+                .map(|other| charge(other, container_entry, limits, name, parse))
                 .sum()
         };
         let other_claim_count = other_claims.len() as u64;
@@ -4074,16 +4691,16 @@ mod tests {
                 mebibytes(&claim.spec.unwrap().resources.unwrap().requests.unwrap()["storage"].0)
             })
             .sum();
-        let other_pods = other_pods.len() as u64;
-        let shared_secrets = shared_secrets(&c);
-        // What each line admits, with the seed pod running. Printed so
-        // `--nocapture` shows the table the file's comment describes.
+        let other_pods = others.len() as u64;
+        let shared_secrets = shared_secrets(c);
+        // What each line admits. Printed so `--nocapture` shows the table the
+        // file's comment describes.
         let admits = |key: &str, limits: bool, name: &str, parse: fn(&str) -> u64| -> u64 {
-            parse(line(key)).saturating_sub(others(limits, name, parse))
+            parse(line(key)).saturating_sub(charged(limits, name, parse))
                 / charge(&pod, container_entry, limits, name, parse)
         };
         let by_memory = admits("requests.memory", false, "memory", mebibytes);
-        let admitted = [
+        let admitted = vec![
             (
                 "requests.cpu",
                 admits("requests.cpu", false, "cpu", millicores),
@@ -4134,15 +4751,13 @@ mod tests {
             .collect();
         let lines: std::collections::BTreeSet<&str> = hard.keys().map(String::as_str).collect();
         assert_eq!(lines, known, "a quota line this test does not divide");
-        println!("tenants admitted by requests.memory (the model seed pod running): {by_memory}");
-        assert!(by_memory >= 1, "the memory line admits no tenant at all");
-        for (dimension, admits) in admitted {
-            println!("tenants admitted by {dimension}: {admits}");
-            assert!(
-                admits > by_memory,
-                "`{dimension}` admits {admits} tenants, not more than the {by_memory} memory does: \
-                 it would refuse a signup while the box still has room"
-            );
+        println!("{state}: tenants admitted by requests.memory: {by_memory}");
+        assert!(
+            by_memory >= 1,
+            "{state}: the memory line admits no tenant at all"
+        );
+        for (dimension, admits) in &admitted {
+            println!("{state}: tenants admitted by {dimension}: {admits}");
         }
         // And the two rules the file states, whatever memory says: the secrets
         // ceiling never binds before the pods ceiling, and the storage line
@@ -4169,5 +4784,6 @@ mod tests {
             "requests.storage must hold a {} claim for every claim slot but the model seed's, plus its",
             c.storage_size
         );
+        (by_memory, admitted)
     }
 }

@@ -329,11 +329,9 @@ ever load the Read slot, and the agent door has no write tools at all. (Older
 versions of this guide said to export again with `--write`; that flag is still
 accepted and changes nothing.)
 
-**Google Calendar.** The calendar is a hidden feature, off until you turn it on:
-start squelchd with `SQUELCH_FEATURES=calendar` (in the compose file's
-`environment`, or on the command line) and the app shows a Calendar page on its
-next stats poll. Without it the calendar routes answer 404 and the calendar sync
-calls Google for nothing.
+**Google Calendar.** Every daemon serves the calendar; there is nothing to turn
+on. (Older guides said to set `SQUELCH_FEATURES=calendar`; that key is retired
+and does nothing now.)
 
 The app's calendar page has a Connect button. On your own
 daemon it asks squelchd to run the Google consent itself: the daemon hands the app

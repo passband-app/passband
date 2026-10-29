@@ -371,6 +371,17 @@ the per-daemon thing this design imagined — `deploy/hosted/SETUP.md` §11.)
   `stage2_usage` ledger (now cache-token-aware) — a persistent gap between them
   is the fraud signal. The gateway also owns model choice, so a fleet-wide model
   swap is a gateway config change, not a rollout. BYOK remains future work.
+- Semantic search in hosted can run on one embedding session per node instead
+  of one per tenant pod. BUILT 2026-10-28, not yet rolled out: `squelch-embed`,
+  a shared service in `tenants` that tenant daemons post texts to when the
+  operator sets `SQUELCH_WARDEN_EMBED_URL` (`docs/EMBED-SERVICE.md`, runbook in
+  `deploy/hosted/SETUP.md` §10b). **It is the second process we operate that
+  sees tenant mail bodies**, after the LLM gateway: the subject and body of
+  every message that passes the sealed gate (never spam, never sealed mail,
+  and nothing inbound before triage has decided it), and search query text, in
+  flight. It logs no text,
+  stores and caches nothing, is never told a tenant's name, and has no egress
+  (`docs/SECURITY.md` §4d). Self-host keeps its embedding session in-process.
 
 ## Scaling path ("properly")
 

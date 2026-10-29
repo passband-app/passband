@@ -7,14 +7,16 @@
 // gets a tab bar, which is a different navigation model rather than a smaller
 // one: a rail is a directory you read, and a tab bar is three or four places you
 // LIVE in. So the rail's seven destinations land here as three tabs — sitrep,
-// quick look, mail — plus the search role parked at the trailing end.
+// calendar, mail — plus the search role parked at the trailing end. The
+// records the Mac pins beside its sitrep sit under the phone's sitrep board
+// (see `MobileTab`).
 //
 // WHAT CAME OFF THE BAR, and where it went. Settings and the login codes are not
 // places anyone lives; they are reference surfaces you visit and leave, so they
 // hang from a navigation bar instead of each spending permanent bar width —
 // settings behind the person glyph leading the sitrep's, the codes behind a key
-// trailing Quick Look's, which is the tab that already holds everything else the
-// app pulled out of your mail for you to look up. The agent's own tab is gone
+// in the sitrep's records section, beside everything else the app pulled out of
+// your mail for you to look up. The agent's own tab is gone
 // too: one text field per screen is what a phone actually has, so the assistant
 // lives behind the search field and the chat is a push off that stack. Two doors
 // for "ask me something" was one too many.
@@ -44,19 +46,15 @@ import SwiftUI
 /// THREE, BECAUSE A TAB IS A CLAIM. Every tab says "you will be here often", and
 /// a bar that makes that claim six times has stopped ranking anything. What is
 /// left is the three surfaces a day actually alternates between: what needs you,
-/// what was pulled out of your mail, and the mail itself.
+/// what is on your calendar, and the mail itself.
 ///
-/// RECORDS IS A TAB HERE AND A RAIL THERE. On the Mac the record zones are
-/// pinned beside the work surface, read WHILE working it; a phone has no room to
-/// pin anything, and stacking them under the obligations would put reference
-/// material behind a scroll past everything you owe. So they get a destination.
-///
-/// `.records` READS "QUICK LOOK" ON THE BAR. The user-facing name changed; the
-/// case did not, because the store, the Mac and every zone type still call this
-/// material records and renaming the symbol would churn all of it to relabel one
-/// tab.
+/// THE RECORDS ARE NOT A TAB. On the Mac the record zones are pinned beside the
+/// work surface; a phone has no room to pin anything, so they sit under the
+/// sitrep's board, below everything you owe. That is the price: a fact you look
+/// up can wait a flick of the thumb; your next meeting cannot. (They had a Quick
+/// Look tab of their own until the calendar took its slot for everyone.)
 private enum MobileTab: Hashable {
-    case sitrep, records, mail, search
+    case sitrep, calendar, mail, search
 
     /// Left-to-right position in the tab bar. Only the slide direction reads it:
     /// a tab further right has to arrive from the right. Search is highest
@@ -65,7 +63,7 @@ private enum MobileTab: Hashable {
     var index: Int {
         switch self {
         case .sitrep: 0
-        case .records: 1
+        case .calendar: 1
         case .mail: 2
         case .search: 3
         }
@@ -167,14 +165,15 @@ private struct MobileShell: View {
     /// The Account page's own stack, which is no tab's.
     @State private var accountReader = ReaderTab()
     @State private var readers: [MobileTab: ReaderTab] = [
-        .sitrep: ReaderTab(), .records: ReaderTab(), .mail: ReaderTab(), .search: ReaderTab(),
+        .sitrep: ReaderTab(), .calendar: ReaderTab(), .mail: ReaderTab(),
+        .search: ReaderTab(),
     ]
 
     /// Sitrep, always, outside a debug build staged for a screenshot.
     private static var openingTab: MobileTab {
         #if DEBUG
             switch FixtureStage.tab {
-            case "records": return .records
+            case "calendar": return .calendar
             case "mail": return .mail
             case "search": return .search
             default: break
@@ -195,23 +194,19 @@ private struct MobileShell: View {
         TabView(selection: $tab) {
             Tab("Sitrep", systemImage: MainView.sitrep.symbol, value: MobileTab.sitrep) {
                 NavigationStack {
-                    MobileSitrepView()
+                    MobileSitrepView(showAuth: $showAuth)
                         .threadDestination(root: true)
                 }
                 .tabSlide(.sitrep, selection: tab)
                 .environment(readers[.sitrep])
             }
-            // `square.grid.2x2` and not a box: the tab is a grid of glanceable
-            // cards, one per zone, and the icon should say the shape of what is
-            // behind it. `archivebox` promised storage — a place things go to be
-            // put away — which is the opposite of a surface you check in passing.
-            Tab("Quick Look", systemImage: "square.grid.2x2", value: MobileTab.records) {
+            Tab("Calendar", systemImage: "calendar", value: MobileTab.calendar) {
                 NavigationStack {
-                    MobileRecordsView(showAuth: $showAuth)
+                    MobileCalendarView()
                         .threadDestination(root: true)
                 }
-                .tabSlide(.records, selection: tab)
-                .environment(readers[.records])
+                .tabSlide(.calendar, selection: tab)
+                .environment(readers[.calendar])
             }
             Tab("Mail", systemImage: MainView.emails.symbol, value: MobileTab.mail) {
                 NavigationStack {
@@ -270,11 +265,12 @@ private struct MobileShell: View {
         // one tap spent saying the same thing twice.
         .tabViewSearchActivation(.searchTabSelection)
         // An auth notification tap: the Mac's routed Auth page is, here, the
-        // login-codes page behind the Quick Look key. `initial` because a tap
-        // that launched the app set the flag before this view existed.
+        // login-codes page behind the key in the sitrep's records section.
+        // `initial` because a tap that launched the app set the flag before
+        // this view existed.
         .onChange(of: store.pendingAuthPage, initial: true) { _, pending in
             guard pending else { return }
-            tab = .records
+            tab = .sitrep
             showAuth = true
             store.consumeAuthPage()
         }
@@ -285,15 +281,36 @@ private struct MobileShell: View {
         // this watched for it those calls changed state no screen was showing.
         .onChange(of: store.routeAsks) { _, _ in
             // The ASK, not the value: this shell only keeps `activeView` true
-            // for the two tabs that have one, so on Quick Look or Search a
-            // route to the view it already names would change nothing.
+            // for the tabs that have one, so on Search a route to the view it
+            // already names would change nothing.
             switch store.activeView {
             case .sitrep: tab = .sitrep
             case .emails: tab = .mail
+            case .calendar: tab = .calendar
             default: break
             }
         }
         .onChange(of: tab, initial: true) { _, _ in syncReaders() }
+        // THE CALENDAR'S FIRST VISIT ASKS FOR GOOGLE CALENDAR, as the Mac's
+        // page does: once per account that has not connected, the card. Asked
+        // only while the Calendar tab is the one on screen, so it never lands
+        // over a tab it says nothing about; `calendarOffer` is `.none` in
+        // practice, once granted, and until this account's own stats land.
+        .onChange(of: tab == .calendar && store.calendarOffer == .card, initial: true) { _, owed in
+            if owed { store.raiseCalendarCardIfOwed() }
+        }
+        // And it is the tab's: leaving the tab takes it down (seen, not
+        // refused), and a wait already started carries on in the tab's own
+        // waiting line.
+        .onChange(of: tab) { _, tab in
+            if tab != .calendar { store.closeCalendarConnectForNavigation() }
+        }
+        // THE GRANT, heard wherever the user is, as the Mac's RootView hears
+        // it: the card and the "waiting for Google" line go away and the real
+        // events load.
+        .onChange(of: store.calendarGranted) { _, granted in
+            if granted { store.calendarGrantArrived() }
+        }
         .onChange(of: door.pane) { _, _ in syncReaders() }
         // Mail opened from somewhere else (a banner) while the drawer is out:
         // the drawer is in front of the stack that mail is about to push on.
@@ -314,6 +331,7 @@ private struct MobileShell: View {
                 switch tab {
                 case .sitrep: .sitrep
                 case .mail: .emails
+                case .calendar: .calendar
                 default: nil
                 }
             if let view, store.activeView != view { store.activeView = view }
@@ -388,6 +406,14 @@ private struct MobileShell: View {
         // sitrep's disconnected banner raises it.
         .overlay {
             if let ask = store.reconnectAsk { ReconnectAccountPrompt(ask: ask) }
+        }
+        // CONNECT GOOGLE CALENDAR: the Mac's own card, over the Calendar tab
+        // only. An overlay for the reason the reconnect prompt is one: it is
+        // its own scrim, and taps off it are "Not now".
+        .overlay {
+            if tab == .calendar, store.calendarCardUp, let ask = store.calendarConnectAsk {
+                CalendarConnectCard(ask: ask)
+            }
         }
         // `v`. A SHEET here and a top-anchored command bar there, for one reason:
         // the palette autofocuses a text field, and a phone answers that by

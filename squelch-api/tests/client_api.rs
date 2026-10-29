@@ -14,9 +14,7 @@ use squelch_core::types::{SealedKind, Sensitivity, Tier};
 use tower::ServiceExt;
 
 mod common;
-use common::{
-    Harness, TOKEN, authed, authed_json, body_json, calendar_on, harness, msg, sent_msg, state_with,
-};
+use common::{Harness, TOKEN, authed, authed_json, body_json, harness, msg, sent_msg, state_with};
 
 /// The mail list exactly as `/client/updates` reads it (`human_agent_updates`),
 /// with the same filters the handler passes. What these tests mean by "what the
@@ -9406,8 +9404,7 @@ async fn stats_offer_a_hosted_mailbox_the_calendar_link() {
     let app = router(
         state
             .with_calendar_credentials(resolver)
-            .with_console_sso_url(Some("https://signup.example/".into()))
-            .with_features(calendar_on()),
+            .with_console_sso_url(Some("https://signup.example/".into())),
     );
     let json = body_json(app.oneshot(authed("GET", "/client/stats")).await.unwrap()).await;
     eprintln!("hosted, not granted: {}", json["calendar"]);
@@ -9432,8 +9429,7 @@ async fn stats_report_a_hosted_calendar_grant() {
     let app = router(
         state
             .with_calendar_credentials(resolver)
-            .with_console_sso_url(Some("https://signup.example".into()))
-            .with_features(calendar_on()),
+            .with_console_sso_url(Some("https://signup.example".into())),
     );
     let json = body_json(app.oneshot(authed("GET", "/client/stats")).await.unwrap()).await;
     eprintln!("hosted, granted: {}", json["calendar"]);
@@ -9455,11 +9451,7 @@ async fn stats_report_a_hosted_calendar_grant() {
 async fn stats_tell_a_self_host_the_calendar_command() {
     let (state, _store, acct) = state_with(|_, _| {});
     let (resolver, path) = calendar_resolver("selfhost", acct, None);
-    let app = router(
-        state
-            .with_calendar_credentials(resolver)
-            .with_features(calendar_on()),
-    );
+    let app = router(state.with_calendar_credentials(resolver));
     let json = body_json(app.oneshot(authed("GET", "/client/stats")).await.unwrap()).await;
     eprintln!("self-host: {}", json["calendar"]);
     assert_eq!(
@@ -9474,7 +9466,7 @@ async fn stats_tell_a_self_host_the_calendar_command() {
     std::fs::remove_file(&path).ok();
 
     // And a door with no resolver at all answers the same shape, not absence.
-    let Harness { app, .. } = common::calendar_harness(|_, _| {});
+    let Harness { app, .. } = common::harness(|_, _| {});
     let json = body_json(app.oneshot(authed("GET", "/client/stats")).await.unwrap()).await;
     assert_eq!(json["calendar"]["granted"], serde_json::json!(false));
     assert_eq!(
@@ -9492,8 +9484,7 @@ async fn the_calendar_link_encodes_the_address() {
     let store = Arc::new(SqliteStore::open_in_memory().unwrap());
     let acct = store.ensure_account("a+b&calendar=0@example.com").unwrap();
     let state = ApiState::new(store, acct, TOKEN)
-        .with_console_sso_url(Some("https://signup.example".into()))
-        .with_features(calendar_on());
+        .with_console_sso_url(Some("https://signup.example".into()));
     let json = body_json(
         router(state)
             .oneshot(authed("GET", "/client/stats"))
@@ -10314,9 +10305,9 @@ async fn person_card_carries_the_inferred_timezone_and_put_overrides_it() {
     // utc_offset_minutes}`, ABSENT (like the card's other optional parts) when
     // nothing is known. PUT /client/person/timezone {addr, zone} sets the
     // user's override, `zone: null` clears it, and both answer
-    // {"timezone": ...|null}: what the card now shows. Both are part of the
-    // `calendar` hidden feature (the flag-off half is the next test).
-    let Harness { app, .. } = common::calendar_harness(|store, acct| {
+    // {"timezone": ...|null}: what the card now shows. Both are served to
+    // every mailbox, with no hidden feature (the next test).
+    let Harness { app, .. } = common::harness(|store, acct| {
         for (i, gmail) in ["g1", "g2", "g3"].into_iter().enumerate() {
             ingest_dated(
                 store,
@@ -10466,12 +10457,11 @@ async fn person_card_carries_the_inferred_timezone_and_put_overrides_it() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
-/// THE TIMEZONE IS BEHIND THE `calendar` FLAG. Off, the card carries no
-/// `timezone` key and the override route is 404 (as on main: no such route),
-/// while the inference behind them keeps running at ingest, so turning the
-/// flag on shows a zone at once.
+/// THE TIMEZONE NEEDS NO HIDDEN FEATURE. It was once behind the `calendar`
+/// flag (now retired): a daemon with no feature at all serves the inferred
+/// zone on the card and takes the override.
 #[tokio::test]
-async fn the_person_timezone_is_served_and_set_only_with_the_calendar_feature() {
+async fn the_person_timezone_is_served_and_set_with_no_hidden_feature() {
     let seed = |store: &SqliteStore, acct| {
         for (i, gmail) in ["g1", "g2", "g3"].into_iter().enumerate() {
             ingest_dated(
@@ -10484,9 +10474,8 @@ async fn the_person_timezone_is_served_and_set_only_with_the_calendar_feature() 
             );
         }
     };
-    let (state, store, acct) = common::state_with(seed);
-    let features = squelch_core::features::Features::none();
-    let app = squelch_api::router(state.with_features(features.clone()));
+    let (state, _store, _acct) = common::state_with(seed);
+    let app = squelch_api::router(state.with_features(squelch_core::features::Features::none()));
     let card = |app: axum::Router| async move {
         let resp = app
             .oneshot(authed("GET", "/client/person?addr=priya%40example.in"))
@@ -10495,34 +10484,16 @@ async fn the_person_timezone_is_served_and_set_only_with_the_calendar_feature() 
         assert_eq!(resp.status(), StatusCode::OK);
         body_json(resp).await
     };
-    let off = card(app.clone()).await;
-    assert!(
-        !off.as_object().unwrap().contains_key("timezone"),
-        "flag off: no timezone key: {off}"
-    );
-    let put = || {
-        authed_json(
+    assert_eq!(card(app.clone()).await["timezone"]["zone"], "Asia/Kolkata");
+    let resp = app
+        .clone()
+        .oneshot(authed_json(
             "PUT",
             "/client/person/timezone",
             serde_json::json!({"addr": "priya@example.in", "zone": "America/Chicago"}),
-        )
-    };
-    let resp = app.clone().oneshot(put()).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "flag off: no route");
-    // Inference ran regardless, and nothing was overridden.
-    let zone = store
-        .person_record(acct, "priya@example.in")
-        .unwrap()
-        .timezone;
-    assert_eq!(
-        zone.as_ref().map(|z| (z.zone.as_str(), z.source)),
-        Some(("Asia/Kolkata", squelch_core::timezone::ZoneSource::Offsets)),
-        "{zone:?}"
-    );
-    // On, the same daemon serves and sets it.
-    features.replace_granted([squelch_core::features::CALENDAR]);
-    assert_eq!(card(app.clone()).await["timezone"]["zone"], "Asia/Kolkata");
-    let resp = app.clone().oneshot(put()).await.unwrap();
+        ))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(card(app).await["timezone"]["source"], "user");
 }

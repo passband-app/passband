@@ -843,45 +843,30 @@ use crate::embed::{Embedder, StubEmbedder};
 use std::sync::Arc;
 
 #[test]
-fn restricted_mail_can_be_embedded_for_internal_recall() {
-    // The structural gate lives at the CALLER, so `messages_missing_vectors`
-    // — the backfill's source — must NEVER return a sealed row. Both halves
-    // are asserted: absent from the list, and its vec slot stays empty.
+fn the_drain_never_hands_a_sealed_row_to_an_embedder() {
+    // The drain's source (`messages_missing_vectors`) returns a decided,
+    // ordinary row and never a sealed one: here the legacy column (the
+    // gate's own tests in `embed_gate.rs` cover the agent pipeline's auth
+    // and restriction, which is where sealed mail comes from today).
     let (store, acct) = store();
-
-    // A normal message and a sealed OTP.
     let normal = triaged(acct, "g1", "t1")
         .importance(70)
         .tier(Tier::Signal)
         .seed(&store);
-
     let sealed = triaged(acct, "g2", "t2")
         .subject("Your verification code")
         .body("code 123456")
         .importance(90)
         .sealed(SealedKind::Otp)
         .seed(&store);
+    settle_decided(&store, acct, &[normal, sealed]);
 
-    // messages_missing_vectors returns the normal row, NEVER the sealed one.
     let missing = store.messages_missing_vectors(acct, 10).unwrap();
     assert!(missing.iter().any(|m| m.message_id == normal));
     assert!(
-        missing.iter().any(|m| m.message_id == sealed),
-        "internal models may process restricted mail"
+        !missing.iter().any(|m| m.message_id == sealed),
+        "sealed mail reaches no embedder"
     );
-
-    // Simulate the backfill embedding only what it was handed: the sealed row
-    // gets no vector.
-    let embedder = StubEmbedder::new(VEC_DIMS);
-    for m in &missing {
-        embed_and_store(&store, &embedder, acct, m.message_id, &m.subject, &m.body);
-    }
-    assert_eq!(
-        vec_count_for(&store, sealed),
-        1,
-        "internal vector is available"
-    );
-    assert_eq!(vec_count_for(&store, normal), 1, "normal row was embedded");
 }
 
 #[test]
@@ -907,6 +892,13 @@ fn sent_raw_body_is_stored_and_embeddable() {
             })
             .unwrap();
         assert!(body.contains("revised design doc by Friday"));
+        // Its access check has answered (own mail embeds only once it has).
+        conn.execute(
+            "INSERT INTO agent_message_state(account_id,message_id,content_snapshot,revision,access)
+             VALUES(?1,?2,'',1,'allowed')",
+            params![acct, id],
+        )
+        .unwrap();
     }
 
     // And it is a backfill candidate (sent mail is embeddable for recall).
@@ -945,7 +937,7 @@ fn semantic_search_ranks_relevant_above_decoy_and_includes_sent() {
         .seed(&store);
 
     // Embed both through the missing-vector path (mirrors backfill).
-    for m in store.messages_missing_vectors(acct, 10).unwrap() {
+    for m in unvectored(&store, acct, 10) {
         embed_and_store(&store, &*embedder, acct, m.message_id, &m.subject, &m.body);
     }
 
@@ -1165,7 +1157,7 @@ fn a_vector_hit_shows_the_sentence_that_carries_the_term() {
         .snippet("Thanks for subscribing to the weekly digest.")
         .body(DEEP_BODY)
         .seed(&store);
-    for m in store.messages_missing_vectors(acct, 10).unwrap() {
+    for m in unvectored(&store, acct, 10) {
         embed_and_store(&store, &*embedder, acct, m.message_id, &m.subject, &m.body);
     }
 
@@ -1235,7 +1227,7 @@ fn hybrid_and_semantic_apply_the_filter_post_hoc() {
         .received_at(day(2026, 2, 11))
         .seed(&store);
 
-    for m in store.messages_missing_vectors(acct, 10).unwrap() {
+    for m in unvectored(&store, acct, 10) {
         embed_and_store(&store, &*embedder, acct, m.message_id, &m.subject, &m.body);
     }
 
@@ -1356,7 +1348,7 @@ fn embed_e2e_real_model_ranks_relevant_first() {
         .body("Want to grab tacos on Thursday?")
         .seed(&store);
 
-    for m in store.messages_missing_vectors(acct, 10).unwrap() {
+    for m in unvectored(&store, acct, 10) {
         embed_and_store(&store, &*embedder, acct, m.message_id, &m.subject, &m.body);
     }
 
@@ -1564,7 +1556,7 @@ fn best_match_turns_the_tilt_off_on_every_ranked_leg() {
         .body(WEAKER_BODY)
         .received_at(now)
         .seed(&store);
-    for m in store.messages_missing_vectors(acct, 10).unwrap() {
+    for m in unvectored(&store, acct, 10) {
         embed_and_store(&store, &*embedder, acct, m.message_id, &m.subject, &m.body);
     }
 
@@ -1786,7 +1778,7 @@ fn hybrid_ranking_puts_the_fresher_of_two_equal_matches_first() {
         let (store, acct) = store_with_embedder(embedder.clone());
         let (a, b) = seed_equal_pair(&store, acct, first, second);
         let fresher = if first == 0 { a } else { b };
-        for m in store.messages_missing_vectors(acct, 10).unwrap() {
+        for m in unvectored(&store, acct, 10) {
             embed_and_store(&store, &*embedder, acct, m.message_id, &m.subject, &m.body);
         }
 
@@ -1836,7 +1828,7 @@ fn semantic_ranking_lifts_the_fresher_within_the_knn_window() {
             .received_at(now - Duration::days(500 - near_age_days))
             .seed(&store);
 
-        for m in store.messages_missing_vectors(acct, 10).unwrap() {
+        for m in unvectored(&store, acct, 10) {
             embed_and_store(&store, &*embedder, acct, m.message_id, &m.subject, &m.body);
         }
 
@@ -2560,7 +2552,7 @@ fn in_sent_and_to_apply_after_ranking_on_the_recall_legs() {
     let embedder = Arc::new(StubEmbedder::new(VEC_DIMS));
     let (store, acct) = store_with_embedder(embedder.clone());
     let [to_dan, to_amy, inbox_copy, ..] = seed_own_mail(&store, acct);
-    for m in store.messages_missing_vectors(acct, 10).unwrap() {
+    for m in unvectored(&store, acct, 10) {
         embed_and_store(&store, &*embedder, acct, m.message_id, &m.subject, &m.body);
     }
 
@@ -2584,14 +2576,17 @@ fn the_agent_door_finds_mail_i_wrote_and_still_checks_access() {
     let embedder = Arc::new(StubEmbedder::new(VEC_DIMS));
     let (store, acct) = store_with_embedder(embedder.clone());
     let [to_dan, to_amy, inbox_copy, from_dan, newsletter] = seed_own_mail(&store, acct);
-    for m in store.messages_missing_vectors(acct, 10).unwrap() {
-        embed_and_store(&store, &*embedder, acct, m.message_id, &m.subject, &m.body);
-    }
     for id in [to_dan, inbox_copy, from_dan, newsletter] {
         super::messages::assess_external(&store, acct, id, "allowed");
     }
     // One of the owner's own sends is restricted: no operator may reach it.
     super::messages::assess_external(&store, acct, to_amy, "restricted");
+    // Planted raw AFTER the assessments (whose state changes would otherwise
+    // clear undecided rows' vectors), the restricted one included: what is
+    // under test is the door's own refusal, not the embedders' gate.
+    for m in unvectored(&store, acct, 10) {
+        embed_and_store(&store, &*embedder, acct, m.message_id, &m.subject, &m.body);
+    }
 
     let run = |q: &str, mode| {
         let (text, filter) = parse_search_query(q);
@@ -2669,7 +2664,7 @@ fn to_never_matches_a_bcc_on_received_mail() {
         .subject("quarterly numbers")
         .body("quarterly numbers for the team")
         .seed(&store);
-    for m in store.messages_missing_vectors(acct, 10).unwrap() {
+    for m in unvectored(&store, acct, 10) {
         embed_and_store(&store, &*embedder, acct, m.message_id, &m.subject, &m.body);
     }
     let (text, filter) = parse_search_query("quarterly to:ceo@victim");
@@ -2682,4 +2677,96 @@ fn to_never_matches_a_bcc_on_received_mail() {
         .unwrap()
         .0;
     assert_eq!(ids(&hybrid), HashSet::from([mine]), "own Bcc still matches");
+}
+
+/// An embedder that is attached and fails every call, which is what the shared
+/// embedding service looks like from a search while it is down or full.
+struct DownEmbedder;
+
+impl crate::embed::Embedder for DownEmbedder {
+    fn embed(&self, _text: &str) -> crate::error::Result<Vec<f32>> {
+        Err(CoreError::Other(anyhow::anyhow!(
+            "embedding service: HTTP 503"
+        )))
+    }
+    fn dims(&self) -> usize {
+        VEC_DIMS
+    }
+}
+
+/// docs/EMBED-SERVICE.md §3: an embed ERROR in a hybrid search is an absent
+/// embedder, keyword results and no 500, on both doors. A semantic-only search
+/// has no keyword leg to fall back to and still fails.
+#[test]
+fn hybrid_search_degrades_to_keyword_when_the_embedder_errors() {
+    use crate::store::ExternalSearchMode;
+
+    let (store, acct) = store_with_embedder(Arc::new(DownEmbedder));
+    let id = triaged(acct, "g-down", "t-down")
+        .subject("osprey migration notes")
+        .body("the ospreys left early this year")
+        .importance(60)
+        .tier(Tier::Signal)
+        .seed(&store);
+    // Readable on the agent door too: an assessment that allowed it.
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO agent_message_state(account_id,message_id,content_snapshot,access)
+             VALUES(?1,?2,'{}','allowed')",
+            params![acct, id],
+        )
+        .unwrap();
+
+    let (hits, _) = store
+        .hybrid_search(
+            acct,
+            "osprey",
+            &SearchFilter::default(),
+            SearchSort::Recent,
+            false,
+            10,
+        )
+        .expect("a failed query embed must not fail the search");
+    assert_eq!(hits.iter().map(|h| h.id).collect::<Vec<_>>(), vec![id]);
+
+    let external = store
+        .external_search_filtered(
+            acct,
+            "osprey",
+            &SearchFilter::default(),
+            SearchSort::Recent,
+            ExternalSearchMode::Hybrid,
+            10,
+        )
+        .expect("nor the agent door's hybrid search");
+
+    assert_eq!(external.iter().map(|h| h.id).collect::<Vec<_>>(), vec![id]);
+
+    assert!(
+        store
+            .semantic_search_hits(
+                acct,
+                "osprey",
+                &SearchFilter::default(),
+                SearchSort::Recent,
+                false,
+                10,
+            )
+            .is_err(),
+        "semantic-only keeps propagating"
+    );
+    assert!(
+        store
+            .external_search_filtered(
+                acct,
+                "osprey",
+                &SearchFilter::default(),
+                SearchSort::Recent,
+                ExternalSearchMode::Semantic,
+                10,
+            )
+            .is_err()
+    );
 }

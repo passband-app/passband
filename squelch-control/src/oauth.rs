@@ -8,11 +8,10 @@
 //! - [`Flow::Signup`] is a GRANT. It asks for the Gmail scope (`gmail.modify`) and
 //!   `access_type=offline`, because what it is for is a refresh token a daemon
 //!   will use for years. It also asks, optionally, for Google Calendar, so a
-//!   new mailbox has it the day the `calendar` feature turns on.
-//! - [`Flow::Reconnect`] is THE SAME GRANT, asked for again. The same Gmail
-//!   scopes and parameters (calendar is kept through `include_granted_scopes`,
-//!   not newly asked for); only the callback differs, re-sealing a mailbox
-//!   that already exists instead of provisioning one. It exists because a refresh
+//!   new mailbox has its Calendar page connected from the first launch.
+//! - [`Flow::Reconnect`] is THE SAME GRANT, asked for again: signup's scopes and
+//!   parameters, calendar included and optional; only the callback differs,
+//!   re-sealing a mailbox that already exists instead of provisioning one. It exists because a refresh
 //!   token can stop working (revoked, or expired under a consent screen still
 //!   in Testing) and the daemon cannot ask for a new one itself.
 //! - [`Flow::Calendar`] is the reconnect grant with the calendar scopes ADDED
@@ -208,13 +207,18 @@ pub enum Flow {
     /// RECONNECT: a fresh Gmail grant for a tenant that already exists,
     /// replacing a refresh token that has stopped working.
     ///
-    /// Asks Google for what [`Flow::Signup`] asks minus calendar (the same
-    /// Gmail and profile scopes, `access_type=offline`, `prompt=consent`)
-    /// because it wants the same thing: a refresh token the daemon can hold.
-    /// Calendar is not newly asked for on a repair; `include_granted_scopes`
-    /// keeps it on a token that had it. It differs only in what the
-    /// callback does with it, which is to re-seal an existing mailbox rather
-    /// than provision a new one.
+    /// Asks Google for exactly what [`Flow::Signup`] asks (the Gmail and
+    /// profile scopes, calendar optional, `access_type=offline`,
+    /// `prompt=consent`) because it wants the same thing: a refresh token the
+    /// daemon can hold. It differs only in what the callback does with it,
+    /// which is to re-seal an existing mailbox rather than provision a new one.
+    ///
+    /// CALENDAR IS ASKED FOR AGAIN (the founder, 2026-10-29: "the reconnect
+    /// flow for email should also reconnect calendar"). It used to lean on
+    /// `include_granted_scopes`, but a reconnect is needed exactly when the old
+    /// grant died, and a REVOKED grant leaves Google nothing to include: the
+    /// new token came back Gmail-only, the install replaced the whole
+    /// credentials file, and calendar needed a second trip through Google.
     ///
     /// `prompt=consent` is not optional here even though the user has consented
     /// before. Without it Google recognises a returning user and may answer
@@ -378,30 +382,24 @@ fn requested_scopes_for(flow: Flow, provider: Provider) -> Vec<&'static str> {
         // RECONNECT asks for signup's Gmail and profile scopes: a replacement
         // that covered less Gmail than the original would leave a mailbox half
         // readable, and the daemon checks a token against these same strings.
-        // Signup's optional calendar is carried by `include_granted_scopes`.
-        Flow::Reconnect => {
-            let mut scopes = gmail_scopes();
-            // ASKED FOR, NOT INSISTED ON: the account's name and photo, so the
-            // app can show a face instead of an initial. It is deliberately
-            // absent from `required_scopes`, because a person who unticks it
-            // has still granted a whole working mailbox.
-            scopes.push(GOOGLE_PROFILE_SCOPE);
-            scopes
-        }
+        //
         // The Gmail set FIRST and whole, and the profile scope beside it, then
         // the calendar pair. Neither the profile nor calendar is ever REQUIRED
-        // (see `required_scopes`).
+        // (see `required_scopes`): the profile is ASKED FOR, NOT INSISTED ON
+        // (the account's name and photo, so the app can show a face instead
+        // of an initial), and a person who unticks either has still granted a
+        // whole working mailbox.
         //
-        // SIGNUP ASKS FOR CALENDAR TOO, even while the `calendar` hidden
-        // feature is off for the tenant: the grant is one consent now instead
-        // of a second trip through Google later. A daemon without the feature
-        // holds the scope and uses none of it (sync calls nothing), and the
-        // day the feature turns on, calendar simply works.
+        // SIGNUP ASKS FOR CALENDAR TOO: the grant is one consent now instead
+        // of a second trip through Google later, and the Calendar page works
+        // from the first launch.
         //
-        // A RECONNECT does not add calendar: it repairs the grant a tenant
-        // already chose, and `include_granted_scopes` keeps calendar on a
-        // token that had it.
-        Flow::Signup | Flow::Calendar => {
+        // A RECONNECT ASKS FOR CALENDAR TOO, for the same reason and one more:
+        // `include_granted_scopes` cannot keep a grant that was revoked, and
+        // the install replaces the whole credentials file, so a Gmail-only
+        // repair would leave the mailbox's calendar disconnected (see
+        // `Flow::Reconnect`).
+        Flow::Signup | Flow::Reconnect | Flow::Calendar => {
             let mut scopes = gmail_scopes();
             scopes.push(GOOGLE_PROFILE_SCOPE);
             scopes.extend_from_slice(CALENDAR_SCOPES);
@@ -1189,10 +1187,12 @@ mod tests {
         );
         assert!(!c.url.contains(&c.pkce_verifier));
 
-        // A reconnect: the same parameters, no calendar scope.
+        // A reconnect: the same parameters, calendar asked for again (a
+        // revoked grant leaves `include_granted_scopes` nothing to keep).
         let r = consent_url(&endpoints(), "s".into(), Flow::Reconnect).unwrap();
         let q = query(&r);
-        assert!(!q["scope"].contains("calendar"));
+        assert!(q["scope"].contains("calendar.events"), "{}", q["scope"]);
+        assert!(q["scope"].contains("calendar.calendarlist.readonly"));
         assert_eq!(
             q.get("include_granted_scopes").map(String::as_str),
             Some("true")

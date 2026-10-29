@@ -400,6 +400,7 @@ struct RefreshError { var message: String; var kind: ErrorKind }
     func isCurrent(_ e: Int) -> Bool { epoch == e }
     func refreshZones(force: Bool = false) async {}
     func noteBoardConfirmed() {}
+    func notePullLanded(epoch: Int) {}
     func pollScheduled() async {}
     func noteThreadArrival(thread: String, message: Int, sender: String) {}
 }

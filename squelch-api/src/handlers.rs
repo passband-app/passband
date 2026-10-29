@@ -2071,7 +2071,7 @@ fn timeline_bound(raw: Option<&str>) -> Result<Option<DateTime<chrono::FixedOffs
 /// is the model's own guess as stored, served even when a stronger tier wins
 /// so the client can say what it was overruled by. A date-only ghost with no
 /// stated or corrected end has no end at all (`end`, `end_source` null).
-fn ghost_view(
+pub(crate) fn ghost_view(
     ghost: &squelch_core::types::GhostEvent,
     now: DateTime<chrono::FixedOffset>,
 ) -> serde_json::Value {
@@ -2132,7 +2132,14 @@ fn ghost_view(
 /// Each ghost
 /// carries `matched_event` (`{calendar_id, id}` or null): a real event at the
 /// same start whose title matches ([`squelch_core::gcal::ghost_matches`]),
-/// computed here for display de-duplication and never stored.
+/// computed here for display de-duplication and never stored. Each event
+/// carries `place` once the small model has cleaned its location
+/// ([`squelch_core::gcal::place`]): the text the detail card shows in place
+/// of `location`, `""` when the location names no place. Absent until then.
+/// An event Passband made in place of Gmail's and keeps current from the mail
+/// ([`squelch_core::gcal::own`]) carries `passband_owned: true`, and the ghost
+/// it was made for is matched to it whatever its title; a ghost is matched to
+/// an event Gmail made from the same mail by `own::same_event` too.
 ///
 /// Defaults: `from` is a day ago and `to` is `from` plus the default window
 /// (so with neither, now-1d to now+90d). `state` is judged at the server's
@@ -2161,28 +2168,82 @@ pub async fn get_timeline(
         Some(calendar) => calendar.granted().await,
         None => false,
     };
-    let (ghosts, events, calendars, status) = store_call(&state, move |store, account_id| {
-        let ghosts = store.list_ghost_events(account_id, from, to)?;
-        if !granted {
-            return Ok((ghosts, Vec::new(), Vec::new(), Default::default()));
-        }
-        let (events, cut) = store.list_calendar_events(account_id, from, to, now)?;
-        let mut status: squelch_core::gcal::CalendarStatus = store.calendar_status(account_id)?;
-        status.truncated |= cut;
-        let calendars: Vec<_> = store
-            .calendar_calendars(account_id)?
-            .into_iter()
-            .filter(|c| c.selected)
-            .collect();
-        Ok((ghosts, events, calendars, status))
-    })
-    .await?;
+    let (ghosts, events, calendars, status, places, owned) =
+        store_call(&state, move |store, account_id| {
+            let ghosts = store.list_ghost_events(account_id, from, to)?;
+            if !granted {
+                return Ok((
+                    ghosts,
+                    Vec::new(),
+                    Vec::new(),
+                    Default::default(),
+                    Default::default(),
+                    Vec::new(),
+                ));
+            }
+            let (events, cut) = store.list_calendar_events(account_id, from, to, now)?;
+            let mut status: squelch_core::gcal::CalendarStatus =
+                store.calendar_status(account_id)?;
+            status.truncated |= cut;
+            let calendars: Vec<_> = store
+                .calendar_calendars(account_id)?
+                .into_iter()
+                .filter(|c| c.selected)
+                .collect();
+            let places = store.calendar_places(account_id)?;
+            let owned = store.calendar_owned(account_id)?;
+            Ok((ghosts, events, calendars, status, places, owned))
+        })
+        .await?;
     // The display match, computed here and never stored, so it can never go
     // stale and never changes a ghost.
-    let matched = squelch_core::gcal::match_ghosts(
+    let mut matched = squelch_core::gcal::match_ghosts(
         ghosts.iter().map(|g| (g.title.as_str(), &g.start)),
         &events,
     );
+    // Two more ways a ghost is the same thing as an event: Passband made the
+    // event for it and keeps it (gcal/own.rs), whatever its time or title
+    // now; or Gmail made the event from the same mail, which titles it its
+    // own way (`own::same_event`: the same start and a distinctive word).
+    use squelch_core::gcal::own::{self, OwnState};
+    // Indexed once, so each ghost looks up rather than scans.
+    let position: std::collections::HashMap<(&str, &str), usize> = events
+        .iter()
+        .enumerate()
+        .map(|(i, e)| ((e.calendar_id.as_str(), e.row.event_id.as_str()), i))
+        .collect();
+    let bound_to: std::collections::HashMap<i64, (&str, &str)> = owned
+        .iter()
+        .filter(|o| o.state == OwnState::Owned)
+        .map(|o| (o.ghost_id, (o.calendar_id.as_str(), o.event_id.as_str())))
+        .collect();
+    let mine: std::collections::HashSet<(&str, &str)> = bound_to.values().copied().collect();
+    // Gmail's events by start (an instant in UTC, or a date), the only ones
+    // `same_event` can match.
+    let start_key = |t: &squelch_core::triage::ghost::EventTime| match t {
+        squelch_core::triage::ghost::EventTime::At(at) => (Some(at.with_timezone(&Utc)), None),
+        squelch_core::triage::ghost::EventTime::Date(day) => (None, Some(*day)),
+    };
+    let mut gmail_at: std::collections::HashMap<_, Vec<usize>> = Default::default();
+    for (i, e) in events.iter().enumerate() {
+        if e.row.from_gmail {
+            gmail_at.entry(start_key(&e.row.start)).or_default().push(i);
+        }
+    }
+    for (ghost, slot) in ghosts.iter().zip(matched.iter_mut()) {
+        let bound = bound_to
+            .get(&ghost.id)
+            .and_then(|key| position.get(key).copied());
+        if bound.is_some() {
+            *slot = bound;
+        } else if slot.is_none() {
+            *slot = gmail_at.get(&start_key(&ghost.start)).and_then(|at| {
+                at.iter()
+                    .copied()
+                    .find(|&i| own::same_event(ghost, &events[i].row))
+            });
+        }
+    }
     let now = now.with_timezone(from.offset());
     let ghosts: Vec<_> = ghosts
         .iter()
@@ -2204,7 +2265,32 @@ pub async fn get_timeline(
         .unwrap_or_default();
     let events: Vec<_> = events
         .iter()
-        .map(|e| calendar_event_view(e, &account_email))
+        .map(|e| {
+            let mut view = calendar_event_view(e, &account_email);
+            // The card's place (gcal/place.rs), once the model has made one
+            // of this location: its name and street address, each null when
+            // the location gives none (both null: it names no place), and the
+            // location it was made from. Absent until then, and the client
+            // shows `location`.
+            if let Some((raw, place)) = e
+                .row
+                .location
+                .as_ref()
+                .and_then(|raw| places.get(raw).map(|p| (raw, p)))
+            {
+                let (name, address) = match place {
+                    Some(p) => (p.name.as_deref(), p.address.as_deref()),
+                    None => (None, None),
+                };
+                view["place"] = json!({ "name": name, "address": address, "original": raw });
+            }
+            // Passband made this event and keeps it current from the mail.
+            // Absent otherwise.
+            if mine.contains(&(e.calendar_id.as_str(), e.row.event_id.as_str())) {
+                view["passband_owned"] = json!(true);
+            }
+            view
+        })
         .collect();
     let calendars: Vec<_> = calendars
         .iter()
@@ -2246,7 +2332,9 @@ pub async fn get_timeline(
 /// hides them. `color` is the event's own colour or its calendar's
 /// (`#rrggbb`, or null when Google gave neither), `editable` the edit guard
 /// ([`squelch_core::gcal::SyncedEvent::editable`]) for `account_email`, and
-/// `description` laundered text of at most 2000 characters. `guests` is the
+/// `description` laundered text of at most 2000 characters (the timeline
+/// listing adds `place`, the card's cleaned location, beside it; see
+/// `get_timeline`). `guests` is the
 /// event's attendees as Google lists them (`{email, name, response,
 /// organizer, self}`, `response` one of `accepted` / `declined` /
 /// `tentative` / `pending`), at most 100 and `[]` when it has none;
@@ -2285,6 +2373,7 @@ pub(crate) fn calendar_event_view(
         })).collect::<Vec<_>>(),
         "guests_truncated": row.guests_truncated,
         "guest_editable": event.guest_editable(account_email),
+        "from_gmail": row.from_gmail,
     })
 }
 
@@ -3306,8 +3395,8 @@ pub struct PersonView {
 /// be walked into a directory dump without already knowing every address.
 /// Sealed mail is absent from every count and list on it (see
 /// `SqliteStore::person_record`). `no-store`, for the same reason as senders.
-/// `timezone` is part of the `calendar` hidden feature: with it off the key is
-/// absent, as on main, though the inference behind it keeps running.
+/// `timezone` is the correspondent's inferred (or user-set) zone, absent when
+/// nothing is known.
 pub async fn get_person(
     State(state): State<ApiState>,
     Query(params): Query<PersonQuery>,
@@ -3359,11 +3448,7 @@ pub async fn get_person(
                 last_at: t.last_at.to_rfc3339(),
             })
             .collect(),
-        timezone: if state.features().enabled(squelch_core::features::CALENDAR) {
-            timezone_view(p.timezone)
-        } else {
-            None
-        },
+        timezone: timezone_view(p.timezone),
     };
     Ok((no_store(), Json(view)))
 }
@@ -4088,50 +4173,45 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
     // /client/timeline/ghosts/{id} exist. A LOUD failure like scheduled send
     // (an old daemon 404s them), so the client shows no timeline without it.
     //
-    // BEHIND THE `calendar` HIDDEN FEATURE: off, those routes 404 (see
-    // `calendar_routes`), so this says `false`, the answer the client already
-    // reads as "no Calendar page", and the `calendar` object below is left
-    // out. Asked now, so a flag flipped under a running daemon shows on the
-    // next poll.
-    let calendar_on = state.features().enabled(squelch_core::features::CALENDAR);
-    body["timeline"] = json!(calendar_on);
-    if calendar_on {
-        // IS GOOGLE CALENDAR GRANTED, and if not, how to grant it. Present
-        // whenever the feature is on (an old daemon's silence, like a feature
-        // that is off, is the client's "no calendar"), and human door only: no
-        // agent route carries it.
-        //
-        // `granted` is the token resolver's answer, read off the scopes recorded
-        // on the stored token, with no call to Google. `connect_url` is the
-        // hosted/self-host split exactly as `gmail.reconnect_url` is: the console
-        // origin when this daemon has one, with the mailbox as `hint` so the
-        // control plane pre-selects it and refuses any other account. Without
-        // one, the command a self-host runs.
-        let granted = match state.calendar() {
-            Some(calendar) => calendar.granted().await,
-            None => false,
-        };
-        // No calendar connect for an Outlook mailbox: its consent already
-        // carries calendar, and Passband's calendar is Google's (#638).
-        let outlook = state.known_provider() == MailProvider::Outlook;
-        let connect_url = state.console_sso_url().filter(|_| !outlook).map(|origin| {
-            format!(
-                "{origin}/reconnect?calendar=1&hint={}",
-                url_component(&email)
-            )
-        });
-        let connect_command = connect_url.is_none().then_some("squelchd auth --calendar");
-        // `self_connect`: whether `POST /client/calendar/connect` runs the consent
-        // here (a self-host with an OAuth client). The client's one Connect button
-        // calls it when true and opens `connect_url` otherwise; `connect_command`
-        // stays for older builds that still print it.
-        body["calendar"] = json!({
-            "granted": granted,
-            "connect_url": connect_url,
-            "connect_command": connect_command,
-            "self_connect": crate::calendar_connect::self_connect(&state),
-        });
-    }
+    // ALWAYS TRUE NOW: the `calendar` hidden feature that once switched this
+    // off is retired (`squelch_core::features::RETIRED`). Current apps show
+    // the Calendar page unconditionally and no longer read this key; it is
+    // kept for apps from before that, which still need it to show the page.
+    body["timeline"] = json!(true);
+    // IS GOOGLE CALENDAR GRANTED, and if not, how to grant it. Always
+    // present (an old daemon's silence is the client's "no calendar"), and
+    // human door only: no agent route carries it.
+    //
+    // `granted` is the token resolver's answer, read off the scopes recorded
+    // on the stored token, with no call to Google. `connect_url` is the
+    // hosted/self-host split exactly as `gmail.reconnect_url` is: the console
+    // origin when this daemon has one, with the mailbox as `hint` so the
+    // control plane pre-selects it and refuses any other account. Without
+    // one, the command a self-host runs.
+    let granted = match state.calendar() {
+        Some(calendar) => calendar.granted().await,
+        None => false,
+    };
+    // No calendar connect for an Outlook mailbox: its consent already
+    // carries calendar, and Passband's calendar is Google's (#638).
+    let outlook = state.known_provider() == MailProvider::Outlook;
+    let connect_url = state.console_sso_url().filter(|_| !outlook).map(|origin| {
+        format!(
+            "{origin}/reconnect?calendar=1&hint={}",
+            url_component(&email)
+        )
+    });
+    let connect_command = connect_url.is_none().then_some("squelchd auth --calendar");
+    // `self_connect`: whether `POST /client/calendar/connect` runs the consent
+    // here (a self-host with an OAuth client). The client's one Connect button
+    // calls it when true and opens `connect_url` otherwise; `connect_command`
+    // stays for older builds that still print it.
+    body["calendar"] = json!({
+        "granted": granted,
+        "connect_url": connect_url,
+        "connect_command": connect_command,
+        "self_connect": crate::calendar_connect::self_connect(&state),
+    });
     Ok(Json(body))
 }
 
@@ -4741,34 +4821,36 @@ async fn resolve_sender_done(state: &ApiState, sender: &str) {
 /// write credential is configured.
 ///
 /// THE WRITER IS THE ACCOUNT'S PROVIDER'S (`accounts.provider`, read on the
-/// first call and kept in [`ApiState::mail_provider`]). The credential is
-/// checked first, so a door with none configured answers exactly as it
-/// always has without touching the store. A provider this build does not know
-/// is refused, never written to as Gmail: see [`writer_unavailable`].
+/// first call and kept in [`ApiState::mail_provider`]). A provider this build
+/// does not know, or cannot write to yet (IMAP, issue #575 phase 2), is
+/// refused with a 501 whether or not a write credential is configured: the
+/// credential is Gmail OAuth, and "run `squelchd auth`" would send an IMAP
+/// user to the wrong fix. See [`writer_unavailable`].
+///
+/// A Gmail door with no credential answers exactly the 403 it always has;
+/// the only new effect on that path is the (cached) provider read, and a
+/// failed read leaves it the 403 too.
 pub(crate) async fn write_client(state: &ApiState) -> Result<Arc<dyn MailWriter>, ApiError> {
     let Some(creds) = state.write_creds().cloned() else {
-        return Err(ApiError::new(
+        let no_credential = ApiError::new(
             StatusCode::FORBIDDEN,
             "write credential not configured; run `squelchd auth`",
-        ));
+        );
+        return Err(match account_provider(state).await {
+            Ok(MailProvider::Gmail | MailProvider::Outlook) => no_credential,
+            Ok(MailProvider::Imap) => imap_has_no_writer(),
+            // A provider this build does not know: the 501, as with a
+            // credential.
+            Err(e) if e.status == StatusCode::NOT_IMPLEMENTED => e,
+            // The read itself failed (the store): the credential is still
+            // what is missing.
+            Err(_) => no_credential,
+        });
     };
-    let provider = match state.mail_provider.get() {
-        Some(provider) => *provider,
-        None => {
-            // The inner `Result` is the provider read itself, mapped below
-            // rather than by the store's generic mapping (which would call an
-            // unknown provider the CALLER's 400).
-            let read = store_call(state, |store, account_id| {
-                Ok(store.account_provider(account_id))
-            })
-            .await?;
-            let provider = read.map_err(writer_unavailable)?;
-            *state.mail_provider.get_or_init(|| provider)
-        }
-    };
-    match provider {
+    match account_provider(state).await? {
         // Over the state's one shared HTTP client (see `ApiState::write_http`);
         // what is built per action is two `Arc` clones and a base URL.
+        MailProvider::Imap => Err(imap_has_no_writer()),
         MailProvider::Gmail => Ok(Arc::new(
             GmailWriteClient::with_http(
                 creds,
@@ -4793,7 +4875,39 @@ pub(crate) async fn write_client(state: &ApiState) -> Result<Arc<dyn MailWriter>
     }
 }
 
-/// Why the account has no writer although a write credential is configured.
+/// The account's mail provider, read once per door and kept in
+/// [`ApiState::mail_provider`]; a failed read is not cached.
+async fn account_provider(state: &ApiState) -> Result<MailProvider, ApiError> {
+    if let Some(provider) = state.mail_provider.get() {
+        return Ok(*provider);
+    }
+    // The inner `Result` is the provider read itself, mapped below rather
+    // than by the store's generic mapping (which would call an unknown
+    // provider the CALLER's 400).
+    let read = store_call(state, |store, account_id| {
+        Ok(store.account_provider(account_id))
+    })
+    .await?;
+    let provider = read.map_err(writer_unavailable)?;
+    Ok(*state.mail_provider.get_or_init(|| provider))
+}
+
+/// What an IMAP account's write attempt is told, in phase 2.
+pub(crate) const IMAP_READ_ONLY: &str =
+    "this is an IMAP account: sending mail and mail actions are not supported for IMAP yet";
+
+/// Read only in phase 2 (issue #575): no SMTP writer yet, so the door answers
+/// 501 for an IMAP account, as for an unknown provider (and audited the same,
+/// `rejected:unsupported_provider`). Its own text, though: "upgrade squelchd"
+/// would send an IMAP user after a fix that does not exist yet.
+fn imap_has_no_writer() -> ApiError {
+    eprintln!(
+        "squelch-api: no writer for this account: mail provider \"imap\" has no write path in this build"
+    );
+    ApiError::new(StatusCode::NOT_IMPLEMENTED, IMAP_READ_ONLY)
+}
+
+/// Why the account has no writer.
 ///
 /// - A provider this build does not know (a database a newer build set up):
 ///   501, because this daemon cannot do it at all and an upgrade is the fix.
@@ -6686,6 +6800,14 @@ pub struct UnsubscribeBody {
     /// exactly that response.
     #[serde(default)]
     auto: bool,
+    /// Required with `auto`, like every other route that acts on the user's
+    /// behalf (docs/SECURITY.md §6): with `auto` the daemon itself visits the
+    /// sender's site and may submit its form, which cannot be undone from
+    /// here. Not required without it: that answer is a link the person opens
+    /// in their own browser, which is the confirmation, and it is what every
+    /// older client asks for.
+    #[serde(default)]
+    confirm: bool,
 }
 
 pub async fn unsubscribe(
@@ -6694,6 +6816,11 @@ pub async fn unsubscribe(
 ) -> Result<impl IntoResponse, ApiError> {
     let message_id = body.message_id;
     let target = Some(message_id.to_string());
+
+    if body.auto && !body.confirm {
+        audit_action(&state, "unsubscribe", target, "rejected:confirm").await;
+        return Err(ApiError::bad_request(CONFIRM_HINT));
+    }
 
     // `None` => missing OR sealed, indistinguishable, both 404.
     let fields = store_call(&state, move |store, account_id| {
@@ -7566,7 +7693,7 @@ mod write_client_tests {
             .with_write_test_harness(Arc::new(StubCreds), "http://127.0.0.1:9".into());
         assert!(write_client(&state).await.is_ok());
         // What a second read would now see: a provider this build refuses.
-        fx.set_provider("imap");
+        fx.set_provider("exchange-ews");
         assert!(
             write_client(&state.clone()).await.is_ok(),
             "the cached read stands, on every clone of the state"
@@ -7615,7 +7742,7 @@ mod write_client_tests {
     #[tokio::test]
     async fn a_provider_this_build_does_not_know_is_refused_not_treated_as_gmail() {
         let fx = Fixture::new("unknown");
-        fx.set_provider("imap");
+        fx.set_provider("exchange-ews");
         let (base, handle) = mock_api().await;
         let state = fx
             .state()
@@ -7628,17 +7755,90 @@ mod write_client_tests {
         assert_eq!(handle.await.unwrap(), None, "nothing reached the API");
     }
 
-    /// The credential is checked first, so a door without one answers with
-    /// the same 403 it always has, whatever the account's provider.
+    /// An IMAP account is read only in phase 2 (issue #575): the door has no
+    /// writer for it and says 501, and nothing goes to Gmail.
     #[tokio::test]
-    async fn no_write_credential_is_still_the_403_whatever_the_provider() {
-        let fx = Fixture::new("no-creds");
+    async fn an_imap_account_has_no_writer_yet() {
+        let fx = Fixture::new("imap");
         fx.set_provider("imap");
-        let err = match write_client(&fx.state()).await {
-            Ok(_) => panic!("no credential, no writer"),
+        let (base, handle) = mock_api().await;
+        let state = fx
+            .state()
+            .with_write_test_harness(Arc::new(StubCreds), base);
+        let err = match write_client(&state).await {
+            Ok(_) => panic!("an imap account must not get a writer"),
             Err(e) => e,
         };
+        assert_eq!(err.status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(handle.await.unwrap(), None, "nothing reached the API");
+    }
+
+    fn refused(r: Result<Arc<dyn MailWriter>, ApiError>) -> ApiError {
+        match r {
+            Ok(_) => panic!("no credential, no writer"),
+            Err(e) => e,
+        }
+    }
+
+    /// GMAIL WITHOUT A WRITE CREDENTIAL IS UNCHANGED, to the byte: the same
+    /// 403, the same text, the same audit reason, whether the row says gmail
+    /// or (as on a database from before the column) nothing was ever set,
+    /// and on a second call answered from the cached provider.
+    #[tokio::test]
+    async fn gmail_without_a_write_credential_is_the_same_403() {
+        for provider in [None, Some("gmail")] {
+            let fx = Fixture::new("no-creds-gmail");
+            if let Some(p) = provider {
+                fx.set_provider(p);
+            }
+            let state = fx.state();
+            for _ in 0..2 {
+                let err = refused(write_client(&state).await);
+                assert_eq!(err.status, StatusCode::FORBIDDEN);
+                assert_eq!(
+                    err.message,
+                    "write credential not configured; run `squelchd auth`"
+                );
+                assert_eq!(write_refusal(&err), "rejected:no_write_credential");
+            }
+        }
+    }
+
+    /// AN IMAP ACCOUNT IS NOT SENT TO GMAIL OAUTH: without a write
+    /// credential it gets the provider's 501, audited as such, not the 403
+    /// that says to run `squelchd auth`. So does a provider this build does
+    /// not know.
+    #[tokio::test]
+    async fn a_non_gmail_account_without_a_write_credential_gets_the_provider_refusal() {
+        for provider in ["imap", "exchange-ews"] {
+            let fx = Fixture::new("no-creds-other");
+            fx.set_provider(provider);
+            let err = refused(write_client(&fx.state()).await);
+            assert_eq!(err.status, StatusCode::NOT_IMPLEMENTED, "{provider}");
+            assert!(!err.message.contains("squelchd auth"), "{}", err.message);
+            assert_eq!(write_refusal(&err), "rejected:unsupported_provider");
+            // IMAP is told IMAP writes are not supported yet; only a provider
+            // this build does not know is told to upgrade.
+            if provider == "imap" {
+                assert_eq!(err.message, IMAP_READ_ONLY);
+                assert!(!err.message.contains("upgrade"), "{}", err.message);
+            } else {
+                assert!(err.message.contains("upgrade squelchd"), "{}", err.message);
+            }
+        }
+    }
+
+    /// A provider read that fails (the account row gone) does not turn the
+    /// missing credential into a store error: still the 403.
+    #[tokio::test]
+    async fn a_failed_provider_read_leaves_the_no_credential_403() {
+        let fx = Fixture::new("no-creds-gone");
+        let db = rusqlite::Connection::open(fx.dir.join("store.sqlite3")).unwrap();
+        db.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+        db.execute("DELETE FROM accounts WHERE id = ?1", [fx.acct])
+            .unwrap();
+        let err = refused(write_client(&fx.state()).await);
         assert_eq!(err.status, StatusCode::FORBIDDEN);
-        assert!(err.message.contains("squelchd auth`"));
+        assert_eq!(write_refusal(&err), "rejected:no_write_credential");
     }
 }

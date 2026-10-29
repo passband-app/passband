@@ -371,7 +371,9 @@ impl Default for SyncConfig {
 #[serde(default)]
 pub struct NotifyConfig {
     /// Fast-model importance at or above which a message qualifies for a push.
-    /// All model-assessed auth qualifies regardless of importance. Default 50.
+    /// All model-assessed auth qualifies regardless of importance. Default 40:
+    /// over-notifying beats burying mail in FYE, so actionable automated
+    /// notices (the prompts' 40-59 band) push too.
     /// Env: `SQUELCH_NOTIFY_MIN_IMPORTANCE`.
     pub min_importance: u8,
     /// THE FIRST-SIGHT TEST: mail whose `Date:` header is older than this when
@@ -472,7 +474,7 @@ impl NotifyConfig {
 impl Default for NotifyConfig {
     fn default() -> Self {
         Self {
-            min_importance: 50,
+            min_importance: 40,
             freshness_window_secs: 900,
             rescue_window_secs: 3600,
             fast_enabled: true,
@@ -729,6 +731,91 @@ pub struct TrackingConfig {
     /// `https://track.example.com`); the pixel is `{base_url}/t/{token}`.
     /// Env: `SQUELCH_TRACK_URL`. `None` => tracking is off for every send.
     pub base_url: Option<String>,
+}
+
+/// Smart re-notify's tunables (issue #625, docs/RENOTIFY.md). WHETHER it runs
+/// is the `renotify` hidden feature ([`crate::features::RENOTIFY`]), per
+/// tenant; this is only HOW. Every field is in minutes or a count, and every
+/// one has an env override, because hosted has no config file to edit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct RenotifyConfig {
+    /// How long the Mac app must have been disconnected for its next
+    /// connection to count as the owner arriving. Default 120.
+    /// Env: `SQUELCH_RENOTIFY_MIN_OFFLINE_MINS`.
+    pub min_offline_mins: u64,
+    /// How long the connection must then stay up before the banner fires, in
+    /// SECONDS: lets the app's own replay land first and drops a wake that
+    /// sleeps again at once. Default 30. Env: `SQUELCH_RENOTIFY_SETTLE_SECS`.
+    pub online_settle_secs: u64,
+    /// Minutes after a meeting ends before its window opens. Default 3.
+    /// Env: `SQUELCH_RENOTIFY_MEETING_END_DELAY_MINS`.
+    pub meeting_end_delay_mins: u64,
+    /// How long that window stays open. Default 10.
+    /// Env: `SQUELCH_RENOTIFY_MEETING_END_WINDOW_MINS`.
+    pub meeting_end_window_mins: u64,
+    /// A timed event longer than this is a block, not a meeting: its end is no
+    /// trigger. Default 240. Env: `SQUELCH_RENOTIFY_MAX_MEETING_MINS`.
+    pub max_meeting_mins: u64,
+    /// Hold when a meeting starts within this many minutes. Default 15.
+    /// Env: `SQUELCH_RENOTIFY_MEETING_GUARD_MINS`.
+    pub meeting_guard_mins: u64,
+    /// The working day in the owner's zone, `[start, end)` hours. Defaults 7
+    /// and 20. Env: `SQUELCH_RENOTIFY_WORK_START_HOUR`,
+    /// `SQUELCH_RENOTIFY_WORK_END_HOUR`.
+    pub work_start_hour: u32,
+    pub work_end_hour: u32,
+    /// Banners per local day. Default 4. Env: `SQUELCH_RENOTIFY_DAILY_BUDGET`.
+    pub daily_budget: u32,
+    /// Messages one banner names. Default 3. Env: `SQUELCH_RENOTIFY_MAX_ITEMS`.
+    pub max_items: usize,
+    /// Re-notifies per message, ever. Default 2.
+    /// Env: `SQUELCH_RENOTIFY_MAX_PER_MESSAGE`.
+    pub max_per_message: u32,
+    /// The first notification must be at least this old. Default 30.
+    /// Env: `SQUELCH_RENOTIFY_MIN_AGE_MINS`.
+    pub min_age_mins: u64,
+    /// ... and at most this old. Default 4320 (three days).
+    /// Env: `SQUELCH_RENOTIFY_MAX_AGE_MINS`.
+    pub max_age_mins: u64,
+    /// Wait after a re-notify before the same message may come again, doubled
+    /// per re-notify already spent on it. Default 180.
+    /// Env: `SQUELCH_RENOTIFY_COOLDOWN_MINS`.
+    pub cooldown_mins: u64,
+    /// Mail in For your eyes with a due date comes back this many minutes
+    /// before it, opened or not. Default 1440 (a day).
+    /// Env: `SQUELCH_RENOTIFY_DUE_LEAD_MINS`.
+    pub due_lead_mins: u64,
+    /// ... and stays eligible this long after it. Default 720.
+    /// Env: `SQUELCH_RENOTIFY_DUE_GRACE_MINS`.
+    pub due_grace_mins: u64,
+    /// The hour a date-only due date is read as, in the owner's zone.
+    /// Default 17. Env: `SQUELCH_RENOTIFY_DUE_DAY_HOUR`.
+    pub due_day_hour: u32,
+}
+
+impl Default for RenotifyConfig {
+    fn default() -> Self {
+        Self {
+            min_offline_mins: 120,
+            online_settle_secs: 30,
+            meeting_end_delay_mins: 3,
+            meeting_end_window_mins: 10,
+            max_meeting_mins: 240,
+            meeting_guard_mins: 15,
+            work_start_hour: 7,
+            work_end_hour: 20,
+            daily_budget: 4,
+            max_items: 3,
+            max_per_message: 2,
+            min_age_mins: 30,
+            max_age_mins: 4320,
+            cooldown_mins: 180,
+            due_lead_mins: 1440,
+            due_grace_mins: 720,
+            due_day_hour: 17,
+        }
+    }
 }
 
 /// Prometheus scrape-endpoint config; see [`crate::metrics`].
@@ -1141,7 +1228,10 @@ pub fn default_embed_cache_dir() -> PathBuf {
 /// to `cache_dir`). `model` and `dims` MUST agree with each other and with the
 /// `message_vecs` vec0 `float[N]` in `store/schema.sql` — the store asserts this
 /// at open time, and changing `dims` means resetting the db.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is written by hand so `token` never reaches a `{:?}` (of this, or
+/// of the [`Config`] that holds it).
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EmbedConfig {
     /// fastembed model, written as a full `model_code`. Default:
@@ -1211,6 +1301,52 @@ pub struct EmbedConfig {
     /// not at 5. Anything at or above the ten-minute default is unaffected by
     /// the rounding.
     pub idle_unload_secs: u64,
+    /// Base URL of the shared per-node embedding service
+    /// (docs/EMBED-SERVICE.md), e.g. `http://squelch-embed:8850`. Env:
+    /// `SQUELCH_EMBED_URL`, which the warden renders on hosted tenants.
+    ///
+    /// THIS IS THE WHOLE SWITCH, and it is exclusive. `None` (the default, and
+    /// every self-hosted daemon) embeds in-process exactly as before. `Some`
+    /// sends text to the service and builds NO local ONNX session, ever: not
+    /// at startup, not as a fallback when the service is down. A daemon that
+    /// quietly loaded a local model whenever the service blinked would be a
+    /// pod quietly costing the 300-500 MB this exists to remove. With a URL,
+    /// `model`, `dims` and `max_tokens` must still equal the service's (they
+    /// decide which vector space the store is in) and a disagreement refuses
+    /// to build the embedder; `cache_dir` and `idle_unload_secs` are unused.
+    pub url: Option<String>,
+    /// Bearer token presented to the embedding service. Env:
+    /// `SQUELCH_EMBED_TOKEN`. Optional: absent sends no `Authorization`
+    /// header. Secret material, NEVER logged; prefer the env var over
+    /// config.toml.
+    pub token: Option<String>,
+}
+
+impl std::fmt::Debug for EmbedConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            model,
+            dims,
+            cache_dir,
+            max_chars,
+            max_tokens,
+            backfill_batch,
+            idle_unload_secs,
+            url,
+            token,
+        } = self;
+        f.debug_struct("EmbedConfig")
+            .field("model", model)
+            .field("dims", dims)
+            .field("cache_dir", cache_dir)
+            .field("max_chars", max_chars)
+            .field("max_tokens", max_tokens)
+            .field("backfill_batch", backfill_batch)
+            .field("idle_unload_secs", idle_unload_secs)
+            .field("url", url)
+            .field("token", &token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl Default for EmbedConfig {
@@ -1223,6 +1359,8 @@ impl Default for EmbedConfig {
             max_tokens: crate::embed::DEFAULT_EMBED_MAX_TOKENS,
             backfill_batch: 8,
             idle_unload_secs: 600,
+            url: None,
+            token: None,
         }
     }
 }
@@ -2106,6 +2244,8 @@ pub struct Config {
     pub carriers: CarriersConfig,
     /// Auto-translate. Defaults only; read from the `[translate]` table.
     pub translate: TranslateConfig,
+    /// Smart re-notify's tunables; whether it runs is a hidden feature.
+    pub renotify: RenotifyConfig,
 }
 
 impl Default for Config {
@@ -2136,6 +2276,7 @@ impl Default for Config {
             console: ConsoleConfig::default(),
             carriers: CarriersConfig::default(),
             translate: TranslateConfig::default(),
+            renotify: RenotifyConfig::default(),
         }
     }
 }
@@ -2341,6 +2482,75 @@ impl Config {
             "SQUELCH_NOTIFY_MIN_IMPORTANCE",
             &mut self.notify.min_importance,
         );
+        for (name, slot) in [
+            (
+                "SQUELCH_RENOTIFY_MIN_OFFLINE_MINS",
+                &mut self.renotify.min_offline_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_SETTLE_SECS",
+                &mut self.renotify.online_settle_secs,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MEETING_END_DELAY_MINS",
+                &mut self.renotify.meeting_end_delay_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MEETING_END_WINDOW_MINS",
+                &mut self.renotify.meeting_end_window_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MAX_MEETING_MINS",
+                &mut self.renotify.max_meeting_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MEETING_GUARD_MINS",
+                &mut self.renotify.meeting_guard_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MIN_AGE_MINS",
+                &mut self.renotify.min_age_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MAX_AGE_MINS",
+                &mut self.renotify.max_age_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_COOLDOWN_MINS",
+                &mut self.renotify.cooldown_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_DUE_LEAD_MINS",
+                &mut self.renotify.due_lead_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_DUE_GRACE_MINS",
+                &mut self.renotify.due_grace_mins,
+            ),
+        ] {
+            env_override(name, slot);
+        }
+        env_override(
+            "SQUELCH_RENOTIFY_WORK_START_HOUR",
+            &mut self.renotify.work_start_hour,
+        );
+        env_override(
+            "SQUELCH_RENOTIFY_WORK_END_HOUR",
+            &mut self.renotify.work_end_hour,
+        );
+        env_override(
+            "SQUELCH_RENOTIFY_DAILY_BUDGET",
+            &mut self.renotify.daily_budget,
+        );
+        env_override(
+            "SQUELCH_RENOTIFY_MAX_PER_MESSAGE",
+            &mut self.renotify.max_per_message,
+        );
+        env_override("SQUELCH_RENOTIFY_MAX_ITEMS", &mut self.renotify.max_items);
+        env_override(
+            "SQUELCH_RENOTIFY_DUE_DAY_HOUR",
+            &mut self.renotify.due_day_hour,
+        );
         // The two notify WINDOWS, both reachable without editing a config file
         // inside a container image. The freshness one never had an override at
         // all, which made the one knob that decides whether a tenant's mail can
@@ -2416,6 +2626,13 @@ impl Config {
             // Same rule again: an exported-but-empty var leaves the Google
             // button off the page rather than rendering one that points at "".
             ("SQUELCH_CONSOLE_SSO_URL", &mut self.console.sso_url),
+            // ---- The shared embedding service ------------------------------
+            // Same rule again, and here it decides where the model runs: an
+            // exported-but-empty URL must leave the daemon embedding in-process
+            // rather than pointing it at "" and building no embedder at all.
+            // The token is never echoed anywhere.
+            ("SQUELCH_EMBED_URL", &mut self.embed.url),
+            ("SQUELCH_EMBED_TOKEN", &mut self.embed.token),
         ] {
             if let Ok(v) = std::env::var(name) {
                 let v = v.trim();
@@ -2906,6 +3123,22 @@ pub fn mirror_env_pairs_to_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The embedding service's bearer token is secret material: no debug
+    /// print of the embed section, or of the whole config, carries it.
+    #[test]
+    fn the_embed_token_never_reaches_a_debug_print() {
+        let mut config = Config::default();
+        config.embed.url = Some("http://squelch-embed:8850".into());
+        config.embed.token = Some("s3cret-embed-token-value".into());
+        for shown in [format!("{:?}", config.embed), format!("{config:?}")] {
+            assert!(!shown.contains("s3cret"), "{shown}");
+            assert!(shown.contains("<redacted>"), "{shown}");
+            assert!(shown.contains("squelch-embed:8850"), "{shown}");
+        }
+        config.embed.token = None;
+        assert!(format!("{:?}", config.embed).contains("token: None"));
+    }
     use std::sync::Mutex;
 
     /// Tests that touch process-wide env must not run concurrently.
@@ -3657,6 +3890,50 @@ archive_access_daily_cap = 9
         }
     }
 
+    /// The daemon half of the warden's `SQUELCH_WARDEN_EMBED_URL`: the two
+    /// variables a hosted pod is rendered with. Absent is in-process embedding,
+    /// which is self-host and every daemon before this existed.
+    #[test]
+    fn env_names_the_embed_service() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let c = Config::default();
+        assert!(c.embed.url.is_none(), "no URL => local embedder");
+        assert!(c.embed.token.is_none());
+
+        // SAFETY: guarded by ENV_LOCK so no other test reads env concurrently.
+        unsafe {
+            std::env::set_var("SQUELCH_EMBED_URL", "  http://squelch-embed:8850\n");
+            std::env::set_var("SQUELCH_EMBED_TOKEN", "s3cret");
+        }
+        let mut c: Config = toml::from_str("[embed]\nurl = \"http://from-file:8850\"\n").unwrap();
+        assert_eq!(c.embed.url.as_deref(), Some("http://from-file:8850"));
+        c.apply_env_overrides();
+        assert_eq!(c.embed.url.as_deref(), Some("http://squelch-embed:8850"));
+        assert_eq!(c.embed.token.as_deref(), Some("s3cret"));
+
+        // Exported but blank is "unset": it must neither clear a configured URL
+        // nor turn a self-hosted daemon into one with no embedder.
+        for blank in ["", "   ", "\n\t "] {
+            unsafe {
+                std::env::set_var("SQUELCH_EMBED_URL", blank);
+                std::env::set_var("SQUELCH_EMBED_TOKEN", blank);
+            }
+            let mut c = Config::default();
+            c.apply_env_overrides();
+            assert!(c.embed.url.is_none(), "{blank:?}");
+            assert!(c.embed.token.is_none(), "{blank:?}");
+
+            let mut c: Config =
+                toml::from_str("[embed]\nurl = \"http://from-file:8850\"\n").unwrap();
+            c.apply_env_overrides();
+            assert_eq!(c.embed.url.as_deref(), Some("http://from-file:8850"));
+        }
+        unsafe {
+            std::env::remove_var("SQUELCH_EMBED_URL");
+            std::env::remove_var("SQUELCH_EMBED_TOKEN");
+        }
+    }
+
     #[test]
     fn stage2_defaults_are_sane() {
         let c = Stage2Config::default();
@@ -4316,10 +4593,10 @@ archive_access_daily_cap = 9
     #[test]
     fn notify_defaults_match_the_squelch_line_and_env_overrides_the_threshold() {
         let _g = ENV_LOCK.lock().unwrap();
-        // The default threshold IS the TUI's starting squelch line (50), so
-        // "notified" and "above the line" mean the same thing to a user.
+        // 40, not the TUI's squelch line (50): the notify prompts' 40-59 band
+        // is "an automated notice you may want to act on", and that pushes.
         let c = Config::default();
-        assert_eq!(c.notify.min_importance, 50);
+        assert_eq!(c.notify.min_importance, 40);
         assert_eq!(c.notify.freshness_window_secs, 900);
         // The rescue ceiling: an hour from FIRST SIGHT, not from the sender's
         // `Date:`.
@@ -4539,7 +4816,7 @@ archive_access_daily_cap = 9
         assert_eq!(cfg.notify.freshness_window_secs, 900);
         // A config that predates the feature has no [notify] table at all.
         let cfg: Config = toml::from_str("squelch_level = 1\n").unwrap();
-        assert_eq!(cfg.notify.min_importance, 50);
+        assert_eq!(cfg.notify.min_importance, 40);
         assert_eq!(cfg.notify.rescue_window_secs, 3600);
     }
 
@@ -4705,7 +4982,7 @@ archive_access_daily_cap = 9
         let c: Config = toml::from_str("").unwrap();
         assert_eq!(c.mail_provider(), crate::mail::MailProvider::Gmail);
         assert_eq!(c.provider, None, "unset, so it can be inferred");
-        assert!(toml::from_str::<Config>("provider = \"imap\"\n").is_err());
+        assert!(toml::from_str::<Config>("provider = \"exchange-ews\"\n").is_err());
     }
 
     #[test]

@@ -5218,6 +5218,81 @@ mod tests {
         assert_eq!(h.cluster.applied().len(), applied);
     }
 
+    /// The egress rules on a tenant's live NetworkPolicy, and whether its live
+    /// daemon has the shared embedder's URL.
+    fn embed_state(h: &Harness, label: &str) -> (usize, bool) {
+        let Some(Object::NetworkPolicy(policy)) = h.cluster.object(Kind::NetworkPolicy, label)
+        else {
+            panic!("no policy for {label}");
+        };
+        let rules = policy.spec.unwrap().egress.unwrap().len();
+        let Some(Object::Deployment(deployment)) = h.cluster.object(Kind::Deployment, label) else {
+            panic!("no deployment for {label}");
+        };
+        let has_url = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+            .env
+            .iter()
+            .flatten()
+            .any(|e| e.name == "SQUELCH_EMBED_URL");
+        (rules, has_url)
+    }
+
+    /// Setting `SQUELCH_WARDEN_EMBED_URL` is a fleet roll and nothing more: the
+    /// render of every tenant's Deployment moves (two env vars, the lighter
+    /// bounds), so the drift report puts every tenant in the queue, and the
+    /// roller converges them one per run. The NetworkPolicy, which a drift
+    /// report never diffs, rides along because the reconcile that converges a
+    /// tenant re-applies all of its objects, the policy BEFORE the Deployment,
+    /// so no pod comes up on the URL without the rule that lets it reach the
+    /// service. Unsetting it walks the fleet back the same way.
+    #[tokio::test]
+    async fn the_embed_url_rolls_the_fleet_one_per_run_and_carries_the_policy() {
+        let local = Harness::new();
+        for label in ["alice", "bob"] {
+            serving_tenant(&local, label).await;
+        }
+        assert_eq!(embed_state(&local, "alice"), (2, false));
+
+        // The same cluster, rendered by a warden pointed at the service, with
+        // the lighter shape the loader gives it.
+        let mut config = crate::testing::test_config();
+        config.embed_url = Some("http://squelch-embed:8850".to_string());
+        config.daemon_resources.cpu_request = "40m".to_string();
+        config.daemon_resources.memory_request = "128Mi".to_string();
+        config.daemon_resources.memory_limit = "512Mi".to_string();
+        let remote = Warden::new(Arc::new(config), local.cluster.clone() as Arc<dyn Cluster>);
+
+        let before = local.cluster.applied().len();
+        let first = remote.roll(false).await.unwrap();
+        assert_eq!(first.rolled, vec!["alice"]);
+        assert_eq!(first.remaining, 1);
+        assert_eq!(first.halted_on, None);
+        // Policy, then Service, then Deployment: the order that keeps the pod
+        // from ever running ahead of its rule.
+        assert_eq!(
+            local.cluster.applied()[before..].to_vec(),
+            workload_applies_for("alice")
+        );
+        assert_eq!(embed_state(&local, "alice"), (3, true));
+        // Bob is untouched until his turn: the rule and the env arrive together.
+        assert_eq!(embed_state(&local, "bob"), (2, false));
+
+        let second = remote.roll(false).await.unwrap();
+        assert_eq!(second.rolled, vec!["bob"]);
+        assert_eq!(embed_state(&local, "bob"), (3, true));
+        let third = remote.roll(false).await.unwrap();
+        assert_eq!(third.current, 2);
+        assert!(third.rolled.is_empty());
+
+        // Rollback: the original render, by the original warden.
+        let back = local.warden.roll(false).await.unwrap();
+        assert_eq!(back.rolled, vec!["alice"]);
+        assert_eq!(embed_state(&local, "alice"), (2, false));
+        assert_eq!(embed_state(&local, "bob"), (3, true));
+        local.warden.roll(false).await.unwrap();
+        assert_eq!(embed_state(&local, "bob"), (2, false));
+    }
+
     /// The rule that makes an unattended roll defensible: a Deployment somebody
     /// else owns fields on is left EXACTLY as it is. Repairing one means
     /// deleting it, which is a live mailbox going down to remove a field a

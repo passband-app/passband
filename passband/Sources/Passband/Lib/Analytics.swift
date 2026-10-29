@@ -1,9 +1,10 @@
 // PostHog capture, written natively. The official SDK is deliberately NOT
 // used: build.sh compiles a flat swiftc file list with no package resolution,
-// and posthog-ios drags in vendored libwebp for session replay — a feature
-// that does not exist on macOS anyway. Everything PostHog offers a Mac app
-// (events, screens, session analytics) is one JSON POST to /batch, so the
-// client lives here where all of it can be read.
+// and posthog-ios drags in vendored libwebp for a screenshot replay that does
+// not exist on macOS anyway. Everything a Mac app needs from PostHog (events,
+// screens, session analytics) is one JSON POST to /batch, and session replay
+// is a second lane to /s/ (see `SessionReplay`), so the client lives here
+// where all of it can be read.
 //
 // PRIVACY: nothing content-shaped goes through this file, and that is
 // ENFORCED, not just observed: every event name and every string value must
@@ -53,9 +54,10 @@ enum Analytics {
             guard let key = env["PASSBAND_POSTHOG_KEY"] else { return nil }
         #endif
         let endpoint = env["PASSBAND_POSTHOG_HOST"] ?? host
-        guard key.hasPrefix("phc_"), let url = URL(string: "\(endpoint)/batch/")
+        guard key.hasPrefix("phc_"), let url = URL(string: "\(endpoint)/batch/"),
+            let replayURL = URL(string: "\(endpoint)/s/")
         else { return nil }
-        return PostHogClient(apiKey: key, endpoint: url)
+        return PostHogClient(apiKey: key, endpoint: url, snapshotEndpoint: replayURL)
     }()
 
     /// The Settings > Privacy level, read straight from UserDefaults on every
@@ -105,6 +107,10 @@ enum Analytics {
         "search_deeper_started",
         "triage_corrected", "triage_digest", "rule_created", "rule_deleted",
         "notification_opened", "sealed_revealed",
+        // Smart re-notify (docs/RENOTIFY.md): a second banner posted, and
+        // tapped. A trigger word, a message count and one bool (a deadline
+        // was a reason); never who or what.
+        "renotify_shown", "renotify_opened",
         "shipment_cleared",
         // Smart clear on the Reading zone: how much it cleared, split by the
         // daemon's reason codes as counts, and whether it was taken back.
@@ -115,7 +121,7 @@ enum Analytics {
         "invite_sent", "invite_nudge_accepted", "invite_nudge_dismissed",
         "ios_nudge_closed", "agent_nudge_closed",
         "group_created", "group_updated", "group_deleted",
-        // The calendar page (behind the `calendar` hidden feature): opened, the
+        // The calendar page: opened, the
         // connect card's two answers, the user's word on a ghost, and the
         // three writes to a real calendar. Bools and a closed state word;
         // never a title, a place, a time, a calendar or an address. A write
@@ -130,6 +136,11 @@ enum Analytics {
         // product works. Whether anybody visits the page is its `$screen`
         // (`discovery`, a MainView), so it has no event of its own.
         "feature_found", "feature_kept",
+        // Frustration, from session replay's click stream (`SessionReplay`):
+        // three clicks in one spot inside a second, and a click after which
+        // nothing on screen changed. PostHog's own names, so its recordings
+        // list can filter on them. `full` only, like the replay they mark.
+        "$rageclick", "$dead_click",
         // Derived, never captured by a call site: see `milestones`.
         "milestone", "catchup_completed",
     ]
@@ -151,6 +162,9 @@ enum Analytics {
         "undo_fired", "assistant_asked",
         "triage_corrected", "triage_digest", "rule_created", "rule_deleted",
         "notification_opened", "sealed_revealed",
+        // Whether the second banner earns its interruption is the "does it
+        // work" question for re-notify, so both ride with the first banner's.
+        "renotify_shown", "renotify_opened",
         "connect_succeeded", "connection_lost", "connection_restored",
         "account_added",
         // Onboarding carries where it started from and the practice step it
@@ -238,6 +252,8 @@ enum Analytics {
             // makes the duplicate free, and naming it here is what keeps this
             // list readable as the vocabulary of THIS event.
             "rail", "settings", "nudge",
+            // renotify_* triggers: the daemon's closed Trigger set.
+            "client_online", "meeting_end",
             // feature_found / feature_kept sets: `FeatureSet`'s raw values, the
             // discovery page's seven rows. Listed by hand like the undo kinds,
             // so a new set must land here too or its find trips the debug assert.
@@ -280,7 +296,38 @@ enum Analytics {
             assertionFailure("analytics: screen name outside vocabulary")
             return
         }
+        currentScreen.set(name)
         client?.capture("$screen", properties: ["$screen_name": name])
+    }
+
+    /// The last screen named, already vocabulary-checked. Session replay
+    /// labels its frames with it (the rrweb meta event's `href`).
+    static let currentScreen = LockedValue("")
+
+    // MARK: - session replay
+
+    /// Replay records only at `full`: a recording of the layout is the most
+    /// behavioral thing this file sends, so it rides with the action verbs and
+    /// stops the moment the level drops. Read per tick, like every event.
+    static var replayEnabled: Bool { client != nil && level == .full }
+
+    /// True when the next replay record must be a full snapshot: the session
+    /// rotated (or none has started), and a recording cannot open on a click.
+    static var replayNeedsFull: Bool { client?.snapshotNeedsFull ?? false }
+
+    /// Send rrweb records for this session's recording. Every String in them
+    /// must be one of our tags, a style string in our exact grammar with grey
+    /// paints, the screen URL for an allowed screen name, or an icon this
+    /// process rendered (`ReplayWireframe.validate`); a record with anything
+    /// else is dropped whole, and a debug build stops on it.
+    static func replay(_ records: [[String: Any]], full: Bool) {
+        guard replayEnabled else { return }
+        // Checked on the client's queue, not here: a full snapshot is
+        // hundreds of style strings through a regex, and this is called from
+        // the main thread.
+        client?.captureSnapshot(records, isFull: full) {
+            ReplayWireframe.validate($0, extra: allowedStrings)
+        }
     }
 
     /// Counter events (`minimalEvents`) ride at `minimal`; the remaining
@@ -476,10 +523,22 @@ enum Analytics {
 final class PostHogClient: @unchecked Sendable {
     private let apiKey: String
     private let endpoint: URL
+    private let snapshotEndpoint: URL
     private let queue = DispatchQueue(label: "app.passband.analytics")
 
     private var buffer: [[String: Any]] = []
     private var inFlight = false
+
+    /// Session replay's own lane: `$snapshot` events go to /s/, not /batch,
+    /// and they are big (a full snapshot each), so they get a small buffer of
+    /// their own and never crowd an ordinary event out of the main one.
+    private var snapshots: [[String: Any]] = []
+    private var snapshotsInFlight = false
+    /// The session the recording's last full snapshot opened. A record under
+    /// any other session id has nothing to draw on, so it waits for a full one.
+    private var snapshotSession = ""
+    private static let snapshotCap = 40
+    private static let snapshotFlushAt = 12
 
     // Session analytics need only a shared $session_id on the events; PostHog
     // derives duration and entry/exit server-side. The id must be a UUIDv7 —
@@ -577,9 +636,10 @@ final class PostHogClient: @unchecked Sendable {
         return ctx
     }()
 
-    init(apiKey: String, endpoint: URL) {
+    init(apiKey: String, endpoint: URL, snapshotEndpoint: URL) {
         self.apiKey = apiKey
         self.endpoint = endpoint
+        self.snapshotEndpoint = snapshotEndpoint
 
         if let saved = UserDefaults.standard.string(forKey: Self.distinctIdKey) {
             distinctId = saved
@@ -590,7 +650,10 @@ final class PostHogClient: @unchecked Sendable {
 
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + Self.flushEvery, repeating: Self.flushEvery)
-        timer.setEventHandler { [weak self] in self?.flushLocked() }
+        timer.setEventHandler { [weak self] in
+            self?.flushLocked()
+            self?.flushSnapshotsLocked()
+        }
         timer.resume()
         flushTimer = timer
     }
@@ -619,15 +682,93 @@ final class PostHogClient: @unchecked Sendable {
     }
 
     func flush() {
-        queue.async { self.flushLocked() }
+        queue.async {
+            self.flushLocked()
+            self.flushSnapshotsLocked()
+        }
     }
 
     /// Terminate-path flush: the process is about to exit, so give the upload
     /// a bounded moment to leave the machine instead of dying in the buffer.
+    /// Events go first; the recording's tail is worth less than they are.
     func flushBlocking(timeout: TimeInterval = 1.5) {
         let sem = DispatchSemaphore(value: 0)
-        queue.async { self.flushLocked { sem.signal() } }
+        queue.async {
+            self.flushLocked { sem.signal() }
+            self.flushSnapshotsLocked()
+        }
         _ = sem.wait(timeout: .now() + timeout)
+    }
+
+    /// Whether the replay must open (or reopen) with a full snapshot: no
+    /// recording yet, or the session it opened has since ended (30 idle
+    /// minutes, or 24 hours). Read from `replayState`, a lock-guarded mirror,
+    /// NOT from `queue`: the replay asks on the main thread every tick, and
+    /// `queue` may be busy encoding and gzipping a flush of big frames.
+    var snapshotNeedsFull: Bool {
+        let st = replayState.get()
+        let now = Date()
+        let live =
+            !st.sessionId.isEmpty
+            && now.timeIntervalSince(st.lastActivity) <= 30 * 60
+            && now.timeIntervalSince(st.sessionStart) <= 24 * 3600
+        return !live || st.snapshotSession != st.sessionId
+    }
+
+    /// The session facts the main thread needs, copied out of `queue` each
+    /// time they change. Written only from inside `queue`.
+    private struct ReplayState: Sendable {
+        var sessionId = ""
+        var sessionStart = Date.distantPast
+        var lastActivity = Date.distantPast
+        var snapshotSession = ""
+    }
+    private let replayState = LockedValue(ReplayState())
+
+    /// One `$snapshot` event carrying rrweb records, filed under the session
+    /// the ordinary events are on (which is what puts them in one recording).
+    /// `$window_id` is the session id too: one window, one recording.
+    func captureSnapshot(
+        _ records: [[String: Any]], isFull: Bool,
+        validate: @escaping @Sendable ([[String: Any]]) -> Bool
+    ) {
+        let boxed = Unchecked(records)
+        queue.async {
+            guard validate(boxed.value) else {
+                assertionFailure("analytics: replay record outside vocabulary")
+                return
+            }
+            let now = Date()
+            let sid = self.currentSessionId(now)
+            if isFull {
+                self.snapshotSession = sid
+                var st = self.replayState.get()
+                st.snapshotSession = sid
+                self.replayState.set(st)
+            } else if sid != self.snapshotSession {
+                // A click in a session with no picture yet: nothing to place it on.
+                return
+            }
+            var props = self.context
+            props["$session_id"] = sid
+            props["$window_id"] = sid
+            props["$snapshot_source"] = "web"
+            props["$snapshot_data"] = boxed.value
+            // The id rides in the properties too, as PostHog's SDKs send it.
+            props["distinct_id"] = self.distinctId
+            self.snapshots.append([
+                "event": "$snapshot",
+                "distinct_id": self.distinctId,
+                "timestamp": self.iso.string(from: now),
+                "uuid": UUID().uuidString.lowercased(),
+                "api_key": self.apiKey,
+                "properties": props,
+            ])
+            // Oldest first. A recording with a hole in it still plays from
+            // the next full snapshot; one that never uploads does not.
+            self.trimSnapshots()
+            if self.snapshots.count >= Self.snapshotFlushAt { self.flushSnapshotsLocked() }
+        }
     }
 
     /// Switch this install's `distinct_id` to an id the control plane minted,
@@ -694,6 +835,11 @@ final class PostHogClient: @unchecked Sendable {
             sessionStart = now
         }
         lastActivity = now
+        var st = replayState.get()
+        st.sessionId = sessionId
+        st.sessionStart = sessionStart
+        st.lastActivity = now
+        replayState.set(st)
         return sessionId
     }
 
@@ -730,6 +876,73 @@ final class PostHogClient: @unchecked Sendable {
         }.resume()
     }
 
+    /// The replay lane's upload: a bare JSON array of events, each carrying
+    /// its own `api_key`, gzipped. Same requeue rule as the events; a batch
+    /// PostHog refuses (4xx) is dropped, and so is its full snapshot's claim
+    /// to have opened the recording (`discardSnapshots`). Frames buffered before the user turned telemetry
+    /// below `full` are thrown away here rather than sent late.
+    private func flushSnapshotsLocked() {
+        guard Analytics.replayEnabled else {
+            discardSnapshots(snapshots)
+            snapshots.removeAll()
+            return
+        }
+        guard !snapshotsInFlight, !snapshots.isEmpty else { return }
+        let batch = Unchecked(snapshots)
+        snapshots.removeAll()
+        guard
+            let json = try? JSONSerialization.data(withJSONObject: batch.value),
+            let body = Gzip.compress(json)
+        else {
+            discardSnapshots(batch.value)
+            return
+        }
+        snapshotsInFlight = true
+
+        var req = URLRequest(url: snapshotEndpoint)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
+        req.httpBody = body
+
+        URLSession.shared.dataTask(with: req) { _, response, error in
+            self.queue.async {
+                self.snapshotsInFlight = false
+                let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+                if error != nil || code == 0 || code >= 500 {
+                    self.snapshots.insert(contentsOf: batch.value, at: 0)
+                    self.trimSnapshots()
+                } else if !(200..<300).contains(code) {
+                    self.discardSnapshots(batch.value)
+                }
+            }
+        }.resume()
+    }
+
+    /// Hold the replay buffer to its cap, oldest out first.
+    private func trimSnapshots() {
+        guard snapshots.count > Self.snapshotCap else { return }
+        let over = snapshots.count - Self.snapshotCap
+        discardSnapshots(Array(snapshots.prefix(over)))
+        snapshots.removeFirst(over)
+    }
+
+    /// Snapshot events that will never reach PostHog. If one of them held a
+    /// full snapshot (rrweb type 2), it may have been the one that opens the
+    /// recording, so the next record must be a full snapshot again; without
+    /// this, later pointer records would play onto nothing.
+    private func discardSnapshots(_ events: [[String: Any]]) {
+        let lostFull = events.contains { event in
+            let data = (event["properties"] as? [String: Any])?["$snapshot_data"] as? [[String: Any]]
+            return data?.contains { $0["type"] as? Int == 2 } ?? false
+        }
+        guard lostFull else { return }
+        snapshotSession = ""
+        var st = replayState.get()
+        st.snapshotSession = ""
+        replayState.set(st)
+    }
+
     /// UUIDv7: 48-bit unix milliseconds, then version/variant bits over random.
     private static func uuidV7(_ date: Date) -> String {
         var b = [UInt8](repeating: 0, count: 16)
@@ -745,6 +958,15 @@ final class PostHogClient: @unchecked Sendable {
         }
         return s
     }
+}
+
+/// One lock-guarded value, readable from any thread.
+final class LockedValue<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: T
+    init(_ value: T) { self.value = value }
+    func get() -> T { lock.withLock { value } }
+    func set(_ v: T) { lock.withLock { value = v } }
 }
 
 /// Sendability asserted by the owner, not the type: used for JSON-shaped

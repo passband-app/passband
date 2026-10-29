@@ -2,12 +2,10 @@
 // column: the hero states what needs you today, For-your-eyes ranks the standing
 // band, and the reading zone offers the rule-onboarding it always has.
 //
-// The Mac's other half, the pinned records rail, is a TAB here instead
-// (MobileRecordsView). That split is the phone's own: a Mac shows work surface
-// and reference material side by side, and a phone that stacked them would bury
-// the four record cards under a scroll nobody reaches — reference material you
-// have to scroll past your obligations to reach is reference material you stop
-// consulting.
+// The Mac's other half, the pinned records rail, sits UNDER the board here, on
+// its own tray (Quick Look, `RecordsTray`): a phone has no room beside the
+// board, and the tab bar's middle slot is the calendar's. A fact you look up
+// can wait a flick of the thumb; what needs you cannot.
 //
 // WHAT IS NOT HERE, and why. The Mac's masthead is a chrome bar (wordmark,
 // re-triage, today's stamp, sync age) — a phone has a navigation bar and a tab
@@ -31,10 +29,8 @@
 //
 // THE TRAILING CORNER USED TO BE THE KEY, and the swap is a trade of a door you
 // open most days for one that is empty most days. Writing an email is the thing
-// this app could not do from a phone at all (#166); the login codes are a lookup,
-// and a lookup belongs on Quick Look with the other things the app pulled out of
-// your mail and is holding (MobileRecordsView's bar carries the key now, dot and
-// all).
+// this app could not do from a phone at all (#166); the login codes are a
+// lookup, and their key now sits in the LEADING corner beside "you".
 //
 // THE URGENT CASE COMES IN BY NOTIFICATION. A code that just landed is not a
 // lookup — you are standing at a login form holding the phone the code is on —
@@ -47,6 +43,9 @@ import SwiftUI
 struct MobileSitrepView: View {
     @Environment(AppStore.self) private var store
     @Environment(Prefs.self) private var prefs
+    /// The login-codes push, owned by the shell so a notification tap can open
+    /// it from any tab. Pushed from here.
+    @Binding var showAuth: Bool
 
     /// ReadingZone takes a cursor because the Mac drives it with the
     /// keyboard. Nothing writes to this one — it is the shared component's
@@ -110,34 +109,37 @@ struct MobileSitrepView: View {
         let overflow = ranked.count - Self.eyesVisible
 
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                // ABOVE THE HERO, because it outranks it, as on the Mac: "what
-                // needs you today" is worthless while the mailbox behind it
-                // has been frozen since Tuesday.
-                banner
-                hero
-                if !ranked.isEmpty {
-                    // Auth mail stays off the reader's queue: it opens in the
-                    // one-time reveal, never in the reader.
-                    forYourEyes(
-                        visible: visible, overflow: overflow,
-                        queue: ranked.filter { store.authMeta(for: $0) == nil })
-                } else if isClear {
-                    // An empty board is the best state this app has, and it
-                    // should not look like a broken one.
-                    ClearNote()
-                        .padding(.horizontal, 4)
-                        .transition(.opacity)
+            VStack(spacing: 0) {
+                VStack(alignment: .leading, spacing: 16) {
+                    // ABOVE THE HERO, because it outranks it, as on the Mac: "what
+                    // needs you today" is worthless while the mailbox behind it
+                    // has been frozen since Tuesday.
+                    banner
+                    hero
+                    if !ranked.isEmpty {
+                        // Auth mail stays off the reader's queue: it opens in the
+                        // one-time reveal, never in the reader.
+                        forYourEyes(
+                            visible: visible, overflow: overflow,
+                            queue: ranked.filter { store.authMeta(for: $0) == nil })
+                    } else if isClear {
+                        // An empty board is the best state this app has, and it
+                        // should not look like a broken one.
+                        ClearNote()
+                            .padding(.horizontal, 4)
+                            .transition(.opacity)
+                    }
+                    // Empty reading still stands beside a live For-your-eyes, but
+                    // on a board with nothing else it is one more absence.
+                    if !(reading.isEmpty && ranked.isEmpty) {
+                        ReadingZone(senders: reading, cursor: cursor)
+                    }
+                    BoardFootnote(bannerShowing: bannerShowing)
                 }
-                // Empty reading still stands beside a live For-your-eyes, but
-                // on a board with nothing else it is one more absence.
-                if !(reading.isEmpty && ranked.isEmpty) {
-                    ReadingZone(senders: reading, cursor: cursor)
-                }
-                BoardFootnote(bannerShowing: bannerShowing)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 24)
+                RecordsTray()
             }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 28)
         }
         .background(Palette.canvas)
         .task {
@@ -167,19 +169,28 @@ struct MobileSitrepView: View {
         // that a glyph is a door and the reason a bare icon still looks tappable.
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
-                // The picker, exactly what the swipe from the left edge
-                // opens: the glyph and the gesture are one door. The full
-                // Account page is the drawer's Settings button.
-                Button {
-                    Haptics.tick()
-                    AccountDoor.shared.pane = .picker
-                } label: {
-                    Image(systemName: "person.crop.circle")
-                        .foregroundStyle(Palette.accent)
+                HStack(spacing: 18) {
+                    // The picker, exactly what the swipe from the left edge
+                    // opens: the glyph and the gesture are one door. The full
+                    // Account page is the drawer's Settings button.
+                    Button {
+                        Haptics.tick()
+                        AccountDoor.shared.pane = .picker
+                    } label: {
+                        Image(systemName: "person.crop.circle")
+                            .foregroundStyle(Palette.accent)
+                    }
+                    .accessibilityLabel("Account")
+                    // THE LOGIN CODES: a key beside "you", because the codes
+                    // are your accounts' and this is the screen the app opens
+                    // on. A code you are racing arrives by banner and opens
+                    // the page from anywhere; this is the door for looking
+                    // one up.
+                    CodesKey { showAuth = true }
                 }
-                .accessibilityLabel("Account")
             }
             .sharedBackgroundVisibility(.hidden)
+
             ToolbarItem(placement: .topBarTrailing) {
                 // THE COMPOSER, ON THE SCREEN THE APP OPENS ON. Until #166 the
                 // phone could not write an email at all, and the fix is not a
@@ -200,10 +211,14 @@ struct MobileSitrepView: View {
             }
             .sharedBackgroundVisibility(.hidden)
         }
+        #if DEBUG
+            // A screenshot's way down to the records (`records-bottom`).
+            .defaultScrollAnchor(FixtureStage.scene == "records-bottom" ? .bottom : nil)
+        #endif
         .simultaneousGesture(accountSwipe)
-        .refreshable {
-            _ = await SitrepPoller.shared.pull()
-            await store.refreshZones(force: true)
+        .refreshable { await RecordZones.refresh(store) }
+        .navigationDestination(isPresented: $showAuth) {
+            MobileAuthView()
         }
         // The zones each ask for this too; the store joins the in-flight pass, so
         // asking here as well is what makes a cold launch paint from one round of
@@ -395,13 +410,17 @@ private struct BoardFootnote: View {
                 .foregroundStyle(store.syncStatus.isWarning ? Palette.warn : Palette.inkFaint)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
-            // The same stamp and tint as the Mac's status strip.
+            // A healthy stamp only when it is late: "synced just now" under
+            // every board was a line of reassurance nobody reads (the founder:
+            // "drop it"). Stale, it is a warning, and stays.
             let stamp = SyncStatus.syncedStamp(
                 stats: store.stats, clientRefresh: store.lastRefresh, date: Fmt.date)
-            Text(stamp.text)
-                .font(Typo.micro)
-                .foregroundStyle(stamp.warn ? Palette.warn : Palette.inkFaintest)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            if stamp.warn {
+                Text(stamp.text)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.warn)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 }
@@ -473,5 +492,38 @@ private struct VisibleWarmKeeper: View {
             .onChange(of: store.lastRefresh) { _, _ in
                 MobileSitrepView.warm(Array(rows.prefix(MobileSitrepView.eyesVisible)))
             }
+    }
+}
+
+/// QUICK LOOK'S RECORDS, under the board.
+/// The surface sets them apart: the board's cards sit on the page; these sit
+/// on a tray a shade off it, rounded at the top and running to the bottom of
+/// the scroll, so the eye reads a second layer (the things kept for you) under
+/// the first (the things that need you). The tray says its own name, in the
+/// zone cards' title weight rather than the old serif masthead. An even fill,
+/// no edge stroke along one side.
+private struct RecordsTray: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Quick Look")
+                .font(Typo.ui(20, weight: .semibold))
+                .foregroundStyle(Palette.ink)
+                .padding(.horizontal, 4)
+                .accessibilityAddTraits(.isHeader)
+            RecordZones()
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 20)
+        .padding(.bottom, 40)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            UnevenRoundedRectangle(
+                topLeadingRadius: 28, bottomLeadingRadius: 0, bottomTrailingRadius: 0,
+                topTrailingRadius: 28, style: .continuous)
+                .fill(Palette.hairline.opacity(0.45))
+                // Past the end of the scroll too, so a bounce never shows
+                // the page under the tray's foot.
+                .padding(.bottom, -600)
+        )
     }
 }

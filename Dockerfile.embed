@@ -1,0 +1,154 @@
+# Builds squelch-embed, the shared per-node embedding service
+# (docs/EMBED-SERVICE.md), with its model weights baked in. Build context is
+# the workspace root:
+#
+#   docker build -f Dockerfile.embed .
+#
+# The binary is built the way squelchd/Dockerfile builds the daemon, and the
+# comments there are the long version of everything in the first three stages:
+# trixie for ORT's glibc, g++ installed unconditionally, cargo-chef for the
+# dependency layer, and a cross-compile when TARGETPLATFORM differs from the
+# runner's, so one amd64 runner produces both arches without QEMU.
+#
+# WEIGHTS ARE FETCHED BY CURL, NOT BY THE BINARY. A cross-built binary cannot
+# run in the build, and weights are arch-independent, so a native stage pulls
+# the exact files fastembed reads, at a pinned revision, checks each against a
+# pinned sha256, and lays them out as the hf-hub cache fastembed looks in
+# (`refs/main` naming the revision, the files under `snapshots/<revision>/`).
+# At runtime the service asks that cache for every file before building the
+# session and refuses to start if one is missing; it never downloads, and the
+# pod has no egress to download with. The file list is restated in
+# `squelch-embed/src/session.rs` (TOKENIZER_FILES plus the model file), and a
+# test there reads THIS file and fails if a file the session reads is not
+# fetched here.
+#
+# THE REVISION IS THE ONE THE FLEET ALREADY RUNS. A daemon fetches `main` of
+# Xenova/bge-small-en-v1.5 on first boot, and `main` has been this commit since
+# 2025-07-22, before the first hosted tenant. Moving the pin moves the weights
+# under vectors already stored, so it is a re-embed decision, not a bump.
+#
+# Runtime: non-root, read-only root filesystem friendly (nothing is written
+# outside /tmp, and only if the runtime wants scratch there), no CA bundle,
+# because there is nothing to connect to.
+
+FROM --platform=$BUILDPLATFORM rust:1-slim-trixie@sha256:1a939748a7cbab172de91a014e3804a97af1394a8c844faa67fce9401c4e40fb AS chef
+ARG BUILDPLATFORM
+ARG TARGETPLATFORM
+WORKDIR /build
+
+RUN cargo install cargo-chef --locked --version 0.1.78
+
+COPY rust-toolchain.toml ./
+RUN rustup toolchain install --no-self-update
+
+RUN set -eux; \
+    case "$TARGETPLATFORM" in \
+      linux/amd64) echo x86_64-unknown-linux-gnu > /rust-triple ;; \
+      linux/arm64) echo aarch64-unknown-linux-gnu > /rust-triple ;; \
+      *) echo "unsupported TARGETPLATFORM: $TARGETPLATFORM" >&2; exit 1 ;; \
+    esac; \
+    triple="$(cat /rust-triple)"; \
+    # ort links -lstdc++ even natively, and rust:slim ships gcc without g++.
+    pkgs="g++"; \
+    if [ "$BUILDPLATFORM" != "$TARGETPLATFORM" ]; then \
+      prefix="$(echo "$triple" | sed 's/-unknown//')"; \
+      pkgs="$pkgs g++-$(echo "$prefix" | tr '_' '-')"; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends $pkgs; \
+    rm -rf /var/lib/apt/lists/*; \
+    rustup target add "$triple"; \
+    : > /cross-env; \
+    if [ "$BUILDPLATFORM" != "$TARGETPLATFORM" ]; then \
+      lower="$(echo "$triple" | tr '-' '_')"; \
+      upper="$(echo "$lower" | tr '[:lower:]' '[:upper:]')"; \
+      { echo "export CARGO_TARGET_${upper}_LINKER=${prefix}-gcc"; \
+        echo "export CC_${lower}=${prefix}-gcc"; \
+        echo "export CXX_${lower}=${prefix}-g++"; } > /cross-env; \
+    fi
+
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock ./
+# Every workspace member, because cargo refuses to resolve the workspace
+# without them. Only squelch-embed (and squelch-httpauth under it) is built.
+COPY squelch-core ./squelch-core
+COPY squelch-httpauth ./squelch-httpauth
+COPY squelch-ratelimit ./squelch-ratelimit
+COPY squelch-mcp ./squelch-mcp
+COPY squelch-tui ./squelch-tui
+COPY squelch-api ./squelch-api
+COPY squelch-relay ./squelch-relay
+COPY squelch-broker ./squelch-broker
+COPY squelch-control ./squelch-control
+COPY squelch-warden ./squelch-warden
+COPY squelchd ./squelchd
+COPY squelch-embed ./squelch-embed
+COPY squelch-eval ./squelch-eval
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /build/recipe.json recipe.json
+RUN set -eux; . /cross-env; \
+    cargo chef cook --release --locked -p squelch-embed \
+      --target "$(cat /rust-triple)" --recipe-path recipe.json
+COPY --from=planner /build ./
+RUN set -eux; . /cross-env; triple="$(cat /rust-triple)"; \
+    cargo build --release --locked -p squelch-embed --bin squelch-embed --target "$triple"; \
+    cp "target/$triple/release/squelch-embed" /squelch-embed; \
+    rm -rf target
+
+# Native, whatever the target: the bytes are the same on every arch.
+FROM --platform=$BUILDPLATFORM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS weights
+# protocol::MODEL_CODE, at the revision the fleet runs (header).
+ARG HF_REPO=Xenova/bge-small-en-v1.5
+ARG HF_REVISION=ea104dacec62c0de699686887e3f920caeb4f3e3
+# sha256 and path of every file the session reads. onnx/model.onnx is the fp32
+# build (133,093,490 bytes); the int8 one beside it in the repo is a different
+# model and is deliberately not fetched.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl; \
+    rm -rf /var/lib/apt/lists/*; \
+    repo="/models/models--$(echo "$HF_REPO" | sed 's#/#--#g')"; \
+    snap="$repo/snapshots/$HF_REVISION"; \
+    mkdir -p "$repo/refs" "$snap/onnx"; \
+    # No trailing newline: hf-hub reads this file whole as the revision.
+    printf '%s' "$HF_REVISION" > "$repo/refs/main"; \
+    for pair in \
+      828e1496d7fabb79cfa4dcd84fa38625c0d3d21da474a00f08db0f559940cf35:onnx/model.onnx \
+      d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66:tokenizer.json \
+      fa73f90bf92c8cace1fbcb709626306f2bdbc9ea3e5b5f94b440df9b6aa56350:config.json \
+      b6d346be366a7d1d48332dbc9fdf3bf8960b5d879522b7799ddba59e76237ee3:special_tokens_map.json \
+      9261e7d79b44c8195c1cada2b453e55b00aeb81e907a6664974b4d7776172ab3:tokenizer_config.json \
+    ; do \
+      sum="${pair%%:*}"; file="${pair#*:}"; \
+      curl -fsSL --retry 3 -o "$snap/$file" \
+        "https://huggingface.co/$HF_REPO/resolve/$HF_REVISION/$file"; \
+      echo "$sum  $snap/$file" | sha256sum -c -; \
+    done; \
+    chmod -R a+rX,go-w /models
+
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
+COPY --from=builder /squelch-embed /usr/local/bin/squelch-embed
+# Root-owned and world-readable: the service reads them as an unprivileged uid
+# and could not change them if it tried.
+COPY --from=weights /models /models
+
+# HOME on /tmp because fastembed's hf-hub layer looks for a token file under
+# $HOME; there is none, and /tmp is the one writable path a read-only root
+# filesystem leaves. HF_HOME must stay unset (the service refuses to start
+# with it, since fastembed would read it in place of the model dir).
+ENV SQUELCH_EMBED_MODEL_DIR=/models \
+    HOME=/tmp
+
+# A uid of its own, NOT the tenants' (squelch-warden's DEFAULT_RUN_AS is
+# 10001): every tenant's text passes through this process, so it shares no uid
+# with any tenant pod. 65-embed.yaml runs it as the same uid, and a warden test
+# keeps the two equal. Numeric so runAsNonRoot can verify it without an
+# /etc/passwd entry.
+USER 10003:10003
+
+# 8850 is the work (POST /embed), 9464 is /healthz and /metrics.
+EXPOSE 8850 9464
+
+ENTRYPOINT ["/usr/local/bin/squelch-embed"]

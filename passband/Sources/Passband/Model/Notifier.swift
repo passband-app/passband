@@ -233,6 +233,41 @@ final class Notifier {
             sender: event.kind == .opened ? "" : event.sender)
     }
 
+    /// Post a smart re-notify banner (RenotifyBanner.swift) for one account.
+    /// Its identity is the BATCH, account-prefixed, so it never replaces the
+    /// first banner for the same mail nor is swallowed as a repeat of it.
+    /// One message carries that sender's tile; a digest of several carries
+    /// none, because one sender's face on "3 emails still need you" would
+    /// misread as all three being theirs.
+    func postRenotify(_ signal: RenotifySignal, accountId: UUID) {
+        let account = accountId.uuidString
+        let copy = EventBanner.renotifyCopy(for: signal)
+        let content = UNMutableNotificationContent()
+        content.title = copy.title
+        content.body = copy.body
+        content.threadIdentifier = "\(account).\(copy.threadIdentifier)"
+        content.userInfo = EventBanner.renotifyUserInfo(signal, account: accountId)
+        if copy.sound { content.sound = Self.sound(for: Prefs.shared.notificationSound) }
+        // `foreground`: the app was frontmost with its window up, so the
+        // ordinary rule (`presentation`) files this into Notification Center
+        // without a banner. Posted is not the same as seen.
+        #if os(macOS)
+            let foreground = NSApp.isActive && MainWindow.find()?.isVisible == true
+        #else
+            let foreground = false
+        #endif
+        var props: [String: Any] = [
+            "items": signal.items.count,
+            "due_soon": signal.items.contains(where: \.isDueSoon),
+            "foreground": foreground,
+        ]
+        if let trigger = signal.knownTrigger { props["trigger"] = trigger.rawValue }
+        Analytics.capture("renotify_shown", props)
+        send(
+            content, identifier: EventBanner.renotifyIdentifier(account: accountId, batch: signal.renotify),
+            sender: signal.items.count == 1 ? signal.items[0].sender : "")
+    }
+
     /// Attach the sender's mark and hand the banner to the system.
     ///
     /// SYNCHRONOUS, and the comment is here because the other shape is so
@@ -350,6 +385,7 @@ final class Notifier {
     /// Where a tap lands once the right mailbox is on screen.
     private enum TapTarget {
         case thread(String?)
+        case renotify(EventBanner.RenotifyTap)
         case message(Int)
         case event(Int)
         case auth
@@ -373,6 +409,16 @@ final class Notifier {
     func handleRevealTap(messageId: Int, threadId: String, sender: String, accountId: UUID?) {
         Analytics.capture("notification_opened", ["has_thread": true])
         deliver(.reveal(messageId: messageId, threadId: threadId, sender: sender), accountId: accountId)
+    }
+
+    /// A tap on a re-notify banner. Its own event rather than
+    /// `notification_opened`, so that one keeps meaning "taps on first
+    /// banners" and the two can be compared.
+    func handleRenotifyTap(_ tap: EventBanner.RenotifyTap, accountId: UUID?) {
+        var props: [String: Any] = ["items": tap.items]
+        if let trigger = tap.trigger { props["trigger"] = trigger.rawValue }
+        Analytics.capture("renotify_opened", props)
+        deliver(.renotify(tap), accountId: accountId)
     }
 
     /// A tap on "your agent left a draft": the composer, holding that draft,
@@ -425,7 +471,7 @@ final class Notifier {
     func drainPendingTap() {
         let store = AppStore.shared
         guard !deliveringTap, !store.switching, !store.accountActionsBlocked,
-            let tap = tapQueue.take(connected: store.connStatus == .connected)
+            let tap = tapQueue.take(connected: store.connStatus == .connected && store.connectionVerified)
         else { return }
         guard let account = tap.accountId ?? AccountManager.shared.activeId,
             AccountManager.shared.accounts.contains(where: { $0.id == account })
@@ -468,6 +514,12 @@ final class Notifier {
             AppStore.shared.openThread(threadId, from: .notification)
         case .message(let messageId):
             AppStore.shared.openMessage(messageId, from: .notification)
+        case .renotify(let tap):
+            // The first message, even for a digest: it is the one the daemon
+            // ranked highest. Reported once the right mailbox is on screen,
+            // so the shared client is that mailbox's daemon.
+            AppStore.shared.openMessage(tap.messageId, from: .notification)
+            Task { await APIClient.shared.reportRenotifyOpened(batch: tap.batch, messageId: tap.messageId) }
         case .event(let eventId):
             let store = AppStore.shared
             let epoch = store.epoch
@@ -486,7 +538,7 @@ final class Notifier {
             }
         case .auth:
             // The routed Auth page on the Mac; on the phone, the login-codes
-            // page behind the Quick Look tab's key.
+            // page behind the sitrep's key.
             AppStore.shared.requestAuthPage()
         case .reveal(let messageId, let threadId, let sender):
             let store = AppStore.shared
@@ -634,6 +686,8 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
                     messageId: messageId, threadId: threadId, sender: sender, accountId: accountId)
             case .authPage:
                 Notifier.shared.handleAuthTap(accountId: accountId)
+            case .renotify(let tap):
+                Notifier.shared.handleRenotifyTap(tap, accountId: accountId)
             case .message(let messageId):
                 Notifier.shared.handleMessageTap(messageId: messageId, accountId: accountId)
             case .event(let unresolved):

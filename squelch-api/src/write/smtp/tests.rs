@@ -110,9 +110,21 @@ fn missing_from_date_and_message_id_are_added_and_present_ones_kept() {
     assert!(text.contains("Message-ID: <m@passband.app>\r\nTo: a@x.test\r\n\r\nb"));
 
     let mine = b"From: Me <me@x.test>\r\nDate: Tue, 1 Sep 2026 10:00:00 +0000\r\nMessage-ID: <keep@x>\r\nTo: a@x.test\r\n\r\nb";
+    let mut ended = mine.to_vec();
+    ended.extend_from_slice(b"\r\n");
     assert_eq!(
         with_submission_headers(mine, "other@x.test", now, "<m@passband.app>"),
-        mine.to_vec()
+        ended
+    );
+    // Already ended: untouched. A bare LF end becomes CRLF, once.
+    assert_eq!(
+        with_submission_headers(&ended, "other@x.test", now, "<m@passband.app>"),
+        ended
+    );
+    let lf = [&mine[..], b"\n"].concat();
+    assert_eq!(
+        with_submission_headers(&lf, "other@x.test", now, "<m@passband.app>"),
+        ended
     );
 }
 

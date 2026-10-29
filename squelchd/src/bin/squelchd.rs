@@ -1292,7 +1292,7 @@ fn cmd_auth_imap(config: &Config, args: &AuthArgs) -> Result<(), squelch_core::C
         None => None,
     };
 
-    eprintln!("squelchd: setting up {email} on an IMAP server (read only for now)");
+    eprintln!("squelchd: setting up {email} on an IMAP server");
     let host = ask("IMAP host", None)?;
     let tls = loop {
         let answer = ask("TLS mode (implicit, starttls, plain)", Some("implicit"))?;

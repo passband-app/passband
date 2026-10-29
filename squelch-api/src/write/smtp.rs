@@ -459,6 +459,11 @@ pub async fn submit(
         conn.abort().await;
         return Err(e);
     }
+    // lettre ends DATA with `CRLF . CRLF` whatever the message ends with, so
+    // a message's own final line break is left off here: that CRLF is it.
+    // Otherwise every delivered copy gains a blank line the copy saved to
+    // Sent lacks, and the two print as different messages.
+    let bytes = bytes.strip_suffix(b"\r\n").unwrap_or(bytes);
     // PAST THIS LINE THE MESSAGE MAY BE ON ITS WAY.
     let sent = match tokio::time::timeout(budget, conn.message(bytes)).await {
         Err(_) => Err(SmtpError::MaybeSent(
@@ -605,6 +610,12 @@ pub fn first_header(raw: &[u8], name: &str) -> Option<String> {
 /// top of the block: `From` (the account), `Date` (now) and `Message-ID`
 /// (`minted`, needed so the look in Sent and the stable id can find it).
 /// Headers already present are kept as they are.
+///
+/// IT ENDS IN CRLF, as every delivered copy does (`submit` sends that final
+/// CRLF as the one `DATA`'s `CRLF . CRLF` begins with). The copy saved to
+/// Sent must have the same body bytes, or the delivered copy and the saved
+/// one print differently and the source takes one of them for a lookalike
+/// (seen end to end: a door-composed body has no final line break).
 pub fn with_submission_headers(
     raw: &[u8],
     from: &str,
@@ -623,6 +634,12 @@ pub fn with_submission_headers(
     }
     let mut out = head.into_bytes();
     out.extend_from_slice(raw);
+    if !out.ends_with(b"\r\n") {
+        if out.ends_with(b"\n") {
+            out.pop();
+        }
+        out.extend_from_slice(b"\r\n");
+    }
     out
 }
 

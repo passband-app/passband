@@ -1162,3 +1162,32 @@ async fn live_the_outbox_token_finds_a_rewritten_copy_exactly() {
         )))
     );
 }
+
+/// A body with no final line break (what the door composes) is delivered
+/// with one, so the saved copy gets one too: the INBOX and Sent copies of a
+/// self-send print the same, and neither is taken for a lookalike (seen end
+/// to end in step 3).
+#[tokio::test]
+#[ignore = "needs scripts/imap-dev.sh start"]
+async fn live_the_delivered_and_saved_copies_have_the_same_body() {
+    let (writer, _, me) = live_writer("crlf");
+    let raw = format!("To: {me}\r\nSubject: no final break\r\n\r\nhello self");
+    let sent = writer.send(raw.as_bytes(), None).await.unwrap();
+    assert!(sent.warning.is_none());
+    let id = sent.id.unwrap();
+    let mid = writer
+        .source
+        .verified_locations(&id)
+        .await
+        .unwrap()
+        .first()
+        .and_then(|l| l.message_id.clone())
+        .expect("the Sent copy is the id's own");
+    let inbox = copies(&me, "INBOX", &mid, 1).await;
+    let sent_copy = copies(&me, "Sent", &mid, 1).await;
+    assert_eq!((inbox.len(), sent_copy.len()), (1, 1));
+    assert_eq!(
+        squelch_core::mail::imap::body_fingerprint(&inbox[0].1),
+        squelch_core::mail::imap::body_fingerprint(&sent_copy[0].1)
+    );
+}

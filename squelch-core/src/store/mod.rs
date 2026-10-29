@@ -2212,12 +2212,14 @@ pub trait Store:
     ) -> Result<()>;
 
     /// Whether the account already stores the message the provider calls
-    /// `provider_msg_id`, in any tier.
+    /// `provider_msg_id` as LIVE mail: not a spam row and not an archive-tier
+    /// row. A stored spam or archive row reads as absent, so a message the
+    /// user moved from Junk (or from an archived folder) into the inbox is
+    /// re-ingested, and the upsert's `MIN(is_spam)` heals the row.
     ///
-    /// UNWIRED ON PURPOSE. When a source wires it, it goes on the INCREMENTAL
-    /// path only: the backfill and catch-up re-fetch mail already stored, and
-    /// that re-fetch is how a sanitizer change reaches `body_html`, which is
-    /// baked at ingest.
+    /// The INCREMENTAL path only (`SyncEngine::unstored_changes`): the backfill
+    /// and catch-up re-fetch mail already stored, and that re-fetch is how a
+    /// sanitizer change reaches `body_html`, which is baked at ingest.
     fn has_message(&self, account_id: AccountId, provider_msg_id: &str) -> Result<bool>;
 
     /// The last Gmail INBOX unread counts the sync loop stored, or `None` when

@@ -1408,6 +1408,14 @@ impl ApiState {
         cfg: &Config,
         cap_sources: Stage2CapSources,
     ) -> Result<Self, StateError> {
+        // The door may run without the daemon (the `squelch-api` binary), and
+        // it picks its writer from `accounts.provider`: bound here too, before
+        // any credential is attached, or an Outlook token would be handed to a
+        // Gmail writer on a fresh database.
+        let account_id = store.ensure_account(account_email)?;
+        if cfg.provider == squelch_core::mail::MailProvider::Outlook {
+            store.bind_account_provider(account_id, cfg.provider)?;
+        }
         let state = Self::from_env(store, account_email)?
             .with_stage2_prices(cfg.stage2.price_in_per_mtok, cfg.stage2.price_out_per_mtok)
             .with_agent_triage(cfg.triage.clone())
@@ -1514,20 +1522,26 @@ impl ApiState {
         Ok(match cfg.oauth_client() {
             Ok(client) => {
                 let account_id = state.account_id;
-                state
-                    .with_calendar_credentials(squelch_core::credentials::CalendarCredentials::new(
-                        account_id,
-                        account_email.to_string(),
-                        cfg.credential_backend,
-                        cfg.resolve_credentials_path(),
-                        client.clone(),
-                    )?)
-                    .with_write_credentials(
-                        cfg.credential_backend,
-                        account_email.to_string(),
-                        cfg.resolve_credentials_path(),
-                        client,
-                    )?
+                // Calendar is Google Calendar: an Outlook daemon has none, and
+                // its Microsoft token must never be offered to Google's API.
+                let state = match client.issuer {
+                    squelch_core::config::OAuthIssuer::Google => state.with_calendar_credentials(
+                        squelch_core::credentials::CalendarCredentials::new(
+                            account_id,
+                            account_email.to_string(),
+                            cfg.credential_backend,
+                            cfg.resolve_credentials_path(),
+                            client.clone(),
+                        )?,
+                    ),
+                    squelch_core::config::OAuthIssuer::Microsoft => state,
+                };
+                state.with_write_credentials(
+                    cfg.credential_backend,
+                    account_email.to_string(),
+                    cfg.resolve_credentials_path(),
+                    client,
+                )?
             }
             Err(_) => {
                 eprintln!(

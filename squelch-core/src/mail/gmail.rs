@@ -643,9 +643,11 @@ impl<C: CredentialStore + ?Sized + 'static> MailSource for GmailSource<C> {
         // dedup at the store keys on (account_id, gmail_msg_id).
         new_ids.sort_unstable();
         new_ids.dedup();
+        let saw_changes = !new_ids.is_empty() || current != Some(start_history_id);
         Ok(Changes {
             ids: new_ids,
             cursor: SyncCursor::new(cursor.to_string()),
+            saw_changes,
             mailbox_unchanged: current == Some(start_history_id),
         })
     }

@@ -28,6 +28,7 @@ fn client() -> OAuthClientConfig {
     OAuthClientConfig {
         client_id: "1234.apps.googleusercontent.com".into(),
         client_secret: "not-a-real-secret".into(),
+        issuer: Default::default(),
     }
 }
 

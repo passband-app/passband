@@ -1411,7 +1411,90 @@ impl EmbedConfig {
 #[derive(Debug, Clone)]
 pub struct OAuthClientConfig {
     pub client_id: String,
+    /// Google's Desktop client secret. EMPTY, and never sent, for
+    /// [`OAuthIssuer::Microsoft`]: an Entra "Mobile and desktop" app is a
+    /// public client, has no secret, and its token endpoint refuses a request
+    /// that presents one.
     pub client_secret: String,
+    /// Whose identity platform mints and refreshes this client's tokens.
+    pub issuer: OAuthIssuer,
+}
+
+/// The identity platform behind an [`OAuthClientConfig`]: which authorize
+/// and token endpoints a consent and every refresh talk to. Picked from the
+/// daemon's `provider`, never from anything a token or blob says about itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OAuthIssuer {
+    /// Google (Gmail).
+    #[default]
+    Google,
+    /// The Microsoft identity platform v2.0 (Outlook), on the `common`
+    /// tenant, which serves personal accounts and work or school ones alike.
+    Microsoft,
+}
+
+/// Microsoft's authorize endpoint (`common` tenant).
+pub const MICROSOFT_AUTH_URL: &str =
+    "https://login.microsoftonline.com/common/oauth2/v2.0/authorize";
+/// Microsoft's token endpoint (`common` tenant).
+pub const MICROSOFT_TOKEN_URL: &str = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
+
+/// PASSBAND'S OWN ENTRA APP, built in so a self-host needs no Azure portal
+/// visit: a public client (no secret), so shipping its id in the binary gives
+/// nothing away. `microsoft_client_id` in the config file overrides it.
+pub const PASSBAND_MICROSOFT_CLIENT_ID: &str = "ac4b9805-c059-4564-a201-58d100df8067";
+
+/// The Graph scopes an Outlook consent asks for, in one consent stored in
+/// both mail slots (as Gmail's `gmail.modify` is): read and move mail, send
+/// it, name the account, and `offline_access`, without which Microsoft issues
+/// no refresh token at all and the credential dies within the hour. Plus
+/// `Calendars.ReadWrite`, asked up front so Outlook calendar (not built yet)
+/// needs no second consent; mail never requires it.
+pub const OUTLOOK_MAIL_READWRITE_SCOPE: &str = "https://graph.microsoft.com/Mail.ReadWrite";
+pub const OUTLOOK_MAIL_SEND_SCOPE: &str = "https://graph.microsoft.com/Mail.Send";
+pub const OUTLOOK_MAIL_READ_SCOPE: &str = "https://graph.microsoft.com/Mail.Read";
+pub const OUTLOOK_USER_READ_SCOPE: &str = "https://graph.microsoft.com/User.Read";
+pub const OUTLOOK_OFFLINE_SCOPE: &str = "offline_access";
+pub const OUTLOOK_CALENDAR_SCOPE: &str = "https://graph.microsoft.com/Calendars.ReadWrite";
+pub const OUTLOOK_SCOPES: &[&str] = &[
+    OUTLOOK_MAIL_READWRITE_SCOPE,
+    OUTLOOK_MAIL_SEND_SCOPE,
+    OUTLOOK_USER_READ_SCOPE,
+    OUTLOOK_CALENDAR_SCOPE,
+    OUTLOOK_OFFLINE_SCOPE,
+];
+/// What a mail-slot refresh asks for: the consent minus calendar. Microsoft
+/// refuses a refresh that names a scope the user never granted, so a token
+/// consented before calendar was added must still refresh.
+pub const OUTLOOK_MAIL_SCOPES: &[&str] = &[
+    OUTLOOK_MAIL_READWRITE_SCOPE,
+    OUTLOOK_MAIL_SEND_SCOPE,
+    OUTLOOK_USER_READ_SCOPE,
+    OUTLOOK_OFFLINE_SCOPE,
+];
+
+impl OAuthIssuer {
+    pub fn auth_url(self) -> &'static str {
+        match self {
+            OAuthIssuer::Google => "https://accounts.google.com/o/oauth2/v2/auth",
+            OAuthIssuer::Microsoft => MICROSOFT_AUTH_URL,
+        }
+    }
+
+    pub fn token_url(self) -> &'static str {
+        match self {
+            OAuthIssuer::Google => "https://oauth2.googleapis.com/token",
+            OAuthIssuer::Microsoft => MICROSOFT_TOKEN_URL,
+        }
+    }
+
+    /// The company, for messages.
+    pub fn name(self) -> &'static str {
+        match self {
+            OAuthIssuer::Google => "Google",
+            OAuthIssuer::Microsoft => "Microsoft",
+        }
+    }
 }
 
 /// Importance scores (0-100) assigned by the Stage-1 rules engine per rung.
@@ -2087,6 +2170,14 @@ pub struct Config {
     pub client_secret: Option<String>,
     /// The single Gmail account this v0 instance manages. Also the keyring key.
     pub account_email: Option<String>,
+    /// Which kind of mailbox `account_email` is: `"gmail"` (the default) or
+    /// `"outlook"` (Outlook.com, Hotmail, Microsoft 365, over Graph). Decides
+    /// the OAuth client and endpoints, and binds the account's
+    /// `accounts.provider` row on first boot. Config file only.
+    pub provider: crate::mail::MailProvider,
+    /// The Entra app (client) id an Outlook daemon authorizes as, when not
+    /// Passband's built-in one. A public client: there is no secret.
+    pub microsoft_client_id: Option<String>,
 
     /// Path to the SQLite store.
     pub db_path: PathBuf,
@@ -2145,6 +2236,8 @@ impl Default for Config {
             client_id: None,
             client_secret: None,
             account_email: None,
+            provider: crate::mail::MailProvider::Gmail,
+            microsoft_client_id: None,
             db_path: default_db_path(),
             credential_backend: CredentialBackend::default(),
             credentials_path: None,
@@ -2771,12 +2864,16 @@ impl Config {
     /// Fetch OAuth client credentials, erroring with a helpful message if the
     /// user hasn't set up their GCP client yet.
     pub fn oauth_client(&self) -> Result<OAuthClientConfig, CoreError> {
+        if self.provider == crate::mail::MailProvider::Outlook {
+            return self.microsoft_client();
+        }
         let client_id = self.client_id.clone().filter(|s| !s.is_empty());
         let client_secret = self.client_secret.clone().filter(|s| !s.is_empty());
         match (client_id, client_secret) {
             (Some(client_id), Some(client_secret)) => Ok(OAuthClientConfig {
                 client_id,
                 client_secret,
+                issuer: OAuthIssuer::Google,
             }),
             _ => Err(CoreError::Credential(format!(
                 "missing OAuth client credentials. Create a Google Cloud \"Desktop app\" \
@@ -2787,6 +2884,34 @@ impl Config {
                     .unwrap_or_else(|| "~/.config/squelch/config.toml".to_string())
             ))),
         }
+    }
+
+    /// The Outlook client: `microsoft_client_id`, else Passband's built-in
+    /// app. A Google `client_secret` left in the config is ignored rather
+    /// than sent, because Microsoft refuses a public client that presents one.
+    fn microsoft_client(&self) -> Result<OAuthClientConfig, CoreError> {
+        let client_id = self
+            .microsoft_client_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(PASSBAND_MICROSOFT_CLIENT_ID)
+            .to_string();
+        if client_id.is_empty() {
+            return Err(CoreError::Credential(format!(
+                "provider = \"outlook\" needs an Entra app: this build has no built-in one, so \
+                 register a \"Mobile and desktop applications\" app (see docs/GETTING-STARTED.md, \
+                 Outlook) and set microsoft_client_id in {}.",
+                Self::default_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "~/.config/squelch/config.toml".to_string())
+            )));
+        }
+        Ok(OAuthClientConfig {
+            client_id,
+            client_secret: String::new(),
+            issuer: OAuthIssuer::Microsoft,
+        })
     }
 
     /// The configured account email, erroring helpfully if unset.
@@ -4653,6 +4778,34 @@ archive_access_daily_cap = 9
     fn oauth_client_errors_when_missing() {
         let c = Config::default();
         assert!(c.oauth_client().is_err());
+    }
+
+    #[test]
+    fn an_outlook_daemon_gets_a_public_microsoft_client() {
+        let mut c: Config = toml::from_str(
+            "provider = \"outlook\"\nmicrosoft_client_id = \" abc-123 \"\nclient_secret = \"google-secret\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.provider, crate::mail::MailProvider::Outlook);
+        let client = c.oauth_client().unwrap();
+        assert_eq!(client.issuer, OAuthIssuer::Microsoft);
+        assert_eq!(client.client_id, "abc-123");
+        assert!(
+            client.client_secret.is_empty(),
+            "a Google secret must never reach Microsoft"
+        );
+        // No id configured: Passband's own Entra app, still public.
+        c.microsoft_client_id = None;
+        let client = c.oauth_client().unwrap();
+        assert_eq!(client.client_id, PASSBAND_MICROSOFT_CLIENT_ID);
+        assert!(client.client_secret.is_empty());
+    }
+
+    #[test]
+    fn the_provider_defaults_to_gmail_and_refuses_strangers() {
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.provider, crate::mail::MailProvider::Gmail);
+        assert!(toml::from_str::<Config>("provider = \"exchange-ews\"\n").is_err());
     }
 
     #[test]

@@ -4829,7 +4829,7 @@ pub(crate) async fn write_client(state: &ApiState) -> Result<Arc<dyn MailWriter>
             "write credential not configured; run `squelchd auth`",
         );
         return Err(match account_provider(state).await {
-            Ok(MailProvider::Gmail) => no_credential,
+            Ok(MailProvider::Gmail | MailProvider::Outlook) => no_credential,
             Ok(MailProvider::Imap) => imap_has_no_writer(),
             // A provider this build does not know: the 501, as with a
             // credential.
@@ -4855,6 +4855,15 @@ pub(crate) async fn write_client(state: &ApiState) -> Result<Arc<dyn MailWriter>
             )
             .with_budget(state.gmail_budget().cloned()),
         )),
+        MailProvider::Outlook => Ok(Arc::new(crate::write::graph::GraphWriteClient::with_http(
+            creds,
+            state.account_id,
+            state
+                .write_api_base()
+                .map(str::to_string)
+                .unwrap_or_else(|| squelch_core::mail::graph::GRAPH_API_BASE.to_string()),
+            state.write_http(),
+        ))),
     }
 }
 
@@ -7676,7 +7685,7 @@ mod write_client_tests {
             .with_write_test_harness(Arc::new(StubCreds), "http://127.0.0.1:9".into());
         assert!(write_client(&state).await.is_ok());
         // What a second read would now see: a provider this build refuses.
-        fx.set_provider("outlook");
+        fx.set_provider("exchange-ews");
         assert!(
             write_client(&state.clone()).await.is_ok(),
             "the cached read stands, on every clone of the state"
@@ -7725,7 +7734,7 @@ mod write_client_tests {
     #[tokio::test]
     async fn a_provider_this_build_does_not_know_is_refused_not_treated_as_gmail() {
         let fx = Fixture::new("unknown");
-        fx.set_provider("outlook");
+        fx.set_provider("exchange-ews");
         let (base, handle) = mock_api().await;
         let state = fx
             .state()
@@ -7793,7 +7802,7 @@ mod write_client_tests {
     /// not know.
     #[tokio::test]
     async fn a_non_gmail_account_without_a_write_credential_gets_the_provider_refusal() {
-        for provider in ["imap", "outlook"] {
+        for provider in ["imap", "exchange-ews"] {
             let fx = Fixture::new("no-creds-other");
             fx.set_provider(provider);
             let err = refused(write_client(&fx.state()).await);

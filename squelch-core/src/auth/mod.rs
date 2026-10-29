@@ -62,8 +62,11 @@ const GMAIL_PROFILE_URL: &str = "https://gmail.googleapis.com/gmail/v1/users/me/
 /// Graph's "who am I", which every Outlook consent's `User.Read` permits:
 /// the Microsoft counterpart of [`GMAIL_PROFILE_URL`]. `mail` is null on some
 /// personal accounts, so `userPrincipalName` (address-shaped there) is the
-/// fallback.
-const GRAPH_ME_URL: &str = "https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName";
+/// fallback. `otherMails` and `proxyAddresses` carry the account's other
+/// addresses: a personal account can sign in as one address (say a work
+/// address) while its Outlook mailbox is an alias like `x@outlook.com`.
+const GRAPH_ME_URL: &str =
+    "https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName,otherMails,proxyAddresses";
 
 /// Budget for the token exchange, the refresh, and the profile check that
 /// follows either. All three are one small round trip to Google, and every
@@ -554,8 +557,14 @@ fn exchange_code_at(
     let refresh = token.refresh_token().map(|r| r.secret().to_string());
     check_refresh_token(issuer, refresh.as_deref()).map_err(ConsentFailure::Failed)?;
 
-    let mailbox = fetch_profile_email(issuer, &http, profile_url, token.access_token().secret())
-        .map_err(|e| ConsentFailure::Failed(calendar_identity_hint(scopes, e)))?;
+    let mailbox = fetch_profile_email(
+        issuer,
+        &http,
+        profile_url,
+        token.access_token().secret(),
+        expected_account,
+    )
+    .map_err(|e| ConsentFailure::Failed(calendar_identity_hint(scopes, e)))?;
     if let Some(expected) = expected_account {
         check_account_match(expected, &mailbox).map_err(ConsentFailure::WrongAccount)?;
     }
@@ -708,6 +717,7 @@ pub(crate) fn verify_transfer_credential_at(
         &http,
         profile_url,
         &refreshed.token.access_token,
+        Some(expected_account),
     )?;
 
     judge_transfer_credential_for(
@@ -915,22 +925,67 @@ struct GmailProfile {
     email_address: Option<String>,
 }
 
-/// The two fields of Graph's `/me` this module reads.
+/// The fields of Graph's `/me` this module reads.
 #[derive(Deserialize)]
 struct GraphMe {
     mail: Option<String>,
     #[serde(rename = "userPrincipalName")]
     user_principal_name: Option<String>,
+    #[serde(rename = "otherMails", default)]
+    other_mails: Option<Vec<String>>,
+    #[serde(rename = "proxyAddresses", default)]
+    proxy_addresses: Option<Vec<String>>,
 }
 
 impl GraphMe {
     /// `mail`, else `userPrincipalName` when it is address-shaped (on a
     /// personal account it is the sign-in address; on a work account without
     /// a mailbox it can be a bare UPN, which matches nothing anyway).
-    fn address(self) -> Option<String> {
+    fn address(&self) -> Option<String> {
         self.mail
+            .clone()
             .filter(|m| !m.trim().is_empty())
-            .or(self.user_principal_name.filter(|u| u.contains('@')))
+            .or(self.user_principal_name.clone().filter(|u| u.contains('@')))
+    }
+
+    /// Every address Graph ties to this account: [`Self::address`] first, then
+    /// the principal name, `otherMails`, and `proxyAddresses` (`smtp:`/`SMTP:`
+    /// prefixes dropped). Only address-shaped, non-empty entries.
+    fn addresses(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let proxies = self.proxy_addresses.iter().flatten().filter_map(|p| {
+            let (kind, addr) = p.split_once(':')?;
+            kind.eq_ignore_ascii_case("smtp").then(|| addr.to_string())
+        });
+        let all = self
+            .address()
+            .into_iter()
+            .chain(self.user_principal_name.clone())
+            .chain(self.other_mails.iter().flatten().cloned())
+            .chain(proxies);
+        for a in all {
+            let a = a.trim().to_string();
+            if a.contains('@') && !out.iter().any(|o| o.eq_ignore_ascii_case(&a)) {
+                out.push(a);
+            }
+        }
+        out
+    }
+
+    /// The configured address when Graph ties it to this account, else the
+    /// primary [`Self::address`]. The caller still holds the result against
+    /// the configuration, so a stranger's account names its own address and
+    /// is refused.
+    fn address_for(&self, expected: Option<&str>) -> Option<String> {
+        if let Some(want) = expected.map(str::trim).filter(|w| !w.is_empty())
+            && let Some(hit) = self
+                .addresses()
+                .into_iter()
+                .find(|a| a.eq_ignore_ascii_case(want))
+        {
+            return Some(hit);
+        }
+        self.address()
     }
 }
 
@@ -941,23 +996,32 @@ fn fetch_profile_email(
     http: &reqwest::blocking::Client,
     profile_url: &str,
     access_token: &str,
+    expected: Option<&str>,
 ) -> Result<String> {
     let who = issuer.name();
     // The token rides in the header and nowhere else; reqwest's own errors carry
     // the URL, not the headers, so a failure here cannot print it.
-    let resp = http
-        .get(profile_url)
-        .bearer_auth(access_token)
-        .send()
-        .map_err(|e| {
-            CoreError::Credential(format!(
-                "could not ask {who} which account this consent authorized: {e}; \
+    let ask = |url: &str| -> Result<(u16, Vec<u8>)> {
+        let resp = http
+            .get(url)
+            .bearer_auth(access_token)
+            .send()
+            .map_err(|e| {
+                CoreError::Credential(format!(
+                    "could not ask {who} which account this consent authorized: {e}; \
                  nothing was stored"
-            ))
-        })?;
-
-    let status = resp.status().as_u16();
-    let body = read_capped(resp, "Gmail's profile response")?;
+                ))
+            })?;
+        let status = resp.status().as_u16();
+        Ok((status, read_capped(resp, "the profile response")?))
+    };
+    let (mut status, mut body) = ask(profile_url)?;
+    // If Graph will not select the alias fields for this account type, the
+    // two-field lookup still names the account.
+    let basic = profile_url.replace(",otherMails,proxyAddresses", "");
+    if issuer == OAuthIssuer::Microsoft && status == 400 && basic != profile_url {
+        (status, body) = ask(&basic)?;
+    }
     if status != 200 {
         return Err(CoreError::Credential(format!(
             "{who} answered {status} when asked which account this consent authorized, so the \
@@ -980,9 +1044,19 @@ fn fetch_profile_email(
                 .map_err(unreadable)?
                 .email_address
         }
-        OAuthIssuer::Microsoft => serde_json::from_slice::<GraphMe>(&body)
-            .map_err(unreadable)?
-            .address(),
+        OAuthIssuer::Microsoft => {
+            let me = serde_json::from_slice::<GraphMe>(&body).map_err(unreadable)?;
+            let picked = me.address_for(expected);
+            if let (Some(want), Some(got)) = (expected, picked.as_deref())
+                && !want.trim().eq_ignore_ascii_case(got)
+            {
+                eprintln!(
+                    "squelchd: Microsoft ties these addresses to that account: {}",
+                    me.addresses().join(", ")
+                );
+            }
+            picked
+        }
     };
     address.filter(|e| !e.trim().is_empty()).ok_or_else(|| {
         CoreError::Credential(format!(
@@ -3529,6 +3603,44 @@ mod microsoft_tests {
         );
     }
 
+    /// A personal account that signs in as one address and owns an Outlook
+    /// alias: the alias matches when configured, a stranger's does not.
+    #[test]
+    fn a_configured_alias_of_the_account_is_its_address() {
+        let me: GraphMe = serde_json::from_str(
+            r#"{"mail":null,"userPrincipalName":"me@work.example",
+                "otherMails":["Alias@Outlook.com"],
+                "proxyAddresses":["SMTP:primary@outlook.com","x500:/o=x","smtp:third@hotmail.com"]}"#,
+        )
+        .unwrap();
+        let pick = |w: Option<&str>| me.address_for(w);
+        assert_eq!(
+            pick(Some("alias@outlook.com")).as_deref(),
+            Some("Alias@Outlook.com")
+        );
+        assert_eq!(
+            pick(Some("third@hotmail.com")).as_deref(),
+            Some("third@hotmail.com")
+        );
+        assert_eq!(
+            pick(Some("primary@outlook.com")).as_deref(),
+            Some("primary@outlook.com")
+        );
+        // Not one of its addresses: the primary comes back, and the match check refuses it.
+        assert_eq!(
+            pick(Some("stranger@outlook.com")).as_deref(),
+            Some("me@work.example")
+        );
+        assert!(check_account_match("stranger@outlook.com", "me@work.example").is_err());
+        assert_eq!(pick(None).as_deref(), Some("me@work.example"));
+        // The old two-field shape still parses.
+        let bare: GraphMe = serde_json::from_str(r#"{"mail":"a@outlook.com"}"#).unwrap();
+        assert_eq!(
+            bare.address_for(Some("b@outlook.com")).as_deref(),
+            Some("a@outlook.com")
+        );
+    }
+
     /// The refresh every Outlook token goes through: Microsoft's endpoint, the
     /// client id in the body, and NO secret in the body or a Basic header.
     #[test]
@@ -3613,6 +3725,31 @@ mod microsoft_tests {
         let (base, _rx) = capturing(vec![ok_token(), me()]);
         let err = verify(&base, "someone@else.com").unwrap_err().to_string();
         assert!(err.contains("nothing was stored"), "{err}");
+
+        // Graph refusing the alias fields falls back to the two-field lookup.
+        let (base, rx) = capturing(vec![
+            ok_token(),
+            ("400 Bad Request", "{}".to_string()),
+            me(),
+        ]);
+        let token = verify_transfer_credential_at(
+            &ms_client(),
+            "me@outlook.com",
+            CredentialKind::Write,
+            &pasted,
+            &format!("{base}/token"),
+            &format!("{base}/me?$select=mail,userPrincipalName,otherMails,proxyAddresses"),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(token.access_token, "a");
+        let requests: Vec<String> = rx.try_iter().collect();
+        assert!(
+            requests
+                .last()
+                .is_some_and(|r| r.contains("$select=mail,userPrincipalName ")),
+            "{requests:?}"
+        );
     }
 
     #[test]

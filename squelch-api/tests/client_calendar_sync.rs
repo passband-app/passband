@@ -5834,3 +5834,94 @@ async fn the_agent_gets_no_ghost_whose_thread_it_may_not_open() {
     let agent = search(&w.app, "/client/agent/calendar/search", "birthday").await;
     assert_eq!(agent["total"], 0, "{agent}");
 }
+
+// --- Adversarial pass, 2026-10-28 -----------------------------------------
+
+#[tokio::test]
+async fn a_half_typed_word_finds_its_event_as_the_user_types() {
+    let w = world("search-typing", GRANTED).await;
+    let at = minute(Utc::now() + Duration::days(2));
+    w.google().full.insert(
+        PRIMARY.into(),
+        vec![vec![
+            timed("evt-m", "Team Meeting", at, 30),
+            timed("evt-c", "Conference call", at, 30),
+            timed("evt-p", "Birthday party", at, 30),
+        ]],
+    );
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    // Every prefix of the word, not just the ones porter leaves alone.
+    for q in [
+        "me", "mee", "meet", "meeti", "meetin", "meeting", "meetings",
+    ] {
+        let body = search(&w.app, "/client/calendar/search", q).await;
+        assert_eq!(hit_titles(&body), ["event:Team Meeting"], "{q}: {body}");
+    }
+    for q in ["conferenc", "conferences", "parties", "party"] {
+        let body = search(&w.app, "/client/calendar/search", q).await;
+        assert_eq!(body["total"], 1, "{q}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn no_address_reaches_the_agent_through_names_titles_or_notes() {
+    let w = world("search-addr", GRANTED).await;
+    let at = minute(Utc::now() + Duration::days(2));
+    let mut sync = timed("evt-s", "Sync with ops@corp.example", at, 30);
+    sync["description"] = json!("host carol@corp.example, dial in");
+    sync["location"] = json!("ask frontdesk@corp.example");
+    sync["attendees"] = json!([
+        {"email": "dan@evil.com", "displayName": "dan@evil.com",
+         "responseStatus": "accepted", "organizer": true},
+        {"email": "me@example.com", "self": true, "responseStatus": "accepted"}
+    ]);
+    w.google().full.insert(PRIMARY.into(), vec![vec![sync]]);
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    // A coworker's calendar Google named after their address.
+    w.store
+        .calendar_note_meta(w.acct, PRIMARY, Some("boss.person@corp.example"), None)
+        .unwrap();
+
+    let body = search(&w.app, "/client/agent/calendar/search", "sync").await;
+    eprintln!("agent: {body}");
+    let text = body.to_string();
+    assert!(!text.contains('@'), "an address reached the agent: {text}");
+    let hit = &body["results"][0];
+    assert_eq!(hit["guests"], json!([]));
+    assert_eq!(hit["guest_count"], 1);
+    assert_eq!(hit["organizer"], Value::Null);
+    assert_eq!(hit["calendar"], Value::Null);
+    assert!(hit["description"].as_str().unwrap().contains("(address)"));
+    // Nor can a word only an address holds find it.
+    for q in ["evil", "carol", "corp", "frontdesk", "ops", "boss"] {
+        let agent = search(&w.app, "/client/agent/calendar/search", q).await;
+        assert_eq!(agent["total"], 0, "{q}: {agent}");
+    }
+    // The owner's own search box finds it by any of them.
+    for q in ["evil", "carol", "corp", "frontdesk", "ops"] {
+        let owner = search(&w.app, "/client/calendar/search", q).await;
+        assert_eq!(owner["total"], 1, "{q}: {owner}");
+    }
+}
+
+#[tokio::test]
+async fn a_huge_query_is_cut_not_an_error_and_limit_zero_serves_nothing() {
+    let w = search_world("search-huge").await;
+    let huge: String = (0..2000).map(|i| format!("al x{i} ")).collect();
+    let started = std::time::Instant::now();
+    let body = search(&w.app, "/client/agent/calendar/search", &huge).await;
+    assert!(body["results"].is_array(), "{body}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    // Repeats count once: "sam standup sam" is two terms that no event has
+    // both of, so the standup (no Sam) is an all-but-one hit like the Sam
+    // dinners. Counted twice, "sam" would be demanded and the standup lost.
+    let body = search(&w.app, "/client/calendar/search", "sam standup sam").await;
+    assert!(
+        hit_titles(&body).contains(&"event:Team standup".to_string()),
+        "{body}"
+    );
+    assert_eq!(body["total"], 4, "{body}");
+    let none = get(&w.app, "/client/calendar/search?q=dinner&limit=0").await;
+    assert_eq!(none["items"], json!([]));
+    assert_eq!(none["total"], 3);
+}

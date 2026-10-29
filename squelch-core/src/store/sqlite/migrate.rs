@@ -1984,6 +1984,16 @@ pub(super) fn retire_records_destination(conn: &Connection) -> Result<()> {
 /// existed, or written by an older daemon that does not keep it. Three counts
 /// on an index-backed table each; a rebuild is one INSERT ... SELECT per
 /// table, and the store holds at most a few thousand events per calendar.
+/// `calendar_search_fts`'s CREATE statement as schema.sql has it.
+fn canonical_calendar_search_create() -> Option<&'static str> {
+    static PARSED: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *PARSED.get_or_init(|| {
+        let start = SCHEMA.find("CREATE VIRTUAL TABLE IF NOT EXISTS calendar_search_fts")?;
+        let end = start + SCHEMA[start..].find(");")? + 1;
+        Some(SCHEMA[start..end].trim())
+    })
+}
+
 pub(super) fn reindex_calendar_search_if_stale(conn: &Connection) -> Result<()> {
     // A partial store (an old schema mid-upgrade, a test fixture) has nothing
     // to index, or nowhere to put it.
@@ -1999,6 +2009,21 @@ pub(super) fn reindex_calendar_search_if_stale(conn: &Connection) -> Result<()> 
         return Ok(());
     }
     let count = |sql: &str| -> Result<i64> { Ok(conn.query_row(sql, [], |r| r.get(0))?) };
+    // A definition that differs from schema.sql's (the tokenizer changed) is
+    // a different index: recreate it, and the counts below then force the
+    // rebuild.
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='calendar_search_fts'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let (Some(stored), Some(canonical)) = (stored, canonical_calendar_search_create()) {
+        if normalize_fts_sql(&stored) != normalize_fts_sql(canonical) {
+            conn.execute_batch(&format!("DROP TABLE calendar_search_fts; {canonical};"))?;
+        }
+    }
     let events = count("SELECT COUNT(*) FROM calendar_events")?;
     let keys = count(
         "SELECT COUNT(*) FROM calendar_search_keys k JOIN calendar_events e
@@ -2010,27 +2035,7 @@ pub(super) fn reindex_calendar_search_if_stale(conn: &Connection) -> Result<()> 
         return Ok(());
     }
     let tx = conn.unchecked_transaction()?;
-    tx.execute("DELETE FROM calendar_search_fts", [])?;
-    tx.execute("DELETE FROM calendar_search_keys", [])?;
-    tx.execute(
-        "INSERT INTO calendar_search_keys(account_id,calendar_id,event_id)
-         SELECT account_id,calendar_id,event_id FROM calendar_events",
-        [],
-    )?;
-    tx.execute(
-        "INSERT INTO calendar_search_fts(rowid,title,place,notes,people,addresses)
-         SELECT k.id, e.summary, e.location, e.description,
-                COALESCE((SELECT group_concat(g.name,' ') FROM calendar_event_guests g
-                          WHERE g.account_id=e.account_id AND g.calendar_id=e.calendar_id
-                            AND g.event_id=e.event_id AND g.name IS NOT NULL),''),
-                trim(COALESCE(e.organizer_email,'')||' '||
-                     COALESCE((SELECT group_concat(g.email,' ') FROM calendar_event_guests g
-                               WHERE g.account_id=e.account_id AND g.calendar_id=e.calendar_id
-                                 AND g.event_id=e.event_id),''))
-         FROM calendar_search_keys k JOIN calendar_events e
-           ON e.account_id=k.account_id AND e.calendar_id=k.calendar_id AND e.event_id=k.event_id",
-        [],
-    )?;
+    super::calendar::reindex_calendar_search(&tx)?;
     tx.commit()?;
     Ok(())
 }

@@ -37,7 +37,14 @@ async fn run(
         None => false,
     };
     let Some(parsed) = CalendarQuery::parse(query.q.as_deref().unwrap_or("")) else {
-        return Ok((CalendarHits::default(), granted));
+        return Ok((
+            CalendarHits {
+                hits: Vec::new(),
+                total: 0,
+                now_local: Utc::now().fixed_offset(),
+            },
+            granted,
+        ));
     };
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT);
     let now = Utc::now();
@@ -60,7 +67,8 @@ pub async fn human(
         .calendar()
         .map(|c| c.account_email().to_string())
         .unwrap_or_default();
-    let now = Utc::now().fixed_offset();
+    // The owner's clock: a ghost's state reads today in their zone.
+    let now = found.now_local;
     let items: Vec<_> = found
         .hits
         .iter()
@@ -91,7 +99,8 @@ pub async fn agent(
     Query(query): Query<CalendarSearchQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let (found, _) = run(&state, query, Audience::Agent).await?;
-    let now = Utc::now().fixed_offset();
+    // The owner's clock: a ghost's state reads today in their zone.
+    let now = found.now_local;
     let results: Vec<AgentCalendarHit> = found
         .hits
         .iter()

@@ -3295,4 +3295,45 @@ fn calendar_search_index_follows_every_write_and_is_rebuilt_when_stale() {
     reindex_calendar_search_if_stale(&store.lock().unwrap()).unwrap();
     assert_eq!(counts(), (1, 1, 1));
     assert_eq!(titles("yoga"), ["Yoga retreat"]);
+
+    // An older daemon EDITS an event in place: the old words must not keep
+    // matching under the new title, and the open after it reindexes.
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE calendar_events SET summary='Running club' WHERE event_id='d'",
+            [],
+        )
+        .unwrap();
+    assert!(titles("yoga").is_empty());
+    reindex_calendar_search_if_stale(&store.lock().unwrap()).unwrap();
+    assert_eq!(counts(), (1, 1, 1));
+    assert_eq!(titles("runni"), ["Running club"]);
+    assert!(titles("yoga").is_empty());
+
+    // An index built with another definition (porter, before 2026-10-28) is
+    // recreated and refilled.
+    {
+        let conn = store.lock().unwrap();
+        conn.execute_batch(
+            "DROP TABLE calendar_search_fts;
+             CREATE VIRTUAL TABLE calendar_search_fts USING fts5(
+                 title, place, notes, people, addresses,
+                 tokenize = 'porter unicode61', prefix = '2 3');",
+        )
+        .unwrap();
+    }
+    reindex_calendar_search_if_stale(&store.lock().unwrap()).unwrap();
+    let sql: String = store
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name='calendar_search_fts'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!sql.contains("porter"), "{sql}");
+    assert_eq!(titles("runni"), ["Running club"]);
 }

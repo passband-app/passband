@@ -1704,12 +1704,15 @@ about mail, so a query that has any of them returns no events. `after:` and
 `before:` bound the event's START, not a received date. What is left is
 split into lowercase words of 2+ characters, punctuation dropped, and the
 common short words (a, at, the, with, ...) dropped unless they are all there
-is. A term matches a word it begins. Events are matched through a word index
-with porter stemming ("dinners" finds "Dinner", "parties" finds "party"),
-over the title, the place, the description, guests' names and, for the owner
-only, the organizer's and guests' addresses. Ghosts (title and place only, a
-few hundred rows) are matched in Rust, the word's start or a plural `s`/`es`
-taken off. An event that matches EVERY term is a hit. When none does and
+is, at most 16 terms from the first 512 bytes, each once. A term matches a
+word it begins, or a word one of its plural forms begins (`s`, `es`, `ies`
+read as `y`: "meetings" finds "Meeting", "parties" finds "party"), the same
+rule for events (a word index) and ghosts (title and place, matched in
+Rust). The index is NOT stemmed: porter stored "meeting" as "meet", so a
+half-typed "meetin" found nothing while the user typed (adversarial pass,
+2026-10-28). Events match on the title, place, description, guests' names
+and, for the owner only, every address the event holds. Ghosts fold no
+diacritics, events do ("uber" finds an "Über" event, not an "Über" ghost). An event that matches EVERY term is a hit. When none does and
 there are 2+ terms, events missing exactly one term are hits instead (the
 mail search's AND-then-OR, kept tight because the block is three rows). No
 match on operators alone: a query must have at least one term. The calendar's
@@ -1723,15 +1726,19 @@ SQLite optimized, all of it under the store's one lock. So: FTS5
 `calendar_search_fts`, whose rowid is the id of `calendar_search_keys`,
 because `calendar_events` has no stable integer key (an implicit rowid can
 be renumbered by VACUUM). Written in `upsert_event`, the one way an event is
-written, after its guests and in its transaction; deleted by a trigger on
-`calendar_events`, whichever path deletes. A store whose index does not hold
-one row per event is reindexed at open. Matches are counted per term in the
+written, after its guests and in its transaction; dropped by triggers on
+`calendar_events` when an event is deleted OR updated, whichever path (or
+daemon version) does it, so an older daemon's edit leaves the index short,
+never stale. A store whose index does not hold one row per event, or whose
+index definition differs from schema.sql's, is rebuilt at open (in Rust,
+through the same code a write uses). Matches are counted per term in the
 index, ordered on their times alone, and the full rows and guests are read
 only for the page served. The probe: under 6 ms per search in a debug build,
 46 ms for a word in all 5000 events.
 
 **Order.** Upcoming first, soonest first (an event in progress counts as
-upcoming), then past events, most recent first. `total` is the number of
+upcoming), then past events, most recent first, on the owner's clock (their
+zone, as every ghost `state` served here also reads it). `total` is the number of
 hits before the limit.
 
 **Ghosts.** A ghost the timeline would list (its supplier message is
@@ -1757,11 +1764,17 @@ Agent answer: `{ "results": [...], "total": n }`, each result:
 start_timezone, location, calendar, status, your_response, organizer,
 organizer_is_you, guests: [names], guest_count, description, thread_id,
 likelihood}`. **NO ADDRESS OF ANYONE leaves the agent door from the
-calendar.** Guests appear by name only (a guest with no name is counted, not
-named), the organizer by name or as `organizer_is_you`, and guest addresses
-are not matched either (a term that only an address would match does not
-hit), so a query cannot test "is dan@x.com on this event" one guess at a
-time. The description is cut to 1000 characters and is the user's data like
+calendar.** Guests appear by name only, the organizer by name or as
+`organizer_is_you`. A name that is (or holds) an address, as Outlook
+invitations often make it, is no name: the guest is counted, not named. A
+calendar name that is an address (Google names a subscribed person's
+calendar after it) is served as null. An address anywhere in the title,
+place or description is served as "(address)". And no address is matched:
+the index files every address the event holds, the ones found in its text
+included, in an `addresses` column the agent's queries never name, so a
+query cannot test "is dan@x.com on this event" one guess at a time (the
+adversarial pass proved all four routes open before this). The description
+is cut to 1000 characters and is the user's data like
 any email body: an instruction in it is not one. A ghost's `thread_id` is the
 mail it came from, and a ghost is served only when every source thread passes
 `external_thread_allowed` (sources that do not are dropped, and a ghost whose

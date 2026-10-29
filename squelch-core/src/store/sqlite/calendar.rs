@@ -521,8 +521,13 @@ impl SqliteStore {
                  WHERE calendar_search_fts MATCH ?1 AND k.account_id=?2",
             )?;
             for term in terms {
-                // Terms are alphanumeric words, so quoting is all they need.
-                let expr = format!("{columns}\"{}\"*", term.replace('"', ""));
+                // Each plural form as a prefix. Terms are alphanumeric
+                // words, so quoting is all they need.
+                let any: Vec<String> = crate::gcal::search::forms(term)
+                    .iter()
+                    .map(|f| format!("\"{}\"*", f.replace('"', "")))
+                    .collect();
+                let expr = format!("{columns}({})", any.join(" OR "));
                 for id in stmt.query_map(params![expr, account], |r| r.get::<_, i64>(0))? {
                     *counts.entry(id?).or_default() += 1;
                 }
@@ -777,37 +782,145 @@ fn index_event(
     calendar_id: &str,
     row: &EventRow,
 ) -> Result<()> {
+    let guests: Vec<(&str, Option<&str>)> = row
+        .guests
+        .iter()
+        .take(MAX_GUESTS)
+        .map(|g| (g.email.as_str(), g.name.as_deref()))
+        .collect();
+    index_parts(
+        tx,
+        account,
+        calendar_id,
+        &row.event_id,
+        [
+            row.summary.as_deref(),
+            row.location.as_deref(),
+            row.description.as_deref(),
+        ],
+        row.organizer_email.as_deref(),
+        &guests,
+    )
+}
+
+/// The index row itself, from an event's parts: every address is cut out of
+/// the free text and filed under `addresses` with the organizer's, the
+/// guests' and any name that is itself an address
+/// ([`crate::gcal::search::split_addresses`]), so the agent door, which never
+/// queries that column, cannot match a word of one. Shared by
+/// [`index_event`] and [`reindex_calendar_search`], so a reindex files text
+/// exactly as a write does.
+fn index_parts(
+    tx: &Connection,
+    account: AccountId,
+    calendar_id: &str,
+    event_id: &str,
+    [title, place, notes]: [Option<&str>; 3],
+    organizer: Option<&str>,
+    guests: &[(&str, Option<&str>)],
+) -> Result<()> {
+    use crate::gcal::search::{has_address, split_addresses};
     tx.execute(
         "INSERT INTO calendar_search_keys(account_id,calendar_id,event_id) VALUES(?1,?2,?3)
          ON CONFLICT(account_id,calendar_id,event_id) DO NOTHING",
-        params![account, calendar_id, row.event_id],
+        params![account, calendar_id, event_id],
     )?;
     let id: i64 = tx.query_row(
         "SELECT id FROM calendar_search_keys WHERE account_id=?1 AND calendar_id=?2 AND event_id=?3",
-        params![account, calendar_id, row.event_id],
+        params![account, calendar_id, event_id],
         |r| r.get(0),
     )?;
-    let guests = || row.guests.iter().take(MAX_GUESTS);
-    let people: Vec<&str> = guests().filter_map(|g| g.name.as_deref()).collect();
-    let addresses: Vec<&str> = row
-        .organizer_email
-        .as_deref()
-        .into_iter()
-        .chain(guests().map(|g| g.email.as_str()))
-        .collect();
+    let mut addresses: Vec<String> = organizer.map(str::to_owned).into_iter().collect();
+    let mut clean = |text: Option<&str>| -> String {
+        let (kept, found) = split_addresses(text.unwrap_or(""));
+        addresses.extend(found);
+        kept
+    };
+    let (title, place, notes) = (clean(title), clean(place), clean(notes));
+    let mut people = Vec::new();
+    for (email, name) in guests {
+        addresses.push((*email).to_owned());
+        match name {
+            Some(name) if has_address(name) => addresses.push((*name).to_owned()),
+            Some(name) => people.push(*name),
+            None => {}
+        }
+    }
     tx.execute("DELETE FROM calendar_search_fts WHERE rowid=?1", [id])?;
     tx.execute(
         "INSERT INTO calendar_search_fts(rowid,title,place,notes,people,addresses)
          VALUES(?1,?2,?3,?4,?5,?6)",
         params![
             id,
-            row.summary,
-            row.location,
-            row.description,
+            title,
+            place,
+            notes,
             people.join(" "),
-            addresses.join(" "),
+            addresses.join(" ")
         ],
     )?;
+    Ok(())
+}
+
+/// Rebuild calendar search's index from every stored event, in ONE
+/// transaction (the caller's). Used at open when the index is out of step.
+pub(super) fn reindex_calendar_search(tx: &Connection) -> Result<()> {
+    tx.execute("DELETE FROM calendar_search_fts", [])?;
+    tx.execute("DELETE FROM calendar_search_keys", [])?;
+    type Event = (
+        i64,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let events: Vec<Event> = tx
+        .prepare(
+            "SELECT account_id,calendar_id,event_id,summary,location,description,organizer_email
+             FROM calendar_events",
+        )?
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    let mut guests = tx.prepare(
+        "SELECT email,name FROM calendar_event_guests
+         WHERE account_id=?1 AND calendar_id=?2 AND event_id=?3 ORDER BY position",
+    )?;
+    for (account, calendar_id, event_id, summary, location, description, organizer) in &events {
+        let list: Vec<(String, Option<String>)> = guests
+            .query_map(params![account, calendar_id, event_id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        let list: Vec<(&str, Option<&str>)> = list
+            .iter()
+            .map(|(e, n)| (e.as_str(), n.as_deref()))
+            .collect();
+        index_parts(
+            tx,
+            *account,
+            calendar_id,
+            event_id,
+            [
+                summary.as_deref(),
+                location.as_deref(),
+                description.as_deref(),
+            ],
+            organizer.as_deref(),
+            &list,
+        )?;
+    }
     Ok(())
 }
 

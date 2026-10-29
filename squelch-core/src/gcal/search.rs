@@ -4,8 +4,14 @@
 //! What differs by door is the [`Audience`], which decides whether anyone's
 //! address is matched, and the view each door serves.
 //!
-//! No index. The store returns every row containing at least one term (a
-//! substring superset), and the exact word test runs here.
+//! Events are matched by the store's word index (schema.sql, CALENDAR
+//! SEARCH); ghosts, a few hundred rows, by the word test here. Both read a
+//! term as a word prefix, with a plural taken off ([`forms`]).
+//!
+//! NO ADDRESS OF ANYONE reaches the agent door from here. Every address in an
+//! event's text is indexed in the `addresses` column only ([`split_addresses`])
+//! and redacted from what the agent is served ([`redact_addresses`]); a name
+//! or a calendar name that is itself an address is treated as no name.
 use super::{SyncedEvent, match_ghosts};
 use crate::owner_clock::OwnerClock;
 use crate::store::EventMatch;
@@ -18,6 +24,49 @@ use serde::Serialize;
 
 /// Hits one search returns at most.
 pub const MAX_LIMIT: usize = 50;
+
+/// Terms one query asks at most. Each is one index read under the store's
+/// lock, so a pasted essay must not become a thousand of them.
+pub const MAX_TERMS: usize = 16;
+
+/// Query bytes read at most; the rest is ignored.
+pub const MAX_QUERY_BYTES: usize = 512;
+
+/// What an address looks like in free text: something@something, cut at the
+/// characters that usually wrap one.
+static ADDRESS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r#"[^\s<>()\[\]{}"',;:]+@[^\s<>()\[\]{}"',;:]+"#).expect("address regex")
+});
+
+/// Whether `text` holds an address anywhere.
+pub fn has_address(text: &str) -> bool {
+    ADDRESS.is_match(text)
+}
+
+/// `text` with every address replaced by "(address)": what the agent door
+/// serves of free text.
+pub fn redact_addresses(text: &str) -> String {
+    ADDRESS.replace_all(text, "(address)").into_owned()
+}
+
+/// `text` without its addresses, and the addresses: how the index files free
+/// text, so that only the `addresses` column (never queried for the agent)
+/// can match a word of an address.
+pub fn split_addresses(text: &str) -> (String, Vec<String>) {
+    let found = ADDRESS
+        .find_iter(text)
+        .map(|m| m.as_str().to_owned())
+        .collect();
+    (ADDRESS.replace_all(text, " ").into_owned(), found)
+}
+
+/// A display name as the agent may see it: None when it is blank or is (or
+/// holds) an address, as Outlook invitations often make it.
+pub fn agent_name(name: Option<&str>) -> Option<String> {
+    name.map(str::trim)
+        .filter(|n| !n.is_empty() && !has_address(n))
+        .map(str::to_owned)
+}
 
 /// Words too common to ask of an event. Dropped unless the query is nothing
 /// else, so "dinner with sam at nopa" asks for dinner, sam and nopa.
@@ -46,7 +95,11 @@ impl CalendarQuery {
     /// None when no event can answer: a mail-only operator (`from:`, `to:`,
     /// `in:sent`, `from:me`), or no term left once operators are lifted.
     pub fn parse(raw: &str) -> Option<Self> {
-        let (text, filter) = parse_search_query(raw.trim());
+        let mut cut = raw.len().min(MAX_QUERY_BYTES);
+        while !raw.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let (text, filter) = parse_search_query(raw[..cut].trim());
         if filter.from.is_some() || filter.to.is_some() || filter.from_me {
             return None;
         }
@@ -57,7 +110,11 @@ impl CalendarQuery {
             .cloned()
             .collect();
         let mut terms = if kept.is_empty() { all } else { kept };
-        terms.dedup();
+        // Each term once, in the order typed: a repeat counted twice would
+        // make "all but one" demand it.
+        let mut seen = std::collections::HashSet::new();
+        terms.retain(|t| seen.insert(t.clone()));
+        terms.truncate(MAX_TERMS);
         if terms.is_empty() {
             return None;
         }
@@ -83,7 +140,20 @@ impl CalendarQuery {
         Some(
             self.terms
                 .iter()
-                .map(|t| forms(t).min_by_key(|f| f.len()).unwrap_or(t).to_owned())
+                .map(|t| {
+                    let forms = forms(t);
+                    // The longest prefix every form shares: what any word a
+                    // form begins contains.
+                    let first = forms.first().cloned().unwrap_or_else(|| t.clone());
+                    forms.iter().fold(first, |common, f| {
+                        common
+                            .chars()
+                            .zip(f.chars())
+                            .take_while(|(a, b)| a == b)
+                            .map(|(a, _)| a)
+                            .collect()
+                    })
+                })
                 .collect(),
         )
     }
@@ -118,21 +188,29 @@ fn words(text: &str) -> impl Iterator<Item = String> + '_ {
         .map(str::to_lowercase)
 }
 
-/// A word and its forms with a plural `s` or `es` taken off, none shorter
-/// than two characters.
-fn forms(word: &str) -> impl Iterator<Item = &str> {
-    let s = word.strip_suffix('s').filter(|_| !word.ends_with("ss"));
-    let es = word.strip_suffix("es");
-    std::iter::once(word)
-        .chain(s)
-        .chain(es)
-        .filter(|f| f.chars().count() >= 2)
+/// A word and its forms with a plural taken off (`s`, `es`, and `ies` read
+/// as `y`), none shorter than two characters. The store queries each as a
+/// prefix, so "meetings" finds "Meeting" and "parties" finds "party".
+pub fn forms(word: &str) -> Vec<String> {
+    let mut out = vec![word.to_owned()];
+    if let Some(stem) = word.strip_suffix('s').filter(|_| !word.ends_with("ss")) {
+        out.push(stem.to_owned());
+    }
+    if let Some(stem) = word.strip_suffix("es") {
+        out.push(stem.to_owned());
+    }
+    if let Some(stem) = word.strip_suffix("ies") {
+        out.push(format!("{stem}y"));
+    }
+    out.retain(|f| f.chars().count() >= 2);
+    out.dedup();
+    out
 }
 
 /// A term answers a word that starts with it, or that agrees with it once a
 /// plural is off ("dinners" answers "Dinner").
 fn term_matches(term: &str, word: &str) -> bool {
-    word.starts_with(term) || forms(term).any(|t| forms(word).any(|w| w == t))
+    forms(term).iter().any(|f| word.starts_with(f.as_str()))
 }
 
 /// One hit: a real event or a ghost.
@@ -159,11 +237,14 @@ impl CalendarHit {
 }
 
 /// What a search found, ordered, after the limit.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CalendarHits {
     pub hits: Vec<CalendarHit>,
     /// Hits before the limit.
     pub total: usize,
+    /// Now on the owner's clock, for the views: a ghost's state reads
+    /// "today" in the owner's zone, as the ordering did.
+    pub now_local: DateTime<FixedOffset>,
 }
 
 /// A time as an instant, a date at the owner's midnight.
@@ -286,8 +367,10 @@ pub fn search(
     let from = (now - far).fixed_offset();
     let to = (now + far).fixed_offset();
     let ghost_rows = store.ghost_events_containing(account, from, to, needles.as_deref())?;
-    let mut scored_ghosts: Vec<(usize, GhostEvent)> = Vec::new();
-    for mut ghost in ghost_rows {
+    // Only ghosts that can be kept go on to the costlier checks: every term,
+    // or all but one.
+    let mut candidates: Vec<(usize, GhostEvent)> = Vec::new();
+    for ghost in ghost_rows {
         if ghost.user_state == Some(GhostUserState::Dismissed) {
             continue;
         }
@@ -295,13 +378,27 @@ pub fn search(
             continue;
         }
         let matched = query.matched(&[&ghost.title, ghost.location.as_deref().unwrap_or("")]);
-        if matched == 0 {
-            continue;
+        if matched >= floor {
+            candidates.push((matched, ghost));
         }
+    }
+    // The agent sees a ghost only with the threads it may open, and only when
+    // the supplier's is one. Each thread is asked once per search.
+    let mut allowed: std::collections::HashMap<String, bool> = Default::default();
+    let mut scored_ghosts: Vec<(usize, GhostEvent)> = Vec::new();
+    for (matched, mut ghost) in candidates {
         if agent {
             let mut kept = Vec::with_capacity(ghost.sources.len());
             for source in std::mem::take(&mut ghost.sources) {
-                if store.external_thread_allowed(account, &source.thread_id)? {
+                let ok = match allowed.get(&source.thread_id) {
+                    Some(ok) => *ok,
+                    None => {
+                        let ok = store.external_thread_allowed(account, &source.thread_id)?;
+                        allowed.insert(source.thread_id.clone(), ok);
+                        ok
+                    }
+                };
+                if ok {
                     kept.push(source);
                 }
             }
@@ -313,26 +410,10 @@ pub fn search(
             }
             ghost.sources = kept;
         }
-        scored_ghosts.push((matched, ghost));
-    }
-
-    let best = scored_events
-        .iter()
-        .map(|e| e.matched)
-        .chain(scored_ghosts.iter().map(|(m, _)| *m))
-        .max()
-        .unwrap_or(0);
-    let kept_ghosts: Vec<GhostEvent> = scored_ghosts
-        .into_iter()
-        .filter(|(m, _)| query.keeps(*m, best))
-        .map(|(_, g)| g)
-        .collect();
-
-    // A ghost the timeline would draw as a real event is that event: drop it
-    // when it matches one of the account's events at its start, whether or
-    // not that event matched the query.
-    let mut pending: Vec<Pending> = Vec::new();
-    for ghost in kept_ghosts {
+        // A ghost the timeline would draw as a real event is that event: drop
+        // it when it matches one of the account's events at its start,
+        // whether or not that event matched the query. Before `best`, so a
+        // dropped ghost cannot suppress the all-but-one fallback.
         let twin = events && {
             let pad = chrono::Duration::days(2);
             let at = instant(&ghost.start, &offset).fixed_offset();
@@ -341,9 +422,21 @@ pub fn search(
             match_ghosts([(ghost.title.as_str(), &ghost.start)], &near)[0].is_some()
         };
         if !twin {
-            pending.push(Pending::Ghost(Box::new(ghost)));
+            scored_ghosts.push((matched, ghost));
         }
     }
+
+    let best = scored_events
+        .iter()
+        .map(|e| e.matched)
+        .chain(scored_ghosts.iter().map(|(m, _)| *m))
+        .max()
+        .unwrap_or(0);
+    let mut pending: Vec<Pending> = scored_ghosts
+        .into_iter()
+        .filter(|(m, _)| query.keeps(*m, best))
+        .map(|(_, g)| Pending::Ghost(Box::new(g)))
+        .collect();
     pending.extend(
         scored_events
             .into_iter()
@@ -352,7 +445,7 @@ pub fn search(
     );
     order(&mut pending, now, today, &offset);
     let total = pending.len();
-    pending.truncate(limit.clamp(1, MAX_LIMIT));
+    pending.truncate(limit.min(MAX_LIMIT));
 
     // Full rows, and guests, for the page served only.
     let keys: Vec<i64> = pending
@@ -378,7 +471,11 @@ pub fn search(
             Pending::Ghost(g) => Some(CalendarHit::Ghost(*g)),
         })
         .collect();
-    Ok(CalendarHits { hits, total })
+    Ok(CalendarHits {
+        hits,
+        total,
+        now_local: clock.local_now().fixed_offset(),
+    })
 }
 
 /// Description characters the agent door serves at most.
@@ -427,26 +524,27 @@ impl AgentCalendarHit {
                 let organizer_is_you =
                     row.organizer_self || organizer_guest.is_some_and(|g| g.is_self);
                 let organizer = (!organizer_is_you)
-                    .then(|| organizer_guest.and_then(|g| g.name.clone()))
-                    .flatten()
-                    .filter(|n| !n.trim().is_empty());
+                    .then(|| organizer_guest.and_then(|g| agent_name(g.name.as_deref())))
+                    .flatten();
                 let guests: Vec<String> = row
                     .guests
                     .iter()
                     .filter(|g| !g.is_self)
-                    .filter_map(|g| g.name.clone().filter(|n| !n.trim().is_empty()))
+                    .filter_map(|g| agent_name(g.name.as_deref()))
                     .collect();
                 let guest_count = row.guests.iter().filter(|g| !g.is_self).count();
                 Self {
                     kind: "event",
-                    title: row.summary.clone(),
+                    title: row.summary.as_deref().map(redact_addresses),
                     start: row.start.to_string(),
                     end: row.end.map(|e| e.to_string()),
                     end_estimated: false,
                     all_day: row.all_day(),
                     start_timezone: row.start_timezone.clone(),
-                    location: row.location.clone(),
-                    calendar: e.calendar_name.clone(),
+                    location: row.location.as_deref().map(redact_addresses),
+                    // Google names a subscribed person's calendar after
+                    // their address.
+                    calendar: agent_name(e.calendar_name.as_deref()),
                     status: if row.tentative {
                         "tentative"
                     } else {
@@ -458,10 +556,12 @@ impl AgentCalendarHit {
                     organizer_is_you,
                     guests,
                     guest_count,
-                    description: row
-                        .description
-                        .as_deref()
-                        .map(|d| d.chars().take(AGENT_DESCRIPTION_CHARS).collect()),
+                    description: row.description.as_deref().map(|d| {
+                        redact_addresses(d)
+                            .chars()
+                            .take(AGENT_DESCRIPTION_CHARS)
+                            .collect()
+                    }),
                     thread_id: None,
                     likelihood: None,
                 }
@@ -475,13 +575,13 @@ impl AgentCalendarHit {
                     .or(g.sources.first());
                 Self {
                     kind: "ghost",
-                    title: Some(g.title.clone()),
+                    title: Some(redact_addresses(&g.title)),
                     start: g.start.to_string(),
                     end: end.as_ref().map(|e| e.end.to_string()),
                     end_estimated: end.as_ref().is_some_and(|e| e.estimated),
                     all_day: g.all_day(),
                     start_timezone: g.start_timezone.clone(),
-                    location: g.location.clone(),
+                    location: g.location.as_deref().map(redact_addresses),
                     calendar: None,
                     status: serde_json::to_value(g.state(now))
                         .ok()

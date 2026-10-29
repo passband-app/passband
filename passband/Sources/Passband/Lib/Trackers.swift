@@ -156,7 +156,16 @@ enum Trackers {
     /// present) ≥ 80px and height ≥ 40px, which skips social icons and spacer
     /// gifs. Protocol-relative srcs resolve to https.
     static func extractHeroSrc(_ html: String) -> String? {
-        var hero: String?
+        extractImageSrcs(html, limit: 1).first
+    }
+
+    /// Every http(s) `<img>` that is not chrome (under 80x40), in
+    /// document order, at most `limit`: the candidates for an event card's
+    /// photo, which is often not the first image (that is usually the
+    /// sender's logo).
+    static func extractImageSrcs(_ html: String, limit: Int) -> [String] {
+        var found: [String] = []
+        guard limit > 0 else { return found }
         _ = HTMLImg.walk(strip(html).html) { tag in
             guard var src = attrValue(tag, "src")?.trimmingCharacters(in: .whitespaces),
                 !src.isEmpty
@@ -165,10 +174,10 @@ enum Trackers {
             guard src.lowercased().hasPrefix("http") else { return .keep }
             if let w = pxDim(attrValue(tag, "width")), w < 80 { return .keep }
             if let h = pxDim(attrValue(tag, "height")), h < 40 { return .keep }
-            hero = src
-            return .stop
+            if !found.contains(src) { found.append(src) }
+            return found.count >= limit ? .stop : .keep
         }
-        return hero
+        return found
     }
 
 }

@@ -209,6 +209,23 @@ struct AgendaItem: Identifiable, Sendable, Hashable {
     let unverified: Bool
     /// Unlikely: folds into the day's count instead of taking a row.
     let folded: Bool
+    /// A real event's mail: the messages behind the ghosts the daemon
+    /// matched to it (the reservation that made Gmail's own event, say),
+    /// oldest first. The matched ghost is not drawn, so this is how the card
+    /// still reaches its mail. Empty for a ghost, which carries its own.
+    var mail: [GhostSource] = []
+    /// The street address under `location` when the daemon split the place
+    /// into a name and an address. Nil for a ghost and a raw location.
+    var placeAddress: String? = nil
+
+    /// What to ask a map for: the name and the address together.
+    var placeQuery: String? {
+        let parts = [location, placeAddress].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    }
+
+    /// The mail behind this row, ghost or event.
+    var sources: [GhostSource] { ghost?.sources ?? mail }
 
     var ghost: TimelineGhost? {
         if case .ghost(let g) = origin { return g }
@@ -258,8 +275,12 @@ enum Agenda {
     ) -> [AgendaItem] {
         var out: [AgendaItem] = []
         out.reserveCapacity(feed.ghosts.count + (feed.events?.count ?? 0))
+        let mail = matchedMail(feed.ghosts)
         for event in feed.events ?? [] {
-            if let item = item(event, calendar: calendar) { out.append(item) }
+            if var item = item(event, calendar: calendar) {
+                item.mail = mail[eventKey(event.calendar_id, event.id)] ?? []
+                out.append(item)
+            }
         }
         for ghost in feed.ghosts {
             if let item = item(ghost, calendar: calendar, showDismissed: showDismissed) {
@@ -267,6 +288,26 @@ enum Agenda {
             }
         }
         return out
+    }
+
+    /// The mail behind each matched event, by `eventKey`: every source of
+    /// every ghost matched to it, each message once, in the ghosts' order.
+    static func matchedMail(_ ghosts: [TimelineGhost]) -> [String: [GhostSource]] {
+        var out: [String: [GhostSource]] = [:]
+        for ghost in ghosts {
+            guard let match = ghost.matched_event else { continue }
+            let key = eventKey(match.calendar_id, match.id)
+            var list = out[key] ?? []
+            for source in ghost.sources where !list.contains(where: { $0.message_id == source.message_id }) {
+                list.append(source)
+            }
+            out[key] = list
+        }
+        return out
+    }
+
+    private static func eventKey(_ calendarId: String, _ id: String) -> String {
+        "\(calendarId)\u{1F}\(id)"
     }
 
     static func item(
@@ -326,11 +367,13 @@ enum Agenda {
             end = parsed.dateOnly ? dayAfter(parsed.date, calendar) : parsed.date
         }
         if allDay, end == nil || end! <= start.date { end = dayAfter(start.date, calendar) }
-        return AgendaItem(
+        var item = AgendaItem(
             id: itemId(event),
             origin: .event(event),
             title: tidy(event.title) ?? "Untitled event",
-            location: tidy(event.location),
+            // The cleaned place's name when the daemon has one (a place
+            // of nothing hides the line); the raw location otherwise.
+            location: event.place.map { tidy($0.name) ?? tidy($0.address) } ?? tidy(event.location),
             start: start.date,
             end: end,
             allDay: allDay,
@@ -340,6 +383,10 @@ enum Agenda {
             cancelled: false,
             unverified: false,
             folded: false)
+        if let place = event.place, tidy(place.name) != nil {
+            item.placeAddress = tidy(place.address)
+        }
+        return item
     }
 
     /// A real event's row id: its calendar and its id, since Google's ids are

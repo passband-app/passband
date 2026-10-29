@@ -75,7 +75,7 @@ pub const MAX_ATTENDEES: u32 = super::MAX_GUESTS as u32;
 /// are asked for alike.
 macro_rules! event_fields {
     () => {
-        "id,status,iCalUID,summary,description,location,colorId,start,end,\
+        "id,status,iCalUID,summary,description,location,colorId,eventType,start,end,\
 organizer(email,self),attendeesOmitted,\
 attendees(email,displayName,responseStatus,organizer,self),transparency,htmlLink,updated"
     };

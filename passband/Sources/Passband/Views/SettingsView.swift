@@ -1614,7 +1614,7 @@ struct PrivacySection: View {
             // The full disclosure stays, word for word in substance: this is
             // the one card whose fine print IS the setting.
             SettingsHint(
-                "No level ever includes email data or anything derived from it: no subjects, senders, bodies, labels, or assistant questions. Minimal sends app opens, screen views, anonymous counters (emails sent, triage volume, corrections, connection health), first-time milestones, and your setup (hosted or self-run, how many mailboxes, which preferences). Full adds which actions are used and where. None sends nothing."
+                "No level ever includes the content of your email: no subjects, senders, bodies, labels, or assistant questions. Minimal sends app opens, screen views, anonymous counters (emails sent, triage volume, corrections, connection health), first-time milestones, and your setup (hosted or self-run, how many mailboxes, which preferences). Full adds which actions are used and where, and on the Mac a recording of each session's layout: plain grey boxes, Passband's own icons, and where you clicked. It never records text, pictures, colors, what you type, or anything inside an email, though the layout does show which kinds of cards and icons were on screen, like a bill or a package. None sends nothing."
             )
         }
     }

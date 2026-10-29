@@ -296,6 +296,7 @@ enum ReleaseNotes {
                 ReleaseItem(.daemon, "Smart clear"),
                 ReleaseItem(.daemon, "Closes event mail once the event is over"),
                 ReleaseItem(.daemon, "Treats breach and security notices as important mail, not sign-ins"),
+                ReleaseItem(.daemon, "Login codes are never added to the search index"),
                 ReleaseItem(.daemon, "Your agent works in your timezone"),
                 ReleaseItem(.daemon, "Your agent can search mail you sent"),
                 ReleaseItem(.daemon, "Faster and steadier"),

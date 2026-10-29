@@ -25,7 +25,9 @@ COPY squelch-broker ./squelch-broker
 # are workspace members and cargo refuses to resolve the workspace without them.
 COPY squelch-control ./squelch-control
 COPY squelch-warden ./squelch-warden
+COPY squelch-eval ./squelch-eval
 COPY squelchd ./squelchd
+COPY squelch-embed ./squelch-embed
 COPY squelch-relay ./squelch-relay
 
 RUN cargo build --release --locked -p squelch-relay

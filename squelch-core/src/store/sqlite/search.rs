@@ -320,6 +320,33 @@ pub(super) struct Candidate {
     received_at: DateTime<Utc>,
 }
 
+/// The query vector for a HYBRID search, or `None` to run it keyword-only.
+///
+/// AN EMBED ERROR IS AN ABSENT EMBEDDER here, not a failed search. Locally an
+/// embedder that built effectively never fails; the shared embedding service
+/// fails on any network blip, a restart, or a full queue, and a search that
+/// 500s over that is worse than one that answers from the keyword leg it
+/// would have used before the embedder attached. `semantic_search` is the
+/// exception and keeps propagating: it has nothing to degrade to.
+///
+/// The instruction is the QUERY side of BGE's asymmetry; the corpus vectors
+/// were embedded without it, on purpose.
+fn query_embed_or_degrade(embedder: &dyn crate::embed::Embedder, query: &str) -> Option<Vec<f32>> {
+    match embedder.embed(&crate::embed::query_embed_text(query)) {
+        Ok(qvec) => Some(qvec),
+        Err(e) => {
+            query_embed_degraded(&e);
+            None
+        }
+    }
+}
+
+/// The one line a degraded hybrid search leaves. The error and nothing else:
+/// never the query, which is the reader's words.
+fn query_embed_degraded(e: &CoreError) {
+    eprintln!("squelch: query embed failed ({e}); this search is keyword-only");
+}
+
 /// The RRF smoothing constant (the standard 60): how far down a list a hit can
 /// sit before its vote stops mattering much.
 const RRF_K: f32 = 60.0;
@@ -643,7 +670,17 @@ impl SqliteStore {
                 }
                 return Ok(ExternalLeg::fixed(Vec::new()));
             };
-            let qvec = embedder.embed(&crate::embed::query_embed_text(text))?;
+            let qvec = match embedder.embed(&crate::embed::query_embed_text(text)) {
+                Ok(qvec) => qvec,
+                // Hybrid degrades the way it does with no embedder; the vector
+                // leg alone has nothing to fall back to. See
+                // `query_embed_or_degrade`.
+                Err(e) if !required => {
+                    query_embed_degraded(&e);
+                    return Ok(ExternalLeg::fixed(Vec::new()));
+                }
+                Err(e) => return Err(e),
+            };
             Ok(ExternalLeg::fixed(self.nearest_readable(
                 account_id,
                 &qvec,
@@ -1127,12 +1164,13 @@ impl SqliteStore {
         snippet_range: std::ops::Range<usize>,
         k: usize,
     ) -> Result<(Vec<LeggedHit>, bool)> {
-        // No embedder (e.g. before the background attach) => keyword-only.
-        let vec_hits: Vec<Candidate> = match self.embedder() {
-            Some(embedder) => {
-                // The instruction is the QUERY side of BGE's asymmetry; the
-                // corpus vectors were embedded without it, on purpose.
-                let qvec = embedder.embed(&crate::embed::query_embed_text(query_text))?;
+        // No embedder (e.g. before the background attach), or one that failed
+        // on this query => keyword-only.
+        let qvec = self
+            .embedder()
+            .and_then(|embedder| query_embed_or_degrade(embedder.as_ref(), query_text));
+        let vec_hits: Vec<Candidate> = match qvec {
+            Some(qvec) => {
                 // sqlite-vec caps one nearest-neighbor query at 4096. For the
                 // human door, which pages as deep as it likes, keyword recall
                 // keeps expanding beyond the semantic window.
@@ -2122,6 +2160,10 @@ impl SqliteStore {
         Ok(out)
     }
 
+    /// RAW vector write, NOT GATED: fixtures use it to plant vectors (sealed
+    /// ones included, to prove the read side refuses them). Production writes
+    /// go through [`Self::write_embedded_vectors`], which re-checks the sealed
+    /// gate under the lock.
     pub(super) fn upsert_message_vector(
         &self,
         account_id: AccountId,
@@ -2137,12 +2179,35 @@ impl SqliteStore {
     /// `synchronous=FULL`: a backfill batch of eight paid sixteen. Here the
     /// batch pays one, and a single vector (ingest's embed-at-write) one
     /// instead of two. All or nothing: a bad width anywhere in the batch
-    /// writes nothing.
+    /// writes nothing. RAW, like [`Self::upsert_message_vector`].
     pub(super) fn upsert_message_vectors(
         &self,
         account_id: AccountId,
         items: &[(i64, &[f32])],
     ) -> Result<()> {
+        self.write_vectors(account_id, items, false).map(|_| ())
+    }
+
+    /// THE GATED VECTOR WRITE the sync engine uses: [`Self::upsert_message_vectors`]
+    /// for the items whose message is still [`embeddable_mail_sql!`] at the
+    /// moment of the write, under the same lock and transaction. A decision
+    /// that sealed a message while its text was at the embedder lands first
+    /// or second; either way no vector survives it (the decision's own
+    /// cleanup deletes one written before it). Returns how many were written.
+    pub(super) fn write_embedded_vectors(
+        &self,
+        account_id: AccountId,
+        items: &[(i64, &[f32])],
+    ) -> Result<usize> {
+        self.write_vectors(account_id, items, true)
+    }
+
+    fn write_vectors(
+        &self,
+        account_id: AccountId,
+        items: &[(i64, &[f32])],
+        gated: bool,
+    ) -> Result<usize> {
         for (_, embedding) in items {
             if embedding.len() != VEC_DIMS {
                 return Err(CoreError::InvalidInput(format!(
@@ -2153,6 +2218,7 @@ impl SqliteStore {
         }
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
+        let mut written = 0usize;
         {
             let mut delete = tx.prepare_cached("DELETE FROM message_vecs WHERE message_id = ?1")?;
             let mut insert = tx.prepare_cached(
@@ -2160,18 +2226,35 @@ impl SqliteStore {
                  VALUES (?1, ?2, ?3)",
             )?;
             for (message_id, embedding) in items {
+                if gated && !embeddable_conn(&tx, account_id, *message_id)? {
+                    continue;
+                }
                 delete.execute(params![message_id])?;
                 insert.execute(params![message_id, embedding.as_bytes(), account_id])?;
+                written += 1;
             }
         }
         tx.commit()?;
-        Ok(())
+        Ok(written)
+    }
+
+    /// Whether the embedder may read `message_id` now ([`embeddable_mail_sql!`]).
+    /// Ingest asks it before handing the row's text to the embedder.
+    pub(super) fn message_embeddable(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+    ) -> Result<bool> {
+        let conn = self.lock()?;
+        embeddable_conn(&conn, account_id, message_id)
     }
 
     /// [`Self::upsert_message_vector`] for the English translation's vector
     /// (`message_translation_vecs`). Written only while the row's translation
-    /// is served: a translation dropped or closed meanwhile gets no vector,
-    /// and the check and the write share one lock.
+    /// is served AND its message passes the sealed gate
+    /// ([`embeddable_mail_sql!`]): a translation dropped or closed meanwhile,
+    /// or a message sealed meanwhile, gets no vector, and the check and the
+    /// write share one lock.
     pub(super) fn upsert_translation_vector(
         &self,
         account_id: AccountId,
@@ -2192,11 +2275,12 @@ impl SqliteStore {
             params![message_id, account_id],
             |r| r.get(0),
         )?;
+        let allowed = served && embeddable_conn(&conn, account_id, message_id)?;
         conn.execute(
             "DELETE FROM message_translation_vecs WHERE message_id = ?1",
             params![message_id],
         )?;
-        if served {
+        if allowed {
             conn.execute(
                 "INSERT INTO message_translation_vecs(message_id, embedding, account_id)
                  VALUES (?1, ?2, ?3)",
@@ -2207,27 +2291,29 @@ impl SqliteStore {
     }
 
     /// Up to `limit` served translations with no vector yet, newest mail
-    /// first, as the TRANSLATED subject and body. Spam is excluded like the
-    /// original's drain.
+    /// first, as the TRANSLATED subject and body. Gated exactly like the
+    /// original's drain ([`embeddable_mail_sql!`]).
     pub(super) fn translations_missing_vectors(
         &self,
         account_id: AccountId,
         limit: usize,
     ) -> Result<Vec<MissingVector>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(concat!(
             "SELECT m.id, COALESCE(tr.subject, ''), COALESCE(tr.body, '')
              FROM message_translations tr
              JOIN messages m ON m.id = tr.message_id
+             LEFT JOIN triage t ON t.message_id = m.id
              WHERE tr.account_id = ?1
                AND tr.status IN ('done','incomplete')
-               AND m.is_spam = 0
                AND NOT EXISTS (
                    SELECT 1 FROM message_translation_vecs v WHERE v.message_id = m.id
                )
-             ORDER BY m.received_at DESC
-             LIMIT ?2",
-        )?;
+               AND ",
+            embeddable_mail_sql!(),
+            " ORDER BY m.received_at DESC
+             LIMIT ?2"
+        ))?;
         let rows = stmt.query_map(params![account_id, limit as i64], |r| {
             Ok(MissingVector {
                 message_id: r.get(0)?,
@@ -2242,24 +2328,28 @@ impl SqliteStore {
         Ok(out)
     }
 
+    /// Up to `limit` messages with no vector that the sealed gate lets an
+    /// embedder read ([`embeddable_mail_sql!`]), newest first. Undecided
+    /// inbound mail is not here until a non-sealed decision lands.
     pub(super) fn messages_missing_vectors(
         &self,
         account_id: AccountId,
         limit: usize,
     ) -> Result<Vec<MissingVector>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(concat!(
             "SELECT m.id, m.subject, m.body
              FROM messages m
-             JOIN triage t ON t.message_id = m.id
+             LEFT JOIN triage t ON t.message_id = m.id
              WHERE m.account_id = ?1
-               AND m.is_spam = 0
                AND NOT EXISTS (
                    SELECT 1 FROM message_vecs v WHERE v.message_id = m.id
                )
-             ORDER BY m.received_at DESC
-             LIMIT ?2",
-        )?;
+               AND ",
+            embeddable_mail_sql!(),
+            " ORDER BY m.received_at DESC
+             LIMIT ?2"
+        ))?;
         let rows = stmt.query_map(params![account_id, limit as i64], |r| {
             Ok(MissingVector {
                 message_id: r.get(0)?,
@@ -2273,4 +2363,84 @@ impl SqliteStore {
         }
         Ok(out)
     }
+}
+
+/// [`embeddable_mail_sql!`] for one message, on the caller's connection or
+/// transaction. A message that does not exist is not embeddable.
+fn embeddable_conn(conn: &Connection, account_id: AccountId, message_id: i64) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            concat!(
+                "SELECT ",
+                embeddable_mail_sql!(),
+                " FROM messages m LEFT JOIN triage t ON t.message_id = m.id
+                 WHERE m.account_id = ?1 AND m.id = ?2"
+            ),
+            params![account_id, message_id],
+            |r| r.get::<_, bool>(0),
+        )
+        .optional()?
+        .unwrap_or(false))
+}
+
+/// DELETE THE VECTORS OF SEALED MAIL ([`vector_forbidden_sql!`]): the
+/// original's in `message_vecs` and the translation's in
+/// `message_translation_vecs`. Touches nothing else: the FTS index, the
+/// message and its translation stay exactly as they were, so keyword search
+/// still finds what the owner may see.
+///
+/// `Some(id)` is the event form, run inside the transaction of whatever just
+/// sealed (or un-decided) that message: a triage commit, an access commit, a
+/// person's correction, a content change. `None` is the backlog sweep at store
+/// open, for vectors embedded before this gate existed. Returns how many
+/// messages lost a vector.
+///
+/// The sweep walks the vector tables' keys and probes each message by
+/// primary key, so it costs one predicate per stored vector.
+pub(super) fn purge_forbidden_vectors_conn(
+    conn: &Connection,
+    message_id: Option<i64>,
+) -> Result<usize> {
+    let ids: Vec<i64> = match message_id {
+        Some(id) => {
+            let forbidden: bool = conn
+                .query_row(
+                    concat!(
+                        "SELECT ",
+                        vector_forbidden_sql!(),
+                        " FROM messages m LEFT JOIN triage t ON t.message_id = m.id
+                         WHERE m.id = ?1"
+                    ),
+                    params![id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if forbidden { vec![id] } else { Vec::new() }
+        }
+        None => {
+            let mut stmt = conn.prepare(concat!(
+                "SELECT m.id
+                 FROM (SELECT message_id AS id FROM message_vecs
+                       UNION SELECT message_id FROM message_translation_vecs) vr
+                 CROSS JOIN messages m ON m.id = vr.id
+                 LEFT JOIN triage t ON t.message_id = m.id
+                 WHERE ",
+                vector_forbidden_sql!()
+            ))?;
+            stmt.query_map([], |r| r.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<_>>()?
+        }
+    };
+    for id in &ids {
+        conn.execute(
+            "DELETE FROM message_vecs WHERE message_id = ?1",
+            params![id],
+        )?;
+        conn.execute(
+            "DELETE FROM message_translation_vecs WHERE message_id = ?1",
+            params![id],
+        )?;
+    }
+    Ok(ids.len())
 }

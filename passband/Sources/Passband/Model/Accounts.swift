@@ -269,6 +269,8 @@ enum AccountIndex {
         QuestionChats.forget(account: id)
         // And its last board (BoardFile.swift), mail content on disk too.
         BoardFile.forget(account: id)
+        // And its saved calendar (CalendarDisk.swift).
+        Task { await CalendarDisk.shared.forget(id) }
     }
 
     // MARK: - orphaned keychain slots

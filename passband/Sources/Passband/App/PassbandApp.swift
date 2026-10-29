@@ -89,6 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the system to carry off, and this clears the ones it never took.
         NotificationIcon.purgeRoot()
         Analytics.start()
+        SessionReplay.shared.start()
         // The boot view never passes through route(to:), so its screen event
         // is recorded here or not at all.
         Analytics.screen(AppStore.shared.activeView.rawValue)

@@ -23,7 +23,13 @@ can hold all of them.
 | The warden | `squelch-warden` | `20-warden.yaml` → `image:` | you apply it |
 | The roller | `squelch-warden` | `90-warden-roller.yaml` → `image:` (**must equal the line above**) | its next tick |
 | The model-seed pod | `squelchd` | `60-models.yaml` → `image:` | only when you re-seed weights; not part of a routine rollout |
-| `control` (signup.passband.app) | `squelch-control` | not pinned | **merge to `main`** — Railway deploys it, independent of all of the above |
+| The shared embedding service | `squelch-embed` | `65-embed.yaml` → `image:` | only when the wire contract (`squelch-embed/src/protocol.rs`), the model or the server changes; never as part of a routine rollout, though every daemon tag publishes one |
+| `control` (signup.passband.app) | `squelch-control` | not pinned | **merge to `main`**, which deploys it, independent of all of the above |
+
+The embed row is pinned on purpose to the release that last changed it, not to
+the fleet's tag: its weights and its wire contract are what every tenant's
+vectors depend on, so it moves by decision (`SETUP.md` §10b), and a routine
+daemon roll leaves it alone.
 
 That last row is the one that catches people. `control` ships on merge and the
 carrier ships on `kubectl apply`, so a change that spans both is out of sync for
@@ -88,13 +94,19 @@ git push origin daemon-X.Y.Z
 gh run watch
 ```
 
-## 2. Verify all three images published
+## 2. Verify all four images published
 
 The failure mode is a **half-published release**: one image lands, another
-fails, and you pin a tag that only two of the three have.
+fails, and you pin a tag that only some of them have. The check is anonymous on
+purpose, because the carrier pulls with no credentials: a package that is
+private answers with no token and nothing listed, which is the right failure to
+see here rather than at a pod's `ImagePullBackOff`. `squelch-embed` is in the
+loop although a routine roll does not move its pin, because the next release
+that does needs the tag to exist and the package to still be public (`SETUP.md`
+§10b, step 1, has the one-time settings).
 
 ```sh
-for img in squelchd squelch-warden squelch-control; do
+for img in squelchd squelch-warden squelch-control squelch-embed; do
   TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:passband-app/$img:pull" \
     | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
   echo "== $img"
@@ -102,8 +114,9 @@ for img in squelchd squelch-warden squelch-control; do
 done
 ```
 
-All three must list `daemon-X.Y.Z`. `squelchd` is amd64 + arm64; warden and
-control are amd64 only, which is fine because the carrier is amd64.
+All four must list `daemon-X.Y.Z`. `squelchd` and `squelch-embed` are amd64 +
+arm64; warden and control are amd64 only, which is fine because the carrier is
+amd64.
 
 ## 3. Repoint the pins
 
@@ -240,6 +253,24 @@ tenant still on the old image answers 403 on `/mcp` until it is rolled (closed,
 but broken). The full procedure, the WorkOS settings, the checklist and the
 verification are in `SETUP.md`, "Publishing the agent door".
 
+### What turns on at the roll: the release with the sealed embed gate
+
+The first daemon with the shared-embedder client (planned as `daemon-0.0.15`)
+also carries the gate that keeps sealed mail out of every embedder
+(`docs/SECURITY.md` §4d), and the gate takes effect as each tenant restarts onto
+the image, whether or not `SQUELCH_WARDEN_EMBED_URL` is set. Expect, per tenant:
+
+- **Vectors deleted at the first open.** The sweep removes the vector of every
+  message that is sealed or whose current content has no decision yet: 360 of
+  2,499 on one real mailbox, 143 of them sealed. It runs at every open, about
+  1 s at 100k vectors. Mail and keyword search are untouched.
+- **Inbound mail embedded only after triage decides it**, not at ingest. A
+  tenant at its daily run cap, out of LLM budget or unminted gets no new vectors
+  until triage runs again; keyword search finds that mail meanwhile.
+
+The knob is a separate step, never in the same edit: `SETUP.md` §10b, step 6
+onwards. This roll is its step 2.
+
 ---
 
 ## When it goes wrong
@@ -324,6 +355,22 @@ they happen to sort first; there is no priority ordering.
 If the bad image will not start at all, the roller stops on the first casualty
 and refuses to touch anyone else, so the blast radius is one mailbox and the
 rollback has fewer tenants to undo than you would fear.
+
+**Below `daemon-0.0.15` with the shared embedder on, the knob goes first.**
+While `SQUELCH_WARDEN_EMBED_URL` is set, the warden renders every tenant at
+the light shape (512Mi limit, no model volume) whatever daemon it is given, and
+a daemon older than the shared-embedder client builds its own session and is
+OOM-killed at 512Mi on every start. So: comment the knob out, apply, restart the
+warden, wait for a run to exit 0 with every tenant back on the in-process
+shape (`SETUP.md` §10b, Rollback), and only then repoint the pins. The floor is
+written beside `SQUELCH_WARDEN_IMAGE` in `15-warden-config.yaml`.
+
+**Going below the sealed gate re-embeds sealed mail.** The database is
+compatible both ways, so a daemon from before the gate opens it fine, but it has
+no gate: its drain re-embeds every vector the gate's sweep deleted, sealed mail
+included, and it embeds inbound mail at ingest again. That is the pre-gate
+exposure back, and a burst of embedding work on each tenant as it restarts.
+Rolling forward again deletes those vectors at the next open.
 
 ---
 

@@ -6,7 +6,7 @@ all of them; know which one you are doing before you start.
 
 | Surface | Trigger | What ships | Who is affected |
 |---|---|---|---|
-| Server images | push tag `daemon-X.Y.Z` | `ghcr.io/passband-app/{squelchd,squelch-warden,squelch-control}` | nobody, until a deploy points at the tag |
+| Server images | push tag `daemon-X.Y.Z` | `ghcr.io/passband-app/{squelchd,squelch-warden,squelch-control,squelch-embed}` | nobody, until a deploy points at the tag |
 | Hosted carrier | manual ops on `carrier` | warden + tenant pods | every hosted tenant |
 | Passband for Mac | push tag `passband-mac-X.Y.Z` | GitHub Release + appcast + Homebrew cask | every Mac user, via Sparkle |
 | Passband for iOS | push tag `passband-ios-X.Y.Z` | a TestFlight build | every TestFlight tester |
@@ -113,9 +113,10 @@ git tag daemon-0.X.Y && git push origin daemon-0.X.Y   # must equal Cargo.toml
 ```
 
 `.github/workflows/release-daemon.yml` verifies the tag against the workspace
-version, then builds all three images and pushes them to GHCR under the tag
-itself plus `latest`. No secrets beyond `GITHUB_TOKEN`. **squelchd is amd64 +
-arm64** (its Dockerfile cross-compiles, so one runner covers both); **warden
+version, then builds all four images and pushes them to GHCR under the tag
+itself plus `latest`. No secrets beyond `GITHUB_TOKEN`. **squelchd and
+squelch-embed are amd64 + arm64** (their Dockerfiles cross-compile, so one
+runner covers both); **warden
 and control are amd64 only**, because they build natively and emulating their
 ONNX build risks the six-hour job ceiling in a token-holding job. The one box
 that runs them is amd64. There is no QEMU step in this workflow, and re-adding one is not how
@@ -125,11 +126,19 @@ Verify (the failure mode is a half-published release):
 
 ```sh
 gh run watch
-for img in squelchd squelch-warden squelch-control; do
+for img in squelchd squelch-warden squelch-control squelch-embed; do
   TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:passband-app/$img:pull" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
   curl -s -H "Authorization: Bearer $TOKEN" "https://ghcr.io/v2/passband-app/$img/tags/list"
 done
 ```
+
+The check is anonymous, which is the point: the carrier pulls with no
+credentials, so an empty answer is a package the carrier cannot pull either.
+**`squelch-embed` was a new package at its first release, and GHCR creates a
+new package PRIVATE** (it takes the private repository's visibility). The
+one-time fix, making it public and giving `passband-app/passband` Write under
+Manage Actions access, is `deploy/hosted/SETUP.md` §10b step 1; any future new
+image needs the same before its first deploy.
 
 Publishing images affects nobody by itself. Self-hosters on `:latest` pick it
 up on their next `docker compose pull`, so the tag IS the self-host release —
@@ -150,6 +159,8 @@ ssh carrier
 #    20-warden.yaml + 90-warden-roller.yaml: the warden's own image, the SAME
 #      tag in both (see below)
 #    60-models.yaml: model-warm job tag (chronically forgotten)
+#    65-embed.yaml: NOT part of a routine roll; it moves only on a contract
+#      change (ROLLOUT.md's pin table)
 kubectl apply -f deploy/hosted/15-warden-config.yaml
 kubectl apply -f deploy/hosted/20-warden.yaml
 kubectl apply -f deploy/hosted/90-warden-roller.yaml
@@ -390,6 +401,15 @@ roll the carrier promptly.
   bases (ort needs glibc ≥ 2.38). Warden and relay are independent.
 - **New workspace crates** must be added to the COPY lists in BOTH
   `squelchd/Dockerfile` and `Dockerfile.control`, or the tag fails in CI.
+- **What gets a vector is behaviour too.** From `daemon-0.0.15`, the sealed
+  gate (`docs/SECURITY.md` §4d) decides which mail is embedded, on self-host as
+  on hosted. Say it in that release's notes, because a self-hoster will notice:
+  inbound mail is embedded only once triage has decided it, so a daemon with no
+  model key embeds none of its mail, inbound or its own (keyword search still
+  finds all of it), and the owner's own mail in the archive tier is never
+  embedded either, since it never gets an access check; and the first open after the upgrade deletes the vectors of sealed
+  and undecided mail. Downgrading after it is data-compatible and re-embeds
+  that mail.
 - Upgrade command in the docs is `docker compose pull && docker compose up -d`
   against `:latest`; bare-metal is `deploy/update.sh`. Whatever those two do
   to a v-1 install IS the self-host upgrade experience.

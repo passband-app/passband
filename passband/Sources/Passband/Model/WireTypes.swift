@@ -1726,7 +1726,14 @@ struct TimelineEvent: Codable, Sendable, Hashable, Identifiable {
     var end: String?
     var all_day: Bool
     var start_timezone: String?
+    /// The location as Google holds it: what the editor shows and writes.
     var location: String?
+    /// The location cut down by the daemon's small model to the venue's name
+    /// and its street address (a booking service's marketing gone): what the
+    /// card shows. Both nil when the location names no place. Nil until the
+    /// daemon has cleaned it, and from an older daemon: the card shows
+    /// `location`.
+    var place: TimelinePlace?
     var status: TimelineEventStatus?
     /// Nil when the user is not an attendee (their own event).
     var self_response: TimelineSelfResponse?
@@ -1753,12 +1760,77 @@ struct TimelineEvent: Codable, Sendable, Hashable, Identifiable {
     /// and theirs to organize. Nil (an older daemon) is NO, and is also how
     /// the client knows a daemon cannot invite at all (Lib/EventGuests.swift).
     var guest_editable: Bool?
+    /// Gmail made this event itself from the user's mail (Google's
+    /// `eventType: fromGmail`). Google refuses edits to it, so `editable` is
+    /// false; the card says where it came from. Nil from an older daemon.
+    var from_gmail: Bool?
+    /// Passband made this event in place of Gmail's copy and keeps it current
+    /// from the mail (the daemon's gcal/own.rs). Nil means no.
+    var passband_owned: Bool?
 }
 
 /// How a guest answered, in the daemon's four words.
 enum GuestResponse: String, LenientRawEnum {
     case accepted, declined, tentative, pending
     static var unknownFallback: GuestResponse { .pending }
+}
+
+/// `GET /client/calendar/search` (docs/CALENDAR.md §10.1): the events and
+/// ghosts a query matches, upcoming soonest first, then past, most recent
+/// first. Each item is exactly what `/client/timeline` serves for it, so one
+/// decoder reads both. `total` counts the hits before the daemon's limit.
+struct CalendarSearchPage: Decodable, Sendable, Hashable {
+    var items: [CalendarSearchItem]
+    var total: Int
+    var granted: Bool
+
+    init(items: [CalendarSearchItem] = [], total: Int = 0, granted: Bool = false) {
+        self.items = items
+        self.total = total
+        self.granted = granted
+    }
+
+    /// LENIENT PER ITEM, as the timeline is: a row that does not decode
+    /// (a null, a number, an object with neither key) costs that row, not
+    /// the block. Each element goes through `Lossy`, which always decodes,
+    /// so one bad element cannot fail the array.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        items = ((try? c.decodeIfPresent([Lossy].self, forKey: .items)) ?? [])
+            .compactMap(\.item)
+            .filter { $0.event != nil || $0.ghost != nil }
+        total = (try? c.decodeIfPresent(Int.self, forKey: .total)) ?? items.count
+        granted = (try? c.decodeIfPresent(Bool.self, forKey: .granted)) ?? false
+    }
+
+    private enum CodingKeys: String, CodingKey { case items, total, granted }
+
+    private struct Lossy: Decodable {
+        let item: CalendarSearchItem?
+        init(from decoder: Decoder) throws {
+            item = try? CalendarSearchItem(from: decoder)
+        }
+    }
+}
+
+/// One hit: `{"event": ...}` or `{"ghost": ...}`. Both nil when the row did
+/// not decode; the page drops those.
+struct CalendarSearchItem: Decodable, Sendable, Hashable {
+    var event: TimelineEvent?
+    var ghost: TimelineGhost?
+
+    init(event: TimelineEvent? = nil, ghost: TimelineGhost? = nil) {
+        self.event = event
+        self.ghost = ghost
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        event = try? c.decodeIfPresent(TimelineEvent.self, forKey: .event)
+        ghost = event == nil ? (try? c.decodeIfPresent(TimelineGhost.self, forKey: .ghost)) : nil
+    }
+
+    private enum CodingKeys: String, CodingKey { case event, ghost }
 }
 
 /// Wave 5: one person on an event. Only the address is required; a row
@@ -1826,11 +1898,36 @@ extension TimelineEvent {
         guests = (try? c.decodeIfPresent([OneGuest].self, forKey: .guests))?.compactMap(\.value)
         guests_truncated = try? c.decodeIfPresent(Bool.self, forKey: .guests_truncated)
         guest_editable = try? c.decodeIfPresent(Bool.self, forKey: .guest_editable)
+        place = try? c.decodeIfPresent(TimelinePlace.self, forKey: .place)
+        from_gmail = try? c.decodeIfPresent(Bool.self, forKey: .from_gmail)
+        passband_owned = try? c.decodeIfPresent(Bool.self, forKey: .passband_owned)
     }
 
     private struct OneGuest: Decodable {
         let value: TimelineGuest?
         init(from decoder: Decoder) throws { value = try? TimelineGuest(from: decoder) }
+    }
+}
+
+/// An event's cleaned place (`place` on the wire). Every word of `name` and
+/// `address` is a word of `original`, checked by the daemon.
+struct TimelinePlace: Codable, Sendable, Hashable {
+    var name: String?
+    var address: String?
+    /// The location the model read, as Google holds it.
+    var original: String?
+
+    init(name: String? = nil, address: String? = nil, original: String? = nil) {
+        self.name = name
+        self.address = address
+        self.original = original
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try? c.decodeIfPresent(String.self, forKey: .name)
+        address = try? c.decodeIfPresent(String.self, forKey: .address)
+        original = try? c.decodeIfPresent(String.self, forKey: .original)
     }
 }
 

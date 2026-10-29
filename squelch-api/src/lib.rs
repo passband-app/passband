@@ -10,6 +10,7 @@ mod agent_write;
 mod assistant;
 mod auth;
 mod calendar_connect;
+mod calendar_search;
 mod calendar_write;
 mod console;
 mod devices;
@@ -474,6 +475,12 @@ fn calendar_routes() -> Router<ApiState> {
         // directions: the agent door has no timeline route.
         .route("/client/timeline", get(handlers::get_timeline))
         .route("/client/timeline/ghosts/{id}", patch(handlers::patch_ghost))
+        // Calendar search (docs/CALENDAR.md §10.1): the search box's Events
+        // block, and the in-app assistant's `search_calendar`, which gets the
+        // agent view (no address of anyone). Agent MCP's `search_calendar`
+        // runs the same search through squelch-mcp.
+        .route("/client/calendar/search", get(calendar_search::human))
+        .route("/client/agent/calendar/search", get(calendar_search::agent))
         // Start a Google Calendar sync now (the calendar page opening), at
         // most once per account per 30 seconds. HUMAN DOOR ONLY: the agent
         // door neither reads the calendar nor spends its quota.
@@ -488,8 +495,8 @@ fn calendar_routes() -> Router<ApiState> {
         )
         // The user's own create, edit and delete of one event on their Google
         // Calendar: Google first, then the local row, each attempt audited.
-        // HUMAN DOOR ONLY: the agent door and the in-app assistant can neither
-        // read nor write a calendar.
+        // HUMAN DOOR ONLY: the agent door and the in-app assistant cannot
+        // write a calendar (they read it only through search, above).
         .route(
             "/client/calendar/events",
             post(calendar_write::create_event),

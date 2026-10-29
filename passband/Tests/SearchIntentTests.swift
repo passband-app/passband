@@ -451,9 +451,9 @@ struct SearchIntentTests {
             "an empty local search says so rather than framing an empty block")
     }
 
-    /// The hits block rides in two places: under the system prompt, where the
-    /// Trust block really is below it, and on a tool-result user message, where
-    /// there is nothing below it at all. One wording has to be true in both, or
+    /// The hits block rides in two places, both user messages: the context a
+    /// question is sent with, and a refinement on a tool-result message. The
+    /// Trust block is in the system prompt above both, never beside them. One wording has to be true in both, or
     /// the copy that is wrong is teaching a model to look for rules it cannot
     /// see and to fall back on its own judgement about a stranger's subject
     /// line.

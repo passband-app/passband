@@ -38,6 +38,7 @@ Tokyo Update
 - Smart clear
 - Closes event mail once the event is over
 - Treats breach and security notices as important mail, not sign-ins
+- Login codes are never added to the search index
 - Your agent works in your timezone
 - Your agent can search mail you sent
 - Faster and steadier

@@ -45,10 +45,20 @@ events and milestones are not emitted at all from the practice inbox.
 
 ## Session replay (Mac, `full` only)
 
-PostHog has no macOS replay, so the app speaks its mobile replay format by
+PostHog has no macOS replay, so the app speaks its WEB replay format by
 hand: `$snapshot` events to `/s/` (gzipped, a lane of their own in
-`PostHogClient`) carrying rrweb records, under the same `$session_id` as the
-events, so a recording in PostHog shows the session's events on its timeline.
+`PostHogClient`, `$snapshot_source: web`) carrying rrweb records, under the
+same `$session_id` as the events, so a recording in PostHog shows the
+session's events on its timeline. Each full snapshot is a tiny HTML page:
+`<body>` is the window, and every box is an absolutely positioned `<div>` (an
+icon is an `<img>` of our own render).
+
+**Not the mobile format.** PostHog's mobile "wireframes" format looks like the
+natural fit and is what this first shipped with. PostHog accepts mobile-format
+uploads from a custom client with `200 OK` and then never stores them
+(verified 2026-10-28: the same 20-second probe session played in web format
+and was "not found" in mobile format, same key, same project). Do not switch
+back without re-running that probe.
 Code: `Lib/SessionReplay.swift` (when to record) and
 `Lib/ReplayWireframe.swift` (what a frame is).
 
@@ -82,8 +92,11 @@ Sheets, popovers and panels over the window are drawn
 onto the same canvas. The meta record's `href` is the current `$screen_name`.
 
 **The guard.** `Analytics.replay` runs `ReplayWireframe.validate` on every
-record: each key must be an rrweb field name, each String a grey `#LLLLLLAA`,
-`rectangle`, or an `allowedStrings` screen name. Anything else drops the
+record: each key must be an rrweb field name, and each String one of the five
+tags we emit (`html` `head` `body` `div` `img`), a style string in exactly the
+grammar `ReplayWireframe` writes with grey `#LLLLLLAA` paints only, the screen
+URL `https://passband.app/app/<screen>` for an `allowedStrings` screen name, or
+an icon data URL this process rendered. Anything else drops the
 record (and asserts in debug). `Tests/ReplayWireframeTests.swift` holds the
 contract against a layer tree with a subject, an avatar, a hued pill and a web
 view in it.
@@ -93,8 +106,14 @@ is sent only when it changed, at most once a second. Nothing while the app is
 in the background or the window is hidden, and nothing after 2 minutes
 without a click, key or scroll, so an idle open window does not keep a
 session alive. A click after a pause sends a full frame first. Clicks are
-rrweb touch records (start and end) at canvas points from the window's
-top-left.
+rrweb mouse interactions on `<body>` (down, up, click) at canvas points from
+the window's top-left.
+
+**Activity.** PostHog's recordings list hides recordings with 5 or fewer
+active seconds by default, and counts them from pointer records, not frames
+(PostHog#91388). So the pointer is sampled each tick, and any
+movement, scroll, key or click since the last tick goes out as one rrweb
+mouse-move at the pointer's position. Never which key.
 
 | Event | Properties | Question |
 |---|---|---|
@@ -109,8 +128,8 @@ The `/s/` body is posthog-ios's shape: a bare JSON array, each event with
 its own `api_key`, a `uuid`, and `distinct_id` repeated in `properties`.
 Buffered frames are dropped, not sent, once the level falls below `full`.
 
-PostHog side: the project must have session recording turned on, and mobile
-recordings count against the mobile replay quota.
+PostHog side: the project must have session recording turned on. These are
+web recordings for billing.
 
 ## Identity
 

@@ -1,10 +1,10 @@
 // The content-free picture behind session replay: a window reduced to boxes.
 //
-// PostHog's mobile replay player draws "wireframes", a list of rectangles with
-// a few style fields, so a replay can be a recording of LAYOUT rather than of
-// pixels. This file builds that list from a window's Core Animation layer tree,
-// which SwiftUI and AppKit both render into, and it is the whole of what a
-// replay can see.
+// A replay can be a recording of LAYOUT rather than of pixels: each frame is a
+// tiny HTML page of grey boxes that PostHog's web replay player renders. This
+// file builds those boxes from a window's Core Animation layer tree, which
+// SwiftUI and AppKit both render into, and it is the whole of what a replay
+// can see.
 //
 // PRIVACY, which is the point of the file. A layer is read for its geometry and
 // nothing else:
@@ -31,8 +31,9 @@
 // grid on every edge, so neither its length nor its line count is exact.
 //
 // `ReplayWireframe.validate` checks that on the way out: every String in a
-// frame must be a grey #LLLLLLAA, a word from `closedWords`, or an image this
-// process rendered itself (`registerImage`), or the frame is not sent. It is the same rule as `Analytics.allowedStrings`, applied to a tree.
+// frame must be a tag from `closedWords`, a style string in exactly our own
+// grammar with grey paints, the screen URL, or an image this process rendered
+// itself (`registerImage`), or the frame is not sent. It is the same rule as `Analytics.allowedStrings`, applied to a tree.
 
 import Foundation
 import QuartzCore
@@ -274,44 +275,76 @@ enum ReplayWireframe {
 
     // MARK: - the wire
 
-    /// One full rrweb snapshot (type 2) of the canvas: a root box the size of
-    /// the main window, painted `background`, with every node as a direct
-    /// child in paint order. Ids are per frame; a full snapshot replaces the
-    /// last one wholesale, so they need not be stable.
+    /// rrweb node ids that never change: the document, <html>, <head>, and
+    /// <body>, which is the canvas and the target of every pointer record.
+    static let bodyId = 5
+
+    /// One full rrweb snapshot (type 2) of the canvas, in PostHog's WEB
+    /// replay format: a tiny HTML page whose <body> is the main window,
+    /// painted `background`, with one absolutely positioned <div> per box
+    /// (or <img> per icon) in paint order. Web, not PostHog's mobile
+    /// "wireframes": PostHog accepts mobile-format recordings from a custom
+    /// client and then silently never stores them (verified 2026-10-28: a
+    /// web-format probe played, the same session in mobile format did not).
+    /// Ids are per frame; a full snapshot replaces the last one wholesale.
     static func fullSnapshot(
         _ nodes: [Node], width: Int, height: Int, background: String, timestamp: Int64
     ) -> [String: Any] {
         var children: [[String: Any]] = []
         children.reserveCapacity(nodes.count)
         for (i, n) in nodes.enumerated() {
+            let id = bodyId + 1 + i
             if let image = n.image {
                 children.append([
-                    "id": i + 2, "x": n.x, "y": n.y, "width": n.w, "height": n.h,
-                    "type": "image", "base64": image,
+                    "type": 2, "tagName": "img", "id": id, "childNodes": [[String: Any]](),
+                    "attributes": ["src": image, "style": boxStyle(n, paint: false)],
                 ])
-                continue
+            } else {
+                children.append([
+                    "type": 2, "tagName": "div", "id": id, "childNodes": [[String: Any]](),
+                    "attributes": ["style": boxStyle(n, paint: true)],
+                ])
             }
-            var style: [String: Any] = [:]
-            if let fill = n.fill { style["backgroundColor"] = fill }
-            if let border = n.border {
-                style["borderColor"] = border
-                style["borderWidth"] = n.borderWidth
-            }
-            if n.radius > 0 { style["borderRadius"] = n.radius }
-            children.append([
-                "id": i + 2, "x": n.x, "y": n.y, "width": n.w, "height": n.h,
-                "type": "rectangle", "style": style,
-            ])
         }
-        let root: [String: Any] = [
-            "id": 1, "x": 0, "y": 0, "width": width, "height": height,
-            "type": "rectangle", "style": ["backgroundColor": background],
-            "childWireframes": children,
+        let body: [String: Any] = [
+            "type": 2, "tagName": "body", "id": bodyId, "childNodes": children,
+            "attributes": ["style": bodyStyle(width: width, height: height, background: background)],
         ]
+        let head: [String: Any] = [
+            "type": 2, "tagName": "head", "id": 4, "childNodes": [[String: Any]](),
+            "attributes": [String: Any](),
+        ]
+        let html: [String: Any] = [
+            "type": 2, "tagName": "html", "id": 3, "childNodes": [head, body],
+            "attributes": [String: Any](),
+        ]
+        let document: [String: Any] = ["type": 0, "id": 1, "childNodes": [html]]
         return [
             "type": 2, "timestamp": timestamp,
-            "data": ["initialOffset": ["top": 0, "left": 0], "wireframes": [root]],
+            "data": ["node": document, "initialOffset": ["top": 0, "left": 0]],
         ]
+    }
+
+    /// The meta record (type 4) that opens every full snapshot: the canvas
+    /// size, and the screen as a URL PostHog shows above the player. The
+    /// screen name is one `Analytics` already allows.
+    static func meta(screen: String, width: Int, height: Int, timestamp: Int64) -> [String: Any] {
+        let href = screen.isEmpty ? hrefRoot : "\(hrefRoot)/\(screen)"
+        return ["type": 4, "timestamp": timestamp, "data": ["href": href, "width": width, "height": height]]
+    }
+    private static let hrefRoot = "https://passband.app/app"
+
+    private static func boxStyle(_ n: Node, paint: Bool) -> String {
+        var css = "position:absolute;left:\(n.x)px;top:\(n.y)px;width:\(n.w)px;height:\(n.h)px;box-sizing:border-box;"
+        guard paint else { return css }
+        if let fill = n.fill { css += "background:\(fill);" }
+        if let border = n.border { css += "border:\(n.borderWidth)px solid \(border);" }
+        if n.radius > 0 { css += "border-radius:\(n.radius)px;" }
+        return css
+    }
+
+    private static func bodyStyle(width: Int, height: Int, background: String) -> String {
+        "margin:0;position:relative;overflow:hidden;width:\(width)px;height:\(height)px;background:\(background);"
     }
 
     /// A cheap fingerprint of a frame, so an unchanged screen is not re-sent.
@@ -331,17 +364,21 @@ enum ReplayWireframe {
         return h.finalize()
     }
 
-    /// The only words a replay record may carry, besides hex colors and the
-    /// screen names `Analytics` already allows (passed in as `extra`).
-    static let closedWords: Set<String> = ["rectangle", "image"]
+    // MARK: - the guard
 
-    /// True when every String anywhere in `value` is a grey #LLLLLLAA, a
-    /// closed word, or one of `extra`. Anything else (and so anything that
-    /// could be text off the screen) fails the whole record.
+    /// The only words a replay record may carry as values.
+    static let closedWords: Set<String> = ["html", "head", "body", "div", "img"]
+
+    /// True when every String anywhere in `value` is one of: a closed word, a
+    /// style string in EXACTLY the grammar `boxStyle`/`bodyStyle` write with
+    /// grey paints only, an image this process rendered (`registerImage`),
+    /// or the screen URL for a name in `extra`. Every key must be an rrweb
+    /// field name. Anything else (and so anything that could be text off the
+    /// screen) fails the whole record.
     static func validate(_ value: Any, extra: Set<String>) -> Bool {
         switch value {
         case let s as String:
-            return closedWords.contains(s) || extra.contains(s) || isHexPaint(s)
+            return closedWords.contains(s) || isOurStyle(s) || isOurHref(s, extra)
                 || (s.hasPrefix("data:image/png;base64,") && isRegistered(s))
         case let d as [String: Any]:
             return d.allSatisfy { closedKeys.contains($0.key) && validate($0.value, extra: extra) }
@@ -354,13 +391,42 @@ enum ReplayWireframe {
         }
     }
 
-    /// Keys are strings too. These are rrweb's and PostHog's own field names.
+    /// Keys are strings too. These are rrweb's own field names.
     private static let closedKeys: Set<String> = [
-        "type", "timestamp", "data", "initialOffset", "top", "left", "wireframes",
-        "id", "x", "y", "width", "height", "style", "childWireframes",
-        "backgroundColor", "borderColor", "borderWidth", "borderRadius",
-        "href", "source", "pointerType", "base64",
+        "type", "timestamp", "data", "node", "childNodes", "tagName", "attributes",
+        "style", "src", "id", "initialOffset", "top", "left", "href", "width", "height",
+        "source", "x", "y", "positions", "timeOffset",
     ]
+
+    nonisolated(unsafe) private static let boxGrammar = try! NSRegularExpression(
+        pattern:
+            "^position:absolute;left:-?\\d{1,5}px;top:-?\\d{1,5}px;width:\\d{1,5}px;height:\\d{1,5}px;box-sizing:border-box;(?:background:(#[0-9A-F]{8});)?(?:border:\\d{1,2}px solid (#[0-9A-F]{8});)?(?:border-radius:\\d{1,3}px;)?$"
+    )
+    nonisolated(unsafe) private static let bodyGrammar = try! NSRegularExpression(
+        pattern:
+            "^margin:0;position:relative;overflow:hidden;width:\\d{1,5}px;height:\\d{1,5}px;background:(#[0-9A-F]{8});$"
+    )
+
+    /// A style string in our grammar, every color in it a grey.
+    static func isOurStyle(_ s: String) -> Bool {
+        let range = NSRange(s.startIndex..., in: s)
+        for grammar in [boxGrammar, bodyGrammar] {
+            guard let m = grammar.firstMatch(in: s, range: range) else { continue }
+            for g in 1..<m.numberOfRanges {
+                let r = m.range(at: g)
+                guard r.location != NSNotFound, let sr = Range(r, in: s) else { continue }
+                if !isHexPaint(String(s[sr])) { return false }
+            }
+            return true
+        }
+        return false
+    }
+
+    private static func isOurHref(_ s: String, _ screens: Set<String>) -> Bool {
+        if s == hrefRoot { return true }
+        guard s.hasPrefix(hrefRoot + "/") else { return false }
+        return screens.contains(String(s.dropFirst(hrefRoot.count + 1)))
+    }
 
     /// #LLLLLLAA, uppercase, with the three channels equal: a grey and
     /// nothing else, so a hue cannot ride out even if `paint` regresses.

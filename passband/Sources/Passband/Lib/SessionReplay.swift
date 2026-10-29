@@ -3,18 +3,26 @@
 // nothing that was on the screen. See `ReplayWireframe` for what a frame is
 // made of and why no text, image or mail body can be in one.
 //
-// PostHog has no macOS replay, so this speaks its mobile wire format by hand:
+// PostHog has no macOS replay, so this speaks its WEB replay format by hand:
 // `$snapshot` events to /s/ carrying rrweb records (4 = meta, the canvas size
-// and the screen's name; 2 = a full wireframe; 3 = a click, as a touch), under
-// the same `$session_id` as the ordinary events so they all land in one
-// recording. `Analytics.replay` is the one door out, and it validates every
+// and the screen as a URL; 2 = a full snapshot, a small HTML page of boxes;
+// 3 = pointer moves and clicks on its <body>), under the same `$session_id` as
+// the ordinary events so they all land in one recording. Not the mobile
+// format: PostHog silently drops mobile-format recordings from a custom client.
+// `Analytics.replay` is the one door out, and it validates every
 // record against the closed vocabulary before it is queued.
 //
 // Cost: a frame is a walk of the window's layer tree on the main thread (a few
 // hundred layers on the sitrep), at most twice a second plus once per click,
-// and only while someone is using the app. An unchanged screen is never re-sent, nothing is recorded while the app
-// is in the background, and two idle minutes stop the recording until the next
-// click or key. Replay runs only at the `full` telemetry level.
+// and only while someone is using the app. An unchanged screen is never
+// re-sent, nothing is recorded while the app is in the background, and two
+// idle minutes stop the recording until the next click or key. Replay runs only at the `full` telemetry level.
+//
+// Activity: PostHog's recordings list hides any recording with 5 or fewer
+// "active seconds", and it counts those from pointer records, not from
+// frames. So while someone moves the pointer, scrolls or types, the pointer's
+// position goes out as an rrweb mouse-move at most once a tick. A key press
+// counts as activity at the pointer's position and never says which key.
 //
 // Frustration comes out of the click stream as two events PostHog's
 // recordings list can filter on: `$rageclick` (three clicks in one spot inside
@@ -48,6 +56,9 @@
         private var clicks: [(at: Date, point: CGPoint)] = []
         private var pendingDead: [(at: Date, print: Int, point: CGPoint)] = []
         private var menuTracking = false
+        /// Input since the last activity record, and where the pointer was.
+        private var activeSinceTick = false
+        private var lastPointer: CGPoint?
 
         private struct Meta: Equatable {
             var width: Int
@@ -114,6 +125,7 @@
         private func observe(_ event: NSEvent) {
             let now = Date()
             lastInput = now
+            activeSinceTick = true
             guard Analytics.replayEnabled else { return }
             switch event.type {
             case .leftMouseDown, .leftMouseUp:
@@ -122,15 +134,19 @@
                 // picture, or there would be nothing to draw the click on.
                 if Analytics.replayNeedsFull || lastPrint == nil { tick(force: true) }
                 let down = event.type == .leftMouseDown
-                Analytics.replay(
-                    [[
+                // rrweb mouse interactions on <body>: 1 = down, 0 = up, and a
+                // 2 = click after the up, which is what the player marks.
+                let x = Int(point.x.rounded())
+                let y = Int(point.y.rounded())
+                func interaction(_ kind: Int) -> [String: Any] {
+                    [
                         "type": 3, "timestamp": Self.millis(now),
                         "data": [
-                            // 7 = touch start, 9 = touch end; id 0 is the root.
-                            "id": 0, "pointerType": 2, "source": 2, "type": down ? 7 : 9,
-                            "x": Int(point.x.rounded()), "y": Int(point.y.rounded()),
+                            "source": 2, "type": kind, "id": ReplayWireframe.bodyId, "x": x, "y": y,
                         ],
-                    ]], full: false)
+                    ]
+                }
+                Analytics.replay(down ? [interaction(1)] : [interaction(0), interaction(2)], full: false)
                 if down { noteClick(point, now) }
             default:
                 break
@@ -179,6 +195,7 @@
                 return
             }
             let now = Date()
+            notePointer(now)
             guard force || now.timeIntervalSince(lastInput) < Self.idleAfter else { return }
             guard let frame = capture() else { return }
             resolveDeadClicks(frame.print, now)
@@ -190,12 +207,12 @@
             guard needsFull || changed else { return }
             guard needsFull || now.timeIntervalSince(lastSent) >= Self.throttle else { return }
 
-            var records: [[String: Any]] = []
-            if needsFull || meta != lastMeta {
-                var data: [String: Any] = ["width": frame.width, "height": frame.height]
-                if !href.isEmpty { data["href"] = href }
-                records.append(["type": 4, "timestamp": Self.millis(now), "data": data])
-            }
+            // rrweb wants a meta record before every full snapshot.
+            var records: [[String: Any]] = [
+                ReplayWireframe.meta(
+                    screen: href, width: frame.width, height: frame.height,
+                    timestamp: Self.millis(now))
+            ]
             records.append(
                 ReplayWireframe.fullSnapshot(
                     frame.nodes, width: frame.width, height: frame.height,
@@ -204,6 +221,37 @@
             lastSent = now
             lastPrint = frame.print
             lastMeta = meta
+        }
+
+        /// The pointer, sampled each tick (mouse-moved events only reach
+        /// windows that ask for them, so a monitor would miss most). A move
+        /// counts as input; any input since the last tick goes out as one
+        /// mouse-move at the pointer's canvas position, once the recording
+        /// has a frame to draw it on.
+        private func notePointer(_ now: Date) {
+            guard let main = MainWindow.find() else { return }
+            let screen = NSEvent.mouseLocation
+            let p = CGPoint(x: screen.x - main.frame.minX, y: main.frame.maxY - screen.y)
+            let inside = p.x >= 0 && p.y >= 0 && p.x <= main.frame.width && p.y <= main.frame.height
+            if inside, let last = lastPointer, hypot(last.x - p.x, last.y - p.y) >= 2 {
+                lastInput = now
+                activeSinceTick = true
+            }
+            if inside { lastPointer = p }
+            guard activeSinceTick, let at = lastPointer, lastPrint != nil else { return }
+            activeSinceTick = false
+            Analytics.replay(
+                [[
+                    "type": 3, "timestamp": Self.millis(now),
+                    "data": [
+                        "source": 1,
+                        "positions": [[
+                            "x": Int(at.x.rounded()), "y": Int(at.y.rounded()),
+                            "id": ReplayWireframe.bodyId,
+                            "timeOffset": 0,
+                        ]],
+                    ],
+                ]], full: false)
         }
 
         private func resolveDeadClicks(_ print: Int, _ now: Date) {

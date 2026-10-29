@@ -35,6 +35,7 @@ struct ReplayWireframeTests {
         flippedAndUnflippedAgree()
         textWidthsAreQuantized()
         validatorIsClosed()
+        webSnapshotShape()
         onlyOurOwnImagesPass()
         gzipIsAGzipMember()
 
@@ -102,6 +103,23 @@ struct ReplayWireframeTests {
             root: root, flipped: flipped, offset: .zero,
             clip: clip ?? root.bounds, into: &out)
         return out
+    }
+
+    static func webSnapshotShape() {
+        let nodes = walk(tempting())
+        let snap = ReplayWireframe.fullSnapshot(
+            nodes, width: 800, height: 600, background: "#1E1E1EFF", timestamp: 1)
+        let data = snap["data"] as? [String: Any]
+        let doc = data?["node"] as? [String: Any]
+        let html = (doc?["childNodes"] as? [[String: Any]])?.first
+        let body = (html?["childNodes"] as? [[String: Any]])?.last
+        expect(doc?["type"] as? Int == 0 && html?["tagName"] as? String == "html", "a document with <html>")
+        expect(body?["tagName"] as? String == "body" && body?["id"] as? Int == ReplayWireframe.bodyId,
+            "<body> carries the fixed id pointer records target")
+        let kids = body?["childNodes"] as? [[String: Any]] ?? []
+        expect(kids.count == nodes.count, "one element per box (\(kids.count) vs \(nodes.count))")
+        let ids = Set(kids.compactMap { $0["id"] as? Int })
+        expect(ids.count == kids.count && !ids.contains(ReplayWireframe.bodyId), "element ids are unique")
     }
 
     static func json(_ nodes: [ReplayWireframe.Node]) -> String {
@@ -259,9 +277,24 @@ struct ReplayWireframeTests {
     }
 
     static func validatorIsClosed() {
-        let ok: [String: Any] = ["type": 4, "timestamp": 1, "data": ["href": "sitrep", "width": 1, "height": 1]]
+        let ok = ReplayWireframe.meta(screen: "sitrep", width: 1, height: 1, timestamp: 1)
         expect(ReplayWireframe.validate([ok], extra: ["sitrep"]), "a screen name from the vocabulary passes")
         expect(!ReplayWireframe.validate([ok], extra: []), "the same name outside the vocabulary fails")
+        let bare = ReplayWireframe.meta(screen: "", width: 1, height: 1, timestamp: 1)
+        expect(ReplayWireframe.validate([bare], extra: []), "no screen yet is fine")
+        // The style grammar is exact: our own string passes, anything that
+        // bends it does not.
+        let box = "position:absolute;left:4px;top:-8px;width:10px;height:12px;box-sizing:border-box;background:#8080801F;border:1px solid #80808059;border-radius:6px;"
+        expect(ReplayWireframe.isOurStyle(box), "our box style passes")
+        expect(!ReplayWireframe.isOurStyle(box.replacingOccurrences(of: "#8080801F", with: "#FF3B30FF")),
+            "a hue inside a style fails")
+        expect(!ReplayWireframe.isOurStyle(box + "content:'hi';"), "an extra declaration fails")
+        expect(!ReplayWireframe.isOurStyle(box.replacingOccurrences(of: "background:#8080801F;", with: "background:url(x);")),
+            "a url() fails")
+        let textNode: [String: Any] = ["type": 3, "textContent": "SECRET", "id": 9]
+        expect(!ReplayWireframe.validate([textNode], extra: []), "an rrweb text node fails")
+        let span: [String: Any] = ["type": 2, "tagName": "span", "id": 9, "attributes": [String: Any](), "childNodes": [Any]()]
+        expect(!ReplayWireframe.validate([span], extra: []), "a tag outside the closed set fails")
         let text: [String: Any] = ["type": 2, "data": ["wireframes": [["type": "text", "text": "hi"]]]]
         expect(!ReplayWireframe.validate([text], extra: []), "a text wireframe fails")
         let hue: [String: Any] = ["style": ["backgroundColor": "#FF0000FF"]]

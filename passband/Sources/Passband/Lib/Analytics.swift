@@ -731,7 +731,7 @@ final class PostHogClient: @unchecked Sendable {
             var props = self.context
             props["$session_id"] = sid
             props["$window_id"] = sid
-            props["$snapshot_source"] = "mobile"
+            props["$snapshot_source"] = "web"
             props["$snapshot_data"] = boxed.value
             // posthog-ios copies the id into the properties too: replay
             // ingestion reads it there.

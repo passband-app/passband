@@ -164,6 +164,9 @@ pub(crate) enum AfterDot {
     HangUp,
     Refuse554,
     Refuse451,
+    /// Read the message, then say nothing and keep the connection open: a
+    /// stalled server, or a NAT that dropped the mapping.
+    Silent,
 }
 
 #[derive(Default)]
@@ -213,6 +216,8 @@ pub(crate) async fn scripted(after_dot: AfterDot) -> (u16, Arc<Seen>) {
                             .unwrap_or_default();
                         if dec.ends_with(b"\0good-pw") {
                             b"235 ok\r\n"
+                        } else if dec.ends_with(b"\0later-pw") {
+                            b"454 4.7.0 temporary authentication failure\r\n"
                         } else {
                             b"535 5.7.8 bad credentials for good-pw-hint\r\n"
                         }
@@ -245,6 +250,12 @@ pub(crate) async fn scripted(after_dot: AfterDot) -> (u16, Arc<Seen>) {
                             AfterDot::HangUp => return,
                             AfterDot::Refuse554 => b"554 5.7.1 rejected\r\n",
                             AfterDot::Refuse451 => b"451 4.3.0 try later\r\n",
+                            AfterDot::Silent => {
+                                // Hold the socket open, answering nothing,
+                                // QUIT included.
+                                tokio::time::sleep(Duration::from_secs(3600)).await;
+                                return;
+                            }
                         }
                     } else if upper == "QUIT" {
                         let _ = w.write_all(b"221 bye\r\n").await;
@@ -286,6 +297,7 @@ fn quick() -> SmtpTimeouts {
     SmtpTimeouts {
         connect: Duration::from_secs(5),
         command: Duration::from_secs(5),
+        stall: Duration::from_secs(5),
     }
 }
 
@@ -464,4 +476,264 @@ async fn starttls_that_the_server_does_not_offer_is_refused_before_auth() {
         "{err:?}"
     );
     assert_eq!(seen.auths.load(Ordering::SeqCst), 0);
+}
+
+// ---- review fixes (phase 3 fix round 1) --------------------------------------
+
+/// SECURITY REVIEW F1: a server that goes silent after the message is handed
+/// over is "may have been sent" within the body budget plus the bounded QUIT,
+/// never a hang (lettre's own `abort` waits for QUIT's reply forever).
+#[tokio::test]
+async fn a_server_silent_after_data_is_maybe_sent_within_the_bound() {
+    let (port, seen) = scripted(AfterDot::Silent).await;
+    let rcpts = vec!["a@x.test".to_string()];
+    let t = SmtpTimeouts {
+        connect: Duration::from_secs(2),
+        command: Duration::from_secs(2),
+        stall: Duration::from_secs(2),
+    };
+    let started = std::time::Instant::now();
+    let out = tokio::time::timeout(
+        Duration::from_secs(20),
+        submit(
+            &endpoint(port, "good-pw"),
+            t,
+            "me@x.test",
+            &rcpts,
+            MSG,
+            Duration::from_secs(1),
+        ),
+    )
+    .await
+    .expect("submit hung on a silent server");
+    let err = out.unwrap_err();
+    assert!(matches!(err, SmtpError::MaybeSent(_)), "{err:?}");
+    // The 1 s budget, then at most the 2 s QUIT bound, and slack.
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(seen.datas.load(Ordering::SeqCst), 1);
+}
+
+/// A deadline that runs out before DATA is "not sent", and quickly.
+#[tokio::test]
+async fn a_spent_deadline_before_data_is_not_sent() {
+    let (port, seen) = scripted(AfterDot::Accept).await;
+    let rcpts = vec!["a@x.test".to_string()];
+    let err = submit_until(
+        &endpoint(port, "good-pw"),
+        quick(),
+        "me@x.test",
+        &rcpts,
+        MSG,
+        Duration::from_secs(5),
+        Some(tokio::time::Instant::now()),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, SmtpError::NotSent(_)), "{err:?}");
+    assert_eq!(seen.datas.load(Ordering::SeqCst), 0);
+}
+
+/// The stall timer: a socket that takes nothing and says nothing fails the
+/// read waiting on it, so even an unbounded wait on it ends.
+#[tokio::test]
+async fn the_wire_fails_a_read_the_server_never_answers() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (_tcp, _) = listener.accept().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+    });
+    let tcp = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let mut wire = Wire::new(tcp, b"", Duration::from_millis(300));
+    let mut buf = [0u8; 8];
+    let started = std::time::Instant::now();
+    let err = tokio::time::timeout(Duration::from_secs(10), wire.read(&mut buf))
+        .await
+        .expect("the stall timer never fired")
+        .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    assert!(started.elapsed() < Duration::from_secs(3));
+}
+
+/// SECURITY REVIEW F4 / CORRECTNESS 7: a 4yz to AUTH is the server's "not
+/// now", a retry with its own words; a 5yz is the fixed bad-password line.
+#[tokio::test]
+async fn a_temporary_auth_refusal_is_a_retry_not_a_bad_password() {
+    let (port, _) = scripted(AfterDot::Accept).await;
+    let err = check_login(&endpoint(port, "later-pw"), quick())
+        .await
+        .unwrap_err();
+    assert_eq!(err, SmtpError::NotSent(SMTP_LOGIN_LATER.into()));
+    assert_eq!(
+        err.to_string(),
+        "the mail server couldn't sign in right now; try again"
+    );
+    let err = check_login(&endpoint(port, "wrong"), quick())
+        .await
+        .unwrap_err();
+    assert_eq!(err, SmtpError::Auth);
+}
+
+#[test]
+fn every_lone_cr_and_lone_lf_becomes_crlf() {
+    assert_eq!(
+        crlf_only(b"a\rb\nc\r\nd\r\r\ne\n\r"),
+        b"a\r\nb\r\nc\r\nd\r\n\r\ne\r\n\r\n"
+    );
+    assert_eq!(crlf_only(b"plain\r\n"), b"plain\r\n");
+}
+
+/// SECURITY REVIEW F2: `<CR>.<CR><LF>` in a body cannot end DATA early. The
+/// copy that is saved and sent has no bare CR; the `.` line is dot-stuffed;
+/// the server sees one message, to the one recipient, and the "commands"
+/// stay text inside it.
+#[tokio::test]
+async fn a_bare_cr_dot_in_a_body_never_ends_the_message_early() {
+    let (port, seen) = scripted(AfterDot::Accept).await;
+    let raw = b"To: a@x.test\r\nSubject: s\r\n\r\nhi\r.\r\nMAIL FROM:<me@x.test>\r\nRCPT TO:<victim@y.test>\r\nDATA\r\nforged\r\n";
+    let now = chrono::DateTime::from_timestamp(1_790_000_000, 0).unwrap();
+    let saved = transfer_safe(&with_submission_headers(
+        raw,
+        "me@x.test",
+        now,
+        "<m@x.test>",
+    ));
+    let wire = transmitted_copy(&saved);
+    for (i, b) in wire.iter().enumerate() {
+        if *b == b'\r' {
+            assert_eq!(wire.get(i + 1), Some(&b'\n'), "bare CR at {i}");
+        }
+    }
+    let rcpts = envelope_recipients(&saved);
+    assert_eq!(rcpts, vec!["a@x.test"]);
+    submit(
+        &endpoint(port, "good-pw"),
+        quick(),
+        "me@x.test",
+        &rcpts,
+        &wire,
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    assert_eq!(seen.datas.load(Ordering::SeqCst), 1);
+    let rcpt_lines = seen.rcpts.lock().unwrap().clone();
+    assert_eq!(rcpt_lines.len(), 1, "{rcpt_lines:?}");
+    let msgs = seen.messages.lock().unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert!(
+        msgs[0].contains("hi\r\n..\r\nMAIL FROM:<me@x.test>\r\n"),
+        "{}",
+        msgs[0]
+    );
+}
+
+/// The text a message decodes to, as a reader would see it.
+fn text_of(raw: &[u8]) -> String {
+    let msg = mail_parser::MessageParser::default().parse(raw).unwrap();
+    msg.body_text(0).unwrap().into_owned()
+}
+
+/// CORRECTNESS 3: a single text part with a line past 998 bytes, or any
+/// 8-bit byte, goes quoted-printable; it reads back as the same text.
+#[test]
+fn a_long_line_or_utf8_text_body_goes_quoted_printable() {
+    let long = "x".repeat(3000);
+    for text in [long.as_str(), "caf\u{e9} \u{1f600} ok", "line one\r\nend "] {
+        let raw = format!(
+            "To: a@x.test\r\nSubject: s\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\nMIME-Version: 1.0\r\n\r\n{text}\r\n"
+        );
+        let out = transfer_safe(raw.as_bytes());
+        let ascii_short = text.is_ascii() && text.len() <= 998;
+        if ascii_short {
+            assert_eq!(out, raw.as_bytes(), "a short ASCII body is left alone");
+            continue;
+        }
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(
+            s.contains("\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n"),
+            "{s}"
+        );
+        assert!(out.is_ascii());
+        assert!(s.split("\r\n").all(|l| l.len() <= 76), "{s}");
+        assert_eq!(text_of(&out).trim_end(), text.trim_end());
+    }
+}
+
+/// An 8bit/7bit CTE is replaced, not doubled; a part already encoded, or
+/// one that is not text, is left exactly as it is.
+#[test]
+fn only_unencoded_text_is_reencoded() {
+    let raw = "To: a@x.test\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding: 8bit\r\n\r\nna\u{ef}ve\r\n";
+    let out = String::from_utf8(transfer_safe(raw.as_bytes())).unwrap();
+    assert_eq!(out.matches("Content-Transfer-Encoding").count(), 1, "{out}");
+    assert!(out.contains("Content-Transfer-Encoding: quoted-printable"));
+    for raw in [
+        "To: a@x.test\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n\r\nbmHvdmU=\r\n".to_string(),
+        format!("To: a@x.test\r\nContent-Type: application/octet-stream\r\n\r\n{}\r\n", "y".repeat(2000)),
+    ] {
+        assert_eq!(transfer_safe(raw.as_bytes()), raw.as_bytes());
+    }
+}
+
+/// A multipart/alternative's text and html parts are each re-encoded; the
+/// boundaries, the other parts and the structure are byte-for-byte kept,
+/// and the message still parses to the same text.
+#[test]
+fn the_parts_of_a_multipart_are_reencoded_in_place() {
+    let long = "w".repeat(2500);
+    let raw = format!(
+        "To: a@x.test\r\nContent-Type: multipart/alternative; boundary=\"BND\"\r\nMIME-Version: 1.0\r\n\r\n\
+         --BND\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n\r\n{long}\r\n\
+         --BND\r\nContent-Type: text/html; charset=\"UTF-8\"\r\n\r\n<p>short</p>\r\n\
+         --BND--\r\n"
+    );
+    let out = String::from_utf8(transfer_safe(raw.as_bytes())).unwrap();
+    assert_eq!(out.matches("--BND\r\n").count(), 2, "{out}");
+    assert!(out.ends_with("\r\n--BND--\r\n"), "{out}");
+    assert_eq!(
+        out.matches("quoted-printable").count(),
+        1,
+        "only the long part: {out}"
+    );
+    assert!(out.contains("\r\n\r\n<p>short</p>\r\n--BND--"), "{out}");
+    assert!(out.split("\r\n").all(|l| l.len() <= 998));
+    assert_eq!(text_of(out.as_bytes()), long);
+}
+
+/// THE BUILDERS' OWN OUTPUT: a reply with html and a long, accented
+/// paragraph goes out 7-bit with every line inside the limit.
+#[test]
+fn a_composed_html_reply_with_a_long_paragraph_is_relay_safe() {
+    let para = format!("{} caf\u{e9}", "word ".repeat(600));
+    let parts = crate::write::mime::ReplyParts {
+        to: "a@x.test".into(),
+        cc: None,
+        bcc: None,
+        subject: "s".into(),
+        body: para.clone(),
+        in_reply_to: None,
+        references: None,
+        body_html: None,
+        pixel_url: Some("https://p.example/x.gif".into()),
+        attachments: vec![],
+        message_id: None,
+        outbox_token: None,
+    };
+    let raw = crate::write::mime::build_reply_rfc822(&parts).unwrap();
+    let now = chrono::DateTime::from_timestamp(1_790_000_000, 0).unwrap();
+    let out = transfer_safe(&with_submission_headers(
+        &raw,
+        "me@x.test",
+        now,
+        "<m@x.test>",
+    ));
+    let (_, body_start) = split_header(&out);
+    assert!(out[body_start..].is_ascii());
+    assert!(out.split(|&b| b == b'\n').all(|l| l.len() <= 1000));
+    assert_eq!(text_of(&out).trim_end(), para.trim_end());
 }

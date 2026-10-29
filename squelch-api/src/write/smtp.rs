@@ -88,6 +88,10 @@ pub struct SmtpTimeouts {
     /// Any one command and its reply (greeting, EHLO, AUTH, MAIL, RCPT,
     /// DATA, QUIT).
     pub command: Duration,
+    /// The longest the server may say nothing (and take nothing) while
+    /// something waits on it: IMAP's stall bound. Not a total, so a large
+    /// message over a slow uplink keeps going.
+    pub stall: Duration,
 }
 
 impl Default for SmtpTimeouts {
@@ -95,6 +99,7 @@ impl Default for SmtpTimeouts {
         Self {
             connect: Duration::from_secs(30),
             command: Duration::from_secs(60),
+            stall: Duration::from_secs(120),
         }
     }
 }
@@ -163,53 +168,146 @@ fn host_of(server: &SmtpServer) -> &str {
     server.host.trim_start_matches('[').trim_end_matches(']')
 }
 
-/// A TLS stream whose first bytes, as lettre reads them, are a greeting we
-/// made up: after STARTTLS the server sends none, and lettre's connection
-/// starts by reading one. The real conversation (EHLO onward) is all TLS.
+/// THE SOCKET LETTRE TALKS OVER: the stream, with
+/// - a greeting we made up served first, when there is one: after STARTTLS
+///   the server sends none, and lettre's connection starts by reading one.
+///   The real conversation (EHLO onward) is all TLS;
+/// - a STALL TIMER, IMAP's ([`squelch_core::mail::imap::Transport`]): while a
+///   read or a write waits, the server must make progress within `stall` or
+///   the operation fails with `TimedOut`. Progress is any byte read or any
+///   write accepted, so a large message over a slow link is never cut off;
+///   only silence is.
 #[derive(Debug)]
-struct Greeted<S> {
+struct Wire<S> {
     greeting: &'static [u8],
     inner: S,
+    stall: Duration,
+    last_progress: tokio::time::Instant,
+    timer: Option<Pin<Box<tokio::time::Sleep>>>,
 }
 
-impl<S: AsyncRead + Unpin> AsyncRead for Greeted<S> {
+impl<S> Wire<S> {
+    fn new(inner: S, greeting: &'static [u8], stall: Duration) -> Self {
+        Self {
+            greeting,
+            inner,
+            stall,
+            last_progress: tokio::time::Instant::now(),
+            timer: None,
+        }
+    }
+
+    fn progressed(&mut self) {
+        self.last_progress = tokio::time::Instant::now();
+        self.timer = None;
+    }
+
+    /// The inner poll came back `Pending`: has the server been silent too
+    /// long? Arms the timer so this task is woken when it would be.
+    fn check_stall(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Error> {
+        let due = self.last_progress + self.stall;
+        let timer = self
+            .timer
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep_until(due)));
+        if timer.deadline() != due {
+            timer.as_mut().reset(due);
+        }
+        match timer.as_mut().poll(cx) {
+            Poll::Ready(()) => Poll::Ready(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the smtp server stopped answering",
+            )),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Wire<S> {
     fn poll_read(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        if !self.greeting.is_empty() {
-            let n = self.greeting.len().min(buf.remaining());
-            buf.put_slice(&self.greeting[..n]);
-            self.greeting = &self.greeting[n..];
+        let this = self.get_mut();
+        if !this.greeting.is_empty() {
+            let n = this.greeting.len().min(buf.remaining());
+            buf.put_slice(&this.greeting[..n]);
+            this.greeting = &this.greeting[n..];
             return Poll::Ready(Ok(()));
         }
-        Pin::new(&mut self.inner).poll_read(cx, buf)
+        match Pin::new(&mut this.inner).poll_read(cx, buf) {
+            Poll::Pending => this.check_stall(cx).map(Err),
+            ready => {
+                this.progressed();
+                ready
+            }
+        }
     }
 }
 
-impl<S: AsyncWrite + Unpin> AsyncWrite for Greeted<S> {
+impl<S: AsyncWrite + Unpin> AsyncWrite for Wire<S> {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_write(cx, buf)
+        let this = self.get_mut();
+        match Pin::new(&mut this.inner).poll_write(cx, buf) {
+            Poll::Pending => this.check_stall(cx).map(Err),
+            ready => {
+                this.progressed();
+                ready
+            }
+        }
     }
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.inner).poll_flush(cx) {
+            Poll::Pending => this.check_stall(cx).map(Err),
+            ready => {
+                this.progressed();
+                ready
+            }
+        }
     }
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
     }
 }
 
 impl lettre::transport::smtp::client::AsyncTokioStream
-    for Greeted<tokio_rustls::client::TlsStream<TcpStream>>
+    for Wire<tokio_rustls::client::TlsStream<TcpStream>>
 {
     fn peer_addr(&self) -> std::io::Result<std::net::SocketAddr> {
         self.inner.get_ref().0.peer_addr()
     }
+}
+
+impl lettre::transport::smtp::client::AsyncTokioStream for Wire<TcpStream> {
+    fn peer_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        self.inner.peer_addr()
+    }
+}
+
+/// TCP keepalive on the socket, as IMAP's has: a peer that vanished (a NAT
+/// that dropped the mapping, a laptop that slept) is noticed by the kernel.
+/// Best effort: a platform that refuses it still has the stall timer.
+fn set_keepalive(tcp: &TcpStream) {
+    let ka = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(60))
+        .with_interval(Duration::from_secs(15));
+    let _ = socket2::SockRef::from(tcp).set_tcp_keepalive(&ka);
+}
+
+/// The longest a QUIT on a connection being given up on may take. lettre's
+/// `abort` sends QUIT and waits for the reply with no bound of its own, and
+/// it runs exactly when the server is not answering (security review F1).
+const ABORT_BOUND: Duration = Duration::from_secs(5);
+
+/// Give up on `conn`: QUIT within [`ABORT_BOUND`] (or the command bound, if
+/// shorter), and the socket closed either way, since dropping it closes it.
+async fn abandon(mut conn: AsyncSmtpConnection, t: SmtpTimeouts) {
+    let _ = tokio::time::timeout(t.command.min(ABORT_BOUND), conn.abort()).await;
 }
 
 /// One reply off the bare socket, read a byte at a time so nothing past its
@@ -261,6 +359,7 @@ async fn open(ep: &SmtpEndpoint, t: SmtpTimeouts) -> Result<AsyncSmtpConnection,
         .await
         .map_err(|_| SmtpError::NotSent("smtp tcp connect: timed out".into()))?
         .map_err(|_| SmtpError::NotSent("smtp tcp connect: failed".into()))?;
+    set_keepalive(&tcp);
     let name = || {
         ServerName::try_from(host.to_string())
             .map_err(|_| SmtpError::NotSent("smtp: the host is not a valid TLS name".into()))
@@ -288,15 +387,16 @@ async fn open(ep: &SmtpEndpoint, t: SmtpTimeouts) -> Result<AsyncSmtpConnection,
                     "smtp: plaintext host resolved off this machine; refusing".into(),
                 ));
             }
-            AsyncSmtpConnection::connect_with_transport(Box::new(tcp), &hello()).await
+            AsyncSmtpConnection::connect_with_transport(
+                Box::new(Wire::new(tcp, b"", t.stall)),
+                &hello(),
+            )
+            .await
         }
         ImapTls::Implicit => {
             let tls = handshake(tcp).await?;
             AsyncSmtpConnection::connect_with_transport(
-                Box::new(Greeted {
-                    greeting: b"",
-                    inner: tls,
-                }),
+                Box::new(Wire::new(tls, b"", t.stall)),
                 &hello(),
             )
             .await
@@ -342,10 +442,7 @@ async fn open(ep: &SmtpEndpoint, t: SmtpTimeouts) -> Result<AsyncSmtpConnection,
             .await?;
             let tls = handshake(tcp).await?;
             AsyncSmtpConnection::connect_with_transport(
-                Box::new(Greeted {
-                    greeting: b"220 tls\r\n",
-                    inner: tls,
-                }),
+                Box::new(Wire::new(tls, b"220 tls\r\n", t.stall)),
                 &hello(),
             )
             .await
@@ -354,38 +451,84 @@ async fn open(ep: &SmtpEndpoint, t: SmtpTimeouts) -> Result<AsyncSmtpConnection,
     connected.map_err(not_sent("EHLO"))
 }
 
+/// What a login the server put off says: a 4yz to AUTH is the server's
+/// "not now" (RFC 4954's 454), not a wrong password.
+pub const SMTP_LOGIN_LATER: &str = "the mail server couldn't sign in right now; try again";
+
+/// How long until `deadline`, capped at `step`: each step's own bound, never
+/// past the send's.
+fn within(step: Duration, deadline: Option<tokio::time::Instant>) -> Duration {
+    match deadline {
+        Some(d) => step.min(d.saturating_duration_since(tokio::time::Instant::now())),
+        None => step,
+    }
+}
+
+/// [`bounded`] by [`within`], and refused outright once `deadline` has
+/// passed: a timer at zero still lets a ready step through.
+async fn bounded_until<T>(
+    step: Duration,
+    deadline: Option<tokio::time::Instant>,
+    what: &str,
+    fut: impl std::future::Future<Output = Result<T, SmtpError>>,
+) -> Result<T, SmtpError> {
+    let limit = within(step, deadline);
+    if limit.is_zero() {
+        return Err(SmtpError::NotSent(format!("smtp {what}: out of time")));
+    }
+    bounded(limit, what, fut).await
+}
+
 /// Connect, secure, greet and log in. The connection-level steps share one
-/// bound per step; the whole thing is bounded too.
+/// bound per step; the whole thing is bounded too, and by `deadline`.
 async fn open_and_login(
     ep: &SmtpEndpoint,
     t: SmtpTimeouts,
+    deadline: Option<tokio::time::Instant>,
 ) -> Result<AsyncSmtpConnection, SmtpError> {
-    let mut conn = bounded(t.connect * 2 + t.command * 2, "connect", open(ep, t)).await?;
+    let mut conn = bounded_until(
+        t.connect * 2 + t.command * 2,
+        deadline,
+        "connect",
+        open(ep, t),
+    )
+    .await?;
     let mechanisms = [Mechanism::Plain, Mechanism::Login];
     if !mechanisms.iter().any(|m| {
         conn.server_info()
             .supports_feature(Extension::Authentication(*m))
     }) {
-        conn.abort().await;
+        abandon(conn, t).await;
         return Err(SmtpError::NotSent(
             "smtp server offers no AUTH PLAIN or LOGIN".into(),
         ));
     }
     let creds = Credentials::new(ep.username.clone(), ep.password.expose_secret().to_string());
-    match tokio::time::timeout(t.command, conn.auth(&mechanisms, &creds)).await {
+    match tokio::time::timeout(within(t.command, deadline), conn.auth(&mechanisms, &creds)).await {
         Ok(Ok(_)) => Ok(conn),
-        Ok(Err(_)) => {
-            conn.abort().await;
-            Err(SmtpError::Auth)
+        Ok(Err(e)) => {
+            abandon(conn, t).await;
+            Err(match e.status() {
+                // A wrong username or password, or a mechanism refused for
+                // good: the fixed line.
+                Some(_) if e.is_permanent() => SmtpError::Auth,
+                // 454 and friends: the server could not check it right now.
+                Some(_) => SmtpError::NotSent(SMTP_LOGIN_LATER.into()),
+                None if e.is_timeout() => SmtpError::NotSent("smtp auth: timed out".into()),
+                None => SmtpError::NotSent("smtp auth: connection failed".into()),
+            })
         }
-        Err(_) => Err(SmtpError::NotSent("smtp auth: timed out".into())),
+        Err(_) => {
+            abandon(conn, t).await;
+            Err(SmtpError::NotSent("smtp auth: timed out".into()))
+        }
     }
 }
 
 /// THE SETUP CHECK `squelchd auth --imap` runs before it stores anything:
 /// EHLO, STARTTLS (or implicit TLS), AUTH, QUIT. No mail is sent.
 pub async fn check_login(ep: &SmtpEndpoint, t: SmtpTimeouts) -> Result<(), SmtpError> {
-    let mut conn = open_and_login(ep, t).await?;
+    let mut conn = open_and_login(ep, t, None).await?;
     let _ = tokio::time::timeout(t.command, conn.quit()).await;
     Ok(())
 }
@@ -402,6 +545,22 @@ pub async fn submit(
     bytes: &[u8],
     budget: Duration,
 ) -> Result<(), SmtpError> {
+    submit_until(ep, t, from, rcpts, bytes, budget, None).await
+}
+
+/// [`submit`], all of it over by `deadline` when there is one: a step that
+/// would run past it before `DATA` is [`SmtpError::NotSent`] (nothing went),
+/// and the message's own budget is cut to it, which past `DATA` is
+/// [`SmtpError::MaybeSent`] as any other cut there is.
+pub async fn submit_until(
+    ep: &SmtpEndpoint,
+    t: SmtpTimeouts,
+    from: &str,
+    rcpts: &[String],
+    bytes: &[u8],
+    budget: Duration,
+    deadline: Option<tokio::time::Instant>,
+) -> Result<(), SmtpError> {
     let parse = |a: &str| {
         a.parse::<Address>()
             .map_err(|_| SmtpError::NotSent(format!("not a deliverable address: {a}")))
@@ -411,13 +570,13 @@ pub async fn submit(
     if rcpts.is_empty() {
         return Err(SmtpError::NotSent("the message has no recipient".into()));
     }
-    let mut conn = open_and_login(ep, t).await?;
+    let mut conn = open_and_login(ep, t, deadline).await?;
     let mut params = Vec::new();
     let ascii = |a: &Address| AsRef::<str>::as_ref(a).is_ascii();
     let non_ascii_addr = !ascii(&from) || rcpts.iter().any(|r| !ascii(r));
     if non_ascii_addr {
         if !conn.server_info().supports_feature(Extension::SmtpUtfEight) {
-            conn.abort().await;
+            abandon(conn, t).await;
             return Err(SmtpError::NotSent(
                 "an address is not ASCII and the server does not take SMTPUTF8".into(),
             ));
@@ -426,7 +585,7 @@ pub async fn submit(
     }
     if !bytes.is_ascii() {
         if !conn.server_info().supports_feature(Extension::EightBitMime) {
-            conn.abort().await;
+            abandon(conn, t).await;
             return Err(SmtpError::NotSent(
                 "the message is not 7-bit and the server does not take 8BITMIME".into(),
             ));
@@ -434,21 +593,21 @@ pub async fn submit(
         params.push(MailParameter::Body(MailBodyParameter::EightBitMime));
     }
     let before_data = async {
-        bounded(t.command, "MAIL FROM", async {
+        bounded_until(t.command, deadline, "MAIL FROM", async {
             conn.command(Mail::new(Some(from), params))
                 .await
                 .map_err(not_sent("MAIL FROM"))
         })
         .await?;
         for r in rcpts {
-            bounded(t.command, "RCPT TO", async {
+            bounded_until(t.command, deadline, "RCPT TO", async {
                 conn.command(Rcpt::new(r, vec![]))
                     .await
                     .map_err(not_sent("a recipient"))
             })
             .await?;
         }
-        bounded(t.command, "DATA", async {
+        bounded_until(t.command, deadline, "DATA", async {
             conn.command(Data).await.map_err(not_sent("DATA"))
         })
         .await?;
@@ -456,7 +615,7 @@ pub async fn submit(
     }
     .await;
     if let Err(e) = before_data {
-        conn.abort().await;
+        abandon(conn, t).await;
         return Err(e);
     }
     // lettre ends DATA with `CRLF . CRLF` whatever the message ends with, so
@@ -465,7 +624,7 @@ pub async fn submit(
     // Sent lacks, and the two print as different messages.
     let bytes = bytes.strip_suffix(b"\r\n").unwrap_or(bytes);
     // PAST THIS LINE THE MESSAGE MAY BE ON ITS WAY.
-    let sent = match tokio::time::timeout(budget, conn.message(bytes)).await {
+    let sent = match tokio::time::timeout(within(budget, deadline), conn.message(bytes)).await {
         Err(_) => Err(SmtpError::MaybeSent(
             "the server did not answer in time".into(),
         )),
@@ -478,9 +637,9 @@ pub async fn submit(
         )),
     };
     if sent.is_ok() {
-        let _ = tokio::time::timeout(t.command, conn.quit()).await;
+        let _ = tokio::time::timeout(t.command.min(ABORT_BOUND), conn.quit()).await;
     } else {
-        conn.abort().await;
+        abandon(conn, t).await;
     }
     sent
 }
@@ -634,13 +793,182 @@ pub fn with_submission_headers(
     }
     let mut out = head.into_bytes();
     out.extend_from_slice(raw);
+    let mut out = crlf_only(&out);
     if !out.ends_with(b"\r\n") {
-        if out.ends_with(b"\n") {
-            out.pop();
-        }
         out.extend_from_slice(b"\r\n");
     }
     out
+}
+
+/// EVERY LINE BREAK A CRLF (security review F2): a lone CR and a lone LF
+/// each become one. RFC 5321 §2.3.8 forbids a bare CR in DATA, and a server
+/// that reads one as a line end turns `X<CR>.<CR><LF>` in a body into the end
+/// of the message, and what follows into commands under the user's login.
+/// As CRLF that is a line holding one `.`, which DATA's dot-stuffing escapes.
+/// Done to the copy that is both saved and transmitted, so they stay the
+/// same bytes.
+pub fn crlf_only(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len() + raw.len() / 64);
+    let mut i = 0;
+    while i < raw.len() {
+        match raw[i] {
+            b'\r' if raw.get(i + 1) == Some(&b'\n') => {
+                out.extend_from_slice(b"\r\n");
+                i += 2;
+                continue;
+            }
+            b'\r' | b'\n' => out.extend_from_slice(b"\r\n"),
+            b => out.push(b),
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The longest line RFC 5322 §2.1.1 allows, CRLF not counted.
+const MAX_LINE: usize = 998;
+
+/// SAFE FOR ANY RELAY (correctness review F4): a text part written with no
+/// `Content-Transfer-Encoding` (or `7bit`/`8bit`) whose body has a line over
+/// [`MAX_LINE`] or any non-ASCII byte is re-encoded quoted-printable, its
+/// header saying so. An MTA is entitled to fold an over-long line (Postfix
+/// splits past 2048) and to down-convert 8-bit, and either makes the
+/// delivered copy's body differ from the one saved to Sent, which then
+/// prints as another message. Quoted-printable has neither problem. The
+/// whole message, then each part of a multipart, one level of nesting at a
+/// time; anything else (an attachment, a part already encoded) is left
+/// exactly as it is. `raw` is CRLF-only ([`crlf_only`]).
+pub fn transfer_safe(raw: &[u8]) -> Vec<u8> {
+    reencode_entity(raw, 0).unwrap_or_else(|| raw.to_vec())
+}
+
+/// How deep [`transfer_safe`] follows multiparts (mixed > related >
+/// alternative is three).
+const MAX_MIME_DEPTH: usize = 4;
+
+/// `entity` re-encoded, or `None` when nothing in it needed to be.
+fn reencode_entity(entity: &[u8], depth: usize) -> Option<Vec<u8>> {
+    let (head_end, body_start) = split_header(entity);
+    if body_start == head_end {
+        return None;
+    }
+    let head = &entity[..head_end];
+    let body = &entity[body_start..];
+    let value = |name: &str| {
+        squelch_core::mail::imap::header_values(head, name)
+            .into_iter()
+            .next()
+            .map(|v| v.trim().to_ascii_lowercase())
+    };
+    let ctype = value("Content-Type").unwrap_or_default();
+    let plain_cte = match value("Content-Transfer-Encoding").as_deref() {
+        None | Some("7bit") | Some("8bit") => true,
+        Some(_) => false,
+    };
+    if !plain_cte {
+        return None;
+    }
+    if ctype.starts_with("multipart/") {
+        if depth >= MAX_MIME_DEPTH {
+            return None;
+        }
+        let boundary = boundary_of(
+            &squelch_core::mail::imap::header_values(head, "Content-Type")
+                .into_iter()
+                .next()
+                .unwrap_or_default(),
+        )?;
+        let body = reencode_multipart(body, boundary.as_bytes(), depth)?;
+        let mut out = entity[..body_start].to_vec();
+        out.extend_from_slice(&body);
+        return Some(out);
+    }
+    if !(ctype.is_empty() || ctype.starts_with("text/")) || !needs_qp(body) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(entity.len() + entity.len() / 4);
+    for (name, field) in header_fields(head) {
+        if !name.eq_ignore_ascii_case(b"content-transfer-encoding") {
+            out.extend_from_slice(field);
+        }
+    }
+    out.extend_from_slice(b"Content-Transfer-Encoding: quoted-printable\r\n");
+    out.extend_from_slice(&entity[head_end..body_start]);
+    out.extend_from_slice(super::mime::qp_encode_bytes(body).as_bytes());
+    Some(out)
+}
+
+/// Does `body` have a line too long for SMTP, or a byte that is not 7-bit?
+fn needs_qp(body: &[u8]) -> bool {
+    !body.is_ascii() || body.split(|&b| b == b'\n').any(|l| l.len() > MAX_LINE + 1)
+}
+
+/// The `boundary` parameter of a Content-Type value, quoted or not.
+fn boundary_of(ctype: &str) -> Option<String> {
+    let lower = ctype.to_ascii_lowercase();
+    let at = lower.find("boundary=")? + "boundary=".len();
+    let rest = &ctype[at..];
+    let b = match rest.strip_prefix('"') {
+        Some(q) => q.split('"').next()?,
+        None => rest.split(|c: char| c == ';' || c.is_whitespace()).next()?,
+    };
+    (!b.is_empty()).then(|| b.to_string())
+}
+
+/// A multipart body with each of its parts through [`reencode_entity`], or
+/// `None` when none changed. The delimiters, the preamble and the epilogue
+/// are kept byte for byte; a part is what lies between one delimiter line's
+/// CRLF and the CRLF that starts the next delimiter (RFC 2046 §5.1.1).
+fn reencode_multipart(body: &[u8], boundary: &[u8], depth: usize) -> Option<Vec<u8>> {
+    let mut dash = b"--".to_vec();
+    dash.extend_from_slice(boundary);
+    // Every delimiter line: (its start, the index after its CRLF, closing?).
+    let mut delims: Vec<(usize, usize, bool)> = Vec::new();
+    let mut i = 0;
+    while i < body.len() {
+        let end = body[i..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(body.len(), |p| i + p + 1);
+        let line = &body[i..end];
+        if let Some(rest) = line.strip_prefix(dash.as_slice()) {
+            let closing = rest.starts_with(b"--");
+            let tail = if closing { &rest[2..] } else { rest };
+            if tail
+                .iter()
+                .all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+            {
+                delims.push((i, end, closing));
+                if closing {
+                    break;
+                }
+            }
+        }
+        i = end;
+    }
+    if delims.len() < 2 {
+        return None;
+    }
+    let mut out = body[..delims[0].1].to_vec();
+    let mut changed = false;
+    for w in delims.windows(2) {
+        let (_, part_start, _) = w[0];
+        let (next_start, next_end, _) = w[1];
+        // The CRLF before the next delimiter belongs to the delimiter.
+        let part_end = next_start.saturating_sub(2).max(part_start);
+        let part = &body[part_start..part_end];
+        match reencode_entity(part, depth + 1) {
+            Some(p) => {
+                changed = true;
+                out.extend_from_slice(&p);
+            }
+            None => out.extend_from_slice(part),
+        }
+        out.extend_from_slice(&body[part_end..next_end]);
+    }
+    let last_end = delims.last().map_or(body.len(), |d| d.1);
+    out.extend_from_slice(&body[last_end..]);
+    changed.then_some(out)
 }
 
 /// A fresh `Message-ID` for a send the composer did not give one: 24 bytes

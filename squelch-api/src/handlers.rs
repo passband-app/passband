@@ -2206,26 +2206,42 @@ pub async fn get_timeline(
     // now; or Gmail made the event from the same mail, which titles it its
     // own way (`own::same_event`: the same start and a distinctive word).
     use squelch_core::gcal::own::{self, OwnState};
-    let mine: std::collections::HashSet<(&str, &str)> = owned
+    // Indexed once, so each ghost looks up rather than scans.
+    let position: std::collections::HashMap<(&str, &str), usize> = events
+        .iter()
+        .enumerate()
+        .map(|(i, e)| ((e.calendar_id.as_str(), e.row.event_id.as_str()), i))
+        .collect();
+    let bound_to: std::collections::HashMap<i64, (&str, &str)> = owned
         .iter()
         .filter(|o| o.state == OwnState::Owned)
-        .map(|o| (o.calendar_id.as_str(), o.event_id.as_str()))
+        .map(|o| (o.ghost_id, (o.calendar_id.as_str(), o.event_id.as_str())))
         .collect();
+    let mine: std::collections::HashSet<(&str, &str)> = bound_to.values().copied().collect();
+    // Gmail's events by start (an instant in UTC, or a date), the only ones
+    // `same_event` can match.
+    let start_key = |t: &squelch_core::triage::ghost::EventTime| match t {
+        squelch_core::triage::ghost::EventTime::At(at) => (Some(at.with_timezone(&Utc)), None),
+        squelch_core::triage::ghost::EventTime::Date(day) => (None, Some(*day)),
+    };
+    let mut gmail_at: std::collections::HashMap<_, Vec<usize>> = Default::default();
+    for (i, e) in events.iter().enumerate() {
+        if e.row.from_gmail {
+            gmail_at.entry(start_key(&e.row.start)).or_default().push(i);
+        }
+    }
     for (ghost, slot) in ghosts.iter().zip(matched.iter_mut()) {
-        let bound = owned
-            .iter()
-            .find(|o| o.ghost_id == ghost.id && o.state == OwnState::Owned)
-            .and_then(|o| {
-                events
-                    .iter()
-                    .position(|e| e.calendar_id == o.calendar_id && e.row.event_id == o.event_id)
-            });
+        let bound = bound_to
+            .get(&ghost.id)
+            .and_then(|key| position.get(key).copied());
         if bound.is_some() {
             *slot = bound;
         } else if slot.is_none() {
-            *slot = events
-                .iter()
-                .position(|e| e.row.from_gmail && own::same_event(ghost, &e.row));
+            *slot = gmail_at.get(&start_key(&ghost.start)).and_then(|at| {
+                at.iter()
+                    .copied()
+                    .find(|&i| own::same_event(ghost, &events[i].row))
+            });
         }
     }
     let now = now.with_timezone(from.offset());

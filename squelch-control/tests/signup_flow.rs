@@ -43,7 +43,8 @@ use axum::{
 use base64::Engine as _;
 use serde_json::{Value, json};
 use squelch_control::config::{
-    BifrostConfig, Config, DEFAULT_ASSISTANT_BUDGET_USD, DEFAULT_LLM_BUDGET_USD, WaitlistConfig,
+    BifrostConfig, Config, DEFAULT_ASSISTANT_BUDGET_USD, DEFAULT_LLM_BUDGET_USD, MicrosoftConfig,
+    WaitlistConfig,
 };
 use squelch_control::warden::HttpWarden;
 use squelch_control::{ControlState, activation, invites, router, seal};
@@ -62,6 +63,17 @@ const MODIFY: &str = "https://www.googleapis.com/auth/gmail.modify";
 const SEND: &str = "https://www.googleapis.com/auth/gmail.send";
 const CAL_EVENTS: &str = "https://www.googleapis.com/auth/calendar.events";
 const CAL_LIST: &str = "https://www.googleapis.com/auth/calendar.calendarlist.readonly";
+
+/// The mock Microsoft app and account. The account is the one Outlook was
+/// built against: a PERSONAL Microsoft account that signs in as an address on
+/// another company's domain (here the same address a Gmail tenant has) while
+/// its mailbox is an `@outlook.com` alias.
+const MS_CLIENT_ID: &str = "11111111-2222-3333-4444-555555555555";
+const MS_CLIENT_SECRET: &str = "ms-hosted-secret";
+const MS_ID: &str = "313658d2f27bcf04";
+const MS_SIGNIN: &str = "braelyn@passband.test";
+const MS_MAILBOX: &str = "passband-qa@outlook.com";
+const MS_GRANT: &str = "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read https://graph.microsoft.com/Calendars.ReadWrite openid";
 
 /// What a consent that left every box checked reports back, the way Google
 /// spells a scope set: space delimited, in one string.
@@ -156,6 +168,13 @@ struct Recorder {
     /// serves at `/hook` so every harness has alerts wired the way production
     /// does.
     alerts: Vec<String>,
+    /// Form fields of the last exchange at the mock MICROSOFT token endpoint.
+    ms_token_form: Vec<(String, String)>,
+    /// What the mock Graph `/me` answers. `None` is a personal account that
+    /// signs in as an address on somebody else's domain.
+    ms_me: Option<Value>,
+    /// The To addresses on the mock inbox, newest first.
+    ms_inbox_to: Vec<String>,
 }
 
 type Shared = Arc<Mutex<Recorder>>;
@@ -212,6 +231,46 @@ async fn spawn_google(rec: Shared) -> String {
                     .into_response()
                 },
             ),
+        )
+        // THE MOCK MICROSOFT, on the same server: the confidential app's
+        // token endpoint and the two Graph reads an Outlook signup makes.
+        .route(
+            "/ms/token",
+            post(
+                |AxumState(rec): AxumState<Shared>, body: String| async move {
+                    let form: Vec<(String, String)> = url::form_urlencoded::parse(body.as_bytes())
+                        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                        .collect();
+                    rec.lock().unwrap().ms_token_form = form;
+                    Json(json!({
+                        "access_token": ACCESS_TOKEN,
+                        "refresh_token": REFRESH_TOKEN,
+                        "expires_in": 3599,
+                        "token_type": "Bearer",
+                        "scope": MS_GRANT,
+                    }))
+                },
+            ),
+        )
+        .route(
+            "/graph/me",
+            get(|AxumState(rec): AxumState<Shared>| async move {
+                let me = rec.lock().unwrap().ms_me.clone().unwrap_or_else(
+                    || json!({"id": MS_ID, "mail": MS_SIGNIN, "userPrincipalName": MS_SIGNIN}),
+                );
+                Json(me)
+            }),
+        )
+        .route(
+            "/graph/me/mailFolders/inbox/messages",
+            get(|AxumState(rec): AxumState<Shared>| async move {
+                let to = rec.lock().unwrap().ms_inbox_to.clone();
+                let value: Vec<Value> = to
+                    .iter()
+                    .map(|a| json!({"toRecipients": [{"emailAddress": {"address": a}}]}))
+                    .collect();
+                Json(json!({ "value": value }))
+            }),
         )
         .route(
             "/profile",
@@ -359,6 +418,19 @@ async fn spawn_warden(rec: Shared) -> String {
                         })),
                     )
                         .into_response()
+                },
+            ),
+        )
+        // A login's pairing code, for the Outlook app-login tests.
+        .route(
+            "/v1/tenants/{label}/pair",
+            post(
+                |axum::extract::Path(label): axum::extract::Path<String>| async move {
+                    Json(json!({
+                        "pair_code": "ABCD-EFGH",
+                        "pair_url": format!("https://{label}.passband.test"),
+                        "deep_link": "passband://pair?url=x&code=ABCD-EFGH",
+                    }))
                 },
             ),
         )
@@ -668,6 +740,13 @@ impl Harness {
             // profile endpoint, which is what its own grant permits. The console
             // login is the one that reads userinfo (`tests/console_auth.rs`).
             userinfo_url: format!("{google}/userinfo"),
+            microsoft: Some(MicrosoftConfig {
+                client_id: MS_CLIENT_ID.into(),
+                client_secret: MS_CLIENT_SECRET.into(),
+                auth_url: format!("{google}/ms/authorize"),
+                token_url: format!("{google}/ms/token"),
+                graph_base: format!("{google}/graph"),
+            }),
             alert_webhook_url: Some(format!("{warden_url}/hook")),
             // No agent door: `/agent/auth` is not mounted.
             workos: None,
@@ -1009,6 +1088,63 @@ impl Harness {
         // Only the cookie pair, as a browser would send it back.
         let cookie = cookie.split(';').next().unwrap().to_string();
         (location, cookie)
+    }
+
+    /// Post the signup form with the Microsoft button and return
+    /// `(consent url, cookie value)`.
+    async fn start_outlook_signup(&self, label: &str) -> (String, String) {
+        let (status, headers, body) = self
+            .post_form(
+                "/signup",
+                format!(
+                    "invite={}&label={label}&provider=microsoft",
+                    urlencode(&self.invite_code)
+                ),
+            )
+            .await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+        let location = headers[header::LOCATION].to_str().unwrap().to_string();
+        let cookie = headers[header::SET_COOKIE].to_str().unwrap().to_string();
+        (location, cookie.split(';').next().unwrap().to_string())
+    }
+
+    /// Walk a whole Outlook signup to its answer.
+    async fn run_outlook_signup(&self, label: &str) -> (StatusCode, String) {
+        let (consent, cookie) = self.start_outlook_signup(label).await;
+        let (status, _, body) = self
+            .get(
+                &format!(
+                    "/oauth/callback?code=the-auth-code&state={}",
+                    state_param(&consent)
+                ),
+                Some(&cookie),
+            )
+            .await;
+        (status, body)
+    }
+
+    /// Walk a whole app login with `provider=` (empty for Google).
+    async fn run_app_login(&self, provider: &str) -> (StatusCode, String) {
+        let uri = if provider.is_empty() {
+            "/app/auth".to_string()
+        } else {
+            format!("/app/auth?provider={provider}")
+        };
+        let (status, headers, body) = self.get(&uri, None).await;
+        assert!(status.is_redirection(), "{status}: {body}");
+        let consent = headers[header::LOCATION].to_str().unwrap().to_string();
+        let cookie = headers[header::SET_COOKIE].to_str().unwrap().to_string();
+        let cookie = cookie.split(';').next().unwrap().to_string();
+        let (status, _, body) = self
+            .get(
+                &format!(
+                    "/oauth/callback?code=the-auth-code&state={}",
+                    state_param(&consent)
+                ),
+                Some(&cookie),
+            )
+            .await;
+        (status, body)
     }
 
     /// Walk one whole signup: form post, consent, callback.
@@ -3596,4 +3732,118 @@ async fn an_old_reconnect_jobs_table_gains_purpose_as_reconnect() {
             .await
             .is_err()
     );
+}
+
+// ---- Outlook -----------------------------------------------------------------
+
+/// THE CASE OUTLOOK WAS BUILT AGAINST. A personal Microsoft account signs in as
+/// an address a GMAIL tenant already has, while its mailbox is an
+/// `@outlook.com` alias that mail arrives at. The signup provisions an Outlook
+/// tenant for the MAILBOX, not the sign-in label, so it is not refused as a
+/// duplicate of the Gmail one; and everything the daemon will need is in what
+/// was sealed and sent.
+#[tokio::test]
+async fn an_outlook_signup_is_for_the_mailbox_mail_arrives_at() {
+    let h = Harness::new().await;
+    // The Gmail tenant at the Microsoft account's sign-in address.
+    h.state
+        .store()
+        .insert_tenant("gmailone", MS_SIGNIN)
+        .await
+        .unwrap();
+    h.rec.lock().unwrap().ms_inbox_to = vec![MS_MAILBOX.into(), MS_MAILBOX.into()];
+
+    let (consent, cookie) = h.start_outlook_signup("qa2").await;
+    let url = url::Url::parse(&consent).unwrap();
+    assert_eq!(url.path(), "/ms/authorize");
+    assert_eq!(query_param(&consent, "client_id"), MS_CLIENT_ID);
+    assert_eq!(query_param(&consent, "prompt"), "select_account");
+    assert!(query_param(&consent, "scope").contains("Mail.ReadWrite"));
+    assert!(query_param(&consent, "access_type").is_empty());
+
+    let (status, _, body) = h
+        .get(
+            &format!(
+                "/oauth/callback?code=the-auth-code&state={}",
+                state_param(&consent)
+            ),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let create = h.rec.lock().unwrap().create_bodies.last().cloned().unwrap();
+    assert_eq!(create["provider"], "outlook");
+    assert_eq!(create["account_email"], MS_MAILBOX);
+    // The confidential app's secret went to Microsoft, in the body.
+    let form = h.rec.lock().unwrap().ms_token_form.clone();
+    assert!(
+        form.iter()
+            .any(|(k, v)| k == "client_secret" && v == MS_CLIENT_SECRET),
+        "{form:?}"
+    );
+    // The sealed credential records Graph scopes, which is how the tenant's
+    // daemon knows it is an Outlook mailbox.
+    let (label, armor) = h.credential_armor(0);
+    let plaintext = h.open_with_tenant_identity(&label, &armor);
+    assert!(
+        plaintext.contains("graph.microsoft.com/Mail.ReadWrite"),
+        "{plaintext}"
+    );
+    assert!(plaintext.contains(MS_MAILBOX), "{plaintext}");
+
+    let store = h.state.store();
+    assert_eq!(
+        store.active_outlook_tenant_for_ms_id(MS_ID).await.unwrap(),
+        Some("qa2".to_string())
+    );
+    let owner = store.active_tenant_owner("qa2").await.unwrap().unwrap();
+    assert_eq!(owner.provider, "outlook");
+    assert_eq!(owner.account_email, MS_MAILBOX);
+
+    // And an Outlook app login finds it, by account id.
+    let (status, body) = h.run_app_login("microsoft").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("qa2.passband.test"), "{body}");
+    assert!(!body.contains("gmailone"), "{body}");
+}
+
+/// A MICROSOFT LOGIN NEVER OPENS A MAILBOX BY ADDRESS. Graph names an account
+/// by whatever address its owner (or its tenant's admin) set, so a Microsoft
+/// account claiming a Gmail tenant's address must find nothing.
+#[tokio::test]
+async fn a_microsoft_login_never_opens_a_mailbox_by_address() {
+    let h = Harness::new().await;
+    h.state
+        .store()
+        .insert_tenant("victim", MS_SIGNIN)
+        .await
+        .unwrap();
+    h.rec.lock().unwrap().ms_me = Some(json!({
+        "id": "deadbeefdeadbeef",
+        "mail": MS_SIGNIN,
+        "userPrincipalName": MS_SIGNIN
+    }));
+    let (status, body) = h.run_app_login("microsoft").await;
+    assert!(!body.contains("victim.passband.test"), "{body}");
+    assert!(!body.contains("pair"), "{status}: {body}");
+}
+
+/// A REAL DUPLICATE is refused across companies: an Outlook signup whose
+/// mailbox already has a tenant (here a Google account registered on that
+/// address) names the mailbox and the company that has it.
+#[tokio::test]
+async fn an_outlook_signup_for_a_mailbox_that_has_a_tenant_is_refused() {
+    let h = Harness::new().await;
+    h.state
+        .store()
+        .insert_tenant("already", MS_MAILBOX)
+        .await
+        .unwrap();
+    h.rec.lock().unwrap().ms_inbox_to = vec![MS_MAILBOX.into()];
+    let (status, body) = h.run_outlook_signup("dupe").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body.contains(MS_MAILBOX), "{body}");
+    assert!(body.contains("(Gmail)"), "{body}");
+    assert!(h.rec.lock().unwrap().create_bodies.is_empty());
 }

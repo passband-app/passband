@@ -44,9 +44,12 @@ use squelch_core::features::Feature;
 /// 303 to Google consent, and under `form-action 'self'` Chrome silently eats
 /// that navigation - the button "does nothing" while the server logs a
 /// perfectly healthy signup. Found live on the first real signup, 2026-08-11.
+/// Microsoft's two sign-in hosts are named for the same reason: an Outlook
+/// signup's 303 goes to `login.microsoftonline.com`, which bounces personal
+/// accounts through `login.live.com`.
 /// `font-src 'self'` admits exactly one file, [`NEWSREADER`], served by this
 /// same origin: the landing page's serif, and still nothing a third party sees.
-const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self' https://accounts.google.com; frame-ancestors 'none'; base-uri 'none'";
+const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self' https://accounts.google.com https://login.microsoftonline.com https://login.live.com; frame-ancestors 'none'; base-uri 'none'";
 
 /// Escape text for HTML.
 pub fn escape_html(s: &str) -> String {
@@ -620,6 +623,20 @@ pub fn signup_form(
     invite: &str,
     error: Option<&str>,
 ) -> Response {
+    signup_form_with(base_domain, waitlist_url, label, invite, error, false)
+}
+
+/// [`signup_form`], with the Outlook button when this deployment has the
+/// Microsoft app (`outlook`). The two buttons submit the same form; the one
+/// pressed names the company in `provider`.
+pub fn signup_form_with(
+    base_domain: &str,
+    waitlist_url: Option<&str>,
+    label: &str,
+    invite: &str,
+    error: Option<&str>,
+    outlook: bool,
+) -> Response {
     let error_html = stop_note(error);
     // Folded only on the first render of an emailed link: a filled-in code
     // and nothing refused yet. Any re-render after a submit shows the code, so
@@ -659,7 +676,7 @@ pub fn signup_form(
         "Set up Passband",
         &format!(
             r#"<h1>Set up Passband</h1>
-<p class="lead">Pick a username, then connect Gmail.</p>
+<p class="lead">Pick a username, then connect {mailboxes}.</p>
 {error_html}
 <form class="rig" method="post" action="/signup">
 <div class="{invite_class}" id="code">
@@ -673,8 +690,8 @@ pub fn signup_form(
   aria-describedby="label-hint" maxlength="{max}" autocomplete="off" autocapitalize="off" spellcheck="false"{label_focus} required><span class="domain">.{domain}</span></label>
 <span class="sr" id="label-hint">{min} to {max} lowercase letters, numbers or hyphens.</span>
 </div>
-<button type="submit">Continue with Google <span class="arrow" aria-hidden="true">→</span></button>
-</form>
+<button type="submit" name="provider" value="google">Continue with Google <span class="arrow" aria-hidden="true">→</span></button>
+{outlook_button}</form>
 <details>
 <summary>Google will ask to read, change, and send your Gmail, and optionally for your calendar.</summary>
 <ul>
@@ -683,10 +700,23 @@ pub fn signup_form(
 <li><strong>Send</strong>: replying from the app.</li>
 </ul>
 <p>All three come from one Google permission, <code>gmail.modify</code>, so keep that box checked. It also asks for your name and profile photo, to show them in the app, and for Google Calendar (<code>calendar.events</code>), which can view and edit your events; both are optional. Calendar is asked for now so it never needs a second consent, and nothing touches your calendar until calendar is available on your account. Your Google refresh token is stored encrypted so mail keeps syncing; self-host to hold it yourself.</p>
-</details>
+{outlook_note}</details>
 {links_html}"#,
             error_html = error_html,
             links_html = links_html,
+            mailboxes = if outlook { "Gmail or Outlook" } else { "Gmail" },
+            outlook_button = if outlook {
+                r#"<button type="submit" name="provider" value="microsoft" class="quiet">Continue with Microsoft <span class="arrow" aria-hidden="true">→</span></button>
+"#
+            } else {
+                ""
+            },
+            outlook_note = if outlook {
+                r#"<p>With Microsoft, Outlook asks once to read, change, and send your mail and to view and edit your calendar (<code>Mail.ReadWrite</code>, <code>Mail.Send</code>, <code>Calendars.ReadWrite</code>), plus your profile and staying signed in. Your Microsoft refresh token is stored encrypted the same way.</p>
+"#
+            } else {
+                ""
+            },
             invite_class = invite_class,
             invite_focus = invite_focus,
             label_focus = label_focus,
@@ -714,7 +744,7 @@ pub fn success(tenant_url: &str) -> Response {
         "Your mailbox is ready",
         &format!(
             r#"<h1>Your mailbox is ready</h1>
-<p class="lead">{host} is live. Get the app, then sign in with Gmail to finish.</p>
+<p class="lead">{host} is live. Get the app, then sign in to finish.</p>
 <a class="button" href="{download}">Download Passband for Mac <span class="arrow" aria-hidden="true">→</span></a>"#,
             host = escape_html(host),
             download = DOWNLOAD_URL,
@@ -768,7 +798,7 @@ pub fn app_signed_in(
 <p class="alt">Need the app? <a href="{download}">Download Passband</a>.</p>
 <details>
 <summary>Passband didn’t open? Connect manually</summary>
-<p>In Passband, choose Sign in with Gmail and enter:</p>
+<p>In Passband, choose Sign in with Gmail or Outlook and enter:</p>
 <p><code>{url}</code></p>
 <p><span class="code">{code}</span></p>
 <p>Works once, expires in {minutes} minutes. If it lapses, sign in again.</p>

@@ -5143,6 +5143,8 @@ mod tests {
             "get_shipments",
             "get_thread",
             "list_sender_rules",
+            // Calendar for everyone: the daemon's door always serves it.
+            "search_calendar",
             "search_mail",
             "set_sender_rule",
         ];

@@ -19,14 +19,15 @@
 # service the durable tenant identity it is otherwise never told.
 #
 # Optional on both sides. Without it the service starts unauthenticated and
-# says so in its log; a tenant provisioned before it existed still boots. Once
-# it exists, both ends must have it: create it, restart the service
-# (`kubectl -n tenants rollout restart deploy/squelch-embed`), and roll the
-# tenants, in that order, accepting that a tenant still on the old env gets
-# 401s (and degrades to keyword search) until it rolls.
+# says so in its log; a tenant provisioned before it existed still boots.
+# Create it BEFORE applying 65-embed.yaml and before any tenant is pointed at
+# the service (SETUP.md 10b): tenants read it through an optional secretKeyRef
+# when their pod starts, so a tenant that started before it existed sends no
+# token, gets 401s and searches by keyword until its next roll.
 #
-# Rotating it is the same three steps with a replaced value. There is no grace
-# period and no second accepted token.
+# Set it once. Rotating has no rolling path today: an in-place edit is no drift
+# the roller sees, and `kubectl rollout restart` on tenants is forbidden
+# (SETUP.md 6c). There is no grace period and no second accepted token.
 #
 # It lands in `tenants` and so spends one of that namespace's `count/secrets`
 # (70-tenant-limits.yaml).

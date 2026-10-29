@@ -7,39 +7,39 @@
 #
 # WHAT IT COSTS. One of the namespace quota's pods and 320Mi of its
 # requests.memory (200m CPU, 768Mi limit), out of `70-tenant-limits.yaml`, for
-# as long as it runs. That quota is sized to tenants alone today, so on a box
-# at its tenant cap this pod is refused at admission until the quota grows by
-# its share; check `kubectl -n tenants describe resourcequota tenants` first.
-# What it saves is the 300-500 MB of session every tenant pod carries now,
-# once the fleet is pointed at it.
+# as long as it runs. While tenants still embed in-process (the knob unset) the
+# quota admits 29 tenants beside this pod, not 30, so on a fleet at that cap it
+# is refused at admission; check `kubectl -n tenants describe resourcequota
+# tenants` first (Used memory at most 11200Mi). What it saves is the 300-500 MB
+# of session every tenant pod carries now, once the fleet is pointed at it.
+# Measured on the built image (linux/arm64, release, 768Mi cap, 2 CPUs) under
+# six concurrent 8-text backfills plus four query streams: 290 MB peak, 257 MB
+# after, about 15 texts a second.
 #
-# ORDER, and each step waits for the one before:
+# ORDER: deploy/hosted/SETUP.md section 10b is the runbook and the one place the
+# steps live. In short: token Secret, apply this file and wait for "session
+# ready", check a NON-tenant pod is refused (from a namespace with no policy,
+# e.g. `default`, aimed at squelch-embed.tenants.svc.cluster.local:8850; a
+# probe run inside `tenants` is blocked by its own default-deny and proves
+# nothing), then suspend the roller, set SQUELCH_WARDEN_EMBED_URL in
+# `15-warden-config.yaml`, restart the warden, roll ONE tenant, and only then
+# verify with a real POST from inside that tenant (its egress rule exists only
+# once the warden renders it). The daemon image has bash and no curl:
 #
-#   1. Optionally, the fleet token: `embed-token.example.yaml`. Without it the
-#      service runs unauthenticated and the NetworkPolicy below is the whole
-#      boundary; it says so in its first log lines.
-#   2. `kubectl apply -f 65-embed.yaml`, then wait for Ready:
-#        kubectl -n tenants rollout status deploy/squelch-embed
-#        kubectl -n tenants logs deploy/squelch-embed   # "session ready: ..."
-#   3. Verify with a REAL POST from INSIDE A TENANT POD, not by reading these
-#      objects. That only succeeds once the warden renders the tenant-side
-#      egress rule (pod selector below, TCP 8850); until then a timeout here is
-#      the tenant's own NetworkPolicy working. The daemon image has bash and no
-#      curl, so:
-#        kubectl -n tenants exec deploy/<tenant> -c squelchd -- bash -c '
-#          body="{\"texts\":[\"hello\"]}"
-#          exec 3<>/dev/tcp/squelch-embed/8850
-#          printf "POST /embed HTTP/1.1\r\nHost: squelch-embed\r\nContent-Type: application/json\r\nAuthorization: Bearer %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" \
-#            "$SQUELCH_EMBED_TOKEN" "${#body}" "$body" >&3
-#          head -c 120 <&3'
-#      `HTTP/1.1 200` and a body starting `{"dims":384` is the answer. And
-#      check the other half, that a pod which is NOT a tenant is refused,
-#      with the scratch pod from SETUP.md "Does the policy actually deny?"
-#      aimed at `squelch-embed 8850`: `blocked` is correct.
-#   4. Only then set SQUELCH_WARDEN_EMBED_URL (http://squelch-embed:8850) in
-#      `15-warden-config.yaml` and restart the warden. A tenant rolled onto a
-#      URL nothing serves builds no local session and embeds nothing until the
-#      service exists. Rollback is unsetting it and rolling again.
+#   kubectl -n tenants exec deploy/<tenant> -c squelchd -- bash -c '
+#     body="{\"texts\":[\"hello\"]}"
+#     exec 3<>/dev/tcp/squelch-embed/8850
+#     printf "POST /embed HTTP/1.1\r\nHost: squelch-embed\r\nContent-Type: application/json\r\nAuthorization: Bearer %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" \
+#       "$SQUELCH_EMBED_TOKEN" "${#body}" "$body" >&3
+#     head -c 300 <&3'
+#
+# `HTTP/1.1 200` and a body starting `{"dims":384` is the answer. Then unsuspend
+# the roller and it walks the rest of the fleet one tenant per tick.
+#
+# TOKEN ROTATION has no rolling path yet: an in-place edit of the Secret is no
+# drift the roller sees, and `kubectl rollout restart` on tenants is forbidden
+# (SETUP.md 6c). Treat the token as set once, until the warden renders a
+# renamed Secret the way the relay's works.
 #
 # The image tag is NOT the fleet's moving tag: it is the release that first
 # shipped this image, and it moves only when the model contract or the server

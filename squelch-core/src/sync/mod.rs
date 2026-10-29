@@ -1525,7 +1525,6 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         ArchiveStep::Held
     }
 
-    /// May the refine lane drain missing vectors this round. See the call.
     /// Whether the vector drain has anything to do: this engine's
     /// `vectors_dirty`, or a write the store saw that no engine made (a
     /// person's correction through the API lifting a restriction), whose debt
@@ -1537,6 +1536,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         self.vectors_dirty.load(Ordering::Relaxed)
     }
 
+    /// May the refine lane drain missing vectors this round. See the call.
     fn may_drain_vectors(&self) -> bool {
         !self.window_in_flight.load(Ordering::Relaxed)
             && !self.archive.in_flight.load(Ordering::Relaxed)

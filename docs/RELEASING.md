@@ -405,9 +405,9 @@ roll the carrier promptly.
   gate (`docs/SECURITY.md` §4d) decides which mail is embedded, on self-host as
   on hosted. Say it in that release's notes, because a self-hoster will notice:
   inbound mail is embedded only once triage has decided it, so a daemon with no
-  model key embeds none of its inbound mail (keyword search still finds all of
-  it, and the owner's own mail is still embedded once its access check
-  settles); and the first open after the upgrade deletes the vectors of sealed
+  model key embeds none of its mail, inbound or its own (keyword search still
+  finds all of it), and the owner's own mail in the archive tier is never
+  embedded either, since it never gets an access check; and the first open after the upgrade deletes the vectors of sealed
   and undecided mail. Downgrading after it is data-compatible and re-embeds
   that mail.
 - Upgrade command in the docs is `docker compose pull && docker compose up -d`

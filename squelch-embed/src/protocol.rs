@@ -65,8 +65,10 @@ pub const BACKFILL_TIMEOUT: Duration = Duration::from_secs(30);
 pub const INTERACTIVE_DEADLINE: Duration = Duration::from_millis(4500);
 
 /// The backfill lane's deadline, under [`BACKFILL_TIMEOUT`] for the same
-/// reason.
-pub const BACKFILL_DEADLINE: Duration = Duration::from_secs(28);
+/// reason, with room for the pass itself: an 8-text pass at 256 tokens takes
+/// 1 to 3 s on a shared core, so a pass that starts at the deadline still
+/// answers inside the client's 30 s.
+pub const BACKFILL_DEADLINE: Duration = Duration::from_secs(25);
 
 const _: () = assert!(INTERACTIVE_DEADLINE.as_millis() < INTERACTIVE_TIMEOUT.as_millis());
 const _: () = assert!(BACKFILL_DEADLINE.as_millis() < BACKFILL_TIMEOUT.as_millis());
@@ -146,7 +148,7 @@ mod tests {
         assert_eq!(INTERACTIVE_TIMEOUT, Duration::from_secs(5));
         assert_eq!(BACKFILL_TIMEOUT, Duration::from_secs(30));
         assert_eq!(INTERACTIVE_DEADLINE, Duration::from_millis(4500));
-        assert_eq!(BACKFILL_DEADLINE, Duration::from_secs(28));
+        assert_eq!(BACKFILL_DEADLINE, Duration::from_secs(25));
         assert_eq!(MAX_BODY_BYTES, 256 * 1024);
         let worst = EmbedRequest {
             texts: vec!["\u{1}".repeat(MAX_CHARS_PER_TEXT)],

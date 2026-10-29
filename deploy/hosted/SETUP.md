@@ -1667,10 +1667,25 @@ the moment each tenant restarts onto it, knob or no knob:
   mail until triage catches up. Keyword search still finds all of it. A
   tenant that has blown its budget wants `squelch-control llm topup <label>`
   (PRODUCTION.md, "The LLM gateway"), and an unminted one `llm mint <label>`.
+- **Own mail needs its access check to have run.** The owner's own mail is
+  embedded only once its access check has settled as allowed. Two kinds of own
+  mail never get that check, so they get no vectors on this release AND lose
+  the ones they have at first open: own mail in the archive tier (archive rows
+  are seeded `pending` and queue no job unless surfaced), and all own mail on a
+  daemon with no model key. On an archive-walked tenant that makes the
+  first-open purge bigger than the 360 above, which came from a store with no
+  archive tier. Semantic search over old sent mail is keyword-only from then on.
+  This is deliberate (years-old sent mail can hold passwords, not only expired
+  codes); the alternative is a one-line change to `embeddable_mail_sql!`.
 - **Self-host is the same.** A self-host daemon with no model key never
-  triages, so on this release it embeds none of its inbound mail; the owner's
-  own mail still gets vectors once its access check settles. This goes in the
-  release notes (`docs/RELEASING.md`, "Self-host compatibility").
+  triages, so on this release it embeds none of its mail, inbound or own;
+  keyword search still finds all of it. This goes in the release notes
+  (`docs/RELEASING.md`, "Self-host compatibility").
+- **A permanent error pauses a daemon's embedding for 5 minutes.** A 400 or
+  401 from the service (a token mismatch, a server bug) opens the backoff
+  window at its cap at once, so after fixing it on the server side every
+  daemon resumes within 5 minutes, or at once on a pod restart (the window is
+  in memory).
 
 **Rolling this release back is data-compatible, and not free.** An older
 daemon opens the same database without complaint, but it has no gate: its
@@ -1934,7 +1949,7 @@ squelch_embed_session_ready
 # first, so interactive waits for at most the one pass already running plus
 # the searches ahead of it. Backfill runs to seconds while a signup's first
 # sync is in progress, and a job that outlives its deadline (4.5 s interactive,
-# 28 s backfill: see INTERACTIVE_DEADLINE and BACKFILL_DEADLINE in
+# 25 s backfill: see INTERACTIVE_DEADLINE and BACKFILL_DEADLINE in
 # squelch-embed/src/protocol.rs) is
 # dropped as `abandoned` rather than run for a caller that has given up.
 histogram_quantile(0.99,

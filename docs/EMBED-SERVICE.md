@@ -42,13 +42,15 @@ the code on the branch; the file named is where to look.
   channel between tenants: a pass pads every text to the longest one in it, so
   how long tenant B's request took said something about the token length of
   whatever tenant A's text it was batched with, and when. Now a pass holds one
-  request's texts and nothing else. The interactive lane is served strictly
+  request's texts and nothing else. Queue wait still tells a caller, coarsely,
+  that someone else is embedding; it no longer carries another request's
+  length. The interactive lane is served strictly
   first: whenever a search or a single-message ingest is waiting, it is the
   next pass. The memory bound is unchanged, since a request is at most
   `protocol::MAX_TEXTS_PER_CALL` (8) texts and a pass was never bigger than
   that. Throughput under load is unremeasured since the change.
 - **Every queued request has a deadline, under the client's.** 4.5 s
-  interactive and 28 s backfill (see `INTERACTIVE_DEADLINE` and
+  interactive and 25 s backfill (see `INTERACTIVE_DEADLINE` and
   `BACKFILL_DEADLINE` in `squelch-embed/src/protocol.rs`), each just under the
   daemon's own 5 s and 30 s timeouts, which `RemoteEmbedder` takes from the
   same file. The deadline is for a request's pass to START: one still queued
@@ -159,7 +161,10 @@ the code on the branch; the file named is where to look.
   decision, a restriction by the model or a person, the legacy column), and
   either a stored decision for the message's CURRENT content with access
   settled, or the owner's own mail once its access check has settled and did
-  not restrict it. "Current" is exact: the decision's revision must equal the
+  not restrict it. Own mail whose access check never runs (archive-tier rows,
+  and every own message on a daemon with no model key) therefore never gets a
+  vector, and loses any it had at first open: deliberate, see SETUP.md 10b.
+  "Current" is exact: the decision's revision must equal the
   message's content revision (`agent_message_state.revision`), so a decision
   made about an earlier version of the text does not let the new version
   through. It is asked before any text leaves for an embedder (ingest, the
@@ -239,6 +244,11 @@ line leaves the capacity arithmetic** and what is left is storage, the PVC cap
 and 3 vCPU of Gmail poll loops.
 
 ## 2. Shape
+
+> Superseded where "As built" above says otherwise: no coalescing window and
+> no cross-request batching, a 256 KiB body limit, lane shares of 16 and 96
+> texts, and a client cut at `MAX_CHARS_PER_TEXT` rather than `max_chars`.
+> The rest of this section is the design record.
 
 ### The unit: a new crate and its own image
 

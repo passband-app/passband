@@ -4100,6 +4100,15 @@ mod tests {
             .find_map(|l| l.strip_prefix("USER "))
             .expect("Dockerfile.embed sets USER");
         assert_eq!(user.trim(), "10003:10003");
+        // Nor the warden's, whose pod holds an API token.
+        const WARDEN_DOCKERFILE: &str = include_str!("../../Dockerfile.warden");
+        const WARDEN_POD: &str = include_str!("../../deploy/hosted/20-warden.yaml");
+        let warden_user = WARDEN_DOCKERFILE
+            .lines()
+            .find_map(|l| l.strip_prefix("USER "))
+            .expect("Dockerfile.warden sets USER");
+        assert_ne!(warden_user.trim(), user.trim());
+        assert!(!WARDEN_POD.contains("runAsUser: 10003"));
     }
 
     /// The tenant side and `65-embed.yaml` are one contract, read from both

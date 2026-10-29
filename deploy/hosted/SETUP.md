@@ -780,6 +780,42 @@ The Secret's name is `SQUELCH_WARDEN_OAUTH_SECRET_NAME` on the warden (default
 `google-oauth-client`); its two keys are fixed at `client_id` and
 `client_secret`. Details and rotation: `google-oauth-client.example.yaml`.
 
+### 6a. The Microsoft app, for Outlook
+
+Optional: without it, hosted is Gmail only and nothing below changes.
+
+1. **Register "Passband Hosted"** in the Azure portal (Microsoft Entra ID, App
+   registrations, New registration):
+   - Supported account types: "Accounts in any organizational directory and
+     personal Microsoft accounts".
+   - Redirect URI: platform **Web**, `https://signup.passband.app/oauth/callback`.
+   - Certificates & secrets: a new client secret. Copy its VALUE once; it goes
+     straight into the two places below and nowhere else.
+   - API permissions, Microsoft Graph, Delegated: `Mail.ReadWrite`,
+     `Mail.Send`, `Calendars.ReadWrite`, `User.Read`, `offline_access`,
+     `openid`, `email`.
+   - Authentication: "Allow public client flows" stays OFF.
+2. **Control** (Railway `control` service): `SQUELCH_CONTROL_MICROSOFT_CLIENT_ID`
+   (the Application (client) ID) and `SQUELCH_CONTROL_MICROSOFT_CLIENT_SECRET`.
+   Both or neither; half refuses to boot.
+3. **Tenants** (the cluster), the same pair, which every Outlook tenant's pod
+   reads as `SQUELCH_CLIENT_ID`/`SQUELCH_CLIENT_SECRET`:
+
+   ```sh
+   kubectl -n tenants create secret generic microsoft-oauth-client \
+     --from-literal=client_id="<the Passband Hosted application id>" \
+     --from-literal=client_secret="<its secret>"
+   ```
+
+   The name is fixed (`microsoft-oauth-client`); there is no warden variable
+   for it. Create it BEFORE the first Outlook signup: the reference is
+   required, so a pod rendered without it waits in CreateContainerConfigError.
+   Details: `microsoft-oauth-client.example.yaml`.
+
+Until the app's publisher is verified, Microsoft marks the consent screen
+"unverified", and work tenants that block user consent need their admin to
+approve it.
+
 ## 6b. LLM triage through the gateway
 
 Tenant daemons never hold our Anthropic key. Each pod gets a **Bifrost virtual

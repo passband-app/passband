@@ -903,11 +903,22 @@ fn login_page(state: &ApiState, site: &Site, error: Option<&str>) -> Response {
 
     let sso_html = match (state.console_sso_url(), site.tenant_label()) {
         (Some(sso), Some(label)) => {
-            let href = format!("{sso}/console/auth?tenant={}", percent_encode(label));
+            // AN OUTLOOK MAILBOX signs in with Microsoft, which the control
+            // plane matches by Microsoft account rather than by address.
+            let outlook = state.known_provider() == squelch_core::mail::MailProvider::Outlook;
+            let (provider_query, company) = if outlook {
+                ("&provider=microsoft", "Microsoft")
+            } else {
+                ("", "Google")
+            };
+            let href = format!(
+                "{sso}/console/auth?tenant={}{provider_query}",
+                percent_encode(label)
+            );
             format!(
-                r#"<p><a class="button" href="{href}">Continue with Google</a></p>
-<p class="muted">Signing in with Google proves you own the mailbox this daemon syncs. Passband
-checks the address against this mailbox and sends you straight back here.</p>
+                r#"<p><a class="button" href="{href}">Continue with {company}</a></p>
+<p class="muted">Signing in with {company} proves you own the mailbox this daemon syncs. Passband
+checks it against this mailbox and sends you straight back here.</p>
 <h2>Or paste a pairing code</h2>"#,
                 href = escape_html(&href),
             )
@@ -1704,6 +1715,23 @@ mod tests {
                 .unwrap();
             assert_eq!(resp.status(), expect, "{name}");
         }
+    }
+
+    /// An Outlook mailbox's console signs in with Microsoft, and the link
+    /// says so to the control plane.
+    #[tokio::test]
+    async fn an_outlook_console_signs_in_with_microsoft() {
+        let (_, _, app) = fixture_with(|s| {
+            s.with_console_sso_url(Some(SSO.to_string()))
+                .with_known_provider(squelch_core::mail::MailProvider::Outlook)
+        });
+        let html = body_of(app.oneshot(get("/console", None)).await.unwrap()).await;
+        assert!(html.contains("Continue with Microsoft"), "{html}");
+        assert!(!html.contains("Continue with Google"), "{html}");
+        assert!(
+            html.contains("/console/auth?tenant=ada&amp;provider=microsoft"),
+            "{html}"
+        );
     }
 
     /// The Google button is a hosted-only affordance: no configured SSO URL means

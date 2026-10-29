@@ -253,6 +253,8 @@ Everything is validated at startup and a bad value is a refusal to boot.
 | `SQUELCH_CONTROL_BASE_DOMAIN` | **yes** | The hosted base domain, e.g. `passband.email`. Tenant URLs are `https://<label>.<base domain>`. Never hardcoded. |
 | `SQUELCH_CONTROL_CLIENT_ID` | **yes** | The confidential **web** OAuth client id (not the desktop client the self-hosted daemon uses). |
 | `SQUELCH_CONTROL_CLIENT_SECRET` | **yes** | Its secret. |
+| `SQUELCH_CONTROL_MICROSOFT_CLIENT_ID` | pair | The confidential "Passband Hosted" Entra app's Application (client) ID, a GUID (`deploy/hosted/SETUP.md` §6a). With the secret below it turns Outlook on: a "Continue with Microsoft" signup button and `provider=microsoft` on `/app/auth`, `/console/auth`, `/reconnect` and `/agent/auth`. Neither set: Gmail only. One without the other refuses to boot. |
+| `SQUELCH_CONTROL_MICROSOFT_CLIENT_SECRET` | pair | Its client secret. Sent to Microsoft in the token request body. |
 | `SQUELCH_CONTROL_COOKIE_KEY` | **yes** | HMAC key for the signup cookie. base64 or hex, at least 32 bytes decoded. `openssl rand -base64 48`. |
 | `SQUELCH_CONTROL_WARDEN_URL` | **yes** | The warden's base URL, e.g. `https://warden.passband.app` (product domain, same reasoning as the public URL). |
 | `SQUELCH_CONTROL_WARDEN_TOKEN` | **yes** | Bearer presented to the warden. Must match `SQUELCH_WARDEN_TOKEN` in the cluster. |

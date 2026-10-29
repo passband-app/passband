@@ -897,6 +897,148 @@ checked against the existing keymap before it is bound. The time pane is NOT a `
 view: that panel takes the modal key context, and composer plus side panel is
 already a known sore spot (#265). The pane sits beside the composer.
 
+### Reminders and tickets (DECIDED 2026-10-29)
+
+The owner's ask (2026-10-29): a notification a well-chosen time before each
+event ("1hr, 30m or 10m"), with something that helps ("if its a concert,
+tapping the notif can show you the email with your tickets"); and on any event
+with tickets in mail, a one-tap button that shows them (the email or the
+attachment).
+
+Owner decisions (AskUserQuestion, 2026-10-29), each against my
+recommendation where noted:
+
+- **The model reads the event, description included** (I recommended without
+  the description). A second exception to docs/SECURITY.md §9.
+- **The model writes the banner's short line** (I recommended templated copy).
+  The line is laundered in code (below), because a stranger's invitation can
+  now steer words onto the lock screen.
+- **Real events and committed ghosts, Mac and iPhone.** The model may decide an
+  event needs no reminder.
+
+No feature flag, no env var: it takes hold when the
+daemon rolls. One owner preference turns it off.
+
+#### Linked mail
+
+An event's **linked mail** is the source messages of the ghosts linked to it:
+
+1. The ghosts the timeline already matches to it (`match_ghosts`, the
+   `calendar_owned` binding, `own::same_event`). That matching moves out of
+   `get_timeline` into one core function both use.
+2. Ghosts the reminder model says are the same thing (`same_as`, below), from
+   a candidate set: ghosts of kind `ticket`, `travel` or `reservation`, on the
+   same day as the event in the owner's zone, matched to no event.
+
+Only ghosts that pass `GhostEvent::verified()` link mail. A source message
+that is spam, trashed or sealed is never linked. A committed or going ghost
+that matches no event stands alone: its linked mail is its own sources.
+
+#### The plan (`squelch-core/src/gcal/remind.rs`)
+
+Once per event version (a hash of the title, times, location, description,
+the user's answer, free/busy, the linked message ids and the candidate ids),
+the `notify` model, on the provider that already reads the owner's mail, is
+asked. This is `place.rs`'s pattern: usage category `calendar_remind`, prompt
+version `calendar-remind-v1` stored on each row, a daily cap (200 calls per
+account), a per-pass cap (15, nearest first), a short timeout, all of it
+untrusted text fenced with `neutralize`.
+
+Who gets planned: every event and committed ghost starting in the next 14
+days, and every one with linked mail at any distance (the tickets button
+needs the plan's pick). Past events, cancelled ones, and events the user
+declined get no plan.
+
+**In:** title, start and end in the owner's zone, all-day, the card's place
+(else the location), the description, the user's answer, busy or free, how
+many other guests (a count, never names or addresses), whether the user
+organizes it, event or ghost (and the ghost's kind); the linked mail, each
+numbered: subject, sender's display name, received date, and its
+non-inline attachments numbered (filename, type); the candidate ghosts,
+numbered (title, start, kind).
+
+**Out:** `{remind, lead_minutes, line, open, ticket, same_as}`, held to the
+input in code:
+
+- `remind: false` means no reminder. All-day events remind at 08:00 on their
+  day in the owner's zone, whatever `lead_minutes` says.
+- `lead_minutes` is one of 10, 30, 60, 120, 180. Anything else becomes the
+  nearest one.
+- `line`: at most 90 characters, cut on a character boundary, laundered with
+  `order_link::plain` (control, bidi and invisible characters gone). Dropped,
+  leaving no line, when it holds a URL or a bare host, an `@`, or a run of 6
+  or more digits counted across separators (the `basis` rule in §3.6). The
+  banner then shows the title and time only.
+- `open` and `ticket`: `{mail, attachment?}` indexes into the numbered lists.
+  An index out of range is null. `open` is what tapping the banner shows;
+  `ticket` is what the Tickets button shows.
+- `same_as`: candidate indexes. Out of range ones are dropped.
+
+**Failure:** no model, a timeout or a refusal stores nothing, and the next pass
+asks again within the caps. If an event is 30 minutes out and has never had a
+plan, it gets the fallback: a 30-minute reminder with no line, opening the
+fallback ticket (below) if there is one.
+
+Stored in `calendar_reminders`, keyed by account and item (`e:<calendar>/<event>`
+or `g:<ghost id>`), and pruned when the item is gone or over.
+
+#### Firing
+
+A worker checks every 30 seconds. A reminder fires once per start instant:
+when the start moves, it can fire again. It fires when now is past
+`start - lead` (or 08:00 on an all-day event's day) and the event has not
+started (an all-day one: before noon that day). A plan that lands late, or a
+daemon that was down, fires at once if the event is still ahead. Each firing
+is a row in `calendar_reminder_fires` (kept 7 days) so the phone can fetch
+it by id. The owner preference `calendar_reminders` (default on) stops all of
+it.
+
+- **Mac:** a non-durable `calendar_reminder` frame on `/client/events`, like
+  `renotify` (no `id:`, an older app ignores it).
+- **iPhone:** a non-durable `CalendarPing` to the pusher, like `DraftPing`:
+  wire id `"<tag>:cal:<fire id>:<fired unix>"`, tagged devices only, relay
+  `kind: "calendar"` with the fallback line "An event is coming up", collapse
+  id `cal-<fire id>-<fired>`. The notification extension fetches
+  `GET /client/calendar/reminders/{fire id}`, which serves the frame's JSON.
+
+The frame:
+
+```json
+{"calendar_reminder": 7, "at": 1793210000,
+ "item": {"kind": "event", "calendar_id": "primary", "id": "abc",
+          "title": "Phoebe Bridgers", "start": "2026-10-30T20:00:00-07:00",
+          "end": null, "all_day": false, "place": "The Greek Theatre"},
+ "lead_minutes": 60, "line": "Your 2 tickets are in the Ticketmaster email",
+ "open": {"message_id": 41, "thread_id": "t41", "attachment_id": 9},
+ "ticket": {"message_id": 41, "thread_id": "t41", "attachment_id": 9,
+            "filename": "tickets.pdf", "mime": "application/pdf"}}
+```
+
+A ghost's `item` is `{"kind": "ghost", "id": <ghost id>, ...}`.
+
+The banner reads: title = the event's title; subtitle = "in 1 hr · The Greek
+Theatre"; body = the line. Tapping it shows `open` (an attachment in Quick
+Look, mail in the reader), else the event's card. When there is a `ticket`,
+the notification carries a "Show tickets" action. Analytics:
+`calendar_reminder_shown`, `calendar_reminder_opened`.
+
+#### The Tickets button
+
+`GET /client/timeline` serves `tickets` on each event and ghost: `{message_id,
+thread_id, kind, attachment: {id, filename, mime} | null}` or null. `kind` is
+the linked ghost's (`ticket`, `travel`, `reservation`), and the card labels the
+button by it: "Tickets", "Boarding pass", "Booking". It is the plan's `ticket`
+when the stored plan is for the current version; otherwise the fallback, from
+linked ghosts of those kinds: the newest source message with a `.pkpass`
+attachment, else one with a PDF, else the newest source message alone. One
+tap opens it: an attachment in Quick Look (a `.pkpass` offers Wallet on the
+phone), mail in the reader.
+
+#### Not in v1
+
+A per-event lead the user picks, snooze, travel time from where the user is,
+and leaving out events Google's own app already reminds about.
+
 ## 6. Scheduling from the sitrep
 
 Someone writes "Thursday 2pm or Friday morning?". The thread's card shows the

@@ -493,6 +493,15 @@ actor APIClient {
         return try await perform(req).0
     }
 
+    /// Report a tap on smart re-notify banner `batch`, naming the message it
+    /// opened. Fire and forget, like `markThreadOpened`. A 404 is an answer,
+    /// not a failure: the feature is off for this mailbox, the daemon predates
+    /// it, or the banner has been pruned.
+    func reportRenotifyOpened(batch: Int, messageId: Int) async {
+        struct Body: Encodable { let message_id: Int }
+        try? await postNoContent("/client/renotify/\(batch)/opened", body: Body(message_id: messageId))
+    }
+
     /// Tell the daemon a thread was OPENED. Fire and forget: it is a ledger
     /// write with nothing to show for it, and a failed one costs a rounding
     /// error in a statistic, never anything the user sees.
@@ -655,6 +664,20 @@ actor APIClient {
         try await get(
             "/client/timeline",
             query: ["from": Self.rfc3339Local(from), "to": to.map(Self.rfc3339Local)])
+    }
+
+    /// `GET /client/calendar/search` (docs/CALENDAR.md §10.1): the events and
+    /// ghosts behind the search panel's Events block. Behind the calendar
+    /// feature, so a 404 is "no calendar here" and the block stays away.
+    func calendarSearch(_ q: String, limit: Int = 20) async throws -> CalendarSearchPage {
+        try await get("/client/calendar/search", query: ["q": q, "limit": String(limit)])
+    }
+
+    /// `GET /client/agent/calendar/search`: the same search under the agent
+    /// view (nobody's address, ghosts only from mail the agent may read),
+    /// handed to the assistant as it came.
+    func agentCalendarSearch(_ q: String, limit: Int) async throws -> JSONValue {
+        try await get("/client/agent/calendar/search", query: ["q": q, "limit": String(limit)])
     }
 
     /// `POST /client/timeline/refresh`: ask the calendar sync to run now. A
@@ -879,6 +902,9 @@ actor APIClient {
         var message_id: Int
         /// Ask the daemon to do it (it may still answer with a link to open).
         var auto: Bool
+        /// The daemon refuses `auto` without it. Every caller is a tap: the
+        /// unsubscribe button, or the assistant after `AgentTools.confirmed`.
+        var confirm: Bool
     }
     struct UnsubSenderBody: Codable, Sendable { var sender: String }
     struct UnsubResolutionBody: Codable, Sendable {
@@ -887,7 +913,7 @@ actor APIClient {
     }
 
     func unsubscribe(messageId: Int) async throws -> UnsubscribeResult {
-        try await post("/client/unsubscribe", body: UnsubBody(message_id: messageId, auto: true))
+        try await post("/client/unsubscribe", body: UnsubBody(message_id: messageId, auto: true, confirm: true))
     }
 
     /// The user followed a `needs_you` link to finish on the sender's site.

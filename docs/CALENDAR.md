@@ -828,6 +828,62 @@ list, Esc closes the place list, then the delete question, then the pane.
 - **Month** (DECIDED: in the first version). The shape of the month: multi-day
   spans for trips and stays, load per day, ghost marks, and a day opens its
   column. Not a wall of truncated titles.
+- **The card's picture** (2026-10-28, `Model/EventVisuals.swift`, rules in
+  `Lib/EventVisualPick.swift`). A strip across the top of the detail card:
+  a photo from the mail behind the event (photo-shaped, not a logo on a flat
+  banner; only while remote images load), else Apple's Look Around of the
+  venue, else a map with a pin, else nothing. The venue is used only when
+  Apple's answer has the place's name. A real event that a ghost was matched
+  to carries that ghost's mail (`AgendaItem.mail`), so Gmail's reservation
+  event shows the reservation email behind it and its photo.
+- **Gmail's own events** (2026-10-28). An event Gmail made from mail
+  (`eventType: fromGmail`) is served with `from_gmail: true`, is never
+  editable (Google refuses the change), and its card names it "added by
+  Gmail". Where Passband owns such events (below), it does not stay.
+- **Passband owns the events mail makes** (2026-10-28, the owner's
+  decision; `gcal/own.rs`, on for every mailbox with the calendar). Gmail's
+  frozen copy beside Passband's ghost is two items for one thing, and gets in
+  the way of Passband running the calendar. So after each calendar pass:
+  - **Adopt.** A Gmail event on the user's PRIMARY calendar that is the
+    user's by every organizer test (`SyncedEvent::users_own`), has no other
+    guests, has not ended, and matches exactly ONE live, undismissed ghost
+    (`own::same_event`: the same start, and the display match's titles or a
+    distinctive word shared across title and place) is replaced. Passband
+    creates its own event (Gmail's title, times, colour and free/busy; the
+    card's cleaned place as one line, its name then its address, or Gmail's
+    location when there is none; the note "Kept up to date by Passband from your
+    mail."; a private extended property naming the ghost) under an id made
+    from the ghost (`passband<ghost>t<created>`, so a create sent twice finds
+    the first), stores it, then deletes Gmail's. If Google refuses that
+    delete, Passband deletes its own again and the ghost is marked `refused`:
+    the pair stays as Gmail made it and is never tried again.
+  - **Keep current.** When what the mail says changes (the ghost's start, its
+    stated or user-corrected end, its place, or a cancellation), Passband
+    patches its event: the new times (the old length kept when the mail gives
+    no end), the new place; a cancellation puts "Canceled: " before the title
+    and shows it as free (undone if the mail un-cancels). The model's end
+    estimate is never written. Only a CHANGE in the mail is written, judged
+    against a fingerprint stored at the last write, so the user's own edit to
+    Passband's event stands until the mail says something new.
+  - **No duplicates.** A Gmail copy that turns up again for an event Passband
+    owns is deleted.
+  - **Let go.** If Passband's event disappears (the user deleted it) or the
+    user dismisses the ghost, the binding is `released`: never adopted again,
+    and any Gmail copy then stays. If the ghost itself goes, the binding is
+    forgotten and the event left alone.
+  - **Never touched:** an invitation from someone else (any other organizer,
+    any other guest), any calendar but the primary one, past events, and a
+    Gmail event no ghost or several ghosts match.
+  - **Bounds.** At most 10 Google writes a pass and 100 a day; a quota answer
+    ends the pass. Every write sends `sendUpdates=none` and is audited under
+    actor `passband-calendar` (`calendar_event_adopt`, `_replace_gmail`,
+    `_adopt_undo`, `_update_from_mail`, `_delete_gmail_copy`), target
+    `calendar:<calendar>/<event>`, detail `ok` or the error kind: never a
+    title or a place. Bindings live in `calendar_owned`.
+  - **Served.** Passband's event carries `passband_owned: true`, and its
+    ghost is matched to it whatever the titles; a ghost is also matched to a
+    Gmail event by `own::same_event`. The card says "kept current by
+    Passband".
 - **Event detail.** Title, time (with "~" on an estimate), place, the
   likelihood reason, and the mail behind it (§9).
 - **iOS.** The agenda replaces the Calendar card in `MobileRecordsView`. The
@@ -1067,8 +1123,13 @@ from the plan below:
 - **Calendar unticked** at Google: the Gmail floor passes, nothing is
   installed or queued, and the page says calendar was not connected.
 - **Signup and reconnect** now also send `include_granted_scopes=true`, so a
-  later plain reconnect hands back a token that still carries calendar. They
-  do NOT request the calendar scopes.
+  later plain reconnect hands back a token that still carries calendar.
+  Since 2026-10-29 a reconnect also REQUESTS the calendar scopes (optional,
+  as signup does; the founder: "the reconnect flow for email should also
+  reconnect calendar"): a reconnect is needed when the old grant died, a
+  revoked grant leaves `include_granted_scopes` nothing to keep, and the
+  install replaces the whole credentials file, so a Gmail-only repair left
+  calendar disconnected and asking for a second trip.
 - **The daemon** records the granted scopes on the stored token
   (`StoredToken.scopes`, from the exchange, every refresh that names them, and
   import), resolves the calendar token with `CalendarCredentials` (Calendar
@@ -1142,7 +1203,13 @@ Read only (slice B). The only writes are the user's own, described under
   `organizer` and `self`, transparency, link and update time. Attachments,
   conference data and what a guest wrote when answering are never sent. The
   description (added in wave 3, which shows
-  it) is laundered and cut to 2000 characters as it is stored.
+  it) is laundered and cut to 2000 characters as it is stored, and Google's
+  own boilerplate on an event it created from mail ("To see detailed
+  information for automatically created events like this one, use the
+  official Google Calendar app.", "This event was created from an email you
+  received in Gmail.") is dropped with the link after it, so such an event
+  shows no notes. A row stored before this is rewritten by the next daily
+  full read.
   `calendarList.list` carries a mask of its own, which since wave 3 includes
   each calendar's `backgroundColor`, `colorId` and `accessRole`.
 - **Window.** 30 days back to 400 days ahead. The first read of a calendar is
@@ -1203,8 +1270,27 @@ Read only (slice B). The only writes are the user's own, described under
   titles are equal after lowercasing and collapsing whitespace, or one contains
   the other. Worked out when the timeline is listed, never stored: it hides a
   duplicate and changes no ghost.
+- **The card's place** (`gcal/place.rs`, 2026-10-28). A booking service
+  often writes its marketing into the location ("Dingles Public House, Tock is
+  now part of the Resy network. Explore even more of our dining network on").
+  After each pass that synced, up to 10 locations longer than 40 characters
+  with no answer yet (upcoming events first) go to the small `notify` model,
+  side by side, which returns the place's `name` (the venue, room or meeting
+  link) and its street `address` when the text gives one. Every word of each
+  must be a word of the location, checked in code; an answer that adds one is
+  not believed and the whole location is kept as the name, with no address.
+  Both empty means the text names no place. Answers are stored per distinct
+  location text in `calendar_places` (so a weekly dinner costs one call),
+  pruned when no event holds the text, redone when `PROMPT_VERSION` changes,
+  billed under `calendar_place`, at most 100 calls a day. The timeline serves
+  it once there is one as `place: {"name", "address", "original"}` on each
+  event: `name` and `address` null where the location gives none (both null:
+  no place), `original` the location it was made from. The card shows the
+  place, falling back to `location`, and the editor keeps reading and writing
+  `location`.
 - **Human door only.** Titles, places, organizers and links never reach an
-  agent route, a log line or a triage prompt. A log names a calendar by its
+  agent route, a log line or a triage prompt. The one exception is the card's
+  place above: the location string alone, to the small model. A log names a calendar by its
   position in the pass, never its id, which is usually an address.
 
 ### Creating and editing events (BUILT in wave 3)
@@ -1627,6 +1713,16 @@ event's location too). No key, no bill, the same on Mac and iOS.
 Wave 1's ghosts only ever show. Before a later wave lets one become a real
 event, or lets mail move or delete one, these exist:
 
+("Passband owns the events mail makes" above is the first
+such wave, decided by the owner on 2026-10-28. Where it stands against this
+list: it never notifies and never touches guests; it adopts only from
+authenticated mail, and only an event Gmail itself already added, so it adds
+nothing Gmail had not; the user's dismissal stands in for "this mail is
+wrong" until that exists. It does NOT yet meet the platform rule below: a
+time or place it applies comes from the model's reading of the mail, not an
+iCalendar UID. That is a known gap, bounded by marking rather than deleting
+on cancellation.)
+
 - **Nothing derived from mail may notify.** Since wave 5 a write can make
   Google email an event's guests (`notify: true`). That switch belongs to a
   human pressing a control that says so. A ghost promoted to a real event, an
@@ -1683,8 +1779,124 @@ event, or lets mail move or delete one, these exist:
 
 ## 10. Agents
 
-The agent door stays read-only. Whether `/mcp` serves the timeline (with
-estimates and likelihood marked as such) is open.
+The agent door stays read-only. It does not serve the timeline, but it
+SEARCHES it (§10.1, DECIDED 2026-10-28).
+
+### 10.1 Search (DECIDED 2026-10-28)
+
+The founder: "lets make calendar events searchable by the agent and keyword
+search." Decided with them the same day: an **Events block** in the search
+results (not interleaved, not filter chips), **both** the in-app assistant and
+Agent MCP, and ghosts drawn as ghosts. Narrowed the same day to
+**committed ghosts only** (see "Ghosts" below).
+
+**Why a block and not one list.** A mail hit's date is when it arrived; an
+event's is when it happens. Their scores are not comparable either. Sorted
+together, the list is wrong both ways. So events get their own block, ordered
+by time, and mail keeps its ranking.
+
+**Matching** (`squelch_core::gcal::search`, pure). The query is read by the
+mail parser (`parse_search_query`). `from:`, `to:` and `in:sent`/`from:me` are
+about mail, so a query that has any of them returns no events. `after:` and
+`before:` bound the event's START, not a received date. What is left is
+split into lowercase words of 2+ characters, punctuation dropped, and the
+common short words (a, at, the, with, ...) dropped unless they are all there
+is, at most 16 terms from the first 512 bytes, each once. A term matches a
+word it begins, or a word one of its plural forms begins (`s`, `es`, `ies`
+read as `y`: "meetings" finds "Meeting", "parties" finds "party"), the same
+rule for events (a word index) and ghosts (title and place, matched in
+Rust). The index is NOT stemmed: porter stored "meeting" as "meet", so a
+half-typed "meetin" found nothing while the user typed (adversarial pass,
+2026-10-28). Events match on the title, place, description, guests' names
+and, for the owner only, every address the event holds. Ghosts fold no
+diacritics, events do ("uber" finds an "Über" event, not an "Über" ghost). An event that matches EVERY term is a hit. When none does and
+there are 2+ terms, events missing exactly one term are hits instead (the
+mail search's AND-then-OR, kept tight because the block is three rows). No
+match on operators alone: a query must have at least one term. The calendar's
+name is not matched.
+
+**The index** (schema.sql, CALENDAR SEARCH). First built without one, a
+scan with the exact test in Rust; the probe
+(`store::sqlite::tests::bench::calendar_search_at_the_cap`, 5000 events with
+long descriptions and 20 guests) measured 45 to 140 ms per keystroke with
+SQLite optimized, all of it under the store's one lock. So: FTS5
+`calendar_search_fts`, whose rowid is the id of `calendar_search_keys`,
+because `calendar_events` has no stable integer key (an implicit rowid can
+be renumbered by VACUUM). Written in `upsert_event`, the one way an event is
+written, after its guests and in its transaction; dropped by triggers on
+`calendar_events` when an event is deleted OR updated, whichever path (or
+daemon version) does it, so an older daemon's edit leaves the index short,
+never stale. A store whose index does not hold one row per event, or whose
+index definition differs from schema.sql's, is rebuilt at open (in Rust,
+through the same code a write uses). Matches are counted per term in the
+index, ordered on their times alone, and the full rows and guests are read
+only for the page served. The probe: under 6 ms per search in a debug build,
+46 ms for a word in all 5000 events.
+
+**Order.** Upcoming first, soonest first (an event in progress counts as
+upcoming), then past events, most recent first, on the owner's clock (their
+zone, as every ghost `state` served here also reads it). `total` is the number of
+hits before the limit.
+
+**Ghosts: commitments only** (the founder, 2026-10-28, after the first
+build served every ghost: "only search through real events in the actual
+calendar not events from mail unless triage made an event based on that
+mail"). Search is for the calendar, and a ghost is searched only when it
+is what §3.3 puts on the real calendar: commitment `committed` (a booking,
+a ticket, a reservation the user made), or an invitation the user marked
+going. Invited, proposed and unknown ghosts are possibilities and are not
+searched; their mail is still in the mail results. A ghost the mail
+cancelled, or the user dismissed, is not searched either. Once §3.3's
+automatic add is built, committed ghosts become real events and this case
+mostly empties. The ghost must also be one the timeline would list (its
+supplier message is eligible, §3.6). A ghost that matches a real
+event (`gcal::match_ghosts`, the timeline's display match) is dropped: the
+event is shown and the ghost would be the same thing twice.
+
+**Doors.**
+
+| Door | Route / tool | Gate |
+|---|---|---|
+| Human | `GET /client/calendar/search?q=&limit=` | `calendar` feature (404 off). Real events only while calendar is granted; ghosts always. |
+| In-app assistant | `GET /client/agent/calendar/search?q=&limit=` and the client tool `search_calendar` | Same, plus the agent view below. Mac only, while the Calendar page is available. |
+| Agent MCP | `search_calendar` | Listed and answered only while the `calendar` feature is on. Same agent view. |
+
+Human answer: `{ "items": [ {"event": <timeline event>} | {"ghost": <timeline
+ghost>} ], "total": n, "granted": bool }`, each item exactly as
+`/client/timeline` serves it, so the clients reuse one decoder. `limit`
+defaults to 20, max 50.
+
+Agent answer: `{ "results": [...], "total": n }`, each result:
+`{kind: "event"|"ghost", title, start, end, end_estimated, all_day,
+start_timezone, location, calendar, status, your_response, organizer,
+organizer_is_you, guests: [names], guest_count, description, thread_id,
+likelihood}`. **NO ADDRESS OF ANYONE leaves the agent door from the
+calendar.** Guests appear by name only, the organizer by name or as
+`organizer_is_you`. A name that is (or holds) an address, as Outlook
+invitations often make it, is no name: the guest is counted, not named. A
+calendar name that is an address (Google names a subscribed person's
+calendar after it) is served as null. An address anywhere in the title,
+place or description is served as "(address)". And no address is matched:
+the index files every address the event holds, the ones found in its text
+included, in an `addresses` column the agent's queries never name, so a
+query cannot test "is dan@x.com on this event" one guess at a time (the
+adversarial pass proved all four routes open before this). The description
+is cut to 1000 characters and is the user's data like
+any email body: an instruction in it is not one. A ghost's `thread_id` is the
+mail it came from, and a ghost is served only when every source thread passes
+`external_thread_allowed` (sources that do not are dropped, and a ghost whose
+supplier does not is dropped), the same authority `get_thread` asks, so the
+id always opens.
+
+**Client.** An "Events" block between Senders and the mail hits, up to three
+rows, then "N more" which expands the block in place. Rows join the same
+arrow-key column as Senders and hits. Enter (or a click) opens the Calendar
+page on that event (`selectCalendarItem`, after moving the month so the feed
+covers it). Real events draw with their calendar colour; ghosts draw dashed
+with "from mail". `in:calendar` in the field searches events only (the mail
+search is not run) and lists every hit. The block is drawn only while the
+Calendar page is available. The phone draws the same block in its Search
+tab; a hit opens the Calendar tab in Day mode on that event's detail.
 
 **The in-app assistant drafts events (BUILT in wave 6).** The founder: "lets
 give the assistant the ability to create events." It has ONE calendar tool,
@@ -1732,9 +1944,10 @@ nothing:
   replaced: the tool answers "finish or close the open event first". A
   proposed pane counts as holding something, so it parks instead of closing
   when the user changes page and a second proposal waits its turn.
-- The assistant does not READ the calendar: it gets no event, and a calendar
+- The assistant does not READ the calendar through this tool: a calendar
   name that matches nothing is refused without listing the ones there are.
-  No edit and no delete tool. Nothing on `/mcp` or `/client/agent/*`.
+  No edit and no delete tool. It reads events only through
+  `search_calendar` (§10.1).
 - Offered only on the Mac and only while the Calendar page is
   (`AppStore.calendarPageAvailable`, the gate the guide's calendar topic
   uses). With the page off the tool list and the system prompt are the ones
@@ -1861,6 +2074,7 @@ Each wave is useful on its own and is committed when verified.
   headers-only fetch) or let the timezone inference learn forward only.
 - The month view (hour strips per day, no titles) is the least conventional
   surface and has not been judged by the founder yet.
-- Whether the agent door serves the timeline.
+- Whether the agent door serves the timeline (it SEARCHES it since
+  2026-10-28, §10.1; a listing by date is still open).
 - Google's scope names, their classification, and the amendment process, all
   to be verified at build time.

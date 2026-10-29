@@ -163,6 +163,10 @@ pub struct ApiState {
     /// clone of the state, rather than on the mailer: it rations the owner's
     /// screen, of which there is one per mailbox however many mailers exist.
     pub(crate) draft_open_clock: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    /// Smart re-notify (issue #625, [`crate::renotify`]): how it behaves, the
+    /// channel its banners reach the Mac on, and the wake the event stream
+    /// pokes when a Mac arrives. See the module for the contract.
+    pub(crate) renotify: crate::renotify::RenotifyShared,
     /// The same requests, for the owner's PHONE: handed to the APNs pusher
     /// (see [`squelch_core::push::DraftPing`]), which pushes them to every
     /// registered iPhone. Not durable either, for the same reason as
@@ -639,6 +643,7 @@ impl ApiState {
             event_notifier: None,
             draft_opens: tokio::sync::broadcast::channel(16).0,
             draft_open_clock: Arc::new(std::sync::Mutex::new(None)),
+            renotify: crate::renotify::RenotifyShared::default(),
             draft_pings: tokio::sync::broadcast::channel(16).0,
             draft_pinged: Default::default(),
             shutdown: None,
@@ -852,6 +857,13 @@ impl ApiState {
     /// stream otherwise keeps the server from finishing its drain.
     pub fn with_shutdown(mut self, shutdown: tokio::sync::watch::Receiver<bool>) -> Self {
         self.shutdown = Some(shutdown);
+        self
+    }
+
+    /// Smart re-notify's tunables (`[renotify]`). Whether it runs at all is
+    /// the `renotify` hidden feature.
+    pub fn with_renotify_config(mut self, config: squelch_core::config::RenotifyConfig) -> Self {
+        self.renotify = crate::renotify::RenotifyShared::new(config);
         self
     }
 
@@ -1401,7 +1413,9 @@ impl ApiState {
         // any credential is attached, or an Outlook token would be handed to a
         // Gmail writer on a fresh database.
         let account_id = store.ensure_account(account_email)?;
-        store.bind_account_provider(account_id, cfg.provider)?;
+        if cfg.provider == squelch_core::mail::MailProvider::Outlook {
+            store.bind_account_provider(account_id, cfg.provider)?;
+        }
         let state = Self::from_env(store, account_email)?
             .with_stage2_prices(cfg.stage2.price_in_per_mtok, cfg.stage2.price_out_per_mtok)
             .with_agent_triage(cfg.triage.clone())
@@ -1431,6 +1445,7 @@ impl ApiState {
                 cfg.notify.price_in_per_mtok,
                 cfg.notify.price_out_per_mtok,
             )
+            .with_renotify_config(cfg.renotify.clone())
             // Smart clear's own model and prices, for the same reason.
             .with_smart_clear_config(
                 cfg.smart_clear.model.clone(),

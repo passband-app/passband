@@ -441,6 +441,7 @@ enum SettingsSearch {
                 "telemetry", "analytics", "privacy", "tracking", "posthog", "data",
                 "usage data", "anonymous", "opt out", "opt-out", "stop sending",
                 "diagnostics", "metrics", "share data",
+                "session replay", "replay", "recording", "screen recording",
             ]),
     ]
 

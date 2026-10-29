@@ -34,7 +34,11 @@ struct AgendaTests {
         unlikelyFoldsIntoACount()
         endLabels()
         matchedGhostsAndDeclinedEventsAreNotDrawn()
+        aMatchedGhostsMailRidesOnTheEvent()
+        theCleanedPlaceIsWhatTheCardShows()
         earlierTodayFoldsAndTodayAlwaysExists()
+        theListCanStartOnAnotherDay()
+        aRunOfDaysKeepsTheQuietOnes()
         theNextCommitment()
         dayTitles()
         todaysStrip()
@@ -396,6 +400,82 @@ struct AgendaTests {
         expect(tue?.visible.last?.title == "Untitled event", "a blank title is named, not blank")
     }
 
+    /// The matched ghost is not drawn, but its mail is not lost: the event
+    /// carries it, each message once, and an unmatched event carries none.
+    static func aMatchedGhostsMailRidesOnTheEvent() {
+        var second = ghost(70, "Dinner", start: "2026-10-06T19:00:00-07:00", matched: true)
+        second.id = 71
+        second.sources = [
+            GhostSource(message_id: 70, thread_id: "t70", role: .agreed),
+            GhostSource(message_id: 72, thread_id: "t72", role: .updated),
+        ]
+        let items = Agenda.items(
+            TimelineFeed(
+                ghosts: [ghost(70, "Dinner", start: "2026-10-06T19:00:00-07:00", matched: true), second],
+                events: [
+                    event("ev70", "Dinner", start: "2026-10-06T19:00:00-07:00"),
+                    event("other", "Gym", start: "2026-10-06T07:00:00-07:00"),
+                ]),
+            calendar: cal)
+        let dinner = items.first { $0.event?.id == "ev70" }
+        expect(dinner?.mail.map(\.message_id) == [70, 72], "both ghosts' mail, each message once")
+        expect(dinner?.sources.map(\.thread_id) == ["t70", "t72"], "the card reads it as its sources")
+        expect(items.first { $0.event?.id == "other" }?.mail.isEmpty == true, "no match, no mail")
+        let ghostRow = Agenda.items(
+            TimelineFeed(ghosts: [ghost(80, "Party", start: "2026-10-06T20:00:00-07:00")], events: []),
+            calendar: cal
+        ).first
+        expect(ghostRow?.sources.map(\.message_id) == [80], "a ghost's sources are its own")
+    }
+
+    /// The daemon's cleaned place wins over the raw location; "" hides it;
+    /// without one (an older daemon, or not cleaned yet) the location shows.
+    static func theCleanedPlaceIsWhatTheCardShows() {
+        var raw = event("p", "Dinner", start: "2026-10-06T19:00:00-07:00")
+        raw.location = "Dingles Public House, Tock is now part of the Resy network."
+        let shown = { (e: TimelineEvent) in Agenda.item(e, calendar: cal)?.location }
+        expect(shown(raw) == raw.location, "no place yet: the location")
+        expect(Agenda.item(raw, calendar: cal)?.placeAddress == nil, "no place yet: no address")
+        var cleaned = raw
+        cleaned.place = TimelinePlace(
+            name: "Dingles Public House", address: "165 Main St, Northampton", original: raw.location)
+        let item = Agenda.item(cleaned, calendar: cal)
+        expect(item?.location == "Dingles Public House", "the cleaned name")
+        expect(item?.placeAddress == "165 Main St, Northampton", "the address under it")
+        expect(
+            item?.placeQuery == "Dingles Public House, 165 Main St, Northampton",
+            "the map asks for both")
+        var onlyAddress = raw
+        onlyAddress.place = TimelinePlace(address: "165 Main St")
+        expect(shown(onlyAddress) == "165 Main St", "an address alone is the line")
+        expect(Agenda.item(onlyAddress, calendar: cal)?.placeAddress == nil, "and not repeated")
+        var nothing = raw
+        nothing.place = TimelinePlace(original: raw.location)
+        expect(shown(nothing) == nil, "a place of nothing hides the line")
+
+        // The new keys must survive the hand-written decoder, not just the
+        // memberwise init.
+        let wire = """
+            {"id":"p","calendar_id":"primary","start":"2026-10-06T19:00:00-07:00","all_day":false,
+             "location":"Dingles Public House, Tock is now part of the Resy network.",
+             "place":{"name":"Dingles Public House","address":"165 Main St","original":"Dingles Public House, Tock is now part of the Resy network."},
+             "from_gmail":true,"passband_owned":true}
+            """
+        let decoded = try? JSONDecoder().decode(TimelineEvent.self, from: Data(wire.utf8))
+        expect(decoded?.place?.name == "Dingles Public House", "place name decodes")
+        expect(decoded?.place?.address == "165 Main St", "place address decodes")
+        expect(decoded?.place?.original?.hasPrefix("Dingles") == true, "place original decodes")
+        expect(decoded?.from_gmail == true, "from_gmail decodes")
+        expect(decoded?.passband_owned == true, "passband_owned decodes")
+        let bad = """
+            {"id":"p","calendar_id":"primary","start":"2026-10-06T19:00:00-07:00","all_day":false,
+             "place":7,"from_gmail":"yes"}
+            """
+        let lenient = try? JSONDecoder().decode(TimelineEvent.self, from: Data(bad.utf8))
+        expect(lenient != nil && lenient?.place == nil && lenient?.from_gmail == nil,
+               "a bad new key costs only itself")
+    }
+
     static func earlierTodayFoldsAndTodayAlwaysExists() {
         let days = build(
             [ghost(70, "Breakfast", start: "2026-10-05T09:00:00-07:00",
@@ -411,6 +491,54 @@ struct AgendaTests {
         let empty = build([])
         expect(empty.count == 1 && empty[0].day == day("2026-10-05") && empty[0].isEmpty,
                "today is there even with nothing on it")
+    }
+
+    /// The phone's selected day leads the list instead of today: last week's
+    /// day shows what was on it, a day ahead hides the days before it, and a
+    /// trip still running when that day began is listed under it.
+    static func theListCanStartOnAnotherDay() {
+        let ghosts = [
+            ghost(74, "Last week", start: "2026-09-28T10:00:00-07:00", commitment: .committed),
+            ghost(75, "Breakfast", start: "2026-10-05T09:00:00-07:00",
+                  end: "2026-10-05T10:00:00-07:00", commitment: .committed),
+            ghost(76, "Trip", start: "2026-10-06", end: "2026-10-10", allDay: true, commitment: .committed),
+            ghost(77, "Dinner", start: "2026-10-09T19:00:00-07:00", commitment: .committed),
+        ]
+        let items = Agenda.items(TimelineFeed(ghosts: ghosts), calendar: cal)
+        let past = Agenda.days(items, now: now, calendar: cal, from: day("2026-09-28"))
+        expect(past.first?.day == day("2026-09-28") && past.first?.visible.map(\.id) == ["g:74"],
+               "a past day leads with what was on it")
+        expect(past.first?.earlier.isEmpty == true, "a past day folds nothing into earlier")
+        expect(past.contains { $0.day == day("2026-10-05") && $0.earlier.map(\.id) == ["g:75"] },
+               "today still folds what has finished")
+        let ahead = Agenda.days(items, now: now, calendar: cal, from: day("2026-10-08"))
+        expect(ahead.first?.day == day("2026-10-08"), "a later day leads")
+        expect(ahead.first?.visible.map(\.id) == ["g:76"], "a trip running into it is listed there")
+        expect(!ahead.contains { $0.day == day("2026-10-05") }, "today is not dragged in ahead of it")
+        expect(ahead.map(\.day) == [day("2026-10-08"), day("2026-10-09")], "then the days with something on")
+        let quiet = Agenda.days([], now: now, calendar: cal, from: day("2026-10-20"))
+        expect(quiet.map(\.day) == [day("2026-10-20")] && quiet[0].isEmpty,
+               "the chosen day is there even with nothing on it")
+        expect(Agenda.days(items, now: now, calendar: cal, from: nil) == build(ghosts),
+               "no day chosen is today, exactly as before")
+    }
+
+    /// The phone's week: seven days, the quiet ones included, each built as
+    /// the agenda builds it.
+    static func aRunOfDaysKeepsTheQuietOnes() {
+        let ghosts = [
+            ghost(78, "Trip", start: "2026-10-03", end: "2026-10-06", allDay: true, commitment: .committed),
+            ghost(79, "Dinner", start: "2026-10-07T19:00:00-07:00", commitment: .committed),
+            ghost(80, "Next week", start: "2026-10-12T19:00:00-07:00", commitment: .committed),
+        ]
+        let items = Agenda.items(TimelineFeed(ghosts: ghosts), calendar: cal)
+        let week = Agenda.run(items, now: now, calendar: cal, from: day("2026-10-04"), count: 7)
+        expect(week.map(\.day) == (4...10).map { day(String(format: "2026-10-%02d", $0)) },
+               "seven days, every one")
+        expect(week[0].visible.map(\.id) == ["g:78"], "a trip running into the first day is listed there")
+        expect(week[2].isEmpty, "a quiet day is there, empty")
+        expect(week[3].visible.map(\.id) == ["g:79"], "a day with something on has it")
+        expect(!week.flatMap(\.visible).contains { $0.id == "g:80" }, "nothing past the last day")
     }
 
     static func theNextCommitment() {

@@ -12,6 +12,23 @@ import Foundation
 /// Palette slots — 10 theme-aware pairs (see Palette.avatarPalette).
 let avatarSlots = 10
 
+/// The avatar palette as plain hex, one row per slot: (background, initials),
+/// each with a light and a dark value. Spelled HERE, in a Foundation-only file,
+/// because the iOS notification extension draws the same tiles and cannot load
+/// SwiftUI's `Palette`; `Palette.avatarPalette` is built from this table.
+let avatarHex: [(bg: (light: UInt32, dark: UInt32), fg: (light: UInt32, dark: UInt32))] = [
+    ((0xD8E6F8, 0x24384F), (0x1C4E82, 0xA9CBF0)),
+    ((0xDCE9E1, 0x22392E), (0x246148, 0x9AD3B6)),
+    ((0xF3E2DC, 0x442C26), (0x8E4231, 0xEBA894)),
+    ((0xE6E1F5, 0x2F2A4A), (0x4C3E9C, 0xB8ACF2)),
+    ((0xF5EBD5, 0x3E2E1B), (0x7E5A16, 0xE2C078)),
+    ((0xDCE7EE, 0x25333D), (0x2C5568, 0x9EC4D8)),
+    ((0xEFDEE9, 0x3E2839), (0x83366A, 0xE0A6CD)),
+    ((0xE0EAD8, 0x2A3726), (0x466A2E, 0xB4D69A)),
+    ((0xE9E3DA, 0x37312A), (0x6A5540, 0xD3C0A6)),
+    ((0xDDE0F0, 0x282C45), (0x3B4490, 0xAAB2EE)),
+]
+
 enum SenderID {
     struct Parsed {
         var name: String

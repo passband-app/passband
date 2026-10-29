@@ -1,7 +1,7 @@
 # The alerts. Every one of them is something that happened, or that
 # deploy/monitoring/README.md said we should be told about and nothing told us.
 #
-# WHY NoData IS OK ON EVERY RULE BUT THE LAST: when carrier stops reporting,
+# WHY NoData IS OK ON EVERY RULE: when carrier stops reporting,
 # every query here goes empty at once, and six alerts saying "I cannot see" is
 # noise around the one that matters. `carrier-metrics-missing` is that one.
 #
@@ -115,6 +115,11 @@ groups:
       # a probe that never passes; this does not care which. Ten minutes is
       # well past the 30s minReadySeconds soak and a Recreate roll. A tenant
       # stopped on purpose is scaled to 0 and so never fires.
+      #
+      # `squelch-embed` lives in the same namespace and is not a tenant: its
+      # own rule (`squelch-embed-down`, below) says what its absence means,
+      # and this rule's description would send whoever reads it to the wrong
+      # pod. So it is left out by name, on both sides of the subtraction.
       - uid: tenant-no-available-pod
         title: Tenant has no running pod
         condition: C
@@ -137,8 +142,8 @@ groups:
               refId: A
               instant: true
               expr: >-
-                kube_deployment_spec_replicas{namespace="tenants"}
-                  - kube_deployment_status_replicas_available{namespace="tenants"}
+                kube_deployment_spec_replicas{namespace="tenants",deployment!="squelch-embed"}
+                  - kube_deployment_status_replicas_available{namespace="tenants",deployment!="squelch-embed"}
           - refId: C
             datasourceUid: __expr__
             model:
@@ -191,6 +196,59 @@ groups:
               expression: A
               conditions:
                 - evaluator: { type: gt, params: [900] }
+
+      # A container in `tenants` killed for memory, the moment it happens. On
+      # the shared embedder a tenant daemon runs under a 512Mi limit sized from
+      # August measurements of a daemon with no session (SETUP.md §10b, "Before
+      # step 9"), so this is the rule that says the number was wrong, one
+      # tenant at a time, before the crash loop is long enough for
+      # `tenant-no-available-pod`. It covers `squelch-embed` too, on purpose.
+      #
+      # The reason gauge alone is not an event: kube-state-metrics keeps
+      # reporting OOMKilled as the LAST termination reason until the container
+      # terminates for some other reason, which can be weeks. So it fires only
+      # while the restart counter has also moved in the last 15 minutes, which
+      # makes it one firing per kill (or per run of kills) rather than a
+      # permanent one. `max by` for the two kube-state-metrics pods of a
+      # rollout, as above.
+      - uid: tenant-oomkilled
+        title: Pod in tenants OOM-killed
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $labels.pod }} ({{ $labels.container }}) was OOM-killed'
+          description: >-
+            The container hit its memory limit and was restarted. Read PRODUCTION.md, "If a tenant
+            is OOM-killed, read the constraint first", before raising anything. On the shared
+            embedder, more than one tenant doing this is the 512Mi limit being too small: pin
+            SQUELCH_WARDEN_MEMORY_LIMIT in 15-warden-config.yaml and redo 70-tenant-limits.yaml.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 900, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                max by (pod, container) (
+                  kube_pod_container_status_last_terminated_reason{namespace="tenants",reason="OOMKilled"}
+                )
+                  and on (pod, container)
+                max by (pod, container) (
+                  increase(kube_pod_container_status_restarts_total{namespace="tenants"}[15m])
+                ) > 0
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
 
       # 2026-09-29: memory is what carrier runs out of first, and the only
       # wall it has is the RAM itself. Nothing is reserved for k3s and there
@@ -306,3 +364,157 @@ groups:
               expression: A
               conditions:
                 - evaluator: { type: gt, params: [0] }
+
+  # The shared embedding service (deploy/hosted/65-embed.yaml,
+  # docs/EMBED-SERVICE.md). One pod that every tenant on the shared embedder
+  # depends on for vectors: while it is down, those tenants embed nothing and
+  # search is keyword-only. Mail sync is unaffected, which is why nothing
+  # else here would notice.
+  - orgId: 1
+    name: embedding
+    folder: Passband
+    interval: 1m
+    rules:
+      # A missing scrape target reads exactly like an idle service, so this
+      # does not trust the service's own series to be there. It asks two
+      # questions: is the session ready, and, if no series says either way,
+      # does the Deployment exist (kube-state-metrics, which sees it whether
+      # or not the pod is scraped). Session ready = 0, a pod that is crash
+      # looping, a scrape that broke, and a NetworkPolicy that stopped
+      # admitting the agent all come out as 1.
+      #
+      # It stays silent until 65-embed.yaml is applied, because before that
+      # the Deployment does not exist and the expression is empty, and an
+      # empty result is OK here like everywhere else in this file: the one
+      # case it would otherwise catch, carrier going dark, is
+      # `carrier-metrics-missing`'s. That leaves one hole, said out loud: the
+      # Deployment deleted while tenants are still pointed at it reads as
+      # "not installed". SETUP.md §10b's rollback deletes it only after the
+      # last tenant has rolled back, and nothing else should.
+      - uid: squelch-embed-down
+        title: Embedding service down
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: 'squelch-embed is not serving'
+          description: >-
+            Every tenant on the shared embedder is getting no vectors: new mail is stored but
+            not embedded, and search is keyword-only until this clears. `kubectl -n tenants
+            describe pod -l app.kubernetes.io/name=squelch-embed` and `kubectl -n tenants logs
+            deploy/squelch-embed`; the last line of a pod that exited says why. If the pod is
+            Running and Ready, the scrape is what broke: check up{job="squelch-embed"}.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                (1 - max(squelch_embed_session_ready{job="squelch-embed"}))
+                  or on ()
+                (max(kube_deployment_spec_replicas{namespace="tenants",deployment="squelch-embed"}) > bool 0)
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+
+      # The refusals that are never the design working. `unauthorized` is a
+      # token mismatch (a tenant started before the Secret existed, or the
+      # Secret changed); `not_ready` past a restart is a session that will
+      # not come up; `error` is inference failing. `queue_full` on the
+      # INTERACTIVE lane is searches being turned away, which the lane's
+      # share exists to prevent, and on lane `none` it is the server out of
+      # body permits (`BODY_PERMITS` in squelch-embed/src/http.rs), which
+      # turns away every caller before it has a lane. Backfill 429s during a
+      # signup are expected and are not here.
+      #
+      # A rate over 5m held for 10m, so the few seconds of `not_ready` a
+      # Recreate rollout costs cannot fire it: that blip leaves the window
+      # after five minutes, before `for` is satisfied.
+      - uid: squelch-embed-errors
+        title: Embedding service refusing requests
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: 'squelch-embed: {{ $labels.outcome }} on the {{ $labels.lane }} lane'
+          description: >-
+            unauthorized: a token mismatch; the tenants that started before the Secret did are the
+            ones to roll (SETUP.md §10b, step 7). not_ready: the session is down; see the pod's log.
+            error: inference is failing. queue_full on interactive or none: searches, or every
+            request, are being refused, which means one or more tenants are flooding the service;
+            see "One tenant can slow every other" in SETUP.md §10b.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                sum by (outcome, lane) (
+                  rate(squelch_embed_requests_total{job="squelch-embed",outcome=~"unauthorized|error|not_ready"}[5m])
+                )
+                  or
+                sum by (outcome, lane) (
+                  rate(squelch_embed_requests_total{job="squelch-embed",outcome="queue_full",lane=~"interactive|none"}[5m])
+                )
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+
+      # The pod against its own limit (768Mi today, so 0.85 is about 650Mi).
+      # Read as a ratio of container_spec_memory_limit_bytes rather than a
+      # literal, so a changed limit in 65-embed.yaml moves the threshold with
+      # it. The memory bound is the texts in one forward pass, and the built
+      # image peaked at 290 MB under load (65-embed.yaml's header), so this
+      # firing is something new: a model, a bound or a leak, not traffic.
+      - uid: squelch-embed-memory-high
+        title: Embedding service near its memory limit
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: 'squelch-embed at {{ humanizePercentage $values.A.Value }} of its memory limit'
+          description: >-
+            An OOM kill of this pod is every shared-embedder tenant without vectors until it
+            restarts. Nothing about tenant count should move this; compare with the last
+            release's peak before raising the limit in 65-embed.yaml.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                max by (pod) (container_memory_working_set_bytes{namespace="tenants",container="squelch-embed"})
+                  / max by (pod) (container_spec_memory_limit_bytes{namespace="tenants",container="squelch-embed"})
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gte, params: [0.85] }

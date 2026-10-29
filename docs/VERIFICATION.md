@@ -108,8 +108,10 @@ sees. Existing hosted tenants are asked at
 `signup.passband.app/reconnect?calendar=1`, which asks for the Gmail
 scopes again plus these two in one consent, and self-host by `squelchd auth
 --calendar`. A user who unticks them at Google keeps a working mailbox and
-nothing is installed. Every grant flow sends `include_granted_scopes=true`, so
-a later Gmail reconnect does not drop a calendar grant made earlier.
+nothing is installed. Every grant flow sends `include_granted_scopes=true`,
+and a Gmail reconnect asks for the two calendar scopes again (optional, since
+2026-10-29), so a repair restores calendar even when the grant it replaces was
+revoked.
 `docs/CALENDAR.md` §8 planned to file calendar as an amendment after the Gmail
 submission. Now that signup asks for it, the reviewer sees these scopes on the
 first consent screen, so they belong in the Gmail submission itself, with the

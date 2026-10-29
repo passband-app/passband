@@ -187,7 +187,7 @@ enum ProductGuide {
         case .triage: triage
         case .senderRules: senderRules
         case .reminders: reminders
-        case .search: search
+        case .search: search(calendar: calendar)
         case .loginCodes: loginCodes
         case .assistant: assistant
         case .appAndAccounts: appAndAccounts
@@ -302,6 +302,7 @@ enum ProductGuide {
         What is on it:
         - Events guessed from mail (invitations, bookings, plans in a thread), drawn solid, striped or outlined by how likely they are. They need no permission.
         - Real events from Google Calendar, once it is connected, in each calendar's own colour.
+        - Opening an event shows a picture when there is one (a photo from the mail behind it, else Apple's street view or a map of the venue) and its place as the venue's name with the street address under it, tidied from what a booking service wrote. On the iPhone, tapping the place asks whether to open it in Apple Maps or Google Maps.
         - Connecting: the "Connect calendar" card or button opens Google's consent screen. Unticking calendar there leaves the mailbox working and simply connects no calendar.
 
         Views:
@@ -333,7 +334,20 @@ enum ProductGuide {
         - When the draft has guests, only the button invites them: a click on the control that names them, such as "add and invite 2". ⌘↵ never does, however much of the pane has been clicked or typed in, and plain Enter never saves an event with guests. The line above the button says so.
         - If an email is open when the assistant drafts, the email stays open and the draft waits on the Calendar page; it appears when that email is closed or the user goes to the page. It never closes mail the user is writing: with something typed in a composer or a reply, the assistant is told to wait, and a draft already waiting stays out of sight until that mail is sent or closed.
         - A draft is made only while the assistant's bar is open. Starting a new chat or switching mailbox while it is working drafts nothing.
-        - The assistant cannot read the calendar, and it cannot edit or delete events. If an event is already open with unsaved changes, it asks the user to finish or close that one first.
+        - The assistant can search the calendar (events, and bookings from mail not on it yet, seeing guests by name only), but it cannot edit or delete events. If an event is already open with unsaved changes, it asks the user to finish or close that one first.
+        """
+
+    /// The search page with the Calendar page on: the same page, and how
+    /// events show up in it. Off, the page is `search` alone, byte for byte.
+    private static func search(calendar: Bool) -> String {
+        guard calendar else { return search }
+        return search + "\n\n" + searchEvents
+    }
+
+    private static let searchEvents = """
+        Events:
+        - Words that match the calendar list up to three events under Events, between the senders and the mail: coming up first, soonest first, then past ones. "N more events" shows the rest. A booking found in mail that is not on the calendar yet, or an invitation marked going, also shows, saying "from mail". Other invitations do not. Down arrow and Enter, or a click, opens one on the Calendar page.
+        - in:calendar searches events only, and lists them all.
         """
 
     private static let readingMail = """

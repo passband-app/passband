@@ -54,7 +54,7 @@ fn an_unknown_account_has_no_provider() {
 fn a_provider_this_build_does_not_know_is_an_error_not_gmail() {
     let (store, acct) = store();
     store.execute_batch_for_test(&format!(
-        "UPDATE accounts SET provider = 'imap' WHERE id = {acct}"
+        "UPDATE accounts SET provider = 'exchange-ews' WHERE id = {acct}"
     ));
     assert!(matches!(
         store.account_provider(acct),

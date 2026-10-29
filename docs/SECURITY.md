@@ -485,9 +485,9 @@ spam it is told to distrust: everything the agent reads is text it may act on.
   Stage-1 — after the seal check, so a misfiled OTP is still sealed and sealed
   still outranks spam. `ingest_message` stamps the `'n/a'` stage markers, which
   is what keeps the row out of both LLM queues.
-- **Never embedded.** `SyncEngine::ingest_one` returns `None` for a spam row, the
-  same structural gate sealed mail gets. An embedding is a similarity claim, and
-  spam is written to imitate the mail it impersonates.
+- **Never embedded.** `SyncEngine::ingest_one` returns no embed text for a spam
+  row, and `messages_missing_vectors` selects `is_spam = 0`. An embedding is a
+  similarity claim, and spam is written to imitate the mail it impersonates.
 - **SQL absence.** Every band, queue, count and search leg pairs `is_spam = 0`
   with its `is_sent = 0`. The one caller asking for the other side is
   `GET /client/updates?spam=only`; an unrecognized value is a 400, never a
@@ -726,6 +726,189 @@ rule text is not delivered as the owner's words.
 - Keep the setting off the agent door: an agent that could raise its own
   level has no level.
 
+## 4d. Hosted mail text in processes we operate
+
+**Invariant.** On hosted, a tenant's mail text leaves its own pod for exactly two
+processes we run: the LLM gateway and the shared embedding service. Provider spam
+reaches neither. Sealed mail (login codes, reset links, sign-in alerts, anything
+the model or a person restricted) never reaches the embedding service, nor the
+in-process embedder on self-host. Self-host reaches neither process. Nothing else
+of ours is handed mail text.
+
+**What each one sees.** They are gated differently, on purpose.
+
+- **The LLM gateway** (Bifrost, `SQUELCH_ANTHROPIC_BASE_URL`, `docs/HOSTED.md`)
+  receives what triage, translation and the hosted assistant send it, and it IS
+  NOT filtered by sealed status. It cannot be: there is no local login-code
+  detector, and since the triage rewrite (`4b7099de`) the triage model is what
+  decides whether a message is authentication or restricted. Triage therefore
+  reads every non-spam message, login codes included, because judging them is
+  its job; translation reads foreign mail before its first triage for the same
+  reason. Access is enforced where mail leaves toward an external reader (§4).
+  A remote service with a per-tenant virtual key, reached over https only
+  (`squelch-warden/src/config.rs`, `SQUELCH_WARDEN_LLM_BASE_URL`).
+- **The embedding service** (`squelch-embed`, `docs/EMBED-SERVICE.md`) receives
+  the subject and body, cut to `protocol::MAX_CHARS_PER_TEXT` (8192
+  characters), of only the messages that pass
+  the sealed gate below, the English of a translated one under the same gate,
+  plus the text of every search query that takes the vector leg
+  (`query_embed_text` in `squelch-core/src/store/sqlite/search.rs`). It is in
+  use only when the operator sets `SQUELCH_WARDEN_EMBED_URL`; unset, each tenant
+  embeds in-process, behind the same gate.
+
+**The sealed gate, at the store side.** One predicate,
+`embeddable_mail_sql!` (`squelch-core/src/store/sqlite/mod.rs`), built from
+the canonical sealed predicates (`known_sealed_mail_sql!`, `sealed_mail_sql!`)
+rather than written a third time. A message may be embedded only when it is
+not spam, is not KNOWN sealed (an auth decision, a restriction by the model or
+a person, or the retired `triage.sensitivity` column), and EITHER has a stored
+triage decision for its current content (the decision's revision equals
+`agent_message_state.revision`) with its access assessment settled, OR is the
+owner's own mail (`own_mail_sql!`) whose access check has settled and did not
+restrict it. NOTHING IS EMBEDDED UNTIL IT IS KNOWN NOT TO BE SEALED.
+
+- **Where it is asked.** Before any text is handed to an embedder: at ingest
+  (`SyncEngine::ingest_one`, through `Store::message_embeddable`), by the drain
+  (`messages_missing_vectors`, `translations_missing_vectors`), and on the
+  translation path (`SyncEngine::embed_translation`). Again under the store
+  lock at the write (`write_embedded_vectors`, `upsert_translation_vector`), so a
+  decision that sealed a message while its text was at the embedder wins.
+- **Undecided mail waits.** At ingest an inbound message has no decision, so it
+  could still be a login code: it gets no vector until a decision that does not
+  seal it lands, and the applied decision raises the drain's flag. A decision
+  about older content is not a decision: when a message's content changes, its
+  revision moves past the decision's, and it waits again for one about the new
+  text. Mail whose
+  triage is DELAYED (the daily run cap, a spent budget, a failing model, no
+  model configured on a self-host) has no vector meanwhile, and mail never
+  triaged by design (an archive row nobody promoted, an old message given only
+  a `source_access` check) has none at all. Keyword search still finds all of
+  it: FTS is not gated by this. That is the accepted trade-off.
+- **The owner's own mail is the one class embedded without a triage
+  decision, and it waits for its access check.** It is filed access-only and
+  never triaged, and it is not a login code someone sent the owner, but it can
+  still carry one (a forwarded code), which is what the access check is for.
+  So it is embedded only once that check has settled, not while it is pending,
+  and only if it did not restrict the message. If a person restricts it later,
+  its vector goes at that event; if a restriction is lifted, the store is
+  marked for the drain and the vector comes back.
+- **Vectors that already exist go.** `purge_forbidden_vectors_conn`
+  (`search.rs`) deletes the original's and the translation's vector for a
+  message that is known sealed, or is in the agent pipeline and no longer
+  passes the gate (new content awaiting its re-triage). It runs inside the
+  transaction of every event that can seal: a triage commit, an access commit,
+  a person's correction, the compatibility sensitivity endpoint, and a content
+  change. It also runs as a sweep at every store open, which removes vectors
+  embedded before the gate existed: on one real mailbox (2,781 messages, 2,499
+  vectors) the first open removed 360, 143 of them known sealed, in about 30 ms.
+  It is a scan of the vectors table, so it costs about 1 s at 100k vectors, at
+  every open. The FTS index and the message are untouched.
+- **A daemon from before the gate undoes it.** The schema is compatible both
+  ways, so rolling a tenant back to an older daemon works, and that daemon's
+  drain re-embeds every vector the sweep deleted, sealed mail included. The next
+  open on a gated daemon deletes them again. A rollback past the gate is a
+  return of the exposure for as long as it lasts, and `deploy/hosted/ROLLOUT.md`
+  says so where rollbacks are planned.
+- **Spam** is excluded by the same predicate (`m.is_spam = 0`), as before.
+
+The embedder itself checks nothing (`squelch-core/src/embed/remote.rs`, module
+docs): a second gate inside it would be one more thing to keep in step with the
+first. Tests: `squelch-core/src/store/sqlite/tests/embed_gate.rs` (every case
+seals through the agent pipeline with the legacy column still `normal`),
+`sync::tests::no_embedder_ever_reads_a_login_code`, and
+`translate_pass::tests::the_english_of_mail_that_may_be_sealed_reaches_no_embedder`.
+
+**What the embedding service does not do**, each backed by code or a test:
+
+- **Logs no text.** Its log lines carry counts, statuses and error words. The
+  session's error type carries nothing (`squelch-embed/src/session.rs`,
+  `SessionError`), and `no_text_or_address_reaches_metrics_or_logs` in
+  `squelch-embed/src/http.rs` drives every path with a canary text and fails if
+  it reaches a log line or the metrics. A panic prints a fixed word, the
+  thread name and a source location from the process's own hook, never the
+  panic's payload,
+  and a canary test holds that too. The daemon-side client's errors carry a
+  status, a closed error word or a transport class, never request or response
+  text, and its config's `Debug` redacts the token.
+- **Stores nothing.** Read-only root filesystem, the baked weights read-only,
+  one 64Mi `/tmp` the service does not write to (`deploy/hosted/65-embed.yaml`).
+  A request's texts live for one forward pass and are dropped; a request whose
+  caller hung up, or that waited past its lane's deadline, is skipped, never
+  run.
+- **Never puts two requests in one pass.** Each request is its own forward
+  pass. Batching requests together was a cross-tenant side channel: a pass pads
+  every text to the longest, so tenant B's latency carried the token length of
+  tenant A's text it happened to share a pass with. One pass per request
+  removes the sharing; what tenant B can still observe is that the single
+  worker was busy, which says someone was embedding something and nothing about
+  what (`squelch-embed/src/coalescer.rs`, module docs).
+- **Caches nothing, and dedups nothing.** A content-keyed shortcut is a
+  cross-tenant oracle on latency: tenant B would learn that tenant A received a
+  byte-identical message.
+- **Runs as its own uid.** 10003, not the tenants' 10001 or the warden's
+  10002, so where user namespaces are off a tenant process and the embedder
+  are still different users on the node.
+- **Is never told a tenant's name.** No tenant name or account id is in the
+  path, a header or the body (`EmbedRequest` is `deny_unknown_fields`, one
+  field). The bearer token is one fleet-wide value, deliberately not per tenant.
+  The accept loop discards the peer address before any handler runs
+  (`squelch-embed/src/http.rs`, `serve`), so nothing can key a log, metric,
+  cache or limit on it.
+- **Has no egress.** Its NetworkPolicy has `egress: []`, not even DNS, and the
+  weights are baked into the image, so a compromised embedder holding text in
+  flight has nowhere to send it. Ingress is tenant pods on 8850 and the
+  monitoring agent on 9464.
+- **Exports closed labels only.** Every metric label value comes from an enum
+  (`lane`: `interactive`, `backfill`, `none`; `outcome`: a closed set), and a
+  test refuses any label outside those sets or anything shaped like an IP
+  address (`squelch-embed/src/metrics.rs`).
+
+**What the shared token is worth.** Against a compromised tenant, nothing: every
+tenant holds it. The boundary is the NetworkPolicy pair (each tenant's one
+egress rule to the service, the service's ingress rule). The token is for the
+day the CNI is not enforcing policy and something that is not a tenant lands on
+the pod network: it gets a 401. It cannot be rotated without restarting every
+tenant today (`deploy/hosted/SETUP.md` §10b, Rollback); a rolling rotation
+path is an open follow-up.
+
+**One tenant can deny service to the others, and that is accepted.** The
+service is never told who is calling, so it has no per-tenant limit to apply.
+A compromised tenant pod (or one daemon backfilling hard) can keep the single
+worker busy and fill a lane's share, and the other tenants' requests wait,
+expire or get 429s. What it cannot do is make that unbounded or read anything
+by it: every lane has a fixed share of queued texts (`INTERACTIVE_SHARE` 16,
+`BACKFILL_SHARE` 96 in `squelch-embed/src/coalescer.rs`), interactive is served
+first, every job has a deadline (`INTERACTIVE_DEADLINE`, `BACKFILL_DEADLINE` in
+`protocol.rs`), a body is at most 256 KiB (`MAX_BODY_BYTES`), and body parsing
+and open connections are capped (`BODY_PERMITS`, about 32, and
+`MAX_CONNECTIONS`, about 256, in `http.rs`). The cost of the attack is degraded
+search for everyone on the node, which falls back to keyword results, and no
+mail is lost. A per-tenant limit would need the tenant's identity on the wire,
+which is the thing this section forbids.
+
+**Plaintext on the pod network, on purpose.** The traffic never leaves the node,
+and the only observer of it would already hold the node and could read the
+tenants' SQLite files directly. The warden's validator therefore allows `http://`
+for `SQUELCH_WARDEN_EMBED_URL` only for an in-cluster host (a single-label
+Service name, `*.svc`, `*.svc.cluster.local`) and refuses public hostnames and
+IP literals, the mirror image of the https requirement on the gateway URL.
+
+**Self-host.** A self-host daemon sets no `SQUELCH_EMBED_URL` and no gateway: it
+builds its own embedding session in-process and talks to no process of ours.
+
+**Do not break.**
+- Never add a cache, a dedup or a persisted queue to `squelch-embed`.
+- Never put a tenant name, account id or per-tenant credential on the wire to it,
+  and never key anything on the peer address.
+- Never give its NetworkPolicy an egress rule; weights stay baked.
+- Never add a metric label whose value comes from a request.
+- Never embed through a raw vector write (`upsert_message_vector(s)`, which
+  exist for fixtures); production writes go through `write_embedded_vectors`.
+- Never widen `embeddable_mail_sql!` to a class of mail that could be inbound
+  auth mail nobody has triaged. Never gate it on `triage.sensitivity` alone.
+- An event that can seal a message must call `purge_forbidden_vectors_conn` in
+  its own transaction.
+
 ## 5. Outbound secret guard
 
 **Invariant.** A secret-looking outgoing body is blocked unless the caller
@@ -828,19 +1011,21 @@ is marked `scheduled:<id>:` exactly as its `send` row is:
 | `send.echo` detail | meaning |
 | --- | --- |
 | `skipped:no_id` | Gmail's send response carried no message id; nothing to fetch back. |
-| `skipped:sealed` | the outbound copy tripped seal detection; nothing was committed. |
+| `skipped:sealed` | not written today: `ingest_sent` always commits (see below). The branch stays so the audit vocabulary is stable. |
 | `failed:fetch` | the read-back GET timed out (5s), failed, decoded badly, or returned zero bytes. |
 | `failed:ingest` | the local store write failed. |
 | `ok:<local id>` | echoed; `<local id>` is the local `messages.id`. |
 
-The echoed row goes through the SAME seal-first ingest as any other message
-(`sync::ingest::ingest_sent`, `is_sent: true`), so it runs no LLM. Because seal
-detection precedes the `is_sent` branch, a reply quoting an OTP trips it — and such
-a copy is **not written at all** (`Ok(None)`, `skipped:sealed`). Committing it would
-put a sealed row in the thread, and `thread_guard_and_subject` 404s any thread
-holding one, so the echo would hide the counterparty's mail the user was reading a
-second ago; skipping degrades to "the reply appears on the next backfill", the
-pre-echo status quo. The read-back is also capped at **5s**
+The echoed row goes through the SAME ingest as any other message
+(`sync::ingest::ingest_sent`, `is_sent: true`), so it runs no LLM, and it is
+**always committed**, including a reply that quotes a one-time code. There is no
+deterministic sealing detector at ingest any more (§4): the copy is stored like any
+other row and is pending until the durable agent assesses its access, so the human
+door shows it at once while the agent door does not, and a restricted verdict
+closes it to agents as it would any message. The human thread does not 404 on it
+(`auth_sent_echo_is_stored_and_the_human_thread_still_opens`). `ingest_sent` still
+returns an `Option` and the `skipped:sealed` branch in `echo_sent` remains, but
+nothing reaches it today. The read-back is also capped at **5s**
 (`ECHO_FETCH_TIMEOUT_SECS`): the client's POST timeout is 15s and `action_send` has
 already made two serial Gmail calls, so bookkeeping may not spend the rest of that
 budget. Keep the echo's failures audited and swallowed; keep it out of core's write
@@ -918,6 +1103,54 @@ the call goes out.
   and the file is deleted when history is cleared or the account is removed. A
   restored chat is re-sanitized (no card comes back live) and is refused if its
   history names a tool the chat no longer offers.
+- **The last board on disk.** The client also keeps at rest the board a launch
+  paints before the daemon answers
+  (`passband/Sources/Passband/Lib/BoardFile.swift`): the bands' rows (subject,
+  sender, the triage's one-line summary and preview), the calendar and shipment
+  cards, the hero's headline, the head of each mail page, and the ids (ids only)
+  of the threads that hold auth mail, so the prefetch fence is up before the
+  sealed list is fetched again. It is written through the same code as the
+  saved chats (`PrivateFile.swift`): one file per account under Application
+  Support's `Passband/Boards`, excluded from backup, written atomically, 0600 in
+  a 0700 directory on the Mac, complete file protection on the phone, contents
+  never logged. NEVER on disk: the sealed list and the banking and receipt cards
+  (the amounts and balances extracted from that mail), which the persisted type
+  has no place for, and auth mail by every signal there is for it, since a
+  preview can be the code. A row goes when its decision names an auth kind
+  (feed rows), when its zone is `auth` (mail-page rows, which carry no
+  decision), or when its thread is one the store fences (the sealed list, the
+  bands' auth rows), and every other row and card of that thread goes with it.
+  So does a mail-page row triage has not placed yet: the newest mail is where a
+  code that just arrived sits. A page is cut at its first such row rather than
+  holed. The rules run on the way in and again on the way back out, so a file
+  written any other way still cannot paint auth mail. Billing and receipt mail
+  is otherwise mail like any other: its rows on a mail page are kept. The
+  headline is kept only for the band it was written about, and not when a band
+  row was taken out. Only what the daemon has answered for this session is
+  written: never a board still repainted from disk or a switch, never a page
+  that has not loaded since, and nothing after the credentials are
+  re-validated in Settings until the next account change. A band that is
+  nothing but auth mail is not written at all, and the file goes. A board the daemon last answered for more than a
+  week ago is not painted and is deleted, by the read that finds it or by the
+  launch sweep, which also deletes the board of every account no longer on the
+  install. The file goes when the account is removed, when the same daemon is
+  connected again or re-validated (the credentials may open another mailbox),
+  and whenever the daemon refuses the saved credentials. Never written for the
+  practice inbox.
+- **The last calendar on disk.** The client keeps the calendar feed it last
+  loaded for each account, so the Calendar page paints before the daemon
+  answers (`passband/Sources/Passband/Model/CalendarDisk.swift`): events
+  (titles, places, descriptions, guests and their addresses), ghosts and the
+  calendars' names. Kept by the board's rules: written through
+  `PrivateFile.swift`, one file per account (named by a hash of the account
+  id) under Application Support's `Passband/CalendarCache`, contents never
+  logged; not painted and deleted a week after it was saved; swept at launch
+  with the boards (stale, or an account no longer on the install); deleted
+  when the account is removed, when the same daemon is connected again or
+  re-validated (and nothing written again under that epoch), when the daemon
+  refuses the saved credentials, and when the `calendar` feature turns off;
+  never written for the practice inbox. Only what the daemon answered is
+  written.
 
 **What a maintainer must not break.**
 - **Prompt injection is the standing threat, and the gate is the answer to it.**
@@ -947,7 +1180,13 @@ it. That move is what the guard below exists for.
   link: an unsubscribe may complete on a plain GET. The job starts from
   `POST /client/unsubscribe` with `auto: true` (`squelch-api/src/unsub_job.rs`),
   human door only; the agent door has no unsubscribe route at all, and the
-  assistant's tool goes through the confirm card (§6).
+  assistant's tool goes through the confirm card (§6). `auto: true` also needs
+  `confirm: true`, like every other route that acts for the user: without it
+  the daemon answers 400 and audits `rejected:confirm` before reading the
+  message or fetching anything
+  (`auto_without_confirm_is_refused_before_anything_is_fetched`). A request
+  without `auto` needs no `confirm`: its answer is a link the person opens in
+  their own browser.
 - **Not for mail we cannot trust.** Spam (`is_spam`) and mail without a passing
   authentication verdict (`auth_pass` not true) are never unsubscribed from
   automatically: fetching a spammer's link confirms the address is live, and an
@@ -1249,14 +1488,23 @@ counted per category and written as at most one summary line per minute
 **Invariant.** Calendar data (event titles, places, descriptions, organizers,
 guests' addresses, names and answers, links, calendar names) is human-door data: served on `GET /client/timeline` (and
 in the answer to the user's own write) and nowhere else, never in a log line,
-never in a triage prompt. Nothing calendar-related is on `/mcp` or
-`/client/agent/*`. The daemon writes to a calendar only when the user creates,
-edits or deletes one event from the human door; nothing writes on its own. Google
-emails an event's guests only when such a write says `notify: true`; no other
-input, default or code path can ask for it.
+never in a triage prompt. ONE EXCEPTION, the owner's decision (2026-10-28): an
+event's location string, alone, goes to the configured provider's small
+(`notify`) model to be cut down to the place the card shows (see "The card's
+place" below). Nothing calendar-related is on `/mcp` or
+`/client/agent/*`. The daemon writes to a calendar when the user creates,
+edits or deletes one event from the human door, and, ONE EXCEPTION (the owner's
+decision, 2026-10-28, on for every mailbox with the calendar), when it
+replaces Gmail's own copy of an event with its own and keeps that event current
+from authenticated mail (see "Passband's own events" below). Nothing else
+writes on its own. Google emails an event's guests only when a human-door
+write says `notify: true`; no other input, default or code path can ask for
+it, and Passband's own writes always send `sendUpdates=none`.
 
 **Enforcement.**
-- **Three tables, human door only.** `calendar_calendars`, `calendar_events` and
+- **Five tables, human door only.** `calendar_calendars`, `calendar_events`,
+  `calendar_places` (the card's place per location text), `calendar_owned`
+  (which event Passband made for which ghost, `gcal/own.rs`) and
   `calendar_event_guests` (an event's attendees, deleted with it by a trigger)
   (`squelch-core/src/store/sqlite/calendar.rs`) are written by the sync loop
   (`squelch-core/src/gcal/sync.rs`) and, one row at a time after Google accepted
@@ -1276,8 +1524,48 @@ input, default or code path can ask for it.
   to the daemon. Of each guest only the address (kept only when it is one), the
   name (laundered like a title), the answer and two flags are stored; past 100,
   Google sends the user's entry alone and the event is marked truncated.
+  Each event's `eventType` is read only to mark Gmail's own events
+  (`fromGmail`), which the edit guard then refuses, since Google does.
   Its description is read (the app shows it): markup becomes text, each line is
-  laundered like a place, and it stops at 2000 characters.
+  laundered like a place, and it stops at 2000 characters. Google's own
+  boilerplate on an event it made from mail ("To see detailed information for
+  automatically created events like this one...") is dropped with its link
+  (`triage/ghost.rs:strip_google_boilerplate`).
+- **Passband's own events** (`gcal/own.rs`, `gcal/sync.rs:own_events`). On
+  whenever the `calendar` feature is, with no flag of its own. It touches only events
+  on the PRIMARY calendar: Gmail's own (`fromGmail`) that are the user's by
+  every organizer test and carry no other guest, and the events Passband made
+  in their place. An invitation from anyone else is never written. Every
+  write sends `sendUpdates=none`, never names attendees, and is audited
+  (actor `passband-calendar`, target `calendar:<calendar>/<event>`, detail
+  `ok` or an error kind; never a title or a place). Only a ghost from mail
+  that passed sender authentication adopts or moves an event. A cancellation
+  from mail marks the event ("Canceled: ", free), it does not delete it. The
+  user's deletion of Passband's event, or dismissal of the ghost, ends
+  Passband's hold on it for good. At most 10 writes a pass, 100 a day.
+  KNOWN GAP against docs/CALENDAR.md "Before anything writes to a real
+  calendar": a time or place change comes from what the triage model read in
+  the mail, not from structured calendar data (an iCalendar UID), so on a
+  shared sending platform another host's mail that the model reads as the
+  same booking could move the event. The marking-not-deleting of
+  cancellations and the authentication rule bound it; structured updates are
+  the fix.
+- **The card's place** (`gcal/place.rs`). After a pass that synced, the loop
+  sends up to 10 stored locations longer than 40 characters (upcoming first) to
+  the provider and `notify` model that already read the owner's mail, each on
+  its own, fenced as untrusted, with nothing else of the event: no title,
+  guests, notes, ids or account. The answer, a `name` and an `address`, is
+  laundered like a title and HELD TO THE INPUT IN CODE: every word of each
+  must be a word of the location (`place::grounded`), so the model can only
+  drop text, never add an address, a link or anything a hostile location
+  asked for; an answer that adds a word is discarded and the location kept. Stored in `calendar_places` keyed by the
+  location text (one call per distinct text), pruned when no event holds it,
+  served on `GET /client/timeline` only, as `place` (name, address and the
+  original location) beside the untouched `location`. An event Passband owns
+  is written with the name and address as its location, so the address
+  survives Gmail's copy being deleted. At most 100 calls per account per day (attempts counted in
+  memory, spend in the usage ledger under `calendar_place`). No key, no call.
+  The location text is never logged.
 - **`html_link` is an allow-list** (`gcal/mod.rs:google_link`): https, a host that is
   `google.com` or ends in `.google.com`, no userinfo, at most 2048 characters.
   Anything else is dropped, because the client opens it.
@@ -1535,6 +1823,18 @@ typed into that one field leaves the device for Apple, from the client and
 only once it is two characters long; the title, the times, the notes, the
 calendar and the account do not, the daemon is not involved, and no location
 permission is requested. Google's Places API is not used.
+
+**What the event card fetches (client, `Model/EventVisuals.swift`).** The
+calendar card's picture is, in order: a photo from the mail behind the event,
+or the venue from Apple MapKit, or nothing. The photo is fetched only while
+"load remote images" is on, from the newest message by someone else in the
+event's threads, at most four of its images, through `HeroBytes` (ephemeral
+session, no cookies, no referrer, no cache, 8 MB, `image/*` only), exactly
+like a Reading card's hero; a sender learns no more than opening the mail
+would tell them. The venue lookup sends the card's place text alone to Apple
+(`MKLocalSearch`, then `MKLookAroundSceneRequest` for the item it returns),
+never for a link or a call, and Apple's answer is used only when its name
+matches the place. No location permission, no key, no Google.
 
 **The token is the union; the slot is the boundary.** Self-host
 `squelchd auth --calendar` stores its token in its own credential slot

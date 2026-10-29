@@ -26,8 +26,18 @@
             return args[safe: i + 1]
         }
 
-        /// `sitrep` (the default), `records`, `mail` or `search`.
+        /// `sitrep` (the default), `records`, `calendar`, `mail` or `search`.
         static var tab: String? { value("--fixture-tab") }
+        /// Turns the hidden `calendar` feature on over a staged week of plans
+        /// (FixtureCalendar), so the bar reads Sitrep, Calendar, Mail.
+        static let calendar = args.contains("--fixture-calendar")
+        /// The calendar's mode for a screenshot: `--fixture-calendar-mode
+        /// month|week|day`. Scene `calendar-detail` pushes the likely ghost.
+        static var calendarMode: String? { value("--fixture-calendar-mode") }
+        /// The day the calendar opens on, in days from today:
+        /// `--fixture-calendar-day 3` (the day with only an evening dinner).
+        static var calendarDay: Int? { value("--fixture-calendar-day").flatMap(Int.init) }
+        static var calendarDetail: String? { scene == "calendar-detail" ? "g:2" : nil }
         /// What to raise once the board has loaded; see `stage`.
         static var scene: String? { value("--fixture-scene") }
         /// Where a What's New vignette's clock is stopped, in seconds into its
@@ -58,6 +68,7 @@
 
         /// Boot onto the fixture mailbox, then raise the scene asked for.
         static func boot(_ store: AppStore) async {
+            if calendar { await RehearsalAPI.shared.stage(timeline: FixtureCalendar.feed()) }
             await store.enterPractice()
             await store.warmPractice()
             guard let scene else { return }
@@ -154,6 +165,14 @@
                 }
             case "search-lane":
                 store.search.query = "thursday?"
+            // The Events block: wants `--fixture-calendar --fixture-tab
+            // search`. `calendar-search` is "dinner" (two plans, one of them
+            // a ghost, beside the mail); `calendar-search-only` is the
+            // events-only listing.
+            case "calendar-search":
+                store.search.query = "dinner"
+            case "calendar-search-only":
+                store.search.query = "in:calendar sam"
             case "accounts":
                 AccountDoor.shared.pane = .picker
             // THE SENT PAGE, which the practice mailbox leaves empty: nothing
@@ -717,6 +736,100 @@
                 batchId: "fixture", cleared: items.count, senders: 5, byReason: byReason,
                 messageIds: items.map(\.id), modelNote: nil, createdAt: now,
                 clock: SmartClearClock(startedAt: now, lasting: 3600), items: items)
+        }
+    }
+#endif
+
+#if DEBUG
+    import Foundation
+
+    /// A week of plans around today, in the device's zone: real events on two
+    /// calendars, and ghosts from mail in every band, so a screenshot shows
+    /// each fill, a guessed end, a trip across days, a fold and a cancellation.
+    enum FixtureCalendar {
+        static func feed(now: Date = Date()) -> TimelineFeed {
+            let cal = Calendar.current
+            let today = cal.startOfDay(for: now)
+            let iso = ISO8601DateFormatter()
+            iso.timeZone = cal.timeZone
+            iso.formatOptions = [.withInternetDateTime]
+            func at(_ day: Int, _ hour: Int, _ minute: Int = 0) -> String {
+                let d = cal.date(byAdding: .day, value: day, to: today)!
+                return iso.string(from: cal.date(bySettingHour: hour, minute: minute, second: 0, of: d)!)
+            }
+            func date(_ day: Int) -> String {
+                let d = cal.date(byAdding: .day, value: day, to: today)!
+                let c = cal.dateComponents([.year, .month, .day], from: d)
+                return String(format: "%04d-%02d-%02d", c.year!, c.month!, c.day!)
+            }
+            let zone = cal.timeZone.identifier
+            let work = "#4285F4", home = "#33B679", family = "#E67C73"
+            func event(
+                _ id: String, _ title: String, _ start: String, _ end: String?, allDay: Bool = false,
+                calendar: String = "Work", color: String = work, place: String? = nil,
+                response: TimelineSelfResponse? = nil, guests: [TimelineGuest]? = nil
+            ) -> TimelineEvent {
+                TimelineEvent(
+                    id: id, calendar_id: calendar.lowercased(), calendar_name: calendar, title: title,
+                    start: start, end: end, all_day: allDay, start_timezone: zone, location: place,
+                    status: .confirmed, self_response: response, busy: true, organizer: nil,
+                    html_link: "https://calendar.google.com/", color: color, editable: true,
+                    description: nil, guests: guests, guests_truncated: false, guest_editable: true)
+            }
+            func ghost(
+                _ id: Int, _ kind: GhostKind, _ title: String, _ start: String, end: String? = nil,
+                allDay: Bool = false, estimated: Bool = false, place: String? = nil,
+                commitment: GhostCommitment, state: GhostState = .ghost, mail: GhostMailState = .live,
+                band: GhostBand? = nil, reason: String? = nil, message: Int = 3
+            ) -> TimelineGhost {
+                TimelineGhost(
+                    id: id, kind: kind, title: title, start: start, start_timezone: zone,
+                    all_day: allDay, end: end, end_estimated: estimated,
+                    end_source: estimated ? .model : (end == nil ? nil : .stated),
+                    estimate: estimated ? GhostEstimate(minutes: 120, basis: "dinner for four at 7:30") : nil,
+                    location: place, commitment: commitment, state: state, mail_state: mail,
+                    verified: true,
+                    likelihood: band.map { GhostLikelihood(band: $0, reason: reason) },
+                    sources: [GhostSource(message_id: message, thread_id: "practice-\(message)", role: .created)],
+                    matched_event: nil)
+            }
+            let events = [
+                event("e1", "Yoga", at(-2, 7, 30), at(-2, 8, 30), calendar: "Personal", color: home),
+                event("e2", "Standup", at(0, 9, 30), at(0, 9, 45)),
+                event("e3", "Lunch with Priya", at(0, 12, 30), at(0, 13, 30), calendar: "Personal", color: home,
+                      place: "Tartine Manufactory"),
+                event("e4", "Design review", at(0, 16), at(0, 17), place: "Room 4B", response: .needsAction,
+                      guests: [
+                          TimelineGuest(email: "sam@studio.example", name: "Sam Ortiz", response: .accepted, organizer: true),
+                          TimelineGuest(email: "jamie@example.com", name: "Jamie", response: .pending, isSelf: true),
+                      ]),
+                event("e5", "Mom's birthday", date(1), date(1), allDay: true, calendar: "Family", color: family),
+                event("e6", "1:1 with Sam", at(1, 10), at(1, 10, 30)),
+                event("e7", "Dinner with the Denver team", at(3, 19), at(3, 21), place: "Tavernetta"),
+                event("e8", "Dentist", at(9, 8, 30), at(9, 9, 30), calendar: "Personal", color: home),
+            ]
+            let ghosts = [
+                ghost(1, .reservation, "Dinner at Nopa", at(0, 19, 30), end: at(0, 21, 30), estimated: true,
+                      place: "Nopa, 560 Divisadero", commitment: .committed, message: 4),
+                ghost(2, .invite, "Climbing at Mission Cliffs", at(1, 18), place: "Mission Cliffs",
+                      commitment: .invited, band: .likely, reason: "they asked twice and you said probably"),
+                ghost(3, .invite, "Book club", at(1, 20), commitment: .invited, band: .maybe),
+                ghost(4, .travel, "Denver trip", date(2), end: date(4), allDay: true, commitment: .committed),
+                ghost(5, .travel, "UA 1532 SFO to DEN", at(2, 7, 5), end: at(2, 10, 40),
+                      place: "SFO Terminal 3", commitment: .committed, message: 6),
+                ghost(6, .invite, "Founders mixer", at(3, 18), commitment: .invited, band: .unlikely),
+                ghost(7, .proposal, "Coffee with Alex", at(4, 9), commitment: .proposed,
+                      state: .cancelled, mail: .cancelled, band: .likely),
+                ghost(8, .ticket, "Japanese Breakfast", at(6, 20), end: at(6, 23), estimated: true,
+                      place: "The Fillmore", commitment: .committed, message: 7),
+            ]
+            return TimelineFeed(
+                ghosts: ghosts, events: events,
+                calendar: TimelineCalendarStatus(granted: true, synced_at: iso.string(from: now)),
+                calendars: [
+                    TimelineCalendar(id: "work", name: "Work", color: work, primary: true, writable: true, can_invite: true),
+                    TimelineCalendar(id: "personal", name: "Personal", color: home, primary: false, writable: true),
+                ])
         }
     }
 #endif

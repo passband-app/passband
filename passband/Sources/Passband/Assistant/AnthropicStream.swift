@@ -23,7 +23,7 @@ import Foundation
 /// means for the tool loop, and whether a `providerError` is fatal.
 enum AnthropicStreamEvent: Sendable, Equatable {
     /// `message_start` — carries the prompt's token count for the ledger.
-    case messageStart(inputTokens: Int)
+    case messageStart(inputTokens: Int, cacheWriteTokens: Int = 0, cacheReadTokens: Int = 0)
     case textDelta(index: Int, text: String)
     /// A tool_use block opened. Its input is still arriving.
     case toolUseStarted(index: Int, id: String, name: String)
@@ -71,7 +71,13 @@ struct AnthropicStreamAccumulator {
 
         switch frame.type {
         case "message_start":
-            return [.messageStart(inputTokens: frame.message?.usage?.input_tokens ?? 0)]
+            let usage = frame.message?.usage
+            return [
+                .messageStart(
+                    inputTokens: usage?.input_tokens ?? 0,
+                    cacheWriteTokens: usage?.cache_creation_input_tokens ?? 0,
+                    cacheReadTokens: usage?.cache_read_input_tokens ?? 0)
+            ]
 
         case "content_block_start":
             guard let index = frame.index else { return [] }
@@ -191,12 +197,40 @@ private enum StreamWire {
     }
 
     struct Usage: Decodable {
+        /// The UNCACHED remainder of the prompt only, once caching is on.
         var input_tokens: Int?
         var output_tokens: Int?
+        var cache_creation_input_tokens: Int?
+        var cache_read_input_tokens: Int?
     }
 
     struct ProviderError: Decodable {
         var type: String?
         var message: String?
+    }
+}
+
+/// A request's prompt as the provider bills it. With prompt caching on,
+/// `input_tokens` is only the part after the last cache hit: the rest is a
+/// cache write (billed at 1.25x) or a cache read (0.1x), reported apart.
+struct PromptTokens: Sendable, Equatable {
+    var input = 0
+    var cacheWrite = 0
+    var cacheRead = 0
+
+    /// Every prompt token sent, however it was billed: what "input tokens"
+    /// meant on the Usage page before caching, and still means.
+    var total: Int { input + cacheWrite + cacheRead }
+
+    /// The prompt in full-price tokens: what it costs at the model's input
+    /// rate. Five-minute cache writes are 1.25x, reads 0.1x.
+    var billedAtInputRate: Double {
+        Double(input) + Double(cacheWrite) * 1.25 + Double(cacheRead) * 0.1
+    }
+
+    static func += (lhs: inout PromptTokens, rhs: PromptTokens) {
+        lhs.input += rhs.input
+        lhs.cacheWrite += rhs.cacheWrite
+        lhs.cacheRead += rhs.cacheRead
     }
 }

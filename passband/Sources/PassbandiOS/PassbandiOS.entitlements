@@ -7,6 +7,12 @@
 	     two configurations cannot drift apart in a hand-edited plist. -->
 	<key>aps-environment</key>
 	<string>$(APS_ENVIRONMENT)</string>
+	<!-- Communication notifications: a pushed banner leads with the sender's
+	     avatar and wears the app icon as a badge, as Messages does. The
+	     notification extension builds the intent (SenderAvatar.swift); iOS
+	     honours it only when the APP holds this. -->
+	<key>com.apple.developer.usernotifications.communication</key>
+	<true/>
 	<!-- This is the app's OWN default keychain group, named explicitly so the
 	     notification extension can join it: the extension is handed an account
 	     id by a push and reads that account's bearer to fetch what the mail

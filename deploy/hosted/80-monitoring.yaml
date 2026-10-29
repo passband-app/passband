@@ -428,6 +428,33 @@ data:
             target_label: tenant
             action: replace
 
+      # The shared embedding service (65-embed.yaml). Its own job because the
+      # squelchd job above keeps only squelchd-labelled pods, and because its
+      # series carry no tenant: every label on them is a closed enum (lane,
+      # outcome, a histogram bound, the build), never a tenant or a peer, so
+      # there is nothing to relabel into `tenant` and nothing should be.
+      # Port 9464 is reachable from this agent alone, by that pod's
+      # NetworkPolicy.
+      #
+      # About 80 series today (squelch-embed/src/metrics.rs: 21 request
+      # counters, two queue-wait histograms of 15, the inference and batch-size
+      # histograms, a handful of gauges). The limit is headroom over that, so a
+      # change that multiplies the series sheds this one target rather than
+      # anything else.
+      - job_name: squelch-embed
+        sample_limit: 200
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [tenants]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            regex: squelch-embed
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_container_port_name]
+            regex: metrics
+            action: keep
+
       - job_name: cert-manager
         kubernetes_sd_configs:
           - role: pod

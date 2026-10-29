@@ -245,7 +245,7 @@ async fn ask(run: &Run, auto: bool) -> serde_json::Value {
         .oneshot(authed_json(
             "POST",
             "/client/unsubscribe",
-            serde_json::json!({ "message_id": run.mid, "auto": auto }),
+            serde_json::json!({ "message_id": run.mid, "auto": auto, "confirm": auto }),
         ))
         .await
         .unwrap();
@@ -573,7 +573,15 @@ async fn the_unsubscribe_link_and_its_token_stay_out_of_the_audit_log() {
     let row = settled(&run).await;
     assert_eq!(row.status.as_deref(), Some("done"), "{row:?}");
 
-    let audit = run.store.list_audit(run.acct, 100).unwrap();
+    // The job finishes its row, then audits: wait for that last write too.
+    let mut audit = Vec::new();
+    for _ in 0..200 {
+        audit = run.store.list_audit(run.acct, 100).unwrap();
+        if audit.iter().any(|e| e.action == "unsubscribe_result") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     assert!(
         audit.iter().any(|e| e.action == "unsubscribe_result"),
         "control: the result was audited: {audit:?}"
@@ -589,4 +597,55 @@ async fn the_unsubscribe_link_and_its_token_stay_out_of_the_audit_log() {
             "audit row carries the URL: {text}"
         );
     }
+}
+
+/// SECURITY.md §6: `auto` makes the daemon act on a stranger's site, so it
+/// needs `confirm` like every other route that acts for the user. Refused and
+/// audited before anything is read or fetched. Without `auto` (every older
+/// client) no `confirm` is needed: the answer is a link the person opens.
+#[tokio::test]
+async fn auto_without_confirm_is_refused_before_anything_is_fetched() {
+    let (site, h) = sender_site().await;
+    let run = mount(&Setup::page(format!("{site}/confirm")), None);
+    for body in [
+        serde_json::json!({ "message_id": run.mid, "auto": true }),
+        serde_json::json!({ "message_id": run.mid, "auto": true, "confirm": false }),
+    ] {
+        let resp = run
+            .app
+            .clone()
+            .oneshot(authed_json("POST", "/client/unsubscribe", body.clone()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(hits(&h).is_empty(), "nothing was fetched: {:?}", hits(&h));
+    assert!(
+        run.store.list_unsubscribes(run.acct).unwrap().is_empty(),
+        "no job was started"
+    );
+    let audit = run.store.list_audit(run.acct, 10).unwrap();
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|e| e.action == "unsubscribe" && e.detail.as_deref() == Some("rejected:confirm"))
+            .count(),
+        2,
+        "{audit:?}"
+    );
+
+    // An older client's request, no `auto` and no `confirm`, still gets its link.
+    let resp = run
+        .app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/client/unsubscribe",
+            serde_json::json!({ "message_id": run.mid }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(body_json(resp).await["url"].is_string());
 }

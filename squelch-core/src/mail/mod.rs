@@ -12,6 +12,7 @@
 
 pub mod gmail;
 pub mod graph;
+pub mod imap;
 
 use std::time::Duration;
 
@@ -37,6 +38,9 @@ pub enum MailProvider {
     /// Microsoft's Graph mail API (Outlook.com, Hotmail, Microsoft 365), over
     /// OAuth: [`graph::GraphSource`].
     Outlook,
+    /// A plain IMAP server with a password (issue #575): self-host only, and
+    /// read only until SMTP lands.
+    Imap,
 }
 
 impl MailProvider {
@@ -45,6 +49,7 @@ impl MailProvider {
         match self {
             MailProvider::Gmail => "gmail",
             MailProvider::Outlook => "outlook",
+            MailProvider::Imap => "imap",
         }
     }
 
@@ -54,6 +59,7 @@ impl MailProvider {
         match s {
             "gmail" => Ok(MailProvider::Gmail),
             "outlook" => Ok(MailProvider::Outlook),
+            "imap" => Ok(MailProvider::Imap),
             // The value is ours (a column default or a build's own write), so
             // echoing it is safe and is what makes the log line useful.
             other => Err(CoreError::InvalidInput(format!(
@@ -344,14 +350,18 @@ mod tests {
 
     #[test]
     fn a_provider_round_trips_through_its_stored_value() {
-        for p in [MailProvider::Gmail, MailProvider::Outlook] {
+        for p in [
+            MailProvider::Gmail,
+            MailProvider::Outlook,
+            MailProvider::Imap,
+        ] {
             assert_eq!(MailProvider::parse(p.as_str()).unwrap(), p);
         }
     }
 
     #[test]
     fn an_unknown_provider_is_refused_not_defaulted() {
-        for stored in ["imap", "Gmail", "Outlook", "", " gmail", "graph"] {
+        for stored in ["IMAP", "Gmail", "Outlook", "", " gmail", "graph"] {
             assert!(
                 matches!(MailProvider::parse(stored), Err(CoreError::InvalidInput(_))),
                 "{stored:?} must not read as a provider"

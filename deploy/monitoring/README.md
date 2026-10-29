@@ -281,11 +281,15 @@ through an incoming webhook.
 |---|---|---|
 | Tenants quota near full | any `tenants` ResourceQuota dimension is at 80% or more | 15m |
 | Tenants quota changed on the box | a hard line of the `tenants` ResourceQuota changed in the last hour (expected once after an apply of `70-tenant-limits.yaml`; otherwise the box was patched past the file) | 0s |
-| Tenant has no running pod | a tenant Deployment wants a pod and has none available | 10m |
+| Tenant has no running pod | a tenant Deployment wants a pod and has none available (`squelch-embed` excluded: it has its own rule) | 10m |
 | Tenant mail sync stale | a tenant's freshest `squelchd_sync_last_success_timestamp_seconds` is over 900s old | 15m |
 | carrier memory high | the box is 85% or more used (`1 - MemAvailable / MemTotal`) | 2m |
 | carrier disk high | the tenant volume (`/mnt/tenant-data`) or the root disk is 85% or more full | 5m |
 | carrier metrics missing | no kube-state-metrics series from carrier for 10 minutes | 5m |
+| Pod in tenants OOM-killed | a container in `tenants` restarted in the last 15 minutes with `OOMKilled` as its last termination reason | 0s |
+| Embedding service down | the `squelch-embed` Deployment exists and its session is not ready, or no series from it says either way | 5m |
+| Embedding service refusing requests | `squelch_embed_requests_total` moving for `unauthorized`, `not_ready` or `error`, or for `queue_full` on the interactive lane or before a request has a lane (`none`) | 10m |
+| Embedding service near its memory limit | `squelch-embed`'s working set is 85% or more of its own limit (768Mi today) | 5m |
 
 The first and the third are 2026-09-28: the quota was full at five tenants and
 the first anyone heard of it was a new user stuck on a signup that timed out.
@@ -294,16 +298,32 @@ The second is what the fix to that did: the quota was raised on the box with a
 set of lines changing, is now announced, expected once after an apply of the
 file and otherwise a patch the file does not record
 (`deploy/hosted/PRODUCTION.md`, "How many tenants fit"); the quota being deleted
-outright is the last rule's, which reads these series. The fourth is the sync
+outright is the seventh rule's, which reads these series. The fourth is the sync
 alert this README recommended above, which until now nothing fired. The fifth
 is 2026-09-29: memory is the box's bottleneck, and with nothing reserved
 for k3s and no swap the RAM is the only wall, so this fires before a global OOM
 rather than after one. The sixth is the disk, which the tenants quota does not
 guard: a claim is nominal on local-path (`deploy/hosted/70-tenant-limits.yaml`),
-so the volume is watched here and grown when this says so. The last is what
+so the volume is watched here and grown when this says so. The seventh is what
 makes the others trustworthy: every rule
 reads series the carrier agent remote-writes, so they go quiet together when it
 stops, and the others treat NoData as OK so that only this one says so.
+
+The OOM rule and the three embedding rules came with the shared embedding
+service (`deploy/hosted/SETUP.md` §10b). On it, a tenant daemon runs under a
+512Mi limit sized from August measurements, so an OOM kill is the first sign
+that number was wrong, and it is announced per kill rather than discovered as a
+crash loop. The embedding rules are silent until `65-embed.yaml` is applied:
+"down" asks kube-state-metrics whether the Deployment exists rather than
+trusting the service's own series to be there, because a target that stopped
+being scraped reads exactly like an idle one. The hole in that, said once: the
+Deployment deleted while tenants still point at it reads as "not installed".
+Every series these rules read is already scraped: kube-state-metrics' job keeps
+everything it exports, the cadvisor allow-list carries
+`container_memory_working_set_bytes` and `container_spec_memory_limit_bytes`,
+and the `squelch-embed` job keeps the service's whole exposition (its series
+carry `job` and `instance` and no namespace or pod, so the rules select it by
+`job`).
 
 Slack hears about a state change and nothing else: one message when an alert
 starts firing, one when it resolves, no reminders while it stays firing

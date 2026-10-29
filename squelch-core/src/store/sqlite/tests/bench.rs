@@ -113,3 +113,90 @@ fn agent_read_thread_enqueues() {
     drop(store);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Calendar search at the per-calendar cap (docs/CALENDAR.md §10.1): 5000
+/// events with long descriptions and 20 guests each, searched the way the
+/// search box asks as the user types. Prints the time per search, the
+/// store's lock included.
+#[test]
+#[ignore]
+fn calendar_search_at_the_cap() {
+    use crate::gcal::search::{Audience, CalendarQuery, search};
+    use crate::gcal::{
+        CalendarMeta, EventItem, EventRow, Guest, GuestResponse, MAX_EVENTS_PER_CALENDAR, PRIMARY,
+    };
+    use crate::triage::ghost::EventTime;
+    let (store, acct, _dir) = file_store("calsearch");
+    store
+        .calendar_set_selection(acct, &[CalendarMeta::primary_only()])
+        .unwrap();
+    let now = Utc::now();
+    let words = [
+        "standup", "review", "dinner", "flight", "dentist", "offsite", "sync", "lunch",
+    ];
+    let items: Vec<EventItem> = (0..MAX_EVENTS_PER_CALENDAR)
+        .map(|i| {
+            let start = now + chrono::Duration::hours(i - MAX_EVENTS_PER_CALENDAR / 2);
+            EventItem::Upsert(Box::new(EventRow {
+                event_id: format!("e{i}"),
+                ical_uid: None,
+                tentative: false,
+                summary: Some(format!("{} {i}", words[i as usize % words.len()])),
+                location: Some("Conference room B, 500 Howard St".into()),
+                start: EventTime::At(start.fixed_offset()),
+                end: None,
+                start_timezone: None,
+                organizer_email: Some("boss@example.com".into()),
+                organizer_unreadable: false,
+                organizer_self: false,
+                self_response: None,
+                transparent: false,
+                html_link: None,
+                updated_at: None,
+                color_id: None,
+                description: Some("Agenda: ".repeat(250)),
+                from_gmail: false,
+                guests: (0..20)
+                    .map(|g| Guest {
+                        email: format!("person{g}@example.com"),
+                        name: Some(format!("Person Number{g}")),
+                        response: GuestResponse::Accepted,
+                        organizer: false,
+                        is_self: false,
+                    })
+                    .collect(),
+                guests_truncated: false,
+            }))
+        })
+        .collect();
+    for page in items.chunks(250) {
+        store.calendar_apply_page(acct, PRIMARY, page, now).unwrap();
+    }
+    for raw in [
+        "d",
+        "di",
+        "din",
+        "dinner",
+        "dinner 42",
+        "person",
+        "zebra",
+        "über",
+    ] {
+        let Some(query) = CalendarQuery::parse(raw) else {
+            println!("{raw:>10}: no query");
+            continue;
+        };
+        let started = Instant::now();
+        let runs = 5;
+        let mut total = 0;
+        for _ in 0..runs {
+            total = search(&store, acct, &query, Audience::Owner, true, now, 20)
+                .unwrap()
+                .total;
+        }
+        println!(
+            "{raw:>10}: {:>6.1} ms per search, {total} hits",
+            started.elapsed().as_secs_f64() * 1000.0 / runs as f64
+        );
+    }
+}

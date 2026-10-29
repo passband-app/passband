@@ -89,7 +89,37 @@ extension AppStore {
         if CalendarGate.leavesPage(available: calendarPageAvailable, active: activeView, calendar: .calendar) {
             setView(.sitrep)
         }
+        // The saved feed goes with the page: the feature is off for this
+        // mailbox, and its calendar should not sit on disk meanwhile.
+        if let id = AccountManager.shared.activeId {
+            Task { await CalendarDisk.shared.forget(id) }
+        }
         dropCalendarState()
+    }
+
+    // MARK: - warm before the page opens
+
+    /// The first time this session the calendar is available for the live
+    /// account (launch, the flag turning on, a switch to another account):
+    /// paint the feed saved on disk at once, and ask the daemon for a fresh
+    /// one in the background, without kicking a Google sync (the page's own
+    /// open does that). So the page has events on its first frame, and fresh
+    /// ones by the time anyone opens it. Only on stats that are the live
+    /// account's (`statsEpoch`): stats are not wiped on a switch.
+    func warmCalendarIfDue() {
+        guard calendarPageAvailable, statsEpoch == epoch,
+              let id = AccountManager.shared.activeId, calendarWarmedFor != id
+        else { return }
+        calendarWarmedFor = id
+        let e = epoch
+        Task {
+            if calendarFeed == nil, !RehearsalMode.isEnabled,
+               let saved = await CalendarDisk.shared.feed(for: id),
+               isCurrent(e), AccountManager.shared.activeId == id, calendarFeed == nil {
+                calendarFeed = saved
+            }
+            await refreshCalendar()
+        }
     }
 
     /// Everything the calendar page holds for the ACTIVE mailbox, gone: the
@@ -101,6 +131,7 @@ extension AppStore {
     func dropCalendarState() {
         calendarFeed = nil
         calendarLoaded = false
+        calendarWarmedFor = nil
         calendarMonthItem = nil
         calendarConnectAsk = nil
         calendarConnectWait = nil
@@ -229,7 +260,17 @@ extension AppStore {
             let feed = try await APIClient.shared.getTimeline(from: from, to: to)
             guard isCurrent(e), generation == calendarLoadGeneration else { return }
             // Assignment is invalidation: an unchanged answer is not written.
-            if feed != calendarFeed { calendarFeed = feed }
+            if feed != calendarFeed {
+                calendarFeed = feed
+                // What the page paints first next launch or switch back.
+                // Never a practice feed: it would land under the real account.
+                // Nor anything after the credentials were re-validated, until
+                // the next account change (SECURITY.md §6, as the board).
+                if !RehearsalMode.isEnabled, boardWritesRefusedEpoch != epoch,
+                   let id = AccountManager.shared.activeId {
+                    Task.detached(priority: .utility) { await CalendarDisk.shared.save(feed, for: id) }
+                }
+            }
             if let wait = calendarLiveWait, wait.renewing, CalendarGate.renewalLanded(feed.calendar) {
                 calendarRenewed()
             }
@@ -299,6 +340,21 @@ extension AppStore {
         let cal = Calendar.current
         calendarPlace = MonthGrid.select(day, in: calendarMonthPlace(now: now, calendar: cal), calendar: cal)
         calendarMonthItem = id
+    }
+
+    /// A search hit opened (the search panel's Events block): the Calendar
+    /// page, on a grid, turned to the row's day with its detail open. Moving
+    /// the place is what makes the page fetch that month, so an event a year
+    /// back is in the feed by the time the detail looks for it.
+    func openCalendarSearchHit(_ item: AgendaItem, now: Date = Date()) {
+        guard calendarPageAvailable else { return }
+        if activeView != .calendar { setView(.calendar) }
+        guard activeView == .calendar else { return }
+        if !calendarMode.isGrid { setCalendarMode(.month) }
+        selectCalendarItem(item.id, on: CalendarSearch.day(item, calendar: .current), now: now)
+        #if os(iOS)
+            calendarSearchOpen = item.id
+        #endif
     }
 
     /// Escape on the month or the week: closes the item's detail, then (the

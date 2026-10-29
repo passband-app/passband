@@ -21,8 +21,26 @@ with that account's credential.
 The engine keeps **cadence, ingest, triage and cursor persistence**: when to
 poll, which folders in which order, what gets stored as sent or spam, what
 notifies, when the cursor commits. A source owns **listing, the change feed,
-fetching and cursor encoding**. Nothing in a source persists anything or
-decides policy.
+fetching and cursor encoding**. A source decides no policy, and the cursor
+stays the engine's to persist. What a source may keep is provider-private
+lookup state the engine never reads: the IMAP source records which folder and
+UID each message was last seen at (`imap_locations`, behind the narrow
+`MessageLocations` trait the store implements), because an IMAP stable id is a
+hash and cannot be turned back into a place to fetch from.
+
+**Setting up an IMAP account** (self-host, read only until SMTP lands):
+`squelchd auth --imap [--ca-file PEM]` prompts for host, TLS mode, port,
+username and app password, logs in and lists the folders, and only then
+stores: the server (host, port, TLS mode, username, and the CA certificate's
+bytes, never its path) together with the password in the credential backend's
+`<email>#imap` slot (the same keyring entry or sealed file the OAuth tokens
+use), then `accounts.provider = 'imap'` last. Nothing about where the password
+is sent lives in the database, so a database writer cannot redirect it. It is
+refused for an account that already has mail, a cursor or a Google grant. A
+slot from an earlier phase-2 build (password only, server in `app_settings`
+under `imap_account`) is moved into the slot at the next start and the setting
+deleted. An IMAP account never touches Google: the profile fetch, calendar
+sync and shredder are skipped for it.
 
 `MailSource` is derived from what the engine actually asked Gmail for:
 

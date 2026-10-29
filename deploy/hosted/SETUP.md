@@ -1607,21 +1607,86 @@ mail sync is unaffected, but a window nobody needs to open.
 **1. Release a daemon tag that ships both images.** The first one is planned as
 `daemon-0.0.15`: the `squelchd` image with `RemoteEmbedder` in it, the warden
 that renders the knob, and `ghcr.io/passband-app/squelch-embed`, which the
-`embed-image` job in `release-daemon.yml` builds on every daemon tag. Check the
-embed image exists before going further, and that `65-embed.yaml`'s `image:`
-names that exact tag:
+`embed-image` job in `release-daemon.yml` builds on every daemon tag.
+
+**The first push creates a new GHCR package, and a new package is PRIVATE.**
+It takes the repository's visibility, and the repository is private. The
+carrier pulls with no credentials (`65-embed.yaml` has no `imagePullSecrets`),
+so a private package is a pod stuck in `ImagePullBackOff` at step 4. Once, after
+the first release that publishes it, as an org owner, in the package's settings
+(github.com/orgs/passband-app/packages/container/squelch-embed/settings):
+
+1. **Change visibility** to Public. The other three packages already are.
+2. **Manage Actions access**: add `passband-app/passband` with the **Write**
+   role, so the next tag's `embed-image` job can push to a package it no longer
+   created.
+
+Then prove it the way the carrier will see it, with no credentials at all. A
+`docker` or `imagetools` check from this laptop proves nothing, because it is
+logged in to GHCR:
 
 ```sh
-docker buildx imagetools inspect ghcr.io/passband-app/squelch-embed:daemon-0.0.15
-grep 'image:' deploy/hosted/65-embed.yaml
+TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:passband-app/squelch-embed:pull" \
+  | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+  https://ghcr.io/v2/passband-app/squelch-embed/manifests/daemon-0.0.15
+# 200. An empty TOKEN and a 403 is a package that is private or not there yet.
+
+grep 'image:' deploy/hosted/65-embed.yaml   # names that exact tag
 ```
+
+Every later release repeats only the curl (`ROLLOUT.md` step 2 has it in its
+loop); the settings stay.
 
 **2. Roll the fleet onto that release, with the knob unset.** This is an
 ordinary rollout (`ROLLOUT.md`, all four pins), and with
-`SQUELCH_WARDEN_EMBED_URL` unset nothing about embedding changes: every tenant
-still loads its own session. Do it first and separately, so a problem with the
-new daemon is never confused with a problem with the service. Wait for the
-roller to report the fleet converged (exit 0) before step 3.
+`SQUELCH_WARDEN_EMBED_URL` unset every tenant still loads its own session. Do it
+first and separately, so a problem with the new daemon is never confused with a
+problem with the service. Wait for the roller to report the fleet converged
+(exit 0) before step 3.
+
+**It is not a no-op for embedding, though.** The same release carries the
+sealed gate (`docs/SECURITY.md` §4d), and that changes which mail has a vector
+the moment each tenant restarts onto it, knob or no knob:
+
+- **Vectors are deleted at the first open.** A sweep at every store open
+  removes the vector of any message that is known sealed or whose current
+  content has no decision yet. On one real mailbox (2,781 messages, 2,499
+  vectors) the first open removed 360, 143 of them known sealed, in about
+  30 ms. The sweep runs at every open after that too; it is a scan of the
+  vectors table, about 1 s at 100k vectors, which lands inside the restart a
+  tenant is already taking. The message and its keyword index are untouched.
+- **New inbound mail gets a vector only after triage decides it.** Ingest no
+  longer embeds inbound mail; the drain does, once a decision that does not seal
+  it lands for the message's current content. Semantic search lags new mail by
+  however long triage takes, which is seconds on a healthy tenant.
+- **A tenant whose triage is not running gets no new vectors.** One at its
+  daily run cap, out of LLM budget, or unminted (`llm mint`) embeds no inbound
+  mail until triage catches up. Keyword search still finds all of it. A
+  tenant that has blown its budget wants `squelch-control llm topup <label>`
+  (PRODUCTION.md, "The LLM gateway"), and an unminted one `llm mint <label>`.
+- **Self-host is the same.** A self-host daemon with no model key never
+  triages, so on this release it embeds none of its inbound mail; the owner's
+  own mail still gets vectors once its access check settles. This goes in the
+  release notes (`docs/RELEASING.md`, "Self-host compatibility").
+
+**Rolling this release back is data-compatible, and not free.** An older
+daemon opens the same database without complaint, but it has no gate: its
+drain finds every vector the sweep deleted missing and embeds them again,
+sealed mail included, and it embeds new inbound mail at ingest. That is the
+pre-gate exposure back, plus a burst of embedding work per tenant as it
+restarts. Rolling forward again deletes those vectors at the next open.
+
+**And once step 6 has set the knob, this release is a floor.**
+`SQUELCH_WARDEN_IMAGE` must never go below it while `SQUELCH_WARDEN_EMBED_URL`
+is set: a warden with the knob renders the light shape (512Mi limit, no model
+volume) around whatever daemon it is given, and an older daemon ignores
+`SQUELCH_EMBED_URL`, builds a local session, downloads its weights, and is
+OOM-killed at 512Mi on every start. To go below it, take the knob out first
+(Rollback, below), let the roller converge the fleet back to the in-process
+shape (exit 0), and only then move the image.
 
 **3. Create the token Secret**, from the command line so the value never
 reaches a file (`embed-token.example.yaml` has the long version):
@@ -1652,6 +1717,22 @@ characters or still the example placeholder, `HF_HOME` set, or a weights file
 missing from the image. It never downloads anything, and it has no egress to
 download with.
 
+Then turn on the scrape, in the same sitting. **The `Embedding service down`
+alert arms the moment the Deployment exists** (it asks kube-state-metrics, so it
+does not wait for the scrape), and with no scrape it reads the service as down
+and pages within five minutes. The monitoring agent never reloads its config,
+so applying the ConfigMap alone changes nothing:
+
+```sh
+kubectl apply -f deploy/hosted/80-monitoring.yaml
+kubectl -n monitoring rollout restart deploy/prometheus-agent
+kubectl -n monitoring rollout status deploy/prometheus-agent
+```
+
+Check `up{job="squelch-embed"}` and `squelch_embed_session_ready` are both 1 in
+Grafana Explore before trusting any panel or alert; a missing target reads
+exactly like no traffic.
+
 **5. Check that something which is not a tenant is refused.** The service's
 NetworkPolicy admits tenant pods on 8850 and the monitoring agent on 9464, and
 nothing else. Test it from a namespace with no NetworkPolicy of its own, so the
@@ -1659,16 +1740,30 @@ only thing that can refuse the connection is the service's ingress rule
 (`kubectl -n default get networkpolicy` should list nothing):
 
 ```sh
-kubectl -n default run embed-probe --rm -it --restart=Never --image=busybox:1.36 \
-  -- sh -c 'nc -w 3 squelch-embed.tenants.svc.cluster.local 8850 </dev/null && echo REACHABLE || echo blocked'
+kubectl -n default run embed-probe --rm -it --restart=Never --image=busybox:1.36 -- sh -c '
+  H=squelch-embed.tenants.svc.cluster.local
+  nslookup $H >/dev/null 2>&1 || { echo "NO DNS: proves nothing"; exit 1; }
+  s=$(date +%s)
+  nc -w 3 $H 8850 </dev/null && { echo REACHABLE; exit 0; }
+  e=$(( $(date +%s) - s ))
+  [ $e -ge 3 ] && echo "blocked (timed out after ${e}s)" || echo "REFUSED in ${e}s: proves nothing"'
 ```
 
-`blocked` is correct. Do not run this from inside `tenants`, as the section
-"Does the policy actually deny?" does for tenant ports: there the scratch pod's
-own default-deny egress refuses the connection first, so `blocked` would prove
-nothing about the service's policy. `REACHABLE` means the service is open to the
-pod network, and the token is the only thing left in front of it; stop and fix
-the policy.
+`blocked (timed out ...)` is correct, and it is the only answer that is: the
+name resolved, so the Service exists, and the connection hung until `nc` gave
+up, which is a policy dropping it. The other two prove nothing about the
+policy. `NO DNS` is a typo, a Service that is not there, or a namespace whose
+DNS is broken, and a bare `nc` would print `blocked` for all three. `REFUSED`
+in under a second is something answering with a reset, usually a Service with
+no ready endpoint (`kubectl -n tenants get endpoints squelch-embed`); fix that
+and run it again.
+
+Do not run this from inside `tenants`, as the section "Does the policy actually
+deny?" does for tenant ports: there the scratch pod's own default-deny egress
+refuses the connection first, DNS included, so a timeout would prove nothing
+about the service's policy. `REACHABLE` means the service is open to the pod
+network, and the token is the only thing left in front of it; stop and fix the
+policy.
 
 **6. Point the warden at it, with the roller suspended, and roll ONE tenant.**
 The proof that the tenant side works is a real `POST /embed` from inside a
@@ -1695,7 +1790,27 @@ kubectl -n warden exec deploy/squelch-warden -- printenv SQUELCH_WARDEN_EMBED_UR
 ```
 
 From this moment new signups get the new shape. Existing tenants do not move
-until the roller runs. Roll one:
+until the roller runs. Move ONE, and pick which: the canary is the owner's own
+mailbox, not a user's. Control runs on AWS ECS, so the CLI is reached through
+ECS Exec, with the `cexec` shell function from `deploy/aws/CUTOVER.md`, "Shell
+setup":
+
+```sh
+T=<the owner's own tenant label>
+cexec "squelch-control reconcile $T"
+```
+
+A reconcile applies the tenant's NetworkPolicy before its Deployment, so the
+pod never comes up on the URL without the rule to reach it. It can take
+minutes, and hanging up on it stops the work partway; read `ROLLOUT.md`, "A
+reconcile can outrun the CLI", before you run it, and the warden's log rather
+than the CLI's answer if it does not come back clean.
+
+**Not a `roll-now` Job, unless there is no other way.** A hand-made roll Job
+converges the first drifted tenant in label order, which with every tenant
+drifted is whoever sorts first: a user's mailbox as the canary. If ECS Exec is
+unavailable, the same reconcile goes straight to the warden (`ROLLOUT.md`, the
+`curl` under "A reconcile can outrun the CLI"). Only if that is out too:
 
 ```sh
 kubectl -n warden create job --from=cronjob/squelch-warden-roll roll-now
@@ -1743,17 +1858,7 @@ the Secret was created after this tenant's pod started, or after the service's.
 If anything here is wrong, stop with the roller still suspended and roll this
 one tenant back (Rollback, below).
 
-**8. Turn on the scrape, then let the roller continue.** The monitoring agent
-never reloads its config, so applying the ConfigMap alone changes nothing:
-
-```sh
-kubectl apply -f deploy/hosted/80-monitoring.yaml
-kubectl -n monitoring rollout restart deploy/prometheus-agent
-kubectl -n monitoring rollout status deploy/prometheus-agent
-```
-
-Check `up{job="squelch-embed"}` is 1 in Grafana Explore before trusting any
-panel; a missing target reads exactly like no traffic. Then unsuspend:
+**8. Let the roller continue.**
 
 ```sh
 kubectl -n warden patch cronjob squelch-warden-roll -p '{"spec":{"suspend":false}}'
@@ -1762,8 +1867,40 @@ kubectl -n warden patch cronjob squelch-warden-roll -p '{"spec":{"suspend":false
 The roller walks the remaining tenants onto the new render one per tick, five
 minutes each. Each tenant's memory drops when it restarts.
 
-**9. After the whole fleet has rolled, apply the new tenant limits.** The roller
-says when (`still behind` stops appearing, exit 0). Then:
+**Before step 9, measure the light shape.** 128Mi and 512Mi rest on August
+measurements of a daemon with no session, not on a fleet running this build,
+and step 9 is what lets the fleet grow past the thirty the old shape fit. A
+limit that is too small is an OOM loop on exactly the tenants with the most
+mail. So, before step 9 and before the fleet passes 30 tenants, two things:
+
+1. **A week of the real fleet on the shared embedder.** The peak working set of
+   each tenant daemon that is on the 512Mi limit, over seven days:
+
+   ```promql
+   max by (pod) (
+     max_over_time(container_memory_working_set_bytes{namespace="tenants",container="squelchd"}[7d])
+   )
+     and on (pod)
+   max by (pod) (container_spec_memory_limit_bytes{namespace="tenants",container="squelchd"} == 536870912)
+   ```
+
+   Every tenant under 435Mi (85% of 512Mi), and nothing from the `Pod in
+   tenants OOM-killed` alert all week, is a pass.
+2. **One deliberate first backfill of big mail at 512Mi.** A scratch tenant
+   whose mailbox holds several messages of 20 MB or more (large attachments)
+   inside the 30-day backfill window, signed up while the knob is set, so its
+   first sync runs on the light shape. Watch its working set through the whole
+   backfill (`container="squelchd"`, `pod=~"<label>-.*"`). The pass is the same:
+   a peak under 435Mi and no OOM kill. Delete the scratch tenant afterwards
+   ("Clean up" under §9 has how).
+
+If either fails, do not apply step 9. Pin `SQUELCH_WARDEN_MEMORY_LIMIT` (and the
+request, if the resting size moved too) in `15-warden-config.yaml`, redo the
+arithmetic in `70-tenant-limits.yaml`, and measure again.
+
+**9. After the whole fleet has rolled and the measurements pass, apply the new
+tenant limits.** The roller says when the fleet has rolled (`still behind`
+stops appearing, exit 0). Then:
 
 ```sh
 kubectl apply -f deploy/hosted/70-tenant-limits.yaml
@@ -1778,6 +1915,12 @@ one tenant's database to about 4 GB. Raise it only on a measurement of disk.
 
 ### What to watch
 
+Four alerts cover the service and the light shape, all in
+`deploy/monitoring/grafana/provisioning/alerting/rules.yml`: `Embedding service
+down` (critical), `Embedding service refusing requests`, `Embedding service near
+its memory limit`, and `Pod in tenants OOM-killed`, which is the one that says
+512Mi was wrong. `Tenant has no running pod` leaves `squelch-embed` out.
+
 There are no dashboard panels for the service yet; these are Grafana Explore
 queries against the `squelch-embed` job. Every family is present at zero, so an
 empty result is a broken scrape, not an idle service.
@@ -1787,8 +1930,13 @@ empty result is a broken scrape, not an idle service.
 squelch_embed_session_ready
 
 # Queue wait p99 per lane: the number to decide a second replica on, not CPU.
-# Interactive should sit near the 10 ms coalescing window. Backfill runs to
-# seconds or tens of seconds while a signup's first sync is in progress.
+# Every request is its own forward pass and the interactive lane always goes
+# first, so interactive waits for at most the one pass already running plus
+# the searches ahead of it. Backfill runs to seconds while a signup's first
+# sync is in progress, and a job that outlives its deadline (4.5 s interactive,
+# 28 s backfill: see INTERACTIVE_DEADLINE and BACKFILL_DEADLINE in
+# squelch-embed/src/protocol.rs) is
+# dropped as `abandoned` rather than run for a caller that has given up.
 histogram_quantile(0.99,
   sum by (le, lane) (rate(squelch_embed_queue_wait_seconds_bucket[5m])))
 
@@ -1796,9 +1944,13 @@ histogram_quantile(0.99,
 # daemon backs off and retries). Interactive 429s are not.
 sum by (lane) (rate(squelch_embed_requests_total{outcome="queue_full"}[5m]))
 
+# Work nobody waited for: a caller that hung up, or a job past its deadline.
+# A steady interactive rate means searches are timing out at the daemon.
+sum by (lane) (rate(squelch_embed_requests_total{outcome="abandoned"}[5m]))
+
 # Everything else that is not ok. unauthorized = a token mismatch somewhere;
 # not_ready = the session is down or loading; error = inference failed.
-sum by (outcome) (rate(squelch_embed_requests_total{outcome!~"ok|queue_full"}[5m]))
+sum by (outcome) (rate(squelch_embed_requests_total{outcome!~"ok|queue_full|abandoned"}[5m]))
 
 # The pod against its 768Mi limit.
 container_memory_working_set_bytes{namespace="tenants", pod=~"squelch-embed-.*", container="squelch-embed"}
@@ -1808,6 +1960,22 @@ On the tenant side, `squelchd_embedder_loaded` reads 0 on every tenant using the
 service, which is the truth (no session in the process). It also reads 0 on a
 local-embedding tenant whose session is idle-unloaded, so it does not tell you
 which tenants have rolled; `printenv SQUELCH_EMBED_URL` in the pod does.
+
+**One tenant can slow every other.** The service is never told who is calling
+(`docs/SECURITY.md` §4d), so it has no per-tenant limit to apply: one daemon
+backfilling hard, or one compromised pod flooding it, fills the backfill
+lane's share and holds the single forward pass, and every other tenant's
+backfill waits or gets 429s. The bounds keep that from becoming more than slow:
+each lane has its own share of queued texts (16 interactive, 96 backfill: see
+`INTERACTIVE_SHARE` and `BACKFILL_SHARE` in `squelch-embed/src/coalescer.rs`),
+interactive always runs first, and a body is at most 256 KiB, with about 32
+read and parsed at once and about 256 connections open (see `MAX_BODY_BYTES` in
+`squelch-embed/src/protocol.rs`, `BODY_PERMITS` and `MAX_CONNECTIONS` in
+`http.rs`). Searches can still be crowded out by a flood of searches, and every
+caller by a flood of bodies. The signal is `queue_full` on the interactive lane,
+or on lane `none` when the body permits run out, which the refusing-requests
+alert covers; finding the tenant is that tenant's own `squelchd` metrics, since
+the service cannot say.
 
 ### Rollback
 
@@ -1822,7 +1990,16 @@ The roller walks tenants back one per tick: the old resources, the model PVC
 mounted and copied again (§10), a local session in each pod. Vectors are in the
 same space either way, so nothing re-embeds. Leave the service running until
 the last tenant has rolled back, then `kubectl delete -f
-deploy/hosted/65-embed.yaml` if it is going away.
+deploy/hosted/65-embed.yaml` if it is going away. Not before: the `Embedding
+service down` alert reads a deleted Deployment as "not installed", so a service
+deleted under tenants that still point at it pages nobody.
+
+**This is also the first step of any daemon rollback below daemon-0.0.15.** The
+image must not go under the release that taught the daemon `SQUELCH_EMBED_URL`
+while the knob is set (step 2 has why: an OOM loop on every tenant). Take the
+knob out here, wait for the roller to exit 0 with every tenant back on the
+in-process shape, and only then repoint `SQUELCH_WARDEN_IMAGE` (`ROLLOUT.md`,
+"Rolling back").
 
 **Rollback only fits the old shape.** A tenant rolled back requests 384Mi again,
 and the quota is `11520Mi`: 30 tenants, 29 while the embed pod still runs. On a
@@ -1835,7 +2012,12 @@ back needs a bigger quota first, or a box that can carry one.
 changes nothing the roller can see as drift, so tenants keep the old value until
 something restarts them; and restarting them all by hand is the
 `kubectl rollout restart` §6c says never to do. Treat the token as set once
-until the warden can render a renamed Secret, as it does for the relay's.
+until the warden can render a renamed Secret, as it does for the relay's. That
+is an open follow-up, not a design choice: a leaked token today is fixed by the
+NetworkPolicy pair still holding (the token is the second lock, `docs/SECURITY.md`
+§4d). The rotation path is a Secret change the roller can see as drift and
+deliver one tenant per tick, with the service accepting the old and the new
+value during the overlap; neither half exists yet.
 
 ## 11. Backups: Litestream to R2
 

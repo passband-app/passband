@@ -184,11 +184,21 @@ per-claim sizes, their growth over a month and the volume's free space are
 what say how many more fit. A cancelled tenant keeps its claim, so it spends a
 slot of this gate, which is right: its file is still on the disk.
 
-**Turning the shared embedder on or off is a roll, not a quota change**, as
-long as the quota was applied first: the order is in `15-warden-config.yaml`
-beside `SQUELCH_WARDEN_EMBED_URL`. Turning it OFF on a fleet that grew past
-thirty cannot complete: at 384Mi the thirty-first tenant to roll back is
-refused by memory, its rollout never finishes, and the roller halts on it.
+**Turning the shared embedder on or off is a roll, not a quota change.** The
+order is `SETUP.md` §10b, and the quota in this file comes last there, after
+the fleet has rolled and the light shape has been measured for a week: the
+memory line is the same in both shapes, so applying it is not what turns the
+service on, it is what lets the fleet grow past thirty, and 128Mi / 512Mi rest
+on August numbers until that week says otherwise. That makes the merge that
+brought the sixty-tenant numbers the one exception to "merged, then applied":
+until §10b step 9, `kubectl diff` on this file is expected to differ, and the
+apply at step 9 is the one the `Tenants quota changed on the box` alert should
+announce. Turning it OFF on a fleet
+that grew past thirty cannot complete: at 384Mi the thirty-first tenant to roll
+back is refused by memory, its rollout never finishes, and the roller halts on
+it. And turning it off comes before any daemon image below `daemon-0.0.15`,
+never alongside: the floor is beside `SQUELCH_WARDEN_IMAGE` in
+`15-warden-config.yaml`.
 
 **The quota is the only refusal on this box.** k3s reserves nothing for itself
 by default, so the scheduler sees all 15985 MiB as allocatable and would admit

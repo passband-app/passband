@@ -98,6 +98,16 @@ data:
   # daemon given both SQUELCH_TRACK_URL and SQUELCH_RELAY_URL starts the opens
   # poller against the shared relay, and the push-only bearer becomes the only
   # lock. Bump this and the warden images together, as a release always does.
+  #
+  # A SECOND FLOOR, while SQUELCH_WARDEN_EMBED_URL below is set: daemon-0.0.15,
+  # the first daemon with the shared-embedder client. A warden with that knob
+  # renders every tenant at the light shape (512Mi limit, no model volume)
+  # whatever image this names, and an older daemon ignores SQUELCH_EMBED_URL,
+  # builds its own ONNX session, downloads the weights, and is OOM-killed at
+  # 512Mi on every start: the whole fleet in a crash loop, one tenant per tick.
+  # To go below it, comment the knob out first, let the roller converge the
+  # fleet back to the in-process shape (a run exiting 0), and only then move
+  # this line. SETUP.md §10b, Rollback; ROLLOUT.md, "Rolling back".
   SQUELCH_WARDEN_IMAGE: "ghcr.io/passband-app/squelchd:daemon-0.0.14"
   # Everything below is a default, restated so this file is the one place an
   # operator has to look. See squelch-warden/README.md.
@@ -380,45 +390,35 @@ data:
   # refuses https, a public host, an IP literal, another namespace, a path,
   # and a missing port (without `:8850` it is port 80, which nothing serves).
   #
-  # ORDER, and each step waits for the one before:
-  #
-  #   1. Apply 70-tenant-limits.yaml (the shared pod needs its quota share),
-  #      the token Secret if you want one (embed-token.example.yaml), then
-  #      `kubectl apply -f 65-embed.yaml`, and wait for Ready:
-  #        kubectl -n tenants rollout status deploy/squelch-embed
-  #        kubectl -n tenants logs deploy/squelch-embed   # "session ready: ..."
-  #   2. Suspend the roller, so ONE tenant takes the change first:
-  #        kubectl -n warden patch cronjob squelch-warden-roll -p '{"spec":{"suspend":true}}'
-  #   3. Uncomment this line, apply this file, restart the warden (rule 2), and
-  #      move one tenant onto it by hand: `squelch-control reconcile <label>`.
-  #      A reconcile applies the tenant's NetworkPolicy BEFORE its Deployment,
-  #      so the pod never comes up on the URL without the rule to reach it.
-  #   4. From INSIDE THAT TENANT'S POD, a real POST: the command is step 3 of
-  #      65-embed.yaml, and `HTTP/1.1 200` with `{"dims":384` is the answer.
-  #      Not before step 3: until the warden renders the egress rule the POST
-  #      times out, which is the tenant's own policy working. Then the other
-  #      half, that a pod which is NOT a tenant is refused (same place).
-  #   5. Unsuspend the roller (`"suspend":false`). It walks the rest of the
-  #      fleet onto the render one tenant per tick, policy first each time.
-  #
-  # A tenant rolled onto a URL nothing answers builds no local session and
-  # embeds nothing (search degrades to keywords, ingest is unaffected) until
-  # the service answers, which is why step 1 comes first.
+  # ORDER: SETUP.md §10b is the runbook, and the only place the steps are
+  # written. The one invariant they protect: the service is Ready and has
+  # said "session ready" before this line is uncommented, because a tenant
+  # rendered onto a URL nothing answers builds no local session and embeds
+  # nothing (search degrades to keywords, ingest is unaffected) until it does.
+  # The canary tenant is moved by hand with the roller suspended, and since
+  # control runs on AWS ECS that is
+  #   cexec "squelch-control reconcile <label>"
+  # (`cexec` is the ECS Exec shell function in deploy/aws/CUTOVER.md, "Shell
+  # setup"), never a hand-made roll Job, which takes whichever drifted tenant
+  # sorts first.
   #
   # THE LIGHTER SHAPE IT IMPLIES. With this set, a tenant's DEFAULT requests
   # drop to 40m CPU / 128Mi memory with a 512Mi limit (the three resource
-  # entries above are left out of this file so that the default applies), the
-  # shared pod takes 320Mi and one pod slot from the tenants quota, and
-  # 70-tenant-limits.yaml carries the arithmetic for both states. Apply that
-  # file before this one.
+  # entries above are left out of this file so that the default applies), and
+  # the shared pod takes 320Mi and one pod slot from the tenants quota.
+  # 70-tenant-limits.yaml carries the arithmetic for both states; SETUP.md
+  # §10b says when to apply it (after the fleet has rolled and the light
+  # shape has been measured, because that apply is what lets the fleet grow
+  # past thirty).
   #
   # ROLLBACK is this line commented out again and a warden restart. The roller
   # walks every tenant back to local embedding at 384Mi, model volume and all.
-  # Nothing re-embeds in either direction: the service runs the same model, so
-  # its vectors and a local session's are the same space. Check the quota
+  # Nothing re-embeds because of the switch: the service runs the same model,
+  # so its vectors and a local session's are the same space. Check the quota
   # first: at 384Mi the box holds thirty, so a fleet that grew past that on the
   # service cannot all roll back, and the roller halts on the first tenant the
-  # quota refuses.
+  # quota refuses. And this comes BEFORE any SQUELCH_WARDEN_IMAGE below
+  # daemon-0.0.15, never after or alongside (the second floor, above).
   # SQUELCH_WARDEN_EMBED_URL: "http://squelch-embed:8850"
   # How long a tenant daemon holds its idle ONNX embedding session before
   # dropping it and handing the heap back. Unset, the daemon's own default (600)
@@ -432,6 +432,13 @@ data:
   # every tenant that restarts for the change, which is the same failure the
   # warden warns about for HTTP readiness with no PVC at all, and the roller
   # takes those pods one at a time.
+  #
+  # With SQUELCH_WARDEN_EMBED_URL set there is no tenant session to move, and
+  # the warden refuses to start with this naming anything but the model the
+  # service is built for (`squelch_embed::protocol::MODEL_CODE`): a daemon
+  # configured for one model and handed another's vectors would be searching
+  # the wrong space. Moving the shared fleet's model is a new squelch-embed
+  # image and a re-embed, not this knob.
   # SQUELCH_WARDEN_EMBED_MODEL: "Xenova/bge-small-en-v1.5"
   # Uncomment if the squelchd image is private. This is the pull secret for
   # TENANT pods; the warden's own pod takes `imagePullSecrets` in

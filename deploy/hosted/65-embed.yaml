@@ -14,17 +14,28 @@
 # of session every tenant pod carries now, once the fleet is pointed at it.
 # Measured on the built image (linux/arm64, release, 768Mi cap, 2 CPUs) under
 # six concurrent 8-text backfills plus four query streams: 290 MB peak, 257 MB
-# after, about 15 texts a second.
+# after, about 15 texts a second. That run predates the end of cross-request
+# batching; a forward pass is still at most one request's 8 texts, which is
+# what the memory peak comes from, so the peak holds and the throughput is
+# unremeasured.
+#
+# The pod runs as uid 10002, not the tenants' 10001, so on a node where user
+# namespaces are off a tenant process and this one are still different users.
 #
 # ORDER: deploy/hosted/SETUP.md section 10b is the runbook and the one place the
 # steps live. In short: token Secret, apply this file and wait for "session
-# ready", check a NON-tenant pod is refused (from a namespace with no policy,
-# e.g. `default`, aimed at squelch-embed.tenants.svc.cluster.local:8850; a
-# probe run inside `tenants` is blocked by its own default-deny and proves
-# nothing), then suspend the roller, set SQUELCH_WARDEN_EMBED_URL in
-# `15-warden-config.yaml`, restart the warden, roll ONE tenant, and only then
-# verify with a real POST from inside that tenant (its egress rule exists only
-# once the warden renders it). The daemon image has bash and no curl:
+# ready", turn on the scrape (the "Embedding service down" alert arms as soon as
+# this Deployment exists), check a NON-tenant pod is refused (from a namespace
+# with no policy, e.g. `default`, aimed at
+# squelch-embed.tenants.svc.cluster.local:8850, and only a name that RESOLVES
+# and then TIMES OUT counts: a failed lookup or a fast refusal proves nothing,
+# and a probe run inside `tenants` is blocked by its own default-deny), then
+# suspend the roller, set SQUELCH_WARDEN_EMBED_URL in `15-warden-config.yaml`,
+# restart the warden, move the owner's own tenant with
+# `cexec "squelch-control reconcile <label>"` (control runs on AWS ECS; `cexec`
+# is in deploy/aws/CUTOVER.md), and only then verify with a real POST from
+# inside that tenant (its egress rule exists only once the warden renders it).
+# The daemon image has bash and no curl:
 #
 #   kubectl -n tenants exec deploy/<tenant> -c squelchd -- bash -c '
 #     body="{\"texts\":[\"hello\"]}"
@@ -36,14 +47,17 @@
 # `HTTP/1.1 200` and a body starting `{"dims":384` is the answer. Then unsuspend
 # the roller and it walks the rest of the fleet one tenant per tick.
 #
-# TOKEN ROTATION has no rolling path yet: an in-place edit of the Secret is no
-# drift the roller sees, and `kubectl rollout restart` on tenants is forbidden
-# (SETUP.md 6c). Treat the token as set once, until the warden renders a
-# renamed Secret the way the relay's works.
+# TOKEN ROTATION has no rolling path yet, and it is an open follow-up: an
+# in-place edit of the Secret is no drift the roller sees, and `kubectl rollout
+# restart` on tenants is forbidden (SETUP.md 6c). Treat the token as set once,
+# until the warden renders a renamed Secret the way the relay's works.
 #
 # The image tag is NOT the fleet's moving tag: it is the release that first
 # shipped this image, and it moves only when the model contract or the server
-# changes, never as part of a daemon roll.
+# changes, never as part of a daemon roll (ROLLOUT.md's pin table). The node
+# pulls it with no credentials, so the GHCR package must be PUBLIC; a new
+# package starts private, and SETUP.md §10b step 1 has the one-time settings
+# and the anonymous pull that proves them.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

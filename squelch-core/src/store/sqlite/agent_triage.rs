@@ -67,7 +67,8 @@ const MESSAGE_COLUMNS: &str = concat!(
     (SELECT tr.subject FROM message_translations tr WHERE tr.message_id=m.id
              AND tr.status IN ('done','incomplete')),
     (SELECT tr.body FROM message_translations tr WHERE tr.message_id=m.id
-             AND tr.status IN ('done','incomplete'))"
+             AND tr.status IN ('done','incomplete')),
+    m.list_unsubscribe IS NOT NULL"
 );
 fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMessage> {
     let mut message = AgentMessage {
@@ -86,6 +87,7 @@ fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMessage> {
         is_sent: row.get(6)?,
         is_spam: row.get(7)?,
         labelled_sent: row.get(14)?,
+        is_bulk: row.get(17)?,
         status: row.get(8)?,
         opened_at: row.get(9)?,
         remind_at: row.get(10)?,

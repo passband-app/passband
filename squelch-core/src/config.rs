@@ -371,7 +371,9 @@ impl Default for SyncConfig {
 #[serde(default)]
 pub struct NotifyConfig {
     /// Fast-model importance at or above which a message qualifies for a push.
-    /// All model-assessed auth qualifies regardless of importance. Default 50.
+    /// All model-assessed auth qualifies regardless of importance. Default 40:
+    /// over-notifying beats burying mail in FYE, so actionable automated
+    /// notices (the prompts' 40-59 band) push too.
     /// Env: `SQUELCH_NOTIFY_MIN_IMPORTANCE`.
     pub min_importance: u8,
     /// THE FIRST-SIGHT TEST: mail whose `Date:` header is older than this when
@@ -472,7 +474,7 @@ impl NotifyConfig {
 impl Default for NotifyConfig {
     fn default() -> Self {
         Self {
-            min_importance: 50,
+            min_importance: 40,
             freshness_window_secs: 900,
             rescue_window_secs: 3600,
             fast_enabled: true,
@@ -4384,10 +4386,10 @@ archive_access_daily_cap = 9
     #[test]
     fn notify_defaults_match_the_squelch_line_and_env_overrides_the_threshold() {
         let _g = ENV_LOCK.lock().unwrap();
-        // The default threshold IS the TUI's starting squelch line (50), so
-        // "notified" and "above the line" mean the same thing to a user.
+        // 40, not the TUI's squelch line (50): the notify prompts' 40-59 band
+        // is "an automated notice you may want to act on", and that pushes.
         let c = Config::default();
-        assert_eq!(c.notify.min_importance, 50);
+        assert_eq!(c.notify.min_importance, 40);
         assert_eq!(c.notify.freshness_window_secs, 900);
         // The rescue ceiling: an hour from FIRST SIGHT, not from the sender's
         // `Date:`.
@@ -4607,7 +4609,7 @@ archive_access_daily_cap = 9
         assert_eq!(cfg.notify.freshness_window_secs, 900);
         // A config that predates the feature has no [notify] table at all.
         let cfg: Config = toml::from_str("squelch_level = 1\n").unwrap();
-        assert_eq!(cfg.notify.min_importance, 50);
+        assert_eq!(cfg.notify.min_importance, 40);
         assert_eq!(cfg.notify.rescue_window_secs, 3600);
     }
 

@@ -267,6 +267,8 @@ enum AccountIndex {
         // Not a default, but per-account all the same: the saved chats behind
         // that account's search-history questions (mail content, on disk).
         QuestionChats.forget(account: id)
+        // And its last board (BoardFile.swift), mail content on disk too.
+        BoardFile.forget(account: id)
     }
 
     // MARK: - orphaned keychain slots

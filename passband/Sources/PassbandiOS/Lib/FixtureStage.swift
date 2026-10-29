@@ -816,7 +816,7 @@
                 ghosts: ghosts, events: events,
                 calendar: TimelineCalendarStatus(granted: true, synced_at: iso.string(from: now)),
                 calendars: [
-                    TimelineCalendar(id: "work", name: "Work", color: work, primary: true, writable: true),
+                    TimelineCalendar(id: "work", name: "Work", color: work, primary: true, writable: true, can_invite: true),
                     TimelineCalendar(id: "personal", name: "Personal", color: home, primary: false, writable: true),
                 ])
         }

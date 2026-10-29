@@ -75,7 +75,7 @@ use super::{
 };
 use crate::credentials::CalendarCredentials;
 use crate::error::{CoreError, Result};
-use crate::features::{CALENDAR, CALENDAR_OWN, Features};
+use crate::features::{CALENDAR, Features};
 use crate::store::{NewAuditEntry, SqliteStore, Store};
 use crate::types::AccountId;
 
@@ -435,11 +435,11 @@ impl CalendarSync {
 
     /// Passband owns the events mail makes ([`own`]): plan from the store,
     /// then carry out at most [`own::WRITES_PER_PASS`] Google writes, within
-    /// [`own::DAILY_CAP`] a day. Only with both [`CALENDAR`] and
-    /// [`CALENDAR_OWN`] on. Every write asks Google to email nobody and is
-    /// audited; a quota answer ends the pass. Public for tests.
+    /// [`own::DAILY_CAP`] a day, whenever [`CALENDAR`] is on. Every write
+    /// asks Google to email nobody and is audited; a quota answer ends the
+    /// pass. Public for tests.
     pub async fn own_events(&self, now: DateTime<Utc>) {
-        if !self.features.enabled(CALENDAR) || !self.features.enabled(CALENDAR_OWN) {
+        if !self.features.enabled(CALENDAR) {
             return;
         }
         let token = match self.creds.calendar_access(self.account_id).await {

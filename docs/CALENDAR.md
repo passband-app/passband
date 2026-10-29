@@ -841,7 +841,7 @@ list, Esc closes the place list, then the delete question, then the pane.
   editable (Google refuses the change), and its card names it "added by
   Gmail". Where Passband owns such events (below), it does not stay.
 - **Passband owns the events mail makes** (2026-10-28, the owner's
-  decision; `gcal/own.rs`, behind the `calendar_own` hidden feature). Gmail's
+  decision; `gcal/own.rs`, on for every mailbox with the calendar). Gmail's
   frozen copy beside Passband's ghost is two items for one thing, and gets in
   the way of Passband running the calendar. So after each calendar pass:
   - **Adopt.** A Gmail event on the user's PRIMARY calendar that is the
@@ -1704,7 +1704,7 @@ event's location too). No key, no bill, the same on Mac and iOS.
 Wave 1's ghosts only ever show. Before a later wave lets one become a real
 event, or lets mail move or delete one, these exist:
 
-(`calendar_own`, "Passband owns the events mail makes" above, is the first
+("Passband owns the events mail makes" above is the first
 such wave, decided by the owner on 2026-10-28. Where it stands against this
 list: it never notifies and never touches guests; it adopts only from
 authenticated mail, and only an event Gmail itself already added, so it adds

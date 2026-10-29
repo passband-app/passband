@@ -49,18 +49,11 @@ pub struct Feature {
 /// `features.enabled(features::THE_KEY)` wherever the daemon gates on it. The
 /// clients gate on the same key string; a flag only a client reads still gets
 /// an entry here, because this list is the only thing the admin page offers.
-pub const KNOWN: &[Feature] = &[
-    Feature {
-        key: CALENDAR,
-        summary: "The Calendar page: events from mail, a Google Calendar connection, and \
-                  creating and editing events.",
-    },
-    Feature {
-        key: CALENDAR_OWN,
-        summary: "Passband replaces the events Gmail adds to the calendar from mail with its \
-                  own, and keeps them current from the mail. Needs calendar.",
-    },
-];
+pub const KNOWN: &[Feature] = &[Feature {
+    key: CALENDAR,
+    summary: "The Calendar page: events from mail, a Google Calendar connection, and creating \
+              and editing events.",
+}];
 
 /// The Calendar page and everything behind it on the human door: the
 /// timeline, the user's word on a ghost, the Google Calendar connection and
@@ -71,14 +64,6 @@ pub const KNOWN: &[Feature] = &[
 /// triage commit and correspondent timezone inference, so a mailbox switched
 /// on sees its recent history at once (docs/CALENDAR.md section 11).
 pub const CALENDAR: &str = "calendar";
-
-/// Passband owns the events mail makes ([`crate::gcal::own`]): after each
-/// calendar pass it replaces Gmail's own copies on the user's primary
-/// calendar with events of its own and keeps them current from the mail.
-/// The ONE place the daemon writes to a calendar without the user asking
-/// for that one write, so it ships behind its own key. Only with
-/// [`CALENDAR`] on too: the sync loop that runs it idles without it.
-pub const CALENDAR_OWN: &str = "calendar_own";
 
 /// The environment variable naming keys that are on for this daemon no matter
 /// what. Comma separated; whitespace around a key is ignored.

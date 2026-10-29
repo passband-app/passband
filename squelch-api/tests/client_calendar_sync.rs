@@ -5776,11 +5776,11 @@ async fn a_place_answer_that_adds_a_word_keeps_the_location() {
 /// Passband's event, which nobody is emailed about and which the audit log
 /// records; an invitation Gmail added from someone else's mail is left
 /// alone; a second pass changes nothing; and when Gmail adds its copy again,
-/// it is deleted as a duplicate. Without the `calendar_own` key, nothing is
+/// it is deleted as a duplicate. With the calendar feature off, nothing is
 /// written at all.
 #[tokio::test]
 async fn passband_takes_over_gmails_own_events_and_leaves_invitations_alone() {
-    use squelch_core::features::{CALENDAR, CALENDAR_OWN};
+    use squelch_core::features::CALENDAR;
     use squelch_core::gcal::own::{AUDIT_ACTOR, OWNED_NOTE};
     let w = world("own", GRANTED).await;
     let start = minute(Utc::now() + Duration::days(2));
@@ -5803,11 +5803,12 @@ async fn passband_takes_over_gmails_own_events_and_leaves_invitations_alone() {
     seed_ghost(&w.store, w.acct, "g2", "Drinks at Bemelmans", rfc(later));
     assert_eq!(w.pass().await, PassOutcome::Synced);
 
-    // The calendar key alone writes nothing.
+    // With the calendar feature off, nothing is written.
+    w.features.replace_granted(Vec::<String>::new());
     w.sync.own_events(Utc::now()).await;
-    assert!(w.google().writes.is_empty(), "off without calendar_own");
+    assert!(w.google().writes.is_empty(), "off with the calendar");
 
-    w.features.replace_granted([CALENDAR, CALENDAR_OWN]);
+    w.features.replace_granted([CALENDAR]);
     w.sync.own_events(Utc::now()).await;
     let new_id = {
         let g = w.google();
@@ -5911,9 +5912,7 @@ async fn passband_takes_over_gmails_own_events_and_leaves_invitations_alone() {
 /// back off, the pair is left as Gmail made it, and it is not tried again.
 #[tokio::test]
 async fn a_refused_gmail_delete_takes_passbands_event_back_off_for_good() {
-    use squelch_core::features::{CALENDAR, CALENDAR_OWN};
     let w = world("own-refused", GRANTED).await;
-    w.features.replace_granted([CALENDAR, CALENDAR_OWN]);
     let start = minute(Utc::now() + Duration::days(2));
     let mut gmail = timed("gm1", "Reservation at Dingles Public House", start, 60);
     gmail["eventType"] = json!("fromGmail");

@@ -1768,7 +1768,7 @@ struct TimelineEvent: Codable, Sendable, Hashable, Identifiable {
     /// false; the card says where it came from. Nil from an older daemon.
     var from_gmail: Bool?
     /// Passband made this event in place of Gmail's copy and keeps it current
-    /// from the mail (the daemon's `calendar_own`). Nil means no.
+    /// from the mail (the daemon's gcal/own.rs). Nil means no.
     var passband_owned: Bool?
 }
 

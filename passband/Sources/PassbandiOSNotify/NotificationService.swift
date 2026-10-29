@@ -106,6 +106,23 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
             return
         }
 
+        // An event reminder: its own fetch and banner, no badge (an event
+        // changes nothing the badge counts).
+        if let reminder = EventBanner.calendarPush(request.content.userInfo[PushRoute.eventIdKey] as? String) {
+            nonisolated(unsafe) let fallback = request.content
+            let task = Task { [weak self] in
+                let content = await Self.calendarContent(reminder)
+                guard let self else { return }
+                self.deliver(content ?? fallback)
+            }
+            let spent = lock.withLock { () -> Bool in
+                work = task
+                return handler == nil
+            }
+            if spent { task.cancel() }
+            return
+        }
+
         guard let route = PushRoute(userInfo: request.content.userInfo) else {
             return deliver(request.content)
         }
@@ -348,6 +365,48 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
         // sound preference lives in ITS UserDefaults, which this process does
         // not share. Silencing the kinds the app silences matters more than
         // which chime the rest use.
+        content.sound = copy.sound ? .default : nil
+        return content
+    }
+
+    // MARK: - an event reminder
+
+    /// The banner the Mac would post for this reminder (CalendarReminder.swift),
+    /// or nil to keep the relay's "An event is coming up". The push names a
+    /// fire by id; what is shown is what THIS account's daemon serves under
+    /// it, and only when the ids agree.
+    ///
+    /// The raw push's `event_id` survives a nil here, so a tap on the generic
+    /// banner still opens the reminder (`EventBanner.tapRoute`).
+    private static func calendarContent(_ push: EventBanner.CalendarPush) async -> UNNotificationContent? {
+        guard let settings = try? SettingsStore.load(accountId: push.accountId) else { return nil }
+
+        var base = settings.serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        while base.hasSuffix("/") { base.removeLast() }
+        guard let url = URL(string: base + CalendarReminderSignal.path(push.fireId)) else { return nil }
+
+        var request = URLRequest(url: url, timeoutInterval: 10)
+        request.setValue("Bearer \(settings.apiToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        // Silent on every failure, for the reason `fetch` is.
+        guard let (data, response) = try? await Self.session.data(for: request),
+            (response as? HTTPURLResponse)?.statusCode == 200,
+            let signal = CalendarReminderSignal.decode(data),
+            signal.calendar_reminder == push.fireId
+        else { return nil }
+
+        let account = push.accountId.uuidString
+        let copy = EventBanner.calendarReminderCopy(signal)
+        let content = UNMutableNotificationContent()
+        content.title = copy.title
+        content.subtitle = copy.subtitle
+        content.body = copy.body
+        content.threadIdentifier = "\(account).\(copy.threadIdentifier)"
+        content.userInfo = EventBanner.calendarReminderUserInfo(signal, account: push.accountId)
+        // The app registers the category and its "Show tickets" action.
+        if signal.ticket != nil { content.categoryIdentifier = EventBanner.calendarTicketCategory }
+        // The system's chime: the app's choice lives in ITS defaults.
         content.sound = copy.sound ? .default : nil
         return content
     }

@@ -672,6 +672,9 @@ struct MainShell: View {
         // The two store watchers are a LEAF of their own (see ShellWatchers) —
         // watching from here made this body a reader of the poll clock.
         .background { ShellWatchers() }
+        // Where a ticket opens (the card's Tickets button, a reminder's tap):
+        // Quick Look needs a view in this window to drive it.
+        .background { TicketPreviewHost() }
         }
     }
 

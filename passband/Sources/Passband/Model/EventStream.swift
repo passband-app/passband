@@ -366,6 +366,17 @@ final class EventStream {
             // the moment) is dropped by the open_draft freshness rule.
             guard renotify.isFresh(now: Int(Date().timeIntervalSince1970)) else { return }
             Notifier.shared.postRenotify(renotify, accountId: accountId)
+        } else if let reminder = CalendarReminderSignal.parse(frame.data) {
+            // An event reminder (CalendarReminder.swift), on renotify's
+            // terms: no id, no cursor, and a late one is dropped.
+            guard reminder.isFresh(now: Int(Date().timeIntervalSince1970)) else { return }
+            #if os(iOS)
+                // The phone is told by its push, which the extension dresses
+                // with this same banner; a second copy from the feed while
+                // the app happens to be open would be the reminder twice.
+                if PushRegistration.shared.covers(accountId) { return }
+            #endif
+            Notifier.shared.postCalendarReminder(reminder, accountId: accountId)
         } else if let id = frame.id.flatMap({ Int($0) }) {
             // An undecodable frame still ADVANCES the cursor, mirroring the
             // server's pump: otherwise one malformed row replays on every

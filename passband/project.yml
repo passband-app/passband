@@ -249,6 +249,9 @@ targets:
       - path: Sources/PassbandiOSNotify
       - path: Sources/Passband/Model/Keychain.swift
       - path: Sources/Passband/Model/EventBanner.swift
+      # An event reminder's frame and its banner, drawn here from
+      # `GET /client/calendar/reminders/{fire id}` exactly as the Mac draws it.
+      - path: Sources/Passband/Model/CalendarReminder.swift
       - path: Sources/Passband/Model/WireTypes.swift
       # WireTypes reaches for `String.withoutEmoji` when it normalizes a
       # subject; the helper lives here.

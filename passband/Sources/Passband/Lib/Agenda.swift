@@ -227,6 +227,9 @@ struct AgendaItem: Identifiable, Sendable, Hashable {
     /// The mail behind this row, ghost or event.
     var sources: [GhostSource] { ghost?.sources ?? mail }
 
+    /// What the card's Tickets button opens, ghost or event.
+    var tickets: CalendarTickets? { ghost?.tickets ?? event?.tickets }
+
     var ghost: TimelineGhost? {
         if case .ghost(let g) = origin { return g }
         return nil

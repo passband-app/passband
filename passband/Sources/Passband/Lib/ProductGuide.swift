@@ -289,6 +289,8 @@ enum ProductGuide {
         - Real events from Google Calendar, once it is connected, in each calendar's own colour.
         - Opening an event shows a picture when there is one (a photo from the mail behind it, else Apple's street view or a map of the venue) and its place as the venue's name with the street address under it, tidied from what a booking service wrote. On the iPhone, tapping the place asks whether to open it in Apple Maps or Google Maps.
         - Connecting: the "Connect calendar" card or button opens Google's consent screen. Unticking calendar there leaves the mailbox working and simply connects no calendar.
+        - Tickets: an event whose mail holds the tickets, a boarding pass or a booking has a button on its card named for what it is: "Tickets", "Boarding pass" or "Booking", with the file's name beside it. One click opens the attachment in Quick Look, or the email itself when there is no attachment. On the iPhone a wallet pass offers Add to Wallet.
+        - Event reminders: a banner a while before each event on the calendar, and before events guessed from mail that the user has committed to. Passband picks the lead for the event (10 minutes to 3 hours); an all-day event's comes at 8am on its day. The banner says when and where, and sometimes one short line about it ("Your 2 tickets are in the Ticketmaster email"). Clicking it opens what the event needs (the tickets or the email about it), else the event here. When the mail holds tickets the banner also has a "Show tickets" button. Passband may decide an event needs no reminder. The iPhone gets the same reminder as a notification. Settings > General > Notifications > "Event reminders" turns them off for the mailbox.
 
         Views:
         - m shows the month, w the week, a the agenda. The month is the default. Trips and stays are bars across the days they cover, and "+N more" is what does not fit in a day.
@@ -641,6 +643,7 @@ enum ProductGuide {
         - A banner fires for urgent mail, deadlines and other mail important enough to surface, and when a tracked email is opened. Everything else arrives silently.
         - Only urgent and deadline banners play a sound. It is chosen in Settings > General > Notifications, where "Test banner" posts one.
         - While Passband is the front window, banners go to Notification Center only. Clicking a banner opens that message.
+        - Event reminders come a while before each event, with the tickets one click away when the mail holds them. They show even while Passband is the front window. "Event reminders" in Settings > General > Notifications turns them off for the mailbox.
 
         Updates:
         - Passband checks for a new version every hour and downloads it in the background. It installs the next time Passband quits.

@@ -70,6 +70,13 @@ enum EventBanner {
         /// banner lost its account key, which the tap queue reads as "the
         /// active account".
         case agentDraft(accountId: UUID?, draftId: Int, created: Int)
+        /// An event reminder (CalendarReminder.swift) the app or the phone's
+        /// extension drew: everything the tap needs is in the payload.
+        case calendarReminder(CalendarReminderTap)
+        /// The relay's own "An event is coming up", which the extension
+        /// could not dress: only the fire id survived, so the app asks the
+        /// daemon what it was before it routes.
+        case calendarReminderPush(CalendarPush)
         case reveal(messageId: Int, threadId: String, sender: String)
         case authPage
         case message(Int)
@@ -98,6 +105,15 @@ enum EventBanner {
         }
         // A draft banner that lost its binding opens nothing at all.
         if route == agentDraftRoute { return .thread(nil) }
+        // An event reminder names no event row of the mail feed, and must
+        // never fall through to the message or thread it may open.
+        if route == calendarRoute {
+            guard let tap = calendarReminderTap(userInfo) else { return .thread(nil) }
+            return .calendarReminder(tap)
+        }
+        if let push = calendarPush(userInfo["event_id"] as? String) {
+            return .calendarReminderPush(push)
+        }
         if let renotify = renotifyTap(userInfo) { return .renotify(renotify) }
         let messageId =
             (userInfo[messageKey] as? Int) ?? (userInfo[messageKey] as? String).flatMap(Int.init)
@@ -113,6 +129,132 @@ enum EventBanner {
             return .event(unresolved)
         }
         return .thread(userInfo[threadKey] as? String)
+    }
+
+    // MARK: - event reminder taps (the banner itself: CalendarReminder.swift)
+
+    /// The tap route an event reminder carries in `routeKey`.
+    static let calendarRoute = "calendar_reminder"
+    /// The reminder's fire id: the daemon's `calendar_reminder_fires` row.
+    static let calendarFireKey = "passband.cal.fire"
+    /// The Calendar page's row id (`e:<calendar>|<event>` or `g:<ghost>`).
+    static let calendarItemKey = "passband.cal.item"
+    /// The event's start as the frame wrote it, so the page can turn to its
+    /// day before the feed holding the row has loaded.
+    static let calendarStartKey = "passband.cal.start"
+    /// What the banner's tap shows, and what "Show tickets" shows: each a
+    /// message, a thread, and maybe one of its attachments.
+    static let calendarOpenPrefix = "passband.cal.open"
+    static let calendarTicketPrefix = "passband.cal.ticket"
+    /// The category a reminder with tickets wears, and its one action.
+    static let calendarTicketCategory = "passband.calendar.ticket"
+    static let calendarShowTicketsAction = "passband.calendar.show_tickets"
+    /// The coalescing group every reminder shares, before the poster
+    /// prefixes it with the account.
+    static let calendarGroup = "passband.calendar"
+
+    /// One thing a reminder can show: a message in the reader, or an
+    /// attachment of it in Quick Look.
+    struct CalendarFile: Equatable, Sendable {
+        var messageId: Int
+        var threadId: String
+        var attachmentId: Int?
+        /// Nil when the frame named the attachment by id alone (`open`):
+        /// the opener looks it up in the thread.
+        var filename: String?
+        var mime: String?
+    }
+
+    /// A tap on an event reminder, read back from the banner's userInfo.
+    struct CalendarReminderTap: Equatable, Sendable {
+        var accountId: UUID?
+        var fireId: Int
+        /// The Calendar page's row id, nil for an item kind this app does
+        /// not know.
+        var itemId: String?
+        var start: String?
+        var open: CalendarFile?
+        var ticket: CalendarFile?
+
+        /// Where the tap goes.
+        enum Target: Equatable, Sendable {
+            case attachment(CalendarFile)
+            case mail(CalendarFile)
+            /// The event's card on the Calendar page.
+            case event(itemId: String, start: String?)
+            /// Nothing to show: the app comes forward and that is all.
+            case none
+        }
+
+        /// "Show tickets" shows the ticket; a plain tap shows `open`, else
+        /// the event's card (docs/CALENDAR.md, "Firing").
+        func target(showTickets: Bool) -> Target {
+            if showTickets, let ticket { return Self.file(ticket) }
+            if let open { return Self.file(open) }
+            if let itemId { return .event(itemId: itemId, start: start) }
+            return .none
+        }
+
+        private static func file(_ f: CalendarFile) -> Target {
+            f.attachmentId != nil ? .attachment(f) : .mail(f)
+        }
+    }
+
+    /// The reminder half of `tapRoute`, nil for any other banner.
+    static func calendarReminderTap(_ userInfo: [AnyHashable: Any]) -> CalendarReminderTap? {
+        guard userInfo[routeKey] as? String == calendarRoute,
+            let fire = intValue(userInfo[calendarFireKey]), fire > 0
+        else { return nil }
+        return CalendarReminderTap(
+            accountId: (userInfo[accountKey] as? String).flatMap(UUID.init(uuidString:)),
+            fireId: fire,
+            itemId: (userInfo[calendarItemKey] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            start: userInfo[calendarStartKey] as? String,
+            open: calendarFile(userInfo, calendarOpenPrefix),
+            ticket: calendarFile(userInfo, calendarTicketPrefix))
+    }
+
+    /// One `CalendarFile` written under `prefix` (see `calendarFileInfo`).
+    private static func calendarFile(_ userInfo: [AnyHashable: Any], _ prefix: String) -> CalendarFile? {
+        guard let message = intValue(userInfo["\(prefix).message"]), message > 0 else { return nil }
+        return CalendarFile(
+            messageId: message, threadId: userInfo["\(prefix).thread"] as? String ?? "",
+            attachmentId: intValue(userInfo["\(prefix).attachment"]).flatMap { $0 > 0 ? $0 : nil },
+            filename: userInfo["\(prefix).filename"] as? String,
+            mime: userInfo["\(prefix).mime"] as? String)
+    }
+
+    /// The userInfo entries for one `CalendarFile`, under `prefix`.
+    static func calendarFileInfo(_ file: CalendarFile, _ prefix: String) -> [String: Any] {
+        var info: [String: Any] = [
+            "\(prefix).message": file.messageId,
+            "\(prefix).thread": file.threadId,
+        ]
+        if let id = file.attachmentId { info["\(prefix).attachment"] = id }
+        if let name = file.filename { info["\(prefix).filename"] = name }
+        if let mime = file.mime { info["\(prefix).mime"] = mime }
+        return info
+    }
+
+    /// The pusher's reminder ping, `"<account>:cal:<fire id>:<fired unix>"`,
+    /// read as strictly as a draft's: the tag, the literal, two plain
+    /// numbers. A bare `"cal:7:…"` (no tag) is unroutable on purpose: fire
+    /// ids are one daemon's ints.
+    struct CalendarPush: Equatable, Sendable {
+        var accountId: UUID
+        var fireId: Int
+        var fired: Int
+    }
+
+    static func calendarPush(_ raw: String?) -> CalendarPush? {
+        guard let raw, raw.count <= 256 else { return nil }
+        let parts = raw.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 4, parts[1] == "cal",
+            let account = UUID(uuidString: String(parts[0])),
+            let fire = plainNumber(parts[2], maxDigits: 12),
+            let fired = plainNumber(parts[3], maxDigits: 11)
+        else { return nil }
+        return CalendarPush(accountId: account, fireId: fire, fired: fired)
     }
 
     // MARK: - smart re-notify taps (the banner itself: RenotifyBanner.swift)
@@ -332,8 +474,12 @@ enum EventBanner {
         return f
     }()
 
-    static func shouldPresentForeground(appActive: Bool, windowVisible: Bool, isTest: Bool, isAuth: Bool) -> Bool {
-        isTest || isAuth || !(appActive && windowVisible)
+    /// An event reminder is shown over the app too: it is about the clock,
+    /// not about a list the human may already be looking at.
+    static func shouldPresentForeground(
+        appActive: Bool, windowVisible: Bool, isTest: Bool, isAuth: Bool, isReminder: Bool = false
+    ) -> Bool {
+        isTest || isAuth || isReminder || !(appActive && windowVisible)
     }
 
     // MARK: - login code

@@ -121,6 +121,7 @@ pub fn msg(account_id: i64, gmail: &str, thread: &str, subject: &str, body: &str
         list_unsubscribe: None,
         list_unsub_one_click: false,
         auth_pass: None,
+        sender_signals: None,
     }
 }
 

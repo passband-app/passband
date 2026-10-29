@@ -11,6 +11,7 @@ pub mod html;
 pub mod ingest;
 pub mod notify_lane;
 mod profile;
+pub mod sender_signals;
 mod translate_pass;
 pub(crate) mod triage_worker;
 
@@ -6760,6 +6761,7 @@ mod tests {
                 list_unsubscribe: None,
                 list_unsub_one_click: false,
                 auth_pass: None,
+                sender_signals: None,
             })
             .unwrap();
         store
@@ -6973,6 +6975,7 @@ mod tests {
                 list_unsubscribe: None,
                 list_unsub_one_click: false,
                 auth_pass: None,
+                sender_signals: None,
             })
             .unwrap();
         store
@@ -8084,6 +8087,7 @@ mod tests {
                 list_unsubscribe: None,
                 list_unsub_one_click: false,
                 auth_pass: None,
+                sender_signals: None,
             })
             .unwrap();
         store
@@ -8157,6 +8161,7 @@ mod tests {
                 list_unsubscribe: None,
                 list_unsub_one_click: false,
                 auth_pass: Some(true),
+                sender_signals: None,
             })
             .unwrap();
         store

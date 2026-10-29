@@ -68,7 +68,7 @@ const MESSAGE_COLUMNS: &str = concat!(
              AND tr.status IN ('done','incomplete')),
     (SELECT tr.body FROM message_translations tr WHERE tr.message_id=m.id
              AND tr.status IN ('done','incomplete')),
-    m.list_unsubscribe IS NOT NULL"
+    m.list_unsubscribe IS NOT NULL, m.sender_signals"
 );
 fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMessage> {
     let mut message = AgentMessage {
@@ -98,6 +98,9 @@ fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMessage> {
         // translation landing after triage re-triages the message once.
         translated_subject: row.get(15)?,
         translated_body: row.get(16)?,
+        sender_signals: crate::types::SenderSignals::from_column(
+            row.get::<_, Option<String>>(18)?.as_deref(),
+        ),
     };
     // Only serde primitives are hashed, so serialization cannot fail here.
     message.source.content = content_snapshot(&message).expect("serializable message");

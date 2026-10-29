@@ -463,7 +463,7 @@ pub fn extract_unsub_headers(msg: &mail_parser::Message) -> (Option<String>, boo
 
 /// The ONLY authserv-id we trust. Gmail stamps its verdict with this id on
 /// delivery; a header carrying any other id is one the sender could have typed.
-const GMAIL_AUTHSERV_ID: &str = "mx.google.com";
+pub(crate) const GMAIL_AUTHSERV_ID: &str = "mx.google.com";
 
 /// Written by Google's own infrastructure on the inbound SMTP path, above the
 /// verdict it stamps.
@@ -527,6 +527,15 @@ const AUTH_RESULTS_HEADER: &str = "Authentication-Results";
 /// ghosts and move that person's inferred zone, and the gap matters for all
 /// of those, not only the pixel.
 pub fn extract_auth_pass(msg: &mail_parser::Message, from_addr: &str) -> Option<bool> {
+    auth_results_verdict(trusted_auth_results(msg)?, from_addr)
+}
+
+/// The raw value of the TOPMOST `Authentication-Results` header, ONLY when
+/// every condition [`extract_auth_pass`] documents holds: one `From`, no POP
+/// marker, and a Google-written header above it. The one trust gate both the
+/// verdict and [`crate::sync::sender_signals`] read through, so a forged
+/// verdict can neither pass a message nor name a signing domain.
+pub(crate) fn trusted_auth_results<'m>(msg: &'m mail_parser::Message) -> Option<&'m str> {
     let headers = msg.headers();
     if headers
         .iter()
@@ -555,7 +564,7 @@ pub fn extract_auth_pass(msg: &mail_parser::Message, from_addr: &str) -> Option<
     let bytes = msg
         .raw_message
         .get(header.offset_start as usize..header.offset_end as usize)?;
-    auth_results_verdict(std::str::from_utf8(bytes).ok()?, from_addr)
+    std::str::from_utf8(bytes).ok()
 }
 
 /// Is this header one Google's inbound path wrote? Either the
@@ -659,7 +668,7 @@ pub fn auth_results_verdict(raw: &str, from_addr: &str) -> Option<bool> {
 /// still breaks the token, so it can never glue two together. `None` for a
 /// malformed value — an unterminated comment or quoted string, where the rest of
 /// the field list would be silently discarded.
-fn tokenize_auth_results(raw: &str) -> Option<Vec<Vec<String>>> {
+pub(crate) fn tokenize_auth_results(raw: &str) -> Option<Vec<Vec<String>>> {
     let mut fields: Vec<Vec<String>> = Vec::new();
     let mut tokens: Vec<String> = Vec::new();
     let mut token = String::new();
@@ -740,7 +749,7 @@ fn tokenize_auth_results(raw: &str) -> Option<Vec<Vec<String>>> {
 /// The domain a `dmarc=` result was evaluated against, from its `header.from=`
 /// property spec. Gmail writes the bare domain; an `addr-spec` form is tolerated
 /// by taking the part after the last `@`.
-fn dmarc_header_from<'a>(tokens: impl Iterator<Item = &'a str>) -> Option<String> {
+pub(crate) fn dmarc_header_from<'a>(tokens: impl Iterator<Item = &'a str>) -> Option<String> {
     for token in tokens {
         let Some((key, val)) = token.split_once('=') else {
             continue;
@@ -763,7 +772,7 @@ fn dmarc_header_from<'a>(tokens: impl Iterator<Item = &'a str>) -> Option<String
 /// name a domain it does not sign for. When BOTH are present that relationship
 /// is checked here rather than assumed, and a violation yields no signing domain
 /// at all.
-fn dkim_signing_domain<'a>(tokens: impl Iterator<Item = &'a str>) -> Option<String> {
+pub(crate) fn dkim_signing_domain<'a>(tokens: impl Iterator<Item = &'a str>) -> Option<String> {
     let mut d: Option<String> = None;
     let mut i: Option<String> = None;
     for token in tokens {
@@ -791,7 +800,7 @@ fn dkim_signing_domain<'a>(tokens: impl Iterator<Item = &'a str>) -> Option<Stri
 
 /// The domain half of an addr-spec, lower-cased. `None` for an address with no
 /// `@` or an empty domain — which makes the whole verdict `None`.
-fn addr_domain(addr: &str) -> Option<String> {
+pub(crate) fn addr_domain(addr: &str) -> Option<String> {
     let (_, domain) = addr.trim().rsplit_once('@')?;
     let domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
     (!domain.is_empty()).then_some(domain)
@@ -799,7 +808,7 @@ fn addr_domain(addr: &str) -> Option<String> {
 
 /// Alignment per the policy documented on [`auth_results_verdict`]: equal, or
 /// the From domain is a dot-suffixed child of `signing`. One direction only.
-fn domains_aligned(signing: &str, from_domain: &str) -> bool {
+pub(crate) fn domains_aligned(signing: &str, from_domain: &str) -> bool {
     let signing = signing.trim().trim_end_matches('.').to_ascii_lowercase();
     let from_domain = from_domain
         .trim()
@@ -1229,6 +1238,12 @@ pub fn ingest(
         crate::translate::detect(&subject, &text, header.as_deref())
     };
 
+    // WHERE FROM AND THE REAL SENDER DISAGREE (#639): headers only, read off
+    // the same parse; `via` goes through the same trust gate as `auth_pass`.
+    let sender_signals = parsed
+        .as_ref()
+        .and_then(|m| super::sender_signals::extract(m, &from_addr, fetched.is_sent));
+
     let message = NewMessage {
         account_id: fetched.account_id,
         gmail_msg_id,
@@ -1248,6 +1263,7 @@ pub fn ingest(
         list_unsubscribe,
         list_unsub_one_click,
         auth_pass,
+        sender_signals,
     };
 
     // Ingest records evidence. Only the triage agent assigns meaning, placement,
@@ -1324,6 +1340,39 @@ pub fn ingest_sent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #639 end to end through `ingest`: a received mail carries its signals,
+    /// the same mail as the account's own send carries none.
+    #[test]
+    fn ingest_reads_sender_signals_for_received_mail_only() {
+        let eml = "Return-Path: <bounce@em.sendgrid.net>\r\n\
+                   Received: by mx.google.com with SMTP id x; Mon, 7 Jul 2026 10:00:00 +0000\r\n\
+                   Authentication-Results: mx.google.com; dkim=pass header.i=@sendgrid.net\r\n\
+                   From: \"billing@bank.example\" <x@evil.example>\r\n\
+                   Reply-To: pay@elsewhere.example\r\n\
+                   Subject: invoice\r\n\
+                   Date: Mon, 7 Jul 2026 10:00:00 +0000\r\n\r\npay now\r\n";
+        let t = ingest(
+            &raw(1, "g-sig", eml, false),
+            &Stage1Config::default(),
+            Utc::now(),
+            |_| false,
+        );
+        let s = t.message.sender_signals.expect("received mail is read");
+        assert_eq!(s.via.as_deref(), Some("sendgrid.net"));
+        assert_eq!(s.reply_to.as_deref(), Some("pay@elsewhere.example"));
+        assert_eq!(s.name_spoof.as_deref(), Some("billing@bank.example"));
+        let t = ingest(
+            &raw(1, "g-sig-sent", eml, true),
+            &Stage1Config::default(),
+            Utc::now(),
+            |_| false,
+        );
+        assert_eq!(
+            t.message.sender_signals, None,
+            "the owner's own headers are not signals"
+        );
+    }
 
     fn raw(account_id: AccountId, msgid: &str, bytes: &str, is_sent: bool) -> RawFetched {
         RawFetched {
@@ -2931,6 +2980,7 @@ mod tests {
                 list_unsubscribe: None,
                 list_unsub_one_click: false,
                 auth_pass: None,
+                sender_signals: None,
             })
             .unwrap();
         store

@@ -1297,6 +1297,7 @@ mod tests {
                 list_unsubscribe: None,
                 list_unsub_one_click: false,
                 auth_pass: Some(true),
+                sender_signals: None,
             })
             .unwrap();
         // The directory knows the name, but nothing readable carries it yet

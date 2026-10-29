@@ -78,6 +78,13 @@ CREATE TABLE IF NOT EXISTS messages (
     -- reaches all three, not only the pixel. Nothing is backfilled: any
     -- re-sync refills the column through the message upsert.
     auth_pass   INTEGER,
+    -- WHERE FROM AND THE REAL SENDER DISAGREE (#639): compact JSON of
+    -- `types::SenderSignals` (sender, via, reply_to, envelope_domain,
+    -- name_spoof). '{}' = read, nothing disagreed; NULL = never read (sent
+    -- mail, rows ingested before the column). Facts for the reader and
+    -- triage, never a gate. Only `via` claims authentication, and it is read
+    -- through the same trust gate as `auth_pass`.
+    sender_signals TEXT,
     -- THE PROVIDER'S SPAM VERDICT, not ours: 1 when this message was fetched
     -- from Gmail's SPAM label, 0 otherwise. Gmail sorted it; nothing in squelch
     -- did, and no LLM ever looks at it (the ingest branch stamps a neutral row

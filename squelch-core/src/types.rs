@@ -320,6 +320,11 @@ pub struct SanitizedMessage {
     /// for English mail and for every translation not ready to serve.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub translation: Option<ExternalTranslation>,
+    /// Where From and the real sender disagree ([`SenderSignals`]): plain
+    /// header facts (addresses and domains), so an agent reading the mail is
+    /// told what a human reader is shown. Absent when nothing disagreed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_signals: Option<SenderSignals>,
 }
 
 /// The agent door's view of a translation: the language, the English, and
@@ -487,6 +492,11 @@ pub struct ClientMessage {
     /// [`ExternalTranslation`] on [`SanitizedMessage`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub translation: Option<ClientTranslation>,
+    /// Where From and the real sender disagree ([`SenderSignals`]), for the
+    /// reader's line under the From line. Absent when nothing disagreed, on
+    /// rows read before the column existed, and from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_signals: Option<SenderSignals>,
 }
 
 /// One attachment's metadata on the HUMAN DOOR. Carries NO bytes.
@@ -1116,6 +1126,59 @@ pub struct BandCounts {
     pub open: i64,
 }
 
+/// Where the From line and the real sender disagree (issue #639), read from
+/// headers at ingest by [`crate::sync::sender_signals`]. Every field is a
+/// fact about the message, never a verdict: the reader shows a quiet line,
+/// triage weighs them, and only the client decides what looks like a scam.
+///
+/// Stored as compact JSON in `messages.sender_signals`; `{}` when the headers
+/// were read and nothing disagreed, NULL when they were never read.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SenderSignals {
+    /// The `Sender:` mailbox, when it names someone other than From: mail
+    /// sent BY this address on behalf of the From address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender: Option<String>,
+    /// The signing domain of a DKIM signature that passed in the PROVIDER'S
+    /// OWN verdict, when nothing aligned with From's organization passed:
+    /// the "via sendgrid.net" a mail service leaves. Never read from a header
+    /// the sender could have written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+    /// The `Reply-To:` address, when replies would go to another
+    /// organization than From's. Not set for mailing lists (`List-Id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+    /// The bounce (`Return-Path`) domain, when it is another organization
+    /// than From's. Weak alone (every mail service does it), so the reader
+    /// does not show it; triage gets it as weight for the others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope_domain: Option<String>,
+    /// An address written INSIDE the display name that is not the real From
+    /// address: `"support@paypal.com" <x@evil.tld>` carries
+    /// `support@paypal.com` here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_spoof: Option<String>,
+}
+
+impl SenderSignals {
+    /// Nothing disagreed.
+    pub fn is_empty(&self) -> bool {
+        self.sender.is_none()
+            && self.via.is_none()
+            && self.reply_to.is_none()
+            && self.envelope_domain.is_none()
+            && self.name_spoof.is_none()
+    }
+
+    /// The stored column value, or `None` when it does not parse or holds
+    /// nothing worth carrying: a reader never sees `{}`.
+    pub fn from_column(raw: Option<&str>) -> Option<Self> {
+        raw.and_then(|r| serde_json::from_str::<Self>(r).ok())
+            .filter(|s| !s.is_empty())
+    }
+}
+
 /// Input record for upserting a fetched message into the store.
 #[derive(Debug, Clone)]
 pub struct NewMessage {
@@ -1166,6 +1229,11 @@ pub struct NewMessage {
     /// to evaluate. `None` is NEVER an assertion of pass — see
     /// `sync::ingest::extract_auth_pass`.
     pub auth_pass: Option<bool>,
+    /// Where From and the real sender disagree ([`SenderSignals`]). `None`
+    /// when the headers were not read (sent mail, an unparsed raw, a writer
+    /// that does not parse): the upsert keeps what is stored. `Some` of an
+    /// empty set is the statement "read, nothing disagreed".
+    pub sender_signals: Option<SenderSignals>,
 }
 
 /// One attachment extracted from a message's RFC822 at ingest — BOTH real
@@ -1483,6 +1551,7 @@ mod tests {
                 received_at: Utc::now(),
                 content: "text".into(),
                 translation: None,
+                sender_signals: None,
             }],
         };
         let v = serde_json::to_value(&tv).unwrap();
@@ -1554,6 +1623,7 @@ mod tests {
                     cc_addrs: Some("cc@b.com".into()),
                     bcc_addrs: None,
                     translation: None,
+                    sender_signals: None,
                 },
                 ClientMessage {
                     id: 2,
@@ -1576,6 +1646,7 @@ mod tests {
                     cc_addrs: None,
                     bcc_addrs: Some("blind@b.com".into()),
                     translation: None,
+                    sender_signals: None,
                 },
             ],
         };

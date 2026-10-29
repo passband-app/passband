@@ -422,10 +422,25 @@ async fn serve() -> anyhow::Result<()> {
     // a `ready_timeout` wide enough to sit through a cold model download. What
     // is not survivable is doing neither by accident, and the failure looks like
     // a healthy tenant timing out on its own signup.
-    if warden.config().http_readiness && warden.config().model_pvc.is_none() {
+    //
+    // A tenant on the shared embedder downloads no weights at all, so the
+    // embed URL is a third way out and the warning would be noise.
+    if warden.config().http_readiness
+        && warden.config().model_pvc.is_none()
+        && warden.config().embed_url.is_none()
+    {
         tracing::warn!(
             ready_timeout_secs = warden.config().ready_timeout.as_secs(),
             "SQUELCH_WARDEN_HTTP_READINESS is on with no SQUELCH_WARDEN_MODEL_PVC: /healthz waits out the first-run embedding-model download, so a new tenant is NotReady for the whole of it - longer than SQUELCH_WARDEN_READY_TIMEOUT_SECS, which fails the signup and makes the next fleet roll read that tenant as a casualty"
+        );
+    }
+
+    // Not a refusal: the two can be set together for the length of a
+    // rollback window, and the embed URL simply wins. Said once at startup so
+    // nobody reads the ConfigMap and believes tenants still mount the volume.
+    if warden.config().embed_url.is_some() && warden.config().model_pvc.is_some() {
+        tracing::info!(
+            "SQUELCH_WARDEN_EMBED_URL is set, so tenant pods do not mount SQUELCH_WARDEN_MODEL_PVC: a daemon on the shared embedder loads no weights of its own"
         );
     }
 

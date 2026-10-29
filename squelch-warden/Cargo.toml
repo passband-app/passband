@@ -24,6 +24,12 @@ axum = { version = "0.8" }
 # Constant-time bearer compare + `Authorization` parse, shared byte-for-byte
 # with the two doors and the relay so a fix to any of them lands in one place.
 squelch-httpauth = { path = "../squelch-httpauth" }
+# The shared embedding service's wire constants, for its port: the URL this
+# warden accepts and the egress rule it renders must name the port the service
+# binds, and one constant is how they cannot drift. Protocol only
+# (`default-features = false`), which is serde and nothing else: no fastembed,
+# no ONNX runtime, no server. The same reason squelch-core is not linked below.
+squelch-embed = { path = "../squelch-embed", default-features = false }
 # The cluster is the state store. Everything the warden creates is a TYPED
 # k8s-openapi object handed to kube-rs; nothing in this crate renders YAML.
 kube = { workspace = true }

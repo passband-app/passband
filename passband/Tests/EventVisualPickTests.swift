@@ -57,7 +57,8 @@ struct EventVisualPickTests {
             "the same name")
         expect(
             EventVisualPick.venueMatches(
-                place: "Dingles Public House, 165 Main St", name: "Dingles Public House"),
+                place: "Dingles Public House, 165 Main St", name: "Dingles Public House",
+                address: "165 Main St, Northampton, MA 01060"),
             "the name before the address")
         expect(EventVisualPick.venueMatches(place: "The Grill", name: "Grill"), "small words are free")
         expect(
@@ -67,6 +68,24 @@ struct EventVisualPickTests {
             !EventVisualPick.venueMatches(place: "Dingles Public House", name: "Dingle Pub"),
             "a lookalike")
         expect(!EventVisualPick.venueMatches(place: "Dingles Public House", name: nil), "no name")
+        expect(
+            EventVisualPick.venueMatches(
+                place: "Starbucks, 12 Main St, Portland ME", name: "Starbucks",
+                address: "12 Main St, Portland, ME 04101, United States"),
+            "the branch at the address")
+        expect(
+            !EventVisualPick.venueMatches(
+                place: "Starbucks, 12 Main St, Portland ME", name: "Starbucks",
+                address: "1912 Pike Pl, Seattle, WA 98101, United States"),
+            "a chain's branch in another city")
+        expect(
+            !EventVisualPick.venueMatches(
+                place: "Starbucks, 12 Main St, Portland ME", name: "Starbucks", address: nil),
+            "an address to check and none to check it against")
+        expect(
+            EventVisualPick.venueMatches(
+                place: "Dingles Public House, Suite", name: "Dingles Public House", address: nil),
+            "only street words after the comma: nothing to check")
     }
 
     static func theMailOffersEveryPhotoInOrder() {

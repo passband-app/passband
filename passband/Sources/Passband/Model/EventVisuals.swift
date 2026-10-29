@@ -117,7 +117,8 @@ final class EventVisuals {
         request.resultTypes = [.pointOfInterest, .address]
         guard let response = try? await MKLocalSearch(request: request).start(),
             let item = response.mapItems.first(where: {
-                EventVisualPick.venueMatches(place: place, name: $0.name)
+                EventVisualPick.venueMatches(
+                    place: place, name: $0.name, address: $0.address?.fullAddress)
             })
         else { return nil }
         if let scene = try? await MKLookAroundSceneRequest(mapItem: item).scene {

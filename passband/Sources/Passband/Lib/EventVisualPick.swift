@@ -49,15 +49,32 @@ enum EventVisualPick {
     /// address, its first line) and the event's first comma part must share
     /// their words: every word of the shorter is in the longer. "Dingles
     /// Public House" names "Dingles Public House, 165 Main St"; "Dingle Pub"
-    /// in another city does not.
-    static func venueMatches(place: String, name: String?) -> Bool {
+    /// does not.
+    ///
+    /// When the place says where it is (anything after the first comma), the
+    /// answer's address must share a word of it too, so a chain's name does
+    /// not match its branch in another city. Street words ("st", "ave") do not
+    /// count: every address has one.
+    static func venueMatches(place: String, name: String?, address: String? = nil) -> Bool {
         guard let name, !name.isEmpty else { return false }
-        let head = place.split(separator: ",", maxSplits: 1).first.map(String.init) ?? place
+        let parts = place.split(separator: ",", maxSplits: 1).map(String.init)
+        let head = parts.first ?? place
         let a = words(head)
         let b = words(name)
         guard !a.isEmpty, !b.isEmpty else { return false }
-        return a.count <= b.count ? a.isSubset(of: b) : b.isSubset(of: a)
+        guard a.count <= b.count ? a.isSubset(of: b) : b.isSubset(of: a) else { return false }
+        guard parts.count > 1 else { return true }
+        let wanted = words(parts[1]).subtracting(streetWords)
+        if wanted.isEmpty { return true }
+        guard let address else { return false }
+        return !wanted.isDisjoint(with: words(address))
     }
+
+    private static let streetWords: Set<String> = [
+        "st", "street", "ave", "avenue", "rd", "road", "blvd", "boulevard", "dr", "drive",
+        "ln", "lane", "way", "pl", "place", "ct", "court", "hwy", "suite", "ste", "floor",
+        "fl", "unit", "n", "s", "e", "w", "ne", "nw", "se", "sw", "usa", "us",
+    ]
 
     private static func words(_ text: String) -> Set<String> {
         let stop: Set<String> = ["the", "a", "an", "and", "of", "at", "&"]

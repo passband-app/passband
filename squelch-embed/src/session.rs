@@ -232,6 +232,21 @@ mod tests {
         }
     }
 
+    /// The test above reads `Dockerfile.embed`, and the image builds from
+    /// it, so a pull request that touches only that file must still run the
+    /// Rust job: the CI path filter names it.
+    #[test]
+    fn ci_runs_the_rust_job_when_the_dockerfile_changes() {
+        let ci = include_str!("../../.github/workflows/ci.yml");
+        let filters = &ci[ci.find("filters: |").expect("ci.yml has a paths filter")..];
+        let rust = &filters[filters.find("rust:").expect("a rust filter")..];
+        let rust = &rust[..rust.find("deny:").expect("the deny filter follows")];
+        assert!(
+            rust.lines().any(|l| l.trim() == "- \"Dockerfile.embed\""),
+            "the rust filter in ci.yml does not name Dockerfile.embed:\n{rust}"
+        );
+    }
+
     /// The real model, end to end. Needs the weights on disk, so it is
     /// ignored by default:
     ///

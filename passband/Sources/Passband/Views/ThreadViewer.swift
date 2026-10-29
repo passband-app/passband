@@ -1370,6 +1370,16 @@ struct ThreadViewer: View {
                 // silent one. Bottom-centre, over the mail rather than beside
                 // it, because it is about the thread and not about any one
                 // message in it.
+                // A WINDOW WITH NO MAIL IN IT. The open lands by jumping to the
+                // end of a lazy stack, and that jump can leave the stack with no
+                // card laid out at all: the header up, the body blank, and
+                // nothing to recover it, because the landing and `holdNewest`
+                // both wait on a card reporting a frame. Seen opening a search
+                // hit; leaving and coming back fixed it. So for the first couple
+                // of seconds of a thread, a window with no card in it is nudged
+                // the way `holdNewest` nudges, a little short of the end and then
+                // the end, until something mounts. A hand on the scroll owns it.
+                .task(id: thread?.thread_id) { await unblankOpening(proxy) }
                 .overlay(alignment: .bottom) { arrivalPill }
                 // THE MAC ONLY. Here the radio rides the mail's own top-right
                 // corner rather than the header row: it is a verdict about the
@@ -1542,6 +1552,20 @@ struct ThreadViewer: View {
     }
 
     private static let columnId = "reader-column"
+
+    /// See the `.task` that calls this: nudges a freshly opened thread whose
+    /// window has no card in it until one mounts, for about two seconds.
+    private func unblankOpening(_ proxy: ScrollViewProxy) async {
+        for attempt in 0..<20 {
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+            guard viewportHeight > 0, !messages.isEmpty, !handScrolling else { continue }
+            let height = viewportHeight
+            let showing = map.frames.values.contains { $0.maxY > 0 && $0.minY < height }
+            if showing { return }
+            let anchor: UnitPoint = attempt.isMultiple(of: 2) ? UnitPoint(x: 0.5, y: 0.99) : .bottom
+            proxy.scrollTo(Self.columnId, anchor: anchor)
+        }
+    }
 
     /// HAVE THE NEXT MESSAGES DRAWN BEFORE THE SCROLL REACHES THEM (see
     /// `FramePrewarmer.ahead`). Asked each time a card mounts, which is as

@@ -1204,6 +1204,23 @@ struct Conn {
     /// Role folders that LIST still names but that refuse STATUS, and how
     /// many times in a row (review N4).
     refused: std::collections::HashMap<String, u32>,
+    /// Role folders given up on ([`REFUSALS_BEFORE_ABSENT`] refusals in a
+    /// row) and when. A give-up lasts until the next periodic re-LIST, never
+    /// the whole session (review fix3 F2): a burst of `UNAVAILABLE` must not
+    /// leave Sent unwalked for as long as poll traffic keeps the session up.
+    given_up: std::collections::HashMap<String, tokio::time::Instant>,
+    /// How many days a reset non-INBOX folder is listed again
+    /// ([`reset_walk`]): the engine's backfill window.
+    relist_days: i64,
+}
+
+/// What [`Conn::role_status_of`] found for a role.
+enum RoleStatus {
+    At(String, FolderPos),
+    /// The role has no folder (none listed, or given up on).
+    NoFolder,
+    /// LIST still names the folder but it refused STATUS: retryable.
+    Refused,
 }
 
 /// How many refusals in a row before a listed role folder is treated as not
@@ -1260,13 +1277,21 @@ impl Conn {
     /// it for as long as the session lives.
     async fn refresh_roles(&mut self) -> Result<()> {
         let mut roles = list_roles(&mut self.session).await?;
-        // A folder that kept refusing STATUS stays out of its role.
-        for given_up in self
-            .refused
+        // A give-up expires at the first re-LIST a full relist interval
+        // after it: the folder is asked again from scratch.
+        let relist = self.roles_relist;
+        let expired: Vec<String> = self
+            .given_up
             .iter()
-            .filter(|(_, n)| **n >= REFUSALS_BEFORE_ABSENT)
-            .map(|(f, _)| f)
-        {
+            .filter(|(_, at)| at.elapsed() >= relist)
+            .map(|(f, _)| f.clone())
+            .collect();
+        for f in expired {
+            self.given_up.remove(&f);
+            self.refused.remove(&f);
+        }
+        // A folder that kept refusing STATUS stays out of its role.
+        for given_up in self.given_up.keys() {
             for role in [&mut roles.sent, &mut roles.junk] {
                 if role.as_deref() == Some(given_up.as_str()) {
                     *role = None;
@@ -1297,22 +1322,34 @@ impl Conn {
     /// missing folder, until it has refused [`REFUSALS_BEFORE_ABSENT`] times
     /// in a row; then it is left out of its role for this session.
     async fn role_status(&mut self, folder: Folder) -> Result<Option<(String, FolderPos)>> {
+        match self.role_status_of(folder).await? {
+            RoleStatus::At(name, pos) => Ok(Some((name, pos))),
+            RoleStatus::NoFolder => Ok(None),
+            RoleStatus::Refused => Err(net_err(
+                "status",
+                "the server refused STATUS on a folder it still lists; retrying",
+            )),
+        }
+    }
+
+    /// [`Conn::role_status`], with a refusal as a value of its own.
+    async fn role_status_of(&mut self, folder: Folder) -> Result<RoleStatus> {
         let Some(name) = self.roles.folder(folder).map(str::to_string) else {
-            return Ok(None);
+            return Ok(RoleStatus::NoFolder);
         };
         if let Some(pos) = self.status(&name).await? {
             self.refused.remove(&name);
-            return Ok(Some((name, pos)));
+            return Ok(RoleStatus::At(name, pos));
         }
         self.refresh_roles().await?;
         let Some(now_name) = self.roles.folder(folder).map(str::to_string) else {
-            return Ok(None);
+            return Ok(RoleStatus::NoFolder);
         };
         if now_name != name
             && let Some(pos) = self.status(&now_name).await?
         {
             self.refused.remove(&now_name);
-            return Ok(Some((now_name, pos)));
+            return Ok(RoleStatus::At(now_name, pos));
         }
         // Still listed, still refused.
         let n = {
@@ -1324,16 +1361,16 @@ impl Conn {
             if n == REFUSALS_BEFORE_ABSENT {
                 eprintln!(
                     "squelch: imap folder {now_name:?} refuses STATUS; leaving it unwatched \
-                     until the next login"
+                     until the folders are next listed"
                 );
             }
+            self.given_up
+                .entry(now_name)
+                .or_insert_with(tokio::time::Instant::now);
             self.refresh_roles().await?;
-            return Ok(None);
+            return Ok(RoleStatus::NoFolder);
         }
-        Err(net_err(
-            "status",
-            "the server refused STATUS on a folder it still lists; retrying",
-        ))
+        Ok(RoleStatus::Refused)
     }
 
     /// One folder's position as `STATUS` reports it now, or `None` if the
@@ -1425,6 +1462,8 @@ pub struct ImapSource {
     /// next early return is held to [`MIN_WAKE_GAP`] after it.
     last_wake: std::sync::Mutex<Option<tokio::time::Instant>>,
     timeouts: Timeouts,
+    /// Days a reset Sent or Junk is listed again ([`reset_walk`]).
+    relist_days: i64,
 }
 
 /// The one thing a failed `LOGIN` ever says.
@@ -1564,7 +1603,16 @@ impl ImapSource {
             idle_backoff: std::sync::Mutex::new(IdleBackoff::default()),
             last_wake: std::sync::Mutex::new(None),
             timeouts: Timeouts::default(),
+            relist_days: RESET_RELIST_DAYS,
         })
+    }
+
+    /// The engine's backfill window (`sync.backfill_days`): how far back a
+    /// Sent or Junk folder rebuilt in another client is listed again
+    /// (review fix3 F6), so it covers what a catch-up would have.
+    pub fn with_backfill_days(mut self, days: u32) -> Self {
+        self.relist_days = i64::from(days.max(1));
+        self
     }
 
     /// Shorter bounds, for the tests that wait on them.
@@ -1631,6 +1679,8 @@ impl ImapSource {
             roles_at: tokio::time::Instant::now(),
             roles_relist: self.timeouts.roles_relist,
             refused: std::collections::HashMap::new(),
+            given_up: std::collections::HashMap::new(),
+            relist_days: self.relist_days,
         })
     }
 
@@ -2110,14 +2160,21 @@ struct Conflict {
 ///   takes this one (a self-sent pair, a MOVE into another folder). A
 ///   folder whose row is at another place keeps that row while it still
 ///   holds: the [`Conflict`]s returned are for the caller to check against
-///   the server ([`still_there`]). In a batch the lowest UID of an id in a
-///   folder is first.
+///   the server ([`still_there`]). In a batch the earliest INTERNALDATE is
+///   first (review fix3 F6: an archive-window batch spans folders, and the
+///   alphabetically first folder is no measure of which copy came first),
+///   then the folder and the lowest UID; a copy without a date goes last.
 fn bind(
     locs: &dyn MessageLocations,
     account: AccountId,
     mut seen: Vec<Seen>,
 ) -> Result<(Vec<Seen>, Vec<Conflict>)> {
-    seen.sort_by(|a, b| (&a.loc.folder, a.loc.uid).cmp(&(&b.loc.folder, b.loc.uid)));
+    seen.sort_by(|a, b| {
+        let key = |s: &Seen| (s.internal_date.is_none(), s.internal_date);
+        key(a)
+            .cmp(&key(b))
+            .then_with(|| (&a.loc.folder, a.loc.uid).cmp(&(&b.loc.folder, b.loc.uid)))
+    });
     let mut batch_digest: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let mut placed: HashSet<(String, String)> = HashSet::new();
@@ -2486,8 +2543,9 @@ enum Walk {
     },
 }
 
-/// How far back a reset non-INBOX folder is listed again: the engine's
-/// default backfill window, the one its catch-up would have used.
+/// How far back a reset non-INBOX folder is listed again unless the engine
+/// says otherwise ([`ImapSource::with_backfill_days`]): the engine's default
+/// backfill window, the one its catch-up would have used.
 const RESET_RELIST_DAYS: i64 = 30;
 
 /// A NON-INBOX WATCHED FOLDER RESET (matrix row 19): a new `UIDVALIDITY`, a
@@ -2505,11 +2563,12 @@ async fn reset_walk(c: &mut Conn, folder: Folder) -> Result<Walk> {
     let Some(validity) = c.examine(&name).await? else {
         return Ok(Walk::Gone);
     };
-    let since = Utc::now() - chrono::Duration::days(RESET_RELIST_DAYS);
+    let days = c.relist_days;
+    let since = Utc::now() - chrono::Duration::days(days);
     let uids = search(&mut c.session, format!("SINCE {}", imap_date(since))).await?;
     let seen = stable_ids(&mut c.session, &name, validity, &uids).await?;
     eprintln!(
-        "squelch: imap folder {name:?} was reset; re-listing its last {RESET_RELIST_DAYS} days \
+        "squelch: imap folder {name:?} was reset; re-listing its last {days} days \
          ({} message(s)) instead of a full catch-up",
         seen.len()
     );
@@ -2707,9 +2766,23 @@ impl MailSource for ImapSource {
                             // another client, correctness H2) is re-resolved,
                             // or left out: `changes` reads a role with no
                             // entry and no folder as nothing to walk.
-                            None => match c.role_status(folder).await? {
-                                Some((_, pos)) => pos,
-                                None => continue,
+                            None => match c.role_status_of(folder).await? {
+                                RoleStatus::At(_, pos) => pos,
+                                RoleStatus::NoFolder => continue,
+                                // A refused Sent or Junk is left out, as a
+                                // folder with no entry (review fix3 F3):
+                                // failing here would fail the backfill or
+                                // catch-up this cursor ends, after all its
+                                // fetches, and the engine would redo it
+                                // whole. The next walk of it relists it
+                                // from its new position ([`reset_walk`]).
+                                RoleStatus::Refused if folder != Folder::Inbox => continue,
+                                RoleStatus::Refused => {
+                                    return Err(net_err(
+                                        "status",
+                                        "the server refused STATUS on INBOX; retrying",
+                                    ));
+                                }
                             },
                         };
                         folders.insert(key.to_string(), pos);

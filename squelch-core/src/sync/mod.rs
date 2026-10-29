@@ -1163,13 +1163,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 c
             }
         };
-        ImapSource::from_config(
+        Ok(ImapSource::from_config(
             self.account_id,
             &credential.config,
             credential.password,
             self.store.clone(),
             self.archive.refusals.clone(),
-        )
+        )?
+        .with_backfill_days(self.config.sync.backfill_days))
     }
 
     /// What this engine's Gmail source is built from, as the engine stands.

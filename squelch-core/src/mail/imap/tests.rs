@@ -3258,3 +3258,163 @@ async fn a_role_folder_that_appears_later_is_picked_up_without_a_new_login() {
     assert_eq!(src.connects(), 1);
     server.abort();
 }
+
+// ---- fix round 4 -----------------------------------------------------------
+
+/// REVIEW FIX3 F2: three refusals in a few seconds unwatched Sent for the
+/// whole session, and the periodic re-LIST re-applied the give-up, so a
+/// burst of `UNAVAILABLE` left Sent unwalked for as long as poll traffic
+/// kept the session alive. The give-up expires at the next re-LIST.
+#[tokio::test]
+async fn a_given_up_role_folder_is_watched_again_after_the_next_relist() {
+    use std::sync::atomic::AtomicBool;
+    let (listed, refuse) = (
+        Arc::new(AtomicBool::new(true)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let (port, server) = role_server(listed, refuse.clone()).await;
+    let src = scripted_source(port, "pw").with_timeouts(Timeouts {
+        roles_relist: Duration::from_millis(300),
+        ..short_timeouts()
+    });
+    let cursor = catch_up(&src).await;
+    refuse.store(true, Ordering::Relaxed);
+    for _ in 1..REFUSALS_BEFORE_ABSENT {
+        assert!(src.changes(&cursor, Folder::Sent).await.is_err());
+    }
+    let w = src.changes(&cursor, Folder::Sent).await.expect("given up");
+    let sent = |c: &SyncCursor| {
+        ImapCursor::decode(c)
+            .unwrap()
+            .folders
+            .get("sent")
+            .map(|p| p.uidvalidity)
+    };
+    assert_eq!(sent(&w.cursor), None);
+    // The burst is over; within a relist interval the folder is back.
+    refuse.store(false, Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let w = src.changes(&w.cursor, Folder::Sent).await.unwrap();
+    assert_eq!(sent(&w.cursor), Some(5), "Sent stayed unwatched");
+    assert_eq!(src.connects(), 1);
+    server.abort();
+}
+
+/// REVIEW FIX3 F3: a refused Sent or Junk made `current_cursor` fail, which
+/// fails the backfill or catch-up it ends after every fetch, and the engine
+/// redid it whole. A refused non-INBOX role is left out of the cursor.
+#[tokio::test]
+async fn a_refused_sent_folder_is_left_out_of_the_cursor_not_an_error() {
+    use std::sync::atomic::AtomicBool;
+    let (listed, refuse) = (
+        Arc::new(AtomicBool::new(true)),
+        Arc::new(AtomicBool::new(true)),
+    );
+    let (port, server) = role_server(listed, refuse).await;
+    let src = scripted_source(port, "pw");
+    // A backfill lists INBOX only, so Sent is asked for by STATUS.
+    src.list(inbox_listing(), None, Urgency::Window)
+        .await
+        .unwrap();
+    let cursor = src
+        .current_cursor()
+        .await
+        .expect("a refused Sent does not fail the cursor");
+    let folders = ImapCursor::decode(&cursor).unwrap().folders;
+    assert!(folders.contains_key("inbox"));
+    assert!(!folders.contains_key("sent"));
+    server.abort();
+}
+
+/// REVIEW FIX3 F6: a reset Sent folder is listed again over the ENGINE's
+/// backfill window, not a fixed 30 days.
+#[tokio::test]
+async fn a_reset_folder_is_relisted_over_the_configured_backfill_window() {
+    use std::sync::atomic::AtomicBool;
+    let listed = Arc::new(AtomicBool::new(false));
+    let log: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let (l, lg) = (listed.clone(), log.clone());
+    let (port, _, server) = scripted_server(true, move |tag, cmd| {
+        lg.lock().unwrap().push(cmd.to_string());
+        let sent = cmd.contains("\"SENT\"");
+        let reply = if cmd.starts_with("LIST") {
+            let mut r = "* LIST () \"/\" INBOX\r\n".to_string();
+            if l.load(Ordering::Relaxed) {
+                r.push_str("* LIST (\\Sent) \"/\" Sent\r\n");
+            }
+            format!("{r}{tag} OK done\r\n")
+        } else if let Some(r) = login_ok(tag, cmd) {
+            r
+        } else if cmd.starts_with("STATUS") {
+            status_reply(tag, cmd)
+        } else if cmd.starts_with("EXAMINE") {
+            let v = if sent { 5 } else { 7 };
+            format!(
+                "* 0 EXISTS\r\n* OK [UIDVALIDITY {v}] ok\r\n* OK [UIDNEXT 1] ok\r\n\
+                 {tag} OK [READ-ONLY] done\r\n"
+            )
+        } else if cmd.starts_with("UID SEARCH") {
+            format!("* SEARCH\r\n{tag} OK done\r\n")
+        } else {
+            format!("{tag} OK done\r\n")
+        };
+        Say::Reply(reply)
+    })
+    .await;
+    let src = scripted_source(port, "pw")
+        .with_backfill_days(90)
+        .with_timeouts(Timeouts {
+            roles_relist: Duration::from_millis(100),
+            ..short_timeouts()
+        });
+    let cursor = src.current_cursor().await.unwrap();
+    listed.store(true, Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    src.changes(&cursor, Folder::Sent).await.unwrap();
+    let want = imap_date(Utc::now() - chrono::Duration::days(90)).to_ascii_uppercase();
+    let cmds = log.lock().unwrap().clone();
+    assert!(
+        cmds.iter()
+            .any(|c| c.contains("SEARCH") && c.contains(&format!("SINCE {want}"))),
+        "{cmds:?}"
+    );
+    server.abort();
+}
+
+fn seen_at(id: &str, folder: &str, uid: u32, date: &str, digest: &str) -> Seen {
+    Seen {
+        id: id.to_string(),
+        loc: MessageLocation {
+            folder: folder.to_string(),
+            uidvalidity: 1,
+            uid,
+            message_id: Some("x@y".into()),
+        },
+        internal_date: Some(
+            DateTime::parse_from_rfc3339(date)
+                .unwrap()
+                .with_timezone(&Utc),
+        ),
+        digest: digest.to_string(),
+        keep_loc: false,
+        new_digest: false,
+    }
+}
+
+/// REVIEW FIX3 F6: two never-seen copies of one id in different folders, in
+/// one archive-window batch: the EARLIER one by INTERNALDATE binds the id,
+/// not the alphabetically first folder.
+#[test]
+fn a_batch_binds_the_earliest_copy_not_the_first_folder() {
+    let locs = MemLocations::default();
+    let batch = vec![
+        seen_at("imap:x", "Archive", 9, "2026-10-27T10:00:00Z", "h1:later"),
+        seen_at("imap:x", "INBOX", 3, "2026-10-26T10:00:00Z", "h1:earlier"),
+    ];
+    let (seen, _) = bind(&locs, 1, batch).unwrap();
+    let inbox = seen.iter().find(|s| s.loc.folder == "INBOX").unwrap();
+    let archive = seen.iter().find(|s| s.loc.folder == "Archive").unwrap();
+    assert_eq!(inbox.id, "imap:x");
+    assert!(inbox.new_digest);
+    assert_ne!(archive.id, "imap:x");
+}

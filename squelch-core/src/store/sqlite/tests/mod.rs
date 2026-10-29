@@ -11,6 +11,7 @@ mod embed_gate;
 mod events;
 mod feedback;
 mod groups;
+mod imap_locations;
 mod messages;
 mod migrate;
 mod notify;

@@ -542,6 +542,7 @@ mod events;
 mod feedback;
 mod ghosts;
 pub mod groups;
+mod imap_locations;
 mod messages;
 mod migrate;
 mod notify;
@@ -2288,6 +2289,15 @@ impl Store for SqliteStore {
 
     fn set_app_setting(&self, account_id: AccountId, key: &str, value: &str) -> Result<()> {
         self.set_app_setting(account_id, key, value)
+    }
+
+    fn delete_app_setting(&self, account_id: AccountId, key: &str) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "DELETE FROM app_settings WHERE account_id = ?1 AND key = ?2",
+            params![account_id, key],
+        )?;
+        Ok(())
     }
 
     fn stage2_cap_overrides(&self, account_id: AccountId) -> Result<Stage2CapOverrides> {

@@ -30,6 +30,40 @@ impl SqliteStore {
         MailProvider::parse(&stored)
     }
 
+    /// Does the account hold any message at all? `squelchd auth --imap`
+    /// refuses to turn an account with mail into an IMAP one: its rows carry
+    /// another provider's ids.
+    pub fn account_has_messages(&self, account_id: AccountId) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT 1 FROM messages WHERE account_id = ?1 LIMIT 1",
+                params![account_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Set which provider an account is. `squelchd auth --imap` is the only
+    /// writer, and it writes LAST, once the server config and the password
+    /// are stored, so an account never reads as IMAP without them.
+    pub fn set_account_provider(
+        &self,
+        account_id: AccountId,
+        provider: MailProvider,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "UPDATE accounts SET provider = ?1 WHERE id = ?2",
+            params![provider.as_str(), account_id],
+        )?;
+        if n == 0 {
+            return Err(CoreError::NotFound);
+        }
+        Ok(())
+    }
+
     pub(super) fn sync_cursor(&self, account_id: AccountId) -> Result<Option<SyncCursor>> {
         let conn = self.lock()?;
         if provider_conn(&conn, account_id)?.as_deref() == Some(MailProvider::Gmail.as_str()) {

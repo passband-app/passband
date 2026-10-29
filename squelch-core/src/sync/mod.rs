@@ -4,7 +4,8 @@
 //! source's change feed is walked for BOTH folders — the inbox for incoming
 //! mail, sent for whatever the user wrote from another client — an expired
 //! cursor falling back to a full catch-up. The source is picked from the
-//! account's `provider` row; Gmail ([`crate::mail::gmail`]) is the only one.
+//! account's `provider` row: Gmail ([`crate::mail::gmail`]) or IMAP
+//! ([`crate::mail::imap`], read only).
 //! Tokens, headers and bodies are NEVER logged; ingest seals first (SECURITY.md).
 
 mod embed_backoff;
@@ -26,6 +27,7 @@ use crate::credentials::CredentialStore;
 use crate::error::{CoreError, Result};
 use crate::gmail_budget::GmailBudget;
 use crate::mail::gmail::{GMAIL_QUOTA_RETRY_CAP, GmailSource, GmailSourceParts};
+use crate::mail::imap::{IMAP_ACCOUNT_SETTING, ImapCredential, ImapSource, StoredImapSlot};
 use crate::mail::{
     Changes, ChangesError, FetchedMessage, Folder, Listing, MailProvider, MailSource, Placement,
     RawBody, SourceRefusals, SyncCursor, Urgency,
@@ -1126,8 +1128,59 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         }
         let built: Arc<dyn MailSource> = match self.store.account_provider(self.account_id)? {
             MailProvider::Gmail => Arc::new(GmailSource::new(self.gmail_parts())),
+            MailProvider::Imap => Arc::new(self.imap_source()?),
         };
         Ok(self.source.get_or_init(|| built).clone())
+    }
+
+    /// An IMAP account's source, from what `squelchd auth --imap` stored: the
+    /// server config and the password, sealed together in the credential
+    /// slot. Never `self.creds`, which is a Google token store: nothing
+    /// Google is read for this account. The store is the source's location
+    /// table.
+    ///
+    /// A slot from an earlier build holds the password alone, with the server
+    /// in `app_settings`: it is moved into the slot here, once (the CA file
+    /// it named read now), and the setting deleted.
+    fn imap_source(&self) -> Result<ImapSource> {
+        let backend = self.config.credential_backend;
+        let path = self.config.resolve_credentials_path();
+        let text = crate::credentials::load_imap_slot_backend(backend, &path, &self.account_email)?;
+        let credential = match ImapCredential::from_slot(&text) {
+            StoredImapSlot::Credential(c) => c,
+            StoredImapSlot::LegacyPassword(password) => {
+                let stored = self
+                    .store
+                    .get_app_setting(self.account_id, IMAP_ACCOUNT_SETTING)?
+                    .ok_or_else(|| {
+                        CoreError::InvalidInput(
+                            "this imap account has no server stored: run `squelchd auth --imap`"
+                                .into(),
+                        )
+                    })?;
+                let c = ImapCredential::from_legacy(password, &stored)?;
+                crate::credentials::store_imap_slot_backend(
+                    backend,
+                    &path,
+                    &self.account_email,
+                    &c.to_slot()?,
+                )?;
+                self.store
+                    .delete_app_setting(self.account_id, IMAP_ACCOUNT_SETTING)?;
+                eprintln!(
+                    "squelch: moved this imap account's server settings into its credential slot"
+                );
+                c
+            }
+        };
+        Ok(ImapSource::from_config(
+            self.account_id,
+            &credential.config,
+            credential.password,
+            self.store.clone(),
+            self.archive.refusals.clone(),
+        )?
+        .with_backfill_days(self.config.sync.backfill_days))
     }
 
     /// What this engine's Gmail source is built from, as the engine stands.
@@ -1236,6 +1289,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             "squelch: {} sync starting for <redacted account>",
             match source.provider() {
                 MailProvider::Gmail => "gmail REST",
+                MailProvider::Imap => "imap",
             }
         );
 
@@ -2329,6 +2383,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         if let Ok(source) = self.source() {
             match source.provider() {
                 MailProvider::Gmail => self.refresh_profile().await,
+                // No Google profile behind an IMAP account.
+                MailProvider::Imap => {}
             }
         }
         // BEFORE the walk, for the same reason: the sweep is purely local —
@@ -6082,6 +6138,161 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &eng.source().unwrap()), "built once");
     }
 
+    /// A throwaway CA certificate (public half only, from the IMAP test bed),
+    /// for the tests that need a PEM that parses.
+    const TEST_CA_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIIDDDCCAfSgAwIBAgIUbWHSoPGtQbOiIqxCtGZYDN70gZYwDQYJKoZIhvcNAQEL
+BQAwHjEcMBoGA1UEAwwTc3F1ZWxjaCBpbWFwLWRldiBDQTAeFw0yNjEwMjgyMTM5
+MjRaFw0zNjEwMjUyMTM5MjRaMB4xHDAaBgNVBAMME3NxdWVsY2ggaW1hcC1kZXYg
+Q0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQC6wLzoOtuvRnC1burK
+xYdNKXXzyU89h1JS38K1tD4B/jX1wMh+fXuflF6aLgnijDTJVTgB3G7Vk0jHreJ8
+qeTx60bMMgn1STnBE9dDHyLSsDkOKRCEoOpPLXfX9jWTRzciUbsq9qz/MVmM9oIW
+yr7rx21EB+ruw6+TS3jgqlWcesi8U/90rGSBXYeyFfwnkP8knnsWmZcVnMSUjLTs
+wInSpU0QECajVJhVCLL2ZAMAvGOur12BUYk60ZQ8ZKkzOchKdWkh7PhEp/Hzn6GG
+yyAqDFVycGVtVx06vY6/Ffcc3GEitT23J8/72VYAFOhJnBJvzv8/8SufbOIR7xH1
+YJl5AgMBAAGjQjBAMB0GA1UdDgQWBBTSBZ6WlapKlExzCP1Dssp8TbBZEDAPBgNV
+HRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBBjANBgkqhkiG9w0BAQsFAAOCAQEA
+DFuZtyAJMM64nAu9g6QomeNcLwvMUnMWxuNi3tp/wWcd76EP5HoTEQNFQ49IJeps
+6lhxzYaXaX1NxOz3txyitaYMFJQ77Ou/M1PTbp0wFQVNjkwRrMr46SDmgTv62DcX
+C/qb0J/jO7bK0fWoYxkn0s9/vONV3R4qJVLfpJ3cmuE9S7Rv5EYLlAe738P1W9Ca
+hh9GKNWVU/WrLL83hrprpJF2sJmGn4gd10HHO/226pDs8cpgfl6PkFO8aQAPxsiu
+ABumuMlx0tOhaEkm2z6hKPb+lGz+12dn7bZjIkPaZ9OeBp7/GwXL9sJDiHLBYzS8
+Q0/00yfa39rgtJLa0DnOoA==
+-----END CERTIFICATE-----
+";
+
+    fn imap_creds_path() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "squelch-imap-engine-{}-{}.json",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ))
+    }
+
+    fn imap_server() -> crate::mail::imap::ImapServer {
+        crate::mail::imap::ImapServer {
+            host: "127.0.0.1".into(),
+            port: 9,
+            tls: crate::mail::imap::ImapTls::Plain,
+            username: "me@example.com".into(),
+        }
+    }
+
+    fn file_config(creds: &std::path::Path) -> Config {
+        let mut config = Config::default();
+        config.credential_backend = crate::config::CredentialBackend::File;
+        config.credentials_path = Some(creds.to_path_buf());
+        config
+    }
+
+    /// AN IMAP ACCOUNT BUILDS AN IMAP SOURCE from what `squelchd auth --imap`
+    /// stores: the server, its CA and the password together in the credential
+    /// slot, and nothing in the database. Building connects to nothing (the
+    /// server here is a dead port).
+    #[tokio::test]
+    async fn an_imap_account_with_a_stored_server_gets_an_imap_source() {
+        let (store, acct) = store_at_cursor(None);
+        let creds = imap_creds_path();
+        let credential = ImapCredential {
+            config: crate::mail::imap::ImapAccountConfig {
+                server: imap_server(),
+                ca_pem: Some(TEST_CA_PEM.into()),
+            },
+            password: crate::mail::imap::ImapPassword::new("pw"),
+        };
+        crate::credentials::store_imap_slot_backend(
+            crate::config::CredentialBackend::File,
+            &creds,
+            "me@example.com",
+            &credential.to_slot().unwrap(),
+        )
+        .unwrap();
+        store
+            .set_account_provider(acct, MailProvider::Imap)
+            .unwrap();
+        let eng = engine_with_config(store, acct, "http://127.0.0.1:9", file_config(&creds));
+        assert_eq!(eng.source().unwrap().provider(), MailProvider::Imap);
+        let _ = std::fs::remove_file(&creds);
+    }
+
+    /// THE SERVER CONFIG LEAVES THE DATABASE (security review 5): a slot an
+    /// earlier build wrote holds the password alone, with the server (and a
+    /// CA by path) in `app_settings`. Building the source moves both into the
+    /// slot, the CA as its certificate bytes, and deletes the setting, so a
+    /// later write to the database or to the CA's path cannot redirect where
+    /// the password goes.
+    #[tokio::test]
+    async fn a_legacy_imap_account_moves_its_server_into_the_credential_slot() {
+        let (store, acct) = store_at_cursor(None);
+        let creds = imap_creds_path();
+        // The legacy layout: a bare password in the slot.
+        crate::credentials::store_imap_slot_backend(
+            crate::config::CredentialBackend::File,
+            &creds,
+            "me@example.com",
+            "pw",
+        )
+        .unwrap();
+        let ca_path = creds.with_extension("ca.crt");
+        std::fs::write(&ca_path, TEST_CA_PEM).unwrap();
+        let legacy = serde_json::json!({
+            "host": "127.0.0.1", "port": 9, "tls": "plain",
+            "username": "me@example.com", "ca_file": ca_path,
+        });
+        store
+            .set_app_setting(acct, IMAP_ACCOUNT_SETTING, &legacy.to_string())
+            .unwrap();
+        store
+            .set_account_provider(acct, MailProvider::Imap)
+            .unwrap();
+        let eng = engine_with_config(
+            store.clone(),
+            acct,
+            "http://127.0.0.1:9",
+            file_config(&creds),
+        );
+        assert_eq!(eng.source().unwrap().provider(), MailProvider::Imap);
+
+        assert_eq!(
+            store.get_app_setting(acct, IMAP_ACCOUNT_SETTING).unwrap(),
+            None
+        );
+        // The CA file can go: its bytes are in the slot now.
+        std::fs::remove_file(&ca_path).unwrap();
+        let text = crate::credentials::load_imap_slot_backend(
+            crate::config::CredentialBackend::File,
+            &creds,
+            "me@example.com",
+        )
+        .unwrap();
+        match ImapCredential::from_slot(&text) {
+            StoredImapSlot::Credential(c) => {
+                assert_eq!(c.config.server, imap_server());
+                assert_eq!(c.config.ca_pem.as_deref(), Some(TEST_CA_PEM));
+            }
+            StoredImapSlot::LegacyPassword(_) => panic!("not migrated"),
+        }
+        // And a second engine builds from the slot alone.
+        let eng = engine_with_config(store, acct, "http://127.0.0.1:9", file_config(&creds));
+        assert_eq!(eng.source().unwrap().provider(), MailProvider::Imap);
+        let _ = std::fs::remove_file(&creds);
+    }
+
+    /// AN IMAP ACCOUNT WITH NOTHING STORED IS REFUSED: the provider row says
+    /// imap but `squelchd auth --imap` never ran, so the engine refuses it,
+    /// never as Gmail.
+    #[tokio::test]
+    async fn an_imap_account_without_a_stored_server_is_refused() {
+        let (store, acct) = store_at_cursor(None);
+        store.execute_batch_for_test(&format!(
+            "UPDATE accounts SET provider = 'imap' WHERE id = {acct}"
+        ));
+        let creds = imap_creds_path();
+        let eng = engine_with_config(store, acct, "http://127.0.0.1:9", file_config(&creds));
+        let err = eng.source().err().expect("refused");
+        assert!(err.to_string().contains("squelchd auth --imap"), "{err}");
+    }
+
     /// AN ACCOUNT THIS BUILD CANNOT SYNC IS NEVER SYNCED AS GMAIL. A database
     /// a newer build set up an IMAP account in must cost that account nothing
     /// here: no request to Gmail with its credential, no cursor, no rows; every
@@ -6090,7 +6301,7 @@ mod tests {
     async fn an_account_whose_provider_this_build_does_not_know_never_reaches_gmail() {
         let (store, acct) = store_at_cursor(None);
         store.execute_batch_for_test(&format!(
-            "UPDATE accounts SET provider = 'imap' WHERE id = {acct}"
+            "UPDATE accounts SET provider = 'outlook' WHERE id = {acct}"
         ));
         let g = MockGmail::default();
         g.listing(LABEL_INBOX, &["a"])

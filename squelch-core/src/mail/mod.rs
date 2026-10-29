@@ -11,6 +11,7 @@
 //! What stays Gmail-specific on purpose, and why, is in `docs/MAIL-PROVIDERS.md`.
 
 pub mod gmail;
+pub mod imap;
 
 use std::time::Duration;
 
@@ -29,6 +30,9 @@ use crate::error::{CoreError, Result};
 pub enum MailProvider {
     /// Google's Gmail REST API, over OAuth.
     Gmail,
+    /// A plain IMAP server with a password (issue #575): self-host only, and
+    /// read only until SMTP lands.
+    Imap,
 }
 
 impl MailProvider {
@@ -36,6 +40,7 @@ impl MailProvider {
     pub fn as_str(self) -> &'static str {
         match self {
             MailProvider::Gmail => "gmail",
+            MailProvider::Imap => "imap",
         }
     }
 
@@ -44,6 +49,7 @@ impl MailProvider {
     pub fn parse(s: &str) -> Result<Self> {
         match s {
             "gmail" => Ok(MailProvider::Gmail),
+            "imap" => Ok(MailProvider::Imap),
             // The value is ours (a column default or a build's own write), so
             // echoing it is safe and is what makes the log line useful.
             other => Err(CoreError::InvalidInput(format!(
@@ -301,15 +307,14 @@ mod tests {
 
     #[test]
     fn a_provider_round_trips_through_its_stored_value() {
-        assert_eq!(
-            MailProvider::parse(MailProvider::Gmail.as_str()).unwrap(),
-            MailProvider::Gmail
-        );
+        for p in [MailProvider::Gmail, MailProvider::Imap] {
+            assert_eq!(MailProvider::parse(p.as_str()).unwrap(), p);
+        }
     }
 
     #[test]
     fn an_unknown_provider_is_refused_not_defaulted() {
-        for stored in ["imap", "Gmail", "", " gmail"] {
+        for stored in ["IMAP", "outlook", "Gmail", "", " gmail"] {
             assert!(
                 matches!(MailProvider::parse(stored), Err(CoreError::InvalidInput(_))),
                 "{stored:?} must not read as a provider"

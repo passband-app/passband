@@ -3080,13 +3080,19 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     // a model. Query-side methods are inherent on `SqliteStore` because they need
     // the attached embedder.
     //
-    // SECURITY: SEALED MESSAGES ARE NEVER EMBEDDED — the write callers gate on
-    // `sensitivity='normal'` and `messages_missing_vectors` selects only normal
-    // rows, so sealed content is structurally absent from the vector space.
+    // SECURITY: SEALED MESSAGES ARE NEVER EMBEDDED. Sealed is the stored
+    // decision (auth, restricted), a person's restriction or the retired
+    // `triage.sensitivity` column, and NOTHING is embedded until it is known
+    // not to be sealed: a stored decision with access settled, or the owner's
+    // own mail (`embeddable_mail_sql!` in `store/sqlite/mod.rs`).
+    // `message_embeddable` is asked before any text reaches an embedder,
+    // `messages_missing_vectors` selects only such rows, and
+    // `write_embedded_vectors` re-checks under the store lock.
 
-    /// Insert (or replace) the embedding vector for one message; idempotent.
-    /// `embedding.len()` MUST equal the vec0 table width (384). CALLER MUST
-    /// ensure the message is non-sealed; this does not re-check.
+    /// RAW insert (or replace) of the embedding vector for one message;
+    /// idempotent. `embedding.len()` MUST equal the vec0 table width (384).
+    /// NOT GATED: for fixtures. Production writes use
+    /// [`Store::write_embedded_vectors`].
     fn upsert_message_vector(
         &self,
         account_id: AccountId,
@@ -3105,8 +3111,23 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         Ok(())
     }
 
-    /// Up to `limit` NON-SEALED messages with no vector yet, newest-first, for
-    /// the startup backfill pass. Sealed rows are excluded in SQL.
+    /// [`Store::upsert_message_vectors`] for the items whose message may still
+    /// be embedded at the moment of the write (the sealed gate, re-checked
+    /// under the store's lock); the rest are skipped. Returns how many were
+    /// written. The one vector write the sync engine makes.
+    fn write_embedded_vectors(
+        &self,
+        account_id: AccountId,
+        items: &[(i64, &[f32])],
+    ) -> Result<usize>;
+
+    /// Whether an embedder may read `message_id` now: not spam, not known
+    /// sealed, and either the owner's own mail or decided with access
+    /// settled. Ingest asks it before embedding a row's text.
+    fn message_embeddable(&self, account_id: AccountId, message_id: i64) -> Result<bool>;
+
+    /// Up to `limit` messages with no vector yet that the sealed gate lets an
+    /// embedder read, newest-first, for the backfill drain.
     fn messages_missing_vectors(
         &self,
         account_id: AccountId,

@@ -7,6 +7,7 @@ mod audit;
 mod bench;
 mod device_tokens;
 mod drafts;
+mod embed_gate;
 mod events;
 mod feedback;
 mod groups;

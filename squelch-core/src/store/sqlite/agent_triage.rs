@@ -616,6 +616,9 @@ pub(super) fn correct_agent_triage_conn(
         // from the corrected decision written above.
         super::ghosts::refresh_message_guarded(conn, account, message)?;
     }
+    // A correction can SEAL (a restriction, an auth kind): the vectors go at
+    // the event, in this transaction (`vector_forbidden_sql!`).
+    super::search::purge_forbidden_vectors_conn(conn, Some(message))?;
     Ok(())
 }
 
@@ -863,6 +866,8 @@ pub(crate) fn reseed_archive_snapshot_conn(
             ],
         )?;
     }
+    // New content awaits its assessment: its vectors go until it has one.
+    super::search::purge_forbidden_vectors_conn(conn, Some(message))?;
     Ok(())
 }
 
@@ -957,6 +962,12 @@ pub(crate) fn enqueue_agent_triage_lane(
                 if restricted { "restricted" } else { "allowed" }
             ],
         )?;
+    }
+    // CHANGED CONTENT IS UNDECIDED CONTENT: a vector computed before the change
+    // is of text no decision has read, so it goes until one does
+    // (`vector_forbidden_sql!`). A no-op for a new message, which has none.
+    if changed {
+        super::search::purge_forbidden_vectors_conn(conn, Some(message))?;
     }
     // Healing an unclassified arrival must not move its first classification
     // into the migration budget. Once any decision exists, later work is refresh.
@@ -2138,6 +2149,9 @@ impl AgentTriageStore for SqliteStore {
         // decision is projected again now (matched afresh), not at its next
         // re-triage.
         super::ghosts::refresh_message_guarded(&tx, job.account_id, job.message_id)?;
+        // A restriction seals: the owner's own mail, embedded at ingest, loses
+        // its vectors at the event (`vector_forbidden_sql!`).
+        super::search::purge_forbidden_vectors_conn(&tx, Some(job.message_id))?;
         finish(&tx, job, "access_applied", metadata)?;
         tx.commit()?;
         Ok(AgentCommitOutcome::Applied)
@@ -2315,6 +2329,9 @@ impl AgentTriageStore for SqliteStore {
                 job.message_id
             ],
         )?;
+        // A decision that SEALS the message deletes its vectors here, at the
+        // event, like its translation above (`vector_forbidden_sql!`).
+        super::search::purge_forbidden_vectors_conn(&tx, Some(job.message_id))?;
         let done = apply_done(&tx, job, decision, Utc::now())?;
         // A RE-CHECK MOVES MAIL ONLY BY ITS DONE. For the owner, done and
         // leaving FYE are one act: a re-check writes no placement at all (no

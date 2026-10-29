@@ -440,7 +440,26 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
 
     /// [`Self::embed_and_store`] for a translation's vector. A failure leaves
     /// `vectors_dirty` raised, and the drain covers translations too.
+    ///
+    /// THE SEALED GATE FIRST: live mail is translated BEFORE its first triage,
+    /// so the message a translation belongs to is usually undecided here and
+    /// could still be a login code. Its English goes to no embedder until a
+    /// non-sealed decision lands; the drain embeds it then
+    /// (`translations_missing_vectors` is gated the same way), and
+    /// `upsert_translation_vector` re-checks under the store lock.
     async fn embed_translation(&self, message_id: i64, text: String) {
+        match self.store.message_embeddable(self.account_id, message_id) {
+            Ok(true) => {}
+            // Not owed yet: the decision that lets it in raises the flag.
+            Ok(false) => return,
+            Err(e) => {
+                eprintln!(
+                    "squelch: translation embed gate failed for message {message_id} (recoverable via backfill): {e}"
+                );
+                self.vectors_dirty.store(true, Ordering::Relaxed);
+                return;
+            }
+        }
         let Some(embedder) = self.embedder() else {
             self.vectors_dirty.store(true, Ordering::Relaxed);
             return;

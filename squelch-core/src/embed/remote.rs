@@ -30,10 +30,11 @@
 //!   service's closed error word, or a transport class (timeout, connect), and
 //!   nothing derived from a request or a response body.
 //!
-//! WHAT IS NOT CHECKED HERE: sensitivity. Sealed mail never reaches an
-//! [`Embedder`] of any kind; the gate is the store-side `sensitivity ==
-//! Normal` selection at ingest and in `messages_missing_vectors`, and a second
-//! gate in here would be one more thing to keep in step with the first.
+//! WHAT IS NOT CHECKED HERE: whether the mail is sealed. Sealed mail never
+//! reaches an [`Embedder`] of any kind; the gate is the store-side
+//! `embeddable_mail_sql!` (`store/sqlite/mod.rs`), asked at ingest, in
+//! `messages_missing_vectors` and on the translation path, and a second gate
+//! in here would be one more thing to keep in step with the first.
 
 use std::io::Read;
 use std::time::Duration;

@@ -730,36 +730,76 @@ rule text is not delivered as the owner's words.
 
 **Invariant.** On hosted, a tenant's mail text leaves its own pod for exactly two
 processes we run: the LLM gateway and the shared embedding service. Provider spam
-reaches neither. Self-host reaches neither. Nothing else of ours is handed mail
-text.
+reaches neither. Sealed mail (login codes, reset links, sign-in alerts, anything
+the model or a person restricted) never reaches the embedding service, nor the
+in-process embedder on self-host. Self-host reaches neither process. Nothing else
+of ours is handed mail text.
 
-**What each one sees.** Neither is filtered by sealed status, and that is the
-current design rather than an oversight: since the triage rewrite
-(`4b7099de`) the triage model is what decides whether a message is
-authentication or restricted, and access is enforced where mail leaves toward an
-external reader (§4), not where it enters an internal one.
+**What each one sees.** They are gated differently, on purpose.
 
 - **The LLM gateway** (Bifrost, `SQUELCH_ANTHROPIC_BASE_URL`, `docs/HOSTED.md`)
-  receives what triage, translation and the hosted assistant send it. Triage
+  receives what triage, translation and the hosted assistant send it, and it IS
+  NOT filtered by sealed status. It cannot be: there is no local login-code
+  detector, and since the triage rewrite (`4b7099de`) the triage model is what
+  decides whether a message is authentication or restricted. Triage therefore
   reads every non-spam message, login codes included, because judging them is
-  its job. A remote service with a per-tenant virtual key, reached over https
-  only (`squelch-warden/src/config.rs`, `SQUELCH_WARDEN_LLM_BASE_URL`).
+  its job; translation reads foreign mail before its first triage for the same
+  reason. Access is enforced where mail leaves toward an external reader (§4).
+  A remote service with a per-tenant virtual key, reached over https only
+  (`squelch-warden/src/config.rs`, `SQUELCH_WARDEN_LLM_BASE_URL`).
 - **The embedding service** (`squelch-embed`, `docs/EMBED-SERVICE.md`) receives
-  the subject and body of every non-spam message the daemon stores, cut to
-  `embed.max_chars`, through `SyncEngine::ingest_one` and
-  `messages_missing_vectors` (`squelch-core/src/store/sqlite/search.rs`), plus
-  the text of every search query that takes the vector leg
-  (`query_embed_text` in the same file). It is in use only when the
-  operator sets `SQUELCH_WARDEN_EMBED_URL`; unset, each tenant embeds
-  in-process and this bullet describes nothing.
+  the subject and body, cut to `embed.max_chars`, of only the messages that pass
+  the sealed gate below, the English of a translated one under the same gate,
+  plus the text of every search query that takes the vector leg
+  (`query_embed_text` in `squelch-core/src/store/sqlite/search.rs`). It is in
+  use only when the operator sets `SQUELCH_WARDEN_EMBED_URL`; unset, each tenant
+  embeds in-process, behind the same gate.
 
-**Spam reaches neither, at the store side.** For the gateway, `sync/ingest.rs`
-gives a spam row a neutral row and `'n/a'` stage markers before any model queue
-sees it (§4b). For the embedder, `SyncEngine::ingest_one` returns no embed text
-for a spam row and `messages_missing_vectors` selects `m.is_spam = 0`. The
-embedder itself checks nothing (`squelch-core/src/embed/remote.rs`, module
+**The sealed gate, at the store side.** One predicate,
+`embeddable_mail_sql!` (`squelch-core/src/store/sqlite/mod.rs`), built from
+the canonical sealed predicates (`known_sealed_mail_sql!`, `sealed_mail_sql!`)
+rather than written a third time. A message may be embedded only when it is
+not spam, is not KNOWN sealed (an auth decision, a restriction by the model or
+a person, or the retired `triage.sensitivity` column), and EITHER has a stored
+triage decision with its access assessment settled OR is the owner's own mail
+(`own_mail_sql!`). NOTHING IS EMBEDDED UNTIL IT IS KNOWN NOT TO BE SEALED.
+
+- **Where it is asked.** Before any text is handed to an embedder: at ingest
+  (`SyncEngine::ingest_one`, through `Store::message_embeddable`), by the drain
+  (`messages_missing_vectors`, `translations_missing_vectors`), and on the
+  translation path (`SyncEngine::embed_translation`). Again under the store
+  lock at the write (`write_embedded_vectors`, `upsert_translation_vector`), so a
+  decision that sealed a message while its text was at the embedder wins.
+- **Undecided mail waits.** At ingest an inbound message has no decision, so it
+  could still be a login code: it gets no vector until a decision that does not
+  seal it lands, and the applied decision raises the drain's flag. Mail whose
+  triage is DELAYED (the daily run cap, a spent budget, a failing model, no
+  model configured on a self-host) has no vector meanwhile, and mail never
+  triaged by design (an archive row nobody promoted, an old message given only
+  a `source_access` check) has none at all. Keyword search still finds all of
+  it: FTS is not gated by this. That is the accepted trade-off.
+- **The owner's own mail is the one undecided class embedded.** It is filed
+  access-only and never triaged, and it is not a login code someone sent the
+  owner. If the access check or a person restricts it (a forwarded code), its
+  vector goes at that event.
+- **Vectors that already exist go.** `purge_forbidden_vectors_conn`
+  (`search.rs`) deletes the original's and the translation's vector for a
+  message that is known sealed, or is in the agent pipeline and no longer
+  passes the gate (new content awaiting its re-triage). It runs inside the
+  transaction of every event that can seal: a triage commit, an access commit,
+  a person's correction, the compatibility sensitivity endpoint, and a content
+  change. It also runs as a sweep at every store open, which removes vectors
+  embedded before the gate existed: on one real mailbox (2,781 messages, 2,499
+  vectors) the first open removed 360, 143 of them known sealed, in about 30 ms.
+  The FTS index and the message are untouched.
+- **Spam** is excluded by the same predicate (`m.is_spam = 0`), as before.
+
+The embedder itself checks nothing (`squelch-core/src/embed/remote.rs`, module
 docs): a second gate inside it would be one more thing to keep in step with the
-first.
+first. Tests: `squelch-core/src/store/sqlite/tests/embed_gate.rs` (every case
+seals through the agent pipeline with the legacy column still `normal`),
+`sync::tests::no_embedder_ever_reads_a_login_code`, and
+`translate_pass::tests::the_english_of_mail_that_may_be_sealed_reaches_no_embedder`.
 
 **What the embedding service does not do**, each backed by code or a test:
 
@@ -815,8 +855,12 @@ builds its own embedding session in-process and talks to no process of ours.
   and never key anything on the peer address.
 - Never give its NetworkPolicy an egress rule; weights stay baked.
 - Never add a metric label whose value comes from a request.
-- If sealed mail is ever to be kept from either process, gate it at the store
-  side beside `is_spam`, not inside the embedder or the gateway client.
+- Never embed through a raw vector write (`upsert_message_vector(s)`, which
+  exist for fixtures); production writes go through `write_embedded_vectors`.
+- Never widen `embeddable_mail_sql!` to a class of mail that could be inbound
+  auth mail nobody has triaged. Never gate it on `triage.sensitivity` alone.
+- An event that can seal a message must call `purge_forbidden_vectors_conn` in
+  its own transaction.
 
 ## 5. Outbound secret guard
 

@@ -547,6 +547,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     // round each that finds nothing.
                     Ok(AgentCommitOutcome::Applied) => {
                         self.metrics.record_agent(AgentVerdict::Applied);
+                        // Inbound mail is embedded only once it is decided
+                        // (`embeddable_mail_sql!`): this decision may be the
+                        // one that makes the message owed a vector.
+                        self.vectors_dirty.store(true, Ordering::Relaxed);
                         if job.arrival_eligible {
                             self.notify_wake.notify_one();
                         }

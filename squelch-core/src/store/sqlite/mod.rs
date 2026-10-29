@@ -77,6 +77,8 @@ const OWN_MAIL: &str = own_mail_sql!();
 /// Correlated subqueries rather than joins, so it drops into any statement
 /// that has `m` and `t` (including an `UPDATE triage AS t`); each is a
 /// primary-key probe. A macro for the reason [`own_mail_sql!`] is.
+///
+/// The embedders' gate is built from this too ([`embeddable_mail_sql!`]).
 macro_rules! known_sealed_mail_sql {
     () => {
         "(COALESCE(t.sensitivity,'normal')!='normal' \
@@ -119,6 +121,77 @@ macro_rules! sealed_mail_sql {
             " OR EXISTS(SELECT 1 FROM agent_message_state pending_s \
                         WHERE pending_s.account_id=m.account_id AND pending_s.message_id=m.id \
                           AND pending_s.access='pending'))"
+        )
+    };
+}
+
+/// SQL predicate for mail an EMBEDDER may read, over `messages m` and its
+/// `triage t` row (LEFT JOINed is fine): the one gate on every vector write,
+/// at ingest, in the drain, for a translation, and re-checked under the store
+/// lock at the write itself (`search.rs`, `write_embedded_vectors`). Sealed
+/// mail reaches neither the in-process embedder nor the shared embedding
+/// service. True when ALL of these hold:
+///
+/// - not provider spam (semantic recall must never return it);
+/// - not KNOWN sealed ([`known_sealed_mail_sql!`]: an auth decision, a
+///   restriction by the model or a person, the retired column);
+/// - and EITHER the account's own mail ([`own_mail_sql!`]), which is never
+///   triaged by design (it is filed access-only) and is not a login code
+///   somebody sent the owner, OR a stored decision exists and the access
+///   assessment is not pending ([`sealed_mail_sql!`], the strict reader
+///   answer, is false).
+///
+/// NOTHING IS EMBEDDED UNTIL IT IS KNOWN NOT TO BE SEALED. There is no local
+/// login-code detector; only the triage model decides auth, and it runs after
+/// ingest. So inbound mail whose triage is merely DELAYED (held by the daily
+/// run cap, a spent budget, a failing model, no model configured at all) or
+/// that is never triaged (an archive row nobody promoted) gets NO VECTOR
+/// until a non-sealed decision lands. Keyword search still finds it: FTS is
+/// not gated by this. That is the accepted trade-off. Own mail that a person
+/// or the access check restricts loses its vector at that event
+/// ([`vector_forbidden_sql!`]).
+///
+/// ORDER IS COST, not meaning: the drain asks this of every row with no
+/// vector, and most of those (archive rows, mail awaiting triage) fail at the
+/// decision probe, so that comes before the sealed probes. SQLite
+/// short-circuits `AND`/`OR`.
+macro_rules! embeddable_mail_sql {
+    () => {
+        concat!(
+            "(m.is_spam=0 AND (",
+            own_mail_sql!(),
+            " OR (EXISTS(SELECT 1 FROM agent_message_decisions emb_d \
+                         WHERE emb_d.account_id=m.account_id AND emb_d.message_id=m.id) \
+                  AND NOT ",
+            sealed_mail_sql!(),
+            ")) AND NOT ",
+            known_sealed_mail_sql!(),
+            ")"
+        )
+    };
+}
+
+/// SQL predicate for a STORED VECTOR that must go, over `m` and `t`: the
+/// message is known sealed, or it is in the agent pipeline (it has state)
+/// and is not [`embeddable_mail_sql!`] (its content changed and awaits a new
+/// decision, it moved to spam, it was embedded at ingest before this gate
+/// existed and is still undecided). The cleanup at every event that can seal
+/// a message and the sweep at store open both delete by it.
+///
+/// A row with NO agent state is a legacy row from before the agent pipeline:
+/// the pipeline that wrote `triage.sensitivity` vetted it, so it keeps its
+/// vector unless that column (or anything else) says sealed. The drain never
+/// embeds such a row afresh: it has no decision.
+macro_rules! vector_forbidden_sql {
+    () => {
+        concat!(
+            "(",
+            known_sealed_mail_sql!(),
+            " OR (EXISTS(SELECT 1 FROM agent_message_state vf_s \
+                         WHERE vf_s.account_id=m.account_id AND vf_s.message_id=m.id) \
+                  AND NOT ",
+            embeddable_mail_sql!(),
+            "))"
         )
     };
 }
@@ -769,6 +842,15 @@ impl SqliteStore {
         // New tables/indexes need no migration (IF NOT EXISTS covers them),
         // EXCEPT an index naming a migrated column, which lives in `migrate`.
         migrate(&conn)?;
+        // THE BACKLOG SWEEP, once per open: vectors written before the sealed
+        // gate existed (login codes embedded at ingest), and any an event
+        // missed, go before anything can search them. One transaction, so a
+        // backlog of hundreds pays one commit, not two per vector.
+        {
+            let tx = conn.unchecked_transaction()?;
+            search::purge_forbidden_vectors_conn(&tx, None)?;
+            tx.commit()?;
+        }
         Ok(Self {
             conn: Mutex::new(conn),
             embedder: RwLock::new(None),
@@ -2262,6 +2344,18 @@ impl Store for SqliteStore {
         limit: usize,
     ) -> Result<Vec<MissingVector>> {
         self.messages_missing_vectors(account_id, limit)
+    }
+
+    fn write_embedded_vectors(
+        &self,
+        account_id: AccountId,
+        items: &[(i64, &[f32])],
+    ) -> Result<usize> {
+        self.write_embedded_vectors(account_id, items)
+    }
+
+    fn message_embeddable(&self, account_id: AccountId, message_id: i64) -> Result<bool> {
+        self.message_embeddable(account_id, message_id)
     }
 
     /// Trait override so a generic `S: Store` caller resolves the CURRENT

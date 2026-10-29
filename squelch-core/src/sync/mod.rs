@@ -141,8 +141,10 @@ enum IngestOrigin {
     Archive,
 }
 
-/// Persisted message and optional local embedding input. Provider spam is
-/// excluded from semantic recall; internal embeddings may include auth mail.
+/// Persisted message and optional embedding input. `embed_text` is `Some`
+/// only when the stored row passes the sealed gate (`Store::message_embeddable`):
+/// provider spam never, inbound mail not until a non-sealed decision lands
+/// (the drain embeds it then), the owner's own mail at once.
 struct Ingested {
     id: i64,
     embed_text: Option<String>,
@@ -718,7 +720,9 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// run the drain. Raised at construction (rows ingested before this
     /// process had an embedder, and failures from an earlier run, are what the
     /// first drain is for), by every arm of [`SyncEngine::embed_and_store`]
-    /// that did not write a vector, and by a drain that stopped on an error;
+    /// that did not write a vector, by an applied triage decision (inbound
+    /// mail is embedded only once it is decided, so a decision is a row the
+    /// drain may now owe a vector), and by a drain that stopped on an error;
     /// lowered by a drain as it starts, so a failure that lands while it runs
     /// is not lost under its clear. Without this the drain ran EVERY round,
     /// and in steady state every non-spam row already has a vector, so its
@@ -2178,10 +2182,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 //
                 // NOT WHILE A WINDOW IS BEING FETCHED. This lane runs beside the
                 // first backfill now (see `run_once`), and a drain in the middle
-                // of one is wrong both ways: with an embedder, every row is
-                // embedded at ingest a moment AFTER its commit, so the drain's
-                // query keeps finding the row that is mid-embed and embeds it a
-                // second time, one ONNX pass per message thrown away on the CPU
+                // of one is wrong both ways: with an embedder, every row the
+                // sealed gate passes at ingest (the owner's own mail; inbound
+                // mail waits for its decision) is embedded a moment AFTER its
+                // commit, so the drain's query keeps finding the row that is
+                // mid-embed and embeds it a second time, one ONNX pass per message thrown away on the CPU
                 // the backfill needs; without one (the gate released at its
                 // ceiling), the batch drain's own peak (`EmbedConfig::
                 // backfill_batch`) would land on top of the backfill's instead
@@ -3387,9 +3392,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             }
             id
         };
-        // Embeddings are internal evidence. Agent search separately checks the
-        // current access assessment before releasing results.
-        let embed_text = if triaged.message.is_spam {
+        // THE SEALED GATE, asked of the row as stored (`embeddable_mail_sql!`).
+        // At ingest an inbound message has no decision yet, so it could still
+        // turn out to be a login code: its text goes to no embedder now, and
+        // the drain embeds it once a non-sealed decision lands. The owner's
+        // own mail passes at once. Spam never does (below).
+        let embeddable =
+            !triaged.message.is_spam && self.store.message_embeddable(self.account_id, id)?;
+        let embed_text = if !embeddable {
             // NEITHER IS PROVIDER SPAM, for two reasons that point the same way.
             // It would be the largest single consumer of embedder time in the
             // daemon — spam outnumbers real mail — spent on the one category of
@@ -3398,6 +3408,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // impersonating, so a vector space containing it puts convincing
             // forgeries next to the real thing in results the user reads as
             // "your mail".
+            //
+            // AND NOT YET-UNDECIDED OR SEALED MAIL: see the gate above.
             None
         } else {
             Some(crate::embed::message_embed_text(
@@ -3473,9 +3485,13 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         let account_id = self.account_id;
         let store = self.store.clone();
         // ONNX inference is CPU-bound; keep it off the poll loop.
+        // Re-checked under the store lock at the write: a decision that sealed
+        // the message while its text was at the embedder wins.
         let result = tokio::task::spawn_blocking(move || {
             let vec = embedder.embed(&text)?;
-            store.upsert_message_vector(account_id, message_id, &vec)
+            store
+                .write_embedded_vectors(account_id, &[(message_id, &vec)])
+                .map(|_| ())
         })
         .await;
         match &result {
@@ -3496,10 +3512,15 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     }
 
     /// Embed every message still missing a vector, in throttled batches, so
-    /// recall covers pre-existing rows and ingest-time embed failures. Sealed
-    /// content is structurally absent — `messages_missing_vectors` selects only
-    /// `sensitivity='normal'` (see docs/SECURITY.md). A failed batch logs a
-    /// redacted one-liner and is retried on a later pass. No-op with no embedder.
+    /// recall covers pre-existing rows, ingest-time embed failures and mail
+    /// whose triage decision has just landed. SEALED MAIL IS NEVER SELECTED:
+    /// `messages_missing_vectors` reads only rows that pass
+    /// `embeddable_mail_sql!` (not spam, not known sealed, and either a stored
+    /// decision with access settled or the owner's own mail), and the write
+    /// re-checks it under the store lock (docs/SECURITY.md §4d). Inbound mail
+    /// still awaiting its decision is not selected until one lands. A failed
+    /// batch logs a redacted one-liner and is retried on a later pass. No-op
+    /// with no embedder.
     ///
     /// Runs only while [`SyncEngine::vectors_dirty`] says a vector may be
     /// missing; the flag's lifecycle across one pass is [`DrainGuard`]'s.
@@ -3593,13 +3614,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     }
                     return Ok(());
                 }
-                // One commit for the batch, not two per vector.
+                // One commit for the batch, not two per vector, each item
+                // re-checked against the sealed gate under that commit's lock.
                 let items: Vec<(i64, &[f32])> = missing
                     .iter()
                     .zip(vecs.iter())
                     .map(|(m, vec)| (m.message_id, vec.as_slice()))
                     .collect();
-                store.upsert_message_vectors(account_id, &items)
+                store.write_embedded_vectors(account_id, &items).map(|_| ())
             })
             .await;
 
@@ -7149,18 +7171,43 @@ mod tests {
         assert!(!job.foreground, "behind live arrivals, not ahead of them");
         assert!(!job.arrival_eligible);
         assert!(queued_job(&store, acct, "notification").is_none());
-        // Not embedded inline: the vector backfill picks it up, batched. The
-        // whole contract, not only the query: the heal raised the drain's
-        // flag (on the SWEEPS engine, which the daemon builds over the sync
-        // engine's handle), a drain that fails leaves it raised, and a drain
-        // that succeeds writes the vector and lowers it.
-        assert!(
+        // Not embedded inline: the vector backfill picks it up, batched, ONCE
+        // THE RE-TRIAGE HAS DECIDED IT (new content is undecided content, and
+        // undecided inbound mail reaches no embedder). The whole contract,
+        // not only the query: the heal raised the drain's flag (on the
+        // SWEEPS engine, which the daemon builds over the sync engine's
+        // handle), a drain that fails leaves it raised, and a drain that
+        // succeeds writes the vector and lowers it.
+        let owed = |store: &SqliteStore| {
             store
                 .messages_missing_vectors(acct, 10)
                 .unwrap()
                 .iter()
                 .any(|m| m.message_id == id)
-        );
+        };
+        assert!(!owed(&store), "undecided: no embedder reads it yet");
+        {
+            use crate::store::agent_triage::AgentTriageStore;
+            let context = store.load_agent_context(&job).unwrap();
+            let decision = crate::triage::decision::MessageDecision {
+                kinds: vec![crate::triage::decision::EmailKind::Bill],
+                summary: "A bill".into(),
+                reason: "A bill".into(),
+                ..Default::default()
+            };
+            assert_eq!(
+                store
+                    .commit_agent_decision(
+                        &job,
+                        &context,
+                        &decision,
+                        std::slice::from_ref(&context.message.source),
+                    )
+                    .unwrap(),
+                crate::store::agent_triage::AgentCommitOutcome::Applied
+            );
+        }
+        assert!(owed(&store), "decided and not sealed: owed a vector");
         assert!(
             eng.vectors_dirty.load(Ordering::Relaxed),
             "the heal raises the drain's flag"
@@ -12556,6 +12603,129 @@ mod tests {
             first.vectors_dirty.load(Ordering::Relaxed),
             "a raise on the sweeps engine lands on the sync engine's flag"
         );
+    }
+
+    /// An embedder that remembers every text it was handed: what the shared
+    /// embedding service would have read.
+    struct Recording(std::sync::Mutex<Vec<String>>);
+
+    impl crate::embed::Embedder for Recording {
+        fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            self.0.lock().unwrap().push(text.to_string());
+            Ok(vec![0.25; crate::store::sqlite::VEC_DIMS])
+        }
+        fn dims(&self) -> usize {
+            crate::store::sqlite::VEC_DIMS
+        }
+    }
+
+    /// Commit a triage decision for `id`, `adjust`ed, the way the worker does.
+    fn decide_now(
+        store: &SqliteStore,
+        acct: AccountId,
+        id: i64,
+        adjust: impl FnOnce(&mut crate::triage::decision::MessageDecision),
+    ) {
+        use crate::store::agent_triage::{AgentCommitOutcome, AgentTriageStore};
+        let job = store
+            .claim_agent_job(acct, "triage", Utc::now() + ChronoDuration::hours(1), 60)
+            .unwrap()
+            .expect("a triage job waits");
+        assert_eq!(job.message_id, id);
+        let context = store.load_agent_context(&job).unwrap();
+        let mut decision = crate::triage::decision::MessageDecision {
+            kinds: vec![crate::triage::decision::EmailKind::General],
+            summary: "Mail".into(),
+            reason: "Mail".into(),
+            ..Default::default()
+        };
+        adjust(&mut decision);
+        assert_eq!(
+            store
+                .commit_agent_decision(
+                    &job,
+                    &context,
+                    &decision,
+                    std::slice::from_ref(&context.message.source),
+                )
+                .unwrap(),
+            AgentCommitOutcome::Applied
+        );
+    }
+
+    /// THE SEALED GATE, END TO END (docs/SECURITY.md §4d): a login code is
+    /// handed to no embedder, not at ingest (it is undecided), not by the
+    /// drain before its decision, and not after the decision says auth, while
+    /// the owner's own mail is embedded at ingest and ordinary inbound mail
+    /// once it is decided.
+    #[tokio::test]
+    async fn no_embedder_ever_reads_a_login_code() {
+        let (store, acct) = store_at_cursor(None);
+        let recording = Arc::new(Recording(std::sync::Mutex::new(Vec::new())));
+        let eng =
+            engine(store.clone(), acct, "http://127.0.0.1:9").with_embedder(recording.clone());
+        let now = Utc::now();
+        let land = |msgid: &str, eml: &str, sent: bool| {
+            let mut raw = fixture(acct, msgid, eml, sent);
+            raw.gmail_thread_id = Some(format!("thread-{msgid}"));
+            eng.ingest_one(&raw, &[], now, IngestOrigin::Incremental)
+                .unwrap()
+                .expect("a new row")
+        };
+
+        let otp = land(
+            "otp",
+            "From: noreply@bank.example\r\nSubject: Your sign-in code\r\n\r\nYour code is 482913",
+            false,
+        );
+        assert!(otp.embed_text.is_none(), "undecided at ingest: no text out");
+        let sent = land(
+            "sent",
+            "From: me@example.com\r\nTo: dan@example.com\r\nSubject: The lease\r\n\r\nSigned lease attached",
+            true,
+        );
+        let text = sent.embed_text.clone().expect("own mail embeds at ingest");
+        eng.embed_and_store(sent.id, text).await;
+        assert_eq!(vec_count(&store, sent.id), 1);
+
+        // The drain, before any decision: the login code is not selected.
+        eng.backfill_missing_vectors().await;
+        assert_eq!(vec_count(&store, otp.id), 0);
+        // The decision says auth; the drain still does not select it.
+        decide_now(&store, acct, otp.id, |d| {
+            d.auth.kinds = vec![crate::triage::decision::AuthKind::Otp]
+        });
+        eng.backfill_missing_vectors().await;
+        assert_eq!(vec_count(&store, otp.id), 0);
+
+        // Ordinary inbound mail: nothing at ingest, a vector once decided.
+        let lunch = land(
+            "lunch",
+            "From: alice@example.com\r\nSubject: Lunch\r\n\r\nLunch on Thursday?",
+            false,
+        );
+        assert!(lunch.embed_text.is_none());
+        eng.backfill_missing_vectors().await;
+        assert_eq!(vec_count(&store, lunch.id), 0, "undecided");
+        decide_now(&store, acct, lunch.id, |_| {});
+        eng.backfill_missing_vectors().await;
+        assert_eq!(vec_count(&store, lunch.id), 1, "decided, not sealed");
+
+        let read = recording.0.lock().unwrap();
+        assert!(
+            !read.iter().any(|t| t.contains("482913")),
+            "the login code reached an embedder: {read:?}"
+        );
+        assert!(read.iter().any(|t| t.contains("Signed lease")));
+        assert!(read.iter().any(|t| t.contains("Lunch on Thursday")));
+    }
+
+    fn vec_count(store: &SqliteStore, id: i64) -> i64 {
+        store
+            .query_i64_for_test(&format!(
+                "SELECT COUNT(*) FROM message_vecs WHERE message_id={id}"
+            ))
+            .unwrap()
     }
 
     /// docs/EMBED-SERVICE.md §3: a remote embedder answering 503 opens a

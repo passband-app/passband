@@ -88,16 +88,28 @@ the code on the branch; the file named is where to look.
 - **The Deployment is `strategy: Recreate`**, so a rollout never holds two
   sessions (or two quota slots). The cost is a few seconds of 503, which tenants
   treat as a transient failure.
-- **§4's sealed-mail paragraph is no longer true, and was not true when the
-  build started.** It describes a `sensitivity == Normal` gate that the triage
-  rewrite (`4b7099de`, 2026-09-17) retired: ingest now always stores
-  `Sensitivity::Normal`, and the only embed gate is provider spam (`is_spam` in
-  `SyncEngine::ingest_one` and in `messages_missing_vectors`). Mail the triage
-  model judges to be authentication, or restricted, is embedded like any other
-  mail; it is kept from external readers on the way out, by the access guard,
-  not on the way in. So with the knob set, the service sees the subject and
-  body of every non-spam message, login codes included. `docs/SECURITY.md`
-  §4d states what is actually true.
+- **Sealed mail reaches no embedder, by a gate on the decision, not the
+  retired column.** §4 as first written described a `sensitivity == Normal`
+  gate that the triage rewrite (`4b7099de`, 2026-09-17) had already retired:
+  ingest always stores `Sensitivity::Normal`, and for a while the only embed
+  gate was provider spam, so login codes were embedded like any other mail.
+  The gate as built is `embeddable_mail_sql!`
+  (`squelch-core/src/store/sqlite/mod.rs`): not spam, not known sealed (an auth
+  decision, a restriction by the model or a person, the legacy column), and
+  either a stored decision with access settled or the owner's own mail. It is
+  asked before any text leaves for an embedder (ingest, the drain, the
+  translation path) and again under the store lock at the write. Because only
+  the triage model decides auth, and it runs after ingest, inbound mail is not
+  embedded at ingest at all: the drain embeds it once a decision that does not
+  seal it lands. Mail whose triage is delayed (run cap, spent budget, model
+  failing or not configured) or never happens (unpromoted archive rows,
+  `source_access`-only rows) has no vector; keyword search still finds it.
+  Vectors of mail that is sealed, or undecided again after a content change,
+  are deleted at the event and by a sweep at every store open
+  (`purge_forbidden_vectors_conn`). The LLM gateway is NOT gated this way and
+  cannot be: triage has to read a message to decide it is auth.
+  `docs/SECURITY.md` §4d is the full statement. Same gate, same behaviour on
+  self-host.
 
 ## 1. Why
 
@@ -383,18 +395,26 @@ the sync engine (5 s, doubling to a few minutes, reset on success), with
 ## 4. Security
 
 Be blunt about what this is. **`squelch-embed` is a process we operate that sees
-the subject and body text of every hosted tenant's normal-sensitivity mail, in
-flight, in one address space.** That widens the hosted trust story and belongs in
+the subject and body text of hosted tenants' decided, non-sealed mail and their
+own sent mail, in flight, in one address space.** That widens the hosted trust story and belongs in
 `docs/SECURITY.md`, not only here. It is not new **in kind**: Bifrost already
 sees every message Stage 2 triages, and `docs/HOSTED.md` says so. This is a
 second such component with a narrower job.
 
-**The sealed-content invariant is unchanged, structurally.** The gate is in the
-store's embed-at-write path (`sensitivity == Normal`, in `SyncEngine::ingest_one`
-and `messages_missing_vectors`), not in the embedder. Sealed text is never handed
-to an `Embedder` of any kind, so it never reaches the wire. Nothing here touches
-that gate, and nothing here may: an embedder that filtered its own input would be
-a second gate to keep in step with the first.
+**The sealed-content invariant is structural, and store-side.** The gate is
+`embeddable_mail_sql!` (`squelch-core/src/store/sqlite/mod.rs`), asked at
+ingest, in `messages_missing_vectors` and `translations_missing_vectors`, on the
+translation path, and again at the write, not in the embedder. Sealed is the
+triage decision (auth, restricted), a person's restriction or the legacy
+`triage.sensitivity` column, never the column alone, and inbound mail is not
+embedded until a decision says it is not sealed (the owner's own mail is the one
+undecided class let through). Sealed text is never handed to an `Embedder` of
+any kind, so it never reaches the wire; an existing vector of mail that becomes
+sealed is deleted at that event and by the sweep at store open. Nothing here may
+touch that gate from the embedder's side: an embedder that filtered its own
+input would be a second gate to keep in step with the first. The LLM gateway is
+the other process that sees hosted mail, and it does read sealed mail, because
+triage is what decides auth.
 
 **What the service must not do**, each a testable claim:
 
@@ -461,8 +481,9 @@ is in-cluster, and a URL with a public host is refused outright.
 
 **What `docs/SECURITY.md` gains.** A subsection under §4: hosted mail text
 reaches two processes we operate, the LLM gateway and the embedding service;
-sealed mail reaches neither, enforced for both at the same store-side
-`sensitivity == Normal` gate; the embedding service logs nothing, stores nothing,
+sealed mail reaches the embedding service never (the store-side
+`embeddable_mail_sql!` gate) and the gateway always (triage must read it to
+decide it is auth); the embedding service logs nothing, stores nothing,
 caches nothing, is never told a tenant's name, and cannot reach the network;
 self-host reaches neither.
 
@@ -529,7 +550,11 @@ open.
 sets no `SQUELCH_EMBED_URL`, builds its own `FastEmbedder` exactly as today, and
 never talks to anything of ours. One user on one machine already has one session,
 which is the shape this design is trying to reach; there is nothing to share.
-`docs/GETTING-STARTED.md` does not change and self-host gains no new knob.
+`docs/GETTING-STARTED.md` does not change and self-host gains no new knob. The
+sealed gate is the same store-side predicate on both (§4): a self-host
+in-process embedder never reads sealed or undecided inbound mail either, and a
+self-host with no model configured triages nothing, so its inbound mail gets
+no vectors and is found by keyword search only.
 
 ## 7. Capacity model
 

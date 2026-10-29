@@ -134,6 +134,9 @@ struct Scripted {
     next_uid: u32,
     /// A command (its first words) the server answers NO to.
     fail: Option<&'static str>,
+    /// How a failed MOVE/COPY/CREATE reads ([`Refusal`]); `None` is a
+    /// broken session (the command never got an answer).
+    refusal: Option<Refusal>,
     /// UIDs no longer in their folder (`UID SEARCH UID` finds nothing).
     gone: Vec<u32>,
     log: Vec<String>,
@@ -150,6 +153,7 @@ impl Scripted {
             relisted: roles(),
             next_uid: 100,
             fail: None,
+            refusal: Some(Refusal::NotHere),
             gone: Vec::new(),
             log: Vec::new(),
         }
@@ -162,6 +166,13 @@ impl Scripted {
         } else {
             Ok(())
         }
+    }
+    /// [`Self::say`] for a MOVE, COPY or CREATE, failing as `refusal` says.
+    fn answer(&mut self, c: String) -> Result<(), CmdFail> {
+        self.say(c).map_err(|e| match self.refusal {
+            Some(r) => CmdFail::Refused(r, e),
+            None => CmdFail::Other(imap_broken("scripted")),
+        })
     }
     /// No command anywhere expunges a folder wholesale or CLOSEs one.
     fn assert_never_destructive(&self) {
@@ -178,6 +189,7 @@ const ALL: WriteCaps = WriteCaps {
     uidplus: true,
     unselect: true,
     create_special_use: true,
+    gmail: false,
 };
 
 const COPY_ONLY: WriteCaps = WriteCaps {
@@ -185,6 +197,7 @@ const COPY_ONLY: WriteCaps = WriteCaps {
     uidplus: true,
     unselect: true,
     create_special_use: false,
+    gmail: false,
 };
 
 #[async_trait::async_trait]
@@ -210,13 +223,13 @@ impl WriteMailbox for Scripted {
             flags.join(" ")
         ))
     }
-    async fn uid_move(&mut self, uid: u32, target: &str) -> Result<NewPlace, WriteError> {
-        self.say(format!("UID MOVE {uid} {target}"))?;
+    async fn uid_move(&mut self, uid: u32, target: &str) -> Result<NewPlace, CmdFail> {
+        self.answer(format!("UID MOVE {uid} {target}"))?;
         self.next_uid += 1;
         Ok(Some((9, self.next_uid)))
     }
-    async fn uid_copy(&mut self, uid: u32, target: &str) -> Result<NewPlace, WriteError> {
-        self.say(format!("UID COPY {uid} {target}"))?;
+    async fn uid_copy(&mut self, uid: u32, target: &str) -> Result<NewPlace, CmdFail> {
+        self.answer(format!("UID COPY {uid} {target}"))?;
         self.next_uid += 1;
         Ok(Some((9, self.next_uid)))
     }
@@ -227,8 +240,8 @@ impl WriteMailbox for Scripted {
         self.say(format!("UID SEARCH UID {uid}"))?;
         Ok(!self.gone.contains(&uid))
     }
-    async fn create_archive(&mut self, name: &str, special_use: bool) -> Result<(), WriteError> {
-        self.say(if special_use {
+    async fn create_archive(&mut self, name: &str, special_use: bool) -> Result<(), CmdFail> {
+        self.answer(if special_use {
             format!("CREATE {name} (USE (\\Archive))")
         } else {
             format!("CREATE {name}")
@@ -450,6 +463,7 @@ async fn no_archive_creates_one_once_then_uses_it() {
 async fn a_refused_create_still_uses_an_archive_that_exists() {
     let mut mb = Scripted::new(ALL);
     mb.fail = Some("CREATE");
+    mb.refusal = Some(Refusal::Exists);
     let mut r0 = roles();
     r0.archive = None;
     let (_, r) = run(
@@ -849,5 +863,185 @@ fn which_copy_moves() {
             vec![loc("INBOX", 1), loc("Sent", 2)],
             Target::Folder("Trash".into())
         ))
+    );
+}
+
+// ---- what a refusal says (final review N1, N2) --------------------------------
+
+#[test]
+fn refusals_read_by_their_response_code() {
+    let no = |t: &str| classify_refusal(false, false, Some(t));
+    assert_eq!(no("[CANNOT] virtual mailbox"), Refusal::NotHere);
+    assert_eq!(no("[NOPERM] no saves here"), Refusal::NotHere);
+    assert_eq!(no("[cannot] lowercase"), Refusal::NotHere);
+    assert_eq!(no("Mailbox doesn't allow saving"), Refusal::NotHere);
+    assert_eq!(classify_refusal(false, false, None), Refusal::NotHere);
+    assert_eq!(no("[ALREADYEXISTS] Mailbox exists"), Refusal::Exists);
+    for code in [
+        "UNAVAILABLE",
+        "INUSE",
+        "LIMIT",
+        "SERVERBUG",
+        "OVERQUOTA",
+        "EXPUNGEISSUED",
+        "CONTACTADMIN",
+        "TRYCREATE",
+    ] {
+        assert_eq!(no(&format!("[{code}] try later")), Refusal::Other, "{code}");
+    }
+    // A BAD, or a code imap-proto parsed itself, never reads as "not here".
+    assert_eq!(classify_refusal(true, false, Some("x")), Refusal::Other);
+    assert_eq!(classify_refusal(true, false, None), Refusal::Other);
+    assert_eq!(classify_refusal(false, true, Some("x")), Refusal::Other);
+}
+
+/// The archive is \All only; `refusal` is how its MOVE is refused.
+async fn archive_into_refusing_all(
+    caps: WriteCaps,
+    refusal: Option<Refusal>,
+) -> (Scripted, Result<(), WriteError>) {
+    let mut mb = Scripted::new(caps);
+    mb.fail = Some(if caps.mv {
+        "UID MOVE 5 All Mail"
+    } else {
+        "UID COPY 5 All Mail"
+    });
+    mb.refusal = refusal;
+    mb.relisted.all = Some("All Mail".into());
+    let mut r0 = roles();
+    r0.archive = None;
+    r0.all = Some("All Mail".into());
+    let (_, r) = run(
+        &mut mb,
+        &mut r0,
+        &[loc("INBOX", 5)],
+        LabelPlan::moving(Move::Archive),
+    )
+    .await;
+    (mb, r)
+}
+
+/// ONLY "THIS CAN NEVER GO HERE" CREATES AN ARCHIVE (N1): [CANNOT],
+/// [NOPERM] or a bare NO do; a "not now" code, a BAD or a broken session is
+/// the 502 (or transport error) to retry, and nothing is created.
+#[tokio::test]
+async fn only_a_definitive_refusal_of_all_creates_an_archive() {
+    let created = |mb: &Scripted| mb.log.iter().any(|c| c.starts_with("CREATE"));
+    let (mb, r) = archive_into_refusing_all(ALL, Some(Refusal::NotHere)).await;
+    r.unwrap();
+    assert!(created(&mb), "{:?}", mb.log);
+
+    let (mb, r) = archive_into_refusing_all(ALL, Some(Refusal::Other)).await;
+    assert!(
+        matches!(r, Err(WriteError::Api { status: 502, .. })),
+        "{r:?}"
+    );
+    assert!(!created(&mb), "{:?}", mb.log);
+
+    let (mb, r) = archive_into_refusing_all(ALL, Some(Refusal::Exists)).await;
+    assert!(r.is_err());
+    assert!(!created(&mb), "{:?}", mb.log);
+
+    // A command that could not be written or answered: a broken session.
+    let (mb, r) = archive_into_refusing_all(ALL, None).await;
+    assert!(matches!(r, Err(WriteError::Transport(_))), "{r:?}");
+    assert!(!created(&mb), "{:?}", mb.log);
+
+    let (mb, r) = archive_into_refusing_all(COPY_ONLY, Some(Refusal::Other)).await;
+    assert!(r.is_err());
+    assert!(!created(&mb), "{:?}", mb.log);
+    assert!(
+        !mb.log.iter().any(|c| c.contains("Deleted")),
+        "{:?}",
+        mb.log
+    );
+}
+
+/// GMAIL'S IMAP (X-GM-EXT-1) NEVER GETS AN ARCHIVE FOLDER in place of All
+/// Mail, whatever its NO says: an Archive label every later archive would
+/// add.
+#[tokio::test]
+async fn gmail_imap_never_creates_an_archive() {
+    let gmail = WriteCaps { gmail: true, ..ALL };
+    for refusal in [Some(Refusal::NotHere), Some(Refusal::Other), None] {
+        let (mb, r) = archive_into_refusing_all(gmail, refusal).await;
+        assert!(r.is_err(), "{refusal:?}");
+        assert!(
+            !mb.log.iter().any(|c| c.starts_with("CREATE")),
+            "{refusal:?} {:?}",
+            mb.log
+        );
+    }
+}
+
+/// N2: the `INBOX.Archive` retry follows only a top-level CREATE refused as
+/// "not here". [ALREADYEXISTS] re-lists and uses the top-level folder; a
+/// "not now" code is the error with no second CREATE and no LIST.
+#[tokio::test]
+async fn the_inbox_child_create_follows_only_a_not_here_refusal() {
+    let only_inbox = || FolderRoles {
+        selectable: s(&["INBOX"]),
+        delimiter: Some(".".into()),
+        ..FolderRoles::default()
+    };
+    let go = |refusal: Refusal, relisted: FolderRoles| async move {
+        let mut mb = Scripted::new(ALL);
+        mb.fail = Some("CREATE Archive");
+        mb.refusal = Some(refusal);
+        mb.relisted = relisted;
+        let mut r0 = only_inbox();
+        let (moved, r) = run(
+            &mut mb,
+            &mut r0,
+            &[loc("INBOX", 5)],
+            LabelPlan::moving(Move::Archive),
+        )
+        .await;
+        (mb, moved, r)
+    };
+    let creates = |mb: &Scripted| {
+        mb.log
+            .iter()
+            .filter(|c| c.starts_with("CREATE"))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    // [ALREADYEXISTS]: the top-level Archive that is there is used.
+    let top = FolderRoles {
+        archive: Some("Archive".into()),
+        selectable: s(&["INBOX", "Archive"]),
+        delimiter: Some(".".into()),
+        ..FolderRoles::default()
+    };
+    let (mb, moved, r) = go(Refusal::Exists, top).await;
+    r.unwrap();
+    assert_eq!(creates(&mb), s(&["CREATE Archive (USE (\\Archive))"]));
+    assert_eq!(moved[0].1.as_ref().unwrap().folder, "Archive");
+
+    // A transient code: the error, one CREATE, no LIST, nothing moved.
+    let (mb, moved, r) = go(Refusal::Other, only_inbox()).await;
+    assert!(
+        matches!(r, Err(WriteError::Api { status: 502, .. })),
+        "{r:?}"
+    );
+    assert_eq!(creates(&mb).len(), 1, "{:?}", mb.log);
+    assert!(!mb.log.contains(&"LIST".to_string()), "{:?}", mb.log);
+    assert!(moved.is_empty());
+
+    // "Not here": the retry under INBOX.
+    let child = FolderRoles {
+        archive: Some("INBOX.Archive".into()),
+        selectable: s(&["INBOX", "INBOX.Archive"]),
+        delimiter: Some(".".into()),
+        ..FolderRoles::default()
+    };
+    let (mb, _, _) = go(Refusal::NotHere, child).await;
+    assert_eq!(
+        creates(&mb),
+        s(&[
+            "CREATE Archive (USE (\\Archive))",
+            "CREATE INBOX.Archive (USE (\\Archive))"
+        ])
     );
 }

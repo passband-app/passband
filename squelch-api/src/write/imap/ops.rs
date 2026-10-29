@@ -163,6 +163,9 @@ pub(crate) struct WriteCaps {
     pub uidplus: bool,
     pub unselect: bool,
     pub create_special_use: bool,
+    /// `X-GM-EXT-1`: Gmail's IMAP, whose `\All` is All Mail and never
+    /// to be replaced by a created folder.
+    pub gmail: bool,
 }
 
 /// How a message moves between folders on this server.
@@ -207,15 +210,15 @@ pub(crate) trait WriteMailbox: Send {
     /// `UID STORE uid {+|-}FLAGS.SILENT (flags)`.
     async fn store(&mut self, uid: u32, add: bool, flags: &[&str]) -> Result<(), WriteError>;
     /// `UID MOVE uid target`, with the `COPYUID` the server gave.
-    async fn uid_move(&mut self, uid: u32, target: &str) -> Result<NewPlace, WriteError>;
+    async fn uid_move(&mut self, uid: u32, target: &str) -> Result<NewPlace, CmdFail>;
     /// `UID COPY uid target`, with the `COPYUID` the server gave.
-    async fn uid_copy(&mut self, uid: u32, target: &str) -> Result<NewPlace, WriteError>;
+    async fn uid_copy(&mut self, uid: u32, target: &str) -> Result<NewPlace, CmdFail>;
     /// `UID EXPUNGE uid`: that one UID, and only when it is `\Deleted`.
     async fn uid_expunge(&mut self, uid: u32) -> Result<(), WriteError>;
     /// Is `uid` still in the selected folder (`UID SEARCH UID uid`)?
     async fn uid_present(&mut self, uid: u32) -> Result<bool, WriteError>;
     /// `CREATE name`, with `USE (\Archive)` when `special_use`.
-    async fn create_archive(&mut self, name: &str, special_use: bool) -> Result<(), WriteError>;
+    async fn create_archive(&mut self, name: &str, special_use: bool) -> Result<(), CmdFail>;
     /// The folder roles, listed afresh.
     async fn list_roles(&mut self) -> Result<FolderRoles, WriteError>;
 }
@@ -267,12 +270,70 @@ pub(crate) async fn apply_flags(
     Ok(())
 }
 
+/// WHAT A SERVER'S `NO`/`BAD` TO A MOVE, COPY OR CREATE SAYS (RFC 5530
+/// response codes), which decides whether another place may be tried
+/// (phase 3 final review N1, N2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// `NO [CANNOT]`, `NO [NOPERM]`, or a `NO` with no response code: this
+    /// cannot go there, for good.
+    NotHere,
+    /// `NO [ALREADYEXISTS]` (to a CREATE).
+    Exists,
+    /// Anything else: a `BAD`, or a `NO` with a code that says "not now"
+    /// (`[UNAVAILABLE]`, `[INUSE]`, `[LIMIT]`, `[SERVERBUG]`,
+    /// `[OVERQUOTA]`, `[EXPUNGEISSUED]`, ...). A retryable 502; nothing
+    /// else is tried.
+    Other,
+}
+
+/// Read a tagged `NO`/`BAD`. imap-proto parses only the codes it knows
+/// (`code_known`); an RFC 5530 code arrives as the head of the text
+/// (`"[CANNOT] ..."`).
+pub(crate) fn classify_refusal(bad: bool, code_known: bool, information: Option<&str>) -> Refusal {
+    if bad || code_known {
+        return Refusal::Other;
+    }
+    let text = information.unwrap_or("").trim_start();
+    let Some(rest) = text.strip_prefix('[') else {
+        return Refusal::NotHere;
+    };
+    let atom: String = rest
+        .chars()
+        .take_while(|c| !matches!(c, ']' | ' '))
+        .collect::<String>()
+        .to_ascii_uppercase();
+    match atom.as_str() {
+        "CANNOT" | "NOPERM" => Refusal::NotHere,
+        "ALREADYEXISTS" => Refusal::Exists,
+        _ => Refusal::Other,
+    }
+}
+
+/// How a MOVE, COPY or CREATE failed.
+#[derive(Debug)]
+pub(crate) enum CmdFail {
+    /// The server answered the command itself `NO`/`BAD`: nothing was done.
+    Refused(Refusal, WriteError),
+    /// The command could not be sent, or its answer not read (a broken
+    /// stream, a timeout): what the server did is not known.
+    Other(WriteError),
+}
+
+impl From<CmdFail> for WriteError {
+    fn from(f: CmdFail) -> Self {
+        match f {
+            CmdFail::Refused(_, e) | CmdFail::Other(e) => e,
+        }
+    }
+}
+
 /// Why a [`move_one`] did not go through.
 #[derive(Debug)]
 pub(crate) enum MoveFail {
-    /// The server answered the MOVE (or the COPY) itself `NO`/`BAD`: nothing
-    /// was done, so another target may be tried.
-    Refused(WriteError),
+    /// The server answered the MOVE (or the COPY) itself `NO`/`BAD`, as
+    /// [`Refusal`] reads it: nothing was done.
+    Refused(Refusal, WriteError),
     /// Anything else (the SELECT, the flagging after a COPY, a broken
     /// stream): what happened is not known, so nothing more is tried.
     Other(WriteError),
@@ -281,17 +342,16 @@ pub(crate) enum MoveFail {
 impl From<MoveFail> for WriteError {
     fn from(f: MoveFail) -> Self {
         match f {
-            MoveFail::Refused(e) | MoveFail::Other(e) => e,
+            MoveFail::Refused(_, e) | MoveFail::Other(e) => e,
         }
     }
 }
 
-/// The server's `NO`/`BAD` to the move command itself, from what the
-/// mailbox calls it ([`imap_failed`]'s 502).
-fn refused_or_other(e: WriteError) -> MoveFail {
+/// The server's `NO`/`BAD` to the move command itself.
+fn refused_or_other(e: CmdFail) -> MoveFail {
     match e {
-        WriteError::Api { status: 502, .. } => MoveFail::Refused(e),
-        e => MoveFail::Other(e),
+        CmdFail::Refused(r, e) => MoveFail::Refused(r, e),
+        CmdFail::Other(e) => MoveFail::Other(e),
     }
 }
 
@@ -333,9 +393,9 @@ pub(crate) async fn move_one(
     }
     .await;
     let moved = match moved {
-        Err(MoveFail::Refused(e)) if gone_ok => match mb.uid_present(loc.uid).await {
+        Err(MoveFail::Refused(r, e)) if gone_ok => match mb.uid_present(loc.uid).await {
             Ok(false) => Ok(None),
-            _ => Err(MoveFail::Refused(e)),
+            _ => Err(MoveFail::Refused(r, e)),
         },
         other => other,
     };
@@ -373,10 +433,16 @@ pub(crate) async fn archive_folder(
 /// A folder named `Archive` CREATEd once (with `USE (\Archive)` where the
 /// server takes it), under the personal namespace's prefix where every
 /// folder is under INBOX (`INBOX.Archive`; [`FolderRoles::create_prefix`]),
-/// and the roles listed again after. A top-level CREATE refused on a server
-/// with a delimiter is tried once more under INBOX (an INBOX.-namespace
-/// server with nothing but INBOX yet). A CREATE the server refuses (it raced
-/// another client, say) still re-lists: an `Archive` that exists is used.
+/// and the roles listed again after.
+///
+/// What the server answers decides what comes next (final review N2):
+/// - a top-level CREATE refused as "not here" ([`Refusal::NotHere`]) on a
+///   server with a delimiter is tried once more under INBOX (an
+///   INBOX.-namespace server with nothing but INBOX yet);
+/// - `[ALREADYEXISTS]` (it raced another client, say) re-lists, and the
+///   `Archive` that exists is used;
+/// - anything else (a "not now" code, a broken stream) is the error, with no
+///   second CREATE and no re-list.
 pub(crate) async fn create_archive_folder(
     mb: &mut dyn WriteMailbox,
     roles: &mut FolderRoles,
@@ -385,7 +451,7 @@ pub(crate) async fn create_archive_folder(
     let prefix = roles.create_prefix();
     let first = format!("{}{ARCHIVE_NAME}", prefix.as_deref().unwrap_or(""));
     let mut created = mb.create_archive(&first, special_use).await;
-    if created.is_err()
+    if matches!(created, Err(CmdFail::Refused(Refusal::NotHere, _)))
         && prefix.is_none()
         && let Some(d) = roles.delimiter.clone().filter(|d| !d.is_empty())
     {
@@ -393,10 +459,15 @@ pub(crate) async fn create_archive_folder(
             .create_archive(&format!("INBOX{d}{ARCHIVE_NAME}"), special_use)
             .await;
     }
+    let created = match created {
+        Ok(()) => None,
+        Err(CmdFail::Refused(Refusal::NotHere | Refusal::Exists, e)) => Some(e),
+        Err(e) => return Err(e.into()),
+    };
     *roles = mb.list_roles().await?;
     match roles.archive.clone() {
         Some(a) => Ok(a),
-        None => Err(created.err().unwrap_or_else(|| WriteError::Api {
+        None => Err(created.unwrap_or_else(|| WriteError::Api {
             status: 502,
             message: "the server did not list the Archive folder it created".into(),
         })),
@@ -529,9 +600,15 @@ pub(crate) async fn run_move(
             continue;
         }
         let mut moved = move_one(mb, &loc, &target, strategy, gone_ok).await;
-        if into_all && matches!(moved, Err(MoveFail::Refused(_))) {
+        if into_all
+            && !mb.caps().gmail
+            && matches!(moved, Err(MoveFail::Refused(Refusal::NotHere, _)))
+        {
             // NOT GMAIL'S \All (correctness review F3): it took nothing,
-            // so the archive is a folder of its own, made now.
+            // and said it never will ([CANNOT], [NOPERM], or a bare NO), so
+            // the archive is a folder of its own, made now. A "not now"
+            // code is a 502 to retry, and Gmail's IMAP (X-GM-EXT-1) never
+            // gets an Archive folder in place of All Mail (final review N1).
             into_all = false;
             match create_archive_folder(mb, roles).await {
                 Ok(f) if roles.all.as_deref() != Some(f.as_str()) => {
@@ -603,6 +680,7 @@ impl LiveMailbox {
             uidplus: caps.has_str("UIDPLUS"),
             unselect: caps.has_str("UNSELECT"),
             create_special_use: caps.has_str("CREATE-SPECIAL-USE"),
+            gmail: caps.has_str("X-GM-EXT-1"),
         })
     }
 
@@ -613,23 +691,26 @@ impl LiveMailbox {
             .map_err(|_| imap_failed(what))
     }
 
-    /// Run a COPY or MOVE and read its `COPYUID` (RFC 4315), wherever the
-    /// server put it: the tagged OK (COPY) or an untagged OK before the
-    /// expunges (MOVE, RFC 6851 §4.3). Only a `COPYUID` naming exactly
-    /// `uid` as its source is believed.
-    async fn copyuid(
+    /// Run a COPY, MOVE or CREATE, and read a COPY's or MOVE's `COPYUID`
+    /// (RFC 4315), wherever the server put it: the tagged OK (COPY) or an
+    /// untagged OK before the expunges (MOVE, RFC 6851 §4.3). Only a
+    /// `COPYUID` naming exactly `uid` as its source is believed. A tagged
+    /// `NO`/`BAD` is a [`CmdFail::Refused`] as [`classify_refusal`] reads
+    /// it; a command that could not be written, or an answer that could not
+    /// be read, is a broken session, never a refusal.
+    async fn tagged(
         &mut self,
         what: &str,
-        uid: u32,
+        uid: Option<u32>,
         command: String,
-    ) -> Result<NewPlace, WriteError> {
+    ) -> Result<NewPlace, CmdFail> {
         use async_imap::imap_proto::{Response, ResponseCode, Status};
         let session = &mut self.session;
         tokio::time::timeout(STEP, async move {
             let tag = session
                 .run_command(command)
                 .await
-                .map_err(|_| imap_failed(what))?;
+                .map_err(|_| CmdFail::Other(imap_broken(what)))?;
             let mut place: NewPlace = None;
             loop {
                 // A stream that broke mid-answer is not a refusal: what the
@@ -637,8 +718,8 @@ impl LiveMailbox {
                 let resp = session
                     .read_response()
                     .await
-                    .map_err(|_| imap_broken(what))?
-                    .ok_or_else(|| imap_broken(what))?;
+                    .map_err(|_| CmdFail::Other(imap_broken(what)))?
+                    .ok_or_else(|| CmdFail::Other(imap_broken(what)))?;
                 let (status, outcome, done) = match resp.parsed() {
                     Response::Done {
                         tag: t,
@@ -651,7 +732,8 @@ impl LiveMailbox {
                 if let (Status::Ok, Some(ResponseCode::CopyUid(validity, src, dst))) =
                     (status, &outcome.code)
                     && let ([s], [d]) = (src.as_slice(), dst.as_slice())
-                    && single_uid(s) == Some(uid)
+                    && uid.is_some()
+                    && single_uid(s) == uid
                     && let Some(new) = single_uid(d)
                 {
                     place = Some((*validity, new));
@@ -659,13 +741,20 @@ impl LiveMailbox {
                 if done {
                     return match status {
                         Status::Ok => Ok(place),
-                        _ => Err(imap_failed(what)),
+                        _ => Err(CmdFail::Refused(
+                            classify_refusal(
+                                matches!(status, Status::Bad),
+                                outcome.code.is_some(),
+                                outcome.information.as_deref(),
+                            ),
+                            imap_failed(what),
+                        )),
                     };
                 }
             }
         })
         .await
-        .map_err(|_| timed_out(what))?
+        .map_err(|_| CmdFail::Other(timed_out(what)))?
     }
 }
 
@@ -717,15 +806,15 @@ impl WriteMailbox for LiveMailbox {
         .await
     }
 
-    async fn uid_move(&mut self, uid: u32, target: &str) -> Result<NewPlace, WriteError> {
-        let t = quoted(target).ok_or_else(|| imap_failed("MOVE"))?;
-        self.copyuid("MOVE", uid, format!("UID MOVE {uid} {t}"))
+    async fn uid_move(&mut self, uid: u32, target: &str) -> Result<NewPlace, CmdFail> {
+        let t = quoted(target).ok_or_else(|| CmdFail::Other(imap_failed("MOVE")))?;
+        self.tagged("MOVE", Some(uid), format!("UID MOVE {uid} {t}"))
             .await
     }
 
-    async fn uid_copy(&mut self, uid: u32, target: &str) -> Result<NewPlace, WriteError> {
-        let t = quoted(target).ok_or_else(|| imap_failed("COPY"))?;
-        self.copyuid("COPY", uid, format!("UID COPY {uid} {t}"))
+    async fn uid_copy(&mut self, uid: u32, target: &str) -> Result<NewPlace, CmdFail> {
+        let t = quoted(target).ok_or_else(|| CmdFail::Other(imap_failed("COPY")))?;
+        self.tagged("COPY", Some(uid), format!("UID COPY {uid} {t}"))
             .await
     }
 
@@ -745,14 +834,14 @@ impl WriteMailbox for LiveMailbox {
         Ok(hits.contains(&uid))
     }
 
-    async fn create_archive(&mut self, name: &str, special_use: bool) -> Result<(), WriteError> {
-        let n = quoted(name).ok_or_else(|| imap_failed("CREATE"))?;
+    async fn create_archive(&mut self, name: &str, special_use: bool) -> Result<(), CmdFail> {
+        let n = quoted(name).ok_or_else(|| CmdFail::Other(imap_failed("CREATE")))?;
         let command = if special_use {
             format!("CREATE {n} (USE (\\Archive))")
         } else {
             format!("CREATE {n}")
         };
-        self.ok("CREATE", command).await
+        self.tagged("CREATE", None, command).await.map(|_| ())
     }
 
     async fn list_roles(&mut self) -> Result<FolderRoles, WriteError> {

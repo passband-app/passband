@@ -93,6 +93,8 @@ struct MobileCalendarView: View {
                         .padding(.horizontal, 16)
                     MobileMonthPager(
                         items: items, place: place, now: now, calendar: cal,
+                        create: store.calendarCanCreate
+                            ? { day in store.openEventEditor(day: day, now: now) } : nil,
                         open: { day in
                             Haptics.tick()
                             withAnimation(.snappy) {
@@ -292,7 +294,13 @@ struct MobileCalendarView: View {
                     stepForward = forward
                     Haptics.tick()
                     withAnimation(.snappy) { store.moveCalendarMonth(.days(forward ? 1 : -1), now: now) }
-                })
+                },
+                create: store.calendarCanCreate
+                    ? { start in
+                        Haptics.tick()
+                        store.openEventEditor(
+                            day: place.day, startMinutes: start, endMinutes: min(1440, start + 60), now: now)
+                    } : nil)
         }
     }
 
@@ -863,11 +871,38 @@ private struct MobileEventPage: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     let id: String
+    /// A destructive answer was given and its delete is (or is about to be)
+    /// out. Cleared when the write settles.
+    @State private var answered = false
 
     private var item: AgendaItem? {
         guard let feed = store.calendarFeed else { return nil }
         return Agenda.items(feed, calendar: .current).first { $0.id == id }
     }
+
+    /// The question is this page's while it is about this page's event.
+    private var deleteWording: DeleteWording? {
+        guard let ask = store.calendarDeleteAsk, ask.epoch == store.epoch, Agenda.itemId(ask.event) == id
+        else { return nil }
+        return EventGuests.deleteWording(ask.event, feed: store.calendarFeed)
+    }
+
+    /// THE QUESTION STAYS ASKED UNTIL IT IS SETTLED, as on the Mac: a delete
+    /// answered here is out, and only `eventDeleted` clears the question (a
+    /// failure leaves it up and the dialog comes back). SwiftUI writes false
+    /// to this binding right after a button's action, before the delete's
+    /// task has even started, so an answered question must not read that as
+    /// "cancel": `answered` is set synchronously by the destructive buttons.
+    private var deleteAsked: Binding<Bool> {
+        Binding(
+            get: { deleteWording != nil && !store.calendarWriting },
+            set: { shown in
+                guard !shown, !answered, store.calendarDeleteAsk != nil, !store.calendarWriting else { return }
+                store.cancelDeleteEvent()
+            })
+    }
+
+    private func sentence(_ s: String) -> String { s.prefix(1).uppercased() + s.dropFirst() }
 
     var body: some View {
         let item = item
@@ -884,8 +919,41 @@ private struct MobileEventPage: View {
         .navigationBarTitleDisplayMode(.inline)
         // Mail opened from "Mail behind it" comes back here, not to the list.
         .readerHost()
+        // THE DELETE QUESTION, asked where Delete was pressed: the store's
+        // own (`askDeleteEvent`), worded by `EventGuests.deleteWording`, with
+        // "tell guests" only where Google may tell them. Nothing is undone.
+        .confirmationDialog(
+            deleteWording?.title ?? "", isPresented: deleteAsked, titleVisibility: .visible
+        ) {
+            if let ask = store.calendarDeleteAsk, let words = deleteWording {
+                if let tell = words.tell {
+                    Button(sentence(tell), role: .destructive) {
+                        answered = true
+                        Task { await store.deleteEvent(ask.event, tellGuests: true) }
+                    }
+                }
+                Button(sentence(words.quiet), role: .destructive) {
+                    answered = true
+                    Task { await store.deleteEvent(ask.event) }
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                answered = false
+                store.cancelDeleteEvent()
+            }
+        } message: {
+            Text(deleteWording?.detail ?? "")
+        }
+        .onChange(of: store.calendarWriting) { _, writing in
+            if !writing { answered = false }
+        }
         .onChange(of: item == nil) { _, gone in
-            if gone { dismiss() }
+            guard gone else { return }
+            // Gone under an open question (deleted elsewhere, say): the
+            // question goes with the page, or every later "+" would be
+            // refused by a question nobody can see.
+            if deleteWording != nil, !store.calendarWriting { store.cancelDeleteEvent() }
+            dismiss()
         }
     }
 }
@@ -936,6 +1004,10 @@ private struct MobileDayTimeline: View {
     let now: Date
     let calendar: Calendar
     let step: (_ forward: Bool) -> Void
+    /// A tap on an empty stretch of the hours: a new event there, an hour
+    /// long, starting on the half hour above the finger. Nil where nothing
+    /// can be created (no writable calendar, the practice inbox).
+    var create: ((_ startMinutes: Int) -> Void)?
 
     @State private var showUnlikely = false
 
@@ -1040,6 +1112,17 @@ private struct MobileDayTimeline: View {
         GeometryReader { geo in
             let lane = max(0, geo.size.width - Self.gutter - 4)
             ZStack(alignment: .topLeading) {
+                // The empty hours, under everything: a tap here is a new
+                // event at that time. Blocks sit above it and take their own.
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { point in
+                        guard let create else { return }
+                        let hours = max(0, Double(point.y) / Double(Self.hourHeight))
+                        let minutes = MonthGrid.dayFromHour * 60 + Int(hours * 2) * 30
+                        // An hour long, always: the last start is 11pm.
+                        create(min(23 * 60, minutes))
+                    }
                 // The hour lines, each labelled in the gutter. Midnight closes
                 // the well without a label of its own.
                 ForEach(0...hours, id: \.self) { i in
@@ -1217,6 +1300,8 @@ private struct MobileMonthGrid: View {
     let month: Date
     let now: Date
     let calendar: Calendar
+    /// Press and hold a day: a new event on it.
+    var create: ((Date) -> Void)?
     let open: (Date) -> Void
 
     static let numberBand: CGFloat = 24
@@ -1322,6 +1407,12 @@ private struct MobileMonthGrid: View {
             Rectangle().fill(Palette.hairline).frame(width: 0.5)
         }
         .accessibilityLabel(accessibility(day, spans: spans, isToday: isToday))
+        .contextMenu {
+            if let create {
+                Button { create(day.day) } label: { Label("New event", systemImage: "plus") }
+            }
+            Button { open(day.day) } label: { Label("Open day", systemImage: "clock") }
+        }
     }
 
     private func spanBar(_ bar: SpanSegment, cellWidth: CGFloat) -> some View {
@@ -1397,6 +1488,7 @@ private struct MobileMonthPager: View {
     let place: MonthPlace
     let now: Date
     let calendar: Calendar
+    var create: ((Date) -> Void)?
     let open: (Date) -> Void
 
     /// Pages are ABSOLUTE month numbers (year * 12 + month), never offsets
@@ -1410,12 +1502,13 @@ private struct MobileMonthPager: View {
 
     init(
         items: [AgendaItem], place: MonthPlace, now: Date, calendar: Calendar,
-        open: @escaping (Date) -> Void
+        create: ((Date) -> Void)? = nil, open: @escaping (Date) -> Void
     ) {
         self.items = items
         self.place = place
         self.now = now
         self.calendar = calendar
+        self.create = create
         self.open = open
         // Seeded here, not in onAppear: a page-style TabView can ignore (or
         // write back over) a selection changed before its first layout.
@@ -1443,7 +1536,8 @@ private struct MobileMonthPager: View {
                 // The grid builds its own month, in its own body: only the
                 // pages the pager realises pay for MonthGrid.build.
                 MobileMonthGrid(
-                    items: items, month: month(number), now: now, calendar: calendar, open: open
+                    items: items, month: month(number), now: now, calendar: calendar,
+                    create: create, open: open
                 )
                 .tag(number)
             }

@@ -15,6 +15,7 @@ struct FrameHeightFileTests {
     static func main() {
         aHeightAnswersOnlyItsOwnQuestion()
         theSignatureIsTheDocument()
+        onlyViewportBodiesDependOnTheWindow()
         theFileStaysUnderItsCap()
         theFileIsKeptPrivatelyAndRoundTrips()
         whatCannotBeReadIsDeleted()
@@ -171,5 +172,16 @@ struct FrameHeightFileTests {
         check(left == [FrameHeightFile.url(account: kept, in: dir).lastPathComponent],
             "the sweep leaves only the accounts still here (left \(left))")
         try? FileManager.default.removeItem(at: dir)
+    }
+
+    static func onlyViewportBodiesDependOnTheWindow() {
+        check(FrameHeightFile.usesViewportUnits("<div style='height:100vh'>"), "100vh depends on the window")
+        check(FrameHeightFile.usesViewportUnits("<div style='min-height: 50.5 dvh'>"), "dvh too")
+        check(FrameHeightFile.usesViewportUnits("<td style='height:10VMIN'>"), "and vmin, in any case")
+        check(FrameHeightFile.usesViewportUnits("<p>a stray 40vh in the text</p>"),
+            "a stray 40vh in text counts too: the cost is only filing it per window height")
+        check(!FrameHeightFile.usesViewportUnits("<p style='width:100vw; margin:12px'>hi</p>"),
+            "vw is a width, already in the key")
+        check(!FrameHeightFile.usesViewportUnits("<p>Your vehicle is ready</p>"), "a word starting vh-ish is not a unit")
     }
 }

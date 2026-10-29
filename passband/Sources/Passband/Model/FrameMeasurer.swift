@@ -145,10 +145,12 @@ final class FrameMeasurer {
             + newestFirst.filter { $0.readyTranslation != nil }.map {
                 Job(shown: $0.presented(original: true), key: style.frameKey(for: $0, original: true))
             }
-        // THE COLUMN AND WINDOW THIS PASS MEASURES AT, taken once: a height is
-        // filed under them, and the pass stops if the column moves under it
-        // (below), as it does for a density flip.
-        let column = Double(FrameHeights.shared.width)
+        // THE WIDTH THE DOCUMENTS ARE DRAWN AT, and the window height, taken
+        // once: a height is filed under them, and the pass stops if the drawn
+        // width would move under it (below), as it does for a density flip.
+        // The drawn width, not the column: a bubble is capped at its own
+        // measure, so a column that moves above the cap draws the same body.
+        let drawn = Double(width)
         let viewport = Double(self.viewportHeight)
         let jobs = versions.filter { job in
             guard let html = job.shown.html, !html.isEmpty else { return false }
@@ -159,7 +161,8 @@ final class FrameMeasurer {
             // Measured on an earlier launch, for exactly this document at
             // this width and density: filed without a WebKit load.
             if let kept = FrameHeightStore.shared.height(
-                job.key, width: column, viewport: viewport,
+                job.key, width: drawn,
+                viewport: FrameHeightFile.usesViewportUnits(html) ? viewport : 0,
                 signature: Self.signature(job.shown, html: html, allowRemote: allowRemote))
             {
                 FrameHeights.shared.set(job.key, kept, authoritative: true)
@@ -193,11 +196,15 @@ final class FrameMeasurer {
                     self.finish()
                     return
                 }
-                // And the column: the reader declared a new width while this
-                // document was being drawn at the old one (a side panel
-                // opened), so its height answers a question nobody is asking.
-                // The reader's own pass for the new width follows.
-                guard abs(Double(FrameHeights.shared.width) - column) <= 0.5 else {
+                // And the width: the reader declared a column whose body is
+                // drawn at another width while this document was drawn at the
+                // old one (a side panel opened), so its height answers a
+                // question nobody is asking. The reader's own pass for the new
+                // body width follows (its task is keyed on that width). A
+                // column change that leaves the body width alone (a bubble
+                // over its cap) changes nothing here and the pass goes on.
+                let now = ThreadViewer.bodyWidth(column: FrameHeights.shared.width, style: self.style)
+                guard abs(Double(now) - drawn) <= 0.5 else {
                     self.finish()
                     return
                 }
@@ -208,7 +215,8 @@ final class FrameMeasurer {
                     // to keep.
                     if measured.settled, let html = job.shown.html {
                         FrameHeightStore.shared.record(
-                            job.key, width: column, viewport: viewport, height: height,
+                            job.key, width: drawn,
+                            viewport: FrameHeightFile.usesViewportUnits(html) ? viewport : 0, height: height,
                             signature: Self.signature(job.shown, html: html, allowRemote: allowRemote))
                     }
                     misses = 0
@@ -341,7 +349,7 @@ final class FrameMeasurer {
                 // that failed (offline, a dead link, a missing cid part) gives
                 // a broken glyph and a height without the picture, fine for
                 // now and wrong to keep for the next launch.
-                return (height, await allImagesDrawn(view))
+                return (height, await allImagesDrawn(view, allowRemote: allowRemote))
             }
             // The script defines the function before the navigation finishes,
             // and an empty body is still 28 points of padding — so a document
@@ -359,12 +367,16 @@ final class FrameMeasurer {
         return (max(0, previous), false)
     }
 
-    /// Whether every image in the document loaded. A failed one is
-    /// `complete` with no natural size.
-    private func allImagesDrawn(_ view: WKWebView) async -> Bool {
-        await withCheckedContinuation { continuation in
+    /// Whether every image in the document drew: loaded, with a size. One
+    /// that failed is `complete` with no natural size; one still loading (a
+    /// lazy image below the frame) is not complete, and its size is not in
+    /// the height either. A remote image with remote images OFF is refused on
+    /// purpose, every time, so it is drawn as the reader will draw it.
+    private func allImagesDrawn(_ view: WKWebView, allowRemote: Bool) async -> Bool {
+        let refusedOnPurpose = allowRemote ? "false" : "i.src.indexOf('passband-img:') === 0"
+        return await withCheckedContinuation { continuation in
             view.evaluateJavaScript(
-                "Array.prototype.every.call(document.images, function(i){ return !i.complete || i.naturalWidth > 0 })"
+                "Array.prototype.every.call(document.images, function(i){ return (i.complete && i.naturalWidth > 0) || \(refusedOnPurpose) })"
             ) { value, _ in
                 continuation.resume(returning: (value as? Bool) ?? false)
             }
@@ -585,11 +597,11 @@ final class FrameHeightStore {
     }
 
     func height(_ key: String, width: Double, viewport: Double, signature: UInt64) -> CGFloat? {
-        guard width > 0, current() != nil, let held = file else { return nil }
+        guard width > 0, current() != nil else { return nil }
         let c = conditions
-        guard held.holds(build: c.build, metrics: c.metrics) else { return nil }
+        guard file?.holds(build: c.build, metrics: c.metrics) == true else { return nil }
         let slot = FrameHeightFile.slot(key, width: width, viewport: viewport)
-        guard let height = held.height(slot, signature: signature) else { return nil }
+        guard let height = file?.height(slot, signature: signature) else { return nil }
         // Used, so it outlasts the ones nobody opens. Written with the next
         // change rather than on its own.
         file?.touch(slot, at: Date().timeIntervalSince1970)

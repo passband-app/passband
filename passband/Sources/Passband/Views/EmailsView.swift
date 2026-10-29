@@ -309,7 +309,10 @@ struct EmailsView: View {
         // selection moves with every `e` and every open, and a highlight
         // following it there would be waiting, live under the verb keys, on a
         // row nobody picked. A hand-off (`viewInEmails`) routes here and sets
-        // the selection in one go, so it arrives with the page on screen.
+        // the selection in one go, so a CHANGED selection arrives with the page
+        // on screen. A first visit (nothing mounted yet) or a selection that
+        // already held that id fires nothing, as it never did before the page
+        // was kept.
         .onChange(of: store.selectedId) { _, id in
             guard pageActive, let id, let i = rows.firstIndex(where: { $0.id == id }) else { return }
             kbActive = true

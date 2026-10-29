@@ -9,9 +9,10 @@
 // - the build and the reader's type and padding (`ReaderMetrics`), once for
 //   the whole file: the reader's CSS ships in the build, and a density
 //   change re-sizes everything;
-// - per height, the column width and window height it was taken at (part of
-//   the entry's key, so a column narrowed by a side panel files its own
-//   heights beside the full-width ones), and a signature of the document
+// - per height, the width the body was drawn at (part of the entry's key, so
+//   a column narrowed by a side panel files its own heights beside the
+//   full-width ones), the window height too for a body sized in viewport
+//   units (`usesViewportUnits`), and a signature of the document
 //   measured: its HTML, its attachments (cid images), and whether trackers
 //   and remote images were allowed. A body fetched again after a sanitizer
 //   change, or translated since, is measured again.
@@ -28,7 +29,7 @@ import Foundation
 
 struct FrameHeightFile: Codable, Equatable, Sendable {
     /// The shape of the file. Another version is not read.
-    static let currentVersion = 1
+    static let currentVersion = 2
     /// At most this many heights are kept; the least recently used go first.
     /// About 70 bytes each.
     static let capacity = 4000
@@ -50,8 +51,9 @@ struct FrameHeightFile: Codable, Equatable, Sendable {
         version == Self.currentVersion && self.build == build && self.metrics == metrics
     }
 
-    /// Where a height for `key` taken at this column width and window height
-    /// is filed. Whole points: a width a fraction off is the same column.
+    /// Where a height for `key` drawn at this width and window height is
+    /// filed (`viewport` 0 for a body whose height does not depend on the
+    /// window). Whole points: a width a fraction off is the same body.
     static func slot(_ key: String, width: Double, viewport: Double) -> String {
         "\(key)@\(Int(width.rounded()))x\(Int(viewport.rounded()))"
     }
@@ -62,6 +64,14 @@ struct FrameHeightFile: Codable, Equatable, Sendable {
             return nil
         }
         return entry.height
+    }
+
+    /// Whether a body's height can depend on the window's height: `vh` and
+    /// its kin. Only those are filed per window height, so a resize does not
+    /// cost every other message its height.
+    static func usesViewportUnits(_ html: String) -> Bool {
+        html.range(of: #"[0-9.]\s*(vh|svh|lvh|dvh|vmin|vmax)\b"#, options: [.regularExpression, .caseInsensitive])
+            != nil
     }
 
     /// A height was used: it is the last to go under the cap.

@@ -819,6 +819,11 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // The card's place gained its street address (2026-10-29). A table made
+    // before it holds names only, under the old prompt, so every row is
+    // pending again anyway.
+    add_column_if_missing(conn, "calendar_places", "address", "TEXT")?;
+
     // STRANDED FAN-OUTS. A group send settles its recipients from a background
     // task, and no task survives the process. So any recipient still 'pending'
     // when the store opens belongs to a batch that died — a restart, a crash, a

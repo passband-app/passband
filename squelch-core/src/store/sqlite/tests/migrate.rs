@@ -2865,8 +2865,12 @@ fn calendar_places_are_pending_stored_and_pruned_by_location() {
             .is_empty()
     );
 
+    let dingles = crate::gcal::place::Place {
+        name: Some("Dingles Public House".to_string()),
+        address: Some("165 Main St".to_string()),
+    };
     store
-        .calendar_place_put(acct, tock, Some("Dingles Public House"), now)
+        .calendar_place_put(acct, tock, Some(&dingles), now)
         .unwrap();
     store.calendar_place_put(acct, past, None, now).unwrap();
     assert_eq!(
@@ -2874,10 +2878,7 @@ fn calendar_places_are_pending_stored_and_pruned_by_location() {
         vec![soon]
     );
     let places = store.calendar_places(acct).unwrap();
-    assert_eq!(
-        places.get(tock),
-        Some(&Some("Dingles Public House".to_string()))
-    );
+    assert_eq!(places.get(tock), Some(&Some(dingles.clone())));
     assert_eq!(places.get(past), Some(&None));
     assert!(store.calendar_places(other).unwrap().is_empty());
 

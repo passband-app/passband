@@ -2185,7 +2185,10 @@ CREATE TABLE IF NOT EXISTS calendar_own_refused (
 CREATE TABLE IF NOT EXISTS calendar_places (
     account_id     INTEGER NOT NULL,
     raw            TEXT NOT NULL,
+    -- The place's name, and its street address when the location gives one
+    -- (gcal/place.rs). Both NULL: the location names no place.
     place          TEXT,
+    address        TEXT,
     prompt_version TEXT NOT NULL,
     cleaned_at     TEXT NOT NULL,
     PRIMARY KEY(account_id, raw)

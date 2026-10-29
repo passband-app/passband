@@ -756,16 +756,28 @@ impl SqliteStore {
         &self,
         account: AccountId,
         raw: &str,
-        place: Option<&str>,
+        place: Option<&place::Place>,
         now: DateTime<Utc>,
     ) -> Result<()> {
         let conn = self.lock()?;
+        let (name, address) = match place {
+            Some(p) => (p.name.as_deref(), p.address.as_deref()),
+            None => (None, None),
+        };
         conn.execute(
-            "INSERT INTO calendar_places(account_id,raw,place,prompt_version,cleaned_at)
-             VALUES(?1,?2,?3,?4,?5)
+            "INSERT INTO calendar_places(account_id,raw,place,address,prompt_version,cleaned_at)
+             VALUES(?1,?2,?3,?4,?5,?6)
              ON CONFLICT(account_id,raw) DO UPDATE SET place=excluded.place,
-                 prompt_version=excluded.prompt_version, cleaned_at=excluded.cleaned_at",
-            params![account, raw, place, place::PROMPT_VERSION, now.to_rfc3339()],
+                 address=excluded.address, prompt_version=excluded.prompt_version,
+                 cleaned_at=excluded.cleaned_at",
+            params![
+                account,
+                raw,
+                name,
+                address,
+                place::PROMPT_VERSION,
+                now.to_rfc3339()
+            ],
         )?;
         Ok(())
     }
@@ -924,12 +936,20 @@ impl SqliteStore {
 
     /// Every stored place, by the location it was made from: `None` for a
     /// location that names no place.
-    pub fn calendar_places(&self, account: AccountId) -> Result<HashMap<String, Option<String>>> {
+    pub fn calendar_places(
+        &self,
+        account: AccountId,
+    ) -> Result<HashMap<String, Option<place::Place>>> {
         let conn = self.lock()?;
         let mut stmt =
-            conn.prepare("SELECT raw, place FROM calendar_places WHERE account_id=?1")?;
+            conn.prepare("SELECT raw, place, address FROM calendar_places WHERE account_id=?1")?;
         let rows = stmt.query_map(params![account], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            let place = place::Place {
+                name: r.get(1)?,
+                address: r.get(2)?,
+            };
+            let named = place.name.is_some() || place.address.is_some();
+            Ok((r.get::<_, String>(0)?, named.then_some(place)))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }

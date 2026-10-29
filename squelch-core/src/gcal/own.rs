@@ -40,6 +40,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use super::place::Place;
 use super::write::google_time;
 use super::{EventRow, SyncedEvent, ghost_matches, normalize_title, same_start};
 use crate::triage::ghost::EventTime;
@@ -307,14 +308,14 @@ fn end_or_default(row: &EventRow) -> EventTime {
 }
 
 /// Passband's event in place of Gmail's `gmail`: its title, times, colour
-/// and free/busy, the cleaned `place` when the card has one, else Gmail's
-/// location (also when the model judged it names no place, `Some("")`: Gmail's
-/// copy is about to be deleted, and a wrong judgment must not lose the
-/// address), and Passband's note.
+/// and free/busy, the cleaned `place` as one line ([`Place::line`]: its name,
+/// then its address) when the card has one, else Gmail's location (also when
+/// the model judged it names no place: Gmail's copy is about to be deleted,
+/// and a wrong judgment must not lose the address), and Passband's note.
 pub fn adopt_body(
     ghost: &GhostEvent,
     gmail: &EventRow,
-    place: Option<&str>,
+    place: Option<&Place>,
     id: &str,
 ) -> Option<Value> {
     let mut body = Map::new();
@@ -331,10 +332,9 @@ pub fn adopt_body(
         "end".into(),
         google_time(&end_or_default(gmail), true, false).ok()?,
     );
-    let location = match place {
-        Some(place) if !place.is_empty() => Some(place.to_string()),
-        _ => gmail.location.clone(),
-    };
+    let location = place
+        .and_then(Place::line)
+        .or_else(|| gmail.location.clone());
     if let Some(location) = location {
         body.insert("location".into(), json!(location));
     }
@@ -424,7 +424,7 @@ pub fn plan(
     ghosts: &[GhostEvent],
     events: &[SyncedEvent],
     owned: &[Owned],
-    places: &HashMap<String, Option<String>>,
+    places: &HashMap<String, Option<Place>>,
     settled: &Settled,
 ) -> Vec<Step> {
     let by_id: HashMap<i64, &GhostEvent> = ghosts.iter().map(|g| (g.id, g)).collect();
@@ -536,7 +536,7 @@ pub fn plan(
             .location
             .as_ref()
             .and_then(|raw| places.get(raw))
-            .map(|p| p.as_deref().unwrap_or_default());
+            .and_then(Option::as_ref);
         let id = owned_event_id(ghost);
         let Some(body) = adopt_body(ghost, &copy.row, place, &id) else {
             continue;
@@ -655,7 +655,10 @@ mod tests {
     ) -> Vec<Step> {
         let places = HashMap::from([(
             "Dingles Public House, Tock is now part of the Resy network".to_string(),
-            Some("Dingles Public House".to_string()),
+            Some(Place {
+                name: Some("Dingles Public House".to_string()),
+                address: None,
+            }),
         )]);
         plan(now(), ME, ghosts, events, owned, &places, settled)
     }
@@ -954,10 +957,36 @@ mod tests {
         let raw = "Sect 102 Row G Seat 14, Gate C entrance";
         let mut e = dingles();
         e.row.location = Some(raw.into());
-        let body = adopt_body(&g, &e.row, Some(""), "id").unwrap();
+        let body = adopt_body(&g, &e.row, None, "id").unwrap();
         assert_eq!(body["location"], raw);
-        let body = adopt_body(&g, &e.row, Some("Gate C"), "id").unwrap();
+        let body = adopt_body(&g, &e.row, Some(&Place::default()), "id").unwrap();
+        assert_eq!(body["location"], raw);
+        let gate = Place {
+            name: Some("Gate C".into()),
+            address: None,
+        };
+        let body = adopt_body(&g, &e.row, Some(&gate), "id").unwrap();
         assert_eq!(body["location"], "Gate C");
+    }
+
+    #[test]
+    fn the_adopted_events_location_is_the_name_then_the_address() {
+        let g = ghost(7, "Dinner at Harbor Tavern", START);
+        let mut e = dingles();
+        e.row.location =
+            Some("Harbor Tavern, 12 Water St, Portland. Tock is now part of Resy".into());
+        let place = Place {
+            name: Some("Harbor Tavern".into()),
+            address: Some("12 Water St, Portland".into()),
+        };
+        let body = adopt_body(&g, &e.row, Some(&place), "id").unwrap();
+        assert_eq!(body["location"], "Harbor Tavern, 12 Water St, Portland");
+        let address = Place {
+            name: None,
+            address: Some("12 Water St, Portland".into()),
+        };
+        let body = adopt_body(&g, &e.row, Some(&address), "id").unwrap();
+        assert_eq!(body["location"], "12 Water St, Portland");
     }
 
     #[test]

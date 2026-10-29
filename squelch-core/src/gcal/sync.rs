@@ -433,7 +433,7 @@ impl CalendarSync {
                         s.extract_bump_usage(a, &day, place::USAGE_CATEGORY, u.into())?;
                     }
                     if let Some(place) = place {
-                        s.calendar_place_put(a, &raw, place.as_deref(), now)?;
+                        s.calendar_place_put(a, &raw, place.as_ref(), now)?;
                     }
                     Ok(())
                 })

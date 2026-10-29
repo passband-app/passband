@@ -850,7 +850,8 @@ list, Esc closes the place list, then the delete question, then the pane.
     (`own::same_event`: the same start, and the display match's titles or a
     distinctive word shared across title and place) is replaced. Passband
     creates its own event (Gmail's title, times, colour and free/busy; the
-    card's cleaned place; the note "Kept up to date by Passband from your
+    card's cleaned place as one line, its name then its address, or Gmail's
+    location when there is none; the note "Kept up to date by Passband from your
     mail."; a private extended property naming the ghost) under an id made
     from the ghost (`passband<ghost>t<created>`, so a create sent twice finds
     the first), stores it, then deletes Gmail's. If Google refuses that
@@ -1273,17 +1274,20 @@ Read only (slice B). The only writes are the user's own, described under
   often writes its marketing into the location ("Dingles Public House, Tock is
   now part of the Resy network. Explore even more of our dining network on").
   After each pass that synced, up to 10 locations longer than 40 characters
-  with no answer yet (upcoming events first) go one at a time to the small
-  `notify` model, which returns the venue and its address when the text gives
-  one. Every word of the answer must be a word of the location, checked in
-  code; an answer that adds one is not believed and the location is kept. An
-  empty answer means the text names no place. Answers are stored per distinct
+  with no answer yet (upcoming events first) go to the small `notify` model,
+  side by side, which returns the place's `name` (the venue, room or meeting
+  link) and its street `address` when the text gives one. Every word of each
+  must be a word of the location, checked in code; an answer that adds one is
+  not believed and the whole location is kept as the name, with no address.
+  Both empty means the text names no place. Answers are stored per distinct
   location text in `calendar_places` (so a weekly dinner costs one call),
   pruned when no event holds the text, redone when `PROMPT_VERSION` changes,
   billed under `calendar_place`, at most 100 calls a day. The timeline serves
-  it as `place` on each event once there is one (`""` for no place); the card
-  shows `place`, falling back to `location`, and the editor keeps reading and
-  writing `location`.
+  it once there is one as `place: {"name", "address", "original"}` on each
+  event: `name` and `address` null where the location gives none (both null:
+  no place), `original` the location it was made from. The card shows the
+  place, falling back to `location`, and the editor keeps reading and writing
+  `location`.
 - **Human door only.** Titles, places, organizers and links never reach an
   agent route, a log line or a triage prompt. The one exception is the card's
   place above: the location string alone, to the small model. A log names a calendar by its

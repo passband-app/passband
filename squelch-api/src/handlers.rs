@@ -2268,10 +2268,21 @@ pub async fn get_timeline(
         .map(|e| {
             let mut view = calendar_event_view(e, &account_email);
             // The card's place (gcal/place.rs), once the model has made one
-            // of this location: "" when it names no place. Absent until then,
-            // and the client shows `location`.
-            if let Some(place) = e.row.location.as_ref().and_then(|raw| places.get(raw)) {
-                view["place"] = json!(place.as_deref().unwrap_or(""));
+            // of this location: its name and street address, each null when
+            // the location gives none (both null: it names no place), and the
+            // location it was made from. Absent until then, and the client
+            // shows `location`.
+            if let Some((raw, place)) = e
+                .row
+                .location
+                .as_ref()
+                .and_then(|raw| places.get(raw).map(|p| (raw, p)))
+            {
+                let (name, address) = match place {
+                    Some(p) => (p.name.as_deref(), p.address.as_deref()),
+                    None => (None, None),
+                };
+                view["place"] = json!({ "name": name, "address": address, "original": raw });
             }
             // Passband made this event and keeps it current from the mail.
             // Absent otherwise.

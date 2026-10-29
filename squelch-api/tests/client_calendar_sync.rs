@@ -5630,15 +5630,18 @@ async fn every_refusal_before_google_names_its_code() {
 
 // --- the card's place ---------------------------------------------------------
 
-/// A fake model that answers every call with `place`, counting the calls and
-/// keeping each request body.
-async fn spawn_place_model(place: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
+/// A fake model that answers every call with `name` and `address`, counting
+/// the calls and keeping each request body.
+async fn spawn_place_model(
+    name: &'static str,
+    address: &'static str,
+) -> (String, Arc<Mutex<Vec<String>>>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let bodies: Arc<Mutex<Vec<String>>> = Arc::default();
     let seen = bodies.clone();
-    let answer = json!({ "place": place }).to_string();
+    let answer = json!({ "name": name, "address": address }).to_string();
     let body = json!({
         "content": [{ "type": "text", "text": answer }],
         "stop_reason": "end_turn",
@@ -5693,7 +5696,7 @@ async fn a_noisy_location_is_served_as_a_clean_place_and_boilerplate_notes_go() 
         .full
         .insert(PRIMARY.into(), vec![vec![dinner, again, call]]);
 
-    let (url, bodies) = spawn_place_model("Dingles Public House").await;
+    let (url, bodies) = spawn_place_model("Dingles Public House", "").await;
     let sync = CalendarSync::with_api_base(
         w.store.clone(),
         w.acct,
@@ -5734,9 +5737,10 @@ async fn a_noisy_location_is_served_as_a_clean_place_and_boilerplate_notes_go() 
     }
     let events = w.events().await;
     let by_id = |id: &str| events.iter().find(|e| e["id"] == id).unwrap().clone();
-    assert_eq!(by_id("evt-1")["place"], json!("Dingles Public House"));
+    let dingles = json!({ "name": "Dingles Public House", "address": null, "original": tock });
+    assert_eq!(by_id("evt-1")["place"], dingles);
     assert_eq!(by_id("evt-1")["location"], json!(tock), "the editor's text");
-    assert_eq!(by_id("evt-2")["place"], json!("Dingles Public House"));
+    assert_eq!(by_id("evt-2")["place"], dingles);
     assert!(by_id("evt-3").get("place").is_none());
     assert_eq!(by_id("evt-3")["location"], json!("Zoom"));
 
@@ -5753,8 +5757,9 @@ async fn a_noisy_location_is_served_as_a_clean_place_and_boilerplate_notes_go() 
     assert_eq!(bodies.lock().unwrap().len(), 1);
 }
 
-/// A model answer that adds a word the location never had is not believed:
-/// the location is served as the place, unchanged.
+/// A model answer that adds a word the location never had, in its name or
+/// its address, is not believed: the location is served as the place's name,
+/// unchanged, with no address.
 #[tokio::test]
 async fn a_place_answer_that_adds_a_word_keeps_the_location() {
     use squelch_core::config::Stage2Provider;
@@ -5769,7 +5774,7 @@ async fn a_place_answer_that_adds_a_word_keeps_the_location() {
     );
     dinner["location"] = json!(noisy);
     w.google().full.insert(PRIMARY.into(), vec![vec![dinner]]);
-    let (url, _) = spawn_place_model("Harbor Tavern, 12 Water St").await;
+    let (url, _) = spawn_place_model("Harbor Tavern", "12 Water St").await;
     let sync = CalendarSync::with_api_base(
         w.store.clone(),
         w.acct,
@@ -5788,7 +5793,73 @@ async fn a_place_answer_that_adds_a_word_keeps_the_location() {
     )));
     assert_eq!(sync.pass(Utc::now()).await, PassOutcome::Synced);
     sync.clean_places(Utc::now()).await;
-    assert_eq!(w.events().await[0]["place"], json!(noisy));
+    assert_eq!(
+        w.events().await[0]["place"],
+        json!({ "name": noisy, "address": null, "original": noisy })
+    );
+}
+
+/// A location with a street address in it is served as the place's name and
+/// address apart, beside the location it came from; and the event Passband
+/// makes in place of Gmail's copy carries both, as one line, so the address
+/// is not lost when Gmail's copy is deleted.
+#[tokio::test]
+async fn a_place_keeps_its_address_apart_and_on_the_adopted_event() {
+    use squelch_core::config::Stage2Provider;
+    use squelch_core::features::CALENDAR;
+    use squelch_core::gcal::place::PlaceClient;
+    let w = world("place-address", GRANTED).await;
+    let booked = "Harbor Tavern, 12 Water St, Portland. Tock is now part of the Resy \
+                  network. Explore even more of our dining network on";
+    let start = minute(Utc::now() + Duration::days(2));
+    let mut gmail = timed("gm1", "Reservation at Harbor Tavern", start, 60);
+    gmail["eventType"] = json!("fromGmail");
+    gmail["location"] = json!(booked);
+    gmail["organizer"] = json!({"email": "me@example.com", "self": true});
+    w.google().full.insert(PRIMARY.into(), vec![vec![gmail]]);
+    seed_ghost(
+        &w.store,
+        w.acct,
+        "g1",
+        "Dinner at Harbor Tavern",
+        rfc(start),
+    );
+    let (url, _) = spawn_place_model("Harbor Tavern", "12 Water St, Portland").await;
+    let sync = CalendarSync::with_api_base(
+        w.store.clone(),
+        w.acct,
+        w.creds.clone(),
+        w.features.clone(),
+        &w.base,
+    )
+    .unwrap()
+    .with_places(Some(PlaceClient::new(
+        reqwest::Client::new(),
+        url,
+        "sk-test",
+        Stage2Provider::Anthropic,
+        "claude-haiku-4-5",
+        None,
+    )));
+    assert_eq!(sync.pass(Utc::now()).await, PassOutcome::Synced);
+    sync.clean_places(Utc::now()).await;
+    assert_eq!(
+        w.events().await[0]["place"],
+        json!({ "name": "Harbor Tavern", "address": "12 Water St, Portland", "original": booked })
+    );
+
+    w.features.replace_granted([CALENDAR]);
+    sync.own_events(Utc::now()).await;
+    let g = w.google();
+    let insert = g
+        .writes
+        .iter()
+        .find(|w| w.method == "POST")
+        .expect("an adoption");
+    assert_eq!(
+        insert.body["location"],
+        "Harbor Tavern, 12 Water St, Portland"
+    );
 }
 
 // --- Passband owns Gmail's events -------------------------------------------

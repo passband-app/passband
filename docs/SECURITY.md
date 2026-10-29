@@ -1554,14 +1554,16 @@ it, and Passband's own writes always send `sendUpdates=none`.
   sends up to 10 stored locations longer than 40 characters (upcoming first) to
   the provider and `notify` model that already read the owner's mail, each on
   its own, fenced as untrusted, with nothing else of the event: no title,
-  guests, notes, ids or account. The answer is laundered like a title and HELD
-  TO THE INPUT IN CODE: every word of it must be a word of the location
-  (`place::grounded`), so the model can only drop text, never add an address,
-  a link or anything a hostile location asked for; an answer that adds a word
-  is discarded and the location kept. Stored in `calendar_places` keyed by the
+  guests, notes, ids or account. The answer, a `name` and an `address`, is
+  laundered like a title and HELD TO THE INPUT IN CODE: every word of each
+  must be a word of the location (`place::grounded`), so the model can only
+  drop text, never add an address, a link or anything a hostile location
+  asked for; an answer that adds a word is discarded and the location kept. Stored in `calendar_places` keyed by the
   location text (one call per distinct text), pruned when no event holds it,
-  served on `GET /client/timeline` only, as `place` beside the untouched
-  `location`. At most 100 calls per account per day (attempts counted in
+  served on `GET /client/timeline` only, as `place` (name, address and the
+  original location) beside the untouched `location`. An event Passband owns
+  is written with the name and address as its location, so the address
+  survives Gmail's copy being deleted. At most 100 calls per account per day (attempts counted in
   memory, spend in the usage ledger under `calendar_place`). No key, no call.
   The location text is never logged.
 - **`html_link` is an allow-list** (`gcal/mod.rs:google_link`): https, a host that is

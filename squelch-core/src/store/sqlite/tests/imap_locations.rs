@@ -3,7 +3,7 @@
 
 use super::super::*;
 use super::support::*;
-use crate::mail::imap::{MessageLocation, MessageLocations};
+use crate::mail::imap::{BodyPrint, MessageLocation, MessageLocations};
 
 fn loc(folder: &str, uidvalidity: u32, uid: u32, mid: Option<&str>) -> MessageLocation {
     MessageLocation {
@@ -162,4 +162,31 @@ fn locations_come_back_first_recorded_first() {
         .map(|l| l.folder)
         .collect();
     assert_eq!(folders, ["Sent", "INBOX"]);
+}
+
+/// REVIEW FIX3 F1: an id's body print is bound once, by its first accepted
+/// fetch; accounts never see each other's.
+#[test]
+fn a_body_print_is_bound_once_per_account() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    let a = store.ensure_account("a@x.org").unwrap();
+    let b = store.ensure_account("b@x.org").unwrap();
+    let first = BodyPrint {
+        body: "b1:first".into(),
+        from: "f".into(),
+    };
+    assert_eq!(store.body_print(a, "imap:1").unwrap(), None);
+    store.record_body_print(a, "imap:1", &first).unwrap();
+    store
+        .record_body_print(
+            a,
+            "imap:1",
+            &BodyPrint {
+                body: "b1:resend".into(),
+                from: "f".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(store.body_print(a, "imap:1").unwrap(), Some(first));
+    assert_eq!(store.body_print(b, "imap:1").unwrap(), None);
 }

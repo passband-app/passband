@@ -928,6 +928,24 @@ CREATE TABLE IF NOT EXISTS imap_digests (
     PRIMARY KEY(account_id, msg_id)
 );
 
+-- WHICH BYTES EACH IMAP ID MAY SERVE (review fix3 F1,
+-- `crate::mail::imap::body_fingerprint`): "b1:" + sha256 of the BODY[TEXT]
+-- bytes of the copy an id's content was first read from, recorded at that
+-- first fetch and never replaced. A copy whose body differs (a re-send
+-- reusing the Message-ID and the identity headers) is never served under the
+-- id, from any folder. `from_key` is a hash of that copy's From addresses: a
+-- distinct (colliding) id gets a thread of its own only when its author
+-- differs (F4). No row: an id never fetched, or one from an earlier build,
+-- bound at its next fetch from its earliest location.
+CREATE TABLE IF NOT EXISTS imap_bodies (
+    account_id  INTEGER NOT NULL,
+    msg_id      TEXT NOT NULL,
+    body_fp     TEXT NOT NULL,
+    from_key    TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    PRIMARY KEY(account_id, msg_id)
+);
+
 -- GMAIL-SIDE INBOX UNREAD COUNTS (labels/INBOX messagesUnread/threadsUnread),
 -- refreshed once per sync cycle. One row per account, overwritten each fetch:
 -- this mirrors Gmail's current state, it is not a history. Sync's own tables

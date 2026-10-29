@@ -3022,7 +3022,10 @@ async fn live_a_resend_under_a_known_id_never_replaces_the_original_bytes() {
 }
 
 /// MATRIX 16b: a self-sent message whose INBOX copy was re-encoded in transit
-/// (quoted-printable; the Sent copy is 8bit) is ONE id with both locations.
+/// (quoted-printable; the Sent copy is 8bit) is ONE id. Its INBOX copy's
+/// bytes differ from the first-read Sent copy's, so under the body print
+/// (review fix3 F1) that copy is dropped at the first fetch and the message
+/// is placed in Sent only: one row, never a second.
 #[tokio::test]
 #[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
 async fn live_a_reencoded_self_sent_copy_is_one_id() {
@@ -3049,9 +3052,11 @@ async fn live_a_reencoded_self_sent_copy_is_one_id() {
     let rows = locs.message_locations(1, &id).unwrap();
     assert_eq!(rows.len(), 2, "{rows:?}");
     let m = src.fetch_raw(&id, Urgency::Live).await.unwrap();
-    assert!(m.placement.in_inbox && m.placement.in_sent);
+    assert!(m.placement.in_sent && !m.placement.in_inbox);
     // First seen first: the Sent copy is the bytes.
     assert_eq!(raw_of(&m), sent.as_bytes());
+    let rows = locs.message_locations(1, &id).unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
     let _ = other.logout().await;
 }
 
@@ -3381,6 +3386,30 @@ async fn a_reset_folder_is_relisted_over_the_configured_backfill_window() {
     server.abort();
 }
 
+/// REVIEW FIX3 F6: an oversized message is reported once per process, not
+/// once per lane that lists it; after that it is quietly nothing to ingest.
+#[tokio::test]
+async fn an_oversized_message_is_reported_once() {
+    let (port, _log, server) = fetch_server(|tag, cmd| {
+        if cmd.contains("RFC822.SIZE") {
+            format!("* 1 FETCH (UID 1 RFC822.SIZE 300000000)\r\n{tag} OK done\r\n")
+        } else {
+            format!("* 1 FETCH (UID 1 BODY[] {{4}}\r\nboom)\r\n{tag} OK done\r\n")
+        }
+    })
+    .await;
+    let locs = Arc::new(MemLocations::default());
+    one_row(&locs, "imap:big");
+    let src = dev_source_for_port(port, locs);
+    let first = src.fetch_raw("imap:big", Urgency::Live).await.unwrap();
+    assert!(matches!(first.raw, RawBody::Undecodable(_)));
+    for _ in 0..2 {
+        let again = src.fetch_raw("imap:big", Urgency::Window).await.unwrap();
+        assert!(matches!(again.raw, RawBody::Missing));
+    }
+    server.abort();
+}
+
 fn seen_at(id: &str, folder: &str, uid: u32, date: &str, digest: &str) -> Seen {
     Seen {
         id: id.to_string(),
@@ -3417,4 +3446,218 @@ fn a_batch_binds_the_earliest_copy_not_the_first_folder() {
     assert_eq!(inbox.id, "imap:x");
     assert!(inbox.new_digest);
     assert_ne!(archive.id, "imap:x");
+}
+
+#[test]
+fn the_body_fingerprint_is_the_bytes_after_the_header_block() {
+    let a = b"From: a@x.org\r\nSubject: s\r\n\r\nbody\r\n";
+    let b = b"Received: by mx\r\nFrom: a@x.org\r\nSubject: other\r\n\r\nbody\r\n";
+    let c = b"From: a@x.org\r\nSubject: s\r\n\r\nbody!\r\n";
+    assert_eq!(body_fingerprint(a), body_fingerprint(b));
+    assert_ne!(body_fingerprint(a), body_fingerprint(c));
+    assert!(body_fingerprint(a).starts_with(BODY_FP_PREFIX));
+    assert_eq!(
+        from_key(b"From: \"A\" <A@X.org>\r\n\r\n"),
+        from_key(b"From: a@x.org\r\nTo: z@z\r\n\r\n")
+    );
+    assert_ne!(from_key(a), from_key(b"From: b@x.org\r\n\r\n"));
+}
+
+/// The original M and a re-send M' of it: the same Message-ID and identical
+/// identity headers (so one header digest, one id), a different body.
+fn original_and_resend(mid: &str) -> (Vec<u8>, Vec<u8>) {
+    let m = |body: &str| {
+        format!(
+            "From: billing@bank.example\r\nTo: me@dev.test\r\nSubject: Your statement\r\n\
+             Date: Mon, 26 Oct 2026 09:00:00 +0000\r\nMessage-ID: <{mid}>\r\n\r\n{body}\r\n"
+        )
+        .into_bytes()
+    };
+    (
+        m("Your statement is ready."),
+        m("URGENT: wire the balance to account 666"),
+    )
+}
+
+/// "Another client" archives the original: a MOVE by doveadm.
+fn archive_in_other_client(user: &str, uid: u32) {
+    let _ = std::process::Command::new("docker")
+        .args(["exec", "squelch-imap-dev", "doveadm", "mailbox", "create"])
+        .args(["-u", user, "Archive"])
+        .output();
+    doveadm(&[
+        "move",
+        "-u",
+        user,
+        "Archive",
+        "mailbox",
+        INBOX,
+        "uid",
+        &uid.to_string(),
+    ]);
+}
+
+/// The same store, a new source: what a daemon restart reads with.
+fn restarted(user: &str, locs: &Arc<MemLocations>) -> ImapSource {
+    dev_source_for(user, ImapTls::Plain, 10143, DEV_PASSWORD, locs.clone())
+}
+
+/// REVIEW FIX3 F1 (a): the original is archived in another client, then a
+/// re-send with the same Message-ID and identical digest headers but another
+/// body is delivered to INBOX. The INBOX listing records the re-send's place
+/// under the id (its old INBOX row is gone), but the body print is the
+/// original's: the re-send's bytes are never served, on the poll re-ingest,
+/// on a forced re-fetch (a heal), or after a restart. The original is found
+/// in Archive and served.
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_a_resend_after_the_original_is_archived_never_takes_its_id() {
+    let user = fresh_user("f1a");
+    let mut other = other_client(&user).await;
+    let (orig, resend) = original_and_resend("f1a@bank.example");
+    append(&mut other, INBOX, &orig, None).await;
+    let (src, locs) = live(&user);
+    let id = stable_id_for_message_id("f1a@bank.example");
+    assert_eq!(
+        src.list(inbox_listing(), None, Urgency::Live)
+            .await
+            .unwrap(),
+        vec![id.clone()]
+    );
+    assert_eq!(
+        raw_of(&src.fetch_raw(&id, Urgency::Live).await.unwrap()),
+        orig
+    );
+    assert!(locs.body_print(1, &id).unwrap().is_some());
+    let cursor = src.current_cursor().await.unwrap();
+
+    archive_in_other_client(&user, 1);
+    append(&mut other, INBOX, &resend, None).await;
+    let walk = src.changes(&cursor, Folder::Inbox).await.unwrap();
+    assert_eq!(walk.ids, vec![id.clone()], "same digest, same id");
+    // The poll lane's re-ingest.
+    let m = src.fetch_raw(&id, Urgency::Live).await.unwrap();
+    assert_eq!(raw_of(&m), orig);
+    assert!(!m.placement.in_inbox, "the re-send is no part of placement");
+    assert!(
+        locs.message_locations(1, &id)
+            .unwrap()
+            .iter()
+            .all(|r| r.folder != INBOX),
+        "the re-send's place was dropped"
+    );
+    // A heal (any later re-fetch).
+    assert_eq!(
+        raw_of(&src.fetch_raw(&id, Urgency::Live).await.unwrap()),
+        orig
+    );
+    // A restart, and a full re-listing of INBOX after it.
+    let src2 = restarted(&user, &locs);
+    src2.list(inbox_listing(), None, Urgency::Window)
+        .await
+        .unwrap();
+    assert_eq!(
+        raw_of(&src2.fetch_raw(&id, Urgency::Live).await.unwrap()),
+        orig
+    );
+    let _ = other.logout().await;
+}
+
+/// REVIEW FIX3 F1 (b): the re-send is filed straight into Junk, a folder with
+/// no row for the id, so the Junk listing records its place at once. Its
+/// bytes are never served and it is no part of placement, before or after
+/// the original is archived, and after a restart.
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_a_resend_filed_into_junk_never_takes_its_id() {
+    let user = fresh_user("f1b");
+    let mut other = other_client(&user).await;
+    let (orig, resend) = original_and_resend("f1b@bank.example");
+    append(&mut other, INBOX, &orig, None).await;
+    let (src, locs) = live(&user);
+    let id = stable_id_for_message_id("f1b@bank.example");
+    src.list(inbox_listing(), None, Urgency::Live)
+        .await
+        .unwrap();
+    assert_eq!(
+        raw_of(&src.fetch_raw(&id, Urgency::Live).await.unwrap()),
+        orig
+    );
+
+    append(&mut other, "Junk", &resend, None).await;
+    let junk = src
+        .list(
+            Listing::Folder {
+                folder: Folder::Spam,
+                within_days: None,
+            },
+            None,
+            Urgency::Live,
+        )
+        .await
+        .unwrap();
+    assert_eq!(junk, vec![id.clone()]);
+    let m = src.fetch_raw(&id, Urgency::Live).await.unwrap();
+    assert_eq!(raw_of(&m), orig);
+    assert!(m.placement.in_inbox);
+    let rows = locs.message_locations(1, &id).unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].folder, INBOX);
+
+    // Junk listed again (the spam lane), then the original archived.
+    src.list(
+        Listing::Folder {
+            folder: Folder::Spam,
+            within_days: None,
+        },
+        None,
+        Urgency::Live,
+    )
+    .await
+    .unwrap();
+    archive_in_other_client(&user, 1);
+    let m = src.fetch_raw(&id, Urgency::Live).await.unwrap();
+    assert_eq!(raw_of(&m), orig);
+    assert_eq!(m.placement, Placement::default());
+    let src2 = restarted(&user, &locs);
+    assert_eq!(
+        raw_of(&src2.fetch_raw(&id, Urgency::Live).await.unwrap()),
+        orig
+    );
+    let _ = other.logout().await;
+}
+
+/// REVIEW FIX3 F1 (c): the fallback search runs INBOX before Archive. With
+/// the original archived and the re-send in INBOX (never listed, so no row),
+/// the search's first exact hit is the re-send; its body is not the id's, so
+/// the original in Archive is the one served and recorded.
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_the_fallback_search_serves_the_original_not_an_earlier_folders_resend() {
+    let user = fresh_user("f1c");
+    let mut other = other_client(&user).await;
+    let (orig, resend) = original_and_resend("f1c@bank.example");
+    append(&mut other, INBOX, &orig, None).await;
+    let (src, locs) = live(&user);
+    let id = stable_id_for_message_id("f1c@bank.example");
+    src.list(inbox_listing(), None, Urgency::Live)
+        .await
+        .unwrap();
+    assert_eq!(
+        raw_of(&src.fetch_raw(&id, Urgency::Live).await.unwrap()),
+        orig
+    );
+    archive_in_other_client(&user, 1);
+    append(&mut other, INBOX, &resend, None).await;
+    let m = src.fetch_raw(&id, Urgency::Live).await.unwrap();
+    assert_eq!(raw_of(&m), orig);
+    let rows = locs.message_locations(1, &id).unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].folder, "Archive");
+    // With the original deleted too, nothing is served: the row keeps what
+    // it has.
+    doveadm(&["expunge", "-u", &user, "mailbox", "Archive", "all"]);
+    let m = src.fetch_raw(&id, Urgency::Live).await.unwrap();
+    assert!(matches!(m.raw, RawBody::Missing));
+    let _ = other.logout().await;
 }

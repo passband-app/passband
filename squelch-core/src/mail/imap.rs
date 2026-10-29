@@ -34,9 +34,13 @@
 //!   ([`ImapSource::bind_and_record`]);
 //! - each id has a HEADER-ONLY [`header_digest`] (From/To/Cc, Date, Subject,
 //!   Reply-To), recorded at first sight; a sighting whose digest differs is
-//!   another message, with an id ([`distinct_stable_id`]) and a thread of its
-//!   own. The body is not part of it: a copy re-encoded or re-wrapped in
-//!   transit is still the same message.
+//!   another message, with an id ([`distinct_stable_id`]), and a thread of
+//!   its own when its author differs. The body is not part of it: a copy
+//!   re-encoded or re-wrapped in transit is still the same message;
+//! - and each id's BYTES are pinned by a [`body_fingerprint`] taken at its
+//!   first accepted fetch: `fetch_raw` serves only bytes with that body, from
+//!   any folder, so a re-send under the same id and identical headers is
+//!   never read under it, even once the original was moved or deleted.
 //!
 //! THE LOCATION TABLE ([`MessageLocations`], the store's `imap_locations`)
 //! records every folder and UID each id was seen at. `fetch_raw` and
@@ -902,6 +906,67 @@ pub fn header_digest(header_or_raw: &[u8]) -> String {
     out
 }
 
+/// What every [`body_fingerprint`] starts with.
+pub(crate) const BODY_FP_PREFIX: &str = "b1:";
+
+/// THE BODY FINGERPRINT (review fix3 F1): sha256 of the exact bytes after
+/// the header block, `BODY[TEXT]`, of the copy an id's content was first
+/// read from. Recorded at that first accepted fetch (free: the bytes are in
+/// hand) and never replaced. From then on `fetch_raw` serves only bytes with
+/// this fingerprint, from ANY location: a re-send with the same Message-ID
+/// and identical identity headers (which the header digest cannot tell
+/// apart) is never read under the id, whether the original is still where
+/// it was, moved, or gone. Identity stays the header digest's (Amendment J);
+/// this only guards which bytes an id may serve.
+pub fn body_fingerprint(raw: &[u8]) -> String {
+    let body = &raw[header_block(raw).len()..];
+    let digest = Sha256::digest(body);
+    let mut out = String::with_capacity(BODY_FP_PREFIX.len() + 64);
+    out.push_str(BODY_FP_PREFIX);
+    for b in digest {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
+/// Who a message is from, as a key: the From addresses (lowercased, sorted)
+/// of a raw message or header block, hashed. Two copies with the same key
+/// are by the same author as far as the headers say (review fix3 F4).
+pub(crate) fn from_key(raw: &[u8]) -> String {
+    let parsed = mail_parser::MessageParser::default().parse_headers(header_block(raw));
+    let mut v: Vec<String> = parsed
+        .as_ref()
+        .and_then(|m| m.from())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.address())
+                .map(|x| x.trim().to_lowercase())
+                .filter(|x| !x.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v.dedup();
+    hex_sha256(format!("imap-from-v1\n{}", v.join(",")).as_bytes())
+}
+
+/// What an id's first accepted bytes were: their [`body_fingerprint`] and
+/// their author's [`from_key`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BodyPrint {
+    pub body: String,
+    pub from: String,
+}
+
+impl BodyPrint {
+    pub fn of(raw: &[u8]) -> Self {
+        Self {
+            body: body_fingerprint(raw),
+            from: from_key(raw),
+        }
+    }
+}
+
 /// The id a message gets when it reuses a known id's Message-ID (or, with
 /// none, its canonical headers) but is not that message: the Message-ID text
 /// (or the known id) with its own digest. Never the known id itself.
@@ -1131,6 +1196,17 @@ pub trait MessageLocations: Send + Sync {
         account_id: AccountId,
         msg_id: &str,
         digest: &str,
+    ) -> Result<()>;
+
+    /// The [`BodyPrint`] recorded for `msg_id` (review fix3 F1), if any.
+    fn body_print(&self, account_id: AccountId, msg_id: &str) -> Result<Option<BodyPrint>>;
+
+    /// Record `msg_id`'s [`BodyPrint`]. The FIRST one recorded stands.
+    fn record_body_print(
+        &self,
+        account_id: AccountId,
+        msg_id: &str,
+        print: &BodyPrint,
     ) -> Result<()>;
 }
 
@@ -1464,6 +1540,14 @@ pub struct ImapSource {
     timeouts: Timeouts,
     /// Days a reset Sent or Junk is listed again ([`reset_walk`]).
     relist_days: i64,
+    /// Ids already reported as over the ingest bound in this process: one
+    /// log line per message, not one per lane that lists it (review fix3 F6).
+    oversized_said: std::sync::Mutex<HashSet<String>>,
+    /// Locations whose bytes were checked against their id's body
+    /// fingerprint in this process, as (id, folder, UIDVALIDITY, UID). IMAP
+    /// content at a UID never changes, so a check holds for as long as the
+    /// location does; placement does not re-download a checked copy.
+    verified: std::sync::Mutex<HashSet<(String, String, u32, u32)>>,
 }
 
 /// The one thing a failed `LOGIN` ever says.
@@ -1604,6 +1688,8 @@ impl ImapSource {
             last_wake: std::sync::Mutex::new(None),
             timeouts: Timeouts::default(),
             relist_days: RESET_RELIST_DAYS,
+            oversized_said: std::sync::Mutex::new(HashSet::new()),
+            verified: std::sync::Mutex::new(HashSet::new()),
         })
     }
 
@@ -2267,8 +2353,8 @@ async fn still_there(c: &mut Conn, conflicts: Vec<Conflict>) -> Result<Vec<(Stri
 }
 
 /// Where a message with this Message-ID is, for a location that has gone
-/// stale (contract §6), searching `folders` in order: at most one place per
-/// folder.
+/// stale (contract §6), searching `folders` in order: every exact hit, by
+/// folder then lowest UID.
 ///
 /// EXACT, NOT A SUBSTRING (security review 2): `SEARCH HEADER` matches any
 /// header CONTAINING the text, so each hit's Message-ID is read back and must
@@ -2324,11 +2410,13 @@ async fn find_by_message_id(
             .filter_map(|f| f.uid)
             .collect();
         exact.sort_unstable();
-        if let Some(uid) = exact.first() {
+        // Every exact hit, lowest UID first: the caller takes one per
+        // folder, the first whose body is the id's when that is checked.
+        for uid in exact {
             out.push(MessageLocation {
                 folder: folder.clone(),
                 uidvalidity,
-                uid: *uid,
+                uid,
                 message_id: Some(message_id.to_string()),
             });
         }
@@ -2401,6 +2489,29 @@ struct Resolved<T> {
     /// The digest this resolve bound the id to, when none was recorded and
     /// it read the message's bytes: recorded by `settle`.
     bound: Option<String>,
+    /// The body print this resolve bound the id to (a [`BodyGuard`] with
+    /// none recorded, bytes read from the EARLIEST row): recorded by
+    /// `settle`.
+    bound_print: Option<BodyPrint>,
+    /// Locations whose bytes were checked against the body print here.
+    verified: Vec<(String, u32, u32)>,
+}
+
+/// THE BODY CHECK `fetch_raw` resolves under (review fix3 F1): which bytes
+/// the id may serve.
+struct BodyGuard<T> {
+    /// What the bytes `fetch` returned print as; `None` for a copy whose
+    /// bytes were not read (over the bound), which never matches.
+    print_of: fn(&T) -> Option<BodyPrint>,
+    /// The id's recorded print, if any.
+    want: Option<BodyPrint>,
+    /// Locations already checked against `want` in this process, as
+    /// (folder, UIDVALIDITY, UID).
+    verified: HashSet<(String, u32, u32)>,
+}
+
+fn place_key(l: &MessageLocation) -> (String, u32, u32) {
+    (l.folder.clone(), l.uidvalidity, l.uid)
 }
 
 /// Walk `rows` (then the Message-ID search) until `fetch` returns something
@@ -2415,6 +2526,13 @@ struct Resolved<T> {
 /// whole message), else it is read from the server. With none recorded, the
 /// first bytes read bind it.
 ///
+/// AND ONLY ITS OWN BYTES, under a `guard` (review fix3 F1): with a body print
+/// recorded, a row (or a search hit) whose body differs is stale too, its
+/// bytes are never returned and it is no part of placement. A row checked
+/// once in this process is not downloaded again for placement. With none
+/// recorded, bytes read from the earliest row bind it; bytes from any other
+/// row are served unbound, and the row is the earliest next time.
+///
 /// Last resort (correctness M3): a message moved out of every folder the
 /// search knows about (into a user folder, before its first fetch) is looked
 /// for in every selectable folder, so it is not lost to the live path.
@@ -2423,6 +2541,7 @@ async fn resolve<T, F>(
     rows: Vec<MessageLocation>,
     mut expected: Option<String>,
     digest_of: fn(&T) -> Option<String>,
+    guard: Option<BodyGuard<T>>,
     mut fetch: F,
 ) -> Result<Resolved<T>>
 where
@@ -2441,8 +2560,26 @@ where
         found: Vec::new(),
         got: None,
         bound: None,
+        bound_print: None,
+        verified: Vec::new(),
     };
-    for row in rows {
+    let (print_of, mut want, verified) = match guard {
+        Some(g) => (Some(g.print_of), g.want, g.verified),
+        None => (None, None, HashSet::new()),
+    };
+    // Does this copy's header digest match the id's (none recorded: yes)?
+    async fn header_ok(c: &mut Conn, want: &Option<String>, loc: &MessageLocation) -> Result<bool> {
+        Ok(match want {
+            Some(w) => {
+                location_digest(c, &loc.folder, loc.uidvalidity, loc.uid)
+                    .await?
+                    .as_deref()
+                    == Some(w.as_str())
+            }
+            None => true,
+        })
+    }
+    for (index, row) in rows.into_iter().enumerate() {
         if c.examine(&row.folder).await? != Some(row.uidvalidity) {
             out.stale.push(row);
             continue;
@@ -2457,29 +2594,66 @@ where
                         }
                         None => None,
                     };
-                    match (&expected, d) {
-                        (Some(want), Some(d)) if *want == d => {
-                            out.got = Some(v);
-                            true
+                    let header_matches = match (&expected, &d) {
+                        (Some(want), Some(d)) => want == d,
+                        (Some(_), None) => false,
+                        (None, _) => true,
+                    };
+                    // The body check, under a guard.
+                    let printed = print_of.and_then(|p| p(&v));
+                    let body_matches = match (print_of, &want) {
+                        (None, _) => true,
+                        (Some(_), Some(w)) => printed.as_ref() == Some(w),
+                        (Some(_), None) => true,
+                    };
+                    if header_matches && body_matches {
+                        if expected.is_none() && d.is_some() {
+                            out.bound = d.clone();
+                            expected = d;
                         }
-                        (Some(_), _) => false,
-                        (None, d) => {
-                            if d.is_some() {
-                                out.bound = d.clone();
-                                expected = d;
+                        if print_of.is_some() {
+                            if want.is_none() && index == 0 && printed.is_some() {
+                                // First accepted bytes, from the earliest
+                                // location: they are what this id is.
+                                out.bound_print = printed.clone();
+                                want = printed;
                             }
-                            out.got = Some(v);
-                            true
+                            if want.is_some() {
+                                out.verified.push(place_key(&row));
+                            }
                         }
+                        out.got = Some(v);
+                        true
+                    } else {
+                        false
                     }
                 }
                 None => false,
             }
-        } else if let Some(want) = &expected {
-            location_digest(c, &row.folder, row.uidvalidity, row.uid)
-                .await?
-                .as_deref()
-                == Some(want.as_str())
+        } else if let (Some(p), Some(w)) = (print_of, &want) {
+            if verified.contains(&place_key(&row)) {
+                uid_exists(&mut c.session, row.uid).await?
+            } else {
+                // Placement counts a copy only once its bytes are known to
+                // be the id's: one download per location per process.
+                let ok = match fetch(&mut c.session, row.uid).await? {
+                    Some(v) => {
+                        p(&v).as_ref() == Some(w)
+                            && match (&expected, digest_of(&v)) {
+                                (Some(e), Some(d)) => *e == d,
+                                (Some(_), None) => false,
+                                (None, _) => true,
+                            }
+                    }
+                    None => false,
+                };
+                if ok {
+                    out.verified.push(place_key(&row));
+                }
+                ok
+            }
+        } else if expected.is_some() {
+            header_ok(c, &expected, &row).await?
         } else {
             uid_exists(&mut c.session, row.uid).await?
         };
@@ -2512,14 +2686,34 @@ where
                 .collect();
             hits = find_by_message_id(c, &rest, &mid, expected.as_deref()).await?;
         }
+        // At most one place per folder: the lowest UID that is the id's.
+        let mut placed: HashSet<String> = HashSet::new();
         for loc in hits {
-            if out.got.is_none() && c.examine(&loc.folder).await? == Some(loc.uidvalidity) {
+            if placed.contains(&loc.folder)
+                || c.examine(&loc.folder).await? != Some(loc.uidvalidity)
+            {
+                continue;
+            }
+            if let (Some(p), Some(w)) = (print_of, &want) {
+                // Under a print, every hit's BODY must be the id's: a re-send
+                // with the same Message-ID and headers, in a folder searched
+                // before the original's, is never the one found.
+                let v = fetch(&mut c.session, loc.uid).await?;
+                if !v.as_ref().is_some_and(|v| p(v).as_ref() == Some(w)) {
+                    continue;
+                }
+                out.verified.push(place_key(&loc));
+                if out.got.is_none() {
+                    out.got = v;
+                }
+            } else if out.got.is_none() {
                 out.got = fetch(&mut c.session, loc.uid).await?;
                 if expected.is_none() {
                     out.bound = out.got.as_ref().and_then(digest_of);
                     expected = out.bound.clone();
                 }
             }
+            placed.insert(loc.folder.clone());
             out.live.push(loc.clone());
             out.found.push(loc);
         }
@@ -2937,6 +3131,23 @@ impl MailSource for ImapSource {
             return Err(CoreError::NotFound);
         }
         let expected = self.locations.content_digest(self.account_id, id)?;
+        let guard = BodyGuard {
+            print_of: |b: &Body| match b {
+                Body::Bytes(bytes, _) if !bytes.is_empty() => Some(BodyPrint::of(bytes)),
+                _ => None,
+            },
+            want: self.locations.body_print(self.account_id, id)?,
+            verified: self
+                .verified
+                .lock()
+                .map(|v| {
+                    v.iter()
+                        .filter(|(i, ..)| i == id)
+                        .map(|(_, f, v, u)| (f.clone(), *v, *u))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
         let (resolved, placement) = self
             .with_conn(|c| {
                 Box::pin(async move {
@@ -2950,6 +3161,7 @@ impl MailSource for ImapSource {
                             }
                             _ => None,
                         },
+                        Some(guard),
                         |s, uid| Box::pin(fetch_body(s, uid)),
                     )
                     .await?;
@@ -2959,8 +3171,26 @@ impl MailSource for ImapSource {
             })
             .await?;
         self.settle(id, &resolved)?;
+        if let Ok(mut v) = self.verified.lock() {
+            for (f, uv, uid) in &resolved.verified {
+                v.insert((id.to_string(), f.clone(), *uv, *uid));
+            }
+        }
+        // THE LAST WORD IS THE STORE'S: bytes are served only if they print
+        // as the id's recorded print. Two lanes fetching a never-fetched id
+        // at once can each read a different copy; the first print recorded
+        // wins and the other lane's bytes are not served (review fix3 F5).
+        let stored = self.locations.body_print(self.account_id, id)?;
         let mut thread_id = None;
         let (raw, received_at) = match resolved.got {
+            Some(Body::Bytes(bytes, received))
+                if !bytes.is_empty()
+                    && stored
+                        .as_ref()
+                        .is_some_and(|p| p.body != body_fingerprint(&bytes)) =>
+            {
+                (RawBody::Missing, received)
+            }
             Some(Body::Bytes(bytes, received)) if !bytes.is_empty() => {
                 // A DISTINCT id (another message that reused a Message-ID,
                 // Amendment J rule 3) is its own thread: keyed on its
@@ -2975,13 +3205,25 @@ impl MailSource for ImapSource {
             Some(Body::Bytes(_, received)) => (RawBody::Missing, received),
             // Exactly what Gmail's decoder answers for the same bound: the
             // engine logs it (id and this text, never content) and steps
-            // over the message on every lane.
-            Some(Body::TooBig(size, received)) => (
-                RawBody::Undecodable(format!(
-                    "raw message exceeds the 64MB ingest bound ({size} bytes)"
-                )),
-                received,
-            ),
+            // over the message on every lane. Once per process: after that
+            // it is nothing to ingest, quietly (review fix3 F6).
+            Some(Body::TooBig(size, received)) => {
+                let first = self
+                    .oversized_said
+                    .lock()
+                    .map(|mut said| said.insert(id.to_string()))
+                    .unwrap_or(true);
+                if first {
+                    (
+                        RawBody::Undecodable(format!(
+                            "raw message exceeds the 64MB ingest bound ({size} bytes)"
+                        )),
+                        received,
+                    )
+                } else {
+                    (RawBody::Missing, received)
+                }
+            }
             // Seen once, gone from every watched folder now: nothing to
             // ingest, which is not an error for the batch it is in.
             None => (RawBody::Missing, None),
@@ -3021,6 +3263,7 @@ impl MailSource for ImapSource {
                         rows,
                         expected,
                         |_| None,
+                        None,
                         move |s, uid| {
                             let query = query.clone();
                             Box::pin(async move {
@@ -3359,6 +3602,9 @@ impl ImapSource {
             self.locations
                 .record_content_digest(self.account_id, id, d)?;
         }
+        if let Some(p) = &r.bound_print {
+            self.locations.record_body_print(self.account_id, id, p)?;
+        }
         for row in &r.stale {
             // A stale row the search found again at the same folder was just
             // re-recorded below; forgetting it first keeps that order safe.
@@ -3388,6 +3634,7 @@ pub(crate) struct MemLocations(
     std::sync::Mutex<MemRows>,
     std::sync::Mutex<std::collections::HashMap<(AccountId, String), String>>,
     AtomicU64,
+    std::sync::Mutex<std::collections::HashMap<(AccountId, String), BodyPrint>>,
 );
 
 #[cfg(test)]
@@ -3445,6 +3692,17 @@ impl MessageLocations for MemLocations {
         if !e.starts_with(DIGEST_PREFIX) {
             *e = digest.to_string();
         }
+        Ok(())
+    }
+    fn body_print(&self, a: AccountId, id: &str) -> Result<Option<BodyPrint>> {
+        Ok(self.3.lock().unwrap().get(&(a, id.to_string())).cloned())
+    }
+    fn record_body_print(&self, a: AccountId, id: &str, print: &BodyPrint) -> Result<()> {
+        self.3
+            .lock()
+            .unwrap()
+            .entry((a, id.to_string()))
+            .or_insert_with(|| print.clone());
         Ok(())
     }
 }

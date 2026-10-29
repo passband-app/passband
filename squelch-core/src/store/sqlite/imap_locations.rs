@@ -4,7 +4,7 @@
 //! `sync_cursor`. See `crate::mail::imap::MessageLocations`.
 
 use super::*;
-use crate::mail::imap::{DIGEST_PREFIX, MessageLocation, MessageLocations};
+use crate::mail::imap::{BodyPrint, DIGEST_PREFIX, MessageLocation, MessageLocations};
 
 impl MessageLocations for SqliteStore {
     fn message_locations(
@@ -127,6 +127,45 @@ impl MessageLocations for SqliteStore {
                 digest,
                 Utc::now().to_rfc3339(),
                 DIGEST_PREFIX
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn body_print(&self, account_id: AccountId, msg_id: &str) -> Result<Option<BodyPrint>> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT body_fp, from_key FROM imap_bodies WHERE account_id = ?1 AND msg_id = ?2",
+                params![account_id, msg_id],
+                |r| {
+                    Ok(BodyPrint {
+                        body: r.get(0)?,
+                        from: r.get(1)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    fn record_body_print(
+        &self,
+        account_id: AccountId,
+        msg_id: &str,
+        print: &BodyPrint,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        // First writer wins: the bytes an id serves are never rebound.
+        conn.execute(
+            "INSERT INTO imap_bodies (account_id, msg_id, body_fp, from_key, recorded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(account_id, msg_id) DO NOTHING",
+            params![
+                account_id,
+                msg_id,
+                print.body,
+                print.from,
+                Utc::now().to_rfc3339()
             ],
         )?;
         Ok(())

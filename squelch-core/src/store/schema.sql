@@ -2152,8 +2152,9 @@ END;
 -- PASSBAND'S OWN EVENTS (gcal/own.rs): which event on the user's calendar
 -- Passband made for a ghost, in place of Gmail's copy, and keeps current from
 -- the mail. `state` is `owned` (kept current), `released` (the user deleted
--- it or dismissed the ghost: never adopted again) or `refused` (Google would
--- not delete Gmail's copy: left alone). `fingerprint` is what the mail said
+-- it or dismissed the ghost: never adopted again), `refused` (Google would
+-- not delete Gmail's copy: left alone) or `undo` (that, and taking Passband's
+-- copy back off failed too: retried each pass). `fingerprint` is what the mail said
 -- when Passband last wrote the event. One row per ghost; a ghost that goes
 -- takes its row with it, the event stays. HUMAN DOOR ONLY.
 CREATE TABLE IF NOT EXISTS calendar_owned (
@@ -2165,6 +2166,17 @@ CREATE TABLE IF NOT EXISTS calendar_owned (
     fingerprint TEXT NOT NULL,
     updated_at  TEXT NOT NULL,
     PRIMARY KEY(account_id, ghost_id)
+);
+-- A write gcal/own.rs had refused by Google (not a quota answer, not a lost
+-- reply), by the event it was aimed at, so the same step is not planned and
+-- spent again every pass. Left alone until `refused_at` is a week old, then
+-- pruned and tried once more. HUMAN DOOR ONLY.
+CREATE TABLE IF NOT EXISTS calendar_own_refused (
+    account_id  INTEGER NOT NULL,
+    calendar_id TEXT NOT NULL,
+    event_id    TEXT NOT NULL,
+    refused_at  TEXT NOT NULL,
+    PRIMARY KEY(account_id, calendar_id, event_id)
 );
 CREATE TABLE IF NOT EXISTS calendar_places (
     account_id     INTEGER NOT NULL,

@@ -120,13 +120,20 @@ fn calendar_backoff(failures_before: u32, base: Duration) -> Duration {
         .map_or(cap, |d| d.min(cap))
 }
 
-/// Resolves once shutdown is asked for (or its sender is gone, which `wait`
-/// also reads as a stop).
 /// Google asking for fewer requests: the pass stops writing.
 fn is_quota(error: CallError) -> bool {
     error == CallError::Kind(CalendarErrorKind::Quota)
 }
 
+/// Google said no to an ownership write, as opposed to asking for less
+/// (quota) or not answering usably (`Uncertain`, which may have applied):
+/// remembered, so the step is not spent again every pass.
+fn is_refusal(error: CallError) -> bool {
+    !is_quota(error) && error != CallError::Uncertain
+}
+
+/// Resolves once shutdown is asked for (or its sender is gone, which `wait`
+/// also reads as a stop).
 async fn stopped(shutdown: &mut watch::Receiver<bool>) {
     let _ = shutdown.wait_for(|stop| *stop).await;
 }
@@ -459,18 +466,39 @@ impl CalendarSync {
                 let from = (now - chrono::Duration::days(1)).fixed_offset();
                 let to = (now + chrono::Duration::days(400)).fixed_offset();
                 let ghosts = s.list_ghost_events(a, from, to)?;
-                let (events, _) = s.list_calendar_events(a, from, to, now)?;
+                let (mut events, _) = s.list_calendar_events(a, from, to, now)?;
                 let owned = s.calendar_owned(a)?;
+                // Every bound event the store still has, wherever it falls
+                // (the user moved it out of the window, or the listing was
+                // cut): plan reads one missing as deleted.
+                let listed: std::collections::HashSet<(String, String)> = events
+                    .iter()
+                    .map(|e| (e.calendar_id.clone(), e.row.event_id.clone()))
+                    .collect();
+                for o in owned
+                    .iter()
+                    .filter(|o| matches!(o.state, OwnState::Owned | OwnState::Undo))
+                {
+                    if !listed.contains(&(o.calendar_id.clone(), o.event_id.clone()))
+                        && let Some(e) = s.calendar_event(a, &o.calendar_id, &o.event_id)?
+                    {
+                        events.push(e);
+                    }
+                }
+                let settled = own::Settled {
+                    gone_ghosts: s.calendar_owned_gone_ghosts(a)?,
+                    refused: s.calendar_own_refused(a, now)?,
+                };
                 let places = s.calendar_places(a)?;
                 let zones: std::collections::HashMap<String, Option<String>> = s
                     .calendar_calendars(a)?
                     .into_iter()
                     .map(|c| (c.calendar_id, c.time_zone))
                     .collect();
-                Ok((ghosts, events, owned, places, zones))
+                Ok((ghosts, events, owned, places, zones, settled))
             })
             .await;
-        let (ghosts, events, owned, places, zones) = match read {
+        let (ghosts, events, owned, places, zones, settled) = match read {
             Ok(read) => read,
             Err(e) => {
                 eprintln!("squelch: calendar ownership could not read the store: {e}");
@@ -478,19 +506,23 @@ impl CalendarSync {
             }
         };
         let day = now.format("%Y-%m-%d").to_string();
-        let mut writes = 0;
-        for step in own::plan(now, &email, &ghosts, &events, &owned, &places) {
-            let writes_google = matches!(
-                step,
-                Step::Adopt { .. }
-                    | Step::DropDuplicate { .. }
-                    | Step::Update { patch: Some(_), .. }
-            );
-            if writes_google {
-                if writes >= own::WRITES_PER_PASS || !self.reserve_own_write(&day) {
+        let mut writes: u32 = 0;
+        for step in own::plan(now, &email, &ghosts, &events, &owned, &places, &settled) {
+            // An adoption is two writes: the create and the delete.
+            let cost = match step {
+                Step::Adopt { .. } => 2u32,
+                Step::DropDuplicate { .. }
+                | Step::Undo { .. }
+                | Step::Update { patch: Some(_), .. } => 1,
+                _ => 0,
+            };
+            if cost > 0 {
+                if (writes + cost) as usize > own::WRITES_PER_PASS
+                    || !self.reserve_own_writes(&day, cost)
+                {
                     break;
                 }
-                writes += 1;
+                writes += cost;
             }
             let zone = |calendar: &str| zones.get(calendar).cloned().flatten();
             let done = match step {
@@ -531,7 +563,18 @@ impl CalendarSync {
                     calendar_id,
                     event_id,
                     ..
-                } => self.own_delete_copy(&token, calendar_id, event_id).await,
+                } => {
+                    self.own_delete_copy(&token, now, calendar_id, event_id)
+                        .await
+                }
+                Step::Undo {
+                    ghost_id,
+                    calendar_id,
+                    event_id,
+                } => {
+                    self.own_undo(&token, now, ghost_id, calendar_id, event_id)
+                        .await
+                }
                 Step::Adopt {
                     ghost_id,
                     calendar_id,
@@ -597,12 +640,16 @@ impl CalendarSync {
             Err(e) => {
                 self.own_audit("calendar_event_adopt", &target, &e.to_string())
                     .await;
+                if is_refusal(e) {
+                    self.own_refuse(now, &calendar, &gmail_event_id).await;
+                }
                 return !is_quota(e);
             }
         };
         let Some(row) = row else {
             self.own_audit("calendar_event_adopt", &target, "unreadable")
                 .await;
+            self.own_refuse(now, &calendar, &gmail_event_id).await;
             return true;
         };
         let stored = owned.clone();
@@ -650,37 +697,76 @@ impl CalendarSync {
             }
             Err(e) => {
                 // Refused: two items would be worse than Gmail's one. Take
-                // Passband's back off and never try this ghost again.
+                // Passband's back off and never try this ghost again; if
+                // that fails too, the binding says so and the undo is tried
+                // again next pass.
                 self.own_audit(
                     "calendar_event_replace_gmail",
                     &gmail_target,
                     &e.to_string(),
                 )
                 .await;
-                let undo = self
-                    .api
-                    .delete_event(token, &calendar, &owned.event_id, SendUpdates::Nobody)
-                    .await;
-                let removed = matches!(undo, Ok(()) | Err(CallError::Gone | CallError::NotFound));
-                self.own_audit(
-                    "calendar_event_adopt_undo",
-                    &target,
-                    if removed { "ok" } else { "failed" },
-                )
-                .await;
-                let ghost_id = owned.ghost_id;
-                let id = owned.event_id.clone();
-                self.own_db(move |s, a| {
-                    if removed {
-                        s.calendar_remove_event(a, &calendar, &id)?;
+                self.own_refuse(now, &calendar, &gmail_event_id).await;
+                self.own_db({
+                    let ghost_id = owned.ghost_id;
+                    move |s, a| {
+                        s.calendar_owned_set_state(a, ghost_id, OwnState::Undo, now)
+                            .map(|_| ())
                     }
+                })
+                .await;
+                self.own_undo(token, now, owned.ghost_id, calendar, owned.event_id)
+                    .await
+            }
+        }
+    }
+
+    /// Take Passband's copy back off after Gmail's could not be deleted.
+    /// Once it is gone the binding is [`OwnState::Refused`]; until then it
+    /// stays [`OwnState::Undo`] and the next pass tries again. False on a
+    /// quota answer.
+    async fn own_undo(
+        &self,
+        token: &str,
+        now: DateTime<Utc>,
+        ghost_id: i64,
+        calendar_id: String,
+        event_id: String,
+    ) -> bool {
+        let target = format!("calendar:{calendar_id}/{event_id}");
+        let undo = self
+            .api
+            .delete_event(token, &calendar_id, &event_id, SendUpdates::Nobody)
+            .await;
+        match undo {
+            Ok(()) | Err(CallError::Gone | CallError::NotFound) => {
+                self.own_audit("calendar_event_adopt_undo", &target, "ok")
+                    .await;
+                self.own_db(move |s, a| {
+                    s.calendar_remove_event(a, &calendar_id, &event_id)?;
                     s.calendar_owned_set_state(a, ghost_id, OwnState::Refused, now)
                         .map(|_| ())
                 })
                 .await;
                 true
             }
+            Err(e) => {
+                self.own_audit("calendar_event_adopt_undo", &target, &e.to_string())
+                    .await;
+                if is_refusal(e) {
+                    self.own_refuse(now, &calendar_id, &event_id).await;
+                }
+                !is_quota(e)
+            }
         }
+    }
+
+    /// Remember that Google refused a write to this event
+    /// ([`own::Settled::refused`]).
+    async fn own_refuse(&self, now: DateTime<Utc>, calendar_id: &str, event_id: &str) {
+        let (calendar_id, event_id) = (calendar_id.to_string(), event_id.to_string());
+        self.own_db(move |s, a| s.calendar_own_refuse(a, &calendar_id, &event_id, now))
+            .await;
     }
 
     /// Patch Passband's event to what the mail now says, and remember it.
@@ -763,7 +849,13 @@ impl CalendarSync {
 
     /// Delete a Gmail copy of an event Passband owns. False on a quota
     /// answer.
-    async fn own_delete_copy(&self, token: &str, calendar_id: String, event_id: String) -> bool {
+    async fn own_delete_copy(
+        &self,
+        token: &str,
+        now: DateTime<Utc>,
+        calendar_id: String,
+        event_id: String,
+    ) -> bool {
         let target = format!("calendar:{calendar_id}/{event_id}");
         match self
             .api
@@ -783,6 +875,9 @@ impl CalendarSync {
             Err(e) => {
                 self.own_audit("calendar_event_delete_gmail_copy", &target, &e.to_string())
                     .await;
+                if is_refusal(e) {
+                    self.own_refuse(now, &calendar_id, &event_id).await;
+                }
                 !is_quota(e)
             }
         }
@@ -812,19 +907,19 @@ impl CalendarSync {
             .await;
     }
 
-    /// Take one of today's [`own::DAILY_CAP`] writes. False when none is
-    /// left.
-    fn reserve_own_write(&self, day: &str) -> bool {
+    /// Take `n` of today's [`own::DAILY_CAP`] writes. False, taking none,
+    /// when fewer are left.
+    fn reserve_own_writes(&self, day: &str, n: u32) -> bool {
         let Ok(mut writes) = self.own_writes.lock() else {
             return false;
         };
         if writes.0 != day {
             *writes = (day.to_string(), 0);
         }
-        if writes.1 >= own::DAILY_CAP {
+        if writes.1 + n > own::DAILY_CAP {
             return false;
         }
-        writes.1 += 1;
+        writes.1 += n;
         true
     }
 

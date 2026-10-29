@@ -67,6 +67,10 @@ pub enum OwnState {
     /// Google refused to delete Gmail's copy: left as Gmail made it, never
     /// tried again.
     Refused,
+    /// Google refused to delete Gmail's copy AND taking Passband's copy back
+    /// off failed: two items are on the calendar. The undo is tried again
+    /// each pass until it lands, then the binding is [`Self::Refused`].
+    Undo,
 }
 
 impl OwnState {
@@ -75,6 +79,7 @@ impl OwnState {
             Self::Owned => "owned",
             Self::Released => "released",
             Self::Refused => "refused",
+            Self::Undo => "undo",
         }
     }
 
@@ -83,6 +88,7 @@ impl OwnState {
             "owned" => Some(Self::Owned),
             "released" => Some(Self::Released),
             "refused" => Some(Self::Refused),
+            "undo" => Some(Self::Undo),
             _ => None,
         }
     }
@@ -127,11 +133,34 @@ pub enum Step {
         calendar_id: String,
         event_id: String,
     },
+    /// Take Passband's copy back off after Gmail's could not be deleted
+    /// ([`OwnState::Undo`]); the binding is then [`OwnState::Refused`].
+    Undo {
+        ghost_id: i64,
+        calendar_id: String,
+        event_id: String,
+    },
     /// Stop keeping this ghost's event, and never adopt for it again.
     Release { ghost_id: i64 },
     /// The ghost is gone: forget the binding, leave the event.
     Forget { ghost_id: i64 },
 }
+
+/// What earlier passes settled, beside the bindings.
+#[derive(Debug, Clone, Default)]
+pub struct Settled {
+    /// Bound ghosts whose row is gone from the store. Only these are
+    /// forgotten: a ghost merely missing from the listing (its mail marked
+    /// spam for a while, or outside the window) keeps its binding.
+    pub gone_ghosts: HashSet<i64>,
+    /// Events (calendar, id) Google recently refused a write to
+    /// ([`REFUSAL_COOLDOWN`]): no step touches them until it passes, so one
+    /// refusal is not spent again every pass.
+    pub refused: HashSet<(String, String)>,
+}
+
+/// How long a refused write is left alone before it is tried again.
+pub const REFUSAL_COOLDOWN: Duration = Duration::days(7);
 
 /// What of a ghost Passband writes, as last written. Stored as JSON so an
 /// update can tell which part the mail changed.
@@ -141,6 +170,21 @@ struct Facts {
     end: Option<String>,
     location: Option<String>,
     cancelled: bool,
+    /// While cancelled: whether the event showed as free before the
+    /// cancellation marked it so, to put back when the mail restores it.
+    /// Not part of what the mail says, so never compared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    was_free: Option<bool>,
+}
+
+impl Facts {
+    /// The same mail facts, ignoring what Passband remembers beside them.
+    fn same_mail(&self, other: &Self) -> bool {
+        self.start == other.start
+            && self.end == other.end
+            && self.location == other.location
+            && self.cancelled == other.cancelled
+    }
 }
 
 fn facts(ghost: &GhostEvent) -> Facts {
@@ -149,6 +193,7 @@ fn facts(ghost: &GhostEvent) -> Facts {
         end: ghost_end(ghost).map(|e| e.to_string()),
         location: ghost.location.clone(),
         cancelled: ghost.mail_state == GhostMailState::Cancelled,
+        was_free: None,
     }
 }
 
@@ -226,8 +271,11 @@ fn distinctive(text: &str) -> HashSet<String> {
 
 /// Are this ghost and this event one thing? The same start, and the titles
 /// match the way the timeline's display match does ([`ghost_matches`]), or
-/// they share a distinctive word across title and place ("Reservation at
-/// Dingles Public House" and a ghost "Dinner at Dingles").
+/// a distinctive word of the ghost's title is in the event's title or place
+/// ("Reservation at Dingles Public House" and a ghost "Dinner at Dingles"),
+/// or the ghost's place shares two with the event's title. A place word
+/// alone is not enough, and place against place never counts: two venues in
+/// one city, or on one street, share those words.
 pub fn same_event(ghost: &GhostEvent, row: &EventRow) -> bool {
     if !same_start(&ghost.start, &row.start) {
         return false;
@@ -240,17 +288,13 @@ pub fn same_event(ghost: &GhostEvent, row: &EventRow) -> bool {
     ) {
         return true;
     }
-    let mine = distinctive(&format!(
-        "{} {}",
-        ghost.title,
-        ghost.location.as_deref().unwrap_or_default()
-    ));
-    let theirs = distinctive(&format!(
-        "{} {}",
-        row.summary.as_deref().unwrap_or_default(),
-        row.location.as_deref().unwrap_or_default()
-    ));
-    !mine.is_disjoint(&theirs)
+    let ghost_title = distinctive(&ghost.title);
+    let ghost_place = distinctive(ghost.location.as_deref().unwrap_or_default());
+    let event_title = distinctive(row.summary.as_deref().unwrap_or_default());
+    let event_place = distinctive(row.location.as_deref().unwrap_or_default());
+    !ghost_title.is_disjoint(&event_title)
+        || !ghost_title.is_disjoint(&event_place)
+        || ghost_place.intersection(&event_title).count() >= 2
 }
 
 /// The event's end, or one made for it: a timed event an hour long, an
@@ -263,8 +307,10 @@ fn end_or_default(row: &EventRow) -> EventTime {
 }
 
 /// Passband's event in place of Gmail's `gmail`: its title, times, colour
-/// and free/busy, the cleaned `place` when the card has one (`Some("")`:
-/// the location names no place), else Gmail's location, and Passband's note.
+/// and free/busy, the cleaned `place` when the card has one, else Gmail's
+/// location (also when the model judged it names no place, `Some("")`: Gmail's
+/// copy is about to be deleted, and a wrong judgment must not lose the
+/// address), and Passband's note.
 pub fn adopt_body(
     ghost: &GhostEvent,
     gmail: &EventRow,
@@ -286,8 +332,8 @@ pub fn adopt_body(
         google_time(&end_or_default(gmail), true, false).ok()?,
     );
     let location = match place {
-        Some(place) => (!place.is_empty()).then(|| place.to_string()),
-        None => gmail.location.clone(),
+        Some(place) if !place.is_empty() => Some(place.to_string()),
+        _ => gmail.location.clone(),
     };
     if let Some(location) = location {
         body.insert("location".into(), json!(location));
@@ -312,6 +358,10 @@ pub fn adopt_body(
 /// holds changes.
 pub fn update_patch(ghost: &GhostEvent, owned: &EventRow, before: &str) -> Option<Value> {
     let before: Facts = serde_json::from_str(before).unwrap_or_default();
+    patch_from(ghost, owned, &before)
+}
+
+fn patch_from(ghost: &GhostEvent, owned: &EventRow, before: &Facts) -> Option<Value> {
     let now = facts(ghost);
     let mut patch = Map::new();
     if now.start != before.start || now.end != before.end {
@@ -341,7 +391,10 @@ pub fn update_patch(ghost: &GhostEvent, owned: &EventRow, before: &str) -> Optio
             patch.insert("transparency".into(), json!("transparent"));
         } else {
             patch.insert("summary".into(), json!(bare));
-            patch.insert("transparency".into(), json!("opaque"));
+            // Back to what it showed before the cancellation marked it free.
+            if before.was_free != Some(true) {
+                patch.insert("transparency".into(), json!("opaque"));
+            }
         }
     }
     (!patch.is_empty()).then_some(Value::Object(patch))
@@ -360,9 +413,11 @@ fn shifted_end(owned: &EventRow, start: EventTime) -> EventTime {
     }
 }
 
-/// Everything to do this pass, in order: bindings first (stop, update,
-/// clear duplicates), then adoptions. `places` is the card's cleaned place
-/// by raw location ([`super::place`]).
+/// Everything to do this pass, in order: bindings first (undo, stop,
+/// update, clear duplicates), then adoptions. `places` is the card's cleaned
+/// place by raw location ([`super::place`]). `events` must hold every bound
+/// event the store still has, wherever it falls: one missing is taken to be
+/// deleted, and its binding is released.
 pub fn plan(
     now: DateTime<Utc>,
     account_email: &str,
@@ -370,29 +425,47 @@ pub fn plan(
     events: &[SyncedEvent],
     owned: &[Owned],
     places: &HashMap<String, Option<String>>,
+    settled: &Settled,
 ) -> Vec<Step> {
     let by_id: HashMap<i64, &GhostEvent> = ghosts.iter().map(|g| (g.id, g)).collect();
-    let find = |calendar: &str, id: &str| {
-        events
-            .iter()
-            .find(|e| e.calendar_id == calendar && e.row.event_id == id)
+    let by_key: HashMap<(&str, &str), &SyncedEvent> = events
+        .iter()
+        .map(|e| ((e.calendar_id.as_str(), e.row.event_id.as_str()), e))
+        .collect();
+    let refused = |calendar: &str, id: &str| {
+        settled
+            .refused
+            .contains(&(calendar.to_string(), id.to_string()))
     };
     let gmail: Vec<&SyncedEvent> = events
         .iter()
         .filter(|e| adoptable(e, account_email, now))
+        .filter(|e| !refused(&e.calendar_id, &e.row.event_id))
         .collect();
     let mut claimed: HashSet<(&str, &str)> = HashSet::new();
     let mut bound: HashSet<i64> = owned.iter().map(|o| o.ghost_id).collect();
     let mut steps = Vec::new();
 
+    for o in owned.iter().filter(|o| o.state == OwnState::Undo) {
+        if !refused(&o.calendar_id, &o.event_id) {
+            steps.push(Step::Undo {
+                ghost_id: o.ghost_id,
+                calendar_id: o.calendar_id.clone(),
+                event_id: o.event_id.clone(),
+            });
+        }
+    }
+
     for o in owned.iter().filter(|o| o.state == OwnState::Owned) {
         let Some(ghost) = by_id.get(&o.ghost_id) else {
-            steps.push(Step::Forget {
-                ghost_id: o.ghost_id,
-            });
+            if settled.gone_ghosts.contains(&o.ghost_id) {
+                steps.push(Step::Forget {
+                    ghost_id: o.ghost_id,
+                });
+            }
             continue;
         };
-        let Some(mine) = find(&o.calendar_id, &o.event_id) else {
+        let Some(mine) = by_key.get(&(o.calendar_id.as_str(), o.event_id.as_str())) else {
             steps.push(Step::Release {
                 ghost_id: o.ghost_id,
             });
@@ -404,15 +477,21 @@ pub fn plan(
             });
             continue;
         }
-        let print = fingerprint(ghost);
+        let before: Facts = serde_json::from_str(&o.fingerprint).unwrap_or_default();
+        let mut print = facts(ghost);
         // Only authenticated mail moves a real event.
-        if print != o.fingerprint && ghost.verified() {
+        if !print.same_mail(&before) && ghost.verified() {
+            print.was_free = match (before.cancelled, print.cancelled) {
+                (false, true) => Some(mine.row.transparent),
+                (true, true) => before.was_free,
+                _ => None,
+            };
             steps.push(Step::Update {
                 ghost_id: o.ghost_id,
                 calendar_id: o.calendar_id.clone(),
                 event_id: o.event_id.clone(),
-                patch: update_patch(ghost, &mine.row, &o.fingerprint),
-                fingerprint: print,
+                patch: patch_from(ghost, &mine.row, &before),
+                fingerprint: serde_json::to_string(&print).expect("facts serialize"),
             });
         }
         for copy in &gmail {
@@ -565,11 +644,20 @@ mod tests {
     }
 
     fn plan_of(ghosts: &[GhostEvent], events: &[SyncedEvent], owned: &[Owned]) -> Vec<Step> {
+        plan_settled(ghosts, events, owned, &Settled::default())
+    }
+
+    fn plan_settled(
+        ghosts: &[GhostEvent],
+        events: &[SyncedEvent],
+        owned: &[Owned],
+        settled: &Settled,
+    ) -> Vec<Step> {
         let places = HashMap::from([(
             "Dingles Public House, Tock is now part of the Resy network".to_string(),
             Some("Dingles Public House".to_string()),
         )]);
-        plan(now(), ME, ghosts, events, owned, &places)
+        plan(now(), ME, ghosts, events, owned, &places, settled)
     }
 
     #[test]
@@ -798,11 +886,131 @@ mod tests {
                 plan_of(std::slice::from_ref(&g), &[dingles()], &[bound(&g, state)]).is_empty()
             );
         }
-        // The ghost is gone: forget the binding, leave the event.
+        // The ghost is gone from the store: forget the binding, leave the
+        // event.
+        let gone = Settled {
+            gone_ghosts: HashSet::from([7]),
+            ..Settled::default()
+        };
         assert_eq!(
-            plan_of(&[], &[mine], std::slice::from_ref(&o)),
+            plan_settled(
+                &[],
+                std::slice::from_ref(&mine),
+                std::slice::from_ref(&o),
+                &gone
+            ),
             vec![Step::Forget { ghost_id: 7 }]
         );
+        // Only missing from the listing (its mail marked spam for a while):
+        // the binding stands.
+        assert!(plan_of(&[], &[mine], std::slice::from_ref(&o)).is_empty());
+    }
+
+    #[test]
+    fn a_refused_target_is_left_alone_until_the_cooldown_passes() {
+        let g = ghost(7, "Dinner at Dingles", START);
+        let o = bound(&g, OwnState::Owned);
+        let mine = passbands(&g, START, END);
+        let refused = Settled {
+            refused: HashSet::from([("primary".to_string(), "gm1".to_string())]),
+            ..Settled::default()
+        };
+        // The duplicate Google would not delete is not asked for again.
+        assert!(
+            plan_settled(
+                std::slice::from_ref(&g),
+                &[mine, dingles()],
+                std::slice::from_ref(&o),
+                &refused
+            )
+            .is_empty()
+        );
+        // Nor is an adoption whose create or delete was refused.
+        assert!(plan_settled(std::slice::from_ref(&g), &[dingles()], &[], &refused).is_empty());
+    }
+
+    #[test]
+    fn a_failed_undo_is_tried_again_until_it_lands() {
+        let g = ghost(7, "Dinner at Dingles", START);
+        let o = bound(&g, OwnState::Undo);
+        let steps = plan_of(
+            std::slice::from_ref(&g),
+            &[passbands(&g, START, END), dingles()],
+            std::slice::from_ref(&o),
+        );
+        assert_eq!(
+            steps,
+            vec![Step::Undo {
+                ghost_id: 7,
+                calendar_id: "primary".into(),
+                event_id: owned_event_id(&g),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_place_of_nothing_keeps_gmails_location_on_the_adopted_event() {
+        let g = ghost(7, "Dinner at Dingles", START);
+        let raw = "Sect 102 Row G Seat 14, Gate C entrance";
+        let mut e = dingles();
+        e.row.location = Some(raw.into());
+        let body = adopt_body(&g, &e.row, Some(""), "id").unwrap();
+        assert_eq!(body["location"], raw);
+        let body = adopt_body(&g, &e.row, Some("Gate C"), "id").unwrap();
+        assert_eq!(body["location"], "Gate C");
+    }
+
+    #[test]
+    fn restoring_a_cancelled_event_puts_back_its_free_busy() {
+        let g = ghost(7, "Hotel stay", START);
+        let o = bound(&g, OwnState::Owned);
+        let mut free = passbands(&g, START, END);
+        free.row.transparent = true;
+        let mut off = g.clone();
+        off.mail_state = GhostMailState::Cancelled;
+        let steps = plan_of(
+            std::slice::from_ref(&off),
+            std::slice::from_ref(&free),
+            &[o],
+        );
+        let [Step::Update { fingerprint, .. }] = steps.as_slice() else {
+            panic!("one update, got {steps:?}");
+        };
+        // Restored: the title unmarked, and still free, as it was.
+        let cancelled = Owned {
+            fingerprint: fingerprint.clone(),
+            ..bound(&g, OwnState::Owned)
+        };
+        let steps = plan_of(std::slice::from_ref(&g), &[free], &[cancelled]);
+        let [
+            Step::Update {
+                patch: Some(patch),
+                fingerprint,
+                ..
+            },
+        ] = steps.as_slice()
+        else {
+            panic!("one update, got {steps:?}");
+        };
+        assert!(patch.get("transparency").is_none(), "{patch}");
+        assert_eq!(*fingerprint, super::fingerprint(&g));
+    }
+
+    #[test]
+    fn a_shared_city_word_does_not_make_two_events_one() {
+        let mut dinner = ghost(7, "Dinner at Harbor Tavern", START);
+        dinner.location = Some("12 Water Street, Portland".into());
+        let mut concert = event("gm1", "Concert, Portland Music Hall", START, END, true);
+        concert.row.location = Some("Portland Music Hall, 28 Monument Square, Portland".into());
+        assert!(!same_event(&dinner, &concert.row));
+        // Nor two venues on one street.
+        let mut bar = event("gm2", "Drinks", START, END, true);
+        bar.row.location = Some("40 Water Street, Portland".into());
+        assert!(!same_event(&dinner, &bar.row));
+        // A generic ghost title still matches by its place's name.
+        let mut generic = ghost(8, "Dinner reservation", START);
+        generic.location = Some("Dingles Public House".into());
+        assert!(same_event(&generic, &dingles().row));
     }
 
     #[test]

@@ -715,6 +715,62 @@ impl SqliteStore {
         )? > 0)
     }
 
+    /// Bound ghosts whose ghost row is gone from the store: the only ones
+    /// whose binding [`own::plan`] forgets.
+    pub fn calendar_owned_gone_ghosts(&self, account: AccountId) -> Result<HashSet<i64>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT o.ghost_id FROM calendar_owned o WHERE o.account_id=?1
+             AND NOT EXISTS(SELECT 1 FROM ghost_events g
+                            WHERE g.account_id=o.account_id AND g.id=o.ghost_id)",
+        )?;
+        let ids = stmt
+            .query_map(params![account], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(ids)
+    }
+
+    /// Remember that Google refused a write to this event.
+    pub fn calendar_own_refuse(
+        &self,
+        account: AccountId,
+        calendar_id: &str,
+        event_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO calendar_own_refused(account_id,calendar_id,event_id,refused_at)
+             VALUES(?1,?2,?3,?4)
+             ON CONFLICT(account_id,calendar_id,event_id) DO UPDATE SET refused_at=excluded.refused_at",
+            params![account, calendar_id, event_id, now.to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Events Google refused a write to within [`own::REFUSAL_COOLDOWN`] of
+    /// `now`, as (calendar, id). Older refusals are pruned here, so they are
+    /// tried once more.
+    pub fn calendar_own_refused(
+        &self,
+        account: AccountId,
+        now: DateTime<Utc>,
+    ) -> Result<HashSet<(String, String)>> {
+        let conn = self.lock()?;
+        let cutoff = (now - own::REFUSAL_COOLDOWN).to_rfc3339();
+        conn.execute(
+            "DELETE FROM calendar_own_refused WHERE account_id=?1 AND refused_at<?2",
+            params![account, cutoff],
+        )?;
+        let mut stmt = conn.prepare(
+            "SELECT calendar_id, event_id FROM calendar_own_refused WHERE account_id=?1",
+        )?;
+        let rows = stmt
+            .query_map(params![account], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
     /// Every stored place, by the location it was made from: `None` for a
     /// location that names no place.
     pub fn calendar_places(&self, account: AccountId) -> Result<HashMap<String, Option<String>>> {

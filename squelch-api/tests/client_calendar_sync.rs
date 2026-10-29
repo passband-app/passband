@@ -96,6 +96,8 @@ struct Google {
     /// Answer every delete of this event id 403, as Google refuses a change
     /// it does not allow.
     fail_delete_of: Option<String>,
+    /// Answer every delete 403.
+    fail_deletes: bool,
     /// Answer this many of the next one-event reads 404, found or not, as a
     /// replica that has not caught up would.
     stale_reads: usize,
@@ -309,7 +311,7 @@ async fn delete_route(
     if let Some(failed) = g.record("DELETE", &calendar, Some(&id), q, Value::Null, &headers) {
         return failed;
     }
-    if g.fail_delete_of.as_deref() == Some(id.as_str()) {
+    if g.fail_deletes || g.fail_delete_of.as_deref() == Some(id.as_str()) {
         let error = json!({"error": {"code": 403, "errors": [{"reason": "forbidden"}]}});
         return (StatusCode::FORBIDDEN, Json(error)).into_response();
     }
@@ -5880,7 +5882,7 @@ async fn passband_takes_over_gmails_own_events_and_leaves_invitations_alone() {
     assert_eq!(w.google().writes.len(), 2);
 
     // Gmail adds its copy back: the next sync brings it, and it goes.
-    let mut again = gmail;
+    let mut again = gmail.clone();
     again["id"] = json!("gm3");
     w.google().changes.insert(
         PRIMARY.into(),
@@ -5906,6 +5908,29 @@ async fn passband_takes_over_gmails_own_events_and_leaves_invitations_alone() {
         .map(|e| e["id"].as_str().unwrap().to_string())
         .collect();
     assert_eq!(ids, [new_id, "gm2".to_string()]);
+
+    // Once more, and Google will not let this copy go: asked once, not
+    // again every pass.
+    let mut stuck = gmail;
+    stuck["id"] = json!("gm4");
+    w.google().changes.insert(
+        PRIMARY.into(),
+        HashMap::from([(
+            "tok-primary-2".to_string(),
+            (vec![stuck], "tok-primary-3".to_string()),
+        )]),
+    );
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    w.google().fail_delete_of = Some("gm4".into());
+    w.sync.own_events(Utc::now()).await;
+    assert_eq!(w.google().writes.len(), 4);
+    w.sync.own_events(Utc::now()).await;
+    w.sync.own_events(Utc::now()).await;
+    assert_eq!(
+        w.google().writes.len(),
+        4,
+        "a refused duplicate is not retried"
+    );
 }
 
 /// When Google refuses to delete Gmail's copy, Passband's event is taken
@@ -5948,4 +5973,55 @@ async fn a_refused_gmail_delete_takes_passbands_event_back_off_for_good() {
     assert_eq!(ids, ["gm1"]);
     w.sync.own_events(Utc::now()).await;
     assert_eq!(w.google().writes.len(), 3, "never tried again");
+}
+
+/// A refused duplicate delete is not spent again every pass; and when the
+/// undo of an adoption is refused too, both copies are not left for good:
+/// the undo is tried again once the refusal has cooled, even after the event
+/// has left the listing window.
+#[tokio::test]
+async fn refusals_are_not_retried_every_pass_and_a_failed_undo_is_retried() {
+    let w = world("own-undo", GRANTED).await;
+    let start = minute(Utc::now() + Duration::days(2));
+    let mut gmail = timed("gm1", "Reservation at Dingles Public House", start, 60);
+    gmail["eventType"] = json!("fromGmail");
+    gmail["organizer"] = json!({"email": "me@example.com", "self": true});
+    w.google().full.insert(PRIMARY.into(), vec![vec![gmail]]);
+    seed_ghost(&w.store, w.acct, "g1", "Dinner at Dingles", rfc(start));
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    w.google().fail_deletes = true;
+    w.sync.own_events(Utc::now()).await;
+    let own_id = {
+        let g = w.google();
+        let methods: Vec<&str> = g.writes.iter().map(|w| w.method).collect();
+        assert_eq!(methods, ["POST", "DELETE", "DELETE"]);
+        g.writes[0].body["id"].as_str().unwrap().to_string()
+    };
+    // Both refused: nothing is asked again while the refusals are fresh.
+    w.sync.own_events(Utc::now()).await;
+    w.sync.own_events(Utc::now()).await;
+    assert_eq!(w.google().writes.len(), 3, "not spent again every pass");
+
+    // A week on, Google allows it: the undo lands, though the event is now
+    // outside the listing window, and the pair is as Gmail made it.
+    w.google().fail_deletes = false;
+    let later = Utc::now() + Duration::days(8);
+    w.sync.own_events(later).await;
+    {
+        let g = w.google();
+        assert_eq!(g.writes.len(), 4, "{:?}", g.writes);
+        assert_eq!(
+            (g.writes[3].method, g.writes[3].event.as_deref()),
+            ("DELETE", Some(own_id.as_str()))
+        );
+    }
+    let ids: Vec<String> = w
+        .events()
+        .await
+        .iter()
+        .map(|e| e["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, ["gm1"]);
+    w.sync.own_events(later).await;
+    assert_eq!(w.google().writes.len(), 4, "done for good");
 }

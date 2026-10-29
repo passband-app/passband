@@ -92,7 +92,7 @@
                 return event
             }
             let t = Timer(timeInterval: Self.tickEvery, repeats: true) { _ in
-                MainActor.assumeIsolated { SessionReplay.shared.tick() }
+                MainActor.assumeIsolated { _ = SessionReplay.shared.tick() }
             }
             // `.common` keeps frames coming while a scroll or drag is tracking.
             RunLoop.main.add(t, forMode: .common)

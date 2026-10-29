@@ -3,7 +3,7 @@
 // `Content-Encoding: gzip`. The difference is a 10-byte header and an 8-byte
 // trailer (CRC-32 and length), which is cheaper to write than a dependency.
 //
-// Used for session replay uploads, where a minute of wireframes is a few
+// Used for session replay uploads, where a minute of frames is a few
 // hundred kilobytes of very repetitive JSON and shrinks about tenfold.
 
 import Foundation

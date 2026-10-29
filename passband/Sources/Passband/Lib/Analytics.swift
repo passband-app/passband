@@ -304,16 +304,18 @@ enum Analytics {
     static var replayNeedsFull: Bool { client?.snapshotNeedsFull ?? false }
 
     /// Send rrweb records for this session's recording. Every String in them
-    /// must be a color, a closed wireframe word or an allowed screen name
-    /// (`ReplayWireframe.validate`); a record with anything else is dropped
-    /// whole, and a debug build stops on it.
+    /// must be one of our tags, a style string in our exact grammar with grey
+    /// paints, the screen URL for an allowed screen name, or an icon this
+    /// process rendered (`ReplayWireframe.validate`); a record with anything
+    /// else is dropped whole, and a debug build stops on it.
     static func replay(_ records: [[String: Any]], full: Bool) {
         guard replayEnabled else { return }
-        guard ReplayWireframe.validate(records, extra: allowedStrings) else {
-            assertionFailure("analytics: replay record outside vocabulary")
-            return
+        // Checked on the client's queue, not here: a full snapshot is
+        // hundreds of style strings through a regex, and this is called from
+        // the main thread.
+        client?.captureSnapshot(records, isFull: full) {
+            ReplayWireframe.validate($0, extra: allowedStrings)
         }
-        client?.captureSnapshot(records, isFull: full)
     }
 
     /// Counter events (`minimalEvents`) ride at `minimal`; the remaining
@@ -516,7 +518,7 @@ final class PostHogClient: @unchecked Sendable {
     private var inFlight = false
 
     /// Session replay's own lane: `$snapshot` events go to /s/, not /batch,
-    /// and they are big (a full wireframe each), so they get a small buffer of
+    /// and they are big (a full snapshot each), so they get a small buffer of
     /// their own and never crowd an ordinary event out of the main one.
     private var snapshots: [[String: Any]] = []
     private var snapshotsInFlight = false
@@ -714,9 +716,16 @@ final class PostHogClient: @unchecked Sendable {
     /// One `$snapshot` event carrying rrweb records, filed under the session
     /// the ordinary events are on (which is what puts them in one recording).
     /// `$window_id` is the session id too: one window, one recording.
-    func captureSnapshot(_ records: [[String: Any]], isFull: Bool) {
+    func captureSnapshot(
+        _ records: [[String: Any]], isFull: Bool,
+        validate: @escaping @Sendable ([[String: Any]]) -> Bool
+    ) {
         let boxed = Unchecked(records)
         queue.async {
+            guard validate(boxed.value) else {
+                assertionFailure("analytics: replay record outside vocabulary")
+                return
+            }
             let now = Date()
             let sid = self.currentSessionId(now)
             if isFull {
@@ -733,8 +742,7 @@ final class PostHogClient: @unchecked Sendable {
             props["$window_id"] = sid
             props["$snapshot_source"] = "web"
             props["$snapshot_data"] = boxed.value
-            // posthog-ios copies the id into the properties too: replay
-            // ingestion reads it there.
+            // The id rides in the properties too, as PostHog's SDKs send it.
             props["distinct_id"] = self.distinctId
             self.snapshots.append([
                 "event": "$snapshot",
@@ -744,11 +752,9 @@ final class PostHogClient: @unchecked Sendable {
                 "api_key": self.apiKey,
                 "properties": props,
             ])
-            if self.snapshots.count > Self.snapshotCap {
-                // Oldest first. A recording with a hole in it still plays from
-                // the next full snapshot; one that never uploads does not.
-                self.snapshots.removeFirst(self.snapshots.count - Self.snapshotCap)
-            }
+            // Oldest first. A recording with a hole in it still plays from
+            // the next full snapshot; one that never uploads does not.
+            self.trimSnapshots()
             if self.snapshots.count >= Self.snapshotFlushAt { self.flushSnapshotsLocked() }
         }
     }
@@ -859,11 +865,13 @@ final class PostHogClient: @unchecked Sendable {
     }
 
     /// The replay lane's upload: a bare JSON array of events, each carrying
-    /// its own `api_key`, gzipped (posthog-ios's shape for /s/). Same requeue
-    /// rule as the events. Frames buffered before the user turned telemetry
+    /// its own `api_key`, gzipped. Same requeue rule as the events; a batch
+    /// PostHog refuses (4xx) is dropped, and so is its full snapshot's claim
+    /// to have opened the recording (`discardSnapshots`). Frames buffered before the user turned telemetry
     /// below `full` are thrown away here rather than sent late.
     private func flushSnapshotsLocked() {
         guard Analytics.replayEnabled else {
+            discardSnapshots(snapshots)
             snapshots.removeAll()
             return
         }
@@ -873,7 +881,10 @@ final class PostHogClient: @unchecked Sendable {
         guard
             let json = try? JSONSerialization.data(withJSONObject: batch.value),
             let body = Gzip.compress(json)
-        else { return }
+        else {
+            discardSnapshots(batch.value)
+            return
+        }
         snapshotsInFlight = true
 
         var req = URLRequest(url: snapshotEndpoint)
@@ -888,12 +899,36 @@ final class PostHogClient: @unchecked Sendable {
                 let code = (response as? HTTPURLResponse)?.statusCode ?? 0
                 if error != nil || code == 0 || code >= 500 {
                     self.snapshots.insert(contentsOf: batch.value, at: 0)
-                    if self.snapshots.count > Self.snapshotCap {
-                        self.snapshots.removeFirst(self.snapshots.count - Self.snapshotCap)
-                    }
+                    self.trimSnapshots()
+                } else if !(200..<300).contains(code) {
+                    self.discardSnapshots(batch.value)
                 }
             }
         }.resume()
+    }
+
+    /// Hold the replay buffer to its cap, oldest out first.
+    private func trimSnapshots() {
+        guard snapshots.count > Self.snapshotCap else { return }
+        let over = snapshots.count - Self.snapshotCap
+        discardSnapshots(Array(snapshots.prefix(over)))
+        snapshots.removeFirst(over)
+    }
+
+    /// Snapshot events that will never reach PostHog. If one of them held a
+    /// full snapshot (rrweb type 2), it may have been the one that opens the
+    /// recording, so the next record must be a full snapshot again; without
+    /// this, later pointer records would play onto nothing.
+    private func discardSnapshots(_ events: [[String: Any]]) {
+        let lostFull = events.contains { event in
+            let data = (event["properties"] as? [String: Any])?["$snapshot_data"] as? [[String: Any]]
+            return data?.contains { $0["type"] as? Int == 2 } ?? false
+        }
+        guard lostFull else { return }
+        snapshotSession = ""
+        var st = replayState.get()
+        st.snapshotSession = ""
+        replayState.set(st)
     }
 
     /// UUIDv7: 48-bit unix milliseconds, then version/variant bits over random.

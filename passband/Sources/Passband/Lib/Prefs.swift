@@ -41,7 +41,7 @@ enum SearchSortChoice: String, CaseIterable, Sendable {
 /// the default. `minimal` keeps sessions, screen views, and the anonymous
 /// counter events (sends, triage volume, corrections, connection health — see
 /// `Analytics.minimalEvents`) but drops the remaining action verbs; `full`
-/// also records Mac sessions as content-free wireframes (`SessionReplay`);
+/// also records Mac sessions as layout only (`SessionReplay`);
 /// `none` sends nothing at all. No level carries content at any time: every
 /// event string that leaves is in `Analytics.allowedStrings`, and a replay
 /// frame holds only those, fixed greys and numbers (`ReplayWireframe.validate`).

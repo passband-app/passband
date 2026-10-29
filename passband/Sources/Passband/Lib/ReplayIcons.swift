@@ -1,21 +1,29 @@
 // Real icons in session replay, without trusting a single pixel of the screen.
 //
 // A small layer with a bitmap could be one of the app's SF Symbols, or a
-// sender's avatar initials, a date, a carrier logo, a photo: the layer type
-// does not tell them apart (SwiftUI draws "TI", "Dec 4" and the gear the same
+// sender's avatar initial, a date, a favicon, an emoji: the layer type does
+// not tell them apart (SwiftUI draws "TI", "Dec 4" and the gear the same
 // way). So the bitmap is read HERE, on this machine, only to ask one question:
-// does its shape match one of the app's own symbols (`ReplayIconNames`)
+// does its shape match one of the app's own icon symbols (`ReplayIconNames`)
 // clearly, with a margin over the next best? If so, the frame gets OUR render
 // of that symbol, in the fixed grey; if not, the layer stays a grey box. The
-// pixels never leave; what leaves is a picture of a symbol from a closed list,
-// so the most a wrong match can say is "something here looked like a gear".
+// pixels never leave; what leaves is a picture of a symbol from a closed list.
+//
+// Three guards keep that list from describing mail:
+//   * the list holds only symbols Sources/ uses as icons, minus any shaped like
+//     a letter, digit, punctuation mark or bare shape (replay-icons.py), so an
+//     initial or a ringed avatar has nothing letter-like to match;
+//   * a bitmap with more than one hue is never matched: the app tints a symbol
+//     one color, while emoji and logos are multicolor;
+//   * only leaf layers are read, so a container cannot mix its children in.
+// What a match still says is which of the app's icons is on screen, which the
+// privacy copy states.
 //
 // Matching: the bitmap's alpha, cropped to its ink, averaged onto a 20×20 grid
 // and lightly blurred (so stroke weight matters less), compared by cosine to
 // the same of each symbol, with the ink's aspect ratio as a gate. Measured on
 // the sitrep: real icons score 0.97 to 0.995; text scores under 0.8; solid
-// shapes (a photo in a circle) match several filled symbols almost equally
-// and fail the margin.
+// shapes match several filled symbols almost equally and fail the margin.
 
 #if os(macOS)
     import AppKit
@@ -30,7 +38,12 @@
         private static let maxAspectRatio: Float = 1.3
         /// Icons are small; anything bigger is a picture and stays a box.
         static let maxSide: CGFloat = 48
-        private static let tint = NSColor(white: 0.6, alpha: 1)
+        /// New bitmaps matched per frame. An animating or scrolling screen can
+        /// show dozens of fresh bitmaps a tick; past this they stay boxes
+        /// until a later frame gets to them.
+        private static let matchesPerFrame = 20
+        /// Grey, as every paint in a replay is (`ReplayWireframe`).
+        private static let tint = CGColor(gray: 0.6, alpha: 1)
 
         private struct Ref {
             let name: String
@@ -39,8 +52,20 @@
         }
         private var refs: [Ref]?
         private var building = false
-        /// Per bitmap object: the symbol it matched, or nil for none.
-        private var matches: [ObjectIdentifier: String?] = [:]
+
+        /// One answer per bitmap object. The entry holds the object itself, so
+        /// its address cannot be freed and reused by another bitmap while the
+        /// answer is cached, and the size it was read at, since a layer can
+        /// show one bitmap at two sizes.
+        private struct Entry {
+            let contents: AnyObject
+            let size: CGSize
+            let name: String?
+            var seen: Int
+        }
+        private var entries: [ObjectIdentifier: Entry] = [:]
+        private var frame = 0
+        private var matchedThisFrame = 0
         private var renders: [String: String] = [:]
 
         /// Build the symbol masks off the main thread; until they are ready
@@ -55,7 +80,7 @@
                         let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
                             .withSymbolConfiguration(.init(pointSize: 40, weight: .regular)),
                         let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
-                        let m = Self.mask(cg)
+                        let m = Self.shape(cg)
                     else { continue }
                     out.append(Ref(name: name, mask: m.mask, aspect: m.aspect))
                 }
@@ -69,21 +94,34 @@
             }
         }
 
+        /// Call once per captured frame: forgets bitmaps not seen for two
+        /// frames and resets the per-frame matching budget.
+        func beginFrame() {
+            frame += 1
+            matchedThisFrame = 0
+            let cutoff = frame - 2
+            entries = entries.filter { $0.value.seen >= cutoff }
+        }
+
         /// The data URL of our render of the matching symbol, sized to the
         /// layer, or nil to leave the layer a box.
         func icon(for layer: CALayer, size: CGSize) -> String? {
-            guard let refs, let contents = layer.contents,
+            guard let refs, let contents = layer.contents as AnyObject?,
+                layer.sublayers?.isEmpty ?? true,
                 size.width >= 6, size.height >= 6,
                 size.width <= Self.maxSide, size.height <= Self.maxSide
             else { return nil }
-            let key = ObjectIdentifier(contents as AnyObject)
+            let key = ObjectIdentifier(contents)
             let name: String?
-            if let known = matches[key] {
-                name = known
+            if var known = entries[key], known.contents === contents, known.size == size {
+                known.seen = frame
+                entries[key] = known
+                name = known.name
             } else {
+                guard matchedThisFrame < Self.matchesPerFrame else { return nil }
+                matchedThisFrame += 1
                 name = match(layer, refs)
-                if matches.count > 2000 { matches.removeAll() }
-                matches[key] = name
+                entries[key] = Entry(contents: contents, size: size, name: name, seen: frame)
             }
             guard let name else { return nil }
             return render(name, size)
@@ -104,7 +142,9 @@
             ctx.translateBy(x: 0, y: CGFloat(h))
             ctx.scaleBy(x: scale, y: -scale)
             layer.render(in: ctx)
-            guard let cg = ctx.makeImage(), let m = Self.mask(cg) else { return nil }
+            guard let cg = ctx.makeImage(), let m = Self.shape(cg), !m.multicolor else {
+                return nil
+            }
 
             var best: (name: String, score: Float) = ("", 0)
             var second: Float = 0
@@ -125,29 +165,36 @@
             return best.name
         }
 
-        /// Our own picture of a symbol: aspect-fit in the layer's box, at 2x,
-        /// in the replay's grey. Registered with `ReplayWireframe` so the
-        /// outbound validator knows it is one of ours.
+        /// Our own picture of a symbol: aspect-fit in the layer's box, at
+        /// exactly 2x pixels, grey, no color profile (about 1.5 KB for an
+        /// 18pt icon). Registered with `ReplayWireframe` so the outbound
+        /// validator knows it is one of ours.
         private func render(_ name: String, _ size: CGSize) -> String? {
             let key = "\(name)@\(Int(size.width))x\(Int(size.height))"
             if let done = renders[key] { return done }
-            guard
+            let w = Int(size.width * 2)
+            let h = Int(size.height * 2)
+            guard w > 0, h > 0,
                 let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
-                    .withSymbolConfiguration(
-                        .init(pointSize: size.height, weight: .regular)
-                            .applying(.init(paletteColors: [Self.tint])))
+                    .withSymbolConfiguration(.init(pointSize: size.height * 2, weight: .regular)),
+                let glyph = symbol.cgImage(forProposedRect: nil, context: nil, hints: nil),
+                let ctx = CGContext(
+                    data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
             else { return nil }
-            let px = NSSize(width: size.width * 2, height: size.height * 2)
-            let image = NSImage(size: px)
-            image.lockFocus()
-            let fit = min(px.width / symbol.size.width, px.height / symbol.size.height)
-            let dw = symbol.size.width * fit
-            let dh = symbol.size.height * fit
-            symbol.draw(
-                in: NSRect(x: (px.width - dw) / 2, y: (px.height - dh) / 2, width: dw, height: dh))
-            image.unlockFocus()
-            guard let tiff = image.tiffRepresentation,
-                let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
+            let gw = CGFloat(glyph.width)
+            let gh = CGFloat(glyph.height)
+            let fit = min(CGFloat(w) / gw, CGFloat(h) / gh)
+            let rect = CGRect(
+                x: (CGFloat(w) - gw * fit) / 2, y: (CGFloat(h) - gh * fit) / 2,
+                width: gw * fit, height: gh * fit)
+            // The glyph as a mask, filled with the replay grey.
+            ctx.clip(to: rect, mask: glyph)
+            ctx.setFillColor(Self.tint)
+            ctx.fill(rect)
+            guard let out = ctx.makeImage(),
+                let png = NSBitmapImageRep(cgImage: out).representation(using: .png, properties: [:])
             else { return nil }
             let url = "data:image/png;base64," + png.base64EncodedString()
             ReplayWireframe.registerImage(url)
@@ -158,8 +205,11 @@
         // MARK: - shape
 
         /// Alpha cropped to its ink, box-averaged onto the grid, lightly
-        /// blurred; plus the ink's aspect ratio.
-        nonisolated private static func mask(_ img: CGImage) -> (mask: [Float], aspect: Float)? {
+        /// blurred; the ink's aspect ratio; and whether the ink holds more
+        /// than one hue (emoji, logos), which is never matched.
+        nonisolated private static func shape(_ img: CGImage)
+            -> (mask: [Float], aspect: Float, multicolor: Bool)?
+        {
             let w = img.width
             let h = img.height
             guard w > 0, h > 0 else { return nil }
@@ -172,12 +222,19 @@
             else { return nil }
             ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
             var minX = w, minY = h, maxX = -1, maxY = -1
+            var hues = Set<Int>()
             for y in 0..<h {
-                for x in 0..<w where px[(y * w + x) * 4 + 3] > 40 {
+                for x in 0..<w {
+                    let i = (y * w + x) * 4
+                    let a = px[i + 3]
+                    guard a > 40 else { continue }
                     minX = min(minX, x)
                     maxX = max(maxX, x)
                     minY = min(minY, y)
                     maxY = max(maxY, y)
+                    if a > 128, let hue = hueBucket(px[i], px[i + 1], px[i + 2], a) {
+                        hues.insert(hue)
+                    }
                 }
             }
             guard maxX >= minX, maxY >= minY else { return nil }
@@ -220,7 +277,42 @@
                     blurred[j * n + i] = sum / count
                 }
             }
-            return (blurred, Float(cw) / Float(ch))
+            return (blurred, Float(cw) / Float(ch), spread(hues) > 2)
+        }
+
+        /// How many 30° buckets the hues span, the short way round the
+        /// wheel. One tint lands in one or two neighbouring buckets (its
+        /// antialiased edge can tip into the next); two colours span more.
+        nonisolated private static func spread(_ buckets: Set<Int>) -> Int {
+            guard buckets.count > 1 else { return buckets.count }
+            let sorted = buckets.sorted()
+            var largestGap = 12 - sorted.last! + sorted.first!
+            for (a, b) in zip(sorted, sorted.dropFirst()) { largestGap = max(largestGap, b - a) }
+            return 12 - largestGap + 1
+        }
+
+        /// A saturated pixel's hue in one of 12 buckets, or nil for a grey.
+        nonisolated private static func hueBucket(_ r8: UInt8, _ g8: UInt8, _ b8: UInt8, _ a8: UInt8)
+            -> Int?
+        {
+            let a = Float(a8)
+            let r = Float(r8) / a
+            let g = Float(g8) / a
+            let b = Float(b8) / a
+            let mx = max(r, g, b)
+            let mn = min(r, g, b)
+            guard mx > 0.15, (mx - mn) / mx > 0.3 else { return nil }
+            var hue: Float
+            if mx == r {
+                hue = (g - b) / (mx - mn)
+            } else if mx == g {
+                hue = 2 + (b - r) / (mx - mn)
+            } else {
+                hue = 4 + (r - g) / (mx - mn)
+            }
+            hue = (hue * 60).truncatingRemainder(dividingBy: 360)
+            if hue < 0 { hue += 360 }
+            return Int(hue / 30) % 12
         }
 
         nonisolated private static func cosine(_ a: [Float], _ b: [Float]) -> Float {

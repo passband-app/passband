@@ -35,6 +35,10 @@ struct ReplayWireframeTests {
         flippedAndUnflippedAgree()
         textWidthsAreQuantized()
         validatorIsClosed()
+        boxesSnapToTheGrid()
+        aClippedIconStaysABox()
+        pointerRecordsPass()
+        iconListHasNoLetters()
         webSnapshotShape()
         onlyOurOwnImagesPass()
         gzipIsAGzipMember()
@@ -147,8 +151,9 @@ struct ReplayWireframeTests {
         let nodes = walk(tempting())
         let web = nodes.filter { $0.kind == .opaque }
         expect(web.count == 1, "the web view is exactly one box (got \(web.count))")
-        expect(web.first.map { $0.x == 20 && $0.y == 200 && $0.w == 500 } ?? false,
-            "and it sits where the web view does")
+        // 20,200 500x300 snapped outward to the 32pt opaque grid.
+        expect(web.first.map { $0.x == 0 && $0.y == 192 && $0.w == 544 && $0.h == 320 } ?? false,
+            "and it covers the web view, on the coarse grid (got \(String(describing: web.first)))")
         // The blue fill and the body text inside it were never visited.
         let insideWeb = nodes.filter {
             $0.kind != .opaque && $0.x >= 20 && $0.y >= 200 && $0.x < 520 && $0.y < 500
@@ -167,7 +172,8 @@ struct ReplayWireframeTests {
         let nodes = walk(root)
         expect(nodes.count == 1 && nodes[0].kind == .opaque,
             "a text field is one opaque box (got \(nodes.map(\.kind)))")
-        expect(nodes.first.map { $0.w == 300 } ?? false, "at the field's own width, not the text's")
+        expect(nodes.first.map { $0.x == 32 && $0.w == 320 } ?? false,
+            "at the field's own frame on the coarse grid, not the text's (got \(String(describing: nodes.first)))")
     }
 
     static func offscreenBoundaryLetsNothingThrough() {
@@ -222,7 +228,7 @@ struct ReplayWireframeTests {
         child.backgroundColor = CGColor(gray: 0.5, alpha: 1)
         container.addSublayer(child)
         expect(
-            walk(root).contains { $0.x == 100 && $0.y == 100 && $0.w == 50 },
+            walk(root).contains { $0.x == 96 && $0.y == 96 && $0.w == 56 && $0.h == 24 },
             "a child of a 0x0 non-clipping container is still drawn")
 
         container.masksToBounds = true
@@ -244,7 +250,9 @@ struct ReplayWireframeTests {
         }
         let rows = walk(root).filter { $0.kind == .fill }
         expect(rows.count == 10, "only the ten visible rows survive (got \(rows.count))")
-        expect(rows.allSatisfy { $0.y + $0.h <= 300 }, "and each is cut to the scroll view")
+        expect(
+            rows.allSatisfy { $0.y + $0.h <= 300 + ReplayWireframe.boxQuantum },
+            "and each is cut to the scroll view (to within one grid step)")
     }
 
     static func flippedAndUnflippedAgree() {
@@ -359,6 +367,61 @@ struct ReplayWireframeTests {
         expect(!ReplayWireframe.validate([theirs], extra: []), "an image we did not render fails")
         let jpeg: [String: Any] = ["type": "image", "base64": "data:image/jpeg;base64,T1VSUw=="]
         expect(!ReplayWireframe.validate([jpeg], extra: []), "nor does any other encoding of it")
+    }
+
+    static func boxesSnapToTheGrid() {
+        let root = layer(0, 0, 800, 600)
+        root.isGeometryFlipped = true
+        let pill = layer(3, 5, 203, 17)  // a recipient pill whose width is an address
+        pill.backgroundColor = CGColor(gray: 0.5, alpha: 1)
+        root.addSublayer(pill)
+        let n = walk(root).first
+        expect(n.map { $0.x == 0 && $0.y == 0 && $0.w == 208 && $0.h == 24 } ?? false,
+            "a box snaps outward to the 8pt grid (got \(String(describing: n)))")
+        for b in walk(tempting()) where b.kind != .icon && b.kind != .text {
+            let q = b.kind == .opaque ? ReplayWireframe.opaqueQuantum : ReplayWireframe.boxQuantum
+            expect(b.x % q == 0 && b.y % q == 0 && b.w % q == 0 && b.h % q == 0,
+                "every box is on its grid (\(b))")
+        }
+    }
+
+    static func aClippedIconStaysABox() {
+        // The avatar spans x 320...360; a clip at 340 cuts it, and a half
+        // icon must not be drawn as a whole one.
+        let ours = "data:image/png;base64,T1VSUw=="
+        ReplayWireframe.registerImage(ours)
+        let root = tempting()
+        var nodes: [ReplayWireframe.Node] = []
+        ReplayWireframe.nodes(
+            root: root, flipped: true, offset: .zero, clip: CGRect(x: 0, y: 0, width: 340, height: 600),
+            icon: { _, _ in ours }, into: &nodes)
+        expect(!nodes.contains { $0.kind == .icon }, "a clipped bitmap is not an icon")
+        expect(nodes.contains { $0.kind == .image }, "it is a box instead")
+    }
+
+    static func pointerRecordsPass() {
+        let move: [String: Any] = [
+            "type": 3, "timestamp": 1,
+            "data": ["source": 1, "positions": [["x": 4, "y": 5, "id": ReplayWireframe.bodyId, "timeOffset": 0]]],
+        ]
+        let click: [String: Any] = [
+            "type": 3, "timestamp": 1,
+            "data": ["source": 2, "type": 2, "id": ReplayWireframe.bodyId, "x": 4, "y": 5],
+        ]
+        expect(ReplayWireframe.validate([move, click], extra: []), "pointer and click records pass")
+        let keyed: [String: Any] = ["type": 3, "timestamp": 1, "data": ["source": 5, "text": "k"]]
+        expect(!ReplayWireframe.validate([keyed], extra: []), "an input record with text fails")
+    }
+
+    static func iconListHasNoLetters() {
+        let banned: Set<String> = ["a", "k", "at", "bold", "italic", "info", "circle", "ring", "exclamationmark"]
+        let names = ReplayIconNames.candidates
+        expect(names.count > 50, "the icon list is populated (\(names.count))")
+        for n in names {
+            expect(!banned.contains(n), "\(n) is not letter- or shape-like")
+            let parts = n.split(separator: ".")
+            expect(!parts.contains { $0.count == 1 }, "\(n) has no single-character part")
+        }
     }
 
     static func expect(_ cond: Bool, _ what: String) {

@@ -1,4 +1,4 @@
-// Session replay for the Mac app, as wireframes: PostHog's recordings player
+// Session replay for the Mac app, as layout only: PostHog's recordings player
 // shows the layout of the window moving, and where the clicks landed, and
 // nothing that was on the screen. See `ReplayWireframe` for what a frame is
 // made of and why no text, image or mail body can be in one.
@@ -40,11 +40,15 @@
         static let shared = SessionReplay()
 
         private static let tickEvery: TimeInterval = 0.5
-        /// At most one frame a second, as posthog-ios does by default.
+        /// At most one frame a second.
         private static let throttle: TimeInterval = 1.0
         /// No input for this long and the recording pauses.
         private static let idleAfter: TimeInterval = 120
         private static let deadAfter: TimeInterval = 1.5
+        /// A pending click older than this is forgotten, not reported: the
+        /// tick that should have judged it did not run (app hidden, window
+        /// minimized), so nothing is known about what it did.
+        private static let deadForget: TimeInterval = 3
         private static let rageWindow: TimeInterval = 1.0
         private static let rageRadius: CGFloat = 30
 
@@ -54,7 +58,7 @@
         private var lastPrint: Int?
         private var lastMeta: Meta?
         private var clicks: [(at: Date, point: CGPoint)] = []
-        private var pendingDead: [(at: Date, print: Int, point: CGPoint)] = []
+        private var pendingDead: [(at: Date, print: Int, point: CGPoint, origin: CGPoint)] = []
         private var menuTracking = false
         /// Input since the last activity record, and where the pointer was.
         private var activeSinceTick = false
@@ -129,10 +133,13 @@
             guard Analytics.replayEnabled else { return }
             switch event.type {
             case .leftMouseDown, .leftMouseUp:
-                guard let point = canvasPoint(event) else { return }
+                guard let window = event.window,
+                    let point = canvasPoint(screen: window.convertPoint(toScreen: event.locationInWindow))
+                else { return }
                 // The first click after a pause opens the recording with a
                 // picture, or there would be nothing to draw the click on.
-                if Analytics.replayNeedsFull || lastPrint == nil { tick(force: true) }
+                var frame: Frame?
+                if Analytics.replayNeedsFull || lastPrint == nil { frame = tick(force: true) }
                 let down = event.type == .leftMouseDown
                 // rrweb mouse interactions on <body>: 1 = down, 0 = up, and a
                 // 2 = click after the up, which is what the player marks.
@@ -147,16 +154,16 @@
                     ]
                 }
                 Analytics.replay(down ? [interaction(1)] : [interaction(0), interaction(2)], full: false)
-                if down { noteClick(point, now) }
+                if down { noteClick(point, now, frame) }
             default:
                 break
             }
         }
 
-        private func noteClick(_ point: CGPoint, _ now: Date) {
+        private func noteClick(_ point: CGPoint, _ now: Date, _ known: Frame?) {
             // The picture as it was before the app saw this click (a local
             // monitor runs before dispatch), to compare against after.
-            guard !menuTracking, let frame = capture(),
+            guard !menuTracking, let main = MainWindow.find(), let frame = known ?? capture(),
                 !frame.opaqueRects.contains(where: { $0.contains(point) })
             else { return }
             clicks.removeAll { now.timeIntervalSince($0.at) > Self.rageWindow }
@@ -166,7 +173,7 @@
                 Analytics.capture("$rageclick", frustration(point))
                 clicks.removeAll()
             }
-            pendingDead.append((now, frame.print, point))
+            pendingDead.append((now, frame.print, point, main.frame.origin))
         }
 
         private func frustration(_ point: CGPoint) -> [String: Any] {
@@ -176,11 +183,10 @@
             return props
         }
 
-        /// A click's position on the canvas: points from the main window's
-        /// top-left, whichever of the app's windows it landed in.
-        private func canvasPoint(_ event: NSEvent) -> CGPoint? {
-            guard let main = MainWindow.find(), let window = event.window else { return nil }
-            let screen = window.convertPoint(toScreen: event.locationInWindow)
+        /// A screen point on the canvas: points from the main window's
+        /// top-left, or nil outside it. Clicks and the pointer both use this.
+        private func canvasPoint(screen: CGPoint) -> CGPoint? {
+            guard let main = MainWindow.find() else { return nil }
             let p = CGPoint(x: screen.x - main.frame.minX, y: main.frame.maxY - screen.y)
             guard p.x >= 0, p.y >= 0, p.x <= main.frame.width, p.y <= main.frame.height
             else { return nil }
@@ -189,23 +195,33 @@
 
         // MARK: - frames
 
-        private func tick(force: Bool = false) {
+        /// One tick: maybe a frame. Returns the frame it captured (sent or
+        /// not), so a click can reuse it instead of walking the layers again.
+        @discardableResult
+        private func tick(force: Bool = false) -> Frame? {
             guard Analytics.replayEnabled, NSApp.isActive else {
                 pendingDead.removeAll()
-                return
+                // Telemetry going below `full` and back, or the app coming
+                // back, must reopen with a full picture.
+                lastPrint = nil
+                return nil
             }
             let now = Date()
             notePointer(now)
-            guard force || now.timeIntervalSince(lastInput) < Self.idleAfter else { return }
-            guard let frame = capture() else { return }
+            guard force || now.timeIntervalSince(lastInput) < Self.idleAfter else { return nil }
+            guard let frame = capture() else {
+                // Minimized or hidden: whatever a pending click did is unknowable.
+                pendingDead.removeAll()
+                return nil
+            }
             resolveDeadClicks(frame.print, now)
 
             let needsFull = force || Analytics.replayNeedsFull
             let href = Analytics.currentScreen.get()
             let meta = Meta(width: frame.width, height: frame.height, href: href)
             let changed = frame.print != lastPrint || meta != lastMeta
-            guard needsFull || changed else { return }
-            guard needsFull || now.timeIntervalSince(lastSent) >= Self.throttle else { return }
+            guard needsFull || changed else { return frame }
+            guard needsFull || now.timeIntervalSince(lastSent) >= Self.throttle else { return frame }
 
             // rrweb wants a meta record before every full snapshot.
             var records: [[String: Any]] = [
@@ -221,6 +237,7 @@
             lastSent = now
             lastPrint = frame.print
             lastMeta = meta
+            return frame
         }
 
         /// The pointer, sampled each tick (mouse-moved events only reach
@@ -229,15 +246,13 @@
         /// mouse-move at the pointer's canvas position, once the recording
         /// has a frame to draw it on.
         private func notePointer(_ now: Date) {
-            guard let main = MainWindow.find() else { return }
-            let screen = NSEvent.mouseLocation
-            let p = CGPoint(x: screen.x - main.frame.minX, y: main.frame.maxY - screen.y)
-            let inside = p.x >= 0 && p.y >= 0 && p.x <= main.frame.width && p.y <= main.frame.height
-            if inside, let last = lastPointer, hypot(last.x - p.x, last.y - p.y) >= 2 {
-                lastInput = now
-                activeSinceTick = true
+            if let p = canvasPoint(screen: NSEvent.mouseLocation) {
+                if let last = lastPointer, hypot(last.x - p.x, last.y - p.y) >= 2 {
+                    lastInput = now
+                    activeSinceTick = true
+                }
+                lastPointer = p
             }
-            if inside { lastPointer = p }
             guard activeSinceTick, let at = lastPointer, lastPrint != nil else { return }
             activeSinceTick = false
             Analytics.replay(
@@ -255,8 +270,12 @@
         }
 
         private func resolveDeadClicks(_ print: Int, _ now: Date) {
+            let origin = MainWindow.find()?.frame.origin
             pendingDead.removeAll { click in
                 if print != click.print { return true }  // something answered
+                // The click moved the window (a title-bar drag): it did something.
+                if origin != click.origin { return true }
+                if now.timeIntervalSince(click.at) > Self.deadForget { return true }
                 guard now.timeIntervalSince(click.at) >= Self.deadAfter else { return false }
                 Analytics.capture("$dead_click", frustration(click.point))
                 return true
@@ -273,11 +292,18 @@
             else { return nil }
             let canvas = main.frame
             let bounds = CGRect(origin: .zero, size: canvas.size)
+            ReplayIcons.shared.beginFrame()
             var nodes: [ReplayWireframe.Node] = []
             var opaqueRects: [CGRect] = []
 
+            // Tooltips and menus are left out: a tooltip can be a sender's
+            // address (`.help(sender)`), drawn as a bar its length.
             let windows = NSApp.windows
                 .filter { $0.isVisible && !$0.isMiniaturized && $0.alphaValue > 0.01 }
+                .filter {
+                    let name = NSStringFromClass(type(of: $0))
+                    return !name.contains("ToolTip") && !name.contains("Menu")
+                }
                 .filter { $0.frame.intersects(canvas) }
                 .sorted { $0.orderedIndex > $1.orderedIndex }
             for window in windows {

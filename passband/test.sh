@@ -625,6 +625,7 @@ run_suite settings-search \
 run_suite replay-wireframe \
   Sources/Passband/Lib/ReplayWireframe.swift \
   Sources/Passband/Lib/Gzip.swift \
+  Sources/Passband/Lib/ReplayIconNames.swift \
   Tests/ReplayWireframeTests.swift
 
 # What the assistant says about Passband itself: the three help tools' answers.

@@ -78,7 +78,7 @@ enum ReplayWireframe {
     static let textQuantum = 8
     /// A frame stops growing here. A screen that needs more boxes than this is
     /// a list far longer than the window, and the clip has already failed.
-    static let nodeCap = 2500
+    static let nodeCap = 1200
 
     /// The whole palette. Mid grey at partial alpha reads on both a light and
     /// a dark window, and nested panels darken or lighten by stacking, which
@@ -176,9 +176,8 @@ enum ReplayWireframe {
         // clearly one of the app's own symbols is drawn as OUR copy of it;
         // anything else is only the fact that it draws something, and which
         // kind of thing that probably is.
-        if layer.contents != nil, let icon,
-            let url = icon(layer, layer.bounds.size), frame.width == visible.width,
-            frame.height == visible.height
+        if layer.contents != nil, let icon, frame.width == visible.width,
+            frame.height == visible.height, let url = icon(layer, layer.bounds.size)
         {
             var n = node(visible, .icon)
             n.image = url
@@ -247,13 +246,34 @@ enum ReplayWireframe {
             kind: .text, fill: textPaint, radius: 3)
     }
 
+    /// Every box snaps OUTWARD to a grid, so its exact size says nothing:
+    /// a recipient pill no longer gives the length of the address in it, nor
+    /// a badge the number of digits. `opaqueQuantum` is coarser because a
+    /// web view sizes itself to the mail it shows, and its exact height
+    /// would fingerprint a newsletter. Icons are not snapped: they are the
+    /// app's own symbols at the app's own sizes.
+    static let boxQuantum = 8
+    static let opaqueQuantum = 32
+
     private static func node(
         _ r: CGRect, _ kind: Node.Kind, fill: String? = nil, border: String? = nil,
         borderWidth: Int = 0, radius: Int = 0
     ) -> Node {
-        Node(
-            x: Int(r.minX.rounded()), y: Int(r.minY.rounded()),
-            w: Int(r.width.rounded()), h: Int(r.height.rounded()), kind: kind,
+        let q: CGFloat
+        switch kind {
+        case .icon:
+            return Node(
+                x: Int(r.minX.rounded()), y: Int(r.minY.rounded()),
+                w: Int(r.width.rounded()), h: Int(r.height.rounded()), kind: kind)
+        case .opaque: q = CGFloat(opaqueQuantum)
+        default: q = CGFloat(boxQuantum)
+        }
+        let minX = (r.minX / q).rounded(.down) * q
+        let minY = (r.minY / q).rounded(.down) * q
+        let maxX = (r.maxX / q).rounded(.up) * q
+        let maxY = (r.maxY / q).rounded(.up) * q
+        return Node(
+            x: Int(minX), y: Int(minY), w: Int(maxX - minX), h: Int(maxY - minY), kind: kind,
             fill: fill, border: border, borderWidth: borderWidth, radius: radius)
     }
 
@@ -359,6 +379,8 @@ enum ReplayWireframe {
             h.combine(n.h)
             h.combine(n.fill)
             h.combine(n.border)
+            h.combine(n.borderWidth)
+            h.combine(n.radius)
             h.combine(n.image)
         }
         return h.finalize()
@@ -398,13 +420,13 @@ enum ReplayWireframe {
         "source", "x", "y", "positions", "timeOffset",
     ]
 
-    nonisolated(unsafe) private static let boxGrammar = try! NSRegularExpression(
+    private static let boxGrammar = try! NSRegularExpression(
         pattern:
-            "^position:absolute;left:-?\\d{1,5}px;top:-?\\d{1,5}px;width:\\d{1,5}px;height:\\d{1,5}px;box-sizing:border-box;(?:background:(#[0-9A-F]{8});)?(?:border:\\d{1,2}px solid (#[0-9A-F]{8});)?(?:border-radius:\\d{1,3}px;)?$"
+            "^position:absolute;left:-?[0-9]{1,5}px;top:-?[0-9]{1,5}px;width:[0-9]{1,5}px;height:[0-9]{1,5}px;box-sizing:border-box;(?:background:(#[0-9A-F]{8});)?(?:border:[0-9]{1,2}px solid (#[0-9A-F]{8});)?(?:border-radius:[0-9]{1,3}px;)?\\z"
     )
-    nonisolated(unsafe) private static let bodyGrammar = try! NSRegularExpression(
+    private static let bodyGrammar = try! NSRegularExpression(
         pattern:
-            "^margin:0;position:relative;overflow:hidden;width:\\d{1,5}px;height:\\d{1,5}px;background:(#[0-9A-F]{8});$"
+            "^margin:0;position:relative;overflow:hidden;width:[0-9]{1,5}px;height:[0-9]{1,5}px;background:(#[0-9A-F]{8});\\z"
     )
 
     /// A style string in our grammar, every color in it a grey.

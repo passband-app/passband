@@ -118,7 +118,7 @@ struct EventProposalTests {
 
     /// MAIN'S INVENTORY, spelled out: the seventeen tools from before the
     /// calendar tool existed, in the order the model is shown them. With the
-    /// Calendar page off the assistant is sent exactly these.
+    /// calendar tool placed among them, the assistant is sent these.
     static let mains = [
         "search_mail", "get_thread", "get_updates", "explain_triage", "get_records", "search_contacts",
         "show_emails", "set_status", "create_sender_rule", "save_draft", "archive_message", "label_message",
@@ -126,24 +126,15 @@ struct EventProposalTests {
     ]
 
     static func theToolIsOfferedOnlyWithTheCalendar() {
-        let off = EventProposals.inventory(mains, calendar: false, after: "unsubscribe_sender")
-        expect(off == mains, "off: main's tools, in main's order, and nothing else")
-        expect(!off.contains(EventProposals.toolName), "off: no calendar tool")
-        let on = EventProposals.inventory(mains, calendar: true, after: "unsubscribe_sender")
-        expect(on.count == mains.count + 1, "on: exactly one more tool")
-        expect(on.filter { $0 != EventProposals.toolName } == mains, "on: the others unmoved")
-        expect(on.firstIndex(of: EventProposals.toolName) == mains.firstIndex(of: "unsubscribe_sender").map { $0 + 1 },
-               "on: after the last acting tool")
-        // Even handed a list that already names it, off means off.
-        expect(EventProposals.inventory(on, calendar: false, after: "unsubscribe_sender") == mains,
-               "off strips the tool from any list")
-        expect(EventProposals.inventory(on, calendar: true, after: "unsubscribe_sender") == on, "on is stable")
-        expect(EventProposals.inventory(mains, calendar: true, after: "no_such_tool").last == EventProposals.toolName,
+        let tools = EventProposals.inventory(mains, after: "unsubscribe_sender")
+        expect(tools.count == mains.count + 1, "exactly one more tool")
+        expect(tools.filter { $0 != EventProposals.toolName } == mains, "the others unmoved")
+        expect(tools.firstIndex(of: EventProposals.toolName) == mains.firstIndex(of: "unsubscribe_sender").map { $0 + 1 },
+               "after the last acting tool")
+        // Handed a list that already names it, it is placed once.
+        expect(EventProposals.inventory(tools, after: "unsubscribe_sender") == tools, "stable")
+        expect(EventProposals.inventory(mains, after: "no_such_tool").last == EventProposals.toolName,
                "an unknown neighbour puts it last, never drops it")
-        expect(!EventProposals.mayRun(EventProposals.toolName, calendar: false),
-               "off: a call to it is a call to a tool that does not exist")
-        expect(EventProposals.mayRun(EventProposals.toolName, calendar: true), "on: it runs")
-        expect(EventProposals.mayRun("search_mail", calendar: false), "every other tool is as it was")
         expect(EventProposals.toolName == "create_calendar_event", "the wire name")
     }
 

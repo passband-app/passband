@@ -4080,9 +4080,9 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
     // (an old daemon 404s them), so the client shows no timeline without it.
     //
     // ALWAYS TRUE NOW: the `calendar` hidden feature that once switched this
-    // off is retired (`squelch_core::features::RETIRED`). A daemon from
-    // before it launched still says `false` for a mailbox without the flag,
-    // and the client still reads that as "no Calendar page".
+    // off is retired (`squelch_core::features::RETIRED`). Current apps show
+    // the Calendar page unconditionally and no longer read this key; it is
+    // kept for apps from before that, which still need it to show the page.
     body["timeline"] = json!(true);
     // IS GOOGLE CALENDAR GRANTED, and if not, how to grant it. Always
     // present (an old daemon's silence is the client's "no calendar"), and

@@ -646,10 +646,9 @@ with a waiting state and a line for the sync state.
 
 Wave 4, from the founder using wave 3 on screen:
 
-- **Number keys.** While the page is offered, Calendar is `2` and every later
-  page is one higher (Sitrep 1, Calendar 2, All mail 3, Auth 4, Rules 5,
-  Groups 6). While it is not offered the numbers are the ones from before it
-  existed. `⇧C` still opens it.
+- **Number keys.** Calendar is `2` and every later page is one higher
+  (Sitrep 1, Calendar 2, All mail 3, Auth 4, Rules 5, Groups 6). `⇧C` still
+  opens it.
 - **No gap under the date.** A bar holds its lane only over the days it
   covers. A lane is free again the day after the span in it ends, in the same
   week row. A cell's own items fill any row left free above a bar before going
@@ -808,7 +807,7 @@ should be able to type 'dinner with steven on friday 4pm'"):
   name is asked again the next time the names change.
 - **The assistant drafts events** (§10).
 
-**Keymap as built.** `1` to `6` the rail (Calendar `2` while offered), `⇧C`
+**Keymap as built.** `1` to `6` the rail (Calendar `2`), `⇧C`
 the calendar; on the page `m` / `w` / `a` month, week and agenda, `j` / `k` the selection,
 `↵` open, `y` going, `x` dismiss, `n` new event, `e` edit, `⌫` delete; in the
 month the arrows move the day, `[` `]` (or `,` `.`) the month, `t` today, Esc
@@ -830,8 +829,9 @@ list, Esc closes the place list, then the delete question, then the pane.
   column. Not a wall of truncated titles.
 - **Event detail.** Title, time (with "~" on an estimate), place, the
   likelihood reason, and the mail behind it (§9).
-- **iOS.** The agenda replaces the Calendar card in `MobileRecordsView`. The
-  column and month views follow in the parity pass.
+- **iOS.** The Calendar is the tab bar's middle tab (Sitrep · Calendar ·
+  Mail) for every mailbox, with month, week and day views; the record zones
+  that had a Quick Look tab sit under the sitrep's board.
 
 A calendar destination joins the rail, directly under Sitrep and above All
 mail (DECIDED). Keys started as the preview drew them (`⇧C` opens the calendar;
@@ -1731,11 +1731,9 @@ nothing:
 - The assistant does not READ the calendar: it gets no event, and a calendar
   name that matches nothing is refused without listing the ones there are.
   No edit and no delete tool. Nothing on `/mcp` or `/client/agent/*`.
-- Offered only on the Mac and only while the Calendar page is
-  (`AppStore.calendarPageAvailable`, the gate the guide's calendar topic
-  uses). With the page off the tool list and the system prompt are the ones
-  from before the tool existed, and a call to its name is answered as any
-  invented tool is.
+- Offered only on the Mac (`AgentTools.Tool.isAvailable`); the phone has
+  no event pane for the assistant to draft into. It was once also gated on
+  the Calendar page being on; the page is unconditional now.
 
 ## 11. Feature flag (RETIRED: calendar is for everyone)
 
@@ -1766,16 +1764,16 @@ What that means now:
   gone, and the callback no longer reads `tenant_features` at all. The
   unticked-calendar, Gmail-floor and hint guards are unchanged. Signup has
   asked for calendar since 2026-10-27.
-- **The apps.** `CalendarGate.pageAvailable` (in
-  `passband/Sources/Passband/Lib/Agenda.swift`) is the daemon's `timeline` and
-  nothing else. It still matters for an OLDER DAEMON: one from before the
-  timeline, or one from before the launch whose mailbox never had the flag,
-  says no timeline, and that app gets no Calendar page (the Mac's rail tile,
-  `⇧C`, number key 2, the Go menu, the shortcuts sheet and the product guide
-  all follow it) and the iPhone keeps Quick Look in the bar's second slot. If
-  the gate closes while the page is open (an account switch onto such a
-  daemon), the app goes to the Sitrep, closes the event pane and drops the
-  calendar state, as before.
+- **The apps have no gate at all.** The Calendar page is unconditional: no
+  hidden feature, no `timeline` check (the client no longer decodes
+  `timeline`). The Mac's rail always has it second, number key 2 and `⇧C`
+  open it, and the Go menu, the `?` sheet, the product guide and the
+  assistant's calendar tool always include it. The iPhone's bar is always
+  Sitrep · Calendar · Mail; the Quick Look tab is gone, its record zones and
+  the login-codes key live on the sitrep. An app on a daemon too old to serve
+  the timeline would show a calendar of errors rather than hide the page; with
+  no users on such a daemon, that was accepted. The daemon keeps sending
+  `timeline: true`, which apps from before this change still need.
 - **Asking for Google Calendar.** Both apps raise the connect card on the
   calendar's FIRST VISIT for an account that has not granted it, once per
   account (`raiseCalendarCardIfOwed`, `calendarOffer == .card`), and offer it
@@ -1794,8 +1792,10 @@ What that means now:
   until then a hosted tenant's daemon still gates on the flag and says
   `timeline: false` without it. The app half needs a Mac and an iOS release;
   an app from before it still asks for `calendar` in `/client/stats`
-  `features` as well as the timeline. So a mailbox sees the page once its
-  daemon AND its app are both new, or, in the meantime, wherever a
+  `features` as well as the timeline. A new app shows the page whatever the
+  daemon says, so on an un-rolled daemon without the flag its routes 404 and
+  the page has nothing to show until the roll. So a mailbox has a working
+  page once its daemon AND its app are both new, or, in the meantime, wherever a
   `calendar` row is still served (the leftover rows above keep an old app or
   an old daemon working, which is the one thing they are good for).
 

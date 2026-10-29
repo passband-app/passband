@@ -26,11 +26,11 @@
             return args[safe: i + 1]
         }
 
-        /// `sitrep` (the default), `records`, `calendar`, `mail` or `search`.
+        /// `sitrep` (the default), `calendar`, `mail` or `search`.
         static var tab: String? { value("--fixture-tab") }
-        /// Serves a timeline over a staged week of plans (FixtureCalendar), so
-        /// the bar reads Sitrep, Calendar, Mail. Without it the practice
-        /// stats claim no timeline and the bar keeps Quick Look.
+        /// Stages a week of plans on the calendar (FixtureCalendar) and a
+        /// granted Google Calendar. Without it the calendar tab is the
+        /// practice inbox's: empty, and offering nothing.
         static let calendar = args.contains("--fixture-calendar")
         /// The calendar's mode for a screenshot: `--fixture-calendar-mode
         /// month|week|day`. Scene `calendar-detail` pushes the likely ghost;

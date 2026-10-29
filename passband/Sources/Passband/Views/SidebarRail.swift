@@ -112,7 +112,7 @@ struct SidebarRail: View {
                 // beside it rather than on its line — the rail is what the bar
                 // runs above, so an icon level with the title would be an icon
                 // sitting in the bar.
-                ForEach(MainView.railViews(calendar: store.calendarPageAvailable), id: \.view) { row in
+                ForEach(MainView.railViews, id: \.view) { row in
                     let view = row.view
                     RailButton(
                         view: view, keyHint: row.key, active: store.activeView == view,

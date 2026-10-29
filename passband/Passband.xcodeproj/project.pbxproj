@@ -15,6 +15,7 @@
 		02A2C5770523B244425499D5 /* MobileSitrepView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E61AF9A237CA524B89126810 /* MobileSitrepView.swift */; };
 		03D3C89A6C13B4790A876F6D /* IntroHaptics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BEFFF28230357ABC4413CD4 /* IntroHaptics.swift */; };
 		04331757A1152346228C2482 /* ShortcutCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AB8DA26906DE820ED1255EA /* ShortcutCatalog.swift */; };
+		04DA41542DB0BFF3DE97CA9E /* RecordZones.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF4D64DC81DF9124C4CA69AE /* RecordZones.swift */; };
 		0547A52C39BF2AF68D572766 /* AgentDraftLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FE7F6DF065E50854897073A /* AgentDraftLink.swift */; };
 		063C1CF09D6E7CE57C547486 /* Markdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE74212A3CE62E8F28EC8D7E /* Markdown.swift */; };
 		06446149C2DA163DC24198B3 /* SearchPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = CCA8E532F2FEA435195F174B /* SearchPreview.swift */; };
@@ -519,7 +520,6 @@
 		EA0F7FADC742BF00778433BF /* SubjectText.swift in Sources */ = {isa = PBXBuildFile; fileRef = E645BA6EC9A8686D95460095 /* SubjectText.swift */; };
 		EA82308C99D5B6C590E73289 /* AgentTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E7DFB379AF677D44E393FF /* AgentTools.swift */; };
 		EB36ACAF3E0BBE6C7281F447 /* RecentSearchStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B8C4EAAA4A34C51BF2C88E6 /* RecentSearchStore.swift */; };
-		EB3A6A193AE3E0C7EDD7E459 /* MobileRecordsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 356A38CCAAFCC056126A2978 /* MobileRecordsView.swift */; };
 		EB6F1BBD2CD99900B963C28B /* CalendarWeek.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43EE54BAA61177B3112BEE9F /* CalendarWeek.swift */; };
 		EB6FD58A6CF88952C59B8109 /* ClearBand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E1FEEC087CEB684B1D4F861 /* ClearBand.swift */; };
 		EC28A617F2EBC9CFCA992B82 /* ImageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2569BA5D1461BBA2A95D77F3 /* ImageStore.swift */; };
@@ -660,7 +660,6 @@
 		327BC236C39F192198AFEF7D /* RecipientField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecipientField.swift; sourceTree = "<group>"; };
 		33EF8FAB871B43DBF883FDEE /* ShareWaitlistPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareWaitlistPanel.swift; sourceTree = "<group>"; };
 		35224D41EE816E52C2396950 /* MailList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailList.swift; sourceTree = "<group>"; };
-		356A38CCAAFCC056126A2978 /* MobileRecordsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileRecordsView.swift; sourceTree = "<group>"; };
 		35991F651C60388C6D9BBEDF /* ComposeSubmit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposeSubmit.swift; sourceTree = "<group>"; };
 		35C12A5AFBCED3C55DA7A5D8 /* MobileAgentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAgentView.swift; sourceTree = "<group>"; };
 		361AB4D81F3740E2B072C5BA /* QuickLookPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickLookPanel.swift; sourceTree = "<group>"; };
@@ -903,6 +902,7 @@
 		FCA6DBA73DEBD1CB392DE3A5 /* RehearsalMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RehearsalMode.swift; sourceTree = "<group>"; };
 		FDDBA0B71BDDC46E844D2856 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		FF2D98A36AEF64366DD338AB /* MarkdownTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownTextView.swift; sourceTree = "<group>"; };
+		FF4D64DC81DF9124C4CA69AE /* RecordZones.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordZones.swift; sourceTree = "<group>"; };
 		FF4D8746B664E116C3036411 /* SchedulePalette.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SchedulePalette.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -1255,11 +1255,11 @@
 				9E5E8356451742599F7D7A2A /* MobileAuthView.swift */,
 				319FFCBAD56A911D2F0BE7E6 /* MobileCalendarView.swift */,
 				4CEEC7B57CBD1141839633D8 /* MobileEventSheet.swift */,
-				356A38CCAAFCC056126A2978 /* MobileRecordsView.swift */,
 				F82499FD36351898E386644C /* MobileSearchView.swift */,
 				E61AF9A237CA524B89126810 /* MobileSitrepView.swift */,
 				D0318A22219D3A1E36429C76 /* MobileToastHost.swift */,
 				7C2908ED50464990EEF0B9AA /* PhoneVignettes.swift */,
+				FF4D64DC81DF9124C4CA69AE /* RecordZones.swift */,
 				5BF804BE9390C230049534D5 /* SelectableTextiOS.swift */,
 				C465B24E00D0436CD5704294 /* SwipeRow.swift */,
 				6895E072B54D7FEA646D6903 /* UpdateVerbs.swift */,
@@ -1967,7 +1967,6 @@
 				921ACE1D761AE0AD1F714980 /* MobileAuthView.swift in Sources */,
 				F9F36612D66761810087A60E /* MobileCalendarView.swift in Sources */,
 				61C5BC2A5FD94E159CAD547F /* MobileEventSheet.swift in Sources */,
-				EB3A6A193AE3E0C7EDD7E459 /* MobileRecordsView.swift in Sources */,
 				7C0A7FD2599738D2B4A2C152 /* MobileRootView.swift in Sources */,
 				72CE3BD39D4FA8820AFBE15C /* MobileSearchView.swift in Sources */,
 				02A2C5770523B244425499D5 /* MobileSitrepView.swift in Sources */,
@@ -2007,6 +2006,7 @@
 				CB68A75D6FF8CCDEDDFB3D77 /* RecentSearches.swift in Sources */,
 				6277F73C5576C9955C6B0656 /* RecipientField.swift in Sources */,
 				74ED2BA3B2637248FED78E13 /* Recipients.swift in Sources */,
+				04DA41542DB0BFF3DE97CA9E /* RecordZones.swift in Sources */,
 				3D9FC5E3CCE051354CB6FF29 /* RefinementSlot.swift in Sources */,
 				64FBE0F708CD095EF5B99E9D /* RehearsalAPI.swift in Sources */,
 				343EE0901066E3E53F8A8E6E /* RehearsalMode.swift in Sources */,

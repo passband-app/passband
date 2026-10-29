@@ -1487,11 +1487,9 @@ write (`passband/Sources/Passband/Lib/EventProposal.swift`,
 - **It never replaces the user's work.** A pane holding anything (typed, or an
   earlier proposal, on screen or parked) refuses the tool with a fixed sentence
   the model relays.
-- **It follows the page.** Offered only on the Mac and only while
-  `calendarPageAvailable` (the daemon serves a timeline; the `calendar` flag
-  is retired); without it the tool definitions and system prompt sent to the
-  model are the ones from before the tool existed, and a
-  call naming it is answered as any unknown tool. No edit or delete tool.
+- **Mac only.** Offered only on the Mac (`AgentTools.Tool.isAvailable`); on
+  the phone a call naming it is answered as any unknown tool. (It was once
+  also gated on the `calendar` flag, now retired.) No edit or delete tool.
   Nothing was added to `/mcp`, `/client/agent/*` or the relay.
 
 **Who a name is: `GET /client/calendar/people` (wave 6).** The event pane reads

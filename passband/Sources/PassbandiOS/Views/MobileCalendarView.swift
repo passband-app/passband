@@ -1,7 +1,7 @@
-// THE CALENDAR TAB. On for every mailbox whose daemon serves a timeline, it
-// takes the bar's second slot (Quick Look's records move under the sitrep's
-// board, see MobileSitrepView) because a calendar is somewhere you live and
-// records are somewhere you look one fact up.
+// THE CALENDAR TAB, the bar's second slot for every mailbox (Quick Look's
+// records sit under the sitrep's board, see MobileSitrepView) because a
+// calendar is somewhere you live and records are somewhere you look one fact
+// up.
 //
 // NOT CONNECTED, IT ASKS. The first visit for an account that has not granted
 // Google Calendar raises the Mac's own connect card over the tab (mounted by

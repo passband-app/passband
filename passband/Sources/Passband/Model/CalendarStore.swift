@@ -71,29 +71,12 @@ struct CalendarDeleteAsk: Hashable {
 }
 
 extension AppStore {
-    // MARK: - the gate
-
-    // `calendarPageAvailable`, the gate itself, is stored in AppStore and
-    // written from `stats` only when it flips.
-
-    /// The gate closed under the user (an older daemon, one that serves no
-    /// timeline): leave the page for the Sitrep if it is up, close the event
-    /// pane and the delete question, and drop everything the page held. An
-    /// unsaved draft in the pane is DISCARDED: the page it belongs to no
-    /// longer exists for this mailbox, and the daemon would refuse its save.
-    func calendarGateClosed() {
-        if CalendarGate.leavesPage(available: calendarPageAvailable, active: activeView, calendar: .calendar) {
-            setView(.sitrep)
-        }
-        dropCalendarState()
-    }
-
     /// Everything the calendar page holds for the ACTIVE mailbox, gone: the
     /// feed, the open item, the connect card and its wait, the event pane and
     /// its draft (a parked one too), the delete question, and any write still
     /// out (its ticket is from the session this ends, so its answer is
     /// dropped whole: `CalendarWriteTicket`). The view mode and the month are
-    /// the user's and stay. Shared by an account switch and the gate closing.
+    /// the user's and stay. Run by an account switch.
     func dropCalendarState() {
         calendarFeed = nil
         calendarLoaded = false
@@ -447,7 +430,7 @@ extension AppStore {
         func refused(_ text: String) -> Result<EventProposals.Landing, ProposalRefusal> {
             .failure(ProposalRefusal(text: text))
         }
-        guard calendarPageAvailable, calendarCanCreate else { return refused(EventProposals.noCalendarText) }
+        guard calendarCanCreate else { return refused(EventProposals.noCalendarText) }
         let landing: EventProposals.Landing
         switch EventProposals.landing(
             askBarOpen: askBarOpen, writingMail: mailBeingWritten(), threadOpen: threadId != nil)
@@ -655,8 +638,8 @@ extension AppStore {
     /// edited draft is never sent under the same id. Only a definite
     /// refusal gives the fields back.
     ///
-    /// AN ANSWER FOR NOBODY: one landing after the gate closed or the account
-    /// changed (`CalendarWriteTicket`) is dropped whole, analytics included.
+    /// AN ANSWER FOR NOBODY: one landing after the calendar state was dropped
+    /// or the account changed (`CalendarWriteTicket`) is dropped whole, analytics included.
     @discardableResult
     func saveEvent(_ draft: EventDraft, _ request: CalendarEditorRequest, via control: SaveControl) async -> Bool {
         guard EventPaneRules.maySave(paneFacts(request)) else { return false }

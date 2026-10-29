@@ -420,6 +420,9 @@ pub(crate) struct Timeouts {
     /// few hundred KB/s keeps moving and is never cut off, and a server that
     /// has stopped answering is noticed in two minutes, not never.
     pub stall: Duration,
+    /// The longest one IDLE round runs before `DONE` and a fresh `IDLE`
+    /// (RFC 2177 says at most 29 minutes; contract §8 says 25).
+    pub idle_reissue: Duration,
 }
 
 impl Default for Timeouts {
@@ -428,6 +431,7 @@ impl Default for Timeouts {
             connect: Duration::from_secs(30),
             login: Duration::from_secs(60),
             stall: Duration::from_secs(120),
+            idle_reissue: IDLE_REISSUE,
         }
     }
 }
@@ -1030,6 +1034,25 @@ struct Backoff {
     last_failure: Option<tokio::time::Instant>,
 }
 
+impl Backoff {
+    /// What is left of the wait before the next attempt.
+    fn remaining(&self) -> Duration {
+        self.last_failure
+            .map(|t| backoff_delay(self.failures).saturating_sub(t.elapsed()))
+            .unwrap_or_default()
+    }
+}
+
+/// The IDLE connection's own failure record (correctness L3): its logins
+/// back off like the command session's, and a refused password is counted
+/// once per run of failures, not once per attempt.
+#[derive(Debug, Default)]
+struct IdleBackoff {
+    backoff: Backoff,
+    /// This run of failures has already counted its login refusal.
+    auth_counted: bool,
+}
+
 // ---- the source -----------------------------------------------------------
 
 /// One authenticated command connection and what was learned on it.
@@ -1163,6 +1186,10 @@ pub struct ImapSource {
     idle_ahead_of: std::sync::Mutex<Option<SyncCursor>>,
     /// IDLE logins that succeeded, for the tests.
     idle_connects: AtomicU64,
+    idle_backoff: std::sync::Mutex<IdleBackoff>,
+    /// When the last wait that returned before its deadline returned: the
+    /// next early return is held to [`MIN_WAKE_GAP`] after it.
+    last_wake: std::sync::Mutex<Option<tokio::time::Instant>>,
     timeouts: Timeouts,
 }
 
@@ -1183,6 +1210,12 @@ const IDLE_REISSUE: Duration = Duration::from_secs(25 * 60);
 /// open and say nothing (Dovecot does, after INBOX is deleted under an IDLE),
 /// and nothing about that may hold the poll lane.
 const IDLE_GRACE: Duration = Duration::from_secs(10);
+
+/// The least time between two waits that return before their deadline
+/// (security review 8): a server streaming untagged FETCH (hostile, or a
+/// mailbox another client churns the flags of) cannot drive back-to-back
+/// poll ticks.
+const MIN_WAKE_GAP: Duration = Duration::from_secs(2);
 
 impl std::fmt::Debug for ImapSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1294,6 +1327,8 @@ impl ImapSource {
             idle_conn: tokio::sync::Mutex::new(None),
             idle_ahead_of: std::sync::Mutex::new(None),
             idle_connects: AtomicU64::new(0),
+            idle_backoff: std::sync::Mutex::new(IdleBackoff::default()),
+            last_wake: std::sync::Mutex::new(None),
             timeouts: Timeouts::default(),
         })
     }
@@ -1349,7 +1384,7 @@ impl ImapSource {
 
     /// Open, secure and authenticate one connection, then resolve roles.
     async fn connect(&self) -> Result<Conn> {
-        let (mut session, caps) = self.open_session(Some(self.timeouts.stall)).await?;
+        let (mut session, caps) = self.open_session(Some(self.timeouts.stall), true).await?;
         let roles = list_roles(&mut session).await?;
         self.connects.fetch_add(1, Ordering::Relaxed);
         Ok(Conn {
@@ -1365,14 +1400,26 @@ impl ImapSource {
     /// Open, secure and authenticate one connection: the command session's
     /// and the IDLE connection's shared first half. `stall` is the session's
     /// stall timer ([`Transport`]); the login conversation is bounded by
-    /// [`Timeouts::login`] either way.
-    async fn open_session(&self, stall: Option<Duration>) -> Result<(ImapSession, Caps)> {
-        tokio::time::timeout(self.timeouts.login, self.open_session_unbounded(stall))
-            .await
-            .map_err(|_| broken_err("login", "the server did not finish logging in in time"))?
+    /// [`Timeouts::login`] either way. A refused login counts in
+    /// [`SourceRefusals::auth`] when `count_refusal` says so.
+    async fn open_session(
+        &self,
+        stall: Option<Duration>,
+        count_refusal: bool,
+    ) -> Result<(ImapSession, Caps)> {
+        tokio::time::timeout(
+            self.timeouts.login,
+            self.open_session_unbounded(stall, count_refusal),
+        )
+        .await
+        .map_err(|_| broken_err("login", "the server did not finish logging in in time"))?
     }
 
-    async fn open_session_unbounded(&self, stall: Option<Duration>) -> Result<(ImapSession, Caps)> {
+    async fn open_session_unbounded(
+        &self,
+        stall: Option<Duration>,
+        count_refusal: bool,
+    ) -> Result<(ImapSession, Caps)> {
         let tcp = self.connect_tcp().await?;
         let mut client = match self.server.tls {
             ImapTls::Implicit => Client::new(Transport::new(self.tls_wrap(tcp).await?, stall)),
@@ -1404,7 +1451,9 @@ impl ImapSource {
                 // `BAD` may echo the whole command, password included), and
                 // it counts as a refusal. None of it helps the user more than
                 // this line does.
-                self.refusals.auth.fetch_add(1, Ordering::Relaxed);
+                if count_refusal {
+                    self.refusals.auth.fetch_add(1, Ordering::Relaxed);
+                }
                 return Err(CoreError::Credential(LOGIN_REFUSED.into()));
             }
         };
@@ -1429,11 +1478,7 @@ impl ImapSource {
         let wait = self
             .backoff
             .lock()
-            .ok()
-            .and_then(|b| {
-                b.last_failure
-                    .map(|t| backoff_delay(b.failures).saturating_sub(t.elapsed()))
-            })
+            .map(|b| b.remaining())
             .unwrap_or_default();
         if !wait.is_zero() {
             tokio::time::sleep(wait).await;
@@ -1925,6 +1970,22 @@ fn is_mailbox_change(r: &async_imap::imap_proto::Response<'_>) -> bool {
             | Response::Vanished { .. }
             | Response::Fetch(..)
     )
+}
+
+/// Read everything queued on a session's unsolicited channel (what arrived
+/// outside a command's own reply) and say whether any of it is a change to
+/// the open folder.
+fn drain_changes(mut next: impl FnMut() -> Option<async_imap::types::UnsolicitedResponse>) -> bool {
+    use async_imap::types::UnsolicitedResponse as U;
+    let mut changed = false;
+    while let Some(u) = next() {
+        changed |= match u {
+            U::Exists(_) | U::Expunge(_) => true,
+            U::Other(r) => is_mailbox_change(r.parsed()),
+            _ => false,
+        };
+    }
+    changed
 }
 
 /// Where the rows say a message is: in the inbox if any row is INBOX, sent
@@ -2502,43 +2563,148 @@ impl MailSource for ImapSource {
     }
 
     /// IDLE on INBOX until it changes or `max_wait` passes (contract §8).
+    ///
+    /// An IDLE connection that fails (a hang-up, a refused login) is tried
+    /// again within the same wait, after a backoff ([`IdleBackoff`]), so mail
+    /// that lands after a server restart wakes the engine in seconds rather
+    /// than at the next poll. Every retry waits at least a second and the
+    /// waits double, so it never spins.
     async fn wait_for_change(&self, cursor: Option<&SyncCursor>, max_wait: Duration) {
         let deadline = tokio::time::Instant::now() + max_wait;
-        if self.idle_support.load(Ordering::Relaxed) == IDLE_NO {
-            tokio::time::sleep_until(deadline).await;
-            return;
-        }
-        // BOUNDED HOWEVER THE SERVER BEHAVES: every step of the wait (login,
-        // EXAMINE, IDLE, DONE) is a read that a silent server never answers.
-        // Timing out drops the session with the future, which is the
-        // cancel-safe path `idle_until` is built for; the next wait logs in
-        // afresh.
-        match tokio::time::timeout_at(deadline + IDLE_GRACE, self.idle_until(cursor, deadline))
-            .await
-        {
-            Ok(Ok(())) => {}
-            Err(_) => {
-                eprintln!(
-                    "squelch: imap idle got no answer from the server by the end of the wait; \
-                     reconnecting next tick"
-                );
-            }
-            Ok(Err(e)) => {
-                // Sit out the rest of the wait: a server that is down or
-                // refusing is asked again next tick, never in a loop. The
-                // error is about the transport, never the password.
-                eprintln!("squelch: imap idle unavailable ({e}); polling this tick");
+        loop {
+            if self.idle_support.load(Ordering::Relaxed) == IDLE_NO {
                 tokio::time::sleep_until(deadline).await;
+                return;
+            }
+            let pause = self.idle_retry_pause();
+            if !pause.is_zero() {
+                if tokio::time::Instant::now() + pause >= deadline {
+                    tokio::time::sleep_until(deadline).await;
+                    return;
+                }
+                tokio::time::sleep(pause).await;
+            }
+            // BOUNDED HOWEVER THE SERVER BEHAVES: every step of the wait
+            // (login, EXAMINE, IDLE, DONE) is a read that a silent server
+            // never answers. Timing out drops the session with the future,
+            // which is the cancel-safe path `idle_until` is built for; the
+            // next wait logs in afresh.
+            match tokio::time::timeout_at(deadline + IDLE_GRACE, self.idle_until(cursor, deadline))
+                .await
+            {
+                Ok(Ok(early)) => {
+                    self.note_idle(true);
+                    if early {
+                        self.space_out_wake(deadline).await;
+                    }
+                    return;
+                }
+                Err(_) => {
+                    self.note_idle(false);
+                    eprintln!(
+                        "squelch: imap idle got no answer from the server by the end of the \
+                         wait; reconnecting next tick"
+                    );
+                    return;
+                }
+                Ok(Err(e)) => {
+                    // The error is about the transport, never the password.
+                    if self.note_idle(false) {
+                        eprintln!("squelch: imap idle unavailable ({e}); retrying with backoff");
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return;
+                    }
+                }
             }
         }
     }
 }
 
 impl ImapSource {
+    /// How long the next IDLE login waits: its own backoff, or the command
+    /// session's if that is longer (a server the command session cannot
+    /// reach is not asked twice as often for IDLE).
+    fn idle_retry_pause(&self) -> Duration {
+        let idle = self
+            .idle_backoff
+            .lock()
+            .map(|b| b.backoff.remaining())
+            .unwrap_or_default();
+        let command = self
+            .backoff
+            .lock()
+            .map(|b| b.remaining())
+            .unwrap_or_default();
+        idle.max(command)
+    }
+
+    /// Book one IDLE outcome. A clean wait ends the run of failures; a
+    /// failure extends it. True when the failure is worth a log line: the
+    /// first of a run, then each time the backoff doubles past a power of
+    /// two, so a server down for an hour is a handful of lines.
+    fn note_idle(&self, ok: bool) -> bool {
+        let Ok(mut b) = self.idle_backoff.lock() else {
+            return true;
+        };
+        if ok {
+            *b = IdleBackoff::default();
+            return false;
+        }
+        b.backoff.failures = b.backoff.failures.saturating_add(1);
+        b.backoff.last_failure = Some(tokio::time::Instant::now());
+        b.backoff.failures.is_power_of_two()
+    }
+
+    /// An IDLE login, counting a refused password once per run of failures
+    /// (correctness L3): the archive walk compares the refusal count before
+    /// and after a fetch, and an IDLE retry must not read as its refusal.
+    async fn open_idle_session(&self) -> Result<(ImapSession, Caps)> {
+        let count = self.idle_backoff.lock().is_ok_and(|b| !b.auth_counted);
+        let out = self.open_session(None, count).await;
+        if let Ok(mut b) = self.idle_backoff.lock() {
+            match &out {
+                Ok(_) => b.auth_counted = false,
+                Err(CoreError::Credential(_)) => b.auth_counted = true,
+                Err(_) => {}
+            }
+        }
+        out
+    }
+
+    /// Hold an early return to [`MIN_WAKE_GAP`] after the previous one
+    /// (never past `deadline`).
+    async fn space_out_wake(&self, deadline: tokio::time::Instant) {
+        let now = tokio::time::Instant::now();
+        let earliest = {
+            let Ok(mut last) = self.last_wake.lock() else {
+                return;
+            };
+            let earliest = last.map_or(now, |t| (t + MIN_WAKE_GAP).max(now));
+            *last = Some(earliest.min(deadline));
+            earliest
+        };
+        if earliest > now {
+            tokio::time::sleep_until(earliest.min(deadline)).await;
+        }
+    }
+
     /// THE IDLE WAIT: on its own connection, `EXAMINE INBOX`, return at once
     /// if the server is already past `cursor`, else IDLE (re-issued every
-    /// [`IDLE_REISSUE`]) until INBOX reports an arrival, an expunge or a flag
-    /// change, or `deadline`.
+    /// [`Timeouts::idle_reissue`]) until INBOX reports an arrival, an expunge
+    /// or a flag change, or `deadline`. `Ok(true)` is a return before the
+    /// deadline because something changed.
+    ///
+    /// THE ROUND ENDS ON ITS OWN CLOCK (correctness H1): async-imap's
+    /// `wait_with_timeout` restarts its timer on every server line, keepalive
+    /// `* OK Still here` included, so on its own a round never times out
+    /// while keepalives flow. The round is cut at its end here, then `DONE`.
+    /// Keepalives are never a wake.
+    ///
+    /// NOTHING SAID IN THE GAPS IS LOST (correctness L2): an `EXISTS` the
+    /// server sends between `EXAMINE` and `+ idling`, or while `DONE` is
+    /// answered, goes to the session's unsolicited channel, which is read
+    /// after each.
     ///
     /// CANCEL-SAFE BY OWNERSHIP: the session is taken out of `idle_conn` for
     /// the whole wait and only put back after a clean `DONE`. A wait dropped
@@ -2549,24 +2715,27 @@ impl ImapSource {
         &self,
         cursor: Option<&SyncCursor>,
         deadline: tokio::time::Instant,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         use async_imap::extensions::idle::IdleResponse;
 
         let parked = self.idle_conn.lock().await.take();
         let mut session = match parked {
             Some(s) => s,
             None => {
-                let (s, caps) = self.open_session(None).await?;
+                let (s, caps) = self.open_idle_session().await?;
                 if !caps.idle {
                     // No IDLE on this server: the default poll, for good.
                     drop(s);
                     tokio::time::sleep_until(deadline).await;
-                    return Ok(());
+                    return Ok(false);
                 }
                 self.idle_connects.fetch_add(1, Ordering::Relaxed);
                 s
             }
         };
+        let unsolicited = session.unsolicited_responses.clone();
+        // Left over from earlier waits: the EXAMINE below is the fresh view.
+        drain_changes(|| unsolicited.try_recv().ok());
         // A fresh view of INBOX each wait: its UIDNEXT is what the engine's
         // cursor is compared with, and IDLE reports changes against it.
         let mbox = session
@@ -2575,36 +2744,42 @@ impl ImapSource {
             .map_err(imap_err("idle examine"))?;
         if self.already_ahead(cursor, mbox.uid_validity, mbox.uid_next) {
             *self.idle_conn.lock().await = Some(session);
-            return Ok(());
+            return Ok(true);
         }
         loop {
             let now = tokio::time::Instant::now();
             if now >= deadline {
                 *self.idle_conn.lock().await = Some(session);
-                return Ok(());
+                return Ok(false);
             }
-            let round = (deadline - now).min(IDLE_REISSUE);
+            let round_end = deadline.min(now + self.timeouts.idle_reissue);
             let mut handle = session.idle();
             handle.init().await.map_err(imap_err("idle"))?;
-            let woke = {
+            let mut changed = drain_changes(|| unsolicited.try_recv().ok());
+            if !changed {
                 // `_stop` must outlive the wait: dropping it interrupts it.
-                let (wait, _stop) = handle.wait_with_timeout(round);
-                wait.await.map_err(imap_err("idle"))?
-            };
-            session = handle.done().await.map_err(imap_err("idle done"))?;
-            match woke {
-                IdleResponse::NewData(data) if is_mailbox_change(data.parsed()) => {
-                    *self.idle_conn.lock().await = Some(session);
-                    return Ok(());
-                }
-                // Something that is not a change (RECENT, an alert), or
-                // the round's timer: IDLE again for what is left.
-                IdleResponse::NewData(_) | IdleResponse::Timeout => {}
-                // The stream ended: the server hung up.
-                IdleResponse::ManualInterrupt => {
-                    return Err(broken_err("idle", "connection closed"));
+                let (wait, _stop) = handle.wait_with_timeout(round_end - now);
+                match tokio::time::timeout_at(round_end, wait).await {
+                    // The round is over, keepalives or not.
+                    Err(_) => {}
+                    Ok(r) => match r.map_err(imap_err("idle"))? {
+                        IdleResponse::NewData(data) => changed = is_mailbox_change(data.parsed()),
+                        IdleResponse::Timeout => {}
+                        // The stream ended: the server hung up.
+                        IdleResponse::ManualInterrupt => {
+                            return Err(broken_err("idle", "connection closed"));
+                        }
+                    },
                 }
             }
+            session = handle.done().await.map_err(imap_err("idle done"))?;
+            changed |= drain_changes(|| unsolicited.try_recv().ok());
+            if changed {
+                *self.idle_conn.lock().await = Some(session);
+                return Ok(true);
+            }
+            // Something that is not a change (RECENT, an alert), or the
+            // round's end: IDLE again for what is left.
         }
     }
 

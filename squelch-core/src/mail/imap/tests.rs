@@ -1417,7 +1417,8 @@ async fn live_a_killed_idle_connection_sleeps_out_the_wait_and_never_spins() {
     tokio::time::sleep(Duration::from_secs(1)).await;
     kick(&user);
     let took = waiter.await.unwrap();
-    // Not back at the moment of the hang-up: the rest of max_wait is slept.
+    // Not back at the moment of the hang-up: after a backoff it logs in
+    // again and parks for the rest of max_wait (no mail came).
     assert!(took >= Duration::from_millis(3900), "{took:?}");
     assert!(took < Duration::from_secs(6), "{took:?}");
 
@@ -1433,6 +1434,81 @@ async fn live_a_killed_idle_connection_sleeps_out_the_wait_and_never_spins() {
         .await;
     assert!(t.elapsed() >= Duration::from_millis(1900));
     assert_eq!(src.idle_connects(), 2);
+}
+
+/// CORRECTNESS H1 against the real server: the bed's keepalive is 10s, so a
+/// 35s wait sees three `* OK Still here` lines. It comes back at 35s (not at
+/// the outer bound, which would also drop the connection), and a later wait
+/// on the same parked connection still wakes on an APPEND.
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_a_long_wait_under_keepalives_ends_on_time_and_still_wakes() {
+    let user = fresh_user("keepalive");
+    let mut other = other_client(&user).await;
+    let (src, _) = live(&user);
+    let cursor = src.current_cursor().await.unwrap();
+    let t = tokio::time::Instant::now();
+    src.wait_for_change(Some(&cursor), Duration::from_secs(35))
+        .await;
+    let took = t.elapsed();
+    assert!(took >= Duration::from_millis(34_900), "{took:?}");
+    assert!(took < Duration::from_secs(37), "{took:?}");
+    assert_eq!(src.idle_connects(), 1);
+
+    let src = Arc::new(src);
+    let waiter = {
+        let (src, cursor) = (src.clone(), cursor.clone());
+        tokio::spawn(async move {
+            src.wait_for_change(Some(&cursor), Duration::from_secs(60))
+                .await
+        })
+    };
+    // Two keepalives in, then mail.
+    tokio::time::sleep(Duration::from_secs(22)).await;
+    assert!(!waiter.is_finished(), "keepalives are not a wake");
+    append(&mut other, INBOX, &mail(Some("ka@x.org"), "ka"), None).await;
+    tokio::time::timeout(Duration::from_secs(5), waiter)
+        .await
+        .expect("woke on the APPEND")
+        .unwrap();
+    assert_eq!(src.idle_connects(), 1, "the same parked connection");
+    let _ = other.logout().await;
+}
+
+/// CORRECTNESS L3 / step 4 scenario 11: after `doveadm kick` the wait does
+/// not sleep out `max_wait`. It logs in again after a backoff and mail that
+/// lands a few seconds later wakes it.
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_mail_after_a_kick_wakes_the_same_wait() {
+    let user = fresh_user("kickmail");
+    let mut other = other_client(&user).await;
+    let (src, _) = live(&user);
+    let cursor = src.current_cursor().await.unwrap();
+    let src = Arc::new(src);
+    let waiter = {
+        let (src, cursor) = (src.clone(), cursor.clone());
+        tokio::spawn(async move {
+            let t = tokio::time::Instant::now();
+            src.wait_for_change(Some(&cursor), Duration::from_secs(120))
+                .await;
+            t.elapsed()
+        })
+    };
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    kick(&user);
+    // The kick took the other client too.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let mut other2 = other_client(&user).await;
+    append(&mut other2, INBOX, &mail(Some("kicked@x.org"), "k"), None).await;
+    let took = tokio::time::timeout(Duration::from_secs(10), waiter)
+        .await
+        .expect("woke within seconds of the APPEND")
+        .unwrap();
+    assert!(took < Duration::from_secs(10), "{took:?}");
+    assert_eq!(src.idle_connects(), 2, "one fresh login after the kick");
+    drop(other);
+    let _ = other2.logout().await;
 }
 
 fn doveadm(args: &[&str]) {
@@ -1653,6 +1729,7 @@ fn short_timeouts() -> Timeouts {
         connect: Duration::from_millis(500),
         login: Duration::from_millis(500),
         stall: Duration::from_millis(300),
+        idle_reissue: IDLE_REISSUE,
     }
 }
 
@@ -2134,4 +2211,232 @@ fn the_credential_slot_holds_where_the_password_goes() {
     ));
     // A CA that is not a certificate is refused at setup, by its bytes.
     assert!(parse_ca_pem(b"not a pem").is_err());
+}
+
+// ---- fake IDLE servers: keepalives, wake floods, the gaps, backoff --------
+
+/// What a fake IDLE server does once a client is idling.
+#[derive(Clone, Copy)]
+enum Idling {
+    /// `* OK Still here` every interval, and nothing else.
+    Keepalive(Duration),
+    /// A flag change (`* 1 FETCH`) the moment IDLE starts, every time.
+    FetchFlood,
+    /// `* 1 EXISTS` BEFORE the `+ idling` continuation, then quiet.
+    ExistsBeforeContinue,
+    /// Quiet, then `* 1 EXISTS` while answering `DONE`.
+    ExistsInDone,
+}
+
+/// Counts a fake IDLE server keeps.
+#[derive(Default)]
+struct IdleCounts {
+    connections: AtomicU64,
+    idles: AtomicU64,
+}
+
+/// A loopback server that logs anyone in (or refuses every LOGIN with
+/// `refuse_login`), advertises IDLE, answers EXAMINE INBOX with an empty
+/// mailbox, and behaves as `idling` says under IDLE.
+async fn idle_server(
+    idling: Idling,
+    refuse_login: bool,
+) -> (u16, Arc<IdleCounts>, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let counts = Arc::new(IdleCounts::default());
+    let c = counts.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((sock, _)) = listener.accept().await else {
+                return;
+            };
+            c.connections.fetch_add(1, Ordering::Relaxed);
+            let c = c.clone();
+            tokio::spawn(async move {
+                let (r, mut w) = sock.into_split();
+                let mut lines = BufReader::new(r).lines();
+                let _ = w.write_all(b"* OK fake idle\r\n").await;
+                let mut idle_tag: Option<String> = None;
+                loop {
+                    let line = if idle_tag.is_some() {
+                        if let Idling::Keepalive(every) = idling {
+                            tokio::select! {
+                                l = lines.next_line() => l,
+                                _ = tokio::time::sleep(every) => {
+                                    if w.write_all(b"* OK Still here\r\n").await.is_err() {
+                                        return;
+                                    }
+                                    continue;
+                                }
+                            }
+                        } else {
+                            lines.next_line().await
+                        }
+                    } else {
+                        lines.next_line().await
+                    };
+                    let Ok(Some(line)) = line else { return };
+                    let reply = if let Some(tag) = idle_tag.take() {
+                        // Under IDLE the only thing a client says is DONE.
+                        assert_eq!(line.trim(), "DONE");
+                        match idling {
+                            Idling::ExistsInDone => format!("* 1 EXISTS\r\n{tag} OK done\r\n"),
+                            _ => format!("{tag} OK done\r\n"),
+                        }
+                    } else {
+                        let (tag, cmd) = line.split_once(' ').unwrap_or((line.as_str(), ""));
+                        let cmd = cmd.to_ascii_uppercase();
+                        if cmd.starts_with("LOGIN") && refuse_login {
+                            format!("{tag} NO [AUTHENTICATIONFAILED] nope\r\n")
+                        } else if cmd.starts_with("CAPABILITY") {
+                            format!("* CAPABILITY IMAP4rev1 IDLE\r\n{tag} OK done\r\n")
+                        } else if cmd.starts_with("EXAMINE") {
+                            format!(
+                                "* 0 EXISTS\r\n* OK [UIDVALIDITY 7] ok\r\n* OK [UIDNEXT 1] ok\r\n\
+                                 {tag} OK [READ-ONLY] done\r\n"
+                            )
+                        } else if cmd.starts_with("IDLE") {
+                            c.idles.fetch_add(1, Ordering::Relaxed);
+                            idle_tag = Some(tag.to_string());
+                            match idling {
+                                Idling::FetchFlood => {
+                                    "+ idling\r\n* 1 FETCH (FLAGS (\\Seen))\r\n".to_string()
+                                }
+                                Idling::ExistsBeforeContinue => {
+                                    "* 1 EXISTS\r\n+ idling\r\n".to_string()
+                                }
+                                _ => "+ idling\r\n".to_string(),
+                            }
+                        } else {
+                            format!("{tag} OK done\r\n")
+                        }
+                    };
+                    if w.write_all(reply.as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (port, counts, task)
+}
+
+/// CORRECTNESS H1: async-imap's IDLE timer restarts on every server line, so
+/// with keepalives flowing a round used to run until the outer bound
+/// (deadline + IDLE_GRACE) cut it and dropped the connection. The round now
+/// ends on its own clock, `DONE`s cleanly and parks the session.
+#[tokio::test]
+async fn keepalives_neither_stretch_the_wait_nor_count_as_a_wake() {
+    let (port, counts, server) =
+        idle_server(Idling::Keepalive(Duration::from_millis(150)), false).await;
+    let src = scripted_source(port, "pw");
+    for _ in 0..2 {
+        let t = tokio::time::Instant::now();
+        src.wait_for_change(None, Duration::from_millis(1500)).await;
+        let took = t.elapsed();
+        assert!(took >= Duration::from_millis(1450), "not a wake: {took:?}");
+        assert!(took < Duration::from_millis(2500), "on time: {took:?}");
+    }
+    // Parked after a clean DONE and reused: one connection, one login.
+    assert_eq!(counts.connections.load(Ordering::Relaxed), 1);
+    assert_eq!(src.idle_connects(), 1);
+    server.abort();
+}
+
+/// The re-issue happens under keepalives too: a round ends at
+/// `idle_reissue` and a fresh IDLE starts, on the same connection.
+#[tokio::test]
+async fn idle_is_reissued_on_schedule_while_keepalives_flow() {
+    let (port, counts, server) =
+        idle_server(Idling::Keepalive(Duration::from_millis(50)), false).await;
+    let src = scripted_source(port, "pw").with_timeouts(Timeouts {
+        idle_reissue: Duration::from_millis(250),
+        ..Timeouts::default()
+    });
+    src.wait_for_change(None, Duration::from_millis(1400)).await;
+    let idles = counts.idles.load(Ordering::Relaxed);
+    assert!((4..=7).contains(&idles), "{idles} IDLE rounds");
+    assert_eq!(counts.connections.load(Ordering::Relaxed), 1);
+    server.abort();
+}
+
+/// SECURITY REVIEW 8: a server streaming FETCH under IDLE wakes every wait
+/// at once, but no two early returns come closer than MIN_WAKE_GAP.
+#[tokio::test]
+async fn a_wake_flood_is_spaced_out() {
+    let (port, _, server) = idle_server(Idling::FetchFlood, false).await;
+    let src = scripted_source(port, "pw");
+    let t = tokio::time::Instant::now();
+    src.wait_for_change(None, Duration::from_secs(30)).await;
+    assert!(
+        t.elapsed() < Duration::from_secs(1),
+        "the first wake is not held"
+    );
+    for _ in 0..2 {
+        src.wait_for_change(None, Duration::from_secs(30)).await;
+    }
+    let took = t.elapsed();
+    assert!(
+        took >= MIN_WAKE_GAP * 2 - Duration::from_millis(50),
+        "{took:?}"
+    );
+    assert!(took < MIN_WAKE_GAP * 2 + Duration::from_secs(1), "{took:?}");
+    // And never past the wait's own deadline.
+    let t = tokio::time::Instant::now();
+    src.wait_for_change(None, Duration::from_millis(500)).await;
+    assert!(
+        t.elapsed() < Duration::from_millis(900),
+        "{:?}",
+        t.elapsed()
+    );
+    server.abort();
+}
+
+/// CORRECTNESS L2: an EXISTS sent between EXAMINE and `+ idling`, or while
+/// DONE is answered, lands in the unsolicited channel; it is a wake.
+#[tokio::test]
+async fn an_arrival_in_the_idle_gaps_is_a_wake() {
+    let (port, _, server) = idle_server(Idling::ExistsBeforeContinue, false).await;
+    let src = scripted_source(port, "pw");
+    let t = tokio::time::Instant::now();
+    src.wait_for_change(None, Duration::from_secs(10)).await;
+    assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+    server.abort();
+
+    // Said during DONE at a re-issue: the wait returns then, not at its
+    // deadline.
+    let (port, _, server) = idle_server(Idling::ExistsInDone, false).await;
+    let src = scripted_source(port, "pw").with_timeouts(Timeouts {
+        idle_reissue: Duration::from_millis(300),
+        ..Timeouts::default()
+    });
+    let t = tokio::time::Instant::now();
+    src.wait_for_change(None, Duration::from_secs(10)).await;
+    assert!(
+        t.elapsed() < Duration::from_millis(1500),
+        "{:?}",
+        t.elapsed()
+    );
+    server.abort();
+}
+
+/// CORRECTNESS L3: refused IDLE logins back off within the wait (1s, 2s,
+/// ...) and across waits, and the whole run counts ONE auth refusal.
+#[tokio::test]
+async fn refused_idle_logins_back_off_and_count_once() {
+    let (port, counts, server) = idle_server(Idling::FetchFlood, true).await;
+    let src = scripted_source(port, "wrong");
+    let t = tokio::time::Instant::now();
+    src.wait_for_change(None, Duration::from_secs(5)).await;
+    assert!(t.elapsed() >= Duration::from_millis(4900), "slept out");
+    // Attempts at about 0s, 1s and 3s; the next would be at 7s.
+    let tries = counts.connections.load(Ordering::Relaxed);
+    assert_eq!(tries, 3, "backed off, never spun");
+    // The next wait starts inside the backoff: at most one more try.
+    src.wait_for_change(None, Duration::from_secs(2)).await;
+    assert!(counts.connections.load(Ordering::Relaxed) <= tries + 1);
+    assert_eq!(src.refusals.auth.load(Ordering::Relaxed), 1);
+    server.abort();
 }

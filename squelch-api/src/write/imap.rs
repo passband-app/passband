@@ -67,6 +67,27 @@ pub const IMAP_NO_SMTP: &str = "run `squelchd auth --imap` again to enable sendi
 pub const MAX_SEND_RAW_BYTES: usize =
     crate::handlers::MAX_OUTBOUND_ATTACHMENT_BYTES * 78 / 57 + 2 * 1024 * 1024;
 
+/// THE WHOLE OF ONE SEND, SMTP and the Sent copy together (security review
+/// F3). The route it runs under is cut at
+/// [`crate::limits::LONG_REQUEST_TIMEOUT`] (20 min), and a send cut there
+/// after SMTP accepted it never reaches its audit or its echo. 17 min leaves
+/// 3 for what the route does around the writer: the slot read, a reply's
+/// parent headers ([`PARENT_HEADERS_BOUND`], 1 min), and the store writes and
+/// echo after it (each store call can wait SQLite's 5 s busy handler; the
+/// echo ingests the bytes in hand, no fetch). SMTP gets all but
+/// [`SENT_RESERVE`] of it, which clears the largest message's own budget
+/// (`send_budget(MAX_SEND_RAW_BYTES)`, about 13.7 min) with 2 min for the
+/// connection, the login and the envelope (a test pins both).
+pub(crate) const SEND_DEADLINE: Duration = Duration::from_secs(17 * 60);
+
+/// What SMTP leaves of [`SEND_DEADLINE`] for the Sent copy. A copy that does
+/// not fit is the warning, never a failed send: the mail went.
+pub(crate) const SENT_RESERVE: Duration = Duration::from_secs(60);
+
+/// The most a reply's parent headers may take (one login, one verified
+/// copy read).
+pub(crate) const PARENT_HEADERS_BOUND: Duration = Duration::from_secs(60);
+
 /// How long the writer waits before each look in Sent for a server's own
 /// copy: looks at 0, 0.25, 0.5, 1.0 and 1.5 s after SMTP accepted it
 /// (amendment A2), then the APPEND. A server that files its copy later than
@@ -661,9 +682,20 @@ impl MailWriter for ImapWriter {
 
     /// From the verified copy's own bytes ([`Self::verified_raw`]): a
     /// lookalike's `Reply-To` never picks a reply's audience.
+    ///
+    /// ONE copy is read (correctness review F2): the first that passes the
+    /// guard, not every location, so a reply to a message with a large
+    /// attachment in INBOX and Sent downloads it once, within
+    /// [`PARENT_HEADERS_BOUND`].
     async fn parent_headers(&self, msg_id: &str) -> Result<ParentHeaders, WriteError> {
-        let (raw, _) = self.verified_raw(msg_id).await?;
-        Ok(parent_headers_of(&raw))
+        let read = tokio::time::timeout(PARENT_HEADERS_BOUND, self.source.verified_copy(msg_id))
+            .await
+            .map_err(|_| WriteError::Transport(IMAP_UNREACHABLE.into()))?;
+        match read {
+            Ok(Some(raw)) => Ok(parent_headers_of(&raw)),
+            Ok(None) | Err(CoreError::NotFound) => Err(not_found()),
+            Err(e) => Err(core_write_error(e)),
+        }
     }
 
     /// SEND (contract §7): add what Gmail used to (From, Date, Message-ID),
@@ -678,7 +710,16 @@ impl MailWriter for ImapWriter {
         }
         let minted = smtp::mint_message_id(&self.from)
             .ok_or_else(|| WriteError::Transport("could not mint a Message-ID".into()))?;
-        let saved = smtp::with_submission_headers(raw, &self.from, chrono::Utc::now(), &minted);
+        let deadline = tokio::time::Instant::now() + SEND_DEADLINE;
+        // ONE BUFFER is saved and (less its Bcc) transmitted: CRLF-only and
+        // safe for any relay, so the delivered copy and the saved one are the
+        // same bytes and print as one message.
+        let saved = smtp::transfer_safe(&smtp::with_submission_headers(
+            raw,
+            &self.from,
+            chrono::Utc::now(),
+            &minted,
+        ));
         let message_id = smtp::first_header(&saved, "Message-ID")
             .and_then(|v| normalize_message_id(&v))
             .ok_or_else(|| WriteError::Invalid("the message has an unusable Message-ID".into()))?;
@@ -707,13 +748,14 @@ impl MailWriter for ImapWriter {
                 });
             }
         }
-        let submitted = smtp::submit(
+        let submitted = smtp::submit_until(
             &self.smtp,
             self.timeouts,
             &self.from,
             &rcpts,
             &wire,
             send_budget(wire.len()),
+            Some(deadline - SENT_RESERVE),
         )
         .await;
         if let (Some(token), Some(ledger)) = (&token, &self.outbox) {
@@ -746,7 +788,12 @@ impl MailWriter for ImapWriter {
             source: &self.source,
             session: None,
         };
-        let copy = look_then_append(&mut folder, &message_id, &saved, &self.look_schedule).await;
+        let copy = tokio::time::timeout_at(
+            deadline,
+            look_then_append(&mut folder, &message_id, &saved, &self.look_schedule),
+        )
+        .await
+        .unwrap_or_else(|_| Err("the Sent copy ran out of time".to_string()));
         folder.logout().await;
         let warning = match copy {
             Ok(SentCopy::ServerSaved(loc)) | Ok(SentCopy::Appended(Some(loc))) => {
@@ -775,6 +822,9 @@ impl MailWriter for ImapWriter {
             id: Some(id),
             thread_id: None,
             warning,
+            // The echo ingests what was saved, Bcc and all (review 1b): the
+            // copy a sync would read first is the delivered one, Bcc-less.
+            raw: Some(saved),
         })
     }
 

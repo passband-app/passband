@@ -1141,6 +1141,7 @@ async fn settle_recovered(
         id: Some(gmail_id),
         thread_id: None,
         warning: None,
+        raw: None,
     };
     let fired = Fire {
         id: row.id,
@@ -1305,6 +1306,7 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
         Ok(SendOutcome::Sent {
             echo_message_id,
             thread_id,
+            ..
         }) => {
             // `finish_send` consumed only unclaimed files (it knows no
             // scheduled id); this row's own go here.

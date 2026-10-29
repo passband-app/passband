@@ -86,6 +86,11 @@ pub struct SentRef {
     /// IMAP send whose copy could not be saved to Sent. Always `None` from
     /// Gmail, which files its own.
     pub warning: Option<String>,
+    /// The exact bytes the writer saved as the sent copy, when it has them:
+    /// an IMAP send's (with its `Bcc`, which no delivered copy carries), so
+    /// the echo ingests those rather than fetching a copy back. `None` from
+    /// Gmail, whose echo fetches.
+    pub raw: Option<Vec<u8>>,
 }
 
 /// One `format=raw` message as Gmail returns it: the base64url RFC822 body plus

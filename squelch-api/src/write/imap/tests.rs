@@ -303,6 +303,44 @@ async fn a_send_whose_sent_copy_fails_is_still_sent_with_a_warning() {
     assert!(msg.contains("Message-ID: <"), "{msg}");
 }
 
+/// SENTREF.RAW (review 1b): the writer hands back the exact bytes it saved,
+/// Bcc and all, so the echo ingests the copy that knows who was blind
+/// copied; the transmitted bytes never had it.
+#[tokio::test]
+async fn a_send_hands_back_the_saved_copy_with_its_bcc() {
+    use crate::write::smtp::tests::{AfterDot, scripted};
+    let (port, seen) = scripted(AfterDot::Accept).await;
+    let mut credential = dev_credential("me@x.test", ImapTls::Plain, port);
+    credential.config.server.host = "127.0.0.1".into();
+    credential.config.server.port = 1;
+    credential.config.smtp.as_mut().unwrap().host = "127.0.0.1".into();
+    credential.smtp_password = Some(ImapPassword::new("good-pw"));
+    let writer = dev_writer(&credential, "me@x.test", Arc::new(MemLocations::default()));
+    let raw = b"To: a@x.test\r\nBcc: s@y.test\r\nSubject: s\r\n\r\nbody";
+    let sent = writer.send(raw, None).await.unwrap();
+    let saved = String::from_utf8(sent.raw.expect("the saved copy")).unwrap();
+    assert!(saved.contains("\r\nBcc: s@y.test\r\n"), "{saved}");
+    assert!(saved.ends_with("\r\n\r\nbody\r\n"), "{saved}");
+    // What went out is the same bytes less the Bcc line (the server's view
+    // drops the final CRLF that DATA's end supplies).
+    let msg = seen.messages.lock().unwrap()[0].clone();
+    assert_eq!(msg, saved.replace("Bcc: s@y.test\r\n", ""));
+}
+
+/// SECURITY REVIEW F3: one send, SMTP and the Sent copy, fits under the
+/// route's ceiling with room for what the route does around it, and SMTP's
+/// share still clears the largest message's own budget.
+#[test]
+fn the_send_deadline_fits_the_route_ceiling_and_the_largest_message() {
+    let around = PARENT_HEADERS_BOUND + Duration::from_secs(2 * 60);
+    assert!(SEND_DEADLINE + around <= crate::limits::LONG_REQUEST_TIMEOUT);
+    let largest = send_budget(MAX_SEND_RAW_BYTES);
+    assert!(
+        SEND_DEADLINE - SENT_RESERVE >= largest + Duration::from_secs(2 * 60),
+        "{largest:?}"
+    );
+}
+
 // ---- live: the Dovecot + Postfix test bed (scripts/imap-dev.sh) ----------------
 
 const DEV_PASSWORD: &str = "squelch-dev-password";
@@ -1190,4 +1228,57 @@ async fn live_the_delivered_and_saved_copies_have_the_same_body() {
         squelch_core::mail::imap::body_fingerprint(&inbox[0].1),
         squelch_core::mail::imap::body_fingerprint(&sent_copy[0].1)
     );
+}
+
+/// CORRECTNESS 3 LIVE: a 3000-byte line (Postfix splits past 2048) and a
+/// UTF-8 body each arrive and are saved as the same bytes, so the INBOX copy
+/// and the Sent copy of a self-send are one id, not a lookalike pair.
+#[tokio::test]
+#[ignore = "needs scripts/imap-dev.sh start"]
+async fn live_a_long_line_and_utf8_body_round_trip_as_one_id() {
+    for (tag, body) in [
+        ("long", "z".repeat(3000)),
+        (
+            "utf8",
+            "caf\u{e9}, na\u{ef}ve \u{1f600}\r\nsecond line".to_string(),
+        ),
+    ] {
+        let (writer, _, me) = live_writer(&format!("qp-{tag}"));
+        let raw = format!(
+            "To: {me}\r\nSubject: {tag}\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n\
+             MIME-Version: 1.0\r\n\r\n{body}"
+        );
+        let sent = writer.send(raw.as_bytes(), None).await.unwrap();
+        assert!(sent.warning.is_none(), "{tag}");
+        let id = sent.id.unwrap();
+        let mid = writer
+            .source
+            .verified_locations(&id)
+            .await
+            .unwrap()
+            .first()
+            .and_then(|l| l.message_id.clone())
+            .expect("the Sent copy is the id's own");
+        let inbox = copies(&me, "INBOX", &mid, 1).await;
+        let sent_copy = copies(&me, "Sent", &mid, 1).await;
+        assert_eq!((inbox.len(), sent_copy.len()), (1, 1), "{tag}");
+        assert_eq!(
+            squelch_core::mail::imap::body_fingerprint(&inbox[0].1),
+            squelch_core::mail::imap::body_fingerprint(&sent_copy[0].1),
+            "{tag}: the delivered body differs from the saved one"
+        );
+        // And it reads back as what was written.
+        let parsed = mail_parser::MessageParser::default()
+            .parse(&inbox[0].1)
+            .unwrap();
+        assert_eq!(
+            parsed
+                .body_text(0)
+                .unwrap()
+                .trim_end()
+                .replace("\r\n", "\n"),
+            body.trim_end().replace("\r\n", "\n"),
+            "{tag}"
+        );
+    }
 }

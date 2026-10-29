@@ -513,7 +513,7 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
 .auth .rig button:is(:hover, :focus-visible) {{ transform: none; box-shadow: none;
   background: linear-gradient(180deg, transparent, var(--slot-rule)); }}
 .auth .rig button:focus-visible {{ outline-offset: -3px; }}
-/* THE PROVIDERS: their own rig under the account fields, the label engraved
+/* THE PROVIDERS: their own rig under the code and username, the label engraved
    like a slot's, then equal tiles, two to a row, each named by product.
    More providers wrap into the grid; a lone one spans the row. */
 .auth form.signup {{ display: flex; flex-direction: column; gap: 0.9rem; margin: 0; }}

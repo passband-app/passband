@@ -915,7 +915,7 @@ pub(crate) const DIGEST_PREFIX: &str = "h1:";
 
 /// Where a raw message's header block ends: after the EARLIEST empty line,
 /// CRLF or bare LF (review N6), or the whole of it.
-fn header_block(raw: &[u8]) -> &[u8] {
+pub fn header_block(raw: &[u8]) -> &[u8] {
     let crlf = raw.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4);
     let lf = raw.windows(2).position(|w| w == b"\n\n").map(|i| i + 2);
     let end = match (crlf, lf) {
@@ -2153,6 +2153,12 @@ async fn read_greeting(client: &mut Client<Transport>) -> Result<()> {
     }
 }
 
+/// The folder roles a session's LIST gives now: the write door's re-list
+/// after it creates an Archive folder (phase 3).
+pub async fn list_folder_roles(session: &mut ImapSession) -> Result<FolderRoles> {
+    list_roles(session).await
+}
+
 async fn list_roles(session: &mut ImapSession) -> Result<FolderRoles> {
     let names: Vec<(String, Vec<String>)> = session
         .list(Some(""), Some("*"))
@@ -3321,81 +3327,7 @@ impl MailSource for ImapSource {
     }
 
     async fn fetch_raw(&self, id: &str, _urgency: Urgency) -> Result<FetchedMessage> {
-        let rows = self.locations.message_locations(self.account_id, id)?;
-        if rows.is_empty() {
-            // Never seen by this source: there is nowhere to look.
-            return Err(CoreError::NotFound);
-        }
-        let expected = self.locations.content_digest(self.account_id, id)?;
-        let guard = BodyGuard {
-            print_of: |b: &Body| match b {
-                Body::Bytes(bytes, _) if !bytes.is_empty() => Some(BodyPrint::of(bytes)),
-                _ => None,
-            },
-            want: self.locations.body_print(self.account_id, id)?,
-            verified: self
-                .verified
-                .lock()
-                .map(|mut v| v.for_id(id))
-                .unwrap_or_default(),
-        };
-        let (resolved, placement) = self
-            .with_conn(|c| {
-                Box::pin(async move {
-                    let r = resolve(
-                        c,
-                        rows,
-                        expected,
-                        |b: &Body| match b {
-                            Body::Bytes(bytes, _) if !bytes.is_empty() => {
-                                Some(header_digest(bytes))
-                            }
-                            _ => None,
-                        },
-                        Some(guard),
-                        |s, uid| Box::pin(fetch_body(s, uid)),
-                    )
-                    .await?;
-                    let placement = placement_for(&c.roles, &r.live);
-                    Ok((r, placement))
-                })
-            })
-            .await?;
-        self.settle(id, &resolved)?;
-        // THE LAST WORD IS THE STORE'S: bytes are served only if they print
-        // as the id's recorded print. Two lanes fetching a never-fetched id
-        // at once can each read a different copy; the first print recorded
-        // wins and the other lane's bytes are not served (review fix3 F5).
-        let stored = self.locations.body_print(self.account_id, id)?;
-        if let Ok(mut v) = self.verified.lock() {
-            for row in &resolved.stale {
-                v.forget(id, &row.folder);
-            }
-            // Copies checked against a print that lost the race are not the
-            // id's: only a check against the STORED print is kept (review
-            // fix4 R3).
-            if stored.is_some() && stored == resolved.checked_against {
-                v.insert(id, &resolved.verified);
-            }
-        }
-        if stored.is_some() && !resolved.body_mismatch.is_empty() {
-            let first = self
-                .mismatch_said
-                .lock()
-                .map(|mut said| said.insert(id.to_string()))
-                .unwrap_or(false);
-            if first {
-                // A canary for servers that rebuild a message's bytes (an
-                // Exchange content conversion, say): the copy is dropped, so
-                // say so, once per id. The id's prefix and the folder only.
-                eprintln!(
-                    "squelch: imap copy of {} in {:?} has the id's headers but another body; \
-                     not served or placed",
-                    id.chars().take(12).collect::<String>(),
-                    resolved.body_mismatch[0]
-                );
-            }
-        }
+        let (resolved, placement, stored) = self.guarded_resolve(id).await?;
         let mut thread_id = None;
         let (raw, received_at) = match resolved.got {
             Some(Body::Bytes(bytes, received))
@@ -3818,6 +3750,132 @@ impl ImapSource {
     #[cfg(test)]
     pub(crate) fn idle_connects(&self) -> u64 {
         self.idle_connects.load(Ordering::Relaxed)
+    }
+
+    /// `fetch_raw`'s resolve under the [`BodyGuard`], with its bookkeeping
+    /// (the rows settled, the placement cache, the mismatch canary): what
+    /// was found, where the id is placed, and the id's STORED body print
+    /// afterwards. Shared with [`ImapSource::verified_locations`], so the
+    /// write door acts on exactly the copies a fetch would serve.
+    async fn guarded_resolve(
+        &self,
+        id: &str,
+    ) -> Result<(Resolved<Body>, Placement, Option<BodyPrint>)> {
+        let rows = self.locations.message_locations(self.account_id, id)?;
+        if rows.is_empty() {
+            // Never seen by this source: there is nowhere to look.
+            return Err(CoreError::NotFound);
+        }
+        let expected = self.locations.content_digest(self.account_id, id)?;
+        let guard = BodyGuard {
+            print_of: |b: &Body| match b {
+                Body::Bytes(bytes, _) if !bytes.is_empty() => Some(BodyPrint::of(bytes)),
+                _ => None,
+            },
+            want: self.locations.body_print(self.account_id, id)?,
+            verified: self
+                .verified
+                .lock()
+                .map(|mut v| v.for_id(id))
+                .unwrap_or_default(),
+        };
+        let (resolved, placement) = self
+            .with_conn(|c| {
+                Box::pin(async move {
+                    let r = resolve(
+                        c,
+                        rows,
+                        expected,
+                        |b: &Body| match b {
+                            Body::Bytes(bytes, _) if !bytes.is_empty() => {
+                                Some(header_digest(bytes))
+                            }
+                            _ => None,
+                        },
+                        Some(guard),
+                        |s, uid| Box::pin(fetch_body(s, uid)),
+                    )
+                    .await?;
+                    let placement = placement_for(&c.roles, &r.live);
+                    Ok((r, placement))
+                })
+            })
+            .await?;
+        self.settle(id, &resolved)?;
+        // THE LAST WORD IS THE STORE'S: bytes are served only if they print
+        // as the id's recorded print. Two lanes fetching a never-fetched id
+        // at once can each read a different copy; the first print recorded
+        // wins and the other lane's bytes are not served (review fix3 F5).
+        let stored = self.locations.body_print(self.account_id, id)?;
+        if let Ok(mut v) = self.verified.lock() {
+            for row in &resolved.stale {
+                v.forget(id, &row.folder);
+            }
+            // Copies checked against a print that lost the race are not the
+            // id's: only a check against the STORED print is kept (review
+            // fix4 R3).
+            if stored.is_some() && stored == resolved.checked_against {
+                v.insert(id, &resolved.verified);
+            }
+        }
+        if stored.is_some() && !resolved.body_mismatch.is_empty() {
+            let first = self
+                .mismatch_said
+                .lock()
+                .map(|mut said| said.insert(id.to_string()))
+                .unwrap_or(false);
+            if first {
+                // A canary for servers that rebuild a message's bytes (an
+                // Exchange content conversion, say): the copy is dropped, so
+                // say so, once per id. The id's prefix and the folder only.
+                eprintln!(
+                    "squelch: imap copy of {} in {:?} has the id's headers but another body; \
+                     not served or placed",
+                    id.chars().take(12).collect::<String>(),
+                    resolved.body_mismatch[0]
+                );
+            }
+        }
+        Ok((resolved, placement, stored))
+    }
+
+    /// THE WRITE DOOR'S TARGETS (phase 3, contract §5): every location of
+    /// `id` whose copy is the id's own, headers AND body, checked by the
+    /// same guarded resolve `fetch_raw` serves through. A lookalike (the
+    /// same Message-ID and identity headers over another body) is never in
+    /// it. Empty when nothing checks out, including a copy too big to read
+    /// (it cannot be checked) and a print that lost a race to another lane.
+    /// [`CoreError::NotFound`] for an id this source has never seen.
+    ///
+    /// Read-only, like everything here: the resolve only `EXAMINE`s.
+    pub async fn verified_locations(&self, id: &str) -> Result<Vec<MessageLocation>> {
+        let (resolved, _, stored) = self.guarded_resolve(id).await?;
+        match (&stored, &resolved.checked_against) {
+            (Some(s), Some(c)) if s == c => Ok(resolved.live),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// The writer moved `id`'s copy out of `from.folder`: forget that place
+    /// (and its body check), and record where it went when the server said
+    /// (`COPYUID`). With no `to`, the next sighting records it.
+    pub fn note_moved(
+        &self,
+        id: &str,
+        from: &MessageLocation,
+        to: Option<MessageLocation>,
+    ) -> Result<()> {
+        self.locations
+            .forget_message_location(self.account_id, id, &from.folder)?;
+        if let Ok(mut v) = self.verified.lock() {
+            v.forget(id, &from.folder);
+        }
+        match to {
+            Some(to) => self
+                .locations
+                .record_message_locations(self.account_id, &[(id.to_string(), to)]),
+            None => Ok(()),
+        }
     }
 
     /// Bring the location rows in line with what a resolve found: stale rows

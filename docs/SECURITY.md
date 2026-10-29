@@ -485,9 +485,9 @@ spam it is told to distrust: everything the agent reads is text it may act on.
   Stage-1 — after the seal check, so a misfiled OTP is still sealed and sealed
   still outranks spam. `ingest_message` stamps the `'n/a'` stage markers, which
   is what keeps the row out of both LLM queues.
-- **Never embedded.** `SyncEngine::ingest_one` returns `None` for a spam row, the
-  same structural gate sealed mail gets. An embedding is a similarity claim, and
-  spam is written to imitate the mail it impersonates.
+- **Never embedded.** `SyncEngine::ingest_one` returns no embed text for a spam
+  row, and `messages_missing_vectors` selects `is_spam = 0`. An embedding is a
+  similarity claim, and spam is written to imitate the mail it impersonates.
 - **SQL absence.** Every band, queue, count and search leg pairs `is_spam = 0`
   with its `is_sent = 0`. The one caller asking for the other side is
   `GET /client/updates?spam=only`; an unrecognized value is a 400, never a
@@ -725,6 +725,98 @@ rule text is not delivered as the owner's words.
 - Keep an unreadable stored setting, and a failed read, meaning `none`.
 - Keep the setting off the agent door: an agent that could raise its own
   level has no level.
+
+## 4d. Hosted mail text in processes we operate
+
+**Invariant.** On hosted, a tenant's mail text leaves its own pod for exactly two
+processes we run: the LLM gateway and the shared embedding service. Provider spam
+reaches neither. Self-host reaches neither. Nothing else of ours is handed mail
+text.
+
+**What each one sees.** Neither is filtered by sealed status, and that is the
+current design rather than an oversight: since the triage rewrite
+(`4b7099de`) the triage model is what decides whether a message is
+authentication or restricted, and access is enforced where mail leaves toward an
+external reader (§4), not where it enters an internal one.
+
+- **The LLM gateway** (Bifrost, `SQUELCH_ANTHROPIC_BASE_URL`, `docs/HOSTED.md`)
+  receives what triage, translation and the hosted assistant send it. Triage
+  reads every non-spam message, login codes included, because judging them is
+  its job. A remote service with a per-tenant virtual key, reached over https
+  only (`squelch-warden/src/config.rs`, `SQUELCH_WARDEN_LLM_BASE_URL`).
+- **The embedding service** (`squelch-embed`, `docs/EMBED-SERVICE.md`) receives
+  the subject and body of every non-spam message the daemon stores, cut to
+  `embed.max_chars`, through `SyncEngine::ingest_one` and
+  `messages_missing_vectors` (`squelch-core/src/store/sqlite/search.rs`), plus
+  the text of every search query that takes the vector leg
+  (`query_embed_text` in the same file). It is in use only when the
+  operator sets `SQUELCH_WARDEN_EMBED_URL`; unset, each tenant embeds
+  in-process and this bullet describes nothing.
+
+**Spam reaches neither, at the store side.** For the gateway, `sync/ingest.rs`
+gives a spam row a neutral row and `'n/a'` stage markers before any model queue
+sees it (§4b). For the embedder, `SyncEngine::ingest_one` returns no embed text
+for a spam row and `messages_missing_vectors` selects `m.is_spam = 0`. The
+embedder itself checks nothing (`squelch-core/src/embed/remote.rs`, module
+docs): a second gate inside it would be one more thing to keep in step with the
+first.
+
+**What the embedding service does not do**, each backed by code or a test:
+
+- **Logs no text.** Its log lines carry counts, statuses and error words. The
+  session's error type carries nothing (`squelch-embed/src/session.rs`,
+  `SessionError`), and `no_text_or_address_reaches_metrics_or_logs` in
+  `squelch-embed/src/http.rs` drives every path with a canary text and fails if
+  it reaches a log line or the metrics. The daemon-side client's errors carry a
+  status, a closed error word or a transport class, never request or response
+  text.
+- **Stores nothing.** Read-only root filesystem, the baked weights read-only,
+  one 64Mi `/tmp` the service does not write to (`deploy/hosted/65-embed.yaml`).
+  A request's texts live for one forward pass and are dropped; a request whose
+  caller hung up is skipped, never run.
+- **Caches nothing, and does not dedup within a batch.** A content-keyed
+  shortcut is a cross-tenant oracle on latency: tenant B would learn that tenant
+  A received a byte-identical message (`squelch-embed/src/coalescer.rs`, module
+  docs).
+- **Is never told a tenant's name.** No tenant name or account id is in the
+  path, a header or the body (`EmbedRequest` is `deny_unknown_fields`, one
+  field). The bearer token is one fleet-wide value, deliberately not per tenant.
+  The accept loop discards the peer address before any handler runs
+  (`squelch-embed/src/http.rs`, `serve`), so nothing can key a log, metric,
+  cache or limit on it.
+- **Has no egress.** Its NetworkPolicy has `egress: []`, not even DNS, and the
+  weights are baked into the image, so a compromised embedder holding text in
+  flight has nowhere to send it. Ingress is tenant pods on 8850 and the
+  monitoring agent on 9464.
+- **Exports closed labels only.** Every metric label value comes from an enum
+  (`lane`: `interactive`, `backfill`, `none`; `outcome`: a closed set), and a
+  test refuses any label outside those sets or anything shaped like an IP
+  address (`squelch-embed/src/metrics.rs`).
+
+**What the shared token is worth.** Against a compromised tenant, nothing: every
+tenant holds it. The boundary is the NetworkPolicy pair (each tenant's one
+egress rule to the service, the service's ingress rule). The token is for the
+day the CNI is not enforcing policy and something that is not a tenant lands on
+the pod network: it gets a 401.
+
+**Plaintext on the pod network, on purpose.** The traffic never leaves the node,
+and the only observer of it would already hold the node and could read the
+tenants' SQLite files directly. The warden's validator therefore allows `http://`
+for `SQUELCH_WARDEN_EMBED_URL` only for an in-cluster host (a single-label
+Service name, `*.svc`, `*.svc.cluster.local`) and refuses public hostnames and
+IP literals, the mirror image of the https requirement on the gateway URL.
+
+**Self-host.** A self-host daemon sets no `SQUELCH_EMBED_URL` and no gateway: it
+builds its own embedding session in-process and talks to no process of ours.
+
+**Do not break.**
+- Never add a cache, a dedup or a persisted queue to `squelch-embed`.
+- Never put a tenant name, account id or per-tenant credential on the wire to it,
+  and never key anything on the peer address.
+- Never give its NetworkPolicy an egress rule; weights stay baked.
+- Never add a metric label whose value comes from a request.
+- If sealed mail is ever to be kept from either process, gate it at the store
+  side beside `is_spam`, not inside the embedder or the gateway client.
 
 ## 5. Outbound secret guard
 

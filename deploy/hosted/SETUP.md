@@ -1346,6 +1346,12 @@ kubectl -n tenants delete pvc test1-data secret/test1-identity secret/test1-cred
 
 ## 10. Embedding weights
 
+**Once `SQUELCH_WARDEN_EMBED_URL` is set (§10b), none of this section is in use.**
+Tenants then embed through the shared service, which bakes its own weights, and
+the warden stops mounting and copying the model PVC into tenant pods. Keep the
+volume and leave `SQUELCH_WARDEN_MODEL_PVC` set anyway: it is what a rollback
+of §10b lands on, and a tenant that rolls back seeds from it again.
+
 Each tenant's daemon downloads about 126 MB of ONNX weights the first time it
 embeds a message, into `$HOME/.local/share/squelch/models`, and `HOME` is that
 tenant's own volume. Left alone, that is the same download once per tenant,
@@ -1563,7 +1569,273 @@ are all on the one node. **If you ever add a second node, this stops working.**
 The answer then is the other mechanism: build a squelchd image with the weights
 baked in at `/data/.local/share/squelch/models` and point
 `SQUELCH_WARDEN_IMAGE` at it. That costs image size and gains node
-independence.
+independence. Or, simpler, finish §10b: the shared embedding service already
+bakes its weights, and with it on no tenant needs the model at all.
+
+## 10b. The shared embedding service
+
+**What it is.** `squelch-embed`, one pod in `tenants` that holds the node's only
+ONNX session. With `SQUELCH_WARDEN_EMBED_URL` set, every tenant daemon posts its
+texts to it (`POST /embed` on 8850) instead of loading a 300-500 MB session of
+its own, and tenant pods drop to 128Mi request, 512Mi limit, 40m CPU by default.
+Design and what changed in the build: `docs/EMBED-SERVICE.md`. What it means for
+the trust story: `docs/SECURITY.md` §4d (it is the second process we run that
+sees tenant mail text). Self-host never uses it.
+
+**What it costs.** One pod: 320Mi of memory request and 200m CPU (768Mi and 2
+CPU limits), out of the `tenants` quota, plus one of the quota's `pods` and one
+`count/secrets` for the token. The image is about 130 MB of weights plus a small
+binary. With the knob unset it costs that and saves nothing, so do not leave it
+running for long without step 6.
+
+**Before you start, check the quota has 320Mi to spare.** Until step 9 the
+quota is the one sized for 30 tenants at 384Mi, and the embed pod comes out of
+it. On a fleet at that cap the pod is refused at admission:
+
+```sh
+kubectl -n tenants describe resourcequota tenants
+# requests.memory  Used must be at most 11200Mi (11520Mi minus the 320Mi here)
+```
+
+### Order
+
+Each step waits for the one before. The reason for the order is that a tenant
+pointed at a URL nothing serves builds no local session (by design) and embeds
+nothing until the service exists: soft, since search degrades to keyword and
+mail sync is unaffected, but a window nobody needs to open.
+
+**1. Release a daemon tag that ships both images.** The first one is planned as
+`daemon-0.0.15`: the `squelchd` image with `RemoteEmbedder` in it, the warden
+that renders the knob, and `ghcr.io/passband-app/squelch-embed`, which the
+`embed-image` job in `release-daemon.yml` builds on every daemon tag. Check the
+embed image exists before going further, and that `65-embed.yaml`'s `image:`
+names that exact tag:
+
+```sh
+docker buildx imagetools inspect ghcr.io/passband-app/squelch-embed:daemon-0.0.15
+grep 'image:' deploy/hosted/65-embed.yaml
+```
+
+**2. Roll the fleet onto that release, with the knob unset.** This is an
+ordinary rollout (`ROLLOUT.md`, all four pins), and with
+`SQUELCH_WARDEN_EMBED_URL` unset nothing about embedding changes: every tenant
+still loads its own session. Do it first and separately, so a problem with the
+new daemon is never confused with a problem with the service. Wait for the
+roller to report the fleet converged (exit 0) before step 3.
+
+**3. Create the token Secret**, from the command line so the value never
+reaches a file (`embed-token.example.yaml` has the long version):
+
+```sh
+kubectl -n tenants create secret generic squelch-embed-token \
+  --from-literal=token="$(openssl rand -base64 32)"
+```
+
+It is optional on both sides: without it the service starts unauthenticated and
+says so in its log. Create it now anyway, before any tenant is pointed at the
+service, so every tenant picks it up on the roll that points it there and no
+tenant ever runs on the other side of a token change.
+
+**4. Apply the service and wait for Ready.**
+
+```sh
+kubectl apply -f deploy/hosted/65-embed.yaml
+kubectl -n tenants rollout status deploy/squelch-embed
+kubectl -n tenants logs deploy/squelch-embed
+# squelch-embed: auth: POST /embed requires the bearer token from SQUELCH_EMBED_TOKEN
+# squelch-embed: loading Xenova/bge-small-en-v1.5 from /models
+# squelch-embed: session ready: Xenova/bge-small-en-v1.5 (384-dim, max_length 256) in ... ms
+```
+
+A pod that exits instead says why on its last line: a token shorter than 32
+characters or still the example placeholder, `HF_HOME` set, or a weights file
+missing from the image. It never downloads anything, and it has no egress to
+download with.
+
+**5. Check that something which is not a tenant is refused.** The service's
+NetworkPolicy admits tenant pods on 8850 and the monitoring agent on 9464, and
+nothing else. Test it from a namespace with no NetworkPolicy of its own, so the
+only thing that can refuse the connection is the service's ingress rule
+(`kubectl -n default get networkpolicy` should list nothing):
+
+```sh
+kubectl -n default run embed-probe --rm -it --restart=Never --image=busybox:1.36 \
+  -- sh -c 'nc -w 3 squelch-embed.tenants.svc.cluster.local 8850 </dev/null && echo REACHABLE || echo blocked'
+```
+
+`blocked` is correct. Do not run this from inside `tenants`, as the section
+"Does the policy actually deny?" does for tenant ports: there the scratch pod's
+own default-deny egress refuses the connection first, so `blocked` would prove
+nothing about the service's policy. `REACHABLE` means the service is open to the
+pod network, and the token is the only thing left in front of it; stop and fix
+the policy.
+
+**6. Point the warden at it, with the roller suspended, and roll ONE tenant.**
+The proof that the tenant side works is a real `POST /embed` from inside a
+tenant pod, and that can only succeed once the warden has rendered the tenant's
+egress rule, which it does only with the knob set. So set the knob with the
+roller held, roll one tenant by hand, and test that one before the rest follow.
+
+Suspend first (the recipe is `90-warden-roller.yaml`, "Running one by hand,
+safely", and the order matters):
+
+```sh
+kubectl -n warden patch cronjob squelch-warden-roll -p '{"spec":{"suspend":true}}'
+kubectl -n warden get cronjob squelch-warden-roll -o jsonpath='{.status.active}{"\n"}'   # empty
+```
+
+Then uncomment `SQUELCH_WARDEN_EMBED_URL: "http://squelch-embed:8850"` in
+`15-warden-config.yaml`, apply, restart, and confirm:
+
+```sh
+kubectl apply -f deploy/hosted/15-warden-config.yaml
+kubectl -n warden rollout restart deploy/squelch-warden
+kubectl -n warden exec deploy/squelch-warden -- printenv SQUELCH_WARDEN_EMBED_URL
+# http://squelch-embed:8850
+```
+
+From this moment new signups get the new shape. Existing tenants do not move
+until the roller runs. Roll one:
+
+```sh
+kubectl -n warden create job --from=cronjob/squelch-warden-roll roll-now
+kubectl -n warden logs -f job/roll-now      # names the tenant it converged
+kubectl -n warden delete job roll-now
+T=<that label>
+```
+
+**7. Verify on that tenant.** The env, the shape, the log line, and then the
+real request:
+
+```sh
+kubectl -n tenants exec deploy/$T -c squelchd -- printenv SQUELCH_EMBED_URL
+# http://squelch-embed:8850
+
+kubectl -n tenants get deploy $T \
+  -o jsonpath='{.spec.template.spec.containers[?(@.name=="squelchd")].resources}{"\n"}'
+# requests 128Mi / 40m, limits 512Mi, unless a SQUELCH_WARDEN_* resource knob overrides
+
+kubectl -n tenants get pod -l app.kubernetes.io/instance=$T \
+  -o jsonpath='{.items[0].spec.volumes[*].persistentVolumeClaim.claimName}{"\n"}'
+# $T-data, and no squelch-models
+
+kubectl -n tenants logs deploy/$T -c squelchd | grep 'embedding service'
+# squelchd: embedding service at http://squelch-embed:8850 is ready
+```
+
+The daemon image has bash and no curl, so the POST is by hand over
+`/dev/tcp`:
+
+```sh
+kubectl -n tenants exec deploy/$T -c squelchd -- bash -c '
+  body="{\"texts\":[\"hello\"]}"
+  exec 3<>/dev/tcp/squelch-embed/8850
+  printf "POST /embed HTTP/1.1\r\nHost: squelch-embed\r\nContent-Type: application/json\r\nAuthorization: Bearer %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" \
+    "$SQUELCH_EMBED_TOKEN" "${#body}" "$body" >&3
+  head -c 300 <&3'
+```
+
+`HTTP/1.1 200` and a body starting `{"dims":384` is the answer. A hang that ends
+in nothing is the tenant's NetworkPolicy without the egress rule (check the
+render, `kubectl -n tenants get networkpolicy $T -o yaml`, for a rule to
+`app.kubernetes.io/name: squelch-embed` on 8850). A `401` is a token mismatch:
+the Secret was created after this tenant's pod started, or after the service's.
+If anything here is wrong, stop with the roller still suspended and roll this
+one tenant back (Rollback, below).
+
+**8. Turn on the scrape, then let the roller continue.** The monitoring agent
+never reloads its config, so applying the ConfigMap alone changes nothing:
+
+```sh
+kubectl apply -f deploy/hosted/80-monitoring.yaml
+kubectl -n monitoring rollout restart deploy/prometheus-agent
+kubectl -n monitoring rollout status deploy/prometheus-agent
+```
+
+Check `up{job="squelch-embed"}` is 1 in Grafana Explore before trusting any
+panel; a missing target reads exactly like no traffic. Then unsuspend:
+
+```sh
+kubectl -n warden patch cronjob squelch-warden-roll -p '{"spec":{"suspend":false}}'
+```
+
+The roller walks the remaining tenants onto the new render one per tick, five
+minutes each. Each tenant's memory drops when it restarts.
+
+**9. After the whole fleet has rolled, apply the new tenant limits.** The roller
+says when (`still behind` stops appearing, exit 0). Then:
+
+```sh
+kubectl apply -f deploy/hosted/70-tenant-limits.yaml
+kubectl -n tenants describe resourcequota tenants
+```
+
+`requests.memory` stays `11520Mi`; at 128Mi a tenant that would admit
+`(11520 - 320) / 128 = 87`, but the `pods` and `persistentvolumeclaims` lines
+hold the fleet at 60 on purpose. The 80 GB disk is the line nobody has measured
+yet: `local-path` does not enforce a PVC's size, and the archive tier can grow
+one tenant's database to about 4 GB. Raise it only on a measurement of disk.
+
+### What to watch
+
+There are no dashboard panels for the service yet; these are Grafana Explore
+queries against the `squelch-embed` job. Every family is present at zero, so an
+empty result is a broken scrape, not an idle service.
+
+```promql
+# 1 once the session is built. 0 means every tenant is getting 503s.
+squelch_embed_session_ready
+
+# Queue wait p99 per lane: the number to decide a second replica on, not CPU.
+# Interactive should sit near the 10 ms coalescing window. Backfill runs to
+# seconds or tens of seconds while a signup's first sync is in progress.
+histogram_quantile(0.99,
+  sum by (le, lane) (rate(squelch_embed_queue_wait_seconds_bucket[5m])))
+
+# 429s, by lane. Backfill 429s during a signup are the design working (the
+# daemon backs off and retries). Interactive 429s are not.
+sum by (lane) (rate(squelch_embed_requests_total{outcome="queue_full"}[5m]))
+
+# Everything else that is not ok. unauthorized = a token mismatch somewhere;
+# not_ready = the session is down or loading; error = inference failed.
+sum by (outcome) (rate(squelch_embed_requests_total{outcome!~"ok|queue_full"}[5m]))
+
+# The pod against its 768Mi limit.
+container_memory_working_set_bytes{namespace="tenants", pod=~"squelch-embed-.*", container="squelch-embed"}
+```
+
+On the tenant side, `squelchd_embedder_loaded` reads 0 on every tenant using the
+service, which is the truth (no session in the process). It also reads 0 on a
+local-embedding tenant whose session is idle-unloaded, so it does not tell you
+which tenants have rolled; `printenv SQUELCH_EMBED_URL` in the pod does.
+
+### Rollback
+
+Comment `SQUELCH_WARDEN_EMBED_URL` out again, apply, restart the warden:
+
+```sh
+kubectl apply -f deploy/hosted/15-warden-config.yaml
+kubectl -n warden rollout restart deploy/squelch-warden
+```
+
+The roller walks tenants back one per tick: the old resources, the model PVC
+mounted and copied again (§10), a local session in each pod. Vectors are in the
+same space either way, so nothing re-embeds. Leave the service running until
+the last tenant has rolled back, then `kubectl delete -f
+deploy/hosted/65-embed.yaml` if it is going away.
+
+**Rollback only fits the old shape.** A tenant rolled back requests 384Mi again,
+and the quota is `11520Mi`: 30 tenants, 29 while the embed pod still runs. On a
+fleet that grew past that under the lighter shape, a tenant rolled back is
+refused at admission and, with `Recreate`, stays down. Past 29 tenants, rolling
+back needs a bigger quota first, or a box that can carry one.
+
+**Rotating the token has no clean path today.** A tenant reads
+`SQUELCH_EMBED_TOKEN` when its pod starts, and a new value in the same Secret
+changes nothing the roller can see as drift, so tenants keep the old value until
+something restarts them; and restarting them all by hand is the
+`kubectl rollout restart` §6c says never to do. Treat the token as set once
+until the warden can render a renamed Secret, as it does for the relay's.
 
 ## 11. Backups: Litestream to R2
 

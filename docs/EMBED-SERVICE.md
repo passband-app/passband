@@ -1,16 +1,110 @@
 # One embedding session per node
 
-Status: designed 2026-08-26, **not built**; the build trigger is §9. The design
-record for the change that makes hosted tenant count independent of the ONNX
-Runtime session: one embedder per node, shared by every tenant, instead of one
-per tenant pod. Written now and built later because the Phase 1 daemon work
-(idle unload, heap trim) buys headroom, and these decisions are cheaper to argue
-about before there is code.
+Status: designed 2026-08-26; **built 2026-10-28 on branch `better-scaling`, not
+yet rolled out**. The rollout is `deploy/hosted/SETUP.md` §10b. The design record
+for the change that makes hosted tenant count independent of the ONNX Runtime
+session: one embedder per node, shared by every tenant, instead of one per
+tenant pod. Sections 1 to 9 below are the design as argued in August, kept as
+written; where the build differs, the next section says so and the code wins.
+
+## As built
+
+What shipped differs from §1 to §9 in these places. Each was checked against
+the code on the branch; the file named is where to look.
+
+- **Fleet objects are operator-applied YAML, not warden objects.** §5 had the
+  warden build `embed_deployment`, `embed_service` and `embed_network_policy`
+  as typed structs. They are `deploy/hosted/65-embed.yaml` instead, applied by
+  hand once, like the monitoring stack. The warden renders only the tenant
+  side: `SQUELCH_EMBED_URL`, `SQUELCH_EMBED_TOKEN` (Secret
+  `squelch-embed-token`, key `token`, optional) and one egress rule per tenant
+  (pod selector `app.kubernetes.io/name: squelch-embed`, TCP 8850). The RBAC
+  file is still untouched, which was §5's point.
+- **The operator knob is `SQUELCH_WARDEN_EMBED_URL`, unset by default.** Unset,
+  every tenant embeds in-process exactly as before, which is also what every
+  self-host daemon does. The validator allows `http://` because the host must
+  be in-cluster: a single-label Service name, `*.svc` or `*.svc.cluster.local`.
+  Public hostnames and IP literals are refused.
+- **A tenant pod is lighter when the knob is set.** The warden stops mounting
+  and copying the model PVC (`SQUELCH_WARDEN_MODEL_PVC` has nothing to seed),
+  and the DEFAULT tenant resources drop to 128Mi request, 512Mi limit, 40m CPU
+  request. Explicit `SQUELCH_WARDEN_*` resource knobs still win.
+- **The quota is provisional at 60 tenants.** `requests.memory` stays
+  `11520Mi`. Knob unset, that is 30 tenants at 384Mi; set, it is `(11520 - 320)
+  / 128 = 87` by memory, but the `pods` and `persistentvolumeclaims` lines in
+  `70-tenant-limits.yaml` deliberately gate at 60, because the 80 GB disk is
+  the unmeasured line now: `local-path` does not enforce a PVC's size, and the
+  archive tier can grow one tenant's database to about 4 GB.
+- **`outcome` gained `not_ready`, `unauthorized` and `abandoned`**
+  (`squelch-embed/src/metrics.rs`). §4 listed `ok`, `rejected`, `queue_full`,
+  `error`. `abandoned` counts a request whose caller hung up before its batch
+  ran (skipped, never run) or before its vectors came back.
+- **`lane` gained `none`**, for a request refused before it has a shape: a 401
+  (decided before the body is read) or a body that does not parse or carries no
+  texts.
+- **Status codes.** An oversized body is a 400 `bad_request`, not a 413, and a
+  body that takes longer than 10 s to arrive is a 408 (`squelch-embed/src/http.rs`).
+  A 401 `unauthorized` exists because the token does. Every error body is one
+  closed word from `protocol.rs`.
+- **Timeouts on the server are header read and body read, 10 s each, and
+  nothing on the write side.** hyper's server has no write timeout to set. A
+  caller that stops reading its response holds a connection task; it cannot
+  hold a queue slot, because the batch has already run. The same 10 s timer
+  closes an idle keep-alive connection. The server is HTTP/1 only, because
+  hyper's HTTP/2 server has no header-read timeout.
+- **`/healthz` is on both ports.** §2 put it on 9464 only. It is also on 8850,
+  because the daemon's one startup probe goes through the Service, which carries
+  only 8850. The kubelet's probes use 9464.
+- **Weights are fetched by `curl` in `Dockerfile.embed`, not by the binary.**
+  A native build stage pulls the five files fastembed reads from
+  `Xenova/bge-small-en-v1.5` at pinned revision `ea104dac`, checks each against
+  a pinned sha256, and lays them out as the hf-hub cache. The binary refuses to
+  start if any file is missing and never downloads (`session.rs`), and a test
+  keeps the Dockerfile's file list in step with the session's. Moving the
+  revision is a re-embed decision, not a bump.
+- **Startup refusals.** The service refuses a `SQUELCH_EMBED_TOKEN` shorter than
+  32 characters or still holding the example Secret's placeholder, and refuses
+  to start with `HF_HOME` set (fastembed would read it in place of the baked
+  cache).
+- **Backoff opens on more than 429 and 503.** `squelch-core/src/sync/embed_backoff.rs`
+  opens a window on any transient failure: 408, 429, 503 and other 5xx, a
+  timeout, a refused or failed connection. 5 s doubling to 5 min, `Retry-After`
+  as a floor (capped at 5 min where it is parsed), reset on the first success.
+  The service sends `Retry-After: 2` from the interactive lane and `10` from
+  backfill. The window covers ingest, the translation embed and the vector
+  drain; inside it ingest stores the message and leaves the vector to the
+  drain. Permanent failures (400, 401, a response in another vector space) and
+  every local embedder error never open a window and keep today's
+  retry-next-tick behaviour.
+- **The client is pinned to the configured host** (`squelch-core/src/embed/remote.rs`).
+  Redirects are disabled and proxy environment variables are ignored, because
+  either would send mail text somewhere nobody configured. The pooled idle
+  timeout is 5 s, under the server's 10 s idle close.
+- **`RemoteEmbedder::new` refuses a daemon in another vector space.** Besides
+  the per-response `dims` check from §3, construction refuses a daemon whose
+  `embed.model`, `embed.dims` or `embed.max_tokens` disagrees with
+  `squelch_embed::protocol`, and a test pins the daemon's defaults to those
+  constants.
+- **The Deployment is `strategy: Recreate`**, so a rollout never holds two
+  sessions (or two quota slots). The cost is a few seconds of 503, which tenants
+  treat as a transient failure.
+- **§4's sealed-mail paragraph is no longer true, and was not true when the
+  build started.** It describes a `sensitivity == Normal` gate that the triage
+  rewrite (`4b7099de`, 2026-09-17) retired: ingest now always stores
+  `Sensitivity::Normal`, and the only embed gate is provider spam (`is_spam` in
+  `SyncEngine::ingest_one` and in `messages_missing_vectors`). Mail the triage
+  model judges to be authentication, or restricted, is embedded like any other
+  mail; it is kept from external readers on the way out, by the access guard,
+  not on the way in. So with the knob set, the service sees the subject and
+  body of every non-spam message, login codes included. `docs/SECURITY.md`
+  §4d states what is actually true.
 
 ## 1. Why
 
-Every hosted tenant runs its own `squelchd` pod on `carrier` (Hetzner CPX21, 3
-shared vCPU, 3.8 GB, 80 GB, no swap). Each embeds mail for semantic recall with
+Every hosted tenant runs its own `squelchd` pod on `carrier` (Hetzner, 4 shared
+vCPU, 16 GB, 80 GB root; resized from a CPX21 on 2026-09-28). The numbers in
+this section were measured in August on the old box, 3 shared vCPU and 3.8 GB
+with no swap, and the arithmetic below is about that box. Each embeds mail for semantic recall with
 fastembed over ONNX Runtime, `bge-small-en-v1.5` at 384 dimensions, weights
 pinned to `Xenova/bge-small-en-v1.5` fp32.
 

@@ -561,13 +561,29 @@ impl Warden {
         raw_label: &str,
         raw_email: &str,
     ) -> Result<Created, WardenError> {
+        self.create_tenant_for(raw_label, raw_email, objects::MailProvider::Gmail)
+            .await
+    }
+
+    /// [`Self::create_tenant`] for a mailbox at `provider`, recorded on the
+    /// identity Secret so every later render (reconcile, roll, rotation) gives
+    /// an Outlook tenant the Microsoft client. A pending tenant is only
+    /// reissued to the same mailbox AT THE SAME COMPANY.
+    pub async fn create_tenant_for(
+        &self,
+        raw_label: &str,
+        raw_email: &str,
+        provider: objects::MailProvider,
+    ) -> Result<Created, WardenError> {
         // Validation first, before anything is touched: a bad request must cost
         // the cluster nothing.
         let name = TenantName::parse(raw_label)?;
         let account_email = validate::validate_account_email(raw_email)?;
 
         if let Some(existing) = self.identity(&name).await? {
-            let recipient = self.reuse(&name, &existing, &account_email).await?;
+            let recipient = self
+                .reuse(&name, &existing, &account_email, provider)
+                .await?;
             tracing::info!(tenant = %name, "re-issued the recipient for a pending tenant");
             return Ok(Created { recipient });
         }
@@ -580,8 +596,14 @@ impl Warden {
         // keep. What we can promise is that nothing writes them anywhere else.)
         let identity = TenantIdentity::mint();
         let recipient = identity.recipient().to_string();
-        let secret =
-            objects::identity_secret(&self.config, &name, &identity, &account_email, now_secs());
+        let secret = objects::identity_secret_for(
+            &self.config,
+            &name,
+            &identity,
+            &account_email,
+            now_secs(),
+            provider,
+        );
 
         match self.cluster.create(Object::Secret(Box::new(secret))).await {
             Ok(()) => {}
@@ -791,14 +813,16 @@ impl Warden {
         // whole mechanism by which a re-consent reaches the daemon. Computed
         // once, because the confirmation at the end asks for the same value.
         let expected_hash = objects::credential_hash(ciphertext);
+        let provider = self.provider_of(name).await?;
         self.apply(
             name,
-            Object::Deployment(Box::new(objects::deployment(
+            Object::Deployment(Box::new(objects::deployment_for(
                 &self.config,
                 name,
                 &expected_hash,
                 llm_hash.as_deref(),
                 share_hash.as_deref(),
+                provider,
             ))),
             "workload_failed",
         )
@@ -1025,9 +1049,10 @@ impl Warden {
             // that dropped the share annotation would roll every sharing
             // tenant's pod off its own token on the next key rotation.
             let share_hash = self.share_hash(&name).await?;
+            let provider = self.provider_of(&name).await?;
             self.apply(
                 &name,
-                Object::Deployment(Box::new(objects::deployment(
+                Object::Deployment(Box::new(objects::deployment_for(
                     &self.config,
                     &name,
                     &objects::credential_hash(&ciphertext),
@@ -1038,6 +1063,7 @@ impl Warden {
                         assistant_api_key.as_deref(),
                     )),
                     share_hash.as_deref(),
+                    provider,
                 ))),
                 "workload_failed",
             )
@@ -1142,9 +1168,10 @@ impl Warden {
             // carried through `set_llm_key`: neither rotation may knock the
             // other's annotation off the pod template.
             let llm_hash = self.llm_hash(&name).await?;
+            let provider = self.provider_of(&name).await?;
             self.apply(
                 &name,
-                Object::Deployment(Box::new(objects::deployment(
+                Object::Deployment(Box::new(objects::deployment_for(
                     &self.config,
                     &name,
                     &objects::credential_hash(&ciphertext),
@@ -1156,6 +1183,7 @@ impl Warden {
                         .as_deref()
                         .map(objects::credential_hash)
                         .as_deref(),
+                    provider,
                 ))),
                 "workload_failed",
             )
@@ -1382,12 +1410,14 @@ impl Warden {
         let llm_hash = self.llm_hash(name).await?;
         let share_hash = self.share_hash(name).await?;
 
-        let rendered = objects::deployment(
+        let provider = self.provider_of(name).await?;
+        let rendered = objects::deployment_for(
             &self.config,
             name,
             &objects::credential_hash(&ciphertext),
             llm_hash.as_deref(),
             share_hash.as_deref(),
+            provider,
         );
         let merged = self
             .cluster
@@ -1637,12 +1667,14 @@ impl Warden {
         )
         .await?;
 
-        let rendered = objects::deployment(
+        let provider = self.provider_of(&name).await?;
+        let rendered = objects::deployment_for(
             &self.config,
             &name,
             &objects::credential_hash(&ciphertext),
             llm_hash.as_deref(),
             share_hash.as_deref(),
+            provider,
         );
         let live = self
             .cluster
@@ -2458,6 +2490,19 @@ impl Warden {
     }
 
     /// The tenant's identity Secret, if phase one ever ran.
+    /// Which company `name`'s mailbox is at, from its identity Secret's
+    /// [`objects::PROVIDER_KEY`]. A tenant with no Secret, or one written
+    /// before Outlook, is Gmail.
+    async fn provider_of(&self, name: &TenantName) -> Result<objects::MailProvider, WardenError> {
+        Ok(objects::MailProvider::from_secret_value(
+            self.identity(name)
+                .await?
+                .as_ref()
+                .and_then(|s| secret_value(s, objects::PROVIDER_KEY))
+                .as_deref(),
+        ))
+    }
+
     async fn identity(&self, name: &TenantName) -> Result<Option<Secret>, WardenError> {
         self.cluster
             .get_secret(&name.identity_secret())
@@ -2537,6 +2582,7 @@ impl Warden {
         name: &TenantName,
         existing: &Secret,
         account_email: &str,
+        provider: objects::MailProvider,
     ) -> Result<String, WardenError> {
         // Only a PENDING tenant may be re-posted. Once a tenant is serving, a
         // second POST is somebody claiming a taken subdomain.
@@ -2545,8 +2591,15 @@ impl Warden {
         }
         let stored_email = secret_value(existing, objects::ACCOUNT_EMAIL_KEY);
         let recipient = secret_value(existing, objects::RECIPIENT_KEY);
+        let stored_provider = objects::MailProvider::from_secret_value(
+            secret_value(existing, objects::PROVIDER_KEY).as_deref(),
+        );
         match (stored_email, recipient) {
-            (Some(stored), Some(recipient)) if stored == account_email => Ok(recipient),
+            (Some(stored), Some(recipient))
+                if stored == account_email && stored_provider == provider =>
+            {
+                Ok(recipient)
+            }
             // A pending tenant whose Secret has no recipient in it is a Secret
             // this warden did not write, or wrote and then had edited. Refusing
             // is the only safe answer: minting a second key would orphan
@@ -2755,6 +2808,37 @@ mod tests {
     /// The whole two-phase happy path, asserted as an exact ordered list of
     /// applies. If provisioning grows a step, or reorders one, this test is the
     /// thing that notices.
+    /// An Outlook tenant is recorded as one at creation, so the workload
+    /// applied after its credential (and every later re-render) takes the
+    /// Microsoft client; and a pending Outlook tenant is not reissued to the
+    /// same address at Google.
+    #[tokio::test]
+    async fn an_outlook_tenant_is_rendered_with_the_microsoft_client() {
+        let h = Harness::new();
+        h.warden
+            .create_tenant_for("qamail", "qa@outlook.com", objects::MailProvider::Outlook)
+            .await
+            .unwrap();
+        // The same mailbox at the other company does not get its recipient.
+        assert!(matches!(
+            h.warden.create_tenant("qamail", "qa@outlook.com").await,
+            Err(WardenError::Conflict)
+        ));
+        h.warden
+            .set_credentials("qamail", &armored("qamail"))
+            .await
+            .unwrap();
+        let Some(Object::Deployment(d)) = h.cluster.object(Kind::Deployment, "qamail") else {
+            panic!("no deployment applied");
+        };
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(
+            json.contains(objects::MICROSOFT_OAUTH_SECRET_NAME),
+            "{json}"
+        );
+        assert!(!json.contains("\"google-oauth-client\""), "{json}");
+    }
+
     #[tokio::test]
     async fn provisions_a_tenant_in_two_phases() {
         let h = Harness::new();

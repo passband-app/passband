@@ -122,6 +122,47 @@ pub const RECIPIENT_KEY: &str = "recipient";
 /// `secretKeyRef`, so the address is never in a pod spec either.
 pub const ACCOUNT_EMAIL_KEY: &str = "account-email";
 
+/// Data key holding which company the tenant's mailbox is at, written ONLY for
+/// an Outlook tenant (`outlook`). Absent is Gmail, so every Gmail tenant's
+/// Secret is exactly what it was before Outlook existed.
+pub const PROVIDER_KEY: &str = "provider";
+
+/// The shared Secret an OUTLOOK tenant's `SQUELCH_CLIENT_ID` and
+/// `SQUELCH_CLIENT_SECRET` come from: the "Passband Hosted" Entra app, the
+/// confidential client the control plane minted its token with. Same two
+/// keys as the Google one ([`OAUTH_CLIENT_ID_KEY`], [`OAUTH_CLIENT_SECRET_KEY`]).
+/// A fixed name, not a knob: see `deploy/hosted/SETUP.md`.
+pub const MICROSOFT_OAUTH_SECRET_NAME: &str = "microsoft-oauth-client";
+
+/// Which company a tenant's mailbox is at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MailProvider {
+    #[default]
+    Gmail,
+    Outlook,
+}
+
+impl MailProvider {
+    /// A request's `provider`: absent or `gmail` is Gmail, `outlook` is
+    /// Outlook, anything else is refused.
+    pub fn parse(raw: Option<&str>) -> Option<Self> {
+        match raw.map(str::trim) {
+            None | Some("") | Some("gmail") => Some(Self::Gmail),
+            Some("outlook") => Some(Self::Outlook),
+            _ => None,
+        }
+    }
+
+    /// Read back from an identity Secret's [`PROVIDER_KEY`].
+    pub fn from_secret_value(raw: Option<&str>) -> Self {
+        if raw == Some("outlook") {
+            Self::Outlook
+        } else {
+            Self::Gmail
+        }
+    }
+}
+
 /// Data key holding the age-armored credentials file.
 pub const CREDENTIAL_KEY: &str = "credentials.json";
 
@@ -583,6 +624,26 @@ pub fn identity_secret(
     account_email: &str,
     created_at: u64,
 ) -> Secret {
+    identity_secret_for(
+        config,
+        name,
+        identity,
+        account_email,
+        created_at,
+        MailProvider::Gmail,
+    )
+}
+
+/// [`identity_secret`] recording `provider`, which is written only for
+/// Outlook (see [`PROVIDER_KEY`]).
+pub fn identity_secret_for(
+    config: &Config,
+    name: &TenantName,
+    identity: &TenantIdentity,
+    account_email: &str,
+    created_at: u64,
+    provider: MailProvider,
+) -> Secret {
     let mut metadata = meta(config, name, name.identity_secret());
     metadata.annotations = Some(BTreeMap::from([(
         CREATED_AT_ANNOTATION.to_string(),
@@ -594,11 +655,17 @@ pub fn identity_secret(
         type_: Some("Opaque".to_string()),
         // `string_data` rather than `data`: the API server does the base64, so
         // no code here handles a key as bytes it might log by accident.
-        string_data: Some(BTreeMap::from([
-            (IDENTITY_KEY.to_string(), identity.expose().to_string()),
-            (RECIPIENT_KEY.to_string(), identity.recipient().to_string()),
-            (ACCOUNT_EMAIL_KEY.to_string(), account_email.to_string()),
-        ])),
+        string_data: Some({
+            let mut data = BTreeMap::from([
+                (IDENTITY_KEY.to_string(), identity.expose().to_string()),
+                (RECIPIENT_KEY.to_string(), identity.recipient().to_string()),
+                (ACCOUNT_EMAIL_KEY.to_string(), account_email.to_string()),
+            ]);
+            if provider == MailProvider::Outlook {
+                data.insert(PROVIDER_KEY.to_string(), "outlook".to_string());
+            }
+            data
+        }),
         ..Default::default()
     }
 }
@@ -1070,6 +1137,29 @@ pub fn deployment(
     llm_key_hash: Option<&str>,
     share_token_hash: Option<&str>,
 ) -> Deployment {
+    deployment_for(
+        config,
+        name,
+        credential_hash,
+        llm_key_hash,
+        share_token_hash,
+        MailProvider::Gmail,
+    )
+}
+
+/// [`deployment`] for a tenant at `provider`. The ONE difference an Outlook
+/// tenant has is where `SQUELCH_CLIENT_ID`/`SQUELCH_CLIENT_SECRET` come from
+/// ([`MICROSOFT_OAUTH_SECRET_NAME`]); the daemon learns it is Outlook from its
+/// own credential, so there is no new variable, and a Gmail tenant renders
+/// byte for byte what it always did (no fleet roll).
+pub fn deployment_for(
+    config: &Config,
+    name: &TenantName,
+    credential_hash: &str,
+    llm_key_hash: Option<&str>,
+    share_token_hash: Option<&str>,
+    provider: MailProvider,
+) -> Deployment {
     let pod_security = PodSecurityContext {
         run_as_non_root: Some(true),
         run_as_user: Some(config.run_as),
@@ -1225,7 +1315,7 @@ pub fn deployment(
                 ..Default::default()
             },
         ]),
-        env: Some(daemon_env(config, name)),
+        env: Some(daemon_env_for(config, name, provider)),
         volume_mounts: Some(vec![
             data_mount,
             VolumeMount {
@@ -1323,7 +1413,13 @@ pub fn deployment(
 /// The daemon's environment. These are the REAL variable names `squelch-core`
 /// reads, checked against `squelch-core/src/config.rs`; v1 shipped two that the
 /// daemon never looked at.
-fn daemon_env(config: &Config, name: &TenantName) -> Vec<EnvVar> {
+fn daemon_env_for(config: &Config, name: &TenantName, provider: MailProvider) -> Vec<EnvVar> {
+    // Gmail: the shared Google client. Outlook: the shared Entra app, under
+    // the same two variables, so the daemon's config is unchanged.
+    let oauth_secret = match provider {
+        MailProvider::Gmail => config.oauth_secret_name.clone(),
+        MailProvider::Outlook => MICROSOFT_OAUTH_SECRET_NAME.to_string(),
+    };
     let plain = |key: &str, value: &str| EnvVar {
         name: key.to_string(),
         value: Some(value.to_string()),
@@ -1390,12 +1486,12 @@ fn daemon_env(config: &Config, name: &TenantName) -> Vec<EnvVar> {
         // `deploy/hosted/SETUP.md`, "The Google OAuth client".
         from_secret(
             "SQUELCH_CLIENT_ID",
-            config.oauth_secret_name.clone(),
+            oauth_secret.clone(),
             OAUTH_CLIENT_ID_KEY,
         ),
         from_secret(
             "SQUELCH_CLIENT_SECRET",
-            config.oauth_secret_name.clone(),
+            oauth_secret,
             OAUTH_CLIENT_SECRET_KEY,
         ),
     ];
@@ -2316,6 +2412,67 @@ mod tests {
             assert_eq!(from.name, "google-oauth-client");
             assert_eq!(from.key, key);
         }
+    }
+
+    /// GMAIL TENANTS RENDER WHAT THEY ALWAYS DID, so shipping Outlook rolls no
+    /// pod: the Gmail render IS the old function's, and an Outlook render
+    /// differs from it in exactly one thing, which Secret the two client
+    /// variables come from.
+    #[test]
+    fn an_outlook_tenant_differs_from_a_gmail_one_only_in_its_oauth_secret() {
+        let c = test_config();
+        let gmail = deployment(&c, &name(), &credential_hash("ct"), Some("l"), Some("s"));
+        let gmail_for = deployment_for(
+            &c,
+            &name(),
+            &credential_hash("ct"),
+            Some("l"),
+            Some("s"),
+            MailProvider::Gmail,
+        );
+        let outlook = deployment_for(
+            &c,
+            &name(),
+            &credential_hash("ct"),
+            Some("l"),
+            Some("s"),
+            MailProvider::Outlook,
+        );
+        let json = |d: &Deployment| serde_json::to_string(d).unwrap();
+        assert_eq!(json(&gmail), json(&gmail_for));
+        assert!(json(&gmail).contains("\"google-oauth-client\""));
+        assert!(!json(&gmail).contains(MICROSOFT_OAUTH_SECRET_NAME));
+        assert_ne!(json(&gmail), json(&outlook));
+        assert_eq!(
+            json(&outlook).replace(MICROSOFT_OAUTH_SECRET_NAME, "google-oauth-client"),
+            json(&gmail)
+        );
+    }
+
+    /// A Gmail tenant's identity Secret carries no provider key at all, so it
+    /// is byte for byte what it was; an Outlook one says `outlook`.
+    #[test]
+    fn only_an_outlook_identity_secret_names_its_provider() {
+        let c = test_config();
+        let id = crate::identity::TenantIdentity::mint();
+        let gmail = identity_secret(&c, &name(), &id, "a@example.com", 1);
+        assert!(!gmail.string_data.unwrap().contains_key(PROVIDER_KEY));
+        let outlook =
+            identity_secret_for(&c, &name(), &id, "a@outlook.com", 1, MailProvider::Outlook);
+        assert_eq!(
+            outlook
+                .string_data
+                .unwrap()
+                .get(PROVIDER_KEY)
+                .map(String::as_str),
+            Some("outlook")
+        );
+        assert_eq!(MailProvider::parse(None), Some(MailProvider::Gmail));
+        assert_eq!(
+            MailProvider::parse(Some("outlook")),
+            Some(MailProvider::Outlook)
+        );
+        assert_eq!(MailProvider::parse(Some("yahoo")), None);
     }
 
     #[test]

@@ -1330,7 +1330,7 @@ function Waitlist({ focus = true }: { focus?: boolean }) {
             name="name"
             required
             autoComplete="name"
-            placeholder="Ada Lovelace"
+            placeholder="Margaret Hamilton"
             aria-label="your name"
             // The control plane's own ceiling is 128 CHARACTERS and this counts
             // UTF-16 units, so the two agree on every name and the browser is

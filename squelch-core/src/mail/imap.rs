@@ -1399,6 +1399,42 @@ async fn search(session: &mut ImapSession, query: String) -> Result<Vec<u32>> {
     Ok(uids)
 }
 
+/// THE ONLY WAY A FETCH'S RESPONSES ARE COLLECTED (security review 4): one
+/// per UID asked for, at most. A response for a UID not asked for, or a
+/// second one for the same UID, is read and dropped (a flag change another
+/// client made can ride along), and a server that keeps sending past a
+/// generous slack is cut off with the session, so memory is bounded by what
+/// was asked for, not by what the server feels like sending.
+async fn collect_fetches<S>(stream: S, wanted: &[u32], context: &'static str) -> Result<Vec<Fetch>>
+where
+    S: futures::Stream<Item = async_imap::error::Result<Fetch>>,
+{
+    use futures::StreamExt;
+    let wanted_set: HashSet<u32> = wanted.iter().copied().collect();
+    let limit = wanted.len().saturating_mul(2).saturating_add(16);
+    let mut stream = std::pin::pin!(stream);
+    let mut got: HashSet<u32> = HashSet::with_capacity(wanted.len());
+    let mut out = Vec::with_capacity(wanted.len());
+    let mut seen = 0usize;
+    while let Some(f) = stream.next().await {
+        let f = f.map_err(imap_err(context))?;
+        seen += 1;
+        if seen > limit {
+            return Err(broken_err(
+                context,
+                "the server sent far more responses than were asked for",
+            ));
+        }
+        if let Some(uid) = f.uid
+            && wanted_set.contains(&uid)
+            && got.insert(uid)
+        {
+            out.push(f);
+        }
+    }
+    Ok(out)
+}
+
 /// The stable id of each UID in `uids` (in `folder`, open, at `uidvalidity`),
 /// with the normalized Message-ID and the INTERNALDATE. Header-only fetches,
 /// `BODY.PEEK`, one round trip per 500 UIDs.
@@ -1410,16 +1446,14 @@ async fn stable_ids(
 ) -> Result<Vec<Seen>> {
     let mut out = Vec::with_capacity(uids.len());
     for chunk in uids.chunks(500) {
-        let fetches: Vec<Fetch> = session
+        let stream = session
             .uid_fetch(
                 uid_set(chunk),
                 format!("(UID INTERNALDATE BODY.PEEK[HEADER.FIELDS ({ID_HEADER_FIELDS})])"),
             )
             .await
-            .map_err(imap_err("fetch ids"))?
-            .try_collect()
-            .await
             .map_err(imap_err("fetch ids"))?;
+        let fetches = collect_fetches(stream, chunk, "fetch ids").await?;
         for f in fetches {
             let (Some(uid), Some(h)) = (f.uid, f.header()) else {
                 continue;
@@ -1442,45 +1476,66 @@ async fn stable_ids(
 
 /// One message's bytes by UID in the open folder, or `None` if the UID is
 /// gone. `BODY.PEEK[]`: `\Seen` is not touched.
+///
+/// THE SIZE IS ASKED FIRST, on its own (security review 4): a message over
+/// the 64 MB ingest bound is refused before a byte of it is downloaded, and
+/// the bound is checked again on what actually arrived, so a server that
+/// understates the size gains nothing.
 async fn fetch_body(
     session: &mut ImapSession,
     uid: u32,
 ) -> Result<Option<(Vec<u8>, Option<DateTime<Utc>>)>> {
-    let fetches: Vec<Fetch> = session
-        .uid_fetch(
-            uid.to_string(),
-            "(UID RFC822.SIZE INTERNALDATE BODY.PEEK[])",
-        )
+    let stream = session
+        .uid_fetch(uid.to_string(), "(UID RFC822.SIZE)")
         .await
-        .map_err(imap_err("fetch body"))?
-        .try_collect()
-        .await
-        .map_err(imap_err("fetch body"))?;
-    let Some(f) = fetches.into_iter().find(|f| f.uid == Some(uid)) else {
+        .map_err(imap_err("fetch size"))?;
+    let Some(sized) = collect_fetches(stream, &[uid], "fetch size")
+        .await?
+        .into_iter()
+        .next()
+    else {
         return Ok(None);
     };
-    if f.size.is_some_and(|s| s > MAX_RAW_BYTES) {
-        return Err(CoreError::InvalidInput(
-            "raw message exceeds the 64MB ingest bound".to_string(),
-        ));
+    if sized.size.is_some_and(|s| s > MAX_RAW_BYTES) {
+        return Err(too_big());
+    }
+    // A partial fetch one byte past the bound: a server keeping to RFC 3501
+    // cannot send more, and one byte over is how "too big" shows.
+    let stream = session
+        .uid_fetch(
+            uid.to_string(),
+            format!("(UID INTERNALDATE BODY.PEEK[]<0.{}>)", MAX_RAW_BYTES + 1),
+        )
+        .await
+        .map_err(imap_err("fetch body"))?;
+    let Some(f) = collect_fetches(stream, &[uid], "fetch body")
+        .await?
+        .into_iter()
+        .next()
+    else {
+        return Ok(None);
+    };
+    let body = f.body().unwrap_or_default();
+    if body.len() > MAX_RAW_BYTES as usize {
+        return Err(too_big());
     }
     let received = f.internal_date().map(|d| d.with_timezone(&Utc));
-    Ok(Some((
-        f.body().map(<[u8]>::to_vec).unwrap_or_default(),
-        received,
-    )))
+    Ok(Some((body.to_vec(), received)))
+}
+
+fn too_big() -> CoreError {
+    CoreError::InvalidInput("raw message exceeds the 64MB ingest bound".to_string())
 }
 
 /// Is `uid` still in the open folder?
 async fn uid_exists(session: &mut ImapSession, uid: u32) -> Result<bool> {
-    let fetches: Vec<Fetch> = session
+    let stream = session
         .uid_fetch(uid.to_string(), "(UID)")
         .await
-        .map_err(imap_err("fetch uid"))?
-        .try_collect()
-        .await
         .map_err(imap_err("fetch uid"))?;
-    Ok(fetches.iter().any(|f| f.uid == Some(uid)))
+    Ok(!collect_fetches(stream, &[uid], "fetch uid")
+        .await?
+        .is_empty())
 }
 
 /// Every folder holding a message with this Message-ID, for a location that
@@ -1973,13 +2028,11 @@ impl MailSource for ImapSource {
                     resolve(c, rows, move |s, uid| {
                         let query = query.clone();
                         Box::pin(async move {
-                            let fetches: Vec<Fetch> = s
+                            let stream = s
                                 .uid_fetch(uid.to_string(), query)
                                 .await
-                                .map_err(imap_err("fetch headers"))?
-                                .try_collect()
-                                .await
                                 .map_err(imap_err("fetch headers"))?;
+                            let fetches = collect_fetches(stream, &[uid], "fetch headers").await?;
                             Ok(fetches.into_iter().find(|f| f.uid == Some(uid)).map(|f| {
                                 FetchedHeaders {
                                     headers: f.header().map(parse_header_block).unwrap_or_default(),

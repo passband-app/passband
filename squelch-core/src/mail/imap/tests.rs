@@ -1717,3 +1717,142 @@ async fn a_login_failure_of_any_kind_says_nothing_the_server_said() {
         server.abort();
     }
 }
+
+/// A server for the fetch caps: INBOX holds UID 1, whose FETCH answers are
+/// `fetch(tag, cmd)`. Records every command it was sent.
+async fn fetch_server(
+    fetch: impl Fn(&str, &str) -> String + Send + Sync + 'static,
+) -> (
+    u16,
+    Arc<std::sync::Mutex<Vec<String>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = log.clone();
+    let (port, _, task) = scripted_server(true, move |tag, cmd| {
+        seen.lock().unwrap().push(cmd.to_string());
+        if let Some(r) = login_ok(tag, cmd) {
+            return Say::Reply(r);
+        }
+        Say::Reply(if cmd.starts_with("EXAMINE") {
+            format!(
+                "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] ok\r\n* OK [UIDNEXT 2] ok\r\n\
+                 {tag} OK [READ-ONLY] done\r\n"
+            )
+        } else if cmd.starts_with("UID FETCH") {
+            fetch(tag, cmd)
+        } else {
+            format!("{tag} OK done\r\n")
+        })
+    })
+    .await;
+    (port, log, task)
+}
+
+fn one_row(locs: &Arc<MemLocations>, id: &str) {
+    locs.record_message_locations(
+        1,
+        &[(
+            id.to_string(),
+            MessageLocation {
+                folder: INBOX.into(),
+                uidvalidity: 7,
+                uid: 1,
+                message_id: None,
+            },
+        )],
+    )
+    .unwrap();
+}
+
+/// THE SIZE IS ASKED BEFORE THE BODY (security review 4): a message over the
+/// bound is refused without the body ever being requested.
+#[tokio::test]
+async fn an_oversized_message_is_refused_before_its_body_is_fetched() {
+    let (port, log, server) = fetch_server(|tag, cmd| {
+        if cmd.contains("RFC822.SIZE") {
+            format!("* 1 FETCH (UID 1 RFC822.SIZE 300000000)\r\n{tag} OK done\r\n")
+        } else {
+            format!("* 1 FETCH (UID 1 BODY[] {{4}}\r\nboom)\r\n{tag} OK done\r\n")
+        }
+    })
+    .await;
+    let locs = Arc::new(MemLocations::default());
+    one_row(&locs, "imap:big");
+    let src = dev_source_for_port(port, locs);
+    let err = src.fetch_raw("imap:big", Urgency::Live).await.unwrap_err();
+    assert!(err.to_string().contains("64MB"), "{err}");
+    let cmds = log.lock().unwrap().clone();
+    assert!(
+        !cmds.iter().any(|c| c.contains("BODY.PEEK[]")),
+        "the body was asked for: {cmds:?}"
+    );
+    server.abort();
+}
+
+/// A body fetch is a partial one capped one byte past the bound, so a
+/// server keeping to the RFC cannot send more than that.
+#[tokio::test]
+async fn the_body_fetch_asks_for_no_more_than_the_bound() {
+    let (port, log, server) = fetch_server(|tag, cmd| {
+        if cmd.contains("RFC822.SIZE") {
+            format!("* 1 FETCH (UID 1 RFC822.SIZE 4)\r\n{tag} OK done\r\n")
+        } else {
+            format!("* 1 FETCH (UID 1 BODY[]<0> {{4}}\r\nabcd)\r\n{tag} OK done\r\n")
+        }
+    })
+    .await;
+    let locs = Arc::new(MemLocations::default());
+    one_row(&locs, "imap:small");
+    let src = dev_source_for_port(port, locs);
+    let m = src.fetch_raw("imap:small", Urgency::Live).await.unwrap();
+    assert!(matches!(&m.raw, RawBody::Bytes(b) if b == b"abcd"));
+    let cmds = log.lock().unwrap().clone();
+    assert!(
+        cmds.iter()
+            .any(|c| c.contains(&format!("BODY.PEEK[]<0.{}>", MAX_RAW_BYTES + 1))),
+        "{cmds:?}"
+    );
+    server.abort();
+}
+
+/// A server that floods a FETCH with responses is cut off with the session,
+/// never collected without bound.
+#[tokio::test]
+async fn a_fetch_flooded_with_responses_retires_the_session() {
+    let (port, _, server) = fetch_server(|tag, _| {
+        let mut r = String::new();
+        for _ in 0..200 {
+            r.push_str("* 1 FETCH (UID 1 RFC822.SIZE 4)\r\n");
+        }
+        r.push_str(&format!("{tag} OK done\r\n"));
+        r
+    })
+    .await;
+    let locs = Arc::new(MemLocations::default());
+    one_row(&locs, "imap:flood");
+    let src = dev_source_for_port(port, locs);
+    let err = src
+        .fetch_raw("imap:flood", Urgency::Live)
+        .await
+        .unwrap_err();
+    assert!(is_session_broken(&err), "{err}");
+    server.abort();
+}
+
+fn dev_source_for_port(port: u16, locs: Arc<MemLocations>) -> ImapSource {
+    ImapSource::new(
+        1,
+        ImapServer {
+            host: "127.0.0.1".into(),
+            port,
+            tls: ImapTls::Plain,
+            username: "u".into(),
+        },
+        ImapPassword::new("pw"),
+        locs,
+        Arc::new(SourceRefusals::default()),
+    )
+    .unwrap()
+    .with_timeouts(short_timeouts())
+}

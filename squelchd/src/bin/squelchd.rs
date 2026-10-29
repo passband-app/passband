@@ -997,18 +997,41 @@ fn cmd_auth(
 /// An IMAP account never talks to Google (the engine reads its password and
 /// server instead, and the profile fetch and calendar sync are skipped for
 /// it), so without a configured client it gets an EMPTY placeholder, which
-/// could not mint or refresh a token even if something asked.
+/// could not mint or refresh a token even if something asked. A provider this
+/// build does not know (`None`) is treated as before IMAP existed: the client
+/// is required, and the engine refuses to sync the account.
 fn oauth_client_for(
     config: &Config,
-    provider: squelch_core::mail::MailProvider,
+    provider: Option<squelch_core::mail::MailProvider>,
 ) -> Result<OAuthClientConfig, squelch_core::CoreError> {
     match (provider, config.oauth_client()) {
         (_, Ok(client)) => Ok(client),
-        (squelch_core::mail::MailProvider::Imap, Err(_)) => Ok(OAuthClientConfig {
+        (Some(squelch_core::mail::MailProvider::Imap), Err(_)) => Ok(OAuthClientConfig {
             client_id: String::new(),
             client_secret: String::new(),
         }),
         (_, Err(e)) => Err(e),
+    }
+}
+
+/// The account's provider for a starting `serve` or `run`, `None` when the
+/// database names one this build cannot sync (correctness L8). That is not a
+/// reason to refuse to start: the API still serves what is stored, and the
+/// engine refuses the sync itself, loudly, never as Gmail (#623). Any other
+/// error (no account row, a broken database) still stops the start.
+fn known_provider(
+    provider: Result<squelch_core::mail::MailProvider, squelch_core::CoreError>,
+) -> Result<Option<squelch_core::mail::MailProvider>, squelch_core::CoreError> {
+    match provider {
+        Ok(p) => Ok(Some(p)),
+        Err(squelch_core::CoreError::InvalidInput(why)) => {
+            eprintln!(
+                "squelchd: {why}; starting without sync for this account (the stored mail is \
+                 still served)"
+            );
+            Ok(None)
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -2091,7 +2114,7 @@ fn run_daemon(config: Config) -> Result<(), squelch_core::CoreError> {
 
     let mut store = SqliteStore::open(&config.db_path)?;
     let account_id = store.ensure_account(&email)?;
-    let client = oauth_client_for(&config, store.account_provider(account_id)?)?;
+    let client = oauth_client_for(&config, known_provider(store.account_provider(account_id))?)?;
 
     // Attach the embedder to both the store (query-side) and the engine
     // (write-side); `None` keeps everything working without vector recall.
@@ -2605,9 +2628,11 @@ fn cmd_serve(
 
     let store = SqliteStore::open(&config.db_path)?;
     let account_id = store.ensure_account(&email)?;
-    let provider = store.account_provider(account_id)?;
+    let provider = known_provider(store.account_provider(account_id))?;
     let client = oauth_client_for(&config, provider)?;
-    let is_gmail = provider == squelch_core::mail::MailProvider::Gmail;
+    // An unknown provider is not Gmail either: no calendar sync and no
+    // shredder go looking for a Google grant under its address.
+    let is_gmail = provider == Some(squelch_core::mail::MailProvider::Gmail);
     let store = Arc::new(store);
 
     let backend = config.credential_backend;
@@ -5057,10 +5082,12 @@ mod tests {
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut config = Config::default();
-        config.db_path = dir.join("db.sqlite");
-        config.credential_backend = squelch_core::config::CredentialBackend::File;
-        config.credentials_path = Some(dir.join("creds.json"));
+        let config = Config {
+            db_path: dir.join("db.sqlite"),
+            credential_backend: squelch_core::config::CredentialBackend::File,
+            credentials_path: Some(dir.join("creds.json")),
+            ..Default::default()
+        };
         let fresh = |email: &str| {
             let store = SqliteStore::open(&config.db_path).unwrap();
             let id = store.ensure_account(email).unwrap();
@@ -5116,5 +5143,42 @@ mod tests {
         store.set_account_provider(b, MailProvider::Imap).unwrap();
         assert!(imap_setup_allowed(&store, b, "mail@x.org", &config).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AN ACCOUNT WITH A PROVIDER THIS BUILD DOES NOT KNOW STILL STARTS
+    /// (correctness L8): `serve` comes up with sync refused by the engine, as
+    /// it did before IMAP, rather than refusing to start at all. Other store
+    /// errors still stop it, and a known provider passes through.
+    #[test]
+    fn an_unknown_provider_starts_without_sync_instead_of_refusing() {
+        use squelch_core::CoreError;
+        use squelch_core::mail::MailProvider;
+        assert_eq!(
+            known_provider(Err(CoreError::InvalidInput(
+                "mail provider \"outlook\" is not supported by this build".into()
+            )))
+            .unwrap(),
+            None
+        );
+        assert!(matches!(
+            known_provider(Err(CoreError::NotFound)),
+            Err(CoreError::NotFound)
+        ));
+        assert_eq!(
+            known_provider(Ok(MailProvider::Gmail)).unwrap(),
+            Some(MailProvider::Gmail)
+        );
+        // The client rule for an unknown provider is Gmail's (required),
+        // never the IMAP placeholder.
+        let config = Config {
+            client_id: None,
+            client_secret: None,
+            ..Default::default()
+        };
+        if config.oauth_client().is_err() {
+            assert!(oauth_client_for(&config, None).is_err());
+            assert!(oauth_client_for(&config, Some(MailProvider::Gmail)).is_err());
+            assert!(oauth_client_for(&config, Some(MailProvider::Imap)).is_ok());
+        }
     }
 }

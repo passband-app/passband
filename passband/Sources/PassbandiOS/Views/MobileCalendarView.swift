@@ -62,7 +62,8 @@ struct MobileCalendarView: View {
 
     /// Kept across launches, like the Mac's mode: the way you like to look at
     /// your week is not a choice to make again every morning.
-    @AppStorage("phoneCalendarMode") private var mode: PhoneCalendarMode = .week
+    /// Month the first time; after that, whatever was on screen last.
+    @AppStorage("phoneCalendarMode") private var mode: PhoneCalendarMode = .month
     /// Folds opened, by day: "u" + day for unlikely, "e" + day for earlier.
     @State private var openFolds: Set<String> = []
     /// The direction the strip last moved, for the slide.
@@ -109,7 +110,11 @@ struct MobileCalendarView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 20) {
                         MobileCalendarStatus()
-                        content(items: items, model: model, week: week, place: place, now: now, cal: cal)
+                        content(
+                            items: items, model: model, week: week, place: place, now: now, cal: cal,
+                            scrollToFirstEvent: {
+                                proxy.scrollTo(MobileDayTimeline.firstEventAnchor, anchor: .top)
+                            })
                     }
                     .padding(.horizontal, 16)
                     .padding(.top, 4)
@@ -127,6 +132,7 @@ struct MobileCalendarView: View {
                         withAnimation(.snappy) { proxy.scrollTo(day, anchor: .top) }
                     }
                 }
+
               }
               }
             }
@@ -191,6 +197,11 @@ struct MobileCalendarView: View {
                 if FixtureStage.on {
                     if let staged = FixtureStage.calendarMode.flatMap(PhoneCalendarMode.init(rawValue:)) {
                         mode = staged
+                    }
+                    if let offset = FixtureStage.calendarDay,
+                       let day = Calendar.current.date(
+                           byAdding: .day, value: offset, to: Calendar.current.startOfDay(for: Date())) {
+                        store.selectCalendarDay(day, open: false, now: Date())
                     }
                     try? await Task.sleep(for: .seconds(1.5))
                     fixtureDetail = FixtureStage.calendarDetail
@@ -270,7 +281,7 @@ struct MobileCalendarView: View {
     @ViewBuilder
     private func content(
         items: [AgendaItem], model: MonthModel, week: MonthWeek?, place: MonthPlace, now: Date,
-        cal: Calendar
+        cal: Calendar, scrollToFirstEvent: @escaping () -> Void
     ) -> some View {
         switch mode {
         case .month:
@@ -300,7 +311,8 @@ struct MobileCalendarView: View {
                         Haptics.tick()
                         store.openEventEditor(
                             day: place.day, startMinutes: start, endMinutes: min(1440, start + 60), now: now)
-                    } : nil)
+                    } : nil,
+                scrollToFirstEvent: scrollToFirstEvent)
         }
     }
 
@@ -1008,6 +1020,10 @@ private struct MobileDayTimeline: View {
     /// long, starting on the half hour above the finger. Nil where nothing
     /// can be created (no writable calendar, the practice inbox).
     var create: ((_ startMinutes: Int) -> Void)?
+    /// Brings `firstEventAnchor` to the top of the list. Called by the mark
+    /// itself as it appears, so it runs once the day's hours are laid out,
+    /// whether the day was picked in the month, stepped to, or launched into.
+    var scrollToFirstEvent: () -> Void = {}
 
     @State private var showUnlikely = false
 
@@ -1028,8 +1044,12 @@ private struct MobileDayTimeline: View {
             if !column.night.isEmpty {
                 nightLine
             }
-            hoursWell
-                .simultaneousGesture(swipe)
+            // The mark beside the hours, in their frame.
+            ZStack(alignment: .topLeading) {
+                hoursWell
+                    .simultaneousGesture(swipe)
+                firstEventMark
+            }
             if !column.unlikely.isEmpty {
                 unlikelyFold
             }
@@ -1107,6 +1127,44 @@ private struct MobileDayTimeline: View {
     }
 
     // MARK: the hours
+
+    /// What the day scrolls to when it opens (`MobileCalendarView`).
+    static let firstEventAnchor = "day-first-event"
+    /// Hours of the well always on screen when a day opens, so a first
+    /// event inside them needs no scroll and the all-day chips stay in view.
+    static let opensOnScreen = 4.0
+    /// How much of the hours above the first event the scroll keeps.
+    static let leadHours = 1.5
+
+    /// A mark an hour and a half above the day's first timed event, when that
+    /// event starts too far down the well to be seen as the day opens. No
+    /// mark (no scroll) for a day whose first event is near the top, or with
+    /// no timed event at all.
+    @ViewBuilder private var firstEventMark: some View {
+        if let first = column.blocks.map(\.segment.lo).min() {
+            let top = CGFloat(first) * height
+            if top > CGFloat(Self.opensOnScreen) * Self.hourHeight {
+                // A spacer, then the mark, in a stack: the mark's OWN frame
+                // starts at the hour. An offset moves only the drawing, and a
+                // padded mark was found by `scrollTo` at the padding's top
+                // (both seen in the simulator, where the day scrolled only to
+                // its top).
+                VStack(spacing: 0) {
+                    Color.clear
+                        .frame(width: 1, height: max(0, top - CGFloat(Self.leadHours) * Self.hourHeight))
+                    Color.clear
+                        .frame(width: 1, height: 1)
+                        .id(Self.firstEventAnchor)
+                        .onAppear {
+                            // The next turn of the run loop: the list's own
+                            // layout pass has to have placed the mark first.
+                            DispatchQueue.main.async { scrollToFirstEvent() }
+                        }
+                }
+                .accessibilityHidden(true)
+            }
+        }
+    }
 
     private var hoursWell: some View {
         GeometryReader { geo in

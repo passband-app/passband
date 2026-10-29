@@ -17,6 +17,8 @@ struct ScriptedSent {
     failing_looks: usize,
     looks: usize,
     appended: Vec<Vec<u8>>,
+    /// The server lists no Sent folder.
+    no_sent: bool,
 }
 
 impl ScriptedSent {
@@ -26,6 +28,7 @@ impl ScriptedSent {
             failing_looks: 0,
             looks: 0,
             appended: Vec::new(),
+            no_sent: false,
         }
     }
 }
@@ -43,6 +46,9 @@ fn loc(uid: u32) -> MessageLocation {
 impl SentFolder for ScriptedSent {
     async fn look(&mut self, _: &str) -> Result<Option<MessageLocation>, String> {
         self.looks += 1;
+        if self.no_sent {
+            return Err(NO_SENT_FOLDER.into());
+        }
         if self.looks <= self.failing_looks {
             return Err("connection reset".into());
         }
@@ -103,6 +109,20 @@ async fn failing_looks_still_end_in_one_append() {
         .unwrap();
     assert!(matches!(got, SentCopy::Appended(_)));
     assert_eq!(sent.appended.len(), 1);
+}
+
+/// NO SENT FOLDER AT ALL: one look (one login) says so, and nothing more is
+/// tried: no further looks, no APPEND. The send's warning says the copy
+/// was not saved.
+#[tokio::test]
+async fn a_server_with_no_sent_folder_is_asked_once() {
+    let mut sent = ScriptedSent::new(None);
+    sent.no_sent = true;
+    let got = look_then_append(&mut sent, "m@x", b"x", &QUICK).await;
+    assert_eq!(got, Err(NO_SENT_FOLDER.to_string()));
+    assert_eq!(sent.looks, 1);
+    assert!(sent.appended.is_empty());
+    assert!(NO_SENT_FOLDER_WARNING.contains("no Sent folder"));
 }
 
 #[test]
@@ -985,11 +1005,11 @@ fn an_outbox_mark_round_trips_and_garbage_is_doubt() {
 }
 
 fn is_doubt(r: &Result<Option<String>, WriteError>) -> bool {
-    matches!(r, Err(WriteError::Transport(m)) if m == MAY_HAVE_BEEN_SENT)
+    matches!(r, Err(e) if is_may_have_been_sent(e))
 }
 
 /// THE DECISION: only "no hit AND no marker" is "not sent". A hit wins
-/// (and clears the marker); `Accepted` is sent; `Submitting`, an unreadable
+/// (and leaves the marker for the worker's settle); `Accepted` is sent; `Submitting`, an unreadable
 /// ledger and no ledger at all are doubt.
 #[test]
 fn only_no_hit_and_no_marker_is_not_sent() {
@@ -1026,7 +1046,11 @@ fn only_no_hit_and_no_marker_is_not_sent() {
         outbox_answer(Some(hit), mid, "tok", Some(&ledger)).unwrap(),
         Some(stable_id_for_message_id(mid))
     );
-    assert_eq!(ledger.mark("tok"), None, "a hit clears the marker");
+    assert_eq!(
+        ledger.mark("tok"),
+        Some(sub),
+        "the row's settle clears it, not the hit"
+    );
 
     assert!(is_doubt(&outbox_answer(None, mid, "tok", None)));
     ledger
@@ -1092,7 +1116,10 @@ async fn live_a_fired_scheduled_send_is_found_and_leaves_no_marker() {
         .unwrap();
     let mid = format!("{token}@passband.app");
     assert_eq!(sent.id, Some(stable_id_for_message_id(&mid)));
-    assert_eq!(ledger.mark(&token), None, "Sent has it: no marker kept");
+    assert!(
+        matches!(ledger.mark(&token), Some(OutboxMark::Accepted { .. })),
+        "kept until the row settles"
+    );
     assert_eq!(copies(&me, "Sent", &mid, 1).await.len(), 1);
     let found = writer
         .find_scheduled_send(&format!("<{mid}>"), WINDOW(), &|| false)
@@ -1161,6 +1188,40 @@ async fn live_a_crash_between_smtp_and_sent_is_never_sent_again() {
         .find_scheduled_send(&asked, WINDOW(), &|| false)
         .await;
     assert!(is_doubt(&r), "{r:?}");
+}
+
+/// THE CRASH AFTER THE SENT COPY, BEFORE THE ROW SETTLED (correctness
+/// review F6): the marker is still `Accepted` (it is the row's settle that
+/// clears it), so a copy something moved out of Sent before recovery asked
+/// still reads as sent, never as "not sent, fire again".
+#[tokio::test]
+#[ignore = "needs scripts/imap-dev.sh start"]
+async fn live_a_copy_moved_out_of_sent_before_recovery_is_still_sent() {
+    let (writer, _, me) = live_writer("sched-moved");
+    let ledger = Arc::new(MemOutbox::default());
+    let writer = writer.with_outbox(ledger.clone());
+    let token = fresh_token();
+    let mid = format!("{token}@passband.app");
+    let sent = writer
+        .send(scheduled_raw(&me, &token).as_bytes(), None)
+        .await
+        .unwrap();
+    assert_eq!(copies(&me, "Sent", &mid, 1).await.len(), 1);
+    // Out of Sent (a server rule, another client): here, our own trash.
+    writer.trash(sent.id.as_deref().unwrap()).await.unwrap();
+    assert!(copies(&me, "Sent", &mid, 0).await.is_empty(), "moved out");
+    assert!(matches!(
+        ledger.mark(&token),
+        Some(OutboxMark::Accepted { .. })
+    ));
+    assert_eq!(
+        writer
+            .find_scheduled_send(&format!("<{mid}>"), WINDOW(), &|| false)
+            .await
+            .unwrap(),
+        Some(stable_id_for_message_id(&mid)),
+        "sent: settled, not fired again"
+    );
 }
 
 /// The token alone finds it, exactly: a copy in Sent whose Message-ID a

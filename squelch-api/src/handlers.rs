@@ -4785,7 +4785,7 @@ pub(crate) async fn write_client(state: &ApiState) -> Result<Arc<dyn MailWriter>
 
 /// The account's mail provider, read once per door and kept in
 /// [`ApiState::mail_provider`]; a failed read is not cached.
-async fn account_provider(state: &ApiState) -> Result<MailProvider, ApiError> {
+pub(crate) async fn account_provider(state: &ApiState) -> Result<MailProvider, ApiError> {
     if let Some(provider) = state.mail_provider.get() {
         return Ok(*provider);
     }

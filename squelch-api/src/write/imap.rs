@@ -152,8 +152,12 @@ pub trait OutboxLedger: Send + Sync {
 /// The app-settings key a token's marker is kept under.
 const OUTBOX_KEY_PREFIX: &str = "imap_outbox:";
 
-/// The daemon's [`OutboxLedger`]: one `app_settings` row per send in doubt,
-/// in the account's own store, removed once the copy in Sent is seen.
+/// The daemon's [`OutboxLedger`]: one `app_settings` row per fired send, in
+/// the account's own store. KEPT UNTIL THE ROW SETTLES (correctness review
+/// F6): the scheduled-send worker clears it when the row goes `sent` or
+/// `cancelled` (or `failed` with no doubt), and its sweep drops markers
+/// whose row is gone. Never cleared here on a Sent hit: a copy moved out of
+/// Sent before recovery would then read as "never sent".
 pub struct StoreOutbox {
     pub store: Arc<squelch_core::store::SqliteStore>,
     pub account_id: squelch_core::types::AccountId,
@@ -187,10 +191,37 @@ impl OutboxLedger for StoreOutbox {
     }
 }
 
-/// What a scheduled send in doubt is answered with: an `Err`, so the worker
-/// defers and in the end fails the row, and never fires it again.
+/// What a scheduled send in doubt is answered with: an `Err` (a 409, not a
+/// transport failure: asking again gets the same answer), which the worker
+/// settles at once as `failed:recovery`, maybe sent (correctness review F5),
+/// and never fires again. See [`is_may_have_been_sent`].
 pub const MAY_HAVE_BEEN_SENT: &str = "this message may already have been sent (the send was \
      interrupted after the mail server took it), so Passband will not send it again; check Sent";
+
+/// Is `e` the writer's [`MAY_HAVE_BEEN_SENT`] answer? The scheduled-send
+/// worker's one IMAP-specific question: it makes the row terminal rather
+/// than retrying the search.
+pub fn is_may_have_been_sent(e: &WriteError) -> bool {
+    matches!(e, WriteError::Api { status: 409, message } if message == MAY_HAVE_BEEN_SENT)
+}
+
+/// The `app_settings` key a fired scheduled send's marker is kept under, by
+/// the row's `Message-ID` header (the token is its local part). `None` for
+/// one with no token.
+pub fn outbox_marker_key(message_id_header: &str) -> Option<String> {
+    let token = outbox_token(message_id_header);
+    (!token.is_empty()).then(|| format!("{OUTBOX_KEY_PREFIX}{token}"))
+}
+
+/// The prefix every marker key has, for the stale-marker sweep.
+pub const OUTBOX_MARKER_PREFIX: &str = OUTBOX_KEY_PREFIX;
+
+/// What a send to a server with no Sent folder at all is told: the mail
+/// went, the copy did not (one login, no looks, no APPEND).
+pub const NO_SENT_FOLDER_WARNING: &str = "no Sent folder on this server; the copy wasn't saved";
+
+/// [`LiveSent`]'s error once it has seen the server has no Sent folder.
+const NO_SENT_FOLDER: &str = "the server has no Sent folder";
 
 /// An IMAP account's [`MailWriter`].
 pub struct ImapWriter {
@@ -461,8 +492,11 @@ pub(crate) async fn look_then_append(
         if !wait.is_zero() {
             tokio::time::sleep(*wait).await;
         }
-        if let Ok(Some(loc)) = folder.look(message_id).await {
-            return Ok(SentCopy::ServerSaved(loc));
+        match folder.look(message_id).await {
+            Ok(Some(loc)) => return Ok(SentCopy::ServerSaved(loc)),
+            // Nowhere to look or append: one answer, not six logins.
+            Err(e) if e == NO_SENT_FOLDER => return Err(e),
+            _ => {}
         }
     }
     folder.append_seen(saved).await?;
@@ -599,20 +633,26 @@ pub(crate) async fn exact_header_hit(
 struct LiveSent<'a> {
     source: &'a ImapSource,
     session: Option<(ImapSession, String)>,
+    /// The server listed no Sent folder: nothing more is asked of it.
+    no_sent: bool,
 }
 
 impl LiveSent<'_> {
     async fn session(&mut self) -> Result<&mut (ImapSession, String), String> {
+        if self.no_sent {
+            return Err(NO_SENT_FOLDER.into());
+        }
         if self.session.is_none() {
-            let (session, roles) =
+            let (mut session, roles) =
                 tokio::time::timeout(IMAP_STEP, self.source.open_writer_session())
                     .await
                     .map_err(|_| "imap login timed out".to_string())?
                     .map_err(|e| e.to_string())?;
-            let sent = roles
-                .sent
-                .clone()
-                .ok_or_else(|| "the server has no Sent folder".to_string())?;
+            let Some(sent) = roles.sent.clone() else {
+                self.no_sent = true;
+                let _ = tokio::time::timeout(Duration::from_secs(5), session.logout()).await;
+                return Err(NO_SENT_FOLDER.into());
+            };
             self.session = Some((session, sent));
         }
         Ok(self.session.as_mut().expect("set above"))
@@ -787,6 +827,7 @@ impl MailWriter for ImapWriter {
         let mut folder = LiveSent {
             source: &self.source,
             session: None,
+            no_sent: false,
         };
         let copy = tokio::time::timeout_at(
             deadline,
@@ -797,12 +838,8 @@ impl MailWriter for ImapWriter {
         folder.logout().await;
         let warning = match copy {
             Ok(SentCopy::ServerSaved(loc)) | Ok(SentCopy::Appended(Some(loc))) => {
-                // Sent has it: the search answers from now on.
-                if let (Some(token), Some(ledger)) = (&token, &self.outbox)
-                    && ledger.clear(token).is_err()
-                {
-                    eprintln!("squelch-api: imap send: an outbox marker was not cleared");
-                }
+                // The `Accepted` marker stays until the row settles (see
+                // [`StoreOutbox`]): the copy can still leave Sent first.
                 // The location is a convenience for the echo: a miss here
                 // is the next sync's to fill in.
                 if self.source.record_own_copy(&id, &saved, loc).is_err() {
@@ -811,6 +848,10 @@ impl MailWriter for ImapWriter {
                 None
             }
             Ok(SentCopy::Appended(None)) => None,
+            Err(e) if e == NO_SENT_FOLDER => {
+                eprintln!("squelch-api: imap send: sent; the server has no Sent folder");
+                Some(NO_SENT_FOLDER_WARNING.to_string())
+            }
             Err(e) => {
                 // Logged without content: the error is the server's or ours
                 // about the APPEND, never the message.
@@ -878,7 +919,8 @@ impl MailWriter for ImapWriter {
     /// and only then is the answer `None`. `Accepted` is sent (the APPEND
     /// never happened): its id. `Submitting` is doubt, and so is a ledger
     /// that cannot be read or a writer with none: [`MAY_HAVE_BEEN_SENT`],
-    /// an `Err`, which the worker defers and in the end fails, never fires.
+    /// an `Err` (a 409), which the worker settles `failed:recovery`, maybe sent,
+    /// and never fires.
     async fn find_scheduled_send(
         &self,
         message_id: &str,
@@ -918,9 +960,9 @@ impl MailWriter for ImapWriter {
 }
 
 /// THE DECISION after the Sent search (see
-/// [`ImapWriter::find_scheduled_send`]): a hit is the answer (and its
-/// marker is no longer needed); with none, only an absent marker is "not
-/// sent". Every doubt is `Err`.
+/// [`ImapWriter::find_scheduled_send`]): a hit is the answer; with none,
+/// only an absent marker is "not sent". Every doubt is `Err`. The marker is
+/// left as it is: the worker clears it when it settles the row.
 pub(crate) fn outbox_answer(
     hit: Option<MessageLocation>,
     mid: &str,
@@ -928,15 +970,13 @@ pub(crate) fn outbox_answer(
     ledger: Option<&dyn OutboxLedger>,
 ) -> Result<Option<String>, WriteError> {
     if let Some(loc) = hit {
-        if let Some(ledger) = ledger
-            && ledger.clear(token).is_err()
-        {
-            eprintln!("squelch-api: imap: an outbox marker was not cleared");
-        }
         let found = loc.message_id.unwrap_or_else(|| mid.to_string());
         return Ok(Some(stable_id_for_message_id(&found)));
     }
-    let doubt = || WriteError::Transport(MAY_HAVE_BEEN_SENT.into());
+    let doubt = || WriteError::Api {
+        status: 409,
+        message: MAY_HAVE_BEEN_SENT.into(),
+    };
     let Some(ledger) = ledger else {
         return Err(doubt());
     };

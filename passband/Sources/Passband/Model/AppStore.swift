@@ -641,7 +641,10 @@ final class AppStore {
     /// The hero's sentence about what For-your-eyes is ABOUT, written by the
     /// daemon's small model (`/client/v2/fye/headline`). nil until it answers,
     /// and on a daemon with no model, where the hero keeps its own line.
-    var fyeHeadline: String?
+    /// The board file keeps it, so a new one schedules a save.
+    var fyeHeadline: String? {
+        didSet { if fyeHeadline != oldValue { scheduleBoardSave() } }
+    }
     /// The board `fyeHeadline` was written for (see `headlineKey`). The hero
     /// keeps showing the last sentence while a newer board's is on its way:
     /// a line a few seconds stale reads better than one that flips to the
@@ -757,7 +760,7 @@ final class AppStore {
     let zones = SitrepZones()
     /// Every thread a Reading sender's window holds, which is what makes a
     /// thread "reading mail" for the reader (`ThreadViewer.isReadingMail`).
-    /// STORED, rebuilt when the zones change and written only when the set
+    /// STORED, rebuilt when the Reading zone changes and written only when the set
     /// does: the reader asked it several times a body, and each was a walk
     /// of every sender's every item.
     private(set) var readingThreadIds: Set<String> = []
@@ -3763,12 +3766,12 @@ final class AppStore {
     private enum ZoneAnswer: Sendable {
         case shipments([Shipment]?)
         case reading([ReadingSender]?)
-        case records(RecordZones?)
+        case records(RecordsFeedZones?)
     }
 
     private func performZoneRefresh() async {
         let e = epoch
-        // Five independent fetches racing in one group, each zone written the
+        // Three independent fetches racing in one group, each zone written the
         // moment ITS fetch answers — completion order, not a fixed await
         // order, which is what actually keeps one wedged endpoint riding out
         // its timeout from holding every later zone's paint hostage. Every
@@ -3787,7 +3790,7 @@ final class AppStore {
                 // a thousand records, every 45 seconds.
                 guard let feed = try? await APIClient.shared.getFeed(destination: "records", limit: 1000)
                 else { return .records(nil) }
-                return .records(RecordZones(feed))
+                return .records(RecordsFeedZones(feed))
             }
             for await answer in group {
                 guard e == epoch else {

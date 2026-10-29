@@ -4,8 +4,8 @@ import Observation
 /// Everything the sitrep's zones render, held here rather than in the zones: a
 /// view's `@State` dies on unmount, so the last good answer is already on screen
 /// when the dashboard re-mounts and the refresh happens UNDERNEATH it — rows are
-/// only ever replaced by newer rows, never cleared first. `loadedAt` keeps that
-/// honest in the other direction (see `refreshZones`).
+/// only ever replaced by newer rows, never cleared first. `AppStore.zonesLoadedAt`
+/// keeps that honest in the other direction (see `refreshZones`).
 struct SitrepZoneCache: Sendable {
     var calendar: [CalendarUpdate] = []
     var shipments: [Shipment] = []
@@ -26,9 +26,8 @@ struct SitrepZoneCache: Sendable {
 ///
 /// `replace(with:)` writes only the zones that differ. The Observation macro
 /// already skips an equal write to an Equatable property, but a `didSet`
-/// still runs on one, and the hooks below must not. `SitrepZoneCache` (not
-/// Equatable, so every write to it notified) stays the value that is copied
-/// around: a switch's snapshot, the board from disk.
+/// still runs on one, and the hooks below must not. `SitrepZoneCache` stays
+/// the value that is copied around: a switch's snapshot, the board from disk.
 @MainActor
 @Observable
 final class SitrepZones {
@@ -74,7 +73,7 @@ final class SitrepZones {
 
 /// The records feed's three zones, derived where the feed is fetched (off
 /// the main actor) so the store only compares and assigns.
-struct RecordZones: Sendable {
+struct RecordsFeedZones: Sendable {
     var receipts: [Receipt]
     var banking: [BankingRecord]
     var calendar: [CalendarUpdate]

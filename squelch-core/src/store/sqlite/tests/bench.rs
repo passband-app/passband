@@ -155,6 +155,7 @@ fn calendar_search_at_the_cap() {
                 updated_at: None,
                 color_id: None,
                 description: Some("Agenda: ".repeat(250)),
+                from_gmail: false,
                 guests: (0..20)
                     .map(|g| Guest {
                         email: format!("person{g}@example.com"),

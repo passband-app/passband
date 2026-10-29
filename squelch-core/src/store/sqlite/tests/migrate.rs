@@ -3354,6 +3354,7 @@ fn calendar_search_index_follows_every_write_and_is_rebuilt_when_stale() {
         updated_at: None,
         color_id: None,
         description: None,
+        from_gmail: false,
         guests: Vec::new(),
         guests_truncated: false,
     };

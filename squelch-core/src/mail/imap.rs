@@ -2668,6 +2668,11 @@ struct BodyGuard<T> {
     /// Locations already checked against `want` in this process, as
     /// (folder, UIDVALIDITY, UID).
     verified: HashSet<(String, u32, u32)>,
+    /// Stop at the first copy that passes: no other location is examined or
+    /// downloaded, so nothing is learned about them (no placement). For a
+    /// read that wants one verified copy's bytes and nothing else
+    /// ([`ImapSource::verified_copy`]).
+    first_only: bool,
 }
 
 fn place_key(l: &MessageLocation) -> (String, u32, u32) {
@@ -2725,9 +2730,9 @@ where
         verified: Vec::new(),
         body_mismatch: Vec::new(),
     };
-    let (print_of, mut want, verified) = match guard {
-        Some(g) => (Some(g.print_of), g.want, g.verified),
-        None => (None, None, HashSet::new()),
+    let (print_of, mut want, verified, first_only) = match guard {
+        Some(g) => (Some(g.print_of), g.want, g.verified, g.first_only),
+        None => (None, None, HashSet::new(), false),
     };
     // Does this copy's header digest match the id's (none recorded: yes)?
     async fn header_ok(c: &mut Conn, want: &Option<String>, loc: &MessageLocation) -> Result<bool> {
@@ -2742,6 +2747,9 @@ where
         })
     }
     for row in rows {
+        if first_only && out.got.is_some() {
+            break;
+        }
         if c.examine(&row.folder).await? != Some(row.uidvalidity) {
             out.stale.push(row);
             continue;
@@ -2861,6 +2869,9 @@ where
                 break;
             };
             for loc in hits {
+                if first_only && out.got.is_some() {
+                    break;
+                }
                 if placed.contains(&loc.folder)
                     || c.examine(&loc.folder).await? != Some(loc.uidvalidity)
                 {
@@ -3327,7 +3338,7 @@ impl MailSource for ImapSource {
     }
 
     async fn fetch_raw(&self, id: &str, _urgency: Urgency) -> Result<FetchedMessage> {
-        let (resolved, placement, stored) = self.guarded_resolve(id).await?;
+        let (resolved, placement, stored) = self.guarded_resolve(id, false).await?;
         let mut thread_id = None;
         let (raw, received_at) = match resolved.got {
             Some(Body::Bytes(bytes, received))
@@ -3760,6 +3771,7 @@ impl ImapSource {
     async fn guarded_resolve(
         &self,
         id: &str,
+        first_only: bool,
     ) -> Result<(Resolved<Body>, Placement, Option<BodyPrint>)> {
         let rows = self.locations.message_locations(self.account_id, id)?;
         if rows.is_empty() {
@@ -3778,6 +3790,7 @@ impl ImapSource {
                 .lock()
                 .map(|mut v| v.for_id(id))
                 .unwrap_or_default(),
+            first_only,
         };
         let (resolved, placement) = self
             .with_conn(|c| {
@@ -3849,11 +3862,32 @@ impl ImapSource {
     ///
     /// Read-only, like everything here: the resolve only `EXAMINE`s.
     pub async fn verified_locations(&self, id: &str) -> Result<Vec<MessageLocation>> {
-        let (resolved, _, stored) = self.guarded_resolve(id).await?;
+        let (resolved, _, stored) = self.guarded_resolve(id, false).await?;
         match (&stored, &resolved.checked_against) {
             (Some(s), Some(c)) if s == c => Ok(resolved.live),
             _ => Ok(Vec::new()),
         }
+    }
+
+    /// ONE VERIFIED COPY'S BYTES (phase 3, a reply's parent headers): the
+    /// first location of `id` whose headers and body are the id's own, by
+    /// the same guarded resolve, and no other location read at all, where
+    /// [`Self::verified_locations`] downloads every copy to place each one.
+    /// `None` when no copy checks out. [`CoreError::NotFound`] for an id
+    /// this source has never seen.
+    pub async fn verified_copy(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        let (resolved, _, stored) = self.guarded_resolve(id, true).await?;
+        let checked = resolved.checked_against;
+        Ok(match (resolved.got, stored) {
+            (Some(Body::Bytes(bytes, _)), Some(p))
+                if !bytes.is_empty()
+                    && checked.as_ref() == Some(&p)
+                    && p.body == body_fingerprint(&bytes) =>
+            {
+                Some(bytes)
+            }
+            _ => None,
+        })
     }
 
     /// The writer moved `id`'s copy out of `from.folder`: forget that place

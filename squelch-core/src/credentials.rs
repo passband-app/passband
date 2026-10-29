@@ -1702,16 +1702,27 @@ pub fn load_imap_slot_backend(
     credentials_path: &Path,
     account_email: &str,
 ) -> Result<String> {
-    let slot = imap_slot(account_email);
-    let missing = || {
+    find_imap_slot_backend(backend, credentials_path, account_email)?.ok_or_else(|| {
         CoreError::Credential(format!(
             "no IMAP account stored for {account_email} (run `squelchd auth --imap`)"
         ))
-    };
+    })
+}
+
+/// [`load_imap_slot_backend`], telling "there is no slot" (`Ok(None)`)
+/// apart from "the store could not be read" (`Err`: a locked keychain, an
+/// unreadable or unopenable file), which the write door answers
+/// differently: the first is a setup step, the second a retry.
+pub fn find_imap_slot_backend(
+    backend: CredentialBackend,
+    credentials_path: &Path,
+    account_email: &str,
+) -> Result<Option<String>> {
+    let slot = imap_slot(account_email);
     let stored = match backend {
         CredentialBackend::Keyring => match keyring_entry(&slot)?.get_password() {
             Ok(json) => StoredToken::from_json(&json)?,
-            Err(keyring_core::Error::NoEntry) => return Err(missing()),
+            Err(keyring_core::Error::NoEntry) => return Ok(None),
             Err(e) => {
                 return Err(CoreError::Credential(format!(
                     "reading the keyring entry for {account_email} (imap slot): {e}"
@@ -1719,32 +1730,43 @@ pub fn load_imap_slot_backend(
             }
         },
         CredentialBackend::File => {
-            return load_imap_slot_file_with(
+            return find_imap_slot_file_with(
                 credentials_path,
                 account_email,
                 age_identity_from_env()?.as_ref(),
             );
         }
     };
-    Ok(stored.access_token)
+    Ok(Some(stored.access_token))
 }
 
 /// The file half of [`load_imap_slot_backend`] against an explicit
 /// identity.
+#[cfg(test)]
 fn load_imap_slot_file_with(
     path: &Path,
     account_email: &str,
     identity: Option<&AgeIdentity>,
 ) -> Result<String> {
+    find_imap_slot_file_with(path, account_email, identity)?.ok_or_else(|| {
+        CoreError::Credential(format!(
+            "no IMAP account stored for {account_email} (run `squelchd auth --imap`)"
+        ))
+    })
+}
+
+/// The file half of [`find_imap_slot_backend`]: a missing file or slot is
+/// `Ok(None)`.
+fn find_imap_slot_file_with(
+    path: &Path,
+    account_email: &str,
+    identity: Option<&AgeIdentity>,
+) -> Result<Option<String>> {
     let file = CredentialsFile::read(path, identity)?;
-    file.slots
+    Ok(file
+        .slots
         .get(&imap_slot(account_email))
-        .map(|t| t.access_token.clone())
-        .ok_or_else(|| {
-            CoreError::Credential(format!(
-                "no IMAP account stored for {account_email} (run `squelchd auth --imap`)"
-            ))
-        })
+        .map(|t| t.access_token.clone()))
 }
 
 /// Build a [`CredentialStore`] trait object bound to `kind` for the
@@ -3033,6 +3055,30 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(missing.contains("squelchd auth --imap"), "{missing}");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&identity_path);
+    }
+
+    /// "No slot" and "could not read the store" are told apart: the write
+    /// door sends the first to setup and asks the second to try again
+    /// (security review F4).
+    #[test]
+    fn a_missing_imap_slot_is_none_and_an_unreadable_store_is_an_error() {
+        let (identity_path, identity) = identity_file("imap-find");
+        let id = Some(&identity);
+        let path = tmp_path("imap-find");
+        // No file at all, then a file without this account's slot: None.
+        assert_eq!(
+            find_imap_slot_file_with(&path, "you@x.com", id).unwrap(),
+            None
+        );
+        store_imap_slot_file_with(&path, "other@x.com", "pw", id).unwrap();
+        assert_eq!(
+            find_imap_slot_file_with(&path, "you@x.com", id).unwrap(),
+            None
+        );
+        // A sealed file and no identity to open it: unreadable, not missing.
+        assert!(find_imap_slot_file_with(&path, "you@x.com", None).is_err());
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&identity_path);
     }

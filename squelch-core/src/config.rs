@@ -1309,13 +1309,26 @@ pub const PASSBAND_MICROSOFT_CLIENT_ID: &str = "ac4b9805-c059-4564-a201-58d100df
 /// The Graph scopes an Outlook consent asks for, in one consent stored in
 /// both mail slots (as Gmail's `gmail.modify` is): read and move mail, send
 /// it, name the account, and `offline_access`, without which Microsoft issues
-/// no refresh token at all and the credential dies within the hour.
+/// no refresh token at all and the credential dies within the hour. Plus
+/// `Calendars.ReadWrite`, asked up front so Outlook calendar (not built yet)
+/// needs no second consent; mail never requires it.
 pub const OUTLOOK_MAIL_READWRITE_SCOPE: &str = "https://graph.microsoft.com/Mail.ReadWrite";
 pub const OUTLOOK_MAIL_SEND_SCOPE: &str = "https://graph.microsoft.com/Mail.Send";
 pub const OUTLOOK_MAIL_READ_SCOPE: &str = "https://graph.microsoft.com/Mail.Read";
 pub const OUTLOOK_USER_READ_SCOPE: &str = "https://graph.microsoft.com/User.Read";
 pub const OUTLOOK_OFFLINE_SCOPE: &str = "offline_access";
+pub const OUTLOOK_CALENDAR_SCOPE: &str = "https://graph.microsoft.com/Calendars.ReadWrite";
 pub const OUTLOOK_SCOPES: &[&str] = &[
+    OUTLOOK_MAIL_READWRITE_SCOPE,
+    OUTLOOK_MAIL_SEND_SCOPE,
+    OUTLOOK_USER_READ_SCOPE,
+    OUTLOOK_CALENDAR_SCOPE,
+    OUTLOOK_OFFLINE_SCOPE,
+];
+/// What a mail-slot refresh asks for: the consent minus calendar. Microsoft
+/// refuses a refresh that names a scope the user never granted, so a token
+/// consented before calendar was added must still refresh.
+pub const OUTLOOK_MAIL_SCOPES: &[&str] = &[
     OUTLOOK_MAIL_READWRITE_SCOPE,
     OUTLOOK_MAIL_SEND_SCOPE,
     OUTLOOK_USER_READ_SCOPE,

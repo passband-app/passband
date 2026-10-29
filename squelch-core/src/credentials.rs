@@ -264,9 +264,10 @@ pub(crate) fn refresh_stored_token_detailed_at(
     let refresh = RefreshToken::new(refresh_token.to_string());
     let mut req = oauth.exchange_refresh_token(&refresh);
     // Microsoft's v2 refresh documents `scope` as required; sending the
-    // consent's own set keeps the grant what it was. Google's never needed it.
+    // mail set keeps the mail grant (calendar is left out so an older,
+    // calendar-less consent still refreshes). Google's never needed it.
     if client.issuer == crate::config::OAuthIssuer::Microsoft {
-        for scope in crate::config::OUTLOOK_SCOPES {
+        for scope in crate::config::OUTLOOK_MAIL_SCOPES {
             req = req.add_scope(oauth2::Scope::new(scope.to_string()));
         }
     }

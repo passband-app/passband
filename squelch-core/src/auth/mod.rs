@@ -247,7 +247,9 @@ impl AuthScopes {
     pub fn label_for(self, issuer: OAuthIssuer) -> &'static str {
         match issuer {
             OAuthIssuer::Google => self.label(),
-            OAuthIssuer::Microsoft => "Outlook (Mail.ReadWrite, Mail.Send, User.Read)",
+            OAuthIssuer::Microsoft => {
+                "Outlook (Mail.ReadWrite, Mail.Send, Calendars.ReadWrite, User.Read)"
+            }
         }
     }
 
@@ -357,7 +359,7 @@ impl GoogleEndpoints {
 fn refuse_unsupported(client: &OAuthClientConfig, scopes: AuthScopes) -> Result<()> {
     if client.issuer == OAuthIssuer::Microsoft && scopes == AuthScopes::Calendar {
         return Err(CoreError::Credential(
-            "calendar is Google-only; an Outlook daemon has no calendar to authorize".into(),
+            "an Outlook consent already asks for Calendars.ReadWrite; there is no separate --calendar step for Outlook".into(),
         ));
     }
     Ok(())

@@ -231,7 +231,10 @@ decides every endpoint, scope set and identity check:
 - **Public client**: an Entra "Mobile and desktop" app has no secret. None is
   sent on the exchange or the refresh, in the body or a Basic header.
 - **One consent, both mail slots** (as Gmail's `gmail.modify` since #618):
-  `Mail.ReadWrite`, `Mail.Send`, `User.Read`, `offline_access`. Read needs
+  `Mail.ReadWrite`, `Mail.Send`, `User.Read`, `Calendars.ReadWrite`,
+  `offline_access`. Calendar is asked up front so the Graph calendar (not
+  built yet) needs no second consent; no slot requires it, and a mail refresh
+  asks only for the mail scopes. Read needs
   `Mail.ReadWrite` or `Mail.Read`; Write needs `Mail.ReadWrite` and
   `Mail.Send`. Either spelling (with or without the
   `https://graph.microsoft.com/` prefix) satisfies a requirement. An exchange

@@ -268,9 +268,9 @@ provider = "outlook"
 
 There is no environment variable for `provider`; it is a config-file key.
 Then run step 3 as written, without the two `SQUELCH_CLIENT_*` variables. The
-consent screen is Microsoft's and asks for mail read/write, send, your
-profile, and offline access, once for both reading and writing. `--broker`
-and calendar are Gmail-only.
+consent screen is Microsoft's and asks for mail read/write, send, calendar,
+your profile, and offline access, once for both reading and writing. `--broker`
+is Gmail-only, and the calendar view is not built for Outlook yet.
 
 The build ships Passband's own Entra app, so there is nothing to register.
 To use your own instead (a work tenant that blocks unverified apps, say): in the Azure
@@ -279,7 +279,7 @@ portal, App registrations, New registration; supported account types
 platform "Mobile and desktop applications" with redirect URI
 `http://127.0.0.1` (Entra ignores the port on a loopback redirect, and
 squelchd's listener picks one); delegated Graph permissions `Mail.ReadWrite`,
-`Mail.Send`, `User.Read` and `offline_access`. No client secret. Put its
+`Mail.Send`, `Calendars.ReadWrite`, `User.Read` and `offline_access`. No client secret. Put its
 Application (client) ID in the config as `microsoft_client_id = "..."`, which
 overrides the built-in one.
 

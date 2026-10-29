@@ -1691,7 +1691,8 @@ SEARCHES it (§10.1, DECIDED 2026-10-28).
 The founder: "lets make calendar events searchable by the agent and keyword
 search." Decided with them the same day: an **Events block** in the search
 results (not interleaved, not filter chips), **both** the in-app assistant and
-Agent MCP, and **ghosts included**, drawn as ghosts.
+Agent MCP, and ghosts drawn as ghosts. Narrowed the same day to
+**committed ghosts only** (see "Ghosts" below).
 
 **Why a block and not one list.** A mail hit's date is when it arrived; an
 event's is when it happens. Their scores are not comparable either. Sorted
@@ -1741,8 +1742,18 @@ upcoming), then past events, most recent first, on the owner's clock (their
 zone, as every ghost `state` served here also reads it). `total` is the number of
 hits before the limit.
 
-**Ghosts.** A ghost the timeline would list (its supplier message is
-eligible, §3.6) and the user has not dismissed. A ghost that matches a real
+**Ghosts: commitments only** (the founder, 2026-10-28, after the first
+build served every ghost: "only search through real events in the actual
+calendar not events from mail unless triage made an event based on that
+mail"). Search is for the calendar, and a ghost is searched only when it
+is what §3.3 puts on the real calendar: commitment `committed` (a booking,
+a ticket, a reservation the user made), or an invitation the user marked
+going. Invited, proposed and unknown ghosts are possibilities and are not
+searched; their mail is still in the mail results. A ghost the mail
+cancelled, or the user dismissed, is not searched either. Once §3.3's
+automatic add is built, committed ghosts become real events and this case
+mostly empties. The ghost must also be one the timeline would list (its
+supplier message is eligible, §3.6). A ghost that matches a real
 event (`gcal::match_ghosts`, the timeline's display match) is dropped: the
 event is shown and the ghost would be the same thing twice.
 

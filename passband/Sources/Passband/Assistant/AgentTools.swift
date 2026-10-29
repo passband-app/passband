@@ -1057,8 +1057,10 @@ enum AgentTools {
         name: Tool.searchCalendar.rawValue,
         description: """
             Search the user's calendar by keyword: their Google Calendar events, and \
-            ghosts (events Passband guessed from their mail, kind="ghost", each with a \
-            thread_id you can read with get_thread). Words match the title, place, notes \
+            ghosts (bookings Passband found in their mail that are not on the calendar \
+            yet, or invitations they said they are going to; kind="ghost", each with a \
+            thread_id you can read with get_thread). Invitations they have not accepted \
+            are not searched. Words match the title, place, notes \
             and guests' names (not the calendar's name). after:YYYY-MM-DD and before:YYYY-MM-DD in the \
             query bound the event's START. Results come upcoming first, soonest first, then \
             past events, most recent first; `total` counts every match. A ghost's end may \

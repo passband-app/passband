@@ -333,7 +333,7 @@ enum ProductGuide {
         - When the draft has guests, only the button invites them: a click on the control that names them, such as "add and invite 2". ⌘↵ never does, however much of the pane has been clicked or typed in, and plain Enter never saves an event with guests. The line above the button says so.
         - If an email is open when the assistant drafts, the email stays open and the draft waits on the Calendar page; it appears when that email is closed or the user goes to the page. It never closes mail the user is writing: with something typed in a composer or a reply, the assistant is told to wait, and a draft already waiting stays out of sight until that mail is sent or closed.
         - A draft is made only while the assistant's bar is open. Starting a new chat or switching mailbox while it is working drafts nothing.
-        - The assistant can search the calendar (events and the ones guessed from mail, seeing guests by name only), but it cannot edit or delete events. If an event is already open with unsaved changes, it asks the user to finish or close that one first.
+        - The assistant can search the calendar (events, and bookings from mail not on it yet, seeing guests by name only), but it cannot edit or delete events. If an event is already open with unsaved changes, it asks the user to finish or close that one first.
         """
 
     /// The search page with the Calendar page on: the same page, and how
@@ -345,7 +345,7 @@ enum ProductGuide {
 
     private static let searchEvents = """
         Events:
-        - Words that match the calendar list up to three events under Events, between the senders and the mail: coming up first, soonest first, then past ones. "N more events" shows the rest. Events guessed from mail say "from mail". Down arrow and Enter, or a click, opens one on the Calendar page.
+        - Words that match the calendar list up to three events under Events, between the senders and the mail: coming up first, soonest first, then past ones. "N more events" shows the rest. A booking found in mail that is not on the calendar yet, or an invitation marked going, also shows, saying "from mail". Other invitations do not. Down arrow and Enter, or a click, opens one on the Calendar page.
         - in:calendar searches events only, and lists them all.
         """
 

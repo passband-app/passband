@@ -486,7 +486,7 @@ const BASE_INSTRUCTIONS: &str = "squelch: local-first email intelligence. Use se
 
 /// Told only while `search_calendar` is offered.
 const CALENDAR_INSTRUCTIONS: &str = " search_calendar finds events on the owner's calendar \
- and events guessed from their mail (kind=ghost, a possibility, not a commitment); use it \
+ and bookings found in their mail but not on it yet (kind=ghost); use it \
  for when, where and who, rather than hunting the invitation in search_mail.";
 
 /// The paragraph of the instructions that says what this agent may WRITE,
@@ -1549,9 +1549,12 @@ impl SquelchServer {
     #[tool(
         name = "search_calendar",
         description = "Search the owner's calendar: events on their Google \
-                       Calendar (kind=event) and events Passband guessed from \
-                       their mail (kind=ghost: a possibility, not a commitment; \
-                       read its mail by passing `thread_id` to get_thread). \
+                       Calendar (kind=event), and bookings Passband found in \
+                       their mail that are not on the calendar yet (kind=ghost: \
+                       a flight, ticket or reservation they made, or an \
+                       invitation they said they are going to; read its mail by \
+                       passing `thread_id` to get_thread). Invitations they have \
+                       not accepted are not here. \
                        Matches words (or their beginnings) in the title, place, \
                        description and guests' names. The query also accepts \
                        after:YYYY-MM-DD and before:YYYY-MM-DD, which bound the \

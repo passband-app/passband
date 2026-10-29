@@ -324,10 +324,28 @@ pub fn order<T: Timed>(hits: &mut [T], now: DateTime<Utc>, today: NaiveDate, off
     });
 }
 
+/// Whether a ghost is searched at all: only what triage read as the owner's
+/// own commitment (a booking, a ticket, a reservation: what §3.3 puts on the
+/// real calendar), or an invitation the owner said they are going to, and
+/// only while the mail has not cancelled it and the owner has not dismissed
+/// it. Invitations, proposals and maybes are possibilities, not calendar
+/// events, and stay out (the founder, 2026-10-28: "only search through real
+/// events in the actual calendar not events from mail unless triage made an
+/// event based on that mail").
+fn searchable(ghost: &GhostEvent) -> bool {
+    use crate::triage::decision::EventCommitment;
+    use crate::types::GhostMailState;
+    let committed = ghost.commitment == EventCommitment::Committed
+        || ghost.user_state == Some(GhostUserState::Going);
+    committed
+        && ghost.user_state != Some(GhostUserState::Dismissed)
+        && ghost.mail_state != GhostMailState::Cancelled
+}
+
 /// Run a calendar search. `events` says whether real events are read (the
 /// caller's grant check: a grant taken back hides what was synced under it).
-/// Ghosts the user dismissed, and ghosts the timeline would show as a real
-/// event, are left out. For [`Audience::Agent`] a ghost is kept only with
+/// Only [`searchable`] ghosts are read, and a ghost the timeline would show
+/// as a real event is left out. For [`Audience::Agent`] a ghost is kept only with
 /// sources whose threads the agent door may open, and only when its supplier
 /// is one of them.
 pub fn search(
@@ -371,7 +389,7 @@ pub fn search(
     // or all but one.
     let mut candidates: Vec<(usize, GhostEvent)> = Vec::new();
     for ghost in ghost_rows {
-        if ghost.user_state == Some(GhostUserState::Dismissed) {
+        if !searchable(&ghost) {
             continue;
         }
         if !query.in_bounds(instant(&ghost.start, &offset)) {

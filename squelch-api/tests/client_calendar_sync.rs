@@ -697,6 +697,25 @@ async fn refresh(app: &axum::Router) -> (StatusCode, Value) {
 /// A committed triage decision carrying one `event` record, the way
 /// production makes a ghost. Returns the message's id.
 fn seed_ghost(store: &SqliteStore, account: i64, gmail: &str, title: &str, start: String) -> i64 {
+    seed_ghost_as(
+        store,
+        account,
+        gmail,
+        title,
+        start,
+        EventCommitment::Committed,
+    )
+}
+
+/// [`seed_ghost`] with the record's commitment.
+fn seed_ghost_as(
+    store: &SqliteStore,
+    account: i64,
+    gmail: &str,
+    title: &str,
+    start: String,
+    commitment: EventCommitment,
+) -> i64 {
     let id = store
         .upsert_message(&NewMessage {
             received_at: Utc::now() - Duration::minutes(5),
@@ -734,7 +753,7 @@ fn seed_ghost(store: &SqliteStore, account: i64, gmail: &str, title: &str, start
         end: None,
         duration_estimate: None,
         event_kind: EventRecordKind::Reservation,
-        commitment: EventCommitment::Committed,
+        commitment,
         change: EventChange::Created,
         identity_refs: vec![format!("REF{gmail}12345")],
         likelihood: None,
@@ -5924,4 +5943,71 @@ async fn a_huge_query_is_cut_not_an_error_and_limit_zero_serves_nothing() {
     let none = get(&w.app, "/client/calendar/search?q=dinner&limit=0").await;
     assert_eq!(none["items"], json!([]));
     assert_eq!(none["total"], 3);
+}
+
+#[tokio::test]
+async fn only_mail_events_triage_committed_to_or_the_user_is_going_to_are_searched() {
+    let w = search_world("search-committed").await;
+    let at = |days| rfc(minute(Utc::now() + Duration::days(days)));
+    // An invitation and a proposal: possibilities, not on the calendar.
+    seed_ghost_as(
+        &w.store,
+        w.acct,
+        "g-inv",
+        "Gala dinner",
+        at(20),
+        EventCommitment::Invited,
+    );
+    seed_ghost_as(
+        &w.store,
+        w.acct,
+        "g-prop",
+        "Dinner pitch",
+        at(21),
+        EventCommitment::Proposed,
+    );
+    seed_ghost_as(
+        &w.store,
+        w.acct,
+        "g-unk",
+        "Dinner maybe",
+        at(22),
+        EventCommitment::Unknown,
+    );
+    let body = search(&w.app, "/client/calendar/search", "dinner").await;
+    assert_eq!(
+        hit_titles(&body),
+        [
+            "event:Dinner w/ Sam",
+            "ghost:Sam's birthday dinner",
+            "event:Dinner w/ Sam"
+        ],
+        "{body}"
+    );
+    let agent = search(&w.app, "/client/agent/calendar/search", "gala").await;
+    assert_eq!(agent["total"], 0, "{agent}");
+
+    // The user saying they are going makes the invitation a commitment.
+    let timeline = w.timeline().await;
+    let gala = timeline["ghosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["title"] == "Gala dinner")
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let resp = w
+        .app
+        .clone()
+        .oneshot(authed_json(
+            "PATCH",
+            &format!("/client/timeline/ghosts/{gala}"),
+            json!({"state": "going"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = search(&w.app, "/client/calendar/search", "gala").await;
+    assert_eq!(hit_titles(&body), ["ghost:Gala dinner"], "{body}");
 }

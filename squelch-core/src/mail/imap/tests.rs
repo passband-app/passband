@@ -1845,6 +1845,8 @@ enum Say {
     Reply(String),
     /// Hold the socket open and never answer again.
     Silence,
+    /// Write this, then close the connection (a kick, a `* BYE`).
+    HangUp(String),
 }
 
 /// A loopback IMAP server that greets (unless `greet` is false) and answers
@@ -1884,6 +1886,11 @@ async fn scripted_server(
                             }
                         }
                         Say::Silence => std::future::pending::<()>().await,
+                        Say::HangUp(r) => {
+                            let _ = w.write_all(r.as_bytes()).await;
+                            let _ = w.shutdown().await;
+                            return;
+                        }
                     }
                 }
             });
@@ -2425,6 +2432,8 @@ enum Idling {
     ExistsBeforeContinue,
     /// Quiet, then `* 1 EXISTS` while answering `DONE`.
     ExistsInDone,
+    /// `* 0 RECENT` (an untagged line that is not a change) every interval.
+    Chatter(Duration),
 }
 
 /// Counts a fake IDLE server keeps.
@@ -2460,11 +2469,16 @@ async fn idle_server(
                 let mut idle_tag: Option<String> = None;
                 loop {
                     let line = if idle_tag.is_some() {
-                        if let Idling::Keepalive(every) = idling {
+                        if let Idling::Keepalive(every) | Idling::Chatter(every) = idling {
+                            let say: &[u8] = if matches!(idling, Idling::Chatter(_)) {
+                                b"* 0 RECENT\r\n"
+                            } else {
+                                b"* OK Still here\r\n"
+                            };
                             tokio::select! {
                                 l = lines.next_line() => l,
                                 _ = tokio::time::sleep(every) => {
-                                    if w.write_all(b"* OK Still here\r\n").await.is_err() {
+                                    if w.write_all(say).await.is_err() {
                                         return;
                                     }
                                     continue;
@@ -2706,4 +2720,150 @@ async fn a_watched_folder_that_stays_gone_drops_out_of_the_cursor() {
     assert_eq!(lists.load(Ordering::Relaxed), lists_then);
     assert_eq!(src.connects(), 1);
     server.abort();
+}
+
+// ---- fix round 3: a session the server hung up on ------------------------
+
+/// A STATUS reply for the scripted servers below: INBOX at UIDVALIDITY 7,
+/// UIDNEXT 3; Sent at 5, UIDNEXT 1.
+fn status_reply(tag: &str, cmd: &str) -> String {
+    let (name, v, next) = if cmd.contains("\"SENT\"") {
+        ("Sent", 5, 1)
+    } else {
+        ("INBOX", 7, 3)
+    };
+    format!("* STATUS {name} (UIDVALIDITY {v} UIDNEXT {next})\r\n{tag} OK done\r\n")
+}
+
+/// MATRIX ROWS 11/18: a kicked command session sat in the pool with `* BYE`
+/// and an EOF queued on it, and every later command was written into it and
+/// "answered" with an empty STATUS, an error that did not retire it, for as
+/// long as the engine kept retrying. Now the next call notices the hang-up
+/// before it sends anything and logs in again at once: the call succeeds.
+#[tokio::test]
+async fn a_session_kicked_while_unused_is_replaced_before_the_next_call() {
+    let statuses = Arc::new(AtomicU64::new(0));
+    let st = statuses.clone();
+    let (port, accepted, server) = scripted_server(true, move |tag, cmd| {
+        if let Some(r) = login_ok(tag, cmd) {
+            return Say::Reply(r);
+        }
+        if cmd.starts_with("STATUS") {
+            // The first connection's last STATUS answer comes with a kick.
+            let n = st.fetch_add(1, Ordering::Relaxed);
+            let r = status_reply(tag, cmd);
+            return if n == 1 {
+                Say::HangUp(format!("{r}* BYE Disconnected for inactivity\r\n"))
+            } else {
+                Say::Reply(r)
+            };
+        }
+        Say::Reply(format!("{tag} OK done\r\n"))
+    })
+    .await;
+    let src = scripted_source(port, "pw");
+    src.current_cursor().await.expect("first cursor");
+    assert_eq!(src.connects(), 1);
+    // Let the BYE and the FIN land.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let cursor = src
+        .current_cursor()
+        .await
+        .expect("the dead session is replaced, not used");
+    let decoded = ImapCursor::decode(&cursor).unwrap();
+    assert_eq!(decoded.folders["inbox"].uidvalidity, 7);
+    assert_eq!(src.connects(), 2);
+    assert_eq!(accepted.load(Ordering::Relaxed), 2);
+    server.abort();
+}
+
+/// A server that hangs up IN THE MIDDLE of a command (BYE, then EOF, no
+/// tagged reply): async-imap hands back what it had parsed as Ok. An empty
+/// SEARCH must not read as "no new mail" (the walk would step its cursor
+/// over the mail it never saw), and the dead session must not be kept.
+#[tokio::test]
+async fn a_hang_up_mid_command_is_an_error_and_retires_the_session() {
+    let searches = Arc::new(AtomicU64::new(0));
+    let se = searches.clone();
+    let (port, _, server) = scripted_server(true, move |tag, cmd| {
+        if let Some(r) = login_ok(tag, cmd) {
+            return Say::Reply(r);
+        }
+        if cmd.starts_with("STATUS") {
+            return Say::Reply(status_reply(tag, cmd));
+        }
+        if cmd.starts_with("EXAMINE") {
+            return Say::Reply(format!(
+                "* 2 EXISTS\r\n* OK [UIDVALIDITY 7] ok\r\n* OK [UIDNEXT 3] ok\r\n\
+                 {tag} OK [READ-ONLY] done\r\n"
+            ));
+        }
+        if cmd.starts_with("UID SEARCH") {
+            se.fetch_add(1, Ordering::Relaxed);
+            return Say::HangUp("* BYE shutting down\r\n".into());
+        }
+        Say::Reply(format!("{tag} OK done\r\n"))
+    })
+    .await;
+    let src = scripted_source(port, "pw");
+    let start = ImapCursor {
+        v: 1,
+        folders: [("inbox".to_string(), pos("INBOX", 7, 0, None))]
+            .into_iter()
+            .collect(),
+    }
+    .encode();
+    match src.changes(&start, Folder::Inbox).await {
+        Err(ChangesError::Other(e)) => assert!(is_session_broken(&e), "{e}"),
+        Ok(c) => panic!("a walk off a dead stream came back Ok: {:?}", c.ids),
+        Err(ChangesError::Expired) => panic!("not a reset"),
+    }
+    assert_eq!(searches.load(Ordering::Relaxed), 1);
+    // The next call is on a new login.
+    src.current_cursor().await.expect("a fresh session");
+    assert_eq!(src.connects(), 2);
+    server.abort();
+}
+
+/// REVIEW N7: an untagged line that is not a change used to end the round:
+/// DONE, then a fresh IDLE, per line, at whatever pace the server set. The
+/// same IDLE now reads past it.
+#[tokio::test]
+async fn chatter_under_idle_does_not_cycle_done_and_idle() {
+    let (port, counts, server) =
+        idle_server(Idling::Chatter(Duration::from_millis(20)), false).await;
+    let src = scripted_source(port, "pw");
+    let t = tokio::time::Instant::now();
+    src.wait_for_change(None, Duration::from_millis(1000)).await;
+    let took = t.elapsed();
+    assert!(took >= Duration::from_millis(950), "not a wake: {took:?}");
+    let idles = counts.idles.load(Ordering::Relaxed);
+    assert_eq!(idles, 1, "{idles} IDLE commands for ~50 chatter lines");
+    server.abort();
+}
+
+/// A kicked command session (matrix row 18) costs one login inside the
+/// next walk, not a failed walk: mail delivered after the kick is in it.
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_a_kicked_command_session_is_replaced_inside_the_next_walk() {
+    let user = fresh_user("kickcmd");
+    let mut other = other_client(&user).await;
+    append(&mut other, INBOX, &mail(Some("pre@x.org"), "pre"), None).await;
+    let (src, _) = live(&user);
+    let cursor = catch_up(&src).await;
+    assert_eq!(src.connects(), 1);
+    kick(&user);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut other = other_client(&user).await;
+    append(&mut other, INBOX, &mail(Some("kicked1@x.org"), "k"), None).await;
+    let t = std::time::Instant::now();
+    let walk = src
+        .changes(&cursor, Folder::Inbox)
+        .await
+        .expect("the walk logs in again instead of failing");
+    assert_eq!(walk.ids, vec![stable_id_for_message_id("kicked1@x.org")]);
+    assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    assert_eq!(src.connects(), 2);
+    let _ = other.logout().await;
 }

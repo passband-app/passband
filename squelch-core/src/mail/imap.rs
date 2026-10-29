@@ -294,7 +294,20 @@ struct Transport {
     /// When the stream last moved (or the timer was first needed).
     last_progress: tokio::time::Instant,
     timer: Option<Pin<Box<tokio::time::Sleep>>>,
+    /// Bytes [`Transport::probe_closed`] read ahead, served first by the
+    /// next read.
+    pending: Vec<u8>,
+    /// THE SERVER HUNG UP (matrix rows 11/18): the read side ended (EOF, a
+    /// read error) or the server said `* BYE`. async-imap answers a command
+    /// whose stream ENDS before its tagged reply with whatever it had parsed
+    /// (`STATUS` with no fields, an empty `SEARCH`, a short `FETCH`), as Ok,
+    /// so this flag, not the command's result, is what says the session is
+    /// dead and the result is not to be believed.
+    closed: bool,
 }
+
+/// The most [`Transport::probe_closed`] reads ahead.
+const PROBE_MAX: usize = 64 * 1024;
 
 impl std::fmt::Debug for Transport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -312,9 +325,66 @@ impl Transport {
             stall,
             last_progress: tokio::time::Instant::now(),
             timer: None,
+            pending: Vec::new(),
+            closed: false,
         }
     }
 
+    fn poll_inner_read(
+        &mut self,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match &mut self.stream {
+            Stream::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            Stream::Tls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
+        }
+    }
+
+    /// Has the server hung up on a session nobody is talking on? Reads what
+    /// is already waiting WITHOUT waiting for more (a no-op waker: whoever
+    /// reads next registers the real one), keeping it for the next read. An
+    /// EOF, a read error or a `* BYE` in what was waiting is a hang-up. A
+    /// `doveadm kick` leaves exactly that queued on the idle command session,
+    /// and without this the next command is written into it and "answered"
+    /// with an empty result.
+    fn probe_closed(&mut self) -> bool {
+        if self.closed {
+            return true;
+        }
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut chunk = [0u8; 4096];
+        while self.pending.len() < PROBE_MAX {
+            let mut rb = ReadBuf::new(&mut chunk);
+            match self.poll_inner_read(&mut cx, &mut rb) {
+                Poll::Pending => break,
+                Poll::Ready(Err(_)) => {
+                    self.closed = true;
+                    break;
+                }
+                Poll::Ready(Ok(())) if rb.filled().is_empty() => {
+                    self.closed = true;
+                    break;
+                }
+                Poll::Ready(Ok(())) => self.pending.extend_from_slice(rb.filled()),
+            }
+        }
+        if says_bye(&self.pending) {
+            self.closed = true;
+        }
+        self.closed
+    }
+}
+
+/// Does `bytes` hold an untagged `BYE` at the start of a line?
+fn says_bye(bytes: &[u8]) -> bool {
+    bytes
+        .split(|b| *b == b'\n')
+        .any(|line| line.len() >= 5 && line[..5].eq_ignore_ascii_case(b"* BYE"))
+}
+
+impl Transport {
     fn progressed(&mut self) {
         self.last_progress = tokio::time::Instant::now();
         self.timer = None;
@@ -350,13 +420,25 @@ impl AsyncRead for Transport {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
-        let polled = match &mut this.stream {
-            Stream::Plain(s) => Pin::new(s).poll_read(cx, buf),
-            Stream::Tls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
-        };
-        match polled {
+        if !this.pending.is_empty() {
+            let n = this.pending.len().min(buf.remaining());
+            buf.put_slice(&this.pending[..n]);
+            this.pending.drain(..n);
+            this.progressed();
+            return Poll::Ready(Ok(()));
+        }
+        let before = buf.filled().len();
+        let room = buf.remaining() > 0;
+        match this.poll_inner_read(cx, buf) {
             Poll::Pending => this.check_stall(cx).map(Err),
             ready => {
+                match &ready {
+                    Poll::Ready(Ok(())) if room && buf.filled().len() == before => {
+                        this.closed = true;
+                    }
+                    Poll::Ready(Err(_)) => this.closed = true,
+                    _ => {}
+                }
                 this.progressed();
                 ready
             }
@@ -1097,7 +1179,7 @@ impl Conn {
         };
         let validity = mbox
             .uid_validity
-            .ok_or_else(|| net_err("examine", "server sent no UIDVALIDITY"))?;
+            .ok_or_else(|| broken_err("examine", "server sent no UIDVALIDITY"))?;
         self.selected = Some((folder.to_string(), validity, self.calls));
         Ok(Some(validity))
     }
@@ -1159,7 +1241,10 @@ impl Conn {
             Err(e) => return Err(imap_err("status")(e)),
         };
         let (Some(uidvalidity), Some(uid_next)) = (st.uid_validity, st.uid_next) else {
-            return Err(net_err("status", "server omitted UIDVALIDITY/UIDNEXT"));
+            // An OK STATUS without the two fields asked for is not a server
+            // being terse: async-imap returns exactly that when the stream
+            // ended before the reply (a `* BYE`). The session is done.
+            return Err(broken_err("status", "server omitted UIDVALIDITY/UIDNEXT"));
         };
         Ok(Some(FolderPos {
             mailbox: folder.to_string(),
@@ -1544,7 +1629,14 @@ impl ImapSource {
             -> Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + 'c>>,
     ) -> Result<T> {
         let mut guard = self.conn.lock().await;
-        if guard.as_ref().is_some_and(|c| c.busy) {
+        // A session the server hung up on while it sat unused (a kick, a
+        // server restart, an idle timeout) is replaced NOW, with no backoff
+        // and no error: one dead session costs one login, not a failed tick
+        // and an engine restart (matrix rows 11/18).
+        if guard
+            .as_mut()
+            .is_some_and(|c| c.busy || c.session.get_mut().probe_closed())
+        {
             *guard = None;
         }
         if guard.is_none() {
@@ -1556,7 +1648,13 @@ impl ImapSource {
         let conn = guard.as_mut().expect("set above");
         conn.busy = true;
         conn.calls = conn.calls.wrapping_add(1);
-        let out = f(conn).await;
+        let mut out = f(conn).await;
+        // The server hung up DURING the call: whatever it returned was parsed
+        // off a stream that ended early, so it is not believed, however Ok it
+        // looks (an empty SEARCH would advance a cursor past real mail).
+        if conn.session.get_ref().closed && !matches!(&out, Err(e) if is_session_broken(e)) {
+            out = Err(broken_err("connection", "the server closed the connection"));
+        }
         match &out {
             Err(e) if is_session_broken(e) => *guard = None,
             _ => {
@@ -2010,6 +2108,18 @@ fn is_mailbox_change(r: &async_imap::imap_proto::Response<'_>) -> bool {
             | Response::Expunge(_)
             | Response::Vanished { .. }
             | Response::Fetch(..)
+    )
+}
+
+/// An untagged `BYE`: the server is closing the connection.
+fn is_bye(r: &async_imap::imap_proto::Response<'_>) -> bool {
+    use async_imap::imap_proto::{Response, Status};
+    matches!(
+        r,
+        Response::Data {
+            status: Status::Bye,
+            ..
+        }
     )
 }
 
@@ -2618,7 +2728,7 @@ impl MailSource for ImapSource {
                     .map_err(imap_err("status"))?;
                 let unseen = i64::from(
                     st.unseen
-                        .ok_or_else(|| net_err("status", "server omitted UNSEEN"))?,
+                        .ok_or_else(|| broken_err("status", "server omitted UNSEEN"))?,
                 );
                 // IMAP has no thread count: the message count stands in for
                 // both, as the Graph mapping does.
@@ -2784,7 +2894,14 @@ impl ImapSource {
     ) -> Result<bool> {
         use async_imap::extensions::idle::IdleResponse;
 
-        let parked = self.idle_conn.lock().await.take();
+        // A parked connection the server hung up on is not worth an EXAMINE
+        // to find out.
+        let parked = self
+            .idle_conn
+            .lock()
+            .await
+            .take()
+            .and_then(|mut s| (!s.get_mut().probe_closed()).then_some(s));
         let mut session = match parked {
             Some(s) => s,
             None => {
@@ -2822,15 +2939,28 @@ impl ImapSource {
             let mut handle = session.idle();
             handle.init().await.map_err(imap_err("idle"))?;
             let mut changed = drain_changes(|| unsolicited.try_recv().ok());
-            if !changed {
+            // A line that is not a change (RECENT, an alert, a server chatty
+            // about nothing) is read and the SAME IDLE goes on (review N7):
+            // no DONE and no fresh IDLE per line, so a server streaming them
+            // costs reading them and nothing more.
+            while !changed {
+                let left = round_end.saturating_duration_since(tokio::time::Instant::now());
+                if left.is_zero() {
+                    break;
+                }
                 // `_stop` must outlive the wait: dropping it interrupts it.
-                let (wait, _stop) = handle.wait_with_timeout(round_end - now);
+                let (wait, _stop) = handle.wait_with_timeout(left);
                 match tokio::time::timeout_at(round_end, wait).await {
                     // The round is over, keepalives or not.
-                    Err(_) => {}
+                    Err(_) => break,
                     Ok(r) => match r.map_err(imap_err("idle"))? {
-                        IdleResponse::NewData(data) => changed = is_mailbox_change(data.parsed()),
-                        IdleResponse::Timeout => {}
+                        IdleResponse::NewData(data) => {
+                            if is_bye(data.parsed()) {
+                                return Err(broken_err("idle", "the server said BYE"));
+                            }
+                            changed = is_mailbox_change(data.parsed());
+                        }
+                        IdleResponse::Timeout => break,
                         // The stream ended: the server hung up.
                         IdleResponse::ManualInterrupt => {
                             return Err(broken_err("idle", "connection closed"));
@@ -2844,8 +2974,7 @@ impl ImapSource {
                 *self.idle_conn.lock().await = Some(session);
                 return Ok(true);
             }
-            // Something that is not a change (RECENT, an alert), or the
-            // round's end: IDLE again for what is left.
+            // The round's end: IDLE again for what is left.
         }
     }
 

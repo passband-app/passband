@@ -3694,3 +3694,188 @@ async fn live_a_same_author_list_echo_is_not_its_own_thread() {
     assert_eq!(e.thread_id, None, "same author: threaded by ingest");
     let _ = other.logout().await;
 }
+
+// ---- fix round 5 -----------------------------------------------------------
+
+/// REVIEW FIX4 R1: the placement cache was one set of every checked copy of
+/// every id, scanned whole on every fetch: N^2/2 work over a backfill, and a
+/// mailbox-sized set. Looking one id up touches that id's entries only, and
+/// an id's entries leave with its forgotten locations.
+#[test]
+fn the_placement_cache_looks_up_one_id_without_touching_the_others() {
+    let mut cache = VerifiedCache::default();
+    for n in 0..20_000 {
+        cache.insert(
+            &format!("other{n}"),
+            &[("Sent".into(), 5, n), (INBOX.into(), 7, n)],
+        );
+    }
+    cache.insert("me", &[("Sent".into(), 5, 1)]);
+    cache.insert("me", &[("Sent".into(), 5, 1), ("Junk".into(), 9, 2)]);
+    cache.visits = 0;
+    let mine = cache.for_id("me");
+    assert_eq!(mine.len(), 2);
+    assert_eq!(cache.visits, 2, "the lookup scanned other ids' entries");
+    assert!(cache.for_id("nobody").is_empty());
+    assert_eq!(cache.visits, 2);
+    cache.forget("me", "Sent");
+    assert_eq!(cache.for_id("me").len(), 1);
+    cache.forget("me", "Junk");
+    assert!(
+        !cache.by_id.contains_key("me"),
+        "an emptied id stays in memory"
+    );
+    cache.insert("none", &[]);
+    assert!(!cache.by_id.contains_key("none"));
+}
+
+/// A self-sent message: one bytes in INBOX and in Sent, both listed.
+async fn self_sent_pair(user: &str, mid: &str) -> (ImapSession, Vec<u8>) {
+    let mut other = other_client(user).await;
+    let raw = format!(
+        "From: me@dev.test\r\nTo: me@dev.test\r\nSubject: note to self\r\n\
+         Date: Mon, 26 Oct 2026 09:00:00 +0000\r\nMessage-ID: <{mid}>\r\n\r\nremember the milk\r\n"
+    )
+    .into_bytes();
+    append(&mut other, INBOX, &raw, None).await;
+    append(&mut other, "Sent", &raw, None).await;
+    (other, raw)
+}
+
+/// REVIEW FIX4 R1: the copy whose bytes were served is not cached (it is
+/// downloaded every time anyway); the other copy, placement-checked, is.
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_only_the_placement_checked_copy_is_cached() {
+    let user = fresh_user("r1");
+    let (mut other, raw) = self_sent_pair(&user, "r1@dev.test").await;
+    let (src, _) = live(&user);
+    let id = stable_id_for_message_id("r1@dev.test");
+    catch_up(&src).await;
+    let m = src.fetch_raw(&id, Urgency::Live).await.unwrap();
+    assert_eq!(raw_of(&m), raw);
+    assert!(m.placement.in_inbox && m.placement.in_sent);
+    let cached = src.verified.lock().unwrap().by_id.get(&id).cloned();
+    let cached = cached.expect("the Sent copy was checked");
+    assert_eq!(cached.len(), 1, "{cached:?}");
+    assert_eq!(cached[0].0, "Sent");
+    let _ = other.logout().await;
+}
+
+/// REVIEW FIX4 R2: a print was bound only from the EARLIEST row, so a first
+/// fetch served from a later row or the search fallback (the original moved
+/// before its first fetch) ingested it unbound, and a later lookalike was
+/// then served under the id. Whatever bytes are served bind the print.
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_a_first_fetch_from_the_fallback_binds_the_print() {
+    let user = fresh_user("r2");
+    let mut other = other_client(&user).await;
+    let (orig, resend) = original_and_resend("r2@bank.example");
+    append(&mut other, INBOX, &orig, None).await;
+    let (src, locs) = live(&user);
+    let id = stable_id_for_message_id("r2@bank.example");
+    src.list(inbox_listing(), None, Urgency::Live)
+        .await
+        .unwrap();
+    // Filed away before its first fetch: the INBOX row is stale and the
+    // fallback search finds it in Archive.
+    archive_in_other_client(&user, 1);
+    assert_eq!(
+        raw_of(&src.fetch_raw(&id, Urgency::Live).await.unwrap()),
+        orig
+    );
+    assert_eq!(
+        locs.body_print(1, &id).unwrap(),
+        Some(BodyPrint::of(&orig)),
+        "served unbound"
+    );
+    // A lookalike filed into Junk is listed there; the original moves on.
+    append(&mut other, "Junk", &resend, None).await;
+    src.list(
+        Listing::Folder {
+            folder: Folder::Spam,
+            within_days: None,
+        },
+        None,
+        Urgency::Live,
+    )
+    .await
+    .unwrap();
+    let _ = std::process::Command::new("docker")
+        .args(["exec", "squelch-imap-dev", "doveadm", "mailbox", "create"])
+        .args(["-u", &user, "Filed"])
+        .output();
+    doveadm(&["move", "-u", &user, "Filed", "mailbox", "Archive", "all"]);
+    let m = src.fetch_raw(&id, Urgency::Live).await.unwrap();
+    assert_eq!(raw_of(&m), orig, "the lookalike was served");
+    // REVIEW FIX4 R5: the dropped Junk copy is said, once.
+    assert!(src.mismatch_said.lock().unwrap().contains(&id));
+    let _ = other.logout().await;
+}
+
+/// A store another lane beat to the id's print: its first
+/// `record_body_print` finds `winner` already recorded.
+struct LostRace {
+    inner: MemLocations,
+    winner: BodyPrint,
+}
+
+impl MessageLocations for LostRace {
+    fn message_locations(&self, a: AccountId, id: &str) -> Result<Vec<MessageLocation>> {
+        self.inner.message_locations(a, id)
+    }
+    fn record_message_locations(
+        &self,
+        a: AccountId,
+        seen: &[(String, MessageLocation)],
+    ) -> Result<()> {
+        self.inner.record_message_locations(a, seen)
+    }
+    fn forget_message_location(&self, a: AccountId, id: &str, folder: &str) -> Result<()> {
+        self.inner.forget_message_location(a, id, folder)
+    }
+    fn content_digest(&self, a: AccountId, id: &str) -> Result<Option<String>> {
+        self.inner.content_digest(a, id)
+    }
+    fn record_content_digest(&self, a: AccountId, id: &str, d: &str) -> Result<()> {
+        self.inner.record_content_digest(a, id, d)
+    }
+    fn body_print(&self, a: AccountId, id: &str) -> Result<Option<BodyPrint>> {
+        self.inner.body_print(a, id)
+    }
+    fn record_body_print(&self, a: AccountId, id: &str, p: &BodyPrint) -> Result<()> {
+        self.inner.record_body_print(a, id, &self.winner)?;
+        self.inner.record_body_print(a, id, p)
+    }
+}
+
+/// REVIEW FIX4 R3: the placement cache was filled BEFORE the final store
+/// check, so a lane that bound the losing print of a two-lane race cached
+/// its copies as the id's. Only a check against the stored print is kept.
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_a_lane_that_lost_the_print_race_caches_nothing() {
+    let user = fresh_user("r3");
+    let (mut other, _) = self_sent_pair(&user, "r3@dev.test").await;
+    let locs = Arc::new(LostRace {
+        inner: MemLocations::default(),
+        winner: BodyPrint {
+            body: "b1:the other lane's copy".into(),
+            from: "me@dev.test".into(),
+        },
+    });
+    let src = dev_source_for(&user, ImapTls::Plain, 10143, DEV_PASSWORD, locs);
+    let id = stable_id_for_message_id("r3@dev.test");
+    catch_up(&src).await;
+    let m = src.fetch_raw(&id, Urgency::Live).await.unwrap();
+    assert!(
+        matches!(m.raw, RawBody::Missing),
+        "the losing bytes were served"
+    );
+    assert!(
+        !src.verified.lock().unwrap().by_id.contains_key(&id),
+        "the losing lane's copies were cached as the id's"
+    );
+    let _ = other.logout().await;
+}

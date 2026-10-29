@@ -301,7 +301,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
    So the mock is the app at one fixed layout, scaled as a picture would be,
    rather than a web page that reflows into something the app never draws.
    Colours are sampled from the same shot. */
-.pb-after .pb-window { background: #262c35; }
+.pb-after .pb-window { background: #101826; }
 /* THE SHOT: the window plus the two things that float over it. It is the
    container the points are measured against, so the login code panel can hang
    off the window's bottom edge and still be drawn in the same points. */
@@ -322,7 +322,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-app-tools svg { width: 17pt; height: 17pt; }
 /* The rail: three destinations on the digit keys, then the discovery ring,
    a hairline, and the account's own group. Rules and Groups live in Settings. */
-.pb-side { background: #2c323f; border-right: 1px solid #363b48; border-top-right-radius: 12pt;
+.pb-side { background: #0c131e; border-right: 1px solid #1b2636; border-top-right-radius: 12pt;
   display: flex; flex-direction: column; align-items: center; gap: 6pt; padding: 10pt 0; }
 .pb-side span { width: 44pt; height: 36pt; display: grid; place-items: center; border-radius: 11pt; color: #9aa6b6; }
 .pb-side span.on { background: rgba(78, 155, 234, 0.26); color: var(--accent); }
@@ -341,8 +341,8 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-dash-hero b { position: relative; display: inline-block; font-family: var(--serif); font-weight: 500;
   font-size: 38pt; letter-spacing: -0.01em; line-height: 1.08; }
 .pb-col { display: flex; flex-direction: column; gap: 16pt; min-width: 0; }
-.pb-zone { position: relative; border-radius: 18pt; padding: 12pt 12pt 10pt; background: #1f2c3a;
-  box-shadow: inset 0 0 0 0.75pt #2f4459; }
+.pb-zone { position: relative; border-radius: 18pt; padding: 12pt 12pt 10pt; background: #152234;
+  box-shadow: inset 0 0 0 0.75pt #24374f; }
 .pb-zone-h { display: flex; align-items: center; gap: 8pt; padding: 0 4pt 10pt; font-size: 13pt; font-weight: 600; }
 .pb-zone-h svg { width: 14pt; height: 14pt; color: var(--zone, var(--accent)); flex: none; }
 .pb-zone-h em { font-style: normal; font-size: 11pt; font-weight: 600; color: var(--faint);
@@ -393,10 +393,10 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-rec { position: relative; border-radius: 18pt; padding: 12pt 11pt 9pt; background: var(--bg-c);
   box-shadow: inset 0 0 0 0.75pt var(--edge); }
 .pb-rec .pb-zone-h { padding: 0 3pt 8pt; }
-.pb-rec-cal { --bg-c: #253341; --edge: #3b5673; --zone: var(--accent); }
-.pb-rec-ship { --bg-c: #35332d; --edge: #6a5a3e; --zone: var(--warn); }
-.pb-rec-bill { --bg-c: #2a3540; --edge: #3f566d; --zone: var(--accent-ink); }
-.pb-rec-rcpt { --bg-c: #233635; --edge: #2f5a49; --zone: var(--positive); }
+.pb-rec-cal { --bg-c: #17283e; --edge: #2f5580; --zone: var(--accent); }
+.pb-rec-ship { --bg-c: #282620; --edge: #5c4b30; --zone: var(--warn); }
+.pb-rec-bill { --bg-c: #1e2b3f; --edge: #34507a; --zone: var(--accent-ink); }
+.pb-rec-rcpt { --bg-c: #172b2c; --edge: #275446; --zone: var(--positive); }
 .pb-rec-row { display: flex; align-items: center; gap: 7pt; padding: 5pt 7pt; white-space: nowrap; }
 .pb-rec-row b { flex: 1; min-width: 0; font-weight: 400; color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
 .pb-rec-row span { font-size: 10pt; color: var(--faintest); font-variant-numeric: tabular-nums; }
@@ -1859,22 +1859,22 @@ const CAL_CSS = `
 .pb-pair.pb-cal .pb-steps { grid-row: 1; padding-top: 8svh; }
 .pb-pair.pb-cal .pb-hold { grid-row: 1; }
 .pb-calshot .pb-app-title b { font-family: var(--sans); font-weight: 700; font-size: 17pt; }
-.pb-seg { margin-left: auto; display: flex; padding: 3pt; border-radius: 99pt; background: #333944;
+.pb-seg { margin-left: auto; display: flex; padding: 3pt; border-radius: 99pt; background: #1a2535;
   font-size: 12pt; font-weight: 600; color: var(--ink); }
 .pb-seg span { padding: 4pt 13pt; border-radius: 99pt; }
 .pb-seg span.on { background: #296798; }
 .pb-calpage { display: grid; grid-template-columns: minmax(0, 1fr) 300pt; column-gap: 18pt;
   padding: 0 18pt 0 20pt; min-height: 0; }
 .pb-caltool { grid-column: 1 / -1; display: flex; align-items: center; gap: 10pt; height: 46pt; }
-.pb-caltool .nav { width: 34pt; height: 26pt; border-radius: 7pt; background: #1f242c;
+.pb-caltool .nav { width: 34pt; height: 26pt; border-radius: 7pt; background: #172131;
   display: grid; place-items: center; color: var(--dim); font-size: 13pt; }
 .pb-caltool b { font-size: 17pt; font-weight: 700; margin: 0 4pt; }
-.pb-caltool .today { padding: 5pt 12pt; border-radius: 7pt; background: #1f242c; font-size: 11pt; color: var(--dim); }
-.pb-caltool .new { margin-left: auto; padding: 6pt 13pt; border-radius: 7pt; background: #1d2129;
+.pb-caltool .today { padding: 5pt 12pt; border-radius: 7pt; background: #172131; font-size: 11pt; color: var(--dim); }
+.pb-caltool .new { margin-left: auto; padding: 6pt 13pt; border-radius: 7pt; background: #172131;
   font-size: 11pt; font-weight: 600; }
 .pb-month { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); grid-auto-rows: auto; align-content: start; }
-.pb-wd { padding: 0 6pt 6pt; font-size: 10.5pt; font-weight: 500; color: #4d5865; border-bottom: 1px solid #3d434c; }
-.pb-day { position: relative; height: 104pt; padding: 6pt 3pt 0; border-bottom: 1px solid #3d434c;
+.pb-wd { padding: 0 6pt 6pt; font-size: 10.5pt; font-weight: 500; color: #4d5865; border-bottom: 1px solid #1e2b3c; }
+.pb-day { position: relative; height: 104pt; padding: 6pt 3pt 0; border-bottom: 1px solid #1e2b3c;
   display: flex; flex-direction: column; gap: 3pt; min-width: 0; }
 .pb-day > header { display: flex; align-items: baseline; justify-content: space-between; padding: 0 4pt 2pt;
   font-size: 11.5pt; font-weight: 500; color: #818c9a; white-space: nowrap; gap: 4pt; }
@@ -1884,7 +1884,7 @@ const CAL_CSS = `
 .pb-day::after { content: ""; position: absolute; inset: 1pt; border-radius: 9pt; pointer-events: none;
   box-shadow: inset 0 0 0 1pt rgba(155, 178, 205, 0); transition: box-shadow 0.4s ease; }
 .pb-day.sel::after { box-shadow: inset 0 0 0 1pt rgba(155, 178, 205, 0.85); }
-.pb-ev { --fill: #3c3c3c; --ink: #b9b9b9; --edge: #6a6a6a;
+.pb-ev { --fill: #263244; --ink: #a9b6c8; --edge: #4b5d76;
   display: block; height: 19pt; line-height: 19pt; padding: 0 5pt; border-radius: 5pt;
   font-size: 10.5pt; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   background: var(--fill); color: #eef1f6; transition: opacity 0.45s ease, box-shadow 0.45s ease; }
@@ -1900,16 +1900,17 @@ const CAL_CSS = `
   margin 0.45s ease, box-shadow 0.45s ease; }
 .pb-ev.red { --fill: #552d3b; --ink: #e79aad; --edge: #b5607a; }
 .pb-ev.purple { --fill: #36375b; --ink: #caccfe; --edge: #8a8de0; }
-.pb-ev.teal { --fill: #0a4547; --ink: #7fc8ca; --edge: #3f9a9c; }
+.pb-ev.teal { --fill: #0d3b44; --ink: #7fc8ca; --edge: #3f9a9c; }
 .pb-ev.brown { --fill: #513514; --ink: #e6b980; --edge: #b5844a; }
 .pb-ev.green { --fill: #284425; --ink: #a5d69e; --edge: #5c9a55; }
-.pb-ev.gray { --fill: #3c3c3c; --ink: #b9b9b9; --edge: #7d7d7d; }
+.pb-ev.gray { --fill: #263244; --ink: #a9b6c8; --edge: #5a6d88; }
 
 /* THE EVENT PANE, beside the month. */
 .pb-evpane { min-width: 0; padding-top: 2pt; }
 .pb-evpane > header { display: flex; align-items: center; gap: 6pt; padding: 0 2pt 10pt; font-size: 14pt;
   font-weight: 600; color: var(--dim); }
-.pb-evcard { border-radius: 16pt; padding: 18pt; background: #2b3038; animation: pb-cal-in 0.45s ease both; }
+.pb-evcard { border-radius: 16pt; padding: 18pt; background: #152234;
+  box-shadow: inset 0 0 0 0.75pt #24374f; animation: pb-cal-in 0.45s ease both; }
 @keyframes pb-cal-in { from { opacity: 0; transform: translateY(5pt); } }
 .pb-evsec { padding: 11pt; margin: -11pt; transition: opacity 0.45s ease, box-shadow 0.45s ease; border-radius: 10pt; }
 .pb-evkind { display: flex; align-items: center; gap: 6pt; font-size: 10.5pt; color: var(--dim); padding-bottom: 11pt; }
@@ -1936,7 +1937,7 @@ const CAL_CSS = `
 .pb-reason { margin-top: 3pt; font-weight: 400; color: var(--dim); line-height: 1.35; }
 .pb-reason small { display: block; font-size: 9.5pt; color: var(--faintest); margin-top: 2pt; }
 .pb-evsec.mail { margin-top: 3pt; }
-.pb-behind { margin-top: 0; padding: 9pt 10pt 4pt; border-radius: 11pt; background: #252a31; }
+.pb-behind { margin-top: 0; padding: 9pt 10pt 4pt; border-radius: 11pt; background: #101b2a; }
 .pb-behind > b { display: block; font-size: 10.5pt; font-weight: 500; color: var(--dim); padding-bottom: 6pt; }
 .pb-brow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 8pt; padding: 5pt 4pt; border-radius: 7pt;
   transition: background 0.45s ease; }
@@ -1945,7 +1946,7 @@ const CAL_CSS = `
 .pb-brow em { grid-column: 2; grid-row: 1; font-style: normal; font-size: 9.5pt; color: var(--faintest); }
 .pb-evkeys { display: flex; gap: 12pt; margin-top: 10pt; font-size: 10pt; color: var(--dim); }
 .pb-evkeys kbd { font: 600 9pt/1 var(--mono); padding: 2pt 5pt; margin-right: 4pt; border-radius: 4pt;
-  background: #383c42; color: var(--dim); }
+  background: #1e2b3d; color: var(--dim); }
 
 /* THE REMINDER, as the iPhone shows it: the system's own banner, dark
    material, the app icon, title, time, and the line the model wrote. Hung off

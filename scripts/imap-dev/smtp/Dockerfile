@@ -5,5 +5,6 @@
 FROM alpine:3.22.2
 RUN apk add --no-cache 'postfix~3.10'
 COPY main.cf.append /etc/postfix/main.cf.append
+COPY bed_header_checks /etc/postfix/bed_header_checks
 RUN cat /etc/postfix/main.cf.append >> /etc/postfix/main.cf && postfix check
 CMD ["postfix", "start-fg"]

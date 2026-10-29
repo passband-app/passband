@@ -17,3 +17,7 @@ virtual_transport = lmtp:inet:squelch-imap-dev:24
 default_transport = error:the imap-dev bed delivers to @dev.test only
 relay_transport = error:the imap-dev bed delivers to @dev.test only
 message_size_limit = 52428800
+# Postfix's cleanup drops every Bcc header on its own, which would hide a
+# client that leaked one. Header checks run first, so a Bcc that reaches the
+# bed is turned into a marker the live tests look for instead.
+header_checks = regexp:/etc/postfix/bed_header_checks

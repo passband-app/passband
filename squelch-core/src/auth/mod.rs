@@ -449,9 +449,16 @@ fn authorize_url_for(
         // Ask for a refresh token.
         req = req.add_extra_param("access_type", "offline");
     }
+    // Google: force the consent screen, so the grant is the one asked for now.
+    // Microsoft: force the account picker instead. With `consent` it reuses
+    // whichever Microsoft session the browser already holds, ignoring
+    // `login_hint`, and it still shows consent for anything not yet granted.
+    let prompt = match issuer {
+        OAuthIssuer::Google => "consent",
+        OAuthIssuer::Microsoft => "select_account",
+    };
     let (url, csrf_token) = req
-        // Force the consent screen, so the grant is the one asked for now.
-        .add_extra_param("prompt", "consent")
+        .add_extra_param("prompt", prompt)
         .set_pkce_challenge(pkce_challenge)
         .url();
     (url, csrf_token, pkce_verifier)
@@ -3447,7 +3454,7 @@ mod microsoft_tests {
         assert!(!scopes.iter().any(|s| s.contains("googleapis")));
         assert!(!q.contains_key("access_type"));
         assert!(!q.contains_key("include_granted_scopes"));
-        assert_eq!(q["prompt"], "consent");
+        assert_eq!(q["prompt"], "select_account");
         assert_eq!(q["login_hint"], "me@outlook.com");
         assert_eq!(q["code_challenge_method"], "S256");
         assert_eq!(q["redirect_uri"], "http://127.0.0.1:8847");

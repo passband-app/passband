@@ -9,6 +9,7 @@ import {
   type PointerEvent,
 } from "react";
 import { CARRIERS, createScope, markerPoint, type ScopeLayout } from "./scope";
+import { SF_SYMBOLS } from "./sf-symbols";
 
 // The "before" panel is a procedurally repeated fake inbox: the drudgery
 // Passband exists to kill. Snippets are written long so rows run the full
@@ -1377,41 +1378,35 @@ function Waitlist({ focus = true }: { focus?: boolean }) {
 // Stand-ins for the SF Symbols the app draws: gauge, envelope, key, the
 // discovery ring, the update arrow, waveform and gear in the side rail; eye, envelope.open, calendar,
 // shippingbox, building.columns and receipt on the zones.
-const GLYPHS = {
-  sitrep: "M8 14.2A6.2 6.2 0 1 0 8 1.8a6.2 6.2 0 0 0 0 12.4Zm0-3.6 2.8-5M3.8 8h1M8 3.8v1m4.2 3.2h-1",
-  mail: "M2 3.8h12v8.4H2V3.8Zm0 0 6 4.6 6-4.6",
-  key: "M8 6.6a2.6 2.6 0 1 0 0-5.2 2.6 2.6 0 0 0 0 5.2Zm0 0v7.8l1.6-1.3M8 10.4h1.6",
-  sliders: "M2 4.5h12M2 8h12M2 11.5h12M5 3.3v2.4M10.5 6.8v2.4M6.5 10.3v2.4",
-  people: "M6 7.2a2.4 2.4 0 1 0 0-4.8 2.4 2.4 0 0 0 0 4.8Zm-4.2 6.4c.3-2.6 2-4 4.2-4s3.9 1.4 4.2 4M11 7.2a2 2 0 1 0 0-4m1.6 6.6c1 .5 1.6 1.7 1.8 3.8",
-  pulse: "M1.5 8.5h3l1.6-4.4 3 8.4 1.8-4h3.6",
-  gear: "M8 10.3a2.3 2.3 0 1 0 0-4.6 2.3 2.3 0 0 0 0 4.6ZM8 2v2m0 8v2M2 8h2m8 0h2M3.8 3.8l1.4 1.4m5.6 5.6 1.4 1.4m0-8.4-1.4 1.4m-5.6 5.6-1.4 1.4",
-  eye: "M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8Zm6.5 2a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z",
-  reading: "M2 6.5 8 2.5l6 4v7H2v-7Zm0 0 6 4 6-4",
-  calendar: "M2.5 3.5h11v10h-11v-10Zm0 3h11M5 2v2.5M11 2v2.5",
-  box: "M8 1.8 14 4.6v6.8L8 14.2 2 11.4V4.6L8 1.8ZM2 4.6 8 7.4l6-2.8M8 7.4v6.8",
-  bank: "M2 6 8 2.5 14 6H2Zm1.2 0v6m3.2-6v6m3.2-6v6M12.8 6v6M2 13.5h12",
-  receipt: "M3.5 1.8h9v12.4l-1.5-1-1.5 1-1.5-1-1.5 1-1.5-1-1.5 1V1.8Zm2.5 4h4m-4 3h4",
-  compose: "M13.6 8.6v4.2a1.2 1.2 0 0 1-1.2 1.2H3.2A1.2 1.2 0 0 1 2 12.8V3.6a1.2 1.2 0 0 1 1.2-1.2h4.2M11.9 1.9l2.2 2.2-5.6 5.6-2.7.5.5-2.7 5.6-5.6Z",
-  search: "M7 12A5 5 0 1 0 7 2a5 5 0 0 0 0 10Zm3.6-1.4L14 14",
-  wind: "M1.8 6.2h7.4a2 2 0 1 0-2-2M1.8 9.2h10.4a2 2 0 1 1-2 2M1.8 12.2h4.2",
-  clip: "M13 7.4 7.9 12.5a3 3 0 0 1-4.3-4.3l5.3-5.3a2 2 0 0 1 2.9 2.9L6.6 11a1 1 0 0 1-1.5-1.5l4.6-4.6",
-  ring: "M8 2.2a5.8 5.8 0 1 1-5 2.9M5.2 2.9l.1 0M3.4 4.3l.1 0",
-  update: "M8 14.2A6.2 6.2 0 1 0 8 1.8a6.2 6.2 0 0 0 0 12.4ZM8 4.8v6m0 0L5.6 8.4M8 10.8l2.4-2.4",
-  done: "M8 14.2A6.2 6.2 0 1 0 8 1.8a6.2 6.2 0 0 0 0 12.4ZM5.3 8.2l1.9 1.9 3.6-3.9",
-  copy: "M5.5 5.5v-2a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2m-7-5h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-6a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1Z",
-};
+// The app's icons are SF Symbols, so the mocks draw the same ones: each is a
+// white mask rendered from the system by tools/sf-symbols.swift and filled
+// with currentColor, which keeps every colour rule below in charge. Only the
+// discovery ring is the app's own drawing, so it stays a path here.
+type GlyphName = keyof typeof SF_SYMBOLS | "ring";
+const RING = "M8 2.2a5.8 5.8 0 1 1-5 2.9M5.2 2.9l.1 0M3.4 4.3l.1 0";
 
-function Glyph({ name }: { name: keyof typeof GLYPHS }) {
+function Glyph({ name }: { name: GlyphName }) {
+  if (name === "ring") {
+    return (
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.25"
+        strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d={RING} />
+      </svg>
+    );
+  }
+  const id = `sf-${name}`;
   return (
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.25"
-      strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d={GLYPHS[name]} />
+    <svg viewBox="0 0 96 96" aria-hidden="true">
+      <mask id={id} maskUnits="userSpaceOnUse" x="0" y="0" width="96" height="96">
+        <image href={SF_SYMBOLS[name]} width="96" height="96" />
+      </mask>
+      <rect width="96" height="96" fill="currentColor" mask={`url(#${id})`} />
     </svg>
   );
 }
 
 function ZoneHead({ glyph, title, count, sub }: {
-  glyph: keyof typeof GLYPHS; title: string; count: number; sub?: string;
+  glyph: GlyphName; title: string; count: number; sub?: string;
 }) {
   return (
     <div className="pb-zone-h">
@@ -1867,7 +1862,11 @@ const CAL_CSS = `
   padding: 0 18pt 0 20pt; min-height: 0; }
 .pb-caltool { grid-column: 1 / -1; display: flex; align-items: center; gap: 10pt; height: 46pt; }
 .pb-caltool .nav { width: 34pt; height: 26pt; border-radius: 7pt; background: #172131;
-  display: grid; place-items: center; color: var(--dim); font-size: 13pt; }
+  display: grid; place-items: center; color: var(--dim); }
+.pb-caltool .nav svg { width: 13pt; height: 13pt; }
+.pb-caltool .new { display: flex; align-items: center; gap: 5pt; }
+.pb-caltool .new svg { width: 11pt; height: 11pt; }
+.pb-evpane > header svg { width: 13pt; height: 13pt; margin-left: -3pt; }
 .pb-caltool b { font-size: 17pt; font-weight: 700; margin: 0 4pt; }
 .pb-caltool .today { padding: 5pt 12pt; border-radius: 7pt; background: #172131; font-size: 11pt; color: var(--dim); }
 .pb-caltool .new { margin-left: auto; padding: 6pt 13pt; border-radius: 7pt; background: #172131;
@@ -2047,7 +2046,6 @@ const CAL_TOUR: Array<{ key: string; title: string; line: ReactNode }> = [
     line: "Passband picks the moment, an hour before doors or ten minutes before a call, and says what will help. Tap to see your tickets." },
 ];
 
-const TICKET_PATH = "M2 5.2V3.5h12v1.7a1.6 1.6 0 0 0 0 3.2v1.7a1.6 1.6 0 0 0 0 3.2v-.8H2v.8a1.6 1.6 0 0 0 0-3.2V8.4a1.6 1.6 0 0 0 0-3.2Z";
 
 // What the pane shows for each step. Before the first and through the second
 // it is the invitation as a maybe; the third opens the unlikely one; the last
@@ -2056,7 +2054,7 @@ function EventPane({ focus }: { focus: string | undefined }) {
   if (focus === "unlikely") {
     return (
       <div className="pb-evpane">
-        <header>‹ Wed Nov 11</header>
+        <header><Glyph name="back" />Wed Nov 11</header>
         <div className="pb-evcard" key="summit">
           <div className="pb-evsec top">
             <div className="pb-evkind"><i />Invitation, from your mail<small>not on your calendar</small></div>
@@ -2088,7 +2086,7 @@ function EventPane({ focus }: { focus: string | undefined }) {
   const going = focus === "remind";
   return (
     <div className="pb-evpane">
-      <header>‹ Fri Nov 20</header>
+      <header><Glyph name="back" />Fri Nov 20</header>
       <div className="pb-evcard" key={going ? "going" : "night"}>
         <div className="pb-evsec top">
           <div className="pb-evkind">
@@ -2101,7 +2099,7 @@ function EventPane({ focus }: { focus: string | undefined }) {
           <div className="pb-evtime">Fri Nov 20, 10pm to Sat 6am</div>
           {going && (
             <span className="pb-tickets">
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"><path d={TICKET_PATH} /></svg>
+              <Glyph name="ticket" />
               Tickets
             </span>
           )}
@@ -2153,10 +2151,10 @@ function CalMock({ focus }: { focus: string | undefined }) {
       <Rail on="calendar" />
       <div className="pb-calpage">
         <div className="pb-caltool">
-          <span className="nav">‹</span><span className="nav">›</span>
+          <span className="nav"><Glyph name="back" /></span><span className="nav"><Glyph name="forward" /></span>
           <b>November 2026</b>
           <span className="today">Today</span>
-          <span className="new">+ New event</span>
+          <span className="new"><Glyph name="plus" />New event</span>
         </div>
         <div className="pb-month">
           {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => <div key={d} className="pb-wd">{d}</div>)}

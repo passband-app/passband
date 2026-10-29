@@ -1240,9 +1240,9 @@ pub fn ingest(
 
     // WHERE FROM AND THE REAL SENDER DISAGREE (#639): headers only, read off
     // the same parse; `via` goes through the same trust gate as `auth_pass`.
-    let sender_signals = parsed
-        .as_ref()
-        .and_then(|m| super::sender_signals::extract(m, &from_addr, fetched.is_sent));
+    let sender_signals = parsed.as_ref().and_then(|m| {
+        super::sender_signals::extract(m, &from_addr, fetched.is_sent, &fetched.account_addr)
+    });
 
     let message = NewMessage {
         account_id: fetched.account_id,

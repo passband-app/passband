@@ -179,6 +179,12 @@ fn content_snapshot(message: &AgentMessage) -> Result<String> {
     // Hashed ONLY WHEN THERE IS ONE, so every message without a translation
     // keeps exactly the snapshot it always had and nothing re-triages
     // fleet-wide when this ships.
+    // SENDER SIGNALS ARE DELIBERATELY NOT HASHED, an exception to the rule
+    // above: the agent door serves them beside the body, but they are only
+    // addresses and domains already visible in the headers the assessment
+    // read (From, plus what the sender wrote), bounded at ingest, and hashing
+    // them would re-triage every message whose row gains signals on a
+    // re-ingest. Revisit if a signal ever carries free text.
     match (&message.translated_subject, &message.translated_body) {
         (None, None) => fingerprint(&base),
         (subject, body) => fingerprint(&(base, subject, body)),

@@ -275,24 +275,26 @@ decides every endpoint, scope set and identity check:
    the alias against the From of real Sent Items, or to stop requiring an
    address for Outlook and take the one Microsoft names. Own-mail detection by
    From (`in_sent`) has the same blind spot for such accounts.
-1. **Live end to end.** Everything above is tested against scripted Graph and
-   token endpoints only. Unverified on a real mailbox: that the message delta
-   honors the `receivedDateTime ge` filter, that `internetMessageHeaders` can
-   be selected on a Sent Items list (the scheduled-send scan depends on it),
-   that a MIME draft keeps our `Message-ID` and outbox header, that the
-   draft's immutable id survives the send, which scope spelling the token
-   endpoint echoes, and that Entra takes the `http://127.0.0.1:<port>`
-   loopback redirect against a registered `http://127.0.0.1`.
-   The send path leans hardest on two of these, and both can double-send if
-   wrong: (a) **the draft's immutable id surviving the send** (if the Sent
-   Items copy gets a new id, the echo fetches a dead id, the next sync adds a
-   second sent row, and the tracker and later actions point at nothing); and
-   (b) **Exchange keeping the minted `Message-ID`**, since
-   `internetMessageHeaders` may be empty on Sent Items, which would leave
-   scheduled-send recovery with no way to find a fired send. Also check that
-   Graph accepts `internetMessageId eq … and isDraft eq false` (a 400 there
-   leaves every `maybe_sent` row stuck), and that the well-known `archive`
-   folder exists on the test mailbox.
+1. **Live end to end: mostly verified 2026-10-28** on a personal Microsoft
+   account (a scratch daemon, Passband's built-in Entra app). Seen working:
+   the `http://127.0.0.1` loopback redirect (registered under "Mobile and
+   desktop", NOT Web), the token endpoint echoing prefixed scope names,
+   backfill and the delta cursor (two inbound mails, one per poll, immutable
+   ids, conversation threads, the sender's UTC offset), a reply, a scheduled
+   reply, and archive. The two send facts the design leans on both hold:
+   **the draft's immutable id survives the send** (the echo row's id is the
+   Sent Items id, so no second sent row), and **Exchange keeps the minted
+   `Message-ID` and `X-Passband-Outbox`** on a MIME draft, with
+   `internetMessageHeaders` populated on Sent Items. Graph accepts
+   `internetMessageId eq … and isDraft eq false`, and the well-known
+   `archive` folder exists. A plain send (no minted id) goes out with
+   Exchange's own `Message-ID`. Still unseen live: removals and moves in the
+   delta, the 410 resync, throttling, trash, not-spam, and the read and flag
+   changes.
+   **Mail goes out as the account's primary address**, the sign-in address
+   on a personal account (see 0), not an `@outlook.com` alias. When that
+   address's domain does not authorize Outlook's servers, receivers may
+   score it as spoofed.
 2. **Auth signals.** `extract_auth_pass` trusts only Google's
    `Authentication-Results`, so Outlook rows get `NULL` (safe: no bypass).
    Microsoft's authserv ids must be captured from real mail first.

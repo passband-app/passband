@@ -1226,7 +1226,10 @@ pub fn default_embed_cache_dir() -> PathBuf {
 /// to `cache_dir`). `model` and `dims` MUST agree with each other and with the
 /// `message_vecs` vec0 `float[N]` in `store/schema.sql` — the store asserts this
 /// at open time, and changing `dims` means resetting the db.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is written by hand so `token` never reaches a `{:?}` (of this, or
+/// of the [`Config`] that holds it).
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EmbedConfig {
     /// fastembed model, written as a full `model_code`. Default:
@@ -1315,6 +1318,33 @@ pub struct EmbedConfig {
     /// header. Secret material, NEVER logged; prefer the env var over
     /// config.toml.
     pub token: Option<String>,
+}
+
+impl std::fmt::Debug for EmbedConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            model,
+            dims,
+            cache_dir,
+            max_chars,
+            max_tokens,
+            backfill_batch,
+            idle_unload_secs,
+            url,
+            token,
+        } = self;
+        f.debug_struct("EmbedConfig")
+            .field("model", model)
+            .field("dims", dims)
+            .field("cache_dir", cache_dir)
+            .field("max_chars", max_chars)
+            .field("max_tokens", max_tokens)
+            .field("backfill_batch", backfill_batch)
+            .field("idle_unload_secs", idle_unload_secs)
+            .field("url", url)
+            .field("token", &token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl Default for EmbedConfig {
@@ -2884,6 +2914,22 @@ pub fn mirror_env_pairs_to_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The embedding service's bearer token is secret material: no debug
+    /// print of the embed section, or of the whole config, carries it.
+    #[test]
+    fn the_embed_token_never_reaches_a_debug_print() {
+        let mut config = Config::default();
+        config.embed.url = Some("http://squelch-embed:8850".into());
+        config.embed.token = Some("s3cret-embed-token-value".into());
+        for shown in [format!("{:?}", config.embed), format!("{config:?}")] {
+            assert!(!shown.contains("s3cret"), "{shown}");
+            assert!(shown.contains("<redacted>"), "{shown}");
+            assert!(shown.contains("squelch-embed:8850"), "{shown}");
+        }
+        config.embed.token = None;
+        assert!(format!("{:?}", config.embed).contains("token: None"));
+    }
     use std::sync::Mutex;
 
     /// Tests that touch process-wide env must not run concurrently.

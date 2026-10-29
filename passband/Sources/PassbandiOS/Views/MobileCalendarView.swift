@@ -183,15 +183,17 @@ struct MobileCalendarView: View {
             MobileEventPage(id: route.id)
         }
         // A HIT FROM SEARCH (MobileSearchView's Events block): the store has
-        // turned to its day (`openCalendarSearchHit`) and named the item in
-        // `calendarMonthItem`, the Mac's open detail, which the phone reads as
-        // a one-shot ask: the day's hours, and the detail pushed over them.
-        // Moving the place is what fetches that month, so the page finds the
-        // row once the feed lands. `initial` because the tab may mount on it.
+        // turned to its day and named the item in `calendarSearchOpen`, a
+        // one-shot ask written only by `openCalendarSearchHit`: the day's
+        // hours, and the detail pushed over them. NOT `calendarMonthItem`,
+        // which every save also sets (`landEvent`), so reading it pushed a
+        // second page after each edit. Moving the place is what fetches that
+        // month, so the page finds the row once the feed lands. `initial`
+        // because the tab may mount on it.
         .navigationDestination(item: $searched) { id in MobileEventPage(id: id) }
-        .onChange(of: store.calendarMonthItem, initial: true) { _, id in
+        .onChange(of: store.calendarSearchOpen, initial: true) { _, id in
             guard let id else { return }
-            store.calendarMonthItem = nil
+            store.calendarSearchOpen = nil
             mode = .day
             searched = id
         }

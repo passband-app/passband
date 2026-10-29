@@ -810,6 +810,11 @@ final class AppStore {
     /// showing. Escape closes them in that order (`calendarMonthBack`).
     var calendarDayOpen = false
     var calendarMonthItem: String?
+    /// A search hit to open, ONE SHOT (the phone's Events block). Written only
+    /// by `openCalendarSearchHit` and cleared by the phone's calendar as it
+    /// pushes the detail. Its own field because `calendarMonthItem` is also set
+    /// by every event save (`landEvent`), which must not push a page.
+    var calendarSearchOpen: String?
     /// The connect card, while it is up. Its own property, apart from the
     /// feed: `modalOverlayOpen` reads it, and the whole shell reads that.
     var calendarConnectAsk: CalendarConnectAsk?

@@ -118,7 +118,9 @@ enum Lane: String, Sendable {
         // Every tool this platform has: the help tools are the Mac's alone
         // (see `AgentTools.Tool.isAvailable`).
         case .chat: Set(AgentTools.Tool.allCases.filter(\.isAvailable).map(\.rawValue))
-        case .search: Set(Self.searchTools.map(\.rawValue))
+        // Filtered by platform too: the phone has no `search_calendar`, and a
+        // lane offered a tool its dispatch refuses fails every call to it.
+        case .search: Set(Self.searchTools.filter(\.isAvailable).map(\.rawValue))
         }
     }
 

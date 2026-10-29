@@ -311,6 +311,9 @@ extension AppStore {
         guard activeView == .calendar else { return }
         if !calendarMode.isGrid { setCalendarMode(.month) }
         selectCalendarItem(item.id, on: CalendarSearch.day(item, calendar: .current), now: now)
+        #if os(iOS)
+            calendarSearchOpen = item.id
+        #endif
     }
 
     /// Escape on the month or the week: closes the item's detail, then (the

@@ -320,6 +320,33 @@ pub(super) struct Candidate {
     received_at: DateTime<Utc>,
 }
 
+/// The query vector for a HYBRID search, or `None` to run it keyword-only.
+///
+/// AN EMBED ERROR IS AN ABSENT EMBEDDER here, not a failed search. Locally an
+/// embedder that built effectively never fails; the shared embedding service
+/// fails on any network blip, a restart, or a full queue, and a search that
+/// 500s over that is worse than one that answers from the keyword leg it
+/// would have used before the embedder attached. `semantic_search` is the
+/// exception and keeps propagating: it has nothing to degrade to.
+///
+/// The instruction is the QUERY side of BGE's asymmetry; the corpus vectors
+/// were embedded without it, on purpose.
+fn query_embed_or_degrade(embedder: &dyn crate::embed::Embedder, query: &str) -> Option<Vec<f32>> {
+    match embedder.embed(&crate::embed::query_embed_text(query)) {
+        Ok(qvec) => Some(qvec),
+        Err(e) => {
+            query_embed_degraded(&e);
+            None
+        }
+    }
+}
+
+/// The one line a degraded hybrid search leaves. The error and nothing else:
+/// never the query, which is the reader's words.
+fn query_embed_degraded(e: &CoreError) {
+    eprintln!("squelch: query embed failed ({e}); this search is keyword-only");
+}
+
 /// The RRF smoothing constant (the standard 60): how far down a list a hit can
 /// sit before its vote stops mattering much.
 const RRF_K: f32 = 60.0;
@@ -643,7 +670,17 @@ impl SqliteStore {
                 }
                 return Ok(ExternalLeg::fixed(Vec::new()));
             };
-            let qvec = embedder.embed(&crate::embed::query_embed_text(text))?;
+            let qvec = match embedder.embed(&crate::embed::query_embed_text(text)) {
+                Ok(qvec) => qvec,
+                // Hybrid degrades the way it does with no embedder; the vector
+                // leg alone has nothing to fall back to. See
+                // `query_embed_or_degrade`.
+                Err(e) if !required => {
+                    query_embed_degraded(&e);
+                    return Ok(ExternalLeg::fixed(Vec::new()));
+                }
+                Err(e) => return Err(e),
+            };
             Ok(ExternalLeg::fixed(self.nearest_readable(
                 account_id,
                 &qvec,
@@ -1127,12 +1164,13 @@ impl SqliteStore {
         snippet_range: std::ops::Range<usize>,
         k: usize,
     ) -> Result<(Vec<LeggedHit>, bool)> {
-        // No embedder (e.g. before the background attach) => keyword-only.
-        let vec_hits: Vec<Candidate> = match self.embedder() {
-            Some(embedder) => {
-                // The instruction is the QUERY side of BGE's asymmetry; the
-                // corpus vectors were embedded without it, on purpose.
-                let qvec = embedder.embed(&crate::embed::query_embed_text(query_text))?;
+        // No embedder (e.g. before the background attach), or one that failed
+        // on this query => keyword-only.
+        let qvec = self
+            .embedder()
+            .and_then(|embedder| query_embed_or_degrade(embedder.as_ref(), query_text));
+        let vec_hits: Vec<Candidate> = match qvec {
+            Some(qvec) => {
                 // sqlite-vec caps one nearest-neighbor query at 4096. For the
                 // human door, which pages as deep as it likes, keyword recall
                 // keeps expanding beyond the semantic window.

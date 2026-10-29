@@ -2683,3 +2683,95 @@ fn to_never_matches_a_bcc_on_received_mail() {
         .0;
     assert_eq!(ids(&hybrid), HashSet::from([mine]), "own Bcc still matches");
 }
+
+/// An embedder that is attached and fails every call, which is what the shared
+/// embedding service looks like from a search while it is down or full.
+struct DownEmbedder;
+
+impl crate::embed::Embedder for DownEmbedder {
+    fn embed(&self, _text: &str) -> crate::error::Result<Vec<f32>> {
+        Err(CoreError::Other(anyhow::anyhow!(
+            "embedding service: HTTP 503"
+        )))
+    }
+    fn dims(&self) -> usize {
+        VEC_DIMS
+    }
+}
+
+/// docs/EMBED-SERVICE.md §3: an embed ERROR in a hybrid search is an absent
+/// embedder, keyword results and no 500, on both doors. A semantic-only search
+/// has no keyword leg to fall back to and still fails.
+#[test]
+fn hybrid_search_degrades_to_keyword_when_the_embedder_errors() {
+    use crate::store::ExternalSearchMode;
+
+    let (store, acct) = store_with_embedder(Arc::new(DownEmbedder));
+    let id = triaged(acct, "g-down", "t-down")
+        .subject("osprey migration notes")
+        .body("the ospreys left early this year")
+        .importance(60)
+        .tier(Tier::Signal)
+        .seed(&store);
+    // Readable on the agent door too: an assessment that allowed it.
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO agent_message_state(account_id,message_id,content_snapshot,access)
+             VALUES(?1,?2,'{}','allowed')",
+            params![acct, id],
+        )
+        .unwrap();
+
+    let (hits, _) = store
+        .hybrid_search(
+            acct,
+            "osprey",
+            &SearchFilter::default(),
+            SearchSort::Recent,
+            false,
+            10,
+        )
+        .expect("a failed query embed must not fail the search");
+    assert_eq!(hits.iter().map(|h| h.id).collect::<Vec<_>>(), vec![id]);
+
+    let external = store
+        .external_search_filtered(
+            acct,
+            "osprey",
+            &SearchFilter::default(),
+            SearchSort::Recent,
+            ExternalSearchMode::Hybrid,
+            10,
+        )
+        .expect("nor the agent door's hybrid search");
+
+    assert_eq!(external.iter().map(|h| h.id).collect::<Vec<_>>(), vec![id]);
+
+    assert!(
+        store
+            .semantic_search_hits(
+                acct,
+                "osprey",
+                &SearchFilter::default(),
+                SearchSort::Recent,
+                false,
+                10,
+            )
+            .is_err(),
+        "semantic-only keeps propagating"
+    );
+    assert!(
+        store
+            .external_search_filtered(
+                acct,
+                "osprey",
+                &SearchFilter::default(),
+                SearchSort::Recent,
+                ExternalSearchMode::Semantic,
+                10,
+            )
+            .is_err()
+    );
+}

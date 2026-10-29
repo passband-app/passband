@@ -691,6 +691,7 @@ final class AppStore {
     private func noteStats() {
         let open = CalendarGate.pageAvailable(timeline: stats?.timeline, feature: hasFeature(.calendar))
         if open != calendarPageAvailable { calendarPageAvailable = open }
+        warmCalendarIfDue()
         let email = stats?.account_email
         if email != accountEmail { accountEmail = email }
         let spam = stats?.spam
@@ -745,7 +746,9 @@ final class AppStore {
     /// describes the one just left; anything that must not mix two accounts
     /// (the calendar grant and its consent link, `calendarAccess`) reads
     /// `stats` only while this is the live epoch.
-    var statsEpoch: Int?
+    var statsEpoch: Int? {
+        didSet { warmCalendarIfDue() }
+    }
     var lastRefresh: Date? {
         // `derive` reads only whether there has been one (`daemonDown`).
         didSet { if (oldValue == nil) != (lastRefresh == nil) { noteSyncStatus() } }
@@ -799,6 +802,10 @@ final class AppStore {
     /// A load has finished at least once (success or failure) for this
     /// account, so an empty feed can be told from one still on its way.
     var calendarLoaded = false
+    /// The account whose calendar was last warmed (`warmCalendarIfDue`):
+    /// its saved feed shown and a fresh one asked for, once per account per
+    /// session. Cleared with the rest of the page's state.
+    var calendarWarmedFor: UUID?
     /// Agenda or month, and where the month is. Kept here, not in the page,
     /// for the session: the page is unmounted every time you leave it, and
     /// coming back should land where you were. `calendarPlace` nil is today.
@@ -2419,6 +2426,8 @@ final class AppStore {
         }
         await AccountManager.shared.remove(id)
         boardSnapshots[id] = nil
+        // The saved calendar is the account's, and goes with it.
+        await CalendarDisk.shared.forget(id)
         // The saved headline can name people and plans from the mailbox just
         // forgotten. It is keyed by board, so it could never show for another
         // account, but it should not outlive the account either.

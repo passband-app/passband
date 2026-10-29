@@ -89,6 +89,14 @@ run_suite calendar-search \
   Sources/Passband/Lib/CalendarSearch.swift \
   Tests/CalendarSearchTests.swift
 
+# The calendar's disk cache: a saved feed comes back whole for its account
+# only, a file that will not read is dropped, and forget deletes it.
+run_suite calendar-disk \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/CalendarDisk.swift \
+  Tests/CalendarDiskTests.swift
+
 # The month view's arithmetic: the grid's days in the user's calendar, what
 # each cell lists and what folds into "+N more", spans and their lanes, the
 # unlikely counts, the day column's hours (the night cap, 7am, past midnight,

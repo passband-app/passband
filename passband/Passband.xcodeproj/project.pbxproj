@@ -83,6 +83,7 @@
 		22E02ADE42C027FF43AC6665 /* AttachmentStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15D14DE02E72E63FE53D5C8D /* AttachmentStrip.swift */; };
 		2305ADF476A30E034D2EC27C /* DraftSaver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06A50E65F84872DFA0504B96 /* DraftSaver.swift */; };
 		231B88B449E171FE30F25D07 /* AuthCode.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB5FEFF987265DA1E7F85007 /* AuthCode.swift */; };
+		2340DCA0B3EC78CC786121E6 /* CalendarDisk.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1CF509A231CD32CD9465772 /* CalendarDisk.swift */; };
 		240B5441D4F292BDC77DDD62 /* CalendarMarks.swift in Sources */ = {isa = PBXBuildFile; fileRef = B60D343AD05DE659303B195E /* CalendarMarks.swift */; };
 		24AF68BF417C51D26EB40ED6 /* SyncStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DAC2EA79665D763DD36958D /* SyncStatus.swift */; };
 		24B9C76ED25930D29752DBC9 /* ReleaseVignettes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20784C558DBC1E921E560D2E /* ReleaseVignettes.swift */; };
@@ -431,6 +432,7 @@
 		C03F06DC880CF67A2908B53A /* UnsubscribeViolationNotice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 321D0FA67DD2EC2D6F98D140 /* UnsubscribeViolationNotice.swift */; };
 		C0A7430CA6A5C39AB995DD4E /* NotificationIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88151BD4CF9D97EE43150B72 /* NotificationIcon.swift */; };
 		C14EABCB7D1F6C3C4B800311 /* Markdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE74212A3CE62E8F28EC8D7E /* Markdown.swift */; };
+		C18770528FEE3E791BCC3EFB /* CalendarDisk.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1CF509A231CD32CD9465772 /* CalendarDisk.swift */; };
 		C1D1665A922C1E5430CAFF76 /* SharePanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8F60C8D4A9145D5DD96DC2A /* SharePanel.swift */; };
 		C208912136BEEE63FE2DBF28 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BE1E84810E523707C4E2CC5 /* SettingsView.swift */; };
 		C2102B9052FF6E97DAAA2AB4 /* ImageProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39D5C019641DC37B55D7D922 /* ImageProxy.swift */; };
@@ -880,6 +882,7 @@
 		DF4D80C15004E528E3B46CFD /* SenderAvatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SenderAvatar.swift; sourceTree = "<group>"; };
 		E076DAB13B2768EAD01C88F3 /* CompositionSummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompositionSummary.swift; sourceTree = "<group>"; };
 		E1C033DDA02DD344F437F943 /* Concurrency.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Concurrency.swift; sourceTree = "<group>"; };
+		E1CF509A231CD32CD9465772 /* CalendarDisk.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalendarDisk.swift; sourceTree = "<group>"; };
 		E28B87131A6A21C97915D758 /* WhatsNewWalk.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatsNewWalk.swift; sourceTree = "<group>"; };
 		E4BFB7F8DEBF73425B2ED67C /* HiddenFeatures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HiddenFeatures.swift; sourceTree = "<group>"; };
 		E4C2C545E14D926E28E48DE6 /* SenderIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SenderIdentity.swift; sourceTree = "<group>"; };
@@ -1189,6 +1192,7 @@
 				9369773169CED1C1EFD48EB0 /* AttachmentFiles.swift */,
 				BE85FBF58B14F2DC27FC16FB /* AttachmentThumbs.swift */,
 				F3B428F6536347775B3EA5DC /* Badge.swift */,
+				E1CF509A231CD32CD9465772 /* CalendarDisk.swift */,
 				1B9D79CC76B3D485EB9AE5B6 /* CalendarStore.swift */,
 				41BFA30FC9B1A10CD0FB94E3 /* ComposeAttach.swift */,
 				30842FA755A887486F228A44 /* ComposeState.swift */,
@@ -1623,6 +1627,7 @@
 				32EB421188805BCCD25DFA71 /* CalendarColor.swift in Sources */,
 				B00C4005F970F338614BAF8C /* CalendarConnectCard.swift in Sources */,
 				DA3413DA80EBFB2717926DCE /* CalendarDetail.swift in Sources */,
+				C18770528FEE3E791BCC3EFB /* CalendarDisk.swift in Sources */,
 				0985F82E82262D75DAD4A857 /* CalendarEventEditor.swift in Sources */,
 				A172DC7A574B508E1B91152E /* CalendarEventPane.swift in Sources */,
 				AA943FA80D1A16355F794F49 /* CalendarMarks.swift in Sources */,
@@ -1893,6 +1898,7 @@
 				1339D6DF9B8F7D622A0D9F17 /* CalendarColor.swift in Sources */,
 				3CDDFF0122107A439FA384A2 /* CalendarConnectCard.swift in Sources */,
 				983BAB15E56877F53331F744 /* CalendarDetail.swift in Sources */,
+				2340DCA0B3EC78CC786121E6 /* CalendarDisk.swift in Sources */,
 				1B83207DE8310AE4C42A5753 /* CalendarEventEditor.swift in Sources */,
 				184050DE6C81DF4550E804C4 /* CalendarEventPane.swift in Sources */,
 				240B5441D4F292BDC77DDD62 /* CalendarMarks.swift in Sources */,

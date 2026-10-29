@@ -1140,6 +1140,7 @@ async fn settle_recovered(
     let sent = SentRef {
         id: Some(gmail_id),
         thread_id: None,
+        warning: None,
     };
     let fired = Fire {
         id: row.id,

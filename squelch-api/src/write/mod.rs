@@ -9,7 +9,9 @@
 //! decided by its `accounts.provider` row (`handlers::write_client`).
 
 pub mod gmail;
+pub mod imap;
 pub mod mime;
+pub mod smtp;
 
 /// An error from a write operation: deliberately coarse and free of any
 /// token/body content.
@@ -80,6 +82,10 @@ pub struct ParentHeaders {
 pub struct SentRef {
     pub id: Option<String>,
     pub thread_id: Option<String>,
+    /// Something the sender should know about a send that DID go out: an
+    /// IMAP send whose copy could not be saved to Sent. Always `None` from
+    /// Gmail, which files its own.
+    pub warning: Option<String>,
 }
 
 /// One `format=raw` message as Gmail returns it: the base64url RFC822 body plus

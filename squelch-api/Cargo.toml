@@ -71,6 +71,21 @@ mail-parser = { workspace = true }
 # Implementing squelch-core's `AgentMailer` over the send pipeline
 # (src/agent_write.rs), and a stub CredentialStore in write-client tests.
 async-trait = { workspace = true }
+# THE IMAP WRITER's SMTP half (src/write/smtp.rs, issue #575 phase 3). lettre
+# for the PROTOCOL only (reply parsing, AUTH encoding, dot-stuffing): default
+# features off (they pull native-tls, the message builder and a pool), and no
+# TLS feature at all. The socket and TLS are ours, made under squelch-core's
+# policy (`imap::tls_client_config`) and handed to lettre already secured, so
+# SMTP trusts exactly what IMAP does and STARTTLS is done without lettre's
+# buffered reader (a response injected before the handshake is never read).
+# No `tracing` feature: it would log the AUTH exchange. MAIL/RCPT/DATA are
+# driven one by one, so the moment a send turns ambiguous (after DATA) is ours.
+lettre = { version = "0.11.23", default-features = false, features = ["smtp-transport", "tokio1"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+# The IMAP writer's half: APPEND to Sent and the exact Message-ID look, on a
+# session squelch-core opens (`ImapSource::open_writer_session`). The same
+# version and features as squelch-core's.
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
 
 [dev-dependencies]
 http-body-util = "0.1"

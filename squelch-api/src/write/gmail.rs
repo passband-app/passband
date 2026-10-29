@@ -357,6 +357,7 @@ impl MailWriter for GmailWriteClient {
         Ok(SentRef {
             id: v["id"].as_str().map(str::to_string),
             thread_id: v["threadId"].as_str().map(str::to_string),
+            warning: None,
         })
     }
 

@@ -1296,6 +1296,25 @@ pub struct EmbedConfig {
     /// not at 5. Anything at or above the ten-minute default is unaffected by
     /// the rounding.
     pub idle_unload_secs: u64,
+    /// Base URL of the shared per-node embedding service
+    /// (docs/EMBED-SERVICE.md), e.g. `http://squelch-embed:8850`. Env:
+    /// `SQUELCH_EMBED_URL`, which the warden renders on hosted tenants.
+    ///
+    /// THIS IS THE WHOLE SWITCH, and it is exclusive. `None` (the default, and
+    /// every self-hosted daemon) embeds in-process exactly as before. `Some`
+    /// sends text to the service and builds NO local ONNX session, ever: not
+    /// at startup, not as a fallback when the service is down. A daemon that
+    /// quietly loaded a local model whenever the service blinked would be a
+    /// pod quietly costing the 300-500 MB this exists to remove. With a URL,
+    /// `model`, `dims` and `max_tokens` must still equal the service's (they
+    /// decide which vector space the store is in) and a disagreement refuses
+    /// to build the embedder; `cache_dir` and `idle_unload_secs` are unused.
+    pub url: Option<String>,
+    /// Bearer token presented to the embedding service. Env:
+    /// `SQUELCH_EMBED_TOKEN`. Optional: absent sends no `Authorization`
+    /// header. Secret material, NEVER logged; prefer the env var over
+    /// config.toml.
+    pub token: Option<String>,
 }
 
 impl Default for EmbedConfig {
@@ -1308,6 +1327,8 @@ impl Default for EmbedConfig {
             max_tokens: crate::embed::DEFAULT_EMBED_MAX_TOKENS,
             backfill_batch: 8,
             idle_unload_secs: 600,
+            url: None,
+            token: None,
         }
     }
 }
@@ -2458,6 +2479,13 @@ impl Config {
             // Same rule again: an exported-but-empty var leaves the Google
             // button off the page rather than rendering one that points at "".
             ("SQUELCH_CONSOLE_SSO_URL", &mut self.console.sso_url),
+            // ---- The shared embedding service ------------------------------
+            // Same rule again, and here it decides where the model runs: an
+            // exported-but-empty URL must leave the daemon embedding in-process
+            // rather than pointing it at "" and building no embedder at all.
+            // The token is never echoed anywhere.
+            ("SQUELCH_EMBED_URL", &mut self.embed.url),
+            ("SQUELCH_EMBED_TOKEN", &mut self.embed.token),
         ] {
             if let Ok(v) = std::env::var(name) {
                 let v = v.trim();
@@ -3604,6 +3632,50 @@ archive_access_daily_cap = 9
         assert_eq!(c.embed.idle_unload_secs, 600, "blank is unset, not zero");
         unsafe {
             std::env::remove_var("SQUELCH_EMBED_IDLE_UNLOAD_SECS");
+        }
+    }
+
+    /// The daemon half of the warden's `SQUELCH_WARDEN_EMBED_URL`: the two
+    /// variables a hosted pod is rendered with. Absent is in-process embedding,
+    /// which is self-host and every daemon before this existed.
+    #[test]
+    fn env_names_the_embed_service() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let c = Config::default();
+        assert!(c.embed.url.is_none(), "no URL => local embedder");
+        assert!(c.embed.token.is_none());
+
+        // SAFETY: guarded by ENV_LOCK so no other test reads env concurrently.
+        unsafe {
+            std::env::set_var("SQUELCH_EMBED_URL", "  http://squelch-embed:8850\n");
+            std::env::set_var("SQUELCH_EMBED_TOKEN", "s3cret");
+        }
+        let mut c: Config = toml::from_str("[embed]\nurl = \"http://from-file:8850\"\n").unwrap();
+        assert_eq!(c.embed.url.as_deref(), Some("http://from-file:8850"));
+        c.apply_env_overrides();
+        assert_eq!(c.embed.url.as_deref(), Some("http://squelch-embed:8850"));
+        assert_eq!(c.embed.token.as_deref(), Some("s3cret"));
+
+        // Exported but blank is "unset": it must neither clear a configured URL
+        // nor turn a self-hosted daemon into one with no embedder.
+        for blank in ["", "   ", "\n\t "] {
+            unsafe {
+                std::env::set_var("SQUELCH_EMBED_URL", blank);
+                std::env::set_var("SQUELCH_EMBED_TOKEN", blank);
+            }
+            let mut c = Config::default();
+            c.apply_env_overrides();
+            assert!(c.embed.url.is_none(), "{blank:?}");
+            assert!(c.embed.token.is_none(), "{blank:?}");
+
+            let mut c: Config =
+                toml::from_str("[embed]\nurl = \"http://from-file:8850\"\n").unwrap();
+            c.apply_env_overrides();
+            assert_eq!(c.embed.url.as_deref(), Some("http://from-file:8850"));
+        }
+        unsafe {
+            std::env::remove_var("SQUELCH_EMBED_URL");
+            std::env::remove_var("SQUELCH_EMBED_TOKEN");
         }
     }
 

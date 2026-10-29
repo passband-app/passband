@@ -3,6 +3,9 @@
 //! SECURITY INVARIANT: sealed (auth/2FA) content is NEVER embedded. The gate is
 //! the store's embed-at-write path (`sensitivity == Normal`), not this module —
 //! sealed text is structurally absent from the vector space. See docs/SECURITY.md.
+//! That holds for [`RemoteEmbedder`] exactly as for the local ones: it is handed
+//! only what that gate already let through, so sealed text never reaches the
+//! wire either.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -12,9 +15,11 @@ use crate::text::truncate_chars;
 
 mod fastembed_impl;
 mod lazy;
+mod remote;
 
 pub use fastembed_impl::{DEFAULT_MODEL_CODE, FastEmbedder};
 pub use lazy::{LazyEmbedder, ReapOutcome};
+pub use remote::{MAX_RETRY_AFTER, RemoteEmbedError, RemoteEmbedder, remote_failure};
 
 /// Turns text into a fixed-dimension embedding vector. CPU-bound; callers run it
 /// under `spawn_blocking` so ingest never stalls on it. `dims()` MUST match the

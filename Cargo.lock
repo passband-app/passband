@@ -4846,6 +4846,7 @@ dependencies = [
  "sha2 0.10.9",
  "socket2",
  "sqlite-vec",
+ "squelch-embed",
  "squelch-httpauth",
  "thiserror 2.0.21",
  "tiny_http",

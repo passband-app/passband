@@ -5627,10 +5627,17 @@ async fn finish_send(
             }
             // A send with no thread of its own — a cold send, or a forward —
             // falls back to the thread Gmail just created, so the client can
-            // open what it just sent.
+            // open what it just sent. An IMAP send names no thread (ingest
+            // threads it by its headers), so there it is the echo's.
+            let thread_id = match (thread_id.or(sent.thread_id), echo_message_id) {
+                (None, Some(local)) if state.mail_provider.get() == Some(&MailProvider::Imap) => {
+                    resolve_target(state, local).await.ok().map(|m| m.thread_id)
+                }
+                (t, _) => t,
+            };
             Ok(SendOutcome::Sent {
                 echo_message_id,
-                thread_id: thread_id.or(sent.thread_id),
+                thread_id,
             })
         }
         Err(e) => {

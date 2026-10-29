@@ -1,0 +1,26 @@
+[package]
+name = "squelch-embed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# One crate, two halves. The `protocol` module (wire types and the constants both
+# ends must agree on) is always built and depends on serde alone, so squelch-core
+# links it with `default-features = false` and gains nothing heavy. The `server`
+# feature is the shared per-node embedding service (docs/EMBED-SERVICE.md): it
+# links fastembed and axum and, deliberately, NOT squelch-core, so the binary every
+# hosted tenant's mail text flows through opens no store, holds no credential and
+# has no Gmail or LLM client to call.
+[features]
+default = ["server"]
+server = []
+
+[lib]
+name = "squelch_embed"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

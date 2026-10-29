@@ -4858,6 +4858,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "squelch-embed"
+version = "0.0.14"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "squelch-httpauth"
 version = "0.0.14"
 dependencies = [

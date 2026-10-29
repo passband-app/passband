@@ -2442,6 +2442,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
                 "description",
                 "guests_truncated",
                 "organizer_unreadable",
+                "from_gmail",
             ]
         );
         assert_eq!(
@@ -2481,7 +2482,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
     {
         let upgraded = SqliteStore::open(&path).unwrap();
         let conn = upgraded.lock().unwrap();
-        assert_eq!(columns(&conn, "calendar_events").len(), 22);
+        assert_eq!(columns(&conn, "calendar_events").len(), 23);
         assert_eq!(columns(&conn, "calendar_event_guests").len(), 9);
         assert!(index_exists(&conn));
         let mail: i64 = conn
@@ -2528,7 +2529,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
     {
         let conn = reopened.lock().unwrap();
         assert_eq!(columns(&conn, "calendar_calendars").len(), 15);
-        assert_eq!(columns(&conn, "calendar_events").len(), 22);
+        assert_eq!(columns(&conn, "calendar_events").len(), 23);
         // A store from before guests was synced one attendee at a time: its
         // tokens are forgotten, so the next pass reads every calendar in full
         // with the new parameters.
@@ -2580,7 +2581,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
     let reopened = SqliteStore::open(&path).unwrap();
     {
         let conn = reopened.lock().unwrap();
-        assert_eq!(columns(&conn, "calendar_events").len(), 22);
+        assert_eq!(columns(&conn, "calendar_events").len(), 23);
         let sync: (Option<String>, Option<String>) = conn
             .query_row(
                 "SELECT sync_token, full_synced_at FROM calendar_calendars",
@@ -2592,6 +2593,37 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
             sync,
             (None, None),
             "the organizer mark alone forgets the tokens"
+        );
+    }
+    drop(reopened);
+    // And one from before the Gmail mark: that column alone forgets the
+    // tokens too, so the next pass rereads with `eventType` in the mask.
+    let reopened = SqliteStore::open(&path).unwrap();
+    reopened
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "ALTER TABLE calendar_events DROP COLUMN from_gmail;
+             UPDATE calendar_calendars SET sync_token='minted-before-gmail',
+                    full_synced_at='2026-10-03T00:00:00+00:00';",
+        )
+        .unwrap();
+    drop(reopened);
+    let reopened = SqliteStore::open(&path).unwrap();
+    {
+        let conn = reopened.lock().unwrap();
+        assert_eq!(columns(&conn, "calendar_events").len(), 23);
+        let sync: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT sync_token, full_synced_at FROM calendar_calendars",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            sync,
+            (None, None),
+            "the Gmail mark alone forgets the tokens"
         );
     }
     drop(reopened);
@@ -2628,6 +2660,7 @@ fn an_events_guests_are_stored_with_it_and_go_with_it() {
         start_timezone: None,
         organizer_email: None,
         organizer_unreadable: false,
+        from_gmail: false,
         organizer_self: true,
         self_response: None,
         transparent: false,
@@ -2763,6 +2796,116 @@ fn an_events_guests_are_stored_with_it_and_go_with_it() {
         })
         .unwrap();
     assert_eq!(left, 0);
+}
+
+/// The card's places: a location wants one only when it is long, shown and
+/// not yet answered under the current prompt; upcoming first; one answer per
+/// location text, scoped by account; pruned once no event holds the text.
+#[test]
+fn calendar_places_are_pending_stored_and_pruned_by_location() {
+    use crate::gcal::{CalendarMeta, EventItem, EventRow, PRIMARY};
+    use crate::triage::ghost::EventTime;
+    let (store, acct) = store();
+    let other = store.ensure_account("other@example.com").unwrap();
+    let now: DateTime<Utc> = "2026-10-05T12:00:00Z".parse().unwrap();
+    let tock = "Dingles Public House, Tock is now part of the Resy network. Explore more";
+    let soon = "Harbor Tavern, 12 Water St, Portland. Book again on our app today";
+    let past = "Old Spot, 1 Elm St. This venue now takes bookings through a new app";
+    let event = |id: &str, location: Option<&str>, start: &str| EventRow {
+        event_id: id.into(),
+        ical_uid: None,
+        tentative: false,
+        summary: Some("Dinner".into()),
+        location: location.map(str::to_string),
+        start: EventTime::parse(start).unwrap(),
+        end: None,
+        start_timezone: None,
+        organizer_email: None,
+        organizer_unreadable: false,
+        from_gmail: false,
+        organizer_self: true,
+        self_response: None,
+        transparent: false,
+        html_link: None,
+        updated_at: None,
+        color_id: None,
+        description: None,
+        guests: Vec::new(),
+        guests_truncated: false,
+    };
+    for account in [acct, other] {
+        store
+            .calendar_set_selection(account, &[CalendarMeta::primary_only()])
+            .unwrap();
+    }
+    for row in [
+        event("a", Some(tock), "2026-10-28T20:15:00-04:00"),
+        event("b", Some(tock), "2026-11-04T20:15:00-04:00"),
+        event("c", Some(soon), "2026-10-06T19:00:00-04:00"),
+        event("d", Some(past), "2026-09-01T19:00:00-04:00"),
+        event("e", Some("Zoom"), "2026-10-07T19:00:00-04:00"),
+        event("f", None, "2026-10-08T19:00:00-04:00"),
+    ] {
+        store.calendar_put_event(acct, PRIMARY, &row).unwrap();
+    }
+    // One per text, the soonest upcoming first, then the past; a short
+    // location makes no call.
+    assert_eq!(
+        store.calendar_places_pending(acct, now, 10).unwrap(),
+        vec![soon.to_string(), tock.to_string(), past.to_string()]
+    );
+    assert_eq!(
+        store.calendar_places_pending(acct, now, 1).unwrap(),
+        vec![soon]
+    );
+    assert!(
+        store
+            .calendar_places_pending(other, now, 10)
+            .unwrap()
+            .is_empty()
+    );
+
+    let dingles = crate::gcal::place::Place {
+        name: Some("Dingles Public House".to_string()),
+        address: Some("165 Main St".to_string()),
+    };
+    store
+        .calendar_place_put(acct, tock, Some(&dingles), now)
+        .unwrap();
+    store.calendar_place_put(acct, past, None, now).unwrap();
+    assert_eq!(
+        store.calendar_places_pending(acct, now, 10).unwrap(),
+        vec![soon]
+    );
+    let places = store.calendar_places(acct).unwrap();
+    assert_eq!(places.get(tock), Some(&Some(dingles.clone())));
+    assert_eq!(places.get(past), Some(&None));
+    assert!(store.calendar_places(other).unwrap().is_empty());
+
+    // An answer under an older prompt is served, and asked again.
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE calendar_places SET prompt_version='old' WHERE raw=?1",
+            [tock],
+        )
+        .unwrap();
+    assert_eq!(
+        store.calendar_places_pending(acct, now, 10).unwrap(),
+        vec![soon.to_string(), tock.to_string()]
+    );
+    assert!(store.calendar_places(acct).unwrap().contains_key(tock));
+
+    // Pruned only once no event holds the text.
+    store
+        .calendar_apply_page(acct, PRIMARY, &[EventItem::Remove("a".into())], now)
+        .unwrap();
+    assert_eq!(store.calendar_places_prune(acct).unwrap(), 0);
+    store.calendar_remove_event(acct, PRIMARY, "b").unwrap();
+    store.calendar_remove_event(acct, PRIMARY, "d").unwrap();
+    assert_eq!(store.calendar_places_prune(acct).unwrap(), 2);
+    assert!(store.calendar_places(acct).unwrap().is_empty());
 }
 
 /// The per-connection tuning `set_pragmas` applies on every open, asserted on a
@@ -3212,6 +3355,7 @@ fn calendar_search_index_follows_every_write_and_is_rebuilt_when_stale() {
         updated_at: None,
         color_id: None,
         description: None,
+        from_gmail: false,
         guests: Vec::new(),
         guests_truncated: false,
     };

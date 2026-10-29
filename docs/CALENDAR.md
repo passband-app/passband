@@ -828,6 +828,62 @@ list, Esc closes the place list, then the delete question, then the pane.
 - **Month** (DECIDED: in the first version). The shape of the month: multi-day
   spans for trips and stays, load per day, ghost marks, and a day opens its
   column. Not a wall of truncated titles.
+- **The card's picture** (2026-10-28, `Model/EventVisuals.swift`, rules in
+  `Lib/EventVisualPick.swift`). A strip across the top of the detail card:
+  a photo from the mail behind the event (photo-shaped, not a logo on a flat
+  banner; only while remote images load), else Apple's Look Around of the
+  venue, else a map with a pin, else nothing. The venue is used only when
+  Apple's answer has the place's name. A real event that a ghost was matched
+  to carries that ghost's mail (`AgendaItem.mail`), so Gmail's reservation
+  event shows the reservation email behind it and its photo.
+- **Gmail's own events** (2026-10-28). An event Gmail made from mail
+  (`eventType: fromGmail`) is served with `from_gmail: true`, is never
+  editable (Google refuses the change), and its card names it "added by
+  Gmail". Where Passband owns such events (below), it does not stay.
+- **Passband owns the events mail makes** (2026-10-28, the owner's
+  decision; `gcal/own.rs`, on for every mailbox with the calendar). Gmail's
+  frozen copy beside Passband's ghost is two items for one thing, and gets in
+  the way of Passband running the calendar. So after each calendar pass:
+  - **Adopt.** A Gmail event on the user's PRIMARY calendar that is the
+    user's by every organizer test (`SyncedEvent::users_own`), has no other
+    guests, has not ended, and matches exactly ONE live, undismissed ghost
+    (`own::same_event`: the same start, and the display match's titles or a
+    distinctive word shared across title and place) is replaced. Passband
+    creates its own event (Gmail's title, times, colour and free/busy; the
+    card's cleaned place as one line, its name then its address, or Gmail's
+    location when there is none; the note "Kept up to date by Passband from your
+    mail."; a private extended property naming the ghost) under an id made
+    from the ghost (`passband<ghost>t<created>`, so a create sent twice finds
+    the first), stores it, then deletes Gmail's. If Google refuses that
+    delete, Passband deletes its own again and the ghost is marked `refused`:
+    the pair stays as Gmail made it and is never tried again.
+  - **Keep current.** When what the mail says changes (the ghost's start, its
+    stated or user-corrected end, its place, or a cancellation), Passband
+    patches its event: the new times (the old length kept when the mail gives
+    no end), the new place; a cancellation puts "Canceled: " before the title
+    and shows it as free (undone if the mail un-cancels). The model's end
+    estimate is never written. Only a CHANGE in the mail is written, judged
+    against a fingerprint stored at the last write, so the user's own edit to
+    Passband's event stands until the mail says something new.
+  - **No duplicates.** A Gmail copy that turns up again for an event Passband
+    owns is deleted.
+  - **Let go.** If Passband's event disappears (the user deleted it) or the
+    user dismisses the ghost, the binding is `released`: never adopted again,
+    and any Gmail copy then stays. If the ghost itself goes, the binding is
+    forgotten and the event left alone.
+  - **Never touched:** an invitation from someone else (any other organizer,
+    any other guest), any calendar but the primary one, past events, and a
+    Gmail event no ghost or several ghosts match.
+  - **Bounds.** At most 10 Google writes a pass and 100 a day; a quota answer
+    ends the pass. Every write sends `sendUpdates=none` and is audited under
+    actor `passband-calendar` (`calendar_event_adopt`, `_replace_gmail`,
+    `_adopt_undo`, `_update_from_mail`, `_delete_gmail_copy`), target
+    `calendar:<calendar>/<event>`, detail `ok` or the error kind: never a
+    title or a place. Bindings live in `calendar_owned`.
+  - **Served.** Passband's event carries `passband_owned: true`, and its
+    ghost is matched to it whatever the titles; a ghost is also matched to a
+    Gmail event by `own::same_event`. The card says "kept current by
+    Passband".
 - **Event detail.** Title, time (with "~" on an estimate), place, the
   likelihood reason, and the mail behind it (§9).
 - **iOS.** The agenda replaces the Calendar card in `MobileRecordsView`. The
@@ -1147,7 +1203,13 @@ Read only (slice B). The only writes are the user's own, described under
   `organizer` and `self`, transparency, link and update time. Attachments,
   conference data and what a guest wrote when answering are never sent. The
   description (added in wave 3, which shows
-  it) is laundered and cut to 2000 characters as it is stored.
+  it) is laundered and cut to 2000 characters as it is stored, and Google's
+  own boilerplate on an event it created from mail ("To see detailed
+  information for automatically created events like this one, use the
+  official Google Calendar app.", "This event was created from an email you
+  received in Gmail.") is dropped with the link after it, so such an event
+  shows no notes. A row stored before this is rewritten by the next daily
+  full read.
   `calendarList.list` carries a mask of its own, which since wave 3 includes
   each calendar's `backgroundColor`, `colorId` and `accessRole`.
 - **Window.** 30 days back to 400 days ahead. The first read of a calendar is
@@ -1208,8 +1270,27 @@ Read only (slice B). The only writes are the user's own, described under
   titles are equal after lowercasing and collapsing whitespace, or one contains
   the other. Worked out when the timeline is listed, never stored: it hides a
   duplicate and changes no ghost.
+- **The card's place** (`gcal/place.rs`, 2026-10-28). A booking service
+  often writes its marketing into the location ("Dingles Public House, Tock is
+  now part of the Resy network. Explore even more of our dining network on").
+  After each pass that synced, up to 10 locations longer than 40 characters
+  with no answer yet (upcoming events first) go to the small `notify` model,
+  side by side, which returns the place's `name` (the venue, room or meeting
+  link) and its street `address` when the text gives one. Every word of each
+  must be a word of the location, checked in code; an answer that adds one is
+  not believed and the whole location is kept as the name, with no address.
+  Both empty means the text names no place. Answers are stored per distinct
+  location text in `calendar_places` (so a weekly dinner costs one call),
+  pruned when no event holds the text, redone when `PROMPT_VERSION` changes,
+  billed under `calendar_place`, at most 100 calls a day. The timeline serves
+  it once there is one as `place: {"name", "address", "original"}` on each
+  event: `name` and `address` null where the location gives none (both null:
+  no place), `original` the location it was made from. The card shows the
+  place, falling back to `location`, and the editor keeps reading and writing
+  `location`.
 - **Human door only.** Titles, places, organizers and links never reach an
-  agent route, a log line or a triage prompt. A log names a calendar by its
+  agent route, a log line or a triage prompt. The one exception is the card's
+  place above: the location string alone, to the small model. A log names a calendar by its
   position in the pass, never its id, which is usually an address.
 
 ### Creating and editing events (BUILT in wave 3)
@@ -1631,6 +1712,16 @@ event's location too). No key, no bill, the same on Mac and iOS.
 
 Wave 1's ghosts only ever show. Before a later wave lets one become a real
 event, or lets mail move or delete one, these exist:
+
+("Passband owns the events mail makes" above is the first
+such wave, decided by the owner on 2026-10-28. Where it stands against this
+list: it never notifies and never touches guests; it adopts only from
+authenticated mail, and only an event Gmail itself already added, so it adds
+nothing Gmail had not; the user's dismissal stands in for "this mail is
+wrong" until that exists. It does NOT yet meet the platform rule below: a
+time or place it applies comes from the model's reading of the mail, not an
+iCalendar UID. That is a known gap, bounded by marking rather than deleting
+on cancellation.)
 
 - **Nothing derived from mail may notify.** Since wave 5 a write can make
   Google email an event's guests (`notify: true`). That switch belongs to a

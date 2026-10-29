@@ -302,6 +302,7 @@ enum ProductGuide {
         What is on it:
         - Events guessed from mail (invitations, bookings, plans in a thread), drawn solid, striped or outlined by how likely they are. They need no permission.
         - Real events from Google Calendar, once it is connected, in each calendar's own colour.
+        - Opening an event shows a picture when there is one (a photo from the mail behind it, else Apple's street view or a map of the venue) and its place as the venue's name with the street address under it, tidied from what a booking service wrote. On the iPhone, tapping the place asks whether to open it in Apple Maps or Google Maps.
         - Connecting: the "Connect calendar" card or button opens Google's consent screen. Unticking calendar there leaves the mailbox working and simply connects no calendar.
 
         Views:

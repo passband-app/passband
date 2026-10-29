@@ -860,6 +860,16 @@ run_suite image-trim \
   Sources/Passband/Lib/ImageTrim.swift \
   Tests/ImageTrimTests.swift
 
+# Which picture an event card wears: the photo test, which places are worth
+# asking Apple Maps about, whether Apple's answer is the place named, and the
+# image candidates a message offers. Pure rules; the fetching is
+# Model/EventVisuals.swift.
+run_suite event-visual-pick \
+  Sources/Passband/Lib/HTMLImg.swift \
+  Sources/Passband/Lib/Trackers.swift \
+  Sources/Passband/Lib/EventVisualPick.swift \
+  Tests/EventVisualPickTests.swift
+
 # Run the queue. xargs keeps going past a failed suite and exits 123 if any
 # failed, which set -e turns into this script's exit status.
 xargs -P "$(sysctl -n hw.ncpu)" -L 1 bash -c 'run_one "$@"' _ < "$QUEUE"

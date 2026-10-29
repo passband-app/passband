@@ -69,6 +69,7 @@
 
         func start() {
             guard timer == nil else { return }
+            ReplayIcons.shared.prepare()
             NSEvent.addLocalMonitorForEvents(
                 matching: [.leftMouseDown, .leftMouseUp, .keyDown, .scrollWheel]
             ) { event in
@@ -246,7 +247,8 @@
                 }
                 let start = nodes.count
                 ReplayWireframe.nodes(
-                    root: layer, flipped: view.isFlipped, offset: offset, clip: clip, into: &nodes)
+                    root: layer, flipped: view.isFlipped, offset: offset, clip: clip,
+                    icon: { ReplayIcons.shared.icon(for: $0, size: $1) }, into: &nodes)
                 for n in nodes[start...] where n.kind == .opaque {
                     opaqueRects.append(CGRect(x: n.x, y: n.y, width: n.w, height: n.h))
                 }

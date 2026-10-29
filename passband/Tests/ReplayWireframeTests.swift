@@ -35,6 +35,7 @@ struct ReplayWireframeTests {
         flippedAndUnflippedAgree()
         textWidthsAreQuantized()
         validatorIsClosed()
+        onlyOurOwnImagesPass()
         gzipIsAGzipMember()
 
         if failures > 0 {
@@ -302,6 +303,29 @@ struct ReplayWireframeTests {
         p.waitUntilExit()
         try? FileManager.default.removeItem(at: tmp)
         expect(p.terminationStatus == 0 && out == input, "gunzip opens it")
+    }
+
+    static func onlyOurOwnImagesPass() {
+        // An icon lookup that claims every bitmap is a symbol: what reaches
+        // the wire is the lookup's own picture, never the layer's.
+        let ours = "data:image/png;base64,T1VSUw=="
+        ReplayWireframe.registerImage(ours)
+        let root = tempting()
+        var nodes: [ReplayWireframe.Node] = []
+        ReplayWireframe.nodes(
+            root: root, flipped: true, offset: .zero, clip: root.bounds,
+            icon: { _, _ in ours }, into: &nodes)
+        let icons = nodes.filter { $0.kind == .icon }
+        expect(icons.count == 1 && icons[0].image == ours, "the avatar becomes our icon (got \(icons.count))")
+        let snap = ReplayWireframe.fullSnapshot(
+            nodes, width: 800, height: 600, background: "#1E1E1EFF", timestamp: 1)
+        expect(ReplayWireframe.validate([snap], extra: []), "a frame carrying our registered image passes")
+        expect(!json(nodes).contains("SECRET"), "and still carries no text")
+
+        let theirs: [String: Any] = ["type": "image", "base64": "data:image/png;base64,QVZBVEFS"]
+        expect(!ReplayWireframe.validate([theirs], extra: []), "an image we did not render fails")
+        let jpeg: [String: Any] = ["type": "image", "base64": "data:image/jpeg;base64,T1VSUw=="]
+        expect(!ReplayWireframe.validate([jpeg], extra: []), "nor does any other encoding of it")
     }
 
     static func expect(_ cond: Bool, _ what: String) {

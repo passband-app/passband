@@ -20,16 +20,19 @@
 // read past "is there one". The window's own background is the one exception
 // (dark or light theme, see `backgroundPaint`).
 //
-// It never reads `contents` (the bitmap a layer shows: rendered text, an
-// avatar, an image in a mail), never reads a `CATextLayer`'s `string`, and
+// It never sends `contents` (the bitmap a layer shows: rendered text, an
+// avatar, an image in a mail). A small bitmap may be READ locally by the
+// `icon` hook, which only answers "this is the app's own symbol X" and draws
+// its own copy (see ReplayIcons.swift); otherwise it is a box. It never reads
+// a `CATextLayer`'s `string`, and
 // never descends into a web view (where a mail body renders) or a text field
 // or text view (where a reply or a search is typed): each is one box at the
 // view's own frame. A run of text becomes a bar snapped OUTWARD to an 8pt
 // grid on every edge, so neither its length nor its line count is exact.
 //
 // `ReplayWireframe.validate` checks that on the way out: every String in a
-// frame must be a grey #LLLLLLAA or a word from `closedWords`, or the frame is
-// not sent. It is the same rule as `Analytics.allowedStrings`, applied to a tree.
+// frame must be a grey #LLLLLLAA, a word from `closedWords`, or an image this
+// process rendered itself (`registerImage`), or the frame is not sent. It is the same rule as `Analytics.allowedStrings`, applied to a tree.
 
 import Foundation
 import QuartzCore
@@ -38,7 +41,8 @@ enum ReplayWireframe {
     /// One box on the canvas, in points from the main window's top-left.
     struct Node: Equatable {
         /// `opaque` is a web view or a text field: a box nothing is read inside.
-        enum Kind { case fill, text, image, opaque }
+        /// `icon` is one of the app's own symbols, drawn from our render.
+        enum Kind { case fill, text, image, opaque, icon }
         var x: Int
         var y: Int
         var w: Int
@@ -48,6 +52,24 @@ enum ReplayWireframe {
         var border: String? = nil
         var borderWidth: Int = 0
         var radius: Int = 0
+        /// A data URL from `registerImage`, for `.icon` only.
+        var image: String? = nil
+    }
+
+    /// Answers whether a small bitmap layer is one of the app's own symbols,
+    /// with our render of it as a data URL. Mac only (ReplayIcons); nil
+    /// leaves every bitmap a box.
+    typealias IconLookup = (CALayer, CGSize) -> String?
+
+    /// Every image this process rendered for a replay. The validator passes
+    /// an image string only if it is in here, so no other picture can ride.
+    private static let imageLock = NSLock()
+    nonisolated(unsafe) private static var images: Set<String> = []
+    static func registerImage(_ url: String) {
+        imageLock.withLock { _ = images.insert(url) }
+    }
+    static func isRegistered(_ url: String) -> Bool {
+        imageLock.withLock { images.contains(url) }
     }
 
     /// Text bars snap outward to this grid on all four edges, so a bar says
@@ -73,19 +95,19 @@ enum ReplayWireframe {
     /// canvas points too, so a scroll view's off-screen rows fall away.
     static func nodes(
         root: CALayer, flipped: Bool, offset: CGPoint, clip: CGRect,
-        into out: inout [Node]
+        icon: IconLookup? = nil, into out: inout [Node]
     ) {
         let height = root.bounds.height
         func toCanvas(_ r: CGRect) -> CGRect {
             let y = flipped ? r.minY : height - r.maxY
             return CGRect(x: r.minX + offset.x, y: y + offset.y, width: r.width, height: r.height)
         }
-        walk(root, root: root, clip: clip, toCanvas: toCanvas, into: &out)
+        walk(root, root: root, clip: clip, toCanvas: toCanvas, icon: icon, into: &out)
     }
 
     private static func walk(
         _ layer: CALayer, root: CALayer, clip: CGRect,
-        toCanvas: (CGRect) -> CGRect, into out: inout [Node]
+        toCanvas: (CGRect) -> CGRect, icon: IconLookup?, into out: inout [Node]
     ) {
         guard out.count < nodeCap, !layer.isHidden, layer.opacity > 0.02 else { return }
         let frame = toCanvas(root.convert(layer.bounds, from: layer))
@@ -111,7 +133,7 @@ enum ReplayWireframe {
             // when it masks; otherwise its children are still on the canvas.
             if !layer.masksToBounds {
                 for sub in layer.sublayers ?? [] {
-                    walk(sub, root: root, clip: clip, toCanvas: toCanvas, into: &out)
+                    walk(sub, root: root, clip: clip, toCanvas: toCanvas, icon: icon, into: &out)
                 }
             }
             return
@@ -128,7 +150,7 @@ enum ReplayWireframe {
             let childClip = layer.masksToBounds ? visible : clip
             for sub in layer.sublayers ?? []
             where !NSStringFromClass(type(of: sub)).hasPrefix("CASDF") {
-                walk(sub, root: root, clip: childClip, toCanvas: toCanvas, into: &out)
+                walk(sub, root: root, clip: childClip, toCanvas: toCanvas, icon: icon, into: &out)
             }
             return
         }
@@ -149,9 +171,18 @@ enum ReplayWireframe {
                 out.append(node(box, .fill, fill: panelPaint, radius: radius))
             }
         }
-        // Whatever the layer DRAWS stays unread. Only the fact that it draws
-        // something, and which kind of thing that probably is, comes through.
-        if layer is CATextLayer || (layer.contents != nil && looksLikeText(layer)) {
+        // Whatever the layer DRAWS is never sent. A small bitmap that is
+        // clearly one of the app's own symbols is drawn as OUR copy of it;
+        // anything else is only the fact that it draws something, and which
+        // kind of thing that probably is.
+        if layer.contents != nil, let icon,
+            let url = icon(layer, layer.bounds.size), frame.width == visible.width,
+            frame.height == visible.height
+        {
+            var n = node(visible, .icon)
+            n.image = url
+            out.append(n)
+        } else if layer is CATextLayer || (layer.contents != nil && looksLikeText(layer)) {
             out.append(textBar(visible))
         } else if layer.contents != nil {
             out.append(node(visible, .image, fill: imagePaint, radius: radius))
@@ -159,7 +190,7 @@ enum ReplayWireframe {
 
         let childClip = layer.masksToBounds ? visible : clip
         for sub in layer.sublayers ?? [] {
-            walk(sub, root: root, clip: childClip, toCanvas: toCanvas, into: &out)
+            walk(sub, root: root, clip: childClip, toCanvas: toCanvas, icon: icon, into: &out)
         }
     }
 
@@ -253,6 +284,13 @@ enum ReplayWireframe {
         var children: [[String: Any]] = []
         children.reserveCapacity(nodes.count)
         for (i, n) in nodes.enumerated() {
+            if let image = n.image {
+                children.append([
+                    "id": i + 2, "x": n.x, "y": n.y, "width": n.w, "height": n.h,
+                    "type": "image", "base64": image,
+                ])
+                continue
+            }
             var style: [String: Any] = [:]
             if let fill = n.fill { style["backgroundColor"] = fill }
             if let border = n.border {
@@ -288,13 +326,14 @@ enum ReplayWireframe {
             h.combine(n.h)
             h.combine(n.fill)
             h.combine(n.border)
+            h.combine(n.image)
         }
         return h.finalize()
     }
 
     /// The only words a replay record may carry, besides hex colors and the
     /// screen names `Analytics` already allows (passed in as `extra`).
-    static let closedWords: Set<String> = ["rectangle"]
+    static let closedWords: Set<String> = ["rectangle", "image"]
 
     /// True when every String anywhere in `value` is a grey #LLLLLLAA, a
     /// closed word, or one of `extra`. Anything else (and so anything that
@@ -303,6 +342,7 @@ enum ReplayWireframe {
         switch value {
         case let s as String:
             return closedWords.contains(s) || extra.contains(s) || isHexPaint(s)
+                || (s.hasPrefix("data:image/png;base64,") && isRegistered(s))
         case let d as [String: Any]:
             return d.allSatisfy { closedKeys.contains($0.key) && validate($0.value, extra: extra) }
         case let a as [Any]:
@@ -319,7 +359,7 @@ enum ReplayWireframe {
         "type", "timestamp", "data", "initialOffset", "top", "left", "wireframes",
         "id", "x", "y", "width", "height", "style", "childWireframes",
         "backgroundColor", "borderColor", "borderWidth", "borderRadius",
-        "href", "source", "pointerType",
+        "href", "source", "pointerType", "base64",
     ]
 
     /// #LLLLLLAA, uppercase, with the three channels equal: a grey and

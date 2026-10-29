@@ -26,6 +26,9 @@ mkdir -p "$BUILD"
 # knows that. This is the check; see the script's header for the history.
 echo "==> analytics-lint"
 python3 ./analytics-lint.py
+# Session replay draws only the app's own SF Symbols; a symbol added without
+# rerunning ./replay-icons.py would replay as a grey box.
+python3 ./replay-icons.py --check
 
 QUEUE=$(mktemp)
 trap 'rm -f "$QUEUE"' EXIT

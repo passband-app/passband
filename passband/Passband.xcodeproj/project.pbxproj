@@ -82,6 +82,7 @@
 		2530ADC217749D5FEEFFA4D9 /* DraftSaver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06A50E65F84872DFA0504B96 /* DraftSaver.swift */; };
 		26C5B834CA3DF63D12F9AAC4 /* Avatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC0ADC18AA758296235E8F59 /* Avatar.swift */; };
 		2785F1AA75B655313673E0D0 /* Trackers.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEFA34554013DFB615774309 /* Trackers.swift */; };
+		284EE7EDD583873625C8B085 /* ReplayIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8EDBD974887B881E9A916E6 /* ReplayIcons.swift */; };
 		28FB2FCE96AB7D2BF0794632 /* EventBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D952F37AD4DF7C050902B19 /* EventBanner.swift */; };
 		2AA5CAD1FAD8A6179B733523 /* ScheduledPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 707238A27F067D0A20AAB186 /* ScheduledPreview.swift */; };
 		2AE0CB107FAB86784BE5C0F4 /* Updater.swift in Sources */ = {isa = PBXBuildFile; fileRef = D179CAC9853B13A5FBFD968E /* Updater.swift */; };
@@ -368,6 +369,7 @@
 		AE9F688F49884E6B3BC14D14 /* PracticeProductTour.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AE10FD89ABF645A3F0617E5 /* PracticeProductTour.swift */; };
 		AEC2A5C751D79A22E98CBA4A /* EventBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D952F37AD4DF7C050902B19 /* EventBanner.swift */; };
 		AF6A48690B292EB49959206C /* SenderIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4C2C545E14D926E28E48DE6 /* SenderIdentity.swift */; };
+		AFE41198F5B0061CC79E88F3 /* ReplayIconNames.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7571A52775BE6D8750AFB12E /* ReplayIconNames.swift */; };
 		B00C4005F970F338614BAF8C /* CalendarConnectCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A98F14CACFFA523492B5C673 /* CalendarConnectCard.swift */; };
 		B06F33EA7966A648B985024D /* PageKeys.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7559B204B617E96295740E2D /* PageKeys.swift */; };
 		B0919D77396F03B78D92E19B /* CalendarWrite.swift in Sources */ = {isa = PBXBuildFile; fileRef = 314947157BBF857B28A1D8D6 /* CalendarWrite.swift */; };
@@ -376,6 +378,7 @@
 		B17EE2D75B244234D57E7679 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 78527CBD27E00907F26B9E79 /* Security.framework */; };
 		B1951023107233782B5D5F49 /* UnsubscribeViolations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02FA6E97F384765600B56587 /* UnsubscribeViolations.swift */; };
 		B220A3270FA5DC1638A76085 /* Raster.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4382469FC056D0CD54B22F3 /* Raster.swift */; };
+		B2A2EF0EADDBB3F3E4957DDD /* ReplayIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8EDBD974887B881E9A916E6 /* ReplayIcons.swift */; };
 		B2AB2894B55FCFB6BBDE8AE2 /* MapKitPlaces.swift in Sources */ = {isa = PBXBuildFile; fileRef = 804C8223C341E4978DF39DC5 /* MapKitPlaces.swift */; };
 		B2DCDDC65C633129F7E17471 /* UpdateRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92398A24BE2068AEBF3FA312 /* UpdateRow.swift */; };
 		B2E2414F9A0257E75BC3C7B0 /* UsageSeries.swift in Sources */ = {isa = PBXBuildFile; fileRef = 380A6F03DF41EB8ACAACDBFC /* UsageSeries.swift */; };
@@ -427,6 +430,7 @@
 		C955E0DC78DCABE9CE211463 /* SquelchSceneView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C3BB3E8C5DCB0B058D3D5E2 /* SquelchSceneView.swift */; };
 		C993F0552420432075D2AE54 /* RulePatternSuggestions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 639039C36559D210FBD9A557 /* RulePatternSuggestions.swift */; };
 		C9A5397B0E0FB0E0C891684D /* TestFlightNudgeModal.swift in Sources */ = {isa = PBXBuildFile; fileRef = D078052FD335EF42C0AF9E8F /* TestFlightNudgeModal.swift */; };
+		CAEC4AE0866FDA9E46683BEF /* ReplayIconNames.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7571A52775BE6D8750AFB12E /* ReplayIconNames.swift */; };
 		CB68A75D6FF8CCDEDDFB3D77 /* RecentSearches.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79260771784529100D58EE3E /* RecentSearches.swift */; };
 		CBE4D470D5B20719C4BB6364 /* MailListCursor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FB62F2478B613F47FF918B0 /* MailListCursor.swift */; };
 		CD3533062FC4604164E59532 /* DiscoveryLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FC443D7A43C9C271CEEBAAE /* DiscoveryLayer.swift */; };
@@ -719,6 +723,7 @@
 		730D519D3EDB0B8F5976BC94 /* TeachVignette.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TeachVignette.swift; sourceTree = "<group>"; };
 		74A0D0F666787312F4991788 /* TriageTargets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageTargets.swift; sourceTree = "<group>"; };
 		7559B204B617E96295740E2D /* PageKeys.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PageKeys.swift; sourceTree = "<group>"; };
+		7571A52775BE6D8750AFB12E /* ReplayIconNames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplayIconNames.swift; sourceTree = "<group>"; };
 		759702EBD03C1CECFD041E57 /* ReadReceipt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadReceipt.swift; sourceTree = "<group>"; };
 		77AFD8EB57E14B5D7CAB454B /* MonthGrid.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MonthGrid.swift; sourceTree = "<group>"; };
 		77F7A4B36E2DEA7F8B1AC50B /* AgentNudge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentNudge.swift; sourceTree = "<group>"; };
@@ -861,6 +866,7 @@
 		F5D8D394D011C195B13791BE /* RehearsalControlPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RehearsalControlPanel.swift; sourceTree = "<group>"; };
 		F714235A8E6F4742ABF772B3 /* PassbandiOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PassbandiOSApp.swift; sourceTree = "<group>"; };
 		F82499FD36351898E386644C /* MobileSearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileSearchView.swift; sourceTree = "<group>"; };
+		F8EDBD974887B881E9A916E6 /* ReplayIcons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplayIcons.swift; sourceTree = "<group>"; };
 		F8FF235DC1DB2B57F7C06220 /* GroupEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroupEditor.swift; sourceTree = "<group>"; };
 		FA1F37AFE6C968BF66760A5B /* SearchFetch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchFetch.swift; sourceTree = "<group>"; };
 		FA2F8E5310BCCF203247E428 /* AccountPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountPage.swift; sourceTree = "<group>"; };
@@ -1064,6 +1070,8 @@
 				FCA6DBA73DEBD1CB392DE3A5 /* RehearsalMode.swift */,
 				1964D381D25BBC803E490328 /* ReleaseNotes.swift */,
 				CDDAB6C380027F87A19022BF /* RemindTimes.swift */,
+				7571A52775BE6D8750AFB12E /* ReplayIconNames.swift */,
+				F8EDBD974887B881E9A916E6 /* ReplayIcons.swift */,
 				68CBBA1FAD0BFDE88B8F8830 /* ReplayWireframe.swift */,
 				0C13060FB00E773CC4E33680 /* RuleGrouping.swift */,
 				88C38163197CC12C0A08950C /* RulePatternSuggest.swift */,
@@ -1695,6 +1703,8 @@
 				24B9C76ED25930D29752DBC9 /* ReleaseVignettes.swift in Sources */,
 				2E55F517D48F9CE4E5882C21 /* RemindPalette.swift in Sources */,
 				39B48BCF60CA5737C7088687 /* RemindTimes.swift in Sources */,
+				CAEC4AE0866FDA9E46683BEF /* ReplayIconNames.swift in Sources */,
+				284EE7EDD583873625C8B085 /* ReplayIcons.swift in Sources */,
 				76F9418F2695BCBE314D184A /* ReplayWireframe.swift in Sources */,
 				346B6C45B35972DC0A41FD9C /* RetriageModal.swift in Sources */,
 				D950DAEE748237F8D4002E11 /* RetriageRun.swift in Sources */,
@@ -1951,6 +1961,8 @@
 				1B5E5602E42CC14034AFB544 /* ReleaseVignettes.swift in Sources */,
 				C7AF257F381B402E8C1F1839 /* RemindPalette.swift in Sources */,
 				C8B62E16CC9F5AE6DA3B774E /* RemindTimes.swift in Sources */,
+				AFE41198F5B0061CC79E88F3 /* ReplayIconNames.swift in Sources */,
+				B2A2EF0EADDBB3F3E4957DDD /* ReplayIcons.swift in Sources */,
 				F11EDC4BBABEC41EDAD38371 /* ReplayWireframe.swift in Sources */,
 				CF0065AF30C9FC626811FF50 /* RetriageModal.swift in Sources */,
 				8C7DC76677CBEE6FB72CE8F8 /* RetriageRun.swift in Sources */,

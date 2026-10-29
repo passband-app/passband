@@ -43,7 +43,6 @@ struct AgendaTests {
         dayTitles()
         todaysStrip()
         theGate()
-        theNumberKeysCountTheCalendarOnlyWhenOffered()
         theGateIsTheActiveAccounts()
         syncNotices()
         ghostStanding()
@@ -169,8 +168,8 @@ struct AgendaTests {
             {"tier_counts":{},"total":0,"sealed":0,"bands":{"standing":0,"new":0,"open":0}}
             """
         let stats = try? JSONDecoder().decode(StoreStats.self, from: Data(oldStats.utf8))
-        expect(stats != nil && stats?.timeline == nil && stats?.calendar == nil,
-               "an older daemon's stats decode with no timeline and no calendar")
+        expect(stats != nil && stats?.calendar == nil,
+               "an older daemon's stats decode with no calendar")
         let newStats = """
             {"tier_counts":{},"total":0,"sealed":0,"bands":{"standing":0,"new":0,"open":0},
              "timeline":true,"calendar":{"granted":false,
@@ -178,7 +177,7 @@ struct AgendaTests {
              "connect_command":null}}
             """
         let s2 = try? JSONDecoder().decode(StoreStats.self, from: Data(newStats.utf8))
-        expect(s2?.timeline == true && s2?.calendar?.granted == false, "Slice A's stats decode")
+        expect(s2?.calendar?.granted == false, "Slice A's stats decode (a timeline key is ignored)")
         expect(s2?.calendar?.self_connect == nil, "an older daemon sends no self_connect")
 
         func access(_ calendar: String) -> CalendarAccess? {
@@ -616,22 +615,6 @@ struct AgendaTests {
     // MARK: gate
 
     static func theGate() {
-        // The truth table: the daemon's timeline against the `calendar` flag.
-        expect(CalendarGate.pageAvailable(timeline: true, feature: true), "both: shown")
-        expect(!CalendarGate.pageAvailable(timeline: true, feature: false), "no flag: hidden")
-        expect(!CalendarGate.pageAvailable(timeline: false, feature: true), "said no: hidden")
-        expect(!CalendarGate.pageAvailable(timeline: false, feature: false), "neither: hidden")
-        expect(!CalendarGate.pageAvailable(timeline: nil, feature: true), "older daemon: hidden")
-        expect(!CalendarGate.pageAvailable(timeline: nil, feature: false), "older daemon, no flag: hidden")
-
-        // The gate closing takes the user off the calendar, and only off it.
-        expect(CalendarGate.leavesPage(available: false, active: "calendar", calendar: "calendar"),
-               "the flag goes off on the page: leave it")
-        expect(!CalendarGate.leavesPage(available: false, active: "emails", calendar: "calendar"),
-               "the flag goes off elsewhere: stay")
-        expect(!CalendarGate.leavesPage(available: true, active: "calendar", calendar: "calendar"),
-               "still on: stay")
-
         let link = "https://console.passband.app/reconnect?calendar=1&hint=a%40b.example"
         expect(CalendarGate.connectRoute(nil) == nil, "an older daemon offers nothing")
         expect(CalendarGate.connectRoute(CalendarAccess(granted: true, connect_url: link)) == nil,
@@ -683,30 +666,6 @@ struct AgendaTests {
 
     /// FINDING 1 OF THE REVIEW: stats outlive an account switch, so until the
     /// active account's own poll lands, nothing about connecting is offered.
-    /// Wave 4: "make calendar 2, all mail 3, etc". With the page offered it
-    /// is second in the count; without it the numbers are the old ones.
-    static func theNumberKeysCountTheCalendarOnlyWhenOffered() {
-        let pages = ["sitrep", "emails", "auth", "rules", "groups"]
-        let offered = CalendarGate.numbered(pages, calendar: "calendar", offered: true)
-        expect(offered == ["sitrep", "calendar", "emails", "auth", "rules", "groups"],
-               "offered: sitrep 1, calendar 2, emails 3, and every later page one higher")
-        expect(offered.firstIndex(of: "calendar") == 1 && offered.firstIndex(of: "emails") == 2,
-               "calendar is 2 and all mail is 3")
-        expect(offered.count == pages.count + 1, "one more digit, and no page lost")
-        let hidden = CalendarGate.numbered(pages, calendar: "calendar", offered: false)
-        expect(hidden == pages, "not offered: the numbers are exactly as they were")
-        expect(!hidden.contains("calendar"), "and no digit opens a page that is not there")
-        expect(CalendarGate.numbered([String](), calendar: "calendar", offered: true).isEmpty,
-               "an empty rail stays empty")
-        // The flag drives the count through the one gate.
-        let flagOff = CalendarGate.pageAvailable(timeline: true, feature: false)
-        expect(CalendarGate.numbered(pages, calendar: "calendar", offered: flagOff) == pages,
-               "the flag off: the old numbers")
-        let flagOn = CalendarGate.pageAvailable(timeline: true, feature: true)
-        expect(CalendarGate.numbered(pages, calendar: "calendar", offered: flagOn) == offered,
-               "the flag on: calendar is 2")
-    }
-
     static func theGateIsTheActiveAccounts() {
         let link = "https://console.passband.app/reconnect?calendar=1&hint=a%40b.example"
         let previous = CalendarAccess(granted: false, connect_url: link)
@@ -812,7 +771,7 @@ struct AgendaTests {
             (#""calendar":null"#, "null"),
         ] {
             let stats = try? JSONDecoder().decode(StoreStats.self, from: Data("{\(base),\(bad)}".utf8))
-            expect(stats?.total == 3 && stats?.timeline == true && stats?.calendar == nil,
+            expect(stats?.total == 3 && stats?.calendar == nil,
                    "a calendar with \(what) reads as absent and the rest decodes")
         }
         let good = try? JSONDecoder().decode(

@@ -19,42 +19,9 @@ import Foundation
 
 // MARK: - the gate
 
-/// Whether the Calendar destination exists, and how to connect a calendar.
+/// How to connect a calendar, and whose stats may say so. (The page itself is
+/// unconditional: every mailbox has the Calendar.)
 enum CalendarGate {
-    /// THE ONE PLACE THE CALENDAR PAGE IS SWITCHED ON. The daemon must serve
-    /// the timeline (`timeline == true` on /client/stats), and the `calendar`
-    /// hidden feature must be on for this mailbox (`feature`, which is
-    /// `store.hasFeature(.calendar)`; docs/FEATURES.md, docs/CALENDAR.md
-    /// section 11). A daemon with the flag off already says `timeline: false`;
-    /// the app asks both anyway, so a daemon older than the flag cannot show
-    /// the page to somebody who was not let in. The rail, the Go menu, the
-    /// number keys, ⇧C, the shortcuts sheet and the route all read it through
-    /// `AppStore.calendarPageAvailable`, so it hides everywhere at once.
-    static func pageAvailable(timeline: Bool?, feature: Bool) -> Bool {
-        timeline == true && feature
-    }
-
-    /// Whether the gate closing (the flag turned off, an older daemon) must
-    /// take the user off the page they are on: only when that page is the
-    /// calendar. Generic for the reason `numbered` is.
-    static func leavesPage<Page: Equatable>(available: Bool, active: Page, calendar: Page) -> Bool {
-        !available && active == calendar
-    }
-
-    /// THE NUMBER KEYS, WITH THE CALENDAR IN THEM (wave 4, the founder: "make
-    /// calendar 2, all mail 3, etc"). The calendar is second on the rail, so
-    /// while it is offered it is second in the count and every later page is
-    /// one higher. While it is NOT offered the numbers are exactly the ones
-    /// from before it existed: nobody's fingers are renumbered by a page
-    /// they cannot see. Generic so the rule is held by a test without the
-    /// app's own page list.
-    static func numbered<Page>(_ pages: [Page], calendar: Page, offered: Bool) -> [Page] {
-        guard offered, !pages.isEmpty else { return pages }
-        var out = pages
-        out.insert(calendar, at: 1)
-        return out
-    }
-
     /// Where the one "Connect calendar" button gets Google's consent link.
     /// The daemon decides which by what it sent; the app never guesses. Both
     /// end the same way: a browser on Google's consent, and the grant showing

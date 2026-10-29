@@ -82,19 +82,20 @@ pub struct SquelchServer {
     tool_router: ToolRouter<Self>,
 }
 
-/// What `search_calendar` (docs/CALENDAR.md §10.1) needs from the host: the
-/// mailbox's feature flags, since the tool exists only while `calendar` is
-/// on, and the calendar grant, since real events are read only while it
-/// holds (ghosts need no grant). The default offers no calendar.
+/// What `search_calendar` (docs/CALENDAR.md §10.1) needs from the host:
+/// whether it serves a calendar at all (the daemon always does; the
+/// standalone binary does not), and the calendar grant, since real events
+/// are read only while it holds (ghosts need no grant). The default offers
+/// no calendar.
 #[derive(Clone, Default)]
 pub struct CalendarDoor {
-    pub features: squelch_core::features::Features,
+    pub enabled: bool,
     pub credentials: Option<Arc<squelch_core::credentials::CalendarCredentials>>,
 }
 
 impl CalendarDoor {
     fn enabled(&self) -> bool {
-        self.features.enabled(squelch_core::features::CALENDAR)
+        self.enabled
     }
 
     async fn granted(&self) -> bool {
@@ -1572,8 +1573,8 @@ impl SquelchServer {
         Parameters(params): Parameters<SearchCalendarParams>,
     ) -> Result<CallToolResult, ErrorData> {
         use squelch_core::gcal::search::{AgentCalendarHit, Audience, CalendarQuery, search};
-        // Off is as if it did not exist: the same answer as a tool that is
-        // not there.
+        // A host with no calendar: the same answer as a tool that is not
+        // there.
         if !self.calendar.enabled() {
             return Err(ErrorData::invalid_params("tool not found", None));
         }
@@ -2036,20 +2037,21 @@ mod tests {
         assert!(!has(&bare, "create_draft") && !has(&bare, "send_email"));
     }
 
-    /// `search_calendar` exists only while the `calendar` feature is on:
-    /// unlisted and refused like an unknown tool when it is off, and the
-    /// flag is read at each call, not at construction.
+    /// `search_calendar` exists only on a host that serves a calendar:
+    /// listed, told of and answered there, and unlisted and refused like an
+    /// unknown tool on a door without one.
     #[tokio::test]
-    async fn search_calendar_follows_the_calendar_feature() {
-        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
-        store.ensure_account("me@localhost").unwrap();
-        let features = squelch_core::features::Features::none();
-        let server = SquelchServer::new(store, "me@localhost")
-            .unwrap()
-            .with_calendar(CalendarDoor {
-                features: features.clone(),
-                credentials: None,
-            });
+    async fn search_calendar_follows_the_calendar_door() {
+        let off = {
+            let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+            store.ensure_account("me@localhost").unwrap();
+            SquelchServer::new(store, "me@localhost")
+                .unwrap()
+                .with_calendar(CalendarDoor {
+                    enabled: false,
+                    credentials: None,
+                })
+        };
         let params = || {
             Parameters(SearchCalendarParams {
                 query: "dinner".into(),
@@ -2057,16 +2059,22 @@ mod tests {
             })
         };
         assert!(
-            !server
-                .offered_tool_names()
+            !off.offered_tool_names()
                 .iter()
                 .any(|n| n == "search_calendar")
         );
-        assert!(server.search_calendar(params()).await.is_err());
-        let told = server.get_info().instructions.unwrap_or_default();
+        assert!(off.search_calendar(params()).await.is_err());
+        let told = off.get_info().instructions.unwrap_or_default();
         assert!(!told.contains("search_calendar"), "{told}");
 
-        features.replace_granted([squelch_core::features::CALENDAR]);
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        store.ensure_account("me@localhost").unwrap();
+        let server = SquelchServer::new(store, "me@localhost")
+            .unwrap()
+            .with_calendar(CalendarDoor {
+                enabled: true,
+                credentials: None,
+            });
         assert!(
             server
                 .offered_tool_names()
@@ -4467,10 +4475,10 @@ mod tests {
         let old = seed_old(&store, account, "old", "g-old", "heron ledger");
         let (server, _mailer) = {
             let mailer = Arc::new(RecordingMailer::default());
-            let calendar = CalendarDoor::default();
-            calendar
-                .features
-                .replace_granted([squelch_core::features::CALENDAR]);
+            let calendar = CalendarDoor {
+                enabled: true,
+                credentials: None,
+            };
             let server = SquelchServer::new(store.clone(), "me@localhost")
                 .unwrap()
                 .with_archive_surfacing(archive_on())

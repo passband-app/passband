@@ -930,8 +930,7 @@ fn gmail_slots(scopes: AuthScopes) -> Vec<CredentialKind> {
 
 /// Whether a Gmail run (plain `auth` or `--write`) should end by OFFERING
 /// the optional calendar consent, so a new self-host is asked for calendar at
-/// setup even while the `calendar` hidden feature is off (sync calls nothing
-/// until it is on). Offered only while no calendar credential is stored, so
+/// setup rather than on the Calendar page later. Offered only while no calendar credential is stored, so
 /// a repair run does not ask again, and never on `--calendar`, which is that
 /// consent already.
 ///
@@ -2711,11 +2710,10 @@ fn build_serve_router(
         Some(api_state.agent_mailer()),
         // And the human door's own archive settings: one depth, one poke.
         api_state.archive_surfacing(),
-        // The human door's own feature flags and calendar grant, so
-        // `search_calendar` is on exactly when the calendar routes are, and
-        // reads real events exactly when the timeline does.
+        // The human door's own calendar grant, so `search_calendar` reads
+        // real events exactly when the timeline does.
         squelch_mcp::CalendarDoor {
-            features: api_state.features().clone(),
+            enabled: true,
             credentials: api_state.calendar().cloned(),
         },
     )?;
@@ -2924,15 +2922,7 @@ fn cmd_serve(
     // Never for an IMAP account: there is no Google grant to find, and the
     // loop must not go looking for one under that account's address.
     let calendar_sync = api_state.calendar().cloned().filter(|_| is_gmail).and_then(|creds| {
-        // The same live feature set the human door gates on: the loop asks it
-        // at every pass, so a flag flipped on the admin page reaches it with
-        // no restart.
-        match squelch_core::gcal::sync::CalendarSync::new(
-            store.clone(),
-            account_id,
-            creds,
-            api_state.features().clone(),
-        ) {
+        match squelch_core::gcal::sync::CalendarSync::new(store.clone(), account_id, creds) {
             // The card's places ride the same key and the notify model, like
             // the sitrep headline. No key: locations are shown as they are.
             Ok(sync) => {
@@ -5153,6 +5143,8 @@ mod tests {
             "get_shipments",
             "get_thread",
             "list_sender_rules",
+            // Calendar for everyone: the daemon's door always serves it.
+            "search_calendar",
             "search_mail",
             "set_sender_rule",
         ];

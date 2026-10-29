@@ -135,8 +135,8 @@ fn build_service(
 /// refine poke and one wait. `Default::default()` (the standalone binary)
 /// reports no archive and never waits.
 ///
-/// `calendar` is what `search_calendar` needs from the host: the feature
-/// flags (the tool is listed and answers only while `calendar` is on) and the
+/// `calendar` is what `search_calendar` needs from the host: whether it
+/// serves a calendar (the tool is listed and answers only then) and the
 /// calendar grant (real events are read only while it holds).
 /// `CalendarDoor::default()` offers no calendar at all.
 ///

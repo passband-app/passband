@@ -53,7 +53,10 @@ enum MainView: String, Sendable, Hashable, CaseIterable {
     /// from, and the rail is for the second kind. They came off the END, so no
     /// digit that is left moved, and the two digits after the rail's last page
     /// still open them where they live (see `RootView.globalBindings`).
-    static let mainViews: [MainView] = [.sitrep, .emails, .auth]
+    ///
+    /// Calendar is second, so its digit is 2 ("make calendar 2, all mail 3,
+    /// etc", the founder). ⇧C opens it too.
+    static let mainViews: [MainView] = [.sitrep, .calendar, .emails, .auth]
     /// The BOTTOM rail group, pinned below a divider.
     ///
     /// `discovery` is in neither group: its one door is the ring, alone above
@@ -61,28 +64,14 @@ enum MainView: String, Sendable, Hashable, CaseIterable {
     /// reach a field guide faster than by looking at it.
     static let bottomViews: [MainView] = [.usage, .settings]
 
-    /// THE NUMBER KEYS AS THEY ARE RIGHT NOW: `mainViews`, with Calendar
-    /// second while it is offered (Sitrep 1, Calendar 2, Emails 3 and every
-    /// later page one higher), and exactly `mainViews` while it is not, so
-    /// the gate being closed renumbers nobody. The rule is
-    /// `CalendarGate.numbered`. ⇧C opens the calendar as well, as it did
-    /// before it had a digit.
-    ///
-    /// `calendar` is `AppStore.calendarPageAvailable`, passed in so the rail,
-    /// the menu and the keys ask the gate the same way and move together.
-    static func numberedViews(calendar: Bool) -> [MainView] {
-        CalendarGate.numbered(mainViews, calendar: .calendar, offered: calendar)
-    }
-
-    /// The most digits the keys ever bind: one per numbered page with the
-    /// calendar offered. The last one declines while it is not.
-    static var numberKeyCount: Int { mainViews.count + 1 }
+    /// One digit per page on the rail.
+    static var numberKeyCount: Int { mainViews.count }
 
     /// THE TOP RAIL AS DRAWN, each page with the digit that opens it: the
     /// hint the rail's tooltip prints, in the same order the keys are bound
     /// in (RootView.globalBindings).
-    static func railViews(calendar: Bool) -> [(view: MainView, key: String)] {
-        numberedViews(calendar: calendar).enumerated().map { (view: $0.element, key: "\($0.offset + 1)") }
+    static var railViews: [(view: MainView, key: String)] {
+        mainViews.enumerated().map { (view: $0.element, key: "\($0.offset + 1)") }
     }
 
     var label: String {
@@ -674,8 +663,6 @@ final class AppStore {
     /// Each is compared first: an assignment of the same value still tells
     /// every reader to look again.
     private func noteStats() {
-        let open = CalendarGate.pageAvailable(timeline: stats?.timeline, feature: hasFeature(.calendar))
-        if open != calendarPageAvailable { calendarPageAvailable = open }
         warmCalendarIfDue()
         let email = stats?.account_email
         if email != accountEmail { accountEmail = email }
@@ -715,17 +702,6 @@ final class AppStore {
     /// Whether any stats have landed: the board's "all clear" waits for
     /// them. See `noteStats`.
     private(set) var hasStats = false
-    /// Whether the Calendar destination exists at all. Rail, Go menu, ⇧C, the
-    /// number keys, the shortcuts sheet, the assistant's guide and the route
-    /// all read this one property; the rule itself, the daemon's timeline AND
-    /// the `calendar` hidden feature, is `CalendarGate.pageAvailable`.
-    ///
-    /// STORED, and written by `noteStats` only when it changes (the
-    /// `statsEpoch` pattern): computed off `stats` it made the rail and the
-    /// Go menu re-evaluate on every poll that changed any count. Off the raw
-    /// `stats`, not `calendarAccess`: it says only whether a page exists,
-    /// never whose calendar is in it.
-    private(set) var calendarPageAvailable = false
     /// The epoch of the poll that wrote `stats`. `stats` is not wiped on an
     /// account switch, so until the new mailbox's first poll lands it still
     /// describes the one just left; anything that must not mix two accounts
@@ -844,7 +820,7 @@ final class AppStore {
     /// an answer is applied only if nothing newer has started since it was
     /// asked for. Not observed: it is bookkeeping, never drawn.
     @ObservationIgnored var calendarLoadGeneration = 0
-    /// Bumped by `dropCalendarState` (an account switch, the gate closing):
+    /// Bumped by `dropCalendarState` (an account switch):
     /// a write still out when it was bumped answers into nothing
     /// (`CalendarWriteTicket`). Bookkeeping, never drawn.
     @ObservationIgnored var calendarSession = 0
@@ -1497,7 +1473,7 @@ final class AppStore {
     var authQueue: [AuthCodeEntry] = []
     /// Set by `requestAuthPage` on the phone, which has no routed Auth page
     /// for `setView(.auth)` to reach: its shell opens the login-codes page
-    /// behind the Quick Look key, then clears this (`consumeAuthPage`). A
+    /// behind the sitrep's key, then clears this (`consumeAuthPage`). A
     /// pending FLAG, read on the shell's first appearance as well as on
     /// change, because a tap that launched the app is drained the moment
     /// `connStatus` turns `.connected`, before the shell exists to see a
@@ -3017,13 +2993,11 @@ final class AppStore {
     /// `MainView` names a page and nothing a daemon minted, so it is the one
     /// piece of navigation that can cross. The rest of the history cannot.
     ///
-    /// Two exceptions. Process is reached only from the all-mail peer-review
-    /// chip, so its way back is Emails. The calendar's gate is read off the
-    /// new account's stats, which have not arrived when this runs, so
-    /// `route(to:)` sends it to the sitrep like any closed gate.
+    /// One exception: Process is reached only from the all-mail peer-review
+    /// chip, so its way back is Emails.
     ///
-    /// MAC ONLY. The phone maps a route onto a tab only for Sitrep and Mail,
-    /// so keeping `activeView` there jumped Quick Look and Search to whichever
+    /// MAC ONLY. The phone maps a route onto a tab only for Sitrep, Calendar
+    /// and Mail, so keeping `activeView` there jumped Search to whichever
     /// of the two was visited last. It keeps its old answer, the sitrep,
     /// until its tabs are taught to stay put on their own.
     private static func pageKeptAcrossSwitch(_ view: MainView) -> MainView {
@@ -3257,9 +3231,6 @@ final class AppStore {
     /// the previous one — assigning `activeView` directly would inherit whatever
     /// the last click set and slide the rail for a keyboard route.
     private func route(to view: MainView, viaPointer: Bool = false) {
-        // A route to a calendar page that is not offered (the gate, a history
-        // entry from before it closed) lands on the sitrep instead.
-        let view = view == .calendar && !calendarPageAvailable ? .sitrep : view
         // On change only: the repeat-press no-op in setView re-routes to the
         // same view, and that is not a navigation worth an event.
         if view != activeView { Analytics.screen(view.rawValue) }
@@ -3276,7 +3247,6 @@ final class AppStore {
 
     func setView(_ view: MainView, viaPointer: Bool = false) {
         guard !RehearsalMode.isEnabled || view == .sitrep else { return }
-        guard view != .calendar || calendarPageAvailable else { return }
         // Navigating ANYWHERE dismisses an open thread viewer: the rail is visible
         // beside it, so a click there means "leave this email", not "change the
         // page underneath the overlay". Through closeThread() so the reader's

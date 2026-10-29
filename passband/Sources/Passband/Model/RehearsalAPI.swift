@@ -112,9 +112,8 @@ actor RehearsalAPI {
             stagedScheduled = scheduled
         }
 
-        /// A timeline, and the stats that open the calendar to it (the hidden
-        /// `calendar` feature, a daemon that serves a timeline, a granted
-        /// Google Calendar). The lesson never claims one; only the phone's
+        /// A timeline, and the stats that go with it (a granted Google
+        /// Calendar, so no connect card). The lesson never claims one; only the phone's
         /// screenshot harness stages this (`--fixture-calendar`).
         private var stagedTimeline: TimelineFeed?
         func stage(timeline: TimelineFeed) {
@@ -169,8 +168,6 @@ actor RehearsalAPI {
         #if DEBUG
             guard stagedTimeline != nil else { return stats }
             var out = stats
-            out.features = ["calendar"]
-            out.timeline = true
             out.calendar = CalendarAccess(granted: true)
             return out
         #else

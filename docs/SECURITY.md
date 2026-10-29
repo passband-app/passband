@@ -1775,17 +1775,16 @@ write (`passband/Sources/Passband/Lib/EventProposal.swift`,
 - **It never replaces the user's work.** A pane holding anything (typed, or an
   earlier proposal, on screen or parked) refuses the tool with a fixed sentence
   the model relays.
-- **It follows the page.** Offered only on the Mac and only while
-  `calendarPageAvailable`; with the flag off the tool definitions and system
-  prompt sent to the model are the ones from before the tool existed, and a
-  call naming it is answered as any unknown tool. No edit or delete tool.
+- **Mac only.** Offered only on the Mac (`AgentTools.Tool.isAvailable`); on
+  the phone a call naming it is answered as any unknown tool. (It was once
+  also gated on the `calendar` flag, now retired.) No edit or delete tool.
   Nothing was added to `/mcp`, `/client/agent/*` or the relay.
 
 **Who a name is: `GET /client/calendar/people` (wave 6).** The event pane reads
 "with steven" out of a new event's title (a deterministic parser in the client,
 no model) and asks the daemon who that most likely is, to SUGGEST a guest.
-- Behind `require_calendar` with the other calendar routes (404 with the flag
-  off), bearer authed on the human door, `no-store`, at most three answers. Not
+- With the other calendar routes (`calendar_routes`; the `calendar` flag that
+  once 404ed them is retired), bearer authed on the human door, `no-store`, at most three answers. Not
   on the agent door, `/mcp` or the assistant relay.
 - **A candidate is somebody the user has written to** (`contacts`, `sent_count >
   0`), never the account's own address. Receiving mail from someone never makes

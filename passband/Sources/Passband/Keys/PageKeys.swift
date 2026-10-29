@@ -3,10 +3,8 @@
 // bindings the app does (test.sh: this file rides along with KeyDispatch.swift)
 // instead of a hand copy that could keep passing while the real ones change.
 //
-// Generic over the page, and handed the gate as closures asked AT KEY TIME:
-// reading the gate where the bindings are built would make the whole shell a
-// reader of the stats poll, and asking when the key is pressed means the gate
-// opening renumbers without anything re-registering.
+// Generic over the page, and asked AT KEY TIME (the page order, whether ⇧C
+// may fire), so nothing the shell builds has to re-register when they change.
 
 import Foundation
 
@@ -29,8 +27,8 @@ enum PageKeys {
 
     /// ⇧C OPENS THE CALENDAR. EXACT CASE, so a bare `c` (compose) is
     /// untouched: the shifted letter used to reach compose only through the
-    /// dispatcher's case fold, and now means this instead wherever the page
-    /// is offered. DECLINING: while `offered` says no, the key passes on and
+    /// dispatcher's case fold, and now means this instead. DECLINING: while
+    /// `offered` says no (a sign-in code is on screen), the key passes on and
     /// the fold hands it to `c` exactly as before.
     static func calendar(offered: @escaping () -> Bool, go: @escaping () -> Void) -> KeyBinding {
         KeyBinding(declining: "C", "go to calendar", exactCase: true) {

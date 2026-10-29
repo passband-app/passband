@@ -32,15 +32,9 @@
 //! self-host (`squelchd auth --calendar`) and a kick from the calendar page
 //! looks at once.
 //!
-//! BEHIND THE `calendar` HIDDEN FEATURE ([`crate::features::CALENDAR`]). The
-//! loop asks the live [`Features`] handle at the top of every pass: off, the
-//! pass reads no credential, calls Google for nothing and idles like a
-//! missing grant ([`PassOutcome::Disabled`]); the first pass after the flag
-//! turns on syncs, with no restart. It asks again before each calendar, so a
-//! flag turned off mid-pass stops the pass at the next calendar (a page
-//! already in flight finishes). Turning it off deletes nothing: the stored
-//! calendars, events and guest lists stay, hidden by the routes, and are
-//! brought up to date by the next pass once it is on again.
+//! ON FOR EVERY MAILBOX. The loop was once behind the `calendar` hidden
+//! feature; that key is retired ([`crate::features::RETIRED`]) and nothing
+//! here asks for it. A pass calls Google only when calendar is granted.
 //!
 //! A pass: resolve the token; decide which calendars to read (the primary
 //! one, plus every calendar the user shows when the list scope was granted,
@@ -75,7 +69,6 @@ use super::{
 };
 use crate::credentials::CalendarCredentials;
 use crate::error::{CoreError, Result};
-use crate::features::{CALENDAR, Features};
 use crate::store::{NewAuditEntry, SqliteStore, Store};
 use crate::types::AccountId;
 
@@ -141,10 +134,6 @@ async fn stopped(shutdown: &mut watch::Receiver<bool>) {
 /// What one pass came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PassOutcome {
-    /// The `calendar` hidden feature is off for this mailbox: nothing was
-    /// read and nothing was called, or (turned off mid-pass) nothing more
-    /// after the calendar in hand.
-    Disabled,
     /// Calendar is not granted: nothing was called.
     NotGranted,
     /// The credential and the primary calendar were read, and Google set no
@@ -172,8 +161,6 @@ pub struct CalendarSync {
     api: CalendarApi,
     kick: Arc<Notify>,
     timing: Timing,
-    /// The live hidden-feature set, asked at the top of every pass.
-    features: Features,
     /// The card's place cleaner, when a model is configured.
     places: Option<PlaceClient>,
     /// Place calls ATTEMPTED today, `(day, count)`. The ledger only learns
@@ -208,9 +195,8 @@ impl CalendarSync {
         store: Arc<SqliteStore>,
         account_id: AccountId,
         creds: Arc<CalendarCredentials>,
-        features: Features,
     ) -> reqwest::Result<Self> {
-        Self::with_api_base(store, account_id, creds, features, API_BASE)
+        Self::with_api_base(store, account_id, creds, API_BASE)
     }
 
     /// The loop against another API origin: a test's local fake.
@@ -218,7 +204,6 @@ impl CalendarSync {
         store: Arc<SqliteStore>,
         account_id: AccountId,
         creds: Arc<CalendarCredentials>,
-        features: Features,
         base: &str,
     ) -> reqwest::Result<Self> {
         Ok(Self {
@@ -233,7 +218,6 @@ impl CalendarSync {
                 idle_recheck: IDLE_RECHECK,
                 backoff_base: BACKOFF_BASE,
             },
-            features,
             places: None,
             place_calls: std::sync::Mutex::new((String::new(), 0)),
             own_writes: std::sync::Mutex::new((String::new(), 0)),
@@ -294,7 +278,7 @@ impl CalendarSync {
                 }
             }
             let (delay, quota) = match outcome {
-                PassOutcome::Disabled | PassOutcome::NotGranted => {
+                PassOutcome::NotGranted => {
                     backoff = None;
                     (self.timing.idle_recheck, false)
                 }
@@ -449,13 +433,9 @@ impl CalendarSync {
 
     /// Passband owns the events mail makes ([`own`]): plan from the store,
     /// then carry out at most [`own::WRITES_PER_PASS`] Google writes, within
-    /// [`own::DAILY_CAP`] a day, whenever [`CALENDAR`] is on. Every write
-    /// asks Google to email nobody and is audited; a quota answer ends the
-    /// pass. Public for tests.
+    /// [`own::DAILY_CAP`] a day. Every write asks Google to email nobody and
+    /// is audited; a quota answer ends the pass. Public for tests.
     pub async fn own_events(&self, now: DateTime<Utc>) {
-        if !self.features.enabled(CALENDAR) {
-            return;
-        }
         let token = match self.creds.calendar_access(self.account_id).await {
             Ok(Some(access)) => access.token.access_token,
             _ => return,
@@ -941,9 +921,6 @@ impl CalendarSync {
 
     /// One pass. Public for tests, which drive passes one at a time.
     pub async fn pass(&self, now: DateTime<Utc>) -> PassOutcome {
-        if !self.features.enabled(CALENDAR) {
-            return PassOutcome::Disabled;
-        }
         let access = match self.creds.calendar_access(self.account_id).await {
             Ok(None) => return PassOutcome::NotGranted,
             Ok(Some(access)) => access,
@@ -985,12 +962,6 @@ impl CalendarSync {
         // is the pass failing; see the module doc.
         let mut failed: Option<CalendarErrorKind> = None;
         for (index, meta) in calendars.iter().enumerate() {
-            // The flag again before each calendar: turning calendar off stops
-            // a pass in flight at the next calendar, not after the last one.
-            // What was stored stays (the routes hide it); nothing more is read.
-            if !self.features.enabled(CALENDAR) {
-                return PassOutcome::Disabled;
-            }
             let Some(row) = stored.iter().find(|c| c.calendar_id == meta.calendar_id) else {
                 continue;
             };

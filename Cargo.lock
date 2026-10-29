@@ -4862,8 +4862,15 @@ dependencies = [
 name = "squelch-embed"
 version = "0.0.14"
 dependencies = [
+ "axum",
+ "fastembed",
+ "hf-hub",
+ "hyper-util",
  "serde",
  "serde_json",
+ "squelch-httpauth",
+ "tokio",
+ "tower",
 ]
 
 [[package]]

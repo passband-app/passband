@@ -83,4 +83,32 @@ impl MessageLocations for SqliteStore {
         )?;
         Ok(())
     }
+
+    fn content_digest(&self, account_id: AccountId, msg_id: &str) -> Result<Option<String>> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT content_sha FROM imap_digests WHERE account_id = ?1 AND msg_id = ?2",
+                params![account_id, msg_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    fn record_content_digest(
+        &self,
+        account_id: AccountId,
+        msg_id: &str,
+        digest: &str,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        // First writer wins: an id is never rebound to other content.
+        conn.execute(
+            "INSERT INTO imap_digests (account_id, msg_id, content_sha, recorded_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(account_id, msg_id) DO NOTHING",
+            params![account_id, msg_id, digest, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
 }

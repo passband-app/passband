@@ -987,11 +987,33 @@ async fn live_a_moved_message_keeps_its_id_and_its_rows_follow_it() {
         .unwrap();
     assert_eq!(window, vec![to_archive.clone()]);
 
-    // Filed somewhere the search does not look (a user folder): Missing, not
-    // an error that would fail a whole ingest batch, and the stale row goes.
+    // Filed in a user folder: the last-resort search over every selectable
+    // folder finds it (correctness M3), so it is not lost to the live path.
     other.create("Projects").await.unwrap();
     other.select("Archive").await.unwrap();
     other.uid_mv("1:*", "Projects").await.unwrap();
+    let m = src.fetch_raw(&to_archive, Urgency::Live).await.unwrap();
+    assert!(matches!(m.raw, RawBody::Bytes(_)));
+    let rows = locs.message_locations(1, &to_archive).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].folder, "Projects");
+    // Gone from every folder: Missing, not an error that would fail a whole
+    // ingest batch, and the stale row goes.
+    other.select("Projects").await.unwrap();
+    other
+        .uid_store("1:*", "+FLAGS (\\Deleted)")
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    other
+        .expunge()
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
     let m = src.fetch_raw(&to_archive, Urgency::Live).await.unwrap();
     assert!(matches!(m.raw, RawBody::Missing));
     assert!(locs.message_locations(1, &to_archive).unwrap().is_empty());
@@ -1855,4 +1877,228 @@ fn dev_source_for_port(port: u16, locs: Arc<MemLocations>) -> ImapSource {
     )
     .unwrap()
     .with_timeouts(short_timeouts())
+}
+
+// ---- Amendment I: content-bound identity -----------------------------------
+
+#[test]
+fn the_content_digest_ignores_delivery_and_sees_content() {
+    // The self-sent pair: trace headers and address spelling differ, the
+    // message does not.
+    assert_eq!(
+        content_digest_of_raw(SENT_COPY),
+        content_digest_of_raw(INBOX_COPY)
+    );
+    let a = mail(Some("same@x.org"), "hello");
+    let mut body_changed = a.clone();
+    let n = body_changed.len();
+    body_changed[n - 3] = b'X';
+    assert_ne!(
+        content_digest_of_raw(&a),
+        content_digest_of_raw(&body_changed)
+    );
+    // Reply-To is in the set: a spoof that only redirects replies differs.
+    let with_reply_to = String::from_utf8(a.clone()).unwrap().replacen(
+        "\r\n\r\n",
+        "\r\nReply-To: evil@x.org\r\n\r\n",
+        1,
+    );
+    assert_ne!(
+        content_digest_of_raw(&a),
+        content_digest_of_raw(with_reply_to.as_bytes())
+    );
+    // The split is where BODY[TEXT] starts.
+    let at = a.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+    assert_eq!(
+        content_digest_of_raw(&a),
+        content_digest(&a[..at], &a[at..])
+    );
+    // A distinct id is never the known one, and is stable.
+    let known = stable_id_for_message_id("same@x.org");
+    let d = content_digest_of_raw(&body_changed);
+    let other = distinct_stable_id(&known, Some("same@x.org"), &d);
+    assert_ne!(other, known);
+    assert!(other.starts_with(STABLE_ID_PREFIX));
+    assert_eq!(other, distinct_stable_id(&known, Some("same@x.org"), &d));
+}
+
+fn spoof(mid: &str) -> Vec<u8> {
+    format!(
+        "From: mallory@evil.example\r\nTo: me@dev.test\r\nSubject: URGENT wire\r\n\
+         Date: Tue, 27 Oct 2026 09:00:00 +0000\r\nMessage-ID: <{mid}>\r\n\r\nsend money\r\n"
+    )
+    .into_bytes()
+}
+
+fn raw_of(m: &FetchedMessage) -> Vec<u8> {
+    match &m.raw {
+        RawBody::Bytes(b) => b.clone(),
+        other => panic!("no bytes: {}", matches!(other, RawBody::Missing)),
+    }
+}
+
+/// A SPOOF REUSING A KNOWN MESSAGE-ID IS ANOTHER MESSAGE (Amendment I):
+/// whether or not the original's body was read yet, the newcomer gets its own
+/// id, and the original id still fetches the original's bytes only, with
+/// placement from its own copy.
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_a_spoof_with_a_known_message_id_gets_its_own_id() {
+    for read_first in [true, false] {
+        let user = fresh_user("spoof");
+        let mut other = other_client(&user).await;
+        let real = mail(Some("bank-1@bank.example"), "Your statement");
+        append(&mut other, INBOX, &real, None).await;
+        let (src, locs) = live(&user);
+        let ids = src
+            .list(inbox_listing(), None, Urgency::Live)
+            .await
+            .unwrap();
+        let known = stable_id_for_message_id("bank-1@bank.example");
+        assert_eq!(ids, vec![known.clone()]);
+        if read_first {
+            assert_eq!(
+                raw_of(&src.fetch_raw(&known, Urgency::Live).await.unwrap()),
+                real
+            );
+        }
+        let cursor = src.current_cursor().await.unwrap();
+
+        append(&mut other, INBOX, &spoof("bank-1@bank.example"), None).await;
+        let walk = src.changes(&cursor, Folder::Inbox).await.unwrap();
+        assert_eq!(walk.ids.len(), 1);
+        let newcomer = walk.ids[0].clone();
+        assert_ne!(newcomer, known, "read_first={read_first}");
+
+        let m = src.fetch_raw(&known, Urgency::Live).await.unwrap();
+        assert_eq!(raw_of(&m), real, "read_first={read_first}");
+        let rows = locs.message_locations(1, &known).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].uid, 1);
+        let s = src.fetch_raw(&newcomer, Urgency::Live).await.unwrap();
+        assert_eq!(raw_of(&s), spoof("bank-1@bank.example"));
+        // Seen again (a re-listing), it is the same newcomer id.
+        let again = src
+            .list(inbox_listing(), None, Urgency::Live)
+            .await
+            .unwrap();
+        let mut again = again;
+        again.sort();
+        let mut want = vec![known.clone(), newcomer.clone()];
+        want.sort();
+        assert_eq!(again, want);
+
+        // The real one goes stale (moved off to a user folder); the spoof in
+        // INBOX shares its Message-ID exactly but not its content, so the
+        // fallback finds the real one where it went, never the spoof.
+        other.create("Statements").await.unwrap();
+        other.select(INBOX).await.unwrap();
+        other.uid_mv("1", "Statements").await.unwrap();
+        let m = src.fetch_raw(&known, Urgency::Live).await.unwrap();
+        assert_eq!(raw_of(&m), real);
+        assert_eq!(m.placement, Placement::default());
+        let rows = locs.message_locations(1, &known).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].folder, "Statements");
+        let _ = other.logout().await;
+    }
+}
+
+/// A MOVE INTO JUNK KEEPS THE ID: the Junk listing re-sights it, the digest
+/// matches, and it is the same message at a new place.
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_a_move_into_junk_keeps_the_id() {
+    let user = fresh_user("junk");
+    let mut other = other_client(&user).await;
+    append(
+        &mut other,
+        INBOX,
+        &mail(Some("j@x.org"), "maybe spam"),
+        None,
+    )
+    .await;
+    let (src, locs) = live(&user);
+    let id = stable_id_for_message_id("j@x.org");
+    assert_eq!(
+        src.list(inbox_listing(), None, Urgency::Live)
+            .await
+            .unwrap(),
+        vec![id.clone()]
+    );
+    // The engine reads each listed body: that binds the digest, and the
+    // Junk sighting below is checked against it.
+    src.fetch_raw(&id, Urgency::Live).await.unwrap();
+    assert!(locs.content_digest(1, &id).unwrap().is_some());
+    other.select(INBOX).await.unwrap();
+    other.uid_mv("1", "Junk").await.unwrap();
+    let junk = src
+        .list(
+            Listing::Folder {
+                folder: Folder::Spam,
+                within_days: None,
+            },
+            None,
+            Urgency::Live,
+        )
+        .await
+        .unwrap();
+    assert_eq!(junk, vec![id.clone()]);
+    let m = src.fetch_raw(&id, Urgency::Live).await.unwrap();
+    assert!(matches!(m.raw, RawBody::Bytes(_)));
+    let rows = locs.message_locations(1, &id).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].folder, "Junk");
+    let _ = other.logout().await;
+}
+
+/// A LOOKALIKE NEVER STANDS IN (security review 2): `SEARCH HEADER` is a
+/// substring match, so `<xabc@…>` and `<abc@….evil>` contain `abc@…`. With
+/// the real message gone, the lookup for `abc@…` finds nothing rather than
+/// one of them, even before any digest was recorded.
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_a_lookalike_message_id_never_satisfies_a_lookup() {
+    let user = fresh_user("lookalike");
+    let mut other = other_client(&user).await;
+    append(&mut other, INBOX, &mail(Some("abc@x.org"), "real"), None).await;
+    let (src, locs) = live(&user);
+    let id = stable_id_for_message_id("abc@x.org");
+    src.list(inbox_listing(), None, Urgency::Live)
+        .await
+        .unwrap();
+    // Gone (expunged), then lookalikes arrive.
+    other.select(INBOX).await.unwrap();
+    other
+        .uid_store("1", "+FLAGS (\\Deleted)")
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    other
+        .expunge()
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    append(
+        &mut other,
+        INBOX,
+        &mail(Some("xabc@x.org"), "lookalike"),
+        None,
+    )
+    .await;
+    append(
+        &mut other,
+        INBOX,
+        &mail(Some("abc@x.org.evil"), "lookalike 2"),
+        None,
+    )
+    .await;
+    let m = src.fetch_raw(&id, Urgency::Live).await.unwrap();
+    assert!(matches!(m.raw, RawBody::Missing));
+    assert!(locs.message_locations(1, &id).unwrap().is_empty());
+    let _ = other.logout().await;
 }

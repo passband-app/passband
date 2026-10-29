@@ -1032,6 +1032,12 @@ impl squelch_core::mail::imap::MessageLocations for NoLocations {
     fn forget_message_location(&self, _: AccountId, _: &str, _: &str) -> squelch_core::Result<()> {
         Ok(())
     }
+    fn content_digest(&self, _: AccountId, _: &str) -> squelch_core::Result<Option<String>> {
+        Ok(None)
+    }
+    fn record_content_digest(&self, _: AccountId, _: &str, _: &str) -> squelch_core::Result<()> {
+        Ok(())
+    }
 }
 
 /// One answer for `squelchd auth --imap`: the prompt on stderr, a line from

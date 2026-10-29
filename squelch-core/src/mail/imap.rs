@@ -24,12 +24,23 @@
 //! holds for an IMAP account, and it survives a `MOVE` between folders, which
 //! a UID does not.
 //!
+//! AN ID IS BOUND TO ITS CONTENT (Amendment I). A Message-ID is chosen by the
+//! sender, so anyone who has seen one can send a new message reusing it. Each
+//! id therefore has a [`content_digest`] (canonical headers plus Reply-To, and
+//! the exact body text), recorded the first time its bytes are read. A later
+//! sighting of a known id at a new place must match it to share the id
+//! ([`bind_identities`]); one that does not is another message with an id of
+//! its own ([`distinct_stable_id`]), so a stored row is never overwritten with
+//! a stranger's content. `fetch_raw` returns only bytes that match, and
+//! placement counts only the copies that match.
+//!
 //! THE LOCATION TABLE ([`MessageLocations`], the store's `imap_locations`)
 //! records every folder and UID each id was seen at. `fetch_raw` and
 //! `fetch_headers` resolve through it, re-checking `UIDVALIDITY` and the UID,
-//! then fall back to `SEARCH HEADER Message-ID` in the watched folders, then
-//! the archive and all-mail folders. A row
-//! that has gone stale is dropped as it is found.
+//! then fall back to an EXACT `SEARCH HEADER Message-ID` (each hit's header
+//! read back and compared, the lowest matching UID taken) in the watched
+//! folders, the archive and all-mail folders, and as a last resort every
+//! folder. A row that has gone stale is dropped as it is found.
 //!
 //! THE CURSOR is one `{mailbox, uidvalidity, last_uid, highestmodseq}` per
 //! watched folder ([`ImapCursor`]). A `UIDVALIDITY` change, or a role that now
@@ -601,10 +612,18 @@ const ID_HEADER_FIELDS: &str = "MESSAGE-ID FROM TO CC DATE SUBJECT";
 /// subject share an id. Mail that careless about its identity is rare, and
 /// for it one row is the honest outcome.
 pub fn canonical_header_id(header: &[u8]) -> String {
-    let Some(m) = mail_parser::MessageParser::default().parse_headers(header) else {
+    match canonical_header_text(header, false) {
+        Some(canonical) => hex_sha256(canonical.as_bytes()),
         // Nothing parseable at all: the block is all there is.
-        return hex_sha256(header);
-    };
+        None => hex_sha256(header),
+    }
+}
+
+/// The canonical header set as text (Amendment E), with Reply-To when
+/// `reply_to` (the content digest's set, Amendment I). `None` when nothing in
+/// the block parses.
+fn canonical_header_text(header: &[u8], reply_to: bool) -> Option<String> {
+    let m = mail_parser::MessageParser::default().parse_headers(header)?;
     let addrs = |a: Option<&mail_parser::Address<'_>>| {
         let mut v: Vec<String> = a
             .map(|a| {
@@ -619,7 +638,7 @@ pub fn canonical_header_id(header: &[u8]) -> String {
         v.dedup();
         v.join(",")
     };
-    let canonical = format!(
+    let mut canonical = format!(
         "imap-canonical-v1\nfrom:{}\nto:{}\ncc:{}\ndate:{}\nsubject:{}\n",
         addrs(m.from()),
         addrs(m.to()),
@@ -629,7 +648,57 @@ pub fn canonical_header_id(header: &[u8]) -> String {
             .unwrap_or_default(),
         m.subject().map(str::trim).unwrap_or_default(),
     );
-    hex_sha256(canonical.as_bytes())
+    if reply_to {
+        canonical.push_str(&format!("reply-to:{}\n", addrs(m.reply_to())));
+    }
+    Some(canonical)
+}
+
+/// The headers the content digest is taken over, as `HEADER.FIELDS` names.
+const DIGEST_HEADER_FIELDS: &str = "FROM TO CC DATE SUBJECT REPLY-TO";
+
+/// THE CONTENT DIGEST (Amendment I): what a re-sighting of a known id must
+/// match to share it. sha256 of the canonical header set plus Reply-To, then
+/// the exact `BODY[TEXT]` bytes. Delivery trace headers are not in the set,
+/// so a self-sent copy in INBOX and Sent and a message MOVEd between folders
+/// keep one digest; a different message reusing a Message-ID does not.
+pub fn content_digest(header: &[u8], text: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(b"imap-content-v1\n");
+    match canonical_header_text(header, true) {
+        Some(c) => h.update(c.as_bytes()),
+        None => h.update(header),
+    }
+    h.update(b"\n--text--\n");
+    h.update(text);
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// [`content_digest`] of a whole message, split where `BODY[TEXT]` starts:
+/// after the first empty line.
+pub fn content_digest_of_raw(raw: &[u8]) -> String {
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| i + 4)
+        .or_else(|| raw.windows(2).position(|w| w == b"\n\n").map(|i| i + 2));
+    match split {
+        Some(at) => content_digest(&raw[..at], &raw[at..]),
+        None => content_digest(raw, b""),
+    }
+}
+
+/// The id a message gets when it reuses a known id's Message-ID (or, with
+/// none, its canonical headers) but is not that message: the Message-ID text
+/// (or the known id) with its own digest. Never the known id itself.
+pub fn distinct_stable_id(known_id: &str, message_id: Option<&str>, digest: &str) -> String {
+    hex_sha256(
+        format!(
+            "imap-distinct-v1\n{}\n{digest}",
+            message_id.unwrap_or(known_id)
+        )
+        .as_bytes(),
+    )
 }
 
 /// The stable id of a message from its header block (all of it, or at least
@@ -833,6 +902,19 @@ pub trait MessageLocations: Send + Sync {
         msg_id: &str,
         folder: &str,
     ) -> Result<()>;
+
+    /// The [`content_digest`] recorded for `msg_id` (Amendment I), if any.
+    fn content_digest(&self, account_id: AccountId, msg_id: &str) -> Result<Option<String>>;
+
+    /// Record `msg_id`'s digest. The FIRST one recorded stands: a later call
+    /// with a different digest changes nothing, so no sighting can rebind an
+    /// id to other content.
+    fn record_content_digest(
+        &self,
+        account_id: AccountId,
+        msg_id: &str,
+        digest: &str,
+    ) -> Result<()>;
 }
 
 // ---- reconnect backoff ----------------------------------------------------
@@ -953,6 +1035,9 @@ struct Seen {
     id: String,
     loc: MessageLocation,
     internal_date: Option<DateTime<Utc>>,
+    /// The content digest, when binding this sighting had to read it
+    /// ([`bind_identities`]): recorded with the location.
+    digest: Option<String>,
 }
 
 /// An IMAP mailbox's read side.
@@ -1314,6 +1399,12 @@ impl ImapSource {
     }
 
     fn record(&self, seen: &[Seen]) -> Result<()> {
+        for s in seen {
+            if let Some(d) = &s.digest {
+                self.locations
+                    .record_content_digest(self.account_id, &s.id, d)?;
+            }
+        }
         let rows: Vec<(String, MessageLocation)> =
             seen.iter().map(|s| (s.id.clone(), s.loc.clone())).collect();
         self.locations
@@ -1468,6 +1559,7 @@ async fn stable_ids(
                     message_id,
                 },
                 internal_date: f.internal_date().map(|d| d.with_timezone(&Utc)),
+                digest: None,
             });
         }
     }
@@ -1538,38 +1630,193 @@ async fn uid_exists(session: &mut ImapSession, uid: u32) -> Result<bool> {
         .is_empty())
 }
 
-/// Every folder holding a message with this Message-ID, for a location that
-/// has gone stale (contract §6): the watched folders, then archive and all
-/// mail ([`FolderRoles::search_folders`]). The highest UID per folder.
-async fn find_by_message_id(c: &mut Conn, message_id: &str) -> Result<Vec<MessageLocation>> {
+/// The [`content_digest`] of the message at `uid` in `folder`, if the folder
+/// is still at `uidvalidity` and the UID is there. Header fields and
+/// `BODY.PEEK[TEXT]`, the text capped one byte past the ingest bound (the
+/// digest of an oversized message covers its first bytes: deterministic, and
+/// ingest refuses it anyway).
+async fn location_digest(
+    c: &mut Conn,
+    folder: &str,
+    uidvalidity: u32,
+    uid: u32,
+) -> Result<Option<String>> {
+    if c.examine(folder).await? != Some(uidvalidity) {
+        return Ok(None);
+    }
+    let stream = c
+        .session
+        .uid_fetch(
+            uid.to_string(),
+            format!(
+                "(UID BODY.PEEK[HEADER.FIELDS ({DIGEST_HEADER_FIELDS})] BODY.PEEK[TEXT]<0.{}>)",
+                MAX_RAW_BYTES + 1
+            ),
+        )
+        .await
+        .map_err(imap_err("fetch digest"))?;
+    Ok(collect_fetches(stream, &[uid], "fetch digest")
+        .await?
+        .into_iter()
+        .next()
+        .map(|f| content_digest(f.header().unwrap_or_default(), text_section(&f))))
+}
+
+/// `BODY[TEXT]`, whole or partial (`BODY[TEXT]<0>`), from a fetch.
+fn text_section(f: &Fetch) -> &[u8] {
+    f.text()
+        .or_else(|| {
+            f.section(&async_imap::imap_proto::SectionPath::Full(
+                async_imap::imap_proto::MessageSection::Text,
+            ))
+        })
+        .unwrap_or_default()
+}
+
+/// Same folder, same `UIDVALIDITY`, same UID: the very copy already known.
+fn same_place(a: &MessageLocation, b: &MessageLocation) -> bool {
+    a.folder == b.folder && a.uidvalidity == b.uidvalidity && a.uid == b.uid
+}
+
+/// A RE-SIGHTING MUST PROVE IT IS THE SAME MESSAGE (Amendment I). `seen` was
+/// just listed in its folder. A sighting of an id nobody has seen, or of a
+/// place already on record, passes as it is: the common case costs nothing.
+/// Any other sighting of a known id (a move, a self-sent twin, or a stranger
+/// reusing the Message-ID) has its digest read and compared with the id's:
+/// equal, it is that message at a new place; different, it is another
+/// message and gets [`distinct_stable_id`], so the stored row is never
+/// overwritten with its content.
+///
+/// The id's digest is the recorded one, or, before any body was fetched, the
+/// digest of the earliest place still holding it (recorded then, so it
+/// cannot drift).
+async fn bind_identities(
+    c: &mut Conn,
+    locs: &dyn MessageLocations,
+    account: AccountId,
+    seen: Vec<Seen>,
+) -> Result<Vec<Seen>> {
+    // First sightings in this batch, so a duplicate WITHIN it is checked too.
+    let mut first_here: std::collections::HashMap<String, MessageLocation> =
+        std::collections::HashMap::new();
+    let mut out = Vec::with_capacity(seen.len());
+    for mut s in seen {
+        let rows = locs.message_locations(account, &s.id)?;
+        if rows.iter().any(|r| same_place(r, &s.loc)) {
+            out.push(s);
+            continue;
+        }
+        let earlier = first_here.get(&s.id).cloned();
+        if rows.is_empty() && earlier.is_none() {
+            first_here.insert(s.id.clone(), s.loc.clone());
+            out.push(s);
+            continue;
+        }
+        let mut reference = locs.content_digest(account, &s.id)?;
+        if reference.is_none() {
+            // Oldest first: the place the id was bound at.
+            for r in earlier.iter().chain(rows.iter().rev()) {
+                if let Some(d) = location_digest(c, &r.folder, r.uidvalidity, r.uid).await? {
+                    locs.record_content_digest(account, &s.id, &d)?;
+                    reference = Some(d);
+                    break;
+                }
+            }
+        }
+        let Some(reference) = reference else {
+            // Every earlier place is gone and nothing was ever read: this
+            // copy is the only one there is, and it binds the id.
+            first_here.insert(s.id.clone(), s.loc.clone());
+            out.push(s);
+            continue;
+        };
+        let Some(digest) =
+            location_digest(c, &s.loc.folder.clone(), s.loc.uidvalidity, s.loc.uid).await?
+        else {
+            // Gone between the listing and now.
+            continue;
+        };
+        if digest != reference {
+            s.id = distinct_stable_id(&s.id, s.loc.message_id.as_deref(), &digest);
+        }
+        s.digest = Some(digest);
+        out.push(s);
+    }
+    Ok(out)
+}
+
+/// Where a message with this Message-ID is, for a location that has gone
+/// stale (contract §6), searching `folders` in order: at most one place per
+/// folder.
+///
+/// EXACT, NOT A SUBSTRING (security review 2): `SEARCH HEADER` matches any
+/// header CONTAINING the text, so the search is for `<id>` with its brackets,
+/// each hit's Message-ID is read back and must normalize to exactly
+/// `message_id`, and when the id has a recorded digest the hit's must match
+/// it too. The LOWEST matching UID wins: a lookalike delivered later sits
+/// above the real one, never below it.
+async fn find_by_message_id(
+    c: &mut Conn,
+    folders: &[String],
+    message_id: &str,
+    expected: Option<&str>,
+) -> Result<Vec<MessageLocation>> {
     // The value goes inside a quoted string: refuse anything that could end
     // it or the command early.
-    if message_id.contains(['"', '\\', '\r', '\n']) {
+    if message_id.contains(['"', '\\', '\r', '\n', '<', '>']) {
         return Ok(Vec::new());
     }
-    let folders: Vec<String> = c
-        .roles
-        .search_folders()
-        .into_iter()
-        .map(str::to_string)
-        .collect();
     let mut out = Vec::new();
     for folder in folders {
-        let Some(uidvalidity) = c.examine(&folder).await? else {
+        let Some(uidvalidity) = c.examine(folder).await? else {
             continue;
         };
         let hits = search(
             &mut c.session,
-            format!("HEADER Message-ID \"{message_id}\""),
+            format!("HEADER Message-ID \"<{message_id}>\""),
         )
         .await?;
-        if let Some(&uid) = hits.last() {
+        if hits.is_empty() {
+            continue;
+        }
+        let stream = c
+            .session
+            .uid_fetch(
+                uid_set(&hits),
+                "(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])",
+            )
+            .await
+            .map_err(imap_err("fetch message-id"))?;
+        let mut exact: Vec<u32> = collect_fetches(stream, &hits, "fetch message-id")
+            .await?
+            .into_iter()
+            .filter(|f| {
+                f.header().is_some_and(|h| {
+                    header_values(h, "Message-ID")
+                        .into_iter()
+                        .find_map(|v| normalize_message_id(&v))
+                        .is_some_and(|m| m == message_id)
+                })
+            })
+            .filter_map(|f| f.uid)
+            .collect();
+        exact.sort_unstable();
+        for uid in exact {
+            if let Some(want) = expected
+                && location_digest(c, folder, uidvalidity, uid)
+                    .await?
+                    .as_deref()
+                    != Some(want)
+            {
+                continue;
+            }
             out.push(MessageLocation {
-                folder,
+                folder: folder.clone(),
                 uidvalidity,
                 uid,
                 message_id: Some(message_id.to_string()),
             });
+            break;
         }
     }
     Ok(out)
@@ -1604,20 +1851,36 @@ fn placement_for(roles: &FolderRoles, rows: &[MessageLocation]) -> Placement {
 struct Resolved<T> {
     /// The rows that checked out, plus any the search fallback found.
     live: Vec<MessageLocation>,
-    /// The rows to drop.
+    /// The rows to drop: gone, or holding other content than the id's.
     stale: Vec<MessageLocation>,
     /// Rows the search fallback found, to record.
     found: Vec<MessageLocation>,
     got: Option<T>,
+    /// The digest this resolve bound the id to, when none was recorded and
+    /// it read the message's bytes: recorded by `settle`.
+    bound: Option<String>,
 }
 
 /// Walk `rows` (then the Message-ID search) until `fetch` returns something
 /// from one of them, checking EVERY row so placement is from live rows only.
 /// `fetch` runs in the opened folder and returns `None` for a UID that is
 /// gone.
+///
+/// ONLY THE ID'S OWN CONTENT IS ACCEPTED (Amendment I): with a digest
+/// recorded (`expected`), a row whose message does not match it is stale, its
+/// bytes are not returned, and it does not count toward placement.
+/// `digest_of` reads the digest from what `fetch` returned when it can (the
+/// whole message), else it is read from the server. With none recorded, the
+/// first bytes read bind it.
+///
+/// Last resort (correctness M3): a message moved out of every folder the
+/// search knows about (into a user folder, before its first fetch) is looked
+/// for in every selectable folder, so it is not lost to the live path.
 async fn resolve<T, F>(
     c: &mut Conn,
     rows: Vec<MessageLocation>,
+    mut expected: Option<String>,
+    digest_of: fn(&T) -> Option<String>,
     mut fetch: F,
 ) -> Result<Resolved<T>>
 where
@@ -1635,6 +1898,7 @@ where
         stale: Vec::new(),
         found: Vec::new(),
         got: None,
+        bound: None,
     };
     for row in rows {
         if c.examine(&row.folder).await? != Some(row.uidvalidity) {
@@ -1644,11 +1908,36 @@ where
         let here = if out.got.is_none() {
             match fetch(&mut c.session, row.uid).await? {
                 Some(v) => {
-                    out.got = Some(v);
-                    true
+                    let d = match digest_of(&v) {
+                        Some(d) => Some(d),
+                        None if expected.is_some() => {
+                            location_digest(c, &row.folder, row.uidvalidity, row.uid).await?
+                        }
+                        None => None,
+                    };
+                    match (&expected, d) {
+                        (Some(want), Some(d)) if *want == d => {
+                            out.got = Some(v);
+                            true
+                        }
+                        (Some(_), _) => false,
+                        (None, d) => {
+                            if d.is_some() {
+                                out.bound = d.clone();
+                                expected = d;
+                            }
+                            out.got = Some(v);
+                            true
+                        }
+                    }
                 }
                 None => false,
             }
+        } else if let Some(want) = &expected {
+            location_digest(c, &row.folder, row.uidvalidity, row.uid)
+                .await?
+                .as_deref()
+                == Some(want.as_str())
         } else {
             uid_exists(&mut c.session, row.uid).await?
         };
@@ -1661,9 +1950,33 @@ where
     if out.got.is_none()
         && let Some(mid) = message_id
     {
-        for loc in find_by_message_id(c, &mid).await? {
+        let known: Vec<String> = c
+            .roles
+            .search_folders()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let mut hits = find_by_message_id(c, &known, &mid, expected.as_deref()).await?;
+        if hits.is_empty() {
+            // Listed afresh: a folder made since this session logged in is
+            // exactly where a message may have just been filed. The roles
+            // are left as they are.
+            let rest: Vec<String> = list_roles(&mut c.session)
+                .await?
+                .selectable
+                .iter()
+                .filter(|f| !known.contains(f))
+                .cloned()
+                .collect();
+            hits = find_by_message_id(c, &rest, &mid, expected.as_deref()).await?;
+        }
+        for loc in hits {
             if out.got.is_none() && c.examine(&loc.folder).await? == Some(loc.uidvalidity) {
                 out.got = fetch(&mut c.session, loc.uid).await?;
+                if expected.is_none() {
+                    out.bound = out.got.as_ref().and_then(digest_of);
+                    expected = out.bound.clone();
+                }
             }
             out.live.push(loc.clone());
             out.found.push(loc);
@@ -1720,6 +2033,7 @@ impl MailSource for ImapSource {
         cap: Option<usize>,
         _urgency: Urgency,
     ) -> Result<Vec<String>> {
+        let (locs, account) = (self.locations.clone(), self.account_id);
         let (seen, snapshot) = match listing {
             Listing::Folder {
                 folder,
@@ -1752,7 +2066,8 @@ impl MailSource for ImapSource {
                         if let Some(cap) = cap {
                             uids.truncate(cap);
                         }
-                        let mut seen = stable_ids(&mut c.session, &name, validity, &uids).await?;
+                        let seen = stable_ids(&mut c.session, &name, validity, &uids).await?;
+                        let mut seen = bind_identities(c, locs.as_ref(), account, seen).await?;
                         seen.sort_unstable_by(|a, b| b.loc.uid.cmp(&a.loc.uid));
                         Ok((seen, Some((folder, snapshot))))
                     })
@@ -1790,6 +2105,7 @@ impl MailSource for ImapSource {
                                 let uids = search(&mut c.session, query.clone()).await?;
                                 let seen =
                                     stable_ids(&mut c.session, &folder, validity, &uids).await?;
+                                let seen = bind_identities(c, locs.as_ref(), account, seen).await?;
                                 all.extend(seen.into_iter().filter(|s| {
                                     s.internal_date.is_some_and(|d| d >= from && d < to)
                                 }));
@@ -1881,6 +2197,7 @@ impl MailSource for ImapSource {
         };
         let key = role_key(folder);
         let start_for_walk = start.clone();
+        let (locs, account) = (self.locations.clone(), self.account_id);
         let walk = self
             .with_conn(|c| {
                 Box::pin(async move {
@@ -1914,7 +2231,8 @@ impl MailSource for ImapSource {
                                 .filter(|u| *u > pos.last_uid)
                                 .collect();
                         last_uid = last_uid.max(uids.last().copied().unwrap_or(0));
-                        seen = stable_ids(&mut c.session, &name, pos.uidvalidity, &uids).await?;
+                        let ids = stable_ids(&mut c.session, &name, pos.uidvalidity, &uids).await?;
+                        seen = bind_identities(c, locs.as_ref(), account, ids).await?;
                     }
                     let mailbox_unchanged = seen.is_empty()
                         && pos.unchanged_at(&now)
@@ -1979,10 +2297,20 @@ impl MailSource for ImapSource {
             // Never seen by this source: there is nowhere to look.
             return Err(CoreError::NotFound);
         }
+        let expected = self.locations.content_digest(self.account_id, id)?;
         let (resolved, placement) = self
             .with_conn(|c| {
                 Box::pin(async move {
-                    let r = resolve(c, rows, |s, uid| Box::pin(fetch_body(s, uid))).await?;
+                    let r = resolve(
+                        c,
+                        rows,
+                        expected,
+                        |(bytes, _): &(Vec<u8>, _)| {
+                            (!bytes.is_empty()).then(|| content_digest_of_raw(bytes))
+                        },
+                        |s, uid| Box::pin(fetch_body(s, uid)),
+                    )
+                    .await?;
                     let placement = placement_for(&c.roles, &r.live);
                     Ok((r, placement))
                 })
@@ -2022,25 +2350,38 @@ impl MailSource for ImapSource {
             "(UID INTERNALDATE BODY.PEEK[HEADER.FIELDS ({})])",
             names.join(" ")
         );
+        let expected = self.locations.content_digest(self.account_id, id)?;
         let resolved = self
             .with_conn(|c| {
                 Box::pin(async move {
-                    resolve(c, rows, move |s, uid| {
-                        let query = query.clone();
-                        Box::pin(async move {
-                            let stream = s
-                                .uid_fetch(uid.to_string(), query)
-                                .await
-                                .map_err(imap_err("fetch headers"))?;
-                            let fetches = collect_fetches(stream, &[uid], "fetch headers").await?;
-                            Ok(fetches.into_iter().find(|f| f.uid == Some(uid)).map(|f| {
-                                FetchedHeaders {
-                                    headers: f.header().map(parse_header_block).unwrap_or_default(),
-                                    received_at: f.internal_date().map(|d| d.with_timezone(&Utc)),
-                                }
-                            }))
-                        })
-                    })
+                    resolve(
+                        c,
+                        rows,
+                        expected,
+                        |_| None,
+                        move |s, uid| {
+                            let query = query.clone();
+                            Box::pin(async move {
+                                let stream = s
+                                    .uid_fetch(uid.to_string(), query)
+                                    .await
+                                    .map_err(imap_err("fetch headers"))?;
+                                let fetches =
+                                    collect_fetches(stream, &[uid], "fetch headers").await?;
+                                Ok(fetches.into_iter().find(|f| f.uid == Some(uid)).map(|f| {
+                                    FetchedHeaders {
+                                        headers: f
+                                            .header()
+                                            .map(parse_header_block)
+                                            .unwrap_or_default(),
+                                        received_at: f
+                                            .internal_date()
+                                            .map(|d| d.with_timezone(&Utc)),
+                                    }
+                                }))
+                            })
+                        },
+                    )
                     .await
                 })
             })
@@ -2217,6 +2558,10 @@ impl ImapSource {
     /// Bring the location rows in line with what a resolve found: stale rows
     /// out, rows the search found in.
     fn settle<T>(&self, id: &str, r: &Resolved<T>) -> Result<()> {
+        if let Some(d) = &r.bound {
+            self.locations
+                .record_content_digest(self.account_id, id, d)?;
+        }
         for row in &r.stale {
             // A stale row the search found again at the same folder was just
             // re-recorded below; forgetting it first keeps that order safe.
@@ -2240,6 +2585,7 @@ pub(crate) struct MemLocations(
     std::sync::Mutex<
         std::collections::HashMap<(AccountId, String), BTreeMap<String, MessageLocation>>,
     >,
+    std::sync::Mutex<std::collections::HashMap<(AccountId, String), String>>,
 );
 
 #[cfg(test)]
@@ -2273,6 +2619,17 @@ impl MessageLocations for MemLocations {
         if let Some(rows) = self.0.lock().unwrap().get_mut(&(a, id.to_string())) {
             rows.remove(folder);
         }
+        Ok(())
+    }
+    fn content_digest(&self, a: AccountId, id: &str) -> Result<Option<String>> {
+        Ok(self.1.lock().unwrap().get(&(a, id.to_string())).cloned())
+    }
+    fn record_content_digest(&self, a: AccountId, id: &str, digest: &str) -> Result<()> {
+        self.1
+            .lock()
+            .unwrap()
+            .entry((a, id.to_string()))
+            .or_insert_with(|| digest.to_string());
         Ok(())
     }
 }

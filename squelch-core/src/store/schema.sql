@@ -911,6 +911,22 @@ CREATE TABLE IF NOT EXISTS imap_locations (
     PRIMARY KEY(account_id, msg_id, folder)
 );
 
+-- WHAT EACH IMAP ID IS (Amendment I, `crate::mail::imap::content_digest`):
+-- sha256 of the canonical headers plus Reply-To and the exact body text, one
+-- per stable id, recorded the first time the message's bytes are read and
+-- never replaced. A later sighting under the same id (a MOVE, a self-sent
+-- twin, or someone reusing the Message-ID) shares it only if its digest
+-- matches; a mismatch is a different message with an id of its own. A new
+-- table rather than a column on `imap_locations`, whose rows are per folder
+-- and come and go with moves: what a message IS does not.
+CREATE TABLE IF NOT EXISTS imap_digests (
+    account_id  INTEGER NOT NULL,
+    msg_id      TEXT NOT NULL,
+    content_sha TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    PRIMARY KEY(account_id, msg_id)
+);
+
 -- GMAIL-SIDE INBOX UNREAD COUNTS (labels/INBOX messagesUnread/threadsUnread),
 -- refreshed once per sync cycle. One row per account, overwritten each fetch:
 -- this mirrors Gmail's current state, it is not a history. Sync's own tables

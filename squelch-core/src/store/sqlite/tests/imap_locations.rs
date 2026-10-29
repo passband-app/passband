@@ -88,3 +88,20 @@ fn forgetting_one_folder_keeps_the_others_and_other_accounts() {
         vec![("INBOX".into(), u32::MAX, u32::MAX)]
     );
 }
+
+/// An id's content digest (Amendment I) is bound once: a later record with
+/// another digest changes nothing, and accounts never see each other's.
+#[test]
+fn a_content_digest_is_bound_once_per_account() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    let a = store.ensure_account("a@x.org").unwrap();
+    let b = store.ensure_account("b@x.org").unwrap();
+    assert_eq!(store.content_digest(a, "imap:1").unwrap(), None);
+    store.record_content_digest(a, "imap:1", "first").unwrap();
+    store.record_content_digest(a, "imap:1", "second").unwrap();
+    assert_eq!(
+        store.content_digest(a, "imap:1").unwrap().as_deref(),
+        Some("first")
+    );
+    assert_eq!(store.content_digest(b, "imap:1").unwrap(), None);
+}

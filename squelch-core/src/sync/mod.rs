@@ -1526,6 +1526,17 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     }
 
     /// May the refine lane drain missing vectors this round. See the call.
+    /// Whether the vector drain has anything to do: this engine's
+    /// `vectors_dirty`, or a write the store saw that no engine made (a
+    /// person's correction through the API lifting a restriction), whose debt
+    /// becomes this flag's here.
+    fn vectors_owed(&self) -> bool {
+        if self.store.take_vectors_owed() {
+            self.vectors_dirty.store(true, Ordering::Relaxed);
+        }
+        self.vectors_dirty.load(Ordering::Relaxed)
+    }
+
     fn may_drain_vectors(&self) -> bool {
         !self.window_in_flight.load(Ordering::Relaxed)
             && !self.archive.in_flight.load(Ordering::Relaxed)
@@ -2204,7 +2215,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 // AND ONLY WHEN SOMETHING MAY BE MISSING: the drain's query
                 // walks the whole account when nothing is, which in steady
                 // state is every round. See `vectors_dirty`.
-                if self.may_drain_vectors() && self.vectors_dirty.load(Ordering::Relaxed) {
+                if self.may_drain_vectors() && self.vectors_owed() {
                     self.backfill_missing_vectors().await;
                 }
             }
@@ -10959,6 +10970,74 @@ mod tests {
         assert_eq!(status(), Some(AttentionStatus::Done));
         server.abort();
     }
+
+    /// An applied access check can be what makes a message embeddable (own
+    /// mail waits for it), so it raises the drain's flag like a triage
+    /// decision does. And a correction made through the API, which no engine
+    /// sees, reaches the drain through the store.
+    #[tokio::test]
+    async fn an_applied_access_check_and_a_correction_raise_the_vector_drain() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, account) = store_at_cursor(Some(100));
+        // Own sent mail: filed access-only, so its access check is its job.
+        let raw = fixture(
+            account,
+            "access-dirty",
+            "From: me@example.com\r\nTo: friend@example.com\r\nSubject: Notes\r\n\r\nThe notes from Tuesday.",
+            true,
+        );
+        let parsed = ingest_with_rules(&raw, &Stage1Config::default(), Utc::now(), &[], |_| false);
+        let id = store.ingest_message(&parsed).unwrap();
+        let content = json!({"restricted": false, "reason": "No credentials"}).to_string();
+        let response = json!({"choices":[{"message":{"content":content},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":12,"completion_tokens":8}});
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(move || {
+                let response = response.clone();
+                async move { Json(response) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+        let llm = ResolvedLlm {
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+            url: format!("http://{address}/"),
+        };
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let job = store
+            .claim_agent_job(
+                account,
+                "access",
+                Utc::now() + ChronoDuration::hours(1),
+                120,
+            )
+            .unwrap()
+            .expect("an access job waits");
+        engine.vectors_dirty.store(false, Ordering::Relaxed);
+        engine.process_agent_job(job, &llm, &day).await;
+        assert!(
+            store.agent_access_allowed(account, id).unwrap(),
+            "the check applied"
+        );
+        assert!(
+            engine.vectors_dirty.load(Ordering::Relaxed),
+            "and told the drain"
+        );
+        server.abort();
+
+        engine.vectors_dirty.store(false, Ordering::Relaxed);
+        let _ = store.take_vectors_owed();
+        assert!(!engine.vectors_owed());
+        store
+            .correct_agent_triage(account, id, "external_access", &json!(false), Utc::now())
+            .unwrap();
+        assert!(engine.vectors_owed(), "the correction reached the drain");
+        assert!(engine.vectors_dirty.load(Ordering::Relaxed));
+    }
     /// THE PAST-EVENT RE-CHECK, END TO END: the model's arrival answer
     /// records a show that is over (and asks for done, which an arrival run
     /// never applies); the real commit projects it into a ghost; the poll
@@ -12656,8 +12735,8 @@ mod tests {
     /// THE SEALED GATE, END TO END (docs/SECURITY.md §4d): a login code is
     /// handed to no embedder, not at ingest (it is undecided), not by the
     /// drain before its decision, and not after the decision says auth, while
-    /// the owner's own mail is embedded at ingest and ordinary inbound mail
-    /// once it is decided.
+    /// the owner's own mail is embedded once its access check settles and
+    /// ordinary inbound mail once it is decided.
     #[tokio::test]
     async fn no_embedder_ever_reads_a_login_code() {
         let (store, acct) = store_at_cursor(None);
@@ -12684,9 +12763,36 @@ mod tests {
             "From: me@example.com\r\nTo: dan@example.com\r\nSubject: The lease\r\n\r\nSigned lease attached",
             true,
         );
-        let text = sent.embed_text.clone().expect("own mail embeds at ingest");
-        eng.embed_and_store(sent.id, text).await;
-        assert_eq!(vec_count(&store, sent.id), 1);
+        // Own mail is never triaged; until its access check answers it could
+        // be a forwarded code, so it waits for that, not for a decision.
+        assert!(
+            sent.embed_text.is_none(),
+            "own mail waits for its access check"
+        );
+        eng.backfill_missing_vectors().await;
+        assert_eq!(vec_count(&store, sent.id), 0, "access check pending");
+        {
+            use crate::store::agent_triage::AgentTriageStore;
+            let job = store
+                .claim_agent_job(acct, "access", Utc::now() + ChronoDuration::hours(1), 60)
+                .unwrap()
+                .expect("own mail is assessed for access");
+            assert_eq!(job.message_id, sent.id);
+            let message = store.load_agent_access_message(&job).unwrap();
+            store
+                .commit_agent_access(
+                    &job,
+                    &message,
+                    &crate::triage::access::AccessDecision {
+                        restricted: false,
+                        reason: "No credentials".into(),
+                    },
+                    &serde_json::json!({}),
+                )
+                .unwrap();
+        }
+        eng.backfill_missing_vectors().await;
+        assert_eq!(vec_count(&store, sent.id), 1, "settled, then embedded");
 
         // The drain, before any decision: the login code is not selected.
         eng.backfill_missing_vectors().await;

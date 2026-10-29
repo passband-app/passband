@@ -3121,10 +3121,17 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         items: &[(i64, &[f32])],
     ) -> Result<usize>;
 
-    /// Whether an embedder may read `message_id` now: not spam, not known
-    /// sealed, and either the owner's own mail or decided with access
-    /// settled. Ingest asks it before embedding a row's text.
+    /// Whether an embedder may read `message_id` now: not spam, not sealed,
+    /// and either the owner's own mail with its access check settled or
+    /// decided on its current content with access settled. Ingest asks it
+    /// before embedding a row's text.
     fn message_embeddable(&self, account_id: AccountId, message_id: i64) -> Result<bool>;
+
+    /// Whether a write since the last call may have made a message newly
+    /// embeddable without the sync engine seeing it (a person's correction
+    /// lifting a restriction, through the API). Clears as it answers; the
+    /// engine's vector drain raises its own flag on `true`.
+    fn take_vectors_owed(&self) -> bool;
 
     /// Up to `limit` messages with no vector yet that the sealed gate lets an
     /// embedder read, newest-first, for the backfill drain.

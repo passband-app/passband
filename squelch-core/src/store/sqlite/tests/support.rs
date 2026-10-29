@@ -756,7 +756,8 @@ pub(super) fn settle_decided(store: &SqliteStore, acct: AccountId, ids: &[i64]) 
         .unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO agent_message_decisions(account_id,message_id,revision,decision_json,decided_at)
-             VALUES(?1,?2,1,'{\"kinds\":[\"general\"]}',?3)",
+             VALUES(?1,?2,(SELECT revision FROM agent_message_state WHERE account_id=?1 AND message_id=?2),
+                    '{\"kinds\":[\"general\"]}',?3)",
             params![acct, id, Utc::now().to_rfc3339()],
         )
         .unwrap();

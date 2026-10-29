@@ -842,7 +842,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     .commit_agent_access(job, &message, &run.decision, &metadata)
                 {
                     Ok(AgentCommitOutcome::Applied) => {
-                        self.metrics.record_agent(AgentVerdict::Applied)
+                        self.metrics.record_agent(AgentVerdict::Applied);
+                        // Own mail is embedded only once its access check
+                        // settles (`embeddable_mail_sql!`): this commit may be
+                        // the one that makes it owed a vector.
+                        self.vectors_dirty.store(true, Ordering::Relaxed);
                     }
                     Ok(AgentCommitOutcome::Stale) => self.retry_agent(job, "context_changed"),
                     Err(_) => self.retry_agent(job, "commit_failed"),

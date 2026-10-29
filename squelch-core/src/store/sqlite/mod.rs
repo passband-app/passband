@@ -133,23 +133,25 @@ macro_rules! sealed_mail_sql {
 /// service. True when ALL of these hold:
 ///
 /// - not provider spam (semantic recall must never return it);
-/// - not KNOWN sealed ([`known_sealed_mail_sql!`]: an auth decision, a
-///   restriction by the model or a person, the retired column);
-/// - and EITHER the account's own mail ([`own_mail_sql!`]), which is never
-///   triaged by design (it is filed access-only) and is not a login code
-///   somebody sent the owner, OR a stored decision exists and the access
-///   assessment is not pending ([`sealed_mail_sql!`], the strict reader
-///   answer, is false).
+/// - EITHER the account's own mail ([`own_mail_sql!`]) whose access check has
+///   SETTLED `allowed` (own mail is never triaged by design, it is filed
+///   access-only, and until that check answers it could be a forwarded login
+///   code), OR a stored decision OF THE CURRENT CONTENT: its `revision` is the
+///   message's `agent_message_state.revision`, so a decision of text that has
+///   since changed vouches for nothing;
+/// - and not sealed by the strict reader answer ([`sealed_mail_sql!`]): not
+///   KNOWN sealed (an auth decision, a restriction by the model or a person,
+///   the retired column) and the access assessment not pending.
 ///
 /// NOTHING IS EMBEDDED UNTIL IT IS KNOWN NOT TO BE SEALED. There is no local
 /// login-code detector; only the triage model decides auth, and it runs after
 /// ingest. So inbound mail whose triage is merely DELAYED (held by the daily
 /// run cap, a spent budget, a failing model, no model configured at all) or
 /// that is never triaged (an archive row nobody promoted) gets NO VECTOR
-/// until a non-sealed decision lands. Keyword search still finds it: FTS is
-/// not gated by this. That is the accepted trade-off. Own mail that a person
-/// or the access check restricts loses its vector at that event
-/// ([`vector_forbidden_sql!`]).
+/// until a non-sealed decision lands. Own mail waits for its access check the
+/// same way. Keyword search still finds both: FTS is not gated by this. That
+/// is the accepted trade-off. Own mail that a person or the access check
+/// restricts loses its vector at that event ([`vector_forbidden_sql!`]).
 ///
 /// ORDER IS COST, not meaning: the drain asks this of every row with no
 /// vector, and most of those (archive rows, mail awaiting triage) fail at the
@@ -158,14 +160,18 @@ macro_rules! sealed_mail_sql {
 macro_rules! embeddable_mail_sql {
     () => {
         concat!(
-            "(m.is_spam=0 AND (",
+            "(m.is_spam=0 AND ((",
             own_mail_sql!(),
-            " OR (EXISTS(SELECT 1 FROM agent_message_decisions emb_d \
-                         WHERE emb_d.account_id=m.account_id AND emb_d.message_id=m.id) \
-                  AND NOT ",
+            " AND EXISTS(SELECT 1 FROM agent_message_state emb_o \
+                         WHERE emb_o.account_id=m.account_id AND emb_o.message_id=m.id \
+                           AND emb_o.access='allowed')) \
+                 OR EXISTS(SELECT 1 FROM agent_message_decisions emb_d \
+                           WHERE emb_d.account_id=m.account_id AND emb_d.message_id=m.id \
+                             AND emb_d.revision=(SELECT emb_s.revision FROM agent_message_state emb_s \
+                                                 WHERE emb_s.account_id=m.account_id \
+                                                   AND emb_s.message_id=m.id))) \
+             AND NOT ",
             sealed_mail_sql!(),
-            ")) AND NOT ",
-            known_sealed_mail_sql!(),
             ")"
         )
     };
@@ -175,7 +181,8 @@ macro_rules! embeddable_mail_sql {
 /// message is known sealed, or it is in the agent pipeline (it has state)
 /// and is not [`embeddable_mail_sql!`] (its content changed and awaits a new
 /// decision, it moved to spam, it was embedded at ingest before this gate
-/// existed and is still undecided). The cleanup at every event that can seal
+/// existed and is still undecided, it is own mail whose access check has not
+/// answered). The cleanup at every event that can seal
 /// a message and the sweep at store open both delete by it.
 ///
 /// A row with NO agent state is a legacy row from before the agent pipeline:
@@ -714,6 +721,12 @@ pub struct SqliteStore {
     /// read at, so a poll that finds nothing written since reuses it
     /// (`attention::InventoryMemo`).
     inventory_memo: Mutex<Option<attention::InventoryMemo>>,
+    /// Raised by a write that may have made a message newly embeddable
+    /// OUTSIDE the sync engine's own commits (a person's correction through
+    /// the API lifting a restriction, say), and taken by the engine's vector
+    /// drain, which otherwise runs only on its own `vectors_dirty` flag
+    /// ([`Store::take_vectors_owed`]).
+    vectors_owed: std::sync::atomic::AtomicBool,
 }
 
 /// Whether anything has been written to the file since a read: this
@@ -856,6 +869,7 @@ impl SqliteStore {
             embedder: RwLock::new(None),
             event_tx: RwLock::new(None),
             inventory_memo: Mutex::new(None),
+            vectors_owed: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -2356,6 +2370,11 @@ impl Store for SqliteStore {
 
     fn message_embeddable(&self, account_id: AccountId, message_id: i64) -> Result<bool> {
         self.message_embeddable(account_id, message_id)
+    }
+
+    fn take_vectors_owed(&self) -> bool {
+        self.vectors_owed
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Trait override so a generic `S: Store` caller resolves the CURRENT

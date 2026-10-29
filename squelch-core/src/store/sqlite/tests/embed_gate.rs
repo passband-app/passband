@@ -126,8 +126,47 @@ fn undecided_inbound_mail_waits_for_a_decision_that_does_not_seal_it() {
     assert_eq!(vec_count_for(&store, id), 1);
 }
 
+/// The access check over `id`, committed through its real path, answering
+/// `restricted`. Queues the check first if none is waiting. For mail filed
+/// access-only (own mail), where every job is an access check.
+fn commit_access(store: &SqliteStore, acct: AccountId, id: i64, restricted: bool) {
+    let claim = || {
+        store
+            .claim_agent_job(acct, "access", Utc::now() + chrono::Duration::hours(1), 60)
+            .unwrap()
+    };
+    let job = match claim() {
+        Some(job) => job,
+        None => {
+            // A trigger of its own, so a settled check is asked again.
+            static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            store
+                .enqueue_agent_triage(acct, id, &format!("test-access:{run}"), false)
+                .unwrap();
+            claim().expect("an access job waits")
+        }
+    };
+    assert_eq!(job.message_id, id);
+    let message = store.load_agent_access_message(&job).unwrap();
+    store
+        .commit_agent_access(
+            &job,
+            &message,
+            &crate::triage::access::AccessDecision {
+                restricted,
+                reason: "the access check".into(),
+            },
+            &serde_json::json!({}),
+        )
+        .unwrap();
+}
+
+/// Own mail is never triaged, so its access check is the only thing that
+/// can say it is not a forwarded login code. Until that check answers
+/// `allowed`, no embedder reads it.
 #[test]
-fn the_owners_own_sent_mail_is_embedded_without_a_decision() {
+fn the_owners_own_sent_mail_waits_for_its_access_check() {
     let (store, acct) = store();
     let id = triaged(acct, "sent", "sent")
         .from("me@example.com")
@@ -145,6 +184,9 @@ fn the_owners_own_sent_mail_is_embedded_without_a_decision() {
         )
         .unwrap();
     assert!(!decided, "own mail is never triaged");
+    refused(&store, acct, id, "own mail, access check pending");
+
+    commit_access(&store, acct, id, false);
     assert!(store.message_embeddable(acct, id).unwrap());
     assert!(owed(&store, acct, id));
     let v = vector();
@@ -152,25 +194,44 @@ fn the_owners_own_sent_mail_is_embedded_without_a_decision() {
 
     // The access check restricting it (a forwarded code, say) seals it, and
     // its vector goes at that commit.
-    let job = store
-        .claim_agent_job(acct, "access", Utc::now() + chrono::Duration::hours(1), 60)
-        .unwrap()
-        .expect("own mail is assessed for access");
-    assert_eq!(job.message_id, id);
-    let message = store.load_agent_access_message(&job).unwrap();
-    store
-        .commit_agent_access(
-            &job,
-            &message,
-            &crate::triage::access::AccessDecision {
-                restricted: true,
-                reason: "a forwarded code".into(),
-            },
-            &serde_json::json!({}),
-        )
-        .unwrap();
+    commit_access(&store, acct, id, true);
     assert_eq!(vec_count_for(&store, id), 0, "restricted own mail loses it");
     refused(&store, acct, id, "restricted own mail");
+}
+
+/// A decision vouches for the text it read. Content that changed under a
+/// person's explicit allow keeps `access='allowed'` and the old decision row,
+/// at a revision that is no longer the message's: no embedder reads it until
+/// the new content is decided, and a vector it had goes.
+#[test]
+fn a_decision_of_older_content_vouches_for_nothing() {
+    let (store, acct) = store();
+    let id = inbound(acct, "changed").ingest(&store);
+    commit_decision(&store, acct, id, |_| {});
+    store
+        .correct_agent_triage(
+            acct,
+            id,
+            "external_access",
+            &serde_json::json!(false),
+            Utc::now(),
+        )
+        .unwrap();
+    assert!(store.message_embeddable(acct, id).unwrap());
+    plant(&store, acct, id);
+
+    // What a content change under that explicit allow leaves behind.
+    {
+        let conn = store.lock().unwrap();
+        conn.execute(
+            "UPDATE agent_message_state SET revision=revision+1, access='allowed' WHERE message_id=?1",
+            [id],
+        )
+        .unwrap();
+        search::purge_forbidden_vectors_conn(&conn, Some(id)).unwrap();
+    }
+    assert_eq!(vec_count_for(&store, id), 0, "the stale vector goes");
+    refused(&store, acct, id, "decision of older content");
 }
 
 #[test]
@@ -234,19 +295,41 @@ fn the_sweep_at_open_deletes_vectors_embedded_before_the_gate() {
         .from("me@example.com")
         .is_sent(true)
         .ingest(&store);
+    commit_access(&store, acct, own, false);
+    let own_pending = triaged(acct, "own-pending", "own-pending")
+        .from("me@example.com")
+        .is_sent(true)
+        .ingest(&store);
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE agent_triage_jobs SET state='completed' WHERE message_id=?1",
+            [own_pending],
+        )
+        .unwrap();
     // A legacy row from before the agent pipeline: no state, the column normal.
     let vetted = triaged(acct, "vetted", "vetted")
         .from("bob@example.com")
         .seed(&store);
     // What a store looks like after the old ingest embedded everything.
-    for id in [auth, restricted, legacy, undecided, ordinary, own, vetted] {
+    for id in [
+        auth,
+        restricted,
+        legacy,
+        undecided,
+        own_pending,
+        ordinary,
+        own,
+        vetted,
+    ] {
         plant(&store, acct, id);
         assert_eq!(vec_count_for(&store, id), 1);
     }
     drop(store);
 
     let store = SqliteStore::open(dir.join("store.sqlite3")).unwrap();
-    for id in [auth, restricted, legacy, undecided] {
+    for id in [auth, restricted, legacy, undecided, own_pending] {
         assert_eq!(vec_count_for(&store, id), 0, "message {id} swept");
         assert_eq!(fts_rows(&store, id), 1, "its keyword row stays");
     }

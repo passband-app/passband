@@ -1933,6 +1933,11 @@ impl AgentTriageStore for SqliteStore {
         let tx = conn.transaction()?;
         correct_agent_triage_conn(&tx, account, message, field, value, now)?;
         tx.commit()?;
+        // A correction can UNSEAL (a restriction lifted, an auth kind
+        // removed), and nothing else would tell the vector drain: no triage
+        // job runs for an archive row, and one that does may wait on a budget.
+        self.vectors_owed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
     fn correct_agent_triage_delta(
@@ -1996,6 +2001,8 @@ impl AgentTriageStore for SqliteStore {
         };
         correct_agent_triage_conn(&tx, account, message, field, &value, now)?;
         tx.commit()?;
+        self.vectors_owed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
     fn enqueue_agent_triage(

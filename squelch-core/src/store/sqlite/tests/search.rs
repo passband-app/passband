@@ -892,6 +892,13 @@ fn sent_raw_body_is_stored_and_embeddable() {
             })
             .unwrap();
         assert!(body.contains("revised design doc by Friday"));
+        // Its access check has answered (own mail embeds only once it has).
+        conn.execute(
+            "INSERT INTO agent_message_state(account_id,message_id,content_snapshot,revision,access)
+             VALUES(?1,?2,'',1,'allowed')",
+            params![acct, id],
+        )
+        .unwrap();
     }
 
     // And it is a backfill candidate (sent mail is embeddable for recall).

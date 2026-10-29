@@ -1067,8 +1067,13 @@ from the plan below:
 - **Calendar unticked** at Google: the Gmail floor passes, nothing is
   installed or queued, and the page says calendar was not connected.
 - **Signup and reconnect** now also send `include_granted_scopes=true`, so a
-  later plain reconnect hands back a token that still carries calendar. They
-  do NOT request the calendar scopes.
+  later plain reconnect hands back a token that still carries calendar.
+  Since 2026-10-29 a reconnect also REQUESTS the calendar scopes (optional,
+  as signup does; the founder: "the reconnect flow for email should also
+  reconnect calendar"): a reconnect is needed when the old grant died, a
+  revoked grant leaves `include_granted_scopes` nothing to keep, and the
+  install replaces the whole credentials file, so a Gmail-only repair left
+  calendar disconnected and asking for a second trip.
 - **The daemon** records the granted scopes on the stored token
   (`StoredToken.scopes`, from the exchange, every refresh that names them, and
   import), resolves the calendar token with `CalendarCredentials` (Calendar

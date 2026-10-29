@@ -527,6 +527,12 @@ run_suite translation-wire \
   Sources/Passband/Lib/Quotes.swift \
   Tests/TranslationWireTests.swift
 
+# Sender signals (issue #639): the wire and which reader lines warn.
+run_suite sender-signals-wire \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/SubjectText.swift \
+  Tests/SenderSignalsWireTests.swift
+
 run_suite spam-wire \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/SubjectText.swift \

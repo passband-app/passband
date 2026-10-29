@@ -398,8 +398,23 @@ struct ClientMessage: Codable, Sendable, Identifiable, Hashable, SenderStringCon
     /// shape (a bare string, an array) reads as no translation at all, rather
     /// than failing the whole message.
     @LenientOptional var translation: ClientTranslation? = nil
+    /// WHERE THE FROM LINE AND THE REAL SENDER DISAGREE (issue #639): who sent
+    /// it on someone's behalf, the service it came through, where replies go,
+    /// an address hiding in the display name. ABSENT on an older daemon, on
+    /// mail nobody has read the headers of, and when nothing disagreed, and all
+    /// of those draw nothing. LENIENT for the same reason `translation` is: the
+    /// notification extension decodes this type and must never fail a push
+    /// over a line it does not draw.
+    @LenientOptional var sender_signals: SenderSignals? = nil
 
     var attachmentList: [Attachment] { attachments ?? [] }
+
+    /// The line the reader draws under the From line, or nil for none. A
+    /// stranger is anyone the daemon has not vouched for, including an older
+    /// daemon that does not say: the reply-to warning errs toward showing.
+    var senderLine: SenderSignals.Line? {
+        sender_signals?.line(senderKnown: sender_known ?? false)
+    }
 
     /// The translation the reader may show INSTEAD of the original: one that
     /// has finished and actually carries a body. A pending or deferred one
@@ -449,6 +464,50 @@ struct ClientMessage: Codable, Sendable, Identifiable, Hashable, SenderStringCon
     /// and a mark on every message from a known contact answers nothing.
     var needsAttention: Bool {
         (attention_open ?? false) && (tier == .pastDue || tier == .deadline)
+    }
+}
+
+/// core::types::SenderSignals: header facts about where From and the real
+/// sender disagree. Every field optional; an unknown one is ignored.
+struct SenderSignals: Codable, Sendable, Hashable {
+    /// The `Sender:` mailbox, when it is someone other than From.
+    var sender: String?
+    /// The domain the mail provider verified a signature for, when nothing
+    /// from the From domain was: a mail service's "via".
+    var via: String?
+    /// A reply address at another organization (never set for lists).
+    var reply_to: String?
+    /// The bounce domain. For triage; the reader does not draw it.
+    var envelope_domain: String?
+    /// An address written inside the display name that is not the real one.
+    var name_spoof: String?
+
+    /// One line of text and whether it is drawn as a warning.
+    struct Line: Equatable, Sendable {
+        let text: String
+        let warning: Bool
+    }
+
+    /// What the reader says, most alarming first, or nil when there is
+    /// nothing to say. Only two things are WARNINGS: an address in the name
+    /// that is not the sender's, and replies routed to another organization
+    /// by someone the owner has never written to. "via" and "sent by" are
+    /// how mail services and assistants work, so they stay quiet.
+    func line(senderKnown: Bool) -> Line? {
+        var parts: [String] = []
+        var warning = false
+        if let spoof = name_spoof, !spoof.isEmpty {
+            parts.append("Name claims \(spoof)")
+            warning = true
+        }
+        if let replyTo = reply_to, !replyTo.isEmpty {
+            parts.append("Replies go to \(replyTo)")
+            if !senderKnown { warning = true }
+        }
+        if let sender, !sender.isEmpty { parts.append("Sent by \(sender)") }
+        if let via, !via.isEmpty { parts.append("via \(via)") }
+        guard !parts.isEmpty else { return nil }
+        return Line(text: parts.joined(separator: " · "), warning: warning)
     }
 }
 

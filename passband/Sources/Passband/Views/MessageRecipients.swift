@@ -224,3 +224,34 @@ private struct RecipientLineView: View {
         }
     }
 }
+
+/// WHERE THE FROM LINE AND THE REAL SENDER DISAGREE (issue #639), one line
+/// under the sender: "via sendgrid.net", "Sent by assistant@…", "Replies go to
+/// …", "Name claims …". Quiet ink for the ordinary cases a mail service or an
+/// assistant leaves; the warning tint only for the two shapes scams take (see
+/// `SenderSignals.line`). Draws nothing at all when there is nothing to say,
+/// so most mail and every older daemon read exactly as before.
+struct SenderSignalLine: View {
+    let message: ClientMessage
+    let compact: Bool
+
+    var body: some View {
+        if let line = message.senderLine {
+            HStack(alignment: .firstTextBaseline, spacing: Space.s4) {
+                if line.warning {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: compact ? 9 : 10, weight: .semibold))
+                        .accessibilityHidden(true)
+                }
+                Text(line.text)
+                    .font(Typo.ui(compact ? 10 : 11))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .foregroundStyle(line.warning ? Palette.warn : Palette.inkFaint)
+            .help(line.text)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(line.warning ? "Caution: \(line.text)" : line.text)
+        }
+    }
+}

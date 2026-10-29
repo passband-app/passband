@@ -49,13 +49,13 @@ use squelch_core::features::Feature;
 /// accounts through `login.live.com`.
 /// `font-src 'self'` admits exactly one file, [`NEWSREADER`], served by this
 /// same origin: the landing page's serif, and still nothing a third party sees.
-/// The providers' sign-in marks, inline: markup rather than a fetch, so the
-/// `default-src 'none'` CSP needs nothing new. Each sits on a small white
-/// tile (`.mark`), which is how the Google G keeps its colors on a dark
-/// button, and the Microsoft squares sit on the same tile so the two buttons
-/// read as a pair. Decorative: the button's text names the provider.
-pub(crate) const GOOGLE_MARK: &str = r##"<span class="mark" aria-hidden="true"><svg viewBox="0 0 48 48" width="16" height="16"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg></span>"##;
-pub(crate) const MICROSOFT_MARK: &str = r##"<span class="mark" aria-hidden="true"><svg viewBox="0 0 21 21" width="14" height="14"><rect x="0" y="0" width="10" height="10" fill="#F25022"/><rect x="11" y="0" width="10" height="10" fill="#7FBA00"/><rect x="0" y="11" width="10" height="10" fill="#00A4EF"/><rect x="11" y="11" width="10" height="10" fill="#FFB900"/></svg></span>"##;
+/// The mailbox products' marks for the signup's provider tiles, which are
+/// named by product (Gmail, Outlook), not by sign-in company. Inline:
+/// markup rather than a fetch, so the `default-src 'none'` CSP needs nothing
+/// new. Each sits on a small white tile (`.mark`) so the brand colors read
+/// on any background. Decorative: the tile's text names the product.
+pub(crate) const GMAIL_MARK: &str = r##"<span class="mark" aria-hidden="true"><svg viewBox="52 42 88 66" width="17" height="13"><path fill="#4285F4" d="M58 108h14V74L52 59v43c0 3.32 2.69 6 6 6"/><path fill="#34A853" d="M120 108h14c3.32 0 6-2.69 6-6V59l-20 15"/><path fill="#FBBC04" d="M120 48v26l20-15v-8c0-7.42-8.47-11.65-14.4-7.2"/><path fill="#EA4335" d="M72 74V48l24 18 24-18v26L96 92"/><path fill="#C5221F" d="M52 51v8l20 15V48l-5.6-4.2c-5.94-4.45-14.4-.22-14.4 7.2"/></svg></span>"##;
+pub(crate) const OUTLOOK_MARK: &str = r##"<span class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" width="17" height="17"><rect x="9" y="4" width="14" height="16" rx="1.8" fill="#28A8EA"/><path d="M9.5 8.5 16 13l6.5-4.5" fill="none" stroke="#0A5EA8" stroke-width="1.3" stroke-linejoin="round"/><rect x="1" y="6" width="12" height="12" rx="1.8" fill="#0078D4"/><ellipse cx="7" cy="12" rx="2.7" ry="3.2" fill="none" stroke="#fff" stroke-width="1.7"/></svg></span>"##;
 
 const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self' https://accounts.google.com https://login.microsoftonline.com https://login.live.com; frame-ancestors 'none'; base-uri 'none'";
 
@@ -486,10 +486,7 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
   width: 1.5rem; height: 1.5rem; border-radius: 0.4rem; background: #fff;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.08); }}
 .mark svg {{ display: block; }}
-/* One block of the same width in every provider button, centered: the marks
-   line up in one column and the arrows in another, whichever name is longer. */
-.choice {{ display: inline-grid; grid-template-columns: 1.5rem 1fr auto; align-items: center;
-  column-gap: 0.6rem; width: 15rem; max-width: 100%; text-align: left; }}
+
 .auth :is(a.button, button):is(:hover, :focus-visible) .arrow {{ transform: translateX(3px); }}
 /* The form: slots cut into one rig, each with its label engraved in it, and
    the submit as the rig's last slot rather than a button sitting under it. */
@@ -516,8 +513,18 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
 .auth .rig button:is(:hover, :focus-visible) {{ transform: none; box-shadow: none;
   background: linear-gradient(180deg, transparent, var(--slot-rule)); }}
 .auth .rig button:focus-visible {{ outline-offset: -3px; }}
-/* A second provider is its own row, ruled off like every slot above it. */
-.auth .rig button + button {{ border-top: 1px solid var(--slot-rule); }}
+/* THE PROVIDERS: their own rig under the account fields, the label engraved
+   like a slot's, then equal tiles, two to a row, each named by product.
+   More providers wrap into the grid; a lone one spans the row. */
+.auth form.signup {{ display: flex; flex-direction: column; gap: 0.9rem; margin: 0; }}
+.auth .providers .rig-label {{ display: block; padding: 0.8rem 1.1rem 0.7rem; color: var(--faintest);
+  font-size: 0.68rem; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase;
+  border-bottom: 1px solid var(--slot-rule); }}
+.auth .provider-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+.auth .provider-grid button:only-child {{ grid-column: 1 / -1; }}
+.auth .provider-grid button {{ gap: 0.65rem; padding: 1.05rem 1rem; font-size: 1rem; }}
+.auth .provider-grid button:nth-child(2n) {{ border-left: 1px solid var(--slot-rule); }}
+.auth .provider-grid button:nth-child(n + 3) {{ border-top: 1px solid var(--slot-rule); }}
 /* The username slot: the input and its domain on one line, the domain in the
    placeholder's grey riding right behind what is typed. See [`signup_form`]
    for why this needs no script. */
@@ -698,7 +705,8 @@ pub fn signup_form_with(
             r#"<h1>Set up Passband</h1>
 <p class="lead">Pick a username, then connect {mailboxes}.</p>
 {error_html}
-<form class="rig" method="post" action="/signup">
+<form class="signup" method="post" action="/signup">
+<div class="rig">
 <div class="{invite_class}" id="code">
 <label for="invite">Invite code</label>
 <input type="text" id="invite" name="invite" value="{invite}" placeholder="XXXX-XXXX-XXXX-XXXX"
@@ -710,8 +718,14 @@ pub fn signup_form_with(
   aria-describedby="label-hint" maxlength="{max}" autocomplete="off" autocapitalize="off" spellcheck="false"{label_focus} required><span class="domain">.{domain}</span></label>
 <span class="sr" id="label-hint">{min} to {max} lowercase letters, numbers or hyphens.</span>
 </div>
-<button type="submit" name="provider" value="google"><span class="choice">{google_mark}<span>Continue with Google</span><span class="arrow" aria-hidden="true">→</span></span></button>
-{outlook_button}</form>
+</div>
+<div class="rig providers" role="group" aria-labelledby="providers-label">
+<span class="rig-label" id="providers-label">Connect your mail</span>
+<div class="provider-grid">
+<button type="submit" name="provider" value="google" aria-label="Connect Gmail">{gmail_mark}<span>Gmail</span></button>
+{outlook_button}</div>
+</div>
+</form>
 <details>
 <summary>{consent_summary}</summary>
 <ul>
@@ -725,7 +739,7 @@ pub fn signup_form_with(
             error_html = error_html,
             links_html = links_html,
             mailboxes = if outlook { "Gmail or Outlook" } else { "Gmail" },
-            google_mark = GOOGLE_MARK,
+            gmail_mark = GMAIL_MARK,
             consent_summary = if outlook {
                 "Google or Microsoft will ask to read, change, and send your mail, and for your calendar."
             } else {
@@ -733,7 +747,7 @@ pub fn signup_form_with(
             },
             outlook_button = if outlook {
                 format!(
-                    r#"<button type="submit" name="provider" value="microsoft" class="quiet"><span class="choice">{MICROSOFT_MARK}<span>Continue with Microsoft</span><span class="arrow" aria-hidden="true">→</span></span></button>
+                    r#"<button type="submit" name="provider" value="microsoft" aria-label="Connect Outlook">{OUTLOOK_MARK}<span>Outlook</span></button>
 "#
                 )
             } else {

@@ -435,32 +435,16 @@ struct OpenAiUsage {
     prompt_tokens: u64,
     #[serde(default)]
     completion_tokens: u64,
-    #[serde(default)]
-    prompt_tokens_details: Option<OpenAiPromptDetails>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiPromptDetails {
-    #[serde(default)]
-    cached_tokens: u64,
 }
 
 impl OpenAiUsage {
-    /// OpenAI's `prompt_tokens` INCLUDES the cached prefix, reported again in
-    /// `prompt_tokens_details.cached_tokens`. Split it the Anthropic way, so
-    /// `input_tokens` is the uncached remainder everywhere and a cached read is
-    /// priced as one. The wire reports no cache writes; the ledger records zero.
     fn into_usage(self) -> Usage {
-        let cached = self
-            .prompt_tokens_details
-            .map(|details| details.cached_tokens)
-            .unwrap_or(0)
-            .min(self.prompt_tokens);
         Usage {
-            input_tokens: self.prompt_tokens - cached,
+            input_tokens: self.prompt_tokens,
             output_tokens: self.completion_tokens,
+            // OpenAI's wire has no prompt-cache split; the ledger records zero.
             cache_creation_input_tokens: 0,
-            cache_read_input_tokens: cached,
+            cache_read_input_tokens: 0,
             cache_creation: None,
         }
     }
@@ -1198,41 +1182,15 @@ mod tests {
     }
 
     #[test]
-    fn openai_usage_without_cache_details_is_all_uncached() {
+    fn openai_usage_leaves_cache_fields_zero() {
         let u = OpenAiUsage {
             prompt_tokens: 42,
             completion_tokens: 7,
-            prompt_tokens_details: None,
         }
         .into_usage();
         assert_eq!(u.input_tokens, 42);
         assert_eq!(u.output_tokens, 7);
         assert_eq!(u.cache_creation_input_tokens, 0);
         assert_eq!(u.cache_read_input_tokens, 0);
-    }
-
-    /// Cached prompt tokens move out of `input_tokens` into the cache-read
-    /// field, so the total prompt (input + cache read) is unchanged and the
-    /// cached share is priced as a read.
-    #[test]
-    fn openai_cached_prompt_tokens_are_reported_as_cache_reads() {
-        let wire: OpenAiUsage = serde_json::from_value(serde_json::json!({
-            "prompt_tokens": 1000, "completion_tokens": 9,
-            "prompt_tokens_details": {"cached_tokens": 640, "audio_tokens": 0}
-        }))
-        .unwrap();
-        let u = wire.into_usage();
-        assert_eq!(u.input_tokens, 360);
-        assert_eq!(u.cache_read_input_tokens, 640);
-        assert_eq!(u.input_tokens + u.cache_read_input_tokens, 1000);
-        assert_eq!(u.cache_creation_input_tokens, 0);
-        // A provider reporting more cached than prompt tokens cannot underflow.
-        let odd = OpenAiUsage {
-            prompt_tokens: 5,
-            completion_tokens: 0,
-            prompt_tokens_details: Some(OpenAiPromptDetails { cached_tokens: 9 }),
-        }
-        .into_usage();
-        assert_eq!((odd.input_tokens, odd.cache_read_input_tokens), (0, 5));
     }
 }

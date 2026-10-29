@@ -573,15 +573,7 @@ async fn the_unsubscribe_link_and_its_token_stay_out_of_the_audit_log() {
     let row = settled(&run).await;
     assert_eq!(row.status.as_deref(), Some("done"), "{row:?}");
 
-    // The job finishes its row, then audits: wait for that last write too.
-    let mut audit = Vec::new();
-    for _ in 0..200 {
-        audit = run.store.list_audit(run.acct, 100).unwrap();
-        if audit.iter().any(|e| e.action == "unsubscribe_result") {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    let audit = run.store.list_audit(run.acct, 100).unwrap();
     assert!(
         audit.iter().any(|e| e.action == "unsubscribe_result"),
         "control: the result was audited: {audit:?}"

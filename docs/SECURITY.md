@@ -828,19 +828,21 @@ is marked `scheduled:<id>:` exactly as its `send` row is:
 | `send.echo` detail | meaning |
 | --- | --- |
 | `skipped:no_id` | Gmail's send response carried no message id; nothing to fetch back. |
-| `skipped:sealed` | the outbound copy tripped seal detection; nothing was committed. |
+| `skipped:sealed` | not written today: `ingest_sent` always commits (see below). The branch stays so the audit vocabulary is stable. |
 | `failed:fetch` | the read-back GET timed out (5s), failed, decoded badly, or returned zero bytes. |
 | `failed:ingest` | the local store write failed. |
 | `ok:<local id>` | echoed; `<local id>` is the local `messages.id`. |
 
-The echoed row goes through the SAME seal-first ingest as any other message
-(`sync::ingest::ingest_sent`, `is_sent: true`), so it runs no LLM. Because seal
-detection precedes the `is_sent` branch, a reply quoting an OTP trips it — and such
-a copy is **not written at all** (`Ok(None)`, `skipped:sealed`). Committing it would
-put a sealed row in the thread, and `thread_guard_and_subject` 404s any thread
-holding one, so the echo would hide the counterparty's mail the user was reading a
-second ago; skipping degrades to "the reply appears on the next backfill", the
-pre-echo status quo. The read-back is also capped at **5s**
+The echoed row goes through the SAME ingest as any other message
+(`sync::ingest::ingest_sent`, `is_sent: true`), so it runs no LLM, and it is
+**always committed**, including a reply that quotes a one-time code. There is no
+deterministic sealing detector at ingest any more (§4): the copy is stored like any
+other row and is pending until the durable agent assesses its access, so the human
+door shows it at once while the agent door does not, and a restricted verdict
+closes it to agents as it would any message. The human thread does not 404 on it
+(`auth_sent_echo_is_stored_and_the_human_thread_still_opens`). `ingest_sent` still
+returns an `Option` and the `skipped:sealed` branch in `echo_sent` remains, but
+nothing reaches it today. The read-back is also capped at **5s**
 (`ECHO_FETCH_TIMEOUT_SECS`): the client's POST timeout is 15s and `action_send` has
 already made two serial Gmail calls, so bookkeeping may not spend the rest of that
 budget. Keep the echo's failures audited and swallowed; keep it out of core's write
@@ -981,7 +983,13 @@ it. That move is what the guard below exists for.
   link: an unsubscribe may complete on a plain GET. The job starts from
   `POST /client/unsubscribe` with `auto: true` (`squelch-api/src/unsub_job.rs`),
   human door only; the agent door has no unsubscribe route at all, and the
-  assistant's tool goes through the confirm card (§6).
+  assistant's tool goes through the confirm card (§6). `auto: true` also needs
+  `confirm: true`, like every other route that acts for the user: without it
+  the daemon answers 400 and audits `rejected:confirm` before reading the
+  message or fetching anything
+  (`auto_without_confirm_is_refused_before_anything_is_fetched`). A request
+  without `auto` needs no `confirm`: its answer is a link the person opens in
+  their own browser.
 - **Not for mail we cannot trust.** Spam (`is_spam`) and mail without a passing
   authentication verdict (`auth_pass` not true) are never unsubscribed from
   automatically: fetching a spammer's link confirms the address is live, and an

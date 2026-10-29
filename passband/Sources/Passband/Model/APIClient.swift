@@ -888,6 +888,9 @@ actor APIClient {
         var message_id: Int
         /// Ask the daemon to do it (it may still answer with a link to open).
         var auto: Bool
+        /// The daemon refuses `auto` without it. Every caller is a tap: the
+        /// unsubscribe button, or the assistant after `AgentTools.confirmed`.
+        var confirm: Bool
     }
     struct UnsubSenderBody: Codable, Sendable { var sender: String }
     struct UnsubResolutionBody: Codable, Sendable {
@@ -896,7 +899,7 @@ actor APIClient {
     }
 
     func unsubscribe(messageId: Int) async throws -> UnsubscribeResult {
-        try await post("/client/unsubscribe", body: UnsubBody(message_id: messageId, auto: true))
+        try await post("/client/unsubscribe", body: UnsubBody(message_id: messageId, auto: true, confirm: true))
     }
 
     /// The user followed a `needs_you` link to finish on the sender's site.

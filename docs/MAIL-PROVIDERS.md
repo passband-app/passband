@@ -266,6 +266,15 @@ decides every endpoint, scope set and identity check:
 
 ### Still open
 
+0. **A personal account's Outlook alias is invisible to `/me`.** Seen live
+   2026-10-28: a Microsoft account that signs in as `x@company.com` and owns
+   the mailbox alias `y@outlook.com` answers `/me` with only `x@company.com`
+   (no `mail`, no `otherMails`, no `proxyAddresses` naming the alias), so
+   `account_email = "y@outlook.com"` is refused as the wrong account. The
+   workaround is to configure the sign-in address. The fix is either to match
+   the alias against the From of real Sent Items, or to stop requiring an
+   address for Outlook and take the one Microsoft names. Own-mail detection by
+   From (`in_sent`) has the same blind spot for such accounts.
 1. **Live end to end.** Everything above is tested against scripted Graph and
    token endpoints only. Unverified on a real mailbox: that the message delta
    honors the `receivedDateTime ge` filter, that `internetMessageHeaders` can

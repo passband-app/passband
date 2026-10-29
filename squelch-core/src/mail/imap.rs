@@ -3193,12 +3193,22 @@ impl MailSource for ImapSource {
             }
             Some(Body::Bytes(bytes, received)) if !bytes.is_empty() => {
                 // A DISTINCT id (another message that reused a Message-ID,
-                // Amendment J rule 3) is its own thread: keyed on its
-                // Message-ID like ordinary mail, it would land inside the
-                // thread of the message it collided with (matrix row 15).
-                // Ordinary mail is `None`, threaded by ingest (Amendment B).
-                if stable_id_for_header_block(header_block(&bytes)).0 != id {
-                    thread_id = Some(id.to_string());
+                // Amendment J rule 3) is its own thread when it is by
+                // someone else: keyed on its Message-ID like ordinary mail,
+                // a spoof would land inside the thread of the message it
+                // collided with (matrix row 15). The same author's other
+                // copy (a self-sent post's list echo, review fix3 F4) is
+                // `None`, threaded by ingest's References fallback with the
+                // original. Ordinary mail is `None` (Amendment B).
+                let plain = stable_id_for_header_block(header_block(&bytes)).0;
+                if plain != id {
+                    let same_author = self
+                        .locations
+                        .body_print(self.account_id, &plain)?
+                        .is_some_and(|p| p.from == from_key(&bytes));
+                    if !same_author {
+                        thread_id = Some(id.to_string());
+                    }
                 }
                 (RawBody::Bytes(bytes), received)
             }

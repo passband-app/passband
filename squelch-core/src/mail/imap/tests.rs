@@ -3661,3 +3661,36 @@ async fn live_the_fallback_search_serves_the_original_not_an_earlier_folders_res
     assert!(matches!(m.raw, RawBody::Missing));
     let _ = other.logout().await;
 }
+
+/// REVIEW FIX3 F4: a self-sent post to a list comes back as an echo with the
+/// list's subject tag and Reply-To, so it is a distinct id; by the same
+/// author, it is NOT given a thread of its own (ingest's References fallback
+/// threads it with the Sent copy). A spoof (another From) still is: see
+/// `live_the_later_of_two_messages_sharing_a_message_id_is_its_own_thread`.
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_a_same_author_list_echo_is_not_its_own_thread() {
+    let user = fresh_user("echo");
+    let mut other = other_client(&user).await;
+    let sent = "From: me@dev.test\r\nTo: list@lists.example\r\nSubject: Hello all\r\n\
+        Date: Mon, 26 Oct 2026 09:00:00 +0000\r\nMessage-ID: <echo@dev.test>\r\n\r\nhi\r\n";
+    let echo = "From: me@dev.test\r\nTo: list@lists.example\r\nSubject: [list] Hello all\r\n\
+        Reply-To: list@lists.example\r\nDate: Mon, 26 Oct 2026 09:00:00 +0000\r\n\
+        Message-ID: <echo@dev.test>\r\nList-Id: <list.lists.example>\r\n\r\nhi\r\n--\r\nfooter\r\n";
+    let (src, _) = live(&user);
+    let start = src.current_cursor().await.unwrap();
+    append(&mut other, "Sent", sent.as_bytes(), None).await;
+    append(&mut other, INBOX, echo.as_bytes(), None).await;
+    let plain = stable_id_for_message_id("echo@dev.test");
+    let s = src.changes(&start, Folder::Sent).await.unwrap();
+    assert_eq!(s.ids, vec![plain.clone()]);
+    let m = src.fetch_raw(&plain, Urgency::Live).await.unwrap();
+    assert_eq!(m.thread_id, None);
+    let i = src.changes(&start, Folder::Inbox).await.unwrap();
+    assert_eq!(i.ids.len(), 1);
+    assert_ne!(i.ids[0], plain, "a distinct id: the digest differs");
+    let e = src.fetch_raw(&i.ids[0], Urgency::Live).await.unwrap();
+    assert_eq!(raw_of(&e), echo.as_bytes());
+    assert_eq!(e.thread_id, None, "same author: threaded by ingest");
+    let _ = other.logout().await;
+}

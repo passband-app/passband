@@ -46,7 +46,7 @@
 //
 // A LIST AND NOT A `List`. The app paints its own canvas and floats glass on it,
 // and `insetGrouped` brings a grouped system background plus separator insets
-// that fight both. This is the same ScrollView-of-cards MobileRecordsView is, and
+// that fight both. This is the same ScrollView-of-cards the Quick Look tab was, and
 // the index reads as inset-grouped because the rows share one glass pane.
 
 import SwiftUI

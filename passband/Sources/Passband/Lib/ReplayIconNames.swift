@@ -108,7 +108,6 @@ enum ReplayIconNames {
         "sparkles",
         "speaker.slash",
         "square.and.pencil",
-        "square.grid.2x2",
         "square.stack",
         "sun.max.fill",
         "tag",

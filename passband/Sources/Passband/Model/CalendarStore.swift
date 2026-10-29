@@ -70,44 +70,18 @@ struct CalendarDeleteAsk: Hashable {
     let epoch: Int
 }
 
-/// The Calendar page and everything behind it, gated per mailbox from the
-/// admin site (docs/FEATURES.md).
-extension HiddenFeature { static let calendar = HiddenFeature(key: "calendar") }
-
 extension AppStore {
-    // MARK: - the gate
-
-    // `calendarPageAvailable`, the gate itself, is stored in AppStore and
-    // written from `stats` only when it flips.
-
-    /// The gate closed under the user (the flag turned off, or an older
-    /// daemon): leave the page for the Sitrep if it is up, close the event
-    /// pane and the delete question, and drop everything the page held. An
-    /// unsaved draft in the pane is DISCARDED: the page it belongs to no
-    /// longer exists for this mailbox, and the daemon would refuse its save.
-    func calendarGateClosed() {
-        if CalendarGate.leavesPage(available: calendarPageAvailable, active: activeView, calendar: .calendar) {
-            setView(.sitrep)
-        }
-        // The saved feed goes with the page: the feature is off for this
-        // mailbox, and its calendar should not sit on disk meanwhile.
-        if let id = AccountManager.shared.activeId {
-            Task { await CalendarDisk.shared.forget(id) }
-        }
-        dropCalendarState()
-    }
-
     // MARK: - warm before the page opens
 
-    /// The first time this session the calendar is available for the live
-    /// account (launch, the flag turning on, a switch to another account):
-    /// paint the feed saved on disk at once, and ask the daemon for a fresh
-    /// one in the background, without kicking a Google sync (the page's own
-    /// open does that). So the page has events on its first frame, and fresh
-    /// ones by the time anyone opens it. Only on stats that are the live
-    /// account's (`statsEpoch`): stats are not wiped on a switch.
+    /// The first time this session for the live account (launch, a switch
+    /// to another account): paint the feed saved on disk at once, and ask the
+    /// daemon for a fresh one in the background, without kicking a Google
+    /// sync (the page's own open does that). So the page has events on its
+    /// first frame, and fresh ones by the time anyone opens it. Only on stats
+    /// that are the live account's (`statsEpoch`): stats are not wiped on a
+    /// switch.
     func warmCalendarIfDue() {
-        guard calendarPageAvailable, statsEpoch == epoch,
+        guard statsEpoch == epoch,
               let id = AccountManager.shared.activeId, calendarWarmedFor != id
         else { return }
         calendarWarmedFor = id
@@ -121,13 +95,12 @@ extension AppStore {
             await refreshCalendar()
         }
     }
-
     /// Everything the calendar page holds for the ACTIVE mailbox, gone: the
     /// feed, the open item, the connect card and its wait, the event pane and
     /// its draft (a parked one too), the delete question, and any write still
     /// out (its ticket is from the session this ends, so its answer is
     /// dropped whole: `CalendarWriteTicket`). The view mode and the month are
-    /// the user's and stay. Shared by an account switch and the gate closing.
+    /// the user's and stay. Run by an account switch.
     func dropCalendarState() {
         calendarFeed = nil
         calendarLoaded = false
@@ -347,7 +320,6 @@ extension AppStore {
     /// the place is what makes the page fetch that month, so an event a year
     /// back is in the feed by the time the detail looks for it.
     func openCalendarSearchHit(_ item: AgendaItem, now: Date = Date()) {
-        guard calendarPageAvailable else { return }
         if activeView != .calendar { setView(.calendar) }
         guard activeView == .calendar else { return }
         if !calendarMode.isGrid { setCalendarMode(.month) }
@@ -507,7 +479,7 @@ extension AppStore {
         func refused(_ text: String) -> Result<EventProposals.Landing, ProposalRefusal> {
             .failure(ProposalRefusal(text: text))
         }
-        guard calendarPageAvailable, calendarCanCreate else { return refused(EventProposals.noCalendarText) }
+        guard calendarCanCreate else { return refused(EventProposals.noCalendarText) }
         let landing: EventProposals.Landing
         switch EventProposals.landing(
             askBarOpen: askBarOpen, writingMail: mailBeingWritten(), threadOpen: threadId != nil)
@@ -715,8 +687,8 @@ extension AppStore {
     /// edited draft is never sent under the same id. Only a definite
     /// refusal gives the fields back.
     ///
-    /// AN ANSWER FOR NOBODY: one landing after the gate closed or the account
-    /// changed (`CalendarWriteTicket`) is dropped whole, analytics included.
+    /// AN ANSWER FOR NOBODY: one landing after the calendar state was dropped
+    /// or the account changed (`CalendarWriteTicket`) is dropped whole, analytics included.
     @discardableResult
     func saveEvent(_ draft: EventDraft, _ request: CalendarEditorRequest, via control: SaveControl) async -> Bool {
         guard EventPaneRules.maySave(paneFacts(request)) else { return false }

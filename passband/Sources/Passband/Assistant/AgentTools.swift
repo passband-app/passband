@@ -97,8 +97,7 @@ enum AgentTools {
         /// has a guide of its own.
         var isAvailable: Bool {
             switch self {
-            // The calendar tools ride the Mac's Calendar page gate
-            // (`calendarPageAvailable`), and the drafting one opens its
+            // The calendar tools are the Mac's: the drafting one opens its
             // event pane.
             case .productHelp, .listShortcuts, .findSetting, .createCalendarEvent, .searchCalendar:
                 #if os(macOS)
@@ -129,14 +128,7 @@ enum AgentTools {
         cite: (ToolCitation) -> Void, show: ([EmailCard]) -> Void,
         live: @MainActor () -> Bool = { true }
     ) async -> ToolOutcome {
-        // Whether the guide may speak of the Calendar page, and whether the
-        // calendar tool exists: only while this mailbox has the page
-        // (ProductGuide.topics(calendar:), EventProposals.mayRun). Off, the
-        // tool's name is answered as any invented name is.
-        let calendar = AppStore.shared.calendarPageAvailable
-        guard let tool = Tool(rawValue: name), tool.isAvailable, EventProposals.mayRun(name, calendar: calendar),
-              tool != .searchCalendar || calendar
-        else {
+        guard let tool = Tool(rawValue: name), tool.isAvailable else {
             return failure("unknown tool \(name)", summary: "unknown tool")
         }
         do {
@@ -157,8 +149,8 @@ enum AgentTools {
             case .unsubscribeSender: return await unsubscribeSender(input, gate)
             case .createCalendarEvent: return await createCalendarEvent(input, live: live)
             case .searchCalendar: return try await searchCalendar(input)
-            case .productHelp: return productHelp(input, calendar: calendar)
-            case .listShortcuts: return listShortcuts(calendar: calendar)
+            case .productHelp: return productHelp(input)
+            case .listShortcuts: return listShortcuts()
             case .findSetting: return findSetting(input)
             }
         } catch {
@@ -539,10 +531,8 @@ enum AgentTools {
     // is mail-derived either: the app wrote every word, so the Trust rules have
     // nothing to guard here.
 
-    private static func productHelp(_ input: [String: JSONValue], calendar: Bool) -> ToolOutcome {
-        // Only a topic on offer: the calendar's is not one while the page is
-        // off, whatever the model remembers from another turn.
-        let offered = ProductGuide.topics(calendar: calendar)
+    private static func productHelp(_ input: [String: JSONValue]) -> ToolOutcome {
+        let offered = ProductGuide.topics
         guard let raw = string(input, "topic"), let topic = ProductGuide.Topic(rawValue: raw),
             offered.contains(topic)
         else {
@@ -559,14 +549,14 @@ enum AgentTools {
             let onPhone = false
         #endif
         return ToolOutcome(
-            content: ProductGuide.text(topic, runningVersion: version, onPhone: onPhone, calendar: calendar),
+            content: ProductGuide.text(topic, runningVersion: version, onPhone: onPhone),
             isError: false,
             summary: "read the guide: \(topic.title)")
     }
 
-    private static func listShortcuts(calendar: Bool) -> ToolOutcome {
+    private static func listShortcuts() -> ToolOutcome {
         ToolOutcome(
-            content: ProductGuide.shortcuts(calendar: calendar), isError: false, summary: "checked the shortcuts")
+            content: ProductGuide.shortcuts, isError: false, summary: "checked the shortcuts")
     }
 
     private static func findSetting(_ input: [String: JSONValue]) -> ToolOutcome {
@@ -1027,32 +1017,23 @@ enum AgentTools {
 
     // MARK: - definitions
 
-    /// The tool list the model is given, in the order it should reach for them.
-    /// The inventory as the model is shown it for this mailbox. Only the
-    /// guide's topic list depends on the mailbox (the Calendar page, see
-    /// `productHelpDefinition`); with the page off this is the inventory
-    /// from before the calendar existed, byte for byte.
-    ///
-    /// With the page ON the list also gains `create_calendar_event`, after
-    /// the last of the acting tools (`EventProposals.inventory` is the
-    /// order, and the suite holds it: off, no such name).
-    static func definitions(calendar: Bool) -> [Wire.ToolDef] {
-        guard calendar else { return definitions }
+    /// The tool list the model is given, in the order it should reach for them:
+    /// `baseDefinitions` with `create_calendar_event` after the last of the
+    /// acting tools (`EventProposals.inventory` is the order).
+    static let definitions: [Wire.ToolDef] = {
         var byName: [String: Wire.ToolDef] = [:]
-        for def in definitions { byName[def.name] = def }
-        byName[Tool.productHelp.rawValue] = productHelpDefinition(calendar: true)
+        for def in baseDefinitions { byName[def.name] = def }
         byName[EventProposals.toolName] = calendarEventDefinition
         byName[Tool.searchCalendar.rawValue] = calendarSearchDefinition
         var names = EventProposals.inventory(
-            definitions.map(\.name), calendar: true, after: Tool.unsubscribeSender.rawValue)
+            baseDefinitions.map(\.name), after: Tool.unsubscribeSender.rawValue)
         // The calendar's search reads beside the mail's.
         let at = names.firstIndex(of: Tool.searchMail.rawValue).map { $0 + 1 } ?? names.count
         names.insert(Tool.searchCalendar.rawValue, at: at)
         return names.compactMap { byName[$0] }
-    }
+    }()
 
-    /// The calendar's one read (docs/CALENDAR.md §10.1). Offered only with
-    /// the Calendar page, like the drafting tool.
+    /// The calendar's one read (docs/CALENDAR.md §10.1).
     private static let calendarSearchDefinition = Wire.ToolDef(
         name: Tool.searchCalendar.rawValue,
         description: """
@@ -1126,7 +1107,7 @@ enum AgentTools {
             ],
             required: ["title", "start"]))
 
-    private static func productHelpDefinition(calendar: Bool) -> Wire.ToolDef {
+    private static var productHelpDefinition: Wire.ToolDef {
         Wire.ToolDef(
             name: Tool.productHelp.rawValue,
             description: """
@@ -1140,15 +1121,14 @@ enum AgentTools {
             input_schema: .init(
                 properties: [
                     "topic": .init(
-                        type: "string", description: ProductGuide.topicIndex(calendar: calendar),
-                        values: ProductGuide.topics(calendar: calendar).map(\.rawValue))
+                        type: "string", description: ProductGuide.topicIndex,
+                        values: ProductGuide.topics.map(\.rawValue))
                 ],
                 required: ["topic"]))
     }
 
-    /// With the Calendar page off. `definitions(calendar:)` is what a lane
-    /// sends.
-    private static let definitions: [Wire.ToolDef] = [
+    /// Every tool but the calendar one, which `definitions` places.
+    private static let baseDefinitions: [Wire.ToolDef] = [
         Wire.ToolDef(
             name: Tool.searchMail.rawValue,
             description: """
@@ -1468,7 +1448,7 @@ enum AgentTools {
                 ],
                 required: ["message_id", "thread_id"])),
 
-        productHelpDefinition(calendar: false),
+        productHelpDefinition,
 
         Wire.ToolDef(
             name: Tool.listShortcuts.rawValue,

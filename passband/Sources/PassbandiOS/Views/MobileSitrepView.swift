@@ -2,12 +2,10 @@
 // column: the hero states what needs you today, For-your-eyes ranks the standing
 // band, and the reading zone offers the rule-onboarding it always has.
 //
-// The Mac's other half, the pinned records rail, is a TAB here instead
-// (MobileRecordsView). That split is the phone's own: a Mac shows work surface
-// and reference material side by side, and a phone that stacked them would bury
-// the four record cards under a scroll nobody reaches — reference material you
-// have to scroll past your obligations to reach is reference material you stop
-// consulting.
+// The Mac's other half, the pinned records rail, sits UNDER the board here, on
+// its own tray (Quick Look, `RecordsTray`): a phone has no room beside the
+// board, and the tab bar's middle slot is the calendar's. A fact you look up
+// can wait a flick of the thumb; what needs you cannot.
 //
 // WHAT IS NOT HERE, and why. The Mac's masthead is a chrome bar (wordmark,
 // re-triage, today's stamp, sync age) — a phone has a navigation bar and a tab
@@ -31,10 +29,8 @@
 //
 // THE TRAILING CORNER USED TO BE THE KEY, and the swap is a trade of a door you
 // open most days for one that is empty most days. Writing an email is the thing
-// this app could not do from a phone at all (#166); the login codes are a lookup,
-// and a lookup belongs on Quick Look with the other things the app pulled out of
-// your mail and is holding (MobileRecordsView's bar carries the key now, dot and
-// all).
+// this app could not do from a phone at all (#166); the login codes are a
+// lookup, and their key now sits in the LEADING corner beside "you".
 //
 // THE URGENT CASE COMES IN BY NOTIFICATION. A code that just landed is not a
 // lookup — you are standing at a login form holding the phone the code is on —
@@ -48,12 +44,8 @@ struct MobileSitrepView: View {
     @Environment(AppStore.self) private var store
     @Environment(Prefs.self) private var prefs
     /// The login-codes push, owned by the shell so a notification tap can open
-    /// it from any tab. Pushed from HERE only while this board holds the
-    /// records (`holdsRecords`); otherwise Quick Look's bar is its door.
+    /// it from any tab. Pushed from here.
     @Binding var showAuth: Bool
-    /// The calendar holds the tab bar's second slot, so Quick Look's records
-    /// (and their login-codes key) live under this board instead.
-    let holdsRecords: Bool
 
     /// ReadingZone takes a cursor because the Mac drives it with the
     /// keyboard. Nothing writes to this one — it is the shared component's
@@ -145,10 +137,8 @@ struct MobileSitrepView: View {
                     BoardFootnote(bannerShowing: bannerShowing)
                 }
                 .padding(.horizontal, 16)
-                .padding(.bottom, holdsRecords ? 24 : 28)
-                if holdsRecords {
-                    RecordsTray()
-                }
+                .padding(.bottom, 24)
+                RecordsTray()
             }
         }
         .background(Palette.canvas)
@@ -191,14 +181,12 @@ struct MobileSitrepView: View {
                             .foregroundStyle(Palette.accent)
                     }
                     .accessibilityLabel("Account")
-                    // THE LOGIN CODES, while the calendar holds Quick Look's
-                    // tab: a key beside "you", because the codes are your
-                    // accounts' and this is the screen the app opens on. A code
-                    // you are racing arrives by banner and opens the page from
-                    // anywhere; this is the door for looking one up.
-                    if holdsRecords {
-                        CodesKey { showAuth = true }
-                    }
+                    // THE LOGIN CODES: a key beside "you", because the codes
+                    // are your accounts' and this is the screen the app opens
+                    // on. A code you are racing arrives by banner and opens
+                    // the page from anywhere; this is the door for looking
+                    // one up.
+                    CodesKey { showAuth = true }
                 }
             }
             .sharedBackgroundVisibility(.hidden)
@@ -229,7 +217,7 @@ struct MobileSitrepView: View {
         #endif
         .simultaneousGesture(accountSwipe)
         .refreshable { await RecordZones.refresh(store) }
-        .navigationDestination(isPresented: holdsRecords ? $showAuth : .constant(false)) {
+        .navigationDestination(isPresented: $showAuth) {
             MobileAuthView()
         }
         // The zones each ask for this too; the store joins the in-flight pass, so
@@ -507,7 +495,7 @@ private struct VisibleWarmKeeper: View {
     }
 }
 
-/// QUICK LOOK'S RECORDS, under the board while the calendar holds their tab.
+/// QUICK LOOK'S RECORDS, under the board.
 /// The surface sets them apart: the board's cards sit on the page; these sit
 /// on a tray a shade off it, rounded at the top and running to the bottom of
 /// the scroll, so the eye reads a second layer (the things kept for you) under

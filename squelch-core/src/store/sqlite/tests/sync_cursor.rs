@@ -54,7 +54,7 @@ fn an_unknown_account_has_no_provider() {
 fn a_provider_this_build_does_not_know_is_an_error_not_gmail() {
     let (store, acct) = store();
     store.execute_batch_for_test(&format!(
-        "UPDATE accounts SET provider = 'outlook' WHERE id = {acct}"
+        "UPDATE accounts SET provider = 'exchange-ews' WHERE id = {acct}"
     ));
     assert!(matches!(
         store.account_provider(acct),
@@ -220,4 +220,97 @@ fn has_message_answers_by_provider_id_and_account() {
     assert!(store.has_message(acct, "g-1").unwrap());
     assert!(!store.has_message(acct, "g-2").unwrap());
     assert!(!store.has_message(other, "g-1").unwrap());
+}
+
+#[test]
+fn a_fresh_account_takes_its_configured_provider() {
+    let (store, acct) = store();
+    store
+        .bind_account_provider(acct, MailProvider::Outlook)
+        .unwrap();
+    assert_eq!(store.account_provider(acct).unwrap(), MailProvider::Outlook);
+    // Idempotent once bound.
+    store
+        .bind_account_provider(acct, MailProvider::Outlook)
+        .unwrap();
+}
+
+#[test]
+fn a_gmail_account_that_ever_synced_never_turns_outlook() {
+    // Each of the three traces of a sync refuses the flip on its own.
+    let with_message = || {
+        let (store, acct) = store();
+        triaged(acct, "g-1", "t-1").ingest(&store);
+        (store, acct)
+    };
+    let with_cursor = || {
+        let (store, acct) = store();
+        store.set_sync_cursor(acct, &SyncCursor::new("42")).unwrap();
+        (store, acct)
+    };
+    let with_legacy = || {
+        let (store, acct) = store();
+        set_legacy(&store, acct, 42);
+        (store, acct)
+    };
+    for (store, acct) in [with_message(), with_cursor(), with_legacy()] {
+        assert!(matches!(
+            store.bind_account_provider(acct, MailProvider::Outlook),
+            Err(CoreError::InvalidInput(_))
+        ));
+        assert_eq!(store.account_provider(acct).unwrap(), MailProvider::Gmail);
+    }
+}
+
+#[test]
+fn an_outlook_account_is_never_rebound_to_gmail() {
+    let (store, acct) = store();
+    store
+        .bind_account_provider(acct, MailProvider::Outlook)
+        .unwrap();
+    // Even untouched: only the column default may move, never a bound value.
+    assert!(
+        store
+            .bind_account_provider(acct, MailProvider::Gmail)
+            .is_err()
+    );
+    assert_eq!(store.account_provider(acct).unwrap(), MailProvider::Outlook);
+}
+
+/// An Outlook cursor is opaque text in `sync_cursor` and never touches the
+/// legacy Gmail row.
+#[test]
+fn an_outlook_cursor_lives_only_in_sync_cursor() {
+    let (store, acct) = store();
+    store
+        .bind_account_provider(acct, MailProvider::Outlook)
+        .unwrap();
+    let c = SyncCursor::new(r#"{"v":1,"inbox":"a","sent":"b"}"#);
+    store.set_sync_cursor(acct, &c).unwrap();
+    assert_eq!(store.sync_cursor(acct).unwrap(), Some(c));
+    assert_eq!(legacy(&store, acct), None);
+}
+
+/// A stored spam or archive-tier row is not "stored" to the incremental skip:
+/// a move into the inbox must re-ingest it so the upsert can heal the row.
+#[test]
+fn has_message_reads_spam_and_archive_rows_as_absent() {
+    let (store, acct) = store();
+    triaged(acct, "s-1", "t-1").ingest(&store);
+    triaged(acct, "a-1", "t-2").ingest(&store);
+    {
+        let conn = store.lock().unwrap();
+        conn.execute(
+            "UPDATE messages SET is_spam = 1 WHERE gmail_msg_id = 's-1'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE messages SET is_archive = 1 WHERE gmail_msg_id = 'a-1'",
+            [],
+        )
+        .unwrap();
+    }
+    assert!(!store.has_message(acct, "s-1").unwrap());
+    assert!(!store.has_message(acct, "a-1").unwrap());
 }

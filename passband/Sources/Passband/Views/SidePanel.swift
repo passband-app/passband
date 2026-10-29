@@ -109,7 +109,7 @@ struct SearchView: View {
 
     /// The field asks for events only (`in:calendar`): no mail search runs.
     private var eventsOnly: Bool {
-        store.calendarPageAvailable && CalendarSearch.eventsOnly(store.search.query)
+        CalendarSearch.eventsOnly(store.search.query)
     }
 
     /// The Events block as drawn: nothing while the Calendar page is not
@@ -118,7 +118,7 @@ struct SearchView: View {
     /// and the list jump on every keystroke; it is replaced when the answer
     /// lands. Events only lists every fetched row.
     private var eventBlock: CalendarSearch.Block {
-        guard store.calendarPageAvailable, !showingRecents, eventsQuery != nil,
+        guard !showingRecents, eventsQuery != nil,
               CalendarSearch.eventQuery(store.search.query.trimmed) != nil
         else { return CalendarSearch.Block(shown: [], more: 0) }
         return CalendarSearch.block(fetchedEvents, total: eventsTotal, expanded: eventsExpanded || eventsOnly)
@@ -366,7 +366,7 @@ struct SearchView: View {
             if found != fetchedSenders { senderIndex = -1 }
             fetchedSenders = found
         }
-        .task(id: [store.search.query, String(store.calendarPageAvailable), String(eventsExpanded)]) {
+        .task(id: [store.search.query, String(eventsExpanded)]) {
             await runEventSearch()
         }
     }
@@ -379,7 +379,7 @@ struct SearchView: View {
     /// the blip as "no events"; it is never an error over the mail results.
     private func runEventSearch() async {
         let field = store.search.query.trimmed
-        guard store.calendarPageAvailable, let asked = CalendarSearch.eventQuery(field) else {
+        guard let asked = CalendarSearch.eventQuery(field) else {
             clearEvents()
             return
         }
@@ -821,7 +821,7 @@ struct SearchView: View {
         // EVENTS ONLY (`in:calendar`) is no mail search at all: nothing goes
         // to `/client/search` (which would read the operator as a word), and
         // with no hits judged, no deeper-search lane starts.
-        let calendarOnly = store.calendarPageAvailable && CalendarSearch.eventsOnly(term)
+        let calendarOnly = CalendarSearch.eventsOnly(term)
         guard !term.isEmpty, !FromOperator.awaitingValue(in: term), !calendarOnly else {
             if calendarOnly { store.resetSearchLane() }
             store.search.hits = []

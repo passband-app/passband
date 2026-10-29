@@ -96,7 +96,7 @@ struct MobileSearchView: View {
 
     /// The field asks for events only (`in:calendar`): no mail search runs.
     private var eventsOnly: Bool {
-        store.calendarPageAvailable && CalendarSearch.eventsOnly(store.search.query)
+        CalendarSearch.eventsOnly(store.search.query)
     }
 
     /// The block as drawn: nothing while the Calendar tab is off the bar or
@@ -104,7 +104,7 @@ struct MobileSearchView: View {
     /// the last one stays (no vanish and jump on every keystroke) until it is
     /// replaced. Events only lists every row.
     private var eventBlock: CalendarSearch.Block {
-        guard store.calendarPageAvailable, !showingRecents, eventsQuery != nil,
+        guard !showingRecents, eventsQuery != nil,
               CalendarSearch.eventQuery(term) != nil
         else { return CalendarSearch.Block(shown: [], more: 0) }
         return CalendarSearch.block(fetchedEvents, total: eventsTotal, expanded: eventsExpanded || eventsOnly)
@@ -210,7 +210,7 @@ struct MobileSearchView: View {
                 guard let found = await SearchFetch.senders(matching: store.search.query) else { return }
                 fetchedSenders = found
             }
-            .task(id: [store.search.query, String(store.calendarPageAvailable), String(eventsExpanded)]) {
+            .task(id: [store.search.query, String(eventsExpanded)]) {
                 await runEventSearch()
             }
             .onChange(of: CalendarSearch.eventQuery(term)) { _, _ in eventsExpanded = false }
@@ -641,7 +641,7 @@ struct MobileSearchView: View {
     /// unset, so the next pass asks again instead of reading it as none.
     private func runEventSearch() async {
         let field = term
-        guard store.calendarPageAvailable, let asked = CalendarSearch.eventQuery(field) else {
+        guard let asked = CalendarSearch.eventQuery(field) else {
             clearEvents()
             return
         }
@@ -742,7 +742,7 @@ struct MobileSearchView: View {
         // something to show a reader halfway through typing a sender.
         // EVENTS ONLY (`in:calendar`) is no mail search at all: nothing goes
         // to `/client/search`, and with no hits judged no lane starts.
-        let calendarOnly = store.calendarPageAvailable && CalendarSearch.eventsOnly(query)
+        let calendarOnly = CalendarSearch.eventsOnly(query)
         guard !query.isEmpty, !FromOperator.awaitingValue(in: query), !calendarOnly else {
             if calendarOnly { store.resetSearchLane() }
             store.search.hits = []

@@ -26,7 +26,7 @@ struct HiddenFeature: Hashable, Sendable {
 ///
 /// THERE IS NO LOCAL OVERRIDE HERE, on purpose. To see a hidden feature in a
 /// development build, pin it on the daemon you are pointed at
-/// (`SQUELCH_FEATURES=calendar squelchd serve`); the app then learns it the way
+/// (`SQUELCH_FEATURES=renotify squelchd serve`); the app then learns it the way
 /// a real tenant's app does, and the gate you are testing is the real one.
 struct HiddenFeatures: Equatable, Sendable {
     private let keys: Set<String>

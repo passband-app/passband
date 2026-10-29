@@ -538,7 +538,7 @@ final class Notifier {
             }
         case .auth:
             // The routed Auth page on the Mac; on the phone, the login-codes
-            // page behind the Quick Look tab's key.
+            // page behind the sitrep's key.
             AppStore.shared.requestAuthPage()
         case .reveal(let messageId, let threadId, let sender):
             let store = AppStore.shared

@@ -204,10 +204,13 @@ pub fn refresh_stored_token_detailed(
     client: &OAuthClientConfig,
     refresh_token: &str,
 ) -> Result<RefreshedToken> {
+    // THE ISSUER'S token endpoint: every refresh in the daemon comes through
+    // here, so a Google URL left in place would send an Outlook refresh token
+    // to Google on the first expiry.
     refresh_stored_token_detailed_at(
         client,
         refresh_token,
-        crate::auth::GOOGLE_TOKEN_URL,
+        client.issuer.token_url(),
         crate::auth::EXCHANGE_HTTP_TIMEOUT,
     )
 }
@@ -229,10 +232,17 @@ pub(crate) fn refresh_stored_token_detailed_at(
     use oauth2::basic::BasicClient;
     use oauth2::{AuthUrl, ClientId, ClientSecret, RefreshToken, TokenResponse, TokenUrl};
 
-    let oauth = BasicClient::new(ClientId::new(client.client_id.clone()))
-        .set_client_secret(ClientSecret::new(client.client_secret.clone()))
+    let oauth = BasicClient::new(ClientId::new(client.client_id.clone()));
+    // A public client (Microsoft) presents no secret; its endpoint refuses one.
+    let oauth = match client.issuer {
+        crate::config::OAuthIssuer::Google => {
+            oauth.set_client_secret(ClientSecret::new(client.client_secret.clone()))
+        }
+        crate::config::OAuthIssuer::Microsoft => oauth,
+    };
+    let oauth = oauth
         .set_auth_uri(
-            AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".to_string())
+            AuthUrl::new(client.issuer.auth_url().to_string())
                 .map_err(|e| CoreError::Credential(format!("bad auth url: {e}")))?,
         )
         .set_token_uri(
@@ -251,10 +261,19 @@ pub(crate) fn refresh_stored_token_detailed_at(
         .build()
         .map_err(|e| CoreError::Credential(format!("building http client: {e}")))?;
 
-    let resp = oauth
-        .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
-        .request(&http)
-        .map_err(|e| CoreError::Credential(refresh_error_message(&e.to_string())))?;
+    let refresh = RefreshToken::new(refresh_token.to_string());
+    let mut req = oauth.exchange_refresh_token(&refresh);
+    // Microsoft's v2 refresh documents `scope` as required; sending the
+    // mail set keeps the mail grant (calendar is left out so an older,
+    // calendar-less consent still refreshes). Google's never needed it.
+    if client.issuer == crate::config::OAuthIssuer::Microsoft {
+        for scope in crate::config::OUTLOOK_MAIL_SCOPES {
+            req = req.add_scope(oauth2::Scope::new(scope.to_string()));
+        }
+    }
+    let resp = req.request(&http).map_err(|e| {
+        CoreError::Credential(refresh_error_message_for(client.issuer, &e.to_string()))
+    })?;
 
     let new_refresh = resp
         .refresh_token()
@@ -275,6 +294,56 @@ pub(crate) fn refresh_stored_token_detailed_at(
     })
 }
 
+/// Whose token this is, read off the scopes recorded on it: every consent
+/// and refresh this code runs records them, and Google's and Microsoft's
+/// scope names never overlap. `None` when nothing recorded says (a token
+/// stored before scopes were recorded, which is Google's).
+pub fn token_issuer(token: &StoredToken) -> Option<crate::config::OAuthIssuer> {
+    use crate::config::OAuthIssuer;
+    let scopes = token.scopes.as_deref()?;
+    if scopes.iter().any(|s| s.contains("googleapis.com")) {
+        Some(OAuthIssuer::Google)
+    } else if scopes
+        .iter()
+        .any(|s| s.contains("graph.microsoft.com") || s.starts_with("Mail.") || s == "User.Read")
+    {
+        Some(OAuthIssuer::Microsoft)
+    } else {
+        None
+    }
+}
+
+/// Refuse a stored token minted by the OTHER identity platform before it is
+/// used or refreshed: its bearer would go to the wrong company's API and its
+/// refresh token to the wrong company's token endpoint. How it gets here: the
+/// same address moving from Google Workspace to Microsoft 365 (or back) with
+/// the old credential still in its slot, or a blob exported under the other
+/// provider.
+///
+/// ASYMMETRIC ON PURPOSE. A token with no recorded scopes predates scope
+/// recording, and every such token is Google's: a Gmail daemon keeps
+/// accepting them, an Outlook daemon refuses them. Every Microsoft token is
+/// born with scopes (the exchange records the requested set when the
+/// response names none, an import refuses a refresh that names none, and a
+/// refresh carries them forward), so requiring proof costs Outlook nothing.
+pub fn check_token_issuer(token: &StoredToken, issuer: crate::config::OAuthIssuer) -> Result<()> {
+    use crate::config::OAuthIssuer;
+    let minted = token_issuer(token);
+    let ok = match issuer {
+        OAuthIssuer::Google => minted != Some(OAuthIssuer::Microsoft),
+        OAuthIssuer::Microsoft => minted == Some(OAuthIssuer::Microsoft),
+    };
+    if ok {
+        return Ok(());
+    }
+    Err(CoreError::Credential(format!(
+        "the stored credential was minted by {}, but this daemon is configured for {} \
+         (provider in the config); it was not used. Re-run `squelchd auth`.",
+        minted.unwrap_or(OAuthIssuer::Google).name(),
+        issuer.name()
+    )))
+}
+
 /// The token to persist after a refresh of `stored`.
 ///
 /// A refresh response MAY omit `scope`, and when it does the grant is the one
@@ -293,6 +362,21 @@ fn carry_scopes_forward(stored: &StoredToken, refreshed: RefreshedToken) -> Stor
 /// The credential-error message for a failed refresh exchange. `invalid_grant` means
 /// the REFRESH token itself is dead, not a transient failure — no backoff recovers
 /// it, so the message names the fix instead.
+fn refresh_error_message_for(issuer: crate::config::OAuthIssuer, err: &str) -> String {
+    match issuer {
+        crate::config::OAuthIssuer::Google => refresh_error_message(err),
+        // Not Google's advice: there is no consent-screen publishing status
+        // to fix. Revocation, a password reset, and a personal account's
+        // refresh token lapsing after about 90 days unused are the causes.
+        crate::config::OAuthIssuer::Microsoft if err.contains("invalid_grant") => format!(
+            "refresh failed: {err} — Microsoft has expired or revoked the refresh token \
+             (revoked access, a password change, or about 90 days without use); re-authorize \
+             with `squelchd auth`"
+        ),
+        crate::config::OAuthIssuer::Microsoft => format!("refresh failed: {err}"),
+    }
+}
+
 fn refresh_error_message(err: &str) -> String {
     if err.contains("invalid_grant") {
         format!(
@@ -321,7 +405,7 @@ fn validate_or_refresh_stored<P>(
     validate_or_refresh_stored_at(
         stored,
         client,
-        crate::auth::GOOGLE_TOKEN_URL,
+        client.issuer.token_url(),
         crate::auth::EXCHANGE_HTTP_TIMEOUT,
         persist,
     )
@@ -337,6 +421,7 @@ fn validate_or_refresh_stored_at<P>(
     timeout: Duration,
     persist: impl FnOnce(&StoredToken) -> Result<P>,
 ) -> Result<(StoredToken, Option<P>)> {
+    check_token_issuer(&stored, client.issuer)?;
     if stored.is_expired(ChronoDuration::seconds(REFRESH_SKEW_SECS)) {
         let refresh = stored.refresh_token.clone().ok_or_else(|| {
             CoreError::Credential(
@@ -2132,6 +2217,7 @@ mod tests {
         OAuthClientConfig {
             client_id: "id".into(),
             client_secret: "secret".into(),
+            issuer: Default::default(),
         }
     }
 

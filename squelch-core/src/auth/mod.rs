@@ -33,7 +33,8 @@ pub use transfer::{
 
 use crate::config::{
     CALENDAR_EVENTS_SCOPE, CALENDAR_SCOPES, GMAIL_MODIFY_SCOPE, GMAIL_READONLY_SCOPE, GMAIL_SCOPES,
-    GOOGLE_PROFILE_SCOPE, OAuthClientConfig, WRITE_SCOPES,
+    GOOGLE_PROFILE_SCOPE, OAuthClientConfig, OAuthIssuer, OUTLOOK_MAIL_READ_SCOPE,
+    OUTLOOK_MAIL_READWRITE_SCOPE, OUTLOOK_MAIL_SEND_SCOPE, OUTLOOK_SCOPES, WRITE_SCOPES,
 };
 use crate::credentials::{CredentialKind, RefreshedToken, StoredToken};
 use crate::error::{CoreError, Result};
@@ -57,6 +58,14 @@ pub(crate) const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 /// The one Gmail call that names the mailbox behind an access token. Every scope
 /// set this module mints (`gmail.readonly`, `gmail.modify`) permits it.
 const GMAIL_PROFILE_URL: &str = "https://gmail.googleapis.com/gmail/v1/users/me/profile";
+
+/// Graph's "who am I", which every Outlook consent's `User.Read` permits:
+/// the Microsoft counterpart of [`GMAIL_PROFILE_URL`]. `mail` is null on some
+/// personal accounts, so `userPrincipalName` (address-shaped there) is the
+/// fallback. `otherMails` and `proxyAddresses` carry the account's other
+/// addresses: a personal account can sign in as one address (say a work
+/// address) while its Outlook mailbox is an alias like `x@outlook.com`.
+const GRAPH_ME_URL: &str = "https://graph.microsoft.com/v1.0/me?$select=id,mail,userPrincipalName,otherMails,proxyAddresses";
 
 /// Budget for the token exchange, the refresh, and the profile check that
 /// follows either. All three are one small round trip to Google, and every
@@ -190,6 +199,62 @@ impl AuthScopes {
         scopes
     }
 
+    /// [`Self::requested`] for `issuer`. Microsoft has one scope set for both
+    /// mail slots (see [`OUTLOOK_SCOPES`]) and no calendar.
+    pub fn requested_for(self, issuer: OAuthIssuer) -> Vec<String> {
+        match issuer {
+            OAuthIssuer::Google => self.requested(),
+            OAuthIssuer::Microsoft => OUTLOOK_SCOPES.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// [`Self::required`] for `issuer`. Microsoft's token endpoint has echoed
+    /// Graph scopes both with and without the resource prefix, so either
+    /// spelling satisfies a requirement. `offline_access` is not held to the
+    /// echo: the refresh token's presence is what proves it (see
+    /// [`check_refresh_token`]).
+    pub fn required_for(self, issuer: OAuthIssuer) -> Vec<Vec<String>> {
+        match issuer {
+            OAuthIssuer::Google => self.required(),
+            OAuthIssuer::Microsoft => {
+                let any = |full: &[&str]| -> Vec<String> {
+                    full.iter()
+                        .flat_map(|f| {
+                            [
+                                f.to_string(),
+                                f.trim_start_matches("https://graph.microsoft.com/")
+                                    .to_string(),
+                            ]
+                        })
+                        .collect()
+                };
+                match self {
+                    AuthScopes::Read => vec![any(&[
+                        OUTLOOK_MAIL_READWRITE_SCOPE,
+                        OUTLOOK_MAIL_READ_SCOPE,
+                    ])],
+                    AuthScopes::Write => vec![
+                        any(&[OUTLOOK_MAIL_READWRITE_SCOPE]),
+                        any(&[OUTLOOK_MAIL_SEND_SCOPE]),
+                    ],
+                    // Refused before a consent is ever built; a requirement
+                    // nothing satisfies, should anything get here regardless.
+                    AuthScopes::Calendar => vec![vec!["(no Microsoft calendar)".into()]],
+                }
+            }
+        }
+    }
+
+    /// The label for prompts, by issuer.
+    pub fn label_for(self, issuer: OAuthIssuer) -> &'static str {
+        match issuer {
+            OAuthIssuer::Google => self.label(),
+            OAuthIssuer::Microsoft => {
+                "Outlook (Mail.ReadWrite, Mail.Send, Calendars.ReadWrite, User.Read)"
+            }
+        }
+    }
+
     /// The credential kind this scope set maps to.
     pub fn kind(self) -> CredentialKind {
         match self {
@@ -232,6 +297,8 @@ pub struct AuthFlowOptions {
     pub headless: bool,
     /// Fixed loopback port for headless mode; ignored (ephemeral) otherwise.
     pub port: u16,
+    /// See [`LoopbackConsent::with_known_account_id`].
+    pub known_account_id: Option<String>,
 }
 
 impl Default for AuthFlowOptions {
@@ -240,6 +307,7 @@ impl Default for AuthFlowOptions {
             scopes: AuthScopes::Read,
             headless: false,
             port: DEFAULT_HEADLESS_PORT,
+            known_account_id: None,
         }
     }
 }
@@ -270,11 +338,36 @@ pub struct GoogleEndpoints {
 
 impl Default for GoogleEndpoints {
     fn default() -> Self {
-        Self {
-            token_url: GOOGLE_TOKEN_URL.to_string(),
-            profile_url: GMAIL_PROFILE_URL.to_string(),
+        Self::for_issuer(OAuthIssuer::Google)
+    }
+}
+
+impl GoogleEndpoints {
+    /// The pinned pair for `issuer`: its token endpoint, and the call that
+    /// names the mailbox behind a token.
+    pub fn for_issuer(issuer: OAuthIssuer) -> Self {
+        match issuer {
+            OAuthIssuer::Google => Self {
+                token_url: GOOGLE_TOKEN_URL.to_string(),
+                profile_url: GMAIL_PROFILE_URL.to_string(),
+            },
+            OAuthIssuer::Microsoft => Self {
+                token_url: crate::config::MICROSOFT_TOKEN_URL.to_string(),
+                profile_url: GRAPH_ME_URL.to_string(),
+            },
         }
     }
+}
+
+/// Refuse what Outlook cannot do before a consent is built: there is no
+/// Microsoft calendar here, and the broker only relays Google's consent.
+fn refuse_unsupported(client: &OAuthClientConfig, scopes: AuthScopes) -> Result<()> {
+    if client.issuer == OAuthIssuer::Microsoft && scopes == AuthScopes::Calendar {
+        return Err(CoreError::Credential(
+            "an Outlook consent already asks for Calendars.ReadWrite; there is no separate --calendar step for Outlook".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Build the Google client for one `redirect_uri`. Google checks the exchange's
@@ -282,7 +375,7 @@ impl Default for GoogleEndpoints {
 /// built once per flow and used for both halves — the loopback and broker flows
 /// differ only in the string that lands here.
 fn google_client(client: &OAuthClientConfig, redirect_uri: &str) -> Result<GoogleClient> {
-    google_client_at(client, redirect_uri, GOOGLE_TOKEN_URL)
+    google_client_at(client, redirect_uri, client.issuer.token_url())
 }
 
 /// [`google_client`] against an explicit token endpoint; see [`GoogleEndpoints`].
@@ -291,11 +384,21 @@ fn google_client_at(
     redirect_uri: &str,
     token_url: &str,
 ) -> Result<GoogleClient> {
-    Ok(BasicClient::new(ClientId::new(client.client_id.clone()))
-        .set_client_secret(ClientSecret::new(client.client_secret.clone()))
-        .set_auth_uri(
-            AuthUrl::new(GOOGLE_AUTH_URL.to_string()).map_err(map_oauth_err("bad auth url"))?,
-        )
+    let auth_url = match client.issuer {
+        OAuthIssuer::Google => GOOGLE_AUTH_URL,
+        OAuthIssuer::Microsoft => client.issuer.auth_url(),
+    };
+    let oauth = BasicClient::new(ClientId::new(client.client_id.clone()));
+    // A public client (Microsoft) presents no secret: its token endpoint
+    // refuses one, and there is none to present.
+    let oauth = match client.issuer {
+        OAuthIssuer::Google => {
+            oauth.set_client_secret(ClientSecret::new(client.client_secret.clone()))
+        }
+        OAuthIssuer::Microsoft => oauth,
+    };
+    Ok(oauth
+        .set_auth_uri(AuthUrl::new(auth_url.to_string()).map_err(map_oauth_err("bad auth url"))?)
         .set_token_uri(
             TokenUrl::new(token_url.to_string()).map_err(map_oauth_err("bad token url"))?,
         )
@@ -315,7 +418,21 @@ fn google_client_at(
 /// `login_hint` pre-selects the configured mailbox on Google's account
 /// chooser. A convenience only: the exchange still holds the token against
 /// the configured account, whatever the person picks.
+#[cfg(test)]
 fn authorize_url(
+    oauth: &GoogleClient,
+    scopes: AuthScopes,
+    state: CsrfToken,
+    login_hint: Option<&str>,
+) -> (Url, CsrfToken, PkceCodeVerifier) {
+    authorize_url_for(OAuthIssuer::Google, oauth, scopes, state, login_hint)
+}
+
+/// The consent URL for `issuer`. Google is asked for a refresh token with
+/// `access_type=offline`; Microsoft has no such parameter and issues one only
+/// for the `offline_access` scope, which its scope set always carries.
+fn authorize_url_for(
+    issuer: OAuthIssuer,
     oauth: &GoogleClient,
     scopes: AuthScopes,
     state: CsrfToken,
@@ -324,19 +441,29 @@ fn authorize_url(
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
     let mut req = oauth.authorize_url(move || state);
-    for scope in scopes.requested() {
+    for scope in scopes.requested_for(issuer) {
         req = req.add_scope(Scope::new(scope));
     }
-    if scopes.include_granted_scopes() {
+    if issuer == OAuthIssuer::Google && scopes.include_granted_scopes() {
         req = req.add_extra_param("include_granted_scopes", "true");
     }
     if let Some(hint) = login_hint.map(str::trim).filter(|h| !h.is_empty()) {
         req = req.add_extra_param("login_hint", hint.to_string());
     }
+    if issuer == OAuthIssuer::Google {
+        // Ask for a refresh token.
+        req = req.add_extra_param("access_type", "offline");
+    }
+    // Google: force the consent screen, so the grant is the one asked for now.
+    // Microsoft: force the account picker instead. With `consent` it reuses
+    // whichever Microsoft session the browser already holds, ignoring
+    // `login_hint`, and it still shows consent for anything not yet granted.
+    let prompt = match issuer {
+        OAuthIssuer::Google => "consent",
+        OAuthIssuer::Microsoft => "select_account",
+    };
     let (url, csrf_token) = req
-        // Ask for a refresh token and force consent so we reliably get one.
-        .add_extra_param("access_type", "offline")
-        .add_extra_param("prompt", "consent")
+        .add_extra_param("prompt", prompt)
         .set_pkce_challenge(pkce_challenge)
         .url();
     (url, csrf_token, pkce_verifier)
@@ -358,6 +485,7 @@ fn authorize_url(
 /// mailbox is DISCOVERED either way and returned alongside the token: `None`
 /// skips the comparison, it never skips asking Google who this is.
 fn exchange_code(
+    issuer: OAuthIssuer,
     oauth: &GoogleClient,
     expected_account: Option<&str>,
     scopes: AuthScopes,
@@ -365,9 +493,11 @@ fn exchange_code(
     pkce_verifier: PkceCodeVerifier,
 ) -> Result<(String, StoredToken)> {
     exchange_code_at(
+        issuer,
         oauth,
-        GMAIL_PROFILE_URL,
+        &GoogleEndpoints::for_issuer(issuer).profile_url,
         expected_account,
+        None,
         scopes,
         code,
         pkce_verifier,
@@ -404,10 +534,13 @@ impl ConsentFailure {
 /// [`exchange_code`] against an explicit profile endpoint (the token endpoint
 /// rides on `oauth`), with its refusals sorted by kind. The ONE body of the
 /// guarded exchange: every flow reaches it.
+#[allow(clippy::too_many_arguments)]
 fn exchange_code_at(
+    issuer: OAuthIssuer,
     oauth: &GoogleClient,
     profile_url: &str,
     expected_account: Option<&str>,
+    known_id: Option<&str>,
     scopes: AuthScopes,
     code: String,
     pkce_verifier: PkceCodeVerifier,
@@ -424,10 +557,20 @@ fn exchange_code_at(
     let granted: Option<Vec<String>> = token
         .scopes()
         .map(|granted| granted.iter().map(|s| s.to_string()).collect());
-    check_scope_grant(scopes, granted.as_deref()).map_err(ConsentFailure::ScopesNotGranted)?;
+    check_scope_grant_for(issuer, scopes, granted.as_deref())
+        .map_err(ConsentFailure::ScopesNotGranted)?;
+    let refresh = token.refresh_token().map(|r| r.secret().to_string());
+    check_refresh_token(issuer, refresh.as_deref()).map_err(ConsentFailure::Failed)?;
 
-    let mailbox = fetch_profile_email(&http, profile_url, token.access_token().secret())
-        .map_err(|e| ConsentFailure::Failed(calendar_identity_hint(scopes, e)))?;
+    let mailbox = fetch_profile_email(
+        issuer,
+        &http,
+        profile_url,
+        token.access_token().secret(),
+        expected_account,
+        known_id,
+    )
+    .map_err(|e| ConsentFailure::Failed(calendar_identity_hint(scopes, e)))?;
     if let Some(expected) = expected_account {
         check_account_match(expected, &mailbox).map_err(ConsentFailure::WrongAccount)?;
     }
@@ -436,10 +579,10 @@ fn exchange_code_at(
         mailbox,
         StoredToken::from_response(
             token.access_token().secret().to_string(),
-            token.refresh_token().map(|r| r.secret().to_string()),
+            refresh,
             token.expires_in(),
         )
-        .with_scopes(Some(recorded_scopes(scopes, granted))),
+        .with_scopes(Some(recorded_scopes_for(issuer, scopes, granted))),
     ))
 }
 
@@ -448,8 +591,33 @@ fn exchange_code_at(
 /// absent means "identical to the request", and [`check_scope_grant`] already
 /// took it that way). The request is [`AuthScopes::requested`], so a Read
 /// grant records the optional profile scope it asked for.
+#[cfg(test)]
 fn recorded_scopes(requested: AuthScopes, granted: Option<Vec<String>>) -> Vec<String> {
-    granted.unwrap_or_else(|| requested.requested())
+    recorded_scopes_for(OAuthIssuer::Google, requested, granted)
+}
+
+fn recorded_scopes_for(
+    issuer: OAuthIssuer,
+    requested: AuthScopes,
+    granted: Option<Vec<String>>,
+) -> Vec<String> {
+    granted.unwrap_or_else(|| requested.requested_for(issuer))
+}
+
+/// Microsoft issues a refresh token only when `offline_access` was granted,
+/// and a credential without one dies within the hour with nothing to renew
+/// it. So a Microsoft exchange that returns none stores nothing. (Google's
+/// `access_type=offline` with `prompt=consent` always returns one.)
+fn check_refresh_token(issuer: OAuthIssuer, refresh: Option<&str>) -> Result<()> {
+    if issuer == OAuthIssuer::Microsoft && refresh.is_none_or(|r| r.is_empty()) {
+        return Err(CoreError::Credential(
+            "Microsoft returned no refresh token (the offline_access permission was not \
+             granted), so the credential would stop working within the hour; nothing was \
+             stored. Re-run `squelchd auth` and accept every permission."
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// A calendar consent whose token cannot read Gmail's profile has nothing to
@@ -511,13 +679,14 @@ pub fn verify_transfer_credential(
     kind: CredentialKind,
     token: &StoredToken,
 ) -> Result<StoredToken> {
+    let endpoints = GoogleEndpoints::for_issuer(client.issuer);
     verify_transfer_credential_at(
         client,
         expected_account,
         kind,
         token,
-        GOOGLE_TOKEN_URL,
-        GMAIL_PROFILE_URL,
+        &endpoints.token_url,
+        &endpoints.profile_url,
         EXCHANGE_HTTP_TIMEOUT,
     )
 }
@@ -541,13 +710,31 @@ pub(crate) fn verify_transfer_credential_at(
         ))
     })?;
 
+    // Before the refresh, which would send the blob's refresh token to THIS
+    // daemon's issuer: a blob exported under the other provider says so in
+    // its scopes, and is refused instead.
+    crate::credentials::check_token_issuer(token, client.issuer)?;
     let refreshed =
         crate::credentials::refresh_stored_token_detailed_at(client, refresh, token_url, timeout)
             .map_err(|e| transfer_client_error(kind, &e))?;
     let http = guarded_http(timeout)?;
-    let mailbox = fetch_profile_email(&http, profile_url, &refreshed.token.access_token)?;
+    let mailbox = fetch_profile_email(
+        client.issuer,
+        &http,
+        profile_url,
+        &refreshed.token.access_token,
+        Some(expected_account),
+        None,
+    )?;
 
-    judge_transfer_credential(expected_account, kind, &mailbox, refreshed, refresh)
+    judge_transfer_credential_for(
+        client.issuer,
+        expected_account,
+        kind,
+        &mailbox,
+        refreshed,
+        refresh,
+    )
 }
 
 /// What Google's answers mean for one blob entry, and the token to store when
@@ -564,6 +751,7 @@ pub(crate) fn verify_transfer_credential_at(
 /// retry re-reads the same row. A blob-supplied bearer string would then be sent
 /// to Gmail on every call, forever, with nothing to make the daemon go get a
 /// real one.
+#[cfg(test)]
 fn judge_transfer_credential(
     expected_account: &str,
     kind: CredentialKind,
@@ -571,12 +759,31 @@ fn judge_transfer_credential(
     refreshed: RefreshedToken,
     blob_refresh: &str,
 ) -> Result<StoredToken> {
+    judge_transfer_credential_for(
+        OAuthIssuer::Google,
+        expected_account,
+        kind,
+        mailbox,
+        refreshed,
+        blob_refresh,
+    )
+}
+
+fn judge_transfer_credential_for(
+    issuer: OAuthIssuer,
+    expected_account: &str,
+    kind: CredentialKind,
+    mailbox: &str,
+    refreshed: RefreshedToken,
+    blob_refresh: &str,
+) -> Result<StoredToken> {
+    let who = issuer.name();
     let granted = refreshed.granted_scopes.as_deref();
     check_account_match(expected_account, mailbox).map_err(|_| {
         CoreError::Credential(format!(
-            "Google says the {kind:?} credential in this blob opens {}, but this daemon is \
+            "{who} says the {kind:?} credential in this blob opens {}, but this daemon is \
              configured for {expected_account}; nothing was stored. The account named inside a \
-             blob is not evidence, which is why Google was asked. Export again while signed in \
+             blob is not evidence, which is why {who} was asked. Export again while signed in \
              as {expected_account}, or fix account_email in the config.",
             printable(mailbox)
         ))
@@ -587,7 +794,7 @@ fn judge_transfer_credential(
     // this token belongs in would be the blob's word alone, so it fails closed.
     let Some(granted) = granted else {
         return Err(CoreError::Credential(format!(
-            "Google named no scopes when refreshing the {kind:?} credential in this blob, so \
+            "{who} named no scopes when refreshing the {kind:?} credential in this blob, so \
              there is no proof it belongs in the {kind:?} slot rather than the other one; \
              nothing was stored. Authorize this host directly with `squelchd auth` instead."
         )));
@@ -601,7 +808,7 @@ fn judge_transfer_credential(
     // refuse every such import. Which slot a token may occupy is decided by what
     // the slot NEEDS being covered; see docs/SECURITY.md §4 for what actually
     // enforces the two-door split, since token scope cannot.
-    check_scope_grant(AuthScopes::from(kind), Some(granted)).map_err(|e| {
+    check_scope_grant_for(issuer, AuthScopes::from(kind), Some(granted)).map_err(|e| {
         CoreError::Credential(format!(
             "the {kind:?} credential in this blob does not carry the scopes the {kind:?} slot \
              needs, so storing it there would put a token with the wrong reach behind that \
@@ -645,7 +852,16 @@ fn transfer_client_error(kind: CredentialKind, err: &CoreError) -> CoreError {
 /// slot that cannot archive or send, failing at the first button instead of
 /// at the consent. Callers check every slot before storing any.
 pub fn check_token_covers_slot(kind: CredentialKind, token: &StoredToken) -> Result<()> {
-    check_scope_grant(AuthScopes::from(kind), token.scopes.as_deref())
+    check_token_covers_slot_for(OAuthIssuer::Google, kind, token)
+}
+
+/// [`check_token_covers_slot`] against `issuer`'s scope names.
+pub fn check_token_covers_slot_for(
+    issuer: OAuthIssuer,
+    kind: CredentialKind,
+    token: &StoredToken,
+) -> Result<()> {
+    check_scope_grant_for(issuer, AuthScopes::from(kind), token.scopes.as_deref())
 }
 
 /// Fail unless the grant covers every scope that was requested.
@@ -659,12 +875,21 @@ pub fn check_token_covers_slot(kind: CredentialKind, token: &StoredToken) -> Res
 /// §5.1). That is taken at face value because the response comes off Google's
 /// pinned token endpoint over TLS with redirects refused, not off anything a
 /// third party can shape.
+#[cfg(test)]
 fn check_scope_grant(requested: AuthScopes, granted: Option<&[String]>) -> Result<()> {
+    check_scope_grant_for(OAuthIssuer::Google, requested, granted)
+}
+
+fn check_scope_grant_for(
+    issuer: OAuthIssuer,
+    requested: AuthScopes,
+    granted: Option<&[String]>,
+) -> Result<()> {
     let Some(granted) = granted else {
         return Ok(());
     };
     let missing: Vec<String> = requested
-        .required()
+        .required_for(issuer)
         .into_iter()
         .filter(|any_of| !any_of.iter().any(|want| granted.contains(want)))
         .filter_map(|any_of| any_of.into_iter().next())
@@ -674,9 +899,10 @@ fn check_scope_grant(requested: AuthScopes, granted: Option<&[String]>) -> Resul
     }
     Err(CoreError::Credential(format!(
         "the consent screen granted [{}], which does not cover [{}]; nothing was stored. \
-         Re-run `squelchd auth` and leave every permission on the Google screen checked.",
+         Re-run `squelchd auth` and leave every permission on the {} screen checked.",
         granted.join(", "),
-        missing.join(", ")
+        missing.join(", "),
+        issuer.name()
     )))
 }
 
@@ -706,54 +932,159 @@ struct GmailProfile {
     email_address: Option<String>,
 }
 
+/// The fields of Graph's `/me` this module reads.
+#[derive(Deserialize)]
+struct GraphMe {
+    /// The account's permanent id. Addresses change (a user can make another
+    /// alias primary at any time); this does not.
+    #[serde(default)]
+    id: Option<String>,
+    mail: Option<String>,
+    #[serde(rename = "userPrincipalName")]
+    user_principal_name: Option<String>,
+    #[serde(rename = "otherMails", default)]
+    other_mails: Option<Vec<String>>,
+    #[serde(rename = "proxyAddresses", default)]
+    proxy_addresses: Option<Vec<String>>,
+}
+
+impl GraphMe {
+    /// `mail`, else `userPrincipalName` when it is address-shaped (on a
+    /// personal account it is the sign-in address; on a work account without
+    /// a mailbox it can be a bare UPN, which matches nothing anyway).
+    fn address(&self) -> Option<String> {
+        self.mail
+            .clone()
+            .filter(|m| !m.trim().is_empty())
+            .or(self.user_principal_name.clone().filter(|u| u.contains('@')))
+    }
+
+    /// Every address Graph ties to this account: [`Self::address`] first, then
+    /// the principal name, `otherMails`, and `proxyAddresses` (`smtp:`/`SMTP:`
+    /// prefixes dropped). Only address-shaped, non-empty entries.
+    fn addresses(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let proxies = self.proxy_addresses.iter().flatten().filter_map(|p| {
+            let (kind, addr) = p.split_once(':')?;
+            kind.eq_ignore_ascii_case("smtp").then(|| addr.to_string())
+        });
+        let all = self
+            .address()
+            .into_iter()
+            .chain(self.user_principal_name.clone())
+            .chain(self.other_mails.iter().flatten().cloned())
+            .chain(proxies);
+        for a in all {
+            let a = a.trim().to_string();
+            if a.contains('@') && !out.iter().any(|o| o.eq_ignore_ascii_case(&a)) {
+                out.push(a);
+            }
+        }
+        out
+    }
+
+    /// The configured address when Graph ties it to this account, else the
+    /// primary [`Self::address`]. The caller still holds the result against
+    /// the configuration, so a stranger's account names its own address and
+    /// is refused.
+    fn address_for(&self, expected: Option<&str>, known_id: Option<&str>) -> Option<String> {
+        // The SAME account the stored credential belongs to, whatever address
+        // Microsoft names it by today: the configured address stands.
+        if let (Some(want), Some(known), Some(id)) = (expected, known_id, self.id.as_deref())
+            && !want.trim().is_empty()
+            && !known.is_empty()
+            && known == id
+        {
+            return Some(want.trim().to_string());
+        }
+        if let Some(want) = expected.map(str::trim).filter(|w| !w.is_empty())
+            && let Some(hit) = self
+                .addresses()
+                .into_iter()
+                .find(|a| a.eq_ignore_ascii_case(want))
+        {
+            return Some(hit);
+        }
+        self.address()
+    }
+}
+
 /// Ask Gmail whose mailbox a fresh access token opens. This is the only source
 /// of truth for that: the exchange response names a token, never an account.
 fn fetch_profile_email(
+    issuer: OAuthIssuer,
     http: &reqwest::blocking::Client,
     profile_url: &str,
     access_token: &str,
+    expected: Option<&str>,
+    known_id: Option<&str>,
 ) -> Result<String> {
+    let who = issuer.name();
     // The token rides in the header and nowhere else; reqwest's own errors carry
     // the URL, not the headers, so a failure here cannot print it.
-    let resp = http
-        .get(profile_url)
-        .bearer_auth(access_token)
-        .send()
-        .map_err(|e| {
-            CoreError::Credential(format!(
-                "could not ask Google which account this consent authorized: {e}; \
+    let ask = |url: &str| -> Result<(u16, Vec<u8>)> {
+        let resp = http
+            .get(url)
+            .bearer_auth(access_token)
+            .send()
+            .map_err(|e| {
+                CoreError::Credential(format!(
+                    "could not ask {who} which account this consent authorized: {e}; \
                  nothing was stored"
-            ))
-        })?;
-
-    let status = resp.status().as_u16();
-    let body = read_capped(resp, "Gmail's profile response")?;
+                ))
+            })?;
+        let status = resp.status().as_u16();
+        Ok((status, read_capped(resp, "the profile response")?))
+    };
+    let (mut status, mut body) = ask(profile_url)?;
+    // If Graph will not select the alias fields for this account type, the
+    // two-field lookup still names the account.
+    let basic = profile_url.replace(",otherMails,proxyAddresses", "");
+    if issuer == OAuthIssuer::Microsoft && status == 400 && basic != profile_url {
+        (status, body) = ask(&basic)?;
+    }
     if status != 200 {
         return Err(CoreError::Credential(format!(
-            "Google answered {status} when asked which account this consent authorized, so the \
+            "{who} answered {status} when asked which account this consent authorized, so the \
              token could not be matched to the configured mailbox; nothing was stored. Re-run \
              `squelchd auth`."
         )));
     }
 
-    let profile: GmailProfile = serde_json::from_slice(&body).map_err(|e| {
+    let unreadable = |e: serde_json::Error| {
         CoreError::Credential(format!(
-            "Google sent an unreadable profile response: {:?} error at line {} column {}",
+            "{who} sent an unreadable profile response: {:?} error at line {} column {}",
             e.classify(),
             e.line(),
             e.column()
         ))
-    })?;
-    profile
-        .email_address
-        .filter(|e| !e.trim().is_empty())
-        .ok_or_else(|| {
-            CoreError::Credential(
-                "Google's profile response named no account, so this token could not be matched \
-                 to the configured mailbox; nothing was stored."
-                    .to_string(),
-            )
-        })
+    };
+    let address = match issuer {
+        OAuthIssuer::Google => {
+            serde_json::from_slice::<GmailProfile>(&body)
+                .map_err(unreadable)?
+                .email_address
+        }
+        OAuthIssuer::Microsoft => {
+            let me = serde_json::from_slice::<GraphMe>(&body).map_err(unreadable)?;
+            let picked = me.address_for(expected, known_id);
+            if let (Some(want), Some(got)) = (expected, picked.as_deref())
+                && !want.trim().eq_ignore_ascii_case(got)
+            {
+                eprintln!(
+                    "squelchd: Microsoft ties these addresses to that account: {}",
+                    me.addresses().join(", ")
+                );
+            }
+            picked
+        }
+    };
+    address.filter(|e| !e.trim().is_empty()).ok_or_else(|| {
+        CoreError::Credential(format!(
+            "{who}'s profile response named no account, so this token could not be matched \
+             to the configured mailbox; nothing was stored."
+        ))
+    })
 }
 
 /// Read a response body with a hard ceiling on it. A declared `Content-Length`
@@ -802,6 +1133,17 @@ pub fn run_auth_flow(
     account_email: &str,
     opts: &AuthFlowOptions,
 ) -> Result<StoredToken> {
+    run_auth_flow_for(client, Some(account_email), opts).map(|(_, token)| token)
+}
+
+/// [`run_auth_flow`] that also returns the mailbox the token opens, and takes
+/// no expected address when none is configured yet (Outlook only: Gmail's
+/// callers always name one).
+pub fn run_auth_flow_for(
+    client: &OAuthClientConfig,
+    account_email: Option<&str>,
+    opts: &AuthFlowOptions,
+) -> Result<(String, StoredToken)> {
     // Headless -> a FIXED port so it can be SSH-forwarded; otherwise ephemeral.
     let bind_addr = if opts.headless {
         format!("127.0.0.1:{}", opts.port)
@@ -816,13 +1158,14 @@ pub fn run_auth_flow(
 
     // The SAME consent the daemon runs for the app's Connect button: one
     // builder for the URL, one guarded exchange behind it.
-    let consent = LoopbackConsent::begin(client, opts.scopes, port, Some(account_email))?;
+    let consent = LoopbackConsent::begin(client, opts.scopes, port, account_email)?
+        .with_known_account_id(opts.known_account_id.clone());
     let auth_url = consent.url().clone();
 
     if opts.headless {
         println!(
             "\n=== squelch headless authorization ({}) ===",
-            opts.scopes.label()
+            opts.scopes.label_for(client.issuer)
         );
         println!(
             "\nThis box is headless. Forward the loopback port to your laptop, e.g.:\n\
@@ -834,7 +1177,7 @@ pub fn run_auth_flow(
     } else {
         println!(
             "\nOpen this URL in your browser to authorize squelch ({}):\n",
-            opts.scopes.label()
+            opts.scopes.label_for(client.issuer)
         );
         println!("{auth_url}\n");
         if webbrowser::open(auth_url.as_str()).is_err() {
@@ -852,10 +1195,56 @@ pub fn run_auth_flow(
         CONSENT_WAIT_TIMEOUT,
     )?;
 
-    let (_mailbox, token) = consent
-        .finish(code, account_email)
-        .map_err(ConsentFailure::into_error)?;
-    Ok(token)
+    consent
+        .finish_for(code, account_email)
+        .map_err(ConsentFailure::into_error)
+}
+
+/// The permanent Microsoft account id behind a stored Outlook token, asked of
+/// Graph with a refreshed access token. `None` on any failure (revoked, no
+/// network): the caller then falls back to matching addresses, never to
+/// accepting anything. BLOCKING.
+pub fn microsoft_account_id(client: &OAuthClientConfig, token: &StoredToken) -> Option<String> {
+    microsoft_account_id_at(
+        client,
+        token,
+        client.issuer.token_url(),
+        "https://graph.microsoft.com/v1.0/me?$select=id",
+    )
+}
+
+fn microsoft_account_id_at(
+    client: &OAuthClientConfig,
+    token: &StoredToken,
+    token_url: &str,
+    me_url: &str,
+) -> Option<String> {
+    if client.issuer != OAuthIssuer::Microsoft {
+        return None;
+    }
+    crate::credentials::check_token_issuer(token, client.issuer).ok()?;
+    let refresh = token.refresh_token.as_deref()?;
+    let refreshed = crate::credentials::refresh_stored_token_detailed_at(
+        client,
+        refresh,
+        token_url,
+        EXCHANGE_HTTP_TIMEOUT,
+    )
+    .ok()?;
+    let http = guarded_http(EXCHANGE_HTTP_TIMEOUT).ok()?;
+    let resp = http
+        .get(me_url)
+        .bearer_auth(&refreshed.token.access_token)
+        .send()
+        .ok()?;
+    if resp.status().as_u16() != 200 {
+        return None;
+    }
+    let body = read_capped(resp, "Graph's /me response").ok()?;
+    serde_json::from_slice::<GraphMe>(&body)
+        .ok()?
+        .id
+        .filter(|i| !i.is_empty())
 }
 
 /// The path of the loopback redirect. A Desktop OAuth client accepts any port
@@ -878,15 +1267,26 @@ pub fn loopback_redirect_uri(port: u16) -> String {
 /// No `Debug`: it holds the verifier and the `state`, and a derived one is how
 /// either ends up in the first error somebody formats with `{:?}`.
 pub struct LoopbackConsent {
+    issuer: OAuthIssuer,
     oauth: GoogleClient,
     profile_url: String,
     scopes: AuthScopes,
     state: CsrfToken,
     verifier: PkceCodeVerifier,
     url: Url,
+    known_account_id: Option<String>,
 }
 
 impl LoopbackConsent {
+    /// The Microsoft account id the credential ALREADY stored for this
+    /// mailbox belongs to ([`microsoft_account_id`]). A consent whose token
+    /// names the same id is the same mailbox, even when Microsoft now calls
+    /// it by another address (the owner made a different alias primary).
+    pub fn with_known_account_id(mut self, id: Option<String>) -> Self {
+        self.known_account_id = id.filter(|i| !i.is_empty());
+        self
+    }
+
     /// Mint a fresh `state` and PKCE pair and build the consent URL for a
     /// redirect to `http://127.0.0.1:<port>`. No network: nothing is sent
     /// until [`Self::finish`].
@@ -901,7 +1301,7 @@ impl LoopbackConsent {
             scopes,
             port,
             login_hint,
-            &GoogleEndpoints::default(),
+            &GoogleEndpoints::for_issuer(client.issuer),
         )
     }
 
@@ -914,16 +1314,24 @@ impl LoopbackConsent {
         login_hint: Option<&str>,
         endpoints: &GoogleEndpoints,
     ) -> Result<Self> {
+        refuse_unsupported(client, scopes)?;
         let oauth = google_client_at(client, &loopback_redirect_uri(port), &endpoints.token_url)?;
-        let (url, state, verifier) =
-            authorize_url(&oauth, scopes, CsrfToken::new_random(), login_hint);
+        let (url, state, verifier) = authorize_url_for(
+            client.issuer,
+            &oauth,
+            scopes,
+            CsrfToken::new_random(),
+            login_hint,
+        );
         Ok(Self {
+            issuer: client.issuer,
             oauth,
             profile_url: endpoints.profile_url.clone(),
             scopes,
             state,
             verifier,
             url,
+            known_account_id: None,
         })
     }
 
@@ -947,10 +1355,23 @@ impl LoopbackConsent {
         code: String,
         expected_account: &str,
     ) -> std::result::Result<(String, StoredToken), ConsentFailure> {
+        self.finish_for(code, Some(expected_account))
+    }
+
+    /// [`Self::finish`] when no mailbox is configured yet: an Outlook daemon
+    /// set up without `account_email` takes the address Microsoft names.
+    /// `Some` holds the token to that address exactly as `finish` does.
+    pub fn finish_for(
+        self,
+        code: String,
+        expected_account: Option<&str>,
+    ) -> std::result::Result<(String, StoredToken), ConsentFailure> {
         exchange_code_at(
+            self.issuer,
             &self.oauth,
             &self.profile_url,
-            Some(expected_account),
+            expected_account,
+            self.known_account_id.as_deref(),
             self.scopes,
             code,
             self.verifier,
@@ -1088,14 +1509,15 @@ pub fn run_export_flow(
     scopes: AuthScopes,
     bind: ConsentBind,
 ) -> Result<(String, StoredToken)> {
+    refuse_unsupported(client, scopes)?;
     let (listener, redirect_uri) = bind_consent_listener(&bind.bind_addr())?;
     let oauth = google_client(client, &redirect_uri)?;
     let (auth_url, csrf_token, pkce_verifier) =
-        authorize_url(&oauth, scopes, CsrfToken::new_random(), None);
+        authorize_url_for(client.issuer, &oauth, scopes, CsrfToken::new_random(), None);
 
     eprintln!(
         "\nOpen this URL in your browser to authorize squelch ({}):\n",
-        scopes.label()
+        scopes.label_for(client.issuer)
     );
     eprintln!("{auth_url}\n");
     if webbrowser::open(auth_url.as_str()).is_err() {
@@ -1121,7 +1543,14 @@ pub fn run_export_flow(
         bind.stranger_policy(),
         CONSENT_WAIT_TIMEOUT,
     )?;
-    exchange_code(&oauth, expected_account, scopes, code, pkce_verifier)
+    exchange_code(
+        client.issuer,
+        &oauth,
+        expected_account,
+        scopes,
+        code,
+        pkce_verifier,
+    )
 }
 
 /// Run the consent flow through a broker (`docs/BROKER.md`) instead of a
@@ -1137,6 +1566,14 @@ pub fn run_broker_flow(
     broker_url: &str,
     scopes: AuthScopes,
 ) -> Result<StoredToken> {
+    // The broker relays Google's consent and pins Google's hosts.
+    if client.issuer != OAuthIssuer::Google {
+        return Err(CoreError::Credential(
+            "--broker relays Google consent only; for Outlook, run `squelchd auth` (add \
+             --headless and an SSH tunnel on a box with no browser)"
+                .into(),
+        ));
+    }
     let base = broker_base(broker_url)?;
     let redirect_uri = format!("{base}/callback");
 
@@ -1152,8 +1589,13 @@ pub fn run_broker_flow(
     // it is how the broker's callback finds the session Google is answering.
     // It is still 32 unguessable bytes minted for this one flow, so it carries
     // everything a random `CsrfToken` would have.
-    let (auth_url, _state, pkce_verifier) =
-        authorize_url(&oauth, scopes, CsrfToken::new(session_id.clone()), None);
+    let (auth_url, _state, pkce_verifier) = authorize_url_for(
+        client.issuer,
+        &oauth,
+        scopes,
+        CsrfToken::new(session_id.clone()),
+        None,
+    );
 
     let http = broker_http()?;
     register_session(&http, &base, &session_id, &claim_token, auth_url.as_str())?;
@@ -1169,8 +1611,14 @@ pub fn run_broker_flow(
     println!("Waiting for consent (the code is collected here, never by the broker) ...");
 
     let code = poll_for_code(&http, &base, &session_id, &claim_token)?;
-    let (_mailbox, token) =
-        exchange_code(&oauth, Some(account_email), scopes, code, pkce_verifier)?;
+    let (_mailbox, token) = exchange_code(
+        client.issuer,
+        &oauth,
+        Some(account_email),
+        scopes,
+        code,
+        pkce_verifier,
+    )?;
     Ok(token)
 }
 
@@ -1717,6 +2165,7 @@ mod tests {
         OAuthClientConfig {
             client_id: "1234.apps.googleusercontent.com".to_string(),
             client_secret: "not-a-real-secret".to_string(),
+            issuer: Default::default(),
         }
     }
 
@@ -3112,6 +3561,438 @@ mod tests {
             matches!(refused, Err(ConsentFailure::Failed(_))),
             "{:?}",
             refused.err()
+        );
+    }
+}
+
+/// The Microsoft arm: the same guarded flows, with Microsoft's endpoints,
+/// scopes and identity check, and no client secret anywhere.
+#[cfg(test)]
+mod microsoft_tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    fn ms_client() -> OAuthClientConfig {
+        OAuthClientConfig {
+            client_id: "00000000-1111-2222-3333-444444444444".into(),
+            client_secret: String::new(),
+            issuer: OAuthIssuer::Microsoft,
+        }
+    }
+
+    /// Serve `answers` in order on loopback, sending each request's raw bytes
+    /// back through the channel.
+    fn capturing(answers: Vec<(&'static str, String)>) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for (status, body) in answers {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_millis(300)))
+                    .ok();
+                let mut req = Vec::new();
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = stream.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    req.extend_from_slice(&buf[..n]);
+                }
+                let _ = tx.send(String::from_utf8_lossy(&req).into_owned());
+                let raw = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                     Connection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(raw.as_bytes());
+            }
+        });
+        (base, rx)
+    }
+
+    #[test]
+    fn the_consent_url_is_microsofts_with_offline_access_and_no_google_params() {
+        let consent =
+            LoopbackConsent::begin(&ms_client(), AuthScopes::Read, 8847, Some("me@outlook.com"))
+                .unwrap();
+        let url = consent.url();
+        assert_eq!(url.host_str(), Some("login.microsoftonline.com"));
+        assert_eq!(url.path(), "/common/oauth2/v2.0/authorize");
+        let q: std::collections::HashMap<String, String> = url.query_pairs().into_owned().collect();
+        let scopes: Vec<&str> = q["scope"].split(' ').collect();
+        for want in OUTLOOK_SCOPES {
+            assert!(scopes.contains(want), "{want} missing from {scopes:?}");
+        }
+        assert!(!scopes.iter().any(|s| s.contains("googleapis")));
+        assert!(!q.contains_key("access_type"));
+        assert!(!q.contains_key("include_granted_scopes"));
+        assert_eq!(q["prompt"], "select_account");
+        assert_eq!(q["login_hint"], "me@outlook.com");
+        assert_eq!(q["code_challenge_method"], "S256");
+        assert_eq!(q["redirect_uri"], "http://127.0.0.1:8847");
+    }
+
+    #[test]
+    fn calendar_and_the_broker_are_refused_before_anything_is_built() {
+        assert!(LoopbackConsent::begin(&ms_client(), AuthScopes::Calendar, 8847, None).is_err());
+        let err = run_broker_flow(
+            &ms_client(),
+            "me@outlook.com",
+            "https://auth.passband.email",
+            AuthScopes::Read,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--broker relays Google consent only"), "{err}");
+    }
+
+    #[test]
+    fn graph_scopes_are_accepted_with_or_without_the_resource_prefix() {
+        let ms = OAuthIssuer::Microsoft;
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let bare = s(&["Mail.ReadWrite", "Mail.Send", "User.Read", "offline_access"]);
+        let full = s(OUTLOOK_SCOPES);
+        for granted in [&bare, &full] {
+            for slot in [AuthScopes::Read, AuthScopes::Write] {
+                assert!(check_scope_grant_for(ms, slot, Some(granted)).is_ok());
+            }
+        }
+        // Read-only mail still reads; it cannot fill the Write slot.
+        let read_only = s(&["Mail.Read", "User.Read"]);
+        assert!(check_scope_grant_for(ms, AuthScopes::Read, Some(&read_only)).is_ok());
+        assert!(check_scope_grant_for(ms, AuthScopes::Write, Some(&read_only)).is_err());
+        // No send, no Write slot.
+        let no_send = s(&["Mail.ReadWrite", "User.Read"]);
+        let err = check_scope_grant_for(ms, AuthScopes::Write, Some(&no_send))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Mail.Send") && err.contains("Microsoft screen"),
+            "{err}"
+        );
+        // Google's names mean nothing to Microsoft, and the reverse.
+        let google = s(&[GMAIL_MODIFY_SCOPE]);
+        assert!(check_scope_grant_for(ms, AuthScopes::Read, Some(&google)).is_err());
+        assert!(check_scope_grant(AuthScopes::Read, Some(&full)).is_err());
+    }
+
+    #[test]
+    fn no_refresh_token_from_microsoft_stores_nothing() {
+        assert!(check_refresh_token(OAuthIssuer::Microsoft, None).is_err());
+        assert!(check_refresh_token(OAuthIssuer::Microsoft, Some("")).is_err());
+        assert!(check_refresh_token(OAuthIssuer::Microsoft, Some("r")).is_ok());
+        assert!(check_refresh_token(OAuthIssuer::Google, None).is_ok());
+    }
+
+    #[test]
+    fn the_account_is_mail_else_an_address_shaped_principal_name() {
+        let me = |j: &str| serde_json::from_str::<GraphMe>(j).unwrap().address();
+        assert_eq!(
+            me(r#"{"mail":"a@outlook.com","userPrincipalName":"x@y.com"}"#).as_deref(),
+            Some("a@outlook.com")
+        );
+        assert_eq!(
+            me(r#"{"mail":null,"userPrincipalName":"me@hotmail.com"}"#).as_deref(),
+            Some("me@hotmail.com")
+        );
+        assert_eq!(
+            me(r#"{"mail":"","userPrincipalName":"not-an-address"}"#),
+            None
+        );
+    }
+
+    /// A personal account that signs in as one address and owns an Outlook
+    /// alias: the alias matches when configured, a stranger's does not.
+    #[test]
+    fn a_configured_alias_of_the_account_is_its_address() {
+        let me: GraphMe = serde_json::from_str(
+            r#"{"mail":null,"userPrincipalName":"me@work.example",
+                "otherMails":["Alias@Outlook.com"],
+                "proxyAddresses":["SMTP:primary@outlook.com","x500:/o=x","smtp:third@hotmail.com"]}"#,
+        )
+        .unwrap();
+        let pick = |w: Option<&str>| me.address_for(w, None);
+        assert_eq!(
+            pick(Some("alias@outlook.com")).as_deref(),
+            Some("Alias@Outlook.com")
+        );
+        assert_eq!(
+            pick(Some("third@hotmail.com")).as_deref(),
+            Some("third@hotmail.com")
+        );
+        assert_eq!(
+            pick(Some("primary@outlook.com")).as_deref(),
+            Some("primary@outlook.com")
+        );
+        // Not one of its addresses: the primary comes back, and the match check refuses it.
+        assert_eq!(
+            pick(Some("stranger@outlook.com")).as_deref(),
+            Some("me@work.example")
+        );
+        assert!(check_account_match("stranger@outlook.com", "me@work.example").is_err());
+        assert_eq!(pick(None).as_deref(), Some("me@work.example"));
+        // The old two-field shape still parses.
+        let bare: GraphMe = serde_json::from_str(r#"{"mail":"a@outlook.com"}"#).unwrap();
+        assert_eq!(
+            bare.address_for(Some("b@outlook.com"), None).as_deref(),
+            Some("a@outlook.com")
+        );
+    }
+
+    /// An owner who made another alias primary is still the same account: the
+    /// stored credential's id vouches for the configured address. A stranger's
+    /// account (another id) is not.
+    #[test]
+    fn the_stored_accounts_id_keeps_the_configured_address() {
+        let me: GraphMe = serde_json::from_str(
+            r#"{"id":"313658d2f27bcf04","mail":"braelyn@passband.app","userPrincipalName":"braelyn@passband.app"}"#,
+        )
+        .unwrap();
+        let want = Some("passband-qa@outlook.com");
+        assert_eq!(
+            me.address_for(want, Some("313658d2f27bcf04")).as_deref(),
+            Some("passband-qa@outlook.com")
+        );
+        assert_eq!(
+            me.address_for(want, Some("someone-else")).as_deref(),
+            Some("braelyn@passband.app")
+        );
+        assert_eq!(
+            me.address_for(want, None).as_deref(),
+            Some("braelyn@passband.app")
+        );
+        // No id from Graph proves nothing.
+        let anon: GraphMe = serde_json::from_str(r#"{"mail":"x@outlook.com"}"#).unwrap();
+        assert_eq!(
+            anon.address_for(want, Some("")).as_deref(),
+            Some("x@outlook.com")
+        );
+    }
+
+    /// The id lookup refreshes the stored token and reads `/me`; any failure is
+    /// `None`, never a guess.
+    #[test]
+    fn the_account_id_comes_from_graph_with_a_refreshed_token() {
+        let stored = StoredToken {
+            access_token: "stale".into(),
+            refresh_token: Some("r".into()),
+            expires_at: None,
+            scopes: Some(vec!["Mail.ReadWrite".into(), "Mail.Send".into()]),
+        };
+        let token_ok = (
+            "200 OK",
+            r#"{"access_token":"fresh","token_type":"Bearer","expires_in":3600}"#.to_string(),
+        );
+        let (base, rx) = capturing(vec![
+            token_ok.clone(),
+            ("200 OK", r#"{"id":"abc123"}"#.to_string()),
+        ]);
+        let id = microsoft_account_id_at(
+            &ms_client(),
+            &stored,
+            &format!("{base}/token"),
+            &format!("{base}/me"),
+        );
+        assert_eq!(id.as_deref(), Some("abc123"));
+        let requests: Vec<String> = rx.try_iter().collect();
+        assert!(
+            requests.last().is_some_and(|r| r.contains("Bearer fresh")),
+            "{requests:?}"
+        );
+
+        let (base, _rx) = capturing(vec![token_ok, ("401 Unauthorized", "{}".to_string())]);
+        assert_eq!(
+            microsoft_account_id_at(
+                &ms_client(),
+                &stored,
+                &format!("{base}/token"),
+                &format!("{base}/me")
+            ),
+            None
+        );
+    }
+
+    /// The refresh every Outlook token goes through: Microsoft's endpoint, the
+    /// client id in the body, and NO secret in the body or a Basic header.
+    #[test]
+    fn a_microsoft_refresh_presents_no_client_secret() {
+        let (base, rx) = capturing(vec![(
+            "200 OK",
+            r#"{"access_token":"a","token_type":"Bearer","expires_in":3600,"refresh_token":"r2","scope":"Mail.ReadWrite Mail.Send User.Read"}"#.into(),
+        )]);
+        let fresh = crate::credentials::refresh_stored_token_detailed_at(
+            &ms_client(),
+            "r1",
+            &format!("{base}/token"),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(fresh.token.access_token, "a");
+        let req = rx.recv().unwrap();
+        assert!(req.contains("grant_type=refresh_token"), "{req}");
+        assert!(
+            req.contains("client_id=00000000-1111-2222-3333-444444444444"),
+            "{req}"
+        );
+        assert!(!req.contains("client_secret"), "{req}");
+        assert!(
+            !req.to_ascii_lowercase().contains("authorization: basic"),
+            "{req}"
+        );
+    }
+
+    #[test]
+    fn the_production_refresh_targets_microsofts_token_endpoint() {
+        assert_eq!(
+            OAuthIssuer::Microsoft.token_url(),
+            "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+        );
+        assert_eq!(
+            GoogleEndpoints::for_issuer(OAuthIssuer::Microsoft).token_url,
+            OAuthIssuer::Microsoft.token_url()
+        );
+        assert_eq!(OAuthIssuer::Google.token_url(), GOOGLE_TOKEN_URL);
+    }
+
+    /// An Outlook transfer blob is verified with Microsoft: the refresh, then
+    /// Graph's `/me`, held to the configured account and the slot's scopes.
+    #[test]
+    fn an_outlook_blob_is_verified_against_graph() {
+        let ok_token = || {
+            (
+                "200 OK",
+                r#"{"access_token":"a","token_type":"Bearer","expires_in":3600,"scope":"https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send"}"#.to_string(),
+            )
+        };
+        let me = || {
+            (
+                "200 OK",
+                r#"{"mail":null,"userPrincipalName":"Me@Outlook.com"}"#.to_string(),
+            )
+        };
+        // An Outlook export always records its scopes.
+        let pasted = StoredToken {
+            access_token: "stale".into(),
+            refresh_token: Some("pasted-refresh".into()),
+            expires_at: None,
+            scopes: Some(vec!["Mail.ReadWrite".into(), "Mail.Send".into()]),
+        };
+        let verify = |base: &str, who: &str| {
+            verify_transfer_credential_at(
+                &ms_client(),
+                who,
+                CredentialKind::Write,
+                &pasted,
+                &format!("{base}/token"),
+                &format!("{base}/me"),
+                Duration::from_secs(5),
+            )
+        };
+        let (base, _rx) = capturing(vec![ok_token(), me()]);
+        let token = verify(&base, "me@outlook.com").unwrap();
+        assert_eq!(token.access_token, "a");
+        assert_eq!(token.refresh_token.as_deref(), Some("pasted-refresh"));
+
+        let (base, _rx) = capturing(vec![ok_token(), me()]);
+        let err = verify(&base, "someone@else.com").unwrap_err().to_string();
+        assert!(err.contains("nothing was stored"), "{err}");
+
+        // Graph refusing the alias fields falls back to the two-field lookup.
+        let (base, rx) = capturing(vec![
+            ok_token(),
+            ("400 Bad Request", "{}".to_string()),
+            me(),
+        ]);
+        let token = verify_transfer_credential_at(
+            &ms_client(),
+            "me@outlook.com",
+            CredentialKind::Write,
+            &pasted,
+            &format!("{base}/token"),
+            &format!("{base}/me?$select=mail,userPrincipalName,otherMails,proxyAddresses"),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(token.access_token, "a");
+        let requests: Vec<String> = rx.try_iter().collect();
+        assert!(
+            requests
+                .last()
+                .is_some_and(|r| r.contains("$select=mail,userPrincipalName ")),
+            "{requests:?}"
+        );
+    }
+
+    #[test]
+    fn a_token_from_the_other_company_is_never_used_or_refreshed() {
+        use crate::credentials::{check_token_issuer, token_issuer};
+        let t = |scopes: Option<&[&str]>| StoredToken {
+            access_token: "a".into(),
+            refresh_token: Some("r".into()),
+            expires_at: None,
+            scopes: scopes.map(|s| s.iter().map(|x| x.to_string()).collect()),
+        };
+        let google = t(Some(&[GMAIL_MODIFY_SCOPE]));
+        let ms = t(Some(&["Mail.ReadWrite", "Mail.Send", "User.Read"]));
+        assert_eq!(token_issuer(&google), Some(OAuthIssuer::Google));
+        assert_eq!(token_issuer(&ms), Some(OAuthIssuer::Microsoft));
+        assert_eq!(token_issuer(&t(None)), None);
+        // A legacy token (no scopes recorded) is Google's: Gmail keeps it,
+        // Outlook refuses it.
+        assert!(check_token_issuer(&t(None), OAuthIssuer::Google).is_ok());
+        assert!(check_token_issuer(&t(None), OAuthIssuer::Microsoft).is_err());
+        let legacy_blob = verify_transfer_credential_at(
+            &ms_client(),
+            "me@outlook.com",
+            CredentialKind::Read,
+            &t(None),
+            "http://127.0.0.1:1/token",
+            "http://127.0.0.1:1/me",
+            Duration::from_secs(1),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(legacy_blob.contains("minted by Google"), "{legacy_blob}");
+        assert!(check_token_issuer(&google, OAuthIssuer::Microsoft).is_err());
+        assert!(check_token_issuer(&ms, OAuthIssuer::Google).is_err());
+        assert!(check_token_issuer(&ms, OAuthIssuer::Microsoft).is_ok());
+        // A Gmail blob imported into an Outlook daemon: refused before the
+        // refresh, so no request is made (the endpoint here does not exist).
+        let err = verify_transfer_credential_at(
+            &ms_client(),
+            "me@outlook.com",
+            CredentialKind::Read,
+            &google,
+            "http://127.0.0.1:1/token",
+            "http://127.0.0.1:1/me",
+            Duration::from_secs(1),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("minted by Google"), "{err}");
+    }
+
+    #[test]
+    fn a_microsoft_refresh_asks_for_the_consents_scopes() {
+        let (base, rx) = capturing(vec![(
+            "200 OK",
+            r#"{"access_token":"a","token_type":"Bearer","expires_in":3600}"#.into(),
+        )]);
+        crate::credentials::refresh_stored_token_detailed_at(
+            &ms_client(),
+            "r1",
+            &format!("{base}/token"),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let req = rx.recv().unwrap();
+        assert!(
+            req.contains("offline_access") && req.contains("Mail.Send"),
+            "{req}"
         );
     }
 }

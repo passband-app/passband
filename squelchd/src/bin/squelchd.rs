@@ -14,8 +14,9 @@ use chrono::{Duration, SecondsFormat};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use squelch_core::auth::{
     AuthFlowOptions, AuthScopes, ConsentBind, CredentialTransfer, DEFAULT_HEADLESS_PORT,
-    TransferCredential, check_token_covers_slot, decode_transfer, encode_transfer, printable,
-    run_auth_flow, run_broker_flow, run_export_flow, verify_transfer_credential,
+    TransferCredential, check_token_covers_slot_for, decode_transfer, encode_transfer,
+    microsoft_account_id, printable, run_auth_flow_for, run_broker_flow, run_export_flow,
+    verify_transfer_credential,
 };
 use squelch_core::config::{Config, CredentialBackend, OAuthClientConfig, Stage2CapSources};
 use squelch_core::credentials::{
@@ -875,7 +876,7 @@ fn main() -> ExitCode {
     let (config, cap_sources) = load_config(&cli);
 
     let result = match &cli.command {
-        Command::Auth(args) => cmd_auth(&config, args, flag_sources),
+        Command::Auth(args) => cmd_auth(&config, cli.config.as_deref(), args, flag_sources),
         Command::Run => run_daemon(config),
         Command::Serve(args) => cmd_serve(config, cap_sources, args),
         Command::Token(args) => cmd_token(&config, args),
@@ -930,8 +931,7 @@ fn gmail_slots(scopes: AuthScopes) -> Vec<CredentialKind> {
 
 /// Whether a Gmail run (plain `auth` or `--write`) should end by OFFERING
 /// the optional calendar consent, so a new self-host is asked for calendar at
-/// setup even while the `calendar` hidden feature is off (sync calls nothing
-/// until it is on). Offered only while no calendar credential is stored, so
+/// setup rather than on the Calendar page later. Offered only while no calendar credential is stored, so
 /// a repair run does not ask again, and never on `--calendar`, which is that
 /// consent already.
 ///
@@ -1001,6 +1001,7 @@ fn mint_first_calendar(run: impl FnOnce() -> Result<(), squelch_core::CoreError>
 /// Run the OAuth consent flow(s) and persist tokens for the configured account.
 fn cmd_auth(
     config: &Config,
+    config_path: Option<&std::path::Path>,
     args: &AuthArgs,
     sources: AuthFlagSources,
 ) -> Result<(), squelch_core::CoreError> {
@@ -1034,12 +1035,35 @@ fn cmd_auth(
     };
 
     let client = config.oauth_client()?;
-    let email = config.require_account_email()?;
+    let outlook = client.issuer == squelch_core::config::OAuthIssuer::Microsoft;
+    // OUTLOOK NEEDS NO ADDRESS UP FRONT: Microsoft names the mailbox, and a
+    // personal account's sign-in, primary and alias addresses differ and
+    // change. Gmail still requires one.
+    let configured = if outlook {
+        config
+            .account_email
+            .clone()
+            .filter(|e| !e.trim().is_empty())
+    } else {
+        Some(config.require_account_email()?)
+    };
     let backend = config.credential_backend;
     // Before the browser opens: a backend this build cannot use is refused
     // here, not after the consent it would have had nowhere to put.
     ensure_backend(backend)?;
     let creds_path = config.resolve_credentials_path();
+    // The Microsoft account the stored credential already belongs to, so a
+    // re-consent after the owner changed their primary alias is still
+    // recognised as this mailbox. Best effort: None falls back to addresses.
+    let known_id = match (&configured, outlook) {
+        (Some(email), true) => {
+            load_token_backend(backend, &creds_path, email, CredentialKind::Read)
+                .ok()
+                .and_then(|t| microsoft_account_id(&client, &t))
+        }
+        _ => None,
+    };
+    let mut email = configured.clone().unwrap_or_default();
 
     let plan = auth_plan(args);
     let total = plan.len();
@@ -1051,37 +1075,85 @@ fn cmd_auth(
         );
         // Strictly sequential: each flow's loopback listener is dropped before
         // the next binds, so headless can reuse the one fixed port.
-        if let Err(e) = mint_credential(&client, &email, backend, &creds_path, scopes, args, broker)
-        {
-            if step > 1 {
-                eprintln!(
-                    "squelchd: the credential(s) minted earlier in this run ARE stored; \
+        let minted = mint_credential(
+            &client,
+            (!email.is_empty()).then_some(email.as_str()),
+            known_id.as_deref(),
+            backend,
+            &creds_path,
+            scopes,
+            args,
+            broker,
+        );
+        match minted {
+            Ok(stored_as) => email = stored_as,
+            Err(e) => {
+                if step > 1 {
+                    eprintln!(
+                        "squelchd: the credential(s) minted earlier in this run ARE stored; \
                      re-run `squelchd auth` to finish the {} credential.",
-                    scope_word(scopes)
-                );
+                        scope_word(scopes)
+                    );
+                }
+                return Err(e);
             }
-            return Err(e);
         }
+    }
+    if configured.is_none() {
+        remember_account_email(config_path, &email);
     }
     // Read AFTER the Gmail consents, so a keyring prompt can never stand in
     // front of the screen that matters. Missing or unreadable both read as
     // "not stored": the worst case is one optional offer made again.
     let calendar_stored =
         load_token_backend(backend, &creds_path, &email, CredentialKind::Calendar).is_ok();
-    if wants_first_calendar(args, calendar_stored) && confirm_first_calendar() {
+    // Calendar is Google Calendar; an Outlook daemon is never offered it.
+    if client.issuer == squelch_core::config::OAuthIssuer::Google
+        && wants_first_calendar(args, calendar_stored)
+        && confirm_first_calendar()
+    {
         mint_first_calendar(|| {
             mint_credential(
                 &client,
-                &email,
+                Some(&email),
+                None,
                 backend,
                 &creds_path,
                 AuthScopes::Calendar,
                 args,
                 broker,
             )
+            .map(|_| ())
         });
     }
     Ok(())
+}
+
+/// Write the address Microsoft named into the config file, so every later
+/// run (and `serve`) finds the credential under it. Best effort, loudly.
+fn remember_account_email(config_path: Option<&std::path::Path>, email: &str) {
+    let Some(path) = config_path
+        .map(std::path::Path::to_path_buf)
+        .or_else(Config::default_path)
+    else {
+        eprintln!("squelchd: add `account_email = \"{email}\"` to your config file.");
+        return;
+    };
+    let pairs = [(
+        squelch_core::config::ENV_ACCOUNT_EMAIL.to_string(),
+        email.to_string(),
+    )];
+    match squelch_core::config::mirror_env_pairs_to_config(&pairs, &path) {
+        Ok(_) => println!(
+            "Microsoft names this mailbox {email}; saved as account_email in {}.",
+            path.display()
+        ),
+        Err(e) => eprintln!(
+            "squelchd: could not save account_email to {}: {e}. Add \
+             `account_email = \"{email}\"` yourself.",
+            path.display()
+        ),
+    }
 }
 
 /// The OAuth client a run is built with. A Gmail account needs the real one.
@@ -1100,6 +1172,7 @@ fn oauth_client_for(
         (Some(squelch_core::mail::MailProvider::Imap), Err(_)) => Ok(OAuthClientConfig {
             client_id: String::new(),
             client_secret: String::new(),
+            issuer: Default::default(),
         }),
         (_, Err(e)) => Err(e),
     }
@@ -1375,19 +1448,24 @@ fn imap_setup_allowed(
 }
 
 /// One consent flow, persisted into that kind's own slot; scopes from different
-/// kinds never share a slot.
+/// kinds never share a slot. Returns the address the token was stored under:
+/// `email` when one is configured, else the one Microsoft named.
+#[allow(clippy::too_many_arguments)]
 fn mint_credential(
     client: &OAuthClientConfig,
-    email: &str,
+    email: Option<&str>,
+    known_id: Option<&str>,
     backend: CredentialBackend,
     creds_path: &std::path::Path,
     scopes: AuthScopes,
     args: &AuthArgs,
     broker: Option<&str>,
-) -> Result<(), squelch_core::CoreError> {
+) -> Result<String, squelch_core::CoreError> {
     println!(
-        "Authorizing Google account: {email} [{}] via {:?} backend",
-        scopes.label(),
+        "Authorizing {} account: {} [{}] via {:?} backend",
+        client.issuer.name(),
+        email.unwrap_or("(whichever account you sign in with)"),
+        scopes.label_for(client.issuer),
         backend
     );
 
@@ -1397,21 +1475,35 @@ fn mint_credential(
         // Both arms are handed `email`: the exchange refuses to return a token
         // for any other mailbox, so a consent finished on the wrong Google
         // account fails here instead of being stored under this one.
-        Some(broker) => run_broker_flow(client, email, broker, scopes)?,
+        Some(broker) => {
+            let email = email.ok_or_else(|| {
+                squelch_core::CoreError::Credential(
+                    "--broker needs account_email in the config".into(),
+                )
+            })?;
+            (
+                email.to_string(),
+                run_broker_flow(client, email, broker, scopes)?,
+            )
+        }
         None => {
             let opts = AuthFlowOptions {
                 scopes,
                 headless: args.headless,
                 port: args.port,
+                known_account_id: known_id.map(str::to_string),
             };
-            run_auth_flow(client, email, &opts)?
+            run_auth_flow_for(client, email, &opts)?
         }
     };
+    let (mailbox, token) = token;
+    let email = email.map_or(mailbox, str::to_string);
+    let email = email.as_str();
     // Every slot checked before any is written, so a grant without
     // gmail.modify stores nothing rather than a Write slot that cannot write.
     let slots = gmail_slots(scopes);
     for kind in &slots {
-        check_token_covers_slot(*kind, &token)?;
+        check_token_covers_slot_for(client.issuer, *kind, &token)?;
     }
     for kind in slots {
         store_and_announce(backend, creds_path, email, kind, &token)?;
@@ -1424,7 +1516,7 @@ fn mint_credential(
              https://myaccount.google.com/permissions and re-run `squelchd auth`."
         );
     }
-    Ok(())
+    Ok(email.to_string())
 }
 
 /// Persist one token into its kind's slot and say where it landed, reading it
@@ -1546,7 +1638,7 @@ fn cmd_auth_export(config: &Config, args: &AuthArgs) -> Result<(), squelch_core:
         account = Some(mailbox);
         let slots = gmail_slots(scopes);
         for kind in &slots {
-            check_token_covers_slot(*kind, &token)?;
+            check_token_covers_slot_for(client.issuer, *kind, &token)?;
         }
         for kind in slots {
             credentials.push(TransferCredential {
@@ -1921,6 +2013,11 @@ fn open_account_store(
     let email = config.require_account_email()?;
     let store = SqliteStore::open(&config.db_path)?;
     let account_id = store.ensure_account(&email)?;
+    // Before anything syncs or writes: the account is the provider the config
+    // says, or this refuses (a mailbox never changes provider).
+    if config.provider == squelch_core::mail::MailProvider::Outlook {
+        store.bind_account_provider(account_id, config.provider)?;
+    }
     Ok((store, account_id))
 }
 
@@ -2220,6 +2317,13 @@ fn run_daemon(config: Config) -> Result<(), squelch_core::CoreError> {
 
     let mut store = SqliteStore::open(&config.db_path)?;
     let account_id = store.ensure_account(&email)?;
+    // Before anything syncs or writes: a config that says Outlook binds the
+    // account to Outlook, or this refuses (a mailbox never changes provider).
+    // Gmail is the config's default, so it binds nothing: the row stays as
+    // `squelchd auth` left it, which is how an IMAP account is set.
+    if config.provider == squelch_core::mail::MailProvider::Outlook {
+        store.bind_account_provider(account_id, config.provider)?;
+    }
     let client = oauth_client_for(&config, known_provider(store.account_provider(account_id))?)?;
 
     // Attach the embedder to both the store (query-side) and the engine
@@ -2711,11 +2815,10 @@ fn build_serve_router(
         Some(api_state.agent_mailer()),
         // And the human door's own archive settings: one depth, one poke.
         api_state.archive_surfacing(),
-        // The human door's own feature flags and calendar grant, so
-        // `search_calendar` is on exactly when the calendar routes are, and
-        // reads real events exactly when the timeline does.
+        // The human door's own calendar grant, so `search_calendar` reads
+        // real events exactly when the timeline does.
         squelch_mcp::CalendarDoor {
-            features: api_state.features().clone(),
+            enabled: true,
             credentials: api_state.calendar().cloned(),
         },
     )?;
@@ -2748,6 +2851,13 @@ fn cmd_serve(
 
     let store = SqliteStore::open(&config.db_path)?;
     let account_id = store.ensure_account(&email)?;
+    // Before anything syncs or writes: a config that says Outlook binds the
+    // account to Outlook, or this refuses (a mailbox never changes provider).
+    // Gmail is the config's default, so it binds nothing: the row stays as
+    // `squelchd auth` left it, which is how an IMAP account is set.
+    if config.provider == squelch_core::mail::MailProvider::Outlook {
+        store.bind_account_provider(account_id, config.provider)?;
+    }
     let provider = known_provider(store.account_provider(account_id))?;
     let client = oauth_client_for(&config, provider)?;
     // An unknown provider is not Gmail either: no calendar sync and no
@@ -2924,15 +3034,7 @@ fn cmd_serve(
     // Never for an IMAP account: there is no Google grant to find, and the
     // loop must not go looking for one under that account's address.
     let calendar_sync = api_state.calendar().cloned().filter(|_| is_gmail).and_then(|creds| {
-        // The same live feature set the human door gates on: the loop asks it
-        // at every pass, so a flag flipped on the admin page reaches it with
-        // no restart.
-        match squelch_core::gcal::sync::CalendarSync::new(
-            store.clone(),
-            account_id,
-            creds,
-            api_state.features().clone(),
-        ) {
+        match squelch_core::gcal::sync::CalendarSync::new(store.clone(), account_id, creds) {
             // The card's places ride the same key and the notify model, like
             // the sitrep headline. No key: locations are shown as they are.
             Ok(sync) => {
@@ -4553,6 +4655,7 @@ mod tests {
             OAuthClientConfig {
                 client_id: "test".into(),
                 client_secret: "test".into(),
+                issuer: Default::default(),
             },
         ));
         let budget = Arc::new(squelch_core::gmail_budget::GmailBudget::new(
@@ -5153,6 +5256,8 @@ mod tests {
             "get_shipments",
             "get_thread",
             "list_sender_rules",
+            // Calendar for everyone: the daemon's door always serves it.
+            "search_calendar",
             "search_mail",
             "set_sender_rule",
         ];

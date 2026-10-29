@@ -9,6 +9,7 @@
 //! decided by its `accounts.provider` row (`handlers::write_client`).
 
 pub mod gmail;
+pub mod graph;
 pub mod mime;
 
 /// An error from a write operation: deliberately coarse and free of any

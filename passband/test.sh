@@ -26,6 +26,9 @@ mkdir -p "$BUILD"
 # knows that. This is the check; see the script's header for the history.
 echo "==> analytics-lint"
 python3 ./analytics-lint.py
+# Session replay draws only the app's own SF Symbols; a symbol added without
+# rerunning ./replay-icons.py would replay as a grey box.
+python3 ./replay-icons.py --check
 
 QUEUE=$(mktemp)
 trap 'rm -f "$QUEUE"' EXIT
@@ -666,6 +669,16 @@ run_suite search-intent \
 run_suite settings-search \
   Sources/Passband/Lib/SettingsSearch.swift \
   Tests/SettingsSearchTests.swift
+
+# Session replay's privacy contract: a layer tree with a subject, an avatar, a
+# hued pill and a web view must come out as grey boxes with no text, no hue
+# and nothing from inside the web view, and the outbound validator must refuse
+# anything else. Plus the gzip member the uploads ride in.
+run_suite replay-wireframe \
+  Sources/Passband/Lib/ReplayWireframe.swift \
+  Sources/Passband/Lib/Gzip.swift \
+  Sources/Passband/Lib/ReplayIconNames.swift \
+  Tests/ReplayWireframeTests.swift
 
 # What the assistant says about Passband itself: the three help tools' answers.
 # All three are text a model reads and repeats to a person, so the suite asks

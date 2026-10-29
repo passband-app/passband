@@ -48,6 +48,13 @@ enum EventBanner {
     /// A new Passband version is ready. The tap fronts the window, where the
     /// update card is already waiting, and is not a mail open either.
     static let updateRoute = "update"
+    /// An agent left a draft and asked the owner to review it. The banner
+    /// names a draft by its row id AND its creation second, which together
+    /// bind the tap to one draft: ids are reused once a draft is sent or
+    /// discarded (see `AgentDraftLink`). No thread, no event.
+    static let agentDraftRoute = "agent_draft"
+    static let draftKey = "passband.draft_id"
+    static let draftCreatedKey = "passband.draft_created"
 
     /// Where a notification tap goes, decided from its userInfo alone. Pure,
     /// so the one rule that matters most here is pinned by a test: a tap on
@@ -56,6 +63,13 @@ enum EventBanner {
     enum TapRoute: Equatable, Sendable {
         case update
         case test
+        /// A smart re-notify banner (RenotifyBanner.swift): open its first
+        /// message and report the tap against its batch.
+        case renotify(RenotifyTap)
+        /// An agent's draft to review. `accountId` nil only when an enriched
+        /// banner lost its account key, which the tap queue reads as "the
+        /// active account".
+        case agentDraft(accountId: UUID?, draftId: Int, created: Int)
         case reveal(messageId: Int, threadId: String, sender: String)
         case authPage
         case message(Int)
@@ -67,6 +81,24 @@ enum EventBanner {
         let route = userInfo[routeKey] as? String
         if route == updateRoute { return .update }
         if route == testRoute { return .test }
+        // BEFORE anything else reads the payload: a draft push carries no
+        // message, thread or event, and must never fall through to them.
+        if route == agentDraftRoute {
+            let id = (userInfo[draftKey] as? Int) ?? (userInfo[draftKey] as? String).flatMap(Int.init)
+            let created =
+                (userInfo[draftCreatedKey] as? Int) ?? (userInfo[draftCreatedKey] as? String).flatMap(Int.init)
+            if let id, id > 0, let created, created > 0 {
+                return .agentDraft(
+                    accountId: (userInfo[accountKey] as? String).flatMap(UUID.init(uuidString:)),
+                    draftId: id, created: created)
+            }
+        }
+        if let push = draftPush(userInfo["event_id"] as? String) {
+            return .agentDraft(accountId: push.accountId, draftId: push.draftId, created: push.created)
+        }
+        // A draft banner that lost its binding opens nothing at all.
+        if route == agentDraftRoute { return .thread(nil) }
+        if let renotify = renotifyTap(userInfo) { return .renotify(renotify) }
         let messageId =
             (userInfo[messageKey] as? Int) ?? (userInfo[messageKey] as? String).flatMap(Int.init)
         let flagged = (userInfo[authKey] as? Bool) ?? false
@@ -83,6 +115,52 @@ enum EventBanner {
         return .thread(userInfo[threadKey] as? String)
     }
 
+    // MARK: - smart re-notify taps (the banner itself: RenotifyBanner.swift)
+
+    /// The daemon's closed re-notify trigger set, mirrored for analytics.
+    enum RenotifyTrigger: String, Sendable {
+        case client_online
+        case meeting_end
+    }
+
+    /// The tap route a re-notify banner carries in `routeKey`.
+    static let renotifyRoute = "renotify"
+    /// The batch id: what a tap reports to `/client/renotify/{id}/opened`.
+    static let renotifyBatchKey = "passband.renotify.batch"
+    /// The frame's trigger, for the tap's analytics.
+    static let renotifyTriggerKey = "passband.renotify.trigger"
+    /// How many messages the banner named.
+    static let renotifyCountKey = "passband.renotify.items"
+    /// The coalescing group every re-notify shares, before the poster
+    /// prefixes it with the account.
+    static let renotifyGroup = "passband.renotify"
+
+    /// A tap on a re-notify banner: open `messageId` (the first item) and
+    /// report it against `batch`.
+    struct RenotifyTap: Equatable, Sendable {
+        var batch: Int
+        var messageId: Int
+        var threadId: String
+        var trigger: RenotifyTrigger?
+        var items: Int
+    }
+
+    /// The re-notify half of `tapRoute`, nil for any other banner.
+    static func renotifyTap(_ userInfo: [AnyHashable: Any]) -> RenotifyTap? {
+        guard userInfo[routeKey] as? String == renotifyRoute,
+            let batch = intValue(userInfo[renotifyBatchKey]), batch > 0,
+            let messageId = intValue(userInfo[messageKey]), messageId > 0
+        else { return nil }
+        return RenotifyTap(
+            batch: batch, messageId: messageId, threadId: userInfo[threadKey] as? String ?? "",
+            trigger: (userInfo[renotifyTriggerKey] as? String).flatMap(RenotifyTrigger.init),
+            items: intValue(userInfo[renotifyCountKey]) ?? 1)
+    }
+
+    private static func intValue(_ any: Any?) -> Int? {
+        (any as? Int) ?? (any as? NSNumber)?.intValue ?? (any as? String).flatMap(Int.init)
+    }
+
     /// The relay's original push survives when device enrichment times out.
     /// Keep its account-qualified event handle so a tap can resolve the email.
     struct UnresolvedPush: Equatable, Sendable {
@@ -95,6 +173,83 @@ enum EventBanner {
             let account = UUID(uuidString: String(raw[..<colon])),
             let event = Int(raw[raw.index(after: colon)...]), event > 0 else { return nil }
         return UnresolvedPush(accountId: account, eventId: event)
+    }
+
+    /// The pusher's draft ping, `"<account>:draft:<id>:<created>"`: the tag
+    /// the client registered, a literal, the draft's row id, and its creation
+    /// time in Unix seconds. STRICT like `AgentDraftLink`: exactly that shape,
+    /// numbers written the one plain way, nothing looser.
+    ///
+    /// Distinct from an event push by construction: `unresolvedPush` splits at
+    /// the LAST colon, so this shape's account half is never a UUID there.
+    struct DraftPush: Equatable, Sendable {
+        var accountId: UUID
+        var draftId: Int
+        var created: Int
+    }
+
+    static func draftPush(_ raw: String?) -> DraftPush? {
+        guard let raw, raw.count <= 256 else { return nil }
+        let parts = raw.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 4, parts[1] == "draft",
+            let account = UUID(uuidString: String(parts[0])),
+            let id = plainNumber(parts[2], maxDigits: 12),
+            let created = plainNumber(parts[3], maxDigits: 11)
+        else { return nil }
+        return DraftPush(accountId: account, draftId: id, created: created)
+    }
+
+    /// A positive integer written the one plain way: ASCII digits, no sign,
+    /// no leading zero.
+    private static func plainNumber(_ text: Substring, maxDigits: Int) -> Int? {
+        guard !text.isEmpty, text.count <= maxDigits, text.first != "0",
+            text.allSatisfy({ $0.isASCII && $0.isNumber }), let n = Int(text), n > 0
+        else { return nil }
+        return n
+    }
+
+    /// A draft's `created_at` (RFC 3339, with or without fractional seconds)
+    /// as the whole Unix second a push or link names it by. nil when the
+    /// stamp cannot be read, which never matches anything.
+    static func draftSecond(_ createdAt: String) -> Int? {
+        guard let date = eventDate(createdAt) else { return nil }
+        return Int(date.timeIntervalSince1970.rounded(.down))
+    }
+
+    /// What the banner for an agent's draft says. Who it is to and what it is
+    /// about, both the agent's own words in the owner's mailbox; never the
+    /// body. Short, because a lock screen truncates.
+    static func agentDraftCopy(to: String, subject: String, isReply: Bool, parentFrom: String?)
+        -> (title: String, body: String)
+    {
+        // Quote-aware: `"Okafor, Maya" <maya@x>` is one recipient.
+        let firstTo = SenderID.recipients(to).first ?? ""
+        // THE AGENT'S DISPLAY NAME IS NOT SHOWN. Every word of `to` is the
+        // agent's, and an agent steered by mail it read could write
+        // `"Passband Security" <x@evil>` to put that name under Passband's own
+        // banner. So an address the agent typed is read by its ADDRESS alone;
+        // a reply's parent sender is read the way every mail banner reads a
+        // sender (it is the mail's own From, not the agent's words). Never a
+        // raw address on the lock screen either way.
+        let who: String
+        if !firstTo.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            who = SenderID.readableName(SenderID.parse(firstTo).addr)
+        } else if let parentFrom, !parentFrom.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            who = SenderID.readableName(parentFrom)
+        } else {
+            who = ""
+        }
+        let topic = flatten(stripBidi(subject), max: 120)
+        let name = flatten(stripBidi(who), max: 64)
+        let lead = name.isEmpty ? "" : (isReply ? "Reply to \(name)" : "To \(name)")
+        let body: String
+        switch (lead.isEmpty, topic.isEmpty) {
+        case (false, false): body = "\(lead): \(topic)"
+        case (false, true): body = lead
+        case (true, false): body = topic
+        case (true, true): body = "Open it to read it and send."
+        }
+        return ("Your agent left a draft", body)
     }
 
     // MARK: - routing
@@ -338,6 +493,15 @@ enum EventBanner {
 
     /// Collapse to one line and cap the length: notification text is a small
     /// fixed box.
+    /// Bidirectional embedding, override and isolate controls removed: they
+    /// let text reorder itself on screen, which is a way to make a banner
+    /// read as something other than what it says.
+    static func stripBidi(_ s: String) -> String {
+        String(
+            String.UnicodeScalarView(
+                s.unicodeScalars.filter { !(0x202A...0x202E).contains($0.value) && !(0x2066...0x2069).contains($0.value) }))
+    }
+
     static func flatten(_ s: String, max: Int) -> String {
         let flat = s.split(whereSeparator: { $0.isNewline || $0 == "\t" })
             .joined(separator: " ")

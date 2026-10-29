@@ -3288,3 +3288,36 @@ fn schema_attention_repairs_probe_the_thread_index() {
         );
     }
 }
+
+#[test]
+fn migrate_gives_every_preexisting_account_the_gmail_provider() {
+    // An `accounts` table from before providers: every row in it is a Gmail
+    // mailbox, because Gmail was the only kind there was.
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE accounts(id INTEGER PRIMARY KEY, email TEXT UNIQUE NOT NULL,
+             created_at TEXT NOT NULL);
+         INSERT INTO accounts VALUES (1, 'a@example.com', '2020-01-01T00:00:00+00:00');",
+    )
+    .unwrap();
+    migrate(&conn).unwrap();
+    migrate(&conn).unwrap(); // idempotent
+    let provider: String = conn
+        .query_row("SELECT provider FROM accounts WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(provider, crate::mail::MailProvider::Gmail.as_str());
+    // A row written afterwards without naming a provider gets the same.
+    conn.execute(
+        "INSERT INTO accounts(id, email, created_at) VALUES (2, 'b@example.com', 'x')",
+        [],
+    )
+    .unwrap();
+    let provider: String = conn
+        .query_row("SELECT provider FROM accounts WHERE id = 2", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(provider, "gmail");
+}

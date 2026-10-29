@@ -38,7 +38,8 @@ pinned to `noopener noreferrer`.
 - HTML never crosses the agent door; MCP serves flattened text only.
 - `body_html` is **baked at ingest** — a sanitizer change does not retroactively fix
   stored mail. Delete the `sync_state` `history` row and restart `squelchd` to
-  re-ingest (triage is preserved).
+  re-ingest (triage is preserved). The `sync_cursor` row needs no edit: for a
+  Gmail account the `history` row is the cursor (`store/sqlite/sync_cursor.rs`).
 
 ## 2. Rendering sandbox
 
@@ -608,8 +609,18 @@ to these rules:
   that asked for it on its own authenticated event stream
   (`GET /client/events?opens=1`) receives an unpersisted, dated `open_draft`
   frame. Nothing is stored or replayed, and the app drops a frame more than a
-  minute old, so a Mac that wakes from sleep has no window thrown at it. The
-  phone never asks and is never told.
+  minute old, so a Mac that wakes from sleep has no window thrown at it.
+- The phone is told by push, ONCE PER DRAFT. The same request hands a
+  `DraftPing` (draft id + creation second) to the APNs pusher over a second
+  in-memory channel (`ApiState::draft_pings`); it is not an event, is never
+  persisted, and is tried once. The relay sees `"<tag>:draft:<id>:<created>"`
+  and `kind: "draft"`, which picks a fixed fallback line and can carry no
+  text of its own; no subject, recipient or body crosses it. The phone's
+  service extension resolves the draft from its own daemon and opens it only
+  if the daemon says an agent wrote it at that second. A tap opens the
+  composer; nothing on the phone sends without the owner pressing send.
+  Asking again for the same draft never buzzes the phone again
+  (`ApiState::draft_pinged`).
 - Only a draft an agent wrote can be named. The mailer refuses any other id
   with the same `not found` as an unknown one, and the app checks
   `from_agent` AGAIN against the daemon's own draft list before opening
@@ -833,7 +844,7 @@ pre-echo status quo. The read-back is also capped at **5s**
 (`ECHO_FETCH_TIMEOUT_SECS`): the client's POST timeout is 15s and `action_send` has
 already made two serial Gmail calls, so bookkeeping may not spend the rest of that
 budget. Keep the echo's failures audited and swallowed; keep it out of core's write
-surface (the fetch lives in `squelch-api/src/gmail_write.rs`, core takes bytes).
+surface (the fetch lives in `squelch-api/src/write/gmail.rs`, core takes bytes).
 
 **Scheduled send (audit contract).** The outbox door audits under three actions of
 its own, target = the message a reply or forward is about (`schedule`) or the row id
@@ -907,6 +918,40 @@ the call goes out.
   and the file is deleted when history is cleared or the account is removed. A
   restored chat is re-sanitized (no card comes back live) and is refused if its
   history names a tool the chat no longer offers.
+- **The last board on disk.** The client also keeps at rest the board a launch
+  paints before the daemon answers
+  (`passband/Sources/Passband/Lib/BoardFile.swift`): the bands' rows (subject,
+  sender, the triage's one-line summary and preview), the calendar and shipment
+  cards, the hero's headline, the head of each mail page, and the ids (ids only)
+  of the threads that hold auth mail, so the prefetch fence is up before the
+  sealed list is fetched again. It is written through the same code as the
+  saved chats (`PrivateFile.swift`): one file per account under Application
+  Support's `Passband/Boards`, excluded from backup, written atomically, 0600 in
+  a 0700 directory on the Mac, complete file protection on the phone, contents
+  never logged. NEVER on disk: the sealed list and the banking and receipt cards
+  (the amounts and balances extracted from that mail), which the persisted type
+  has no place for, and auth mail by every signal there is for it, since a
+  preview can be the code. A row goes when its decision names an auth kind
+  (feed rows), when its zone is `auth` (mail-page rows, which carry no
+  decision), or when its thread is one the store fences (the sealed list, the
+  bands' auth rows), and every other row and card of that thread goes with it.
+  So does a mail-page row triage has not placed yet: the newest mail is where a
+  code that just arrived sits. A page is cut at its first such row rather than
+  holed. The rules run on the way in and again on the way back out, so a file
+  written any other way still cannot paint auth mail. Billing and receipt mail
+  is otherwise mail like any other: its rows on a mail page are kept. The
+  headline is kept only for the band it was written about, and not when a band
+  row was taken out. Only what the daemon has answered for this session is
+  written: never a board still repainted from disk or a switch, never a page
+  that has not loaded since, and nothing after the credentials are
+  re-validated in Settings until the next account change. A band that is
+  nothing but auth mail is not written at all, and the file goes. A board the daemon last answered for more than a
+  week ago is not painted and is deleted, by the read that finds it or by the
+  launch sweep, which also deletes the board of every account no longer on the
+  install. The file goes when the account is removed, when the same daemon is
+  connected again or re-validated (the credentials may open another mailbox),
+  and whenever the daemon refuses the saved credentials. Never written for the
+  practice inbox.
 
 **What a maintainer must not break.**
 - **Prompt injection is the standing threat, and the gate is the answer to it.**

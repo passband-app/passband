@@ -35,7 +35,7 @@ use axum::{
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use squelch_core::store::{MessageOpen, Store};
+use squelch_core::store::{MessageOpen, OPEN_SCANNER, Store};
 use squelch_core::tracking::{classify_user_agent, notify_open};
 
 use crate::error::ApiError;
@@ -141,7 +141,8 @@ pub async fn tracking_pixel(
             user_agent.as_deref(),
             classification,
         )?;
-        if recorded {
+        // A probable scanner is recorded but wakes nobody.
+        if recorded && classification != OPEN_SCANNER {
             notify_open(store, account_id, &token);
         }
         Ok(())

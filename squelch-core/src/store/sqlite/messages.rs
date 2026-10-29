@@ -2165,7 +2165,8 @@ impl SqliteStore {
                     m.received_at,
                     (SELECT COUNT(*) FROM message_opens o
                      JOIN send_trackers st ON st.token = o.token
-                     WHERE st.account_id = m.account_id AND st.message_id = m.id) AS opens,
+                     WHERE st.account_id = m.account_id AND st.message_id = m.id
+                       AND o.classification != 'scanner') AS opens,
                     COALESCE(m.cc_addrs, ''), COALESCE(m.bcc_addrs, '')
              FROM messages m
              WHERE m.account_id = ?1

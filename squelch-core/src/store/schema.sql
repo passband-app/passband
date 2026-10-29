@@ -6,7 +6,11 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS accounts (
     id         INTEGER PRIMARY KEY,
     email      TEXT UNIQUE NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    -- Which kind of mailbox this is (`crate::mail::MailProvider`): the sync
+    -- engine and the write door pick their provider from it. Every account
+    -- before providers existed was Gmail, which is what the default says.
+    provider   TEXT NOT NULL DEFAULT 'gmail'
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -861,15 +865,29 @@ CREATE INDEX IF NOT EXISTS idx_triage_revisits_due
 CREATE INDEX IF NOT EXISTS idx_triage_revisits_msg
     ON triage_revisits(account_id, message_id);
 
--- Gmail sync cursor, keyed by a logical mailbox string. Exactly one row is
--- stored, keyed mailbox='history': uidvalidity is unused (0) and last_uid holds
--- the account's historyId (a u64 that fits SQLite's i64 INTEGER).
+-- Gmail sync cursor, keyed by a logical mailbox string. The engine's cursor
+-- row is keyed mailbox='history': uidvalidity is unused (0) and last_uid holds
+-- the account's historyId (a u64 that fits SQLite's i64 INTEGER). The engine
+-- now reads and writes `sync_cursor` below; for a Gmail account that row is
+-- still written alongside it, so a rolled-back build resumes where this one
+-- stopped. The one-time sweeps keep their own done flags here.
 CREATE TABLE IF NOT EXISTS sync_state (
     account_id  INTEGER NOT NULL,
     mailbox     TEXT NOT NULL,
     uidvalidity INTEGER NOT NULL,
     last_uid    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(account_id, mailbox)
+);
+
+-- THE SYNC ENGINE'S CURSOR, one per account, opaque: whatever the account's
+-- mail source (`crate::mail::MailSource`) encodes its change-feed position as.
+-- Gmail's is the decimal historyId; nothing outside the source reads inside it.
+-- A Gmail account written before this table existed has no row here and is
+-- adopted from `sync_state` mailbox='history' on read.
+CREATE TABLE IF NOT EXISTS sync_cursor (
+    account_id INTEGER PRIMARY KEY,
+    cursor     TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 
 -- GMAIL-SIDE INBOX UNREAD COUNTS (labels/INBOX messagesUnread/threadsUnread),
@@ -1117,6 +1135,49 @@ CREATE TABLE IF NOT EXISTS events (
 
 -- The read pattern is exactly "rows after my cursor, for my account".
 CREATE INDEX IF NOT EXISTS idx_events_account_id ON events(account_id, id);
+
+-- SMART RE-NOTIFY (issue #625, docs/RENOTIFY.md). Written only while the
+-- `renotify` hidden feature is on for the account.
+--
+-- `client_sessions`: one row per Mac event stream (`/client/events?opens=1`),
+-- open while `disconnected_at` is NULL. What it answers is "how long was the
+-- Mac away before this connection", which is the client-online trigger.
+-- Rows a crash left open are closed at the next daemon start. Pruned to the
+-- newest few hundred per account on every insert.
+CREATE TABLE IF NOT EXISTS client_sessions (
+    id              INTEGER PRIMARY KEY,
+    account_id      INTEGER NOT NULL,
+    platform        TEXT NOT NULL,
+    connected_at    TEXT NOT NULL,
+    disconnected_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_client_sessions_account ON client_sessions(account_id, id);
+
+-- One re-notify banner (`renotify_batches`) and the messages it named
+-- (`renotify_items`, in banner order). `opened_at` is the banner tap the app
+-- reports; whether each message was HANDLED after it is derived on read from
+-- the message's own state, never stored, so it cannot drift from it.
+CREATE TABLE IF NOT EXISTS renotify_batches (
+    id                INTEGER PRIMARY KEY,
+    account_id        INTEGER NOT NULL,
+    trigger           TEXT NOT NULL,     -- client_online | meeting_end
+    fired_at          TEXT NOT NULL,
+    listeners         INTEGER NOT NULL,  -- Macs the frame was sent to
+    opened_at         TEXT,
+    opened_message_id INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_renotify_batches_account ON renotify_batches(account_id, id);
+CREATE TABLE IF NOT EXISTS renotify_items (
+    batch_id   INTEGER NOT NULL REFERENCES renotify_batches(id) ON DELETE CASCADE,
+    account_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    position   INTEGER NOT NULL,
+    -- The due time a due-soon re-notify was for (RFC 3339), NULL for an
+    -- ordinary one. One due-soon re-notify per message per due time.
+    due_at     TEXT,
+    PRIMARY KEY(batch_id, position)
+);
+CREATE INDEX IF NOT EXISTS idx_renotify_items_message ON renotify_items(account_id, message_id);
 
 -- THE NOTIFY DECISION LEDGER: one row per (message, lane) recording what that
 -- lane decided about notifying, and nothing else (docs/NOTIFY.md §11.4).

@@ -141,9 +141,11 @@ fn map_slug_conflict(e: rusqlite::Error) -> CoreError {
 /// Read receipts recorded against one message, as a SQL scalar subquery. The
 /// join through `send_trackers` is what scopes the count to this account —
 /// `message_opens` carries no account of its own.
+/// Probable scanners (`OPEN_SCANNER`) are listed but never counted.
 const OPENS_SUBQUERY: &str = "(SELECT COUNT(*) FROM message_opens o
       JOIN send_trackers st ON st.token = o.token
-      WHERE st.account_id = m.account_id AND st.message_id = m.id)";
+      WHERE st.account_id = m.account_id AND st.message_id = m.id
+        AND o.classification != 'scanner')";
 
 impl SqliteStore {
     /// Replace the normalized recipient index for one message.
@@ -634,7 +636,7 @@ impl SqliteStore {
                      JOIN send_trackers st
                        ON st.account_id = gs.account_id AND st.message_id = r.message_id
                      JOIN message_opens o ON o.token = st.token
-                     WHERE r.group_send_id = gs.id)
+                     WHERE r.group_send_id = gs.id AND o.classification != 'scanner')
              FROM group_sends gs
              WHERE gs.account_id = ?1 AND gs.group_id = ?2
              ORDER BY gs.sent_at DESC, gs.id DESC

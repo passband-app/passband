@@ -135,6 +135,10 @@ pub struct AgentDraftOpened {
     /// bring the draft up. `false` means nothing was listening: the draft is
     /// saved and the link below is the way in.
     pub on_mac: bool,
+    /// The owner's phone was sent a notification for this draft, now. Handed
+    /// to the push relay, which is not proof it arrived. `false` also when the
+    /// phone was already told about this draft once: one push per draft.
+    pub on_phone: bool,
     /// A `passband://` link that opens the draft in the Mac app. Handed back
     /// either way, so the agent can give its human a way to the draft.
     pub link: String,

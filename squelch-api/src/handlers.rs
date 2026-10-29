@@ -16,12 +16,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use squelch_core::CoreError;
 use squelch_core::config::{CACHE_READ_INPUT_MULT, CACHE_WRITE_INPUT_MULT};
+use squelch_core::mail::MailProvider;
 use squelch_core::store::{
     ActionMessageRef, ClientPlatform, Draft, DraftKey, FtsQuery, NewAuditEntry,
     OutboundAttachmentMeta, SearchDiagnostics, SearchFilter, SearchSort, SenderDigestRow,
     SitrepBand, SmartBlockMemo, SpamScope, SqliteStore, Store,
 };
-use squelch_core::sync::{LABEL_INBOX, LABEL_SPAM, decode_raw_b64url, parse_internal_date};
+use squelch_core::sync::{decode_raw_b64url, parse_internal_date};
 use squelch_core::triage::llm::Usage;
 use squelch_core::triage::rule_infer;
 use squelch_core::triage::rule_suggest;
@@ -29,18 +30,21 @@ use squelch_core::types::{
     AccountId, AttentionStatus, Disposition, GroupMode, SenderRule, ShredStats, Tier, TriageAxis,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::ApiError;
-use crate::gmail_write::{
-    ForwardParts, ForwardedOriginal, GmailWriteClient, MailAttachment, ReplyParts, SentRef,
-    WriteError, addrs_excluding, build_forward_rfc822, build_references, build_reply_rfc822,
-    cc_excluding, count_addrs, derive_reply_recipients, forward_subject, mark_inline, outbox_token,
-    parse_addr_list, parse_forwarded_original, reply_subject,
-};
 use crate::group_send;
 use crate::guard;
 use crate::state::ApiState;
+use crate::write::gmail::GmailWriteClient;
+use crate::write::mime::{
+    ForwardParts, ForwardedOriginal, MailAttachment, ReplyParts, addrs_excluding,
+    build_forward_rfc822, build_references, build_reply_rfc822, cc_excluding, count_addrs,
+    derive_reply_recipients, forward_subject, mark_inline, outbox_token, parse_addr_list,
+    parse_forwarded_original, reply_subject,
+};
+use crate::write::{MailWriter, SentRef, WriteError};
 
 /// Default page size when `limit` is omitted, and the hard ceiling we clamp to.
 const DEFAULT_LIMIT: u32 = 50;
@@ -4787,25 +4791,85 @@ async fn resolve_sender_done(state: &ApiState, sender: &str) {
     .await;
 }
 
-/// Resolve the WRITE-bound gmail client, or 403 with a hint if none configured.
-pub(crate) fn write_client(state: &ApiState) -> Result<GmailWriteClient, ApiError> {
-    match state.write_creds() {
-        // Over the state's one shared HTTP client (see `ApiState::write_http`);
-        // what is built per action is two `Arc` clones and a base URL.
-        Some(creds) => Ok(GmailWriteClient::with_http(
-            creds.clone(),
-            state.account_id,
-            state
-                .write_api_base()
-                .map(str::to_string)
-                .unwrap_or_else(|| squelch_core::sync::GMAIL_API_BASE.to_string()),
-            state.write_http(),
-        )
-        .with_budget(state.gmail_budget().cloned())),
-        None => Err(ApiError::new(
+/// Resolve the account's WRITE-bound mail writer, or 403 with a hint if no
+/// write credential is configured.
+///
+/// THE WRITER IS THE ACCOUNT'S PROVIDER'S (`accounts.provider`, read on the
+/// first call and kept in [`ApiState::mail_provider`]). The credential is
+/// checked first, so a door with none configured answers exactly as it
+/// always has without touching the store. A provider this build does not know
+/// is refused, never written to as Gmail: see [`writer_unavailable`].
+pub(crate) async fn write_client(state: &ApiState) -> Result<Arc<dyn MailWriter>, ApiError> {
+    let Some(creds) = state.write_creds().cloned() else {
+        return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "write credential not configured; run `squelchd auth`",
+        ));
+    };
+    let provider = match state.mail_provider.get() {
+        Some(provider) => *provider,
+        None => {
+            // The inner `Result` is the provider read itself, mapped below
+            // rather than by the store's generic mapping (which would call an
+            // unknown provider the CALLER's 400).
+            let read = store_call(state, |store, account_id| {
+                Ok(store.account_provider(account_id))
+            })
+            .await?;
+            let provider = read.map_err(writer_unavailable)?;
+            *state.mail_provider.get_or_init(|| provider)
+        }
+    };
+    match provider {
+        // Over the state's one shared HTTP client (see `ApiState::write_http`);
+        // what is built per action is two `Arc` clones and a base URL.
+        MailProvider::Gmail => Ok(Arc::new(
+            GmailWriteClient::with_http(
+                creds,
+                state.account_id,
+                state
+                    .write_api_base()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| squelch_core::sync::GMAIL_API_BASE.to_string()),
+                state.write_http(),
+            )
+            .with_budget(state.gmail_budget().cloned()),
         )),
+    }
+}
+
+/// Why the account has no writer although a write credential is configured.
+///
+/// - A provider this build does not know (a database a newer build set up):
+///   501, because this daemon cannot do it at all and an upgrade is the fix.
+///   Not the credential's 403, which would send the user to re-authorize, and
+///   not 503, which reads as "try again shortly".
+/// - Anything else (the door's own account row gone, the store failing): the
+///   opaque 500 every other store failure is.
+fn writer_unavailable(e: CoreError) -> ApiError {
+    match e {
+        CoreError::InvalidInput(m) => {
+            // The message names the stored value, which this code wrote: safe
+            // to log, and what makes the line useful.
+            eprintln!("squelch-api: no writer for this account: {m}");
+            ApiError::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "this account's mail provider is not supported by this build; upgrade squelchd",
+            )
+        }
+        _ => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+    }
+}
+
+/// The audit reason for a [`write_client`] refusal, by what refused: the
+/// credential (403, the reason every caller has always recorded), a provider
+/// this build cannot write to (501), or anything else (the store). Distinct so
+/// a store blip is not recorded as "re-authorize".
+pub(crate) fn write_refusal(e: &ApiError) -> &'static str {
+    match e.status {
+        StatusCode::FORBIDDEN => "rejected:no_write_credential",
+        StatusCode::NOT_IMPLEMENTED => "rejected:unsupported_provider",
+        _ => "failed:store",
     }
 }
 
@@ -4871,7 +4935,7 @@ async fn guarded_action<F, Fut>(
     call: F,
 ) -> Result<(), ApiError>
 where
-    F: FnOnce(GmailWriteClient, ActionMessageRef) -> Fut,
+    F: FnOnce(Arc<dyn MailWriter>, ActionMessageRef) -> Fut,
     Fut: std::future::Future<Output = Result<(), WriteError>>,
 {
     let target = Some(message_id.to_string());
@@ -4885,10 +4949,10 @@ where
         return Err(err);
     }
 
-    let client = match write_client(state) {
+    let client = match write_client(state).await {
         Ok(c) => c,
         Err(e) => {
-            audit_action(state, action, target, "rejected:no_write_credential").await;
+            audit_action(state, action, target, write_refusal(&e)).await;
             return Err(e);
         }
     };
@@ -4986,15 +5050,7 @@ pub async fn action_not_spam(
         // NOT ResolveDone: this mail is arriving, not being handled. `clear_spam`
         // puts the attention row back to 'new' so it lands in the New band.
         OnSuccess::LeaveOpen,
-        |client, msg| async move {
-            client
-                .modify(
-                    &msg.gmail_msg_id,
-                    &[LABEL_INBOX.to_string()],
-                    &[LABEL_SPAM.to_string()],
-                )
-                .await
-        },
+        |client, msg| async move { client.not_spam(&msg.gmail_msg_id).await },
     )
     .await?;
 
@@ -5094,11 +5150,11 @@ pub struct SendBody {
     /// the rest of its To/Cc minus this account. Requires
     /// `reply_to_message_id` — there is no audience to widen without a parent —
     /// and absent means today's single-recipient reply, so every existing caller
-    /// is unchanged. See [`crate::gmail_write::derive_reply_recipients`].
+    /// is unchanged. See [`crate::write::mime::derive_reply_recipients`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) reply_all: bool,
     /// BLIND copies, comma-joined, for a send whose audience must not see each
-    /// other. Never derived from anything (see [`crate::gmail_write::ReplyParts`])
+    /// other. Never derived from anything (see [`crate::write::mime::ReplyParts`])
     /// and nothing ever will derive it — no header of a parent records who was
     /// blind-copied on it, which is what blind means, so absent and `""` are the
     /// same thing here, unlike `cc`. Filtered against `to`/`cc` before it
@@ -5182,7 +5238,7 @@ pub struct SendBody {
 /// outbox row the mail went out from (see [`fired`]), as its `send` row is.
 pub(crate) async fn echo_sent(
     state: &ApiState,
-    client: &GmailWriteClient,
+    client: &dyn MailWriter,
     target: Option<String>,
     sent: &SentRef,
     fire: Option<Fire<'_>>,
@@ -5446,7 +5502,7 @@ pub(crate) async fn guard_verdict(
 #[allow(clippy::too_many_arguments)]
 async fn finish_send(
     state: &ApiState,
-    client: &GmailWriteClient,
+    client: &dyn MailWriter,
     raw: &[u8],
     thread_id: Option<String>,
     resolve: Option<i64>,
@@ -5852,17 +5908,12 @@ pub(crate) async fn perform_send(
     let target = send_target(body);
     let message_id = fire.map(|f| f.message_id);
 
-    let client = match write_client(state) {
+    let client = match write_client(state).await {
         Ok(c) => c,
         Err(e) => {
-            audit_action(
-                state,
-                "send",
-                target,
-                &fired(fire, "rejected:no_write_credential"),
-            )
-            .await;
-            return Err(SendFailure::new("rejected:no_write_credential", e));
+            let reason = write_refusal(&e);
+            audit_action(state, "send", target, &fired(fire, reason)).await;
+            return Err(SendFailure::new(reason, e));
         }
     };
 
@@ -5870,7 +5921,7 @@ pub(crate) async fn perform_send(
         return forward_send(
             state,
             body,
-            &client,
+            &*client,
             target,
             original_id,
             owed,
@@ -5914,7 +5965,7 @@ pub(crate) async fn perform_send(
         && let Some(audience) = &audience
         && audience.mode == GroupMode::Individual
     {
-        return fan_out_send(state, body, audience, attachments).await;
+        return fan_out_send(state, client, body, audience, attachments).await;
     }
 
     let (parent, thread_id) = match body.reply_to_message_id {
@@ -6126,7 +6177,7 @@ pub(crate) async fn perform_send(
     let outcome = fired_outcome(fire, outcome);
     let result = finish_send(
         state,
-        &client,
+        &*client,
         &raw,
         thread_id,
         // A cold send has no target row to resolve.
@@ -6228,6 +6279,7 @@ fn frozen_addrs(body: &SendBody, mode: GroupMode) -> Vec<String> {
 /// recipients ARE the progress bar, so nothing else has to be plumbed.
 async fn fan_out_send(
     state: &ApiState,
+    client: Arc<dyn MailWriter>,
     body: &SendBody,
     audience: &group_send::GroupAudience,
     attachments: Vec<MailAttachment>,
@@ -6266,7 +6318,7 @@ async fn fan_out_send(
     plan.attachments = attachments;
     let recipients = plan.audience.addrs.len();
 
-    let group_send_id = match group_send::start(state, plan).await {
+    let group_send_id = match group_send::start(state, client, plan).await {
         Ok(id) => id,
         Err(e) => {
             if let Some((token, _)) = &tracker {
@@ -6320,7 +6372,7 @@ fn forward_raw_too_large(len: usize) -> bool {
 /// scheduled send is being fired (see [`fired`]).
 pub(crate) async fn read_forward_original(
     state: &ApiState,
-    client: &GmailWriteClient,
+    client: &dyn MailWriter,
     action: &'static str,
     target: Option<String>,
     original_id: i64,
@@ -6471,7 +6523,7 @@ pub(crate) fn forward_original_kinds(original: &ForwardedOriginal) -> Vec<&'stat
 async fn forward_send(
     state: &ApiState,
     body: &SendBody,
-    client: &GmailWriteClient,
+    client: &dyn MailWriter,
     target: Option<String>,
     original_id: i64,
     owed: SendGuard,
@@ -6624,7 +6676,7 @@ pub async fn reply_recipients(
     Query(q): Query<ReplyRecipientsQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let msg = resolve_target(&state, message_id).await?;
-    let client = write_client(&state)?;
+    let client = write_client(&state).await?;
     let own = store_call(&state, |store, account_id| store.account_email(account_id)).await?;
     let headers = client
         .parent_headers(&msg.gmail_msg_id)
@@ -6965,9 +7017,13 @@ pub async fn run_shred_pass(state: &ApiState) -> Result<u32, ApiError> {
     if !enabled {
         return Ok(0);
     }
-    let Ok(client) = write_client(state) else {
+    let client = match write_client(state).await {
+        Ok(client) => client,
         // No write credential: nothing to do, and nothing to complain about.
-        return Ok(0);
+        Err(e) if e.status == StatusCode::FORBIDDEN => return Ok(0),
+        // Anything else is a failure the timer should see, like every other
+        // store error in this pass.
+        Err(e) => return Err(e),
     };
 
     let cutoff = Utc::now() - chrono::Duration::days(after_days);
@@ -7435,5 +7491,199 @@ mod send_split_tests {
             (f.reason, f.paced, f.maybe_sent),
             ("failed:gmail", false, true)
         );
+    }
+}
+
+/// Which writer [`write_client`] hands out: the account's provider's, and
+/// never Gmail's by default.
+#[cfg(test)]
+mod write_client_tests {
+    use super::*;
+    use squelch_core::credentials::{CredentialStore, OAuthToken};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    struct StubCreds;
+    #[async_trait::async_trait]
+    impl CredentialStore for StubCreds {
+        async fn token(&self, _account: AccountId) -> squelch_core::Result<OAuthToken> {
+            Ok(OAuthToken {
+                access_token: "WRITE-TOKEN".into(),
+                refresh_token: None,
+                expires_at: None,
+            })
+        }
+    }
+
+    /// A file-backed store with one account, so a second connection can set
+    /// its `accounts.provider` the way a newer build's setup would have.
+    struct Fixture {
+        dir: std::path::PathBuf,
+        store: Arc<SqliteStore>,
+        acct: AccountId,
+    }
+
+    impl Fixture {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "squelch-write-client-{}-{name}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let store = Arc::new(SqliteStore::open(dir.join("store.sqlite3")).unwrap());
+            let acct = store.ensure_account("me@example.com").unwrap();
+            Self { dir, store, acct }
+        }
+
+        fn set_provider(&self, provider: &str) {
+            rusqlite::Connection::open(self.dir.join("store.sqlite3"))
+                .unwrap()
+                .execute(
+                    "UPDATE accounts SET provider = ?1 WHERE id = ?2",
+                    rusqlite::params![provider, self.acct],
+                )
+                .unwrap();
+        }
+
+        fn state(&self) -> ApiState {
+            ApiState::new(self.store.clone(), self.acct, "probe-token")
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// A mock API that answers the first request with `{}` and returns it,
+    /// or `None` when nothing connected within half a second.
+    async fn mock_api() -> (String, tokio::task::JoinHandle<Option<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let accepted =
+                tokio::time::timeout(Duration::from_millis(500), listener.accept()).await;
+            let Ok(Ok((mut sock, _))) = accepted else {
+                return None;
+            };
+            let mut buf = vec![0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                  Content-Length: 2\r\nConnection: close\r\n\r\n{}",
+            )
+            .await
+            .unwrap();
+            sock.flush().await.unwrap();
+            Some(req)
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    #[tokio::test]
+    async fn a_gmail_account_gets_the_gmail_writer() {
+        let fx = Fixture::new("gmail");
+        let (base, handle) = mock_api().await;
+        let state = fx
+            .state()
+            .with_write_test_harness(Arc::new(StubCreds), base);
+        let writer = write_client(&state)
+            .await
+            .expect("a Gmail account has a writer");
+        writer.archive("gm-1").await.unwrap();
+        let req = handle.await.unwrap().expect("the archive reached the API");
+        // Gmail's archive, exactly: a label modify removing INBOX.
+        assert!(req.starts_with("POST /messages/gm-1/modify "), "{req}");
+        assert!(req.contains("\"removeLabelIds\":[\"INBOX\"]"), "{req}");
+    }
+
+    /// THE PROVIDER IS READ ONCE PER DOOR. After the first writer, a later
+    /// action neither pays a store call for it nor can fail on one: a store
+    /// hiccup must not fail a write the credential would have allowed.
+    #[tokio::test]
+    async fn the_provider_is_read_once_and_kept() {
+        let fx = Fixture::new("cached");
+        let state = fx
+            .state()
+            .with_write_test_harness(Arc::new(StubCreds), "http://127.0.0.1:9".into());
+        assert!(write_client(&state).await.is_ok());
+        // What a second read would now see: a provider this build refuses.
+        fx.set_provider("imap");
+        assert!(
+            write_client(&state.clone()).await.is_ok(),
+            "the cached read stands, on every clone of the state"
+        );
+    }
+
+    /// A refusal is audited as what refused, so a store failure is never
+    /// recorded as "re-authorize".
+    #[test]
+    fn a_refusal_is_audited_as_what_refused() {
+        let at = |status| ApiError::new(status, "x");
+        assert_eq!(
+            write_refusal(&at(StatusCode::FORBIDDEN)),
+            "rejected:no_write_credential"
+        );
+        assert_eq!(
+            write_refusal(&at(StatusCode::NOT_IMPLEMENTED)),
+            "rejected:unsupported_provider"
+        );
+        assert_eq!(
+            write_refusal(&at(StatusCode::INTERNAL_SERVER_ERROR)),
+            "failed:store"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_explicit_gmail_row_is_the_same_gmail_writer() {
+        let fx = Fixture::new("explicit-gmail");
+        fx.set_provider("gmail");
+        let (base, handle) = mock_api().await;
+        let state = fx
+            .state()
+            .with_write_test_harness(Arc::new(StubCreds), base);
+        write_client(&state)
+            .await
+            .unwrap()
+            .trash("gm-2")
+            .await
+            .unwrap();
+        let req = handle.await.unwrap().expect("the trash reached the API");
+        assert!(req.starts_with("POST /messages/gm-2/trash "), "{req}");
+    }
+
+    /// A database a newer build wrote (an `imap` account) must not have its
+    /// mail written to as Gmail by this one: refused, and nothing is sent.
+    #[tokio::test]
+    async fn a_provider_this_build_does_not_know_is_refused_not_treated_as_gmail() {
+        let fx = Fixture::new("unknown");
+        fx.set_provider("imap");
+        let (base, handle) = mock_api().await;
+        let state = fx
+            .state()
+            .with_write_test_harness(Arc::new(StubCreds), base);
+        let err = match write_client(&state).await {
+            Ok(_) => panic!("an unknown provider must not get a writer"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(handle.await.unwrap(), None, "nothing reached the API");
+    }
+
+    /// The credential is checked first, so a door without one answers with
+    /// the same 403 it always has, whatever the account's provider.
+    #[tokio::test]
+    async fn no_write_credential_is_still_the_403_whatever_the_provider() {
+        let fx = Fixture::new("no-creds");
+        fx.set_provider("imap");
+        let err = match write_client(&fx.state()).await {
+            Ok(_) => panic!("no credential, no writer"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert!(err.message.contains("squelchd auth`"));
     }
 }

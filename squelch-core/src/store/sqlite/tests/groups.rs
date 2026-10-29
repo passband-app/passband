@@ -576,3 +576,65 @@ fn last_sent_at_reports_the_most_recent_recorded_send() {
     let group = store.get_send_group(acct, id).unwrap().unwrap();
     assert_eq!(group.last_sent_at, Some(t(40)));
 }
+
+/// Both group listings count a person's open and leave a probable scanner out,
+/// derived history and recorded sends alike.
+#[test]
+fn group_history_counts_opens_but_not_probable_scanners() {
+    let (store, acct) = store();
+    let derived = triaged(acct, "g1", "t1")
+        .is_sent(true)
+        .subject("Update #1")
+        .received_at(t(0))
+        .to_addrs("ann@fund.com, bo@fund.com")
+        .ingest(&store);
+    let recorded = triaged(acct, "g2", "t2")
+        .is_sent(true)
+        .subject("Update #2")
+        .received_at(t(10))
+        .to_addrs("ann@fund.com, bo@fund.com, cy@fund.com")
+        .ingest(&store);
+    let id = investors(&store, acct);
+    store
+        .record_group_send(
+            acct,
+            id,
+            "Update #2",
+            GroupMode::To,
+            t(10),
+            &[GroupSendRecipient {
+                addr: "ann@fund.com".into(),
+                message_id: Some(recorded),
+                status: GroupSendStatus::Sent,
+                error: None,
+            }],
+        )
+        .unwrap();
+    for (token, message) in [("tok-derived", derived), ("tok-recorded", recorded)] {
+        store
+            .insert_send_tracker(acct, token, Some(message), 1_000)
+            .unwrap();
+        assert!(
+            store
+                .record_open(acct, token, 1_100, Some("Apple Mail/16.0"), "unknown")
+                .unwrap()
+        );
+        assert!(
+            store
+                .record_open(acct, token, 1_050, Some("curl/8.4.0"), "scanner")
+                .unwrap()
+        );
+    }
+
+    let history = store.group_history(acct, id, 50, 0).unwrap();
+    assert_eq!(history.len(), 2);
+    for entry in &history {
+        assert_eq!(
+            entry.opens, 1,
+            "{}: the scanner is not an open",
+            entry.subject
+        );
+    }
+    assert!(history.iter().any(|h| h.group_send_id.is_some()));
+    assert!(history.iter().any(|h| h.group_send_id.is_none()));
+}

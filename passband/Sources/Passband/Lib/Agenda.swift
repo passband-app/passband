@@ -426,23 +426,29 @@ enum Agenda {
         return a.id < b.id
     }
 
-    /// Today and the days after it, in the user's zone.
+    /// Today and the days after it, in the user's zone. `from` starts the
+    /// list on another day instead (the phone's selected day, which can be
+    /// last week or next month); nil is today.
     ///
     /// A row lands on the day it STARTS. The exception is one still running
-    /// when today began (last night's party, a trip that started Sunday): it
-    /// is listed under today, because today is when it is in the way.
-    /// Anything that ended before today began is gone. Today is always returned, empty
-    /// or not; any other day only when it has something on it.
-    static func days(_ items: [AgendaItem], now: Date, calendar: Calendar) -> [AgendaDay] {
+    /// when the first day began (last night's party, a trip that started
+    /// Sunday): it is listed under that day, because that is when it is in
+    /// the way. Anything that ended before the first day began is gone. The
+    /// first day is always returned, empty or not; any other day only when it
+    /// has something on it. Only TODAY folds what has finished into "earlier".
+    static func days(
+        _ items: [AgendaItem], now: Date, calendar: Calendar, from anchor: Date? = nil
+    ) -> [AgendaDay] {
         let today = calendar.startOfDay(for: now)
-        var byDay: [Date: [AgendaItem]] = [today: []]
+        let first = anchor.map { calendar.startOfDay(for: $0) } ?? today
+        var byDay: [Date: [AgendaItem]] = [first: []]
         for item in items {
             let day = calendar.startOfDay(for: item.start)
-            if day < today {
-                // Ran into today at all: listed there, and the earlier fold
-                // below takes it if it has finished since.
-                guard item.effectiveEnd > today else { continue }
-                byDay[today, default: []].append(item)
+            if day < first {
+                // Ran into the first day at all: listed there, and the
+                // earlier fold below takes it if it has finished since.
+                guard item.effectiveEnd > first else { continue }
+                byDay[first, default: []].append(item)
             } else {
                 byDay[day, default: []].append(item)
             }
@@ -462,7 +468,23 @@ enum Agenda {
                 }
             }
             let built = AgendaDay(day: day, visible: visible, unlikely: unlikely, earlier: earlier)
-            return day == today || !(visible.isEmpty && unlikely.isEmpty) ? built : nil
+            return day == first || day == today || !(visible.isEmpty && unlikely.isEmpty) ? built : nil
+        }
+    }
+
+    /// `count` days from `first`, EVERY one of them, the empty ones too: the
+    /// phone's week, which lists a quiet Tuesday rather than skipping it.
+    /// Built by `days(from:)`, so a row lands, folds and orders exactly as it
+    /// does in the agenda; past the last day nothing is returned.
+    static func run(
+        _ items: [AgendaItem], now: Date, calendar: Calendar, from first: Date, count: Int
+    ) -> [AgendaDay] {
+        let start = calendar.startOfDay(for: first)
+        var byDay: [Date: AgendaDay] = [:]
+        for day in days(items, now: now, calendar: calendar, from: start) { byDay[day.day] = day }
+        return (0..<max(0, count)).compactMap { offset in
+            guard let day = calendar.date(byAdding: .day, value: offset, to: start) else { return nil }
+            return byDay[day] ?? AgendaDay(day: day, visible: [], unlikely: [], earlier: [])
         }
     }
 

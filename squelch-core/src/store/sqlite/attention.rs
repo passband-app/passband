@@ -91,10 +91,29 @@ pub(super) const AGENT_DONE_THREAD_SQL: &str = concat!(done_thread_sql!(), " AND
 /// thread — fires into a row that no band, no count and no page will ever show.
 ///
 /// Like [`STANDING_BAND`] it lives in ONE place because the list query and the
-/// header's count must agree row for row.
-const WITHIN_WINDOW: &str = "(m.received_at >= ?2
+/// header's count must agree row for row. [`WINDOW_ROWS`] is the same three
+/// arms as a set to drive a count from: AN ARM ADDED HERE NEEDS ITS BRANCH
+/// THERE, or the rows only it admits never reach it.
+pub(super) const WITHIN_WINDOW: &str = "(m.received_at >= ?2
             OR t.remind_at IS NOT NULL
             OR t.reminded_at IS NOT NULL)";
+
+/// The message ids [`WITHIN_WINDOW`] can admit for account `?1`, ONE BRANCH
+/// PER ARM, each from its own index: mail received since `?2`
+/// (`idx_messages_received`, covering), and rows with a reminder set or fired
+/// (the two partial reminder indexes, which `migrate` creates on every open
+/// with the columns they cover). A superset is all a driver needs, because
+/// the predicate itself is still applied, so `UNION ALL`: an id two arms
+/// admit twice counts once under the counts' own DISTINCT.
+/// `band_counts_match_the_unwindowed_scan` covers every arm.
+pub(super) const WINDOW_ROWS: &str = "SELECT id FROM messages INDEXED BY idx_messages_received
+              WHERE account_id = ?1 AND received_at >= ?2
+             UNION ALL
+             SELECT message_id FROM triage INDEXED BY idx_triage_remind_at
+              WHERE account_id = ?1 AND remind_at IS NOT NULL
+             UNION ALL
+             SELECT message_id FROM triage INDEXED BY idx_triage_reminded_at
+              WHERE account_id = ?1 AND reminded_at IS NOT NULL";
 
 /// The archive tier's exclusion from the human inventory, with the same
 /// exemption [`WITHIN_WINDOW`] gives: a reminder the user set on an archive
@@ -177,6 +196,138 @@ pub(super) const STANDING_BAND: &str = "(t.tier IN ('past_due','deadline')
                   AND c.addr = lower(trim(m.from_addr)) COLLATE NOCASE
                   AND c.sent_count > 0)))
        AND t.status != 'done'";
+
+/// Sitrep band counts over non-sealed rows, one per THREAD, hence DISTINCT
+/// thread keys (blank thread_id falls back to the message id), over the
+/// received_at window, hence `?2` AND the [`WITHIN_WINDOW`] reminder
+/// exemption: a fired reminder still counts however old the mail is.
+/// Standing is decided in the subquery, where the `m` join alias the shared
+/// expression is written against is still in scope.
+///
+/// DRIVEN FROM THE WINDOW: `w` is [`WINDOW_ROWS`], the rows
+/// [`WITHIN_WINDOW`] can admit, so the count reads a month of mail rather
+/// than every message in the store. Each is then one rowid probe of `triage`
+/// and `messages`, and the predicates the list shares with it apply
+/// unchanged, [`WITHIN_WINDOW`] included, so the narrowing cannot change a
+/// count (`band_counts_match_the_unwindowed_scan`).
+pub(super) static BANDS_SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "SELECT
+             COUNT(DISTINCT CASE WHEN t.standing = 1 THEN tkey END),
+             COUNT(DISTINCT CASE WHEN t.surfaced_at IS NULL
+                 AND t.status != 'done' THEN tkey END),
+             COUNT(DISTINCT CASE WHEN t.status = 'open' THEN tkey END)
+         FROM (SELECT t.*, COALESCE(NULLIF(m.thread_id, ''), 'msg-' || m.id) AS tkey,
+                      ({STANDING_BAND}) AS standing
+               FROM ({WINDOW_ROWS}) w
+               CROSS JOIN triage t ON t.message_id = w.id
+               CROSS JOIN messages m ON m.id = t.message_id
+               WHERE t.account_id = ?1
+                 AND m.is_sent = 0
+                 AND m.is_spam = 0
+                 AND {LIVE_OR_REMINDER}
+                 AND {WITHIN_WINDOW}) t"
+    )
+});
+
+/// The all-time half of [`StoreStats`]: everything but the windowed bands.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct InventoryCounts {
+    pub(super) tier_counts: std::collections::BTreeMap<String, i64>,
+    pub(super) sealed: i64,
+    pub(super) spam: i64,
+    pub(super) spam_synced_at: Option<DateTime<Utc>>,
+    pub(super) last_history_id: Option<i64>,
+    pub(super) last_surfaced_at: Option<DateTime<Utc>>,
+}
+
+/// [`InventoryCounts`] as last read, for one account, at one [`WriteToken`].
+#[derive(Debug)]
+pub(super) struct InventoryMemo {
+    pub(super) account: AccountId,
+    pub(super) token: WriteToken,
+    pub(super) counts: InventoryCounts,
+}
+
+/// Read [`InventoryCounts`] from the store.
+fn inventory_counts(conn: &Connection, account_id: AccountId) -> Result<InventoryCounts> {
+    let mut tier_counts = std::collections::BTreeMap::new();
+    {
+        // JOINED TO `messages` for the two exclusions, which this count did
+        // without for a long time and should not have. Sent mail and
+        // provider spam are both written tier=noise by ingest without a
+        // model ever looking at them, and neither is listed by the noise
+        // page, so counting them made the header's noise number a promise
+        // the page could not keep.
+        let mut stmt = conn.prepare(&format!(
+            "{CANONICAL_MAIL_CTE} SELECT display_tier, COUNT(*) FROM classified
+             WHERE account_id=?1 AND is_sent=0 AND is_spam=0 GROUP BY display_tier"
+        ))?;
+        let rows = stmt.query_map(params![account_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (tier, n) = row?;
+            tier_counts.insert(tier, n);
+        }
+    }
+
+    let sealed: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM agent_message_state a
+         JOIN agent_message_decisions d ON d.account_id=a.account_id AND d.message_id=a.message_id AND d.revision=a.revision
+         WHERE a.account_id=?1 AND a.access='restricted'
+           AND EXISTS(SELECT 1 FROM json_each(d.decision_json,'$.auth.kinds')
+             WHERE value IN ('otp','password_reset','sign_in_link','verification'))",
+        params![account_id],
+        |r| r.get(0),
+    )?;
+
+    // WHEN THE SPAM FOLDER WAS LAST FETCHED, which the page needs in order to
+    // tell "we looked and it is empty" from "nobody has looked yet".
+    let spam_synced_at: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE account_id = ?1 AND key = ?2",
+            params![account_id, SPAM_SYNCED_AT_KEY],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let spam_synced_at = spam_synced_at.as_deref().and_then(|s| parse_dt(s).ok());
+
+    // THE SPAM PAGE'S DOOR NUMBER. Counted the same way the human page lists,
+    // served by `idx_messages_spam` — so the chip and the
+    // page it opens cannot disagree.
+    let spam: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM messages m
+         JOIN triage t ON t.message_id = m.id
+         WHERE m.account_id=?1 AND m.is_spam = 1",
+        params![account_id],
+        |r| r.get(0),
+    )?;
+
+    let last_history_id: Option<i64> = conn
+        .query_row(
+            "SELECT last_uid FROM sync_state WHERE account_id=?1 AND mailbox='history'",
+            params![account_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+
+    let last_surfaced_at = conn.query_row(
+        "SELECT MAX(surfaced_at) FROM triage
+         WHERE account_id = ?1",
+        params![account_id],
+        |r| dt_opt(r, 0),
+    )?;
+
+    Ok(InventoryCounts {
+        tier_counts,
+        sealed,
+        spam,
+        spam_synced_at,
+        last_history_id,
+        last_surfaced_at,
+    })
+}
 
 impl SqliteStore {
     pub(super) fn mark_surfaced(
@@ -561,109 +712,57 @@ impl SqliteStore {
     /// grows monotonically with corpus age and outruns the list it heads. The
     /// inventory counts (tiers, total, sealed) stay all-time on purpose —
     /// they describe the store, not the sitrep.
+    ///
+    /// THE INVENTORY IS REUSED UNTIL SOMETHING IS WRITTEN. It is the expensive
+    /// half (the tier count reads every message in the store) and depends on
+    /// nothing but stored rows, so it is kept with the [`WriteToken`] it was
+    /// read at and served again while the token is unchanged: the client's
+    /// poll and the metrics scrape on a mailbox with nothing new. The bands
+    /// are recomputed every call, because their window moves with the clock.
     pub(super) fn stats(
         &self,
         account_id: AccountId,
         bands_since: DateTime<Utc>,
     ) -> Result<StoreStats> {
         let conn = self.lock()?;
-
-        let mut tier_counts = std::collections::BTreeMap::new();
-        {
-            // JOINED TO `messages` for the two exclusions, which this count did
-            // without for a long time and should not have. Sent mail and
-            // provider spam are both written tier=noise by ingest without a
-            // model ever looking at them, and neither is listed by the noise
-            // page, so counting them made the header's noise number a promise
-            // the page could not keep.
-            let mut stmt = conn.prepare(&format!(
-                "{CANONICAL_MAIL_CTE} SELECT display_tier, COUNT(*) FROM classified
-                 WHERE account_id=?1 AND is_sent=0 AND is_spam=0 GROUP BY display_tier"
-            ))?;
-            let rows = stmt.query_map(params![account_id], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-            })?;
-            for row in rows {
-                let (tier, n) = row?;
-                tier_counts.insert(tier, n);
+        let token = WriteToken::of(&conn)?;
+        let inventory = {
+            // A cache: a poisoned lock only means a panic mid-store, and the
+            // token decides what in it is still good.
+            let mut memo = self
+                .inventory_memo
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match memo.as_ref() {
+                Some(kept) if kept.account == account_id && kept.token == token => {
+                    kept.counts.clone()
+                }
+                _ => {
+                    let counts = inventory_counts(&conn, account_id)?;
+                    *memo = Some(InventoryMemo {
+                        account: account_id,
+                        token,
+                        counts: counts.clone(),
+                    });
+                    counts
+                }
             }
-        }
+        };
+        let InventoryCounts {
+            tier_counts,
+            sealed,
+            spam,
+            spam_synced_at,
+            last_history_id,
+            last_surfaced_at,
+        } = inventory;
         let total: i64 = tier_counts.values().sum();
 
-        let sealed: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM agent_message_state a
-             JOIN agent_message_decisions d ON d.account_id=a.account_id AND d.message_id=a.message_id AND d.revision=a.revision
-             WHERE a.account_id=?1 AND a.access='restricted'
-               AND EXISTS(SELECT 1 FROM json_each(d.decision_json,'$.auth.kinds')
-                 WHERE value IN ('otp','password_reset','sign_in_link','verification'))",
-            params![account_id],
-            |r| r.get(0),
-        )?;
-
-        // WHEN THE SPAM FOLDER WAS LAST FETCHED, which the page needs in order to
-        // tell "we looked and it is empty" from "nobody has looked yet".
-        let spam_synced_at: Option<String> = conn
-            .query_row(
-                "SELECT value FROM app_settings WHERE account_id = ?1 AND key = ?2",
-                params![account_id, SPAM_SYNCED_AT_KEY],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let spam_synced_at = spam_synced_at.as_deref().and_then(|s| parse_dt(s).ok());
-
-        // THE SPAM PAGE'S DOOR NUMBER. Counted the same way the human page lists,
-        // served by `idx_messages_spam` — so the chip and the
-        // page it opens cannot disagree.
-        let spam: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM messages m
-             JOIN triage t ON t.message_id = m.id
-             WHERE m.account_id=?1 AND m.is_spam = 1",
-            params![account_id],
-            |r| r.get(0),
-        )?;
-
-        let last_history_id: Option<i64> = conn
-            .query_row(
-                "SELECT last_uid FROM sync_state WHERE account_id=?1 AND mailbox='history'",
-                params![account_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-
-        // Sitrep band counts over non-sealed rows, one per THREAD, hence
-        // DISTINCT thread keys (blank thread_id falls back to the message id),
-        // over the received_at window, hence `bands_since` AND the WITHIN_WINDOW
-        // reminder exemption: a fired reminder still counts however old the
-        // mail is.
-        // Standing is decided in the subquery, where the `m` join alias the
-        // shared expression is written against is still in scope.
-        let (standing, new_count, open_count): (i64, i64, i64) = conn.query_row(
-            &format!(
-                "SELECT
-                     COUNT(DISTINCT CASE WHEN t.standing = 1 THEN tkey END),
-                     COUNT(DISTINCT CASE WHEN t.surfaced_at IS NULL
-                         AND t.status != 'done' THEN tkey END),
-                     COUNT(DISTINCT CASE WHEN t.status = 'open' THEN tkey END)
-                 FROM (SELECT t.*, COALESCE(NULLIF(m.thread_id, ''), 'msg-' || m.id) AS tkey,
-                              ({STANDING_BAND}) AS standing
-                       FROM triage t
-                       JOIN messages m ON m.id = t.message_id
-                       WHERE t.account_id = ?1
-                         AND m.is_sent = 0
-                         AND m.is_spam = 0
-                         AND {LIVE_OR_REMINDER}
-                         AND {WITHIN_WINDOW}) t"
-            ),
-            params![account_id, bands_since.to_rfc3339()],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
-
-        let last_surfaced_at = conn.query_row(
-            "SELECT MAX(surfaced_at) FROM triage
-             WHERE account_id = ?1",
-            params![account_id],
-            |r| dt_opt(r, 0),
-        )?;
+        let (standing, new_count, open_count): (i64, i64, i64) =
+            conn.prepare_cached(&BANDS_SQL)?
+                .query_row(params![account_id, bands_since.to_rfc3339()], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })?;
 
         Ok(StoreStats {
             tier_counts,

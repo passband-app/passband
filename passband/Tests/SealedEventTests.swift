@@ -51,6 +51,9 @@ struct SealedEventTests {
         authBannersOfOneMailboxShareAGroup()
         genericPushStillIdentifiesItsAccountAndEvent()
         anAuthTapNeverRoutesToTheReader()
+        aDraftPushParsesOnlyItsOwnShape()
+        aDraftTapOpensTheDraftAndNothingElse()
+        aDraftBannerSaysWhoAndWhat()
         var taps = NotificationTapQueue<Int>()
         let account = UUID()
         taps.enqueue(91, accountId: account)
@@ -483,5 +486,82 @@ struct SealedEventTests {
         expect(
             K.tapRoute(["event_id": "\(account.uuidString):9"])
                 == .event(.init(accountId: account, eventId: 9)), "an unresolved push resolves its event")
+    }
+
+    static func aDraftPushParsesOnlyItsOwnShape() {
+        typealias K = EventBanner
+        let account = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let a = account.uuidString
+        let good = K.draftPush("\(a):draft:12:1761600000")
+        expect(good == K.DraftPush(accountId: account, draftId: 12, created: 1_761_600_000), "the pusher's shape parses")
+        expect(K.draftPush("\(a.lowercased()):draft:12:1761600000")?.accountId == account, "a lowercased tag is the same account")
+        for bad in [
+            "\(a):draft:12", "\(a):draft:12:1761600000:9", "\(a):drafts:12:1761600000",
+            "\(a):Draft:12:1761600000", "\(a):draft:012:1761600000", "\(a):draft:12:01761600000",
+            "\(a):draft:+12:1761600000", "\(a):draft:-12:1761600000", "\(a):draft:0:1761600000",
+            "\(a):draft:12:0", "\(a):draft::1761600000", "\(a):draft:1 2:1761600000",
+            "\(a):draft:１２:1761600000", "not-a-uuid:draft:12:1761600000", "draft:12:1761600000",
+            "\(a):draft:1234567890123:1761600000", "\(a):42", "",
+        ] {
+            expect(K.draftPush(bad) == nil, "rejects \(bad)")
+        }
+        expect(K.draftPush(nil) == nil, "nil is nothing")
+        // An event push is not a draft push, and a draft push is not an event.
+        expect(K.draftPush("\(a):42") == nil, "an event id is not a draft")
+        expect(K.unresolvedPush("\(a):draft:12:1761600000") == nil, "a draft id never resolves as an event")
+        expect(K.unresolvedPush("\(a):draft:12") == nil, "nor does a shorter one")
+    }
+
+    static func aDraftTapOpensTheDraftAndNothingElse() {
+        typealias K = EventBanner
+        let account = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        // The raw push, unenriched: the relay's generic banner, tapped.
+        let raw: [AnyHashable: Any] = ["event_id": "\(account.uuidString):draft:7:1761600000"]
+        expect(K.tapRoute(raw) == .agentDraft(accountId: account, draftId: 7, created: 1_761_600_000), "raw push opens the draft")
+        // The extension's banner.
+        let enriched: [AnyHashable: Any] = [
+            K.routeKey: K.agentDraftRoute, K.accountKey: account.uuidString, K.draftKey: 7,
+            K.draftCreatedKey: 1_761_600_000,
+        ]
+        expect(K.tapRoute(enriched) == .agentDraft(accountId: account, draftId: 7, created: 1_761_600_000), "enriched banner opens the draft")
+        let strings: [AnyHashable: Any] = [
+            K.routeKey: K.agentDraftRoute, K.draftKey: "7", K.draftCreatedKey: "1761600000",
+        ]
+        expect(K.tapRoute(strings) == .agentDraft(accountId: nil, draftId: 7, created: 1_761_600_000), "string ids, no account")
+        // A draft route missing its binding opens no draft.
+        let unbound: [AnyHashable: Any] = [K.routeKey: K.agentDraftRoute, K.draftKey: 7]
+        if case .agentDraft = K.tapRoute(unbound) { expect(false, "no creation second, no draft") }
+        // Neither shape is an event, so neither is deduped as one.
+        expect(K.eventIdentity(raw) == nil, "a raw draft push is about no event")
+        expect(K.eventIdentity(enriched) == nil, "an enriched draft banner is about no event")
+    }
+
+    static func aDraftBannerSaysWhoAndWhat() {
+        typealias K = EventBanner
+        let newMail = K.agentDraftCopy(
+            to: "Maya Okafor <maya.okafor@example.com>, b@example.com", subject: "Vendor contract",
+            isReply: false, parentFrom: nil)
+        expect(newMail.title == "Your agent left a draft", "title")
+        expect(newMail.body == "To Maya Okafor: Vendor contract", "new mail names its first recipient: \(newMail.body)")
+        let reply = K.agentDraftCopy(
+            to: "", subject: "Re: Vendor contract", isReply: true, parentFrom: "Maya Okafor <maya@example.com>")
+        expect(reply.body == "Reply to Maya Okafor: Re: Vendor contract", "reply falls back to the parent: \(reply.body)")
+        // The agent's display name never reaches the lock screen, nor does a
+        // raw address, nor a reordering control, nor an unbounded subject.
+        let spoof = K.agentDraftCopy(
+            to: "\"Passband Security\" <x@evil.example>", subject: "Locked\u{202E}321 llac" + String(repeating: "x", count: 500),
+            isReply: false, parentFrom: nil)
+        expect(!spoof.body.contains("Passband Security"), "agent display name shown: \(spoof.body)")
+        expect(!spoof.body.contains("@"), "raw address shown: \(spoof.body)")
+        expect(!spoof.body.unicodeScalars.contains { $0.value == 0x202E }, "bidi override survived")
+        expect(spoof.body.count < 220, "subject not capped: \(spoof.body.count)")
+        let bare = K.agentDraftCopy(to: "", subject: "  ", isReply: false, parentFrom: nil)
+        expect(!bare.body.isEmpty, "never an empty body")
+        for copy in [newMail, reply, bare] {
+            expect(!copy.title.contains("\u{2014}") && !copy.body.contains("\u{2014}"), "no em dashes")
+        }
+        expect(K.draftSecond("2026-10-28T01:20:00Z") == 1_793_150_400, "plain stamp")
+        expect(K.draftSecond("2026-10-28T01:20:00.987Z") == 1_793_150_400, "fraction floors")
+        expect(K.draftSecond("yesterday") == nil, "unreadable stamp")
     }
 }

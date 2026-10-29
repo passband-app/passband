@@ -22,7 +22,7 @@ use tokio::sync::watch;
 
 use crate::config::Config;
 use crate::error::{CoreError, Result};
-use crate::store::{NewEvent, OPEN_PROXIED, OPEN_UNKNOWN, Store, SyncState};
+use crate::store::{NewEvent, OPEN_PROXIED, OPEN_SCANNER, OPEN_UNKNOWN, Store, SyncState};
 use crate::types::{AccountId, EventKind, Tier};
 
 /// Whether a `[tracking] base_url` is one a pixel may be minted against:
@@ -104,12 +104,63 @@ pub fn mint_token() -> Result<String> {
 /// What a fetch's `User-Agent` implies about the open. Gmail proxies every
 /// remote image through `GoogleImageProxy`, and that fetch can be a cache warm
 /// rather than a human reading, so it is labelled rather than counted as a read.
-/// Everything else — including no User-Agent at all — is `unknown`.
+/// An agent that marks itself as a machine ([`is_probable_scanner`]) is
+/// `scanner`: shown as a "probable scanner", never counted, never notified.
+/// Everything else, including no User-Agent at all, is `unknown`.
 pub fn classify_user_agent(user_agent: Option<&str>) -> &'static str {
     match user_agent {
         Some(ua) if ua.contains("GoogleImageProxy") => OPEN_PROXIED,
+        Some(ua) if is_probable_scanner(ua) => OPEN_SCANNER,
         _ => OPEN_UNKNOWN,
     }
+}
+
+/// Substrings (lowercase) that only automated fetchers put in a User-Agent:
+/// server-side HTTP libraries, headless browsers, and self-declared bots in the
+/// shapes they actually use (`Googlebot/2.1`, `(compatible; FooBot; +http…)`).
+///
+/// DELIBERATELY ABSENT: library defaults a phone app can send with a person
+/// behind it. `okhttp/` (Android image loaders such as Coil, and Glide on
+/// OkHttp), `Dalvik/`, `Java/` and `Apache-HttpClient/` (old Android
+/// networking) would each hide a real open in a native mail app. A bare `bot`
+/// is also out: it matches device and app names (CUBOT phones).
+const SCANNER_MARKERS: &[&str] = &[
+    "bot/",
+    "bot;",
+    "bot)",
+    "bot.html",
+    "+http",
+    "crawler",
+    "spider",
+    "headlesschrome",
+    "phantomjs",
+    "python-requests",
+    "python-urllib",
+    "aiohttp",
+    "curl/",
+    "wget/",
+    "go-http-client",
+    "libwww-perl",
+    "node-fetch",
+    "axios/",
+    "scrapy",
+];
+
+/// Whether a pixel fetch's agent says it is a machine rather than someone's
+/// mail client. CONSERVATIVE on purpose: a real open hidden as a scanner is a
+/// worse mistake than a scanner counted as an open, so this matches only what
+/// no person's mail client sends, and an absent or bare agent stays `unknown`.
+///
+/// - [`SCANNER_MARKERS`].
+/// - EdgeHTML 12 (`Edge/12.`), the 2015 Windows 10 launch browser. Nobody
+///   reads mail in it; the string lives on as a security scanner's disguise
+///   (seen on 2026-10-27 fetching a pixel the minute the mail was delivered).
+///
+/// Changing this list is safe in both directions: the store relabels every
+/// stored `unknown` and `scanner` row with it on open.
+pub fn is_probable_scanner(user_agent: &str) -> bool {
+    let ua = user_agent.to_ascii_lowercase();
+    SCANNER_MARKERS.iter().any(|m| ua.contains(m)) || ua.contains("edge/12.")
 }
 
 /// One open as the relay reports it. `id` is the relay's own row id and the
@@ -360,17 +411,23 @@ impl OpensPoller {
                 if open.id <= cursor {
                     continue;
                 }
+                let classification = classify_user_agent(open.user_agent.as_deref());
                 let recorded = self.store.record_open(
                     self.account_id,
                     &open.token,
                     open.opened_at,
                     open.user_agent.as_deref(),
-                    classify_user_agent(open.user_agent.as_deref()),
+                    classification,
                 )?;
                 // Durable first, cursor second — and per row, so a failure
                 // mid-page leaves the rest to be re-collected.
                 self.set_cursor(open.id)?;
-                if recorded && !newly_opened.iter().any(|t| t == &open.token) {
+                // A probable scanner is recorded but wakes nobody, so the one
+                // nudge per message waits for an open that may be a person.
+                if recorded
+                    && classification != OPEN_SCANNER
+                    && !newly_opened.iter().any(|t| t == &open.token)
+                {
                     newly_opened.push(open.token.clone());
                 }
             }
@@ -449,6 +506,46 @@ mod tests {
         assert_eq!(classify_user_agent(Some("Apple Mail/16.0")), OPEN_UNKNOWN);
         assert_eq!(classify_user_agent(Some("")), OPEN_UNKNOWN);
         assert_eq!(classify_user_agent(None), OPEN_UNKNOWN);
+    }
+
+    #[test]
+    fn machines_are_probable_scanners_and_mail_clients_are_not() {
+        for ua in [
+            // The one that started it: delivered and fetched in the same minute.
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.246 Mozilla/5.0",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+            "Mozilla/5.0 (compatible; AhrefsBot/7.0; +http://ahrefs.com/robot/)",
+            "Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)",
+            "python-requests/2.31.0",
+            "curl/8.4.0",
+            "Go-http-client/1.1",
+        ] {
+            assert_eq!(classify_user_agent(Some(ua)), OPEN_SCANNER, "{ua}");
+        }
+        for ua in [
+            "Mozilla/5.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
+            "Microsoft Office/16.0 (Windows NT 10.0; Microsoft Outlook 16.0.17928; Pro)",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/20100101 Thunderbird/128.4.0",
+            "Apple Mail/16.0",
+            "Mozilla/5.0 (Linux; Android 12; CUBOT KINGKONG 7) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/120.0 Mobile Safari/537.36",
+            // A native Android mail app's image loader, with a person behind it.
+            "okhttp/4.12.0",
+            "Dalvik/2.1.0 (Linux; U; Android 14; Pixel 8 Build/AP2A.240805.005)",
+            "Java/17.0.2",
+            "Apache-HttpClient/UNAVAILABLE (java 1.4)",
+            "YahooMailProxy; https://help.yahoo.com/kb/yahoo-mail-proxy-SLN28749.html",
+        ] {
+            assert_eq!(classify_user_agent(Some(ua)), OPEN_UNKNOWN, "{ua}");
+        }
+        // The Google proxy outranks every marker.
+        assert_eq!(
+            classify_user_agent(Some("Mozilla/5.0 (via ggpht.com GoogleImageProxy) bot")),
+            OPEN_PROXIED
+        );
     }
 
     /// No relay configured => no poller, and `Ok(None)` rather than `Err`.

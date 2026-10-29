@@ -2551,7 +2551,9 @@ fn cmd_serve(
             Some(pusher) => {
                 eprintln!("squelchd: APNs pusher enabled (relay configured)");
                 sync_metrics.set_apns_pusher_enabled(true);
-                let pusher = pusher.with_metrics(sync_metrics.clone());
+                let pusher = pusher
+                    .with_metrics(sync_metrics.clone())
+                    .with_draft_pings(api_state.subscribe_draft_pings());
                 let shutdown_rx = shutdown_rx.clone();
                 Some(tokio::spawn(async move {
                     pusher.run(pusher_wake, shutdown_rx).await
@@ -2823,6 +2825,18 @@ fn cmd_serve(
             ))
         };
 
+        // SMART RE-NOTIFY (docs/RENOTIFY.md). Always spawned, and idle unless
+        // the `renotify` hidden feature is on for this mailbox: the feature is
+        // read at every pass, so ticking it on the admin page needs no restart.
+        // Before the listener binds, so no Mac stream can open a session the
+        // sweep would then close while it is live.
+        squelch_api::close_stale_renotify_sessions(&api_state);
+        let renotify_handle = tokio::spawn(squelch_api::renotify_worker(
+            api_state.clone(),
+            shutdown_tx.subscribe(),
+            squelch_api::RenotifyTiming::daemon(),
+        ));
+
         // Bind BEFORE building the embedder: its first-run model download must
         // not leave the doors unreachable.
         let app = build_serve_router(
@@ -3013,6 +3027,9 @@ fn cmd_serve(
         }
         if scheduled_handle.await.is_err() {
             eprintln!("squelchd: scheduled-send worker task join error");
+        }
+        if renotify_handle.await.is_err() {
+            eprintln!("squelchd: renotify worker task join error");
         }
         if let Some(handle) = metrics_handle {
             match handle.await {

@@ -371,7 +371,9 @@ impl Default for SyncConfig {
 #[serde(default)]
 pub struct NotifyConfig {
     /// Fast-model importance at or above which a message qualifies for a push.
-    /// All model-assessed auth qualifies regardless of importance. Default 50.
+    /// All model-assessed auth qualifies regardless of importance. Default 40:
+    /// over-notifying beats burying mail in FYE, so actionable automated
+    /// notices (the prompts' 40-59 band) push too.
     /// Env: `SQUELCH_NOTIFY_MIN_IMPORTANCE`.
     pub min_importance: u8,
     /// THE FIRST-SIGHT TEST: mail whose `Date:` header is older than this when
@@ -472,7 +474,7 @@ impl NotifyConfig {
 impl Default for NotifyConfig {
     fn default() -> Self {
         Self {
-            min_importance: 50,
+            min_importance: 40,
             freshness_window_secs: 900,
             rescue_window_secs: 3600,
             fast_enabled: true,
@@ -729,6 +731,91 @@ pub struct TrackingConfig {
     /// `https://track.example.com`); the pixel is `{base_url}/t/{token}`.
     /// Env: `SQUELCH_TRACK_URL`. `None` => tracking is off for every send.
     pub base_url: Option<String>,
+}
+
+/// Smart re-notify's tunables (issue #625, docs/RENOTIFY.md). WHETHER it runs
+/// is the `renotify` hidden feature ([`crate::features::RENOTIFY`]), per
+/// tenant; this is only HOW. Every field is in minutes or a count, and every
+/// one has an env override, because hosted has no config file to edit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct RenotifyConfig {
+    /// How long the Mac app must have been disconnected for its next
+    /// connection to count as the owner arriving. Default 120.
+    /// Env: `SQUELCH_RENOTIFY_MIN_OFFLINE_MINS`.
+    pub min_offline_mins: u64,
+    /// How long the connection must then stay up before the banner fires, in
+    /// SECONDS: lets the app's own replay land first and drops a wake that
+    /// sleeps again at once. Default 30. Env: `SQUELCH_RENOTIFY_SETTLE_SECS`.
+    pub online_settle_secs: u64,
+    /// Minutes after a meeting ends before its window opens. Default 3.
+    /// Env: `SQUELCH_RENOTIFY_MEETING_END_DELAY_MINS`.
+    pub meeting_end_delay_mins: u64,
+    /// How long that window stays open. Default 10.
+    /// Env: `SQUELCH_RENOTIFY_MEETING_END_WINDOW_MINS`.
+    pub meeting_end_window_mins: u64,
+    /// A timed event longer than this is a block, not a meeting: its end is no
+    /// trigger. Default 240. Env: `SQUELCH_RENOTIFY_MAX_MEETING_MINS`.
+    pub max_meeting_mins: u64,
+    /// Hold when a meeting starts within this many minutes. Default 15.
+    /// Env: `SQUELCH_RENOTIFY_MEETING_GUARD_MINS`.
+    pub meeting_guard_mins: u64,
+    /// The working day in the owner's zone, `[start, end)` hours. Defaults 7
+    /// and 20. Env: `SQUELCH_RENOTIFY_WORK_START_HOUR`,
+    /// `SQUELCH_RENOTIFY_WORK_END_HOUR`.
+    pub work_start_hour: u32,
+    pub work_end_hour: u32,
+    /// Banners per local day. Default 4. Env: `SQUELCH_RENOTIFY_DAILY_BUDGET`.
+    pub daily_budget: u32,
+    /// Messages one banner names. Default 3. Env: `SQUELCH_RENOTIFY_MAX_ITEMS`.
+    pub max_items: usize,
+    /// Re-notifies per message, ever. Default 2.
+    /// Env: `SQUELCH_RENOTIFY_MAX_PER_MESSAGE`.
+    pub max_per_message: u32,
+    /// The first notification must be at least this old. Default 30.
+    /// Env: `SQUELCH_RENOTIFY_MIN_AGE_MINS`.
+    pub min_age_mins: u64,
+    /// ... and at most this old. Default 4320 (three days).
+    /// Env: `SQUELCH_RENOTIFY_MAX_AGE_MINS`.
+    pub max_age_mins: u64,
+    /// Wait after a re-notify before the same message may come again, doubled
+    /// per re-notify already spent on it. Default 180.
+    /// Env: `SQUELCH_RENOTIFY_COOLDOWN_MINS`.
+    pub cooldown_mins: u64,
+    /// Mail in For your eyes with a due date comes back this many minutes
+    /// before it, opened or not. Default 1440 (a day).
+    /// Env: `SQUELCH_RENOTIFY_DUE_LEAD_MINS`.
+    pub due_lead_mins: u64,
+    /// ... and stays eligible this long after it. Default 720.
+    /// Env: `SQUELCH_RENOTIFY_DUE_GRACE_MINS`.
+    pub due_grace_mins: u64,
+    /// The hour a date-only due date is read as, in the owner's zone.
+    /// Default 17. Env: `SQUELCH_RENOTIFY_DUE_DAY_HOUR`.
+    pub due_day_hour: u32,
+}
+
+impl Default for RenotifyConfig {
+    fn default() -> Self {
+        Self {
+            min_offline_mins: 120,
+            online_settle_secs: 30,
+            meeting_end_delay_mins: 3,
+            meeting_end_window_mins: 10,
+            max_meeting_mins: 240,
+            meeting_guard_mins: 15,
+            work_start_hour: 7,
+            work_end_hour: 20,
+            daily_budget: 4,
+            max_items: 3,
+            max_per_message: 2,
+            min_age_mins: 30,
+            max_age_mins: 4320,
+            cooldown_mins: 180,
+            due_lead_mins: 1440,
+            due_grace_mins: 720,
+            due_day_hour: 17,
+        }
+    }
 }
 
 /// Prometheus scrape-endpoint config; see [`crate::metrics`].
@@ -1997,6 +2084,8 @@ pub struct Config {
     pub carriers: CarriersConfig,
     /// Auto-translate. Defaults only; read from the `[translate]` table.
     pub translate: TranslateConfig,
+    /// Smart re-notify's tunables; whether it runs is a hidden feature.
+    pub renotify: RenotifyConfig,
 }
 
 impl Default for Config {
@@ -2024,6 +2113,7 @@ impl Default for Config {
             console: ConsoleConfig::default(),
             carriers: CarriersConfig::default(),
             translate: TranslateConfig::default(),
+            renotify: RenotifyConfig::default(),
         }
     }
 }
@@ -2225,6 +2315,75 @@ impl Config {
         env_override(
             "SQUELCH_NOTIFY_MIN_IMPORTANCE",
             &mut self.notify.min_importance,
+        );
+        for (name, slot) in [
+            (
+                "SQUELCH_RENOTIFY_MIN_OFFLINE_MINS",
+                &mut self.renotify.min_offline_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_SETTLE_SECS",
+                &mut self.renotify.online_settle_secs,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MEETING_END_DELAY_MINS",
+                &mut self.renotify.meeting_end_delay_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MEETING_END_WINDOW_MINS",
+                &mut self.renotify.meeting_end_window_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MAX_MEETING_MINS",
+                &mut self.renotify.max_meeting_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MEETING_GUARD_MINS",
+                &mut self.renotify.meeting_guard_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MIN_AGE_MINS",
+                &mut self.renotify.min_age_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MAX_AGE_MINS",
+                &mut self.renotify.max_age_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_COOLDOWN_MINS",
+                &mut self.renotify.cooldown_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_DUE_LEAD_MINS",
+                &mut self.renotify.due_lead_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_DUE_GRACE_MINS",
+                &mut self.renotify.due_grace_mins,
+            ),
+        ] {
+            env_override(name, slot);
+        }
+        env_override(
+            "SQUELCH_RENOTIFY_WORK_START_HOUR",
+            &mut self.renotify.work_start_hour,
+        );
+        env_override(
+            "SQUELCH_RENOTIFY_WORK_END_HOUR",
+            &mut self.renotify.work_end_hour,
+        );
+        env_override(
+            "SQUELCH_RENOTIFY_DAILY_BUDGET",
+            &mut self.renotify.daily_budget,
+        );
+        env_override(
+            "SQUELCH_RENOTIFY_MAX_PER_MESSAGE",
+            &mut self.renotify.max_per_message,
+        );
+        env_override("SQUELCH_RENOTIFY_MAX_ITEMS", &mut self.renotify.max_items);
+        env_override(
+            "SQUELCH_RENOTIFY_DUE_DAY_HOUR",
+            &mut self.renotify.due_day_hour,
         );
         // The two notify WINDOWS, both reachable without editing a config file
         // inside a container image. The freshness one never had an override at
@@ -4109,10 +4268,10 @@ archive_access_daily_cap = 9
     #[test]
     fn notify_defaults_match_the_squelch_line_and_env_overrides_the_threshold() {
         let _g = ENV_LOCK.lock().unwrap();
-        // The default threshold IS the TUI's starting squelch line (50), so
-        // "notified" and "above the line" mean the same thing to a user.
+        // 40, not the TUI's squelch line (50): the notify prompts' 40-59 band
+        // is "an automated notice you may want to act on", and that pushes.
         let c = Config::default();
-        assert_eq!(c.notify.min_importance, 50);
+        assert_eq!(c.notify.min_importance, 40);
         assert_eq!(c.notify.freshness_window_secs, 900);
         // The rescue ceiling: an hour from FIRST SIGHT, not from the sender's
         // `Date:`.
@@ -4332,7 +4491,7 @@ archive_access_daily_cap = 9
         assert_eq!(cfg.notify.freshness_window_secs, 900);
         // A config that predates the feature has no [notify] table at all.
         let cfg: Config = toml::from_str("squelch_level = 1\n").unwrap();
-        assert_eq!(cfg.notify.min_importance, 50);
+        assert_eq!(cfg.notify.min_importance, 40);
         assert_eq!(cfg.notify.rescue_window_secs, 3600);
     }
 

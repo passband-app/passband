@@ -227,6 +227,17 @@ run_suite shipment-wire \
   Sources/Passband/Model/APIError.swift \
   Tests/ShipmentWireTests.swift
 
+# The last board on disk: no sealed or auth row ever reaches the file, only a
+# fresh board of this version is painted (the rest are deleted), and the file
+# is the owner's alone, out of backups, and gone with its account.
+run_suite board-file \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/APIError.swift \
+  Sources/Passband/Lib/PrivateFile.swift \
+  Sources/Passband/Lib/BoardFile.swift \
+  Tests/BoardFileTests.swift
+
 # Credential validation must never succeed against the fixture transport.
 run_suite credential-probe \
   Sources/Passband/Model/SubjectText.swift \
@@ -597,6 +608,21 @@ run_suite sealed-event \
   Sources/Passband/Lib/AuthLabels.swift \
   Sources/Passband/Model/EventBanner.swift \
   Tests/SealedEventTests.swift
+
+# Smart re-notify's banner (docs/RENOTIFY.md): the `renotify` frame beside
+# open_draft on the Mac stream, its freshness, its copy, an identity no first
+# banner can swallow or replace, and a tap that opens the first message.
+run_suite renotify-banner \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Sources/Passband/Lib/SenderIdentity.swift \
+  Sources/Passband/Lib/AuthLabels.swift \
+  Sources/Passband/Lib/AgentDraftLink.swift \
+  Sources/Passband/Model/EventBanner.swift \
+  Sources/Passband/Model/RenotifyBanner.swift \
+  Tests/RenotifyBannerTests.swift
 
 # What auth mail asks of the owner (docs/AUTH-MAIL-HANDLING.md, "Clients"): the
 # sealed row from both daemon versions, which kinds open a question and for

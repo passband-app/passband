@@ -49,11 +49,24 @@ pub struct Feature {
 /// `features.enabled(features::THE_KEY)` wherever the daemon gates on it. The
 /// clients gate on the same key string; a flag only a client reads still gets
 /// an entry here, because this list is the only thing the admin page offers.
-pub const KNOWN: &[Feature] = &[Feature {
-    key: CALENDAR,
-    summary: "The Calendar page: events from mail, a Google Calendar connection, and creating \
-              and editing events.",
-}];
+pub const KNOWN: &[Feature] = &[
+    Feature {
+        key: CALENDAR,
+        summary: "The Calendar page: events from mail, a Google Calendar connection, and creating \
+                  and editing events.",
+    },
+    Feature {
+        key: RENOTIFY,
+        summary: "Smart re-notify: a second banner for mail that still needs handling, when the \
+                  Mac comes online or a meeting ends.",
+    },
+];
+
+/// Smart re-notify (issue #625, docs/RENOTIFY.md): the daemon records the Mac
+/// app's connections and, at a moment the owner can act, sends a `renotify`
+/// frame naming mail that still needs them. OFF IS AS IF IT DID NOT EXIST: no
+/// session is recorded and no frame is sent.
+pub const RENOTIFY: &str = "renotify";
 
 /// The Calendar page and everything behind it on the human door: the
 /// timeline, the user's word on a ghost, the Google Calendar connection and

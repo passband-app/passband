@@ -18,7 +18,15 @@ without a human reading anything:
   recipient's IP and user agent but still fetches.
 
 Every open is stored with its user agent and a `classification`: `proxied` when
-the fetch came from a known image proxy, `unknown` otherwise. Passband renders
+the fetch came from a known image proxy, `scanner` when the agent marks it as a
+machine (a server-side HTTP library, a headless browser, a self-declared bot, a retired
+browser string that only scanners still send), `unknown` otherwise. A
+`scanner` row is a **probable scanner**: listed in the opens popover, never
+counted as an open, and never notified. Security gateways fetch every image in
+a message the moment it is delivered, and counting that as a read was the
+first false open hosted saw. The classifier is deliberately conservative
+(`squelch_core::tracking::is_probable_scanner`): hiding a person's real open is
+worse than counting a machine's. Passband renders
 these as "opened" and "opened (via proxy)". Treat the signal as *probably
 opened*, never as certified mail. There is no way to distinguish a proxy
 pre-fetch from a real read, and any product that claims otherwise is guessing.

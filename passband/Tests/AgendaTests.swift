@@ -37,6 +37,8 @@ struct AgendaTests {
         aMatchedGhostsMailRidesOnTheEvent()
         theCleanedPlaceIsWhatTheCardShows()
         earlierTodayFoldsAndTodayAlwaysExists()
+        theListCanStartOnAnotherDay()
+        aRunOfDaysKeepsTheQuietOnes()
         theNextCommitment()
         dayTitles()
         todaysStrip()
@@ -456,6 +458,54 @@ struct AgendaTests {
         let empty = build([])
         expect(empty.count == 1 && empty[0].day == day("2026-10-05") && empty[0].isEmpty,
                "today is there even with nothing on it")
+    }
+
+    /// The phone's selected day leads the list instead of today: last week's
+    /// day shows what was on it, a day ahead hides the days before it, and a
+    /// trip still running when that day began is listed under it.
+    static func theListCanStartOnAnotherDay() {
+        let ghosts = [
+            ghost(74, "Last week", start: "2026-09-28T10:00:00-07:00", commitment: .committed),
+            ghost(75, "Breakfast", start: "2026-10-05T09:00:00-07:00",
+                  end: "2026-10-05T10:00:00-07:00", commitment: .committed),
+            ghost(76, "Trip", start: "2026-10-06", end: "2026-10-10", allDay: true, commitment: .committed),
+            ghost(77, "Dinner", start: "2026-10-09T19:00:00-07:00", commitment: .committed),
+        ]
+        let items = Agenda.items(TimelineFeed(ghosts: ghosts), calendar: cal)
+        let past = Agenda.days(items, now: now, calendar: cal, from: day("2026-09-28"))
+        expect(past.first?.day == day("2026-09-28") && past.first?.visible.map(\.id) == ["g:74"],
+               "a past day leads with what was on it")
+        expect(past.first?.earlier.isEmpty == true, "a past day folds nothing into earlier")
+        expect(past.contains { $0.day == day("2026-10-05") && $0.earlier.map(\.id) == ["g:75"] },
+               "today still folds what has finished")
+        let ahead = Agenda.days(items, now: now, calendar: cal, from: day("2026-10-08"))
+        expect(ahead.first?.day == day("2026-10-08"), "a later day leads")
+        expect(ahead.first?.visible.map(\.id) == ["g:76"], "a trip running into it is listed there")
+        expect(!ahead.contains { $0.day == day("2026-10-05") }, "today is not dragged in ahead of it")
+        expect(ahead.map(\.day) == [day("2026-10-08"), day("2026-10-09")], "then the days with something on")
+        let quiet = Agenda.days([], now: now, calendar: cal, from: day("2026-10-20"))
+        expect(quiet.map(\.day) == [day("2026-10-20")] && quiet[0].isEmpty,
+               "the chosen day is there even with nothing on it")
+        expect(Agenda.days(items, now: now, calendar: cal, from: nil) == build(ghosts),
+               "no day chosen is today, exactly as before")
+    }
+
+    /// The phone's week: seven days, the quiet ones included, each built as
+    /// the agenda builds it.
+    static func aRunOfDaysKeepsTheQuietOnes() {
+        let ghosts = [
+            ghost(78, "Trip", start: "2026-10-03", end: "2026-10-06", allDay: true, commitment: .committed),
+            ghost(79, "Dinner", start: "2026-10-07T19:00:00-07:00", commitment: .committed),
+            ghost(80, "Next week", start: "2026-10-12T19:00:00-07:00", commitment: .committed),
+        ]
+        let items = Agenda.items(TimelineFeed(ghosts: ghosts), calendar: cal)
+        let week = Agenda.run(items, now: now, calendar: cal, from: day("2026-10-04"), count: 7)
+        expect(week.map(\.day) == (4...10).map { day(String(format: "2026-10-%02d", $0)) },
+               "seven days, every one")
+        expect(week[0].visible.map(\.id) == ["g:78"], "a trip running into the first day is listed there")
+        expect(week[2].isEmpty, "a quiet day is there, empty")
+        expect(week[3].visible.map(\.id) == ["g:79"], "a day with something on has it")
+        expect(!week.flatMap(\.visible).contains { $0.id == "g:80" }, "nothing past the last day")
     }
 
     static func theNextCommitment() {

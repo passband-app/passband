@@ -3150,7 +3150,23 @@ async fn role_server(
     listed: Arc<std::sync::atomic::AtomicBool>,
     refuse: Arc<std::sync::atomic::AtomicBool>,
 ) -> (u16, tokio::task::JoinHandle<()>) {
+    let (port, _, server) = role_server_logged(listed, refuse).await;
+    (port, server)
+}
+
+/// [`role_server`], recording every command it was sent.
+async fn role_server_logged(
+    listed: Arc<std::sync::atomic::AtomicBool>,
+    refuse: Arc<std::sync::atomic::AtomicBool>,
+) -> (
+    u16,
+    Arc<std::sync::Mutex<Vec<String>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let log: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let lg = log.clone();
     let (port, _, server) = scripted_server(true, move |tag, cmd| {
+        lg.lock().unwrap().push(cmd.to_string());
         let sent = cmd.contains("\"SENT\"");
         let reply = if cmd.starts_with("LIST") {
             let mut r = "* LIST () \"/\" INBOX\r\n".to_string();
@@ -3178,7 +3194,7 @@ async fn role_server(
         Say::Reply(reply)
     })
     .await;
-    (port, server)
+    (port, log, server)
 }
 
 /// REVIEW N4: a role folder LIST still names but that refuses STATUS (a
@@ -3204,13 +3220,12 @@ async fn a_listed_folder_that_refuses_status_is_retried_not_dropped() {
             Ok(c) => panic!("refusal {attempt} read as success: {:?}", c.ids),
         }
     }
-    // Persistent: unwatched for the session, the walk goes on, no Expired.
+    // Persistent: unwatched for now, the walk goes on, no Expired, and
+    // the entry is KEPT (review fix4 R4): a give-up is not a deleted folder.
     let w = src.changes(&cursor, Folder::Sent).await.expect("given up");
-    assert!(
-        !ImapCursor::decode(&w.cursor)
-            .unwrap()
-            .folders
-            .contains_key("sent")
+    assert_eq!(
+        ImapCursor::decode(&w.cursor).unwrap().folders["sent"].uidvalidity,
+        5
     );
     // A transient one that clears is just a retry.
     let src2 = scripted_source(port, "pw");
@@ -3277,7 +3292,7 @@ async fn a_given_up_role_folder_is_watched_again_after_the_next_relist() {
         Arc::new(AtomicBool::new(true)),
         Arc::new(AtomicBool::new(false)),
     );
-    let (port, server) = role_server(listed, refuse.clone()).await;
+    let (port, log, server) = role_server_logged(listed, refuse.clone()).await;
     let src = scripted_source(port, "pw").with_timeouts(Timeouts {
         roles_relist: Duration::from_millis(300),
         ..short_timeouts()
@@ -3295,12 +3310,27 @@ async fn a_given_up_role_folder_is_watched_again_after_the_next_relist() {
             .get("sent")
             .map(|p| p.uidvalidity)
     };
-    assert_eq!(sent(&w.cursor), None);
-    // The burst is over; within a relist interval the folder is back.
+    // REVIEW FIX4 R4: the give-up skips the walk and KEEPS the entry; it
+    // was read as gone, dropped, and the recovery relisted the whole
+    // backfill window of Sent (every body fetched again) each time.
+    assert_eq!(sent(&w.cursor), Some(5), "a give-up dropped the entry");
+    let w = src
+        .changes(&w.cursor, Folder::Sent)
+        .await
+        .expect("still given up");
+    assert_eq!(sent(&w.cursor), Some(5));
+    // The burst is over; within a relist interval the folder is back, and
+    // it resumes from the kept entry: no window relist.
     refuse.store(false, Ordering::Relaxed);
     tokio::time::sleep(Duration::from_millis(400)).await;
+    log.lock().unwrap().clear();
     let w = src.changes(&w.cursor, Folder::Sent).await.unwrap();
     assert_eq!(sent(&w.cursor), Some(5), "Sent stayed unwatched");
+    let cmds = log.lock().unwrap().clone();
+    assert!(
+        !cmds.iter().any(|c| c.contains("SINCE")),
+        "the recovery relisted Sent: {cmds:?}"
+    );
     assert_eq!(src.connects(), 1);
     server.abort();
 }

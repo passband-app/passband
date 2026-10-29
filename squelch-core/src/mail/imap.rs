@@ -2814,6 +2814,19 @@ where
     Ok(out)
 }
 
+/// Is the cursor's folder for this role one the session has given up on for
+/// now (it kept refusing STATUS)? Then the walk is skipped and the entry
+/// KEPT (review fix4 R4): when the give-up expires the walk resumes from it,
+/// where reading it as gone would drop it and relist the whole backfill
+/// window on recovery, every time a flaky server refuses a few in a row. Only
+/// a LIST without the folder (no give-up) drops an entry.
+fn given_up_at_cursor(c: &Conn, start: &ImapCursor, key: &str) -> bool {
+    start
+        .folders
+        .get(key)
+        .is_some_and(|pos| c.given_up.contains_key(&pos.mailbox))
+}
+
 /// What one `changes` walk found on the session, before the source records it.
 enum Walk {
     /// The cursor cannot be replayed from (Amendment D / contract §7).
@@ -2882,6 +2895,9 @@ async fn others_unchanged(c: &mut Conn, start: &ImapCursor, skip: Folder) -> Res
         let pos = start.folders.get(role_key(folder));
         match (name, pos) {
             (None, None) => {}
+            // Given up on for now, its entry kept (review fix4 R4): not
+            // walked, so it cannot be missed.
+            (None, Some(pos)) if c.given_up.contains_key(&pos.mailbox) => {}
             (Some(name), Some(pos)) if name == pos.mailbox => match c.status(&name).await? {
                 Some(now) if pos.unchanged_at(&now) => {}
                 _ => return Ok(false),
@@ -3116,6 +3132,7 @@ impl MailSource for ImapSource {
                         // The role gained, lost or changed its folder: the
                         // position means nothing in the new one.
                         _ if folder == Folder::Inbox => return Ok(Walk::Expired),
+                        _ if given_up_at_cursor(c, &start, key) => return Ok(Walk::NoFolder),
                         _ => return reset_walk(c, folder).await,
                     };
                     let now = match c.role_status(folder).await? {
@@ -3123,6 +3140,7 @@ impl MailSource for ImapSource {
                         // Gone (correctness H2), or the role moved to another
                         // folder: the roles were just listed again.
                         _ if folder == Folder::Inbox => return Ok(Walk::Expired),
+                        _ if given_up_at_cursor(c, &start, key) => return Ok(Walk::NoFolder),
                         _ => return reset_walk(c, folder).await,
                     };
                     if now.uidvalidity != pos.uidvalidity {

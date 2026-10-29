@@ -294,8 +294,8 @@ struct AuthArgs {
     expose_consent_listener: bool,
 
     /// Set this account up on a plain IMAP server with an app password
-    /// instead of Google (issue #575; read only for now, so the write door
-    /// answers 501).
+    /// instead of Google (issue #575), then the SMTP server it sends
+    /// through.
     ///
     /// Prompts for the host, port, TLS mode (implicit TLS, STARTTLS, or none
     /// for a server on this machine only), username and app password (not
@@ -3302,8 +3302,8 @@ fn cmd_serve(
         // Auth-mail retention runs here because this process owns the write
         // credential (sync is bound to gmail.readonly by hard invariant). No-op
         // unless the shredder is enabled AND a write credential exists. Not
-        // for an IMAP account, whose write door is 501 until SMTP lands: the
-        // pass would fail every hour.
+        // for an IMAP account (yet): its door can trash now, but turning the
+        // shredder on for IMAP mail is its own decision, not part of #575.
         if is_gmail {
             let shred_state = api_state.clone();
             tokio::spawn(async move {

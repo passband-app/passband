@@ -482,7 +482,7 @@ pub async fn get_invites(State(state): State<ApiState>) -> Result<impl IntoRespo
     // The reason is named, rather than collapsed into the boolean, because the
     // app's copy for the two is different and only one of them is fixable by
     // the person reading it.
-    if let Some(reason) = unavailable_reason(&state) {
+    if let Some(reason) = unavailable_reason(&state).await {
         return Ok(Json(json!({ "can_share": false, "reason": reason })));
     }
     // The rate is read even when it will not clear the floor: `share_stat` is
@@ -517,11 +517,14 @@ pub async fn get_invites(State(state): State<ApiState>) -> Result<impl IntoRespo
 /// Two reasons, and they are told apart because the copy is: one is a property
 /// of the deployment (nothing the user can do), and the other names a command
 /// whose whole job is to fix it.
-fn unavailable_reason(state: &ApiState) -> Option<&'static str> {
+///
+/// "Can send" is the provider's: the Gmail write store for Gmail, a sealed
+/// slot with SMTP config for IMAP ([`crate::handlers::write_ready`]).
+async fn unavailable_reason(state: &ApiState) -> Option<&'static str> {
     if state.sharing().is_none() {
         return Some("no_control_plane");
     }
-    if state.write_creds().is_none() {
+    if !crate::handlers::write_ready(state).await {
         return Some("no_write_credential");
     }
     None

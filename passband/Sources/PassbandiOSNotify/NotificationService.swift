@@ -327,6 +327,9 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
             EventBanner.authKey: event.isAuth || event.sealed_kind != nil,
             EventBanner.threadKey: event.thread_id,
             EventBanner.senderKey: event.sender,
+            // So a clear from the Mac can find this banner (`isCleared`).
+            EventBanner.clearIdentityKey: EventBanner.eventIdentity(
+                account: accountId, event: event.id),
         ]
         // Always a chime, and the system's rather than the user's chosen one:
         // the app's sound preference lives in ITS UserDefaults, which this

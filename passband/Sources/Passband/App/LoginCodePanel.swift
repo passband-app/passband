@@ -69,8 +69,12 @@ final class LoginCodePanel {
     private init() {}
 
     /// Float `login`. A code already on screen is replaced by the newer one,
-    /// and goes the way of any other unanswered code.
-    func show(_ login: EventBanner.LoginCode, sender: String, account: String?, onMissed: @escaping () -> Void) {
+    /// and goes the way of any other unanswered code. `onCopy` runs once, when
+    /// the code is copied: the caller's chance to say it was used here.
+    func show(
+        _ login: EventBanner.LoginCode, sender: String, account: String?,
+        onCopy: @escaping () -> Void = {}, onMissed: @escaping () -> Void
+    ) {
         close(showing, answered: false)
         self.onMissed = onMissed
         let entry = Entry(login: login, sender: sender, account: account)
@@ -80,7 +84,10 @@ final class LoginCodePanel {
             rootView: LoginCodeCard(
                 entry: entry,
                 onCopied: { [weak self] in self?.close(id, answered: true) },
-                onCopy: { [weak self] in self?.markAnswered(id) },
+                onCopy: { [weak self] in
+                    self?.markAnswered(id)
+                    onCopy()
+                },
                 onDismiss: { [weak self] in self?.close(id, answered: true) },
                 onTimeout: { [weak self] in self?.close(id, answered: false) }))
         // The card has one size and the panel is given it once. A hosting

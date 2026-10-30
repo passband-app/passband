@@ -196,6 +196,12 @@ for your review" (an agent asked its owner to look at a draft), and `"kind":
 owner's calendar). It is a closed set: any other value is a `400`, so a daemon can choose between fixed lines but
 never write one.
 
+`"kind": "clear"` is the one push with no alert. The owner dealt with an event
+on another device (copied its login code on the Mac), so the phone should take
+that banner down. It goes out as a silent background push (`apns-push-type:
+background`, `apns-priority: 5`, payload `{"aps": {"content-available": 1},
+"event_id": …}`), with no title, no body, and no sound.
+
 `device_tokens` is 1-100 hex tokens of 16-200 characters. `event_id` is an
 opaque string (≤256 bytes) or integer, forwarded into the payload verbatim — the
 relay never interprets it. `collapse_id` (≤64 bytes, APNs' own limit), `topic`

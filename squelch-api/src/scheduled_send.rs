@@ -1284,7 +1284,8 @@ async fn settle_recovered(
 /// Not rebuilt: the read-tracking pixel (its token was minted for the
 /// delivered copy; a second one would be a tracker for mail nobody got) and
 /// the group attribution (`finish_send`'s caller writes it after a send; a
-/// recovered row's history is the row). The Date is the attempt's.
+/// recovered row's history is the row). The Date is the attempt's (or the
+/// row's `send_at`).
 async fn rebuild_sent_copy(state: &ApiState, row: &ScheduledSend) -> Option<Option<i64>> {
     let id = row.id;
     let Ok(mut body) = serde_json::from_str::<SendBody>(&row.request) else {
@@ -1318,10 +1319,10 @@ async fn rebuild_sent_copy(state: &ApiState, row: &ScheduledSend) -> Option<Opti
             }
         }
     };
-    let at = row
-        .last_attempt_at
-        .or(row.lease_until)
-        .unwrap_or_else(|| clock(state));
+    // The attempt's start when the row recorded it, else when it fell due
+    // (a fire claims a due row within a second of `send_at`; a lapsed lease
+    // ends minutes after the send).
+    let at = row.last_attempt_at.unwrap_or(row.send_at);
     let fired = Fire {
         id,
         message_id: &row.message_id_header,

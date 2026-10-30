@@ -79,7 +79,7 @@ clap = { workspace = true }
 # which are public keys: encrypting is all it can do.
 age = { workspace = true }
 # Invite-code hashes at rest, the PKCE S256 challenge, and the cookie MAC.
-sha2 = "0.10"
+sha2 = "0.11"
 hmac = "0.12"
 # Label validation against the contract's literal regex.
 regex = { workspace = true }

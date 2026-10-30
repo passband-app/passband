@@ -1023,6 +1023,21 @@ input in code:
   An index out of range is null. `open` is what tapping the banner shows;
   `ticket` is what the Tickets button shows.
 - `same_as`: candidate indexes. Out of range ones are dropped.
+- `code` (added 2026-10-30, prompt `calendar-remind-v2`): `{label, value}` or
+  null, an entry code the person needs on arrival (a door PIN, a gate code).
+  The owner's ask: an event whose description says "If no one is at the
+  front desk, use PIN 642181 to enter" should hand over the PIN right before
+  they walk in. The line rule drops codes on purpose (a steered line must
+  not carry one), so the code has its own field, HELD TO THE ITEM'S OWN TEXT
+  in code (`remind::settle_code`), as the card's place is held to the
+  location: the value must appear word for word, as a whole word, in the
+  title, location or description, never the mail; 3 to 12 letters, digits,
+  `#` and `*`; at least 1 digit and at most 8 (every phone number has more).
+  The label is plain words of at most 24 characters, else "Code". Served
+  from a CURRENT plan only, so a PIN that changed in the description never
+  shows the old one. The banner body leads with it: "Door PIN 642181 · the
+  line". On the iPhone the lock screen hides it until Face ID unlocks
+  (Show Previews: When Unlocked, the default).
 
 **Failure:** no model, a timeout or a refusal stores no plan, backs the item
 off, and a later pass asks again within the caps. If an event is 30 minutes
@@ -1087,6 +1102,7 @@ The frame:
           "title": "Phoebe Bridgers", "start": "2026-10-30T20:00:00-07:00",
           "end": null, "all_day": false, "place": "The Greek Theatre"},
  "lead_minutes": 60, "line": "Your 2 tickets are in the Ticketmaster email",
+ "code": null,
  "open": {"message_id": 41, "thread_id": "t41", "attachment_id": 9},
  "ticket": {"message_id": 41, "thread_id": "t41", "kind": "ticket",
             "attachment_id": 9, "filename": "tickets.pdf",
@@ -1097,7 +1113,7 @@ A ghost's `item` is `{"kind": "ghost", "id": <ghost id>, ...}`.
 
 The banner reads: title = the event's title; subtitle = "8pm · The Greek
 Theatre" (the start in the device's zone, "Today" for all-day; a countdown
-would go stale on the lock screen); body = the line. The title, place and
+would go stale on the lock screen); body = the code, if any, then the line. The title, place and
 line are stripped of bidi controls and invisible marks on the device too.
 Tapping it shows `open` (an attachment in Quick Look, mail in the reader),
 else the event's card. A push the extension could not dress is fetched by the

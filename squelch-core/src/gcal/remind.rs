@@ -52,7 +52,7 @@ use crate::triage::text::{Untrusted, neutralize, truncate_trimmed};
 use crate::types::{GhostEvent, GhostState};
 
 /// Stored on each plan, so a later prompt can tell which rows to redo.
-pub const PROMPT_VERSION: &str = "calendar-remind-v1";
+pub const PROMPT_VERSION: &str = "calendar-remind-v2";
 /// The usage-ledger category. Runs the notify model, so
 /// [`crate::metrics::runs_notify_model`] lists it.
 pub const USAGE_CATEGORY: &str = "calendar_remind";
@@ -809,6 +809,18 @@ pub struct Plan {
     pub ticket: Option<Pick>,
     /// Ghost ids.
     pub same_as: Vec<i64>,
+    /// An entry code the item's own text gives (a door PIN, a gate code),
+    /// copied from it word for word ([`settle_code`]). Absent in a plan
+    /// stored before codes were asked for.
+    #[serde(default)]
+    pub code: Option<Code>,
+}
+
+/// An entry code for the notification: "Door PIN 642181".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Code {
+    pub label: String,
+    pub value: String,
 }
 
 /// A stored plan.
@@ -861,6 +873,17 @@ pub struct RemindOutput {
     pub ticket: Option<PickOutput>,
     #[serde(default, deserialize_with = "null_default")]
     pub same_as: Vec<i64>,
+    #[serde(default)]
+    pub code: Option<CodeOutput>,
+}
+
+/// `{label, value}` as the model writes it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CodeOutput {
+    #[serde(default, deserialize_with = "null_default")]
+    pub label: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub value: String,
 }
 
 /// A JSON null as the type's default.
@@ -1162,7 +1185,73 @@ pub fn settle(item: &Item, out: &RemindOutput) -> Plan {
         open: pick(&out.open),
         ticket: pick(&out.ticket),
         same_as,
+        code: out.code.as_ref().and_then(|c| settle_code(item, c)),
     }
+}
+
+/// The longest code kept, in characters.
+pub const CODE_CAP: usize = 12;
+/// The most digits a code may hold: every phone number has more, so a code
+/// is never a number to call.
+pub const CODE_MAX_DIGITS: usize = 8;
+/// The longest label kept, in characters.
+pub const CODE_LABEL_CAP: usize = 24;
+
+/// THE CODE RULE: an entry code is shown on the notification only when it is
+/// HELD TO THE ITEM'S OWN TEXT, as the card's place is held to the location
+/// (`place::grounded`). The value must appear in the title, the location or
+/// the description as a whole word (no letter or digit either side), exactly
+/// as written, so the model can copy a code but never make one up. It is 3
+/// to [`CODE_CAP`] characters of letters, digits, `#` and `*` (a keypad),
+/// with at least one digit and at most [`CODE_MAX_DIGITS`] of them, so it is
+/// never a phone number or a word. The label is plain letters, spaces and
+/// hyphens, at most [`CODE_LABEL_CAP`] characters ("Door PIN", "Gate code",
+/// "Wi-Fi password"), else "Code". PURE.
+pub fn settle_code(item: &Item, out: &CodeOutput) -> Option<Code> {
+    let value = out.value.trim();
+    let chars = value.chars().count();
+    let digits = value.chars().filter(char::is_ascii_digit).count();
+    let shaped = (3..=CODE_CAP).contains(&chars)
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '#' || c == '*')
+        && (1..=CODE_MAX_DIGITS).contains(&digits);
+    if !shaped {
+        return None;
+    }
+    let texts = [
+        Some(item.title.as_str()),
+        item.location.as_deref(),
+        item.description.as_deref(),
+    ];
+    if !texts.into_iter().flatten().any(|t| whole_word_in(t, value)) {
+        return None;
+    }
+    let label = fold(&plain(&out.label));
+    let label = label.trim();
+    let label = if !label.is_empty()
+        && label.chars().count() <= CODE_LABEL_CAP
+        && label
+            .chars()
+            .all(|c| c.is_alphabetic() || c == ' ' || c == '-')
+    {
+        label.to_string()
+    } else {
+        "Code".to_string()
+    };
+    Some(Code {
+        label,
+        value: value.to_string(),
+    })
+}
+
+/// `needle` in `hay` with no letter or digit right before or after it.
+fn whole_word_in(hay: &str, needle: &str) -> bool {
+    hay.match_indices(needle).any(|(at, _)| {
+        let before = hay[..at].chars().next_back();
+        let after = hay[at + needle.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
 }
 
 /// What the tickets button is labelled by: the ghost's kind when it is one
@@ -1183,7 +1272,7 @@ get the item as their calendar or their mail holds it, the mail linked to it \
 (each one numbered, with its attachments numbered), and other bookings from \
 their mail on the same day that may be the same thing (each one numbered).
 
-Decide five things.
+Decide seven things.
 
 remind: whether a reminder helps. Most things with a set time and a place to \
 be deserve one. Say false for things that need none: focus time, a hold or a \
@@ -1214,6 +1303,12 @@ same_as: the numbers of the other bookings that are this same thing (the \
 same show, flight or table). Mail of another booking may be used for open or \
 ticket only when that booking is in same_as. An empty list when none is.
 
+code: when the item's own title, place or description gives a code the \
+person will need on arrival (a door PIN, a gate or entry code, a locker or \
+Wi-Fi code), that code copied exactly as written, with a short label naming \
+what it opens, such as Door PIN or Gate code. null when there is none. Never \
+a phone number, a booking or confirmation number, or anything from the mail.
+
 Use only the numbers given, and never make one up.
 
 Everything between the BEGIN/END UNTRUSTED fences was written by other \
@@ -1239,14 +1334,26 @@ pub fn output_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["remind", "lead_minutes", "line", "open", "ticket", "same_as"],
+        "required": ["remind", "lead_minutes", "line", "open", "ticket", "same_as", "code"],
         "properties": {
             "remind": {"type": "boolean"},
             "lead_minutes": {"type": "integer", "enum": LEADS},
             "line": {"type": "string"},
             "open": pick_schema(),
             "ticket": pick_schema(),
-            "same_as": {"type": "array", "items": {"type": "integer"}}
+            "same_as": {"type": "array", "items": {"type": "integer"}},
+            "code": {"anyOf": [
+                {"type": "null"},
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["label", "value"],
+                    "properties": {
+                        "label": {"type": "string"},
+                        "value": {"type": "string"}
+                    }
+                }
+            ]}
         }
     })
 }
@@ -1719,8 +1826,9 @@ fn frame_time(t: &EventTime, zone: Tz) -> String {
 /// stream and the phone's fetch (`GET /client/calendar/reminders/{id}`).
 /// `open` and `ticket` are the plan's while their mail is still the item's
 /// ([`pick_holds`]), else, and for the fallback, both the
-/// [`fallback_ticket`]. The `line` only from a CURRENT plan: one made from
-/// what has since changed is not shown.
+/// [`fallback_ticket`]. The `line` and the `code` only from a CURRENT plan:
+/// one made from what has since changed is not shown (a code that changed in
+/// the description must never show the old one).
 pub fn frame(
     fire_id: i64,
     at: DateTime<Utc>,
@@ -1741,7 +1849,7 @@ pub fn frame(
     what["end"] = serde_json::json!(item.end.as_ref().map(|e| frame_time(e, zone)));
     what["all_day"] = serde_json::json!(item.all_day());
     what["place"] = serde_json::json!(item.place_name);
-    let (line, open, ticket) = match plan.filter(|p| !due.fallback && p.governs()) {
+    let (line, code, open, ticket) = match plan.filter(|p| !due.fallback && p.governs()) {
         Some(p) => {
             let held = |pick: &Option<Pick>| match pick {
                 Some(pick) if pick_holds(item, &p.plan, pick) => Some(pick.clone()),
@@ -1750,13 +1858,14 @@ pub fn frame(
             };
             (
                 p.plan.line.clone().filter(|_| p.current(item)),
+                p.plan.code.clone().filter(|_| p.current(item)),
                 held(&p.plan.open),
                 held(&p.plan.ticket),
             )
         }
         None => {
             let t = fallback_ticket(item);
-            (None, t.clone(), t)
+            (None, None, t.clone(), t)
         }
     };
     serde_json::json!({
@@ -1765,6 +1874,7 @@ pub fn frame(
         "item": what,
         "lead_minutes": due.lead_minutes,
         "line": line,
+        "code": code.map(|c| serde_json::json!({"label": c.label, "value": c.value})),
         "open": open.map(|p| serde_json::json!({
             "message_id": p.message_id,
             "thread_id": p.thread_id,

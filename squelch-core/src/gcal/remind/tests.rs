@@ -196,6 +196,7 @@ fn output(remind: bool, lead: i64, line: &str) -> RemindOutput {
         open: None,
         ticket: None,
         same_as: Vec::new(),
+        code: None,
     }
 }
 
@@ -596,6 +597,7 @@ fn plan(remind: bool, lead: u32) -> Plan {
         open: None,
         ticket: None,
         same_as: Vec::new(),
+        code: None,
     }
 }
 
@@ -800,6 +802,7 @@ fn the_frame_is_the_wire_contract() {
                      "end": null, "all_day": false, "place": "The Greek Theatre"},
             "lead_minutes": 60,
             "line": "Your 2 tickets are in the Ticketmaster email",
+            "code": null,
             "open": {"message_id": 41, "thread_id": "t41", "attachment_id": 9},
             "ticket": {"message_id": 41, "thread_id": "t41", "kind": "ticket",
                        "attachment_id": 9, "filename": "tickets.pdf",
@@ -1409,4 +1412,129 @@ fn the_line_rule_keeps_ordinary_lines_and_drops_steered_ones() {
         ],
         "steered lines kept"
     );
+}
+
+// --- entry codes ----------------------------------------------------------------
+
+const FRONT_DESK: &str = "If no one is at the front desk, use PIN 642181 to enter, or call \
+                          through the intercom.";
+
+fn code(label: &str, value: &str) -> Option<CodeOutput> {
+    Some(CodeOutput {
+        label: label.into(),
+        value: value.into(),
+    })
+}
+
+fn with_code(description: &str, label: &str, value: &str) -> Option<Code> {
+    let mut w = concert();
+    w.events[0].row.description = Some(description.into());
+    let item = w.built().events[0].clone();
+    let mut out = output(true, 10, "");
+    out.code = code(label, value);
+    settle(&item, &out).code
+}
+
+#[test]
+fn a_code_in_the_events_own_text_is_handed_over() {
+    assert_eq!(
+        with_code(FRONT_DESK, "Door PIN", "642181"),
+        Some(Code {
+            label: "Door PIN".into(),
+            value: "642181".into()
+        })
+    );
+    // Keypad characters and letters, from the title or the place too.
+    assert!(with_code("Gate code #4417 then buzz", "Gate code", "#4417").is_some());
+    assert!(with_code("Locker B12 is yours", "Locker", "B12").is_some());
+}
+
+#[test]
+fn a_code_the_text_does_not_hold_word_for_word_is_dropped() {
+    // Made up, or a piece of a longer number.
+    assert_eq!(with_code(FRONT_DESK, "Door PIN", "123456"), None);
+    assert_eq!(with_code(FRONT_DESK, "Door PIN", "64218"), None);
+    assert_eq!(with_code(FRONT_DESK, "Door PIN", "42181"), None);
+    // Joined from a number written with separators.
+    assert_eq!(
+        with_code("Call 555-1234 at the gate", "Gate code", "5551234"),
+        None
+    );
+    // From the mail rather than the event's own text.
+    assert_eq!(with_code("Doors at 7", "Door PIN", "642181"), None);
+}
+
+#[test]
+fn a_code_is_never_a_phone_number_a_word_or_a_sentence() {
+    // More digits than any code: a number to call.
+    assert_eq!(
+        with_code("Call 4155551234 on arrival", "Gate code", "4155551234"),
+        None
+    );
+    // No digit: a word, not a code.
+    assert_eq!(
+        with_code("The password is WELCOME", "Password", "WELCOME"),
+        None
+    );
+    // Too short, too long, or with anything but letters, digits, # and *.
+    assert_eq!(with_code("Room 12", "Room", "12"), None);
+    assert_eq!(
+        with_code("Code ABCDEFGH12345", "Code", "ABCDEFGH12345"),
+        None
+    );
+    assert_eq!(with_code("Use 642-181", "Door PIN", "642-181"), None);
+    assert_eq!(with_code("evil.com/1234", "Code", "evil.com/1234"), None);
+}
+
+#[test]
+fn a_codes_label_is_plain_words_or_just_code() {
+    let label = |l: &str| with_code(FRONT_DESK, l, "642181").map(|c| c.label);
+    assert_eq!(label("Wi-Fi password").as_deref(), Some("Wi-Fi password"));
+    assert_eq!(label("Door PIN: call now!").as_deref(), Some("Code"));
+    assert_eq!(label("visit evil.com").as_deref(), Some("Code"));
+    assert_eq!(label("").as_deref(), Some("Code"));
+    assert_eq!(
+        label("A label that runs on far too long").as_deref(),
+        Some("Code")
+    );
+}
+
+#[test]
+fn the_frame_hands_over_a_code_only_from_a_current_plan() {
+    let mut w = concert();
+    w.events[0].row.description = Some(FRONT_DESK.into());
+    let item = w.built().events[0].clone();
+    let mut out = output(true, 10, "");
+    out.code = code("Door PIN", "642181");
+    let p = StoredPlan {
+        version: item.version.clone(),
+        prompt_version: PROMPT_VERSION.into(),
+        plan: settle(&item, &out),
+    };
+    let fired: DateTime<Utc> = "2026-10-31T02:50:00Z".parse().unwrap();
+    let d = due(&item, Some(&p), fired, LA).unwrap();
+    assert_eq!(
+        frame(1, fired, &item, &d, Some(&p), LA)["code"],
+        serde_json::json!({"label": "Door PIN", "value": "642181"})
+    );
+    // The description changed (a new PIN): the old one is never shown.
+    let mut stale = p.clone();
+    stale.version = "older".into();
+    let d = due(&item, Some(&stale), fired, LA).unwrap();
+    assert_eq!(
+        frame(1, fired, &item, &d, Some(&stale), LA)["code"],
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn a_plan_stored_before_codes_reads_with_none() {
+    let old =
+        r#"{"remind":true,"lead_minutes":30,"line":null,"open":null,"ticket":null,"same_as":[]}"#;
+    let plan: Plan = serde_json::from_str(old).unwrap();
+    assert_eq!(plan.code, None);
+    // And a null code from the model is none.
+    let out: RemindOutput =
+        serde_json::from_str(r#"{"remind":true,"lead_minutes":30,"code":null}"#).unwrap();
+    assert!(out.code.is_none());
 }

@@ -1605,7 +1605,11 @@ it, and Passband's own writes always send `sendUpdates=none`.
   letter or digit, 6+ digits unbroken or in 3+ hyphen-joined groups, 7+
   across the separators a number is printed with (`/ , _ ·` included,
   look-alike `l I o` counted inside a run), and vanity numbers; then cut to
-  90 characters (docs/CALENDAR.md has the measured corpus). The title, place and
+  90 characters (docs/CALENDAR.md has the measured corpus). An entry code
+  (`remind::settle_code`) is served only when it appears word for word in
+  the item's own title, location or description, is 3 to 12 letters, digits,
+  `#` or `*` with 1 to 8 digits (never a phone number), and comes from a
+  current plan; its label is plain words or "Code". The title, place and
   line are stripped of bidi controls and invisible marks again on the
   device; every mail, attachment and booking number is bounds-checked
   (out of range is none), and a booking's mail counts only once the answer

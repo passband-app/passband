@@ -6780,6 +6780,7 @@ async fn a_stale_plan_is_planned_again_before_it_fires() {
         open: None,
         ticket: None,
         same_as: Vec::new(),
+        code: None,
     };
     w.store
         .calendar_reminder_put(w.acct, "e:primary/party", "old", &old, Utc::now())

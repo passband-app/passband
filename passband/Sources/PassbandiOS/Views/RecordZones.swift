@@ -11,8 +11,8 @@
 // Look rather than Records: you come here to READ ONE FACT (the flight time,
 // the tracking number) and leave.
 //
-// WHERE IT LIVES. Under the sitrep's board, on its own tray (MobileSitrepView's
-// `RecordsTray`). It had a tab of its own once; the tab bar's middle slot is
+// WHERE IT LIVES. Docked at the foot of the sitrep's board, opening over it
+// (MobileSitrepView's `QuickLookDock`). It had a tab of its own once; the tab bar's middle slot is
 // the calendar's now, for every mailbox, and a calendar is a place you live in
 // where records are a place you look one fact up.
 //

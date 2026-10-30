@@ -2,8 +2,8 @@
 // column: the hero states what needs you today, For-your-eyes ranks the standing
 // band, and the reading zone offers the rule-onboarding it always has.
 //
-// The Mac's other half, the pinned records rail, sits UNDER the board here, on
-// its own tray (Quick Look, `RecordsTray`): a phone has no room beside the
+// The Mac's other half, the pinned records rail, docks at the FOOT of the board
+// here (Quick Look, `QuickLookDock`): a phone has no room beside the
 // board, and the tab bar's middle slot is the calendar's. A fact you look up
 // can wait a flick of the thumb; what needs you cannot.
 //
@@ -46,6 +46,8 @@ struct MobileSitrepView: View {
     /// The login-codes push, owned by the shell so a notification tap can open
     /// it from any tab. Pushed from here.
     @Binding var showAuth: Bool
+    /// Quick Look is open over the board.
+    @State private var dockOpen = false
 
     /// ReadingZone takes a cursor because the Mac drives it with the
     /// keyboard. Nothing writes to this one — it is the shared component's
@@ -137,9 +139,24 @@ struct MobileSitrepView: View {
                     BoardFootnote(bannerShowing: bannerShowing)
                 }
                 .padding(.horizontal, 16)
-                .padding(.bottom, 24)
-                RecordsTray()
+                .padding(.bottom, 28)
             }
+        }
+        // QUICK LOOK, DOCKED: a strip at the foot of the board that stays out
+        // of the way, and opens over it when you go looking (QuickLookDock).
+        // The board keeps the strip's height free at its end, so its last
+        // card is never under it.
+        .safeAreaPadding(.bottom, QuickLookDock.peek)
+        .scrollBounceBehavior(.always)
+        .onScrollGeometryChange(for: CGFloat.self, of: QuickLookDock.pastTheEnd) { _, past in
+            // Scrolling on past the end of the board is the reach for it.
+            if !dockOpen, past > QuickLookDock.unlock {
+                Haptics.tick()
+                withAnimation(QuickLookDock.motion) { dockOpen = true }
+            }
+        }
+        .overlay(alignment: .bottom) {
+            QuickLookDock(open: $dockOpen)
         }
         .background(Palette.canvas)
         .task {
@@ -214,6 +231,13 @@ struct MobileSitrepView: View {
         #if DEBUG
             // A screenshot's way down to the records (`records-bottom`).
             .defaultScrollAnchor(FixtureStage.scene == "records-bottom" ? .bottom : nil)
+            // And Quick Look opened (`quicklook-open`).
+            .task {
+                if FixtureStage.scene == "quicklook-open" {
+                    try? await Task.sleep(for: .seconds(1))
+                    withAnimation(QuickLookDock.motion) { dockOpen = true }
+                }
+            }
         #endif
         .simultaneousGesture(accountSwipe)
         .refreshable { await RecordZones.refresh(store) }
@@ -495,35 +519,143 @@ private struct VisibleWarmKeeper: View {
     }
 }
 
-/// QUICK LOOK'S RECORDS, under the board.
-/// The surface sets them apart: the board's cards sit on the page; these sit
-/// on a tray a shade off it, rounded at the top and running to the bottom of
-/// the scroll, so the eye reads a second layer (the things kept for you) under
-/// the first (the things that need you). The tray says its own name, in the
-/// zone cards' title weight rather than the old serif masthead. An even fill,
-/// no edge stroke along one side.
-private struct RecordsTray: View {
+/// QUICK LOOK, DOCKED. The founder: "stay
+/// pinned to the bottom until you scroll down enough to unlock it, then it
+/// should zoom to cover the empty space. basically stay out of the way unless
+/// you want to see it."
+///
+/// So it has two states and nothing between them to manage:
+///   - DOCKED: a strip at the foot of the board, its name and what is in it
+///     ("3 packages, 3 receipts"), on the tray's own shade. The board scrolls
+///     above it; it never covers a card.
+///   - OPEN: the strip springs up over the whole board with the record cards
+///     in it. Scrolling on past the end of the board opens it (the reach for
+///     more), as do a tap or a drag up on the strip. A drag down on its top,
+///     or pulling down past the top of its cards, puts it back.
+struct QuickLookDock: View {
+    @Environment(AppStore.self) private var store
+    @Binding var open: Bool
+    @State private var drag: CGFloat = 0
+
+    /// The docked strip's height.
+    static let peek: CGFloat = 64
+    /// How far past the end of the board (or the top of the open cards) a
+    /// scroll must go to open (or close) it: far enough to be meant.
+    static let unlock: CGFloat = 70
+    static let motion = Animation.spring(response: 0.42, dampingFraction: 0.86)
+
+    /// How far a scroll view is pulled past its end, 0 when it is not.
+    static func pastTheEnd(_ g: ScrollGeometry) -> CGFloat {
+        let last = max(
+            g.contentSize.height + g.contentInsets.bottom - g.containerSize.height, -g.contentInsets.top)
+        return max(0, g.contentOffset.y - last)
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Quick Look")
-                .font(Typo.ui(20, weight: .semibold))
-                .foregroundStyle(Palette.ink)
-                .padding(.horizontal, 4)
-                .accessibilityAddTraits(.isHeader)
-            RecordZones()
+        GeometryReader { geo in
+            let full = geo.size.height
+            let height = open ? max(Self.peek, full - max(0, drag)) : min(full, Self.peek + max(0, -drag))
+            VStack(spacing: 0) {
+                header
+                if open {
+                    ScrollView {
+                        RecordZones()
+                            .padding(.horizontal, 16)
+                            .padding(.top, 4)
+                            .padding(.bottom, 28)
+                    }
+                    .onScrollGeometryChange(for: CGFloat.self) { g in
+                        // Pulled down past the top of the cards.
+                        -(g.contentOffset.y + g.contentInsets.top)
+                    } action: { _, pulled in
+                        if pulled > Self.unlock { close() }
+                    }
+                    .transition(.opacity)
+                    .refreshable { await RecordZones.refresh(store) }
+                }
+            }
+            .frame(width: geo.size.width, height: height, alignment: .top)
+            .background(
+                UnevenRoundedRectangle(
+                    topLeadingRadius: 28, bottomLeadingRadius: 0, bottomTrailingRadius: 0,
+                    topTrailingRadius: 28, style: .continuous)
+                    .fill(Palette.canvas)
+                    .overlay(
+                        UnevenRoundedRectangle(
+                            topLeadingRadius: 28, bottomLeadingRadius: 0, bottomTrailingRadius: 0,
+                            topTrailingRadius: 28, style: .continuous)
+                            .fill(Palette.hairline.opacity(0.45))
+                    )
+                    // A soft lift, even all round, so the strip reads as
+                    // resting over the board rather than cut into it.
+                    .shadow(color: .black.opacity(open ? 0.18 : 0.12), radius: 14, y: -2)
+                    // Past the bottom edge, so the tab bar's glass shows the
+                    // tray and not the board under it.
+                    .padding(.bottom, -200)
+            )
+            .frame(maxHeight: .infinity, alignment: .bottom)
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 20)
-        .padding(.bottom, 40)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            UnevenRoundedRectangle(
-                topLeadingRadius: 28, bottomLeadingRadius: 0, bottomTrailingRadius: 0,
-                topTrailingRadius: 28, style: .continuous)
-                .fill(Palette.hairline.opacity(0.45))
-                // Past the end of the scroll too, so a bounce never shows
-                // the page under the tray's foot.
-                .padding(.bottom, -600)
-        )
+        .task { await store.refreshZones() }
+    }
+
+    private var header: some View {
+        HStack(alignment: .center, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Quick Look")
+                    .font(Typo.ui(open ? 20 : 17, weight: .semibold))
+                    .foregroundStyle(Palette.ink)
+                if !open, let summary {
+                    Text(summary)
+                        .font(Typo.ui(12))
+                        .foregroundStyle(Palette.inkFaint)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 8)
+            Image(systemName: open ? "chevron.down" : "chevron.up")
+                .font(Typo.ui(14, weight: .semibold))
+                .foregroundStyle(Palette.inkFaint)
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, open ? 18 : 12)
+        .padding(.bottom, open ? 10 : 12)
+        .frame(height: open ? nil : Self.peek)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            Haptics.tick()
+            withAnimation(Self.motion) { open.toggle() }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 8)
+                .onChanged { value in drag = value.translation.height }
+                .onEnded { value in
+                    let dy = value.translation.height
+                    withAnimation(Self.motion) {
+                        drag = 0
+                        if !open, dy < -40 { open = true; Haptics.tick() }
+                        else if open, dy > 80 { open = false; Haptics.tick() }
+                    }
+                })
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityHint(open ? "Closes Quick Look" : "Opens Quick Look")
+    }
+
+    private func close() {
+        guard open else { return }
+        Haptics.tick()
+        withAnimation(Self.motion) { open = false }
+    }
+
+    /// What is inside, in a few words: "3 packages, 2 bills, 3 receipts".
+    private var summary: String? {
+        let parts: [(Int, String, String)] = [
+            (CalendarZone.rows(store, now: Date()).count, "calendar update", "calendar updates"),
+            (ShipmentsZone.rows(store).count, "package", "packages"),
+            (BankingZone.rows(store).count, "bill", "bills"),
+            (ReceiptsZone.rows(store).count, "receipt", "receipts"),
+        ]
+        let said = parts.filter { $0.0 > 0 }.map { "\($0.0) \($0.0 == 1 ? $0.1 : $0.2)" }
+        return said.isEmpty ? "Nothing kept right now" : said.joined(separator: ", ")
     }
 }

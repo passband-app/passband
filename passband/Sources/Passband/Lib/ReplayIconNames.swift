@@ -47,6 +47,7 @@ enum ReplayIconNames {
         "chevron.left",
         "chevron.left.forwardslash.chevron.right",
         "chevron.right",
+        "chevron.up",
         "circle.dashed",
         "circle.dotted",
         "clock",

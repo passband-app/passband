@@ -52,6 +52,9 @@ const ALERT_BODY: &str = "New mail surfaced";
 /// asked them to look at it. Just as content-free; it names no draft and no
 /// recipient, only which of two fixed lines the phone falls back to.
 const DRAFT_ALERT_BODY: &str = "A draft is waiting for your review";
+/// The fallback for a `kind: "calendar"` push: a reminder before an event on
+/// the owner's calendar. It names no event, no time and no place.
+const CALENDAR_ALERT_BODY: &str = "An event is coming up";
 
 /// Open-token bounds. The alphabet is URL-safe base64 without padding, so a
 /// token can neither reshape the path it arrives on nor smuggle anything into
@@ -114,8 +117,9 @@ pub struct PushRequest {
     #[serde(default)]
     pub environment: Option<String>,
     /// Which fixed fallback line the alert carries: absent for mail, `"draft"`
-    /// for an agent's draft awaiting review. A closed set, so a daemon can
-    /// pick a line but never write one.
+    /// for an agent's draft awaiting review, `"calendar"` for a reminder
+    /// before an event. A closed set, so a daemon can pick a line but never
+    /// write one.
     #[serde(default)]
     pub kind: Option<String>,
 }
@@ -403,7 +407,12 @@ fn validate(state: &RelayState, req: PushRequest) -> Result<Validated, RelayErro
     let body = match req.kind.as_deref() {
         None => ALERT_BODY,
         Some("draft") => DRAFT_ALERT_BODY,
-        Some(_) => return Err(RelayError::bad_request("kind must be absent or `draft`")),
+        Some("calendar") => CALENDAR_ALERT_BODY,
+        Some(_) => {
+            return Err(RelayError::bad_request(
+                "kind must be absent, `draft` or `calendar`",
+            ));
+        }
     };
 
     // Content-free by design: an opaque id plus a generic alert.
@@ -585,8 +594,27 @@ mod tests {
     }
 
     #[test]
+    fn a_calendar_push_falls_back_to_its_own_fixed_line() {
+        let mut req = base(json!([hex(64)]));
+        req["kind"] = json!("calendar");
+        req["event_id"] = json!("acct:cal:7:1793210000");
+        let v = parse(req).unwrap();
+        let p: serde_json::Value = serde_json::from_slice(&v.payload).unwrap();
+        assert_eq!(p["aps"]["alert"]["title"], "Passband");
+        assert_eq!(p["aps"]["alert"]["body"], "An event is coming up");
+        assert_eq!(p["aps"]["mutable-content"], 1);
+        assert_eq!(p["event_id"], "acct:cal:7:1793210000");
+        assert!(p.get("kind").is_none());
+    }
+
+    #[test]
     fn an_unknown_kind_is_refused_rather_than_written() {
-        for bad in [json!("Your bank wants $5000"), json!(""), json!(1)] {
+        for bad in [
+            json!("Your bank wants $5000"),
+            json!(""),
+            json!(1),
+            json!("Calendar"),
+        ] {
             let mut req = base(json!([hex(64)]));
             req["kind"] = bad.clone();
             assert!(parse(req).is_err(), "kind {bad} should be rejected");

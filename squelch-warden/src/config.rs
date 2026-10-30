@@ -116,14 +116,52 @@ pub const DEFAULT_CPU_LIMIT: &str = "1000m";
 /// a feeling. The limit stays at 1Gi: that one is the ceiling, this one is the
 /// promise, and they answer different questions.
 ///
-/// Inert in production on its own. `deploy/hosted/15-warden-config.yaml`
-/// restates every bound as an env entry and an env entry outranks this
-/// constant, so a change here that is not made there ships nothing.
+/// LIVE in production, unlike most defaults here. `deploy/hosted/15-warden-config.yaml`
+/// restates nearly every bound as an env entry, which would outrank this
+/// constant, but deliberately not this one, the memory limit or the CPU
+/// request: their default depends on [`Config::embed_url`]
+/// ([`DEFAULT_REMOTE_EMBED_MEMORY_REQUEST`]), and an entry there would pin it
+/// in both states. So a change here IS a change to every hosted tenant, on the
+/// next roll, and `deploy/hosted/70-tenant-limits.yaml` has to move with it.
 pub const DEFAULT_MEMORY_REQUEST: &str = "384Mi";
 
 /// A tenant daemon's memory ceiling. Past this the container is OOM-killed and
 /// restarted, which is one tenant down rather than the node down.
 pub const DEFAULT_MEMORY_LIMIT: &str = "1Gi";
+
+/// A tenant daemon's memory floor when it embeds through the shared service
+/// ([`Config::embed_url`] set): the same promise as [`DEFAULT_MEMORY_REQUEST`],
+/// about a different process.
+///
+/// Everything [`DEFAULT_MEMORY_REQUEST`] pays for is the ONNX session, and a
+/// daemon pointed at the shared service never builds one. What is left is the
+/// Rust side, 25-40 MB in every reading of the August audit (one process
+/// walked from boot rested at ~25 MB before its first embed and ~40 MB after
+/// the session was dropped and trimmed), plus about 30 MB of the binary's own
+/// file-backed pages, which the working-set metric counts: roughly 40-80 MB for
+/// a pod without ORT (`docs/EMBED-SERVICE.md` §1). 128Mi is that with headroom
+/// for SQLite's page cache and a sync in flight, and it is still a measurement
+/// to redo off a week of `container_memory_working_set_bytes` once the fleet
+/// has run on the service, exactly as the 384Mi comment says of itself.
+///
+/// A DEFAULT, and only while the knob is set: an explicit
+/// `SQUELCH_WARDEN_MEMORY_REQUEST` wins either way, so an operator who sized
+/// the fleet by hand keeps their number.
+pub const DEFAULT_REMOTE_EMBED_MEMORY_REQUEST: &str = "128Mi";
+
+/// A tenant daemon's memory ceiling with the shared embedder. Not the steady
+/// state but a burst: a large message parsed whole, an archive walk, a backfill
+/// page held while its texts are posted out. Half of [`DEFAULT_MEMORY_LIMIT`],
+/// because the half that limit was sized for was the ORT arena's high-water
+/// mark (~520 MB after one backfill pass), which this pod no longer has.
+pub const DEFAULT_REMOTE_EMBED_MEMORY_LIMIT: &str = "512Mi";
+
+/// A tenant daemon's CPU floor with the shared embedder. The 100m of
+/// [`DEFAULT_CPU_REQUEST`] reserved room for embedding batches on the pod's own
+/// cores; those run in the shared service now, which carries its own request,
+/// and an idle mailbox is a poll loop. The ceiling stays at
+/// [`DEFAULT_CPU_LIMIT`]: a sync burst still gets a core.
+pub const DEFAULT_REMOTE_EMBED_CPU_REQUEST: &str = "40m";
 
 /// Ephemeral-storage floor for a tenant daemon: `/tmp` plus its own logs. The
 /// mailbox lives on a PersistentVolume and does not count against this.
@@ -382,6 +420,26 @@ pub struct Config {
     /// unless the warden renders it. `0` pins the session in memory, which is
     /// the off switch if the reaper ever misbehaves in production.
     pub embed_idle_unload_secs: Option<u64>,
+    /// The shared embedding service every tenant daemon posts its texts to,
+    /// from `SQUELCH_WARDEN_EMBED_URL`, handed on as `SQUELCH_EMBED_URL`
+    /// (`deploy/hosted/65-embed.yaml`, `docs/EMBED-SERVICE.md`).
+    ///
+    /// UNSET MEANS LOCAL EMBEDDING, which is today's behaviour and the
+    /// self-host answer, and the render is byte-identical to a warden that
+    /// never heard of the service: no `SQUELCH_EMBED_*` variable, no extra
+    /// egress rule, the model PVC mounted as before, the 384Mi shape.
+    ///
+    /// Set, it changes four things about every tenant, all from this one value
+    /// so they cannot come apart: the two env vars (the URL and an optional
+    /// reference to the fleet token Secret), one egress rule to the service's
+    /// pods on its port, no model volume (a daemon that builds no session has
+    /// nothing to seed), and a lighter DEFAULT shape
+    /// ([`DEFAULT_REMOTE_EMBED_MEMORY_REQUEST`] and its two siblings).
+    ///
+    /// Always `http://<in-cluster Service>:8850`; see `canonical_embed_url` for
+    /// why plain http is allowed here when every other URL this warden hands a
+    /// tenant must be https.
+    pub embed_url: Option<String>,
     /// The OAuth authorization server tenant daemons trust for the AGENT door,
     /// from `SQUELCH_WARDEN_MCP_OAUTH_ISSUER`. Absent, the agent door stays
     /// unpublished and the render is byte-identical to a warden that never
@@ -476,6 +534,7 @@ impl std::fmt::Debug for Config {
             .field("llm_stage1_daily_cap", &self.llm_stage1_daily_cap)
             .field("llm_stage2_daily_cap", &self.llm_stage2_daily_cap)
             .field("embed_idle_unload_secs", &self.embed_idle_unload_secs)
+            .field("embed_url", &self.embed_url)
             .field("mcp_oauth_issuer", &self.mcp_oauth_issuer)
             // The relay bearer is not a field at all: the warden holds only the
             // Secret's NAME, and the kubelet resolves the value into the pod.
@@ -818,6 +877,57 @@ impl Config {
             }
         };
 
+        // Read ahead of the struct below because two other values depend on
+        // it: the embed URL has to name a Service in THIS namespace, and the
+        // default tenant shape depends on whether the URL is set.
+        let namespace = name_var(
+            get,
+            "SQUELCH_WARDEN_TENANT_NAMESPACE",
+            DEFAULT_TENANT_NAMESPACE,
+        )?;
+        let embed_url = match var(get, "SQUELCH_WARDEN_EMBED_URL") {
+            None => None,
+            Some(raw) => Some(canonical_embed_url(&raw, &namespace)?),
+        };
+        let embed_model = env_value_var(get, "SQUELCH_WARDEN_EMBED_MODEL")?;
+        // With the shared embedder, the model is the service's, not a choice.
+        // A daemon pinned to anything else refuses to build its embedder and
+        // runs keyword-only, every tenant at once; refuse here, where one
+        // operator sees it, rather than there, in every pod's log. Compared
+        // as written: the daemon accepts aliases, but the fleet's pin should
+        // name the one model code the service runs.
+        if embed_url.is_some()
+            && let Some(model) = &embed_model
+            && model != squelch_embed::protocol::MODEL_CODE
+        {
+            return Err(ConfigError::invalid(format!(
+                "SQUELCH_WARDEN_EMBED_MODEL `{model}` is not the shared embedder's model `{}`, \
+                 and SQUELCH_WARDEN_EMBED_URL is set: every tenant would refuse the service. \
+                 Unset SQUELCH_WARDEN_EMBED_MODEL or set it to `{}`",
+                squelch_embed::protocol::MODEL_CODE,
+                squelch_embed::protocol::MODEL_CODE
+            )));
+        }
+        // The DEFAULT shape follows the embedder. A daemon that posts its texts
+        // to the shared service has no ONNX session to rest at 384Mi with, so
+        // the constants that describe it are the lighter ones; an explicit
+        // value for any one knob still wins, knob by knob, so an operator who
+        // pinned a number keeps it whichever way the embedder goes.
+        let (cpu_request_default, memory_request_default, memory_limit_default) =
+            if embed_url.is_some() {
+                (
+                    DEFAULT_REMOTE_EMBED_CPU_REQUEST,
+                    DEFAULT_REMOTE_EMBED_MEMORY_REQUEST,
+                    DEFAULT_REMOTE_EMBED_MEMORY_LIMIT,
+                )
+            } else {
+                (
+                    DEFAULT_CPU_REQUEST,
+                    DEFAULT_MEMORY_REQUEST,
+                    DEFAULT_MEMORY_LIMIT,
+                )
+            };
+
         let mcp_oauth_issuer = match var(get, "SQUELCH_WARDEN_MCP_OAUTH_ISSUER") {
             None => None,
             Some(raw) => Some(canonical_mcp_oauth_issuer(&raw)?),
@@ -840,11 +950,7 @@ impl Config {
             token,
             base_domain,
             image,
-            namespace: name_var(
-                get,
-                "SQUELCH_WARDEN_TENANT_NAMESPACE",
-                DEFAULT_TENANT_NAMESPACE,
-            )?,
+            namespace,
             ingress_namespace: name_var(
                 get,
                 "SQUELCH_WARDEN_INGRESS_NAMESPACE",
@@ -862,17 +968,17 @@ impl Config {
             storage_class: name_var(get, "SQUELCH_WARDEN_STORAGE_CLASS", DEFAULT_STORAGE_CLASS)?,
             storage_size: quantity_var(get, "SQUELCH_WARDEN_STORAGE_SIZE", DEFAULT_STORAGE_SIZE)?,
             daemon_resources: Resources {
-                cpu_request: quantity_var(get, "SQUELCH_WARDEN_CPU_REQUEST", DEFAULT_CPU_REQUEST)?,
+                cpu_request: quantity_var(get, "SQUELCH_WARDEN_CPU_REQUEST", cpu_request_default)?,
                 cpu_limit: quantity_var(get, "SQUELCH_WARDEN_CPU_LIMIT", DEFAULT_CPU_LIMIT)?,
                 memory_request: quantity_var(
                     get,
                     "SQUELCH_WARDEN_MEMORY_REQUEST",
-                    DEFAULT_MEMORY_REQUEST,
+                    memory_request_default,
                 )?,
                 memory_limit: quantity_var(
                     get,
                     "SQUELCH_WARDEN_MEMORY_LIMIT",
-                    DEFAULT_MEMORY_LIMIT,
+                    memory_limit_default,
                 )?,
                 ephemeral_request: quantity_var(
                     get,
@@ -889,7 +995,7 @@ impl Config {
             pull_secret: optional_name_var(get, "SQUELCH_WARDEN_IMAGE_PULL_SECRET")?,
             user_namespaces,
             model_pvc: optional_name_var(get, "SQUELCH_WARDEN_MODEL_PVC")?,
-            embed_model: env_value_var(get, "SQUELCH_WARDEN_EMBED_MODEL")?,
+            embed_model,
             node_cidr,
             http_readiness,
             run_as,
@@ -903,6 +1009,7 @@ impl Config {
             llm_stage1_daily_cap,
             llm_stage2_daily_cap,
             embed_idle_unload_secs,
+            embed_url,
             mcp_oauth_issuer,
             relay_url,
             relay_secret_name: name_var(
@@ -1119,6 +1226,120 @@ fn canonical_https_url(raw: &str, name: &str, why: &str) -> Result<String, Confi
     Ok(url.to_string())
 }
 
+/// Validate the shared embedding service's URL: `http://`, a Service in the
+/// tenant namespace, the service's port, and nothing else.
+///
+/// THE MIRROR IMAGE OF [`canonical_https_url`], and the reason is where the
+/// other end is. The LLM gateway and the relay are remote, so their URLs must
+/// be https: a bearer crossing the internet in the clear is a leak. This one is
+/// the opposite case, and the checks are the opposite way round:
+///
+/// - **http, and only http.** The service speaks plain HTTP on the pod network
+///   and nothing else (`docs/EMBED-SERVICE.md` §4, "TLS: no"): the traffic
+///   never leaves the node, and the only observer of it would already hold the
+///   node's network namespace and could read every tenant's SQLite file
+///   directly. http is allowed BECAUSE the destination is in-cluster, so the
+///   host check below is what makes the scheme safe. https is refused rather
+///   than tolerated, because nothing answers TLS on that port and every
+///   tenant's every embed would fail the handshake.
+/// - **an in-cluster host, and nothing that could be anywhere else.** A single
+///   label (`squelch-embed`, which the pod's DNS search path resolves in its own
+///   namespace), or `<name>.<namespace>.svc` / `.svc.cluster.local` with the
+///   namespace this warden renders tenants into. Every tenant's mail text is
+///   posted here, so a public hostname is refused outright: with http that
+///   would be mail in the clear across the internet, and https would not make
+///   a host we do not run a place mail should go. IP literals are refused too:
+///   a ClusterIP is not stable across a Service re-create, and the egress rule
+///   the warden renders selects the service's PODS, so the address a policy
+///   can see is never the one a literal names. Another namespace is refused for
+///   the same rule's reason: it is a pod selector with no namespace selector,
+///   which reaches this namespace only.
+/// - **the port, explicitly, and only [`squelch_embed::protocol::PORT`].** A URL
+///   with no port is port 80, which the Service does not publish, and the
+///   egress rule opens this one port; either way the failure is every tenant
+///   silently falling back to keyword search.
+/// - **no userinfo, path, query or fragment.** The token is a Secret reference
+///   (`SQUELCH_EMBED_TOKEN`), never part of a URL in a pod spec; the daemon
+///   appends `/embed` and `/healthz` to the base, which the service serves at
+///   its root, so a path is every call a 404, and a query or fragment would
+///   swallow the route.
+///
+/// Whitespace and one trailing `/` are trimmed and the rest is kept verbatim.
+fn canonical_embed_url(raw: &str, namespace: &str) -> Result<String, ConfigError> {
+    const NAME: &str = "SQUELCH_WARDEN_EMBED_URL";
+    let port = squelch_embed::protocol::PORT;
+    let example = format!("e.g. http://squelch-embed:{port}");
+    let url = raw.trim();
+    let url = url.strip_suffix('/').unwrap_or(url);
+    if url.len() > 512 {
+        return Err(ConfigError::invalid(format!(
+            "{NAME} is longer than 512 characters"
+        )));
+    }
+    let Some(authority) = url.strip_prefix("http://") else {
+        return Err(ConfigError::invalid(format!(
+            "{NAME} must be an http:// URL ({example}): the embedding service speaks plain HTTP \
+             on the pod network, which is safe only because it is in-cluster, and answers no TLS"
+        )));
+    };
+    if authority.contains('@') {
+        return Err(ConfigError::invalid(format!(
+            "{NAME} must not carry userinfo; the service's token reaches tenants from the \
+             squelch-embed-token Secret, never inside a URL"
+        )));
+    }
+    if authority.contains(['/', '?', '#']) {
+        return Err(ConfigError::invalid(format!(
+            "{NAME} must be a base URL with no path, query or fragment ({example}): the daemon \
+             appends /embed and /healthz itself, and the service serves them at its root"
+        )));
+    }
+    let Some((host, given_port)) = authority.rsplit_once(':') else {
+        return Err(ConfigError::invalid(format!(
+            "{NAME} must name the service's port ({example}): without one it is port 80, which \
+             the Service does not publish and no tenant may reach"
+        )));
+    };
+    if given_port != port.to_string() {
+        return Err(ConfigError::invalid(format!(
+            "{NAME} must use port {port}, the embedding service's port and the only one the \
+             tenant egress rule opens ({example})"
+        )));
+    }
+    if host.parse::<IpAddr>().is_ok() || host.starts_with('[') {
+        return Err(ConfigError::invalid(format!(
+            "{NAME} must name the Service, not an IP address ({example}): a ClusterIP changes \
+             when the Service is re-created, and the tenant egress rule selects the service's \
+             pods, not an address"
+        )));
+    }
+    // A Kubernetes Service name is a DNS-1035 label: lowercase, starting with
+    // a letter. That also rules out every all-digit label a URL parser would
+    // read as an IPv4 number.
+    let service_label = |label: &str| {
+        is_dns_label(label)
+            && label.len() <= 63
+            && label.starts_with(|c: char| c.is_ascii_lowercase())
+    };
+    let labels: Vec<&str> = host.split('.').collect();
+    let in_cluster = match labels.as_slice() {
+        [service] => service_label(service),
+        [service, ns, "svc"] | [service, ns, "svc", "cluster", "local"] => {
+            service_label(service) && *ns == namespace
+        }
+        _ => false,
+    };
+    if !in_cluster {
+        return Err(ConfigError::invalid(format!(
+            "{NAME} must name a Service in the `{namespace}` namespace: `<name>`, \
+             `<name>.{namespace}.svc` or `<name>.{namespace}.svc.cluster.local` ({example}). \
+             Every tenant's mail text is posted to it over plain http, so a public host is \
+             refused, and the tenant egress rule reaches this namespace only"
+        )));
+    }
+    Ok(url.to_string())
+}
+
 /// Validate the agent door's OAuth issuer: `https://`, a host, and NOTHING
 /// else, not even a port.
 ///
@@ -1321,6 +1542,8 @@ mod tests {
         assert!(c.relay_url.is_none());
         assert!(c.relay_topic.is_none());
         assert_eq!(c.relay_secret_name, "apns-relay");
+        // Local embedding unless the operator points the fleet at the service.
+        assert!(c.embed_url.is_none());
     }
 
     /// The boot-refusal table. Every one of these is a value that would
@@ -1846,6 +2069,178 @@ mod tests {
 
     /// The embedding pin, which is NOT part of the LLM block and needs no
     /// gateway: it is a fastembed model name, not a call to anybody.
+    /// The shared embedder's URL: plain http to a Service in the tenant
+    /// namespace on the service's port, and nothing else. Each refusal is a
+    /// URL that boots a fleet whose every embed silently fails, or that posts
+    /// mail text somewhere it must never go.
+    #[test]
+    fn the_embed_url_is_plain_http_to_an_in_cluster_service_or_nothing() {
+        for (raw, want) in [
+            ("http://squelch-embed:8850", "http://squelch-embed:8850"),
+            // Trimmed, one trailing slash and the whitespace an editor leaves.
+            (
+                "  http://squelch-embed:8850/\n",
+                "http://squelch-embed:8850",
+            ),
+            (
+                "http://squelch-embed.tenants.svc:8850",
+                "http://squelch-embed.tenants.svc:8850",
+            ),
+            (
+                "http://squelch-embed.tenants.svc.cluster.local:8850",
+                "http://squelch-embed.tenants.svc.cluster.local:8850",
+            ),
+            ("http://embed2:8850", "http://embed2:8850"),
+        ] {
+            let c = with("SQUELCH_WARDEN_EMBED_URL", raw)
+                .unwrap_or_else(|e| panic!("`{raw}` was refused: {e}"));
+            assert_eq!(c.embed_url.as_deref(), Some(want), "{raw}");
+        }
+
+        for (raw, why) in [
+            // TLS: nothing answers it, so every handshake fails.
+            ("https://squelch-embed:8850", "http://"),
+            ("squelch-embed:8850", "http://"),
+            ("ftp://squelch-embed:8850", "http://"),
+            // No port is port 80, which the Service does not publish.
+            ("http://squelch-embed", "port"),
+            ("http://squelch-embed:80", "port 8850"),
+            ("http://squelch-embed:08850", "port 8850"),
+            ("http://squelch-embed:", "port 8850"),
+            // Public hosts: mail text in the clear across the internet.
+            ("http://embed.passband.app:8850", "namespace"),
+            ("http://squelch-embed.example.com:8850", "namespace"),
+            ("http://squelch-embed.svc:8850", "namespace"),
+            ("http://squelch-embed.tenants:8850", "namespace"),
+            (
+                "http://squelch-embed.tenants.svc.cluster.local.evil.example:8850",
+                "namespace",
+            ),
+            // Another namespace: the egress rule reaches this one only.
+            ("http://squelch-embed.monitoring.svc:8850", "namespace"),
+            (
+                "http://squelch-embed.monitoring.svc.cluster.local:8850",
+                "namespace",
+            ),
+            // IP literals, a ClusterIP included.
+            ("http://10.43.12.7:8850", "IP address"),
+            ("http://127.0.0.1:8850", "IP address"),
+            ("http://[::1]:8850", "IP address"),
+            // A bare number is an IPv4 address to a URL parser.
+            ("http://167772161:8850", "namespace"),
+            // Not a Service name: capitals, a leading digit or hyphen.
+            ("http://Squelch-Embed:8850", "namespace"),
+            ("http://1embed:8850", "namespace"),
+            ("http://-embed:8850", "namespace"),
+            ("http://:8850", "namespace"),
+            // The trailing-slash trim leaves `http:/`, which is no scheme.
+            ("http://", "http://"),
+            // Userinfo, a path, a query, a fragment.
+            ("http://user:pw@squelch-embed:8850", "userinfo"),
+            ("http://evil@squelch-embed:8850", "userinfo"),
+            ("http://squelch-embed:8850/v1", "no path"),
+            ("http://squelch-embed:8850/embed", "no path"),
+            ("http://squelch-embed:8850?x=1", "no path"),
+            ("http://squelch-embed:8850#x", "no path"),
+        ] {
+            let err = with("SQUELCH_WARDEN_EMBED_URL", raw)
+                .err()
+                .unwrap_or_else(|| panic!("`{raw}` was accepted"))
+                .to_string();
+            assert!(err.starts_with("SQUELCH_WARDEN_EMBED_URL"), "{raw}: {err}");
+            assert!(err.contains(why), "{raw}: `{err}` does not say `{why}`");
+        }
+
+        // The namespace is the one the warden renders into, not a constant.
+        let mut vars = required();
+        vars.insert(
+            "SQUELCH_WARDEN_TENANT_NAMESPACE".to_string(),
+            "mail".to_string(),
+        );
+        vars.insert(
+            "SQUELCH_WARDEN_EMBED_URL".to_string(),
+            "http://squelch-embed.mail.svc:8850".to_string(),
+        );
+        assert!(load(&vars).is_ok());
+        vars.insert(
+            "SQUELCH_WARDEN_EMBED_URL".to_string(),
+            "http://squelch-embed.tenants.svc:8850".to_string(),
+        );
+        assert!(load(&vars).is_err());
+
+        // Blank is unset, like every other optional knob.
+        assert!(
+            with("SQUELCH_WARDEN_EMBED_URL", "  ")
+                .unwrap()
+                .embed_url
+                .is_none()
+        );
+    }
+
+    /// The default tenant shape follows the embedder, and an explicit value
+    /// always beats either default, knob by knob.
+    #[test]
+    fn the_shared_embedder_lightens_the_default_shape_and_never_an_explicit_one() {
+        const URL: &str = "http://squelch-embed:8850";
+
+        // Unset: the in-process shape, exactly as before.
+        let local = load(&required()).unwrap().daemon_resources;
+        assert_eq!(local.cpu_request, "100m");
+        assert_eq!(local.memory_request, "384Mi");
+        assert_eq!(local.memory_limit, "1Gi");
+
+        // Set: the three that the ONNX session paid for drop; the rest do not
+        // move, because nothing about them was the session's.
+        let remote = with("SQUELCH_WARDEN_EMBED_URL", URL)
+            .unwrap()
+            .daemon_resources;
+        assert_eq!(
+            remote,
+            Resources {
+                cpu_request: "40m".to_string(),
+                memory_request: "128Mi".to_string(),
+                memory_limit: "512Mi".to_string(),
+                ..local.clone()
+            }
+        );
+        assert_eq!(remote.cpu_limit, "1000m");
+        assert_eq!(remote.ephemeral_request, "256Mi");
+        assert_eq!(remote.ephemeral_limit, "1Gi");
+
+        // Set, with each knob pinned on its own: that knob keeps the pinned
+        // value and the other two still take the lighter default.
+        for (knob, value) in [
+            ("SQUELCH_WARDEN_CPU_REQUEST", "100m"),
+            ("SQUELCH_WARDEN_MEMORY_REQUEST", "384Mi"),
+            ("SQUELCH_WARDEN_MEMORY_LIMIT", "1Gi"),
+        ] {
+            let mut vars = required();
+            vars.insert("SQUELCH_WARDEN_EMBED_URL".to_string(), URL.to_string());
+            vars.insert(knob.to_string(), value.to_string());
+            let r = load(&vars).unwrap().daemon_resources;
+            let got = [
+                ("SQUELCH_WARDEN_CPU_REQUEST", &r.cpu_request, "40m"),
+                ("SQUELCH_WARDEN_MEMORY_REQUEST", &r.memory_request, "128Mi"),
+                ("SQUELCH_WARDEN_MEMORY_LIMIT", &r.memory_limit, "512Mi"),
+            ];
+            for (name, actual, lighter) in got {
+                let want = if name == knob { value } else { lighter };
+                assert_eq!(actual, want, "{knob}={value}: {name}");
+            }
+        }
+
+        // And an explicit value that happens to equal the lighter default is
+        // still an explicit value with the knob unset.
+        let mut vars = required();
+        vars.insert(
+            "SQUELCH_WARDEN_MEMORY_REQUEST".to_string(),
+            "128Mi".to_string(),
+        );
+        let r = load(&vars).unwrap().daemon_resources;
+        assert_eq!(r.memory_request, "128Mi");
+        assert_eq!(r.memory_limit, "1Gi");
+    }
+
     #[test]
     fn the_embedding_model_is_optional_and_stands_alone() {
         let mut vars = required();
@@ -1864,6 +2259,41 @@ mod tests {
             "bge small".to_string(),
         );
         assert!(load(&vars).is_err());
+    }
+
+    /// With the shared embedder, the fleet's model pin must be the
+    /// service's model: anything else would have every tenant refuse it.
+    #[test]
+    fn the_embedding_model_must_be_the_services_when_the_url_is_set() {
+        let mut vars = required();
+        vars.insert(
+            "SQUELCH_WARDEN_EMBED_URL".to_string(),
+            "http://squelch-embed:8850".to_string(),
+        );
+        vars.insert(
+            "SQUELCH_WARDEN_EMBED_MODEL".to_string(),
+            "Qdrant/bge-small-en-v1.5-onnx-Q".to_string(),
+        );
+        let err = load(&vars).unwrap_err().to_string();
+        assert!(err.contains("SQUELCH_WARDEN_EMBED_MODEL"), "{err}");
+        assert!(err.contains(squelch_embed::protocol::MODEL_CODE), "{err}");
+
+        // The service's own code, or no pin at all, is fine.
+        vars.insert(
+            "SQUELCH_WARDEN_EMBED_MODEL".to_string(),
+            squelch_embed::protocol::MODEL_CODE.to_string(),
+        );
+        assert!(load(&vars).is_ok());
+        vars.remove("SQUELCH_WARDEN_EMBED_MODEL");
+        assert!(load(&vars).is_ok());
+
+        // Without the URL the pin is the daemon's own business, as before.
+        let mut vars = required();
+        vars.insert(
+            "SQUELCH_WARDEN_EMBED_MODEL".to_string(),
+            "Qdrant/bge-small-en-v1.5-onnx-Q".to_string(),
+        );
+        assert!(load(&vars).is_ok());
     }
 
     /// The token is the one value that must never appear in a diagnostic, and

@@ -398,8 +398,33 @@ struct ClientMessage: Codable, Sendable, Identifiable, Hashable, SenderStringCon
     /// shape (a bare string, an array) reads as no translation at all, rather
     /// than failing the whole message.
     @LenientOptional var translation: ClientTranslation? = nil
+    /// WHERE THE FROM LINE AND THE REAL SENDER DISAGREE (issue #639): who sent
+    /// it on someone's behalf, the service it came through, where replies go,
+    /// an address hiding in the display name. ABSENT on an older daemon, on
+    /// mail nobody has read the headers of, and when nothing disagreed, and all
+    /// of those draw nothing. LENIENT for the same reason `translation` is: the
+    /// notification extension decodes this type and must never fail a push
+    /// over a line it does not draw.
+    @LenientOptional var sender_signals: SenderSignals? = nil
+    /// The daemon's call on whether `sender_signals` is a WARNING (a name
+    /// claim, or replies routed elsewhere by someone who is not a trusted
+    /// contact). ABSENT on a daemon that predates it, which falls back to the
+    /// local rule in `senderLine`.
+    var sender_signals_warn: Bool?
 
     var attachmentList: [Attachment] { attachments ?? [] }
+
+    /// The lines the reader draws under the From line, or nil for none. The
+    /// daemon decides warning versus quiet (`sender_signals_warn`); an older
+    /// daemon that does not say falls back to "anyone it has not vouched for
+    /// is a stranger", which errs toward warning.
+    var senderLine: SenderSignals.Line? {
+        guard let line = sender_signals?.line(senderKnown: sender_known ?? false) else {
+            return nil
+        }
+        guard let warn = sender_signals_warn else { return line }
+        return SenderSignals.Line(parts: line.parts, warning: warn)
+    }
 
     /// The translation the reader may show INSTEAD of the original: one that
     /// has finished and actually carries a body. A pending or deferred one
@@ -449,6 +474,100 @@ struct ClientMessage: Codable, Sendable, Identifiable, Hashable, SenderStringCon
     /// and a mark on every message from a known contact answers nothing.
     var needsAttention: Bool {
         (attention_open ?? false) && (tier == .pastDue || tier == .deadline)
+    }
+}
+
+/// core::types::SenderSignals: header facts about where From and the real
+/// sender disagree. Every field optional; an unknown one is ignored.
+struct SenderSignals: Codable, Sendable, Hashable {
+    /// The `Sender:` mailbox, when it is someone other than From.
+    var sender: String?
+    /// The domain the mail provider verified a signature for, when nothing
+    /// from the From domain was: a mail service's "via".
+    var via: String?
+    /// A reply address at another organization (never set for lists).
+    var reply_to: String?
+    /// The bounce domain. For triage; the reader does not draw it.
+    var envelope_domain: String?
+    /// An address written inside the display name that is not the real one.
+    var name_spoof: String?
+
+    init(
+        sender: String? = nil, via: String? = nil, reply_to: String? = nil,
+        envelope_domain: String? = nil, name_spoof: String? = nil
+    ) {
+        self.sender = sender
+        self.via = via
+        self.reply_to = reply_to
+        self.envelope_domain = envelope_domain
+        self.name_spoof = name_spoof
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sender, via, reply_to, envelope_domain, name_spoof
+    }
+
+    /// FIELD BY FIELD, like `ClientTranslation`: one mistyped value (a number,
+    /// a future array) costs that value, never the name-claim warning beside
+    /// it.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func field(_ k: CodingKeys) -> String? { (try? c.decodeIfPresent(String.self, forKey: k)) ?? nil }
+        sender = field(.sender)
+        via = field(.via)
+        reply_to = field(.reply_to)
+        envelope_domain = field(.envelope_domain)
+        name_spoof = field(.name_spoof)
+    }
+
+    /// One row per signal, and whether they are drawn as a warning. `text`
+    /// joins them for the tooltip and VoiceOver.
+    struct Line: Equatable, Sendable {
+        let parts: [String]
+        let warning: Bool
+        var text: String { parts.joined(separator: " · ") }
+    }
+
+    /// A value safe to draw: bidi overrides and zero-width characters
+    /// removed (an attacker's display name must not reorder the rest of the
+    /// line), control characters dropped, and capped at an address's length.
+    static func clean(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let scalars = raw.unicodeScalars.filter { s in
+            switch s.value {
+            case 0x00AD, 0x200B...0x200F, 0x202A...0x202E, 0x2060...0x2064,
+                 0x2066...0x2069, 0xFEFF:
+                return false
+            default:
+                return !CharacterSet.controlCharacters.contains(s)
+            }
+        }
+        let cleaned = String(String.UnicodeScalarView(scalars))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return nil }
+        return cleaned.count > 254 ? String(cleaned.prefix(254)) + "…" : cleaned
+    }
+
+    /// What the reader says, most alarming first, or nil when there is
+    /// nothing to say. Only two things are WARNINGS: an address in the name
+    /// that is not the sender's, and replies routed to another organization
+    /// by someone the owner has never written to. "via" and "sent by" are
+    /// how mail services and assistants work, so they stay quiet.
+    func line(senderKnown: Bool) -> Line? {
+        var parts: [String] = []
+        var warning = false
+        if let spoof = Self.clean(name_spoof) {
+            parts.append("Name claims \(spoof)")
+            warning = true
+        }
+        if let replyTo = Self.clean(reply_to) {
+            parts.append("Replies go to \(replyTo)")
+            if !senderKnown { warning = true }
+        }
+        if let sender = Self.clean(sender) { parts.append("Sent by \(sender)") }
+        if let via = Self.clean(via) { parts.append("via \(via)") }
+        guard !parts.isEmpty else { return nil }
+        return Line(parts: parts, warning: warning)
     }
 }
 
@@ -1412,10 +1531,6 @@ struct StoreStats: Codable, Sendable, Hashable {
     /// rather than offered as a 404 on the click. See
     /// `AppStore.scheduledSendAvailable`.
     var scheduled_send: Bool?
-    /// Whether `GET /client/timeline` and `PATCH /client/timeline/ghosts/{id}`
-    /// exist. ABSENT on an older daemon, which 404s both, and absence reads as
-    /// no: the calendar page is not offered at all (`AppStore.calendarPageAvailable`).
-    var timeline: Bool?
     /// Whether this mailbox has granted Google Calendar, and how to grant it.
     /// ABSENT on a daemon too old to have the grant path, and absence reads as
     /// "do not know", never as "not granted": with no way to connect there is
@@ -1705,6 +1820,10 @@ struct TimelineGhost: Codable, Sendable, Hashable, Identifiable {
     var sources: [GhostSource]
     /// Slice B. Absent until the daemon syncs real events.
     var matched_event: GhostMatchedEvent?
+    /// What the card's Tickets button opens (docs/CALENDAR.md, "The Tickets
+    /// button"). LENIENT: absent on an older daemon, and a value of the wrong
+    /// shape is nil rather than the ghost dropped from the page.
+    @LenientDecoded var tickets: CalendarTickets? = nil
 }
 
 enum TimelineEventStatus: String, LenientRawEnum {
@@ -1730,7 +1849,14 @@ struct TimelineEvent: Codable, Sendable, Hashable, Identifiable {
     var end: String?
     var all_day: Bool
     var start_timezone: String?
+    /// The location as Google holds it: what the editor shows and writes.
     var location: String?
+    /// The location cut down by the daemon's small model to the venue's name
+    /// and its street address (a booking service's marketing gone): what the
+    /// card shows. Both nil when the location names no place. Nil until the
+    /// daemon has cleaned it, and from an older daemon: the card shows
+    /// `location`.
+    var place: TimelinePlace?
     var status: TimelineEventStatus?
     /// Nil when the user is not an attendee (their own event).
     var self_response: TimelineSelfResponse?
@@ -1757,12 +1883,81 @@ struct TimelineEvent: Codable, Sendable, Hashable, Identifiable {
     /// and theirs to organize. Nil (an older daemon) is NO, and is also how
     /// the client knows a daemon cannot invite at all (Lib/EventGuests.swift).
     var guest_editable: Bool?
+    /// Gmail made this event itself from the user's mail (Google's
+    /// `eventType: fromGmail`). Google refuses edits to it, so `editable` is
+    /// false; the card says where it came from. Nil from an older daemon.
+    var from_gmail: Bool?
+    /// Passband made this event in place of Gmail's copy and keeps it current
+    /// from the mail (the daemon's gcal/own.rs). Nil means no.
+    var passband_owned: Bool?
+    /// What the card's Tickets button opens: the mail (or its attachment)
+    /// with the tickets, boarding pass or booking in it. Nil from an older
+    /// daemon and on an event with none.
+    var tickets: CalendarTickets? = nil
 }
 
 /// How a guest answered, in the daemon's four words.
 enum GuestResponse: String, LenientRawEnum {
     case accepted, declined, tentative, pending
     static var unknownFallback: GuestResponse { .pending }
+}
+
+/// `GET /client/calendar/search` (docs/CALENDAR.md §10.1): the events and
+/// ghosts a query matches, upcoming soonest first, then past, most recent
+/// first. Each item is exactly what `/client/timeline` serves for it, so one
+/// decoder reads both. `total` counts the hits before the daemon's limit.
+struct CalendarSearchPage: Decodable, Sendable, Hashable {
+    var items: [CalendarSearchItem]
+    var total: Int
+    var granted: Bool
+
+    init(items: [CalendarSearchItem] = [], total: Int = 0, granted: Bool = false) {
+        self.items = items
+        self.total = total
+        self.granted = granted
+    }
+
+    /// LENIENT PER ITEM, as the timeline is: a row that does not decode
+    /// (a null, a number, an object with neither key) costs that row, not
+    /// the block. Each element goes through `Lossy`, which always decodes,
+    /// so one bad element cannot fail the array.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        items = ((try? c.decodeIfPresent([Lossy].self, forKey: .items)) ?? [])
+            .compactMap(\.item)
+            .filter { $0.event != nil || $0.ghost != nil }
+        total = (try? c.decodeIfPresent(Int.self, forKey: .total)) ?? items.count
+        granted = (try? c.decodeIfPresent(Bool.self, forKey: .granted)) ?? false
+    }
+
+    private enum CodingKeys: String, CodingKey { case items, total, granted }
+
+    private struct Lossy: Decodable {
+        let item: CalendarSearchItem?
+        init(from decoder: Decoder) throws {
+            item = try? CalendarSearchItem(from: decoder)
+        }
+    }
+}
+
+/// One hit: `{"event": ...}` or `{"ghost": ...}`. Both nil when the row did
+/// not decode; the page drops those.
+struct CalendarSearchItem: Decodable, Sendable, Hashable {
+    var event: TimelineEvent?
+    var ghost: TimelineGhost?
+
+    init(event: TimelineEvent? = nil, ghost: TimelineGhost? = nil) {
+        self.event = event
+        self.ghost = ghost
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        event = try? c.decodeIfPresent(TimelineEvent.self, forKey: .event)
+        ghost = event == nil ? (try? c.decodeIfPresent(TimelineGhost.self, forKey: .ghost)) : nil
+    }
+
+    private enum CodingKeys: String, CodingKey { case event, ghost }
 }
 
 /// Wave 5: one person on an event. Only the address is required; a row
@@ -1830,12 +2025,117 @@ extension TimelineEvent {
         guests = (try? c.decodeIfPresent([OneGuest].self, forKey: .guests))?.compactMap(\.value)
         guests_truncated = try? c.decodeIfPresent(Bool.self, forKey: .guests_truncated)
         guest_editable = try? c.decodeIfPresent(Bool.self, forKey: .guest_editable)
+        place = try? c.decodeIfPresent(TimelinePlace.self, forKey: .place)
+        from_gmail = try? c.decodeIfPresent(Bool.self, forKey: .from_gmail)
+        passband_owned = try? c.decodeIfPresent(Bool.self, forKey: .passband_owned)
+        tickets = try? c.decodeIfPresent(CalendarTickets.self, forKey: .tickets)
     }
 
     private struct OneGuest: Decodable {
         let value: TimelineGuest?
         init(from decoder: Decoder) throws { value = try? TimelineGuest(from: decoder) }
     }
+}
+
+/// An event's cleaned place (`place` on the wire). Every word of `name` and
+/// `address` is a word of `original`, checked by the daemon.
+struct TimelinePlace: Codable, Sendable, Hashable {
+    var name: String?
+    var address: String?
+    /// The location the model read, as Google holds it.
+    var original: String?
+
+    init(name: String? = nil, address: String? = nil, original: String? = nil) {
+        self.name = name
+        self.address = address
+        self.original = original
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try? c.decodeIfPresent(String.self, forKey: .name)
+        address = try? c.decodeIfPresent(String.self, forKey: .address)
+        original = try? c.decodeIfPresent(String.self, forKey: .original)
+    }
+}
+
+/// `tickets` on a timeline event or ghost (docs/CALENDAR.md, "The Tickets
+/// button"): the one message, and maybe the one attachment in it, that a tap
+/// on the card's Tickets button shows. `kind` is the linked ghost's and
+/// names the button. Only the ids are required: a `kind` or an `attachment`
+/// of the wrong shape costs only itself.
+struct CalendarTickets: Codable, Sendable, Hashable {
+    struct File: Codable, Sendable, Hashable {
+        var id: Int
+        var filename: String
+        var mime: String
+
+        init(id: Int, filename: String, mime: String) {
+            self.id = id
+            self.filename = filename
+            self.mime = mime
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = try c.decode(Int.self, forKey: .id)
+            filename = (try? c.decodeIfPresent(String.self, forKey: .filename)) ?? "attachment"
+            mime = (try? c.decodeIfPresent(String.self, forKey: .mime)) ?? "application/octet-stream"
+        }
+
+        /// A wallet pass, by its type or its name: some mailers send a
+        /// `.pkpass` as `application/octet-stream`.
+        var isWalletPass: Bool {
+            mime.lowercased().hasPrefix("application/vnd.apple.pkpass")
+                || filename.lowercased().hasSuffix(".pkpass")
+        }
+    }
+
+    var message_id: Int
+    var thread_id: String
+    var kind: GhostKind
+    var attachment: File?
+
+    init(message_id: Int, thread_id: String, kind: GhostKind, attachment: File? = nil) {
+        self.message_id = message_id
+        self.thread_id = thread_id
+        self.kind = kind
+        self.attachment = attachment
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        message_id = try c.decode(Int.self, forKey: .message_id)
+        thread_id = try c.decode(String.self, forKey: .thread_id)
+        kind = (try? c.decodeIfPresent(GhostKind.self, forKey: .kind)) ?? .ticket
+        attachment = try? c.decodeIfPresent(File.self, forKey: .attachment)
+    }
+
+    /// The button's word, by the linked ghost's kind. A kind the daemon has
+    /// not promised (anything but these three) still reads "Tickets".
+    var label: String {
+        switch kind {
+        case .travel: "Boarding pass"
+        case .reservation: "Booking"
+        default: "Tickets"
+        }
+    }
+}
+
+/// EVENT REMINDER ROUTES, in one place for the app (APIClient) and the
+/// phone's notification extension. The settings route is an assumption the
+/// daemon's contract left open: `GET` answers `{"enabled": bool}`, `PUT`
+/// takes the same. Repoint it here.
+enum CalendarReminderRoute {
+    /// One fired reminder: the same JSON as the Mac's `calendar_reminder`
+    /// frame (CalendarReminderSignal). Kept a week on the daemon.
+    static func fire(_ fireId: Int) -> String { "/client/calendar/reminders/\(fireId)" }
+    static let settings = "/client/calendar/reminders/settings"
+}
+
+/// `{"enabled": bool}` on `CalendarReminderRoute.settings`.
+struct CalendarReminderSettings: Codable, Sendable, Hashable {
+    var enabled: Bool
 }
 
 /// Wave 3: one calendar being synced, from the feed's `calendars`. Primary

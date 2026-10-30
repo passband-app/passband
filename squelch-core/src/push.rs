@@ -97,7 +97,8 @@ pub struct PushRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub environment: Option<&'a str>,
     /// Which of the relay's FIXED fallback lines the alert carries: absent for
-    /// mail, `"draft"` for a [`DraftPing`]. A closed set the relay enforces;
+    /// mail, `"draft"` for a [`DraftPing`], `"calendar"` for a
+    /// [`CalendarPing`]. A closed set the relay enforces;
     /// it picks a line and can never carry one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<&'static str>,
@@ -132,6 +133,34 @@ impl DraftPing {
     /// and APNs would let one's banner silently replace the other's.
     fn collapse_id(&self) -> String {
         format!("draft-{}-{}", self.draft_id, self.created)
+    }
+}
+
+/// A calendar reminder fired (docs/CALENDAR.md, "Reminders and tickets"):
+/// not durable, like [`DraftPing`], and for the same reason. A reminder is
+/// about the next few minutes, and its row in `calendar_reminder_fires` is
+/// what the phone fetches, not this ping.
+///
+/// On the wire it is `"<tag>:cal:<fire_id>:<fired>"`, `fired` the Unix second
+/// it fired: fire ids are per-mailbox row ids, so the second binds the push
+/// to one firing. Untagged devices are skipped. The relay sees no title, no
+/// time and no place: the phone's extension fetches
+/// `GET /client/calendar/reminders/{fire_id}` from its own daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CalendarPing {
+    pub fire_id: i64,
+    pub fired: i64,
+}
+
+impl CalendarPing {
+    fn event_id(&self, tag: Option<&str>) -> Option<PushEventId> {
+        tag.map(|tag| PushEventId::Tagged(format!("{tag}:cal:{}:{}", self.fire_id, self.fired)))
+    }
+
+    /// With the second, as [`DraftPing::collapse_id`] is, so two mailboxes'
+    /// fire 3 never replace each other's banner.
+    fn collapse_id(&self) -> String {
+        format!("cal-{}-{}", self.fire_id, self.fired)
     }
 }
 
@@ -334,6 +363,9 @@ pub struct Pusher {
     /// Review requests from the agent door; see [`DraftPing`]. `None` until
     /// [`Pusher::with_draft_pings`] hands it the human door's channel.
     draft_pings: Option<broadcast::Receiver<DraftPing>>,
+    /// Calendar reminders from the human door's reminder worker; see
+    /// [`CalendarPing`]. `None` until [`Pusher::with_calendar_pings`].
+    calendar_pings: Option<broadcast::Receiver<CalendarPing>>,
 }
 
 impl Pusher {
@@ -368,6 +400,7 @@ impl Pusher {
             http,
             metrics: SyncMetrics::new(),
             draft_pings: None,
+            calendar_pings: None,
         }))
     }
 
@@ -387,6 +420,7 @@ impl Pusher {
             http: http_client().expect("test http client"),
             metrics: SyncMetrics::new(),
             draft_pings: None,
+            calendar_pings: None,
         }
     }
 
@@ -399,6 +433,12 @@ impl Pusher {
     /// Listen for agent draft review requests (see [`DraftPing`]).
     pub fn with_draft_pings(mut self, pings: broadcast::Receiver<DraftPing>) -> Self {
         self.draft_pings = Some(pings);
+        self
+    }
+
+    /// Listen for calendar reminders (see [`CalendarPing`]).
+    pub fn with_calendar_pings(mut self, pings: broadcast::Receiver<CalendarPing>) -> Self {
+        self.calendar_pings = Some(pings);
         self
     }
 
@@ -578,6 +618,33 @@ impl Pusher {
     /// gone. A 410 still retires the device, because that answer is the same
     /// whatever the push was about.
     async fn push_draft(&self, ping: DraftPing) {
+        self.push_once("draft", ping.collapse_id(), "a draft review ping", |tag| {
+            ping.event_id(tag)
+        })
+        .await;
+    }
+
+    /// Push one [`CalendarPing`] to every tagged device, ONCE, as
+    /// [`Self::push_draft`] does.
+    async fn push_calendar(&self, ping: CalendarPing) {
+        self.push_once(
+            "calendar",
+            ping.collapse_id(),
+            "a calendar reminder",
+            |tag| ping.event_id(tag),
+        )
+        .await;
+    }
+
+    /// The non-durable push both pings make: every TAGGED device, once, the
+    /// relay's `kind` line, a failure logged and dropped.
+    async fn push_once(
+        &self,
+        kind: &'static str,
+        collapse: String,
+        what: &str,
+        id_for: impl Fn(Option<&str>) -> Option<PushEventId>,
+    ) {
         let devices: Vec<(Route, String)> = match self.store.list_devices(self.account_id) {
             Ok(rows) => rows
                 .into_iter()
@@ -593,25 +660,21 @@ impl Pusher {
                 })
                 .collect(),
             Err(e) => {
-                eprintln!("squelch: APNs pusher could not list devices for a draft ping: {e}");
+                eprintln!("squelch: APNs pusher could not list devices for {what}: {e}");
                 return;
             }
         };
         if devices.is_empty() {
             return;
         }
-        let outcome = self
-            .fan_out(&devices, ping.collapse_id(), Some("draft"), |tag| {
-                ping.event_id(tag)
-            })
-            .await;
+        let outcome = self.fan_out(&devices, collapse, Some(kind), id_for).await;
         for token in &outcome.dead {
             if let Err(e) = self.store.delete_device_by_token(self.account_id, token) {
                 eprintln!("squelch: APNs pusher could not drop a device: {e}");
             }
         }
         if outcome.relay_failed || outcome.nothing_landed() {
-            eprintln!("squelch: a draft review ping reached no device; not retried");
+            eprintln!("squelch: {what} reached no device; not retried");
         }
     }
 
@@ -720,6 +783,7 @@ impl Pusher {
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<()> {
         let mut pings = self.draft_pings.take();
+        let mut reminders = self.calendar_pings.take();
         let mut backoff: Option<Duration> = None;
         loop {
             if *shutdown.borrow() {
@@ -751,6 +815,9 @@ impl Pusher {
                             Some(ping) = next_ping(&mut pings) => {
                                 if let Some(ping) = ping { self.push_draft(ping).await; }
                             }
+                            Some(ping) = next_ping(&mut reminders) => {
+                                if let Some(ping) = ping { self.push_calendar(ping).await; }
+                            }
                             _ = shutdown.changed() => {
                                 if *shutdown.borrow() { return Ok(()); }
                             }
@@ -770,6 +837,9 @@ impl Pusher {
                         Some(ping) = next_ping(&mut pings) => {
                             if let Some(ping) = ping { self.push_draft(ping).await; }
                         }
+                        Some(ping) = next_ping(&mut reminders) => {
+                            if let Some(ping) = ping { self.push_calendar(ping).await; }
+                        }
                         _ = shutdown.changed() => {
                             if *shutdown.borrow() { return Ok(()); }
                         }
@@ -780,12 +850,11 @@ impl Pusher {
     }
 }
 
-/// The next draft ping: `Some(Some(p))` for a ping, `Some(None)` when some
-/// were missed (lagged: dropped, they are not durable), and pending forever
-/// once there is no channel, so a `select!` arm on it simply never fires.
-async fn next_ping(
-    pings: &mut Option<broadcast::Receiver<DraftPing>>,
-) -> Option<Option<DraftPing>> {
+/// The next ping (a draft or a calendar reminder): `Some(Some(p))` for a
+/// ping, `Some(None)` when some were missed (lagged: dropped, they are not
+/// durable), and pending forever once there is no channel, so a `select!` arm
+/// on it simply never fires.
+async fn next_ping<T: Clone>(pings: &mut Option<broadcast::Receiver<T>>) -> Option<Option<T>> {
     let Some(rx) = pings else {
         return std::future::pending().await;
     };
@@ -920,6 +989,22 @@ mod tests {
             serde_json::json!("acct-a:draft:12:1790000000")
         );
         assert_eq!(ping.collapse_id(), "draft-12-1790000000");
+    }
+
+    /// A calendar reminder names its firing and second, never the event,
+    /// and only to a device that can tell which account it is in.
+    #[test]
+    fn a_calendar_ping_is_tagged_only_and_carries_its_binding() {
+        let ping = CalendarPing {
+            fire_id: 7,
+            fired: 1_793_210_000,
+        };
+        assert_eq!(ping.event_id(None), None);
+        assert_eq!(
+            serde_json::to_value(ping.event_id(Some("acct-a")).unwrap()).unwrap(),
+            serde_json::json!("acct-a:cal:7:1793210000")
+        );
+        assert_eq!(ping.collapse_id(), "cal-7-1793210000");
     }
 
     fn route(tag: Option<&str>, environment: Option<&str>) -> Route {

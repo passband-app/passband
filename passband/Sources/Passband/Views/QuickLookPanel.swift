@@ -357,6 +357,12 @@
         nonisolated init() {}
 
         func open(_ attachment: Attachment) { host?.open(attachment) }
+
+        /// Whether the host has taken this attachment into its list yet: a
+        /// list handed over in a state change lands on the host's next update.
+        func holds(_ attachment: Attachment) -> Bool {
+            host?.items.contains { $0.attachment.id == attachment.id } ?? false
+        }
     }
 
     /// Plants the host view in the strip's background. Zero chrome by design:

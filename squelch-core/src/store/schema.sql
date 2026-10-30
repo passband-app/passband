@@ -78,6 +78,13 @@ CREATE TABLE IF NOT EXISTS messages (
     -- reaches all three, not only the pixel. Nothing is backfilled: any
     -- re-sync refills the column through the message upsert.
     auth_pass   INTEGER,
+    -- WHERE FROM AND THE REAL SENDER DISAGREE (#639): compact JSON of
+    -- `types::SenderSignals` (sender, via, reply_to, envelope_domain,
+    -- name_spoof). '{}' = read, nothing disagreed; NULL = never read (sent
+    -- mail, rows ingested before the column). Facts for the reader and
+    -- triage, never a gate. Only `via` claims authentication, and it is read
+    -- through the same trust gate as `auth_pass`.
+    sender_signals TEXT,
     -- THE PROVIDER'S SPAM VERDICT, not ours: 1 when this message was fetched
     -- from Gmail's SPAM label, 0 otherwise. Gmail sorted it; nothing in squelch
     -- did, and no LLM ever looks at it (the ingest branch stamps a neutral row
@@ -890,6 +897,62 @@ CREATE TABLE IF NOT EXISTS sync_cursor (
     updated_at TEXT NOT NULL
 );
 
+-- WHERE AN IMAP ACCOUNT'S MESSAGES ARE, private to the IMAP mail source
+-- (`crate::mail::imap::MessageLocations`): one row per (message, folder) the
+-- source has seen it in. `msg_id` is the stable id (`messages.gmail_msg_id`),
+-- a hash that cannot be turned back into a place to fetch from, hence this
+-- table. `message_id` is the normalized Message-ID TEXT, kept for the
+-- stale-location fallback (`SEARCH HEADER Message-ID`); NULL for mail without
+-- one. A row is a hint, never the truth: the source re-checks UIDVALIDITY and
+-- the UID on every use and drops rows that have gone stale. A Gmail account
+-- never has a row here. No foreign key: like `sync_cursor`, a row for a gone
+-- account is an orphan nothing reads.
+CREATE TABLE IF NOT EXISTS imap_locations (
+    account_id  INTEGER NOT NULL,
+    msg_id      TEXT NOT NULL,
+    folder      TEXT NOT NULL,
+    uidvalidity INTEGER NOT NULL,
+    uid         INTEGER NOT NULL,
+    message_id  TEXT,
+    seen_at     TEXT NOT NULL,
+    PRIMARY KEY(account_id, msg_id, folder)
+);
+
+-- WHAT EACH IMAP ID IS (Amendment J, `crate::mail::imap::header_digest`):
+-- "h1:" + sha256 of the canonical headers plus Reply-To (never the body),
+-- one per stable id, recorded at first sight and never replaced. A later
+-- sighting under the same id whose digest differs is a different message
+-- with an id of its own. A value without the "h1:" prefix is an Amendment I
+-- (body-bound) digest from an earlier build: read as none, and replaced by
+-- the first header digest recorded. A new table rather than a column on
+-- `imap_locations`, whose rows are per folder and come and go with moves:
+-- what a message IS does not.
+CREATE TABLE IF NOT EXISTS imap_digests (
+    account_id  INTEGER NOT NULL,
+    msg_id      TEXT NOT NULL,
+    content_sha TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    PRIMARY KEY(account_id, msg_id)
+);
+
+-- WHICH BYTES EACH IMAP ID MAY SERVE (review fix3 F1,
+-- `crate::mail::imap::body_fingerprint`): "b1:" + sha256 of the BODY[TEXT]
+-- bytes of the copy an id's content was first read from, recorded at that
+-- first fetch and never replaced. A copy whose body differs (a re-send
+-- reusing the Message-ID and the identity headers) is never served under the
+-- id, from any folder. `from_key` is a hash of that copy's From addresses: a
+-- distinct (colliding) id gets a thread of its own only when its author
+-- differs (F4). No row: an id never fetched, or one from an earlier build,
+-- bound at its next fetch from its earliest location.
+CREATE TABLE IF NOT EXISTS imap_bodies (
+    account_id  INTEGER NOT NULL,
+    msg_id      TEXT NOT NULL,
+    body_fp     TEXT NOT NULL,
+    from_key    TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    PRIMARY KEY(account_id, msg_id)
+);
+
 -- GMAIL-SIDE INBOX UNREAD COUNTS (labels/INBOX messagesUnread/threadsUnread),
 -- refreshed once per sync cycle. One row per account, overwritten each fetch:
 -- this mirrors Gmail's current state, it is not a history. Sync's own tables
@@ -1042,9 +1105,13 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 -- back. `account_id` is a vec0 METADATA column so KNN queries can constrain by
 -- account in the WHERE clause.
 --
--- SECURITY: SEALED MESSAGES ARE NEVER INSERTED HERE — the embed-at-write path is
--- gated on `sensitivity='normal'`, so sealed content is absent from the vector
--- space entirely. `semantic_search` re-excludes sealed rows anyway.
+-- SECURITY: SEALED MESSAGES ARE NEVER INSERTED HERE. Every write is gated on
+-- `embeddable_mail_sql!` (store/sqlite/mod.rs): not spam, not known sealed (an
+-- auth decision, a restriction, the retired `triage.sensitivity` column), and
+-- either decided with access settled or the owner's own mail. A vector whose
+-- message becomes sealed (or undecided again) is deleted at that event, and a
+-- sweep at every store open deletes any left from before the gate
+-- (`purge_forbidden_vectors_conn`). The read side re-checks access anyway.
 --
 -- DIMENSION: float[384] matches BGE-small-en-v1.5, and the store asserts the
 -- configured embedder matches at attach time. Changing it means editing this
@@ -2114,6 +2181,7 @@ CREATE TABLE IF NOT EXISTS calendar_events (
     description     TEXT,
     guests_truncated INTEGER NOT NULL DEFAULT 0,
     organizer_unreadable INTEGER NOT NULL DEFAULT 0,
+    from_gmail      INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(account_id, calendar_id, event_id)
 );
 CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(account_id, start_sort);
@@ -2139,6 +2207,154 @@ CREATE TABLE IF NOT EXISTS calendar_event_guests (
 CREATE TRIGGER IF NOT EXISTS calendar_event_guests_follow_event
 AFTER DELETE ON calendar_events BEGIN
     DELETE FROM calendar_event_guests
+    WHERE account_id = OLD.account_id AND calendar_id = OLD.calendar_id
+      AND event_id = OLD.event_id;
+END;
+-- The calendar card's PLACE for an event location (gcal/place.rs): what the
+-- small model made of `raw`, a location exactly as stored on calendar_events.
+-- `place` NULL means the text names no place, and the card shows none. Keyed
+-- by the text, so every event at one place shares one call. A row whose text
+-- no event holds any more is pruned after each batch. HUMAN DOOR ONLY, like
+-- the events it describes.
+-- PASSBAND'S OWN EVENTS (gcal/own.rs): which event on the user's calendar
+-- Passband made for a ghost, in place of Gmail's copy, and keeps current from
+-- the mail. `state` is `owned` (kept current), `released` (the user deleted
+-- it or dismissed the ghost: never adopted again), `refused` (Google would
+-- not delete Gmail's copy: left alone) or `undo` (that, and taking Passband's
+-- copy back off failed too: retried each pass). `fingerprint` is what the mail said
+-- when Passband last wrote the event. One row per ghost; a ghost that goes
+-- takes its row with it, the event stays. HUMAN DOOR ONLY.
+CREATE TABLE IF NOT EXISTS calendar_owned (
+    account_id  INTEGER NOT NULL,
+    ghost_id    INTEGER NOT NULL,
+    calendar_id TEXT NOT NULL,
+    event_id    TEXT NOT NULL,
+    state       TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY(account_id, ghost_id)
+);
+-- A write gcal/own.rs had refused by Google (not a quota answer, not a lost
+-- reply), by the event it was aimed at, so the same step is not planned and
+-- spent again every pass. Left alone until `refused_at` is a week old, then
+-- pruned and tried once more. HUMAN DOOR ONLY.
+CREATE TABLE IF NOT EXISTS calendar_own_refused (
+    account_id  INTEGER NOT NULL,
+    calendar_id TEXT NOT NULL,
+    event_id    TEXT NOT NULL,
+    refused_at  TEXT NOT NULL,
+    PRIMARY KEY(account_id, calendar_id, event_id)
+);
+CREATE TABLE IF NOT EXISTS calendar_places (
+    account_id     INTEGER NOT NULL,
+    raw            TEXT NOT NULL,
+    -- The place's name, and its street address when the location gives one
+    -- (gcal/place.rs). Both NULL: the location names no place.
+    place          TEXT,
+    address        TEXT,
+    prompt_version TEXT NOT NULL,
+    cleaned_at     TEXT NOT NULL,
+    PRIMARY KEY(account_id, raw)
+);
+
+-- CALENDAR REMINDERS (gcal/remind.rs, docs/CALENDAR.md "Reminders and
+-- tickets"): the small model's plan for one item, `e:<calendar>/<event>` or
+-- `g:<ghost id>`, made for one `version` (a hash of what it read) under one
+-- prompt. `plan_json` holds whether to remind, the lead, the laundered line,
+-- what a tap opens, the tickets pick and the ghosts it said are the same
+-- thing, all held to the input in code. Pruned when the item is gone or over
+-- (its end, not its start: the tickets button is wanted at the door).
+-- HUMAN DOOR ONLY.
+CREATE TABLE IF NOT EXISTS calendar_reminders (
+    account_id     INTEGER NOT NULL,
+    item_key       TEXT NOT NULL,
+    version        TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    plan_json      TEXT NOT NULL,
+    planned_at     TEXT NOT NULL,
+    PRIMARY KEY(account_id, item_key)
+);
+-- Each reminder that fired: once per item per start (`start_key`, the start
+-- as a UTC instant or a date), so a moved event can fire again, at most
+-- twice a day (gcal/remind.rs `may_fire`). `covers` is a JSON array of the
+-- ghost keys the item stood for, so a ghost and its event never both fire.
+-- `frame` is the `calendar_reminder` frame as sent, which the phone fetches
+-- by `id` (`GET /client/calendar/reminders/{id}`): AUTOINCREMENT, so an id is
+-- never reused once a quiet week's prune empties the table, and a late tap
+-- on an old notification cannot open a newer reminder. `fired_at` is Unix
+-- seconds. Kept 7 days. HUMAN DOOR ONLY.
+CREATE TABLE IF NOT EXISTS calendar_reminder_fires (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    item_key   TEXT NOT NULL,
+    start_key  TEXT NOT NULL,
+    fired_at   INTEGER NOT NULL,
+    covers     TEXT NOT NULL DEFAULT '[]',
+    frame      TEXT NOT NULL,
+    UNIQUE(account_id, item_key, start_key)
+);
+-- The planning backoff (gcal/remind.rs `backoff`): an item whose last asks
+-- failed, how many in a row, and when it may be asked again (Unix seconds).
+-- Cleared by a plan; pruned with the plans. HUMAN DOOR ONLY.
+CREATE TABLE IF NOT EXISTS calendar_reminder_backoff (
+    account_id INTEGER NOT NULL,
+    item_key   TEXT NOT NULL,
+    failures   INTEGER NOT NULL,
+    retry_at   INTEGER NOT NULL,
+    PRIMARY KEY(account_id, item_key)
+);
+-- The reminder planner's model calls ATTEMPTED per UTC day (timeouts and
+-- failures too, which the usage ledger never hears of), so the daily cap
+-- holds across restarts. Days before yesterday are pruned. HUMAN DOOR ONLY.
+CREATE TABLE IF NOT EXISTS calendar_reminder_calls (
+    account_id INTEGER NOT NULL,
+    day        TEXT NOT NULL,
+    calls      INTEGER NOT NULL,
+    PRIMARY KEY(account_id, day)
+);
+
+-- CALENDAR SEARCH (docs/CALENDAR.md §10.1): a word index over the synced
+-- events, for the search box, the assistant and Agent MCP. `calendar_search_keys`
+-- gives each event a stable integer id, because `calendar_events` has none (an
+-- implicit rowid can be renumbered by VACUUM), and that id is the FTS rowid.
+-- Written in ONE place, `upsert_event`, inside the event's own transaction and
+-- after its guests; deleted with the event by the trigger below, whichever path
+-- deletes it. `people` is guest names, `addresses` every address the event
+-- holds: the organizer's and guests', a name that is an address, and each one
+-- found in the title, place or description (cut out of those columns). The
+-- agent door's queries never name `addresses`. NOT STEMMED: porter would store
+-- "meeting" as "meet" and a half-typed "meetin" would find nothing; plurals
+-- are folded in the query instead (`gcal::search::forms`). An UPDATE drops the
+-- row (the trigger), so an older daemon that edits events leaves the index
+-- out of step, never stale, and the open after it reindexes.
+CREATE TABLE IF NOT EXISTS calendar_search_keys (
+    id          INTEGER PRIMARY KEY,
+    account_id  INTEGER NOT NULL,
+    calendar_id TEXT NOT NULL,
+    event_id    TEXT NOT NULL,
+    UNIQUE(account_id, calendar_id, event_id)
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS calendar_search_fts USING fts5(
+    title, place, notes, people, addresses,
+    tokenize = 'unicode61', prefix = '2 3'
+);
+CREATE TRIGGER IF NOT EXISTS calendar_search_drops_an_edited_event
+AFTER UPDATE ON calendar_events BEGIN
+    DELETE FROM calendar_search_fts WHERE rowid IN (
+        SELECT id FROM calendar_search_keys
+        WHERE account_id = OLD.account_id AND calendar_id = OLD.calendar_id
+          AND event_id = OLD.event_id);
+    DELETE FROM calendar_search_keys
+    WHERE account_id = OLD.account_id AND calendar_id = OLD.calendar_id
+      AND event_id = OLD.event_id;
+END;
+CREATE TRIGGER IF NOT EXISTS calendar_search_follows_event
+AFTER DELETE ON calendar_events BEGIN
+    DELETE FROM calendar_search_fts WHERE rowid IN (
+        SELECT id FROM calendar_search_keys
+        WHERE account_id = OLD.account_id AND calendar_id = OLD.calendar_id
+          AND event_id = OLD.event_id);
+    DELETE FROM calendar_search_keys
     WHERE account_id = OLD.account_id AND calendar_id = OLD.calendar_id
       AND event_id = OLD.event_id;
 END;

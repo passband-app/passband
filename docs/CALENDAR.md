@@ -512,8 +512,8 @@ is still needed (a refund pending, a later leg's tickets, a question to
 answer) is a judgment, and hand-written rules for it were never as accurate
 as asking. Code does two things around the model: it schedules the question
 from the model's own dates, and it enforces a few rails on the answer. It is
-NOT behind the `calendar` flag: it runs for every mailbox, like ghost
-projection does.
+NOT behind the (now retired) `calendar` flag: it runs for every mailbox,
+like ghost projection does.
 
 - **The question.** A triage job whose trigger starts with `revisit:` is a
   scheduled re-check. On one, and only on one, the agent may answer `done`
@@ -632,7 +632,7 @@ founder says otherwise:
 - Accounts are two muted fills. Blue is reserved for state: now, next, holds
   and suggested slots.
 
-**Built so far** (Mac client, behind the `calendar` hidden feature, §11): a Calendar destination
+**Built so far** (Mac client; for every mailbox since the `calendar` flag was retired, §11): a Calendar destination
 second in the rail. The page opens on a conventional month (Month | Agenda in
 the header, `m` and `a`): each cell lists its day top-down as chips in the
 calendar's colour, trips and stays as named bars across the cells they cover,
@@ -646,10 +646,9 @@ with a waiting state and a line for the sync state.
 
 Wave 4, from the founder using wave 3 on screen:
 
-- **Number keys.** While the page is offered, Calendar is `2` and every later
-  page is one higher (Sitrep 1, Calendar 2, All mail 3, Auth 4, Rules 5,
-  Groups 6). While it is not offered the numbers are the ones from before it
-  existed. `⇧C` still opens it.
+- **Number keys.** Calendar is `2` and every later page is one higher
+  (Sitrep 1, Calendar 2, All mail 3, Auth 4, Rules 5, Groups 6). `⇧C` still
+  opens it.
 - **No gap under the date.** A bar holds its lane only over the days it
   covers. A lane is free again the day after the span in it ends, in the same
   week row. A cell's own items fill any row left free above a bar before going
@@ -808,7 +807,7 @@ should be able to type 'dinner with steven on friday 4pm'"):
   name is asked again the next time the names change.
 - **The assistant drafts events** (§10).
 
-**Keymap as built.** `1` to `6` the rail (Calendar `2` while offered), `⇧C`
+**Keymap as built.** `1` to `6` the rail (Calendar `2`), `⇧C`
 the calendar; on the page `m` / `w` / `a` month, week and agenda, `j` / `k` the selection,
 `↵` open, `y` going, `x` dismiss, `n` new event, `e` edit, `⌫` delete; in the
 month the arrows move the day, `[` `]` (or `,` `.`) the month, `t` today, Esc
@@ -828,10 +827,67 @@ list, Esc closes the place list, then the delete question, then the pane.
 - **Month** (DECIDED: in the first version). The shape of the month: multi-day
   spans for trips and stays, load per day, ghost marks, and a day opens its
   column. Not a wall of truncated titles.
+- **The card's picture** (2026-10-28, `Model/EventVisuals.swift`, rules in
+  `Lib/EventVisualPick.swift`). A strip across the top of the detail card:
+  a photo from the mail behind the event (photo-shaped, not a logo on a flat
+  banner; only while remote images load), else Apple's Look Around of the
+  venue, else a map with a pin, else nothing. The venue is used only when
+  Apple's answer has the place's name. A real event that a ghost was matched
+  to carries that ghost's mail (`AgendaItem.mail`), so Gmail's reservation
+  event shows the reservation email behind it and its photo.
+- **Gmail's own events** (2026-10-28). An event Gmail made from mail
+  (`eventType: fromGmail`) is served with `from_gmail: true`, is never
+  editable (Google refuses the change), and its card names it "added by
+  Gmail". Where Passband owns such events (below), it does not stay.
+- **Passband owns the events mail makes** (2026-10-28, the owner's
+  decision; `gcal/own.rs`, on for every mailbox with the calendar). Gmail's
+  frozen copy beside Passband's ghost is two items for one thing, and gets in
+  the way of Passband running the calendar. So after each calendar pass:
+  - **Adopt.** A Gmail event on the user's PRIMARY calendar that is the
+    user's by every organizer test (`SyncedEvent::users_own`), has no other
+    guests, has not ended, and matches exactly ONE live, undismissed ghost
+    (`own::same_event`: the same start, and the display match's titles or a
+    distinctive word shared across title and place) is replaced. Passband
+    creates its own event (Gmail's title, times, colour and free/busy; the
+    card's cleaned place as one line, its name then its address, or Gmail's
+    location when there is none; the note "Kept up to date by Passband from your
+    mail."; a private extended property naming the ghost) under an id made
+    from the ghost (`passband<ghost>t<created>`, so a create sent twice finds
+    the first), stores it, then deletes Gmail's. If Google refuses that
+    delete, Passband deletes its own again and the ghost is marked `refused`:
+    the pair stays as Gmail made it and is never tried again.
+  - **Keep current.** When what the mail says changes (the ghost's start, its
+    stated or user-corrected end, its place, or a cancellation), Passband
+    patches its event: the new times (the old length kept when the mail gives
+    no end), the new place; a cancellation puts "Canceled: " before the title
+    and shows it as free (undone if the mail un-cancels). The model's end
+    estimate is never written. Only a CHANGE in the mail is written, judged
+    against a fingerprint stored at the last write, so the user's own edit to
+    Passband's event stands until the mail says something new.
+  - **No duplicates.** A Gmail copy that turns up again for an event Passband
+    owns is deleted.
+  - **Let go.** If Passband's event disappears (the user deleted it) or the
+    user dismisses the ghost, the binding is `released`: never adopted again,
+    and any Gmail copy then stays. If the ghost itself goes, the binding is
+    forgotten and the event left alone.
+  - **Never touched:** an invitation from someone else (any other organizer,
+    any other guest), any calendar but the primary one, past events, and a
+    Gmail event no ghost or several ghosts match.
+  - **Bounds.** At most 10 Google writes a pass and 100 a day; a quota answer
+    ends the pass. Every write sends `sendUpdates=none` and is audited under
+    actor `passband-calendar` (`calendar_event_adopt`, `_replace_gmail`,
+    `_adopt_undo`, `_update_from_mail`, `_delete_gmail_copy`), target
+    `calendar:<calendar>/<event>`, detail `ok` or the error kind: never a
+    title or a place. Bindings live in `calendar_owned`.
+  - **Served.** Passband's event carries `passband_owned: true`, and its
+    ghost is matched to it whatever the titles; a ghost is also matched to a
+    Gmail event by `own::same_event`. The card says "kept current by
+    Passband".
 - **Event detail.** Title, time (with "~" on an estimate), place, the
   likelihood reason, and the mail behind it (§9).
-- **iOS.** The agenda replaces the Calendar card in `MobileRecordsView`. The
-  column and month views follow in the parity pass.
+- **iOS.** The Calendar is the tab bar's middle tab (Sitrep · Calendar ·
+  Mail) for every mailbox, with month, week and day views; the record zones
+  that had a Quick Look tab sit under the sitrep's board.
 
 A calendar destination joins the rail, directly under Sitrep and above All
 mail (DECIDED). Keys started as the preview drew them (`⇧C` opens the calendar;
@@ -840,6 +896,276 @@ adjusted after use ("Keymap as built" above is what is bound today); each is
 checked against the existing keymap before it is bound. The time pane is NOT a `SidePanel`
 view: that panel takes the modal key context, and composer plus side panel is
 already a known sore spot (#265). The pane sits beside the composer.
+
+### Reminders and tickets (DECIDED 2026-10-29)
+
+The owner's ask (2026-10-29): a notification a well-chosen time before each
+event ("1hr, 30m or 10m"), with something that helps ("if its a concert,
+tapping the notif can show you the email with your tickets"); and on any event
+with tickets in mail, a one-tap button that shows them (the email or the
+attachment).
+
+Owner decisions (AskUserQuestion, 2026-10-29), each against my
+recommendation where noted:
+
+- **The model reads the event, description included** (I recommended without
+  the description). A second exception to docs/SECURITY.md §9.
+- **The model writes the banner's short line** (I recommended templated copy).
+  The line is laundered in code (below), because a stranger's invitation can
+  now steer words onto the lock screen.
+- **Real events and committed ghosts, Mac and iPhone.** The model may decide an
+  event needs no reminder.
+
+No feature flag, no env var: it takes hold when the
+daemon rolls. One owner preference turns it off.
+
+#### Whose events (DECIDED 2026-10-29, after review)
+
+**THE ATTENDANCE RULE.** A real event is reminded (planned, fired, or given
+the fallback), links ghosts for reminding and tickets, and may claim
+candidates with `same_as`, ONLY when it is the user's own to go to
+(`remind::attends`): it sits on one of the owner's OWN calendars (the
+primary, or one they are `owner` of: renotify's busy-time rule) AND one of
+
+- the user accepted it or said maybe;
+- it is their own (`SyncedEvent::users_own`: they organize it, or it names
+  no organizer);
+- they have not answered and its organizer is a KNOWN CONTACT (the owner has
+  written to them: the store's `is_known_contact`, "emailed = known").
+
+A declined event never is. Google puts anyone's invitation on the calendar
+unasked, so without this a stranger could put a title and a place of their
+choosing on the lock screen with a chime, and capture the user's real booking
+by copying its title and start. An event that fails the rule is no reminder
+item at all (no plan, no model call, no fire); the timeline's `matched_event`
+display match is unchanged; its `tickets` are only ever the fallback from its
+own linked ghosts, never a plan's pick or a claim; and a ghost linked to it
+stands alone and reminds itself. Ghosts keep their own rule (committed or
+going, from authenticated mail).
+
+#### Linked mail
+
+An event's **linked mail** is the source messages of the ghosts linked to it:
+
+1. The ghosts the timeline already matches to it (`match_ghosts`, the
+   `calendar_owned` binding, `own::same_event`). That matching moves out of
+   `get_timeline` into one core function both use.
+2. Ghosts the reminder model says are the same thing (`same_as`, below), from
+   a candidate set: ghosts of kind `ticket`, `travel` or `reservation`, on the
+   same day as the event in the owner's zone, matched to no event.
+
+Only ghosts that pass `GhostEvent::verified()` link mail. A source message
+that is spam, trashed or sealed is never linked. A committed or going ghost
+that matches no event stands alone: its linked mail is its own sources.
+
+#### The plan (`squelch-core/src/gcal/remind.rs`)
+
+Once per event version (a hash of the title, times, location, description,
+the user's answer, free/busy, the linked message ids, and each candidate's id
+with its eligible source message ids),
+the `notify` model, on the provider that already reads the owner's mail, is
+asked. This is `place.rs`'s pattern: usage category `calendar_remind`, prompt
+version `calendar-remind-v1` stored on each row, a daily cap (200 calls per
+account, counted per ATTEMPT in `calendar_reminder_calls`, so timeouts and
+restarts buy no more), a per-pass cap (15, nearest first), a short timeout,
+all of it untrusted text fenced with `neutralize`. An item whose ask failed
+is not asked again for 30 minutes, doubling each time to 4 hours
+(`calendar_reminder_backoff`, cleared by a plan).
+
+Who gets planned: every one of the user's events (the attendance rule) and
+every committed ghost starting in the next 14 days, and every one with linked
+mail at any distance (the tickets button needs the plan's pick). Past events,
+cancelled ones, events the user declined and events that are not theirs get
+no plan.
+
+**In:** title, start and end in the owner's zone, all-day, the card's place
+(else the location), the description, the user's answer, busy or free, how
+many other guests (a count, never names or addresses), whether the user
+organizes it, event or ghost (and the ghost's kind); the linked mail, each
+numbered: subject, sender's display name (none when it holds an `@`),
+received date, and its
+non-inline attachments numbered (filename, type); the candidate ghosts,
+numbered (title, start, kind).
+
+**Out:** `{remind, lead_minutes, line, open, ticket, same_as}`, held to the
+input in code:
+
+- `remind: false` means no reminder. All-day events remind at 08:00 on their
+  day in the owner's zone, whatever `lead_minutes` says.
+- `lead_minutes` is one of 10, 30, 60, 120, 180. Anything else becomes the
+  nearest one.
+- `line`: at most 90 characters, cut on a character boundary, laundered with
+  `order_link::plain` (control, bidi and invisible characters gone) and
+  NFKC-folded (fullwidth `ｅｖｉｌ．ｃｏｍ` reads as `evil.com`). Dropped, leaving
+  no line, by `remind::line_shaped`, which is the `basis` rule of §3.6 plus a
+  stricter set of its own (the `basis` rule itself is unchanged for triage):
+  any dotted host (`evil-tickets.com`, `bit.ly`; not "St. Louis" or "7.30"),
+  a dot written out (`[.]`, `(.)`, `[dot]`, ` dot ` before a top-level
+  domain), `hxxp`, an `@` or `[at]`, a run of 6 or more digits counted across
+  the separators a number is printed with (space, `- . / , _ · + ( )`, with
+  `l`, `I` and `o` counting inside a run), and a vanity number (`1-800-` and
+  letters). A real line never needs any of these. The banner then shows the
+  title and time only.
+- `open` and `ticket`: `{mail, attachment?}` indexes into the numbered lists.
+  An index out of range is null. `open` is what tapping the banner shows;
+  `ticket` is what the Tickets button shows.
+- `same_as`: candidate indexes. Out of range ones are dropped.
+
+**Failure:** no model, a timeout or a refusal stores no plan, backs the item
+off, and a later pass asks again within the caps. If an event is 30 minutes
+out and has never had a plan, it gets the fallback: a 30-minute reminder with no line, opening the
+fallback ticket (below) if there is one. Only an item worth it gets the
+fallback: one with linked mail, or a timed one the user is busy for. With no
+model every item is unplanned, and a fallback for everything would buzz for
+each holiday and focus block.
+
+**Stale plans.** A version moves whenever anything the plan read does (a
+description edit, a new booking that day). Until the item is planned again,
+its STALE plan still governs: its `remind` (a "no" stays silent), its lead,
+its `same_as` claims (only of ghosts still among its candidates) and its
+picks (while their mail is still the item's: a linked source, or a source of
+a claimed candidate; sources are only ever eligible mail, so a pick whose
+mail went spam or sealed falls back). Its `line` is not shown: it was written
+from what has since changed. The fallback is for an item that has never had
+a plan (or only one from another prompt). A fire pass about to fire an item
+with no plan or a stale one asks the model first (at most 4 a pass, within
+the caps and the backoff), so a late-synced event fires as planned.
+
+Stored in `calendar_reminders`, keyed by account and item (`e:<calendar>/<event>`
+or `g:<ghost id>`), and pruned when the item is gone or OVER: at its end; with
+no end, three hours after a timed start or the end of an all-day one's day,
+owner-local. Not at its start: the tickets button is wanted at the door. A
+pass that could not list the calendar (no grant, a keychain read that failed)
+prunes no event's plan.
+
+Every reader (the planner, the fire pass, the timeline) lists ghosts and
+events two days past its range on both sides (`remind::LISTING_PAD`), so an
+item's linked mail and same-day candidates, and so its version, are the same
+whoever reads it.
+
+#### Firing
+
+A worker checks at start and every 30 seconds. A reminder fires once per start
+instant: when the start moves, it can fire again, but an item fires at most
+TWICE a day (owner-local), however often its start moves. One real thing has
+two keys (a ghost's `g:` and its event's `e:`): a firing records the ghost
+keys its item stands for (`covers`: its matched and claimed ghosts), and for
+24 hours neither fires under the other key. It fires when now is past
+`start - lead` (or 08:00 on an all-day event's day) and the event has not
+started (an all-day one: before noon that day). A plan that lands late, or a
+daemon that was down, fires at once if the event is still ahead. Each firing
+is a row in `calendar_reminder_fires` (kept 7 days, ids AUTOINCREMENT so one
+is never reused) so the phone can fetch it by id. The owner preference `calendar_reminders` (default on) stops all of
+it.
+
+- **Mac:** a non-durable `calendar_reminder` frame on `/client/events`, like
+  `renotify` (no `id:`, an older app ignores it).
+- **iPhone:** a non-durable `CalendarPing` to the pusher, like `DraftPing`:
+  wire id `"<tag>:cal:<fire id>:<fired unix>"`, tagged devices only, relay
+  `kind: "calendar"` with the fallback line "An event is coming up", collapse
+  id `cal-<fire id>-<fired>`. The notification extension fetches
+  `GET /client/calendar/reminders/{fire id}`, which serves the frame's JSON.
+
+The frame:
+
+```json
+{"calendar_reminder": 7, "at": 1793210000,
+ "item": {"kind": "event", "calendar_id": "primary", "id": "abc",
+          "title": "Phoebe Bridgers", "start": "2026-10-30T20:00:00-07:00",
+          "end": null, "all_day": false, "place": "The Greek Theatre"},
+ "lead_minutes": 60, "line": "Your 2 tickets are in the Ticketmaster email",
+ "open": {"message_id": 41, "thread_id": "t41", "attachment_id": 9},
+ "ticket": {"message_id": 41, "thread_id": "t41", "kind": "ticket",
+            "attachment_id": 9, "filename": "tickets.pdf",
+            "mime": "application/pdf"}}
+```
+
+A ghost's `item` is `{"kind": "ghost", "id": <ghost id>, ...}`.
+
+The banner reads: title = the event's title; subtitle = "8pm · The Greek
+Theatre" (the start in the device's zone, "Today" for all-day; a countdown
+would go stale on the lock screen); body = the line. The title, place and
+line are stripped of bidi controls and invisible marks on the device too.
+Tapping it shows `open` (an attachment in Quick Look, mail in the reader),
+else the event's card. A push the extension could not dress is fetched by the
+app on tap, and shown only when the fetched frame's `at` is the push's
+`fired` (the extension checks the same): an old notification never opens a
+different reminder. When there is a `ticket`,
+the notification carries a "Show tickets" action. Analytics:
+`calendar_reminder_shown`, `calendar_reminder_opened`.
+
+#### The Tickets button
+
+`GET /client/timeline` serves `tickets` on each event and ghost: `{message_id,
+thread_id, kind, attachment: {id, filename, mime} | null}` or null. `kind` is
+the linked ghost's (`ticket`, `travel`, `reservation`), and the card labels the
+button by it: "Tickets", "Boarding pass", "Booking". It is the plan's `ticket`
+(current or stale, while its mail is still the item's), null when the plan
+named none; a ghost an event's plan claims keeps its own fallback when that
+plan names none. Otherwise, and always for an event that is not the user's,
+the fallback, from
+linked ghosts of those kinds: the newest source message with a `.pkpass`
+attachment, else one with a PDF, else the newest source message alone. One
+tap opens it: an attachment in Quick Look (a `.pkpass` offers Wallet on the
+phone), mail in the reader.
+
+#### Not in v1
+
+A per-event lead the user picks, snooze, travel time from where the user is,
+and leaving out events Google's own app already reminds about.
+
+#### As built (daemon, 2026-10-29)
+
+Where the build settled something the design left open, or differs from it:
+
+- **The planner runs in the reminder worker, not after a sync pass**
+  (`squelch-api/src/calendar_remind.rs`). One worker: a plan pass and a fire
+  pass at start, then a fire pass every 30 seconds, a plan pass first on
+  every tenth (5 minutes). A sync
+  pass only runs with a calendar grant, and committed ghosts are reminded
+  without one. Events are read only while calendar is granted, as the
+  timeline serves them. No flag gates it (the `calendar` hidden feature
+  was retired by #637); the owner preference is the only off switch.
+- **A ghost from mail that failed authentication is never reminded**, not
+  only kept from linking mail: its title would otherwise reach the lock
+  screen on a stranger's say-so.
+- **A ghost the event's plan names in `same_as` is that event's** (stale
+  plans too, while it is still a candidate): it is not reminded on its own
+  (one banner, not two), and its tickets are the event's, or its own fallback
+  when the plan names none. Its own plan is kept.
+- **A ghost bound to a Passband event that the listing does not hold**
+  (`calendar_owned` state `owned`, calendar granted) is not reminded on its
+  own: that event, wherever it now is, reminds for it.
+- **Numbering.** The prompt numbers mail from 1: the linked mail first
+  (newest first, at most 6), then each candidate booking's mail (at most 2
+  each), listed under that booking; attachments from 1 within their mail (at
+  most 6, only non-inline ones with bytes stored: an `image/*` part with a
+  Content-ID is inline). A pick of a booking's mail counts only when the
+  answer also names that booking in `same_as`; otherwise it is null. At most
+  6 candidates, nearest the event's start.
+- **Lead ties go to the longer lead** (45 becomes 60). An all-day item's
+  frame has `lead_minutes: null`.
+- **The version** also folds in the ghost's kind for a ghost item, and a
+  ghost's "answer" is `going` (the user said so) or `booked` (committed).
+- **No plan** (never planned, or only one from an older prompt): the
+  30-minute fallback with no line. A plan that says `remind: false` never
+  fires, current or stale.
+- **The model's answer** may write `null` for `line`, `open`, `ticket` or
+  `same_as` (an endpoint that does not enforce the schema); it reads as none.
+- **A moved-then-moved-back start** does not fire again for the start that
+  already fired (once per start instant), and the two-a-day cap holds either
+  way.
+- **`kind` on a pick** is the kind of the ghost the mail came from when that
+  is ticket, travel or reservation, else `ticket`.
+- **Trash.** The store keeps no trash state for a message, so "never
+  trashed" is not checked; spam, sent, sealed and unreviewed mail are.
+- **The frame's `ticket`** also carries `kind`. Times are the owner's zone
+  with its offset (a date for all-day); `place` is the card's place name,
+  else its address, else the raw location (null when the card says it names
+  no place).
+- **The preference** is the `app_settings` row `calendar_reminders` (`0` is
+  off), `GET`/`PUT /client/calendar/reminders/settings` `{"enabled": bool}`,
+  human door only.
 
 ## 6. Scheduling from the sitrep
 
@@ -1010,8 +1336,7 @@ Rules:
   confidence. It is served on the person record behind the contact card
   (`GET /client/person`), where the user can see it and correct it
   (`PUT /client/person/timezone`; clearing the correction hands it back to
-  inference), both only while the `calendar` flag is on (§11); inference
-  runs either way. The Date offset is written by the message upsert itself,
+  inference), for every mailbox (§11). The Date offset is written by the message upsert itself,
   in the same INSERT as the row, so ingest writes each message once. It
   learns forward from the day it ships: the raw mail is not
   kept, so filling in existing correspondents would take a Gmail request per
@@ -1067,8 +1392,13 @@ from the plan below:
 - **Calendar unticked** at Google: the Gmail floor passes, nothing is
   installed or queued, and the page says calendar was not connected.
 - **Signup and reconnect** now also send `include_granted_scopes=true`, so a
-  later plain reconnect hands back a token that still carries calendar. They
-  do NOT request the calendar scopes.
+  later plain reconnect hands back a token that still carries calendar.
+  Since 2026-10-29 a reconnect also REQUESTS the calendar scopes (optional,
+  as signup does; the founder: "the reconnect flow for email should also
+  reconnect calendar"): a reconnect is needed when the old grant died, a
+  revoked grant leaves `include_granted_scopes` nothing to keep, and the
+  install replaces the whole credentials file, so a Gmail-only repair left
+  calendar disconnected and asking for a second trip.
 - **The daemon** records the granted scopes on the stored token
   (`StoredToken.scopes`, from the exchange, every refresh that names them, and
   import), resolves the calendar token with `CalendarCredentials` (Calendar
@@ -1101,13 +1431,10 @@ from the plan below:
   control plane passes it to Google as `login_hint` and, at the callback,
   installs nothing when a different account consented. The hint is a guard,
   never an authority: the tenant is still found from the account Google names.
-- **New signups** are asked for calendar at signup (decided 2026-10-27), even
-  while the `calendar` hidden feature is off for them. It is optional, like
-  the profile scope: a person who unticks it still gets a mailbox. A daemon
-  without the feature holds the scope and calls nothing; when the feature
-  turns on, calendar works with no second consent. The callback's feature
-  gate applies to the calendar reconnect only, never to signup. Tenants from
-  before this still grant through the calendar page.
+- **New signups** are asked for calendar at signup (decided 2026-10-27). It
+  is optional, like the profile scope: a person who unticks it still gets a
+  mailbox, and the calendar page offers the grant on its first visit. Tenants
+  from before this grant through the calendar page.
 - **Self-host** connects from the app (`POST /client/calendar/connect`, the
   daemon running the consent on loopback) or from a terminal with
   `squelchd auth --calendar`. Both BUILT, and both build the same consent.
@@ -1142,7 +1469,13 @@ Read only (slice B). The only writes are the user's own, described under
   `organizer` and `self`, transparency, link and update time. Attachments,
   conference data and what a guest wrote when answering are never sent. The
   description (added in wave 3, which shows
-  it) is laundered and cut to 2000 characters as it is stored.
+  it) is laundered and cut to 2000 characters as it is stored, and Google's
+  own boilerplate on an event it created from mail ("To see detailed
+  information for automatically created events like this one, use the
+  official Google Calendar app.", "This event was created from an email you
+  received in Gmail.") is dropped with the link after it, so such an event
+  shows no notes. A row stored before this is rewritten by the next daily
+  full read.
   `calendarList.list` carries a mask of its own, which since wave 3 includes
   each calendar's `backgroundColor`, `colorId` and `accessRole`.
 - **Window.** 30 days back to 400 days ahead. The first read of a calendar is
@@ -1203,8 +1536,27 @@ Read only (slice B). The only writes are the user's own, described under
   titles are equal after lowercasing and collapsing whitespace, or one contains
   the other. Worked out when the timeline is listed, never stored: it hides a
   duplicate and changes no ghost.
+- **The card's place** (`gcal/place.rs`, 2026-10-28). A booking service
+  often writes its marketing into the location ("Dingles Public House, Tock is
+  now part of the Resy network. Explore even more of our dining network on").
+  After each pass that synced, up to 10 locations longer than 40 characters
+  with no answer yet (upcoming events first) go to the small `notify` model,
+  side by side, which returns the place's `name` (the venue, room or meeting
+  link) and its street `address` when the text gives one. Every word of each
+  must be a word of the location, checked in code; an answer that adds one is
+  not believed and the whole location is kept as the name, with no address.
+  Both empty means the text names no place. Answers are stored per distinct
+  location text in `calendar_places` (so a weekly dinner costs one call),
+  pruned when no event holds the text, redone when `PROMPT_VERSION` changes,
+  billed under `calendar_place`, at most 100 calls a day. The timeline serves
+  it once there is one as `place: {"name", "address", "original"}` on each
+  event: `name` and `address` null where the location gives none (both null:
+  no place), `original` the location it was made from. The card shows the
+  place, falling back to `location`, and the editor keeps reading and writing
+  `location`.
 - **Human door only.** Titles, places, organizers and links never reach an
-  agent route, a log line or a triage prompt. A log names a calendar by its
+  agent route, a log line or a triage prompt. The one exception is the card's
+  place above: the location string alone, to the small model. A log names a calendar by its
   position in the pass, never its id, which is usually an address.
 
 ### Creating and editing events (BUILT in wave 3)
@@ -1627,6 +1979,16 @@ event's location too). No key, no bill, the same on Mac and iOS.
 Wave 1's ghosts only ever show. Before a later wave lets one become a real
 event, or lets mail move or delete one, these exist:
 
+("Passband owns the events mail makes" above is the first
+such wave, decided by the owner on 2026-10-28. Where it stands against this
+list: it never notifies and never touches guests; it adopts only from
+authenticated mail, and only an event Gmail itself already added, so it adds
+nothing Gmail had not; the user's dismissal stands in for "this mail is
+wrong" until that exists. It does NOT yet meet the platform rule below: a
+time or place it applies comes from the model's reading of the mail, not an
+iCalendar UID. That is a known gap, bounded by marking rather than deleting
+on cancellation.)
+
 - **Nothing derived from mail may notify.** Since wave 5 a write can make
   Google email an event's guests (`notify: true`). That switch belongs to a
   human pressing a control that says so. A ghost promoted to a real event, an
@@ -1683,8 +2045,124 @@ event, or lets mail move or delete one, these exist:
 
 ## 10. Agents
 
-The agent door stays read-only. Whether `/mcp` serves the timeline (with
-estimates and likelihood marked as such) is open.
+The agent door stays read-only. It does not serve the timeline, but it
+SEARCHES it (§10.1, DECIDED 2026-10-28).
+
+### 10.1 Search (DECIDED 2026-10-28)
+
+The founder: "lets make calendar events searchable by the agent and keyword
+search." Decided with them the same day: an **Events block** in the search
+results (not interleaved, not filter chips), **both** the in-app assistant and
+Agent MCP, and ghosts drawn as ghosts. Narrowed the same day to
+**committed ghosts only** (see "Ghosts" below).
+
+**Why a block and not one list.** A mail hit's date is when it arrived; an
+event's is when it happens. Their scores are not comparable either. Sorted
+together, the list is wrong both ways. So events get their own block, ordered
+by time, and mail keeps its ranking.
+
+**Matching** (`squelch_core::gcal::search`, pure). The query is read by the
+mail parser (`parse_search_query`). `from:`, `to:` and `in:sent`/`from:me` are
+about mail, so a query that has any of them returns no events. `after:` and
+`before:` bound the event's START, not a received date. What is left is
+split into lowercase words of 2+ characters, punctuation dropped, and the
+common short words (a, at, the, with, ...) dropped unless they are all there
+is, at most 16 terms from the first 512 bytes, each once. A term matches a
+word it begins, or a word one of its plural forms begins (`s`, `es`, `ies`
+read as `y`: "meetings" finds "Meeting", "parties" finds "party"), the same
+rule for events (a word index) and ghosts (title and place, matched in
+Rust). The index is NOT stemmed: porter stored "meeting" as "meet", so a
+half-typed "meetin" found nothing while the user typed (adversarial pass,
+2026-10-28). Events match on the title, place, description, guests' names
+and, for the owner only, every address the event holds. Ghosts fold no
+diacritics, events do ("uber" finds an "Über" event, not an "Über" ghost). An event that matches EVERY term is a hit. When none does and
+there are 2+ terms, events missing exactly one term are hits instead (the
+mail search's AND-then-OR, kept tight because the block is three rows). No
+match on operators alone: a query must have at least one term. The calendar's
+name is not matched.
+
+**The index** (schema.sql, CALENDAR SEARCH). First built without one, a
+scan with the exact test in Rust; the probe
+(`store::sqlite::tests::bench::calendar_search_at_the_cap`, 5000 events with
+long descriptions and 20 guests) measured 45 to 140 ms per keystroke with
+SQLite optimized, all of it under the store's one lock. So: FTS5
+`calendar_search_fts`, whose rowid is the id of `calendar_search_keys`,
+because `calendar_events` has no stable integer key (an implicit rowid can
+be renumbered by VACUUM). Written in `upsert_event`, the one way an event is
+written, after its guests and in its transaction; dropped by triggers on
+`calendar_events` when an event is deleted OR updated, whichever path (or
+daemon version) does it, so an older daemon's edit leaves the index short,
+never stale. A store whose index does not hold one row per event, or whose
+index definition differs from schema.sql's, is rebuilt at open (in Rust,
+through the same code a write uses). Matches are counted per term in the
+index, ordered on their times alone, and the full rows and guests are read
+only for the page served. The probe: under 6 ms per search in a debug build,
+46 ms for a word in all 5000 events.
+
+**Order.** Upcoming first, soonest first (an event in progress counts as
+upcoming), then past events, most recent first, on the owner's clock (their
+zone, as every ghost `state` served here also reads it). `total` is the number of
+hits before the limit.
+
+**Ghosts: commitments only** (the founder, 2026-10-28, after the first
+build served every ghost: "only search through real events in the actual
+calendar not events from mail unless triage made an event based on that
+mail"). Search is for the calendar, and a ghost is searched only when it
+is what §3.3 puts on the real calendar: commitment `committed` (a booking,
+a ticket, a reservation the user made), or an invitation the user marked
+going. Invited, proposed and unknown ghosts are possibilities and are not
+searched; their mail is still in the mail results. A ghost the mail
+cancelled, or the user dismissed, is not searched either. Once §3.3's
+automatic add is built, committed ghosts become real events and this case
+mostly empties. The ghost must also be one the timeline would list (its
+supplier message is eligible, §3.6). A ghost that matches a real
+event (`gcal::match_ghosts`, the timeline's display match) is dropped: the
+event is shown and the ghost would be the same thing twice.
+
+**Doors.**
+
+| Door | Route / tool | Gate |
+|---|---|---|
+| Human | `GET /client/calendar/search?q=&limit=` | `calendar` feature (404 off). Real events only while calendar is granted; ghosts always. |
+| In-app assistant | `GET /client/agent/calendar/search?q=&limit=` and the client tool `search_calendar` | Same, plus the agent view below. Mac only, while the Calendar page is available. |
+| Agent MCP | `search_calendar` | Listed and answered only while the `calendar` feature is on. Same agent view. |
+
+Human answer: `{ "items": [ {"event": <timeline event>} | {"ghost": <timeline
+ghost>} ], "total": n, "granted": bool }`, each item exactly as
+`/client/timeline` serves it, so the clients reuse one decoder. `limit`
+defaults to 20, max 50.
+
+Agent answer: `{ "results": [...], "total": n }`, each result:
+`{kind: "event"|"ghost", title, start, end, end_estimated, all_day,
+start_timezone, location, calendar, status, your_response, organizer,
+organizer_is_you, guests: [names], guest_count, description, thread_id,
+likelihood}`. **NO ADDRESS OF ANYONE leaves the agent door from the
+calendar.** Guests appear by name only, the organizer by name or as
+`organizer_is_you`. A name that is (or holds) an address, as Outlook
+invitations often make it, is no name: the guest is counted, not named. A
+calendar name that is an address (Google names a subscribed person's
+calendar after it) is served as null. An address anywhere in the title,
+place or description is served as "(address)". And no address is matched:
+the index files every address the event holds, the ones found in its text
+included, in an `addresses` column the agent's queries never name, so a
+query cannot test "is dan@x.com on this event" one guess at a time (the
+adversarial pass proved all four routes open before this). The description
+is cut to 1000 characters and is the user's data like
+any email body: an instruction in it is not one. A ghost's `thread_id` is the
+mail it came from, and a ghost is served only when every source thread passes
+`external_thread_allowed` (sources that do not are dropped, and a ghost whose
+supplier does not is dropped), the same authority `get_thread` asks, so the
+id always opens.
+
+**Client.** An "Events" block between Senders and the mail hits, up to three
+rows, then "N more" which expands the block in place. Rows join the same
+arrow-key column as Senders and hits. Enter (or a click) opens the Calendar
+page on that event (`selectCalendarItem`, after moving the month so the feed
+covers it). Real events draw with their calendar colour; ghosts draw dashed
+with "from mail". `in:calendar` in the field searches events only (the mail
+search is not run) and lists every hit. The block is drawn only while the
+Calendar page is available. The phone draws the same block in its Search
+tab; a hit opens the Calendar tab in Day mode on that event's detail.
 
 **The in-app assistant drafts events (BUILT in wave 6).** The founder: "lets
 give the assistant the ability to create events." It has ONE calendar tool,
@@ -1732,76 +2210,77 @@ nothing:
   replaced: the tool answers "finish or close the open event first". A
   proposed pane counts as holding something, so it parks instead of closing
   when the user changes page and a second proposal waits its turn.
-- The assistant does not READ the calendar: it gets no event, and a calendar
+- The assistant does not READ the calendar through this tool: a calendar
   name that matches nothing is refused without listing the ones there are.
-  No edit and no delete tool. Nothing on `/mcp` or `/client/agent/*`.
-- Offered only on the Mac and only while the Calendar page is
-  (`AppStore.calendarPageAvailable`, the gate the guide's calendar topic
-  uses). With the page off the tool list and the system prompt are the ones
-  from before the tool existed, and a call to its name is answered as any
-  invented tool is.
+  No edit and no delete tool. It reads events only through
+  `search_calendar` (§10.1).
+- Offered only on the Mac (`AgentTools.Tool.isAvailable`); the phone has
+  no event pane for the assistant to draft into. It was once also gated on
+  the Calendar page being on; the page is unconditional now.
 
-## 11. Feature flag
+## 11. Feature flag (RETIRED: calendar is for everyone)
 
-The calendar is the hidden feature `calendar` (`squelch_core::features::CALENDAR`,
-in `KNOWN`, so it is a column on `/admin/features`). How hidden features travel
-is `docs/FEATURES.md`. For this one:
+The calendar was the hidden feature `calendar` from its first merge (#360)
+until October 2026, when it launched for every tenant and every app ("everyone
+should get it", the founder, 2026-10-28). The key is RETIRED and listed in
+`squelch_core::features::RETIRED`; it is never to be reused (docs/FEATURES.md,
+"Launching"). With no users yet there was no staged rollout: the flag and
+every check on it were deleted in one change.
 
-- **Turning it on.** Hosted: tick the box for a tenant, or "Everyone", on
-  `/admin/features`; the daemon hears within five minutes and the app on its
-  next stats poll, with no restart and no release. Development and self-host:
-  start squelchd with `SQUELCH_FEATURES=calendar`.
-- **Off is as if the feature did not exist, on the daemon.** Every route
-  behind the page (`GET /client/timeline`, `PATCH /client/timeline/ghosts/{id}`,
-  `POST /client/timeline/refresh`, `POST /client/calendar/connect`,
-  `POST /client/calendar/events`, `PATCH` and `DELETE
+What that means now:
+
+- **The daemon.** Every route behind the page (`GET /client/timeline`, `PATCH
+  /client/timeline/ghosts/{id}`, `POST /client/timeline/refresh`, `POST
+  /client/calendar/connect`, `GET /client/calendar/people`, `POST
+  /client/calendar/events`, `PATCH` and `DELETE
   /client/calendar/events/{calendar_id}/{id}`, `PUT /client/person/timezone`)
-  answers the opaque 404
-  (`{"error": "not found"}`) from a route layer (`calendar_routes` in
-  `squelch-api/src/lib.rs`), after bearer auth and before the handler reads a
-  body or calls Google. A refused write writes no audit row: a path that is
-  not served is not an attempt at an action. `/client/stats` says `timeline:
-  false` and carries no `calendar` object. The sync loop asks the flag at the
-  top of every pass and, off, reads no credential and calls Google for
-  nothing; the first pass after it turns on syncs. It asks again before each
-  calendar of a pass, so a flag turned off mid-pass stops at the next
-  calendar (a page already in flight finishes). Each answer is asked at the
-  moment of the decision, so a flip takes effect on the next request, pass
-  or calendar.
-- **Off deletes nothing.** Calendars, events and guest lists already synced
-  stay in the store (other people's addresses among them), served by no
-  route while the flag is off, and brought up to date by the first pass once
-  it is on again. Purging them on off was considered and not done: a flag
-  flipped by mistake would cost a full resync of every calendar.
-- **What keeps running when it is off,** on purpose: ghost projection in the
-  triage commit, and correspondent timezone inference at ingest. Both are
-  cheap and never leave the daemon, and keeping them means a mailbox switched
-  on sees its recent history at once instead of starting empty. What they
-  produce is NOT served while it is off: `GET /client/person` carries no
-  `timezone` key (as on main), and `PUT /client/person/timezone` is one of
-  the gated routes (404).
-- **The hosted calendar consent** (`/reconnect?calendar=1`) is refused for a
-  tenant without the feature (its own row or the Everyone default), with
-  "Calendar isn't available for this mailbox yet." It is refused at the
-  CALLBACK, after Google, not at the start: the start names no tenant by
-  design (the `hint` is a guard that is never used to look anything up), so
-  refusing there would make the link an oracle for which mailboxes have
-  calendar. Nothing is installed or queued. The plain reconnect is untouched.
-- **The apps.** `CalendarGate.pageAvailable` (in
-  `passband/Sources/Passband/Lib/Agenda.swift`) is the daemon's `timeline` AND
-  `store.hasFeature(.calendar)`. Developer mode no longer has anything to do
-  with it. The rail tile, `⇧C`, number key 2 and the shift of the later pages,
-  the Go menu and the shortcuts sheet all follow it. The rail and the Go menu
-  read a stored "page available" value that the stats poller writes only
-  when it changes, so they do not rebuild on every poll. The product guide
-  behind ⌘K help (`Lib/ProductGuide.swift`), its topic index and the
-  assistant's `product_help` schema mention the calendar (its topic, its
-  getting-around line, its shortcut group) only while the page is available;
-  with it off their text equals main's. If the flag turns off while the page
-  is open, the app goes to the Sitrep, closes the event pane (an unsaved
-  draft is discarded, as on an account switch; leaving the page by
-  navigation instead parks it, §5) and drops the calendar state. A write
-  whose answer lands after the gate closed is dropped, with no analytics.
+  is served to every mailbox, after bearer auth like every human-door route
+  (`calendar_routes` in `squelch-api/src/lib.rs`). `/client/stats` always says
+  `timeline: true` and always carries the `calendar` object (granted or not,
+  and how to connect). `GET /client/person` serves the inferred `timezone`.
+  The sync loop needs no flag: it idles until calendar is GRANTED and then
+  syncs. Ghost projection and timezone inference ran regardless of the flag
+  all along, so every mailbox has its history from the day those shipped.
+- **The hosted calendar consent** (`/reconnect?calendar=1`) installs for any
+  tenant. It used to be refused at the callback for a tenant without the
+  feature ("Calendar isn't available for this mailbox yet"); that refusal is
+  gone, and the callback no longer reads `tenant_features` at all. The
+  unticked-calendar, Gmail-floor and hint guards are unchanged. Signup has
+  asked for calendar since 2026-10-27.
+- **The apps have no gate at all.** The Calendar page is unconditional: no
+  hidden feature, no `timeline` check (the client no longer decodes
+  `timeline`). The Mac's rail always has it second, number key 2 and `⇧C`
+  open it, and the Go menu, the `?` sheet, the product guide and the
+  assistant's calendar tool always include it. The iPhone's bar is always
+  Sitrep · Calendar · Mail; the Quick Look tab is gone, its record zones and
+  the login-codes key live on the sitrep. An app on a daemon too old to serve
+  the timeline would show a calendar of errors rather than hide the page; with
+  no users on such a daemon, that was accepted. The daemon keeps sending
+  `timeline: true`, which apps from before this change still need.
+- **Asking for Google Calendar.** Both apps raise the connect card on the
+  calendar's FIRST VISIT for an account that has not granted it, once per
+  account (`raiseCalendarCardIfOwed`, `calendarOffer == .card`), and offer it
+  after that from a banner (Mac) or an inline card at the top of the list
+  (iPhone). The card is `Views/CalendarConnectCard.swift`, the same view on
+  both: the Mac's action layer mounts it, and the iPhone's `MobileShell`
+  mounts it over the Calendar tab only. Practice mode and a granted calendar
+  are never offered it.
+- **Leftover rows.** `tenant_features` rows (and an "Everyone" default) for
+  `calendar` may still exist. They are harmless: nothing asks for the key. They
+  are still served on `GET /tenant/features` and listed in `/client/stats`
+  `features`, which the apps ignore. Saving `/admin/features` does not touch
+  them, since `calendar` is no longer a column there.
+- **Rollout: both halves, or the flag.** The control-plane half deploys
+  itself from `main`. The daemon half needs a daemon release and a fleet roll;
+  until then a hosted tenant's daemon still gates on the flag and says
+  `timeline: false` without it. The app half needs a Mac and an iOS release;
+  an app from before it still asks for `calendar` in `/client/stats`
+  `features` as well as the timeline. A new app shows the page whatever the
+  daemon says, so on an un-rolled daemon without the flag its routes 404 and
+  the page has nothing to show until the roll. So a mailbox has a working
+  page once its daemon AND its app are both new, or, in the meantime, wherever a
+  `calendar` row is still served (the leftover rows above keep an old app or
+  an old daemon working, which is the one thing they are good for).
 
 ## 12. Build order
 
@@ -1861,6 +2340,7 @@ Each wave is useful on its own and is committed when verified.
   headers-only fetch) or let the timezone inference learn forward only.
 - The month view (hour strips per day, no titles) is the least conventional
   surface and has not been judged by the founder yet.
-- Whether the agent door serves the timeline.
+- Whether the agent door serves the timeline (it SEARCHES it since
+  2026-10-28, §10.1; a listing by date is still open).
 - Google's scope names, their classification, and the amendment process, all
   to be verified at build time.

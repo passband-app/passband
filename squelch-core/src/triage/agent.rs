@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const PROMPT_VERSION: &str = "agent-triage-v15";
+pub const PROMPT_VERSION: &str = "agent-triage-v17";
 /// The prompt text, with one figure to fill in: the `read_message` page
 /// size, defined beside the request it answers
 /// ([`super::context::READ_MESSAGE_PAGE_CHARS`]) and shared with the
@@ -107,19 +107,7 @@ pub async fn run_agent(
         model_calls: 0,
         retry_after: None,
     })?;
-    {
-        // The stored bodies serve the bound and go: a run holds the
-        // condensed text, not the stored.
-        let stored = condense_initial_context(&mut context.initial, &config.context);
-        // Reserve half the context window for investigation results.
-        // Truncation is visible in the payload and never silently drops a
-        // message's identity.
-        bound_evidence_text(
-            &mut context.initial,
-            config.context.max_context_bytes / 2,
-            &stored,
-        );
-    }
+    prepare_initial_context(&mut context.initial, &config.context);
     let mut progress = RunProgress::default();
     // Each turn has `timeout_secs` of its own (inside `run_bounded`); this is
     // the ceiling on the whole run, every turn and every evidence read, so
@@ -169,6 +157,7 @@ async fn run_bounded(
     let mut revisions = context.thread_revisions.clone();
     let mut observed = ObservedDecisionContext::default();
     observed.observe(&context.initial, Some(&context.thread_id));
+    let now = run_clock(&context.initial);
     let mut history = Vec::<Value>::new();
     let mut tool_calls = 0;
     let mut reviews = 0;
@@ -255,7 +244,7 @@ async fn run_bounded(
         };
         match step {
             AgentStep::Finish { decision } => {
-                match validate_decision(&decision, &sources, &revisions, &context.rule_ids)
+                match validate_decision(&decision, &sources, &revisions, &context.rule_ids, now)
                     .and_then(|()| observed.validate(&decision, &context.thread_id))
                 {
                     Ok(()) => {
@@ -341,6 +330,39 @@ async fn run_bounded(
 /// the last word on what is visible: a body the bound shrinks is condensed
 /// again from its stored text, exactly ([`shrink_body`]).
 type StoredBodies = BTreeMap<i64, super::condense::StoredBody>;
+
+/// Everything [`run_agent`] does to the initial snapshot before the first
+/// model call: [`condense_initial_context`], then the byte bound. The stored
+/// bodies serve the bound and go: a run holds the condensed text, not the
+/// stored. Public so `squelch-eval` can measure the user message a snapshot
+/// will produce.
+pub fn prepare_initial_context(initial: &mut Value, config: &super::agent_config::ContextConfig) {
+    let stored = condense_initial_context(initial, config);
+    // Reserve half the context window for investigation results. Truncation
+    // is visible in the payload and never silently drops a message's identity.
+    bound_evidence_text(initial, config.max_context_bytes / 2, &stored);
+}
+
+/// The byte bound alone, for snapshots from before condensation existed
+/// (an eval replaying old gold). With no stored bodies, a shrunk body is cut
+/// from the text in hand.
+pub fn bound_initial_context(initial: &mut Value, config: &super::agent_config::ContextConfig) {
+    bound_evidence_text(initial, config.max_context_bytes / 2, &StoredBodies::new());
+}
+
+/// The run's own clock: the snapshot's `now` (an owner-clock prompt line,
+/// `2026-10-19T16:46:00-07:00 (Zone, Day)`, so its first word is RFC 3339).
+/// In production that is within the run's deadline of the wall clock; a
+/// replay of an old snapshot judges its revisit against the time it shows.
+fn run_clock(initial: &Value) -> chrono::DateTime<chrono::Utc> {
+    initial
+        .get("now")
+        .and_then(Value::as_str)
+        .and_then(|line| line.split_whitespace().next())
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&chrono::Utc))
+        .unwrap_or_else(chrono::Utc::now)
+}
 
 /// Condense the bodies of the initial snapshot: the target and the newest
 /// `full_sibling_bodies` siblings lose quoted tails and long URLs and are cut
@@ -773,11 +795,13 @@ pub fn normalize_decision(decision: &mut MessageDecision) {
     }
 }
 
+/// `now` is the run's clock ([`run_clock`]), which a revisit must follow.
 pub fn validate_decision(
     decision: &MessageDecision,
     sources: &BTreeSet<i64>,
     revisions: &BTreeMap<String, i64>,
     rule_ids: &[i64],
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), String> {
     let fail = |kind: &str| Err(kind.to_owned());
     if decision.kinds.is_empty()
@@ -886,11 +910,7 @@ pub fn validate_decision(
     {
         return fail("revisit_requires_reason");
     }
-    if decision
-        .revisit
-        .as_ref()
-        .is_some_and(|r| r.at <= chrono::Utc::now())
-    {
+    if decision.revisit.as_ref().is_some_and(|r| r.at <= now) {
         return fail("revisit_must_be_in_the_future");
     }
     if decision
@@ -1729,7 +1749,7 @@ mod tests {
                 super::super::context::READ_MESSAGE_PAGE_CHARS,
                 PROMPT_VERSION
             ),
-            (2_000, "agent-triage-v15")
+            (2_000, "agent-triage-v17")
         );
     }
     #[test]
@@ -1740,7 +1760,16 @@ mod tests {
             evidence: decision.attention.evidence.clone(),
             critical: false,
         };
-        assert!(validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[]).is_ok());
+        assert!(
+            validate_decision(
+                &decision,
+                &BTreeSet::from([7]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            )
+            .is_ok()
+        );
         assert!(!decision.external_access.restricted);
     }
     /// A done carries why and where it was read, like a rule exception: one
@@ -1755,8 +1784,15 @@ mod tests {
                 location: "body".into(),
             }]
         };
-        let check =
-            |d: &MessageDecision| validate_decision(d, &BTreeSet::from([7]), &BTreeMap::new(), &[]);
+        let check = |d: &MessageDecision| {
+            validate_decision(
+                d,
+                &BTreeSet::from([7]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now(),
+            )
+        };
         for (reason, evidence) in [(" ", cited(7)), ("Over", vec![]), ("Over", cited(8))] {
             decision.done = Some(DoneRequest {
                 reason: reason.into(),
@@ -1843,17 +1879,41 @@ mod tests {
             reason: "Check later".into(),
         });
         assert_eq!(
-            validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[]),
+            validate_decision(
+                &decision,
+                &BTreeSet::from([7]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            ),
             Err("revisit_must_be_in_the_future".into())
         );
         decision.revisit.as_mut().unwrap().at = chrono::Utc::now() + chrono::Duration::hours(1);
-        assert!(validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[]).is_ok());
+        assert!(
+            validate_decision(
+                &decision,
+                &BTreeSet::from([7]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            )
+            .is_ok()
+        );
     }
     #[test]
     fn unknown_evidence_and_unfetched_updates_fail() {
         let mut decision = valid();
         decision.attention.relevant_message_ids = vec![8];
-        assert!(validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[]).is_err());
+        assert!(
+            validate_decision(
+                &decision,
+                &BTreeSet::from([7]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            )
+            .is_err()
+        );
         decision = valid();
         decision.related_updates.push(RelatedAttentionUpdate {
             thread_id: "other".into(),
@@ -1861,7 +1921,16 @@ mod tests {
             attention: decision.attention.clone(),
             evidence: decision.attention.evidence.clone(),
         });
-        assert!(validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[]).is_err());
+        assert!(
+            validate_decision(
+                &decision,
+                &BTreeSet::from([7]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            )
+            .is_err()
+        );
     }
     /// A shipping email that never prints its order number: the model finds
     /// the number in the sender's history and cites THAT message. Any message a
@@ -1889,9 +1958,24 @@ mod tests {
             ],
         });
         let fetched = BTreeSet::from([7, 3]);
-        assert!(validate_decision(&decision, &fetched, &BTreeMap::new(), &[]).is_ok());
+        assert!(
+            validate_decision(
+                &decision,
+                &fetched,
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            )
+            .is_ok()
+        );
         assert_eq!(
-            validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[]),
+            validate_decision(
+                &decision,
+                &BTreeSet::from([7]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            ),
             Err("record_requires_evidence".into())
         );
         let delivery = &decision_schema()["properties"]["records"]["items"]["anyOf"][2];
@@ -1989,7 +2073,16 @@ mod tests {
             evidence: decision.attention.evidence.clone(),
             critical: true,
         };
-        assert!(validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[]).is_ok());
+        assert!(
+            validate_decision(
+                &decision,
+                &BTreeSet::from([7]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            )
+            .is_ok()
+        );
         normalize_decision(&mut decision);
         assert!(!decision.auth.critical);
         decision.auth.kinds = vec![AuthKind::LoginAlert, AuthKind::AccountChange];
@@ -2037,14 +2130,17 @@ mod tests {
         let sources = BTreeSet::from([source]);
         let none = BTreeMap::new();
         let rules: [i64; 0] = [];
-        assert_eq!(validate_decision(&dated, &sources, &none, &rules), Ok(()));
+        assert_eq!(
+            validate_decision(&dated, &sources, &none, &rules, chrono::Utc::now()),
+            Ok(())
+        );
         // The agent writes a stated time as a LOCAL time with no offset, the
         // way it writes event starts. That is a valid `ends`.
         for naive in ["2026-10-31T23:59:00", "2026-10-31T23:59"] {
             let mut timed = dated.clone();
             timed.ends.as_mut().unwrap().value = naive.into();
             assert_eq!(
-                validate_decision(&timed, &sources, &none, &rules),
+                validate_decision(&timed, &sources, &none, &rules, chrono::Utc::now()),
                 Ok(()),
                 "{naive}"
             );
@@ -2053,13 +2149,13 @@ mod tests {
         let mut vague = dated.clone();
         vague.ends.as_mut().unwrap().value = "end of the month".into();
         assert_eq!(
-            validate_decision(&vague, &sources, &none, &rules),
+            validate_decision(&vague, &sources, &none, &rules, chrono::Utc::now()),
             Err("invalid_ends_time".to_string())
         );
         let mut unsourced = dated;
         unsourced.ends.as_mut().unwrap().source_message_id = source + 999;
         assert_eq!(
-            validate_decision(&unsourced, &sources, &none, &rules),
+            validate_decision(&unsourced, &sources, &none, &rules, chrono::Utc::now()),
             Err("invalid_ends_time".to_string())
         );
     }

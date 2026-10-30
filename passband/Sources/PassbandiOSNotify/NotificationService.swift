@@ -106,6 +106,23 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
             return
         }
 
+        // An event reminder: its own fetch and banner, no badge (an event
+        // changes nothing the badge counts).
+        if let reminder = EventBanner.calendarPush(request.content.userInfo[PushRoute.eventIdKey] as? String) {
+            nonisolated(unsafe) let fallback = request.content
+            let task = Task { [weak self] in
+                let content = await Self.calendarContent(reminder)
+                guard let self else { return }
+                self.deliver(content ?? fallback)
+            }
+            let spent = lock.withLock { () -> Bool in
+                work = task
+                return handler == nil
+            }
+            if spent { task.cancel() }
+            return
+        }
+
         guard let route = PushRoute(userInfo: request.content.userInfo) else {
             return deliver(request.content)
         }
@@ -131,8 +148,10 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
             guard let event else {
                 return self.deliver(Self.badged(fallback, count: count))
             }
-            self.deliver(
-                Self.badged(Self.content(for: event, accountId: route.accountId), count: count))
+            // Badged BEFORE the sender is attached, so the communication
+            // content `updating(from:)` returns is the one delivered as is.
+            let base = Self.badged(Self.content(for: event, accountId: route.accountId), count: count)
+            self.deliver(await Self.withSender(base, event: event))
         }
         // Published after launch, so an expiry in between could not cancel
         // it: if the handler is already spent, cancel the fetch here instead.
@@ -261,6 +280,20 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
         }
     }
 
+    /// An ordinary mail banner re-dressed as a communication notification, so
+    /// the sender's avatar leads and Passband's icon is the badge (see
+    /// SenderAvatar). Not for auth banners, which lead with the kind of event
+    /// rather than who sent it, and not for a read receipt, whose "sender" is
+    /// the account's own address.
+    private static func withSender(_ content: UNNotificationContent, event: Event) async
+        -> UNNotificationContent
+    {
+        guard case .threadBanner = EventBanner.routing(for: event), event.kind != .opened,
+            !event.sender.isEmpty
+        else { return content }
+        return await SenderAvatar.communication(content, sender: event.sender, name: content.title)
+    }
+
     /// AUTH MAIL. The phone cannot poll in the background, so this push is the
     /// only way a login code reaches a phone at all — and it is the one banner
     /// here that is NOT built from what the mail says. Two fields of the event
@@ -332,6 +365,48 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
         // sound preference lives in ITS UserDefaults, which this process does
         // not share. Silencing the kinds the app silences matters more than
         // which chime the rest use.
+        content.sound = copy.sound ? .default : nil
+        return content
+    }
+
+    // MARK: - an event reminder
+
+    /// The banner the Mac would post for this reminder (CalendarReminder.swift),
+    /// or nil to keep the relay's "An event is coming up". The push names a
+    /// fire by id and second; what is shown is what THIS account's daemon
+    /// serves under it, and only when both agree.
+    ///
+    /// The raw push's `event_id` survives a nil here, so a tap on the generic
+    /// banner still opens the reminder (`EventBanner.tapRoute`).
+    private static func calendarContent(_ push: EventBanner.CalendarPush) async -> UNNotificationContent? {
+        guard let settings = try? SettingsStore.load(accountId: push.accountId) else { return nil }
+
+        var base = settings.serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        while base.hasSuffix("/") { base.removeLast() }
+        guard let url = URL(string: base + CalendarReminderSignal.path(push.fireId)) else { return nil }
+
+        var request = URLRequest(url: url, timeoutInterval: 10)
+        request.setValue("Bearer \(settings.apiToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        // Silent on every failure, for the reason `fetch` is.
+        guard let (data, response) = try? await Self.session.data(for: request),
+            (response as? HTTPURLResponse)?.statusCode == 200,
+            let signal = CalendarReminderSignal.decode(data),
+            EventBanner.isPushedFire(signal, fireId: push.fireId, fired: push.fired)
+        else { return nil }
+
+        let account = push.accountId.uuidString
+        let copy = EventBanner.calendarReminderCopy(signal)
+        let content = UNMutableNotificationContent()
+        content.title = copy.title
+        content.subtitle = copy.subtitle
+        content.body = copy.body
+        content.threadIdentifier = "\(account).\(copy.threadIdentifier)"
+        content.userInfo = EventBanner.calendarReminderUserInfo(signal, account: push.accountId)
+        // The app registers the category and its "Show tickets" action.
+        if signal.ticket != nil { content.categoryIdentifier = EventBanner.calendarTicketCategory }
+        // The system's chime: the app's choice lives in ITS defaults.
         content.sound = copy.sound ? .default : nil
         return content
     }

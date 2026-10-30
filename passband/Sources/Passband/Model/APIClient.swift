@@ -460,7 +460,7 @@ actor APIClient {
 
     /// Who a first name most likely is, for the event pane's guest
     /// suggestion: at most three people the user has written to, the most
-    /// recent exchange first. Behind the calendar feature; a daemon older
+    /// recent exchange first. A daemon older
     /// than the route answers 404, and the pane then suggests nobody.
     func calendarPeople(named name: String) async throws -> [NamedPerson] {
         let answer: NamedPeople = try await get("/client/calendar/people", query: ["name": name])
@@ -664,6 +664,20 @@ actor APIClient {
         try await get(
             "/client/timeline",
             query: ["from": Self.rfc3339Local(from), "to": to.map(Self.rfc3339Local)])
+    }
+
+    /// `GET /client/calendar/search` (docs/CALENDAR.md §10.1): the events and
+    /// ghosts behind the search panel's Events block. Behind the calendar
+    /// feature, so a 404 is "no calendar here" and the block stays away.
+    func calendarSearch(_ q: String, limit: Int = 20) async throws -> CalendarSearchPage {
+        try await get("/client/calendar/search", query: ["q": q, "limit": String(limit)])
+    }
+
+    /// `GET /client/agent/calendar/search`: the same search under the agent
+    /// view (nobody's address, ghosts only from mail the agent may read),
+    /// handed to the assistant as it came.
+    func agentCalendarSearch(_ q: String, limit: Int) async throws -> JSONValue {
+        try await get("/client/agent/calendar/search", query: ["q": q, "limit": String(limit)])
     }
 
     /// `POST /client/timeline/refresh`: ask the calendar sync to run now. A
@@ -888,6 +902,9 @@ actor APIClient {
         var message_id: Int
         /// Ask the daemon to do it (it may still answer with a link to open).
         var auto: Bool
+        /// The daemon refuses `auto` without it. Every caller is a tap: the
+        /// unsubscribe button, or the assistant after `AgentTools.confirmed`.
+        var confirm: Bool
     }
     struct UnsubSenderBody: Codable, Sendable { var sender: String }
     struct UnsubResolutionBody: Codable, Sendable {
@@ -896,7 +913,7 @@ actor APIClient {
     }
 
     func unsubscribe(messageId: Int) async throws -> UnsubscribeResult {
-        try await post("/client/unsubscribe", body: UnsubBody(message_id: messageId, auto: true))
+        try await post("/client/unsubscribe", body: UnsubBody(message_id: messageId, auto: true, confirm: true))
     }
 
     /// The user followed a `needs_you` link to finish on the sender's site.
@@ -1273,6 +1290,30 @@ actor APIClient {
     @discardableResult
     func setTrackingDefault(_ enabled: Bool) async throws -> TrackingConfig {
         try await post("/client/tracking-config", body: TrackingConfigBody(default_enabled: enabled))
+    }
+
+    // MARK: - event reminders (docs/CALENDAR.md, "Reminders and tickets")
+
+    /// One fired reminder, by its fire id: the same JSON as the Mac's
+    /// `calendar_reminder` frame. Kept a week on the daemon; a 404 after.
+    /// Generic over the frame type so this file (and the suites that compile
+    /// it) need not carry the banner code: the caller names
+    /// `CalendarReminderSignal`.
+    func getCalendarReminder<T: Decodable>(_ fireId: Int, as type: T.Type) async throws -> T {
+        try await get(CalendarReminderRoute.fire(fireId))
+    }
+
+    /// THE OWNER'S SWITCH (`CalendarReminderRoute.settings`, an assumed
+    /// route). A daemon older than the setting answers 404, which the card
+    /// reads as "not offered here".
+    func getCalendarReminderSettings() async throws -> CalendarReminderSettings {
+        try await get(CalendarReminderRoute.settings)
+    }
+
+    /// Writes the switch. Whatever the daemon answers with (its stored view,
+    /// or nothing at all) a 2xx means it now holds `enabled`.
+    func setCalendarReminderSettings(enabled: Bool) async throws {
+        try await putNoContent(CalendarReminderRoute.settings, body: CalendarReminderSettings(enabled: enabled))
     }
 
     // MARK: - translation languages

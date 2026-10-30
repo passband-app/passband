@@ -190,6 +190,7 @@ fn seed_message(store: &SqliteStore, account: i64, label: i64) -> i64 {
             list_unsubscribe: None,
             list_unsub_one_click: false,
             auth_pass: None,
+            sender_signals: None,
         })
         .unwrap()
 }
@@ -1457,6 +1458,61 @@ async fn a_draft_ping_goes_to_tagged_devices_once() {
     assert_eq!(body["kind"], json!("draft"));
     assert_eq!(body["collapse_id"], json!("draft-12-1790000000"));
     assert_eq!(h.cursor(), cursor, "a draft ping is not an event");
+
+    h.stop().await;
+}
+
+/// A calendar reminder: pushed once, to TAGGED devices only, as
+/// `"<tag>:cal:<fire id>:<fired>"` with the relay's calendar fallback line,
+/// and without touching the event cursor.
+#[tokio::test]
+async fn a_calendar_ping_goes_to_tagged_devices_once() {
+    let (base, relay) = spawn_relay().await;
+    let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+    let acct = store.ensure_account("me@example.com").unwrap();
+    let (events, _) = broadcast::channel::<i64>(256);
+    store.attach_event_notifier(events.clone()).unwrap();
+    let (pings, _) = broadcast::channel::<squelch_core::push::CalendarPing>(8);
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let pusher = Pusher::for_test(store.clone() as Arc<dyn Store>, acct, &base)
+        .with_calendar_pings(pings.subscribe());
+    let handle = tokio::spawn(pusher.run(events.subscribe(), shutdown_rx));
+    let h = Harness {
+        store,
+        acct,
+        shutdown,
+        handle,
+    };
+    h.register(DEV_A);
+    h.register_tagged(DEV_B, "3F2A9C1E-7B44-4D0A-9E21-8C5B6D0F1A32");
+    wait_for("the initial cursor", Duration::from_secs(2), || {
+        h.cursor().is_some()
+    })
+    .await;
+    let cursor = h.cursor();
+
+    pings
+        .send(squelch_core::push::CalendarPing {
+            fire_id: 7,
+            fired: 1_793_210_000,
+        })
+        .unwrap();
+    wait_for("the calendar push", Duration::from_secs(5), || {
+        relay.count() == 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(relay.count(), 1, "one request, the untagged device skipped");
+
+    let body = relay.bodies().remove(0);
+    assert_eq!(body["device_tokens"], json!([DEV_B]));
+    assert_eq!(
+        body["event_id"],
+        json!("3F2A9C1E-7B44-4D0A-9E21-8C5B6D0F1A32:cal:7:1793210000")
+    );
+    assert_eq!(body["kind"], json!("calendar"));
+    assert_eq!(body["collapse_id"], json!("cal-7-1793210000"));
+    assert_eq!(h.cursor(), cursor, "a calendar ping is not an event");
 
     h.stop().await;
 }

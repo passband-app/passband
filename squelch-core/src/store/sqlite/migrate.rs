@@ -124,6 +124,7 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     retire_records_destination(conn)?;
     relabel_scanner_opens(conn)?;
     retire_preference_retriage(conn)?;
+    rebuild_calendar_reminder_fires(conn)?;
     // The account's mail provider. 'gmail' on every pre-existing row, which is
     // the honest reading: Gmail was the only provider this daemon ever had.
     add_column_if_missing(
@@ -144,6 +145,10 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // tracking-pixel bypass, no ghost sender scope, no timezone observation),
     // and a re-sync refills it through the message upsert.
     add_column_if_missing(conn, "messages", "auth_pass", "INTEGER")?;
+    // Where From and the real sender disagree (#639), as JSON. NULL on every
+    // pre-existing row and NOT backfilled here: the raw mail is not stored,
+    // so only a re-fetch can fill it, and the message upsert does that.
+    add_column_if_missing(conn, "messages", "sender_signals", "TEXT")?;
     // Automatic-unsubscribe job state. NULL on every pre-existing row, which is
     // exactly a legacy browser unsubscribe: no job, and the detector armed.
     for col in ["status", "status_url", "status_reason", "status_at"] {
@@ -803,6 +808,26 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    // Gmail's own events (2026-10-28). A row from before the mark reads as
+    // an ordinary event, which offers an edit Google then refuses; so when
+    // the column is new every calendar forgets its token and last full read,
+    // and the next pass rereads each in full with `eventType` in the mask.
+    if add_column_if_missing(
+        conn,
+        "calendar_events",
+        "from_gmail",
+        "INTEGER NOT NULL DEFAULT 0",
+    )? {
+        conn.execute(
+            "UPDATE calendar_calendars SET sync_token=NULL, full_synced_at=NULL",
+            [],
+        )?;
+    }
+
+    // The card's place gained its street address (2026-10-29). A table made
+    // before it holds names only, under the old prompt, so every row is
+    // pending again anyway.
+    add_column_if_missing(conn, "calendar_places", "address", "TEXT")?;
 
     // STRANDED FAN-OUTS. A group send settles its recipients from a background
     // task, and no task survives the process. So any recipient still 'pending'
@@ -847,6 +872,11 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // Best-effort by design: see the function for why a busy sibling process
     // must not turn this into a failed open.
     rebuild_fts_if_stale(conn)?;
+
+    // ---- CALENDAR SEARCH'S INDEX OUT OF STEP ------------------------------
+    //
+    // Events written before the index existed, or by an older daemon since.
+    reindex_calendar_search_if_stale(conn)?;
 
     // Re-launder every stored institution through the extractor's OWN sanitizer,
     // which grew a shape check after a model returned a valid-looking JSON object
@@ -1881,6 +1911,35 @@ pub(super) fn retire_preference_retriage(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// `calendar_reminder_fires` GREW `covers` and became AUTOINCREMENT (a fire
+/// id the phone fetches by must never be reused). Neither can be ALTERed in,
+/// so a table without `covers` is DROPPED and recreated, discarding its rows:
+/// it only ever existed on development databases of the unreleased branch
+/// that made it, and a row is a week-long record of a banner already shown.
+/// Guarded on the column, so it runs at most once per DB; schema.sql already
+/// ran this open, hence the CREATE here.
+pub(super) fn rebuild_calendar_reminder_fires(conn: &Connection) -> Result<()> {
+    if !tables_exist(conn, &["calendar_reminder_fires"])?
+        || has_columns(conn, "calendar_reminder_fires", &["covers"])?
+    {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "DROP TABLE calendar_reminder_fires;
+         CREATE TABLE calendar_reminder_fires (
+             id         INTEGER PRIMARY KEY AUTOINCREMENT,
+             account_id INTEGER NOT NULL,
+             item_key   TEXT NOT NULL,
+             start_key  TEXT NOT NULL,
+             fired_at   INTEGER NOT NULL,
+             covers     TEXT NOT NULL DEFAULT '[]',
+             frame      TEXT NOT NULL,
+             UNIQUE(account_id, item_key, start_key)
+         );",
+    )?;
+    Ok(())
+}
+
 /// Retire the old independent placement without dropping typed record facts.
 /// Old generic placements are queued for investigation rather than relabeled
 /// by guessing. The transaction makes cleanup and requeue atomic and idempotent.
@@ -1970,6 +2029,67 @@ pub(super) fn retire_records_destination(conn: &Connection) -> Result<()> {
             false,
         )?;
     }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Rebuild calendar search's index (schema.sql, CALENDAR SEARCH) when it does
+/// not hold exactly one row per stored event: events stored before it
+/// existed, or written by an older daemon that does not keep it. Three counts
+/// on an index-backed table each; a rebuild is one INSERT ... SELECT per
+/// table, and the store holds at most a few thousand events per calendar.
+/// `calendar_search_fts`'s CREATE statement as schema.sql has it.
+fn canonical_calendar_search_create() -> Option<&'static str> {
+    static PARSED: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *PARSED.get_or_init(|| {
+        let start = SCHEMA.find("CREATE VIRTUAL TABLE IF NOT EXISTS calendar_search_fts")?;
+        let end = start + SCHEMA[start..].find(");")? + 1;
+        Some(SCHEMA[start..end].trim())
+    })
+}
+
+pub(super) fn reindex_calendar_search_if_stale(conn: &Connection) -> Result<()> {
+    // A partial store (an old schema mid-upgrade, a test fixture) has nothing
+    // to index, or nowhere to put it.
+    if !tables_exist(
+        conn,
+        &[
+            "calendar_events",
+            "calendar_event_guests",
+            "calendar_search_keys",
+            "calendar_search_fts",
+        ],
+    )? {
+        return Ok(());
+    }
+    let count = |sql: &str| -> Result<i64> { Ok(conn.query_row(sql, [], |r| r.get(0))?) };
+    // A definition that differs from schema.sql's (the tokenizer changed) is
+    // a different index: recreate it, and the counts below then force the
+    // rebuild.
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='calendar_search_fts'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let (Some(stored), Some(canonical)) = (stored, canonical_calendar_search_create())
+        && normalize_fts_sql(&stored) != normalize_fts_sql(canonical)
+    {
+        conn.execute_batch(&format!("DROP TABLE calendar_search_fts; {canonical};"))?;
+    }
+    let events = count("SELECT COUNT(*) FROM calendar_events")?;
+    let keys = count(
+        "SELECT COUNT(*) FROM calendar_search_keys k JOIN calendar_events e
+           ON e.account_id=k.account_id AND e.calendar_id=k.calendar_id AND e.event_id=k.event_id",
+    )?;
+    let all_keys = count("SELECT COUNT(*) FROM calendar_search_keys")?;
+    let indexed = count("SELECT COUNT(*) FROM calendar_search_fts")?;
+    if events == keys && keys == all_keys && all_keys == indexed {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    super::calendar::reindex_calendar_search(&tx)?;
     tx.commit()?;
     Ok(())
 }

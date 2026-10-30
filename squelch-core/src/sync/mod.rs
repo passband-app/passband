@@ -4,15 +4,20 @@
 //! source's change feed is walked for BOTH folders — the inbox for incoming
 //! mail, sent for whatever the user wrote from another client — an expired
 //! cursor falling back to a full catch-up. The source is picked from the
-//! account's `provider` row; Gmail ([`crate::mail::gmail`]) is the only one.
+//! account's `provider` row: Gmail ([`crate::mail::gmail`]) or IMAP
+//! ([`crate::mail::imap`], read only).
 //! Tokens, headers and bodies are NEVER logged; ingest seals first (SECURITY.md).
 
+mod embed_backoff;
 pub mod html;
 pub mod ingest;
 pub mod notify_lane;
 mod profile;
+pub mod sender_signals;
 mod translate_pass;
-pub(crate) mod triage_worker;
+/// Public for `squelch-eval`, which replays triage through the production
+/// evidence reader and snapshot builder rather than copies of them.
+pub mod triage_worker;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
@@ -25,6 +30,8 @@ use crate::credentials::CredentialStore;
 use crate::error::{CoreError, Result};
 use crate::gmail_budget::GmailBudget;
 use crate::mail::gmail::{GMAIL_QUOTA_RETRY_CAP, GmailSource, GmailSourceParts};
+use crate::mail::graph::{GRAPH_API_BASE, GraphSource, GraphSourceParts};
+use crate::mail::imap::{IMAP_ACCOUNT_SETTING, ImapCredential, ImapSource, StoredImapSlot};
 use crate::mail::{
     Changes, ChangesError, FetchedMessage, Folder, Listing, MailProvider, MailSource, Placement,
     RawBody, SourceRefusals, SyncCursor, Urgency,
@@ -140,8 +147,10 @@ enum IngestOrigin {
     Archive,
 }
 
-/// Persisted message and optional local embedding input. Provider spam is
-/// excluded from semantic recall; internal embeddings may include auth mail.
+/// Persisted message and optional embedding input. `embed_text` is `Some`
+/// only when the stored row passes the sealed gate (`Store::message_embeddable`):
+/// provider spam never, inbound mail not until a non-sealed decision lands
+/// (the drain embeds it then), the owner's own mail at once.
 struct Ingested {
     id: i64,
     embed_text: Option<String>,
@@ -717,7 +726,9 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// run the drain. Raised at construction (rows ingested before this
     /// process had an embedder, and failures from an earlier run, are what the
     /// first drain is for), by every arm of [`SyncEngine::embed_and_store`]
-    /// that did not write a vector, and by a drain that stopped on an error;
+    /// that did not write a vector, by an applied triage decision (inbound
+    /// mail is embedded only once it is decided, so a decision is a row the
+    /// drain may now owe a vector), and by a drain that stopped on an error;
     /// lowered by a drain as it starts, so a failure that lands while it runs
     /// is not lost under its clear. Without this the drain ran EVERY round,
     /// and in steady state every non-spam row already has a vector, so its
@@ -732,6 +743,10 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// [`SyncEngine::with_vectors_dirty`] hands one flag to every engine over
     /// one store.
     vectors_dirty: Arc<AtomicBool>,
+    /// The window during which a remote embedder is not called after a
+    /// transient failure. Never opens for a local embedder. See
+    /// [`embed_backoff`].
+    embed_backoff: embed_backoff::EmbedBackoff,
     /// Shared cooldown after provider failure. Rejected configuration must not
     /// trigger one request per queued message or consume message retry attempts.
     agent_retry_after: AtomicI64,
@@ -787,6 +802,9 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// [`GMAIL_API_BASE`] in production; the tests point it at a loopback mock so
     /// the walk/cursor rules are asserted on the wire rather than on a struct.
     api_base: String,
+    /// Graph base for an Outlook account's source. Always [`GRAPH_API_BASE`]
+    /// in production; test-only setter, for the reason `api_base` has none.
+    graph_api_base: String,
     /// THE ACCOUNT'S MAIL SOURCE, picked from its `provider` row and built ON
     /// FIRST USE, for the reason [`Self::notify_lane`] is: it holds clones of
     /// what the builders (`with_metrics`, `with_gmail_budget`) replace after
@@ -898,6 +916,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             archive_pace: ArchivePace::default(),
             archive: ArchiveRun::default(),
             vectors_dirty: Arc::new(AtomicBool::new(true)),
+            embed_backoff: embed_backoff::EmbedBackoff::default(),
             agent_retry_after: AtomicI64::new(0),
             agent_throttle_strikes: AtomicU32::new(0),
             agent_access_strikes: AtomicU32::new(0),
@@ -909,6 +928,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             gateway_answer_ms: AtomicI64::new(0),
             metrics: SyncMetrics::new(),
             api_base: GMAIL_API_BASE.to_string(),
+            graph_api_base: GRAPH_API_BASE.to_string(),
             profile_url: profile::PEOPLE_ME_URL.to_string(),
             source: std::sync::OnceLock::new(),
             last_cursor: std::sync::Mutex::new(None),
@@ -940,11 +960,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// a build that could be aimed at an arbitrary host would be a bearer-token
     /// exfiltration primitive.
     #[cfg(test)]
-    fn with_api_base(mut self, base: String) -> Self {
+    pub(crate) fn with_api_base(mut self, base: String) -> Self {
         // The profile fetch goes wherever Gmail goes: a mocked engine must not
         // be one poll tick away from a real request to Google. The mock has no
         // such route, which reads as "no profile", exactly like an old grant.
         self.profile_url = format!("{base}/people/me");
+        self.graph_api_base = base.clone();
         self.api_base = base;
         self
     }
@@ -1116,8 +1137,60 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         }
         let built: Arc<dyn MailSource> = match self.store.account_provider(self.account_id)? {
             MailProvider::Gmail => Arc::new(GmailSource::new(self.gmail_parts())),
+            MailProvider::Outlook => Arc::new(GraphSource::new(self.graph_parts())),
+            MailProvider::Imap => Arc::new(self.imap_source()?),
         };
         Ok(self.source.get_or_init(|| built).clone())
+    }
+
+    /// An IMAP account's source, from what `squelchd auth --imap` stored: the
+    /// server config and the password, sealed together in the credential
+    /// slot. Never `self.creds`, which is a Google token store: nothing
+    /// Google is read for this account. The store is the source's location
+    /// table.
+    ///
+    /// A slot from an earlier build holds the password alone, with the server
+    /// in `app_settings`: it is moved into the slot here, once (the CA file
+    /// it named read now), and the setting deleted.
+    fn imap_source(&self) -> Result<ImapSource> {
+        let backend = self.config.credential_backend;
+        let path = self.config.resolve_credentials_path();
+        let text = crate::credentials::load_imap_slot_backend(backend, &path, &self.account_email)?;
+        let credential = match ImapCredential::from_slot(&text) {
+            StoredImapSlot::Credential(c) => c,
+            StoredImapSlot::LegacyPassword(password) => {
+                let stored = self
+                    .store
+                    .get_app_setting(self.account_id, IMAP_ACCOUNT_SETTING)?
+                    .ok_or_else(|| {
+                        CoreError::InvalidInput(
+                            "this imap account has no server stored: run `squelchd auth --imap`"
+                                .into(),
+                        )
+                    })?;
+                let c = ImapCredential::from_legacy(password, &stored)?;
+                crate::credentials::store_imap_slot_backend(
+                    backend,
+                    &path,
+                    &self.account_email,
+                    &c.to_slot()?,
+                )?;
+                self.store
+                    .delete_app_setting(self.account_id, IMAP_ACCOUNT_SETTING)?;
+                eprintln!(
+                    "squelch: moved this imap account's server settings into its credential slot"
+                );
+                c
+            }
+        };
+        Ok(ImapSource::from_config(
+            self.account_id,
+            &credential.config,
+            credential.password,
+            self.store.clone(),
+            self.archive.refusals.clone(),
+        )?
+        .with_backfill_days(self.config.sync.backfill_days))
     }
 
     /// What this engine's Gmail source is built from, as the engine stands.
@@ -1134,6 +1207,23 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             refusals: self.archive.refusals.clone(),
             api_base: self.api_base.clone(),
             quota_backoff: self.gmail_quota_backoff,
+            quota_retry_cap: self.gmail_quota_retry_cap,
+        }
+    }
+
+    /// What this engine's Outlook source is built from. The same HTTP client
+    /// (redirects refused) and the same refusal counters as Gmail's; Graph's
+    /// quota is Microsoft's per-mailbox throttle, so the Gmail budget does not
+    /// apply.
+    fn graph_parts(&self) -> GraphSourceParts<C> {
+        GraphSourceParts {
+            http: self.http.clone(),
+            creds: self.creds.clone(),
+            account_id: self.account_id,
+            account_email: self.account_email.clone(),
+            metrics: self.metrics.clone(),
+            refusals: self.archive.refusals.clone(),
+            api_base: self.graph_api_base.clone(),
             quota_retry_cap: self.gmail_quota_retry_cap,
         }
     }
@@ -1226,6 +1316,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             "squelch: {} sync starting for <redacted account>",
             match source.provider() {
                 MailProvider::Gmail => "gmail REST",
+                MailProvider::Outlook => "outlook graph",
+                MailProvider::Imap => "imap",
             }
         );
 
@@ -1259,6 +1351,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
 
     async fn backfill_inner(&self) -> Result<()> {
         let since = self.backfill_since();
+        let early_cursor = self.cursor_ahead_of_window().await?;
 
         // INBOX bodies.
         let inbox_ids = self
@@ -1310,7 +1403,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // folder is fetched only when somebody opens the page that shows it.
 
         // Establish the cursor from the mailbox as it stands now.
-        let cursor = self.source()?.current_cursor().await?;
+        let cursor = match early_cursor {
+            Some(cursor) => cursor,
+            None => self.source()?.current_cursor().await?,
+        };
         self.store_cursor(&cursor)?;
         eprintln!("squelch: history cursor established (backfill window from {since})");
         Ok(())
@@ -1513,6 +1609,17 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             }
         }
         ArchiveStep::Held
+    }
+
+    /// Whether the vector drain has anything to do: this engine's
+    /// `vectors_dirty`, or a write the store saw that no engine made (a
+    /// person's correction through the API lifting a restriction), whose debt
+    /// becomes this flag's here.
+    fn vectors_owed(&self) -> bool {
+        if self.store.take_vectors_owed() {
+            self.vectors_dirty.store(true, Ordering::Relaxed);
+        }
+        self.vectors_dirty.load(Ordering::Relaxed)
     }
 
     /// May the refine lane drain missing vectors this round. See the call.
@@ -2172,10 +2279,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 //
                 // NOT WHILE A WINDOW IS BEING FETCHED. This lane runs beside the
                 // first backfill now (see `run_once`), and a drain in the middle
-                // of one is wrong both ways: with an embedder, every row is
-                // embedded at ingest a moment AFTER its commit, so the drain's
-                // query keeps finding the row that is mid-embed and embeds it a
-                // second time, one ONNX pass per message thrown away on the CPU
+                // of one is wrong both ways: with an embedder, every row the
+                // sealed gate passes at ingest (the owner's own mail; inbound
+                // mail waits for its decision) is embedded a moment AFTER its
+                // commit, so the drain's query keeps finding the row that is
+                // mid-embed and embeds it a second time, one ONNX pass per message thrown away on the CPU
                 // the backfill needs; without one (the gate released at its
                 // ceiling), the batch drain's own peak (`EmbedConfig::
                 // backfill_batch`) would land on top of the backfill's instead
@@ -2193,7 +2301,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 // AND ONLY WHEN SOMETHING MAY BE MISSING: the drain's query
                 // walks the whole account when nothing is, which in steady
                 // state is every round. See `vectors_dirty`.
-                if self.may_drain_vectors() && self.vectors_dirty.load(Ordering::Relaxed) {
+                if self.may_drain_vectors() && self.vectors_owed() {
                     self.backfill_missing_vectors().await;
                 }
             }
@@ -2307,6 +2415,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         if let Ok(source) = self.source() {
             match source.provider() {
                 MailProvider::Gmail => self.refresh_profile().await,
+                // No Google profile for a Microsoft mailbox, and no Graph
+                // photo fetch yet: the client shows the initial.
+                MailProvider::Outlook => {}
+                // No Google profile behind an IMAP account.
+                MailProvider::Imap => {}
             }
         }
         // BEFORE the walk, for the same reason: the sweep is purely local —
@@ -2394,6 +2507,37 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         }
     }
 
+    /// The cursor to store at the end of a window, minted NOW, before the
+    /// window is listed, for a source whose cursor is a point in time
+    /// ([`MailSource::cursor_before_window`]); `None` for one that is asked
+    /// where its feed stands after the window, as Gmail always has been.
+    async fn cursor_ahead_of_window(&self) -> Result<Option<SyncCursor>> {
+        let source = self.source()?;
+        if !source.cursor_before_window() {
+            return Ok(None);
+        }
+        Ok(Some(source.current_cursor().await?))
+    }
+
+    /// The ids of an incremental walk worth fetching. All of them for a
+    /// source whose change feed names only arrivals (Gmail); for one that also
+    /// names CHANGED mail (Graph's delta, on every read-state flip), only the
+    /// ids not already stored, so a poll on an account somebody reads in
+    /// another client does not re-download every message they opened. The
+    /// incremental path only: see [`MailSource::changes_report_updates`].
+    fn unstored_changes(&self, ids: &[String]) -> Result<Vec<String>> {
+        if ids.is_empty() || !self.source()?.changes_report_updates() {
+            return Ok(ids.to_vec());
+        }
+        let mut fresh = Vec::with_capacity(ids.len());
+        for id in ids {
+            if !self.store.has_message(self.account_id, id)? {
+                fresh.push(id.clone());
+            }
+        }
+        Ok(fresh)
+    }
+
     /// One incremental poll: THREE label-filtered `history.list` walks from the
     /// SAME start cursor, INBOX then SENT then SPAM, with the cursor committed
     /// ONCE at the end at the max historyId any walk observed.
@@ -2430,11 +2574,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         if inbox.ids.is_empty() && inbox.mailbox_unchanged {
             return Ok(false);
         }
-        let (inbox_ids, inbox_cursor) = (inbox.ids, inbox.cursor);
-        if !inbox_ids.is_empty() {
+        let (inbox_ids, inbox_cursor, inbox_saw) = (inbox.ids, inbox.cursor, inbox.saw_changes);
+        let inbox_new = self.unstored_changes(&inbox_ids)?;
+        if !inbox_new.is_empty() {
             let n = self
                 .fetch_raw_and_ingest(
-                    &inbox_ids,
+                    &inbox_new,
                     Mailbox::Inbox,
                     IngestOrigin::Incremental,
                     Urgency::Live,
@@ -2457,8 +2602,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // unit, neither of which `UNIQUE` collapses. It re-reads the ledger
         // first for exactly this path (`Store::notify_decision_exists`), so a
         // re-walk costs one indexed probe per message and still changes nothing.
-        let (sent_ids, sent_cursor) = match self.changes(start, Folder::Sent).await {
-            Ok(walk) => (walk.ids, walk.cursor),
+        let (sent_ids, sent_cursor, sent_saw) = match self.changes(start, Folder::Sent).await {
+            Ok(walk) => (walk.ids, walk.cursor, walk.saw_changes),
             // An expired historyId is not a SENT-specific failure: the cursor
             // itself is gone and only a catch-up can recover it.
             Err(CoreError::NotFound) => return Err(CoreError::NotFound),
@@ -2468,7 +2613,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             }
         };
 
-        let sent_only = subtract_ids(sent_ids, &inbox_ids);
+        // A source whose feed names every change (Graph's delta) proves an
+        // idle mailbox the other way round from Gmail: both rounds empty.
+        let idle = !inbox_saw && !sent_saw && self.source()?.changes_report_updates();
+        let sent_only = self.unstored_changes(&subtract_ids(sent_ids, &inbox_ids))?;
         if !sent_only.is_empty() {
             // `Incremental`, like the INBOX half: the silence guarantee for the
             // user's own mail is NOT the origin. It is, in order,
@@ -2506,7 +2654,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 .source()?
                 .merge_cursors(start, &inbox_cursor, &sent_cursor),
         )?;
-        Ok(true)
+        Ok(!idle)
     }
 
     /// Fresh catch-up: re-run the backfill-window INBOX fetch, then the SENT
@@ -2541,6 +2689,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// The catch-up body, split out so [`Self::catch_up`] can hold the progress
     /// guard and run the trim across every exit path, `?` included.
     async fn catch_up_inner(&self) -> Result<()> {
+        let early_cursor = self.cursor_ahead_of_window().await?;
         let ids = self
             .list(self.window_listing(Folder::Inbox), None, Urgency::Window)
             .await?;
@@ -2624,7 +2773,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // the longest thing this loop does, and the spam folder is fetched only
         // when the page that shows it is opened.
 
-        let cursor = self.source()?.current_cursor().await?;
+        let cursor = match early_cursor {
+            Some(cursor) => cursor,
+            None => self.source()?.current_cursor().await?,
+        };
         self.store_cursor(&cursor)?;
         Ok(())
     }
@@ -3381,9 +3533,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             }
             id
         };
-        // Embeddings are internal evidence. Agent search separately checks the
-        // current access assessment before releasing results.
-        let embed_text = if triaged.message.is_spam {
+        // THE SEALED GATE, asked of the row as stored (`embeddable_mail_sql!`).
+        // At ingest an inbound message has no decision yet, so it could still
+        // turn out to be a login code: its text goes to no embedder now, and
+        // the drain embeds it once a non-sealed decision lands. The owner's
+        // own mail passes at once. Spam never does (below).
+        let embeddable =
+            !triaged.message.is_spam && self.store.message_embeddable(self.account_id, id)?;
+        let embed_text = if !embeddable {
             // NEITHER IS PROVIDER SPAM, for two reasons that point the same way.
             // It would be the largest single consumer of embedder time in the
             // daemon — spam outnumbers real mail — spent on the one category of
@@ -3392,6 +3549,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // impersonating, so a vector space containing it puts convincing
             // forgeries next to the real thing in results the user reads as
             // "your mail".
+            //
+            // AND NOT YET-UNDECIDED OR SEALED MAIL: see the gate above.
             None
         } else {
             Some(crate::embed::message_embed_text(
@@ -3446,9 +3605,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     }
 
     /// Embed `text` off the async runtime and write the vector for
-    /// `message_id`. No-op without an embedder. A failure logs a redacted
-    /// one-liner (id + error kind, never body) and never propagates — the
-    /// backfill pass recovers the vector, so ingest must not block on it.
+    /// `message_id`. No-op without an embedder, and inside a remote embedder's
+    /// backoff window ([`embed_backoff`]), which is what keeps a down
+    /// embedding service from costing mail ingest a timeout per message. A
+    /// failure logs a redacted one-liner (id + error kind, never body) and
+    /// never propagates — the backfill pass recovers the vector, so ingest
+    /// must not block on it.
     async fn embed_and_store(&self, message_id: i64, text: String) {
         let Some(embedder) = self.embedder() else {
             // No vector written: the drain owes this row one once an embedder
@@ -3456,19 +3618,32 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             self.vectors_dirty.store(true, Ordering::Relaxed);
             return;
         };
+        if !self.embed_backoff.may_call(tokio::time::Instant::now()) {
+            // Same debt, same payer: the drain, once the window closes.
+            self.vectors_dirty.store(true, Ordering::Relaxed);
+            return;
+        }
         let account_id = self.account_id;
         let store = self.store.clone();
         // ONNX inference is CPU-bound; keep it off the poll loop.
+        // Re-checked under the store lock at the write: a decision that sealed
+        // the message while its text was at the embedder wins.
         let result = tokio::task::spawn_blocking(move || {
             let vec = embedder.embed(&text)?;
-            store.upsert_message_vector(account_id, message_id, &vec)
+            store
+                .write_embedded_vectors(account_id, &[(message_id, &vec)])
+                .map(|_| ())
         })
         .await;
         match &result {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => eprintln!(
-                "squelch: embed failed for message {message_id} (recoverable via backfill): {e}"
-            ),
+            Ok(Ok(())) => self.embed_backoff.succeeded(),
+            Ok(Err(e)) => {
+                if !self.embed_backoff_opened(e) {
+                    eprintln!(
+                        "squelch: embed failed for message {message_id} (recoverable via backfill): {e}"
+                    );
+                }
+            }
             Err(e) => eprintln!("squelch: embed task join error for message {message_id}: {e}"),
         }
         // Anything but a written vector is a row the drain owes.
@@ -3478,10 +3653,15 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     }
 
     /// Embed every message still missing a vector, in throttled batches, so
-    /// recall covers pre-existing rows and ingest-time embed failures. Sealed
-    /// content is structurally absent — `messages_missing_vectors` selects only
-    /// `sensitivity='normal'` (see docs/SECURITY.md). A failed batch logs a
-    /// redacted one-liner and is retried on a later pass. No-op with no embedder.
+    /// recall covers pre-existing rows, ingest-time embed failures and mail
+    /// whose triage decision has just landed. SEALED MAIL IS NEVER SELECTED:
+    /// `messages_missing_vectors` reads only rows that pass
+    /// `embeddable_mail_sql!` (not spam, not known sealed, and either a stored
+    /// decision with access settled or the owner's own mail), and the write
+    /// re-checks it under the store lock (docs/SECURITY.md §4d). Inbound mail
+    /// still awaiting its decision is not selected until one lands. A failed
+    /// batch logs a redacted one-liner and is retried on a later pass. No-op
+    /// with no embedder.
     ///
     /// Runs only while [`SyncEngine::vectors_dirty`] says a vector may be
     /// missing; the flag's lifecycle across one pass is [`DrainGuard`]'s.
@@ -3491,6 +3671,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // round after an embedder is attached is the one to pay them.
             return;
         };
+        if !self.embed_backoff.may_call(tokio::time::Instant::now()) {
+            // Inside a remote embedder's backoff window. Before the query, not
+            // after: the query walks the account, and the answer would only be
+            // thrown away. The flag stays standing for the round after.
+            return;
+        }
         // Lowered BEFORE the first query, not after the last: a failure that
         // lands on the poll lane while this drain is between awaits raises it
         // again, and a clear at the end would erase that. The guard raises it
@@ -3569,20 +3755,26 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     }
                     return Ok(());
                 }
-                // One commit for the batch, not two per vector.
+                // One commit for the batch, not two per vector, each item
+                // re-checked against the sealed gate under that commit's lock.
                 let items: Vec<(i64, &[f32])> = missing
                     .iter()
                     .zip(vecs.iter())
                     .map(|(m, vec)| (m.message_id, vec.as_slice()))
                     .collect();
-                store.upsert_message_vectors(account_id, &items)
+                store.write_embedded_vectors(account_id, &items).map(|_| ())
             })
             .await;
 
             match result {
-                Ok(Ok(())) => total += n,
+                Ok(Ok(())) => {
+                    self.embed_backoff.succeeded();
+                    total += n;
+                }
                 Ok(Err(e)) => {
-                    eprintln!("squelch: vector backfill batch failed ({e}); stopping pass");
+                    if !self.embed_backoff_opened(&e) {
+                        eprintln!("squelch: vector backfill batch failed ({e}); stopping pass");
+                    }
                     return None;
                 }
                 Err(e) => {
@@ -3601,6 +3793,22 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // here still delays the next `history.list`.
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    /// Record a failed embed against the backoff, and say so when it opened a
+    /// window: one line per window rather than one per message, carrying the
+    /// error (a status or a transport class, never text). `false` means the
+    /// error was not a transient remote one and the caller logs it as before.
+    fn embed_backoff_opened(&self, e: &CoreError) -> bool {
+        let Some(delay) = self.embed_backoff.failed(e, tokio::time::Instant::now()) else {
+            return false;
+        };
+        eprintln!(
+            "squelch: {e}; embedding paused for {} s (mail sync unaffected; missing \
+             vectors are filled in by the backfill afterwards)",
+            delay.as_secs()
+        );
+        true
     }
 
     async fn trim_after_drain(total: usize) {
@@ -4152,6 +4360,9 @@ fn synthesize_rfc822_headers(headers: &[(String, String)]) -> String {
 
 /// Type alias helper so callers can name the concrete rule slice.
 pub type Rules = Vec<SenderRule>;
+
+#[cfg(test)]
+mod outlook_tests;
 
 #[cfg(test)]
 mod tests {
@@ -6004,6 +6215,161 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &eng.source().unwrap()), "built once");
     }
 
+    /// A throwaway CA certificate (public half only, from the IMAP test bed),
+    /// for the tests that need a PEM that parses.
+    const TEST_CA_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIIDDDCCAfSgAwIBAgIUbWHSoPGtQbOiIqxCtGZYDN70gZYwDQYJKoZIhvcNAQEL
+BQAwHjEcMBoGA1UEAwwTc3F1ZWxjaCBpbWFwLWRldiBDQTAeFw0yNjEwMjgyMTM5
+MjRaFw0zNjEwMjUyMTM5MjRaMB4xHDAaBgNVBAMME3NxdWVsY2ggaW1hcC1kZXYg
+Q0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQC6wLzoOtuvRnC1burK
+xYdNKXXzyU89h1JS38K1tD4B/jX1wMh+fXuflF6aLgnijDTJVTgB3G7Vk0jHreJ8
+qeTx60bMMgn1STnBE9dDHyLSsDkOKRCEoOpPLXfX9jWTRzciUbsq9qz/MVmM9oIW
+yr7rx21EB+ruw6+TS3jgqlWcesi8U/90rGSBXYeyFfwnkP8knnsWmZcVnMSUjLTs
+wInSpU0QECajVJhVCLL2ZAMAvGOur12BUYk60ZQ8ZKkzOchKdWkh7PhEp/Hzn6GG
+yyAqDFVycGVtVx06vY6/Ffcc3GEitT23J8/72VYAFOhJnBJvzv8/8SufbOIR7xH1
+YJl5AgMBAAGjQjBAMB0GA1UdDgQWBBTSBZ6WlapKlExzCP1Dssp8TbBZEDAPBgNV
+HRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBBjANBgkqhkiG9w0BAQsFAAOCAQEA
+DFuZtyAJMM64nAu9g6QomeNcLwvMUnMWxuNi3tp/wWcd76EP5HoTEQNFQ49IJeps
+6lhxzYaXaX1NxOz3txyitaYMFJQ77Ou/M1PTbp0wFQVNjkwRrMr46SDmgTv62DcX
+C/qb0J/jO7bK0fWoYxkn0s9/vONV3R4qJVLfpJ3cmuE9S7Rv5EYLlAe738P1W9Ca
+hh9GKNWVU/WrLL83hrprpJF2sJmGn4gd10HHO/226pDs8cpgfl6PkFO8aQAPxsiu
+ABumuMlx0tOhaEkm2z6hKPb+lGz+12dn7bZjIkPaZ9OeBp7/GwXL9sJDiHLBYzS8
+Q0/00yfa39rgtJLa0DnOoA==
+-----END CERTIFICATE-----
+";
+
+    fn imap_creds_path() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "squelch-imap-engine-{}-{}.json",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ))
+    }
+
+    fn imap_server() -> crate::mail::imap::ImapServer {
+        crate::mail::imap::ImapServer {
+            host: "127.0.0.1".into(),
+            port: 9,
+            tls: crate::mail::imap::ImapTls::Plain,
+            username: "me@example.com".into(),
+        }
+    }
+
+    fn file_config(creds: &std::path::Path) -> Config {
+        let mut config = Config::default();
+        config.credential_backend = crate::config::CredentialBackend::File;
+        config.credentials_path = Some(creds.to_path_buf());
+        config
+    }
+
+    /// AN IMAP ACCOUNT BUILDS AN IMAP SOURCE from what `squelchd auth --imap`
+    /// stores: the server, its CA and the password together in the credential
+    /// slot, and nothing in the database. Building connects to nothing (the
+    /// server here is a dead port).
+    #[tokio::test]
+    async fn an_imap_account_with_a_stored_server_gets_an_imap_source() {
+        let (store, acct) = store_at_cursor(None);
+        let creds = imap_creds_path();
+        let credential = ImapCredential {
+            config: crate::mail::imap::ImapAccountConfig {
+                server: imap_server(),
+                ca_pem: Some(TEST_CA_PEM.into()),
+            },
+            password: crate::mail::imap::ImapPassword::new("pw"),
+        };
+        crate::credentials::store_imap_slot_backend(
+            crate::config::CredentialBackend::File,
+            &creds,
+            "me@example.com",
+            &credential.to_slot().unwrap(),
+        )
+        .unwrap();
+        store
+            .set_account_provider(acct, MailProvider::Imap)
+            .unwrap();
+        let eng = engine_with_config(store, acct, "http://127.0.0.1:9", file_config(&creds));
+        assert_eq!(eng.source().unwrap().provider(), MailProvider::Imap);
+        let _ = std::fs::remove_file(&creds);
+    }
+
+    /// THE SERVER CONFIG LEAVES THE DATABASE (security review 5): a slot an
+    /// earlier build wrote holds the password alone, with the server (and a
+    /// CA by path) in `app_settings`. Building the source moves both into the
+    /// slot, the CA as its certificate bytes, and deletes the setting, so a
+    /// later write to the database or to the CA's path cannot redirect where
+    /// the password goes.
+    #[tokio::test]
+    async fn a_legacy_imap_account_moves_its_server_into_the_credential_slot() {
+        let (store, acct) = store_at_cursor(None);
+        let creds = imap_creds_path();
+        // The legacy layout: a bare password in the slot.
+        crate::credentials::store_imap_slot_backend(
+            crate::config::CredentialBackend::File,
+            &creds,
+            "me@example.com",
+            "pw",
+        )
+        .unwrap();
+        let ca_path = creds.with_extension("ca.crt");
+        std::fs::write(&ca_path, TEST_CA_PEM).unwrap();
+        let legacy = serde_json::json!({
+            "host": "127.0.0.1", "port": 9, "tls": "plain",
+            "username": "me@example.com", "ca_file": ca_path,
+        });
+        store
+            .set_app_setting(acct, IMAP_ACCOUNT_SETTING, &legacy.to_string())
+            .unwrap();
+        store
+            .set_account_provider(acct, MailProvider::Imap)
+            .unwrap();
+        let eng = engine_with_config(
+            store.clone(),
+            acct,
+            "http://127.0.0.1:9",
+            file_config(&creds),
+        );
+        assert_eq!(eng.source().unwrap().provider(), MailProvider::Imap);
+
+        assert_eq!(
+            store.get_app_setting(acct, IMAP_ACCOUNT_SETTING).unwrap(),
+            None
+        );
+        // The CA file can go: its bytes are in the slot now.
+        std::fs::remove_file(&ca_path).unwrap();
+        let text = crate::credentials::load_imap_slot_backend(
+            crate::config::CredentialBackend::File,
+            &creds,
+            "me@example.com",
+        )
+        .unwrap();
+        match ImapCredential::from_slot(&text) {
+            StoredImapSlot::Credential(c) => {
+                assert_eq!(c.config.server, imap_server());
+                assert_eq!(c.config.ca_pem.as_deref(), Some(TEST_CA_PEM));
+            }
+            StoredImapSlot::LegacyPassword(_) => panic!("not migrated"),
+        }
+        // And a second engine builds from the slot alone.
+        let eng = engine_with_config(store, acct, "http://127.0.0.1:9", file_config(&creds));
+        assert_eq!(eng.source().unwrap().provider(), MailProvider::Imap);
+        let _ = std::fs::remove_file(&creds);
+    }
+
+    /// AN IMAP ACCOUNT WITH NOTHING STORED IS REFUSED: the provider row says
+    /// imap but `squelchd auth --imap` never ran, so the engine refuses it,
+    /// never as Gmail.
+    #[tokio::test]
+    async fn an_imap_account_without_a_stored_server_is_refused() {
+        let (store, acct) = store_at_cursor(None);
+        store.execute_batch_for_test(&format!(
+            "UPDATE accounts SET provider = 'imap' WHERE id = {acct}"
+        ));
+        let creds = imap_creds_path();
+        let eng = engine_with_config(store, acct, "http://127.0.0.1:9", file_config(&creds));
+        let err = eng.source().err().expect("refused");
+        assert!(err.to_string().contains("squelchd auth --imap"), "{err}");
+    }
+
     /// AN ACCOUNT THIS BUILD CANNOT SYNC IS NEVER SYNCED AS GMAIL. A database
     /// a newer build set up an IMAP account in must cost that account nothing
     /// here: no request to Gmail with its credential, no cursor, no rows; every
@@ -6012,7 +6378,7 @@ mod tests {
     async fn an_account_whose_provider_this_build_does_not_know_never_reaches_gmail() {
         let (store, acct) = store_at_cursor(None);
         store.execute_batch_for_test(&format!(
-            "UPDATE accounts SET provider = 'imap' WHERE id = {acct}"
+            "UPDATE accounts SET provider = 'exchange-ews' WHERE id = {acct}"
         ));
         let g = MockGmail::default();
         g.listing(LABEL_INBOX, &["a"])
@@ -6760,6 +7126,7 @@ mod tests {
                 list_unsubscribe: None,
                 list_unsub_one_click: false,
                 auth_pass: None,
+                sender_signals: None,
             })
             .unwrap();
         store
@@ -6973,6 +7340,7 @@ mod tests {
                 list_unsubscribe: None,
                 list_unsub_one_click: false,
                 auth_pass: None,
+                sender_signals: None,
             })
             .unwrap();
         store
@@ -7104,18 +7472,43 @@ mod tests {
         assert!(!job.foreground, "behind live arrivals, not ahead of them");
         assert!(!job.arrival_eligible);
         assert!(queued_job(&store, acct, "notification").is_none());
-        // Not embedded inline: the vector backfill picks it up, batched. The
-        // whole contract, not only the query: the heal raised the drain's
-        // flag (on the SWEEPS engine, which the daemon builds over the sync
-        // engine's handle), a drain that fails leaves it raised, and a drain
-        // that succeeds writes the vector and lowers it.
-        assert!(
+        // Not embedded inline: the vector backfill picks it up, batched, ONCE
+        // THE RE-TRIAGE HAS DECIDED IT (new content is undecided content, and
+        // undecided inbound mail reaches no embedder). The whole contract,
+        // not only the query: the heal raised the drain's flag (on the
+        // SWEEPS engine, which the daemon builds over the sync engine's
+        // handle), a drain that fails leaves it raised, and a drain that
+        // succeeds writes the vector and lowers it.
+        let owed = |store: &SqliteStore| {
             store
                 .messages_missing_vectors(acct, 10)
                 .unwrap()
                 .iter()
                 .any(|m| m.message_id == id)
-        );
+        };
+        assert!(!owed(&store), "undecided: no embedder reads it yet");
+        {
+            use crate::store::agent_triage::AgentTriageStore;
+            let context = store.load_agent_context(&job).unwrap();
+            let decision = crate::triage::decision::MessageDecision {
+                kinds: vec![crate::triage::decision::EmailKind::Bill],
+                summary: "A bill".into(),
+                reason: "A bill".into(),
+                ..Default::default()
+            };
+            assert_eq!(
+                store
+                    .commit_agent_decision(
+                        &job,
+                        &context,
+                        &decision,
+                        std::slice::from_ref(&context.message.source),
+                    )
+                    .unwrap(),
+                crate::store::agent_triage::AgentCommitOutcome::Applied
+            );
+        }
+        assert!(owed(&store), "decided and not sealed: owed a vector");
         assert!(
             eng.vectors_dirty.load(Ordering::Relaxed),
             "the heal raises the drain's flag"
@@ -8084,6 +8477,7 @@ mod tests {
                 list_unsubscribe: None,
                 list_unsub_one_click: false,
                 auth_pass: None,
+                sender_signals: None,
             })
             .unwrap();
         store
@@ -8157,6 +8551,7 @@ mod tests {
                 list_unsubscribe: None,
                 list_unsub_one_click: false,
                 auth_pass: Some(true),
+                sender_signals: None,
             })
             .unwrap();
         store
@@ -10867,6 +11262,74 @@ mod tests {
         assert_eq!(status(), Some(AttentionStatus::Done));
         server.abort();
     }
+
+    /// An applied access check can be what makes a message embeddable (own
+    /// mail waits for it), so it raises the drain's flag like a triage
+    /// decision does. And a correction made through the API, which no engine
+    /// sees, reaches the drain through the store.
+    #[tokio::test]
+    async fn an_applied_access_check_and_a_correction_raise_the_vector_drain() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, account) = store_at_cursor(Some(100));
+        // Own sent mail: filed access-only, so its access check is its job.
+        let raw = fixture(
+            account,
+            "access-dirty",
+            "From: me@example.com\r\nTo: friend@example.com\r\nSubject: Notes\r\n\r\nThe notes from Tuesday.",
+            true,
+        );
+        let parsed = ingest_with_rules(&raw, &Stage1Config::default(), Utc::now(), &[], |_| false);
+        let id = store.ingest_message(&parsed).unwrap();
+        let content = json!({"restricted": false, "reason": "No credentials"}).to_string();
+        let response = json!({"choices":[{"message":{"content":content},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":12,"completion_tokens":8}});
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(move || {
+                let response = response.clone();
+                async move { Json(response) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+        let llm = ResolvedLlm {
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+            url: format!("http://{address}/"),
+        };
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let job = store
+            .claim_agent_job(
+                account,
+                "access",
+                Utc::now() + ChronoDuration::hours(1),
+                120,
+            )
+            .unwrap()
+            .expect("an access job waits");
+        engine.vectors_dirty.store(false, Ordering::Relaxed);
+        engine.process_agent_job(job, &llm, &day).await;
+        assert!(
+            store.agent_access_allowed(account, id).unwrap(),
+            "the check applied"
+        );
+        assert!(
+            engine.vectors_dirty.load(Ordering::Relaxed),
+            "and told the drain"
+        );
+        server.abort();
+
+        engine.vectors_dirty.store(false, Ordering::Relaxed);
+        let _ = store.take_vectors_owed();
+        assert!(!engine.vectors_owed());
+        store
+            .correct_agent_triage(account, id, "external_access", &json!(false), Utc::now())
+            .unwrap();
+        assert!(engine.vectors_owed(), "the correction reached the drain");
+        assert!(engine.vectors_dirty.load(Ordering::Relaxed));
+    }
     /// THE PAST-EVENT RE-CHECK, END TO END: the model's arrival answer
     /// records a show that is over (and asks for done, which an arrival run
     /// never applies); the real commit projects it into a ghost; the poll
@@ -11177,8 +11640,8 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let day = now.format("%Y-%m-%d").to_string();
         let mut sent = std::collections::BTreeMap::new();
-        // One job per claim, in the claim's own order; a failed step's retry
-        // is scheduled past this claim time, so each is seen exactly once.
+        // One job per claim, in the claim's own order; each failed job is
+        // parked past this claim time after it runs, so each is seen once.
         // A job makes several requests (every step the agent retries before
         // giving the job up), all at the one effort.
         for _ in 0..5 {
@@ -11199,7 +11662,15 @@ mod tests {
                 (t, _) => t.to_string(),
             };
             let before = efforts.lock().unwrap().len();
+            let ran = job.clone();
             engine.process_agent_job(job, &llm, &day).await;
+            // Its retry is due at once now; park it so the next claim is
+            // the next job, which is what this test walks.
+            store.execute_batch_for_test(&format!(
+                "UPDATE agent_triage_jobs SET available_at='{}' WHERE id={}",
+                (Utc::now() + ChronoDuration::hours(1)).to_rfc3339(),
+                ran.id
+            ));
             // An empty answer is the job's failure, not a provider outage:
             // nothing here may put the account on a cooldown that would
             // keep the next job from making its request.
@@ -11259,8 +11730,11 @@ mod tests {
         use crate::store::agent_triage::AgentTriageStore;
         for (status, retry_after, lo, hi) in [
             (StatusCode::TOO_MANY_REQUESTS, Some("7"), 6, 23),
+            // No number from the provider: a 429 is most often a limit the
+            // host's tenants share, so it starts short and spread; a server
+            // error retries at once.
             (StatusCode::TOO_MANY_REQUESTS, None, 14, 30),
-            (StatusCode::SERVICE_UNAVAILABLE, None, 14, 30),
+            (StatusCode::SERVICE_UNAVAILABLE, None, -1, 0),
             (StatusCode::FORBIDDEN, None, 284, 300),
         ] {
             let (store, account) = store_at_cursor(Some(100));
@@ -11380,6 +11854,7 @@ mod tests {
         )
         .await;
         let wait = engine.agent_retry_after.load(Ordering::Relaxed) - Utc::now().timestamp();
+        // A 429 skips the immediate rung: 15 s and spread, then climbing.
         assert!((14..=30).contains(&wait), "first rung: stood off {wait}s");
         assert_eq!(engine.agent_throttle_strikes.load(Ordering::Relaxed), 1);
         for rung in [30, 60, 120, 240, 285, 285] {
@@ -11452,8 +11927,9 @@ mod tests {
         )
         .await;
         assert!(dropped.is_err(), "the run was still in flight");
-        // Handed back at once, due after the retry ladder's wait for the
-        // attempt it took: not re-run on the spot.
+        // Handed back at once, due after the local ladder's wait for the
+        // attempt it took: not re-run on the spot, so a crash loop does not
+        // re-bill a long run straight away.
         assert!(
             store
                 .claim_agent_job(account, "investigation", Utc::now(), lease)
@@ -11569,7 +12045,7 @@ mod tests {
             generation: hours_ago,
             at: Utc::now(),
         };
-        let (_, wait) = engine.open_cooldown(asked, false, start, true);
+        let (_, wait) = engine.open_cooldown(asked, false, false, start, true);
         assert!((7..=22).contains(&wait), "the provider's number: {wait}s");
         assert_eq!(engine.agent_throttle_strikes.load(Ordering::Relaxed), 1);
         // A continuing episode: its last cooldown lapsed moments before
@@ -11585,8 +12061,8 @@ mod tests {
             generation: lapsed,
             at: Utc::now(),
         };
-        let (_, wait) = engine.open_cooldown(asked, false, start, true);
-        assert!((239..=255).contains(&wait), "the fifth rung: {wait}s");
+        let (_, wait) = engine.open_cooldown(asked, false, false, start, true);
+        assert!((119..=135).contains(&wait), "the fifth rung: {wait}s");
         assert_eq!(engine.agent_throttle_strikes.load(Ordering::Relaxed), 5);
         // And a probe that itself ran long before failing is still that
         // episode's probe: its start is what is measured.
@@ -11600,8 +12076,8 @@ mod tests {
             generation: lapsed,
             at: DateTime::from_timestamp(lapsed + 1, 0).unwrap(),
         };
-        let (_, wait) = engine.open_cooldown(asked, false, start, true);
-        assert!((239..=255).contains(&wait), "still the fifth rung: {wait}s");
+        let (_, wait) = engine.open_cooldown(asked, false, false, start, true);
+        assert!((119..=135).contains(&wait), "still the fifth rung: {wait}s");
     }
 
     /// The access lane's failures climb a ladder of their own, the
@@ -11614,13 +12090,13 @@ mod tests {
         use super::triage_worker::JobStart;
         let (store, account) = store_at_cursor(Some(100));
         let engine = engine(store.clone(), account, "http://127.0.0.1:1");
-        for rung in [15, 30, 60] {
+        for rung in [0, 15, 30] {
             engine.agent_retry_after.store(0, Ordering::Relaxed);
             let start = JobStart {
                 generation: engine.agent_last_cooldown_end.load(Ordering::Relaxed),
                 at: Utc::now(),
             };
-            let (_, wait) = engine.open_cooldown(None, false, start, false);
+            let (_, wait) = engine.open_cooldown(None, false, false, start, false);
             assert!(
                 (rung - 1..=rung + 15).contains(&wait),
                 "rung {rung}: stood off {wait}s"
@@ -12033,8 +12509,10 @@ mod tests {
             "one cooldown, one strike"
         );
         let wait = engine.agent_retry_after.load(Ordering::Relaxed) - Utc::now().timestamp();
+        // The opener's rung is the first, an immediate retry; the sibling
+        // waits that, not the second rung.
         assert!(
-            (14..=30).contains(&wait),
+            (-2..=0).contains(&wait),
             "the sibling waits the opener's rung: {wait}s"
         );
         server.abort();
@@ -12296,6 +12774,8 @@ mod tests {
         let mut engine = engine(store, account, "http://127.0.0.1:1");
         engine.stage2_llm = Some(llm);
         engine.config.triage.agent.concurrency = 4;
+        // The probe after an immediate retry: one strike already taken.
+        engine.agent_throttle_strikes.store(1, Ordering::Relaxed);
         engine
             .agent_retry_after
             .store(Utc::now().timestamp() - 1, Ordering::Relaxed);
@@ -12510,6 +12990,214 @@ mod tests {
         assert!(
             first.vectors_dirty.load(Ordering::Relaxed),
             "a raise on the sweeps engine lands on the sync engine's flag"
+        );
+    }
+
+    /// An embedder that remembers every text it was handed: what the shared
+    /// embedding service would have read.
+    struct Recording(std::sync::Mutex<Vec<String>>);
+
+    impl crate::embed::Embedder for Recording {
+        fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            self.0.lock().unwrap().push(text.to_string());
+            Ok(vec![0.25; crate::store::sqlite::VEC_DIMS])
+        }
+        fn dims(&self) -> usize {
+            crate::store::sqlite::VEC_DIMS
+        }
+    }
+
+    /// Commit a triage decision for `id`, `adjust`ed, the way the worker does.
+    fn decide_now(
+        store: &SqliteStore,
+        acct: AccountId,
+        id: i64,
+        adjust: impl FnOnce(&mut crate::triage::decision::MessageDecision),
+    ) {
+        use crate::store::agent_triage::{AgentCommitOutcome, AgentTriageStore};
+        let job = store
+            .claim_agent_job(acct, "triage", Utc::now() + ChronoDuration::hours(1), 60)
+            .unwrap()
+            .expect("a triage job waits");
+        assert_eq!(job.message_id, id);
+        let context = store.load_agent_context(&job).unwrap();
+        let mut decision = crate::triage::decision::MessageDecision {
+            kinds: vec![crate::triage::decision::EmailKind::General],
+            summary: "Mail".into(),
+            reason: "Mail".into(),
+            ..Default::default()
+        };
+        adjust(&mut decision);
+        assert_eq!(
+            store
+                .commit_agent_decision(
+                    &job,
+                    &context,
+                    &decision,
+                    std::slice::from_ref(&context.message.source),
+                )
+                .unwrap(),
+            AgentCommitOutcome::Applied
+        );
+    }
+
+    /// THE SEALED GATE, END TO END (docs/SECURITY.md §4d): a login code is
+    /// handed to no embedder, not at ingest (it is undecided), not by the
+    /// drain before its decision, and not after the decision says auth, while
+    /// the owner's own mail is embedded once its access check settles and
+    /// ordinary inbound mail once it is decided.
+    #[tokio::test]
+    async fn no_embedder_ever_reads_a_login_code() {
+        let (store, acct) = store_at_cursor(None);
+        let recording = Arc::new(Recording(std::sync::Mutex::new(Vec::new())));
+        let eng =
+            engine(store.clone(), acct, "http://127.0.0.1:9").with_embedder(recording.clone());
+        let now = Utc::now();
+        let land = |msgid: &str, eml: &str, sent: bool| {
+            let mut raw = fixture(acct, msgid, eml, sent);
+            raw.gmail_thread_id = Some(format!("thread-{msgid}"));
+            eng.ingest_one(&raw, &[], now, IngestOrigin::Incremental)
+                .unwrap()
+                .expect("a new row")
+        };
+
+        let otp = land(
+            "otp",
+            "From: noreply@bank.example\r\nSubject: Your sign-in code\r\n\r\nYour code is 482913",
+            false,
+        );
+        assert!(otp.embed_text.is_none(), "undecided at ingest: no text out");
+        let sent = land(
+            "sent",
+            "From: me@example.com\r\nTo: dan@example.com\r\nSubject: The lease\r\n\r\nSigned lease attached",
+            true,
+        );
+        // Own mail is never triaged; until its access check answers it could
+        // be a forwarded code, so it waits for that, not for a decision.
+        assert!(
+            sent.embed_text.is_none(),
+            "own mail waits for its access check"
+        );
+        eng.backfill_missing_vectors().await;
+        assert_eq!(vec_count(&store, sent.id), 0, "access check pending");
+        {
+            use crate::store::agent_triage::AgentTriageStore;
+            let job = store
+                .claim_agent_job(acct, "access", Utc::now() + ChronoDuration::hours(1), 60)
+                .unwrap()
+                .expect("own mail is assessed for access");
+            assert_eq!(job.message_id, sent.id);
+            let message = store.load_agent_access_message(&job).unwrap();
+            store
+                .commit_agent_access(
+                    &job,
+                    &message,
+                    &crate::triage::access::AccessDecision {
+                        restricted: false,
+                        reason: "No credentials".into(),
+                    },
+                    &serde_json::json!({}),
+                )
+                .unwrap();
+        }
+        eng.backfill_missing_vectors().await;
+        assert_eq!(vec_count(&store, sent.id), 1, "settled, then embedded");
+
+        // The drain, before any decision: the login code is not selected.
+        eng.backfill_missing_vectors().await;
+        assert_eq!(vec_count(&store, otp.id), 0);
+        // The decision says auth; the drain still does not select it.
+        decide_now(&store, acct, otp.id, |d| {
+            d.auth.kinds = vec![crate::triage::decision::AuthKind::Otp]
+        });
+        eng.backfill_missing_vectors().await;
+        assert_eq!(vec_count(&store, otp.id), 0);
+
+        // Ordinary inbound mail: nothing at ingest, a vector once decided.
+        let lunch = land(
+            "lunch",
+            "From: alice@example.com\r\nSubject: Lunch\r\n\r\nLunch on Thursday?",
+            false,
+        );
+        assert!(lunch.embed_text.is_none());
+        eng.backfill_missing_vectors().await;
+        assert_eq!(vec_count(&store, lunch.id), 0, "undecided");
+        decide_now(&store, acct, lunch.id, |_| {});
+        eng.backfill_missing_vectors().await;
+        assert_eq!(vec_count(&store, lunch.id), 1, "decided, not sealed");
+
+        let read = recording.0.lock().unwrap();
+        assert!(
+            !read.iter().any(|t| t.contains("482913")),
+            "the login code reached an embedder: {read:?}"
+        );
+        assert!(read.iter().any(|t| t.contains("Signed lease")));
+        assert!(read.iter().any(|t| t.contains("Lunch on Thursday")));
+    }
+
+    fn vec_count(store: &SqliteStore, id: i64) -> i64 {
+        store
+            .query_i64_for_test(&format!(
+                "SELECT COUNT(*) FROM message_vecs WHERE message_id={id}"
+            ))
+            .unwrap()
+    }
+
+    /// docs/EMBED-SERVICE.md §3: a remote embedder answering 503 opens a
+    /// backoff window, and inside it neither ingest nor the vector drain calls
+    /// it again. Ingest still completes (the row is owed to the drain), which
+    /// is the half that keeps mail sync from slowing down.
+    #[tokio::test]
+    async fn a_full_embedding_service_is_not_asked_again_inside_the_window() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::AtomicUsize;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let asked = Arc::new(AtomicUsize::new(0));
+        let count = asked.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                count.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 503 X\r\nretry-after: 1\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                );
+            }
+        });
+        let remote = tokio::task::spawn_blocking(move || {
+            let settings = crate::config::EmbedConfig::default().settings();
+            crate::embed::RemoteEmbedder::new(&url, None, &settings).unwrap()
+        })
+        .await
+        .unwrap();
+
+        let (store, acct) = store_at_cursor(None);
+        let eng = engine(store, acct, "http://127.0.0.1:9").with_embedder(Arc::new(remote));
+        eng.vectors_dirty.store(false, Ordering::Relaxed);
+
+        eng.embed_and_store(1, "hello there".to_string()).await;
+        assert_eq!(asked.load(Ordering::SeqCst), 1, "the first embed asks");
+        assert!(eng.vectors_dirty.load(Ordering::Relaxed), "and is owed");
+        assert!(!eng.embed_backoff.may_call(tokio::time::Instant::now()));
+
+        eng.vectors_dirty.store(false, Ordering::Relaxed);
+        eng.embed_and_store(2, "hello again".to_string()).await;
+        assert!(
+            eng.vectors_dirty.load(Ordering::Relaxed),
+            "skipped inside the window, so still owed"
+        );
+        eng.backfill_missing_vectors().await;
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            1,
+            "nothing asks again until the window closes"
+        );
+        assert!(
+            eng.vectors_dirty.load(Ordering::Relaxed),
+            "a drain that did not run leaves the debt standing"
         );
     }
 }

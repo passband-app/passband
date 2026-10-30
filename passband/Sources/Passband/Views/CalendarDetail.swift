@@ -11,19 +11,27 @@
 //
 // THE PHONE PUSHES THIS SAME VIEW (PassbandiOS/Views/MobileCalendarView.swift).
 // What differs there is only the verbs: no key chips on a phone, and edit
-// opens the phone's sheet (PassbandiOS/Views/MobileEventSheet.swift). No
-// delete there yet.
+// opens the phone's sheet (PassbandiOS/Views/MobileEventSheet.swift), and
+// delete asks on the phone's own page (MobileEventPage).
 
+import MapKit
 import SwiftUI
 
 struct CalendarDetail: View {
     @Environment(AppStore.self) private var store
     let item: AgendaItem
     let calendar: Calendar
+    /// The card's picture once it is known (Model/EventVisuals.swift).
+    @State private var visual: EventVisual?
+    @State private var choosingMap = false
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         VStack(alignment: .leading, spacing: Space.s12) {
             header
+            if let visual {
+                EventVisualView(visual: visual)
+            }
             VStack(alignment: .leading, spacing: Space.s4) {
                 Text(item.title)
                     .font(Typo.ui(17, weight: .semibold))
@@ -37,14 +45,39 @@ struct CalendarDetail: View {
                 }
             }
             facts
-            if let ghost = item.ghost, !ghost.sources.isEmpty {
-                MailBehind(sources: ghost.sources)
+            // The tickets, boarding pass or booking the mail holds: one tap
+            // to what the door wants to see.
+            if let tickets = item.tickets {
+                TicketsRow(tickets: tickets) { store.openTickets(tickets) }
+            }
+            // A ghost's own mail, or the mail behind the ghost matched to a
+            // real event (Gmail's reservation event, say).
+            if !item.sources.isEmpty {
+                MailBehind(sources: item.sources)
             }
             actions
         }
         .padding(Space.s16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTint)
+        .animation(.easeOut(duration: 0.2), value: visual != nil)
+        .task(id: visualKey) {
+            let visuals = EventVisuals.shared
+            if let known = visuals.cached(visualKey) {
+                visual = known
+                return
+            }
+            visual = nil
+            let found = await visuals.resolve(
+                key: visualKey, threadIds: item.sources.map(\.thread_id), place: item.placeQuery)
+            if !Task.isCancelled { visual = found }
+        }
+    }
+
+    /// What the picture depends on: the row, its place and its mail.
+    private var visualKey: String {
+        ([item.id, item.placeQuery ?? ""] + item.sources.map(\.thread_id))
+            .joined(separator: "\u{1F}")
     }
 
     // MARK: header
@@ -73,7 +106,9 @@ struct CalendarDetail: View {
     /// mail made it.
     private var source: String {
         if let event = item.event {
-            return event.calendar_name.map { "\($0) calendar" } ?? "Your calendar"
+            let name = event.calendar_name.map { "\($0) calendar" } ?? "Your calendar"
+            if event.passband_owned == true { return "\(name), kept current by Passband" }
+            return event.from_gmail == true ? "\(name), added by Gmail" : name
         }
         switch item.ghost?.kind ?? .other {
         case .ticket: return "Ticket, from your mail"
@@ -131,6 +166,59 @@ struct CalendarDetail: View {
         }
     }
 
+    // MARK: place
+
+    /// The venue's name, its address under it. On iOS a tap asks which maps
+    /// app to open it in; on the Mac it stays selectable text.
+    @ViewBuilder
+    private func placeValue(_ name: String) -> some View {
+        let lines = VStack(alignment: .leading, spacing: Space.s2) {
+            Text(name)
+                .font(Typo.rowSub)
+                .foregroundStyle(Palette.ink)
+            if let address = item.placeAddress {
+                Text(address)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkDim)
+            }
+        }
+        #if os(iOS)
+            Button { choosingMap = true } label: { lines.contentShape(Rectangle()) }
+                .buttonStyle(.plain)
+                .confirmationDialog(name, isPresented: $choosingMap, titleVisibility: .visible) {
+                    Button("Open in Apple Maps") { openInAppleMaps() }
+                    Button("Open in Google Maps") { open(Self.googleMaps, item.placeQuery) }
+                    Button("Cancel", role: .cancel) {}
+                }
+        #else
+            lines.textSelection(.enabled)
+        #endif
+    }
+
+    private static let appleMaps = "https://maps.apple.com/?q="
+    /// Opens the Google Maps app when it is installed (a universal link),
+    /// else Google Maps in Safari.
+    private static let googleMaps = "https://www.google.com/maps/search/?api=1&query="
+
+    /// The venue Apple Maps already matched for the picture when there is
+    /// one, so the pin is the same place; else a search for the place.
+    private func openInAppleMaps() {
+        switch visual {
+        case .lookAround(_, let found), .map(let found):
+            found.openInMaps()
+        default:
+            open(Self.appleMaps, item.placeQuery)
+        }
+    }
+
+    private func open(_ base: String, _ query: String?) {
+        guard let query,
+            let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed.subtracting(["&", "+", "="])),
+            let url = URL(string: base + encoded)
+        else { return }
+        openURL(url)
+    }
+
     // MARK: facts
 
     private var facts: some View {
@@ -139,12 +227,7 @@ struct CalendarDetail: View {
                 standing(ghost)
             }
             if let place = item.location {
-                FactRow(label: "Place") {
-                    Text(place)
-                        .font(Typo.rowSub)
-                        .foregroundStyle(Palette.ink)
-                        .textSelection(.enabled)
-                }
+                FactRow(label: "Place") { placeValue(place) }
             }
             if let event = item.event {
                 let guests = event.guests ?? []
@@ -278,11 +361,7 @@ struct CalendarDetail: View {
                 HStack(spacing: Space.s14) {
                     if editable {
                         HintButton(key: "e", label: "edit") { store.openEventEditor(editing: event) }
-                        // The phone edits in its sheet; deleting is a later
-                        // pass there.
-                        #if os(macOS)
-                            HintButton(key: "⌫", label: "delete") { store.askDeleteEvent(event) }
-                        #endif
+                        HintButton(key: "⌫", label: "delete") { store.askDeleteEvent(event) }
                     }
                     if let link {
                         HintButton(key: "↵", label: "open in Google Calendar") { Opener.open(link) }
@@ -403,6 +482,60 @@ struct HintButton: View {
             }
             .buttonStyle(.plain)
         #endif
+    }
+}
+
+/// The Tickets button (docs/CALENDAR.md, "The Tickets button"), named by
+/// what the mail holds: "Tickets", "Boarding pass", "Booking". Beside it,
+/// what a tap opens: the file by its name, or the email. One tap, no menu:
+/// an attachment opens in Quick Look (on the phone a wallet pass offers
+/// Wallet), the email in the reader.
+private struct TicketsRow: View {
+    let tickets: CalendarTickets
+    let action: () -> Void
+
+    var body: some View {
+        HStack(spacing: Space.s10) {
+            Button(action: action) {
+                Label(tickets.label, systemImage: symbol)
+                    .font(Typo.ui(13, weight: .semibold))
+            }
+            .buttonStyle(.glass)
+            #if os(macOS)
+                .controlSize(.regular)
+                .pointingHand()
+            #else
+                .controlSize(.large)
+            #endif
+            .accessibilityHint(hint)
+            // The file's name is the sender's: plain Text, never markup.
+            Text(verbatim: detail)
+                .font(Typo.micro)
+                .foregroundStyle(Palette.inkFaint)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var symbol: String {
+        switch tickets.kind {
+        case .travel: "airplane"
+        case .reservation: "bookmark"
+        default: "ticket"
+        }
+    }
+
+    private var detail: String {
+        guard let file = tickets.attachment else { return "in the email" }
+        #if os(iOS)
+            if file.isWalletPass { return "Add to Wallet" }
+        #endif
+        return file.filename
+    }
+
+    private var hint: String {
+        tickets.attachment.map { "Opens \($0.filename)" } ?? "Opens the email"
     }
 }
 

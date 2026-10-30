@@ -34,6 +34,8 @@ struct AgendaTests {
         unlikelyFoldsIntoACount()
         endLabels()
         matchedGhostsAndDeclinedEventsAreNotDrawn()
+        aMatchedGhostsMailRidesOnTheEvent()
+        theCleanedPlaceIsWhatTheCardShows()
         earlierTodayFoldsAndTodayAlwaysExists()
         theListCanStartOnAnotherDay()
         aRunOfDaysKeepsTheQuietOnes()
@@ -41,7 +43,6 @@ struct AgendaTests {
         dayTitles()
         todaysStrip()
         theGate()
-        theNumberKeysCountTheCalendarOnlyWhenOffered()
         theGateIsTheActiveAccounts()
         syncNotices()
         ghostStanding()
@@ -167,8 +168,8 @@ struct AgendaTests {
             {"tier_counts":{},"total":0,"sealed":0,"bands":{"standing":0,"new":0,"open":0}}
             """
         let stats = try? JSONDecoder().decode(StoreStats.self, from: Data(oldStats.utf8))
-        expect(stats != nil && stats?.timeline == nil && stats?.calendar == nil,
-               "an older daemon's stats decode with no timeline and no calendar")
+        expect(stats != nil && stats?.calendar == nil,
+               "an older daemon's stats decode with no calendar")
         let newStats = """
             {"tier_counts":{},"total":0,"sealed":0,"bands":{"standing":0,"new":0,"open":0},
              "timeline":true,"calendar":{"granted":false,
@@ -176,7 +177,7 @@ struct AgendaTests {
              "connect_command":null}}
             """
         let s2 = try? JSONDecoder().decode(StoreStats.self, from: Data(newStats.utf8))
-        expect(s2?.timeline == true && s2?.calendar?.granted == false, "Slice A's stats decode")
+        expect(s2?.calendar?.granted == false, "Slice A's stats decode (a timeline key is ignored)")
         expect(s2?.calendar?.self_connect == nil, "an older daemon sends no self_connect")
 
         func access(_ calendar: String) -> CalendarAccess? {
@@ -398,6 +399,82 @@ struct AgendaTests {
         expect(tue?.visible.last?.title == "Untitled event", "a blank title is named, not blank")
     }
 
+    /// The matched ghost is not drawn, but its mail is not lost: the event
+    /// carries it, each message once, and an unmatched event carries none.
+    static func aMatchedGhostsMailRidesOnTheEvent() {
+        var second = ghost(70, "Dinner", start: "2026-10-06T19:00:00-07:00", matched: true)
+        second.id = 71
+        second.sources = [
+            GhostSource(message_id: 70, thread_id: "t70", role: .agreed),
+            GhostSource(message_id: 72, thread_id: "t72", role: .updated),
+        ]
+        let items = Agenda.items(
+            TimelineFeed(
+                ghosts: [ghost(70, "Dinner", start: "2026-10-06T19:00:00-07:00", matched: true), second],
+                events: [
+                    event("ev70", "Dinner", start: "2026-10-06T19:00:00-07:00"),
+                    event("other", "Gym", start: "2026-10-06T07:00:00-07:00"),
+                ]),
+            calendar: cal)
+        let dinner = items.first { $0.event?.id == "ev70" }
+        expect(dinner?.mail.map(\.message_id) == [70, 72], "both ghosts' mail, each message once")
+        expect(dinner?.sources.map(\.thread_id) == ["t70", "t72"], "the card reads it as its sources")
+        expect(items.first { $0.event?.id == "other" }?.mail.isEmpty == true, "no match, no mail")
+        let ghostRow = Agenda.items(
+            TimelineFeed(ghosts: [ghost(80, "Party", start: "2026-10-06T20:00:00-07:00")], events: []),
+            calendar: cal
+        ).first
+        expect(ghostRow?.sources.map(\.message_id) == [80], "a ghost's sources are its own")
+    }
+
+    /// The daemon's cleaned place wins over the raw location; "" hides it;
+    /// without one (an older daemon, or not cleaned yet) the location shows.
+    static func theCleanedPlaceIsWhatTheCardShows() {
+        var raw = event("p", "Dinner", start: "2026-10-06T19:00:00-07:00")
+        raw.location = "Dingles Public House, Tock is now part of the Resy network."
+        let shown = { (e: TimelineEvent) in Agenda.item(e, calendar: cal)?.location }
+        expect(shown(raw) == raw.location, "no place yet: the location")
+        expect(Agenda.item(raw, calendar: cal)?.placeAddress == nil, "no place yet: no address")
+        var cleaned = raw
+        cleaned.place = TimelinePlace(
+            name: "Dingles Public House", address: "165 Main St, Northampton", original: raw.location)
+        let item = Agenda.item(cleaned, calendar: cal)
+        expect(item?.location == "Dingles Public House", "the cleaned name")
+        expect(item?.placeAddress == "165 Main St, Northampton", "the address under it")
+        expect(
+            item?.placeQuery == "Dingles Public House, 165 Main St, Northampton",
+            "the map asks for both")
+        var onlyAddress = raw
+        onlyAddress.place = TimelinePlace(address: "165 Main St")
+        expect(shown(onlyAddress) == "165 Main St", "an address alone is the line")
+        expect(Agenda.item(onlyAddress, calendar: cal)?.placeAddress == nil, "and not repeated")
+        var nothing = raw
+        nothing.place = TimelinePlace(original: raw.location)
+        expect(shown(nothing) == nil, "a place of nothing hides the line")
+
+        // The new keys must survive the hand-written decoder, not just the
+        // memberwise init.
+        let wire = """
+            {"id":"p","calendar_id":"primary","start":"2026-10-06T19:00:00-07:00","all_day":false,
+             "location":"Dingles Public House, Tock is now part of the Resy network.",
+             "place":{"name":"Dingles Public House","address":"165 Main St","original":"Dingles Public House, Tock is now part of the Resy network."},
+             "from_gmail":true,"passband_owned":true}
+            """
+        let decoded = try? JSONDecoder().decode(TimelineEvent.self, from: Data(wire.utf8))
+        expect(decoded?.place?.name == "Dingles Public House", "place name decodes")
+        expect(decoded?.place?.address == "165 Main St", "place address decodes")
+        expect(decoded?.place?.original?.hasPrefix("Dingles") == true, "place original decodes")
+        expect(decoded?.from_gmail == true, "from_gmail decodes")
+        expect(decoded?.passband_owned == true, "passband_owned decodes")
+        let bad = """
+            {"id":"p","calendar_id":"primary","start":"2026-10-06T19:00:00-07:00","all_day":false,
+             "place":7,"from_gmail":"yes"}
+            """
+        let lenient = try? JSONDecoder().decode(TimelineEvent.self, from: Data(bad.utf8))
+        expect(lenient != nil && lenient?.place == nil && lenient?.from_gmail == nil,
+               "a bad new key costs only itself")
+    }
+
     static func earlierTodayFoldsAndTodayAlwaysExists() {
         let days = build(
             [ghost(70, "Breakfast", start: "2026-10-05T09:00:00-07:00",
@@ -538,22 +615,6 @@ struct AgendaTests {
     // MARK: gate
 
     static func theGate() {
-        // The truth table: the daemon's timeline against the `calendar` flag.
-        expect(CalendarGate.pageAvailable(timeline: true, feature: true), "both: shown")
-        expect(!CalendarGate.pageAvailable(timeline: true, feature: false), "no flag: hidden")
-        expect(!CalendarGate.pageAvailable(timeline: false, feature: true), "said no: hidden")
-        expect(!CalendarGate.pageAvailable(timeline: false, feature: false), "neither: hidden")
-        expect(!CalendarGate.pageAvailable(timeline: nil, feature: true), "older daemon: hidden")
-        expect(!CalendarGate.pageAvailable(timeline: nil, feature: false), "older daemon, no flag: hidden")
-
-        // The gate closing takes the user off the calendar, and only off it.
-        expect(CalendarGate.leavesPage(available: false, active: "calendar", calendar: "calendar"),
-               "the flag goes off on the page: leave it")
-        expect(!CalendarGate.leavesPage(available: false, active: "emails", calendar: "calendar"),
-               "the flag goes off elsewhere: stay")
-        expect(!CalendarGate.leavesPage(available: true, active: "calendar", calendar: "calendar"),
-               "still on: stay")
-
         let link = "https://console.passband.app/reconnect?calendar=1&hint=a%40b.example"
         expect(CalendarGate.connectRoute(nil) == nil, "an older daemon offers nothing")
         expect(CalendarGate.connectRoute(CalendarAccess(granted: true, connect_url: link)) == nil,
@@ -605,30 +666,6 @@ struct AgendaTests {
 
     /// FINDING 1 OF THE REVIEW: stats outlive an account switch, so until the
     /// active account's own poll lands, nothing about connecting is offered.
-    /// Wave 4: "make calendar 2, all mail 3, etc". With the page offered it
-    /// is second in the count; without it the numbers are the old ones.
-    static func theNumberKeysCountTheCalendarOnlyWhenOffered() {
-        let pages = ["sitrep", "emails", "auth", "rules", "groups"]
-        let offered = CalendarGate.numbered(pages, calendar: "calendar", offered: true)
-        expect(offered == ["sitrep", "calendar", "emails", "auth", "rules", "groups"],
-               "offered: sitrep 1, calendar 2, emails 3, and every later page one higher")
-        expect(offered.firstIndex(of: "calendar") == 1 && offered.firstIndex(of: "emails") == 2,
-               "calendar is 2 and all mail is 3")
-        expect(offered.count == pages.count + 1, "one more digit, and no page lost")
-        let hidden = CalendarGate.numbered(pages, calendar: "calendar", offered: false)
-        expect(hidden == pages, "not offered: the numbers are exactly as they were")
-        expect(!hidden.contains("calendar"), "and no digit opens a page that is not there")
-        expect(CalendarGate.numbered([String](), calendar: "calendar", offered: true).isEmpty,
-               "an empty rail stays empty")
-        // The flag drives the count through the one gate.
-        let flagOff = CalendarGate.pageAvailable(timeline: true, feature: false)
-        expect(CalendarGate.numbered(pages, calendar: "calendar", offered: flagOff) == pages,
-               "the flag off: the old numbers")
-        let flagOn = CalendarGate.pageAvailable(timeline: true, feature: true)
-        expect(CalendarGate.numbered(pages, calendar: "calendar", offered: flagOn) == offered,
-               "the flag on: calendar is 2")
-    }
-
     static func theGateIsTheActiveAccounts() {
         let link = "https://console.passband.app/reconnect?calendar=1&hint=a%40b.example"
         let previous = CalendarAccess(granted: false, connect_url: link)
@@ -734,7 +771,7 @@ struct AgendaTests {
             (#""calendar":null"#, "null"),
         ] {
             let stats = try? JSONDecoder().decode(StoreStats.self, from: Data("{\(base),\(bad)}".utf8))
-            expect(stats?.total == 3 && stats?.timeline == true && stats?.calendar == nil,
+            expect(stats?.total == 3 && stats?.calendar == nil,
                    "a calendar with \(what) reads as absent and the rest decodes")
         }
         let good = try? JSONDecoder().decode(

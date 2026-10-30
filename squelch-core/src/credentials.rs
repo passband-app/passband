@@ -204,10 +204,13 @@ pub fn refresh_stored_token_detailed(
     client: &OAuthClientConfig,
     refresh_token: &str,
 ) -> Result<RefreshedToken> {
+    // THE ISSUER'S token endpoint: every refresh in the daemon comes through
+    // here, so a Google URL left in place would send an Outlook refresh token
+    // to Google on the first expiry.
     refresh_stored_token_detailed_at(
         client,
         refresh_token,
-        crate::auth::GOOGLE_TOKEN_URL,
+        client.issuer.token_url(),
         crate::auth::EXCHANGE_HTTP_TIMEOUT,
     )
 }
@@ -229,10 +232,21 @@ pub(crate) fn refresh_stored_token_detailed_at(
     use oauth2::basic::BasicClient;
     use oauth2::{AuthUrl, ClientId, ClientSecret, RefreshToken, TokenResponse, TokenUrl};
 
-    let oauth = BasicClient::new(ClientId::new(client.client_id.clone()))
-        .set_client_secret(ClientSecret::new(client.client_secret.clone()))
+    let oauth = BasicClient::new(ClientId::new(client.client_id.clone()));
+    // Microsoft: a public app presents no secret (its endpoint refuses one);
+    // a confidential one (the hosted app) presents its secret in the body.
+    let oauth = match client.issuer {
+        crate::config::OAuthIssuer::Google => {
+            oauth.set_client_secret(ClientSecret::new(client.client_secret.clone()))
+        }
+        crate::config::OAuthIssuer::Microsoft if !client.client_secret.is_empty() => oauth
+            .set_client_secret(ClientSecret::new(client.client_secret.clone()))
+            .set_auth_type(oauth2::AuthType::RequestBody),
+        crate::config::OAuthIssuer::Microsoft => oauth,
+    };
+    let oauth = oauth
         .set_auth_uri(
-            AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".to_string())
+            AuthUrl::new(client.issuer.auth_url().to_string())
                 .map_err(|e| CoreError::Credential(format!("bad auth url: {e}")))?,
         )
         .set_token_uri(
@@ -251,10 +265,19 @@ pub(crate) fn refresh_stored_token_detailed_at(
         .build()
         .map_err(|e| CoreError::Credential(format!("building http client: {e}")))?;
 
-    let resp = oauth
-        .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
-        .request(&http)
-        .map_err(|e| CoreError::Credential(refresh_error_message(&e.to_string())))?;
+    let refresh = RefreshToken::new(refresh_token.to_string());
+    let mut req = oauth.exchange_refresh_token(&refresh);
+    // Microsoft's v2 refresh documents `scope` as required; sending the
+    // mail set keeps the mail grant (calendar is left out so an older,
+    // calendar-less consent still refreshes). Google's never needed it.
+    if client.issuer == crate::config::OAuthIssuer::Microsoft {
+        for scope in crate::config::OUTLOOK_MAIL_SCOPES {
+            req = req.add_scope(oauth2::Scope::new(scope.to_string()));
+        }
+    }
+    let resp = req.request(&http).map_err(|e| {
+        CoreError::Credential(refresh_error_message_for(client.issuer, &e.to_string()))
+    })?;
 
     let new_refresh = resp
         .refresh_token()
@@ -275,6 +298,56 @@ pub(crate) fn refresh_stored_token_detailed_at(
     })
 }
 
+/// Whose token this is, read off the scopes recorded on it: every consent
+/// and refresh this code runs records them, and Google's and Microsoft's
+/// scope names never overlap. `None` when nothing recorded says (a token
+/// stored before scopes were recorded, which is Google's).
+pub fn token_issuer(token: &StoredToken) -> Option<crate::config::OAuthIssuer> {
+    use crate::config::OAuthIssuer;
+    let scopes = token.scopes.as_deref()?;
+    if scopes.iter().any(|s| s.contains("googleapis.com")) {
+        Some(OAuthIssuer::Google)
+    } else if scopes
+        .iter()
+        .any(|s| s.contains("graph.microsoft.com") || s.starts_with("Mail.") || s == "User.Read")
+    {
+        Some(OAuthIssuer::Microsoft)
+    } else {
+        None
+    }
+}
+
+/// Refuse a stored token minted by the OTHER identity platform before it is
+/// used or refreshed: its bearer would go to the wrong company's API and its
+/// refresh token to the wrong company's token endpoint. How it gets here: the
+/// same address moving from Google Workspace to Microsoft 365 (or back) with
+/// the old credential still in its slot, or a blob exported under the other
+/// provider.
+///
+/// ASYMMETRIC ON PURPOSE. A token with no recorded scopes predates scope
+/// recording, and every such token is Google's: a Gmail daemon keeps
+/// accepting them, an Outlook daemon refuses them. Every Microsoft token is
+/// born with scopes (the exchange records the requested set when the
+/// response names none, an import refuses a refresh that names none, and a
+/// refresh carries them forward), so requiring proof costs Outlook nothing.
+pub fn check_token_issuer(token: &StoredToken, issuer: crate::config::OAuthIssuer) -> Result<()> {
+    use crate::config::OAuthIssuer;
+    let minted = token_issuer(token);
+    let ok = match issuer {
+        OAuthIssuer::Google => minted != Some(OAuthIssuer::Microsoft),
+        OAuthIssuer::Microsoft => minted == Some(OAuthIssuer::Microsoft),
+    };
+    if ok {
+        return Ok(());
+    }
+    Err(CoreError::Credential(format!(
+        "the stored credential was minted by {}, but this daemon is configured for {} \
+         (provider in the config); it was not used. Re-run `squelchd auth`.",
+        minted.unwrap_or(OAuthIssuer::Google).name(),
+        issuer.name()
+    )))
+}
+
 /// The token to persist after a refresh of `stored`.
 ///
 /// A refresh response MAY omit `scope`, and when it does the grant is the one
@@ -293,6 +366,21 @@ fn carry_scopes_forward(stored: &StoredToken, refreshed: RefreshedToken) -> Stor
 /// The credential-error message for a failed refresh exchange. `invalid_grant` means
 /// the REFRESH token itself is dead, not a transient failure — no backoff recovers
 /// it, so the message names the fix instead.
+fn refresh_error_message_for(issuer: crate::config::OAuthIssuer, err: &str) -> String {
+    match issuer {
+        crate::config::OAuthIssuer::Google => refresh_error_message(err),
+        // Not Google's advice: there is no consent-screen publishing status
+        // to fix. Revocation, a password reset, and a personal account's
+        // refresh token lapsing after about 90 days unused are the causes.
+        crate::config::OAuthIssuer::Microsoft if err.contains("invalid_grant") => format!(
+            "refresh failed: {err} — Microsoft has expired or revoked the refresh token \
+             (revoked access, a password change, or about 90 days without use); re-authorize \
+             with `squelchd auth`"
+        ),
+        crate::config::OAuthIssuer::Microsoft => format!("refresh failed: {err}"),
+    }
+}
+
 fn refresh_error_message(err: &str) -> String {
     if err.contains("invalid_grant") {
         format!(
@@ -321,7 +409,7 @@ fn validate_or_refresh_stored<P>(
     validate_or_refresh_stored_at(
         stored,
         client,
-        crate::auth::GOOGLE_TOKEN_URL,
+        client.issuer.token_url(),
         crate::auth::EXCHANGE_HTTP_TIMEOUT,
         persist,
     )
@@ -337,6 +425,7 @@ fn validate_or_refresh_stored_at<P>(
     timeout: Duration,
     persist: impl FnOnce(&StoredToken) -> Result<P>,
 ) -> Result<(StoredToken, Option<P>)> {
+    check_token_issuer(&stored, client.issuer)?;
     if stored.is_expired(ChronoDuration::seconds(REFRESH_SKEW_SECS)) {
         let refresh = stored.refresh_token.clone().ok_or_else(|| {
             CoreError::Credential(
@@ -1625,6 +1714,128 @@ pub fn load_token_backend(
     }
 }
 
+// --- an IMAP account's credential: server and app password (issue #575) -----
+
+/// The storage-slot suffix of an IMAP account's credential: `email#imap`,
+/// beside the OAuth slots in the SAME backend (the keyring entry, or the
+/// credentials file with its age sealing), so a password is kept exactly as
+/// carefully as a refresh token. The slot holds the server config with the
+/// password (`crate::mail::imap::ImapCredential`), so what decides where the
+/// password goes is sealed with it.
+///
+/// NOT a [`CredentialKind`]: every kind is an OAuth grant with scopes that
+/// the import and consent paths check a token against, and a password has
+/// none. A slot of its own keeps it out of all of them.
+pub const IMAP_PASSWORD_SLOT_SUFFIX: &str = "#imap";
+
+fn imap_slot(account_email: &str) -> String {
+    format!("{account_email}{IMAP_PASSWORD_SLOT_SUFFIX}")
+}
+
+/// The slot holds a [`StoredToken`] whose `access_token` is the slot text
+/// (`ImapCredential::to_slot`) and nothing else, so the file and keyring
+/// formats do not change.
+fn imap_slot_token(slot_text: &str) -> StoredToken {
+    StoredToken {
+        access_token: slot_text.to_string(),
+        refresh_token: None,
+        expires_at: None,
+        scopes: None,
+    }
+}
+
+/// Store an IMAP account's credential slot text in the configured backend.
+/// The file backend seals it when `SQUELCH_CRED_AGE_IDENTITY` is set, as it
+/// does every token. Errors never carry it.
+pub fn store_imap_slot_backend(
+    backend: CredentialBackend,
+    credentials_path: &Path,
+    account_email: &str,
+    slot_text: &str,
+) -> Result<()> {
+    ensure_backend(backend)?;
+    let slot = imap_slot(account_email);
+    let token = imap_slot_token(slot_text);
+    match backend {
+        CredentialBackend::Keyring => keyring_entry(&slot)?
+            .set_password(&token.to_json()?)
+            .map_err(|e| CoreError::Credential(format!("writing keyring entry: {e}"))),
+        CredentialBackend::File => store_imap_slot_file_with(
+            credentials_path,
+            account_email,
+            slot_text,
+            age_identity_from_env()?.as_ref(),
+        ),
+    }
+}
+
+/// The file half of [`store_imap_slot_backend`] against an explicit
+/// identity (resolved once by the caller, as [`store_token_file_with`] is).
+fn store_imap_slot_file_with(
+    path: &Path,
+    account_email: &str,
+    slot_text: &str,
+    identity: Option<&AgeIdentity>,
+) -> Result<()> {
+    let slot = imap_slot(account_email);
+    let token = imap_slot_token(slot_text);
+    update_credentials_file(path, identity, |file| {
+        file.slots.insert(slot, token);
+    })
+    .map(|_| ())
+}
+
+/// An IMAP account's credential slot text from the configured backend.
+pub fn load_imap_slot_backend(
+    backend: CredentialBackend,
+    credentials_path: &Path,
+    account_email: &str,
+) -> Result<String> {
+    let slot = imap_slot(account_email);
+    let missing = || {
+        CoreError::Credential(format!(
+            "no IMAP account stored for {account_email} (run `squelchd auth --imap`)"
+        ))
+    };
+    let stored = match backend {
+        CredentialBackend::Keyring => match keyring_entry(&slot)?.get_password() {
+            Ok(json) => StoredToken::from_json(&json)?,
+            Err(keyring_core::Error::NoEntry) => return Err(missing()),
+            Err(e) => {
+                return Err(CoreError::Credential(format!(
+                    "reading the keyring entry for {account_email} (imap slot): {e}"
+                )));
+            }
+        },
+        CredentialBackend::File => {
+            return load_imap_slot_file_with(
+                credentials_path,
+                account_email,
+                age_identity_from_env()?.as_ref(),
+            );
+        }
+    };
+    Ok(stored.access_token)
+}
+
+/// The file half of [`load_imap_slot_backend`] against an explicit
+/// identity.
+fn load_imap_slot_file_with(
+    path: &Path,
+    account_email: &str,
+    identity: Option<&AgeIdentity>,
+) -> Result<String> {
+    let file = CredentialsFile::read(path, identity)?;
+    file.slots
+        .get(&imap_slot(account_email))
+        .map(|t| t.access_token.clone())
+        .ok_or_else(|| {
+            CoreError::Credential(format!(
+                "no IMAP account stored for {account_email} (run `squelchd auth --imap`)"
+            ))
+        })
+}
+
 /// Build a [`CredentialStore`] trait object bound to `kind` for the
 /// configured backend, the one place a backend becomes a store: the backend
 /// is made ready here, or refused ([`ensure_backend`]), so every process that
@@ -2010,6 +2221,7 @@ mod tests {
         OAuthClientConfig {
             client_id: "id".into(),
             client_secret: "secret".into(),
+            issuer: Default::default(),
         }
     }
 
@@ -2879,6 +3091,54 @@ mod tests {
             name,
             Utc::now().timestamp_nanos_opt().unwrap_or(0)
         ))
+    }
+
+    /// An IMAP password lands sealed in its own slot beside the OAuth ones,
+    /// leaves them alone, and reads back.
+    #[test]
+    ///
+    /// Against an explicit identity, NOT by setting `SQUELCH_CRED_AGE_IDENTITY`:
+    /// the env is process-wide, and the `file_store_*` tests that write
+    /// plaintext and read it back (without `ENV_LOCK`) failed when a write
+    /// landed sealed while the var was set and the read ran after it was unset.
+    fn an_imap_password_is_sealed_in_its_own_slot() {
+        let (identity_path, identity) = identity_file("imap-password");
+        let id = Some(&identity);
+        let path = tmp_path("imap-password");
+        let tok = sealed_token("access", "refresh");
+        store_token_file_with(&path, "you@x.com", CredentialKind::Read, &tok, id).unwrap();
+        store_imap_slot_file_with(&path, "you@x.com", "app-pw-123", id).unwrap();
+        let on_disk = std::fs::read(&path).unwrap();
+        assert!(is_age_file(&on_disk), "sealed");
+        assert!(!String::from_utf8_lossy(&on_disk).contains("app-pw-123"));
+        assert_eq!(
+            load_imap_slot_file_with(&path, "you@x.com", id).unwrap(),
+            "app-pw-123"
+        );
+        assert_eq!(
+            load_token_file_with(&path, "you@x.com", CredentialKind::Read, id).unwrap(),
+            tok
+        );
+        let missing = load_imap_slot_file_with(&path, "other@x.com", id)
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("squelchd auth --imap"), "{missing}");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&identity_path);
+    }
+
+    /// The public pair round-trips through the file backend. It reads the
+    /// env, so it holds `ENV_LOCK` against the tests that set it.
+    #[test]
+    fn an_imap_password_round_trips_through_the_file_backend() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let path = tmp_path("imap-password-plain");
+        store_imap_slot_backend(CredentialBackend::File, &path, "you@x.com", "app-pw-9").unwrap();
+        assert_eq!(
+            load_imap_slot_backend(CredentialBackend::File, &path, "you@x.com").unwrap(),
+            "app-pw-9"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

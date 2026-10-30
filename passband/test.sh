@@ -26,6 +26,9 @@ mkdir -p "$BUILD"
 # knows that. This is the check; see the script's header for the history.
 echo "==> analytics-lint"
 python3 ./analytics-lint.py
+# Session replay draws only the app's own SF Symbols; a symbol added without
+# rerunning ./replay-icons.py would replay as a grey box.
+python3 ./replay-icons.py --check
 
 QUEUE=$(mktemp)
 trap 'rm -f "$QUEUE"' EXIT
@@ -78,6 +81,25 @@ run_suite agenda \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Lib/Agenda.swift \
   Tests/AgendaTests.swift
+
+# The search panel's Events block: which query goes to which search
+# (`in:calendar`, the mail-only operators), the wire it reads, three rows
+# then "N more", and each row's day, time and place in the user's zone.
+run_suite calendar-search \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Lib/CalendarSearch.swift \
+  Tests/CalendarSearchTests.swift
+
+# The calendar's disk cache: a saved feed comes back whole for its account
+# only, a file that will not read is dropped, and forget deletes it.
+run_suite calendar-disk \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/PrivateFile.swift \
+  Sources/Passband/Model/CalendarDisk.swift \
+  Tests/CalendarDiskTests.swift
 
 # The month view's arithmetic: the grid's days in the user's calendar, what
 # each cell lists and what folds into "+N more", spans and their lanes, the
@@ -226,6 +248,36 @@ run_suite shipment-wire \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/APIError.swift \
   Tests/ShipmentWireTests.swift
+
+# The last board on disk: no sealed or auth row ever reaches the file, only a
+# fresh board of this version is painted (the rest are deleted), and the file
+# is the owner's alone, out of backups, and gone with its account.
+run_suite board-file \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/APIError.swift \
+  Sources/Passband/Lib/PrivateFile.swift \
+  Sources/Passband/Lib/BoardFile.swift \
+  Tests/BoardFileTests.swift
+
+# Measured email heights kept across launches: answered only for the exact
+# document, width, type and build, capped, and kept like the board file.
+run_suite frame-height-file \
+  Sources/Passband/Lib/PrivateFile.swift \
+  Sources/Passband/Lib/FrameHeightFile.swift \
+  Tests/FrameHeightFileTests.swift
+
+# The sitrep's zones: one observed property per zone, and a write to one
+# never invalidates another's readers.
+run_suite zone-store \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Sources/Passband/Lib/SenderIdentity.swift \
+  Sources/Passband/Lib/Reading.swift \
+  Sources/Passband/Model/ZoneStore.swift \
+  Tests/ZoneStoreTests.swift
 
 # Credential validation must never succeed against the fixture transport.
 run_suite credential-probe \
@@ -516,6 +568,12 @@ run_suite translation-wire \
   Sources/Passband/Lib/Quotes.swift \
   Tests/TranslationWireTests.swift
 
+# Sender signals (issue #639): the wire and which reader lines warn.
+run_suite sender-signals-wire \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/SubjectText.swift \
+  Tests/SenderSignalsWireTests.swift
+
 run_suite spam-wire \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/SubjectText.swift \
@@ -571,6 +629,7 @@ run_suite sender-identity \
 # PageKeys.swift rides along: the digits and ⇧C exactly as RootView binds them.
 run_suite key-dispatch \
   Sources/Passband/Keys/KeyDispatch.swift \
+  Sources/Passband/Views/PagePresence.swift \
   Sources/Passband/Keys/PageKeys.swift \
   Tests/KeyDispatchTests.swift
 
@@ -612,6 +671,25 @@ run_suite renotify-banner \
   Sources/Passband/Model/EventBanner.swift \
   Sources/Passband/Model/RenotifyBanner.swift \
   Tests/RenotifyBannerTests.swift
+
+# Event reminders and the Tickets button (docs/CALENDAR.md, "Reminders and
+# tickets"): the `calendar_reminder` frame, the phone's `<tag>:cal:<fire>:<at>`
+# push id (tag-less and malformed ones refused), the banner's words, where a
+# tap and "Show tickets" go, and `tickets` on timeline events and ghosts, kept
+# through a decode error of their own and through an encode (the disk cache).
+run_suite calendar-reminder \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Sources/Passband/Lib/SenderIdentity.swift \
+  Sources/Passband/Lib/AuthLabels.swift \
+  Sources/Passband/Lib/AgentDraftLink.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Model/EventBanner.swift \
+  Sources/Passband/Model/RenotifyBanner.swift \
+  Sources/Passband/Model/CalendarReminder.swift \
+  Tests/CalendarReminderTests.swift
 
 # What auth mail asks of the owner (docs/AUTH-MAIL-HANDLING.md, "Clients"): the
 # sealed row from both daemon versions, which kinds open a question and for
@@ -655,6 +733,16 @@ run_suite search-intent \
 run_suite settings-search \
   Sources/Passband/Lib/SettingsSearch.swift \
   Tests/SettingsSearchTests.swift
+
+# Session replay's privacy contract: a layer tree with a subject, an avatar, a
+# hued pill and a web view must come out as grey boxes with no text, no hue
+# and nothing from inside the web view, and the outbound validator must refuse
+# anything else. Plus the gzip member the uploads ride in.
+run_suite replay-wireframe \
+  Sources/Passband/Lib/ReplayWireframe.swift \
+  Sources/Passband/Lib/Gzip.swift \
+  Sources/Passband/Lib/ReplayIconNames.swift \
+  Tests/ReplayWireframeTests.swift
 
 # What the assistant says about Passband itself: the three help tools' answers.
 # All three are text a model reads and repeats to a person, so the suite asks
@@ -717,6 +805,14 @@ run_suite conversation-snapshot \
   Sources/Passband/Assistant/Transcript.swift \
   Sources/Passband/Assistant/ConversationSnapshot.swift \
   Tests/ConversationSnapshotTests.swift
+
+# The assistant's request body: two prompt-cache breakpoints and no more, the
+# same request as the same bytes (tool schemas are dictionaries), and the
+# history pruned for a request without breaking a tool_use/tool_result pair.
+run_suite assistant-request \
+  Sources/Passband/Assistant/JSONValue.swift \
+  Sources/Passband/Assistant/Transcript.swift \
+  Tests/AssistantRequestTests.swift
 
 # ⌘F in the reader: matches in a string, the cursor walking them across a
 # thread's messages (wrap, skip, the backwards step into an uncounted message),
@@ -816,6 +912,16 @@ run_suite image-trim \
   Sources/Passband/Lib/ImageFill.swift \
   Sources/Passband/Lib/ImageTrim.swift \
   Tests/ImageTrimTests.swift
+
+# Which picture an event card wears: the photo test, which places are worth
+# asking Apple Maps about, whether Apple's answer is the place named, and the
+# image candidates a message offers. Pure rules; the fetching is
+# Model/EventVisuals.swift.
+run_suite event-visual-pick \
+  Sources/Passband/Lib/HTMLImg.swift \
+  Sources/Passband/Lib/Trackers.swift \
+  Sources/Passband/Lib/EventVisualPick.swift \
+  Tests/EventVisualPickTests.swift
 
 # Run the queue. xargs keeps going past a failed suite and exits 123 if any
 # failed, which set -e turns into this script's exit status.

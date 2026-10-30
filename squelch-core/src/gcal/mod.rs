@@ -35,6 +35,10 @@
 //! at [`MAX_GUESTS`] ([`client`]).
 
 pub mod client;
+pub mod own;
+pub mod place;
+pub mod remind;
+pub mod search;
 pub mod sync;
 pub mod write;
 
@@ -386,6 +390,11 @@ pub struct EventRow {
     /// Laundered like a location, line breaks kept, at most
     /// [`ghost::DESCRIPTION_CAP`] characters.
     pub description: Option<String>,
+    /// Google's `eventType` is `fromGmail`: Gmail made the event itself from
+    /// a reservation, a flight or a ticket in the user's mail. Google refuses
+    /// a change to its title, time, place or notes, so the edit guard does
+    /// not offer one ([`SyncedEvent::editable`]).
+    pub from_gmail: bool,
     /// The attendees Google sent, in its order, at most [`MAX_GUESTS`].
     pub guests: Vec<Guest>,
     /// Google holds more attendees than `guests` (`attendeesOmitted`, or a
@@ -458,8 +467,17 @@ impl SyncedEvent {
     /// could not be read ([`EventRow::organizer_unreadable`]) is someone
     /// else, and so is an event whose stored guest list names an organizer
     /// that is not this calendar (`organizer` and not `self`), whatever the
-    /// organizer field says.
+    /// organizer field says. And never an event Gmail made itself
+    /// ([`EventRow::from_gmail`]), which Google will not let anyone edit.
     pub fn editable(&self, account_email: &str) -> bool {
+        self.users_own(account_email) && !self.row.from_gmail
+    }
+
+    /// [`Self::editable`] before the Gmail rule: on a calendar the user
+    /// writes to, and theirs by every organizer test. Gmail's own events
+    /// that pass it are the ones Passband may take over
+    /// ([`own::adoptable`]); an invitation from someone else never does.
+    pub fn users_own(&self, account_email: &str) -> bool {
         let writable = self.calendar_access.is_some_and(AccessRole::writable);
         let organized_elsewhere = self.row.guests.iter().any(|g| g.organizer && !g.is_self);
         let own = self.row.organizer_self
@@ -674,6 +692,7 @@ pub fn read_event(
             .and_then(Value::as_str),
     );
     let organizer_unreadable = organizer.is_some() && !organizer_self && organizer_email.is_none();
+    let from_gmail = item.get("eventType").and_then(Value::as_str) == Some("fromGmail");
     let end = end.and_then(|end| match end {
         EventTime::Date(day) => day
             .pred_opt()
@@ -698,6 +717,7 @@ pub fn read_event(
         start_timezone,
         organizer_email,
         organizer_unreadable,
+        from_gmail,
         organizer_self,
         self_response,
         transparent: item.get("transparency").and_then(Value::as_str) == Some("transparent"),
@@ -855,6 +875,65 @@ pub fn match_ghosts<'a>(
         .collect()
 }
 
+/// THE ONE LINK between ghosts and events, for the timeline's
+/// `matched_event` and the calendar reminders' linked mail
+/// ([`remind`]): for each ghost, the index in `events` of the event it is.
+/// Three ways, strongest first:
+///
+/// 1. Passband made the event for it and keeps it ([`own`], an `owned`
+///    binding), whatever its time or title now, when that event is listed.
+/// 2. The display match ([`match_ghosts`]): the same start and a title match.
+/// 3. Gmail made the event from the same mail and titled it its own way
+///    ([`own::same_event`]): the same start and a distinctive word.
+///
+/// Computed when asked and never stored, so it cannot go stale and changes
+/// no ghost.
+pub fn link_ghosts(
+    ghosts: &[crate::types::GhostEvent],
+    events: &[SyncedEvent],
+    owned: &[own::Owned],
+) -> Vec<Option<usize>> {
+    let mut matched = match_ghosts(ghosts.iter().map(|g| (g.title.as_str(), &g.start)), events);
+    // Indexed once, so each ghost looks up rather than scans.
+    let position: std::collections::HashMap<(&str, &str), usize> = events
+        .iter()
+        .enumerate()
+        .map(|(i, e)| ((e.calendar_id.as_str(), e.row.event_id.as_str()), i))
+        .collect();
+    let bound_to: std::collections::HashMap<i64, (&str, &str)> = owned
+        .iter()
+        .filter(|o| o.state == own::OwnState::Owned)
+        .map(|o| (o.ghost_id, (o.calendar_id.as_str(), o.event_id.as_str())))
+        .collect();
+    // Gmail's events by start (an instant in UTC, or a date), the only ones
+    // `same_event` can match.
+    let start_key = |t: &EventTime| match t {
+        EventTime::At(at) => (Some(at.with_timezone(&Utc)), None),
+        EventTime::Date(day) => (None, Some(*day)),
+    };
+    let mut gmail_at: std::collections::HashMap<_, Vec<usize>> = Default::default();
+    for (i, e) in events.iter().enumerate() {
+        if e.row.from_gmail {
+            gmail_at.entry(start_key(&e.row.start)).or_default().push(i);
+        }
+    }
+    for (ghost, slot) in ghosts.iter().zip(matched.iter_mut()) {
+        let bound = bound_to
+            .get(&ghost.id)
+            .and_then(|key| position.get(key).copied());
+        if bound.is_some() {
+            *slot = bound;
+        } else if slot.is_none() {
+            *slot = gmail_at.get(&start_key(&ghost.start)).and_then(|at| {
+                at.iter()
+                    .copied()
+                    .find(|&i| own::same_event(ghost, &events[i].row))
+            });
+        }
+    }
+    matched
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -881,6 +960,7 @@ mod tests {
             start_timezone: None,
             organizer_email: None,
             organizer_unreadable: false,
+            from_gmail: false,
             organizer_self: false,
             self_response: None,
             transparent: false,
@@ -1562,6 +1642,20 @@ mod tests {
             "attendees": [{"email": "me@example.com", "self": true, "organizer": true}]
         }));
         assert!(!own.row.organizer_unreadable && own.editable(me));
+        // An event Gmail made from the user's mail is on their own calendar
+        // with them as organizer, and still not theirs to edit: Google
+        // refuses the change.
+        let gmail = synced(json!({
+            "id": "e", "start": {"dateTime": "2026-10-05T09:00:00Z"},
+            "eventType": "fromGmail",
+            "organizer": {"self": true}
+        }));
+        assert!(gmail.row.from_gmail && !gmail.editable(me) && !gmail.guest_editable(me));
+        let default = synced(json!({
+            "id": "e", "start": {"dateTime": "2026-10-05T09:00:00Z"},
+            "eventType": "default"
+        }));
+        assert!(!default.row.from_gmail && default.editable(me));
 
         // Colour: the event's own over the calendar's.
         let mut colored = event(owner, None, true);

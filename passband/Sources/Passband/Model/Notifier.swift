@@ -82,8 +82,24 @@ final class Notifier {
     /// the delegate exists, and a center without one drops it.
     func install() {
         UNUserNotificationCenter.current().delegate = delegate
+        // The categories are the APP's to register, on both platforms: the
+        // phone's notification extension only names one on a banner it
+        // dresses, and a category nobody registered draws no action.
+        UNUserNotificationCenter.current().setNotificationCategories([Self.calendarTicketCategory])
         Self.installSounds()
     }
+
+    /// An event reminder with tickets in its mail: one action, which shows
+    /// them (docs/CALENDAR.md, "Firing"). Foreground, because what it opens
+    /// is drawn by the app.
+    static let calendarTicketCategory = UNNotificationCategory(
+        identifier: EventBanner.calendarTicketCategory,
+        actions: [
+            UNNotificationAction(
+                identifier: EventBanner.calendarShowTicketsAction, title: "Show tickets",
+                options: [.foreground])
+        ],
+        intentIdentifiers: [], options: [])
 
     /// Copy the bundled chimes into ~/Library/Sounds. UNNotificationSound
     /// resolves names against that folder reliably; resolution against the app
@@ -268,6 +284,42 @@ final class Notifier {
             sender: signal.items.count == 1 ? signal.items[0].sender : "")
     }
 
+    /// Post an event reminder (CalendarReminder.swift) for one account. Its
+    /// identity is the FIRE, account-prefixed: one banner per start instant,
+    /// which a second frame for the same fire replaces rather than stacks.
+    /// No sender tile: an event is nobody's mail, and the linked message's
+    /// sender on it would read as the event being from them.
+    ///
+    /// The owner's preference is the daemon's to honour (it stops firing);
+    /// this also drops a frame for an account whose switch was turned off on
+    /// this Mac in the last minute (`CalendarReminderPref.knownOff`), so a
+    /// toggle flipped a moment ago is believed at once.
+    func postCalendarReminder(_ signal: CalendarReminderSignal, accountId: UUID) {
+        guard !CalendarReminderPref.knownOff(accountId) else { return }
+        let account = accountId.uuidString
+        let copy = EventBanner.calendarReminderCopy(signal)
+        let content = UNMutableNotificationContent()
+        content.title = copy.title
+        content.subtitle = copy.subtitle
+        content.body = copy.body
+        content.threadIdentifier = "\(account).\(copy.threadIdentifier)"
+        content.userInfo = EventBanner.calendarReminderUserInfo(signal, account: accountId)
+        if signal.ticket != nil { content.categoryIdentifier = EventBanner.calendarTicketCategory }
+        if copy.sound { content.sound = Self.sound(for: Prefs.shared.notificationSound) }
+        Analytics.capture(
+            "calendar_reminder_shown",
+            [
+                "lead_minutes": signal.lead_minutes ?? 0,
+                "all_day": signal.item.all_day,
+                "has_line": !copy.body.isEmpty,
+                "has_ticket": signal.ticket != nil,
+                "ghost": signal.item.kind == .ghost,
+            ])
+        send(
+            content, identifier: EventBanner.calendarReminderIdentifier(account: accountId, fire: signal.calendar_reminder),
+            sender: "")
+    }
+
     /// Attach the sender's mark and hand the banner to the system.
     ///
     /// SYNCHRONOUS, and the comment is here because the other shape is so
@@ -376,10 +428,11 @@ final class Notifier {
     /// you are looking at the list it came from; a banner you just pressed a
     /// button for is the whole point.
     nonisolated static func presentation(
-        appActive: Bool, windowVisible: Bool, isTest: Bool = false, isAuth: Bool = false
+        appActive: Bool, windowVisible: Bool, isTest: Bool = false, isAuth: Bool = false,
+        isReminder: Bool = false
     ) -> UNNotificationPresentationOptions {
         EventBanner.shouldPresentForeground(appActive: appActive, windowVisible: windowVisible,
-            isTest: isTest, isAuth: isAuth) ? [.banner, .sound, .list] : [.list]
+            isTest: isTest, isAuth: isAuth, isReminder: isReminder) ? [.banner, .sound, .list] : [.list]
     }
 
     /// Where a tap lands once the right mailbox is on screen.
@@ -393,6 +446,11 @@ final class Notifier {
         case reveal(messageId: Int, threadId: String, sender: String)
         /// An agent's draft to review, bound to its creation second.
         case agentDraft(draftId: Int, created: Int)
+        /// An event reminder's tap, already resolved to what it shows.
+        case calendar(EventBanner.CalendarReminderTap.Target)
+        /// A reminder push the extension could not dress: fetched first, and
+        /// shown only when the fire is the one the push was sent for.
+        case calendarPush(fireId: Int, fired: Int, showTickets: Bool)
     }
 
     /// A tap: front the app, restore the window if it was closed, open the
@@ -427,6 +485,35 @@ final class Notifier {
     func handleAgentDraftTap(draftId: Int, created: Int, accountId: UUID?) {
         Analytics.capture("notification_opened", ["has_thread": false])
         deliver(.agentDraft(draftId: draftId, created: created), accountId: accountId)
+    }
+
+    /// A tap on an event reminder, or on its "Show tickets". Its own event,
+    /// like re-notify's, so `notification_opened` keeps meaning mail banners.
+    func handleCalendarReminderTap(_ tap: EventBanner.CalendarReminderTap, showTickets: Bool) {
+        let target = tap.target(showTickets: showTickets)
+        Self.captureReminderOpened(target, showTickets: showTickets)
+        deliver(.calendar(target), accountId: tap.accountId)
+    }
+
+    /// The relay's generic reminder, tapped: the app asks the daemon which
+    /// reminder it was once that mailbox is on screen.
+    func handleCalendarPushTap(_ push: EventBanner.CalendarPush, showTickets: Bool) {
+        deliver(
+            .calendarPush(fireId: push.fireId, fired: push.fired, showTickets: showTickets),
+            accountId: push.accountId)
+    }
+
+    private static func captureReminderOpened(
+        _ target: EventBanner.CalendarReminderTap.Target, showTickets: Bool
+    ) {
+        let word: String =
+            switch target {
+            case .attachment: "attachment"
+            case .mail: "mail"
+            case .event: "event"
+            case .none: "none"
+            }
+        Analytics.capture("calendar_reminder_opened", ["target": word, "show_tickets": showTickets])
     }
 
     func handleMessageTap(messageId: Int, accountId: UUID?) {
@@ -471,7 +558,7 @@ final class Notifier {
     func drainPendingTap() {
         let store = AppStore.shared
         guard !deliveringTap, !store.switching, !store.accountActionsBlocked,
-            let tap = tapQueue.take(connected: store.connStatus == .connected)
+            let tap = tapQueue.take(connected: store.connStatus == .connected && store.connectionVerified)
         else { return }
         guard let account = tap.accountId ?? AccountManager.shared.activeId,
             AccountManager.shared.accounts.contains(where: { $0.id == account })
@@ -538,7 +625,7 @@ final class Notifier {
             }
         case .auth:
             // The routed Auth page on the Mac; on the phone, the login-codes
-            // page behind the Quick Look tab's key.
+            // page behind the sitrep's key.
             AppStore.shared.requestAuthPage()
         case .reveal(let messageId, let threadId, let sender):
             let store = AppStore.shared
@@ -551,6 +638,31 @@ final class Notifier {
             // the active account is the one it was for.
             guard let account = AccountManager.shared.activeId else { return }
             AppStore.shared.openAgentDraftFromPush(draftId: draftId, created: created, accountId: account)
+        case .calendar(let target):
+            AppStore.shared.openCalendarReminder(target)
+        case .calendarPush(let fireId, let fired, let showTickets):
+            // Delivered once the push's mailbox is on screen, so the shared
+            // client is that mailbox's daemon.
+            guard let account = AccountManager.shared.activeId else { return }
+            let store = AppStore.shared
+            let epoch = store.epoch
+            Task {
+                guard let signal = try? await APIClient.shared.getCalendarReminder(
+                    fireId, as: CalendarReminderSignal.self),
+                    store.isCurrent(epoch),
+                    EventBanner.isPushedFire(signal, fireId: fireId, fired: fired)
+                else {
+                    // Gone (kept a week), unreachable, or a different reminder
+                    // under the same id: the calendar itself is the next best
+                    // thing to show.
+                    if store.isCurrent(epoch) { store.openCalendarReminder(.none) }
+                    return
+                }
+                let target = EventBanner.calendarReminderTap(signal, account: account)
+                    .target(showTickets: showTickets)
+                Self.captureReminderOpened(target, showTickets: showTickets)
+                store.openCalendarReminder(target)
+            }
         }
     }
 }
@@ -586,6 +698,7 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
     ) {
         let route = notification.request.content.userInfo[EventBanner.routeKey] as? String
         let isAuth = notification.request.content.userInfo[EventBanner.authKey] as? Bool ?? false
+        let isReminder = route == EventBanner.calendarRoute
         nonisolated(unsafe) let done = completionHandler
         #if os(iOS)
             // ONE BANNER PER EVENT. The phone hears new mail twice while it is
@@ -639,7 +752,7 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
             done(
                 Notifier.presentation(
                     appActive: active, windowVisible: visible,
-                    isTest: route == EventBanner.testRoute, isAuth: isAuth))
+                    isTest: route == EventBanner.testRoute, isAuth: isAuth, isReminder: isReminder))
         }
     }
 
@@ -654,6 +767,7 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         // Decided from the payload alone, BEFORE anything is fetched: an auth
         // tap opens the reveal (or the Auth page) and never `getMessage`.
         let tap = EventBanner.tapRoute(userInfo)
+        let showTickets = response.actionIdentifier == EventBanner.calendarShowTicketsAction
         // Stored as a string and parsed here rather than crossing as one: a
         // payload that survived a relaunch (or came from an older build) can
         // hold anything, and an unparseable id must read as "no account", not
@@ -688,6 +802,10 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
                 Notifier.shared.handleAuthTap(accountId: accountId)
             case .renotify(let tap):
                 Notifier.shared.handleRenotifyTap(tap, accountId: accountId)
+            case .calendarReminder(let tap):
+                Notifier.shared.handleCalendarReminderTap(tap, showTickets: showTickets)
+            case .calendarReminderPush(let push):
+                Notifier.shared.handleCalendarPushTap(push, showTickets: showTickets)
             case .message(let messageId):
                 Notifier.shared.handleMessageTap(messageId: messageId, accountId: accountId)
             case .event(let unresolved):

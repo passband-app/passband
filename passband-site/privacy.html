@@ -4,11 +4,11 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Privacy Policy · Passband</title>
-    <meta name="description" content="Passband brings the important things forward, so you can give them your attention and get on with your day. For Gmail, on Mac and iPhone." />
+    <meta name="description" content="Passband brings the important things forward, so you can give them your attention and get on with your day. For Mac and iPhone." />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Passband" />
     <meta property="og:title" content="Privacy Policy · Passband" />
-    <meta property="og:description" content="Passband brings the important things forward, so you can give them your attention and get on with your day. For Gmail, on Mac and iPhone." />
+    <meta property="og:description" content="Passband brings the important things forward, so you can give them your attention and get on with your day. For Mac and iPhone." />
     <meta property="og:url" content="https://passband.app/privacy" />
     <meta property="og:image" content="https://passband.app/og.png" />
     <meta property="og:image:width" content="1200" />
@@ -68,7 +68,7 @@
   <body>
     <nav><a href="/">&larr; Passband</a></nav>
     <h1>Privacy Policy</h1>
-    <p class="meta">Effective September 28, 2026</p>
+    <p class="meta">Effective October 29, 2026</p>
 
     <p>
       Passband is an email client for Mac and iOS. Behind it runs
@@ -241,7 +241,7 @@
       <li>
         <strong>Your account record:</strong> the email address you signed up
         with, your account label, timestamps, and the invite you used. This is
-        stored in a managed PostgreSQL database at Railway.
+        stored in a managed PostgreSQL database (Amazon RDS) at AWS.
       </li>
       <li>
         <strong>Encrypted backups.</strong> Your database is continuously
@@ -360,7 +360,7 @@
       <tr><td>Hetzner Cloud</td><td>Servers running hosted daemons</td><td>Yes (at rest and in memory)</td></tr>
       <tr><td>Cloudflare</td><td>Encrypted database backups (R2), DNS</td><td>Encrypted only</td></tr>
       <tr><td>Anthropic</td><td>Language model inference</td><td>Yes (in transit, no training)</td></tr>
-      <tr><td>Railway</td><td>Signup, control plane, relays, gateway hosting</td><td>Gateway transit only</td></tr>
+      <tr><td>Amazon Web Services</td><td>Signup, control plane, relays, gateway hosting</td><td>Gateway transit only</td></tr>
       <tr><td>Resend</td><td>Sending invite email</td><td>No</td></tr>
       <tr><td>PostHog</td><td>Product analytics (see below)</td><td>No</td></tr>
       <tr><td>Browserbase</td><td>A remote browser that finishes an unsubscribe on the sender's page, when you ask to unsubscribe and that page needs one</td><td>No message text. The sender's unsubscribe link, the page it opens, and your email address if the form asks for it. Not recorded</td></tr>
@@ -416,9 +416,17 @@
       Event names and property values come from a fixed allowlist enforced in
       code: message content, subjects, senders, recipients, labels, and search
       queries are structurally unable to leave the app through this channel.
+      At the default level the Mac app also records the layout of each
+      session: the window as plain grey boxes with the app's own icons, and
+      where you clicked. Text, pictures, colors, what you type, and anything
+      inside an email are never recorded; a line of text becomes a blank bar
+      of roughly its length, and an email's body is one empty box. The layout
+      does show which kinds of cards and icons were on screen, such as a bill
+      or a package. This helps us see where the app is confusing.
       Events are keyed to a random per-install identifier, or for hosted
       accounts to an opaque account identifier that is not your email address.
-      You can reduce or disable telemetry in Settings under Privacy.
+      You can reduce or disable telemetry in Settings under Privacy; any level
+      below Full turns recording off.
     </p>
 
     <h2>Retention and deletion</h2>

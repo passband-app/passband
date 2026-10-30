@@ -193,8 +193,9 @@ probe and must answer even while a client is being throttled.
 ```
 
 An optional `"kind": "draft"` swaps the fallback line for "A draft is waiting
-for your review" (an agent asked its owner to look at a draft). It is a closed
-set: any other value is a `400`, so a daemon can choose between fixed lines but
+for your review" (an agent asked its owner to look at a draft), and `"kind":
+"calendar"` for "An event is coming up" (a reminder before an event on the
+owner's calendar). It is a closed set: any other value is a `400`, so a daemon can choose between fixed lines but
 never write one.
 
 `device_tokens` is 1-100 hex tokens of 16-200 characters. `event_id` is an

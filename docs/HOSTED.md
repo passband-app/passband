@@ -103,6 +103,40 @@ to boot without them. On its own the client opens no mailbox; it is one more thi
 hosted tenant is trusting us with, and the self-host tier is exactly for people who
 would rather not. Full reasoning: `deploy/hosted/SETUP.md` §6.
 
+### Outlook on hosted
+
+A second company behind the same flows, with its own security argument:
+
+- **A second confidential app.** "Passband Hosted" is an Entra app of type Web
+  with a client secret, registered for `https://signup.passband.app/oauth/callback`
+  (separate from the public "Mobile and desktop" app self-hosters use: a
+  Microsoft refresh token, like Google's, only refreshes for the app that
+  minted it). Control reads it from `SQUELCH_CONTROL_MICROSOFT_CLIENT_ID` and
+  `..._SECRET`; without them every Outlook button is hidden and every Outlook
+  route refuses. Outlook tenant pods get the same id and secret, under the
+  SAME `SQUELCH_CLIENT_ID`/`SQUELCH_CLIENT_SECRET` names, from the
+  `microsoft-oauth-client` Secret; the daemon knows it is Outlook from its own
+  credential (core's `infer_provider`), so there is no new variable and Gmail
+  pods render exactly as before.
+- **Logins never match by address.** Microsoft carries no `email_verified`,
+  and an Entra admin can put any address on an account, Gmail addresses
+  included. So `tenants` records `provider` and `ms_account_id` (Graph `/me`
+  `id`), and a Microsoft login (app, console, agent, reconnect) finds the
+  OUTLOOK tenant with that account id, never a tenant by address. A Google
+  login finds only GMAIL tenants. The same address at the two companies is two
+  different people.
+- **One mailbox per address, the address mail arrives at.** A personal
+  Microsoft account can sign in as `x@gmail.com` while its mailbox is
+  `y@outlook.com`. An Outlook signup is filed under, in order: the most common
+  To on its recent inbox mail at a Microsoft consumer domain (or a work
+  account's own domain); a work account's `/me` address, or a personal one's
+  when it is on a Microsoft consumer domain; else the account's internal
+  `outlook_<ID>@outlook.com`. That address then meets the same
+  one-active-tenant-per-address rule as Gmail, ACROSS companies, and a
+  Microsoft account may hold one Outlook tenant.
+- **No calendar grant to start.** The Outlook consent already carries
+  `Calendars.ReadWrite`; Passband's calendar is Google's until #638.
+
 ### One consent, both slots (decided 2026-08-10)
 
 Hosted signup asks for `gmail.modify` (until 2026-10-27: `gmail.readonly`,
@@ -337,6 +371,17 @@ the per-daemon thing this design imagined — `deploy/hosted/SETUP.md` §11.)
   `stage2_usage` ledger (now cache-token-aware) — a persistent gap between them
   is the fraud signal. The gateway also owns model choice, so a fleet-wide model
   swap is a gateway config change, not a rollout. BYOK remains future work.
+- Semantic search in hosted can run on one embedding session per node instead
+  of one per tenant pod. BUILT 2026-10-28, not yet rolled out: `squelch-embed`,
+  a shared service in `tenants` that tenant daemons post texts to when the
+  operator sets `SQUELCH_WARDEN_EMBED_URL` (`docs/EMBED-SERVICE.md`, runbook in
+  `deploy/hosted/SETUP.md` §10b). **It is the second process we operate that
+  sees tenant mail bodies**, after the LLM gateway: the subject and body of
+  every message that passes the sealed gate (never spam, never sealed mail,
+  and nothing inbound before triage has decided it), and search query text, in
+  flight. It logs no text,
+  stores and caches nothing, is never told a tenant's name, and has no egress
+  (`docs/SECURITY.md` §4d). Self-host keeps its embedding session in-process.
 
 ## Scaling path ("properly")
 

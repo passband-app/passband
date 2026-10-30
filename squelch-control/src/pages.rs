@@ -44,9 +44,20 @@ use squelch_core::features::Feature;
 /// 303 to Google consent, and under `form-action 'self'` Chrome silently eats
 /// that navigation - the button "does nothing" while the server logs a
 /// perfectly healthy signup. Found live on the first real signup, 2026-08-11.
+/// Microsoft's two sign-in hosts are named for the same reason: an Outlook
+/// signup's 303 goes to `login.microsoftonline.com`, which bounces personal
+/// accounts through `login.live.com`.
 /// `font-src 'self'` admits exactly one file, [`NEWSREADER`], served by this
 /// same origin: the landing page's serif, and still nothing a third party sees.
-const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self' https://accounts.google.com; frame-ancestors 'none'; base-uri 'none'";
+/// The mailbox products' marks for the signup's provider tiles, which are
+/// named by product (Gmail, Outlook), not by sign-in company. Inline:
+/// markup rather than a fetch, so the `default-src 'none'` CSP needs nothing
+/// new. Each sits on a small white tile (`.mark`) so the brand colors read
+/// on any background. Decorative: the tile's text names the product.
+pub(crate) const GMAIL_MARK: &str = r##"<span class="mark" aria-hidden="true"><svg viewBox="52 42 88 66" width="17" height="13"><path fill="#4285F4" d="M58 108h14V74L52 59v43c0 3.32 2.69 6 6 6"/><path fill="#34A853" d="M120 108h14c3.32 0 6-2.69 6-6V59l-20 15"/><path fill="#FBBC04" d="M120 48v26l20-15v-8c0-7.42-8.47-11.65-14.4-7.2"/><path fill="#EA4335" d="M72 74V48l24 18 24-18v26L96 92"/><path fill="#C5221F" d="M52 51v8l20 15V48l-5.6-4.2c-5.94-4.45-14.4-.22-14.4 7.2"/></svg></span>"##;
+pub(crate) const OUTLOOK_MARK: &str = r##"<span class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" width="17" height="17"><rect x="9" y="4" width="14" height="16" rx="1.8" fill="#28A8EA"/><path d="M9.5 8.5 16 13l6.5-4.5" fill="none" stroke="#0A5EA8" stroke-width="1.3" stroke-linejoin="round"/><rect x="1" y="6" width="12" height="12" rx="1.8" fill="#0078D4"/><ellipse cx="7" cy="12" rx="2.7" ry="3.2" fill="none" stroke="#fff" stroke-width="1.7"/></svg></span>"##;
+
+const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self' https://accounts.google.com https://login.microsoftonline.com https://login.live.com; frame-ancestors 'none'; base-uri 'none'";
 
 /// Escape text for HTML.
 pub fn escape_html(s: &str) -> String {
@@ -469,6 +480,13 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
 .auth :is(a.button, button):active {{ transform: translateY(0) scale(0.995); }}
 .auth :is(a.button, button):focus-visible {{ outline: 2px solid var(--rig-lit); outline-offset: 3px; }}
 .auth .arrow {{ transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1); }}
+/* A provider's mark: one white tile, the same size on every button, so the
+   brand colors read on the dark primary and the outlined secondary alike. */
+.mark {{ display: inline-flex; align-items: center; justify-content: center; flex: none;
+  width: 1.5rem; height: 1.5rem; border-radius: 0.4rem; background: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.08); }}
+.mark svg {{ display: block; }}
+
 .auth :is(a.button, button):is(:hover, :focus-visible) .arrow {{ transform: translateX(3px); }}
 /* The form: slots cut into one rig, each with its label engraved in it, and
    the submit as the rig's last slot rather than a button sitting under it. */
@@ -495,6 +513,18 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
 .auth .rig button:is(:hover, :focus-visible) {{ transform: none; box-shadow: none;
   background: linear-gradient(180deg, transparent, var(--slot-rule)); }}
 .auth .rig button:focus-visible {{ outline-offset: -3px; }}
+/* THE PROVIDERS: their own rig under the code and username, the label engraved
+   like a slot's, then equal tiles, two to a row, each named by product.
+   More providers wrap into the grid; a lone one spans the row. */
+.auth form.signup {{ display: flex; flex-direction: column; gap: 0.9rem; margin: 0; }}
+.auth .providers .rig-label {{ display: block; padding: 0.8rem 1.1rem 0.7rem; color: var(--faintest);
+  font-size: 0.68rem; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase;
+  border-bottom: 1px solid var(--slot-rule); }}
+.auth .provider-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+.auth .provider-grid button:only-child {{ grid-column: 1 / -1; }}
+.auth .provider-grid button {{ gap: 0.65rem; padding: 1.05rem 1rem; font-size: 1rem; }}
+.auth .provider-grid button:nth-child(2n) {{ border-left: 1px solid var(--slot-rule); }}
+.auth .provider-grid button:nth-child(n + 3) {{ border-top: 1px solid var(--slot-rule); }}
 /* The username slot: the input and its domain on one line, the domain in the
    placeholder's grey riding right behind what is typed. See [`signup_form`]
    for why this needs no script. */
@@ -620,6 +650,20 @@ pub fn signup_form(
     invite: &str,
     error: Option<&str>,
 ) -> Response {
+    signup_form_with(base_domain, waitlist_url, label, invite, error, false)
+}
+
+/// [`signup_form`], with the Outlook button when this deployment has the
+/// Microsoft app (`outlook`). The two buttons submit the same form; the one
+/// pressed names the company in `provider`.
+pub fn signup_form_with(
+    base_domain: &str,
+    waitlist_url: Option<&str>,
+    label: &str,
+    invite: &str,
+    error: Option<&str>,
+    outlook: bool,
+) -> Response {
     let error_html = stop_note(error);
     // Folded only on the first render of an emailed link: a filled-in code
     // and nothing refused yet. Any re-render after a submit shows the code, so
@@ -659,9 +703,10 @@ pub fn signup_form(
         "Set up Passband",
         &format!(
             r#"<h1>Set up Passband</h1>
-<p class="lead">Pick a username, then connect Gmail.</p>
+<p class="lead">Pick a username, then connect {mailboxes}.</p>
 {error_html}
-<form class="rig" method="post" action="/signup">
+<form class="signup" method="post" action="/signup">
+<div class="rig">
 <div class="{invite_class}" id="code">
 <label for="invite">Invite code</label>
 <input type="text" id="invite" name="invite" value="{invite}" placeholder="XXXX-XXXX-XXXX-XXXX"
@@ -673,20 +718,47 @@ pub fn signup_form(
   aria-describedby="label-hint" maxlength="{max}" autocomplete="off" autocapitalize="off" spellcheck="false"{label_focus} required><span class="domain">.{domain}</span></label>
 <span class="sr" id="label-hint">{min} to {max} lowercase letters, numbers or hyphens.</span>
 </div>
-<button type="submit">Continue with Google <span class="arrow" aria-hidden="true">→</span></button>
+</div>
+<div class="rig providers" role="group" aria-labelledby="providers-label">
+<span class="rig-label" id="providers-label">Connect your mail</span>
+<div class="provider-grid">
+<button type="submit" name="provider" value="google" aria-label="Connect Gmail">{gmail_mark}<span>Gmail</span></button>
+{outlook_button}</div>
+</div>
 </form>
 <details>
-<summary>Google will ask to read, change, and send your Gmail, and optionally for your calendar.</summary>
+<summary>{consent_summary}</summary>
 <ul>
 <li><strong>Read</strong>: mail triage.</li>
 <li><strong>Change</strong>: archiving, labeling and moving to trash, never permanent deletion.</li>
 <li><strong>Send</strong>: replying from the app.</li>
 </ul>
 <p>All three come from one Google permission, <code>gmail.modify</code>, so keep that box checked. It also asks for your name and profile photo, to show them in the app, and for Google Calendar (<code>calendar.events</code>), which can view and edit your events; both are optional. Calendar is asked for now so it never needs a second consent, and nothing touches your calendar until calendar is available on your account. Your Google refresh token is stored encrypted so mail keeps syncing; self-host to hold it yourself.</p>
-</details>
+{outlook_note}</details>
 {links_html}"#,
             error_html = error_html,
             links_html = links_html,
+            mailboxes = if outlook { "Gmail or Outlook" } else { "Gmail" },
+            gmail_mark = GMAIL_MARK,
+            consent_summary = if outlook {
+                "Google or Microsoft will ask to read, change, and send your mail, and for your calendar."
+            } else {
+                "Google will ask to read, change, and send your Gmail, and optionally for your calendar."
+            },
+            outlook_button = if outlook {
+                format!(
+                    r#"<button type="submit" name="provider" value="microsoft" aria-label="Connect Outlook">{OUTLOOK_MARK}<span>Outlook</span></button>
+"#
+                )
+            } else {
+                String::new()
+            },
+            outlook_note = if outlook {
+                r#"<p>With Microsoft, Outlook asks once to read, change, and send your mail and to view and edit your calendar (<code>Mail.ReadWrite</code>, <code>Mail.Send</code>, <code>Calendars.ReadWrite</code>), plus your profile and staying signed in. Your Microsoft refresh token is stored encrypted the same way.</p>
+"#
+            } else {
+                ""
+            },
             invite_class = invite_class,
             invite_focus = invite_focus,
             label_focus = label_focus,
@@ -714,7 +786,7 @@ pub fn success(tenant_url: &str) -> Response {
         "Your mailbox is ready",
         &format!(
             r#"<h1>Your mailbox is ready</h1>
-<p class="lead">{host} is live. Get the app, then sign in with Gmail to finish.</p>
+<p class="lead">{host} is live. Get the app, then sign in to finish.</p>
 <a class="button" href="{download}">Download Passband for Mac <span class="arrow" aria-hidden="true">→</span></a>"#,
             host = escape_html(host),
             download = DOWNLOAD_URL,
@@ -768,7 +840,7 @@ pub fn app_signed_in(
 <p class="alt">Need the app? <a href="{download}">Download Passband</a>.</p>
 <details>
 <summary>Passband didn’t open? Connect manually</summary>
-<p>In Passband, choose Sign in with Gmail and enter:</p>
+<p>In Passband, choose Sign in with Gmail or Outlook and enter:</p>
 <p><code>{url}</code></p>
 <p><span class="code">{code}</span></p>
 <p>Works once, expires in {minutes} minutes. If it lapses, sign in again.</p>

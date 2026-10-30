@@ -883,6 +883,17 @@ fn clean_title(raw: &str) -> Option<String> {
 /// character ends it, which keeps "doors 7, show 8" a phrase.
 fn note(raw: &str) -> String {
     let text = plain(raw);
+    if mail_shaped(&text) {
+        return String::new();
+    }
+    truncate_trimmed(&text, NOTE_CAP)
+}
+
+/// [`note`]'s drop test, over text already [`plain`]: a URL or a bare host,
+/// an `@`, or a run of 6 or more digits counted across the separators a
+/// number is printed with. Also the calendar reminder line's
+/// ([`crate::gcal::remind`]), which a stranger's invitation can steer.
+pub(crate) fn mail_shaped(text: &str) -> bool {
     let mut run = 0;
     let digits = text.chars().any(|c| {
         if c.is_numeric() {
@@ -892,10 +903,7 @@ fn note(raw: &str) -> String {
         }
         run >= 6
     });
-    if digits || text.contains('@') || text.split(' ').any(|t| url_core(t).is_some()) {
-        return String::new();
-    }
-    truncate_trimmed(&text, NOTE_CAP)
+    digits || text.contains('@') || text.split(' ').any(|t| url_core(t).is_some())
 }
 
 /// A location is display text, except that every URL in it (a meeting link,
@@ -925,7 +933,9 @@ pub const DESCRIPTION_CAP: usize = 2000;
 /// [`DESCRIPTION_CAP`] characters. Google's description "Can contain HTML",
 /// and an invitation's usually does: line-breaking tags become line breaks,
 /// every other tag goes, and the few entities an editor writes are decoded,
-/// so the client is never handed markup to show as text.
+/// so the client is never handed markup to show as text. Google's own
+/// boilerplate on an event it made from mail goes too
+/// ([`strip_google_boilerplate`]).
 pub(crate) fn launder_description(raw: &str) -> Option<String> {
     let text = html_to_text(raw);
     let mut lines: Vec<String> = Vec::new();
@@ -936,8 +946,59 @@ pub(crate) fn launder_description(raw: &str) -> Option<String> {
         }
         lines.push(line);
     }
-    let text = truncate_trimmed(&lines.join("\n"), DESCRIPTION_CAP);
+    let text = strip_google_boilerplate(&lines.join("\n"));
+    let text = truncate_trimmed(&text, DESCRIPTION_CAP);
     (!text.is_empty()).then_some(text)
+}
+
+/// What Google writes as the description of an event it created itself from
+/// mail (a reservation, a flight, a ticket in Gmail). It tells the reader
+/// nothing about the event, only to open Google's app, so it is never notes.
+/// Lowercase, single-spaced, matched case-insensitively.
+const GOOGLE_BOILERPLATE: [&str; 2] = [
+    "to see detailed information for automatically created events like this one, \
+     use the official google calendar app.",
+    "this event was created from an email you received in gmail.",
+];
+
+/// The links Google puts after its boilerplate, as [`meeting_link`] leaves
+/// them (host and path).
+const GOOGLE_BOILERPLATE_LINKS: [&str; 3] = ["g.co/", "mail.google.com/", "calendar.google.com/"];
+
+/// [`launder_description`]'s text without [`GOOGLE_BOILERPLATE`], each
+/// sentence with the Google link that follows it. A paragraph is matched with
+/// its line breaks read as spaces, since the sentence may be wrapped; one that
+/// held boilerplate keeps what else it said on one line, and one that held
+/// nothing else goes.
+fn strip_google_boilerplate(text: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for paragraph in text.split("\n\n") {
+        let mut flat = paragraph.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut matched = false;
+        for phrase in GOOGLE_BOILERPLATE {
+            // ASCII lowering keeps every byte offset where it was.
+            while let Some(at) = flat.to_ascii_lowercase().find(phrase) {
+                matched = true;
+                let mut end = at + phrase.len();
+                let rest = flat[end..].trim_start();
+                if GOOGLE_BOILERPLATE_LINKS
+                    .iter()
+                    .any(|host| rest.to_ascii_lowercase().starts_with(host))
+                {
+                    let link = rest.find(char::is_whitespace).unwrap_or(rest.len());
+                    end = flat.len() - rest.len() + link;
+                }
+                flat.replace_range(at..end, " ");
+                flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+            }
+        }
+        if !matched {
+            out.push(paragraph.to_string());
+        } else if !flat.is_empty() {
+            out.push(flat);
+        }
+    }
+    out.join("\n\n")
 }
 
 /// Markup to plain text, for [`launder_description`]. A `<` starts a tag only
@@ -1123,6 +1184,35 @@ pub fn effective_end(
 mod tests {
     use super::*;
     use crate::triage::decision::{DurationEstimate, LikelihoodBand, SupportedTime};
+
+    #[test]
+    fn google_auto_event_boilerplate_is_not_notes() {
+        // Google's description on an event it made from a reservation in
+        // Gmail: nothing left to show.
+        let raw = "To see detailed information for automatically created events like this \
+                   one, use the official Google Calendar app. https://g.co/calendar";
+        assert_eq!(launder_description(raw), None);
+        let raw = "<p>This event was created from an email you received in Gmail. \
+                   https://mail.google.com/mail?extsrc=cal&plid=ACUX6DM</p>\
+                   <p>To see detailed information for automatically created events like \
+                   this one, use the official Google Calendar app. https://g.co/calendar</p>";
+        assert_eq!(launder_description(raw), None);
+        // Wrapped across lines and in other cases, it still goes; what else
+        // the notes say stays, paragraphs intact.
+        let raw = "Table for 3, ask for Sam.\n\nTO SEE detailed information for \
+                   automatically created events\nlike this one, use the official Google \
+                   Calendar app.\n\nPark on 5th.";
+        assert_eq!(
+            launder_description(raw).as_deref(),
+            Some("Table for 3, ask for Sam.\n\nPark on 5th.")
+        );
+        // A link that is not Google's is the user's, and stays.
+        let raw = "This event was created from an email you received in Gmail. menu.example/x";
+        assert_eq!(launder_description(raw).as_deref(), Some("menu.example/x"));
+        // Notes that only mention Google's app are untouched.
+        let raw = "Use the official Google Calendar app to RSVP.";
+        assert_eq!(launder_description(raw).as_deref(), Some(raw));
+    }
 
     fn time(value: &str) -> Option<SupportedTime> {
         Some(SupportedTime {

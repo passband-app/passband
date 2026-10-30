@@ -59,6 +59,12 @@ pub struct AgentMessage {
     /// snapshot.
     #[serde(skip)]
     pub labelled_sent: bool,
+    /// Bulk mail: the message carries a `List-Unsubscribe` header. Read by
+    /// the notify lane's trusted context only, so a mail-merged cold
+    /// sequence cannot pass for a person writing one-to-one. Not part of
+    /// the model's view or the content snapshot.
+    #[serde(skip)]
+    pub is_bulk: bool,
     pub status: String,
     pub notify_eligible_at: Option<String>,
     pub opened_at: Option<String>,
@@ -74,6 +80,13 @@ pub struct AgentMessage {
     pub translated_subject: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub translated_body: Option<String>,
+    /// Where From and the real sender disagree (#639): header facts the model
+    /// weighs for phishing and impersonation. Not in the content snapshot:
+    /// they are read off the same headers every sighting, so they never
+    /// change on their own, and hashing them would re-triage every message
+    /// once when this shipped. Absent when nothing disagreed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_signals: Option<crate::types::SenderSignals>,
 }
 
 /// Captured with the evidence read and checked before any decision writes.

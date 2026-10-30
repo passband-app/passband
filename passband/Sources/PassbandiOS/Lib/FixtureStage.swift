@@ -26,15 +26,30 @@
             return args[safe: i + 1]
         }
 
-        /// `sitrep` (the default), `records`, `calendar`, `mail` or `search`.
+        /// `sitrep` (the default), `calendar`, `mail` or `search`.
         static var tab: String? { value("--fixture-tab") }
-        /// Turns the hidden `calendar` feature on over a staged week of plans
-        /// (FixtureCalendar), so the bar reads Sitrep, Calendar, Mail.
+        /// Stages a week of plans on the calendar (FixtureCalendar) and a
+        /// granted Google Calendar. Without it the calendar tab is the
+        /// practice inbox's: empty, and offering nothing.
         static let calendar = args.contains("--fixture-calendar")
         /// The calendar's mode for a screenshot: `--fixture-calendar-mode
-        /// month|week|day`. Scene `calendar-detail` pushes the likely ghost.
+        /// month|week|day`. Scene `calendar-detail` pushes the likely ghost;
+        /// `calendar-connect` raises the Google Calendar connect card, which
+        /// practice never offers on its own.
         static var calendarMode: String? { value("--fixture-calendar-mode") }
-        static var calendarDetail: String? { scene == "calendar-detail" ? "g:2" : nil }
+        /// The day the calendar opens on, in days from today:
+        /// `--fixture-calendar-day 3` (the day with only an evening dinner).
+        static var calendarDay: Int? { value("--fixture-calendar-day").flatMap(Int.init) }
+        /// Scene `calendar-tickets` pushes the concert, whose card has a
+        /// Tickets button; `calendar-boarding` the flight's Boarding pass.
+        static var calendarDetail: String? {
+            switch scene {
+            case "calendar-detail": "g:2"
+            case "calendar-tickets": "g:8"
+            case "calendar-boarding": "g:5"
+            default: nil
+            }
+        }
         /// What to raise once the board has loaded; see `stage`.
         static var scene: String? { value("--fixture-scene") }
         /// Where a What's New vignette's clock is stopped, in seconds into its
@@ -162,6 +177,14 @@
                 }
             case "search-lane":
                 store.search.query = "thursday?"
+            // The Events block: wants `--fixture-calendar --fixture-tab
+            // search`. `calendar-search` is "dinner" (two plans, one of them
+            // a ghost, beside the mail); `calendar-search-only` is the
+            // events-only listing.
+            case "calendar-search":
+                store.search.query = "dinner"
+            case "calendar-search-only":
+                store.search.query = "in:calendar sam"
             case "accounts":
                 AccountDoor.shared.pane = .picker
             // THE SENT PAGE, which the practice mailbox leaves empty: nothing
@@ -769,7 +792,8 @@
                 _ id: Int, _ kind: GhostKind, _ title: String, _ start: String, end: String? = nil,
                 allDay: Bool = false, estimated: Bool = false, place: String? = nil,
                 commitment: GhostCommitment, state: GhostState = .ghost, mail: GhostMailState = .live,
-                band: GhostBand? = nil, reason: String? = nil, message: Int = 3
+                band: GhostBand? = nil, reason: String? = nil, message: Int = 3,
+                tickets: CalendarTickets? = nil
             ) -> TimelineGhost {
                 TimelineGhost(
                     id: id, kind: kind, title: title, start: start, start_timezone: zone,
@@ -780,7 +804,7 @@
                     verified: true,
                     likelihood: band.map { GhostLikelihood(band: $0, reason: reason) },
                     sources: [GhostSource(message_id: message, thread_id: "practice-\(message)", role: .created)],
-                    matched_event: nil)
+                    matched_event: nil, tickets: tickets)
             }
             let events = [
                 event("e1", "Yoga", at(-2, 7, 30), at(-2, 8, 30), calendar: "Personal", color: home),
@@ -805,18 +829,24 @@
                 ghost(3, .invite, "Book club", at(1, 20), commitment: .invited, band: .maybe),
                 ghost(4, .travel, "Denver trip", date(2), end: date(4), allDay: true, commitment: .committed),
                 ghost(5, .travel, "UA 1532 SFO to DEN", at(2, 7, 5), end: at(2, 10, 40),
-                      place: "SFO Terminal 3", commitment: .committed, message: 6),
+                      place: "SFO Terminal 3", commitment: .committed, message: 6,
+                      tickets: CalendarTickets(
+                          message_id: 6, thread_id: "practice-6", kind: .travel,
+                          attachment: .init(id: 61, filename: "UA1532.pkpass", mime: "application/vnd.apple.pkpass"))),
                 ghost(6, .invite, "Founders mixer", at(3, 18), commitment: .invited, band: .unlikely),
                 ghost(7, .proposal, "Coffee with Alex", at(4, 9), commitment: .proposed,
                       state: .cancelled, mail: .cancelled, band: .likely),
                 ghost(8, .ticket, "Japanese Breakfast", at(6, 20), end: at(6, 23), estimated: true,
-                      place: "The Fillmore", commitment: .committed, message: 7),
+                      place: "The Fillmore", commitment: .committed, message: 7,
+                      tickets: CalendarTickets(
+                          message_id: 7, thread_id: "practice-7", kind: .ticket,
+                          attachment: .init(id: 71, filename: "Japanese Breakfast tickets.pdf", mime: "application/pdf"))),
             ]
             return TimelineFeed(
                 ghosts: ghosts, events: events,
                 calendar: TimelineCalendarStatus(granted: true, synced_at: iso.string(from: now)),
                 calendars: [
-                    TimelineCalendar(id: "work", name: "Work", color: work, primary: true, writable: true),
+                    TimelineCalendar(id: "work", name: "Work", color: work, primary: true, writable: true, can_invite: true),
                     TimelineCalendar(id: "personal", name: "Personal", color: home, primary: false, writable: true),
                 ])
         }

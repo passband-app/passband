@@ -106,8 +106,7 @@ struct TimeOfDay: Hashable, Sendable {
 /// by going to another page: it is PARKED (kept in the store, not drawn) and
 /// comes back as it was on the way back to the Calendar page. An untouched
 /// pane simply closes. A composer opened elsewhere while one is parked opens
-/// normally and leaves it parked. The gate closing and an account switch
-/// still discard it (`AppStore.dropCalendarState`).
+/// normally and leaves it parked. An account switch still discards it (`AppStore.dropCalendarState`).
 enum EventPaneTravel {
     enum Leave: Hashable, Sendable {
         case close

@@ -16,7 +16,7 @@ pub use search_query::{
 pub use sqlite::{
     ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_OUTSTANDING_MAX,
     ARCHIVE_SURFACE_CAP, AccessProgress, ArchiveAccessCaps, BACKGROUND_BUDGET_KEY,
-    EXTERNAL_RECALL_MAX, ExternalSearchMode, SqliteStore,
+    EXTERNAL_RECALL_MAX, EventMatch, ExternalSearchMode, SqliteStore,
 };
 
 use crate::error::Result;
@@ -1530,7 +1530,11 @@ impl ArchiveDisk {
 /// SECURITY: every method that can feed the MCP surface (`thread_view`,
 /// `deadlines`, the agent listings) MUST exclude `sensitivity = 'sealed'` in the SQL
 /// itself. `sealed_messages` is the sole local-only escape hatch (TUI).
-pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
+/// [`crate::mail::imap::MessageLocations`] is a supertrait so the engine can
+/// hand its store to an IMAP source as that source's lookup table.
+pub trait Store:
+    agent_triage::AgentTriageStore + crate::mail::imap::MessageLocations + Send + Sync
+{
     /// Insert or update a message (and its FTS body + derived contacts).
     /// Returns the local message id.
     fn upsert_message(&self, msg: &NewMessage) -> Result<i64>;
@@ -2208,12 +2212,14 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     ) -> Result<()>;
 
     /// Whether the account already stores the message the provider calls
-    /// `provider_msg_id`, in any tier.
+    /// `provider_msg_id` as LIVE mail: not a spam row and not an archive-tier
+    /// row. A stored spam or archive row reads as absent, so a message the
+    /// user moved from Junk (or from an archived folder) into the inbox is
+    /// re-ingested, and the upsert's `MIN(is_spam)` heals the row.
     ///
-    /// UNWIRED ON PURPOSE. When a source wires it, it goes on the INCREMENTAL
-    /// path only: the backfill and catch-up re-fetch mail already stored, and
-    /// that re-fetch is how a sanitizer change reaches `body_html`, which is
-    /// baked at ingest.
+    /// The INCREMENTAL path only (`SyncEngine::unstored_changes`): the backfill
+    /// and catch-up re-fetch mail already stored, and that re-fetch is how a
+    /// sanitizer change reaches `body_html`, which is baked at ingest.
     fn has_message(&self, account_id: AccountId, provider_msg_id: &str) -> Result<bool>;
 
     /// The last Gmail INBOX unread counts the sync loop stored, or `None` when
@@ -3023,6 +3029,9 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// Upsert one `app_settings` value for `(account_id, key)`.
     fn set_app_setting(&self, account_id: AccountId, key: &str, value: &str) -> Result<()>;
 
+    /// Delete one `app_settings` value; absent is not an error.
+    fn delete_app_setting(&self, account_id: AccountId, key: &str) -> Result<()>;
+
     /// Read the daily-cap overrides in ONE query. A cap is `None` when no row
     /// exists OR the stored value does not parse as an integer in `1..=100000`.
     fn stage2_cap_overrides(&self, account_id: AccountId) -> Result<Stage2CapOverrides>;
@@ -3080,13 +3089,19 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     // a model. Query-side methods are inherent on `SqliteStore` because they need
     // the attached embedder.
     //
-    // SECURITY: SEALED MESSAGES ARE NEVER EMBEDDED — the write callers gate on
-    // `sensitivity='normal'` and `messages_missing_vectors` selects only normal
-    // rows, so sealed content is structurally absent from the vector space.
+    // SECURITY: SEALED MESSAGES ARE NEVER EMBEDDED. Sealed is the stored
+    // decision (auth, restricted), a person's restriction or the retired
+    // `triage.sensitivity` column, and NOTHING is embedded until it is known
+    // not to be sealed: a stored decision with access settled, or the owner's
+    // own mail (`embeddable_mail_sql!` in `store/sqlite/mod.rs`).
+    // `message_embeddable` is asked before any text reaches an embedder,
+    // `messages_missing_vectors` selects only such rows, and
+    // `write_embedded_vectors` re-checks under the store lock.
 
-    /// Insert (or replace) the embedding vector for one message; idempotent.
-    /// `embedding.len()` MUST equal the vec0 table width (384). CALLER MUST
-    /// ensure the message is non-sealed; this does not re-check.
+    /// RAW insert (or replace) of the embedding vector for one message;
+    /// idempotent. `embedding.len()` MUST equal the vec0 table width (384).
+    /// NOT GATED: for fixtures. Production writes use
+    /// [`Store::write_embedded_vectors`].
     fn upsert_message_vector(
         &self,
         account_id: AccountId,
@@ -3105,8 +3120,30 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         Ok(())
     }
 
-    /// Up to `limit` NON-SEALED messages with no vector yet, newest-first, for
-    /// the startup backfill pass. Sealed rows are excluded in SQL.
+    /// [`Store::upsert_message_vectors`] for the items whose message may still
+    /// be embedded at the moment of the write (the sealed gate, re-checked
+    /// under the store's lock); the rest are skipped. Returns how many were
+    /// written. The one vector write the sync engine makes.
+    fn write_embedded_vectors(
+        &self,
+        account_id: AccountId,
+        items: &[(i64, &[f32])],
+    ) -> Result<usize>;
+
+    /// Whether an embedder may read `message_id` now: not spam, not sealed,
+    /// and either the owner's own mail with its access check settled or
+    /// decided on its current content with access settled. Ingest asks it
+    /// before embedding a row's text.
+    fn message_embeddable(&self, account_id: AccountId, message_id: i64) -> Result<bool>;
+
+    /// Whether a write since the last call may have made a message newly
+    /// embeddable without the sync engine seeing it (a person's correction
+    /// lifting a restriction, through the API). Clears as it answers; the
+    /// engine's vector drain raises its own flag on `true`.
+    fn take_vectors_owed(&self) -> bool;
+
+    /// Up to `limit` messages with no vector yet that the sealed gate lets an
+    /// embedder read, newest-first, for the backfill drain.
     fn messages_missing_vectors(
         &self,
         account_id: AccountId,

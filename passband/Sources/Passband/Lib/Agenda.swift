@@ -19,42 +19,9 @@ import Foundation
 
 // MARK: - the gate
 
-/// Whether the Calendar destination exists, and how to connect a calendar.
+/// How to connect a calendar, and whose stats may say so. (The page itself is
+/// unconditional: every mailbox has the Calendar.)
 enum CalendarGate {
-    /// THE ONE PLACE THE CALENDAR PAGE IS SWITCHED ON. The daemon must serve
-    /// the timeline (`timeline == true` on /client/stats), and the `calendar`
-    /// hidden feature must be on for this mailbox (`feature`, which is
-    /// `store.hasFeature(.calendar)`; docs/FEATURES.md, docs/CALENDAR.md
-    /// section 11). A daemon with the flag off already says `timeline: false`;
-    /// the app asks both anyway, so a daemon older than the flag cannot show
-    /// the page to somebody who was not let in. The rail, the Go menu, the
-    /// number keys, ⇧C, the shortcuts sheet and the route all read it through
-    /// `AppStore.calendarPageAvailable`, so it hides everywhere at once.
-    static func pageAvailable(timeline: Bool?, feature: Bool) -> Bool {
-        timeline == true && feature
-    }
-
-    /// Whether the gate closing (the flag turned off, an older daemon) must
-    /// take the user off the page they are on: only when that page is the
-    /// calendar. Generic for the reason `numbered` is.
-    static func leavesPage<Page: Equatable>(available: Bool, active: Page, calendar: Page) -> Bool {
-        !available && active == calendar
-    }
-
-    /// THE NUMBER KEYS, WITH THE CALENDAR IN THEM (wave 4, the founder: "make
-    /// calendar 2, all mail 3, etc"). The calendar is second on the rail, so
-    /// while it is offered it is second in the count and every later page is
-    /// one higher. While it is NOT offered the numbers are exactly the ones
-    /// from before it existed: nobody's fingers are renumbered by a page
-    /// they cannot see. Generic so the rule is held by a test without the
-    /// app's own page list.
-    static func numbered<Page>(_ pages: [Page], calendar: Page, offered: Bool) -> [Page] {
-        guard offered, !pages.isEmpty else { return pages }
-        var out = pages
-        out.insert(calendar, at: 1)
-        return out
-    }
-
     /// Where the one "Connect calendar" button gets Google's consent link.
     /// The daemon decides which by what it sent; the app never guesses. Both
     /// end the same way: a browser on Google's consent, and the grant showing
@@ -242,6 +209,26 @@ struct AgendaItem: Identifiable, Sendable, Hashable {
     let unverified: Bool
     /// Unlikely: folds into the day's count instead of taking a row.
     let folded: Bool
+    /// A real event's mail: the messages behind the ghosts the daemon
+    /// matched to it (the reservation that made Gmail's own event, say),
+    /// oldest first. The matched ghost is not drawn, so this is how the card
+    /// still reaches its mail. Empty for a ghost, which carries its own.
+    var mail: [GhostSource] = []
+    /// The street address under `location` when the daemon split the place
+    /// into a name and an address. Nil for a ghost and a raw location.
+    var placeAddress: String? = nil
+
+    /// What to ask a map for: the name and the address together.
+    var placeQuery: String? {
+        let parts = [location, placeAddress].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    }
+
+    /// The mail behind this row, ghost or event.
+    var sources: [GhostSource] { ghost?.sources ?? mail }
+
+    /// What the card's Tickets button opens, ghost or event.
+    var tickets: CalendarTickets? { ghost?.tickets ?? event?.tickets }
 
     var ghost: TimelineGhost? {
         if case .ghost(let g) = origin { return g }
@@ -291,8 +278,12 @@ enum Agenda {
     ) -> [AgendaItem] {
         var out: [AgendaItem] = []
         out.reserveCapacity(feed.ghosts.count + (feed.events?.count ?? 0))
+        let mail = matchedMail(feed.ghosts)
         for event in feed.events ?? [] {
-            if let item = item(event, calendar: calendar) { out.append(item) }
+            if var item = item(event, calendar: calendar) {
+                item.mail = mail[eventKey(event.calendar_id, event.id)] ?? []
+                out.append(item)
+            }
         }
         for ghost in feed.ghosts {
             if let item = item(ghost, calendar: calendar, showDismissed: showDismissed) {
@@ -300,6 +291,26 @@ enum Agenda {
             }
         }
         return out
+    }
+
+    /// The mail behind each matched event, by `eventKey`: every source of
+    /// every ghost matched to it, each message once, in the ghosts' order.
+    static func matchedMail(_ ghosts: [TimelineGhost]) -> [String: [GhostSource]] {
+        var out: [String: [GhostSource]] = [:]
+        for ghost in ghosts {
+            guard let match = ghost.matched_event else { continue }
+            let key = eventKey(match.calendar_id, match.id)
+            var list = out[key] ?? []
+            for source in ghost.sources where !list.contains(where: { $0.message_id == source.message_id }) {
+                list.append(source)
+            }
+            out[key] = list
+        }
+        return out
+    }
+
+    private static func eventKey(_ calendarId: String, _ id: String) -> String {
+        "\(calendarId)\u{1F}\(id)"
     }
 
     static func item(
@@ -359,11 +370,13 @@ enum Agenda {
             end = parsed.dateOnly ? dayAfter(parsed.date, calendar) : parsed.date
         }
         if allDay, end == nil || end! <= start.date { end = dayAfter(start.date, calendar) }
-        return AgendaItem(
+        var item = AgendaItem(
             id: itemId(event),
             origin: .event(event),
             title: tidy(event.title) ?? "Untitled event",
-            location: tidy(event.location),
+            // The cleaned place's name when the daemon has one (a place
+            // of nothing hides the line); the raw location otherwise.
+            location: event.place.map { tidy($0.name) ?? tidy($0.address) } ?? tidy(event.location),
             start: start.date,
             end: end,
             allDay: allDay,
@@ -373,6 +386,10 @@ enum Agenda {
             cancelled: false,
             unverified: false,
             folded: false)
+        if let place = event.place, tidy(place.name) != nil {
+            item.placeAddress = tidy(place.address)
+        }
+        return item
     }
 
     /// A real event's row id: its calendar and its id, since Google's ids are

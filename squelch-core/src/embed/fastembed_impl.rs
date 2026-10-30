@@ -92,6 +92,16 @@ fn load_session(settings: &EmbedSettings) -> Result<(TextEmbedding, usize)> {
     Ok((embedding, dim))
 }
 
+/// The full `model_code` a configured model name resolves to, through the same
+/// [`resolve_model`] every local session is built with. Metadata only: no
+/// weights are read and no session is built, which is why
+/// [`super::RemoteEmbedder`] may ask it. A daemon pointed at the shared service
+/// still has to prove its `embed.model` names the service's model, and an alias
+/// has to be judged by what it means rather than how it is spelled.
+pub(super) fn resolved_model_code(name: &str) -> Result<String> {
+    resolve_model(name).map(|m| m.code)
+}
+
 /// [`load_session`] behind [`super::lazy::EmbedSession`], which is the shape
 /// [`super::LazyEmbedder`] loads through. Boxing here rather than there keeps
 /// every fastembed type inside this file: the lazy wrapper is pure lifecycle

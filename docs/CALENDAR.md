@@ -997,19 +997,83 @@ input in code:
 - `line`: at most 90 characters, cut on a character boundary, laundered with
   `order_link::plain` (control, bidi and invisible characters gone) and
   NFKC-folded (fullwidth `ｅｖｉｌ．ｃｏｍ` reads as `evil.com`). Dropped, leaving
-  no line, by `remind::line_shaped`, which is the `basis` rule of §3.6 plus a
-  stricter set of its own (the `basis` rule itself is unchanged for triage):
-  any dotted host (`evil-tickets.com`, `bit.ly`; not "St. Louis" or "7.30"),
-  a dot written out (`[.]`, `(.)`, `[dot]`, ` dot ` before a top-level
-  domain), `hxxp`, an `@` or `[at]`, a run of 6 or more digits counted across
-  the separators a number is printed with (space, `- . / , _ · + ( )`, with
-  `l`, `I` and `o` counting inside a run), and a vanity number (`1-800-` and
-  letters). A real line never needs any of these. The banner then shows the
-  title and time only.
+  no line, by `remind::line_shaped`, its own rule (the `basis` rule of §3.6
+  is unchanged for triage, and was both too loose and too strict here):
+  - a URL, or a dotted host whose last label is a country code or 3+
+    letters (`evil-tickets.com`, `bit.ly`; not "St. Louis", "7.30" or
+    "Node.js");
+  - a dot written out (`[.]`, `(.)`, `[dot]`, `evil dot com`) or spaced out
+    (`evil . com`, `evil. com`, `evil·com`, `evil,com`) before a top-level
+    domain. The spaced forms count only a LOWER-case domain, since a sentence
+    capitalizes its next word ("Arrive early. Info desk"); country codes
+    that are English words ("polka dot or stripes") never count here;
+  - `hxxp`, `[at]`, or an `@` touching a letter or digit ("Dinner @ 7" stays);
+  - a phone number or code: 6+ digits unbroken, 6+ in 3+ hyphen-joined
+    groups ("12-34-56"), or 7+ across the separators a number is printed
+    with (every phone number has 7, while "Oct 30, 2026", "seats 101-104"
+    and "2026-27" make 6);
+  - a vanity number (`1-800-flowers`, or `888-TICKETS` in capitals), or a
+    number spelled on a keypad: joined by `-` or `.`, a toll-free prefix in
+    capitals (`888-GET-CASH`) or any case as a whole 10-key number
+    (`888-Tickets`, `1800flowers`; not "800-seat hall"), or another prefix
+    in capitals in 2+ groups and 10 keys (`415-PAY-CASH`; not "Room
+    101-ABCD", "Boeing 737-MAX8"); spaced, only after a toll-free prefix in
+    capitals (`888 GET CASH`, `(888) TICKETS`; not "UA 1532 SFO-EWR",
+    "Highway 101 NORTH");
+  - before testing, real dates with a year are masked ("Oct 30 2026,
+    7:30pm", "10/30/2026", "2026-10-30"; whole month names only, so "Call
+    Martin 20 7946 0958" is no date), every dash and `| ~ * •` count as
+    separators
+    ("415–555–1234"), and invisible characters and combining marks are
+    dropped, so `evil\u{AD}.com` is `evil.com`. A host whose last label
+    mixes ASCII Latin with Greek or Cyrillic counts (`evil.cоm` with a
+    Cyrillic `о`), and so does a real non-Latin domain (`.рф`), but not a
+    sentence after a full stop ("です。お楽しみに", "Dr.Müller"). A space
+    BEFORE a literal dot is never a sentence break, so `evil . Com` counts
+    in any case; a spaced " · " lists things, so after it only com, net,
+    org and the like count ("Doors 7 · Show 8 · ca 2 hrs" stays).
+  The banner then shows the title and time only. Measured 2026-10-30 over 84
+  ordinary lines and 37 steered ones (`remind::tests::
+  the_line_rule_keeps_ordinary_lines_and_drops_steered_ones`): every ordinary
+  line kept, every steered one dropped but two no filter can catch, an SMS
+  short code ("Text 55512") and plain words ("Your account is locked,
+  verify in Passband"). The earlier rule dropped 9 of the first 64. A
+  verification pass the same day found bypasses (Unicode dashes, keypad
+  numbers, a Cyrillic `о`, invisible characters) and date false positives;
+  each is now a case in that test.
+
+A plan from an older prompt on `remind::GOVERNING_PROMPTS` governs like a
+stale one (it decides whether and when, and keeps its claims; only a current
+plan shows its line and code), so bumping the prompt never turns every "no
+reminder" into the fallback, or drops every claim, before each item is
+planned again. A prompt that changes what a plan MEANS leaves the older
+versions off that list, and their items fall to the fallback until planned.
 - `open` and `ticket`: `{mail, attachment?}` indexes into the numbered lists.
   An index out of range is null. `open` is what tapping the banner shows;
   `ticket` is what the Tickets button shows.
 - `same_as`: candidate indexes. Out of range ones are dropped.
+- `code` (added 2026-10-30, prompt `calendar-remind-v2`): `{label, value}` or
+  null, an entry code the person needs on arrival (a door PIN, a gate code).
+  The owner's ask: an event whose description says "If no one is at the
+  front desk, use PIN 642181 to enter" should hand over the PIN right before
+  they walk in. The line rule drops codes on purpose (a steered line must
+  not carry one), so the code has its own field, HELD TO THE ITEM'S OWN TEXT
+  in code (`remind::settle_code`), as the card's place is held to the
+  location: the value must appear word for word, as a whole word (not a
+  piece of "1234-5678"), in the title, location or description, never the
+  mail; at most 2 letters then digits, `#` and `*` ("642181", "#4417",
+  "B12"), 3 to 12 characters, 2 to 6 digits (phone numbers run from 7, and 8
+  in Singapore, Hong Kong, Denmark and Norway, so 6 keeps them all out and a
+  spelled number like `1800FLOWERS` has no shape to fit). The label uses only
+  a closed list of words that name what a code opens (door, gate, entry,
+  building, locker, PIN, code, desk, callbox, intercom, Wi-Fi and the like,
+  hyphenated or not), so it can never say "Call now"; anything else is
+  "Code". A joiner joins numbers, not words: "1234" is no code of
+  "1234-5678", while "PIN 642181—it opens the side door" hands it over. Served
+  from a CURRENT plan only, so a PIN that changed in the description never
+  shows the old one. The banner body leads with it: "Door PIN 642181 · the
+  line". On the iPhone the lock screen hides it until Face ID unlocks
+  (Show Previews: When Unlocked, the default).
 
 **Failure:** no model, a timeout or a refusal stores no plan, backs the item
 off, and a later pass asks again within the caps. If an event is 30 minutes
@@ -1074,6 +1138,7 @@ The frame:
           "title": "Phoebe Bridgers", "start": "2026-10-30T20:00:00-07:00",
           "end": null, "all_day": false, "place": "The Greek Theatre"},
  "lead_minutes": 60, "line": "Your 2 tickets are in the Ticketmaster email",
+ "code": null,
  "open": {"message_id": 41, "thread_id": "t41", "attachment_id": 9},
  "ticket": {"message_id": 41, "thread_id": "t41", "kind": "ticket",
             "attachment_id": 9, "filename": "tickets.pdf",
@@ -1084,7 +1149,7 @@ A ghost's `item` is `{"kind": "ghost", "id": <ghost id>, ...}`.
 
 The banner reads: title = the event's title; subtitle = "8pm · The Greek
 Theatre" (the start in the device's zone, "Today" for all-day; a countdown
-would go stale on the lock screen); body = the line. The title, place and
+would go stale on the lock screen); body = the code, if any, then the line. The title, place and
 line are stripped of bidi controls and invisible marks on the device too.
 Tapping it shows `open` (an attachment in Quick Look, mail in the reader),
 else the event's card. A push the extension could not dress is fetched by the

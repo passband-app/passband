@@ -496,6 +496,7 @@ mod tests {
             open: None,
             ticket: None,
             same_as: vec![3],
+            code: None,
         };
         s.calendar_reminder_put(a, "e:primary/abc", "v1", &plan, now())
             .unwrap();
@@ -587,6 +588,7 @@ mod tests {
             open: None,
             ticket: None,
             same_as: Vec::new(),
+            code: None,
         };
         s.calendar_reminder_failed(a, "g:1", t).unwrap();
         s.calendar_reminder_put(a, "g:1", "v", &plan, t).unwrap();

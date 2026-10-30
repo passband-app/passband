@@ -241,6 +241,10 @@ pub struct ImapWriter {
     /// The maybe-sent markers. `None` (a writer built without one) is safe,
     /// not lax: a scheduled send it cannot find in Sent is doubt.
     outbox: Option<Arc<dyn OutboxLedger>>,
+    /// The Message-IDs (normalized) [`MailWriter::find_scheduled_send`]
+    /// answered "sent" for by the `Accepted` marker alone, with no copy in
+    /// Sent ([`MailWriter::sent_without_copy`]).
+    unsaved: std::sync::Mutex<std::collections::HashSet<String>>,
     /// Tests only: stop right after SMTP accepted, before Sent, as a crash
     /// there would.
     #[cfg(test)]
@@ -267,6 +271,7 @@ impl ImapWriter {
             look_schedule: LOOK_SCHEDULE.to_vec(),
             without_move: false,
             outbox: None,
+            unsaved: Default::default(),
             #[cfg(test)]
             crash_after_smtp: false,
         })
@@ -958,7 +963,99 @@ impl MailWriter for ImapWriter {
             eprintln!("squelch-api: imap scheduled-send lookup: {e}");
             WriteError::Transport(IMAP_SEARCH_FAILED.into())
         })?;
-        outbox_answer(hit, &mid, &token, self.outbox.as_deref())
+        let found_copy = hit.is_some();
+        let answer = outbox_answer(hit, &mid, &token, self.outbox.as_deref());
+        if let Ok(mut unsaved) = self.unsaved.lock() {
+            if matches!(answer, Ok(Some(_))) && !found_copy {
+                unsaved.insert(mid);
+            } else {
+                unsaved.remove(&mid);
+            }
+        }
+        answer
+    }
+
+    fn sent_without_copy(&self, message_id: &str) -> bool {
+        normalize_message_id(message_id).is_some_and(|mid| {
+            self.unsaved
+                .lock()
+                .map(|u| u.contains(&mid))
+                .unwrap_or(false)
+        })
+    }
+
+    /// THE SENT COPY A CRASH LOST (final matrix 7b): the rebuilt message
+    /// goes through what [`Self::send`] does to its bytes
+    /// (`with_submission_headers`, which keeps the request's Message-ID and
+    /// outbox token and adds From and the attempt's Date; `transfer_safe`;
+    /// CRLF only), then one look and, only if Sent has no copy, an APPEND
+    /// with `\Seen`. Nothing here talks to SMTP. Bcc stays, as in the copy a
+    /// send saves.
+    async fn save_sent_copy(
+        &self,
+        raw: &[u8],
+        date: chrono::DateTime<chrono::Utc>,
+    ) -> Result<SentRef, WriteError> {
+        if raw.len() > MAX_SEND_RAW_BYTES {
+            return Err(WriteError::Invalid(
+                "the message is too large to save".into(),
+            ));
+        }
+        let message_id = smtp::first_header(raw, "Message-ID")
+            .and_then(|v| normalize_message_id(&v))
+            .ok_or_else(|| WriteError::Invalid("the message has an unusable Message-ID".into()))?;
+        let saved = smtp::transfer_safe(&smtp::with_submission_headers(
+            raw,
+            &self.from,
+            date,
+            &format!("<{message_id}>"),
+        ));
+        let id = stable_id_for_message_id(&message_id);
+        let mut folder = LiveSent {
+            source: &self.source,
+            session: None,
+            no_sent: false,
+        };
+        let copy = tokio::time::timeout(
+            SEND_DEADLINE,
+            look_then_append(&mut folder, &message_id, &saved, &[Duration::ZERO]),
+        )
+        .await
+        .unwrap_or_else(|_| Err("the Sent copy ran out of time".to_string()));
+        folder.logout().await;
+        if let Ok(mut unsaved) = self.unsaved.lock() {
+            unsaved.remove(&message_id);
+        }
+        let (raw, warning) = match copy {
+            // Sent had one after all: that copy is the record, fetched by
+            // the echo, not these rebuilt bytes.
+            Ok(SentCopy::ServerSaved(_)) => (None, None),
+            Ok(SentCopy::Appended(loc)) => {
+                if let Some(loc) = loc
+                    && self.source.record_own_copy(&id, &saved, loc).is_err()
+                {
+                    eprintln!(
+                        "squelch-api: imap recovery: could not record the Sent copy's location"
+                    );
+                }
+                (Some(saved), None)
+            }
+            Err(e) if e == NO_SENT_FOLDER => {
+                (Some(saved), Some(NO_SENT_FOLDER_WARNING.to_string()))
+            }
+            Err(e) => {
+                eprintln!("squelch-api: imap recovery: saving the Sent copy failed: {e}");
+                return Err(WriteError::Transport(
+                    "the copy in Sent could not be saved".into(),
+                ));
+            }
+        };
+        Ok(SentRef {
+            id: Some(id),
+            thread_id: None,
+            warning,
+            raw,
+        })
     }
 }
 

@@ -164,4 +164,28 @@ pub trait MailWriter: Send + Sync {
         window: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>),
         stopping: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<Option<String>, WriteError>;
+
+    /// Did this writer's last [`Self::find_scheduled_send`] for `message_id`
+    /// answer "sent" with NO saved copy to show for it (IMAP: the `Accepted`
+    /// marker answered, Sent had nothing; #575 phase 3 final matrix 7b)? The
+    /// recovery then rebuilds the message and [`Self::save_sent_copy`]s it.
+    /// Gmail files its own copy: never.
+    fn sent_without_copy(&self, _message_id: &str) -> bool {
+        false
+    }
+
+    /// SAVE THE SENDER'S COPY of a send that went with none saved: `raw` is
+    /// the message rebuilt from its scheduled request, `date` the attempt's
+    /// time, for a `Date` the composer left out. NEVER SUBMITTED. A copy
+    /// already in Sent is the answer (no second one). The [`SentRef`] is as
+    /// [`Self::send`] would give it, so the echo makes the local row.
+    async fn save_sent_copy(
+        &self,
+        _raw: &[u8],
+        _date: chrono::DateTime<chrono::Utc>,
+    ) -> Result<SentRef, WriteError> {
+        Err(WriteError::Invalid(
+            "this mailbox files its own sent copies".into(),
+        ))
+    }
 }

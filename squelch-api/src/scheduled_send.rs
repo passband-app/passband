@@ -1208,20 +1208,40 @@ async fn settle_recovered(
     let target = serde_json::from_str::<SendBody>(&row.request)
         .ok()
         .and_then(|b| send_target(&b));
-    let sent = SentRef {
-        id: Some(gmail_id),
-        thread_id: None,
-        warning: None,
-        raw: None,
+    // IMAP, sent by the marker alone with no copy in Sent (a crash between
+    // SMTP and the APPEND): the copy is rebuilt and saved, and its echo is
+    // the row. Anything short of that settles it sent all the same, with no
+    // copy: never a second send.
+    let rebuilt = if client.sent_without_copy(&row.message_id_header) {
+        rebuild_sent_copy(state, row).await
+    } else {
+        None
     };
-    let fired = Fire {
-        id: row.id,
-        message_id: &row.message_id_header,
-    };
-    let echo_message_id = echo_sent(state, client, target.clone(), &sent, Some(fired)).await;
-    let thread_id = match echo_message_id {
-        Some(local) => resolve_target(state, local).await.ok().map(|m| m.thread_id),
-        None => None,
+    let (echo_message_id, thread_id) = match rebuilt {
+        Some(Some(local)) => (
+            Some(local),
+            resolve_target(state, local).await.ok().map(|m| m.thread_id),
+        ),
+        _ => {
+            let sent = SentRef {
+                id: Some(gmail_id),
+                thread_id: None,
+                warning: None,
+                raw: None,
+            };
+            let fired = Fire {
+                id: row.id,
+                message_id: &row.message_id_header,
+                copy_at: None,
+            };
+            let echo_message_id =
+                echo_sent(state, client, target.clone(), &sent, Some(fired)).await;
+            let thread_id = match echo_message_id {
+                Some(local) => resolve_target(state, local).await.ok().map(|m| m.thread_id),
+                None => None,
+            };
+            (echo_message_id, thread_id)
+        }
     };
     let (id, attempts) = (row.id, row.attempts);
     let ids: Vec<i64> = row.attachments.iter().map(|a| a.id).collect();
@@ -1249,6 +1269,76 @@ async fn settle_recovered(
         Err(_) => {
             eprintln!("squelch-api: scheduled send {id} recovered but not settled");
             false
+        }
+    }
+}
+
+/// THE SENT COPY A CRASH LOST (IMAP, #575 phase 3 final matrix 7b): compose
+/// the row's request again exactly as the fire did (same Message-ID, same
+/// outbox token, same parent and files, through the same builder) and SAVE
+/// it to Sent ([`Fire::copy_at`]: never submitted). `Some(echo)` when the
+/// copy was saved (or found) and echoed; `None` when it could not be
+/// (an unreadable request, a lost file, a parent gone), which the caller
+/// settles as sent with no copy.
+///
+/// Not rebuilt: the read-tracking pixel (its token was minted for the
+/// delivered copy; a second one would be a tracker for mail nobody got) and
+/// the group attribution (`finish_send`'s caller writes it after a send; a
+/// recovered row's history is the row). The Date is the attempt's.
+async fn rebuild_sent_copy(state: &ApiState, row: &ScheduledSend) -> Option<Option<i64>> {
+    let id = row.id;
+    let Ok(mut body) = serde_json::from_str::<SendBody>(&row.request) else {
+        eprintln!(
+            "squelch-api: scheduled send {id} was sent; its request is unreadable, so Sent has \
+             no copy of it"
+        );
+        return None;
+    };
+    body.include_tracker = None;
+    body.group_id = None;
+    body.group_mode = None;
+    body.draft_id = None;
+    let ids = dedup_ids(&body.attachment_ids);
+    let attachments = if ids.is_empty() {
+        Vec::new()
+    } else {
+        let wanted = ids.clone();
+        match store_call(state, move |store, account_id| {
+            store.scheduled_outbound_attachments(account_id, id, &wanted)
+        })
+        .await
+        {
+            Ok(rows) if rows.len() == ids.len() => rows.into_iter().map(mail_attachment).collect(),
+            _ => {
+                eprintln!(
+                    "squelch-api: scheduled send {id} was sent; a file is gone, so Sent has no \
+                     copy of it"
+                );
+                return None;
+            }
+        }
+    };
+    let at = row
+        .last_attempt_at
+        .or(row.lease_until)
+        .unwrap_or_else(|| clock(state));
+    let fired = Fire {
+        id,
+        message_id: &row.message_id_header,
+        copy_at: Some(at),
+    };
+    match perform_send(state, &body, attachments, SendGuard::Settled, Some(fired)).await {
+        Ok(SendOutcome::Sent {
+            echo_message_id, ..
+        }) => {
+            eprintln!("squelch-api: scheduled send {id} was sent; its Sent copy was rebuilt");
+            Some(echo_message_id)
+        }
+        Ok(SendOutcome::Sending { .. }) | Err(_) => {
+            eprintln!(
+                "squelch-api: scheduled send {id} was sent; its Sent copy could not be rebuilt"
+            );
+            None
         }
     }
 }
@@ -1387,6 +1477,7 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
     let fired = Fire {
         id,
         message_id: &row.message_id_header,
+        copy_at: None,
     };
     match perform_send(state, &body, attachments, SendGuard::Settled, Some(fired)).await {
         Ok(SendOutcome::Sent {

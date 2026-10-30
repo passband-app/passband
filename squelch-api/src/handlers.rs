@@ -5663,7 +5663,13 @@ async fn finish_send(
     target: Option<String>,
     fire: Option<Fire<'_>>,
 ) -> Result<SendOutcome, SendFailure> {
-    match client.send(raw, thread_id.as_deref()).await {
+    let rebuild = fire.and_then(|f| f.copy_at);
+    let went = match rebuild {
+        // Saved, never submitted: the mail already went.
+        Some(at) => client.save_sent_copy(raw, at).await,
+        None => client.send(raw, thread_id.as_deref()).await,
+    };
+    match went {
         Ok(sent) => {
             if let Some(id) = resolve {
                 resolve_done(state, id).await;
@@ -5672,7 +5678,9 @@ async fn finish_send(
                 discard_sent_draft(state, draft_id).await;
             }
             discard_sent_attachments(state, draft_id, attachment_ids.to_vec()).await;
-            audit_action(state, "send", target.clone(), &outcome).await;
+            if rebuild.is_none() {
+                audit_action(state, "send", target.clone(), &outcome).await;
+            }
             let echo_message_id = echo_sent(state, client, target, &sent, fire).await;
             if let (Some((token, _)), Some(message_id)) = (&tracker, echo_message_id) {
                 link_tracker(state, token, message_id).await;
@@ -5873,6 +5881,13 @@ pub(crate) enum SendGuard {
 pub(crate) struct Fire<'a> {
     pub(crate) id: i64,
     pub(crate) message_id: &'a str,
+    /// A REBUILD, NOT A SEND (IMAP recovery, #575 phase 3 final matrix 7b):
+    /// the row's mail went at this time and its Sent copy was lost, so the
+    /// message is composed again exactly as it was and only SAVED
+    /// ([`MailWriter::save_sent_copy`]), never submitted. Its ledger lines
+    /// read `scheduled:<id>:rebuild:...`, and the success line is the
+    /// worker's `recovered`, not a second `ok`.
+    pub(crate) copy_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// The success ledger detail for a send, marked when it was a fired scheduled
@@ -5885,6 +5900,7 @@ pub(crate) struct Fire<'a> {
 /// `reply_all:N`) the plain detail records.
 fn fired_outcome(fire: Option<Fire<'_>>, outcome: String) -> String {
     match fire {
+        Some(f) if f.copy_at.is_some() => format!("scheduled:{}:rebuild:{outcome}", f.id),
         Some(f) => format!("scheduled:{}:{outcome}", f.id),
         None => outcome,
     }

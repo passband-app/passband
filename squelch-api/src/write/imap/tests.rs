@@ -1190,6 +1190,76 @@ async fn live_a_crash_between_smtp_and_sent_is_never_sent_again() {
     assert!(is_doubt(&r), "{r:?}");
 }
 
+/// THE LOST SENT COPY IS REBUILT, NEVER RESENT (final matrix 7b): after
+/// the crash between SMTP and the APPEND, the recovery answer says it went
+/// with no copy ([`MailWriter::sent_without_copy`]), and the rebuilt bytes
+/// are saved to Sent with \Seen, Bcc and all, under the same Message-ID,
+/// token and the attempt's Date; nothing more is delivered. A second save
+/// finds the copy and adds none; an ordinary send's answer is never "no copy".
+#[tokio::test]
+#[ignore = "needs scripts/imap-dev.sh start"]
+async fn live_a_lost_sent_copy_is_rebuilt_and_saved_once_never_resent() {
+    let (writer, _, me) = live_writer("sched-rebuild");
+    let ledger = Arc::new(MemOutbox::default());
+    let writer = writer.with_outbox(ledger.clone()).crash_after_smtp();
+    let token = fresh_token();
+    let mid = format!("{token}@passband.app");
+    let raw = scheduled_raw(&me, &token).replace(
+        "Subject: scheduled\r\n",
+        "Subject: scheduled\r\nBcc: blind@dev.test\r\n",
+    );
+    assert!(writer.send(raw.as_bytes(), None).await.is_err());
+    assert_eq!(copies(&me, "INBOX", &mid, 1).await.len(), 1, "it went");
+    let asked = format!("<{mid}>");
+    assert!(!writer.sent_without_copy(&asked), "not asked yet");
+    let found = writer
+        .find_scheduled_send(&asked, WINDOW(), &|| false)
+        .await
+        .unwrap();
+    assert_eq!(found, Some(stable_id_for_message_id(&mid)));
+    assert!(writer.sent_without_copy(&asked));
+
+    let at = chrono::DateTime::parse_from_rfc2822("Tue, 27 Oct 2026 10:00:00 +0000")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let saved = writer.save_sent_copy(raw.as_bytes(), at).await.unwrap();
+    assert_eq!(saved.id, Some(stable_id_for_message_id(&mid)));
+    let bytes = saved.raw.expect("the echo ingests the saved bytes");
+    let sent = copies(&me, "Sent", &mid, 1).await;
+    assert_eq!(sent.len(), 1);
+    assert!(
+        sent[0].0.iter().any(|f| f.contains("Seen")),
+        "{:?}",
+        sent[0].0
+    );
+    assert_eq!(sent[0].1, bytes, "Sent holds exactly the saved bytes");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("Bcc: blind@dev.test"), "{text}");
+    assert!(
+        text.contains(&format!("{OUTBOX_HEADER}: {token}")),
+        "{text}"
+    );
+    assert!(
+        text.contains("Date: Tue, 27 Oct 2026 10:00:00 +0000"),
+        "{text}"
+    );
+    assert!(!writer.sent_without_copy(&asked), "saved: no longer owed");
+
+    // Again: the copy is found, none added, nothing delivered.
+    let again = writer.save_sent_copy(raw.as_bytes(), at).await.unwrap();
+    assert!(again.raw.is_none(), "the copy in Sent is the record");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(copies(&me, "Sent", &mid, 1).await.len(), 1);
+    assert_eq!(copies(&me, "INBOX", &mid, 1).await.len(), 1, "never resent");
+
+    // Asked again now that Sent has it: a hit, not "no copy".
+    writer
+        .find_scheduled_send(&asked, WINDOW(), &|| false)
+        .await
+        .unwrap();
+    assert!(!writer.sent_without_copy(&asked));
+}
+
 /// THE CRASH AFTER THE SENT COPY, BEFORE THE ROW SETTLED (correctness
 /// review F6): the marker is still `Accepted` (it is the row's settle that
 /// clears it), so a copy something moved out of Sent before recovery asked

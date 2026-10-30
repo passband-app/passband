@@ -541,7 +541,7 @@ struct ConnectView: View {
         switch hostingChoice {
         case .hosted:
             return signInOpened
-                ? "Sign in with Google in the tab that just opened. If Passband doesn’t come back on its own, enter the server URL and pairing code from that page."
+                ? "Sign in with \(signInOutlook ? "Microsoft" : "Google") in the tab that just opened. If Passband doesn’t come back on its own, enter the server URL and pairing code from that page."
                 : "Sign in with Gmail or Outlook again to pick up where you left off, or enter your server URL and a pairing code below."
         case .selfHosted:
             return "Run squelchd pair on your server, then enter what it prints."
@@ -778,12 +778,22 @@ struct ConnectView: View {
     /// The gate's quiet way out, beside whatever second chance this route has.
     @ViewBuilder private var gateSecondaryAction: some View {
         if hostingChoice == .hosted {
-            Button(signInOpened ? "Open sign in again" : "Sign in with Gmail") {
-                openHostedSignIn(outlook: signInOpened ? nil : false)
+            // Reopening keeps the provider already picked. Before that, both
+            // doors, because the subtitle promises Gmail or Outlook.
+            if signInOpened {
+                Button("Open sign in again") { openHostedSignIn() }
+                    .buttonStyle(.plain)
+                    .font(Typo.ui(12))
+                    .foregroundStyle(Palette.inkDim)
+            } else {
+                HStack(spacing: Space.s12) {
+                    Button("Sign in with Gmail") { openHostedSignIn(outlook: false) }
+                    Button("Sign in with Outlook") { openHostedSignIn(outlook: true) }
+                }
+                    .buttonStyle(.plain)
+                    .font(Typo.ui(12))
+                    .foregroundStyle(Palette.inkDim)
             }
-                .buttonStyle(.plain)
-                .font(Typo.ui(12))
-                .foregroundStyle(Palette.inkDim)
         } else if hostingChoice == .selfHosted {
             Button("Need help setting up a server?") { gateStep = .selfHostGuide }
                 .buttonStyle(.plain)

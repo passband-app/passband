@@ -1,0 +1,644 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Passband MCP vs Superhuman MCP</title>
+    <meta name="description" content="An AI agent with your whole inbox is a path to every account that resets by email. Superhuman's MCP server hands an agent 28 tools, sending among them. Passband's Agent MCP briefs your agent, keeps sign-in codes and reset links away from it, and writes mail only as far as you allow. A sourced comparison, checked October 2026." />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Passband" />
+    <meta property="og:title" content="Passband MCP vs Superhuman MCP" />
+    <meta property="og:description" content="An AI agent with your whole inbox is a path to every account that resets by email. Superhuman's MCP server hands an agent 28 tools, sending among them. Passband's Agent MCP briefs your agent, keeps sign-in codes and reset links away from it, and writes mail only as far as you allow. A sourced comparison, checked October 2026." />
+    <meta property="og:url" content="https://passband.app/mcp-vs-superhuman" />
+    <meta property="og:image" content="https://passband.app/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="4,312 emails. Three need you. Passband, over a spectrum analyzer with three marked peaks." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="/icon.svg"
+      media="(prefers-color-scheme: light)"
+    />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="/icon-dark.svg"
+      media="(prefers-color-scheme: dark)"
+    />
+    <link rel="apple-touch-icon" href="/icon-180.png" />
+    <link
+      rel="preload"
+      href="/newsreader-var.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <!--
+      A comparison page, static like trust and self-host so a crawler reads it
+      without running anything. Every line about Superhuman cites one of the
+      sources at the bottom, as checked in October 2026; every line about
+      Passband is true of the code today (docs/SECURITY.md). Re-check both
+      before editing a number.
+    -->
+    <link rel="stylesheet" href="/site.css" />
+    <style>
+      h1 { max-width: 19ch; }
+      .lede { max-width: 42rem; }
+
+      /* THE READOUT: four measurements, each read off both instruments.
+         Passband's line is the lit one. */
+      .vs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: clamp(2.5rem, 5vw, 3.5rem) 0 0;
+        border: 1px solid rgba(130, 186, 245, 0.2); border-radius: 12px; background: rgba(9, 13, 22, 0.7);
+        -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); overflow: hidden; }
+      .vs > div { padding: 1rem 1.1rem 1.1rem; border-left: 1px solid rgba(130, 186, 245, 0.1); }
+      .vs > div:first-child { border-left: 0; }
+      .vs dt { font: 500 10px/1.3 var(--mono); letter-spacing: 0.1em; color: var(--faintest); text-transform: uppercase;
+        min-height: 2.6em; }
+      .vs dd { margin: 0.7rem 0 0; display: grid; gap: 0.55rem; }
+      .vs dd p { margin: 0; display: grid; gap: 0.1rem; }
+      .vs dd span { font: 600 10px/1.2 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
+      .vs dd b { font-family: var(--serif); font-weight: 500; font-size: 1.3rem; line-height: 1.15; color: var(--dim); }
+      .vs dd .pb span { color: var(--accent-ink); }
+      .vs dd .pb b { color: var(--ink); }
+      @media (max-width: 900px) {
+        .vs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .vs > div:nth-child(3) { border-left: 0; }
+        .vs > div:nth-child(n + 3) { border-top: 1px solid rgba(130, 186, 245, 0.1); }
+      }
+      @media (max-width: 520px) {
+        .vs { grid-template-columns: minmax(0, 1fr); }
+        .vs > div { border-left: 0; }
+        .vs > div:nth-child(n + 2) { border-top: 1px solid rgba(130, 186, 245, 0.1); }
+        .vs dt { min-height: 0; }
+        .vs dd { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.9rem; }
+      }
+
+      /* THE COMPARISON: site.css's table, plus a verdict column. On a phone
+         each row becomes its own card instead of scrolling sideways. */
+      .cmp table { min-width: 0; }
+      .cmp th:nth-child(1) { width: 17%; }
+      .cmp th:nth-child(2), .cmp th:nth-child(3) { width: 33%; }
+      .cmp td:first-child { white-space: normal; }
+      .cmp td.pb { color: var(--ink); }
+      .cmp td q { quotes: "\201C" "\201D"; color: var(--dim); }
+      .win { display: inline-block; padding: 0.15rem 0.55rem; border-radius: 99px; white-space: nowrap;
+        font: 600 10px/1.4 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; }
+      .win.pb { color: var(--accent-ink); background: rgba(78, 155, 234, 0.14); }
+      .win.sh { color: var(--dim); background: rgba(168, 180, 196, 0.1); }
+      .win.even { color: var(--faint); box-shadow: inset 0 0 0 1px var(--hair-strong); }
+      .cmp td small { margin-top: 0.35rem; }
+      @media (max-width: 760px) {
+        .cmp.table-wrap { box-shadow: none; border-radius: 0; overflow: visible; }
+        .cmp table, .cmp tbody, .cmp tr, .cmp td { display: block; width: auto; }
+        .cmp thead { display: none; }
+        .cmp tr { margin-bottom: 0.7rem; border-radius: 12px; background: var(--canvas);
+          box-shadow: inset 0 0 0 1px var(--hair); padding: 0.85rem 1rem 0.95rem; }
+        .cmp td { border-top: 0; padding: 0.3rem 0; }
+        .cmp td:first-child { font-family: var(--serif); font-weight: 500; font-size: 1.2rem; padding-bottom: 0.45rem; }
+        .cmp td[data-label]::before { content: attr(data-label); display: block; margin-bottom: 0.1rem;
+          font: 600 10px/1.3 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--faintest); }
+        .cmp td.verdict { padding-top: 0.6rem; }
+      }
+
+      /* WHAT IT GETS: six briefs, the tool name in the corner for whoever
+         wants it. Then the owner's write setting, one card per level, the
+         default lit, on the same grid. */
+      .brief { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.8rem; }
+      @media (max-width: 900px) { .brief { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+      @media (max-width: 600px) { .brief { grid-template-columns: minmax(0, 1fr); } }
+      .brief > div { padding: 1.1rem 1.2rem 1.2rem; border-radius: 14px; background: var(--card);
+        box-shadow: inset 0 0 0 1px var(--hair-strong); }
+      .brief h3 { margin: 0.55rem 0 0.45rem; font-family: var(--serif); font-weight: 500; font-size: 1.35rem; line-height: 1.15; }
+      .brief p { margin: 0; color: var(--dim); font-size: 0.92rem; line-height: 1.6; }
+      .brief code { font: 500 10px/1 var(--mono); letter-spacing: 0.04em; color: var(--faintest); }
+      .write { margin-top: 2.75rem; max-width: 40rem; }
+      .write h3 { margin: 0 0 0.6rem; font-family: var(--serif); font-weight: 500; font-size: 1.6rem; line-height: 1.12; }
+      .write h3 em { font-style: normal; color: var(--accent-ink); }
+      .write p { margin: 0 0 1.25rem; color: var(--dim); font-size: 1rem; }
+      .levels > div.on { background: linear-gradient(180deg, #152032, #0f1724);
+        box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.35); }
+      .levels h3 small { display: inline-block; margin-left: 0.5rem; vertical-align: middle; font: 600 10px/1.4 var(--mono);
+        letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent-ink); }
+
+      /* THE SEAL, drawn as the signal chain: mail in, triage, the door, the
+         agent. What the triage holds back drops off the chain into Passband
+         and never reaches the door. Stacks on a phone. */
+      .chain { display: grid; grid-template-columns: minmax(0, 1fr) 4.5rem minmax(0, 1.2fr) 4.5rem minmax(0, 1fr) 4.5rem minmax(0, 1fr);
+        align-items: center; row-gap: 0; }
+      .node { border-radius: 14px; background: var(--card); box-shadow: inset 0 0 0 1px var(--hair-strong);
+        padding: 1rem 1.1rem; align-self: stretch; }
+      .node .tag, .held .tag { font: 600 10px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--faintest); }
+      .node b, .held b { display: block; margin: 0.45rem 0 0.2rem; font-weight: 600; }
+      .node p, .held p { margin: 0; font-size: 0.85rem; color: var(--faint); line-height: 1.5; }
+      .node.lit { background: linear-gradient(180deg, #152032, #0f1724);
+        box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.35), 0 0 60px -20px rgba(78, 155, 234, 0.45); }
+      .node.lit .tag { color: var(--accent-ink); }
+      .link { position: relative; height: 0; border-top: 2px solid var(--accent); margin: 0 6px; }
+      .link::after { content: ""; position: absolute; right: -1px; top: -6px; border: 5px solid transparent;
+        border-left: 6px solid var(--accent); border-right: 0; }
+      .link span { position: absolute; left: 50%; bottom: 0.55rem; transform: translateX(-50%);
+        font: 500 10px/1.3 var(--mono); color: var(--dim); text-align: center; width: 4.5rem; }
+      .held { grid-column: 3; grid-row: 2; position: relative; margin-top: 3rem; padding: 0.9rem 1.1rem 1rem;
+        border-radius: 14px; background: rgba(79, 192, 138, 0.06); box-shadow: inset 0 0 0 1px rgba(79, 192, 138, 0.3); }
+      .held::before { content: ""; position: absolute; left: 50%; top: -3rem; height: 3rem; width: 0;
+        border-left: 2px dashed var(--positive); }
+      .held .tag { color: var(--positive); }
+      .held ul { list-style: none; margin: 0.6rem 0 0; padding: 0; display: grid; gap: 0.3rem; }
+      .held li { font-size: 0.86rem; color: var(--dim); display: flex; gap: 0.5rem; }
+      .held li::before { content: "\2298"; color: var(--positive); }
+      @media (max-width: 900px) {
+        .chain { grid-template-columns: minmax(0, 1fr); }
+        .link { height: 2.8rem; width: 0; border-top: 0; border-left: 2px solid var(--accent); margin: 6px 0 6px 1.6rem; }
+        .link::after { left: -6px; right: auto; top: auto; bottom: -1px; border: 5px solid transparent;
+          border-top: 6px solid var(--accent); border-bottom: 0; }
+        .link span { left: 0.8rem; bottom: auto; top: 50%; transform: translateY(-50%); text-align: left; width: auto; }
+        /* On a phone the held box hangs beside the chain: the main wire runs
+           on past it, and only a dashed tap leads off to the side. */
+        .held { grid-column: 1; grid-row: auto; margin: 0.9rem 0 0 3.2rem; }
+        .held::after { content: ""; position: absolute; left: -1.6rem; top: -0.9rem; bottom: -6px; width: 0;
+          border-left: 2px solid var(--accent); }
+        .held::before { left: calc(-1.6rem + 2px); top: 50%; height: 0; width: calc(1.6rem - 2px);
+          border-left: 0; border-top: 2px dashed var(--positive); }
+        .held + .link { margin-top: 0; }
+      }
+      .fine-print { margin: 1.5rem 0 0; color: var(--faint); font-size: 0.9rem; max-width: 46rem; }
+
+      /* THE ATTACK SURFACE: three steps on the briefs' grid, numbered. */
+      .steps code { font-size: 11px; letter-spacing: 0.1em; color: var(--accent-ink); }
+
+      /* AN EMAIL THAT STEERS THE AGENT: what is in reach, side by side. */
+      .duo { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.8rem; margin-top: 2.5rem; }
+      @media (max-width: 820px) { .duo { grid-template-columns: minmax(0, 1fr); } }
+      .duo > div { padding: 1.2rem 1.25rem 1.3rem; border-radius: 14px; background: var(--canvas);
+        box-shadow: inset 0 0 0 1px var(--hair-strong); }
+      .duo > div.pb { background: linear-gradient(180deg, #152032, #0f1724);
+        box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.35), 0 0 60px -24px rgba(78, 155, 234, 0.45); }
+      .duo .tag { font: 600 10px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--faintest); }
+      .duo .pb .tag { color: var(--accent-ink); }
+      .duo h3 { margin: 0.6rem 0 0.6rem; font-family: var(--serif); font-weight: 500; font-size: 1.55rem; line-height: 1.12; }
+      .duo p { margin: 0.55rem 0 0; color: var(--dim); font-size: 0.93rem; }
+      .duo q { quotes: "\201C" "\201D"; color: var(--ink); }
+      .duo code { color: var(--ink); }
+
+      /* CONNECT: one line per agent. */
+      .agents { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 clamp(1.5rem, 4vw, 3.5rem);
+        border-top: 1px solid var(--hair); }
+      @media (max-width: 760px) { .agents { grid-template-columns: minmax(0, 1fr); } }
+      .agents > div { display: grid; grid-template-columns: 8.5rem minmax(0, 1fr); gap: 0.4rem 1rem;
+        padding: 1rem 0; border-bottom: 1px solid var(--hair); }
+      @media (max-width: 480px) { .agents > div { grid-template-columns: minmax(0, 1fr); } }
+      .agents b { font-weight: 600; }
+      .agents p { margin: 0; color: var(--dim); font-size: 0.92rem; }
+      .agents code { background: var(--canvas); border-radius: 0.3rem; padding: 0.1rem 0.35rem;
+        box-shadow: inset 0 0 0 1px var(--hair-strong); overflow-wrap: anywhere; }
+      .agents .on { display: inline-block; margin-left: 0.4rem; font: 600 10px/1 var(--mono); letter-spacing: 0.08em;
+        text-transform: uppercase; color: var(--faint); }
+
+      /* PRICE: the two entry points as two readouts, then the way in. */
+      .price { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.8rem; }
+      @media (max-width: 820px) { .price { grid-template-columns: minmax(0, 1fr); } }
+      .price > div { padding: 1.2rem 1.25rem 1.3rem; border-radius: 14px; background: var(--canvas);
+        box-shadow: inset 0 0 0 1px var(--hair-strong); }
+      .price > div.pb { background: linear-gradient(180deg, #152032, #0f1724);
+        box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.35), 0 0 60px -24px rgba(78, 155, 234, 0.45); }
+      .price .tag { font: 600 10px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--faintest); }
+      .price .pb .tag { color: var(--accent-ink); }
+      .price .big { margin: 0.6rem 0 0.4rem; font-family: var(--serif); font-weight: 500; font-size: clamp(1.7rem, 3vw, 2.2rem); line-height: 1.1; }
+      .price p { margin: 0.45rem 0 0; color: var(--dim); font-size: 0.93rem; }
+      .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem 1.4rem; margin-top: 2rem; }
+
+      /* SOURCES */
+      .sources { margin: 0; padding: 0; list-style: none; display: grid; gap: 0.55rem; max-width: 50rem;
+        border-top: 1px solid var(--hair); padding-top: 1.25rem; font-size: 0.88rem; color: var(--faint); }
+      .sources a { overflow-wrap: anywhere; }
+      .sources small { color: var(--faintest); }
+      .checked { margin: 0 0 1rem; font: 600 11px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase;
+        color: var(--accent-ink); }
+    </style>
+  </head>
+  <body>
+    <header class="top">
+      <a class="brand" href="/"><img src="/mark.svg" alt="" width="42" height="23" /><span>passband</span></a>
+      <nav class="nav">
+        <a class="keep" href="/self-host">Self-host</a>
+        <a class="keep" href="/trust">Trust</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <p class="matchup"><b>Passband MCP</b> <i>vs</i> <span>Superhuman MCP</span> <small>Checked October 2026</small></p>
+        <h1>An agent with your inbox holds the keys to your life.</h1>
+        <p class="lede">
+          Email is how every other account you own gets reset, and an AI agent
+          reads whatever lands there, including mail written to steer it.
+          Superhuman's MCP server hands that agent the mailbox: 28 documented
+          tools that read, search, draft, send, trash, label and schedule
+          across every inbox you link, with no filter documented for sign-in
+          codes. Passband's Agent MCP is built for the day your agent is
+          fooled. It hands over what triage already worked out, what needs
+          you and why, what is due, what is on its way, and it keeps back the
+          rest. Sign-in codes and password reset links never reach it, and it
+          writes mail only as far as you allow: by default, a draft you send
+          yourself.
+        </p>
+        <dl class="vs">
+          <div>
+            <dt>Tools</dt>
+            <dd>
+              <p class="sh"><span>Superhuman</span><b>28</b></p>
+              <p class="pb"><span>Passband</span><b>7 to 10</b></p>
+            </dd>
+          </div>
+          <div>
+            <dt>Sign-in codes to the agent</dt>
+            <dd>
+              <p class="sh"><span>Superhuman</span><b>No filter documented</b></p>
+              <p class="pb"><span>Passband</span><b>Never</b></p>
+            </dd>
+          </div>
+          <div>
+            <dt>What an email that steers your agent can reach</dt>
+            <dd>
+              <p class="sh"><span>Superhuman</span><b>Send, trash, unsubscribe</b></p>
+              <p class="pb"><span>Passband</span><b>A rule or a draft, logged</b></p>
+            </dd>
+          </div>
+          <div>
+            <dt>Price of entry</dt>
+            <dd>
+              <p class="sh"><span>Superhuman</span><b>$33 to $40 per user a month</b></p>
+              <p class="pb"><span>Passband</span><b>Free in Beta</b></p>
+            </dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="section" id="risk">
+        <p class="num">01 &middot; THE ATTACK SURFACE</p>
+        <h2>Your inbox <em>opens everything else.</em></h2>
+        <p class="intro">
+          Almost every account you own can be reset by an email. That makes
+          your inbox the most valuable thing an attacker can reach, and an AI
+          agent is the newest way to reach it: an agent reads whatever
+          arrives, and anyone can send you mail.
+        </p>
+        <div class="brief steps">
+          <div>
+            <code>01</code>
+            <h3>Anyone can write to your agent</h3>
+            <p>An agent cannot reliably tell your instructions from text inside an email it was asked to read. A message written to steer it sits in the same inbox as everything else. This is prompt injection, and it has no complete fix today.</p>
+          </div>
+          <div>
+            <code>02</code>
+            <h3>It acts with your hands</h3>
+            <p>Whatever its tools allow, a steered agent can do: read any thread, send as you, then file or trash the evidence. The agent is not the attacker. It is the attacker's way in.</p>
+          </div>
+          <div>
+            <code>03</code>
+            <h3>Your inbox is the reset button</h3>
+            <p>Sign-in codes and password reset links arrive by email. An agent that can read them is a path to your bank, your domain, your cloud accounts and your payroll: not one mailbox, your whole life online.</p>
+          </div>
+        </div>
+        <div class="duo">
+          <div>
+            <span class="tag">Superhuman MCP</span>
+            <h3>The tools in reach include sending.</h3>
+            <p>An email written to steer an agent lands among the mail it reads. Through Superhuman's server, the tools that agent can call include <code>send_draft</code>, <code>trash_thread</code>, <code>unsubscribe</code> with block, and <code>update_personalization</code>, which changes the facts your drafts are written from, across every linked inbox.</p>
+            <p>Whether a call waits for you is a setting in your AI client. Superhuman's help article advises turning confirmation on for <code>send_draft</code>, <q>as it can send emails instantly without any delay</q>, and calls confirmation <q>a safety net, not a permanent setting.</q></p>
+          </div>
+          <div class="pb">
+            <span class="tag">Passband Agent MCP</span>
+            <h3>Worst case out of the box: a rule, or a draft you have to send.</h3>
+            <p>A steered agent can change a sender rule inside Passband, which applies only to mail that arrives after it, or leave a draft, marked as the agent's, that goes nowhere until you press send. Nothing it can do out of the box sends mail.</p>
+            <p>Turn on &ldquo;Send, with your approval&rdquo; and the worst case grows to a message sent from your address. The agent is told to show you each one and wait for your yes, Passband's outbound guard reads all of it for anything that looks like a password or a key with no override, and every send is logged. But the yes happens in the agent's chat, where Passband cannot check it. Drafts only is the hard stop.</p>
+            <p>Every rule, draft and send by an agent is recorded as the agent's. A rule or draft whose record cannot be written is not written.</p>
+          </div>
+        </div>
+        <p class="fine-print">
+          Passband does not make an agent safe to steer. Mail your agent is
+          allowed to read can still be read by an agent that has been fooled,
+          and what happens to it next depends on the other tools you gave
+          that agent. What Passband does is take the account-takeover path
+          out of reach, keep sending off until you turn it on, and write
+          down everything an agent does.
+        </p>
+        <p class="fine-print">
+          This is not hypothetical for email AI. In January 2026, PromptArmor
+          showed that one received email could make Superhuman's built-in AI
+          exfiltrate &ldquo;partial contents from over 40 emails with a single
+          AI response.&rdquo; That was Superhuman's built-in AI, not its MCP
+          server, and no attack on the MCP server has been published.
+          Superhuman responded quickly, in what PromptArmor called &ldquo;a
+          security response in the top percentile.&rdquo;
+        </p>
+      </section>
+
+      <section class="section" id="sealed">
+        <p class="num">02 &middot; WHAT NEVER REACHES THE AGENT</p>
+        <h2>Sign-in codes <em>stay sealed.</em></h2>
+        <p class="intro">
+          So Passband cuts the path at its source. Mail carrying a live
+          sign-in code or a password reset link never reaches your agent. It is not redacted; it is absent. Ask for it by
+          id and the answer is the same not-found as a message that does not
+          exist, so even its existence stays in Passband.
+        </p>
+
+        <div class="chain" aria-label="Your Gmail feeds Passband's triage. Triage passes assessed mail to Agent MCP, which serves your agent. Sign-in codes, password reset links, spam and mail not yet assessed stay in Passband.">
+          <div class="node">
+            <span class="tag">Source</span>
+            <b>Your Gmail</b>
+            <p>Every message, as it arrives.</p>
+          </div>
+          <div class="link" aria-hidden="true"><span>sync</span></div>
+          <div class="node lit">
+            <span class="tag">Passband</span>
+            <b>Triage</b>
+            <p>Triages each message: what needs you, and what an agent may see.</p>
+          </div>
+          <div class="held">
+            <span class="tag">Stays in Passband</span>
+            <ul>
+              <li>Sign-in codes</li>
+              <li>Password reset links</li>
+              <li>Spam</li>
+              <li>Mail not yet assessed</li>
+            </ul>
+          </div>
+          <div class="link" aria-hidden="true"><span>assessed</span></div>
+          <div class="node lit">
+            <span class="tag">The door</span>
+            <b>Agent MCP</b>
+            <p>Seven tools, plus the writes you allow. Plain text only, never HTML.</p>
+          </div>
+          <div class="link" aria-hidden="true"><span>briefing</span></div>
+          <div class="node">
+            <span class="tag">Yours</span>
+            <b>Your agent</b>
+            <p>Claude, OpenClaw, Hermes Agent, Codex, Cursor.</p>
+          </div>
+        </div>
+        <p class="fine-print">
+          Passband's triage decides which messages carry a code or a reset
+          link, and a message it has not assessed yet stays closed to agents
+          until it has. A thread is readable only if every message in it is.
+          A routine &ldquo;new sign-in to your account&rdquo; notice with no
+          code in it may still be readable. The full rules are in the
+          <a href="/security">threat model</a>.
+        </p>
+
+      </section>
+
+      <section class="section" id="compare">
+        <p class="num">03 &middot; SIDE BY SIDE</p>
+        <h2>Where each one is <em>ahead.</em></h2>
+        <p class="intro">
+          Superhuman is ahead on reach: it hands the agent more of the mailbox,
+          across more inboxes. Passband is ahead on judgment and on what it
+          keeps back. Both are true, so here are both.
+        </p>
+        <div class="table-wrap cmp">
+          <table>
+            <thead><tr><th>&nbsp;</th><th>Superhuman MCP</th><th>Passband Agent MCP</th><th>Ahead</th></tr></thead>
+            <tbody>
+            <tr>
+              <td>What the agent works from</td>
+              <td data-label="Superhuman">Your mail and calendar, from Superhuman's own real-time index</td>
+              <td data-label="Passband" class="pb">Passband's triage of your mail: what needs you, and why</td>
+              <td class="verdict"><span class="win even">Different bets</span></td>
+            </tr>
+            <tr>
+              <td>Tools</td>
+              <td data-label="Superhuman">28 documented. By our reading of their descriptions, 14 read and 14 act</td>
+              <td data-label="Passband" class="pb">7 always: six read, one sets a sender rule inside Passband. Up to 3 more as you allow: leave a draft, open it on your Mac, send</td>
+              <td class="verdict"><span class="win even">Different bets</span></td>
+            </tr>
+            <tr>
+              <td>Actions in your mailbox</td>
+              <td data-label="Superhuman">Draft, send, schedule, undo send, archive, label, trash, reminders, unsubscribe and block</td>
+              <td data-label="Passband" class="pb">As far as you allow, per mailbox. Out of the box: a draft, marked as the agent's, that you read, edit and send yourself. Turn on sending and it sends from your address through Passband's own guarded, logged pipeline, told to show you each message first. Read only takes drafts away</td>
+              <td class="verdict"><span class="win even">Different bets</span></td>
+            </tr>
+            <tr>
+              <td>Inboxes</td>
+              <td data-label="Superhuman">Several Gmail and Outlook accounts, searched together in one session</td>
+              <td data-label="Passband" class="pb">One Gmail mailbox per connection</td>
+              <td class="verdict"><span class="win sh">Superhuman</span></td>
+            </tr>
+            <tr>
+              <td>What needs you, and why</td>
+              <td data-label="Superhuman">Filter threads by Split Inbox, label, sender, subject and date</td>
+              <td data-label="Passband" class="pb">A ranked list, each thread with its state, what it asks of you, when it is due, and the scores behind its place</td>
+              <td class="verdict"><span class="win pb">Passband</span></td>
+            </tr>
+            <tr>
+              <td>Bills and deadlines</td>
+              <td data-label="Superhuman">No dedicated tool documented</td>
+              <td data-label="Passband" class="pb">Bill due dates and open deadlines in one list, in date order</td>
+              <td class="verdict"><span class="win pb">Passband</span></td>
+            </tr>
+            <tr>
+              <td>Packages</td>
+              <td data-label="Superhuman">No dedicated tool documented</td>
+              <td data-label="Passband" class="pb">Packages grouped by order, with the carrier's latest status</td>
+              <td class="verdict"><span class="win pb">Passband</span></td>
+            </tr>
+            <tr>
+              <td>Sign-in codes and reset links</td>
+              <td data-label="Superhuman">No filter documented. The server <q>operates under the authenticated user's existing identity and permissions</q></td>
+              <td data-label="Passband" class="pb">Never reach the agent</td>
+              <td class="verdict"><span class="win pb">Passband</span></td>
+            </tr>
+            <tr>
+              <td>A record of what agents did</td>
+              <td data-label="Superhuman"><q>No MCP-specific logging exists today</q></td>
+              <td data-label="Passband" class="pb">Every rule, draft and send by an agent is logged as the agent's. A rule or draft whose log entry fails is not written</td>
+              <td class="verdict"><span class="win pb">Passband</span></td>
+            </tr>
+            <tr>
+              <td>Price of entry</td>
+              <td data-label="Superhuman">Business plan: $40 per user per month, or $33 billed annually</td>
+              <td data-label="Passband" class="pb">Free in beta. Self-host is MIT licensed, with no plan. Hosted is an invitation-only preview</td>
+              <td class="verdict"><span class="win pb">Passband</span><small>while in beta</small></td>
+            </tr>
+            <tr>
+              <td>Availability</td>
+              <td data-label="Superhuman">Live since April 2026</td>
+              <td data-label="Passband" class="pb">Available today on self-host, rolling out to hosted</td>
+              <td class="verdict"><span class="win sh">Superhuman</span></td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section" id="what-it-gets">
+        <p class="num">04 &middot; WHAT YOUR AGENT GETS</p>
+        <h2>Your agent, <em>briefed.</em></h2>
+        <p class="intro">
+          Passband triages every message as it arrives and decides what needs
+          you. Agent MCP hands your agent that judgment, so it starts from an
+          answer instead of a pile of mail. Seven tools, always there, in plain
+          terms:
+        </p>
+        <div class="brief">
+          <div>
+            <code>get_inbox_updates</code>
+            <h3>What needs you, ranked</h3>
+            <p>The threads Passband put in front of you, in order. Each says whether it needs you or is waiting on someone else, what it asks you to do and by when, and the evidence behind the call.</p>
+          </div>
+          <div>
+            <code>get_thread</code>
+            <h3>The whole conversation</h3>
+            <p>Any thread, oldest message first, as plain text. No HTML and no recipient addresses.</p>
+          </div>
+          <div>
+            <code>search_mail</code>
+            <h3>Search that finds the old one</h3>
+            <p>Keyword and meaning together, tilted toward recent mail, or ranked on relevance alone when you are hunting. Results come back as one-line summaries, and your agent opens the thread it wants.</p>
+          </div>
+          <div>
+            <code>get_deadlines</code>
+            <h3>What is due</h3>
+            <p>Bill due dates and open deadlines in one list, in date order, with amounts and a past-due flag. A date stays a date; nothing invents a time.</p>
+          </div>
+          <div>
+            <code>get_shipments</code>
+            <h3>What is on its way</h3>
+            <p>Packages grouped by order, with the carrier's latest status, including deliveries that never had a tracking number.</p>
+          </div>
+          <div>
+            <code>list_sender_rules &middot; set_sender_rule</code>
+            <h3>Your standing instructions</h3>
+            <p>Write a rule for a sender in Passband, like &ldquo;only tell me when the amount changes,&rdquo; and your words travel with that sender's mail to your agent. Your agent can read your rules and set new ones, inside Passband.</p>
+          </div>
+        </div>
+
+        <div class="write">
+          <h3>What it may write is <em>your call.</em></h3>
+          <p>
+            Out of the box an agent can leave you a draft, and nothing more.
+            In Passband, under Settings, Agents, &ldquo;What your agent may
+            write&rdquo; moves that line per mailbox, and the door offers only
+            the tools your level allows.
+          </p>
+        </div>
+        <div class="brief levels">
+          <div>
+            <code>no extra tools</code>
+            <h3>Read only</h3>
+            <p>The seven tools above and nothing else. The agent cannot leave a draft or send a message.</p>
+          </div>
+          <div class="on">
+            <code>create_draft &middot; open_draft</code>
+            <h3>Drafts only <small>default</small></h3>
+            <p>The agent leaves a draft in Passband, marked from your agent, for you to read, edit and send, or discard. It can ask your Mac to bring the draft up in the composer, where only the send button sends it. Nothing leaves your mailbox.</p>
+          </div>
+          <div>
+            <code>send_email</code>
+            <h3>Send, with your approval</h3>
+            <p>The agent sends from your address through the same guarded, logged pipeline your own mail takes. It is told to show you each message and wait for your yes in its chat, which Passband cannot see: an instruction to the agent, not a lock. Drafts only is the hard stop.</p>
+          </div>
+        </div>
+        <p class="fine-print">
+          At every level an agent can reply only to mail it can read, writes
+          to the sender address it was shown and copies nobody it did not
+          name, attaches and forwards nothing, never touches a draft you are
+          writing, and never holds your Gmail credential. The full rules are in
+          the <a href="/security">threat model</a>.
+        </p>
+      </section>
+
+      <section class="section" id="connect">
+        <p class="num">05 &middot; HOW IT CONNECTS</p>
+        <h2>Add it where your agent <em>already lives.</em></h2>
+        <p class="intro">
+          Passband for Mac writes the exact setup for your agent in Settings,
+          Agents, with your address already in it. On hosted, which is rolling out now, your agent opens
+          a browser and you sign in with the Google account of the mailbox. On
+          self-host, the address stays on your computer or your tailnet. Either
+          way, there is no token to paste.
+        </p>
+        <div class="agents">
+          <div><b>Claude</b><p>Add Passband as a custom connector: Customize, Connectors, paste the address. <span class="on">hosted</span></p></div>
+          <div><b>OpenClaw</b><p>One <code>openclaw mcp add passband</code> on the machine your gateway runs on.</p></div>
+          <div><b>Hermes Agent</b><p>A few lines in <code>~/.hermes/config.yaml</code>, then <code>/reload-mcp</code>.</p></div>
+          <div><b>Claude Code</b><p><code>claude mcp add --transport http passband &lt;address&gt;</code></p></div>
+          <div><b>Codex</b><p><code>codex mcp add passband --url &lt;address&gt;</code></p></div>
+          <div><b>Cursor</b><p>One entry in <code>~/.cursor/mcp.json</code>.</p></div>
+        </div>
+        <p class="fine-print">
+          Claude's custom connectors reach Passband from Anthropic's servers,
+          so they need hosted. On self-host, Claude Desktop connects through
+          <code>mcp-remote</code>. Any other client that takes a remote MCP
+          server works the same way.
+        </p>
+      </section>
+
+      <section class="section" id="price">
+        <p class="num">06 &middot; PRICE</p>
+        <h2>What it costs <em>to start.</em></h2>
+        <div class="price">
+          <div>
+            <span class="tag">Superhuman MCP</span>
+            <p class="big">$33 to $40 per user per month</p>
+            <p>MCP access starts at the Business plan: $40 per user per month, or $33 billed annually. Superhuman's help article: <q>The MCP Server is not available on the Starter plan.</q></p>
+          </div>
+          <div class="pb">
+            <span class="tag">Passband Agent MCP</span>
+            <p class="big">Free in Beta</p>
+            <p>The daemon is MIT licensed and Agent MCP is part of it. Triage uses a model key you supply, or runs on local rules with none. Hosted Passband is invitation-only while it is in preview.</p>
+          </div>
+        </div>
+        <div class="actions">
+          <a class="cta" href="/self-host">Self-host Passband &rarr;</a>
+          <a href="/waitlist">or join the waitlist for hosted</a>
+        </div>
+      </section>
+
+      <section class="section" id="sources">
+        <p class="checked">Checked October 2026</p>
+        <h2>Sources.</h2>
+        <p class="intro">
+          Everything said here about Superhuman comes from these pages, read in
+          October 2026. Products change; if one of these has, tell us at
+          <a href="mailto:braelyn@passband.app">braelyn@passband.app</a> and we
+          will fix this page.
+        </p>
+        <ul class="sources">
+          <li><a href="https://help.superhuman.com/hc/en-us/articles/46005696690317-Superhuman-Mail-MCP-Server">Superhuman Mail MCP Server</a> <small>Superhuman help center, updated September 22, 2026. Tools, plan, confirmation, logging.</small></li>
+          <li><a href="https://docs.superhuman.com/@emma-hong/superhuman-mail-mcp-overview">Superhuman Mail MCP Server Overview</a> <small>Superhuman docs. Identity and permissions.</small></li>
+          <li><a href="https://blog.superhuman.com/superhuman-mail-mcp/">Drive Superhuman Mail from Claude and ChatGPT</a> <small>Superhuman blog, April 29, 2026. Launch, directories, real-time index.</small></li>
+          <li><a href="https://superhuman.com/plans">Superhuman plans</a> <small>Business pricing.</small></li>
+          <li><a href="https://claude.com/connectors/superhuman-mail">Superhuman Mail in Claude's connector directory</a></li>
+          <li><a href="https://promptarmor.com/resources/superhuman-ai-exfiltrates-emails">Superhuman AI exfiltrates emails</a> <small>PromptArmor, January 12, 2026.</small></li>
+          <li><a href="/security">Passband threat model</a> <small>What Agent MCP serves and withholds, and how it signs agents in.</small></li>
+        </ul>
+        <p class="aside-sub" style="margin-top:1.25rem; max-width:50rem">
+          Tool counts are as Superhuman documents them; its help article
+          introduces the list with &ldquo;tools such as.&rdquo; The read and
+          act split is our reading of each tool's description. Passband's
+          count is seven tools always, and up to ten by the mailbox owner's
+          setting.
+        </p>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <span>Passband</span>
+      <nav>
+        <a href="/about">About</a>
+        <a href="/self-host">Self-host</a>
+        <a href="/trust">Trust</a>
+        <a href="/vs-superhuman">Passband vs Superhuman</a>
+        <a href="/mcp-vs-superhuman" aria-current="page">Agent MCP vs Superhuman</a>
+        <a href="/vs-slashy">Passband vs Slashy</a>
+        <a href="/mcp-vs-slashy">Agent MCP vs Slashy</a>
+        <a href="/privacy">Privacy</a>
+        <a href="/terms">Terms</a>
+      </nav>
+    </footer>
+  </body>
+</html>

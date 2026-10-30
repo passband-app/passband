@@ -555,9 +555,10 @@ fn a_ghost_an_events_current_plan_claims_is_not_reminded_twice() {
     // claim meanwhile would remind twice.
     w.plans.get_mut(&item.key).unwrap().version = "old".into();
     assert!(matches!(w.built().ghosts[1], GhostLink::Claimed(0, _)));
-    // A plan from another prompt claims nothing.
+    // So does a plan from an older prompt: a new prompt must not drop every
+    // claim in the minutes before each event is planned again.
     w.plans.get_mut(&item.key).unwrap().prompt_version = "calendar-remind-v0".into();
-    assert!(matches!(w.built().ghosts[1], GhostLink::Alone(_)));
+    assert!(matches!(w.built().ghosts[1], GhostLink::Claimed(0, _)));
     // Nor does a plan naming a ghost that is no longer a candidate.
     w.plans.get_mut(&item.key).unwrap().prompt_version = PROMPT_VERSION.into();
     w.ghosts[1].start = at("2026-11-02T17:30:00-08:00");
@@ -758,14 +759,14 @@ fn the_tickets_button_takes_the_plans_pick_else_the_fallback() {
     let mut none = stored.clone();
     none.plan.ticket = None;
     assert_eq!(tickets(&item, Some(&none)), None);
-    // A stale plan still holds its pick until it is planned again; one from
-    // an older prompt is no plan: the fallback.
+    // A stale plan still holds its pick until it is planned again, and so
+    // does one from an older prompt.
     let mut stale = stored.clone();
     stale.version = "old".into();
     assert_eq!(tickets(&item, Some(&stale)).unwrap().message_id, 40);
     let mut older = stored;
     older.prompt_version = "calendar-remind-v0".into();
-    assert_eq!(tickets(&item, Some(&older)).unwrap().message_id, 41);
+    assert_eq!(tickets(&item, Some(&older)).unwrap().message_id, 40);
     w.mail.clear();
     assert_eq!(tickets(&w.built().events[0], None), None);
 }
@@ -1186,9 +1187,16 @@ fn a_stale_plan_still_governs_and_the_fallback_is_for_the_never_planned() {
     )
     .unwrap();
     assert_eq!((d.lead_minutes, d.fallback), (Some(120), false));
-    // A plan from another prompt is no plan.
+    // A plan from an older prompt governs the same way: a new prompt must
+    // not turn every "no reminder" into the fallback before it is asked again.
     quiet.prompt_version = "calendar-remind-v0".into();
-    assert!(due(&item, Some(&quiet), t, LA).unwrap().fallback);
+    assert_eq!(
+        due(&item, Some(&quiet), t, LA),
+        None,
+        "an older prompt's no stays no"
+    );
+    // Only an item never planned gets the fallback.
+    assert!(due(&item, None, t, LA).unwrap().fallback);
 }
 
 #[test]
@@ -1353,6 +1361,19 @@ fn the_line_rule_keeps_ordinary_lines_and_drops_steered_ones() {
         "Meet by the fountain, then walk over",
         "Water, snacks, sunscreen",
         "Park on Elm St. Net fee is $10",
+        // Dates with a year and a time, or written in numbers.
+        "Oct 30 2026, 7:30pm",
+        "Doors Dec 31, 2026 11:59pm",
+        "Your show is 10/30/2026",
+        "2026-10-30 at 8",
+        "30 Oct 2026, doors 7pm",
+        // Numbers next to words that a keypad rule must not read as a phone.
+        "100-Year anniversary gala",
+        "Doors at 730 then dinner",
+        "Gate 101-B, row 12",
+        // Other scripts.
+        "Rendez-vous à l'entrée, côté gauche",
+        "Bring your Führerschein for the rental",
     ];
     let bad = [
         "Pay at evil-tickets.com now",
@@ -1392,6 +1413,29 @@ fn the_line_rule_keeps_ordinary_lines_and_drops_steered_ones() {
         "Call 1 800 TICKETS",
         "evil-tickets.ru",
         "evil. org",
+        // From the verification pass, 2026-10-30.
+        "pay at evil.c\u{43E}m",
+        "see \u{43F}\u{440}\u{438}\u{43C}\u{435}\u{440}.\u{440}\u{444}",
+        "Call 415\u{2013}555\u{2013}1234",
+        "Call 415\u{2014}555\u{2014}1234",
+        "Call 415\u{2212}555\u{2212}1234",
+        "Call 888-GET-CASH",
+        "Call 844-PAY-NOW",
+        "Call (888) TICKETS",
+        "Call 1 (800) FLOWERS",
+        "Call 1800FLOWERS",
+        "Call 800-555-CASH",
+        "Call 888-Tickets",
+        "Call 415-PAY-CASH",
+        "pay at evil\u{AD}.com",
+        "pay at evil.\u{301}com",
+        "pay at evil\u{34F}.com",
+        "evil . Com",
+        "evil .Com",
+        "evil . me",
+        "evil {dot} com",
+        "evil <dot> com",
+        "Booking ref 12\u{2013}34\u{2013}56",
     ];
     let dropped: Vec<&str> = good
         .iter()
@@ -1447,6 +1491,30 @@ fn a_code_in_the_events_own_text_is_handed_over() {
     // Keypad characters and letters, from the title or the place too.
     assert!(with_code("Gate code #4417 then buzz", "Gate code", "#4417").is_some());
     assert!(with_code("Locker B12 is yours", "Locker", "B12").is_some());
+    assert!(with_code("Keypad 1234# at the side door", "Side door", "1234#").is_some());
+}
+
+#[test]
+fn a_code_never_carries_a_phone_number_from_any_country() {
+    // A US local number (7 digits), an 8-digit number (Singapore, Hong
+    // Kong, Denmark, Norway), and numbers spelled on a keypad.
+    assert_eq!(
+        with_code("Call 5551234 at the gate", "Gate code", "5551234"),
+        None
+    );
+    assert_eq!(
+        with_code("Ring 91234567 on arrival", "Gate code", "91234567"),
+        None
+    );
+    assert_eq!(with_code("Call 1800FLOWERS", "Code", "1800FLOWERS"), None);
+    assert_eq!(with_code("Call 888GETCASH", "Code", "888GETCASH"), None);
+    // A piece of a longer number is not a whole word of it.
+    assert_eq!(with_code("PIN 1234-5678", "Door PIN", "1234"), None);
+    assert_eq!(with_code("Call 415-555-1234", "Code", "555"), None);
+    assert_eq!(
+        with_code("Call 415\u{2013}555\u{2013}1234", "Code", "555"),
+        None
+    );
 }
 
 #[test]
@@ -1489,8 +1557,14 @@ fn a_code_is_never_a_phone_number_a_word_or_a_sentence() {
 #[test]
 fn a_codes_label_is_plain_words_or_just_code() {
     let label = |l: &str| with_code(FRONT_DESK, l, "642181").map(|c| c.label);
-    assert_eq!(label("Wi-Fi password").as_deref(), Some("Wi-Fi password"));
+    assert_eq!(label("Wi-Fi").as_deref(), Some("Wi-Fi"));
+    assert_eq!(label("Front door PIN").as_deref(), Some("Front door PIN"));
     assert_eq!(label("Door PIN: call now!").as_deref(), Some("Code"));
+    // A label only names what the code opens: it never asks for anything.
+    assert_eq!(label("Call now").as_deref(), Some("Code"));
+    assert_eq!(label("Text").as_deref(), Some("Code"));
+    assert_eq!(label("WhatsApp").as_deref(), Some("Code"));
+    assert_eq!(label("Pay at evil dot com").as_deref(), Some("Code"));
     assert_eq!(label("visit evil.com").as_deref(), Some("Code"));
     assert_eq!(label("").as_deref(), Some("Code"));
     assert_eq!(
@@ -1537,4 +1611,31 @@ fn a_plan_stored_before_codes_reads_with_none() {
     let out: RemindOutput =
         serde_json::from_str(r#"{"remind":true,"lead_minutes":30,"code":null}"#).unwrap();
     assert!(out.code.is_none());
+}
+
+#[test]
+fn an_older_prompts_plan_governs_until_planned_again() {
+    // A plan from the previous prompt still says no reminder, holds its lead
+    // and keeps its claims; only its line and code wait for a current plan.
+    let w = concert();
+    let item = &w.built().events[0];
+    let old = StoredPlan {
+        version: item.version.clone(),
+        prompt_version: "calendar-remind-v1".into(),
+        plan: plan(false, 60),
+    };
+    assert!(old.governs() && !old.current(item));
+    let t: DateTime<Utc> = "2026-10-31T02:45:00Z".parse().unwrap();
+    // In the fallback's window and busy: still silent.
+    assert_eq!(due(item, Some(&old), t, LA), None);
+    let mut yes = old.clone();
+    yes.plan = plan(true, 120);
+    yes.plan.line = Some("Old words".into());
+    let early: DateTime<Utc> = "2026-10-31T01:00:00Z".parse().unwrap();
+    let d = due(item, Some(&yes), early, LA).unwrap();
+    assert!(!d.fallback, "its own lead, not the fallback");
+    assert_eq!(
+        frame(1, early, item, &d, Some(&yes), LA)["line"],
+        serde_json::Value::Null
+    );
 }

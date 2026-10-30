@@ -1012,13 +1012,31 @@ input in code:
     groups ("12-34-56"), or 7+ across the separators a number is printed
     with (every phone number has 7, while "Oct 30, 2026", "seats 101-104"
     and "2026-27" make 6);
-  - a vanity number (`1-800-flowers`, or `888-TICKETS` in capitals).
+  - a vanity number (`1-800-flowers`, or `888-TICKETS` in capitals), or a
+    number spelled on a keypad: 3 digits then letters and digits joined by
+    `-` or `.`, 7 keys or more, toll-free or in capitals (`888-GET-CASH`,
+    `(888) TICKETS`, `1800FLOWERS`, `415-PAY-CASH`; not "100-Year gala");
+  - before testing, dates with a year are masked ("Oct 30 2026, 7:30pm",
+    "10/30/2026", "2026-10-30"), every dash counts as a separator
+    ("415–555–1234"), and invisible characters and combining marks are
+    dropped, so `evil\u{AD}.com` is `evil.com`. A host whose last label has
+    a non-ASCII letter counts (`evil.cоm` with a Cyrillic `о`), and a space
+    BEFORE a dot is never a sentence break, so `evil . Com` counts in any
+    case.
   The banner then shows the title and time only. Measured 2026-10-30 over 84
   ordinary lines and 37 steered ones (`remind::tests::
   the_line_rule_keeps_ordinary_lines_and_drops_steered_ones`): every ordinary
   line kept, every steered one dropped but two no filter can catch, an SMS
   short code ("Text 55512") and plain words ("Your account is locked,
-  verify in Passband"). The earlier rule dropped 9 of the first 64.
+  verify in Passband"). The earlier rule dropped 9 of the first 64. A
+  verification pass the same day found bypasses (Unicode dashes, keypad
+  numbers, a Cyrillic `о`, invisible characters) and date false positives;
+  each is now a case in that test.
+
+A plan from an OLDER prompt governs like a stale one (it decides whether
+and when, and keeps its claims; only a current plan shows its line and
+code), so bumping the prompt never turns every "no reminder" into the
+fallback, or drops every claim, before each item is planned again.
 - `open` and `ticket`: `{mail, attachment?}` indexes into the numbered lists.
   An index out of range is null. `open` is what tapping the banner shows;
   `ticket` is what the Tickets button shows.
@@ -1030,10 +1048,15 @@ input in code:
   they walk in. The line rule drops codes on purpose (a steered line must
   not carry one), so the code has its own field, HELD TO THE ITEM'S OWN TEXT
   in code (`remind::settle_code`), as the card's place is held to the
-  location: the value must appear word for word, as a whole word, in the
-  title, location or description, never the mail; 3 to 12 letters, digits,
-  `#` and `*`; at least 1 digit and at most 8 (every phone number has more).
-  The label is plain words of at most 24 characters, else "Code". Served
+  location: the value must appear word for word, as a whole word (not a
+  piece of "1234-5678"), in the title, location or description, never the
+  mail; at most 2 letters then digits, `#` and `*` ("642181", "#4417",
+  "B12"), 3 to 12 characters, 2 to 6 digits (phone numbers run from 7, and 8
+  in Singapore, Hong Kong, Denmark and Norway, so 6 keeps them all out and a
+  spelled number like `1800FLOWERS` has no shape to fit). The label uses only
+  a closed list of words that name what a code opens (door, gate, entry,
+  building, locker, PIN, code, Wi-Fi and the like), so it can never say
+  "Call now"; anything else is "Code". Served
   from a CURRENT plan only, so a PIN that changed in the description never
   shows the old one. The banner body leads with it: "Door PIN 642181 · the
   line". On the iPhone the lock screen hides it until Face ID unlocks

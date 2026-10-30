@@ -653,11 +653,7 @@ pub fn build(input: &Input<'_>, zone: Tz, now: DateTime<Utc>) -> Built {
         if !item.theirs {
             continue;
         }
-        let Some(plan) = input
-            .plans
-            .get(&item.key)
-            .filter(|p| p.prompt_version == PROMPT_VERSION)
-        else {
+        let Some(plan) = input.plans.get(&item.key).filter(|p| p.governs()) else {
             continue;
         };
         for id in &plan.plan.same_as {
@@ -838,11 +834,14 @@ impl StoredPlan {
     }
 
     /// The plan that governs `item` while it waits to be planned again: a
-    /// STALE plan (its version moved) still decides whether to remind, how
-    /// long before, and what it claims; only a plan from another prompt is
-    /// none at all. The fallback is for an item that has never had a plan.
+    /// STALE plan (its version moved, or an older prompt made it) still
+    /// decides whether to remind, how long before, and what it claims, and
+    /// only a CURRENT one shows its line and its code. So a new prompt never
+    /// turns every "no reminder" into the fallback, or drops every claim, in
+    /// the minutes before each item is planned again. The fallback is for an
+    /// item that has never had a plan.
     pub fn governs(&self) -> bool {
-        self.prompt_version == PROMPT_VERSION
+        true
     }
 }
 
@@ -939,12 +938,46 @@ fn fold(text: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
     let folded: String = text
         .nfkc()
+        .filter(|&c| !ignorable(c))
         .map(|c| match c {
             '\u{3002}' | '\u{FF61}' => '.',
             c => c,
         })
         .collect();
     plain(&folded)
+}
+
+/// Default-ignorable code points [`plain`] leaves: drawn as nothing, so one
+/// inside a word ("evil\u{AD}.com") splits it for a test and not on screen.
+fn ignorable(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{034F}'
+            | '\u{115F}'..='\u{1160}'
+            | '\u{17B4}'..='\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E0FFF}'
+    )
+}
+
+/// What the drop test reads: the folded text without combining marks, so a
+/// mark stacked on a dot or a letter ("evil.\u{301}com") cannot split what
+/// the screen draws as one word. Only tested, never shown: removing marks
+/// would spoil words in many scripts.
+fn skeleton(text: &str) -> String {
+    text.chars()
+        .filter(|&c| !ignorable(c) && !unicode_normalization::char::is_combining_mark(c))
+        .collect()
 }
 
 /// Common generic top-level domains: the right side of a dot written out
@@ -1002,14 +1035,18 @@ fn loose_tld(word: &str) -> bool {
 /// - a phone number or a code ([`digit_run`]);
 /// - a vanity number ([`vanity_number`]).
 pub fn line_shaped(text: &str) -> bool {
+    let text = &skeleton(text);
     if ghost::has_url(text) {
         return true;
     }
     let lower = text.to_lowercase();
     if lower.contains("hxxp")
-        || ["[.]", "(.)", "[dot]", "(dot)", "{.}", "[at]", "(at)"]
-            .iter()
-            .any(|o| lower.contains(o))
+        || lower.contains(" d0t ")
+        || [
+            "[.]", "(.)", "[dot]", "(dot)", "{dot}", "<dot>", "{.}", "[at]", "(at)",
+        ]
+        .iter()
+        .any(|o| lower.contains(o))
         || address_at(&lower)
     {
         return true;
@@ -1020,7 +1057,62 @@ pub fn line_shaped(text: &str) -> bool {
     if words.iter().any(|w| dotted_host(w)) || loose_host(text) {
         return true;
     }
-    digit_run(text) || vanity_number(text)
+    digit_run(&mask_dates(text)) || vanity_number(text) || keypad_number(text)
+}
+
+/// Dates written with a year, replaced by a word before digits are counted:
+/// "Oct 30 2026, 7:30pm", "10/30/2026" and "2026-10-30" are no phone
+/// number. Only real months and days match, so "415/555/1234" and
+/// "415-555-1234" are untouched.
+fn mask_dates(text: &str) -> String {
+    static DATES: std::sync::LazyLock<[regex::Regex; 4]> = std::sync::LazyLock::new(|| {
+        const MONTH: &str = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?";
+        const DAY: &str = r"(?:0?[1-9]|[12][0-9]|3[01])";
+        const MM: &str = r"(?:0?[1-9]|1[0-2])";
+        [
+            regex::Regex::new(&format!(r"\b[0-9]{{4}}-{MM}-{DAY}\b")),
+            regex::Regex::new(&format!(
+                r"\b(?:{MM}/{DAY}|{DAY}/{MM})/(?:[0-9]{{4}}|[0-9]{{2}})\b"
+            )),
+            regex::Regex::new(&format!(
+                r"(?i)\b{MONTH}\s+{DAY}(?:st|nd|rd|th)?,?\s+[0-9]{{4}}\b"
+            )),
+            regex::Regex::new(&format!(r"(?i)\b{DAY}\s+{MONTH},?\s+[0-9]{{4}}\b")),
+        ]
+        .map(|r| r.expect("date regex"))
+    });
+    DATES.iter().fold(text.to_string(), |t, re| {
+        re.replace_all(&t, " date ").into_owned()
+    })
+}
+
+/// A phone number spelled on a keypad: three digits (a `1` before them, in
+/// brackets or not), then letters and digits joined by `-` or `.` or nothing,
+/// 7 or more keys in all, with a letter. It counts when the prefix is
+/// toll-free (`888-Tickets`, `1800FLOWERS`, `800-555-CASH`) or the letters
+/// are capitals (`415-PAY-CASH`, `(888) TICKETS`). A space after the prefix
+/// counts only before capitals, so "100-Year gala" and "730 then dinner" are
+/// text.
+fn keypad_number(text: &str) -> bool {
+    static KEYPAD: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?:^|[^0-9A-Za-z])(?:1[ .-]?)?\(?([0-9]{3})\)?([ .-]?)([A-Za-z0-9]+(?:[-.][A-Za-z0-9]+)*)",
+        )
+        .expect("keypad regex")
+    });
+    KEYPAD.captures_iter(text).any(|c| {
+        let prefix = &c[1];
+        let spaced = &c[2] == " ";
+        let rest = &c[3];
+        let letters: Vec<char> = rest.chars().filter(char::is_ascii_alphabetic).collect();
+        let keys = 3 + rest.chars().filter(char::is_ascii_alphanumeric).count();
+        let capitals = !letters.is_empty() && letters.iter().all(char::is_ascii_uppercase);
+        let toll_free = matches!(
+            prefix,
+            "800" | "833" | "844" | "855" | "866" | "877" | "888"
+        );
+        !letters.is_empty() && keys >= 7 && (capitals || (toll_free && !spaced))
+    })
 }
 
 /// An `@` with a letter or digit right before or after it.
@@ -1033,15 +1125,19 @@ fn address_at(lower: &str) -> bool {
     })
 }
 
-/// `label(.label)+` with a last label that is a country code or 3 or more
-/// letters, over one run of letters, digits, dots and hyphens.
+/// `label(.label)+` with a last label of letters that is a country code, 3
+/// or more ASCII letters, or any label with a non-ASCII letter (`evil.cоm`
+/// with a Cyrillic `о`, `пример.рф`), over one run of letters, digits, dots
+/// and hyphens.
 fn dotted_host(word: &str) -> bool {
     let word = word.trim_matches(['.', '-']);
     let labels: Vec<&str> = word.split('.').collect();
     labels.len() >= 2
         && labels.iter().all(|l| !l.is_empty())
         && labels.last().is_some_and(|tld| {
-            tld.chars().all(|c| c.is_ascii_alphabetic()) && (tld.len() >= 3 || country_tld(tld))
+            tld.chars().count() >= 2
+                && tld.chars().all(char::is_alphabetic)
+                && (!tld.is_ascii() || tld.len() >= 3 || country_tld(tld))
         })
 }
 
@@ -1077,13 +1173,28 @@ fn loose_host(text: &str) -> bool {
                 .is_some_and(|tld| loose_tld(&tld.as_str().to_lowercase()))
         })
     };
-    hit(&WRITTEN) || hit(&SPACED)
+    // A space BEFORE the dot never ends a sentence, so there any case and
+    // any country code count ("evil . Com", "evil .me").
+    static BEFORE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"[A-Za-z0-9]\s+[.\u{B7}\u{2027}\u{2219}\u{30FB}]\s*([A-Za-z]{2,6})(?:[^A-Za-z-]|$)",
+        )
+        .expect("spaced-before regex")
+    });
+    let before = BEFORE.captures_iter(text).any(|c| {
+        c.get(1).is_some_and(|tld| {
+            let tld = tld.as_str().to_lowercase();
+            COMMON_TLDS.contains(&tld.as_str()) || country_tld(&tld)
+        })
+    });
+    hit(&WRITTEN) || hit(&SPACED) || before
 }
 
 /// A phone number or a code: an unbroken run of 6 or more digits (a code,
 /// "482913"), 6 or more in 3 or more groups joined only by hyphens (a code,
 /// "12-34-56"), or 7 or more counted across the separators a number is
-/// printed with (space, `- . / , _ · + ( )`; every phone number has 7). The
+/// printed with (space, any dash, `. / , _ · + ( )`; every phone number has
+/// 7). Dates with a year are masked first ([`mask_dates`]). The
 /// look-alike letters `l`, `I` and `o` count inside a run. Two short numbers
 /// side by side ("Oct 30, 2026", "seats 101-104", "2026-27") make 6 and are
 /// text.
@@ -1104,9 +1215,19 @@ fn digit_run(text: &str) -> bool {
         } else if run > 0
             && matches!(
                 c,
-                ' ' | '-' | '.' | '+' | '(' | ')' | '/' | ',' | '_' | '\u{B7}'
+                ' ' | '-' | '.' | '+' | '(' | ')' | '/' | ',' | '_' | '\u{B7}' | '\u{2010}'
+                    ..='\u{2015}' | '\u{2212}' | '\u{FE58}' | '\u{FE63}'
             )
         {
+            // Every dash is a hyphen for the code rule.
+            let c = if matches!(
+                c,
+                '\u{2010}'..='\u{2015}' | '\u{2212}' | '\u{FE58}' | '\u{FE63}'
+            ) {
+                '-'
+            } else {
+                c
+            };
             // A separator inside a run: the next digit starts a new group.
             // Two separators in a row ("1, 2") are joined by the last one
             // unless either is not a hyphen.
@@ -1191,31 +1312,75 @@ pub fn settle(item: &Item, out: &RemindOutput) -> Plan {
 
 /// The longest code kept, in characters.
 pub const CODE_CAP: usize = 12;
-/// The most digits a code may hold: every phone number has more, so a code
-/// is never a number to call.
-pub const CODE_MAX_DIGITS: usize = 8;
+/// The most digits a code may hold. Phone numbers run from 7 digits (a US
+/// local number) up, 8 in some countries, so 6 keeps every one out while
+/// holding the 4 to 6 digit PINs keypads use.
+pub const CODE_MAX_DIGITS: usize = 6;
+
+/// The words a code's label may use, so a label names what the code opens
+/// and never asks for anything ("Call now", "Text"). Any other word makes the
+/// label "Code".
+const CODE_LABEL_WORDS: [&str; 34] = [
+    "access",
+    "alarm",
+    "apartment",
+    "apt",
+    "back",
+    "box",
+    "building",
+    "buzzer",
+    "code",
+    "door",
+    "elevator",
+    "entrance",
+    "entry",
+    "front",
+    "garage",
+    "gate",
+    "guest",
+    "key",
+    "keypad",
+    "lobby",
+    "lock",
+    "lockbox",
+    "locker",
+    "main",
+    "office",
+    "parking",
+    "pin",
+    "room",
+    "side",
+    "studio",
+    "suite",
+    "unit",
+    "wi-fi",
+    "wifi",
+];
 /// The longest label kept, in characters.
 pub const CODE_LABEL_CAP: usize = 24;
 
 /// THE CODE RULE: an entry code is shown on the notification only when it is
 /// HELD TO THE ITEM'S OWN TEXT, as the card's place is held to the location
 /// (`place::grounded`). The value must appear in the title, the location or
-/// the description as a whole word (no letter or digit either side), exactly
-/// as written, so the model can copy a code but never make one up. It is 3
-/// to [`CODE_CAP`] characters of letters, digits, `#` and `*` (a keypad),
-/// with at least one digit and at most [`CODE_MAX_DIGITS`] of them, so it is
-/// never a phone number or a word. The label is plain letters, spaces and
-/// hyphens, at most [`CODE_LABEL_CAP`] characters ("Door PIN", "Gate code",
-/// "Wi-Fi password"), else "Code". PURE.
+/// the description as a whole word ([`whole_word_in`]), exactly as written,
+/// so the model can copy a code but never make one up. It is at most 2
+/// letters and then digits, `#` and `*` (a keypad: "642181", "#4417",
+/// "B12"), 3 to [`CODE_CAP`] characters, with 2 to [`CODE_MAX_DIGITS`]
+/// digits, so it is never a phone number, a spelled number (`1800FLOWERS`)
+/// or a word. The label uses only [`CODE_LABEL_WORDS`] ("Door PIN", "Gate
+/// code", "Locker"), else it is "Code", and must pass the line rule
+/// ([`line_shaped`]). The value is held to its own shape above, not to the
+/// line rule, which drops any 6-digit run. PURE.
 pub fn settle_code(item: &Item, out: &CodeOutput) -> Option<Code> {
+    static SHAPE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^[A-Za-z]{0,2}[0-9#*]+$").expect("code shape regex")
+    });
     let value = out.value.trim();
     let chars = value.chars().count();
     let digits = value.chars().filter(char::is_ascii_digit).count();
     let shaped = (3..=CODE_CAP).contains(&chars)
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '#' || c == '*')
-        && (1..=CODE_MAX_DIGITS).contains(&digits);
+        && SHAPE.is_match(value)
+        && (2..=CODE_MAX_DIGITS).contains(&digits);
     if !shaped {
         return None;
     }
@@ -1229,28 +1394,40 @@ pub fn settle_code(item: &Item, out: &CodeOutput) -> Option<Code> {
     }
     let label = fold(&plain(&out.label));
     let label = label.trim();
-    let label = if !label.is_empty()
+    let named = !label.is_empty()
         && label.chars().count() <= CODE_LABEL_CAP
         && label
-            .chars()
-            .all(|c| c.is_alphabetic() || c == ' ' || c == '-')
-    {
+            .split(' ')
+            .all(|w| CODE_LABEL_WORDS.contains(&w.to_lowercase().as_str()));
+    let label = if named {
         label.to_string()
     } else {
         "Code".to_string()
     };
+    if line_shaped(&label) {
+        return None;
+    }
     Some(Code {
         label,
         value: value.to_string(),
     })
 }
 
-/// `needle` in `hay` with no letter or digit right before or after it.
+/// `needle` in `hay` as a whole word: no letter or digit right before or
+/// after it, and no joiner (`- . /` or a dash) with a letter or digit beyond
+/// it, so "1234" is not a whole word of "1234-5678" or "415-555-1234".
 fn whole_word_in(hay: &str, needle: &str) -> bool {
+    fn joined(mut side: impl Iterator<Item = char>) -> bool {
+        match side.next() {
+            Some(c) if c.is_alphanumeric() => true,
+            Some('-' | '.' | '/' | '\u{2010}'..='\u{2015}' | '\u{2212}') => {
+                side.next().is_some_and(char::is_alphanumeric)
+            }
+            _ => false,
+        }
+    }
     hay.match_indices(needle).any(|(at, _)| {
-        let before = hay[..at].chars().next_back();
-        let after = hay[at + needle.len()..].chars().next();
-        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+        !joined(hay[..at].chars().rev()) && !joined(hay[at + needle.len()..].chars())
     })
 }
 
@@ -1304,10 +1481,10 @@ same show, flight or table). Mail of another booking may be used for open or \
 ticket only when that booking is in same_as. An empty list when none is.
 
 code: when the item's own title, place or description gives a code the \
-person will need on arrival (a door PIN, a gate or entry code, a locker or \
-Wi-Fi code), that code copied exactly as written, with a short label naming \
-what it opens, such as Door PIN or Gate code. null when there is none. Never \
-a phone number, a booking or confirmation number, or anything from the mail.
+person will need on arrival (a door PIN, a gate, entry, building or locker \
+code), that code copied exactly as written, with a short label naming what \
+it opens, such as Door PIN or Gate code. null when there is none. Never a \
+phone number, a booking or confirmation number, or anything from the mail.
 
 Use only the numbers given, and never make one up.
 

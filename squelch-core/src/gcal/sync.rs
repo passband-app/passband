@@ -69,6 +69,7 @@ use super::{
 };
 use crate::credentials::CalendarCredentials;
 use crate::error::{CoreError, Result};
+use crate::features::{CALENDAR_OWN, Features};
 use crate::store::{NewAuditEntry, SqliteStore, Store};
 use crate::types::AccountId;
 
@@ -170,6 +171,9 @@ pub struct CalendarSync {
     /// Google writes made today for Passband's own events, `(day, count)`:
     /// [`own::DAILY_CAP`].
     own_writes: std::sync::Mutex<(String, u32)>,
+    /// The hidden features this daemon follows: [`own_events`](Self::own_events)
+    /// runs only with [`CALENDAR_OWN`] on. None until `with_features`.
+    features: Features,
 }
 
 /// A credential failure as a kind: Google refusing the refresh token (or no
@@ -221,6 +225,7 @@ impl CalendarSync {
             places: None,
             place_calls: std::sync::Mutex::new((String::new(), 0)),
             own_writes: std::sync::Mutex::new((String::new(), 0)),
+            features: Features::none(),
         })
     }
 
@@ -228,6 +233,13 @@ impl CalendarSync {
     /// (None: never).
     pub fn with_places(mut self, client: Option<PlaceClient>) -> Self {
         self.places = client;
+        self
+    }
+
+    /// The daemon's hidden features, read live on every pass, so ticking
+    /// [`CALENDAR_OWN`] on the admin page reaches a running daemon.
+    pub fn with_features(mut self, features: Features) -> Self {
+        self.features = features;
         self
     }
 
@@ -431,11 +443,15 @@ impl CalendarSync {
         }
     }
 
-    /// Passband owns the events mail makes ([`own`]): plan from the store,
+    /// Passband owns the events mail makes ([`own`]), only with the
+    /// [`CALENDAR_OWN`] hidden feature on: plan from the store,
     /// then carry out at most [`own::WRITES_PER_PASS`] Google writes, within
     /// [`own::DAILY_CAP`] a day. Every write asks Google to email nobody and
     /// is audited; a quota answer ends the pass. Public for tests.
     pub async fn own_events(&self, now: DateTime<Utc>) {
+        if !self.features.enabled(CALENDAR_OWN) {
+            return;
+        }
         let token = match self.creds.calendar_access(self.account_id).await {
             Ok(Some(access)) => access.token.access_token,
             _ => return,

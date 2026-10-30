@@ -4,13 +4,12 @@
 // launch after taking that version, and never again. Everything below is the
 // ways that sentence can be got wrong.
 //
-// IT NEVER MEETS A NEW USER. `tourCompleted` is the gate, and it is exactly the
-// right bit: it says the app has already introduced itself to whoever is
-// sitting here. A fresh install has not been introduced, so it gets the tour
-// and no changelog, and the two overlays can never stack, because one runs only
-// where the other has finished. Finishing the tour for the first time stamps
-// the install current (`meetNewcomer`), or the launch after it would look like
-// the next case and announce the build they installed. It also settles the transition INTO this
+// A NEW USER MEETS IT AFTER THE TOUR, never over it. `tourCompleted` is the
+// gate: a fresh install gets the tour first, and the two overlays can never
+// stack, because one runs only where the other has finished. Finishing the tour
+// for the first time (`meetNewcomer`) stamps the release just below the latest,
+// so their first time on the Sitrep shows the latest release and nothing older
+// (owner's call, 2026-10-30; it used to stamp current and show nothing). It also settles the transition INTO this
 // feature, which has no other honest signal: an install that predates the stamp
 // but has finished the tour is an established install, owed the release it just
 // took and nothing older (see ReleaseNotes.unseen).
@@ -104,15 +103,18 @@ final class WhatsNew {
         Analytics.capture("whats_new_shown", ["releases": unseen.count])
     }
 
-    /// The tour has just been finished for the first time: stamp this install
-    /// current, so the next launch does not read "tour done, no stamp" as an
-    /// install older than this feature and announce the only version this
-    /// person has ever run. The phone does the same at its Connect gate. An
+    /// The tour has just been finished for the first time. New users are
+    /// shown the LATEST release when they reach the Sitrep (owner's call,
+    /// 2026-10-30), and nothing older: stamp the release just below it, then
+    /// ask. If they are not on the Sitrep yet, arriving there asks again
+    /// (RootView's ShellWatchers); if they quit first, the next launch's
+    /// first sync does. The phone does the same at its Connect gate. An
     /// install that already carries a stamp keeps it.
     func meetNewcomer() {
         guard !Self.forced, Prefs.shared.lastSeenReleaseNotes == nil else { return }
         guard let running = runningVersion else { return }
-        stamp(ReleaseNotes.newest(atOrBelow: running)?.version)
+        stamp(ReleaseLedger.newcomerStamp(ReleaseNotes.all, running: running))
+        maybeShow()
     }
 
     /// Settings' "what's new in this version": on demand, ignoring the stamp.

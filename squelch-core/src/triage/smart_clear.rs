@@ -501,7 +501,10 @@ pub fn model_question(row: &RowFacts<'_>, now: DateTime<Utc>) -> Option<String> 
 /// its own lock before honouring anything.
 pub fn summary_fingerprint(summary: &str) -> String {
     use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(summary.trim().as_bytes()))
+    Sha256::digest(summary.trim().as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Words that name a day or a stretch of days. Matched as whole lowercased
@@ -1986,6 +1989,16 @@ mod tests {
         assert_ne!(
             summary_fingerprint("Sale ends"),
             summary_fingerprint("Sale ended")
+        );
+    }
+
+    /// Stored verdicts carry this string, so its format must never drift: a
+    /// change would make every stored summary look edited.
+    #[test]
+    fn a_fingerprint_is_lowercase_sha256_hex() {
+        assert_eq!(
+            summary_fingerprint("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
 

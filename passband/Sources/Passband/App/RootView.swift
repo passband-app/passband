@@ -286,6 +286,10 @@ private struct ShellWatchers: View {
             // leaving it over a page it says nothing about. A wait already
             // started is kept, and the page's waiting line carries it.
             .onChange(of: store.activeView) { _, view in
+                // Notes still owed (a newcomer who finished the tour on
+                // another page) wait for the Sitrep. A no-op for everyone
+                // already stamped, and once per session for the rest.
+                if view == .sitrep, store.lastRefresh != nil { store.whatsNew.maybeShow() }
                 if view != .calendar {
                     store.closeCalendarConnectForNavigation()
                     // The delete question is about the page being left, and

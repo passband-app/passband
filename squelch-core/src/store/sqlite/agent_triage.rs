@@ -52,7 +52,8 @@ fn decode<T: serde::de::DeserializeOwned>(value: &str) -> Result<T> {
     serde_json::from_str(value).map_err(|e| CoreError::Other(e.into()))
 }
 fn fingerprint<T: serde::Serialize>(value: &T) -> Result<String> {
-    Ok(format!("{:x}", Sha256::digest(json(value)?.as_bytes())))
+    let digest = Sha256::digest(json(value)?.as_bytes());
+    Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
 }
 const MESSAGE_COLUMNS: &str = concat!(
     "m.id, m.thread_id, m.from_addr, m.subject, m.body, m.received_at,

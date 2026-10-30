@@ -3,7 +3,7 @@ resolver = "3"
 members = ["squelch-core", "squelch-httpauth", "squelch-ratelimit", "squelch-mcp", "squelch-tui", "squelch-api", "squelch-relay", "squelch-broker", "squelch-control", "squelch-warden", "squelchd", "squelch-embed", "squelch-eval"]
 
 [workspace.package]
-version = "0.0.14"
+version = "0.0.15"
 edition = "2024"
 license = "MIT"
 
@@ -69,7 +69,7 @@ age = { version = "0.12", default-features = false, features = ["armor"] }
 # `env` so `squelchd auth --broker` can be set once in a container's environment
 # (SQUELCH_BROKER_URL) instead of on every invocation.
 clap = { version = "4", features = ["derive", "env"] }
-toml = "0.8"
+toml = "1.1"
 tiny_http = "0.12"
 webbrowser = "1"
 url = "2"

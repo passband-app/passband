@@ -2888,9 +2888,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.33"
+version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lru"
@@ -4947,11 +4947,11 @@ dependencies = [
 
 [[package]]
 name = "serde_spanned"
-version = "0.6.9"
+version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
+checksum = "4e7523beb55eece201a2356bee0bbca0d1ab466c14c07703b2e0ee6d42cb0c2c"
 dependencies = [
- "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -5189,7 +5189,7 @@ dependencies = [
 
 [[package]]
 name = "squelch-api"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "async-imap",
@@ -5209,7 +5209,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "socket2",
  "squelch-core",
  "squelch-httpauth",
@@ -5226,14 +5226,14 @@ dependencies = [
 
 [[package]]
 name = "squelch-broker"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "axum",
  "http-body-util",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "squelch-ratelimit",
  "thiserror 2.0.21",
  "tokio",
@@ -5245,7 +5245,7 @@ dependencies = [
 
 [[package]]
 name = "squelch-control"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "age",
  "anyhow",
@@ -5256,7 +5256,7 @@ dependencies = [
  "clap",
  "deadpool-postgres",
  "getrandom 0.3.4",
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "http-body-util",
  "oauth2",
  "percent-encoding",
@@ -5267,7 +5267,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "squelch-core",
  "squelch-httpauth",
  "thiserror 2.0.21",
@@ -5283,7 +5283,7 @@ dependencies = [
 
 [[package]]
 name = "squelch-core"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "age",
  "ammonia",
@@ -5311,7 +5311,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "socket2",
  "sqlite-vec",
  "squelch-embed",
@@ -5320,7 +5320,7 @@ dependencies = [
  "tiny_http",
  "tokio",
  "tokio-rustls",
- "toml 0.8.23",
+ "toml 1.1.8+spec-1.1.0",
  "unicode-normalization",
  "url",
  "webbrowser",
@@ -5331,7 +5331,7 @@ dependencies = [
 
 [[package]]
 name = "squelch-embed"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "axum",
  "fastembed",
@@ -5346,7 +5346,7 @@ dependencies = [
 
 [[package]]
 name = "squelch-eval"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "axum",
@@ -5359,19 +5359,19 @@ dependencies = [
  "serde_json",
  "squelch-core",
  "tokio",
- "toml 0.8.23",
+ "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]
 name = "squelch-httpauth"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "subtle",
 ]
 
 [[package]]
 name = "squelch-mcp"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5397,14 +5397,14 @@ dependencies = [
 
 [[package]]
 name = "squelch-ratelimit"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "http",
 ]
 
 [[package]]
 name = "squelch-relay"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "axum",
@@ -5425,7 +5425,7 @@ dependencies = [
 
 [[package]]
 name = "squelch-tui"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5437,7 +5437,7 @@ dependencies = [
 
 [[package]]
 name = "squelch-warden"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "age",
  "anyhow",
@@ -5450,7 +5450,7 @@ dependencies = [
  "serde",
  "serde-saphyr",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "squelch-embed",
  "squelch-httpauth",
  "thiserror 2.0.21",
@@ -5462,7 +5462,7 @@ dependencies = [
 
 [[package]]
 name = "squelchd"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "axum",
@@ -6038,44 +6038,42 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "0.8.23"
+version = "1.1.8+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
-dependencies = [
- "serde",
- "serde_spanned",
- "toml_datetime",
- "toml_edit",
-]
-
-[[package]]
-name = "toml_datetime"
-version = "0.6.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22cddaf88f4fbc13c51aebbf5f8eceb5c7c5a9da2ac40a13519eb5b0a0e8f11c"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "toml_edit"
-version = "0.22.27"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
+checksum = "20489e00e4d8741d6be680764cc12e270655e375a20d1011e844a9c3379e678d"
 dependencies = [
  "indexmap",
- "serde",
+ "serde_core",
  "serde_spanned",
  "toml_datetime",
- "toml_write",
+ "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 
 [[package]]
-name = "toml_write"
-version = "0.1.2"
+name = "toml_datetime"
+version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
+checksum = "2b86d767906c6c42421dcba507eb9d203e779497710a47782a224bb871653053"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
+name = "toml_parser"
+version = "1.1.5+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "baa693a8032d7e1cada7d0041e96126df243179ff061456783ac7f12bda4744c"
+dependencies = [
+ "winnow",
+]
+
+[[package]]
+name = "toml_writer"
+version = "1.1.3+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 
 [[package]]
 name = "tower"
@@ -6277,9 +6275,9 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "unicode-normalization"
-version = "0.1.25"
+version = "0.1.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+checksum = "75cd3fb03d5288b3ba9a1ee103ac7e9cbb59f0b03d64f8ddfcc04dd42758a85d"
 dependencies = [
  "tinyvec",
 ]
@@ -6917,12 +6915,9 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "winnow"
-version = "0.7.15"
+version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
-dependencies = [
- "memchr",
-]
+checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 
 [[package]]
 name = "wit-bindgen"

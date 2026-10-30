@@ -269,7 +269,7 @@ fn a_slot_without_smtp_is_the_run_auth_again_refusal() {
     }
     assert_eq!(
         IMAP_NO_SMTP,
-        "run `squelchd auth --imap` again to enable sending"
+        "run `squelchd auth --imap` again to enable sending and mail actions"
     );
 }
 

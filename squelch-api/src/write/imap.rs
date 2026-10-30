@@ -55,9 +55,12 @@ use super::smtp::{self, SmtpEndpoint, SmtpError, SmtpTimeouts};
 use super::{FetchedRaw, MailWriter, ParentHeaders, SentRef, WriteError, send_budget};
 
 /// What a write on an IMAP account set up before sending existed is told
-/// (contract §1): its slot has no SMTP config. The door answers it 403,
-/// audited `rejected:no_write_credential`, as for any missing credential.
-pub const IMAP_NO_SMTP: &str = "run `squelchd auth --imap` again to enable sending";
+/// (contract §1): its slot has no SMTP config. One string for every write
+/// (send, labels, archive, trash), since the same re-auth enables them all.
+/// The door answers it 403, audited `rejected:no_write_credential`, as for
+/// any missing credential.
+pub const IMAP_NO_SMTP: &str =
+    "run `squelchd auth --imap` again to enable sending and mail actions";
 
 /// The largest raw message a send takes: the most any route can build (25
 /// MiB of attachments in base64's 78-per-57 lines, plus the 2 MiB a body

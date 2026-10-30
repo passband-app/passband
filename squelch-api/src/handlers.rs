@@ -8011,7 +8011,7 @@ mod write_client_tests {
                 assert_eq!(err.status, StatusCode::FORBIDDEN);
                 assert_eq!(
                     err.message,
-                    "run `squelchd auth --imap` again to enable sending"
+                    "run `squelchd auth --imap` again to enable sending and mail actions"
                 );
                 assert_eq!(write_refusal(&err), "rejected:no_write_credential");
                 assert!(!write_ready(&state).await);

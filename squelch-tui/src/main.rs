@@ -49,7 +49,10 @@ fn main() -> Result<()> {
     res
 }
 
-fn run<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> {
+fn run<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()>
+where
+    B::Error: Send + Sync + 'static,
+{
     let mut last_tick = Instant::now();
     while !app.quit {
         terminal.draw(|f| ui::draw(f, app))?;

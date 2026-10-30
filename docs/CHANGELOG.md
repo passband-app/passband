@@ -12,6 +12,37 @@ updates itself, the phone comes through TestFlight, and the daemon is
 rolled onto hosted accounts or pulled as an image on a self-host box,
 so every note says which one it landed in.
 
+## 0.0.16 (2026-10-30)
+
+Stella's Update
+
+### Mac
+
+- **Calendar.** A calendar just as magical as Passband Mail
+- **Reminders that know the event.** A heads-up timed to each event, with a helper like a Tickets button that opens your tickets email
+- **Sign in with Outlook.** Outlook and Hotmail accounts work alongside Gmail
+- A warning when mail is not really from who it says
+- Opens from security scanners are no longer counted
+- Opens to your last board instantly
+- Smaller download
+- Incredible speed improvements
+- Bug fixes
+
+### Daemon
+
+- Calendar for everyone
+- Smart event reminders
+- Events Gmail makes from your mail join your calendar, without duplicates
+- Your agent can search your calendar
+- Amazon packages show up on Shipments, one per box
+- Flags mail sent on someone else's behalf
+- Notifies you about more of the mail that matters
+- Recovers faster when the model is busy
+- Outlook support
+- IMAP support for self-host
+- Sealed mail is never added to search vectors
+- Bug fixes
+
 ## 0.0.15 (2026-10-27)
 
 Tokyo Update

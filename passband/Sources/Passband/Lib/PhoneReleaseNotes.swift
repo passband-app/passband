@@ -101,6 +101,30 @@ enum PhoneReleaseNotes {
     /// THE TABLE. Newest first, and the only place a phone note is written.
     static let all: [PhoneReleaseNote] = [
         PhoneReleaseNote(
+            version: "0.0.11",
+            date: "2026-10-30",
+            headline: "Stella's Update",
+            features: [
+                PhoneFeature(
+                    "Calendar",
+                    detail: "Month, week and day views. Tap a day to see it, tap the grid to make an event, add guests.",
+                    symbol: "calendar"),
+                PhoneFeature(
+                    "Quick Look at the foot of the board",
+                    detail: "Your packages, bills and codes sit in a strip under the cards. Drag it up to open it.",
+                    symbol: "rectangle.bottomhalf.filled"),
+                PhoneFeature(
+                    "Reminders that know the event",
+                    detail: "A heads-up on your phone before each event, with your tickets one tap away.",
+                    symbol: "ticket"),
+            ],
+            also: [
+                PhoneAside("Notifications lead with the sender's photo", symbol: "person.crop.circle"),
+                PhoneAside("Your agent's drafts ping your phone for review", symbol: "square.and.pencil"),
+                PhoneAside("Sign in with Outlook", symbol: "envelope"),
+                PhoneAside("Bug fixes"),
+            ]),
+        PhoneReleaseNote(
             version: "0.0.10",
             date: "2026-10-27",
             headline: "Tokyo Update",

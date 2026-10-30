@@ -263,6 +263,42 @@ enum ReleaseNotes {
     /// THE TABLE. Newest first, and the only place a release note is written.
     static let all: [ReleaseNote] = [
         ReleaseNote(
+            version: "0.0.16",
+            date: "2026-10-30",
+            headline: "Stella's Update",
+            items: [
+                ReleaseItem(
+                    .app, "Calendar",
+                    detail: "A calendar just as magical as Passband Mail",
+                    symbol: "calendar"),
+                ReleaseItem(
+                    .app, "Reminders that know the event",
+                    detail: "A heads-up timed to each event, with a helper like a Tickets button that opens your tickets email",
+                    symbol: "ticket"),
+                ReleaseItem(
+                    .app, "Sign in with Outlook",
+                    detail: "Outlook and Hotmail accounts work alongside Gmail",
+                    symbol: "person.crop.circle.badge.plus"),
+                ReleaseItem(.app, "A warning when mail is not really from who it says"),
+                ReleaseItem(.app, "Opens from security scanners are no longer counted"),
+                ReleaseItem(.app, "Opens to your last board instantly"),
+                ReleaseItem(.app, "Smaller download"),
+                ReleaseItem(.app, "Incredible speed improvements"),
+                ReleaseItem(.app, "Bug fixes"),
+                ReleaseItem(.daemon, "Calendar for everyone"),
+                ReleaseItem(.daemon, "Smart event reminders"),
+                ReleaseItem(.daemon, "Events Gmail makes from your mail join your calendar, without duplicates"),
+                ReleaseItem(.daemon, "Your agent can search your calendar"),
+                ReleaseItem(.daemon, "Amazon packages show up on Shipments, one per box"),
+                ReleaseItem(.daemon, "Flags mail sent on someone else's behalf"),
+                ReleaseItem(.daemon, "Notifies you about more of the mail that matters"),
+                ReleaseItem(.daemon, "Recovers faster when the model is busy"),
+                ReleaseItem(.daemon, "Outlook support"),
+                ReleaseItem(.daemon, "IMAP support for self-host"),
+                ReleaseItem(.daemon, "Sealed mail is never added to search vectors"),
+                ReleaseItem(.daemon, "Bug fixes"),
+            ]),
+        ReleaseNote(
             version: "0.0.15",
             date: "2026-10-27",
             headline: "Tokyo Update",

@@ -196,6 +196,7 @@ fn output(remind: bool, lead: i64, line: &str) -> RemindOutput {
         open: None,
         ticket: None,
         same_as: Vec::new(),
+        code: None,
     }
 }
 
@@ -554,9 +555,10 @@ fn a_ghost_an_events_current_plan_claims_is_not_reminded_twice() {
     // claim meanwhile would remind twice.
     w.plans.get_mut(&item.key).unwrap().version = "old".into();
     assert!(matches!(w.built().ghosts[1], GhostLink::Claimed(0, _)));
-    // A plan from another prompt claims nothing.
-    w.plans.get_mut(&item.key).unwrap().prompt_version = "calendar-remind-v0".into();
-    assert!(matches!(w.built().ghosts[1], GhostLink::Alone(_)));
+    // So does a plan from an older prompt: a new prompt must not drop every
+    // claim in the minutes before each event is planned again.
+    w.plans.get_mut(&item.key).unwrap().prompt_version = "calendar-remind-v1".into();
+    assert!(matches!(w.built().ghosts[1], GhostLink::Claimed(0, _)));
     // Nor does a plan naming a ghost that is no longer a candidate.
     w.plans.get_mut(&item.key).unwrap().prompt_version = PROMPT_VERSION.into();
     w.ghosts[1].start = at("2026-11-02T17:30:00-08:00");
@@ -596,6 +598,7 @@ fn plan(remind: bool, lead: u32) -> Plan {
         open: None,
         ticket: None,
         same_as: Vec::new(),
+        code: None,
     }
 }
 
@@ -756,14 +759,14 @@ fn the_tickets_button_takes_the_plans_pick_else_the_fallback() {
     let mut none = stored.clone();
     none.plan.ticket = None;
     assert_eq!(tickets(&item, Some(&none)), None);
-    // A stale plan still holds its pick until it is planned again; one from
-    // an older prompt is no plan: the fallback.
+    // A stale plan still holds its pick until it is planned again, and so
+    // does one from an older prompt.
     let mut stale = stored.clone();
     stale.version = "old".into();
     assert_eq!(tickets(&item, Some(&stale)).unwrap().message_id, 40);
     let mut older = stored;
-    older.prompt_version = "calendar-remind-v0".into();
-    assert_eq!(tickets(&item, Some(&older)).unwrap().message_id, 41);
+    older.prompt_version = "calendar-remind-v1".into();
+    assert_eq!(tickets(&item, Some(&older)).unwrap().message_id, 40);
     w.mail.clear();
     assert_eq!(tickets(&w.built().events[0], None), None);
 }
@@ -800,6 +803,7 @@ fn the_frame_is_the_wire_contract() {
                      "end": null, "all_day": false, "place": "The Greek Theatre"},
             "lead_minutes": 60,
             "line": "Your 2 tickets are in the Ticketmaster email",
+            "code": null,
             "open": {"message_id": 41, "thread_id": "t41", "attachment_id": 9},
             "ticket": {"message_id": 41, "thread_id": "t41", "kind": "ticket",
                        "attachment_id": 9, "filename": "tickets.pdf",
@@ -899,11 +903,15 @@ fn an_ordinary_line_passes_the_drop_test() {
 
 #[test]
 fn triage_basis_laundering_is_not_widened() {
-    // The reminder line is stricter than the shared `basis` rule, which
-    // still lets a bare host with no path through: widening it would change
-    // triage.
+    // The reminder line has its own rule, stricter where a stranger could
+    // steer it and looser where `basis` drops ordinary lines. Changing either
+    // must not change the other, so both directions are pinned.
     assert!(!ghost::mail_shaped("Pay at evil-tickets.com now"));
     assert!(line_shaped("Pay at evil-tickets.com now"));
+    assert!(ghost::mail_shaped("Dinner @ 7"));
+    assert!(!line_shaped("Dinner @ 7"));
+    assert!(ghost::mail_shaped("Your 2 tickets, seats 101-104"));
+    assert!(!line_shaped("Your 2 tickets, seats 101-104"));
 }
 
 #[test]
@@ -1179,9 +1187,16 @@ fn a_stale_plan_still_governs_and_the_fallback_is_for_the_never_planned() {
     )
     .unwrap();
     assert_eq!((d.lead_minutes, d.fallback), (Some(120), false));
-    // A plan from another prompt is no plan.
-    quiet.prompt_version = "calendar-remind-v0".into();
-    assert!(due(&item, Some(&quiet), t, LA).unwrap().fallback);
+    // A plan from an older prompt governs the same way: a new prompt must
+    // not turn every "no reminder" into the fallback before it is asked again.
+    quiet.prompt_version = "calendar-remind-v1".into();
+    assert_eq!(
+        due(&item, Some(&quiet), t, LA),
+        None,
+        "an older prompt's no stays no"
+    );
+    // Only an item never planned gets the fallback.
+    assert!(due(&item, None, t, LA).unwrap().fallback);
 }
 
 #[test]
@@ -1246,4 +1261,470 @@ fn a_claimed_ghost_keeps_its_own_tickets_when_the_plan_names_none() {
     assert_eq!(pick.message_id, 50, "the dinner booking's own mail");
     // The claimed ghost's plan is kept, for when the claim lets go.
     assert!(built.keep(now(), LA).contains("g:2"));
+}
+
+/// The line rule over what the model plausibly writes: every ordinary line
+/// survives (dates with a year, seat ranges, "Dinner @ 7", "polka dot",
+/// "Node.js", sentence breaks before words that are also domains), and every
+/// steered one goes. Not caught, by design: a short code ("Text 55512") and
+/// plain words ("Your account is locked"); see docs/CALENDAR.md.
+#[test]
+fn the_line_rule_keeps_ordinary_lines_and_drops_steered_ones() {
+    let good = [
+        // concerts / shows
+        "Your 2 tickets are in the Ticketmaster email",
+        "Doors open at 7, show at 8",
+        "Doors open Oct 30, 2026",
+        "Doors at 7:30pm, bring your ID",
+        "Your 2 tickets, seats 101-104",
+        "Seats 101, 102 in section 12",
+        "Section 104, Row G, seats 5-6",
+        "Floor GA, no re-entry",
+        "Bag policy: clear bags only, 12x6x12 or smaller",
+        "Will call opens at 6pm",
+        "Wear polka dot or stripes, it's the dress code",
+        "Meet at the red dot in Hall B",
+        "Mobile tickets are in the AXS app",
+        "Parking pass is in the SeatGeek email",
+        "Starts at 8, opener at 7:15",
+        // flights / travel
+        "Boarding pass is in the United email",
+        "Flight 1234, 10:05 departure",
+        "UA 1532 boards at 6:25 from gate B12",
+        "Check in opens 24 hours before",
+        "Terminal 3, arrive 2 hours early for international",
+        "Confirmation is in the Delta email",
+        "Train 2150 leaves from track 12",
+        "Car rental pickup at Hertz, Terminal 1 lot",
+        "Hotel check in is after 3pm",
+        "Your seat is 23A",
+        // dining
+        "Table for 4 under Boynton",
+        "Dinner @ 7",
+        "Reservation for 2 at 7:30, 15 minute grace period",
+        "Booking is in the Resy email",
+        "Dress code: smart casual",
+        "Prepaid, $85 per person plus tip",
+        // meetings
+        "Zoom link is in the invite",
+        "Agenda: Q4 planning, bring the deck",
+        "Node.js meetup notes are in the description",
+        "Review the doc before you join",
+        "1:1 with Sam, 30 min",
+        "Room 4.12 on the fourth floor",
+        "Building 2, floor 3, room 301",
+        "Prep: 3 slides, 10 minutes",
+        // appointments
+        "Bring your insurance card and photo ID",
+        "Arrive 15 minutes early to fill out forms",
+        "Fasting from midnight, water is fine",
+        "Dr. Patel, suite 200",
+        "Copay is $40",
+        // generic / other
+        "Leave by 6:15 to make it on time",
+        "It's 25 minutes away with traffic",
+        "Bring a gift, it's her 30th",
+        "Rain expected, bring an umbrella",
+        "St. Louis time is an hour behind",
+        "Kickoff 1:05pm, gates open 11:30am",
+        "Race bib pickup 7-9am, start 9:30",
+        "Version 2.0 launch, demo at 3",
+        "Ticket for 1 adult, 2 children",
+        "Open until 10, last entry 9:15",
+        "Pickup order #4521 at the counter",
+        "Bring $20 cash for the coat check",
+        "Gate 4, Row 12, Seat 7",
+        "Event runs 6-9pm",
+        "Show starts 8pm, runtime 2 hr 15 min",
+        "Nov 4, 2026 at the Fillmore",
+        "Tuesday 11/4 at 8pm",
+        "Season opener, 2026-27 season",
+        "Room 101A",
+        "10.30am start",
+        "Bring ID. Cash only at the bar",
+        "Doors at 7. Show at 8",
+        "Arrive early. Info desk is by the entrance",
+        "Great seats. Club level, section 204",
+        "Bring snacks. Top tier has no food",
+        "See you there. Live music after",
+        "Lots of parking. Shop opens at 9",
+        "Party. Co-hosted by Sam and Alex",
+        "Dress warm. Site is outdoors",
+        "Pickup at 5. Ma and Pa will drive",
+        "Early start. App check in is open",
+        "Gift ideas. Link in the invite",
+        "It's casual. No jacket needed",
+        "Wear sneakers, net courts are outside",
+        "Online check in, then bag drop",
+        "Covid test required. Org is strict about it",
+        "Bring a jacket, it gets cold",
+        "Meet by the fountain, then walk over",
+        "Water, snacks, sunscreen",
+        "Park on Elm St. Net fee is $10",
+        // Dates with a year and a time, or written in numbers.
+        "Oct 30 2026, 7:30pm",
+        "Doors Dec 31, 2026 11:59pm",
+        "Your show is 10/30/2026",
+        "2026-10-30 at 8",
+        "30 Oct 2026, doors 7pm",
+        // Numbers next to words that a keypad rule must not read as a phone.
+        "100-Year anniversary gala",
+        "Doors at 730 then dinner",
+        "Gate 101-B, row 12",
+        // Other scripts.
+        "Rendez-vous à l'entrée, côté gauche",
+        "Bring your Führerschein for the rental",
+        // Second verification pass, 2026-10-30: lists joined with " · ",
+        // flight routes, capitals after a number, other scripts.
+        "Doors 7 · No bags",
+        "Row 12 · Club level",
+        "Gate B · Top floor",
+        "Sec 104 · In person",
+        "Doors 7 · At the door",
+        "Doors 7 · ID required",
+        "Doors 7 · TV in lobby",
+        "Doors 7 · Show 8 · ca 2 hrs",
+        "UA 1532 SFO-EWR",
+        "Flight 302 SFO-JFK",
+        "Flight AA 100 LAX-JFK",
+        "Highway 101 NORTH",
+        "Meet at 450 SUTTER ST",
+        "Bus 101 EXPRESS",
+        "Room 512 B-WING",
+        "Room 101-ABCD",
+        "2026-FIFA fan zone",
+        "100-YEAR gala",
+        "Ford F-150 RAPTOR parking",
+        "Boeing 737-MAX8",
+        "800-seat hall",
+        "888-piece orchestra",
+        "877-acre park",
+        "会場は渋谷です。お楽しみに",
+        "门票在邮件里。请提前到达。",
+        "Встреча: г.Москва, ул.Тверская",
+        "Bei Dr.Müller im zweiten Stock",
+        "Cita con la Sra.García",
+        "Showtimes 6:30, 7:45, 9:00",
+    ];
+    let bad = [
+        "Pay at evil-tickets.com now",
+        "see bit.ly",
+        "Visit paypal.com.evil.ru today",
+        "evil-tickets . com",
+        "evil. com",
+        "evil .com",
+        "evil-tickets·com",
+        "visit evil\u{2027}com",
+        "evil-tickets,com",
+        "Call 888-TICKETS",
+        "Call 800 FLOWERS",
+        "Call 1-800-FLOWERS",
+        "Call 415 555 1234",
+        "Call 555-1234",
+        "Text 55512 to confirm",
+        "Email support@evil.com",
+        "hxxps://evil[.]com/pay",
+        "Your account is locked, verify in Passband",
+        "evil dot com",
+        "evil dot co",
+        "Use code 482913",
+        "Call 415, 555, 1234",
+        "Call (415) 555-1234 now",
+        "Call +44 20 7946 0958",
+        "Call 555 1234",
+        "Text 4155551234",
+        "go to evil.co",
+        "evil.io/pay",
+        "Visit evil dot io",
+        "evil · net",
+        "evil ・ com",
+        "pay at evil.me",
+        "write to x@y",
+        "DM @evilsupport",
+        "Call 1 800 TICKETS",
+        "evil-tickets.ru",
+        "evil. org",
+        // From the verification pass, 2026-10-30.
+        "pay at evil.c\u{43E}m",
+        "see \u{43F}\u{440}\u{438}\u{43C}\u{435}\u{440}.\u{440}\u{444}",
+        "Call 415\u{2013}555\u{2013}1234",
+        "Call 415\u{2014}555\u{2014}1234",
+        "Call 415\u{2212}555\u{2212}1234",
+        "Call 888-GET-CASH",
+        "Call 844-PAY-NOW",
+        "Call (888) TICKETS",
+        "Call 1 (800) FLOWERS",
+        "Call 1800FLOWERS",
+        "Call 800-555-CASH",
+        "Call 888-Tickets",
+        "Call 415-PAY-CASH",
+        "pay at evil\u{AD}.com",
+        "pay at evil.\u{301}com",
+        "pay at evil\u{34F}.com",
+        "evil . Com",
+        "evil .Com",
+        "evil . me",
+        "evil {dot} com",
+        "evil <dot> com",
+        "Booking ref 12\u{2013}34\u{2013}56",
+        // Second verification pass, 2026-10-30.
+        "Call Novotel 02 9374 4000",
+        "Help desk: you may 02 9374 4000",
+        "Call Martin 20 7946 0958",
+        "Call Marco 31 0555 1234",
+        "Text Julia 21 2555 1234",
+        "Call 888 GET CASH",
+        "Call 800 555 CASH",
+        "Call 415|555|1234",
+        "Call 415~555~1234",
+        "Call 415*555*1234",
+        "Call 415\u{2022}555\u{2022}1234",
+        "Call 415\u{30FB}555\u{30FB}1234",
+        "evil\u{2022}com",
+        "evil \u{2022} com",
+        "evil .me",
+    ];
+    let dropped: Vec<&str> = good
+        .iter()
+        .copied()
+        .filter(|l| launder_line(l).is_none())
+        .collect();
+    assert!(dropped.is_empty(), "ordinary lines dropped: {dropped:#?}");
+    let kept: Vec<&str> = bad
+        .iter()
+        .copied()
+        .filter(|l| launder_line(l).is_some())
+        .collect();
+    assert_eq!(
+        kept,
+        vec![
+            "Text 55512 to confirm",
+            "Your account is locked, verify in Passband"
+        ],
+        "steered lines kept"
+    );
+}
+
+// --- entry codes ----------------------------------------------------------------
+
+const FRONT_DESK: &str = "If no one is at the front desk, use PIN 642181 to enter, or call \
+                          through the intercom.";
+
+fn code(label: &str, value: &str) -> Option<CodeOutput> {
+    Some(CodeOutput {
+        label: label.into(),
+        value: value.into(),
+    })
+}
+
+fn with_code(description: &str, label: &str, value: &str) -> Option<Code> {
+    let mut w = concert();
+    w.events[0].row.description = Some(description.into());
+    let item = w.built().events[0].clone();
+    let mut out = output(true, 10, "");
+    out.code = code(label, value);
+    settle(&item, &out).code
+}
+
+#[test]
+fn a_code_in_the_events_own_text_is_handed_over() {
+    assert_eq!(
+        with_code(FRONT_DESK, "Door PIN", "642181"),
+        Some(Code {
+            label: "Door PIN".into(),
+            value: "642181".into()
+        })
+    );
+    // Keypad characters and letters, from the title or the place too.
+    assert!(with_code("Gate code #4417 then buzz", "Gate code", "#4417").is_some());
+    assert!(with_code("Locker B12 is yours", "Locker", "B12").is_some());
+    assert!(with_code("Keypad 1234# at the side door", "Side door", "1234#").is_some());
+}
+
+#[test]
+fn a_code_never_carries_a_phone_number_from_any_country() {
+    // A US local number (7 digits), an 8-digit number (Singapore, Hong
+    // Kong, Denmark, Norway), and numbers spelled on a keypad.
+    assert_eq!(
+        with_code("Call 5551234 at the gate", "Gate code", "5551234"),
+        None
+    );
+    assert_eq!(
+        with_code("Ring 91234567 on arrival", "Gate code", "91234567"),
+        None
+    );
+    assert_eq!(with_code("Call 1800FLOWERS", "Code", "1800FLOWERS"), None);
+    assert_eq!(with_code("Call 888GETCASH", "Code", "888GETCASH"), None);
+    // A piece of a longer number is not a whole word of it.
+    assert_eq!(with_code("PIN 1234-5678", "Door PIN", "1234"), None);
+    assert_eq!(with_code("Call 415-555-1234", "Code", "555"), None);
+    assert_eq!(
+        with_code("Call 415\u{2013}555\u{2013}1234", "Code", "555"),
+        None
+    );
+    // A joiner before a WORD is punctuation: the code is whole.
+    assert!(
+        with_code(
+            "use PIN 642181\u{2014}it opens the side door",
+            "Door PIN",
+            "642181"
+        )
+        .is_some()
+    );
+    assert!(with_code("Door 1234/Gate 5678", "Door code", "1234").is_some());
+}
+
+#[test]
+fn a_code_the_text_does_not_hold_word_for_word_is_dropped() {
+    // Made up, or a piece of a longer number.
+    assert_eq!(with_code(FRONT_DESK, "Door PIN", "123456"), None);
+    assert_eq!(with_code(FRONT_DESK, "Door PIN", "64218"), None);
+    assert_eq!(with_code(FRONT_DESK, "Door PIN", "42181"), None);
+    // Joined from a number written with separators.
+    assert_eq!(
+        with_code("Call 555-1234 at the gate", "Gate code", "5551234"),
+        None
+    );
+    // From the mail rather than the event's own text.
+    assert_eq!(with_code("Doors at 7", "Door PIN", "642181"), None);
+}
+
+#[test]
+fn a_code_is_never_a_phone_number_a_word_or_a_sentence() {
+    // More digits than any code: a number to call.
+    assert_eq!(
+        with_code("Call 4155551234 on arrival", "Gate code", "4155551234"),
+        None
+    );
+    // No digit: a word, not a code.
+    assert_eq!(
+        with_code("The password is WELCOME", "Password", "WELCOME"),
+        None
+    );
+    // Too short, too long, or with anything but letters, digits, # and *.
+    assert_eq!(with_code("Room 12", "Room", "12"), None);
+    assert_eq!(
+        with_code("Code ABCDEFGH12345", "Code", "ABCDEFGH12345"),
+        None
+    );
+    assert_eq!(with_code("Use 642-181", "Door PIN", "642-181"), None);
+    assert_eq!(with_code("evil.com/1234", "Code", "evil.com/1234"), None);
+}
+
+#[test]
+fn a_codes_label_is_plain_words_or_just_code() {
+    let label = |l: &str| with_code(FRONT_DESK, l, "642181").map(|c| c.label);
+    assert_eq!(label("Wi-Fi").as_deref(), Some("Wi-Fi"));
+    assert_eq!(label("Front door PIN").as_deref(), Some("Front door PIN"));
+    assert_eq!(label("Door PIN: call now!").as_deref(), Some("Code"));
+    // A label only names what the code opens: it never asks for anything.
+    assert_eq!(label("Call now").as_deref(), Some("Code"));
+    assert_eq!(label("Text").as_deref(), Some("Code"));
+    assert_eq!(label("WhatsApp").as_deref(), Some("Code"));
+    assert_eq!(label("Pay at evil dot com").as_deref(), Some("Code"));
+    // Real labels the first list missed.
+    assert_eq!(label("Front desk").as_deref(), Some("Front desk"));
+    assert_eq!(label("Callbox").as_deref(), Some("Callbox"));
+    assert_eq!(label("Intercom code").as_deref(), Some("Intercom code"));
+    assert_eq!(label("Front-door code").as_deref(), Some("Front-door code"));
+    assert_eq!(label("PIN:").as_deref(), Some("PIN"));
+    // A hyphen does not smuggle a word in.
+    assert_eq!(label("Call-now").as_deref(), Some("Code"));
+    assert_eq!(label("visit evil.com").as_deref(), Some("Code"));
+    assert_eq!(label("").as_deref(), Some("Code"));
+    assert_eq!(
+        label("A label that runs on far too long").as_deref(),
+        Some("Code")
+    );
+}
+
+#[test]
+fn the_frame_hands_over_a_code_only_from_a_current_plan() {
+    let mut w = concert();
+    w.events[0].row.description = Some(FRONT_DESK.into());
+    let item = w.built().events[0].clone();
+    let mut out = output(true, 10, "");
+    out.code = code("Door PIN", "642181");
+    let p = StoredPlan {
+        version: item.version.clone(),
+        prompt_version: PROMPT_VERSION.into(),
+        plan: settle(&item, &out),
+    };
+    let fired: DateTime<Utc> = "2026-10-31T02:50:00Z".parse().unwrap();
+    let d = due(&item, Some(&p), fired, LA).unwrap();
+    assert_eq!(
+        frame(1, fired, &item, &d, Some(&p), LA)["code"],
+        serde_json::json!({"label": "Door PIN", "value": "642181"})
+    );
+    // The description changed (a new PIN): the old one is never shown.
+    let mut stale = p.clone();
+    stale.version = "older".into();
+    let d = due(&item, Some(&stale), fired, LA).unwrap();
+    assert_eq!(
+        frame(1, fired, &item, &d, Some(&stale), LA)["code"],
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn a_plan_stored_before_codes_reads_with_none() {
+    let old =
+        r#"{"remind":true,"lead_minutes":30,"line":null,"open":null,"ticket":null,"same_as":[]}"#;
+    let plan: Plan = serde_json::from_str(old).unwrap();
+    assert_eq!(plan.code, None);
+    // And a null code from the model is none.
+    let out: RemindOutput =
+        serde_json::from_str(r#"{"remind":true,"lead_minutes":30,"code":null}"#).unwrap();
+    assert!(out.code.is_none());
+}
+
+#[test]
+fn an_older_prompts_plan_governs_until_planned_again() {
+    // A plan from the previous prompt still says no reminder, holds its lead
+    // and keeps its claims; only its line and code wait for a current plan.
+    let w = concert();
+    let item = &w.built().events[0];
+    let old = StoredPlan {
+        version: item.version.clone(),
+        prompt_version: "calendar-remind-v1".into(),
+        plan: plan(false, 60),
+    };
+    assert!(old.governs() && !old.current(item));
+    // A prompt left off the governing list is no plan: the fallback.
+    let mut unlisted = old.clone();
+    unlisted.prompt_version = "calendar-remind-v0".into();
+    assert!(!unlisted.governs());
+    let t: DateTime<Utc> = "2026-10-31T02:45:00Z".parse().unwrap();
+    assert!(due(item, Some(&unlisted), t, LA).unwrap().fallback);
+    // In the fallback's window and busy: still silent.
+    assert_eq!(due(item, Some(&old), t, LA), None);
+    let mut yes = old.clone();
+    yes.plan = plan(true, 120);
+    yes.plan.line = Some("Old words".into());
+    let early: DateTime<Utc> = "2026-10-31T01:00:00Z".parse().unwrap();
+    let d = due(item, Some(&yes), early, LA).unwrap();
+    assert!(!d.fallback, "its own lead, not the fallback");
+    assert_eq!(
+        frame(1, early, item, &d, Some(&yes), LA)["line"],
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn only_real_dates_are_masked_before_digits_are_counted() {
+    let masked = |t: &str| !mask_dates(t).chars().any(|c| c.is_ascii_digit());
+    // Real dates go.
+    assert!(masked("Oct 30 2026"));
+    assert!(masked("October 30, 2026"));
+    assert!(masked("30 Oct 2026"));
+    assert!(masked("10/30/2026"));
+    assert!(masked("2026-10-30"));
+    // A name that starts like a month is no month ("Martin", "Novotel").
+    assert!(!masked("Martin 20 2026"));
+    assert!(!masked("Novotel 2 2026"));
+    // A day after a month name has no leading zero ("may 02 9374").
+    assert!(!masked("may 02 2026"));
+    // A year is 19xx or 20xx, never any four digits.
+    assert!(!masked("Oct 30 7946"));
+    assert!(!masked("7946-10-30"));
 }

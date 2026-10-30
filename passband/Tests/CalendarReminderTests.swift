@@ -44,6 +44,7 @@ struct CalendarReminderTests {
         freshness()
         thePushId()
         theBannersWords()
+        theEntryCode()
         whereATapGoes()
         ticketsOnTheTimeline()
         theSameFire()
@@ -125,6 +126,38 @@ struct CalendarReminderTests {
         // The raw push routes to the fetch, before any mail route.
         let route = EventBanner.tapRoute(["event_id": "\(tag):cal:7:1793210000"])
         expect(route == .calendarReminderPush(.init(accountId: account, fireId: 7, fired: 1_793_210_000)), "raw push: \(route)")
+    }
+
+    static func theEntryCode() {
+        let json = #"{"calendar_reminder": 9, "at": 1793210000,"#
+            + #""item": {"kind": "event", "calendar_id": "primary", "id": "gym", "title": "Gym session","#
+            + #""start": "2026-10-30T20:00:00-07:00", "all_day": false, "place": "Equinox"},"#
+            + #""lead_minutes": 10, "line": "If the desk is empty, use the PIN or the intercom","#
+            + #""code": {"label": "Door PIN", "value": "642181"}, "open": null, "ticket": null}"#
+        let s = CalendarReminderSignal.parse(json)
+        expect(s?.code == .init(label: "Door PIN", value: "642181"), "code decodes")
+        if let s {
+            let body = EventBanner.calendarReminderCopy(s).body
+            expect(body == "Door PIN 642181 · If the desk is empty, use the PIN or the intercom", "body: \(body)")
+            var codeOnly = s
+            codeOnly.line = nil
+            expect(EventBanner.calendarReminderCopy(codeOnly).body == "Door PIN 642181", "code alone")
+            var bare = s
+            bare.code = .init(label: "", value: "642181")
+            bare.line = nil
+            expect(EventBanner.calendarReminderCopy(bare).body == "642181", "no label")
+            var sneaky = s
+            sneaky.code = .init(label: "Door\u{202E}PIN", value: "64\u{200B}2181")
+            sneaky.line = nil
+            expect(EventBanner.calendarReminderCopy(sneaky).body == "DoorPIN 642181", "invisible marks stripped")
+        }
+        // A code of the wrong shape costs only itself.
+        let bad = json.replacingOccurrences(of: #"{"label": "Door PIN", "value": "642181"}"#, with: "42")
+        let b = CalendarReminderSignal.parse(bad)
+        expect(b != nil && b?.code == nil, "bad code dropped, banner kept")
+        // An older daemon sends none.
+        let old = json.replacingOccurrences(of: #""code": {"label": "Door PIN", "value": "642181"}, "#, with: "")
+        expect(CalendarReminderSignal.parse(old)?.code == nil, "absent code")
     }
 
     static func theBannersWords() {

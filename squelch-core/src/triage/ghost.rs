@@ -906,6 +906,13 @@ pub(crate) fn mail_shaped(text: &str) -> bool {
     digits || text.contains('@') || text.split(' ').any(|t| url_core(t).is_some())
 }
 
+/// Whether any space-separated token of `text` is a URL or a bare host, by
+/// the rule [`mail_shaped`] uses. The calendar reminder line applies it with
+/// its own digit and `@` rules ([`crate::gcal::remind::line_shaped`]).
+pub(crate) fn has_url(text: &str) -> bool {
+    text.split(' ').any(|t| url_core(t).is_some())
+}
+
 /// A location is display text, except that every URL in it (a meeting link,
 /// alone or after a label as in "Zoom: https://...") keeps only host and
 /// path: a query string is where a meeting passcode lives. A path with a

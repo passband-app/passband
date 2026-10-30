@@ -127,6 +127,13 @@ struct CalendarReminderSignal: Decodable, Equatable, Sendable {
         }
     }
 
+    /// An entry code the event's own text gives ("Door PIN 642181"), held to
+    /// that text by the daemon (`remind::settle_code`).
+    struct EntryCode: Decodable, Equatable {
+        var label: String
+        var value: String
+    }
+
     /// The fire id.
     let calendar_reminder: Int
     var at: Int?
@@ -135,10 +142,11 @@ struct CalendarReminderSignal: Decodable, Equatable, Sendable {
     var line: String?
     var open: Target?
     var ticket: Target?
+    var code: EntryCode?
 
     init(
         calendar_reminder: Int, at: Int? = nil, item: Item, lead_minutes: Int? = nil,
-        line: String? = nil, open: Target? = nil, ticket: Target? = nil
+        line: String? = nil, open: Target? = nil, ticket: Target? = nil, code: EntryCode? = nil
     ) {
         self.calendar_reminder = calendar_reminder
         self.at = at
@@ -147,6 +155,7 @@ struct CalendarReminderSignal: Decodable, Equatable, Sendable {
         self.line = line
         self.open = open
         self.ticket = ticket
+        self.code = code
     }
 
     /// LENIENT EVERYWHERE BUT THE SPINE. The fire id, the item's id and its
@@ -162,10 +171,11 @@ struct CalendarReminderSignal: Decodable, Equatable, Sendable {
         line = try? c.decodeIfPresent(String.self, forKey: .line)
         open = try? c.decodeIfPresent(Target.self, forKey: .open)
         ticket = try? c.decodeIfPresent(Target.self, forKey: .ticket)
+        code = try? c.decodeIfPresent(EntryCode.self, forKey: .code)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case calendar_reminder, at, item, lead_minutes, line, open, ticket
+        case calendar_reminder, at, item, lead_minutes, line, open, ticket, code
     }
 
     /// Where one fired reminder is served, for the app and the extension.
@@ -264,10 +274,23 @@ extension EventBanner {
         return ReminderCopy(
             title: title.isEmpty ? "Untitled event" : title,
             subtitle: subtitle,
-            body: flatten(stripInvisible(signal.line ?? ""), max: 120),
+            body: reminderBody(signal),
             threadIdentifier: calendarGroup,
             // Time-bound by definition: it chimes.
             sound: true)
+    }
+
+    /// The body: the entry code first, where a glance finds it ("Door PIN
+    /// 642181"), then the line. Either may be missing.
+    static func reminderBody(_ signal: CalendarReminderSignal) -> String {
+        let line = flatten(stripInvisible(signal.line ?? ""), max: 120)
+        var code = ""
+        if let entry = signal.code {
+            let value = flatten(stripInvisible(entry.value), max: 12)
+            let label = flatten(stripInvisible(entry.label), max: 24)
+            if !value.isEmpty { code = label.isEmpty ? value : "\(label) \(value)" }
+        }
+        return [code, line].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
     /// "8pm", "8:30pm", or "Today" for an all-day event; nil when the start

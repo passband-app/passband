@@ -364,6 +364,7 @@ async fn a_stale_plan_still_decides_whether_and_when_it_fires() {
         open: None,
         ticket: None,
         same_as: Vec::new(),
+        code: None,
     };
     store
         .calendar_reminder_put(acct, &key, "stale", &plan(false, 30), Utc::now())

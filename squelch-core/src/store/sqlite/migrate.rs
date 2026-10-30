@@ -914,6 +914,10 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // zoned local time, so each is rebuilt once from its stored decisions.
     rebuild_ghosts_for_zoned_times(conn);
 
+    // See the function: Amazon's Shipped/Delivered decisions were always
+    // stored, and only lacked a key to project on.
+    project_amazon_boxes(conn);
+
     // `skipped` came after the table's first form; a database a pre-release
     // build opened has the table without it. Guarded, like the rest, on the
     // table existing.
@@ -1761,6 +1765,76 @@ fn rebuild_ghosts_once(conn: &Connection) -> Result<(usize, usize)> {
     }
     conn.execute_batch("COMMIT")?;
     Ok((rebuilt, skipped))
+}
+
+/// The `app_settings` key marking an account whose stored Amazon decisions
+/// have been projected by [`project_amazon_boxes`].
+pub(super) const AMAZON_BOXES_KEY: &str = "amazon_boxes_projected";
+
+/// ONE-TIME: put every Amazon box the stored decisions already describe on
+/// the Shipments rail (`agent_deliveries::project_amazon_boxes`). Before box
+/// keys existed, every Amazon Shipped/Delivered record had no tracking number
+/// and projected nothing, so the rail had never shown an Amazon package.
+///
+/// Gated per account by a marker in `app_settings`, written in the same
+/// `BEGIN IMMEDIATE` transaction as the projection and re-read inside it, the
+/// way [`rebuild_ghosts_for_zoned_times`] is. Running it twice is harmless
+/// (a rebuild is idempotent); the marker only spares the scan.
+///
+/// NEVER A REASON NOT TO START: a failure rolls the pass back, is logged with
+/// no mail content, and retries on the next open.
+fn project_amazon_boxes(conn: &Connection) {
+    match project_amazon_boxes_once(conn) {
+        Ok(0) => {}
+        Ok(boxes) => eprintln!("squelch: migration projected {boxes} Amazon package(s)"),
+        Err(error) => {
+            eprintln!("squelch: Amazon package backfill failed ({error}); will retry next open");
+            if !conn.is_autocommit() {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+        }
+    }
+}
+
+fn project_amazon_boxes_once(conn: &Connection) -> Result<usize> {
+    if !tables_exist(
+        conn,
+        &[
+            "accounts",
+            "app_settings",
+            "agent_message_decisions",
+            "agent_delivery_projections",
+            "messages",
+            "shipments",
+        ],
+    )? {
+        return Ok(0);
+    }
+    let pending = |conn: &Connection| -> Result<Vec<i64>> {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM accounts WHERE NOT EXISTS(
+                 SELECT 1 FROM app_settings s WHERE s.account_id=accounts.id AND s.key=?1)
+             ORDER BY id",
+        )?;
+        Ok(stmt
+            .query_map([AMAZON_BOXES_KEY], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?)
+    };
+    if pending(conn)?.is_empty() {
+        return Ok(0);
+    }
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let now = Utc::now().to_rfc3339();
+    let mut boxes = 0;
+    for account in pending(conn)? {
+        boxes += agent_deliveries::project_amazon_boxes(conn, account)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO app_settings(account_id, key, value) VALUES(?1, ?2, ?3)",
+            params![account, AMAZON_BOXES_KEY, now],
+        )?;
+    }
+    conn.execute_batch("COMMIT")?;
+    Ok(boxes)
 }
 
 /// Re-run [`banking::sanitize_institution`] over every stored institution,

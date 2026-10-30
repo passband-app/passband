@@ -7,6 +7,7 @@
 pub mod access;
 pub mod agent;
 pub mod agent_config;
+pub mod amazon;
 pub mod auth_pairing;
 pub mod calendar;
 pub mod condense;

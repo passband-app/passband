@@ -260,6 +260,13 @@ run_suite board-file \
   Sources/Passband/Lib/BoardFile.swift \
   Tests/BoardFileTests.swift
 
+# Measured email heights kept across launches: answered only for the exact
+# document, width, type and build, capped, and kept like the board file.
+run_suite frame-height-file \
+  Sources/Passband/Lib/PrivateFile.swift \
+  Sources/Passband/Lib/FrameHeightFile.swift \
+  Tests/FrameHeightFileTests.swift
+
 # The sitrep's zones: one observed property per zone, and a write to one
 # never invalidates another's readers.
 run_suite zone-store \
@@ -616,6 +623,7 @@ run_suite sender-identity \
 # PageKeys.swift rides along: the digits and ⇧C exactly as RootView binds them.
 run_suite key-dispatch \
   Sources/Passband/Keys/KeyDispatch.swift \
+  Sources/Passband/Views/PagePresence.swift \
   Sources/Passband/Keys/PageKeys.swift \
   Tests/KeyDispatchTests.swift
 

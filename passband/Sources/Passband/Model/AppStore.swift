@@ -1949,6 +1949,7 @@ final class AppStore {
         // any of an account no longer here. Behind the paint, not in front of
         // it on the queue.
         BoardFile.sweep(keeping: Set(index.accounts.map(\.id)))
+        FrameHeightStore.sweep(keeping: Set(index.accounts.map(\.id)))
         let accounts = Set(index.accounts.map(\.id))
         Task.detached(priority: .utility) { await CalendarDisk.shared.sweep(keeping: accounts) }
     }
@@ -2185,6 +2186,7 @@ final class AppStore {
             // mailbox behind the same host. The one on disk too.
             boardSnapshots[account.id] = nil
             discardBoardFile(account.id)
+            FrameHeightStore.shared.forget(account: account.id)
             let replaced = account.id
             Task { await CalendarDisk.shared.forget(replaced) }
             // Arriving from the Connect gate the feeds are down, so this is a
@@ -2257,6 +2259,7 @@ final class AppStore {
             // these credentials.
             boardWritesRefusedEpoch = epoch
             discardBoardFile(account.id)
+            FrameHeightStore.shared.forget(account: account.id)
             let revalidated = account.id
             Task { await CalendarDisk.shared.forget(revalidated) }
             #if os(iOS)

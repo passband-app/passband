@@ -5010,6 +5010,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "squelch-eval"
+version = "0.0.14"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "clap",
+ "futures",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "squelch-core",
+ "tokio",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "squelch-httpauth"
 version = "0.0.14"
 dependencies = [

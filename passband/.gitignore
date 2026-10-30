@@ -7,3 +7,8 @@ releases/
 *.xcodeproj/xcuserdata/
 *.xcodeproj/project.xcworkspace/xcuserdata/
 .DS_Store
+# A -g release compile can leave its module here (see build.sh).
+Passband-[0-9]*.swiftmodule
+Passband-[0-9]*.swiftdoc
+Passband-[0-9]*.swiftsourceinfo
+Passband-[0-9]*.abi.json

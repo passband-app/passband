@@ -231,6 +231,11 @@ code {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 
   background: #efece7; padding: 0.1em 0.35em; border-radius: 3px; word-break: break-all; }}
 a.button {{ display: inline-block; margin: 0.25rem 0 1.25rem; padding: 0.5rem 1rem;
   background: #1a1a1a; color: #fbfaf8; text-decoration: none; border-radius: 6px; font-weight: 500; }}
+a.button:has(.mark) {{ display: inline-flex; align-items: center; gap: 0.55rem; }}
+.mark {{ display: inline-flex; align-items: center; justify-content: center; flex: none;
+  width: 1.35rem; height: 1.35rem; border-radius: 0.35rem; background: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.08); }}
+.mark svg {{ display: block; }}
 form.inline {{ display: inline; }}
 @media (prefers-color-scheme: dark) {{
   body {{ background: #141414; color: #e8e6e3; }}
@@ -903,11 +908,22 @@ fn login_page(state: &ApiState, site: &Site, error: Option<&str>) -> Response {
 
     let sso_html = match (state.console_sso_url(), site.tenant_label()) {
         (Some(sso), Some(label)) => {
-            let href = format!("{sso}/console/auth?tenant={}", percent_encode(label));
+            // AN OUTLOOK MAILBOX signs in with Microsoft, which the control
+            // plane matches by Microsoft account rather than by address.
+            let outlook = state.known_provider() == squelch_core::mail::MailProvider::Outlook;
+            let (provider_query, company, mark) = if outlook {
+                ("&provider=microsoft", "Microsoft", MICROSOFT_MARK)
+            } else {
+                ("", "Google", GOOGLE_MARK)
+            };
+            let href = format!(
+                "{sso}/console/auth?tenant={}{provider_query}",
+                percent_encode(label)
+            );
             format!(
-                r#"<p><a class="button" href="{href}">Continue with Google</a></p>
-<p class="muted">Signing in with Google proves you own the mailbox this daemon syncs. Passband
-checks the address against this mailbox and sends you straight back here.</p>
+                r#"<p><a class="button" href="{href}">{mark}Continue with {company}</a></p>
+<p class="muted">Signing in with {company} proves you own the mailbox this daemon syncs. Passband
+checks it against this mailbox and sends you straight back here.</p>
 <h2>Or paste a pairing code</h2>"#,
                 href = escape_html(&href),
             )
@@ -1138,6 +1154,12 @@ it, come back and make another.</p>
         ),
     )
 }
+
+/// The providers' sign-in marks, the same inline SVG the signup site uses
+/// (markup, not a fetch, so the console's CSP needs nothing new).
+/// Decorative: the button's text names the provider.
+const GOOGLE_MARK: &str = r##"<span class="mark" aria-hidden="true"><svg viewBox="0 0 48 48" width="16" height="16"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg></span>"##;
+const MICROSOFT_MARK: &str = r##"<span class="mark" aria-hidden="true"><svg viewBox="0 0 21 21" width="14" height="14"><rect x="0" y="0" width="10" height="10" fill="#F25022"/><rect x="11" y="0" width="10" height="10" fill="#7FBA00"/><rect x="0" y="11" width="10" height="10" fill="#00A4EF"/><rect x="11" y="11" width="10" height="10" fill="#FFB900"/></svg></span>"##;
 
 #[cfg(test)]
 mod tests {
@@ -1704,6 +1726,23 @@ mod tests {
                 .unwrap();
             assert_eq!(resp.status(), expect, "{name}");
         }
+    }
+
+    /// An Outlook mailbox's console signs in with Microsoft, and the link
+    /// says so to the control plane.
+    #[tokio::test]
+    async fn an_outlook_console_signs_in_with_microsoft() {
+        let (_, _, app) = fixture_with(|s| {
+            s.with_console_sso_url(Some(SSO.to_string()))
+                .with_known_provider(squelch_core::mail::MailProvider::Outlook)
+        });
+        let html = body_of(app.oneshot(get("/console", None)).await.unwrap()).await;
+        assert!(html.contains("Continue with Microsoft"), "{html}");
+        assert!(!html.contains("Continue with Google"), "{html}");
+        assert!(
+            html.contains("/console/auth?tenant=ada&amp;provider=microsoft"),
+            "{html}"
+        );
     }
 
     /// The Google button is a hosted-only affordance: no configured SSO URL means

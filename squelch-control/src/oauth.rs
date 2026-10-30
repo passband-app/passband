@@ -8,7 +8,7 @@
 //! - [`Flow::Signup`] is a GRANT. It asks for the Gmail scope (`gmail.modify`) and
 //!   `access_type=offline`, because what it is for is a refresh token a daemon
 //!   will use for years. It also asks, optionally, for Google Calendar, so a
-//!   new mailbox has it the day the `calendar` feature turns on.
+//!   new mailbox has its Calendar page connected from the first launch.
 //! - [`Flow::Reconnect`] is THE SAME GRANT, asked for again: signup's scopes and
 //!   parameters, calendar included and optional; only the callback differs,
 //!   re-sealing a mailbox that already exists instead of provisioning one. It exists because a refresh
@@ -48,6 +48,7 @@ use oauth2::{
 };
 use squelch_core::config::{
     CALENDAR_EVENTS_SCOPE, CALENDAR_SCOPES, GMAIL_SCOPES, GOOGLE_PROFILE_SCOPE,
+    OUTLOOK_MAIL_READWRITE_SCOPE, OUTLOOK_MAIL_SEND_SCOPE, OUTLOOK_SCOPES, OUTLOOK_USER_READ_SCOPE,
 };
 use squelch_core::credentials::StoredToken;
 
@@ -77,15 +78,95 @@ pub enum OAuthError {
     /// Google granted less than was asked for. A partial consent is fatal, not
     /// a warning: a daemon that cannot read the mailbox is not a daemon, and one
     /// that cannot archive or send is a tenant whose app 403s on every button.
-    #[error("the Google consent did not include every permission this flow asks for")]
+    #[error("the consent did not include every permission this flow asks for")]
     Scope,
     /// The profile call failed or answered something that is not a mailbox.
-    #[error("Google did not say which mailbox this grant is for")]
+    #[error("the provider did not say which mailbox this grant is for")]
     Profile,
     /// Google returned no refresh token, so the daemon would stop working
     /// within the hour with nothing to recover from.
-    #[error("Google returned no refresh token for this grant")]
+    #[error("the provider returned no refresh token for this grant")]
     NoRefreshToken,
+}
+
+/// WHICH COMPANY a flow goes to. Google is the default and what every flow
+/// was before Outlook existed; Microsoft is the confidential "Passband Hosted"
+/// Entra app.
+///
+/// MICROSOFT HAS NO `email_verified`, and an Entra tenant's admin can set any
+/// address on an account, so a Microsoft login is NEVER matched to a mailbox
+/// by address: it is matched by the account's permanent Graph id
+/// ([`Identity::microsoft_id`]). See `handlers` for where that is enforced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Provider {
+    #[default]
+    Google,
+    Microsoft,
+}
+
+impl Provider {
+    /// A `provider=` query or form value. Absent and empty are Google, as
+    /// every link written before Outlook means; an unknown value is `None`
+    /// and refused by the caller rather than guessed.
+    pub fn parse(raw: Option<&str>) -> Option<Self> {
+        match raw.map(str::trim).unwrap_or("") {
+            "" | "google" | "gmail" => Some(Self::Google),
+            "microsoft" | "outlook" => Some(Self::Microsoft),
+            _ => None,
+        }
+    }
+
+    /// The `tenants.provider` value, which is also the daemon's
+    /// `MailProvider` spelling.
+    pub fn tenant_value(self) -> &'static str {
+        match self {
+            Self::Google => "gmail",
+            Self::Microsoft => "outlook",
+        }
+    }
+
+    /// The query value links carry.
+    pub fn query_value(self) -> &'static str {
+        match self {
+            Self::Google => "google",
+            Self::Microsoft => "microsoft",
+        }
+    }
+
+    /// Read a `tenants.provider` value; anything but `outlook` is Gmail.
+    pub fn from_tenant_value(raw: &str) -> Self {
+        if raw == "outlook" {
+            Self::Microsoft
+        } else {
+            Self::Google
+        }
+    }
+
+    /// The mailbox, as copy names it.
+    pub fn mailbox_name(self) -> &'static str {
+        match self {
+            Self::Google => "Gmail",
+            Self::Microsoft => "Outlook",
+        }
+    }
+
+    /// The account the user signs in with, as copy names it.
+    pub fn account_name(self) -> &'static str {
+        match self {
+            Self::Google => "Google",
+            Self::Microsoft => "Microsoft",
+        }
+    }
+}
+
+/// Who signed in, as a login learns it. A Google login names a verified
+/// address; a Microsoft one names the account's permanent id, and its
+/// `email` is for display only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Identity {
+    pub email: String,
+    /// `Some` exactly when Microsoft answered: Graph `/me`'s `id`.
+    pub microsoft_id: Option<String>,
 }
 
 /// The endpoints and client credentials one flow needs. Borrowed from
@@ -106,6 +187,13 @@ pub struct GoogleEndpoints<'a> {
     /// `openid email` token can read, and reading it is the whole errand.
     pub userinfo_url: &'a str,
     pub timeout: Duration,
+    /// Which company these endpoints are. For [`Provider::Microsoft`],
+    /// `profile_url` and `userinfo_url` are unused and Graph is read at
+    /// `graph_base` instead.
+    pub provider: Provider,
+    /// Microsoft Graph's base (`https://graph.microsoft.com/v1.0`), or a mock.
+    /// Empty for Google.
+    pub graph_base: &'a str,
 }
 
 /// Which flow a consent is being built for. It decides the scope set, the
@@ -181,6 +269,9 @@ pub struct ExchangedGrant {
     /// recorded on [`ExchangedGrant::token`], so the daemon reads the grant off
     /// the credential it was installed with.
     pub granted_scopes: Vec<String>,
+    /// A Microsoft grant's account id (Graph `/me` `id`): the identity a
+    /// Microsoft login is matched by. `None` for Google.
+    pub microsoft_id: Option<String>,
 }
 
 impl ExchangedGrant {
@@ -198,9 +289,9 @@ impl ExchangedGrant {
 /// OPTIONAL scope is never assumed from silence: with no field the grant is
 /// recorded as the required set only, so calendar reads as not granted and
 /// the calendar flow installs nothing.
-fn recorded_grant(granted: Option<Vec<String>>, flow: Flow) -> Vec<String> {
+fn recorded_grant(granted: Option<Vec<String>>, flow: Flow, provider: Provider) -> Vec<String> {
     granted.unwrap_or_else(|| {
-        required_scopes(flow)
+        required_scopes_for(flow, provider)
             .into_iter()
             .filter_map(|spellings| spellings.first().map(|s| s.to_string()))
             .collect()
@@ -215,8 +306,15 @@ fn bad_url(what: &'static str) -> impl Fn(url::ParseError) -> OAuthError {
 }
 
 fn client(e: &GoogleEndpoints<'_>) -> Result<GoogleClient, OAuthError> {
-    Ok(BasicClient::new(ClientId::new(e.client_id.to_string()))
-        .set_client_secret(ClientSecret::new(e.client_secret.to_string()))
+    let base = BasicClient::new(ClientId::new(e.client_id.to_string()))
+        .set_client_secret(ClientSecret::new(e.client_secret.to_string()));
+    // Entra's confidential apps take the secret in the BODY; every Entra app
+    // accepts it there, and it is the form Microsoft documents.
+    let base = match e.provider {
+        Provider::Google => base,
+        Provider::Microsoft => base.set_auth_type(oauth2::AuthType::RequestBody),
+    };
+    Ok(base
         .set_auth_uri(AuthUrl::new(e.auth_url.to_string()).map_err(bad_url("auth url"))?)
         .set_token_uri(TokenUrl::new(e.token_url.to_string()).map_err(bad_url("token url"))?)
         .set_redirect_uri(
@@ -262,7 +360,24 @@ const EMAIL_SCOPE_URL: &str = "https://www.googleapis.com/auth/userinfo.email";
 /// reason to hold a key to somebody's mail, and a login that requested Gmail
 /// scopes would be asking a person to re-approve, on every sign in, the thing
 /// they already approved once at signup.
+#[cfg(test)]
 fn requested_scopes(flow: Flow) -> Vec<&'static str> {
+    requested_scopes_for(flow, Provider::Google)
+}
+
+/// [`requested_scopes`] for either company. MICROSOFT asks, on every grant,
+/// for the one Outlook consent squelchd itself asks for (core's
+/// `OUTLOOK_SCOPES`, which include calendar and `offline_access`), so a
+/// hosted Outlook token is the same token a self-hosted one is. A Microsoft
+/// LOGIN asks for `openid` and `User.Read`, which is what reading `/me`'s
+/// id needs and nothing more.
+fn requested_scopes_for(flow: Flow, provider: Provider) -> Vec<&'static str> {
+    if provider == Provider::Microsoft {
+        return match flow {
+            Flow::Console => vec![OPENID_SCOPE, OUTLOOK_USER_READ_SCOPE],
+            Flow::Signup | Flow::Reconnect | Flow::Calendar => OUTLOOK_SCOPES.to_vec(),
+        };
+    }
     match flow {
         // RECONNECT asks for signup's Gmail and profile scopes: a replacement
         // that covered less Gmail than the original would leave a mailbox half
@@ -275,11 +390,9 @@ fn requested_scopes(flow: Flow) -> Vec<&'static str> {
         // of an initial), and a person who unticks either has still granted a
         // whole working mailbox.
         //
-        // SIGNUP ASKS FOR CALENDAR TOO, even while the `calendar` hidden
-        // feature is off for the tenant: the grant is one consent now instead
-        // of a second trip through Google later. A daemon without the feature
-        // holds the scope and uses none of it (sync calls nothing), and the
-        // day the feature turns on, calendar simply works.
+        // SIGNUP ASKS FOR CALENDAR TOO: the grant is one consent now instead
+        // of a second trip through Google later, and the Calendar page works
+        // from the first launch.
         //
         // A RECONNECT ASKS FOR CALENDAR TOO, for the same reason and one more:
         // `include_granted_scopes` cannot keep a grant that was revoked, and
@@ -309,7 +422,25 @@ fn gmail_scopes() -> Vec<&'static str> {
 /// The alternatives exist for exactly one reason: Google accepts `email` on the
 /// request and reports [`EMAIL_SCOPE_URL`] on the response. Everything else is a
 /// single spelling, and the Gmail set is unchanged.
+#[cfg(test)]
 fn required_scopes(flow: Flow) -> Vec<Vec<&'static str>> {
+    required_scopes_for(flow, Provider::Google)
+}
+
+/// [`required_scopes`] for either company. Microsoft's token endpoint has
+/// echoed Graph scopes both with and without the resource prefix, so either
+/// spelling satisfies a requirement.
+fn required_scopes_for(flow: Flow, provider: Provider) -> Vec<Vec<&'static str>> {
+    if provider == Provider::Microsoft {
+        return match flow {
+            Flow::Console => vec![vec![OUTLOOK_USER_READ_SCOPE, "User.Read"]],
+            Flow::Signup | Flow::Reconnect | Flow::Calendar => vec![
+                vec![OUTLOOK_MAIL_READWRITE_SCOPE, "Mail.ReadWrite"],
+                vec![OUTLOOK_MAIL_SEND_SCOPE, "Mail.Send"],
+                vec![OUTLOOK_USER_READ_SCOPE, "User.Read"],
+            ],
+        };
+    }
     match flow {
         // `gmail.modify`, spelled one way. NOT the profile scope: it is
         // requested and optional. CALENDAR'S FLOOR IS THE SAME: its calendar scopes are requested and never required, so
@@ -362,17 +493,23 @@ pub fn consent_url_with_hint(
     let mut request = oauth
         .authorize_url(|| CsrfToken::new(state))
         .add_scopes(
-            requested_scopes(flow)
+            requested_scopes_for(flow, e.provider)
                 .into_iter()
                 .map(|s| Scope::new(s.to_string())),
         )
         .set_pkce_challenge(challenge);
-    request = match flow {
-        Flow::Signup | Flow::Reconnect | Flow::Calendar => request
+    request = match (e.provider, flow) {
+        // Microsoft has no `access_type` or `include_granted_scopes`: its
+        // refresh token comes from `offline_access`, which every grant asks
+        // for, and it shows consent on its own for anything not yet granted.
+        // The account picker, so a browser holding a work session cannot
+        // answer for a personal account (seen live while building this).
+        (Provider::Microsoft, _) => request.add_extra_param("prompt", "select_account"),
+        (_, Flow::Signup | Flow::Reconnect | Flow::Calendar) => request
             .add_extra_param("access_type", "offline")
             .add_extra_param("prompt", "consent")
             .add_extra_param("include_granted_scopes", "true"),
-        Flow::Console => request.add_extra_param("prompt", "select_account"),
+        (_, Flow::Console) => request.add_extra_param("prompt", "select_account"),
     };
     if let Some(hint) = login_hint.filter(|_| flow.is_grant()) {
         // Percent-encoded by the url builder like every other parameter, so a
@@ -427,8 +564,8 @@ pub async fn exchange_code(
     let granted: Option<Vec<String>> = response
         .scopes()
         .map(|s| s.iter().map(|s| s.to_string()).collect());
-    check_scope_grant(granted.as_deref(), flow)?;
-    let granted_scopes = recorded_grant(granted, flow);
+    check_scope_grant_for(granted.as_deref(), flow, e.provider)?;
+    let granted_scopes = recorded_grant(granted, flow, e.provider);
 
     let access_token = response.access_token().secret().to_string();
     let refresh_token = response.refresh_token().map(|r| r.secret().to_string());
@@ -439,21 +576,33 @@ pub async fn exchange_code(
         return Err(OAuthError::NoRefreshToken);
     }
 
-    // Gmail's profile endpoint, which does not carry `email_verified`: the
-    // mailbox is named by the grant this user just approved.
-    let account_email = fetch_profile_email(
-        &http,
-        e.profile_url,
-        &access_token,
-        Verification::NotClaimed,
-    )
-    .await?;
+    let (account_email, microsoft_id) = match e.provider {
+        // Gmail's profile endpoint, which does not carry `email_verified`: the
+        // mailbox is named by the grant this user just approved.
+        Provider::Google => (
+            fetch_profile_email(
+                &http,
+                e.profile_url,
+                &access_token,
+                Verification::NotClaimed,
+            )
+            .await?,
+            None,
+        ),
+        Provider::Microsoft => {
+            let me = fetch_graph_me(&http, e.graph_base, &access_token).await?;
+            let inbox_to = fetch_inbox_recipients(&http, e.graph_base, &access_token).await;
+            let mailbox = outlook_mailbox(&me, &inbox_to).ok_or(OAuthError::Profile)?;
+            (mailbox, Some(me.id))
+        }
+    };
 
     Ok(ExchangedGrant {
         token: StoredToken::from_response(access_token, refresh_token, response.expires_in())
             .with_scopes(Some(granted_scopes.clone())),
         account_email,
         granted_scopes,
+        microsoft_id,
     })
 }
 
@@ -472,6 +621,11 @@ pub async fn verify_identity(
     code: String,
     pkce_verifier: String,
 ) -> Result<String, OAuthError> {
+    if e.provider != Provider::Google {
+        return Err(OAuthError::Config(
+            "verify_identity is Google's; use verify_login".to_string(),
+        ));
+    }
     let oauth = client(e)?;
     let http = http(e.timeout)?;
 
@@ -495,6 +649,231 @@ pub async fn verify_identity(
     fetch_profile_email(&http, e.userinfo_url, &access_token, Verification::Required).await
 }
 
+/// A login for either company, answering with who signed in and NO token.
+///
+/// Google: [`verify_identity`] (a verified address). Microsoft: the
+/// account's permanent Graph id, which is what every Microsoft login is
+/// matched by; its `email` is display only, because Microsoft vouches for no
+/// address.
+pub async fn verify_login(
+    e: &GoogleEndpoints<'_>,
+    code: String,
+    pkce_verifier: String,
+) -> Result<Identity, OAuthError> {
+    if e.provider == Provider::Google {
+        return verify_identity(e, code, pkce_verifier)
+            .await
+            .map(|email| Identity {
+                email,
+                microsoft_id: None,
+            });
+    }
+    let oauth = client(e)?;
+    let http = http(e.timeout)?;
+    let response = oauth
+        .exchange_code(AuthorizationCode::new(code))
+        .set_pkce_verifier(PkceCodeVerifier::new(pkce_verifier))
+        .request_async(&http)
+        .await
+        .map_err(|_| OAuthError::Exchange)?;
+    let granted: Option<Vec<String>> = response
+        .scopes()
+        .map(|s| s.iter().map(|s| s.to_string()).collect());
+    check_scope_grant_for(granted.as_deref(), Flow::Console, Provider::Microsoft)?;
+    let me = fetch_graph_me(&http, e.graph_base, response.access_token().secret()).await?;
+    Ok(Identity {
+        email: me.address().unwrap_or_default(),
+        microsoft_id: Some(me.id),
+    })
+}
+
+/// What this module reads of Graph's `/me`.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct GraphMe {
+    /// The account's permanent id: a GUID for a work or school account, 16
+    /// hex digits for a personal one.
+    pub id: String,
+    pub mail: Option<String>,
+    #[serde(rename = "userPrincipalName")]
+    pub user_principal_name: Option<String>,
+}
+
+impl GraphMe {
+    /// `mail`, else an address-shaped principal name.
+    fn address(&self) -> Option<String> {
+        self.mail
+            .as_deref()
+            .or(self.user_principal_name.as_deref())
+            .map(str::trim)
+            .filter(|a| a.contains('@'))
+            .map(str::to_string)
+    }
+
+    /// A work or school account (its id is a GUID). Its `/me` address IS its
+    /// Exchange mailbox, on a domain its organization verified.
+    fn is_work_account(&self) -> bool {
+        squelch_core::config::is_entra_app_id(&self.id)
+    }
+}
+
+async fn fetch_graph_me(
+    http: &reqwest::Client,
+    graph_base: &str,
+    access_token: &str,
+) -> Result<GraphMe, OAuthError> {
+    let resp = http
+        .get(format!("{graph_base}/me?$select=id,mail,userPrincipalName"))
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|_| OAuthError::Profile)?;
+    if !resp.status().is_success() {
+        return Err(OAuthError::Profile);
+    }
+    let body = read_capped(resp).await?;
+    let me: GraphMe = serde_json::from_slice(&body).map_err(|_| OAuthError::Profile)?;
+    let id_ok = !me.id.is_empty()
+        && me.id.len() <= 64
+        && me.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if !id_ok {
+        return Err(OAuthError::Profile);
+    }
+    Ok(me)
+}
+
+/// The To addresses on recent inbox mail. Best effort: any failure is an
+/// empty list and the caller falls back to `/me`.
+async fn fetch_inbox_recipients(
+    http: &reqwest::Client,
+    graph_base: &str,
+    access_token: &str,
+) -> Vec<String> {
+    #[derive(serde::Deserialize)]
+    struct Addr {
+        address: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Recipient {
+        #[serde(rename = "emailAddress")]
+        email_address: Addr,
+    }
+    #[derive(serde::Deserialize)]
+    struct Msg {
+        #[serde(rename = "toRecipients", default)]
+        to: Vec<Recipient>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Page {
+        #[serde(default)]
+        value: Vec<Msg>,
+    }
+    let url = format!("{graph_base}/me/mailFolders/inbox/messages?$top=50&$select=toRecipients");
+    let Ok(resp) = http.get(url).bearer_auth(access_token).send().await else {
+        return Vec::new();
+    };
+    if !resp.status().is_success() {
+        return Vec::new();
+    }
+    let Ok(body) = read_capped_to(resp, INBOX_PAGE_LIMIT).await else {
+        return Vec::new();
+    };
+    serde_json::from_slice::<Page>(&body)
+        .map(|p| {
+            p.value
+                .into_iter()
+                .flat_map(|m| m.to)
+                .filter_map(|r| r.email_address.address)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A page of 50 messages' recipients is far more than [`MAX_RESPONSE_BODY`].
+const INBOX_PAGE_LIMIT: usize = 1024 * 1024;
+
+/// Is `domain` one of Microsoft's own consumer mail domains
+/// (`outlook.com`, `hotmail.co.uk`, `live.fr`, `msn.com`, ...)?
+pub fn is_microsoft_consumer_domain(domain: &str) -> bool {
+    let d = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+    let labels: Vec<&str> = d.split('.').collect();
+    (2..=3).contains(&labels.len())
+        && matches!(
+            labels[0],
+            "outlook" | "hotmail" | "live" | "msn" | "windowslive"
+        )
+        && labels[1..].iter().all(|l| !l.is_empty() && l.len() <= 3)
+}
+
+fn domain_of(addr: &str) -> Option<&str> {
+    addr.rsplit_once('@')
+        .map(|(_, d)| d)
+        .filter(|d| !d.is_empty())
+}
+
+/// THE MAILBOX AN OUTLOOK SIGNUP IS FOR: the address the one-mailbox-per-
+/// address rule applies to. NOT Microsoft's name for the account when that is
+/// only a sign-in label: a personal account can sign in as `x@gmail.com` (or
+/// any other company's address) while its mailbox is `y@outlook.com`, and
+/// that label must not collide with the Gmail tenant that really is `x@...`.
+///
+/// 1. The most common To on recent inbox mail at a Microsoft consumer domain
+///    (or, for a work account, at its own domain): where mail to it arrives.
+/// 2. A work account's `/me` address (Exchange Online's own mailbox), or a
+///    personal account's when it is on a Microsoft consumer domain.
+/// 3. A personal account's internal mailbox address,
+///    `outlook_<ID>@outlook.com`, which Exchange itself uses for the account
+///    and which no other account can have.
+pub(crate) fn outlook_mailbox(me: &GraphMe, inbox_to: &[String]) -> Option<String> {
+    let me_addr = me.address();
+    let own_domain = me_addr
+        .as_deref()
+        .and_then(domain_of)
+        .filter(|_| me.is_work_account())
+        .map(str::to_ascii_lowercase);
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for a in inbox_to {
+        let a = a.trim().to_ascii_lowercase();
+        let Some(d) = domain_of(&a) else { continue };
+        let ours = is_microsoft_consumer_domain(d) || own_domain.as_deref() == Some(d);
+        if !ours || !mailbox_shaped(&a) {
+            continue;
+        }
+        match counts.iter_mut().find(|(x, _)| *x == a) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((a, 1)),
+        }
+    }
+    // Most common; the first seen wins a tie (the list is newest first).
+    let best = counts
+        .iter()
+        .fold(None::<&(String, usize)>, |acc, c| match acc {
+            Some(a) if a.1 >= c.1 => Some(a),
+            _ => Some(c),
+        })
+        .map(|(a, _)| a.clone());
+    if best.is_some() {
+        return best;
+    }
+    if let Some(addr) = me_addr.map(|a| a.to_ascii_lowercase())
+        && mailbox_shaped(&addr)
+        && (me.is_work_account() || domain_of(&addr).is_some_and(is_microsoft_consumer_domain))
+    {
+        return Some(addr);
+    }
+    let hex = me.id.len() == 16 && me.id.chars().all(|c| c.is_ascii_hexdigit());
+    hex.then(|| format!("outlook_{}@outlook.com", me.id.to_ascii_uppercase()))
+        .map(|a| a.to_ascii_lowercase())
+}
+
+/// The shape every stored mailbox address must have (see
+/// [`email_from_answer`]).
+fn mailbox_shaped(a: &str) -> bool {
+    !a.is_empty()
+        && a.len() <= 320
+        && a.contains('@')
+        && !a.chars().any(|c| c.is_control() || c.is_whitespace())
+}
+
 /// Hold the granted scopes against what the flow asked for: every requirement in
 /// [`required_scopes`] must be covered by some spelling.
 ///
@@ -509,10 +888,19 @@ pub async fn verify_identity(
 /// An absent `scope` field means "same as the request" per RFC 6749 section 5.1,
 /// so it passes.
 fn check_scope_grant(granted: Option<&[String]>, flow: Flow) -> Result<(), OAuthError> {
+    check_scope_grant_for(granted, flow, Provider::Google)
+}
+
+/// [`check_scope_grant`] for either company.
+fn check_scope_grant_for(
+    granted: Option<&[String]>,
+    flow: Flow,
+    provider: Provider,
+) -> Result<(), OAuthError> {
     match granted {
         None => Ok(()),
         Some(scopes) => {
-            let all_granted = required_scopes(flow)
+            let all_granted = required_scopes_for(flow, provider)
                 .iter()
                 .all(|spellings| scopes.iter().any(|got| spellings.contains(&got.as_str())));
             if all_granted {
@@ -634,10 +1022,14 @@ fn email_from_answer(body: &[u8], verification: Verification) -> Result<String, 
 
 /// Read a response body up to [`MAX_RESPONSE_BODY`], streaming so that an
 /// oversized body is abandoned rather than buffered.
-async fn read_capped(mut resp: reqwest::Response) -> Result<Vec<u8>, OAuthError> {
+async fn read_capped(resp: reqwest::Response) -> Result<Vec<u8>, OAuthError> {
+    read_capped_to(resp, MAX_RESPONSE_BODY).await
+}
+
+async fn read_capped_to(mut resp: reqwest::Response, limit: usize) -> Result<Vec<u8>, OAuthError> {
     let mut out = Vec::new();
     while let Some(chunk) = resp.chunk().await.map_err(|_| OAuthError::Profile)? {
-        if out.len() + chunk.len() > MAX_RESPONSE_BODY {
+        if out.len() + chunk.len() > limit {
             return Err(OAuthError::Profile);
         }
         out.extend_from_slice(&chunk);
@@ -659,6 +1051,8 @@ mod tests {
             profile_url: crate::config::GMAIL_PROFILE_URL,
             userinfo_url: crate::config::GOOGLE_USERINFO_URL,
             timeout: Duration::from_secs(5),
+            provider: Provider::Google,
+            graph_base: "",
         }
     }
 
@@ -842,7 +1236,7 @@ mod tests {
     /// grant: silence covers the required Gmail floor and nothing optional.
     #[test]
     fn a_silent_response_never_grants_calendar() {
-        let silent = recorded_grant(None, Flow::Calendar);
+        let silent = recorded_grant(None, Flow::Calendar, Provider::Google);
         assert!(
             !silent.iter().any(|s| s == CALENDAR_EVENTS_SCOPE),
             "{silent:?}"
@@ -855,10 +1249,14 @@ mod tests {
         let named = recorded_grant(
             Some(vec![CALENDAR_EVENTS_SCOPE.to_string()]),
             Flow::Calendar,
+            Provider::Google,
         );
         assert_eq!(named, vec![CALENDAR_EVENTS_SCOPE.to_string()]);
         // Flows with nothing optional are unchanged by the rule.
-        assert_eq!(recorded_grant(None, Flow::Reconnect).len(), 1);
+        assert_eq!(
+            recorded_grant(None, Flow::Reconnect, Provider::Google).len(),
+            1
+        );
     }
 
     #[test]
@@ -1039,5 +1437,120 @@ mod tests {
                 "{short:?}"
             );
         }
+    }
+
+    fn me(id: &str, mail: Option<&str>) -> GraphMe {
+        GraphMe {
+            id: id.to_string(),
+            mail: mail.map(str::to_string),
+            user_principal_name: mail.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn microsoft_consumer_domains_are_recognised() {
+        for d in [
+            "outlook.com",
+            "hotmail.co.uk",
+            "live.fr",
+            "msn.com",
+            "Outlook.COM.",
+        ] {
+            assert!(is_microsoft_consumer_domain(d), "{d}");
+        }
+        for d in [
+            "gmail.com",
+            "passband.app",
+            "outlook.evil.example",
+            "notoutlook.com",
+        ] {
+            assert!(!is_microsoft_consumer_domain(d), "{d}");
+        }
+    }
+
+    /// The mailbox an Outlook signup is for, in the three cases the design
+    /// names: where inbox mail is addressed, a work account's own address, and
+    /// a personal account's internal address.
+    #[test]
+    fn the_outlook_mailbox_is_where_mail_arrives_not_the_sign_in_label() {
+        let personal = me("313658d2f27bcf04", Some("braelyn@passband.app"));
+        let to = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            outlook_mailbox(
+                &personal,
+                &to(&[
+                    "someone@gmail.com",
+                    "Passband-QA@outlook.com",
+                    "passband-qa@outlook.com"
+                ])
+            )
+            .as_deref(),
+            Some("passband-qa@outlook.com")
+        );
+        // No mail yet and a sign-in on another company's domain: the account's
+        // internal address, never the label.
+        assert_eq!(
+            outlook_mailbox(&personal, &[]).as_deref(),
+            Some("outlook_313658d2f27bcf04@outlook.com")
+        );
+        // A personal account whose own address is Microsoft's.
+        let native = me("0123456789abcdef", Some("ada@hotmail.com"));
+        assert_eq!(
+            outlook_mailbox(&native, &[]).as_deref(),
+            Some("ada@hotmail.com")
+        );
+        // A work account: its /me address IS its mailbox, and its own domain
+        // counts on inbox mail.
+        let work = me(
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            Some("ceo@contoso.com"),
+        );
+        assert_eq!(
+            outlook_mailbox(&work, &[]).as_deref(),
+            Some("ceo@contoso.com")
+        );
+        assert_eq!(
+            outlook_mailbox(&work, &to(&["sales@contoso.com", "sales@contoso.com"])).as_deref(),
+            Some("sales@contoso.com")
+        );
+    }
+
+    #[test]
+    fn a_microsoft_consent_asks_for_the_outlook_set_with_the_account_picker() {
+        let e = GoogleEndpoints {
+            provider: Provider::Microsoft,
+            auth_url: crate::config::MICROSOFT_AUTH_URL,
+            token_url: crate::config::MICROSOFT_TOKEN_URL,
+            graph_base: crate::config::GRAPH_BASE_URL,
+            ..endpoints()
+        };
+        let c = consent_url(&e, "s".into(), Flow::Signup).unwrap();
+        let url = url::Url::parse(&c.url).unwrap();
+        let q: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(url.host_str(), Some("login.microsoftonline.com"));
+        assert_eq!(q["prompt"], "select_account");
+        assert!(!q.contains_key("access_type"));
+        assert!(!q.contains_key("include_granted_scopes"));
+        let scope = &q["scope"];
+        for want in OUTLOOK_SCOPES {
+            assert!(scope.contains(want), "{want} missing: {scope}");
+        }
+        assert!(!scope.contains("googleapis"), "{scope}");
+        let login = consent_url(&e, "s".into(), Flow::Console).unwrap();
+        assert!(!login.url.contains("Mail."), "{}", login.url);
+    }
+
+    #[test]
+    fn the_provider_parses_and_refuses_strangers() {
+        assert_eq!(Provider::parse(None), Some(Provider::Google));
+        assert_eq!(Provider::parse(Some("")), Some(Provider::Google));
+        assert_eq!(
+            Provider::parse(Some("microsoft")),
+            Some(Provider::Microsoft)
+        );
+        assert_eq!(Provider::parse(Some("outlook")), Some(Provider::Microsoft));
+        assert_eq!(Provider::parse(Some("yahoo")), None);
+        assert_eq!(Provider::from_tenant_value("outlook"), Provider::Microsoft);
+        assert_eq!(Provider::from_tenant_value("gmail"), Provider::Google);
     }
 }

@@ -21,16 +21,18 @@ import SwiftUI
 
 /// The hosted control plane's one door from the app.
 ///
-/// SIGN IN is the only hosted action, for newcomers too: Google names them, the
-/// control plane looks for the daemon that mailbox owns, and the browser comes
-/// back with a `passband://pair` link. Somebody with no mailbox yet is told so
+/// SIGN IN is the only hosted action, for newcomers too: Google (or, for an
+/// Outlook mailbox, Microsoft) names them, the control plane looks for the
+/// daemon that mailbox owns, and the browser comes back with a
+/// `passband://pair` link. Somebody with no mailbox yet is told so
 /// on that same page and handed the signup form from there, so the app never
 /// has to ask "do you have an account?" before it knows the answer.
 private enum Hosted {
     // Send the rendered appearance, including a resolved system preference.
     // The account site preserves this choice through OAuth and pairing (#214).
-    static func signIn(theme: ColorScheme) -> String {
+    static func signIn(theme: ColorScheme, outlook: Bool = false) -> String {
         "https://signup.passband.app/app/auth?theme=\(theme == .dark ? "dark" : "light")"
+            + (outlook ? "&provider=microsoft" : "")
     }
 }
 
@@ -161,6 +163,9 @@ struct ConnectView: View {
     /// way (a saved hosted account that failed to restore) has no tab to
     /// point at, and must not say it does.
     @State private var signInOpened = false
+    /// Which company the last sign in went to, so "open sign in again" reopens
+    /// the same one.
+    @State private var signInOutlook = false
     @State private var showingPairingDetails = false
     /// The gate was mounted because a saved connection could not be restored,
     /// at launch or after the practice inbox. Fixed at mount: the retry it offers is about
@@ -352,7 +357,8 @@ struct ConnectView: View {
             if case .welcome = effectiveGateStep {
                 WelcomeActions(
                     retrySaved: savedRetry, retrying: retryingSavedConnection,
-                    login: signIn, selfHostedLogin: selfHost, maxWidth: .infinity)
+                    login: signIn, outlookLogin: signInWithOutlook,
+                    selfHostedLogin: selfHost, maxWidth: .infinity)
                     .modifier(IntroEntrance(delay: 0.32))
             }
         }
@@ -360,17 +366,26 @@ struct ConnectView: View {
 
     /// Open the hosted sign in. Every door to it goes through here, so the
     /// "finish in your browser" copy can never disagree with what happened.
-    private func openHostedSignIn() {
+    private func openHostedSignIn(outlook: Bool? = nil) {
+        if let outlook { signInOutlook = outlook }
         signInOpened = true
-        Opener.open(Hosted.signIn(theme: colorScheme))
+        Opener.open(Hosted.signIn(theme: colorScheme, outlook: signInOutlook))
     }
 
     private func signIn() {
+        startHostedSignIn(outlook: false)
+    }
+
+    private func signInWithOutlook() {
+        startHostedSignIn(outlook: true)
+    }
+
+    private func startHostedSignIn(outlook: Bool) {
         url = ""
         mode = .pair
         arrivedViaPairLink = false
         gateStep = .credentials(.hosted)
-        openHostedSignIn()
+        openHostedSignIn(outlook: outlook)
     }
 
     private func selfHost() {
@@ -396,6 +411,7 @@ struct ConnectView: View {
                 retrySaved: savedRetry,
                 retrying: retryingSavedConnection,
                 login: signIn,
+                outlookLogin: signInWithOutlook,
                 selfHostedLogin: selfHost)
         case .selfHostGuide:
             SelfHostGuide(
@@ -526,7 +542,7 @@ struct ConnectView: View {
         case .hosted:
             return signInOpened
                 ? "Sign in with Google in the tab that just opened. If Passband doesn’t come back on its own, enter the server URL and pairing code from that page."
-                : "Sign in with Gmail again to pick up where you left off, or enter your server URL and a pairing code below."
+                : "Sign in with Gmail or Outlook again to pick up where you left off, or enter your server URL and a pairing code below."
         case .selfHosted:
             return "Run squelchd pair on your server, then enter what it prints."
         case nil:
@@ -566,7 +582,7 @@ struct ConnectView: View {
     /// code would: ringed, a press away from adding, never added on its own.
     private var sheetSignIn: some View {
         VStack(alignment: .leading, spacing: Space.s8) {
-            Button { openHostedSignIn() } label: {
+            Button { openHostedSignIn(outlook: signInOpened ? nil : false) } label: {
                 HStack(spacing: Space.scaled(9)) {
                     Image(systemName: "envelope.fill")
                     Text(signInOpened ? "open sign in again" : "sign in with Gmail")
@@ -582,9 +598,26 @@ struct ConnectView: View {
             .tint(Palette.accent)
             .disabled(busy)
 
+            if !signInOpened {
+                Button { openHostedSignIn(outlook: true) } label: {
+                    HStack(spacing: Space.scaled(9)) {
+                        Image(systemName: "envelope")
+                        Text("sign in with Outlook")
+                        Spacer(minLength: 0)
+                        Image(systemName: "arrow.up.right")
+                    }
+                    .font(Typo.ui(14, weight: .medium))
+                    .padding(.vertical, Space.scaled(9))
+                    .padding(.horizontal, Space.s8)
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(busy)
+            }
+
             Text(signInOpened
                 ? "finish signing in in your browser. keep this sheet open: it fills in when passband comes back."
-                : "pick the Google account whose mail you want to add.")
+                : "pick the Google or Microsoft account whose mail you want to add.")
                 .font(Typo.ui(12))
                 .foregroundStyle(Palette.inkFaint)
                 .fixedSize(horizontal: false, vertical: true)
@@ -746,7 +779,7 @@ struct ConnectView: View {
     @ViewBuilder private var gateSecondaryAction: some View {
         if hostingChoice == .hosted {
             Button(signInOpened ? "Open sign in again" : "Sign in with Gmail") {
-                openHostedSignIn()
+                openHostedSignIn(outlook: signInOpened ? nil : false)
             }
                 .buttonStyle(.plain)
                 .font(Typo.ui(12))
@@ -1219,8 +1252,8 @@ struct ConnectView: View {
 
 /// The sign-in gate, set on the intro's own stage: the same scene behind it,
 /// the same masthead and type, so finishing the intro changes the words and
-/// nothing else. One hosted door, sign in with Gmail, with self-hosting as the
-/// quieter way in beneath it.
+/// nothing else. Two hosted doors, Gmail and Outlook, with self-hosting as the
+/// quieter way in beneath them.
 private struct WelcomeGate: View {
     let wide: Bool
     /// Present only when the gate is up because a saved connection could
@@ -1229,6 +1262,7 @@ private struct WelcomeGate: View {
     var retrySaved: (() -> Void)? = nil
     var retrying = false
     let login: () -> Void
+    let outlookLogin: () -> Void
     let selfHostedLogin: () -> Void
 
     var body: some View {
@@ -1247,7 +1281,7 @@ private struct WelcomeGate: View {
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.isHeader)
 
-            Text("Sign in with the Google account whose mail you want Passband to sort. New here? The same button gets you set up.")
+            Text("Sign in with the Google or Microsoft account whose mail you want Passband to sort. New here? The same buttons get you set up.")
                 .font(Typo.ui(15))
                 .foregroundStyle(Palette.inkDim)
                 .lineSpacing(5)
@@ -1260,7 +1294,8 @@ private struct WelcomeGate: View {
             if wide {
                 WelcomeActions(
                     retrySaved: retrySaved, retrying: retrying,
-                    login: login, selfHostedLogin: selfHostedLogin)
+                    login: login, outlookLogin: outlookLogin,
+                    selfHostedLogin: selfHostedLogin)
                     .padding(.top, Space.s32)
                     .modifier(IntroEntrance(delay: 0.32))
             }
@@ -1268,12 +1303,13 @@ private struct WelcomeGate: View {
     }
 }
 
-/// The welcome screen's two doors: Sign in with Gmail, and self-hosting as the
-/// quieter option beneath it.
+/// The welcome screen's doors: Sign in with Gmail, Sign in with Outlook, and
+/// self-hosting as the quieter option beneath them.
 private struct WelcomeActions: View {
     var retrySaved: (() -> Void)? = nil
     var retrying = false
     let login: () -> Void
+    let outlookLogin: () -> Void
     let selfHostedLogin: () -> Void
     /// A column's measure in a window; the full width of a phone's footer.
     var maxWidth: CGFloat = 340
@@ -1295,6 +1331,20 @@ private struct WelcomeActions: View {
             .buttonStyle(.borderedProminent)
             .tint(Palette.accent)
             .keyboardShortcut(.defaultAction)
+
+            Button(action: outlookLogin) {
+                HStack(spacing: Space.scaled(9)) {
+                    Image(systemName: "envelope")
+                    Text("Sign in with Outlook")
+                    Spacer(minLength: 0)
+                    Image(systemName: "arrow.right")
+                }
+                .font(Typo.ui(14, weight: .medium))
+                .padding(.vertical, Space.scaled(9))
+                .padding(.horizontal, Space.s8)
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
 
             Button(action: selfHostedLogin) {
                 HStack(spacing: Space.scaled(9)) {

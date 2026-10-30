@@ -260,6 +260,25 @@ run_suite board-file \
   Sources/Passband/Lib/BoardFile.swift \
   Tests/BoardFileTests.swift
 
+# Measured email heights kept across launches: answered only for the exact
+# document, width, type and build, capped, and kept like the board file.
+run_suite frame-height-file \
+  Sources/Passband/Lib/PrivateFile.swift \
+  Sources/Passband/Lib/FrameHeightFile.swift \
+  Tests/FrameHeightFileTests.swift
+
+# The sitrep's zones: one observed property per zone, and a write to one
+# never invalidates another's readers.
+run_suite zone-store \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Sources/Passband/Lib/SenderIdentity.swift \
+  Sources/Passband/Lib/Reading.swift \
+  Sources/Passband/Model/ZoneStore.swift \
+  Tests/ZoneStoreTests.swift
+
 # Credential validation must never succeed against the fixture transport.
 run_suite credential-probe \
   Sources/Passband/Model/SubjectText.swift \
@@ -549,6 +568,12 @@ run_suite translation-wire \
   Sources/Passband/Lib/Quotes.swift \
   Tests/TranslationWireTests.swift
 
+# Sender signals (issue #639): the wire and which reader lines warn.
+run_suite sender-signals-wire \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/SubjectText.swift \
+  Tests/SenderSignalsWireTests.swift
+
 run_suite spam-wire \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/SubjectText.swift \
@@ -604,6 +629,7 @@ run_suite sender-identity \
 # PageKeys.swift rides along: the digits and ⇧C exactly as RootView binds them.
 run_suite key-dispatch \
   Sources/Passband/Keys/KeyDispatch.swift \
+  Sources/Passband/Views/PagePresence.swift \
   Sources/Passband/Keys/PageKeys.swift \
   Tests/KeyDispatchTests.swift
 
@@ -761,6 +787,14 @@ run_suite conversation-snapshot \
   Sources/Passband/Assistant/ConversationSnapshot.swift \
   Tests/ConversationSnapshotTests.swift
 
+# The assistant's request body: two prompt-cache breakpoints and no more, the
+# same request as the same bytes (tool schemas are dictionaries), and the
+# history pruned for a request without breaking a tool_use/tool_result pair.
+run_suite assistant-request \
+  Sources/Passband/Assistant/JSONValue.swift \
+  Sources/Passband/Assistant/Transcript.swift \
+  Tests/AssistantRequestTests.swift
+
 # ⌘F in the reader: matches in a string, the cursor walking them across a
 # thread's messages (wrap, skip, the backwards step into an uncounted message),
 # and the session reconciling its text estimate with what a frame reports.
@@ -859,6 +893,16 @@ run_suite image-trim \
   Sources/Passband/Lib/ImageFill.swift \
   Sources/Passband/Lib/ImageTrim.swift \
   Tests/ImageTrimTests.swift
+
+# Which picture an event card wears: the photo test, which places are worth
+# asking Apple Maps about, whether Apple's answer is the place named, and the
+# image candidates a message offers. Pure rules; the fetching is
+# Model/EventVisuals.swift.
+run_suite event-visual-pick \
+  Sources/Passband/Lib/HTMLImg.swift \
+  Sources/Passband/Lib/Trackers.swift \
+  Sources/Passband/Lib/EventVisualPick.swift \
+  Tests/EventVisualPickTests.swift
 
 # Run the queue. xargs keeps going past a failed suite and exits 123 if any
 # failed, which set -e turns into this script's exit status.

@@ -281,13 +281,6 @@ private struct ShellWatchers: View {
             .onChange(of: store.calendarGranted) { _, granted in
                 if granted { store.calendarGrantArrived() }
             }
-            // The gate closing (the `calendar` hidden feature turned off, an
-            // older daemon) takes an open calendar page with it, rather than
-            // leaving a page up that the rail no longer has a door to, and
-            // drops the event pane and everything the page held.
-            .onChange(of: store.calendarPageAvailable) { _, available in
-                if !available { store.calendarGateClosed() }
-            }
             // The connect card belongs to the calendar page: leaving the page
             // (a digit, ⇧-anything, the rail) takes it down rather than
             // leaving it over a page it says nothing about. A wait already
@@ -691,22 +684,8 @@ struct MainShell: View {
         return nil
     }
 
-    @ViewBuilder
     private var routedBody: some View {
-        switch store.activeView {
-        case .sitrep: SitrepView()
-        // `route(to:)` never lands here with the gate closed; the shell's
-        // watcher sends an open page back to the sitrep if it closes.
-        case .calendar: RoutedHost(view: .calendar) { CalendarPage() }.id(pageWorld)
-        case .emails: EmailsView().id(pageWorld)
-        case .auth: RoutedHost(view: .auth) { AuthView() }.id(pageWorld)
-        case .usage: UsageView().id(pageWorld)
-        case .settings: SettingsView().id(pageWorld)
-        case .process: RoutedHost(view: .process) { ProcessView() }.id(pageWorld)
-        case .discovery:
-            DiscoveryView()
-                .transition(reduceMotion ? .opacity : .move(edge: .leading).combined(with: .opacity))
-        }
+        RoutedPages(pageWorld: pageWorld, reduceMotion: reduceMotion)
     }
 
     /// A PAGE IS MOUNTED PER ACCOUNT WORLD. An account switch keeps the page
@@ -744,36 +723,29 @@ struct MainShell: View {
                 KeyBinding("\\", "toggle light/dark theme") { Prefs.shared.flipTheme() },
             ]
         }
-        // THE DIGITS FOLLOW THE RAIL: Sitrep 1, then Calendar 2 while it is
-        // offered and every later page one higher; with the gate closed the
-        // numbers are the ones from before the calendar existed
-        // (`MainView.numberedViews`). DECLINING, and the order is asked for
-        // AT KEY TIME rather than built here: reading the gate in this body
-        // would make the whole shell a reader of the stats poll. One more
-        // digit is bound than there are pages without the calendar; it
-        // passes on while the calendar is not offered.
+        // THE DIGITS FOLLOW THE RAIL: Sitrep 1, Calendar 2, Emails 3, Auth 4
+        // (`MainView.mainViews`).
         //
         // AND THEN THE TWO THAT OUTLIVED THEIR RAIL SLOTS. Rules and Groups
         // moved into Settings, and their digits went with them rather than
-        // going dead: they still follow the last page on the rail (4 and 5,
-        // or 5 and 6 with the calendar), so a key somebody already has in
+        // going dead: they still follow the last page on the rail (5 and 6),
+        // so a key somebody already has in
         // their fingers lands on the page it always did, wherever that page
         // is filed now. Which is why the order is one of DOORS, not views.
         var bindings: [KeyBinding] = PageKeys.digits(
             count: MainView.numberKeyCount + 2,
             pages: { () -> [@MainActor () -> Void] in
-                MainView.numberedViews(calendar: store.calendarPageAvailable).map { view in
+                MainView.mainViews.map { view in
                     { store.setView(view) }
                 } + [{ store.openSettings(.rules) }, { store.openSettings(.groups) }]
             },
             go: { $0() })
-        // ⇧C OPENS THE CALENDAR TOO, as it did before the page had a digit
-        // (`PageKeys.calendar`: exact case, declining). With the gate closed,
-        // and while a sign-in code is on screen (whose modal copies on `c`,
-        // and so on ⇧C through the fold), the key passes on as before.
+        // ⇧C OPENS THE CALENDAR TOO (`PageKeys.calendar`: exact case,
+        // declining). While a sign-in code is on screen (whose modal copies
+        // on `c`, and so on ⇧C through the fold), the key passes on.
         bindings.append(
             PageKeys.calendar(
-                offered: { store.calendarPageAvailable && store.authQueue.isEmpty },
+                offered: { store.authQueue.isEmpty },
                 go: { store.setView(.calendar) }))
         bindings.append(
             KeyBinding("[", "back", meta: true, allowInInput: true) { store.goBack() })
@@ -963,6 +935,59 @@ extension AppStore.ThreadFlight {
         switch self {
         case .departing, .departingDown, .departingTrailing: true
         case .settled, .entering: false
+        }
+    }
+}
+
+/// THE ROUTED PAGES. Sitrep and Emails are KEPT MOUNTED across rail
+/// navigation, drawn only while active (`keptPage`, PagePresence): building
+/// Emails again on every visit was ~400 ms before it appeared, and the visit
+/// lost the scroll and the cursor. Every other page is mounted only while it
+/// is the active one, as before.
+///
+/// Emails is mounted from its first visit, not at launch, and only for the
+/// account world it was visited in: a switch while another page is on screen
+/// drops it, so the switch does not pay for building a page nobody is
+/// looking at.
+private struct RoutedPages: View {
+    @Environment(AppStore.self) private var store
+    let pageWorld: Int
+    let reduceMotion: Bool
+    /// The account world the kept Emails page belongs to.
+    @State private var emailsWorld: Int?
+
+    private var onEmails: Bool { store.activeView == .emails }
+    private var keepEmails: Bool { onEmails || emailsWorld == pageWorld }
+
+    var body: some View {
+        ZStack {
+            SitrepView().keptPage(active: store.activeView == .sitrep)
+            if keepEmails {
+                EmailsView().id(pageWorld).keptPage(active: onEmails)
+            }
+            otherPage
+        }
+        .onChange(of: onEmails, initial: true) { _, now in
+            if now { emailsWorld = pageWorld }
+        }
+        .onChange(of: pageWorld) { _, world in
+            emailsWorld = onEmails ? world : nil
+        }
+    }
+
+    @ViewBuilder
+    private var otherPage: some View {
+        switch store.activeView {
+        case .sitrep, .emails: EmptyView()
+        case .calendar: RoutedHost(view: .calendar) { CalendarPage() }.id(pageWorld).zIndex(1)
+        case .auth: RoutedHost(view: .auth) { AuthView() }.id(pageWorld).zIndex(1)
+        case .usage: UsageView().id(pageWorld).zIndex(1)
+        case .settings: SettingsView().id(pageWorld).zIndex(1)
+        case .process: RoutedHost(view: .process) { ProcessView() }.id(pageWorld).zIndex(1)
+        case .discovery:
+            DiscoveryView()
+                .transition(reduceMotion ? .opacity : .move(edge: .leading).combined(with: .opacity))
+                .zIndex(1)
         }
     }
 }

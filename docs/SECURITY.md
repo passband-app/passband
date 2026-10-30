@@ -1488,14 +1488,23 @@ counted per category and written as at most one summary line per minute
 **Invariant.** Calendar data (event titles, places, descriptions, organizers,
 guests' addresses, names and answers, links, calendar names) is human-door data: served on `GET /client/timeline` (and
 in the answer to the user's own write) and nowhere else, never in a log line,
-never in a triage prompt. Nothing calendar-related is on `/mcp` or
-`/client/agent/*`. The daemon writes to a calendar only when the user creates,
-edits or deletes one event from the human door; nothing writes on its own. Google
-emails an event's guests only when such a write says `notify: true`; no other
-input, default or code path can ask for it.
+never in a triage prompt. ONE EXCEPTION, the owner's decision (2026-10-28): an
+event's location string, alone, goes to the configured provider's small
+(`notify`) model to be cut down to the place the card shows (see "The card's
+place" below). Nothing calendar-related is on `/mcp` or
+`/client/agent/*`. The daemon writes to a calendar when the user creates,
+edits or deletes one event from the human door, and, ONE EXCEPTION (the owner's
+decision, 2026-10-28, on for every mailbox with the calendar), when it
+replaces Gmail's own copy of an event with its own and keeps that event current
+from authenticated mail (see "Passband's own events" below). Nothing else
+writes on its own. Google emails an event's guests only when a human-door
+write says `notify: true`; no other input, default or code path can ask for
+it, and Passband's own writes always send `sendUpdates=none`.
 
 **Enforcement.**
-- **Three tables, human door only.** `calendar_calendars`, `calendar_events` and
+- **Five tables, human door only.** `calendar_calendars`, `calendar_events`,
+  `calendar_places` (the card's place per location text), `calendar_owned`
+  (which event Passband made for which ghost, `gcal/own.rs`) and
   `calendar_event_guests` (an event's attendees, deleted with it by a trigger)
   (`squelch-core/src/store/sqlite/calendar.rs`) are written by the sync loop
   (`squelch-core/src/gcal/sync.rs`) and, one row at a time after Google accepted
@@ -1515,8 +1524,48 @@ input, default or code path can ask for it.
   to the daemon. Of each guest only the address (kept only when it is one), the
   name (laundered like a title), the answer and two flags are stored; past 100,
   Google sends the user's entry alone and the event is marked truncated.
+  Each event's `eventType` is read only to mark Gmail's own events
+  (`fromGmail`), which the edit guard then refuses, since Google does.
   Its description is read (the app shows it): markup becomes text, each line is
-  laundered like a place, and it stops at 2000 characters.
+  laundered like a place, and it stops at 2000 characters. Google's own
+  boilerplate on an event it made from mail ("To see detailed information for
+  automatically created events like this one...") is dropped with its link
+  (`triage/ghost.rs:strip_google_boilerplate`).
+- **Passband's own events** (`gcal/own.rs`, `gcal/sync.rs:own_events`). On
+  whenever the `calendar` feature is, with no flag of its own. It touches only events
+  on the PRIMARY calendar: Gmail's own (`fromGmail`) that are the user's by
+  every organizer test and carry no other guest, and the events Passband made
+  in their place. An invitation from anyone else is never written. Every
+  write sends `sendUpdates=none`, never names attendees, and is audited
+  (actor `passband-calendar`, target `calendar:<calendar>/<event>`, detail
+  `ok` or an error kind; never a title or a place). Only a ghost from mail
+  that passed sender authentication adopts or moves an event. A cancellation
+  from mail marks the event ("Canceled: ", free), it does not delete it. The
+  user's deletion of Passband's event, or dismissal of the ghost, ends
+  Passband's hold on it for good. At most 10 writes a pass, 100 a day.
+  KNOWN GAP against docs/CALENDAR.md "Before anything writes to a real
+  calendar": a time or place change comes from what the triage model read in
+  the mail, not from structured calendar data (an iCalendar UID), so on a
+  shared sending platform another host's mail that the model reads as the
+  same booking could move the event. The marking-not-deleting of
+  cancellations and the authentication rule bound it; structured updates are
+  the fix.
+- **The card's place** (`gcal/place.rs`). After a pass that synced, the loop
+  sends up to 10 stored locations longer than 40 characters (upcoming first) to
+  the provider and `notify` model that already read the owner's mail, each on
+  its own, fenced as untrusted, with nothing else of the event: no title,
+  guests, notes, ids or account. The answer, a `name` and an `address`, is
+  laundered like a title and HELD TO THE INPUT IN CODE: every word of each
+  must be a word of the location (`place::grounded`), so the model can only
+  drop text, never add an address, a link or anything a hostile location
+  asked for; an answer that adds a word is discarded and the location kept. Stored in `calendar_places` keyed by the
+  location text (one call per distinct text), pruned when no event holds it,
+  served on `GET /client/timeline` only, as `place` (name, address and the
+  original location) beside the untouched `location`. An event Passband owns
+  is written with the name and address as its location, so the address
+  survives Gmail's copy being deleted. At most 100 calls per account per day (attempts counted in
+  memory, spend in the usage ledger under `calendar_place`). No key, no call.
+  The location text is never logged.
 - **`html_link` is an allow-list** (`gcal/mod.rs:google_link`): https, a host that is
   `google.com` or ends in `.google.com`, no userinfo, at most 2048 characters.
   Anything else is dropped, because the client opens it.
@@ -1726,17 +1775,16 @@ write (`passband/Sources/Passband/Lib/EventProposal.swift`,
 - **It never replaces the user's work.** A pane holding anything (typed, or an
   earlier proposal, on screen or parked) refuses the tool with a fixed sentence
   the model relays.
-- **It follows the page.** Offered only on the Mac and only while
-  `calendarPageAvailable`; with the flag off the tool definitions and system
-  prompt sent to the model are the ones from before the tool existed, and a
-  call naming it is answered as any unknown tool. No edit or delete tool.
+- **Mac only.** Offered only on the Mac (`AgentTools.Tool.isAvailable`); on
+  the phone a call naming it is answered as any unknown tool. (It was once
+  also gated on the `calendar` flag, now retired.) No edit or delete tool.
   Nothing was added to `/mcp`, `/client/agent/*` or the relay.
 
 **Who a name is: `GET /client/calendar/people` (wave 6).** The event pane reads
 "with steven" out of a new event's title (a deterministic parser in the client,
 no model) and asks the daemon who that most likely is, to SUGGEST a guest.
-- Behind `require_calendar` with the other calendar routes (404 with the flag
-  off), bearer authed on the human door, `no-store`, at most three answers. Not
+- With the other calendar routes (`calendar_routes`; the `calendar` flag that
+  once 404ed them is retired), bearer authed on the human door, `no-store`, at most three answers. Not
   on the agent door, `/mcp` or the assistant relay.
 - **A candidate is somebody the user has written to** (`contacts`, `sent_count >
   0`), never the account's own address. Receiving mail from someone never makes
@@ -1774,6 +1822,18 @@ typed into that one field leaves the device for Apple, from the client and
 only once it is two characters long; the title, the times, the notes, the
 calendar and the account do not, the daemon is not involved, and no location
 permission is requested. Google's Places API is not used.
+
+**What the event card fetches (client, `Model/EventVisuals.swift`).** The
+calendar card's picture is, in order: a photo from the mail behind the event,
+or the venue from Apple MapKit, or nothing. The photo is fetched only while
+"load remote images" is on, from the newest message by someone else in the
+event's threads, at most four of its images, through `HeroBytes` (ephemeral
+session, no cookies, no referrer, no cache, 8 MB, `image/*` only), exactly
+like a Reading card's hero; a sender learns no more than opening the mail
+would tell them. The venue lookup sends the card's place text alone to Apple
+(`MKLocalSearch`, then `MKLookAroundSceneRequest` for the item it returns),
+never for a link or a call, and Apple's answer is used only when its name
+matches the place. No location permission, no key, no Google.
 
 **The token is the union; the slot is the boundary.** Self-host
 `squelchd auth --calendar` stores its token in its own credential slot

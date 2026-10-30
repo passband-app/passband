@@ -43,7 +43,8 @@ use axum::{
 use base64::Engine as _;
 use serde_json::{Value, json};
 use squelch_control::config::{
-    BifrostConfig, Config, DEFAULT_ASSISTANT_BUDGET_USD, DEFAULT_LLM_BUDGET_USD, WaitlistConfig,
+    BifrostConfig, Config, DEFAULT_ASSISTANT_BUDGET_USD, DEFAULT_LLM_BUDGET_USD, MicrosoftConfig,
+    WaitlistConfig,
 };
 use squelch_control::warden::HttpWarden;
 use squelch_control::{ControlState, activation, invites, router, seal};
@@ -62,6 +63,17 @@ const MODIFY: &str = "https://www.googleapis.com/auth/gmail.modify";
 const SEND: &str = "https://www.googleapis.com/auth/gmail.send";
 const CAL_EVENTS: &str = "https://www.googleapis.com/auth/calendar.events";
 const CAL_LIST: &str = "https://www.googleapis.com/auth/calendar.calendarlist.readonly";
+
+/// The mock Microsoft app and account. The account is the one Outlook was
+/// built against: a PERSONAL Microsoft account that signs in as an address on
+/// another company's domain (here the same address a Gmail tenant has) while
+/// its mailbox is an `@outlook.com` alias.
+const MS_CLIENT_ID: &str = "11111111-2222-3333-4444-555555555555";
+const MS_CLIENT_SECRET: &str = "ms-hosted-secret";
+const MS_ID: &str = "313658d2f27bcf04";
+const MS_SIGNIN: &str = "braelyn@passband.test";
+const MS_MAILBOX: &str = "passband-qa@outlook.com";
+const MS_GRANT: &str = "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read https://graph.microsoft.com/Calendars.ReadWrite openid";
 
 /// What a consent that left every box checked reports back, the way Google
 /// spells a scope set: space delimited, in one string.
@@ -156,6 +168,13 @@ struct Recorder {
     /// serves at `/hook` so every harness has alerts wired the way production
     /// does.
     alerts: Vec<String>,
+    /// Form fields of the last exchange at the mock MICROSOFT token endpoint.
+    ms_token_form: Vec<(String, String)>,
+    /// What the mock Graph `/me` answers. `None` is a personal account that
+    /// signs in as an address on somebody else's domain.
+    ms_me: Option<Value>,
+    /// The To addresses on the mock inbox, newest first.
+    ms_inbox_to: Vec<String>,
 }
 
 type Shared = Arc<Mutex<Recorder>>;
@@ -212,6 +231,46 @@ async fn spawn_google(rec: Shared) -> String {
                     .into_response()
                 },
             ),
+        )
+        // THE MOCK MICROSOFT, on the same server: the confidential app's
+        // token endpoint and the two Graph reads an Outlook signup makes.
+        .route(
+            "/ms/token",
+            post(
+                |AxumState(rec): AxumState<Shared>, body: String| async move {
+                    let form: Vec<(String, String)> = url::form_urlencoded::parse(body.as_bytes())
+                        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                        .collect();
+                    rec.lock().unwrap().ms_token_form = form;
+                    Json(json!({
+                        "access_token": ACCESS_TOKEN,
+                        "refresh_token": REFRESH_TOKEN,
+                        "expires_in": 3599,
+                        "token_type": "Bearer",
+                        "scope": MS_GRANT,
+                    }))
+                },
+            ),
+        )
+        .route(
+            "/graph/me",
+            get(|AxumState(rec): AxumState<Shared>| async move {
+                let me = rec.lock().unwrap().ms_me.clone().unwrap_or_else(
+                    || json!({"id": MS_ID, "mail": MS_SIGNIN, "userPrincipalName": MS_SIGNIN}),
+                );
+                Json(me)
+            }),
+        )
+        .route(
+            "/graph/me/mailFolders/inbox/messages",
+            get(|AxumState(rec): AxumState<Shared>| async move {
+                let to = rec.lock().unwrap().ms_inbox_to.clone();
+                let value: Vec<Value> = to
+                    .iter()
+                    .map(|a| json!({"toRecipients": [{"emailAddress": {"address": a}}]}))
+                    .collect();
+                Json(json!({ "value": value }))
+            }),
         )
         .route(
             "/profile",
@@ -359,6 +418,19 @@ async fn spawn_warden(rec: Shared) -> String {
                         })),
                     )
                         .into_response()
+                },
+            ),
+        )
+        // A login's pairing code, for the Outlook app-login tests.
+        .route(
+            "/v1/tenants/{label}/pair",
+            post(
+                |axum::extract::Path(label): axum::extract::Path<String>| async move {
+                    Json(json!({
+                        "pair_code": "ABCD-EFGH",
+                        "pair_url": format!("https://{label}.passband.test"),
+                        "deep_link": "passband://pair?url=x&code=ABCD-EFGH",
+                    }))
                 },
             ),
         )
@@ -668,6 +740,13 @@ impl Harness {
             // profile endpoint, which is what its own grant permits. The console
             // login is the one that reads userinfo (`tests/console_auth.rs`).
             userinfo_url: format!("{google}/userinfo"),
+            microsoft: Some(MicrosoftConfig {
+                client_id: MS_CLIENT_ID.into(),
+                client_secret: MS_CLIENT_SECRET.into(),
+                auth_url: format!("{google}/ms/authorize"),
+                token_url: format!("{google}/ms/token"),
+                graph_base: format!("{google}/graph"),
+            }),
             alert_webhook_url: Some(format!("{warden_url}/hook")),
             // No agent door: `/agent/auth` is not mounted.
             workos: None,
@@ -1009,6 +1088,63 @@ impl Harness {
         // Only the cookie pair, as a browser would send it back.
         let cookie = cookie.split(';').next().unwrap().to_string();
         (location, cookie)
+    }
+
+    /// Post the signup form with the Microsoft button and return
+    /// `(consent url, cookie value)`.
+    async fn start_outlook_signup(&self, label: &str) -> (String, String) {
+        let (status, headers, body) = self
+            .post_form(
+                "/signup",
+                format!(
+                    "invite={}&label={label}&provider=microsoft",
+                    urlencode(&self.invite_code)
+                ),
+            )
+            .await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+        let location = headers[header::LOCATION].to_str().unwrap().to_string();
+        let cookie = headers[header::SET_COOKIE].to_str().unwrap().to_string();
+        (location, cookie.split(';').next().unwrap().to_string())
+    }
+
+    /// Walk a whole Outlook signup to its answer.
+    async fn run_outlook_signup(&self, label: &str) -> (StatusCode, String) {
+        let (consent, cookie) = self.start_outlook_signup(label).await;
+        let (status, _, body) = self
+            .get(
+                &format!(
+                    "/oauth/callback?code=the-auth-code&state={}",
+                    state_param(&consent)
+                ),
+                Some(&cookie),
+            )
+            .await;
+        (status, body)
+    }
+
+    /// Walk a whole app login with `provider=` (empty for Google).
+    async fn run_app_login(&self, provider: &str) -> (StatusCode, String) {
+        let uri = if provider.is_empty() {
+            "/app/auth".to_string()
+        } else {
+            format!("/app/auth?provider={provider}")
+        };
+        let (status, headers, body) = self.get(&uri, None).await;
+        assert!(status.is_redirection(), "{status}: {body}");
+        let consent = headers[header::LOCATION].to_str().unwrap().to_string();
+        let cookie = headers[header::SET_COOKIE].to_str().unwrap().to_string();
+        let cookie = cookie.split(';').next().unwrap().to_string();
+        let (status, _, body) = self
+            .get(
+                &format!(
+                    "/oauth/callback?code=the-auth-code&state={}",
+                    state_param(&consent)
+                ),
+                Some(&cookie),
+            )
+            .await;
+        (status, body)
     }
 
     /// Walk one whole signup: form post, consent, callback.
@@ -3094,7 +3230,6 @@ async fn the_calendar_consent_url_carries_every_parameter() {
 async fn a_granted_calendar_consent_installs_through_the_reconnect_pipeline() {
     let h = Harness::new().await;
     h.complete_signup("ada").await;
-    h.grant_feature("ada", "calendar").await;
     let installs = h.rec.lock().unwrap().credential_puts.len();
     let invite_before = h.invite_row().await;
     h.rec.lock().unwrap().granted_scope = Some(calendar_grant());
@@ -3143,104 +3278,39 @@ async fn a_granted_calendar_consent_installs_through_the_reconnect_pipeline() {
     assert_eq!(h.invite_row().await, invite_before, "no invite spent");
 }
 
-/// THE CALENDAR HIDDEN FEATURE. A tenant without `calendar` (no row of its
-/// own, no Everyone default) can start the consent, because the start names no
-/// tenant and must not become an oracle; but once Google has said whose
-/// mailbox this is, nothing is installed or queued and the page says calendar
-/// is not available yet. The plain reconnect is untouched. With the Everyone
-/// default on, the same consent installs.
+/// CALENDAR FOR EVERYONE. The consent installs for a tenant with no hidden
+/// feature at all: `calendar` is a retired key and the callback never reads
+/// `tenant_features`, so the table being unreadable does not stop it either.
+/// A leftover row granting the retired key is just as harmless.
 #[tokio::test]
-async fn a_calendar_consent_for_a_tenant_without_the_feature_installs_nothing() {
+async fn a_calendar_consent_needs_no_hidden_feature() {
     let h = Harness::new().await;
     h.complete_signup("ada").await;
     let installs = h.rec.lock().unwrap().credential_puts.len();
     h.rec.lock().unwrap().granted_scope = Some(calendar_grant());
-    // ANOTHER tenant holds the feature: that grant is theirs, not ada's. The
-    // gate reads the grant of the tenant the consent is for, never "anyone's".
-    let other: i64 = common::raw_client(&h.db_url)
-        .await
-        .query_one(
-            "INSERT INTO tenants(label, account_email, status, created_at)
-             VALUES('bob', 'bob@example.com', 'active', '2026-10-01T00:00:00Z')
-             RETURNING id",
-            &[],
-        )
-        .await
-        .unwrap()
-        .get(0);
-    h.state
-        .store()
-        .save_features(
-            &[other],
-            &["calendar".to_string()],
-            &[(other, "calendar".to_string())],
-            &[],
-            chrono::Utc::now(),
-        )
-        .await
-        .unwrap();
     assert!(
-        h.state
+        !h.state
             .store()
-            .tenant_has_feature("bob", "calendar")
+            .tenant_has_feature("ada", "calendar")
             .await
             .unwrap(),
-        "the other tenant does hold it"
+        "ada has no feature row"
     );
 
-    let (status, body) = h.run_reconnect_with(&calendar_link()).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(
-        body.contains("Calendar isn&#39;t available for this mailbox yet.")
-            || body.contains("Calendar isn't available for this mailbox yet."),
-        "{body}"
-    );
-    assert!(!body.contains(MAILBOX), "{body}");
-    assert!(!body.contains(REFRESH_TOKEN));
-    assert_eq!(h.rec.lock().unwrap().credential_puts.len(), installs);
-    assert!(job_purposes(&h).await.is_empty(), "nothing queued");
-
-    // Everyone: the default row turns it on for this tenant too.
-    let store = h.state.store();
-    store
-        .save_features(
-            &[],
-            &["calendar".to_string()],
-            &[],
-            &["calendar".to_string()],
-            chrono::Utc::now(),
-        )
-        .await
-        .unwrap();
     let (status, body) = h.run_reconnect_with(&calendar_link()).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("Calendar is connected"), "{body}");
     assert_eq!(h.rec.lock().unwrap().credential_puts.len(), installs + 1);
     assert_eq!(job_purposes(&h).await, vec!["calendar"]);
-}
 
-/// THE GATE FAILS CLOSED: when the feature cannot be read (Postgres down,
-/// the table gone), a calendar consent installs nothing and queues nothing,
-/// and the page says to try again; it never falls through to the install.
-#[tokio::test]
-async fn a_calendar_consent_whose_feature_read_fails_installs_nothing() {
-    let h = Harness::new().await;
-    h.complete_signup("ada").await;
-    let installs = h.rec.lock().unwrap().credential_puts.len();
-    h.rec.lock().unwrap().granted_scope = Some(calendar_grant());
-    // The Everyone default would answer yes if it were read: the failure, not
-    // a "no", is what refuses.
-    h.state
-        .store()
-        .save_features(
-            &[],
-            &["calendar".to_string()],
-            &[],
-            &["calendar".to_string()],
-            chrono::Utc::now(),
-        )
-        .await
-        .unwrap();
+    // A leftover row for the retired key: the same consent, the same install.
+    h.grant_feature("ada", "calendar").await;
+    let (status, body) = h.run_reconnect_with(&calendar_link()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Calendar is connected"), "{body}");
+    assert_eq!(h.rec.lock().unwrap().credential_puts.len(), installs + 2);
+
+    // And the features table gone: nothing on this path reads it.
     let raw = common::raw_client(&h.db_url).await;
     raw.execute(
         "ALTER TABLE tenant_features RENAME TO tenant_features_gone",
@@ -3248,39 +3318,15 @@ async fn a_calendar_consent_whose_feature_read_fails_installs_nothing() {
     )
     .await
     .unwrap();
-    assert!(
-        h.state
-            .store()
-            .tenant_has_feature("ada", "calendar")
-            .await
-            .is_err()
-    );
-
-    let (status, body) = h.run_reconnect_with(&calendar_link()).await;
-    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
-    assert!(
-        body.contains("Reconnecting is unavailable right now"),
-        "{body}"
-    );
-    assert!(!body.contains(MAILBOX), "{body}");
-    assert!(!body.contains(REFRESH_TOKEN));
-    assert_eq!(h.rec.lock().unwrap().credential_puts.len(), installs);
-    assert!(job_purposes(&h).await.is_empty(), "nothing queued");
-
-    // The control: with the table back, the same consent installs.
-    raw.execute(
-        "ALTER TABLE tenant_features_gone RENAME TO tenant_features",
-        &[],
-    )
-    .await
-    .unwrap();
     let (status, body) = h.run_reconnect_with(&calendar_link()).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("Calendar is connected"), "{body}");
-    assert_eq!(h.rec.lock().unwrap().credential_puts.len(), installs + 1);
+    assert_eq!(h.rec.lock().unwrap().credential_puts.len(), installs + 3);
+    assert!(!body.contains(MAILBOX), "{body}");
+    assert!(!body.contains(REFRESH_TOKEN));
 }
 
-/// The plain reconnect never asks about the calendar feature.
+/// The plain reconnect installs with no hidden feature, as it always did.
 #[tokio::test]
 async fn a_plain_reconnect_does_not_need_the_calendar_feature() {
     let h = Harness::new().await;
@@ -3377,7 +3423,6 @@ async fn a_mismatched_account_with_a_hint_installs_nothing_and_names_no_address(
     const BOB: &str = "bob@example.com";
     let h = Harness::new().await;
     h.complete_signup("ada").await;
-    h.grant_feature("ada", "calendar").await;
     // Bob has a mailbox here too.
     h.rec.lock().unwrap().profile_email = Some(BOB.to_string());
     h.rec.lock().unwrap().expected_challenge = None;
@@ -3435,7 +3480,6 @@ async fn a_mismatched_account_with_a_hint_installs_nothing_and_names_no_address(
 async fn a_garbage_or_oversized_hint_is_ignored() {
     let h = Harness::new().await;
     h.complete_signup("ada").await;
-    h.grant_feature("ada", "calendar").await;
     let oversized = format!("{}@example.com", "a".repeat(400));
     for raw in [
         "not-an-address".to_string(),
@@ -3609,4 +3653,118 @@ async fn an_old_reconnect_jobs_table_gains_purpose_as_reconnect() {
             .await
             .is_err()
     );
+}
+
+// ---- Outlook -----------------------------------------------------------------
+
+/// THE CASE OUTLOOK WAS BUILT AGAINST. A personal Microsoft account signs in as
+/// an address a GMAIL tenant already has, while its mailbox is an
+/// `@outlook.com` alias that mail arrives at. The signup provisions an Outlook
+/// tenant for the MAILBOX, not the sign-in label, so it is not refused as a
+/// duplicate of the Gmail one; and everything the daemon will need is in what
+/// was sealed and sent.
+#[tokio::test]
+async fn an_outlook_signup_is_for_the_mailbox_mail_arrives_at() {
+    let h = Harness::new().await;
+    // The Gmail tenant at the Microsoft account's sign-in address.
+    h.state
+        .store()
+        .insert_tenant("gmailone", MS_SIGNIN)
+        .await
+        .unwrap();
+    h.rec.lock().unwrap().ms_inbox_to = vec![MS_MAILBOX.into(), MS_MAILBOX.into()];
+
+    let (consent, cookie) = h.start_outlook_signup("qa2").await;
+    let url = url::Url::parse(&consent).unwrap();
+    assert_eq!(url.path(), "/ms/authorize");
+    assert_eq!(query_param(&consent, "client_id"), MS_CLIENT_ID);
+    assert_eq!(query_param(&consent, "prompt"), "select_account");
+    assert!(query_param(&consent, "scope").contains("Mail.ReadWrite"));
+    assert!(query_param(&consent, "access_type").is_empty());
+
+    let (status, _, body) = h
+        .get(
+            &format!(
+                "/oauth/callback?code=the-auth-code&state={}",
+                state_param(&consent)
+            ),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let create = h.rec.lock().unwrap().create_bodies.last().cloned().unwrap();
+    assert_eq!(create["provider"], "outlook");
+    assert_eq!(create["account_email"], MS_MAILBOX);
+    // The confidential app's secret went to Microsoft, in the body.
+    let form = h.rec.lock().unwrap().ms_token_form.clone();
+    assert!(
+        form.iter()
+            .any(|(k, v)| k == "client_secret" && v == MS_CLIENT_SECRET),
+        "{form:?}"
+    );
+    // The sealed credential records Graph scopes, which is how the tenant's
+    // daemon knows it is an Outlook mailbox.
+    let (label, armor) = h.credential_armor(0);
+    let plaintext = h.open_with_tenant_identity(&label, &armor);
+    assert!(
+        plaintext.contains("graph.microsoft.com/Mail.ReadWrite"),
+        "{plaintext}"
+    );
+    assert!(plaintext.contains(MS_MAILBOX), "{plaintext}");
+
+    let store = h.state.store();
+    assert_eq!(
+        store.active_outlook_tenant_for_ms_id(MS_ID).await.unwrap(),
+        Some("qa2".to_string())
+    );
+    let owner = store.active_tenant_owner("qa2").await.unwrap().unwrap();
+    assert_eq!(owner.provider, "outlook");
+    assert_eq!(owner.account_email, MS_MAILBOX);
+
+    // And an Outlook app login finds it, by account id.
+    let (status, body) = h.run_app_login("microsoft").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("qa2.passband.test"), "{body}");
+    assert!(!body.contains("gmailone"), "{body}");
+}
+
+/// A MICROSOFT LOGIN NEVER OPENS A MAILBOX BY ADDRESS. Graph names an account
+/// by whatever address its owner (or its tenant's admin) set, so a Microsoft
+/// account claiming a Gmail tenant's address must find nothing.
+#[tokio::test]
+async fn a_microsoft_login_never_opens_a_mailbox_by_address() {
+    let h = Harness::new().await;
+    h.state
+        .store()
+        .insert_tenant("victim", MS_SIGNIN)
+        .await
+        .unwrap();
+    h.rec.lock().unwrap().ms_me = Some(json!({
+        "id": "deadbeefdeadbeef",
+        "mail": MS_SIGNIN,
+        "userPrincipalName": MS_SIGNIN
+    }));
+    let (status, body) = h.run_app_login("microsoft").await;
+    assert!(!body.contains("victim.passband.test"), "{body}");
+    assert!(!body.contains("pair"), "{status}: {body}");
+}
+
+/// A REAL DUPLICATE is refused across companies: an Outlook signup whose
+/// mailbox already has a tenant (here a Google account registered on that
+/// address) names the mailbox and the company that has it.
+#[tokio::test]
+async fn an_outlook_signup_for_a_mailbox_that_has_a_tenant_is_refused() {
+    let h = Harness::new().await;
+    h.state
+        .store()
+        .insert_tenant("already", MS_MAILBOX)
+        .await
+        .unwrap();
+    h.rec.lock().unwrap().ms_inbox_to = vec![MS_MAILBOX.into()];
+    let (status, body) = h.run_outlook_signup("dupe").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body.contains(MS_MAILBOX), "{body}");
+    assert!(body.contains("(Gmail)"), "{body}");
+    assert!(h.rec.lock().unwrap().create_bodies.is_empty());
 }

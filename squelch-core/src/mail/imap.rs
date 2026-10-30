@@ -3380,6 +3380,7 @@ impl MailSource for ImapSource {
                 ids: Vec::new(),
                 cursor: since.clone(),
                 mailbox_unchanged: false,
+                saw_changes: false,
             }),
             Walk::Gone => {
                 let mut cursor = start;
@@ -3388,6 +3389,7 @@ impl MailSource for ImapSource {
                     ids: Vec::new(),
                     cursor: cursor.encode(),
                     mailbox_unchanged: false,
+                    saw_changes: true,
                 })
             }
             Walk::Moved {
@@ -3404,10 +3406,12 @@ impl MailSource for ImapSource {
                 ids.dedup();
                 let mut cursor = start;
                 cursor.folders.insert(key.to_string(), pos);
+                let saw_changes = !mailbox_unchanged || !ids.is_empty();
                 Ok(Changes {
                     ids,
                     cursor: cursor.encode(),
                     mailbox_unchanged,
+                    saw_changes,
                 })
             }
         }

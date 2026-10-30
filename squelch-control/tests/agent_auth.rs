@@ -237,6 +237,7 @@ impl Harness {
             auth_url: format!("{google}/authorize"),
             profile_url: format!("{google}/profile"),
             userinfo_url: format!("{google}/userinfo"),
+            microsoft: None,
             alert_webhook_url: None,
             bifrost: None,
             waitlist: None,

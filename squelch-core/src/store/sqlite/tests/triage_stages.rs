@@ -1150,6 +1150,7 @@ fn count_inbound_since_counts_only_received_in_window() {
             list_unsubscribe: None,
             list_unsub_one_click: false,
             auth_pass: None,
+            sender_signals: None,
         };
         store.upsert_message(&m).unwrap();
     };

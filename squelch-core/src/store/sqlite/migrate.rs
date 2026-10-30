@@ -144,6 +144,10 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // tracking-pixel bypass, no ghost sender scope, no timezone observation),
     // and a re-sync refills it through the message upsert.
     add_column_if_missing(conn, "messages", "auth_pass", "INTEGER")?;
+    // Where From and the real sender disagree (#639), as JSON. NULL on every
+    // pre-existing row and NOT backfilled here: the raw mail is not stored,
+    // so only a re-fetch can fill it, and the message upsert does that.
+    add_column_if_missing(conn, "messages", "sender_signals", "TEXT")?;
     // Automatic-unsubscribe job state. NULL on every pre-existing row, which is
     // exactly a legacy browser unsubscribe: no job, and the detector armed.
     for col in ["status", "status_url", "status_reason", "status_at"] {
@@ -803,6 +807,26 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    // Gmail's own events (2026-10-28). A row from before the mark reads as
+    // an ordinary event, which offers an edit Google then refuses; so when
+    // the column is new every calendar forgets its token and last full read,
+    // and the next pass rereads each in full with `eventType` in the mask.
+    if add_column_if_missing(
+        conn,
+        "calendar_events",
+        "from_gmail",
+        "INTEGER NOT NULL DEFAULT 0",
+    )? {
+        conn.execute(
+            "UPDATE calendar_calendars SET sync_token=NULL, full_synced_at=NULL",
+            [],
+        )?;
+    }
+
+    // The card's place gained its street address (2026-10-29). A table made
+    // before it holds names only, under the old prompt, so every row is
+    // pending again anyway.
+    add_column_if_missing(conn, "calendar_places", "address", "TEXT")?;
 
     // STRANDED FAN-OUTS. A group send settles its recipients from a background
     // task, and no task survives the process. So any recipient still 'pending'

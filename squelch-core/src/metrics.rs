@@ -1518,6 +1518,7 @@ pub fn runs_notify_model(category: &str) -> bool {
         || category == crate::triage::access::USAGE_CATEGORY
         || category == crate::triage::unsub_page::USAGE_CATEGORY
         || category == crate::triage::unsub_agent::USAGE_CATEGORY
+        || category == crate::gcal::place::USAGE_CATEGORY
 }
 
 /// Estimated spend for a ledger rollup, costed exactly as `/client/usage` does.
@@ -2699,6 +2700,7 @@ mod tests {
             RULE_SUGGEST_USAGE_CATEGORY,
             FYE_HEADLINE_USAGE_CATEGORY,
             crate::triage::access::USAGE_CATEGORY,
+            crate::gcal::place::USAGE_CATEGORY,
         ] {
             assert!(
                 (estimate_cost_usd(&one_mtok_in(category), &config) - expected).abs() < 1e-9,

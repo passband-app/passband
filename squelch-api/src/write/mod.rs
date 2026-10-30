@@ -9,6 +9,7 @@
 //! decided by its `accounts.provider` row (`handlers::write_client`).
 
 pub mod gmail;
+pub mod graph;
 pub mod imap;
 pub mod mime;
 pub mod smtp;

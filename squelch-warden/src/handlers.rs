@@ -144,6 +144,10 @@ fn malformed(detail: String) -> Response {
 struct CreateTenant {
     label: String,
     account_email: String,
+    /// `outlook` for an Outlook tenant. Absent (every control plane before
+    /// Outlook, and every Gmail signup since) is Gmail.
+    #[serde(default)]
+    provider: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -254,9 +258,12 @@ pub async fn create_tenant(State(state): State<WardenState>, body: Bytes) -> Res
         Ok(req) => req,
         Err(detail) => return malformed(detail),
     };
+    let Some(provider) = crate::objects::MailProvider::parse(req.provider.as_deref()) else {
+        return malformed("provider must be gmail or outlook".to_string());
+    };
     match state
         .warden()
-        .create_tenant(&req.label, &req.account_email)
+        .create_tenant_for(&req.label, &req.account_email, provider)
         .await
     {
         Ok(created) => (

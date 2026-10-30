@@ -21,7 +21,6 @@ use squelch_core::config::{
     OAuthClientConfig,
 };
 use squelch_core::credentials::{CalendarCredentials, CredentialKind, StoredToken};
-use squelch_core::features::Features;
 use squelch_core::gcal::sync::{CalendarSync, PassOutcome};
 use squelch_core::gcal::{CalendarErrorKind, PRIMARY};
 use squelch_core::store::{
@@ -93,6 +92,11 @@ struct Google {
     list_gets: Vec<String>,
     /// Answer every `calendarList.get` with this status instead.
     list_get_status: Option<u16>,
+    /// Answer every delete of this event id 403, as Google refuses a change
+    /// it does not allow.
+    fail_delete_of: Option<String>,
+    /// Answer every delete 403.
+    fail_deletes: bool,
     /// Answer this many of the next one-event reads 404, found or not, as a
     /// replica that has not caught up would.
     stale_reads: usize,
@@ -305,6 +309,10 @@ async fn delete_route(
     let mut g = g.lock().unwrap();
     if let Some(failed) = g.record("DELETE", &calendar, Some(&id), q, Value::Null, &headers) {
         return failed;
+    }
+    if g.fail_deletes || g.fail_delete_of.as_deref() == Some(id.as_str()) {
+        let error = json!({"error": {"code": 403, "errors": [{"reason": "forbidden"}]}});
+        return (StatusCode::FORBIDDEN, Json(error)).into_response();
     }
     let Some(pages) = g.full.get_mut(&calendar) else {
         return StatusCode::GONE.into_response();
@@ -567,8 +575,6 @@ struct World {
     creds: Arc<CalendarCredentials>,
     path: PathBuf,
     metrics: Arc<squelch_core::metrics::SyncMetrics>,
-    /// The `calendar` hidden feature as the loop and the door both read it.
-    features: Features,
 }
 
 impl Drop for World {
@@ -612,29 +618,25 @@ async fn world_with(
             OAuthClientConfig {
                 client_id: "id".into(),
                 client_secret: "secret".into(),
+                issuer: Default::default(),
             },
         )
         .unwrap(),
     );
     let google: Fake = Arc::default();
     let base = spawn_google(google.clone()).await;
-    // The calendar hidden feature, ON: every test here is about a mailbox
-    // that has it. One handle, shared by the loop and the door, so a test can
-    // flip it under both.
-    let features = Features::none();
-    features.replace_granted([squelch_core::features::CALENDAR]);
-    let sync =
-        CalendarSync::with_api_base(store.clone(), acct, creds.clone(), features.clone(), &base)
-            .unwrap()
-            .with_test_timing(StdDuration::from_millis(50));
+    // NO HIDDEN FEATURE: calendar is on for every mailbox, so the door and
+    // the loop are built with none at all.
+    let sync = CalendarSync::with_api_base(store.clone(), acct, creds.clone(), &base)
+        .unwrap()
+        .with_test_timing(StdDuration::from_millis(50));
     let metrics = squelch_core::metrics::SyncMetrics::new();
     let app = router(door(
         state
             .with_calendar_credentials((*creds).clone())
             .with_calendar_sync_kick(sync.kick_handle())
             .with_calendar_api_base(base.clone())
-            .with_sync_metrics(metrics.clone())
-            .with_features(features.clone()),
+            .with_sync_metrics(metrics.clone()),
         &base,
     ));
     World {
@@ -647,7 +649,6 @@ async fn world_with(
         creds,
         path,
         metrics,
-        features,
     }
 }
 
@@ -869,6 +870,7 @@ async fn a_first_sync_reads_the_window_in_full_and_serves_every_field() {
             "description",
             "editable",
             "end",
+            "from_gmail",
             "guest_editable",
             "guests",
             "guests_truncated",
@@ -915,6 +917,7 @@ async fn a_first_sync_reads_the_window_in_full_and_serves_every_field() {
             ],
             "guests_truncated": false,
             "guest_editable": false,
+            "from_gmail": false,
         })
     );
     // The all-day ones: dates, the INCLUSIVE last day as the end (Google
@@ -1401,7 +1404,6 @@ async fn a_network_error_leaves_the_old_rows_and_sets_the_error_kind() {
         w.store.clone(),
         w.acct,
         w.creds.clone(),
-        w.features.clone(),
         "http://127.0.0.1:1",
     )
     .unwrap();
@@ -1466,7 +1468,6 @@ async fn no_calendar_failure_touches_gmail_health() {
         w.store.clone(),
         w.acct,
         w.creds.clone(),
-        w.features.clone(),
         "http://127.0.0.1:1",
     )
     .unwrap();
@@ -1563,15 +1564,9 @@ async fn the_loop_idles_without_a_grant_and_starts_when_one_appears() {
         )]],
     );
     let (stop, shutdown) = tokio::sync::watch::channel(false);
-    let sync = CalendarSync::with_api_base(
-        w.store.clone(),
-        w.acct,
-        w.creds.clone(),
-        w.features.clone(),
-        &w.base,
-    )
-    .unwrap()
-    .with_test_timing(StdDuration::from_millis(30));
+    let sync = CalendarSync::with_api_base(w.store.clone(), w.acct, w.creds.clone(), &w.base)
+        .unwrap()
+        .with_test_timing(StdDuration::from_millis(30));
     let task = tokio::spawn(sync.run(shutdown));
     tokio::time::sleep(StdDuration::from_millis(300)).await;
     assert!(w.google().bearers.is_empty(), "idle: Google not called");
@@ -1594,72 +1589,45 @@ async fn the_loop_idles_without_a_grant_and_starts_when_one_appears() {
     task.await.unwrap().unwrap();
 }
 
-/// BEHIND THE `calendar` HIDDEN FEATURE. Off, a pass reads nothing and calls
-/// Google for nothing, granted or not; the running loop starts reading on its
-/// own once the flag turns on, with no restart, and stops again when it goes
-/// off.
+/// CALENDAR FOR EVERYONE. A mailbox with no hidden features at all (the
+/// `calendar` key is retired) syncs, serves its events, and says so on
+/// `/client/stats`; a leftover grant of the retired key, as a control plane
+/// with an old `tenant_features` row still serves it, changes nothing.
 #[tokio::test]
-async fn the_loop_calls_google_for_nothing_while_the_flag_is_off() {
-    let w = world("flag", GRANTED).await;
+async fn a_mailbox_with_no_hidden_features_syncs_and_serves_its_calendar() {
+    let w = world("everyone", GRANTED).await;
     w.google().full.insert(
         PRIMARY.into(),
         vec![vec![timed(
             "e",
-            "After the flag",
+            "For everyone",
             minute(Utc::now() + Duration::days(1)),
             30,
         )]],
     );
-    w.features.replace_granted(Vec::<String>::new());
-    assert_eq!(w.pass().await, PassOutcome::Disabled);
-    assert!(
-        w.google().requests.is_empty(),
-        "a pass that is off read nothing"
-    );
-    assert!(
-        w.google().bearers.is_empty(),
-        "a pass that is off called nothing"
-    );
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    assert_eq!(w.titles().await, ["For everyone"]);
+    let stats = get(&w.app, "/client/stats").await;
+    assert_eq!(stats["timeline"], true, "{stats}");
+    assert_eq!(stats["calendar"]["granted"], true, "{stats}");
+    assert_eq!(stats["features"], json!([]), "no hidden feature was needed");
 
-    let (stop, shutdown) = tokio::sync::watch::channel(false);
-    let sync = CalendarSync::with_api_base(
-        w.store.clone(),
-        w.acct,
-        w.creds.clone(),
-        w.features.clone(),
-        &w.base,
+    let leftover = router(
+        squelch_api::ApiState::new(w.store.clone(), w.acct, TOKEN)
+            .with_calendar_credentials((*w.creds).clone())
+            .with_features(squelch_core::features::Features::pinned(["calendar"])),
+    );
+    assert_eq!(get(&leftover, "/client/stats").await["timeline"], true);
+    let body = get(
+        &leftover,
+        &format!(
+            "/client/timeline?from={}&to={}",
+            q(Utc::now() - Duration::days(1)),
+            q(Utc::now() + Duration::days(7)),
+        ),
     )
-    .unwrap()
-    .with_test_timing(StdDuration::from_millis(30));
-    let task = tokio::spawn(sync.run(shutdown));
-    tokio::time::sleep(StdDuration::from_millis(300)).await;
-    assert!(
-        w.google().requests.is_empty(),
-        "the loop, off: Google not called"
-    );
-    assert!(
-        w.google().bearers.is_empty(),
-        "the loop, off: Google not called"
-    );
-
-    w.features
-        .replace_granted([squelch_core::features::CALENDAR]);
-    let mut waited = 0;
-    while w.titles().await.is_empty() {
-        assert!(waited < 100, "the loop never noticed the flag");
-        tokio::time::sleep(StdDuration::from_millis(50)).await;
-        waited += 1;
-    }
-    assert_eq!(w.titles().await, ["After the flag"]);
-
-    // Off again: the passes after it read nothing more.
-    w.features.replace_granted(Vec::<String>::new());
-    tokio::time::sleep(StdDuration::from_millis(100)).await;
-    let before = w.google().requests.len();
-    tokio::time::sleep(StdDuration::from_millis(300)).await;
-    assert_eq!(w.google().requests.len(), before, "off again: nothing read");
-    stop.send(true).unwrap();
-    task.await.unwrap().unwrap();
+    .await;
+    assert_eq!(body["events"].as_array().unwrap().len(), 1, "{body}");
 }
 
 // --- refresh -----------------------------------------------------------------
@@ -1677,22 +1645,15 @@ async fn refresh_kicks_the_loop_at_most_once_per_30_seconds() {
     );
     // A loop that, left alone, would not pass again for an hour.
     let (stop, shutdown) = tokio::sync::watch::channel(false);
-    let sync = CalendarSync::with_api_base(
-        w.store.clone(),
-        w.acct,
-        w.creds.clone(),
-        w.features.clone(),
-        &w.base,
-    )
-    .unwrap()
-    .with_test_timing(StdDuration::from_secs(3600));
+    let sync = CalendarSync::with_api_base(w.store.clone(), w.acct, w.creds.clone(), &w.base)
+        .unwrap()
+        .with_test_timing(StdDuration::from_secs(3600));
     let kick = sync.kick_handle();
     let app = router(
         state_with(|_, _| {})
             .0
             .with_calendar_credentials((*w.creds).clone())
-            .with_calendar_sync_kick(kick)
-            .with_features(w.features.clone()),
+            .with_calendar_sync_kick(kick),
     );
     let task = tokio::spawn(sync.run(shutdown));
     let requests = |w: &World| w.google().requests.len();
@@ -1724,7 +1685,7 @@ async fn refresh_kicks_the_loop_at_most_once_per_30_seconds() {
     task.await.unwrap().unwrap();
 
     // A door with no loop answers the same shape.
-    let Harness { app, .. } = calendar_harness(|_, _| {});
+    let Harness { app, .. } = harness(|_, _| {});
     assert_eq!(
         refresh(&app).await,
         (StatusCode::ACCEPTED, json!({"kicked": false}))
@@ -1837,12 +1798,12 @@ async fn events_are_scoped_to_their_account() {
         OAuthClientConfig {
             client_id: "id".into(),
             client_secret: "secret".into(),
+            issuer: Default::default(),
         },
     )
     .unwrap();
     let app = router(
         squelch_api::ApiState::new(w.store.clone(), other, TOKEN)
-            .with_features(w.features.clone())
             .with_calendar_credentials(other_creds),
     );
     let body = get(&app, "/client/timeline").await;
@@ -2133,15 +2094,9 @@ async fn shutdown_interrupts_a_pass_in_flight_and_leaves_the_store_as_it_was() {
         g.requests.clear();
     }
     let (stop, shutdown) = tokio::sync::watch::channel(false);
-    let sync = CalendarSync::with_api_base(
-        w.store.clone(),
-        w.acct,
-        w.creds.clone(),
-        w.features.clone(),
-        &w.base,
-    )
-    .unwrap()
-    .with_test_timing(StdDuration::from_millis(30));
+    let sync = CalendarSync::with_api_base(w.store.clone(), w.acct, w.creds.clone(), &w.base)
+        .unwrap()
+        .with_test_timing(StdDuration::from_millis(30));
     let task = tokio::spawn(sync.run(shutdown));
     let mut waited = 0;
     while !w
@@ -2262,14 +2217,8 @@ async fn a_secondary_calendar_failing_forever_holds_back_nothing() {
         );
     }
     // The production pacing: a calendar's own backoff starts at a minute.
-    let sync = CalendarSync::with_api_base(
-        w.store.clone(),
-        w.acct,
-        w.creds.clone(),
-        w.features.clone(),
-        &w.base,
-    )
-    .unwrap();
+    let sync =
+        CalendarSync::with_api_base(w.store.clone(), w.acct, w.creds.clone(), &w.base).unwrap();
     let t0 = Utc::now();
     let reads = |w: &World, cal: &str| w.google().requests.iter().filter(|(c, _)| c == cal).count();
     let mut team_reads = Vec::new();
@@ -2456,6 +2405,7 @@ fn row_at(id: String, now: DateTime<Utc>, minutes: i64) -> squelch_core::gcal::E
         start_timezone: None,
         organizer_email: None,
         organizer_unreadable: false,
+        from_gmail: false,
         organizer_self: false,
         self_response: None,
         transparent: false,
@@ -2612,15 +2562,9 @@ async fn a_kick_during_a_quota_backoff_leaves_no_extra_pass_behind() {
     w.google().fail = Some((429, json!({})));
     let tick = StdDuration::from_millis(600);
     let (stop, shutdown) = tokio::sync::watch::channel(false);
-    let sync = CalendarSync::with_api_base(
-        w.store.clone(),
-        w.acct,
-        w.creds.clone(),
-        w.features.clone(),
-        &w.base,
-    )
-    .unwrap()
-    .with_test_timing(tick);
+    let sync = CalendarSync::with_api_base(w.store.clone(), w.acct, w.creds.clone(), &w.base)
+        .unwrap()
+        .with_test_timing(tick);
     let kick = sync.kick_handle();
     let task = tokio::spawn(sync.run(shutdown));
     let mut waited = 0;
@@ -2823,6 +2767,7 @@ async fn creating_an_event_goes_to_google_then_the_store_and_is_served() {
             "guests": [],
             "guests_truncated": false,
             "guest_editable": true,
+            "from_gmail": false,
         })
     );
     // Stored at once, served by the timeline as answered, and the next sync
@@ -3514,12 +3459,12 @@ async fn writes_are_scoped_to_their_account() {
         OAuthClientConfig {
             client_id: "id".into(),
             client_secret: "secret".into(),
+            issuer: Default::default(),
         },
     )
     .unwrap();
     let app = router(
         squelch_api::ApiState::new(w.store.clone(), other, TOKEN)
-            .with_features(w.features.clone())
             .with_calendar_credentials(other_creds)
             .with_calendar_api_base(w.base.clone()),
     );
@@ -4533,12 +4478,12 @@ async fn guests_are_scoped_to_their_account() {
         OAuthClientConfig {
             client_id: "id".into(),
             client_secret: "secret".into(),
+            issuer: Default::default(),
         },
     )
     .unwrap();
     let app = router(
         squelch_api::ApiState::new(w.store.clone(), other, TOKEN)
-            .with_features(w.features.clone())
             .with_calendar_credentials(other_creds)
             .with_calendar_api_base(w.base.clone()),
     );
@@ -5485,57 +5430,6 @@ async fn a_delete_404_whose_list_read_fails_deletes_nothing() {
     }
 }
 
-/// THE FLAG STOPS A PASS IN FLIGHT at the next calendar: turned off while the
-/// primary calendar is being read, the pass reads no other calendar. What was
-/// stored stays (the routes hide it); nothing is deleted.
-#[tokio::test]
-async fn turning_the_flag_off_mid_pass_stops_at_the_next_calendar() {
-    let w = world("flag-mid-pass", GRANTED_WITH_LIST).await;
-    let start = minute(Utc::now() + Duration::days(2));
-    {
-        let mut g = w.google();
-        g.list = vec![
-            list_entry("me@example.com", "Me", true, true),
-            list_entry(TEAM, "Team", true, false),
-        ];
-        g.full
-            .insert(PRIMARY.into(), vec![vec![timed("p1", "Mine", start, 30)]]);
-        g.full
-            .insert(TEAM.into(), vec![vec![timed("t1", "Team's", start, 30)]]);
-        g.delay_page = Some((0, StdDuration::from_millis(300)));
-    }
-    let flip = async {
-        let deadline = std::time::Instant::now() + StdDuration::from_secs(5);
-        while w.google().requests.is_empty() {
-            assert!(std::time::Instant::now() < deadline);
-            tokio::time::sleep(StdDuration::from_millis(5)).await;
-        }
-        w.features.replace_granted(Vec::<String>::new());
-    };
-    let (outcome, ()) = tokio::join!(w.pass(), flip);
-    assert_eq!(outcome, PassOutcome::Disabled);
-    let asked: Vec<String> = w.google().requests.iter().map(|(c, _)| c.clone()).collect();
-    assert_eq!(
-        asked,
-        vec![PRIMARY.to_string()],
-        "the team calendar was never read"
-    );
-    // The page in flight finished and was kept; turning the flag off deleted
-    // nothing.
-    assert!(
-        w.store
-            .calendar_event(w.acct, PRIMARY, "p1")
-            .unwrap()
-            .is_some()
-    );
-    // On again, the next pass reads both.
-    w.features
-        .replace_granted([squelch_core::features::CALENDAR]);
-    w.google().delay_page = None;
-    assert_eq!(w.pass().await, PassOutcome::Synced);
-    assert!(w.google().requests.iter().any(|(c, _)| c == TEAM));
-}
-
 /// EVERY REFUSAL NAMES ITS KIND (verify4 X1): each of the daemon's own
 /// refusals before Google carries its `code`, with its status, from the
 /// closed list in docs/CALENDAR.md §8. The app keys on these codes to decide
@@ -5613,6 +5507,466 @@ async fn every_refusal_before_google_names_its_code() {
         assert!(answer["error"].is_string(), "the human message stays");
     }
     assert!(writes(&w).is_empty(), "nothing reached Google");
+}
+
+// --- the card's place ---------------------------------------------------------
+
+/// A fake model that answers every call with `name` and `address`, counting
+/// the calls and keeping each request body.
+async fn spawn_place_model(
+    name: &'static str,
+    address: &'static str,
+) -> (String, Arc<Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies: Arc<Mutex<Vec<String>>> = Arc::default();
+    let seen = bodies.clone();
+    let answer = json!({ "name": name, "address": address }).to_string();
+    let body = json!({
+        "content": [{ "type": "text", "text": answer }],
+        "stop_reason": "end_turn",
+        "usage": { "input_tokens": 200, "output_tokens": 8 }
+    })
+    .to_string();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let body = body.clone();
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 65536];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                seen.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    (format!("http://{addr}"), bodies)
+}
+
+/// After a pass, a booking service's location is cleaned once by the model
+/// and served as `place`, beside the untouched `location`; a short location
+/// makes no call and carries no `place`; and Google's own boilerplate never
+/// reaches `description`.
+#[tokio::test]
+async fn a_noisy_location_is_served_as_a_clean_place_and_boilerplate_notes_go() {
+    use squelch_core::config::Stage2Provider;
+    use squelch_core::gcal::place::{PlaceClient, USAGE_CATEGORY};
+    let w = world("place", GRANTED).await;
+    let tock = "Dingles Public House, Tock is now part of the Resy network. \
+                Explore even more of our dining network on";
+    let start = minute(Utc::now() + Duration::days(2));
+    let mut dinner = timed("evt-1", "Reservation at Dingles Public House", start, 60);
+    dinner["location"] = json!(tock);
+    dinner["description"] = json!(
+        "To see detailed information for automatically created events like this one, \
+         use the official Google Calendar app. https://g.co/calendar"
+    );
+    let mut again = timed("evt-2", "Dinner again", start + Duration::days(7), 60);
+    again["location"] = json!(tock);
+    let mut call = timed("evt-3", "Call", start + Duration::days(1), 30);
+    call["location"] = json!("Zoom");
+    w.google()
+        .full
+        .insert(PRIMARY.into(), vec![vec![dinner, again, call]]);
+
+    let (url, bodies) = spawn_place_model("Dingles Public House", "").await;
+    let sync = CalendarSync::with_api_base(w.store.clone(), w.acct, w.creds.clone(), &w.base)
+        .unwrap()
+        .with_places(Some(PlaceClient::new(
+            reqwest::Client::new(),
+            url,
+            "sk-test",
+            Stage2Provider::Anthropic,
+            "claude-haiku-4-5",
+            None,
+        )));
+    assert_eq!(sync.pass(Utc::now()).await, PassOutcome::Synced);
+
+    // Before the model has answered: no `place`, the location as it was.
+    let events = w.events().await;
+    assert!(events.iter().all(|e| e.get("place").is_none()));
+    assert_eq!(events[0]["location"], json!(tock));
+    assert_eq!(
+        events[0]["description"],
+        Value::Null,
+        "boilerplate is not notes"
+    );
+
+    sync.clean_places(Utc::now()).await;
+    // One call for the one long location, carrying it and nothing else of
+    // the event.
+    {
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert!(bodies[0].contains("Tock is now part of the Resy network"));
+        assert!(!bodies[0].contains("Reservation at Dingles"));
+        assert!(!bodies[0].contains("Zoom"));
+    }
+    let events = w.events().await;
+    let by_id = |id: &str| events.iter().find(|e| e["id"] == id).unwrap().clone();
+    let dingles = json!({ "name": "Dingles Public House", "address": null, "original": tock });
+    assert_eq!(by_id("evt-1")["place"], dingles);
+    assert_eq!(by_id("evt-1")["location"], json!(tock), "the editor's text");
+    assert_eq!(by_id("evt-2")["place"], dingles);
+    assert!(by_id("evt-3").get("place").is_none());
+    assert_eq!(by_id("evt-3")["location"], json!("Zoom"));
+
+    // Billed to its own category; asked once, not again.
+    let billed = w
+        .store
+        .list_usage_by_category(w.acct, 1)
+        .unwrap()
+        .into_iter()
+        .find(|(c, _)| c == USAGE_CATEGORY)
+        .map(|(_, days)| days.iter().map(|d| d.calls).sum::<u64>());
+    assert_eq!(billed, Some(1));
+    sync.clean_places(Utc::now()).await;
+    assert_eq!(bodies.lock().unwrap().len(), 1);
+}
+
+/// A model answer that adds a word the location never had, in its name or
+/// its address, is not believed: the location is served as the place's name,
+/// unchanged, with no address.
+#[tokio::test]
+async fn a_place_answer_that_adds_a_word_keeps_the_location() {
+    use squelch_core::config::Stage2Provider;
+    use squelch_core::gcal::place::PlaceClient;
+    let w = world("place-added", GRANTED).await;
+    let noisy = "Harbor Tavern. Book your next table with us on our brand new app today";
+    let mut dinner = timed(
+        "evt-1",
+        "Dinner",
+        minute(Utc::now() + Duration::days(2)),
+        60,
+    );
+    dinner["location"] = json!(noisy);
+    w.google().full.insert(PRIMARY.into(), vec![vec![dinner]]);
+    let (url, _) = spawn_place_model("Harbor Tavern", "12 Water St").await;
+    let sync = CalendarSync::with_api_base(w.store.clone(), w.acct, w.creds.clone(), &w.base)
+        .unwrap()
+        .with_places(Some(PlaceClient::new(
+            reqwest::Client::new(),
+            url,
+            "sk-test",
+            Stage2Provider::Anthropic,
+            "claude-haiku-4-5",
+            None,
+        )));
+    assert_eq!(sync.pass(Utc::now()).await, PassOutcome::Synced);
+    sync.clean_places(Utc::now()).await;
+    assert_eq!(
+        w.events().await[0]["place"],
+        json!({ "name": noisy, "address": null, "original": noisy })
+    );
+}
+
+/// A location with a street address in it is served as the place's name and
+/// address apart, beside the location it came from; and the event Passband
+/// makes in place of Gmail's copy carries both, as one line, so the address
+/// is not lost when Gmail's copy is deleted.
+#[tokio::test]
+async fn a_place_keeps_its_address_apart_and_on_the_adopted_event() {
+    use squelch_core::config::Stage2Provider;
+    use squelch_core::gcal::place::PlaceClient;
+    let w = world("place-address", GRANTED).await;
+    let booked = "Harbor Tavern, 12 Water St, Portland. Tock is now part of the Resy \
+                  network. Explore even more of our dining network on";
+    let start = minute(Utc::now() + Duration::days(2));
+    let mut gmail = timed("gm1", "Reservation at Harbor Tavern", start, 60);
+    gmail["eventType"] = json!("fromGmail");
+    gmail["location"] = json!(booked);
+    gmail["organizer"] = json!({"email": "me@example.com", "self": true});
+    w.google().full.insert(PRIMARY.into(), vec![vec![gmail]]);
+    seed_ghost(
+        &w.store,
+        w.acct,
+        "g1",
+        "Dinner at Harbor Tavern",
+        rfc(start),
+    );
+    let (url, _) = spawn_place_model("Harbor Tavern", "12 Water St, Portland").await;
+    let sync = CalendarSync::with_api_base(w.store.clone(), w.acct, w.creds.clone(), &w.base)
+        .unwrap()
+        .with_places(Some(PlaceClient::new(
+            reqwest::Client::new(),
+            url,
+            "sk-test",
+            Stage2Provider::Anthropic,
+            "claude-haiku-4-5",
+            None,
+        )));
+    assert_eq!(sync.pass(Utc::now()).await, PassOutcome::Synced);
+    sync.clean_places(Utc::now()).await;
+    assert_eq!(
+        w.events().await[0]["place"],
+        json!({ "name": "Harbor Tavern", "address": "12 Water St, Portland", "original": booked })
+    );
+
+    sync.own_events(Utc::now()).await;
+    let g = w.google();
+    let insert = g
+        .writes
+        .iter()
+        .find(|w| w.method == "POST")
+        .expect("an adoption");
+    assert_eq!(
+        insert.body["location"],
+        "Harbor Tavern, 12 Water St, Portland"
+    );
+}
+
+// --- Passband owns Gmail's events -------------------------------------------
+
+/// Gmail's own copy of a reservation on the user's calendar is replaced by
+/// Passband's event, which nobody is emailed about and which the audit log
+/// records; an invitation Gmail added from someone else's mail is left
+/// alone; a second pass changes nothing; and when Gmail adds its copy again,
+/// it is deleted as a duplicate.
+#[tokio::test]
+async fn passband_takes_over_gmails_own_events_and_leaves_invitations_alone() {
+    use squelch_core::gcal::own::{AUDIT_ACTOR, OWNED_NOTE};
+    let w = world("own", GRANTED).await;
+    let start = minute(Utc::now() + Duration::days(2));
+    let later = start + Duration::days(1);
+    let mut gmail = timed("gm1", "Reservation at Dingles Public House", start, 60);
+    gmail["eventType"] = json!("fromGmail");
+    gmail["location"] = json!("Dingles Public House, 165 Main St");
+    gmail["organizer"] = json!({"email": "me@example.com", "self": true});
+    let mut invite = timed("gm2", "Drinks at Bemelmans", later, 60);
+    invite["eventType"] = json!("fromGmail");
+    invite["organizer"] = json!({"email": "ellie@example.com"});
+    invite["attendees"] = json!([
+        {"email": "ellie@example.com", "organizer": true, "responseStatus": "accepted"},
+        {"email": "me@example.com", "self": true, "responseStatus": "accepted"}
+    ]);
+    w.google()
+        .full
+        .insert(PRIMARY.into(), vec![vec![gmail.clone(), invite]]);
+    seed_ghost(&w.store, w.acct, "g1", "Dinner at Dingles", rfc(start));
+    seed_ghost(&w.store, w.acct, "g2", "Drinks at Bemelmans", rfc(later));
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+
+    w.sync.own_events(Utc::now()).await;
+    let new_id = {
+        let g = w.google();
+        assert_eq!(g.writes.len(), 2, "{:?}", g.writes);
+        let insert = &g.writes[0];
+        assert_eq!((insert.method, insert.calendar.as_str()), ("POST", PRIMARY));
+        assert_eq!(insert.query["sendUpdates"], "none");
+        assert_eq!(
+            insert.body["summary"],
+            "Reservation at Dingles Public House"
+        );
+        assert_eq!(insert.body["description"], OWNED_NOTE);
+        assert_eq!(insert.body["start"]["dateTime"], json!(rfc(start)));
+        let id = insert.body["id"].as_str().unwrap().to_string();
+        assert!(id.starts_with("passband"));
+        let delete = &g.writes[1];
+        assert_eq!(
+            (delete.method, delete.event.as_deref()),
+            ("DELETE", Some("gm1"))
+        );
+        assert_eq!(delete.query["sendUpdates"], "none");
+        id
+    };
+
+    // Served: Passband's event, editable, in Gmail's place; the invitation
+    // as it was.
+    let events = w.events().await;
+    let ids: Vec<&str> = events.iter().map(|e| e["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, [new_id.as_str(), "gm2"]);
+    assert_eq!(events[0]["editable"], json!(true));
+    assert_eq!(events[0]["from_gmail"], json!(false));
+    assert_eq!(events[1]["from_gmail"], json!(true));
+    assert_eq!(events[1]["editable"], json!(false));
+    assert_eq!(events[0]["passband_owned"], json!(true));
+    assert!(events[1].get("passband_owned").is_none());
+    // The ghost Passband made it for is matched to it, though the titles
+    // differ, so the timeline draws one item, not two.
+    let ghosts = w.timeline().await["ghosts"].as_array().unwrap().clone();
+    let dinner = ghosts
+        .iter()
+        .find(|g| g["title"] == "Dinner at Dingles")
+        .unwrap();
+    assert_eq!(
+        dinner["matched_event"],
+        json!({"calendar_id": PRIMARY, "id": new_id})
+    );
+
+    // Audited, with no title or place.
+    let rows = w.store.list_audit(w.acct, 10).unwrap();
+    let actions: Vec<(&str, &str, &str)> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.actor.as_str(),
+                r.action.as_str(),
+                r.detail.as_deref().unwrap_or(""),
+            )
+        })
+        .collect();
+    assert!(actions.contains(&(AUDIT_ACTOR, "calendar_event_adopt", "ok")));
+    assert!(actions.contains(&(AUDIT_ACTOR, "calendar_event_replace_gmail", "ok")));
+    let text = serde_json::to_string(&rows).unwrap();
+    for secret in ["Dingles", "Bemelmans", "Main St"] {
+        assert!(!text.contains(secret), "the audit log carries {secret}");
+    }
+
+    // Again: nothing to do.
+    w.sync.own_events(Utc::now()).await;
+    assert_eq!(w.google().writes.len(), 2);
+
+    // Gmail adds its copy back: the next sync brings it, and it goes.
+    let mut again = gmail.clone();
+    again["id"] = json!("gm3");
+    w.google().changes.insert(
+        PRIMARY.into(),
+        HashMap::from([(
+            "tok-primary-1".to_string(),
+            (vec![again], "tok-primary-2".to_string()),
+        )]),
+    );
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    w.sync.own_events(Utc::now()).await;
+    {
+        let g = w.google();
+        assert_eq!(g.writes.len(), 3);
+        assert_eq!(
+            (g.writes[2].method, g.writes[2].event.as_deref()),
+            ("DELETE", Some("gm3"))
+        );
+    }
+    let ids: Vec<String> = w
+        .events()
+        .await
+        .iter()
+        .map(|e| e["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, [new_id, "gm2".to_string()]);
+
+    // Once more, and Google will not let this copy go: asked once, not
+    // again every pass.
+    let mut stuck = gmail;
+    stuck["id"] = json!("gm4");
+    w.google().changes.insert(
+        PRIMARY.into(),
+        HashMap::from([(
+            "tok-primary-2".to_string(),
+            (vec![stuck], "tok-primary-3".to_string()),
+        )]),
+    );
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    w.google().fail_delete_of = Some("gm4".into());
+    w.sync.own_events(Utc::now()).await;
+    assert_eq!(w.google().writes.len(), 4);
+    w.sync.own_events(Utc::now()).await;
+    w.sync.own_events(Utc::now()).await;
+    assert_eq!(
+        w.google().writes.len(),
+        4,
+        "a refused duplicate is not retried"
+    );
+}
+
+/// When Google refuses to delete Gmail's copy, Passband's event is taken
+/// back off, the pair is left as Gmail made it, and it is not tried again.
+#[tokio::test]
+async fn a_refused_gmail_delete_takes_passbands_event_back_off_for_good() {
+    let w = world("own-refused", GRANTED).await;
+    let start = minute(Utc::now() + Duration::days(2));
+    let mut gmail = timed("gm1", "Reservation at Dingles Public House", start, 60);
+    gmail["eventType"] = json!("fromGmail");
+    gmail["organizer"] = json!({"email": "me@example.com", "self": true});
+    w.google().full.insert(PRIMARY.into(), vec![vec![gmail]]);
+    seed_ghost(&w.store, w.acct, "g1", "Dinner at Dingles", rfc(start));
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    w.google().fail_delete_of = Some("gm1".into());
+    w.sync.own_events(Utc::now()).await;
+    {
+        let g = w.google();
+        let methods: Vec<(&str, Option<&str>)> = g
+            .writes
+            .iter()
+            .map(|w| (w.method, w.event.as_deref()))
+            .collect();
+        let id = g.writes[0].body["id"].as_str().unwrap().to_string();
+        assert_eq!(
+            methods,
+            [
+                ("POST", None),
+                ("DELETE", Some("gm1")),
+                ("DELETE", Some(id.as_str()))
+            ]
+        );
+    }
+    let ids: Vec<String> = w
+        .events()
+        .await
+        .iter()
+        .map(|e| e["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, ["gm1"]);
+    w.sync.own_events(Utc::now()).await;
+    assert_eq!(w.google().writes.len(), 3, "never tried again");
+}
+
+/// A refused duplicate delete is not spent again every pass; and when the
+/// undo of an adoption is refused too, both copies are not left for good:
+/// the undo is tried again once the refusal has cooled, even after the event
+/// has left the listing window.
+#[tokio::test]
+async fn refusals_are_not_retried_every_pass_and_a_failed_undo_is_retried() {
+    let w = world("own-undo", GRANTED).await;
+    let start = minute(Utc::now() + Duration::days(2));
+    let mut gmail = timed("gm1", "Reservation at Dingles Public House", start, 60);
+    gmail["eventType"] = json!("fromGmail");
+    gmail["organizer"] = json!({"email": "me@example.com", "self": true});
+    w.google().full.insert(PRIMARY.into(), vec![vec![gmail]]);
+    seed_ghost(&w.store, w.acct, "g1", "Dinner at Dingles", rfc(start));
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    w.google().fail_deletes = true;
+    w.sync.own_events(Utc::now()).await;
+    let own_id = {
+        let g = w.google();
+        let methods: Vec<&str> = g.writes.iter().map(|w| w.method).collect();
+        assert_eq!(methods, ["POST", "DELETE", "DELETE"]);
+        g.writes[0].body["id"].as_str().unwrap().to_string()
+    };
+    // Both refused: nothing is asked again while the refusals are fresh.
+    w.sync.own_events(Utc::now()).await;
+    w.sync.own_events(Utc::now()).await;
+    assert_eq!(w.google().writes.len(), 3, "not spent again every pass");
+
+    // A week on, Google allows it: the undo lands, though the event is now
+    // outside the listing window, and the pair is as Gmail made it.
+    w.google().fail_deletes = false;
+    let later = Utc::now() + Duration::days(8);
+    w.sync.own_events(later).await;
+    {
+        let g = w.google();
+        assert_eq!(g.writes.len(), 4, "{:?}", g.writes);
+        assert_eq!(
+            (g.writes[3].method, g.writes[3].event.as_deref()),
+            ("DELETE", Some(own_id.as_str()))
+        );
+    }
+    let ids: Vec<String> = w
+        .events()
+        .await
+        .iter()
+        .map(|e| e["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, ["gm1"]);
+    w.sync.own_events(later).await;
+    assert_eq!(w.google().writes.len(), 4, "done for good");
 }
 
 // ---------------------------------------------------------------------------
@@ -5809,20 +6163,8 @@ async fn a_ghost_that_is_a_real_event_is_served_once_as_the_event() {
 }
 
 #[tokio::test]
-async fn calendar_search_follows_the_flag_and_the_grant() {
+async fn calendar_search_follows_the_grant() {
     let w = search_world("search-gate").await;
-    w.features.replace_granted(Vec::<String>::new());
-    for route in ["/client/calendar/search", "/client/agent/calendar/search"] {
-        let resp = w
-            .app
-            .clone()
-            .oneshot(authed("GET", &format!("{route}?q=dinner")))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{route}");
-    }
-    w.features
-        .replace_granted([squelch_core::features::CALENDAR]);
     // A grant taken back hides the synced events; the ghost stays.
     std::fs::remove_file(&w.path).unwrap();
     let body = search(&w.app, "/client/calendar/search", "dinner").await;

@@ -612,6 +612,26 @@ struct ThreadMessageView {
     /// computed per request, so a newly-written-to sender takes effect on the
     /// next open with no re-ingest.
     sender_known: bool,
+    /// Whether the reader should draw this message's sender signals as a
+    /// WARNING rather than a quiet line. Decided here, once, so every client
+    /// and later the agent agree: any `name_spoof`; or a `reply_to` at
+    /// another organization unless the sender is a contact whose mail did
+    /// not FAIL authentication. Unknown authentication (IMAP, Outlook, rows
+    /// older than the verdict) from a contact stays quiet; a contact whose
+    /// mail failed authentication is how a spoofed colleague looks, so it
+    /// warns. Absent when the message has no signals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sender_signals_warn: Option<bool>,
+}
+
+/// See [`ThreadMessageView::sender_signals_warn`].
+fn signals_warn(
+    sig: &squelch_core::types::SenderSignals,
+    known_contact: bool,
+    auth_pass: Option<bool>,
+) -> bool {
+    sig.name_spoof.is_some()
+        || (sig.reply_to.is_some() && (!known_contact || auth_pass == Some(false)))
 }
 
 /// `ClientThreadView` on the wire, message-for-message, with the extra bit.
@@ -675,9 +695,14 @@ pub async fn get_thread(
             // ingested before the column existed — reads as NO bypass, the safe
             // default for a permissive feature, so nothing is backfilled.
             let sender_known = known && message.auth_pass == Some(true);
+            let sender_signals_warn = message
+                .sender_signals
+                .as_ref()
+                .map(|sig| signals_warn(sig, known, message.auth_pass));
             messages.push(ThreadMessageView {
                 message,
                 sender_known,
+                sender_signals_warn,
             });
         }
         Ok(ThreadResponse {
@@ -2134,7 +2159,14 @@ pub(crate) fn ghost_view(
 /// Each ghost
 /// carries `matched_event` (`{calendar_id, id}` or null): a real event at the
 /// same start whose title matches ([`squelch_core::gcal::ghost_matches`]),
-/// computed here for display de-duplication and never stored.
+/// computed here for display de-duplication and never stored. Each event
+/// carries `place` once the small model has cleaned its location
+/// ([`squelch_core::gcal::place`]): the text the detail card shows in place
+/// of `location`, `""` when the location names no place. Absent until then.
+/// An event Passband made in place of Gmail's and keeps current from the mail
+/// ([`squelch_core::gcal::own`]) carries `passband_owned: true`, and the ghost
+/// it was made for is matched to it whatever its title; a ghost is matched to
+/// an event Gmail made from the same mail by `own::same_event` too.
 ///
 /// Defaults: `from` is a day ago and `to` is `from` plus the default window
 /// (so with neither, now-1d to now+90d). `state` is judged at the server's
@@ -2163,28 +2195,82 @@ pub async fn get_timeline(
         Some(calendar) => calendar.granted().await,
         None => false,
     };
-    let (ghosts, events, calendars, status) = store_call(&state, move |store, account_id| {
-        let ghosts = store.list_ghost_events(account_id, from, to)?;
-        if !granted {
-            return Ok((ghosts, Vec::new(), Vec::new(), Default::default()));
-        }
-        let (events, cut) = store.list_calendar_events(account_id, from, to, now)?;
-        let mut status: squelch_core::gcal::CalendarStatus = store.calendar_status(account_id)?;
-        status.truncated |= cut;
-        let calendars: Vec<_> = store
-            .calendar_calendars(account_id)?
-            .into_iter()
-            .filter(|c| c.selected)
-            .collect();
-        Ok((ghosts, events, calendars, status))
-    })
-    .await?;
+    let (ghosts, events, calendars, status, places, owned) =
+        store_call(&state, move |store, account_id| {
+            let ghosts = store.list_ghost_events(account_id, from, to)?;
+            if !granted {
+                return Ok((
+                    ghosts,
+                    Vec::new(),
+                    Vec::new(),
+                    Default::default(),
+                    Default::default(),
+                    Vec::new(),
+                ));
+            }
+            let (events, cut) = store.list_calendar_events(account_id, from, to, now)?;
+            let mut status: squelch_core::gcal::CalendarStatus =
+                store.calendar_status(account_id)?;
+            status.truncated |= cut;
+            let calendars: Vec<_> = store
+                .calendar_calendars(account_id)?
+                .into_iter()
+                .filter(|c| c.selected)
+                .collect();
+            let places = store.calendar_places(account_id)?;
+            let owned = store.calendar_owned(account_id)?;
+            Ok((ghosts, events, calendars, status, places, owned))
+        })
+        .await?;
     // The display match, computed here and never stored, so it can never go
     // stale and never changes a ghost.
-    let matched = squelch_core::gcal::match_ghosts(
+    let mut matched = squelch_core::gcal::match_ghosts(
         ghosts.iter().map(|g| (g.title.as_str(), &g.start)),
         &events,
     );
+    // Two more ways a ghost is the same thing as an event: Passband made the
+    // event for it and keeps it (gcal/own.rs), whatever its time or title
+    // now; or Gmail made the event from the same mail, which titles it its
+    // own way (`own::same_event`: the same start and a distinctive word).
+    use squelch_core::gcal::own::{self, OwnState};
+    // Indexed once, so each ghost looks up rather than scans.
+    let position: std::collections::HashMap<(&str, &str), usize> = events
+        .iter()
+        .enumerate()
+        .map(|(i, e)| ((e.calendar_id.as_str(), e.row.event_id.as_str()), i))
+        .collect();
+    let bound_to: std::collections::HashMap<i64, (&str, &str)> = owned
+        .iter()
+        .filter(|o| o.state == OwnState::Owned)
+        .map(|o| (o.ghost_id, (o.calendar_id.as_str(), o.event_id.as_str())))
+        .collect();
+    let mine: std::collections::HashSet<(&str, &str)> = bound_to.values().copied().collect();
+    // Gmail's events by start (an instant in UTC, or a date), the only ones
+    // `same_event` can match.
+    let start_key = |t: &squelch_core::triage::ghost::EventTime| match t {
+        squelch_core::triage::ghost::EventTime::At(at) => (Some(at.with_timezone(&Utc)), None),
+        squelch_core::triage::ghost::EventTime::Date(day) => (None, Some(*day)),
+    };
+    let mut gmail_at: std::collections::HashMap<_, Vec<usize>> = Default::default();
+    for (i, e) in events.iter().enumerate() {
+        if e.row.from_gmail {
+            gmail_at.entry(start_key(&e.row.start)).or_default().push(i);
+        }
+    }
+    for (ghost, slot) in ghosts.iter().zip(matched.iter_mut()) {
+        let bound = bound_to
+            .get(&ghost.id)
+            .and_then(|key| position.get(key).copied());
+        if bound.is_some() {
+            *slot = bound;
+        } else if slot.is_none() {
+            *slot = gmail_at.get(&start_key(&ghost.start)).and_then(|at| {
+                at.iter()
+                    .copied()
+                    .find(|&i| own::same_event(ghost, &events[i].row))
+            });
+        }
+    }
     let now = now.with_timezone(from.offset());
     let ghosts: Vec<_> = ghosts
         .iter()
@@ -2206,7 +2292,32 @@ pub async fn get_timeline(
         .unwrap_or_default();
     let events: Vec<_> = events
         .iter()
-        .map(|e| calendar_event_view(e, &account_email))
+        .map(|e| {
+            let mut view = calendar_event_view(e, &account_email);
+            // The card's place (gcal/place.rs), once the model has made one
+            // of this location: its name and street address, each null when
+            // the location gives none (both null: it names no place), and the
+            // location it was made from. Absent until then, and the client
+            // shows `location`.
+            if let Some((raw, place)) = e
+                .row
+                .location
+                .as_ref()
+                .and_then(|raw| places.get(raw).map(|p| (raw, p)))
+            {
+                let (name, address) = match place {
+                    Some(p) => (p.name.as_deref(), p.address.as_deref()),
+                    None => (None, None),
+                };
+                view["place"] = json!({ "name": name, "address": address, "original": raw });
+            }
+            // Passband made this event and keeps it current from the mail.
+            // Absent otherwise.
+            if mine.contains(&(e.calendar_id.as_str(), e.row.event_id.as_str())) {
+                view["passband_owned"] = json!(true);
+            }
+            view
+        })
         .collect();
     let calendars: Vec<_> = calendars
         .iter()
@@ -2248,7 +2359,9 @@ pub async fn get_timeline(
 /// hides them. `color` is the event's own colour or its calendar's
 /// (`#rrggbb`, or null when Google gave neither), `editable` the edit guard
 /// ([`squelch_core::gcal::SyncedEvent::editable`]) for `account_email`, and
-/// `description` laundered text of at most 2000 characters. `guests` is the
+/// `description` laundered text of at most 2000 characters (the timeline
+/// listing adds `place`, the card's cleaned location, beside it; see
+/// `get_timeline`). `guests` is the
 /// event's attendees as Google lists them (`{email, name, response,
 /// organizer, self}`, `response` one of `accepted` / `declined` /
 /// `tentative` / `pending`), at most 100 and `[]` when it has none;
@@ -2287,6 +2400,7 @@ pub(crate) fn calendar_event_view(
         })).collect::<Vec<_>>(),
         "guests_truncated": row.guests_truncated,
         "guest_editable": event.guest_editable(account_email),
+        "from_gmail": row.from_gmail,
     })
 }
 
@@ -3308,8 +3422,8 @@ pub struct PersonView {
 /// be walked into a directory dump without already knowing every address.
 /// Sealed mail is absent from every count and list on it (see
 /// `SqliteStore::person_record`). `no-store`, for the same reason as senders.
-/// `timezone` is part of the `calendar` hidden feature: with it off the key is
-/// absent, as on main, though the inference behind it keeps running.
+/// `timezone` is the correspondent's inferred (or user-set) zone, absent when
+/// nothing is known.
 pub async fn get_person(
     State(state): State<ApiState>,
     Query(params): Query<PersonQuery>,
@@ -3361,11 +3475,7 @@ pub async fn get_person(
                 last_at: t.last_at.to_rfc3339(),
             })
             .collect(),
-        timezone: if state.features().enabled(squelch_core::features::CALENDAR) {
-            timezone_view(p.timezone)
-        } else {
-            None
-        },
+        timezone: timezone_view(p.timezone),
     };
     Ok((no_store(), Json(view)))
 }
@@ -3997,9 +4107,14 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
             // reason.
             // `hint` names this mailbox so the control plane pre-selects it at
             // Google and refuses a consent from any other account.
+            // An Outlook mailbox reconnects with Microsoft, which takes no
+            // hint (the control plane finds it by Microsoft account).
             if let Some(origin) = state.console_sso_url() {
-                gmail["reconnect_url"] =
-                    json!(format!("{origin}/reconnect?hint={}", url_component(&email)));
+                gmail["reconnect_url"] = if state.known_provider() == MailProvider::Outlook {
+                    json!(format!("{origin}/reconnect?provider=microsoft"))
+                } else {
+                    json!(format!("{origin}/reconnect?hint={}", url_component(&email)))
+                };
             }
         }
         body["gmail"] = gmail;
@@ -4085,47 +4200,45 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
     // /client/timeline/ghosts/{id} exist. A LOUD failure like scheduled send
     // (an old daemon 404s them), so the client shows no timeline without it.
     //
-    // BEHIND THE `calendar` HIDDEN FEATURE: off, those routes 404 (see
-    // `calendar_routes`), so this says `false`, the answer the client already
-    // reads as "no Calendar page", and the `calendar` object below is left
-    // out. Asked now, so a flag flipped under a running daemon shows on the
-    // next poll.
-    let calendar_on = state.features().enabled(squelch_core::features::CALENDAR);
-    body["timeline"] = json!(calendar_on);
-    if calendar_on {
-        // IS GOOGLE CALENDAR GRANTED, and if not, how to grant it. Present
-        // whenever the feature is on (an old daemon's silence, like a feature
-        // that is off, is the client's "no calendar"), and human door only: no
-        // agent route carries it.
-        //
-        // `granted` is the token resolver's answer, read off the scopes recorded
-        // on the stored token, with no call to Google. `connect_url` is the
-        // hosted/self-host split exactly as `gmail.reconnect_url` is: the console
-        // origin when this daemon has one, with the mailbox as `hint` so the
-        // control plane pre-selects it and refuses any other account. Without
-        // one, the command a self-host runs.
-        let granted = match state.calendar() {
-            Some(calendar) => calendar.granted().await,
-            None => false,
-        };
-        let connect_url = state.console_sso_url().map(|origin| {
-            format!(
-                "{origin}/reconnect?calendar=1&hint={}",
-                url_component(&email)
-            )
-        });
-        let connect_command = connect_url.is_none().then_some("squelchd auth --calendar");
-        // `self_connect`: whether `POST /client/calendar/connect` runs the consent
-        // here (a self-host with an OAuth client). The client's one Connect button
-        // calls it when true and opens `connect_url` otherwise; `connect_command`
-        // stays for older builds that still print it.
-        body["calendar"] = json!({
-            "granted": granted,
-            "connect_url": connect_url,
-            "connect_command": connect_command,
-            "self_connect": crate::calendar_connect::self_connect(&state),
-        });
-    }
+    // ALWAYS TRUE NOW: the `calendar` hidden feature that once switched this
+    // off is retired (`squelch_core::features::RETIRED`). Current apps show
+    // the Calendar page unconditionally and no longer read this key; it is
+    // kept for apps from before that, which still need it to show the page.
+    body["timeline"] = json!(true);
+    // IS GOOGLE CALENDAR GRANTED, and if not, how to grant it. Always
+    // present (an old daemon's silence is the client's "no calendar"), and
+    // human door only: no agent route carries it.
+    //
+    // `granted` is the token resolver's answer, read off the scopes recorded
+    // on the stored token, with no call to Google. `connect_url` is the
+    // hosted/self-host split exactly as `gmail.reconnect_url` is: the console
+    // origin when this daemon has one, with the mailbox as `hint` so the
+    // control plane pre-selects it and refuses any other account. Without
+    // one, the command a self-host runs.
+    let granted = match state.calendar() {
+        Some(calendar) => calendar.granted().await,
+        None => false,
+    };
+    // No calendar connect for an Outlook mailbox: its consent already
+    // carries calendar, and Passband's calendar is Google's (#638).
+    let outlook = state.known_provider() == MailProvider::Outlook;
+    let connect_url = state.console_sso_url().filter(|_| !outlook).map(|origin| {
+        format!(
+            "{origin}/reconnect?calendar=1&hint={}",
+            url_component(&email)
+        )
+    });
+    let connect_command = connect_url.is_none().then_some("squelchd auth --calendar");
+    // `self_connect`: whether `POST /client/calendar/connect` runs the consent
+    // here (a self-host with an OAuth client). The client's one Connect button
+    // calls it when true and opens `connect_url` otherwise; `connect_command`
+    // stays for older builds that still print it.
+    body["calendar"] = json!({
+        "granted": granted,
+        "connect_url": connect_url,
+        "connect_command": connect_command,
+        "self_connect": crate::calendar_connect::self_connect(&state),
+    });
     Ok(Json(body))
 }
 
@@ -4754,7 +4867,7 @@ pub(crate) async fn write_client(state: &ApiState) -> Result<Arc<dyn MailWriter>
             "write credential not configured; run `squelchd auth`",
         );
         return match account_provider(state).await {
-            Ok(MailProvider::Gmail) => Err(no_credential),
+            Ok(MailProvider::Gmail | MailProvider::Outlook) => Err(no_credential),
             Ok(MailProvider::Imap) => imap_writer(state).await,
             // A provider this build does not know: the 501, as with a
             // credential.
@@ -4780,6 +4893,15 @@ pub(crate) async fn write_client(state: &ApiState) -> Result<Arc<dyn MailWriter>
             )
             .with_budget(state.gmail_budget().cloned()),
         )),
+        MailProvider::Outlook => Ok(Arc::new(crate::write::graph::GraphWriteClient::with_http(
+            creds,
+            state.account_id,
+            state
+                .write_api_base()
+                .map(str::to_string)
+                .unwrap_or_else(|| squelch_core::mail::graph::GRAPH_API_BASE.to_string()),
+            state.write_http(),
+        ))),
     }
 }
 
@@ -4956,7 +5078,7 @@ fn write_error_in(state: &ApiState, e: &WriteError) -> ApiError {
 fn write_error_as(provider: Option<MailProvider>, e: &WriteError) -> ApiError {
     match provider {
         Some(MailProvider::Imap) => imap_write_error(e),
-        Some(MailProvider::Gmail) | None => write_error(e),
+        Some(MailProvider::Gmail | MailProvider::Outlook) | None => write_error(e),
     }
 }
 
@@ -7894,7 +8016,7 @@ mod write_client_tests {
             .with_write_test_harness(Arc::new(StubCreds), "http://127.0.0.1:9".into());
         assert!(write_client(&state).await.is_ok());
         // What a second read would now see: a provider this build refuses.
-        fx.set_provider("outlook");
+        fx.set_provider("exchange-ews");
         assert!(
             write_client(&state.clone()).await.is_ok(),
             "the cached read stands, on every clone of the state"
@@ -7943,7 +8065,7 @@ mod write_client_tests {
     #[tokio::test]
     async fn a_provider_this_build_does_not_know_is_refused_not_treated_as_gmail() {
         let fx = Fixture::new("unknown");
-        fx.set_provider("outlook");
+        fx.set_provider("exchange-ews");
         let (base, handle) = mock_api().await;
         let state = fx
             .state()
@@ -8176,7 +8298,7 @@ mod write_client_tests {
     #[tokio::test]
     async fn an_unknown_provider_without_a_write_credential_gets_the_provider_refusal() {
         let fx = Fixture::new("no-creds-other");
-        fx.set_provider("outlook");
+        fx.set_provider("exchange-ews");
         let err = refused(write_client(&fx.state()).await);
         assert_eq!(err.status, StatusCode::NOT_IMPLEMENTED);
         assert!(!err.message.contains("squelchd auth"), "{}", err.message);
@@ -8196,5 +8318,37 @@ mod write_client_tests {
         let err = refused(write_client(&fx.state()).await);
         assert_eq!(err.status, StatusCode::FORBIDDEN);
         assert_eq!(write_refusal(&err), "rejected:no_write_credential");
+    }
+}
+
+#[cfg(test)]
+mod signals_warn_tests {
+    use super::signals_warn;
+    use squelch_core::types::SenderSignals;
+
+    #[test]
+    fn warning_is_name_claims_or_a_foreign_reply_to_without_a_trusted_contact() {
+        let spoof = SenderSignals {
+            name_spoof: Some("support@bank.example".into()),
+            ..SenderSignals::default()
+        };
+        let reply = SenderSignals {
+            reply_to: Some("pay@elsewhere.example".into()),
+            ..SenderSignals::default()
+        };
+        let via = SenderSignals {
+            via: Some("sendgrid.net".into()),
+            ..SenderSignals::default()
+        };
+        // A name claim warns whoever sent it.
+        assert!(signals_warn(&spoof, true, Some(true)));
+        // A foreign Reply-To from a stranger warns.
+        assert!(signals_warn(&reply, false, None));
+        // From a contact: quiet unless their mail FAILED authentication.
+        assert!(!signals_warn(&reply, true, Some(true)));
+        assert!(!signals_warn(&reply, true, None));
+        assert!(signals_warn(&reply, true, Some(false)));
+        // Via alone never warns.
+        assert!(!signals_warn(&via, false, Some(false)));
     }
 }

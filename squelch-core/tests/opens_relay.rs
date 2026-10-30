@@ -119,6 +119,7 @@ fn seeded() -> (Arc<SqliteStore>, i64, i64) {
             list_unsubscribe: None,
             list_unsub_one_click: false,
             auth_pass: None,
+            sender_signals: None,
         })
         .unwrap();
     store
@@ -321,6 +322,7 @@ async fn an_unlinked_tracker_records_the_open_without_an_event() {
             list_unsubscribe: None,
             list_unsub_one_click: false,
             auth_pass: None,
+            sender_signals: None,
         })
         .unwrap();
     assert!(

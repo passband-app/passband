@@ -78,6 +78,13 @@ CREATE TABLE IF NOT EXISTS messages (
     -- reaches all three, not only the pixel. Nothing is backfilled: any
     -- re-sync refills the column through the message upsert.
     auth_pass   INTEGER,
+    -- WHERE FROM AND THE REAL SENDER DISAGREE (#639): compact JSON of
+    -- `types::SenderSignals` (sender, via, reply_to, envelope_domain,
+    -- name_spoof). '{}' = read, nothing disagreed; NULL = never read (sent
+    -- mail, rows ingested before the column). Facts for the reader and
+    -- triage, never a gate. Only `via` claims authentication, and it is read
+    -- through the same trust gate as `auth_pass`.
+    sender_signals TEXT,
     -- THE PROVIDER'S SPAM VERDICT, not ours: 1 when this message was fetched
     -- from Gmail's SPAM label, 0 otherwise. Gmail sorted it; nothing in squelch
     -- did, and no LLM ever looks at it (the ingest branch stamps a neutral row
@@ -2174,6 +2181,7 @@ CREATE TABLE IF NOT EXISTS calendar_events (
     description     TEXT,
     guests_truncated INTEGER NOT NULL DEFAULT 0,
     organizer_unreadable INTEGER NOT NULL DEFAULT 0,
+    from_gmail      INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(account_id, calendar_id, event_id)
 );
 CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(account_id, start_sort);
@@ -2202,6 +2210,52 @@ AFTER DELETE ON calendar_events BEGIN
     WHERE account_id = OLD.account_id AND calendar_id = OLD.calendar_id
       AND event_id = OLD.event_id;
 END;
+-- The calendar card's PLACE for an event location (gcal/place.rs): what the
+-- small model made of `raw`, a location exactly as stored on calendar_events.
+-- `place` NULL means the text names no place, and the card shows none. Keyed
+-- by the text, so every event at one place shares one call. A row whose text
+-- no event holds any more is pruned after each batch. HUMAN DOOR ONLY, like
+-- the events it describes.
+-- PASSBAND'S OWN EVENTS (gcal/own.rs): which event on the user's calendar
+-- Passband made for a ghost, in place of Gmail's copy, and keeps current from
+-- the mail. `state` is `owned` (kept current), `released` (the user deleted
+-- it or dismissed the ghost: never adopted again), `refused` (Google would
+-- not delete Gmail's copy: left alone) or `undo` (that, and taking Passband's
+-- copy back off failed too: retried each pass). `fingerprint` is what the mail said
+-- when Passband last wrote the event. One row per ghost; a ghost that goes
+-- takes its row with it, the event stays. HUMAN DOOR ONLY.
+CREATE TABLE IF NOT EXISTS calendar_owned (
+    account_id  INTEGER NOT NULL,
+    ghost_id    INTEGER NOT NULL,
+    calendar_id TEXT NOT NULL,
+    event_id    TEXT NOT NULL,
+    state       TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY(account_id, ghost_id)
+);
+-- A write gcal/own.rs had refused by Google (not a quota answer, not a lost
+-- reply), by the event it was aimed at, so the same step is not planned and
+-- spent again every pass. Left alone until `refused_at` is a week old, then
+-- pruned and tried once more. HUMAN DOOR ONLY.
+CREATE TABLE IF NOT EXISTS calendar_own_refused (
+    account_id  INTEGER NOT NULL,
+    calendar_id TEXT NOT NULL,
+    event_id    TEXT NOT NULL,
+    refused_at  TEXT NOT NULL,
+    PRIMARY KEY(account_id, calendar_id, event_id)
+);
+CREATE TABLE IF NOT EXISTS calendar_places (
+    account_id     INTEGER NOT NULL,
+    raw            TEXT NOT NULL,
+    -- The place's name, and its street address when the location gives one
+    -- (gcal/place.rs). Both NULL: the location names no place.
+    place          TEXT,
+    address        TEXT,
+    prompt_version TEXT NOT NULL,
+    cleaned_at     TEXT NOT NULL,
+    PRIMARY KEY(account_id, raw)
+);
 
 -- CALENDAR SEARCH (docs/CALENDAR.md §10.1): a word index over the synced
 -- events, for the search box, the assistant and Agent MCP. `calendar_search_keys`

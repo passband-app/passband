@@ -308,6 +308,7 @@ fn mixed_thread(store: &SqliteStore, account: AccountId) -> (i64, i64) {
             list_unsubscribe: None,
             list_unsub_one_click: false,
             auth_pass: None,
+            sender_signals: None,
         })
         .unwrap();
     let conn = store.lock().unwrap();

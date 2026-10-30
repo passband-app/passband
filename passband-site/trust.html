@@ -234,7 +234,7 @@
 
     <main>
       <section class="hero">
-        <p class="eyebrow"><b>Trust</b> &middot; updated September 28, 2026</p>
+        <p class="eyebrow"><b>Trust</b> &middot; updated October 29, 2026</p>
         <h1>Where your mail goes. All of it.</h1>
         <p class="lede">
           Passband reads your mail so it can decide what needs you. This page is
@@ -314,7 +314,7 @@
             <div class="ch content" data-hosted>
               <span class="wire"></span>
               <div class="what"><b>Triage and the assistant</b>The parts of a message a model needs to score it, summarize it, or answer a question you asked. Codes our rules recognize are held back before this point.</div>
-              <div class="who"><b>Anthropic</b>through our gateway on Railway, which meters spend and keeps no bodies<br /><span class="pill">mail content</span><span class="off">off</span></div>
+              <div class="who"><b>Anthropic</b>through our gateway on AWS, which meters spend and keeps no bodies<br /><span class="pill">mail content</span><span class="off">off</span></div>
             </div>
             <div class="ch sealed" data-hosted>
               <span class="wire"></span>
@@ -324,12 +324,12 @@
             <div class="ch meta">
               <span class="wire"></span>
               <div class="what"><b>Push notifications</b>A fixed alert, an event id, and the Gmail thread id so repeat alerts collapse. The phone fetches the mail itself, from the daemon.</div>
-              <div class="who"><b>Apple Push Notification service</b>via our relay on Railway, which stores nothing<br /><span class="pill">no mail content</span></div>
+              <div class="who"><b>Apple Push Notification service</b>via our relay on AWS, which stores nothing<br /><span class="pill">no mail content</span></div>
             </div>
             <div class="ch meta" data-self>
               <span class="wire"></span>
               <div class="what"><b>Read receipts <small class="opt">opt-in</small></b>If you turn on open tracking for mail you send, a self-hosted daemon that uses our relay has it hold an opaque token, a time and a user agent until the daemon collects them. A hosted account serves the pixel from its own daemon, so its opens never reach the relay.</div>
-              <div class="who"><b>Our relay on Railway</b>self-hosted only; only your daemon can tie a token to a message<br /><span class="pill">no mail content</span><span class="off">off</span></div>
+              <div class="who"><b>Our relay on AWS</b>self-hosted only; only your daemon can tie a token to a message<br /><span class="pill">no mail content</span><span class="off">off</span></div>
             </div>
             <div class="ch meta" data-hosted>
               <span class="wire"></span>
@@ -339,7 +339,7 @@
             <div class="ch meta" data-hosted>
               <span class="wire"></span>
               <div class="what"><b>Health metrics</b>Counts and timings, like messages synced and triage latency, labelled with your account's label and nothing finer.</div>
-              <div class="who"><b>Our monitoring on Railway</b>aggregate by design, never per message<br /><span class="pill">no mail content</span><span class="off">off</span></div>
+              <div class="who"><b>Our monitoring on AWS</b>aggregate by design, never per message<br /><span class="pill">no mail content</span><span class="off">off</span></div>
             </div>
           </div>
         </div>
@@ -349,7 +349,7 @@
         <div class="aside">
           <div class="ch meta">
             <div class="what"><b>Your account record</b>The address you signed up with, your account label, your invite, and timestamps. No mail, no Google token.</div>
-            <div class="who">Our control plane, Postgres on Railway</div>
+            <div class="who">Our control plane, Postgres on AWS</div>
           </div>
           <div class="ch meta">
             <div class="what"><b>Your invite</b>When you come off the waitlist, one email with your invite code.</div>
@@ -390,7 +390,7 @@
               <td>United States</td>
             </tr>
             <tr>
-              <td>Railway<small>railway.com</small></td>
+              <td>Amazon Web Services<small>aws.amazon.com</small></td>
               <td>Our control plane, LLM gateway, push relay and monitoring</td>
               <td>Mail excerpts passing through the gateway, not stored. Your account record<br /><span class="dot content">mail content</span></td>
               <td>United States</td>

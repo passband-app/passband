@@ -361,6 +361,11 @@ pub struct PendingSession {
     /// still discovered from the account Google says consented, and the warden
     /// still checks custody. Anyone can craft the link that sets it.
     pub login_hint: Option<String>,
+    /// WHICH COMPANY the user was sent to. Server side, so a session started
+    /// for Google can only ever be finished as Google: the callback picks the
+    /// token endpoint, the identity rule (address versus account id) and the
+    /// lookup from THIS, never from anything the browser carries back.
+    pub provider: crate::oauth::Provider,
     created: Instant,
 }
 
@@ -418,6 +423,32 @@ impl SessionStore {
         login_hint: Option<String>,
         now: Instant,
     ) -> Result<(), InsertError> {
+        self.insert_full(
+            sid,
+            kind,
+            state,
+            pkce_verifier,
+            label,
+            login_hint,
+            crate::oauth::Provider::Google,
+            now,
+        )
+    }
+
+    /// [`SessionStore::insert_with_hint`] for either company. See
+    /// [`PendingSession::provider`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_full(
+        &mut self,
+        sid: String,
+        kind: SessionKind,
+        state: String,
+        pkce_verifier: String,
+        label: String,
+        login_hint: Option<String>,
+        provider: crate::oauth::Provider,
+        now: Instant,
+    ) -> Result<(), InsertError> {
         self.sweep(now);
         if self.sessions.len() >= MAX_SESSIONS {
             return Err(InsertError::Full);
@@ -437,6 +468,7 @@ impl SessionStore {
                 pkce_verifier,
                 label,
                 login_hint,
+                provider,
                 created: now,
             },
         );
@@ -522,6 +554,7 @@ impl SessionStore {
                     pkce_verifier: String::new(),
                     label: taken.label.clone(),
                     login_hint: None,
+                    provider: taken.provider,
                     created: now,
                 },
             );

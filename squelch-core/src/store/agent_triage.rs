@@ -80,6 +80,13 @@ pub struct AgentMessage {
     pub translated_subject: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub translated_body: Option<String>,
+    /// Where From and the real sender disagree (#639): header facts the model
+    /// weighs for phishing and impersonation. Not in the content snapshot:
+    /// they are read off the same headers every sighting, so they never
+    /// change on their own, and hashing them would re-triage every message
+    /// once when this shipped. Absent when nothing disagreed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_signals: Option<crate::types::SenderSignals>,
 }
 
 /// Captured with the evidence read and checked before any decision writes.

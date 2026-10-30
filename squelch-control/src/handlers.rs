@@ -129,7 +129,7 @@ use crate::config::OUTBOUND_TIMEOUT;
 use crate::cookie::{self, SessionClaim};
 use crate::invites;
 use crate::labels;
-use crate::oauth::{self, Flow, GoogleEndpoints};
+use crate::oauth::{self, Flow, GoogleEndpoints, Identity, Provider};
 use crate::pages;
 use crate::seal;
 use crate::sessions::{self, InsertError, Purpose, SessionKind};
@@ -284,14 +284,6 @@ const AGENT_NO_TENANT: &str = "This Google account has no Passband mailbox, so n
      If your mailbox is on another Google account, go back to your agent, connect again, \
      and pick that account.";
 
-/// What a calendar consent gets when the mailbox it came back for does not
-/// have the `calendar` hidden feature yet. Shown only after Google has
-/// authenticated the reader as that mailbox, so it is about their own.
-/// NOTHING was installed: their mail keeps working as it was.
-const CALENDAR_NOT_AVAILABLE_HEADING: &str = "Calendar isn't available yet";
-const CALENDAR_NOT_AVAILABLE: &str = "Calendar isn't available for this mailbox yet. Nothing about your Passband \
-     mailbox changed.";
-
 /// The longest `external_auth_id` this service will carry. AuthKit's are ULIDs
 /// (26 characters) today; this is slack for a format change, and a bound on
 /// what a stranger can park in the session table.
@@ -340,12 +332,13 @@ pub async fn signup_form(State(state): State<ControlState>, RawQuery(query): Raw
     } else {
         suggested_label(&state, &invite).await.unwrap_or_default()
     };
-    pages::signup_form(
+    pages::signup_form_with(
         &state.config().base_domain,
         waitlist_url(&state).as_deref(),
         &label,
         &invite,
         None,
+        state.config().microsoft.is_some(),
     )
 }
 
@@ -421,6 +414,7 @@ pub async fn signup(State(state): State<ControlState>, body: Bytes) -> Response 
     let config = state.config();
     let raw_label = field(&body, "label");
     let raw_invite = field(&body, "invite");
+    let raw_provider = field(&body, "provider");
 
     // The form is re-rendered on every refusal with both fields echoed, so a
     // person fixes one thing rather than retyping everything. The waitlist link
@@ -428,18 +422,22 @@ pub async fn signup(State(state): State<ControlState>, body: Bytes) -> Response 
     // moment somebody discovers they do not have a working one.
     let waitlist = waitlist_url(&state);
     let reject = |error: &str, label: &str| {
-        pages::signup_form(
+        pages::signup_form_with(
             &config.base_domain,
             waitlist.as_deref(),
             label,
             &raw_invite,
             Some(error),
+            config.microsoft.is_some(),
         )
     };
 
     let label = match labels::parse(&raw_label) {
         Ok(l) => l,
         Err(e) => return reject(&e.message(), &raw_label),
+    };
+    let Some(provider) = provider_choice(&state, Some(&raw_provider)) else {
+        return reject("Outlook signup is not available yet.", &label);
     };
 
     // The invite is GATED here and held below, once the address is known to be
@@ -514,7 +512,10 @@ pub async fn signup(State(state): State<ControlState>, body: Bytes) -> Response 
         }
     };
 
-    let consent = match oauth::consent_url(&endpoints(&state), csrf_state, Flow::Signup) {
+    let consent = match endpoints_for(&state, provider)
+        .ok_or(oauth::OAuthError::Config("no microsoft app".into()))
+        .and_then(|e| oauth::consent_url(&e, csrf_state, Flow::Signup))
+    {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "building the consent url failed");
@@ -552,12 +553,14 @@ pub async fn signup(State(state): State<ControlState>, body: Bytes) -> Response 
     // The guard is taken and dropped by this ONE statement. Holding it across
     // the `if` below would deadlock the moment the arm asked for the session
     // count, because a std `Mutex` is not reentrant.
-    let inserted = state.sessions().insert(
+    let inserted = state.sessions().insert_full(
         sid.clone(),
         SessionKind::Signup { invite_id },
         consent.state,
         consent.pkce_verifier,
         label.clone(),
+        None,
+        provider,
         Instant::now(),
     );
     if let Err(InsertError::Full) = inserted {
@@ -758,6 +761,10 @@ pub async fn console_auth(
     let Ok(label) = labels::parse(&raw_label) else {
         return console_refused();
     };
+    let Some(provider) = provider_choice(&state, param(query.as_deref(), "provider").as_deref())
+    else {
+        return console_refused();
+    };
 
     let (sid, csrf_state) = match (random_token(), random_token()) {
         (Ok(a), Ok(b)) => (a, b),
@@ -767,7 +774,10 @@ pub async fn console_auth(
         }
     };
 
-    let consent = match oauth::consent_url(&endpoints(&state), csrf_state, Flow::Console) {
+    let consent = match endpoints_for(&state, provider)
+        .ok_or(oauth::OAuthError::Config("no microsoft app".into()))
+        .and_then(|e| oauth::consent_url(&e, csrf_state, Flow::Console))
+    {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "building the console consent url failed");
@@ -775,12 +785,14 @@ pub async fn console_auth(
         }
     };
 
-    let inserted = state.sessions().insert(
+    let inserted = state.sessions().insert_full(
         sid.clone(),
         SessionKind::Console,
         consent.state,
         consent.pkce_verifier,
         label.clone(),
+        None,
+        provider,
         Instant::now(),
     );
     if let Err(InsertError::Full) = inserted {
@@ -838,8 +850,12 @@ pub async fn console_auth(
 /// NO RETURN URL, and no parameter that could become one, exactly as next door.
 /// The only place it can send anybody is a `passband://` link built from this
 /// deployment's own base domain.
-pub async fn app_auth(State(state): State<ControlState>) -> Response {
+pub async fn app_auth(State(state): State<ControlState>, RawQuery(query): RawQuery) -> Response {
     let config = state.config();
+    let Some(provider) = provider_choice(&state, param(query.as_deref(), "provider").as_deref())
+    else {
+        return app_unavailable();
+    };
 
     let (sid, csrf_state) = match (random_token(), random_token()) {
         (Ok(a), Ok(b)) => (a, b),
@@ -851,7 +867,10 @@ pub async fn app_auth(State(state): State<ControlState>) -> Response {
 
     // Flow::Console: identity alone, online, no refresh token. An app login asks
     // Google exactly what a console login asks, because it is the same question.
-    let consent = match oauth::consent_url(&endpoints(&state), csrf_state, Flow::Console) {
+    let consent = match endpoints_for(&state, provider)
+        .ok_or(oauth::OAuthError::Config("no microsoft app".into()))
+        .and_then(|e| oauth::consent_url(&e, csrf_state, Flow::Console))
+    {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "building the app consent url failed");
@@ -859,7 +878,7 @@ pub async fn app_auth(State(state): State<ControlState>) -> Response {
         }
     };
 
-    let inserted = state.sessions().insert(
+    let inserted = state.sessions().insert_full(
         sid.clone(),
         SessionKind::App,
         consent.state,
@@ -869,6 +888,8 @@ pub async fn app_auth(State(state): State<ControlState>) -> Response {
         // against the session's, so an empty label is a fact both sides agree on
         // rather than a value one of them made up.
         String::new(),
+        None,
+        provider,
         Instant::now(),
     );
     if let Err(InsertError::Full) = inserted {
@@ -947,6 +968,20 @@ pub async fn reconnect_start(
         _ => Purpose::Reconnect,
     };
     let hint = param(query, "hint").and_then(|h| login_hint(&h));
+    let Some(provider) = provider_choice(&state, param(query, "provider").as_deref()) else {
+        return reconnect_unavailable();
+    };
+    // An Outlook consent already carries calendar, so there is no separate
+    // calendar grant to start, and a hint (a Google address) means nothing
+    // to Microsoft.
+    if provider == Provider::Microsoft && purpose == Purpose::Calendar {
+        return pages::console_problem(
+            StatusCode::OK,
+            "Calendar is not available",
+            "Outlook calendar is not available in Passband yet.",
+        );
+    }
+    let hint = hint.filter(|_| provider == Provider::Google);
 
     let (sid, csrf_state) = match (random_token(), random_token()) {
         (Ok(a), Ok(b)) => (a, b),
@@ -964,16 +999,18 @@ pub async fn reconnect_start(
         Purpose::Reconnect => Flow::Reconnect,
         Purpose::Calendar => Flow::Calendar,
     };
-    let consent =
-        match oauth::consent_url_with_hint(&endpoints(&state), csrf_state, flow, hint.as_deref()) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!(error = %e, "building the reconnect consent url failed");
-                return reconnect_unavailable();
-            }
-        };
+    let consent = match endpoints_for(&state, provider)
+        .ok_or(oauth::OAuthError::Config("no microsoft app".into()))
+        .and_then(|e| oauth::consent_url_with_hint(&e, csrf_state, flow, hint.as_deref()))
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "building the reconnect consent url failed");
+            return reconnect_unavailable();
+        }
+    };
 
-    let inserted = state.sessions().insert_with_hint(
+    let inserted = state.sessions().insert_full(
         sid.clone(),
         SessionKind::Reconnect { purpose },
         consent.state,
@@ -983,6 +1020,7 @@ pub async fn reconnect_start(
         // fact both sides agree on rather than a value one of them made up.
         String::new(),
         hint.clone(),
+        provider,
         Instant::now(),
     );
     if let Err(InsertError::Full) = inserted {
@@ -1087,6 +1125,10 @@ pub async fn agent_auth(State(state): State<ControlState>, RawQuery(query): RawQ
         tracing::info!("agent login refused: malformed external_auth_id");
         return agent_refused();
     }
+    let Some(provider) = provider_choice(&state, param(query.as_deref(), "provider").as_deref())
+    else {
+        return agent_refused();
+    };
 
     let (sid, csrf_state) = match (random_token(), random_token()) {
         (Ok(a), Ok(b)) => (a, b),
@@ -1100,7 +1142,10 @@ pub async fn agent_auth(State(state): State<ControlState>, RawQuery(query): RawQ
     // agent asks Google exactly what an app login asks, because it is the same
     // question: who is this. What the agent may then read is decided by the
     // token AuthKit issues, never by a Google grant.
-    let consent = match oauth::consent_url(&endpoints(&state), csrf_state, Flow::Console) {
+    let consent = match endpoints_for(&state, provider)
+        .ok_or(oauth::OAuthError::Config("no microsoft app".into()))
+        .and_then(|e| oauth::consent_url(&e, csrf_state, Flow::Console))
+    {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "building the agent consent url failed");
@@ -1108,7 +1153,7 @@ pub async fn agent_auth(State(state): State<ControlState>, RawQuery(query): RawQ
         }
     };
 
-    let inserted = state.sessions().insert(
+    let inserted = state.sessions().insert_full(
         sid.clone(),
         SessionKind::Agent { external_auth_id },
         consent.state,
@@ -1116,6 +1161,8 @@ pub async fn agent_auth(State(state): State<ControlState>, RawQuery(query): RawQ
         // EMPTY, as on an app login: the tenant is found from the mailbox
         // Google names on the way back.
         String::new(),
+        None,
+        provider,
         Instant::now(),
     );
     if let Err(InsertError::Full) = inserted {
@@ -1324,6 +1371,7 @@ pub async fn oauth_callback(
     };
 
     let label = session.label;
+    let provider = session.provider;
 
     // THE FORK. Both logins share everything above (state, cookie, one-shot
     // session, code shape) and nothing below: they provision nothing, seal
@@ -1334,10 +1382,12 @@ pub async fn oauth_callback(
     let invite_id = match session.kind {
         SessionKind::Signup { invite_id } => invite_id,
         SessionKind::Console => {
-            return done(console_login(&state, &label, code, session.pkce_verifier).await);
+            return done(
+                console_login(&state, &label, code, session.pkce_verifier, provider).await,
+            );
         }
         SessionKind::App => {
-            return done(app_login(&state, code, session.pkce_verifier).await);
+            return done(app_login(&state, code, session.pkce_verifier, provider).await);
         }
         // RECONNECT forks here with the two logins rather than continuing into
         // the signup half, even though it is a GRANT like signup is. What it
@@ -1353,6 +1403,7 @@ pub async fn oauth_callback(
                     session.pkce_verifier,
                     purpose,
                     session.login_hint.as_deref(),
+                    provider,
                 )
                 .await,
             );
@@ -1364,7 +1415,15 @@ pub async fn oauth_callback(
         // SETS a cookie rather than clearing it: it hands the browser a fresh
         // flow cookie for the session it just parked.
         SessionKind::Agent { external_auth_id } => {
-            return match agent_login(&state, code, session.pkce_verifier, external_auth_id).await {
+            return match agent_login(
+                &state,
+                code,
+                session.pkce_verifier,
+                external_auth_id,
+                provider,
+            )
+            .await
+            {
                 Ok(page) => page,
                 Err(refusal) => done(refusal),
             };
@@ -1389,62 +1448,107 @@ pub async fn oauth_callback(
 
     // ---- from here on, the irreversible half ----
 
-    let grant = match oauth::exchange_code(
-        &endpoints(&state),
-        code,
-        session.pkce_verifier,
-        Flow::Signup,
-    )
-    .await
-    {
-        Ok(g) => g,
-        // A PARTIAL CONSENT is its own answer, and the only exchange failure a
-        // user can act on: Google's screen lets the boxes be unchecked one by
-        // one, and the person who unchecked one is the person reading this page.
-        // ONE page for whichever box it was: naming the missing scope would say
-        // nothing they cannot see on Google's screen and would put a third
-        // wording of the same instruction in front of them.
-        //
-        // Nothing has been provisioned at this point, so the retry is clean.
-        Err(oauth::OAuthError::Scope) => {
-            tracing::info!(label = %label, "consent granted only part of the scope set");
-            release().await;
-            return done(partial_consent_problem());
-        }
-        Err(e) => {
-            // The error type only. Its `Display` is written to carry no code,
-            // no secret, and no provider body.
-            tracing::warn!(error = %e, label = %label, "token exchange failed");
-            release().await;
-            return done(pages::problem(
-                StatusCode::BAD_GATEWAY,
-                "Google did not complete the sign in",
-                "Nothing was set up. Start again and approve the Gmail permission.",
-            ));
-        }
+    let Some(signup_endpoints) = endpoints_for(&state, provider) else {
+        release().await;
+        return done(internal_problem());
     };
+    let grant =
+        match oauth::exchange_code(&signup_endpoints, code, session.pkce_verifier, Flow::Signup)
+            .await
+        {
+            Ok(g) => g,
+            // A PARTIAL CONSENT is its own answer, and the only exchange failure a
+            // user can act on: Google's screen lets the boxes be unchecked one by
+            // one, and the person who unchecked one is the person reading this page.
+            // ONE page for whichever box it was: naming the missing scope would say
+            // nothing they cannot see on Google's screen and would put a third
+            // wording of the same instruction in front of them.
+            //
+            // Nothing has been provisioned at this point, so the retry is clean.
+            Err(oauth::OAuthError::Scope) => {
+                tracing::info!(label = %label, "consent granted only part of the scope set");
+                release().await;
+                return done(partial_consent_problem());
+            }
+            Err(e) => {
+                // The error type only. Its `Display` is written to carry no code,
+                // no secret, and no provider body.
+                tracing::warn!(error = %e, label = %label, "token exchange failed");
+                release().await;
+                return done(pages::problem(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("{} did not complete the sign in", provider.account_name()),
+                    &format!(
+                        "Nothing was set up. Start again and approve the {} permission.",
+                        provider.mailbox_name()
+                    ),
+                ));
+            }
+        };
 
     // One mailbox, one daemon. Checked before anything is provisioned, and
     // enforced again by a unique index when the tenant row is written.
+    //
+    // ACROSS COMPANIES: the address is the mailbox's, so an Outlook signup for
+    // an address a Gmail tenant already has is the same mailbox twice. For
+    // Outlook the address is the one mail ARRIVES at (see
+    // `oauth::outlook_mailbox`), never Microsoft's sign-in label, which can
+    // be anybody's Gmail address.
     match state
         .store()
-        .active_tenant_for_email(&grant.account_email)
+        .active_tenant_and_provider_for_email(&grant.account_email)
         .await
     {
-        Ok(Some(existing)) => {
+        Ok(Some((existing, existing_provider))) => {
             tracing::info!(label = %existing, "signup refused: mailbox already has a tenant");
             release().await;
-            return done(pages::problem(
-                StatusCode::CONFLICT,
-                "That Google account already has a mailbox",
-                "Open Passband and sign in with this account instead.",
-            ));
+            let existing_provider = Provider::from_tenant_value(&existing_provider);
+            let (heading, body) =
+                if provider == Provider::Google && existing_provider == Provider::Google {
+                    (
+                        "That Google account already has a mailbox".to_string(),
+                        "Open Passband and sign in with this account instead.".to_string(),
+                    )
+                } else {
+                    (
+                        "That mailbox is already set up".to_string(),
+                        format!(
+                            "A Passband mailbox is already set up for {} ({}). Open Passband and \
+                         sign in with {} instead.",
+                            grant.account_email,
+                            existing_provider.mailbox_name(),
+                            existing_provider.mailbox_name(),
+                        ),
+                    )
+                };
+            return done(pages::problem(StatusCode::CONFLICT, &heading, &body));
         }
         Ok(None) => {}
         Err(e) => {
             tracing::error!(error = %e, "tenant lookup failed");
             release().await;
             return done(internal_problem());
+        }
+    }
+    // One Microsoft account, one Outlook mailbox, whatever address it is
+    // reached at today.
+    if let Some(ms_id) = grant.microsoft_id.as_deref() {
+        match state.store().active_outlook_tenant_for_ms_id(ms_id).await {
+            Ok(Some(existing)) => {
+                tracing::info!(label = %existing, "signup refused: microsoft account already has a tenant");
+                release().await;
+                return done(pages::problem(
+                    StatusCode::CONFLICT,
+                    "That Microsoft account already has a mailbox",
+                    "Open Passband and sign in with Outlook instead.",
+                ));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::error!(error = %e, "tenant lookup failed");
+                release().await;
+                return done(internal_problem());
+            }
         }
     }
 
@@ -1454,7 +1558,7 @@ pub async fn oauth_callback(
     // mailbox, that only this mailbox can complete.
     let created = match state
         .warden()
-        .create_tenant(&label, &grant.account_email)
+        .create_tenant(&label, &grant.account_email, provider.tenant_value())
         .await
     {
         Ok(c) => c,
@@ -1664,7 +1768,12 @@ pub async fn oauth_callback(
     // stays held, unspent, until an operator sorts the row out.
     if let Err(e) = state
         .store()
-        .insert_tenant(&label, &grant.account_email)
+        .insert_tenant_for(
+            &label,
+            &grant.account_email,
+            provider.tenant_value(),
+            grant.microsoft_id.as_deref(),
+        )
         .await
     {
         // The daemon is running in the cluster but this control plane could not
@@ -1813,12 +1922,16 @@ async fn console_login(
     label: &str,
     code: String,
     pkce_verifier: String,
+    provider: Provider,
 ) -> Response {
+    let Some(login_endpoints) = endpoints_for(state, provider) else {
+        return console_refused();
+    };
     // Identity only, and the function that does it hands back a mailbox rather
     // than a token: there is no credential on this path for anything downstream
     // to hold.
-    let account_email = match oauth::verify_identity(&endpoints(state), code, pkce_verifier).await {
-        Ok(email) => email,
+    let identity = match oauth::verify_login(&login_endpoints, code, pkce_verifier).await {
+        Ok(identity) => identity,
         Err(e) => {
             // PRIVACY: the error type, which is written to carry no code, no
             // token, and no provider body.
@@ -1827,8 +1940,8 @@ async fn console_login(
         }
     };
 
-    let owner = match state.store().active_tenant_email(label).await {
-        Ok(Some(email)) => email,
+    let owner = match state.store().active_tenant_owner(label).await {
+        Ok(Some(owner)) => owner,
         // Provisioned and then torn down while the user was at Google, or a
         // label that never existed and only reached here because nothing before
         // this point could tell the difference either.
@@ -1844,9 +1957,25 @@ async fn console_login(
     // stored side is folded too even though every row is written folded: this is
     // the comparison that decides whether somebody gets into a mailbox, and it
     // must not turn on a column's history. `ct_eq` for the compare itself.
-    let presented = account_email.trim().to_lowercase();
-    let owner = owner.trim().to_lowercase();
-    if !squelch_httpauth::ct_eq(presented.as_bytes(), owner.as_bytes()) {
+    //
+    // WITHIN ONE COMPANY ONLY, and a Microsoft login by account id alone: see
+    // `tenant_for_login`, which this is the label-first twin of.
+    let owns = match &identity.microsoft_id {
+        Some(id) => {
+            owner.provider == "outlook"
+                && owner
+                    .ms_account_id
+                    .as_deref()
+                    .is_some_and(|stored| squelch_httpauth::ct_eq(stored.as_bytes(), id.as_bytes()))
+        }
+        None => {
+            let presented = identity.email.trim().to_lowercase();
+            let stored = owner.account_email.trim().to_lowercase();
+            owner.provider == "gmail"
+                && squelch_httpauth::ct_eq(presented.as_bytes(), stored.as_bytes())
+        }
+    };
+    if !owns {
         // PRIVACY: the label, never either address. That somebody signed in with
         // the wrong Google account is not a reason to write a list of mailboxes
         // into a log.
@@ -1948,6 +2077,7 @@ async fn reconnect_install(
     pkce_verifier: String,
     purpose: Purpose,
     login_hint: Option<&str>,
+    provider: Provider,
 ) -> Response {
     let flow = match purpose {
         Purpose::Reconnect => Flow::Reconnect,
@@ -1956,7 +2086,13 @@ async fn reconnect_install(
     // A FULL GMAIL GRANT, not an identity hop: this is the credential the daemon
     // will hold, so it is exchanged and scope-checked exactly as signup's is.
     // The floor is the Gmail scope (`gmail.modify`) for both purposes.
-    let grant = match oauth::exchange_code(&endpoints(state), code, pkce_verifier, flow).await {
+    let Some(grant_endpoints) = endpoints_for(state, provider) else {
+        return reconnect_unavailable();
+    };
+    if provider == Provider::Microsoft && purpose == Purpose::Calendar {
+        return reconnect_unavailable();
+    }
+    let grant = match oauth::exchange_code(&grant_endpoints, code, pkce_verifier, flow).await {
         Ok(g) => g,
         Err(oauth::OAuthError::Scope) if purpose == Purpose::Calendar => {
             tracing::info!("calendar consent granted only part of the Gmail scope set");
@@ -1992,7 +2128,7 @@ async fn reconnect_install(
     // THE HINT GUARD. Case-insensitive like every account comparison in this
     // codebase; the hint was shape-checked at `/reconnect` and is ASCII. The
     // token is dropped unsealed: nothing of this grant survives the request.
-    if let Some(hint) = login_hint
+    if let Some(hint) = login_hint.filter(|_| provider == Provider::Google)
         && !hint.eq_ignore_ascii_case(grant.account_email.trim())
     {
         tracing::info!(
@@ -2017,11 +2153,20 @@ async fn reconnect_install(
 
     // Normalized the way the store normalizes on insert, so a capitalized Google
     // answer finds the same row rather than none.
-    let label = match state
-        .store()
-        .active_tenant_for_email(&grant.account_email)
-        .await
-    {
+    //
+    // THE LOGIN RULE, applied to a grant: a Google grant reconnects the GMAIL
+    // tenant at its address, a Microsoft grant the OUTLOOK tenant with its
+    // account id. Never across companies.
+    let found = match &grant.microsoft_id {
+        Some(id) => state.store().active_outlook_tenant_for_ms_id(id).await,
+        None => {
+            state
+                .store()
+                .active_gmail_tenant_for_email(&grant.account_email)
+                .await
+        }
+    };
+    let label = match found {
         Ok(Some(label)) => label,
         // A real Google account with no mailbox here. Said plainly, and not an
         // oracle: see [`RECONNECT_NO_TENANT`].
@@ -2039,52 +2184,31 @@ async fn reconnect_install(
         }
     };
 
-    // THE CALENDAR HIDDEN FEATURE. Calendar is behind the `calendar` flag
-    // (`squelch_core::features::CALENDAR`): a tenant without it (its own row
-    // or the Everyone default) gets no calendar grant installed, because its
-    // daemon would hide everything the grant is for.
-    //
-    // CHECKED HERE, AFTER GOOGLE, NOT AT `/reconnect`. The start of this flow
-    // names no tenant on purpose (see `reconnect_start`): the only input that
-    // could pick one is the `hint`, which is attacker-controlled and is never
-    // used to look anything up, so refusing at the start would turn the link
-    // into an oracle for "which mailboxes have calendar". Here the tenant is
-    // the one Google just authenticated this browser as, so the answer is
-    // only ever about the reader's own mailbox. The token is dropped unsealed
-    // and nothing is installed or queued: their working credential stays as
-    // it was.
-    if purpose == Purpose::Calendar {
-        match state
-            .store()
-            .tenant_has_feature(&label, squelch_core::features::CALENDAR)
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::info!(label = %label, "calendar consent for a tenant without the calendar feature; nothing installed");
-                drop(grant.token);
-                return pages::console_problem(
-                    StatusCode::OK,
-                    CALENDAR_NOT_AVAILABLE_HEADING,
-                    CALENDAR_NOT_AVAILABLE,
-                );
-            }
-            Err(e) => {
-                tracing::error!(error = %e, label = %label, "reading the calendar feature failed");
-                drop(grant.token);
-                return reconnect_unavailable();
-            }
-        }
-    }
+    // NO FEATURE CHECK: calendar is on for every tenant. It was once behind
+    // the `calendar` hidden feature, refused here for a tenant without it;
+    // that key is retired (`squelch_core::features::RETIRED`), and a leftover
+    // `tenant_features` row for it decides nothing.
 
     // Re-learn the recipient. Creates nothing and mutates nothing; what it does
     // is refuse if this mailbox is not the account the CLUSTER says owns the
     // label.
-    let created = match state
-        .warden()
-        .recipient_for(&label, &grant.account_email)
-        .await
-    {
+    // THE TENANT'S OWN ADDRESS is what custody is checked against and what the
+    // credential is sealed under: an Outlook mailbox's address can change
+    // (a new primary alias) while its account id does not, and the daemon
+    // reads its credential under the address it was created with.
+    let custody_email = if provider == Provider::Microsoft {
+        match state.store().active_tenant_email(&label).await {
+            Ok(Some(email)) => email,
+            Ok(None) => return reconnect_unavailable(),
+            Err(e) => {
+                tracing::error!(error = %e, label = %label, "reconnect: reading the tenant failed");
+                return reconnect_unavailable();
+            }
+        }
+    } else {
+        grant.account_email.clone()
+    };
+    let created = match state.warden().recipient_for(&label, &custody_email).await {
         Ok(c) => c,
         Err(WardenError::LabelTaken | WardenError::NotFound) => {
             // The store said this email owns this label and the cluster says
@@ -2104,11 +2228,8 @@ async fn reconnect_install(
 
     // The ONE moment a plaintext refresh token exists on this machine ends
     // here, exactly as at signup.
-    let ciphertext = match seal::seal_credentials(
-        &created.recipient,
-        &grant.account_email,
-        &grant.token,
-    ) {
+    let ciphertext = match seal::seal_credentials(&created.recipient, &custody_email, &grant.token)
+    {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, label = %label, "reconnect: sealing the credential failed");
@@ -2123,15 +2244,9 @@ async fn reconnect_install(
     };
     // Save before starting work. A browser disconnect cannot cancel the job,
     // and a service restart resumes the same tenant-sealed ciphertext.
-    if let Err(e) = crate::reconnect::enqueue_for(
-        state,
-        &token,
-        &label,
-        &grant.account_email,
-        &ciphertext,
-        purpose,
-    )
-    .await
+    if let Err(e) =
+        crate::reconnect::enqueue_for(state, &token, &label, &custody_email, &ciphertext, purpose)
+            .await
     {
         tracing::error!(error = %e, label = %label, "saving reconnect work failed");
         return reconnect_unavailable();
@@ -2145,12 +2260,20 @@ async fn reconnect_install(
     crate::reconnect::started(&token, !state.config().is_insecure())
 }
 
-async fn app_login(state: &ControlState, code: String, pkce_verifier: String) -> Response {
+async fn app_login(
+    state: &ControlState,
+    code: String,
+    pkce_verifier: String,
+    provider: Provider,
+) -> Response {
+    let Some(login_endpoints) = endpoints_for(state, provider) else {
+        return app_unavailable();
+    };
     // Identity only, and the function that does it hands back a mailbox rather
     // than a token: there is no credential on this path for anything downstream
     // to hold.
-    let account_email = match oauth::verify_identity(&endpoints(state), code, pkce_verifier).await {
-        Ok(email) => email,
+    let identity = match oauth::verify_login(&login_endpoints, code, pkce_verifier).await {
+        Ok(identity) => identity,
         Err(e) => {
             // PRIVACY: the error type, which is written to carry no code, no
             // token, and no provider body.
@@ -2161,7 +2284,7 @@ async fn app_login(state: &ControlState, code: String, pkce_verifier: String) ->
 
     // Normalized the way the store normalizes on insert, so a capitalized Google
     // answer finds the same row rather than none.
-    let label = match state.store().active_tenant_for_email(&account_email).await {
+    let label = match tenant_for_login(state, &identity).await {
         Ok(Some(label)) => label,
         // A real Google account with no mailbox here. Said plainly: see
         // [`APP_NO_TENANT`] for why that is not an oracle.
@@ -2206,6 +2329,15 @@ async fn app_login(state: &ControlState, code: String, pkce_verifier: String) ->
     // The page builds the `passband://` link itself, from this deployment's own
     // tenant URL and the warden's code. Nothing a caller sent is in it, because
     // this route accepted nothing a caller sent.
+    // What the page names: Google's verified address, or, for Microsoft
+    // (whose address is only a label), the mailbox the tenant was set up as.
+    let account_email = match identity.microsoft_id {
+        None => identity.email.clone(),
+        Some(_) => match state.store().active_tenant_email(&label).await {
+            Ok(Some(email)) => email,
+            _ => identity.email.clone(),
+        },
+    };
     let page = pages::app_signed_in(
         &account_email,
         &state.config().tenant_url(&label),
@@ -2254,6 +2386,7 @@ async fn agent_login(
     code: String,
     pkce_verifier: String,
     external_auth_id: String,
+    provider: Provider,
 ) -> Result<Response, Response> {
     if state.workos().is_none() {
         // The route that opens these sessions is unmounted without WorkOS, so
@@ -2262,8 +2395,11 @@ async fn agent_login(
         return Err(agent_unavailable());
     }
 
-    let account_email = match oauth::verify_identity(&endpoints(state), code, pkce_verifier).await {
-        Ok(email) => email,
+    let Some(login_endpoints) = endpoints_for(state, provider) else {
+        return Err(agent_unavailable());
+    };
+    let identity = match oauth::verify_login(&login_endpoints, code, pkce_verifier).await {
+        Ok(identity) => identity,
         Err(e) => {
             // PRIVACY: the error type, which is written to carry no code, no
             // token, and no provider body.
@@ -2274,7 +2410,7 @@ async fn agent_login(
 
     // Normalized the way the store normalizes on insert, so a capitalized Google
     // answer finds the same row rather than none.
-    let label = match state.store().active_tenant_for_email(&account_email).await {
+    let label = match tenant_for_login(state, &identity).await {
         Ok(Some(label)) => label,
         // A real Google account with no mailbox here. Said plainly, AFTER
         // Google, and WorkOS is never called: see [`AGENT_NO_TENANT`].
@@ -2299,7 +2435,13 @@ async fn agent_login(
             return Err(agent_unavailable());
         }
     };
-    let user_id = account_email.trim().to_lowercase();
+    // The AuthKit user id is the tenant's own address, which its daemon holds
+    // the token against: Google's verified address (the same thing), or for a
+    // Microsoft login (matched by account id) the address the tenant has.
+    let user_id = match identity.microsoft_id {
+        None => identity.email.trim().to_lowercase(),
+        Some(_) => stored_email.trim().to_lowercase(),
+    };
 
     // A FRESH session id and a fresh CSRF token. The id the browser carried to
     // Google was handed out before anybody had authenticated; the one that
@@ -3136,6 +3278,64 @@ fn endpoints(state: &ControlState) -> GoogleEndpoints<'_> {
         profile_url: &c.profile_url,
         userinfo_url: &c.userinfo_url,
         timeout: OUTBOUND_TIMEOUT,
+        provider: Provider::Google,
+        graph_base: "",
+    }
+}
+
+/// The endpoints for `provider`: Google's, or the confidential Microsoft
+/// app's. `None` when this deployment has no Microsoft app, which every
+/// caller answers as "not available" rather than falling back to Google.
+fn endpoints_for(state: &ControlState, provider: Provider) -> Option<GoogleEndpoints<'_>> {
+    match provider {
+        Provider::Google => Some(endpoints(state)),
+        Provider::Microsoft => {
+            let c = state.config();
+            let m = c.microsoft.as_ref()?;
+            Some(GoogleEndpoints {
+                client_id: &m.client_id,
+                client_secret: &m.client_secret,
+                redirect_uri: &c.redirect_uri,
+                auth_url: &m.auth_url,
+                token_url: &m.token_url,
+                profile_url: "",
+                userinfo_url: "",
+                timeout: OUTBOUND_TIMEOUT,
+                provider: Provider::Microsoft,
+                graph_base: &m.graph_base,
+            })
+        }
+    }
+}
+
+/// The `provider=` a link or form asked for, when this deployment can serve
+/// it. `None` (refused by the caller) for an unknown value, or for Microsoft
+/// on a deployment without the app.
+fn provider_choice(state: &ControlState, raw: Option<&str>) -> Option<Provider> {
+    let p = Provider::parse(raw)?;
+    (p == Provider::Google || state.config().microsoft.is_some()).then_some(p)
+}
+
+/// THE LOGIN RULE. The active tenant a verified login may open:
+/// - Google: the GMAIL tenant at the address Google verified.
+/// - Microsoft: the OUTLOOK tenant with that Microsoft account id. NEVER by
+///   address, because Microsoft vouches for none and an Entra admin can set
+///   any address on an account (anyone's Gmail address included).
+///
+/// Never across companies, so the same address at Google and at Microsoft are
+/// two different people as far as this is concerned.
+async fn tenant_for_login(
+    state: &ControlState,
+    identity: &Identity,
+) -> Result<Option<String>, StoreError> {
+    match &identity.microsoft_id {
+        Some(id) => state.store().active_outlook_tenant_for_ms_id(id).await,
+        None => {
+            state
+                .store()
+                .active_gmail_tenant_for_email(&identity.email)
+                .await
+        }
     }
 }
 

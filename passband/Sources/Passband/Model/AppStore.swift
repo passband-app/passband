@@ -53,7 +53,10 @@ enum MainView: String, Sendable, Hashable, CaseIterable {
     /// from, and the rail is for the second kind. They came off the END, so no
     /// digit that is left moved, and the two digits after the rail's last page
     /// still open them where they live (see `RootView.globalBindings`).
-    static let mainViews: [MainView] = [.sitrep, .emails, .auth]
+    ///
+    /// Calendar is second, so its digit is 2 ("make calendar 2, all mail 3,
+    /// etc", the founder). ⇧C opens it too.
+    static let mainViews: [MainView] = [.sitrep, .calendar, .emails, .auth]
     /// The BOTTOM rail group, pinned below a divider.
     ///
     /// `discovery` is in neither group: its one door is the ring, alone above
@@ -61,28 +64,14 @@ enum MainView: String, Sendable, Hashable, CaseIterable {
     /// reach a field guide faster than by looking at it.
     static let bottomViews: [MainView] = [.usage, .settings]
 
-    /// THE NUMBER KEYS AS THEY ARE RIGHT NOW: `mainViews`, with Calendar
-    /// second while it is offered (Sitrep 1, Calendar 2, Emails 3 and every
-    /// later page one higher), and exactly `mainViews` while it is not, so
-    /// the gate being closed renumbers nobody. The rule is
-    /// `CalendarGate.numbered`. ⇧C opens the calendar as well, as it did
-    /// before it had a digit.
-    ///
-    /// `calendar` is `AppStore.calendarPageAvailable`, passed in so the rail,
-    /// the menu and the keys ask the gate the same way and move together.
-    static func numberedViews(calendar: Bool) -> [MainView] {
-        CalendarGate.numbered(mainViews, calendar: .calendar, offered: calendar)
-    }
-
-    /// The most digits the keys ever bind: one per numbered page with the
-    /// calendar offered. The last one declines while it is not.
-    static var numberKeyCount: Int { mainViews.count + 1 }
+    /// One digit per page on the rail.
+    static var numberKeyCount: Int { mainViews.count }
 
     /// THE TOP RAIL AS DRAWN, each page with the digit that opens it: the
     /// hint the rail's tooltip prints, in the same order the keys are bound
     /// in (RootView.globalBindings).
-    static func railViews(calendar: Bool) -> [(view: MainView, key: String)] {
-        numberedViews(calendar: calendar).enumerated().map { (view: $0.element, key: "\($0.offset + 1)") }
+    static var railViews: [(view: MainView, key: String)] {
+        mainViews.enumerated().map { (view: $0.element, key: "\($0.offset + 1)") }
     }
 
     var label: String {
@@ -209,24 +198,6 @@ enum SideView: Equatable, Sendable {
 /// itself by exactly this much so an open panel stays visible beside the reader,
 /// and two numbers drifting apart would leave a seam or a covered strip.
 let sidePanelWidth: CGFloat = 460
-
-/// Everything the sitrep's zones render, held here rather than in the zones: a
-/// view's `@State` dies on unmount, so the last good answer is already on screen
-/// when the dashboard re-mounts and the refresh happens UNDERNEATH it — rows are
-/// only ever replaced by newer rows, never cleared first. `loadedAt` keeps that
-/// honest in the other direction (see `refreshZones`).
-struct SitrepZoneCache: Sendable {
-    var calendar: [CalendarUpdate] = []
-    var shipments: [Shipment] = []
-    var banking: [BankingRecord] = []
-    var receipts: [Receipt] = []
-    var reading: [ReadingSender] = []
-    /// Whether the reading fetch has ANSWERED for this account. An empty
-    /// `reading` means "nothing to read" only once it has; before that it
-    /// means nobody has asked yet, and the quiet board must not take the one
-    /// for the other.
-    var readingLoaded = false
-}
 
 /// The search panel's state, held OUT of the panel: SwiftUI discards a view's
 /// `@State` on unmount, and parking it here is what makes `/` resumable — same
@@ -659,7 +630,10 @@ final class AppStore {
     /// The hero's sentence about what For-your-eyes is ABOUT, written by the
     /// daemon's small model (`/client/v2/fye/headline`). nil until it answers,
     /// and on a daemon with no model, where the hero keeps its own line.
-    var fyeHeadline: String?
+    /// The board file keeps it, so a new one schedules a save.
+    var fyeHeadline: String? {
+        didSet { if fyeHeadline != oldValue { scheduleBoardSave() } }
+    }
     /// The board `fyeHeadline` was written for (see `headlineKey`). The hero
     /// keeps showing the last sentence while a newer board's is on its way:
     /// a line a few seconds stale reads better than one that flips to the
@@ -689,8 +663,6 @@ final class AppStore {
     /// Each is compared first: an assignment of the same value still tells
     /// every reader to look again.
     private func noteStats() {
-        let open = CalendarGate.pageAvailable(timeline: stats?.timeline, feature: hasFeature(.calendar))
-        if open != calendarPageAvailable { calendarPageAvailable = open }
         warmCalendarIfDue()
         let email = stats?.account_email
         if email != accountEmail { accountEmail = email }
@@ -730,17 +702,6 @@ final class AppStore {
     /// Whether any stats have landed: the board's "all clear" waits for
     /// them. See `noteStats`.
     private(set) var hasStats = false
-    /// Whether the Calendar destination exists at all. Rail, Go menu, ⇧C, the
-    /// number keys, the shortcuts sheet, the assistant's guide and the route
-    /// all read this one property; the rule itself, the daemon's timeline AND
-    /// the `calendar` hidden feature, is `CalendarGate.pageAvailable`.
-    ///
-    /// STORED, and written by `noteStats` only when it changes (the
-    /// `statsEpoch` pattern): computed off `stats` it made the rail and the
-    /// Go menu re-evaluate on every poll that changed any count. Off the raw
-    /// `stats`, not `calendarAccess`: it says only whether a page exists,
-    /// never whose calendar is in it.
-    private(set) var calendarPageAvailable = false
     /// The epoch of the poll that wrote `stats`. `stats` is not wiped on an
     /// account switch, so until the new mailbox's first poll lands it still
     /// describes the one just left; anything that must not mix two accounts
@@ -769,18 +730,13 @@ final class AppStore {
     // MARK: selection slice — stable by message id
     var selectedId: Int?
 
-    // MARK: sitrep zones — see SitrepZoneCache
-    var zones = SitrepZoneCache() {
-        didSet {
-            scheduleBoardSave()
-            // A zone pass writes each zone apart; only Reading's moves this.
-            guard zones.reading != oldValue.reading else { return }
-            noteReadingThreads()
-        }
-    }
+    // MARK: sitrep zones, see SitrepZones
+    /// A `let`, so reading `store.zones` tracks nothing: a view tracks only
+    /// the zones it reads through it. Its hooks are set in `init`.
+    let zones = SitrepZones()
     /// Every thread a Reading sender's window holds, which is what makes a
     /// thread "reading mail" for the reader (`ThreadViewer.isReadingMail`).
-    /// STORED, rebuilt when the zones change and written only when the set
+    /// STORED, rebuilt when the Reading zone changes and written only when the set
     /// does: the reader asked it several times a body, and each was a walk
     /// of every sender's every item.
     private(set) var readingThreadIds: Set<String> = []
@@ -864,7 +820,7 @@ final class AppStore {
     /// an answer is applied only if nothing newer has started since it was
     /// asked for. Not observed: it is bookkeeping, never drawn.
     @ObservationIgnored var calendarLoadGeneration = 0
-    /// Bumped by `dropCalendarState` (an account switch, the gate closing):
+    /// Bumped by `dropCalendarState` (an account switch):
     /// a write still out when it was bumped answers into nothing
     /// (`CalendarWriteTicket`). Bookkeeping, never drawn.
     @ObservationIgnored var calendarSession = 0
@@ -1517,7 +1473,7 @@ final class AppStore {
     var authQueue: [AuthCodeEntry] = []
     /// Set by `requestAuthPage` on the phone, which has no routed Auth page
     /// for `setView(.auth)` to reach: its shell opens the login-codes page
-    /// behind the Quick Look key, then clears this (`consumeAuthPage`). A
+    /// behind the sitrep's key, then clears this (`consumeAuthPage`). A
     /// pending FLAG, read on the shell's first appearance as well as on
     /// change, because a tap that launched the app is drained the moment
     /// `connStatus` turns `.connected`, before the shell exists to see a
@@ -1730,6 +1686,10 @@ final class AppStore {
         // Keyed by `authThreadIds`, which the feed rows' own decisions feed
         // too, so a blank sealed list cannot reopen the door.
         ThreadPrefetch.shared.refuses = { AppStore.shared.authThreadIds.contains($0) }
+        // The board file keeps the calendar and the shipments, so those two
+        // schedule a save; Reading's threads are kept as a set for the reader.
+        zones.onPersistedChange = { [weak self] in self?.scheduleBoardSave() }
+        zones.onReadingChange = { [weak self] in self?.noteReadingThreads() }
         // A conversation that belongs to a question in search history is saved
         // whenever one of its runs ends; see `saveQuestionChat`.
         assistant.onRunEnded = { [weak self] in self?.saveQuestionChat(from: $0) }
@@ -1989,6 +1949,7 @@ final class AppStore {
         // any of an account no longer here. Behind the paint, not in front of
         // it on the queue.
         BoardFile.sweep(keeping: Set(index.accounts.map(\.id)))
+        FrameHeightStore.sweep(keeping: Set(index.accounts.map(\.id)))
         let accounts = Set(index.accounts.map(\.id))
         Task.detached(priority: .utility) { await CalendarDisk.shared.sweep(keeping: accounts) }
     }
@@ -2225,6 +2186,7 @@ final class AppStore {
             // mailbox behind the same host. The one on disk too.
             boardSnapshots[account.id] = nil
             discardBoardFile(account.id)
+            FrameHeightStore.shared.forget(account: account.id)
             let replaced = account.id
             Task { await CalendarDisk.shared.forget(replaced) }
             // Arriving from the Connect gate the feeds are down, so this is a
@@ -2297,6 +2259,7 @@ final class AppStore {
             // these credentials.
             boardWritesRefusedEpoch = epoch
             discardBoardFile(account.id)
+            FrameHeightStore.shared.forget(account: account.id)
             let revalidated = account.id
             Task { await CalendarDisk.shared.forget(revalidated) }
             #if os(iOS)
@@ -2791,7 +2754,7 @@ final class AppStore {
         bands.sealed = []
         return BoardSnapshot(
             sitrep: bands, stats: stats, fyeHeadline: fyeHeadline, fyeHeadlineKey: fyeHeadlineKey,
-            zones: zones,
+            zones: zones.value,
             // The head of each page: the scroll refills the rest, and the
             // head is what the refresh behind the repaint merges into. ONLY
             // from a daemon that pages by arrival. One that pages by cursor
@@ -2820,7 +2783,7 @@ final class AppStore {
         if kept.stats != nil { statsEpoch = epoch }
         fyeHeadline = kept.fyeHeadline
         fyeHeadlineKey = kept.fyeHeadlineKey
-        zones = kept.zones
+        zones.replace(with: kept.zones)
         mailPages = kept.mailPages.mapValues { Loadable(value: $0, error: nil, isLoading: false) }
         mailKeyset = kept.mailKeyset
         selectedId = kept.selectedId
@@ -3033,13 +2996,11 @@ final class AppStore {
     /// `MainView` names a page and nothing a daemon minted, so it is the one
     /// piece of navigation that can cross. The rest of the history cannot.
     ///
-    /// Two exceptions. Process is reached only from the all-mail peer-review
-    /// chip, so its way back is Emails. The calendar's gate is read off the
-    /// new account's stats, which have not arrived when this runs, so
-    /// `route(to:)` sends it to the sitrep like any closed gate.
+    /// One exception: Process is reached only from the all-mail peer-review
+    /// chip, so its way back is Emails.
     ///
-    /// MAC ONLY. The phone maps a route onto a tab only for Sitrep and Mail,
-    /// so keeping `activeView` there jumped Quick Look and Search to whichever
+    /// MAC ONLY. The phone maps a route onto a tab only for Sitrep, Calendar
+    /// and Mail, so keeping `activeView` there jumped Search to whichever
     /// of the two was visited last. It keeps its old answer, the sitrep,
     /// until its tabs are taught to stay put on their own.
     private static func pageKeptAcrossSwitch(_ view: MainView) -> MainView {
@@ -3097,7 +3058,7 @@ final class AppStore {
         stats = nil
         fyeHeadline = nil
         fyeHeadlineKey = nil
-        zones = SitrepZoneCache()
+        zones.replace(with: SitrepZoneCache())
         // AND THE TTL STAMP, which no longer rides inside the struct above.
         // Left standing, it vouches for the rows just thrown away: the new
         // account's first refreshes are skipped as "still fresh", and the
@@ -3231,6 +3192,7 @@ final class AppStore {
         PreparedKeyMemo.shared.wipe()
         InBodyImages.shared.wipe()
         HeroCache.shared.wipe()
+        EventVisuals.shared.wipe()
         AttachmentThumbs.shared.wipe()
         ComposeAttach.wipe()
         // The staged preview files, for the same reason and with more teeth: a
@@ -3272,9 +3234,6 @@ final class AppStore {
     /// the previous one — assigning `activeView` directly would inherit whatever
     /// the last click set and slide the rail for a keyboard route.
     private func route(to view: MainView, viaPointer: Bool = false) {
-        // A route to a calendar page that is not offered (the gate, a history
-        // entry from before it closed) lands on the sitrep instead.
-        let view = view == .calendar && !calendarPageAvailable ? .sitrep : view
         // On change only: the repeat-press no-op in setView re-routes to the
         // same view, and that is not a navigation worth an event.
         if view != activeView { Analytics.screen(view.rawValue) }
@@ -3291,7 +3250,6 @@ final class AppStore {
 
     func setView(_ view: MainView, viaPointer: Bool = false) {
         guard !RehearsalMode.isEnabled || view == .sitrep else { return }
-        guard view != .calendar || calendarPageAvailable else { return }
         // Navigating ANYWHERE dismisses an open thread viewer: the rail is visible
         // beside it, so a click there means "leave this email", not "change the
         // page underneath the overlay". Through closeThread() so the reader's
@@ -3782,12 +3740,12 @@ final class AppStore {
     private enum ZoneAnswer: Sendable {
         case shipments([Shipment]?)
         case reading([ReadingSender]?)
-        case records(AgentFeed?)
+        case records(RecordsFeedZones?)
     }
 
     private func performZoneRefresh() async {
         let e = epoch
-        // Five independent fetches racing in one group, each zone written the
+        // Three independent fetches racing in one group, each zone written the
         // moment ITS fetch answers — completion order, not a fixed await
         // order, which is what actually keeps one wedged endpoint riding out
         // its timeout from holding every later zone's paint hostage. Every
@@ -3802,33 +3760,30 @@ final class AppStore {
             }
             group.addTask { .reading(await ReadingFeed.load()) }
             group.addTask {
-                .records(try? await APIClient.shared.getFeed(destination: "records", limit: 1000))
+                // Derived HERE, off the main actor: three walks over up to
+                // a thousand records, every 45 seconds.
+                guard let feed = try? await APIClient.shared.getFeed(destination: "records", limit: 1000)
+                else { return .records(nil) }
+                return .records(RecordsFeedZones(feed))
             }
             for await answer in group {
                 guard e == epoch else {
                     group.cancelAll()
                     return
                 }
-                // ASSIGN ONLY ON CHANGE, every one: `zones` is one observed
-                // property, so any assignment re-renders every zone card and
-                // the board, and most passes find the same rows they found
-                // 45 seconds ago.
+                // ASSIGN ONLY ON CHANGE, every one: most passes find the
+                // rows they found 45 seconds ago, and an equal write still
+                // runs the zone's hooks (a board save, the reading threads).
                 switch answer {
                 case .shipments(let rows?):
                     if rows != zones.shipments { zones.shipments = rows }
                 case .reading(let rows?):
                     if rows != zones.reading { zones.reading = rows }
                     if !zones.readingLoaded { zones.readingLoaded = true }
-                case .records(let feed?):
-                    // Derived off the feed ONCE, off the main actor would be
-                    // better still; the three walks are over up to a thousand
-                    // records.
-                    let receipts = feed.receipts
-                    let banking = feed.banking
-                    let calendar = feed.calendar
-                    if receipts != zones.receipts { zones.receipts = receipts }
-                    if banking != zones.banking { zones.banking = banking }
-                    if calendar != zones.calendar { zones.calendar = calendar }
+                case .records(let records?):
+                    if records.receipts != zones.receipts { zones.receipts = records.receipts }
+                    if records.banking != zones.banking { zones.banking = records.banking }
+                    if records.calendar != zones.calendar { zones.calendar = records.calendar }
                 case .shipments, .reading, .records: missed = true
                 }
             }

@@ -245,6 +245,7 @@ fn seed_fake_data(store: &SqliteStore, account: AccountId) -> Result<()> {
             list_unsubscribe: None,
             list_unsub_one_click: false,
             auth_pass: None,
+            sender_signals: None,
         })?;
         store.set_triage(
             id,

@@ -154,10 +154,10 @@ fn upsert_message_conn(
              subject, received_at, snippet, body, body_html, is_sent, to_addrs,
              cc_addrs, bcc_addrs,
              list_unsubscribe, list_unsub_one_click, auth_pass, is_spam,
-             date_offset_minutes)
+             date_offset_minutes, sender_signals)
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,
              CASE WHEN ?11 = 1 THEN ?14 ELSE NULL END,
-             ?15,?16,?17,?18,?19)
+             ?15,?16,?17,?18,?19,?20)
          ON CONFLICT(account_id, gmail_msg_id) DO UPDATE SET
              thread_id=excluded.thread_id, from_addr=excluded.from_addr,
              from_name=excluded.from_name, subject=excluded.subject,
@@ -173,7 +173,9 @@ fn upsert_message_conn(
              auth_pass=excluded.auth_pass,
              is_spam=MIN(messages.is_spam, excluded.is_spam),
              date_offset_minutes=COALESCE(excluded.date_offset_minutes,
-                                          messages.date_offset_minutes)",
+                                          messages.date_offset_minutes),
+             sender_signals=COALESCE(excluded.sender_signals,
+                                     messages.sender_signals)",
         params![
             msg.account_id,
             msg.gmail_msg_id,
@@ -194,6 +196,9 @@ fn upsert_message_conn(
             msg.auth_pass.map(|p| p as i64),
             msg.is_spam as i64,
             date_offset_minutes,
+            msg.sender_signals
+                .as_ref()
+                .and_then(|s| serde_json::to_string(s).ok()),
         ],
     )?;
     let id: i64 = conn.query_row(
@@ -893,7 +898,7 @@ impl SqliteStore {
         // could not (docs/TRANSLATION.md, invariant 5). Served statuses only.
         let mut stmt = conn.prepare(concat!(
             "SELECT m.id, m.from_addr, m.from_name, m.received_at, m.body,
-                    tr.source_lang, tr.subject, tr.body, tr.status
+                    tr.source_lang, tr.subject, tr.body, tr.status, m.sender_signals
              FROM messages m
              LEFT JOIN agent_message_state a
                ON a.account_id=m.account_id AND a.message_id=m.id
@@ -922,6 +927,9 @@ impl SqliteStore {
                     received_at: dt(r, 3)?,
                     content: r.get(4)?,
                     translation,
+                    sender_signals: crate::types::SenderSignals::from_column(
+                        r.get::<_, Option<String>>(9)?.as_deref(),
+                    ),
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1001,7 +1009,7 @@ impl SqliteStore {
                          AND LOWER(TRIM(COALESCE(m.from_addr, ''))) =
                              LOWER(TRIM(COALESCE(a.email, ''))))) AS authored_by_account,
                     tr.source_lang, tr.status, tr.subject, tr.body, tr.body_html,
-                    tr.missing_facts
+                    tr.missing_facts, m.sender_signals
              FROM messages m
              LEFT JOIN triage t ON t.message_id = m.id
              LEFT JOIN accounts a ON a.id = m.account_id
@@ -1056,6 +1064,9 @@ impl SqliteStore {
                     one_line: r.get::<_, Option<String>>(9)?.filter(|s| !s.is_empty()),
                     auth_pass: r.get::<_, Option<bool>>(10)?,
                     translation: client_translation(r, 17)?,
+                    sender_signals: crate::types::SenderSignals::from_column(
+                        r.get::<_, Option<String>>(23)?.as_deref(),
+                    ),
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;

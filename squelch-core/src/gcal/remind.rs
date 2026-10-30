@@ -53,6 +53,11 @@ use crate::types::{GhostEvent, GhostState};
 
 /// Stored on each plan, so a later prompt can tell which rows to redo.
 pub const PROMPT_VERSION: &str = "calendar-remind-v2";
+/// The prompts whose plans still govern while they wait to be planned again
+/// ([`StoredPlan::governs`]): every version whose `remind`, lead and claims
+/// mean what they mean now. A future prompt that changes what a plan means
+/// leaves the older ones out, and their items fall to the fallback.
+pub const GOVERNING_PROMPTS: [&str; 2] = ["calendar-remind-v1", PROMPT_VERSION];
 /// The usage-ledger category. Runs the notify model, so
 /// [`crate::metrics::runs_notify_model`] lists it.
 pub const USAGE_CATEGORY: &str = "calendar_remind";
@@ -841,7 +846,7 @@ impl StoredPlan {
     /// the minutes before each item is planned again. The fallback is for an
     /// item that has never had a plan.
     pub fn governs(&self) -> bool {
-        true
+        GOVERNING_PROMPTS.contains(&self.prompt_version.as_str())
     }
 }
 
@@ -980,6 +985,33 @@ fn skeleton(text: &str) -> String {
         .collect()
 }
 
+/// Non-Latin top-level domains in common use. A last label in another
+/// script counts as a host only when it is one of these (or mixes in Latin).
+const IDN_TLDS: [&str; 22] = [
+    "рф",
+    "онлайн",
+    "сайт",
+    "рус",
+    "бел",
+    "укр",
+    "срб",
+    "мкд",
+    "қаз",
+    "中国",
+    "中國",
+    "公司",
+    "网络",
+    "在线",
+    "网址",
+    "香港",
+    "台灣",
+    "한국",
+    "ไทย",
+    "भारत",
+    "مصر",
+    "امارات",
+];
+
 /// Common generic top-level domains: the right side of a dot written out
 /// (` dot com`) or spaced out (`evil . com`).
 const COMMON_TLDS: [&str; 14] = [
@@ -1066,18 +1098,24 @@ pub fn line_shaped(text: &str) -> bool {
 /// "415-555-1234" are untouched.
 fn mask_dates(text: &str) -> String {
     static DATES: std::sync::LazyLock<[regex::Regex; 4]> = std::sync::LazyLock::new(|| {
-        const MONTH: &str = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?";
+        // Whole month names and their usual short forms only: "Martin",
+        // "Novotel" and "Julia" start like a month and are not one.
+        const MONTH: &str = r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?";
+        // A day after a month name is written without a leading zero, so
+        // "may 02 9374" (a Sydney number) is no date.
+        const NAMED_DAY: &str = r"(?:[1-9]|[12][0-9]|3[01])";
         const DAY: &str = r"(?:0?[1-9]|[12][0-9]|3[01])";
         const MM: &str = r"(?:0?[1-9]|1[0-2])";
+        const YEAR: &str = r"(?:19|20)[0-9]{2}";
         [
-            regex::Regex::new(&format!(r"\b[0-9]{{4}}-{MM}-{DAY}\b")),
+            regex::Regex::new(&format!(r"\b{YEAR}-{MM}-{DAY}\b")),
             regex::Regex::new(&format!(
-                r"\b(?:{MM}/{DAY}|{DAY}/{MM})/(?:[0-9]{{4}}|[0-9]{{2}})\b"
+                r"\b(?:{MM}/{DAY}|{DAY}/{MM})/(?:{YEAR}|[0-9]{{2}})\b"
             )),
             regex::Regex::new(&format!(
-                r"(?i)\b{MONTH}\s+{DAY}(?:st|nd|rd|th)?,?\s+[0-9]{{4}}\b"
+                r"(?i)\b{MONTH}\s+{NAMED_DAY}(?:st|nd|rd|th)?,?\s+{YEAR}\b"
             )),
-            regex::Regex::new(&format!(r"(?i)\b{DAY}\s+{MONTH},?\s+[0-9]{{4}}\b")),
+            regex::Regex::new(&format!(r"(?i)\b{NAMED_DAY}\s+{MONTH},?\s+{YEAR}\b")),
         ]
         .map(|r| r.expect("date regex"))
     });
@@ -1087,32 +1125,64 @@ fn mask_dates(text: &str) -> String {
 }
 
 /// A phone number spelled on a keypad: three digits (a `1` before them, in
-/// brackets or not), then letters and digits joined by `-` or `.` or nothing,
-/// 7 or more keys in all, with a letter. It counts when the prefix is
-/// toll-free (`888-Tickets`, `1800FLOWERS`, `800-555-CASH`) or the letters
-/// are capitals (`415-PAY-CASH`, `(888) TICKETS`). A space after the prefix
-/// counts only before capitals, so "100-Year gala" and "730 then dinner" are
-/// text.
+/// brackets or not), then letters and digits, 7 keys or more with a letter.
+/// Two shapes, each tight enough that ordinary lines pass:
+///
+/// - JOINED by `-` or `.` or nothing (no spaces): a toll-free prefix with
+///   capitals and 7 keys (`888-GET-CASH`, `800-555-CASH`), or with any case
+///   and 10 keys, a whole number (`888-Tickets`, `1800flowers`; not
+///   "800-seat hall"); any other prefix only in capitals, in 2 or more groups
+///   and 10 keys (`415-PAY-CASH`; not "Room 101-ABCD", "Boeing 737-MAX8",
+///   "100-YEAR gala"). With nothing after the prefix, the next key is a
+///   letter, so "2026-FIFA" is no prefix.
+/// - SPACED, in capitals, after a toll-free prefix only: `800 FLOWERS`,
+///   `(888) TICKETS`, `888 GET CASH`. Any other prefix with a space is a
+///   flight, a road or an address ("UA 1532 SFO-EWR", "Highway 101 NORTH",
+///   "450 SUTTER ST").
 fn keypad_number(text: &str) -> bool {
-    static KEYPAD: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    static JOINED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(
-            r"(?:^|[^0-9A-Za-z])(?:1[ .-]?)?\(?([0-9]{3})\)?([ .-]?)([A-Za-z0-9]+(?:[-.][A-Za-z0-9]+)*)",
+            r"(?:^|[^0-9A-Za-z])(?:1[ .-]?)?\(?([0-9]{3})\)?([.-]?)([A-Za-z0-9]+(?:[-.][A-Za-z0-9]+)*)",
         )
-        .expect("keypad regex")
+        .expect("joined keypad regex")
     });
-    KEYPAD.captures_iter(text).any(|c| {
-        let prefix = &c[1];
-        let spaced = &c[2] == " ";
-        let rest = &c[3];
-        let letters: Vec<char> = rest.chars().filter(char::is_ascii_alphabetic).collect();
-        let keys = 3 + rest.chars().filter(char::is_ascii_alphanumeric).count();
-        let capitals = !letters.is_empty() && letters.iter().all(char::is_ascii_uppercase);
-        let toll_free = matches!(
+    static SPACED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?:^|[^0-9A-Za-z])(?:1[ .-]?)?\(?(8(?:00|33|44|55|66|77|88))\)? +([A-Z0-9]+(?:[-. ][A-Z0-9]+)*)",
+        )
+        .expect("spaced keypad regex")
+    });
+    fn toll_free(prefix: &str) -> bool {
+        matches!(
             prefix,
             "800" | "833" | "844" | "855" | "866" | "877" | "888"
-        );
-        !letters.is_empty() && keys >= 7 && (capitals || (toll_free && !spaced))
-    })
+        )
+    }
+    let keys = |rest: &str| 3 + rest.chars().filter(char::is_ascii_alphanumeric).count();
+    let has_letter = |rest: &str| rest.chars().any(|c| c.is_ascii_alphabetic());
+    let joined = JOINED.captures_iter(text).any(|c| {
+        let (prefix, sep, rest) = (&c[1], &c[2], &c[3]);
+        if !has_letter(rest)
+            || (sep.is_empty() && !rest.starts_with(|c: char| c.is_ascii_alphabetic()))
+        {
+            return false;
+        }
+        let capitals = rest
+            .chars()
+            .filter(char::is_ascii_alphabetic)
+            .all(|c| c.is_ascii_uppercase());
+        let groups = rest.split(['-', '.']).count();
+        if toll_free(prefix) {
+            keys(rest) >= if capitals { 7 } else { 10 }
+        } else {
+            capitals && groups >= 2 && keys(rest) >= 10
+        }
+    });
+    joined
+        || SPACED.captures_iter(text).any(|c| {
+            let rest = &c[2];
+            toll_free(&c[1]) && has_letter(rest) && keys(rest) >= 7
+        })
 }
 
 /// An `@` with a letter or digit right before or after it.
@@ -1137,7 +1207,20 @@ fn dotted_host(word: &str) -> bool {
         && labels.last().is_some_and(|tld| {
             tld.chars().count() >= 2
                 && tld.chars().all(char::is_alphabetic)
-                && (!tld.is_ascii() || tld.len() >= 3 || country_tld(tld))
+                && if tld.is_ascii() {
+                    tld.len() >= 3 || country_tld(tld)
+                } else {
+                    // ASCII Latin mixed with Greek or Cyrillic look-alike
+                    // letters (`cоm`), or a real non-Latin top-level domain.
+                    // "Müller" and "García" are Latin. A sentence in another
+                    // script after a full stop ("です。お楽しみに",
+                    // "г.Москва") is neither.
+                    let latin = tld.chars().any(|c| c.is_ascii_alphabetic());
+                    let lookalike = tld
+                        .chars()
+                        .any(|c| matches!(c, '\u{0370}'..='\u{03FF}' | '\u{0400}'..='\u{04FF}'));
+                    (latin && lookalike) || IDN_TLDS.contains(tld)
+                }
         })
 }
 
@@ -1161,33 +1244,40 @@ fn loose_host(text: &str) -> bool {
     });
     static SPACED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(
-            r"[A-Za-z0-9](?:\s*[.\u{B7}\u{2027}\u{2219}\u{30FB}]\s*|,)([a-z]{2,6})(?:[^A-Za-z-]|$)",
+            r"[A-Za-z0-9](\s*[.\u{B7}\u{2022}\u{2027}\u{2219}\u{30FB}]\s*|,)([a-z]{2,6})(?:[^A-Za-z-]|$)",
         )
         .expect("spaced dot regex")
     });
-    // SPACED captures lower case only, so folding the case changes nothing
-    // there; WRITTEN takes any case.
-    let hit = |re: &regex::Regex| {
-        re.captures_iter(text).any(|c| {
-            c.get(1)
-                .is_some_and(|tld| loose_tld(&tld.as_str().to_lowercase()))
-        })
-    };
-    // A space BEFORE the dot never ends a sentence, so there any case and
-    // any country code count ("evil . Com", "evil .me").
+    // WRITTEN takes any case.
+    let written = WRITTEN
+        .captures_iter(text)
+        .any(|c| loose_tld(&c[1].to_lowercase()));
+    // SPACED captures lower case only. A look-alike dot with a space after it
+    // is how a line lists things ("Doors 7 · Show 8 · ca 2 hrs"), so there
+    // only a common generic domain counts (`evil • com`); joined (`evil·ca`)
+    // or after a real dot, a country code does too.
+    let spaced = SPACED.captures_iter(text).any(|c| {
+        let sep = &c[1];
+        let listing = !sep.contains('.') && sep.trim() != sep && sep != ",";
+        if listing {
+            COMMON_TLDS.contains(&&c[2])
+        } else {
+            loose_tld(&c[2])
+        }
+    });
+    // On a LITERAL dot only: " · " is how a line lists things ("Doors 7 ·
+    // No bags"), and the look-alike dots are SPACED's, in lower case. A
+    // space BEFORE a dot never happens in a sentence, so there any case and
+    // any country code count ("evil . Com", "evil . me", "evil .me").
     static BEFORE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(
-            r"[A-Za-z0-9]\s+[.\u{B7}\u{2027}\u{2219}\u{30FB}]\s*([A-Za-z]{2,6})(?:[^A-Za-z-]|$)",
-        )
-        .expect("spaced-before regex")
+        regex::Regex::new(r"[A-Za-z0-9]\s+\.\s*([A-Za-z]{2,6})(?:[^A-Za-z-]|$)")
+            .expect("spaced-before regex")
     });
     let before = BEFORE.captures_iter(text).any(|c| {
-        c.get(1).is_some_and(|tld| {
-            let tld = tld.as_str().to_lowercase();
-            COMMON_TLDS.contains(&tld.as_str()) || country_tld(&tld)
-        })
+        let tld = c[1].to_lowercase();
+        COMMON_TLDS.contains(&tld.as_str()) || country_tld(&tld)
     });
-    hit(&WRITTEN) || hit(&SPACED) || before
+    written || spaced || before
 }
 
 /// A phone number or a code: an unbroken run of 6 or more digits (a code,
@@ -1215,7 +1305,21 @@ fn digit_run(text: &str) -> bool {
         } else if run > 0
             && matches!(
                 c,
-                ' ' | '-' | '.' | '+' | '(' | ')' | '/' | ',' | '_' | '\u{B7}' | '\u{2010}'
+                ' ' | '-'
+                    | '.'
+                    | '+'
+                    | '('
+                    | ')'
+                    | '/'
+                    | ','
+                    | '_'
+                    | '|'
+                    | '~'
+                    | '*'
+                    | '\u{B7}'
+                    | '\u{2022}'
+                    | '\u{30FB}'
+                    | '\u{2010}'
                     ..='\u{2015}' | '\u{2212}' | '\u{FE58}' | '\u{FE63}'
             )
         {
@@ -1320,7 +1424,7 @@ pub const CODE_MAX_DIGITS: usize = 6;
 /// The words a code's label may use, so a label names what the code opens
 /// and never asks for anything ("Call now", "Text"). Any other word makes the
 /// label "Code".
-const CODE_LABEL_WORDS: [&str; 34] = [
+const CODE_LABEL_WORDS: [&str; 39] = [
     "access",
     "alarm",
     "apartment",
@@ -1355,6 +1459,11 @@ const CODE_LABEL_WORDS: [&str; 34] = [
     "unit",
     "wi-fi",
     "wifi",
+    "desk",
+    "callbox",
+    "intercom",
+    "mailbox",
+    "passcode",
 ];
 /// The longest label kept, in characters.
 pub const CODE_LABEL_CAP: usize = 24;
@@ -1394,11 +1503,15 @@ pub fn settle_code(item: &Item, out: &CodeOutput) -> Option<Code> {
     }
     let label = fold(&plain(&out.label));
     let label = label.trim();
+    // "PIN:" is "PIN"; "Front-door code" is three listed words.
+    let label = label.trim_end_matches(':').trim();
     let named = !label.is_empty()
         && label.chars().count() <= CODE_LABEL_CAP
-        && label
-            .split(' ')
-            .all(|w| CODE_LABEL_WORDS.contains(&w.to_lowercase().as_str()));
+        && label.split(' ').all(|w| {
+            let w = w.to_lowercase();
+            CODE_LABEL_WORDS.contains(&w.as_str())
+                || (!w.is_empty() && w.split('-').all(|p| CODE_LABEL_WORDS.contains(&p)))
+        });
     let label = if named {
         label.to_string()
     } else {
@@ -1414,14 +1527,16 @@ pub fn settle_code(item: &Item, out: &CodeOutput) -> Option<Code> {
 }
 
 /// `needle` in `hay` as a whole word: no letter or digit right before or
-/// after it, and no joiner (`- . /` or a dash) with a letter or digit beyond
-/// it, so "1234" is not a whole word of "1234-5678" or "415-555-1234".
+/// after it, and no joiner (`- . /` or a dash) with a digit beyond it, so
+/// "1234" is not a whole word of "1234-5678" or "415-555-1234".
 fn whole_word_in(hay: &str, needle: &str) -> bool {
     fn joined(mut side: impl Iterator<Item = char>) -> bool {
         match side.next() {
             Some(c) if c.is_alphanumeric() => true,
+            // A joiner joins numbers ("1234-5678"), not words: "642181—it
+            // opens" and "Door 1234/Gate 5678" hand over the code.
             Some('-' | '.' | '/' | '\u{2010}'..='\u{2015}' | '\u{2212}') => {
-                side.next().is_some_and(char::is_alphanumeric)
+                side.next().is_some_and(char::is_numeric)
             }
             _ => false,
         }

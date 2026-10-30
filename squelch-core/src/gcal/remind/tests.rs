@@ -557,7 +557,7 @@ fn a_ghost_an_events_current_plan_claims_is_not_reminded_twice() {
     assert!(matches!(w.built().ghosts[1], GhostLink::Claimed(0, _)));
     // So does a plan from an older prompt: a new prompt must not drop every
     // claim in the minutes before each event is planned again.
-    w.plans.get_mut(&item.key).unwrap().prompt_version = "calendar-remind-v0".into();
+    w.plans.get_mut(&item.key).unwrap().prompt_version = "calendar-remind-v1".into();
     assert!(matches!(w.built().ghosts[1], GhostLink::Claimed(0, _)));
     // Nor does a plan naming a ghost that is no longer a candidate.
     w.plans.get_mut(&item.key).unwrap().prompt_version = PROMPT_VERSION.into();
@@ -765,7 +765,7 @@ fn the_tickets_button_takes_the_plans_pick_else_the_fallback() {
     stale.version = "old".into();
     assert_eq!(tickets(&item, Some(&stale)).unwrap().message_id, 40);
     let mut older = stored;
-    older.prompt_version = "calendar-remind-v0".into();
+    older.prompt_version = "calendar-remind-v1".into();
     assert_eq!(tickets(&item, Some(&older)).unwrap().message_id, 40);
     w.mail.clear();
     assert_eq!(tickets(&w.built().events[0], None), None);
@@ -1189,7 +1189,7 @@ fn a_stale_plan_still_governs_and_the_fallback_is_for_the_never_planned() {
     assert_eq!((d.lead_minutes, d.fallback), (Some(120), false));
     // A plan from an older prompt governs the same way: a new prompt must
     // not turn every "no reminder" into the fallback before it is asked again.
-    quiet.prompt_version = "calendar-remind-v0".into();
+    quiet.prompt_version = "calendar-remind-v1".into();
     assert_eq!(
         due(&item, Some(&quiet), t, LA),
         None,
@@ -1374,6 +1374,37 @@ fn the_line_rule_keeps_ordinary_lines_and_drops_steered_ones() {
         // Other scripts.
         "Rendez-vous à l'entrée, côté gauche",
         "Bring your Führerschein for the rental",
+        // Second verification pass, 2026-10-30: lists joined with " · ",
+        // flight routes, capitals after a number, other scripts.
+        "Doors 7 · No bags",
+        "Row 12 · Club level",
+        "Gate B · Top floor",
+        "Sec 104 · In person",
+        "Doors 7 · At the door",
+        "Doors 7 · ID required",
+        "Doors 7 · TV in lobby",
+        "Doors 7 · Show 8 · ca 2 hrs",
+        "UA 1532 SFO-EWR",
+        "Flight 302 SFO-JFK",
+        "Flight AA 100 LAX-JFK",
+        "Highway 101 NORTH",
+        "Meet at 450 SUTTER ST",
+        "Bus 101 EXPRESS",
+        "Room 512 B-WING",
+        "Room 101-ABCD",
+        "2026-FIFA fan zone",
+        "100-YEAR gala",
+        "Ford F-150 RAPTOR parking",
+        "Boeing 737-MAX8",
+        "800-seat hall",
+        "888-piece orchestra",
+        "877-acre park",
+        "会場は渋谷です。お楽しみに",
+        "门票在邮件里。请提前到达。",
+        "Встреча: г.Москва, ул.Тверская",
+        "Bei Dr.Müller im zweiten Stock",
+        "Cita con la Sra.García",
+        "Showtimes 6:30, 7:45, 9:00",
     ];
     let bad = [
         "Pay at evil-tickets.com now",
@@ -1436,6 +1467,22 @@ fn the_line_rule_keeps_ordinary_lines_and_drops_steered_ones() {
         "evil {dot} com",
         "evil <dot> com",
         "Booking ref 12\u{2013}34\u{2013}56",
+        // Second verification pass, 2026-10-30.
+        "Call Novotel 02 9374 4000",
+        "Help desk: you may 02 9374 4000",
+        "Call Martin 20 7946 0958",
+        "Call Marco 31 0555 1234",
+        "Text Julia 21 2555 1234",
+        "Call 888 GET CASH",
+        "Call 800 555 CASH",
+        "Call 415|555|1234",
+        "Call 415~555~1234",
+        "Call 415*555*1234",
+        "Call 415\u{2022}555\u{2022}1234",
+        "Call 415\u{30FB}555\u{30FB}1234",
+        "evil\u{2022}com",
+        "evil \u{2022} com",
+        "evil .me",
     ];
     let dropped: Vec<&str> = good
         .iter()
@@ -1515,6 +1562,16 @@ fn a_code_never_carries_a_phone_number_from_any_country() {
         with_code("Call 415\u{2013}555\u{2013}1234", "Code", "555"),
         None
     );
+    // A joiner before a WORD is punctuation: the code is whole.
+    assert!(
+        with_code(
+            "use PIN 642181\u{2014}it opens the side door",
+            "Door PIN",
+            "642181"
+        )
+        .is_some()
+    );
+    assert!(with_code("Door 1234/Gate 5678", "Door code", "1234").is_some());
 }
 
 #[test]
@@ -1565,6 +1622,14 @@ fn a_codes_label_is_plain_words_or_just_code() {
     assert_eq!(label("Text").as_deref(), Some("Code"));
     assert_eq!(label("WhatsApp").as_deref(), Some("Code"));
     assert_eq!(label("Pay at evil dot com").as_deref(), Some("Code"));
+    // Real labels the first list missed.
+    assert_eq!(label("Front desk").as_deref(), Some("Front desk"));
+    assert_eq!(label("Callbox").as_deref(), Some("Callbox"));
+    assert_eq!(label("Intercom code").as_deref(), Some("Intercom code"));
+    assert_eq!(label("Front-door code").as_deref(), Some("Front-door code"));
+    assert_eq!(label("PIN:").as_deref(), Some("PIN"));
+    // A hyphen does not smuggle a word in.
+    assert_eq!(label("Call-now").as_deref(), Some("Code"));
     assert_eq!(label("visit evil.com").as_deref(), Some("Code"));
     assert_eq!(label("").as_deref(), Some("Code"));
     assert_eq!(
@@ -1625,7 +1690,12 @@ fn an_older_prompts_plan_governs_until_planned_again() {
         plan: plan(false, 60),
     };
     assert!(old.governs() && !old.current(item));
+    // A prompt left off the governing list is no plan: the fallback.
+    let mut unlisted = old.clone();
+    unlisted.prompt_version = "calendar-remind-v0".into();
+    assert!(!unlisted.governs());
     let t: DateTime<Utc> = "2026-10-31T02:45:00Z".parse().unwrap();
+    assert!(due(item, Some(&unlisted), t, LA).unwrap().fallback);
     // In the fallback's window and busy: still silent.
     assert_eq!(due(item, Some(&old), t, LA), None);
     let mut yes = old.clone();
@@ -1638,4 +1708,23 @@ fn an_older_prompts_plan_governs_until_planned_again() {
         frame(1, early, item, &d, Some(&yes), LA)["line"],
         serde_json::Value::Null
     );
+}
+
+#[test]
+fn only_real_dates_are_masked_before_digits_are_counted() {
+    let masked = |t: &str| !mask_dates(t).chars().any(|c| c.is_ascii_digit());
+    // Real dates go.
+    assert!(masked("Oct 30 2026"));
+    assert!(masked("October 30, 2026"));
+    assert!(masked("30 Oct 2026"));
+    assert!(masked("10/30/2026"));
+    assert!(masked("2026-10-30"));
+    // A name that starts like a month is no month ("Martin", "Novotel").
+    assert!(!masked("Martin 20 2026"));
+    assert!(!masked("Novotel 2 2026"));
+    // A day after a month name has no leading zero ("may 02 9374").
+    assert!(!masked("may 02 2026"));
+    // A year is 19xx or 20xx, never any four digits.
+    assert!(!masked("Oct 30 7946"));
+    assert!(!masked("7946-10-30"));
 }

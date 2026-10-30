@@ -1013,16 +1013,25 @@ input in code:
     with (every phone number has 7, while "Oct 30, 2026", "seats 101-104"
     and "2026-27" make 6);
   - a vanity number (`1-800-flowers`, or `888-TICKETS` in capitals), or a
-    number spelled on a keypad: 3 digits then letters and digits joined by
-    `-` or `.`, 7 keys or more, toll-free or in capitals (`888-GET-CASH`,
-    `(888) TICKETS`, `1800FLOWERS`, `415-PAY-CASH`; not "100-Year gala");
-  - before testing, dates with a year are masked ("Oct 30 2026, 7:30pm",
-    "10/30/2026", "2026-10-30"), every dash counts as a separator
+    number spelled on a keypad: joined by `-` or `.`, a toll-free prefix in
+    capitals (`888-GET-CASH`) or any case as a whole 10-key number
+    (`888-Tickets`, `1800flowers`; not "800-seat hall"), or another prefix
+    in capitals in 2+ groups and 10 keys (`415-PAY-CASH`; not "Room
+    101-ABCD", "Boeing 737-MAX8"); spaced, only after a toll-free prefix in
+    capitals (`888 GET CASH`, `(888) TICKETS`; not "UA 1532 SFO-EWR",
+    "Highway 101 NORTH");
+  - before testing, real dates with a year are masked ("Oct 30 2026,
+    7:30pm", "10/30/2026", "2026-10-30"; whole month names only, so "Call
+    Martin 20 7946 0958" is no date), every dash and `| ~ * •` count as
+    separators
     ("415–555–1234"), and invisible characters and combining marks are
-    dropped, so `evil\u{AD}.com` is `evil.com`. A host whose last label has
-    a non-ASCII letter counts (`evil.cоm` with a Cyrillic `о`), and a space
-    BEFORE a dot is never a sentence break, so `evil . Com` counts in any
-    case.
+    dropped, so `evil\u{AD}.com` is `evil.com`. A host whose last label
+    mixes ASCII Latin with Greek or Cyrillic counts (`evil.cоm` with a
+    Cyrillic `о`), and so does a real non-Latin domain (`.рф`), but not a
+    sentence after a full stop ("です。お楽しみに", "Dr.Müller"). A space
+    BEFORE a literal dot is never a sentence break, so `evil . Com` counts
+    in any case; a spaced " · " lists things, so after it only com, net,
+    org and the like count ("Doors 7 · Show 8 · ca 2 hrs" stays).
   The banner then shows the title and time only. Measured 2026-10-30 over 84
   ordinary lines and 37 steered ones (`remind::tests::
   the_line_rule_keeps_ordinary_lines_and_drops_steered_ones`): every ordinary
@@ -1033,10 +1042,12 @@ input in code:
   numbers, a Cyrillic `о`, invisible characters) and date false positives;
   each is now a case in that test.
 
-A plan from an OLDER prompt governs like a stale one (it decides whether
-and when, and keeps its claims; only a current plan shows its line and
-code), so bumping the prompt never turns every "no reminder" into the
-fallback, or drops every claim, before each item is planned again.
+A plan from an older prompt on `remind::GOVERNING_PROMPTS` governs like a
+stale one (it decides whether and when, and keeps its claims; only a current
+plan shows its line and code), so bumping the prompt never turns every "no
+reminder" into the fallback, or drops every claim, before each item is
+planned again. A prompt that changes what a plan MEANS leaves the older
+versions off that list, and their items fall to the fallback until planned.
 - `open` and `ticket`: `{mail, attachment?}` indexes into the numbered lists.
   An index out of range is null. `open` is what tapping the banner shows;
   `ticket` is what the Tickets button shows.
@@ -1055,8 +1066,10 @@ fallback, or drops every claim, before each item is planned again.
   in Singapore, Hong Kong, Denmark and Norway, so 6 keeps them all out and a
   spelled number like `1800FLOWERS` has no shape to fit). The label uses only
   a closed list of words that name what a code opens (door, gate, entry,
-  building, locker, PIN, code, Wi-Fi and the like), so it can never say
-  "Call now"; anything else is "Code". Served
+  building, locker, PIN, code, desk, callbox, intercom, Wi-Fi and the like,
+  hyphenated or not), so it can never say "Call now"; anything else is
+  "Code". A joiner joins numbers, not words: "1234" is no code of
+  "1234-5678", while "PIN 642181—it opens the side door" hands it over. Served
   from a CURRENT plan only, so a PIN that changed in the description never
   shows the old one. The banner body leads with it: "Door PIN 642181 · the
   line". On the iPhone the lock screen hides it until Face ID unlocks

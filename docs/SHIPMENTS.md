@@ -459,14 +459,45 @@ polling one.
 
 ### Amazon stays email-only, by design
 
-Amazon Logistics `TBA…` numbers are detected, stored, and tracked from mail like
-anything else, but they are never polled and they carry no `tracking_url`. There
-is no public Amazon tracking API keyed by a TBA number and no public URL that
-resolves one: that tracking lives behind an Amazon account login, in the orders
-page. The poller's carrier list is `ups`, `usps`, `fedex`, `dhl` for exactly this
-reason, and `unknown`-carrier rows are excluded on the same grounds. An Amazon
-package's status is therefore whatever the last Amazon email said, permanently.
-That is not a gap waiting to be filled; there is nothing to fill it with.
+Amazon packages are never polled. There is no public Amazon tracking API, and
+the tracker page lives behind the owner's Amazon login. The poller's carrier
+list is `ups`, `usps`, `fedex`, `dhl` for exactly this reason, and
+`unknown`-carrier rows are excluded on the same grounds. An Amazon package's
+status is whatever the last Amazon email said.
+
+### Amazon boxes: keyed by Amazon's shipment id
+
+Amazon's Shipped and Delivered mail prints no tracking number, so the agent's
+delivery records for it carry `tracking_number: null`, and until box keys
+existed every one of them projected nothing: the rail had never shown an
+Amazon package. What that mail does carry is a "Track package" link,
+`amazon.com/progress-tracker/package?orderId=…&shipmentId=…`, and the
+`shipmentId` is per box: the same in one box's Shipped and Delivered mail,
+different for two boxes of one order.
+
+`triage/amazon.rs` reads it, in code, never by the model. When a delivery record
+has no usable number, `reconcile` keys it on `amazon:<orderId>:<shipmentId>`
+from its message, and the row:
+
+- is `carrier = 'amazon'` whatever the model said (it often says null or
+  `unknown`), so it is never polled;
+- links to Amazon's tracker page, BUILT from the two ids, never copied from the
+  mail;
+- carries the link's order id among its order refs, and `Amazon` as merchant
+  when the record named none, so two boxes of one order are one card.
+
+Only mail whose From domain authenticated as `amazon.com`
+(`ghost::sender_scope`) counts, both ids must match Amazon's shapes, per-item
+feedback links (they carry `itemId` and a different, numeric `shipmentId`) are
+skipped, and mail naming two boxes yields nothing rather than a guess. A real
+carrier number on the record still wins, since it can be polled. Order
+confirmations carry no tracker link and still project nothing. A model-written
+number can never collide with a box key: the tracking sanitizer upper-cases,
+and the prefix is lower-case.
+
+Decisions stored before box keys existed project once, on the open that
+introduces them (`migrate::project_amazon_boxes`, gated per account by the
+`amazon_boxes_projected` marker in `app_settings`). Every other open does one indexed read.
 
 ## Identity: which package is this?
 

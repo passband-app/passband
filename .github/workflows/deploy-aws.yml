@@ -1,14 +1,13 @@
-# Deploys to AWS (deploy/aws/DESIGN.md, "Deploys"). INERT until cutover:
-# every job is gated on the repo variable AWS_DEPLOY_ENABLED == 'true', and
-# Railway keeps deploying itself from `main` meanwhile.
+# Deploys production to AWS (deploy/aws/DESIGN.md, "Deploys"). Every job is
+# gated on the repo variable AWS_DEPLOY_ENABLED == 'true'; unset it to stop
+# deploys without editing this file.
 #
 # Triggers:
 #   - push to main, path-filtered per service (the `changes` job decides);
 #   - workflow_dispatch, one service or all;
 #   - workflow_run of release-passband-mac: that workflow pushes the new
 #     appcast to main with GITHUB_TOKEN, and pushes made with GITHUB_TOKEN do
-#     NOT start other workflows. Railway's webhook sees that push; this file
-#     would not, so without this trigger the site would keep serving the old
+#     NOT start other workflows, so without this trigger the site would keep serving the old
 #     appcast and baking the old /download version until some later push.
 #
 # Repo variables (Settings > Variables; none are secrets):
@@ -126,10 +125,8 @@ jobs:
             monitor:
               - .dockerignore
               - deploy/aws/monitor/**
-              - deploy/monitoring/grafana/dashboards/**
-              - deploy/monitoring/grafana/provisioning/alerting/**
-              - deploy/monitoring/grafana/provisioning/dashboards/**
-              - deploy/monitoring/prometheus/entrypoint.sh
+              - deploy/monitoring/grafana/**
+              - deploy/monitoring/prometheus/**
               - deploy/monitoring/blackbox/**
             site:
               - passband-site/**
@@ -158,8 +155,7 @@ jobs:
           # Native arm64 runners for the Rust builds (emulating the ONNX
           # compile is hours; see release-daemon.yml). bifrost is FROM-only,
           # so buildx just pulls the arm64 base and any runner will do. Its
-          # AWS Dockerfile pins the base by digest; the root Dockerfile.bifrost
-          # is Railway's and stays untouched until cutover.
+          # Dockerfile (deploy/aws/docker/) pins the base by digest.
           ecs='[]'
           add() {
             ecs=$(jq -c --arg s "$1" --arg f "$2" --arg r "$3" \
@@ -308,8 +304,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # Embedded compose copy matches, AWS configs have not drifted from the
-      # Railway ones, only 3000/9090 are published.
+      # Embedded compose copy matches, only 3000/9090 are published.
       - run: bash deploy/aws/monitor/check.sh
 
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0

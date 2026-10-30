@@ -207,7 +207,7 @@ pub async fn page(State(state): State<ControlState>, headers: HeaderMap) -> Resp
 /// IT EXISTS BECAUSE THE SESSION GOT LONG. At twelve hours the browser signed
 /// itself out by lunchtime and a button would have been decoration; at thirty
 /// days ([`cookie::ADMIN_COOKIE_TTL_SECS`]) the only way off a machine that is
-/// not yours would have been rotating the admin token in Railway, which signs
+/// not yours would have been rotating the admin token in Secrets Manager, which signs
 /// out every other browser too. This is the small exit, and the token rotation
 /// stays the big one.
 ///

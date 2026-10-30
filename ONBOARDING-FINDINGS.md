@@ -29,7 +29,7 @@ same rename, same fix.
 
 ## 3. No documented way to build the squelchd *image* from source — [gap]
 
-The root `Dockerfile` builds **squelch-relay** (the Railway push relay), not
+The root `Dockerfile` builds **squelch-relay** (the APNs push relay, which production runs on AWS), not
 the daemon. A user told "build from source" who types `docker build .` gets an
 APNs relay with no explanation. The actual image is:
 

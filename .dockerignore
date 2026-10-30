@@ -4,9 +4,9 @@ passband/
 passband-site/
 docs/
 deploy/
-# ...except the monitoring configs, which Dockerfile.{prometheus,blackbox,grafana} COPY.
+# ...except the monitoring configs and the AWS monitor box's files, which
+# deploy/aws/monitor/Dockerfile.* COPY.
 !deploy/monitoring/
-# ...and the AWS monitor box's configs, which deploy/aws/monitor/Dockerfile.* COPY.
 !deploy/aws/monitor/
 scripts/
 *.md

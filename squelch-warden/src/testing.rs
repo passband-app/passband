@@ -107,7 +107,7 @@ pub fn test_config() -> Config {
 /// paths: `set_llm_key` refuses outright when `llm_base_url` is absent.
 pub fn llm_test_config() -> Config {
     Config {
-        llm_base_url: Some("https://bifrost.railway.internal".to_string()),
+        llm_base_url: Some("https://bifrost.example.invalid".to_string()),
         ..test_config()
     }
 }

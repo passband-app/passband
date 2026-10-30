@@ -2,8 +2,8 @@
 //! string's own `sslmode`.
 //!
 //! NO ENV VAR, ON PURPOSE. The URL already says how it wants to be dialed, so the
-//! switch rides on it: Railway's private URL carries no `sslmode` and keeps the
-//! exact plaintext path it always had, and the AWS one says
+//! switch rides on it: a URL with no `sslmode` (local dev, the CI test Postgres)
+//! keeps the exact plaintext path it always had, and production's RDS URL says
 //! `sslmode=verify-full` (or `require`) and gets rustls against the RDS CA.
 //!
 //! | `sslmode` | connector | what is verified |
@@ -89,7 +89,7 @@ pub enum PgTlsError {
 /// Parse `database_url` and decide its connector.
 ///
 /// With no `sslmode` the string goes to tokio-postgres UNTOUCHED, which is what
-/// keeps today's Railway URL on exactly today's path.
+/// keeps a URL without one (local dev, CI) on exactly the pre-TLS path.
 pub(crate) fn parse(database_url: &str) -> Result<(tokio_postgres::Config, TlsChoice), PgTlsError> {
     let Some((mode, rest)) = split_sslmode(database_url)? else {
         return Ok((database_url.parse()?, TlsChoice::Plain));
@@ -304,14 +304,13 @@ mod tests {
 
     #[test]
     fn absent_sslmode_is_todays_plain_path_untouched() {
-        // Today's Railway URL shape: no sslmode at all.
-        let railway =
-            format!("postgres://postgres:{SECRET}@postgres.railway.internal:5432/railway");
-        let (config, c) = parse(&railway).unwrap();
+        // A local dev URL shape: no sslmode at all.
+        let plain = format!("postgres://postgres:{SECRET}@localhost:5432/postgres");
+        let (config, c) = parse(&plain).unwrap();
         assert_eq!(c, TlsChoice::Plain);
         // tokio-postgres's own default, i.e. what `parse()` alone produced
         // before this module existed.
-        let before: tokio_postgres::Config = railway.parse().unwrap();
+        let before: tokio_postgres::Config = plain.parse().unwrap();
         assert_eq!(format!("{config:?}"), format!("{before:?}"));
         assert_eq!(config.get_ssl_mode(), SslMode::Prefer);
         // Other query params, still no sslmode.

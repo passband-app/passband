@@ -230,7 +230,7 @@ variable "control_trusted_proxy_hops" {
   description = <<-EOT
     SQUELCH_CONTROL_TRUSTED_PROXY_HOPS. The ALB appends the TCP peer it saw to
     X-Forwarded-For, and control reads the hops-th entry from the right
-    (ratelimit.rs client_ip), so 1 is the real client, as on Railway.
+    (ratelimit.rs client_ip), so 1 is the real client.
   EOT
   type        = number
   default     = 1
@@ -254,7 +254,7 @@ variable "control_llm_budget_usd" {
 }
 
 variable "control_llm_models" {
-  description = "SQUELCH_CONTROL_LLM_MODELS; null leaves control's default. Copy the live Railway value."
+  description = "SQUELCH_CONTROL_LLM_MODELS; null leaves control's default."
   type        = string
   default     = null
 }
@@ -266,7 +266,7 @@ variable "control_assistant_budget_usd" {
 }
 
 variable "control_assistant_models" {
-  description = "SQUELCH_CONTROL_ASSISTANT_MODELS; null leaves control's default. Copy the live Railway value."
+  description = "SQUELCH_CONTROL_ASSISTANT_MODELS; null leaves control's default."
   type        = string
   default     = null
 }

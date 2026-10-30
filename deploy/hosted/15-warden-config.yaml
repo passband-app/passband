@@ -155,8 +155,8 @@ data:
   # these knobs are for (they are refused at boot unless the LLM base URL above
   # is set, which is the right coupling: prefix only when a gateway is routing).
   #
-  # KEEP IN LOCKSTEP WITH the canary's BLACKBOX_CANARY_MODEL on the blackbox
-  # Railway service. If these two disagree, the canary is probing a request the
+  # KEEP IN LOCKSTEP WITH the canary's BLACKBOX_CANARY_MODEL (Secrets Manager
+  # passband/monitor/BLACKBOX_CANARY_MODEL, read by blackbox on the AWS monitor box). If these two disagree, the canary is probing a request the
   # fleet does not send, and a green light stops meaning the fleet works.
   #
   # AND WITH THE GATEWAY, which allow-lists a model TWICE: on each virtual key

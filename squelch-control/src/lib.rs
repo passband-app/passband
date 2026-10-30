@@ -1,6 +1,6 @@
 //! squelch-control: the hosted signup control plane (Passband hosted tier).
 //!
-//! It runs on Railway, holds the confidential web OAuth client, and turns one
+//! It runs on AWS (ECS Fargate), holds the confidential web OAuth client, and turns one
 //! invite code plus one Google consent into one provisioned tenant daemon, which
 //! runs as its own pod. The provisioning itself belongs to `squelch-warden`, and
 //! this crate only ever talks to it over the two-call wire contract spelled out

@@ -187,7 +187,7 @@ Both the daemon's and the relay's `GET /t/{token}` behave identically:
 
 Tokens are 192 bits of OS entropy and are never logged, audited, or sent to the
 client. **They do, however, ride as a URL path segment**, so whatever fronts your
-public base URL — a CDN, nginx, Railway's edge — will record live tokens in its
+public base URL (a CDN, nginx, a cloud load balancer) will record live tokens in its
 access logs. The daemon and the relay keep that promise; your reverse proxy was
 never asked to.
 

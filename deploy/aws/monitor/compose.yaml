@@ -10,7 +10,7 @@
 # and IMAGE_TAG (the commit SHA the deploy built). Secrets are NOT in that
 # file: they are fetched from Secrets Manager on every start into per-service
 # env files on tmpfs (/run/passband-monitor, mode 0600), so each container
-# sees only its own, the way each Railway service had only its own variables.
+# sees only its own.
 #
 # Ports: grafana :3000 and prometheus :9090 are published because the ALB
 # targets them (grafana.passband.app, metrics.passband.app); the security group
@@ -70,7 +70,7 @@ services:
     restart: unless-stopped
     env_file: /run/passband-monitor/grafana.env
     environment:
-      # Non-secret settings Railway carried as service variables.
+      # Non-secret settings.
       GF_SERVER_ROOT_URL: https://grafana.passband.app
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:

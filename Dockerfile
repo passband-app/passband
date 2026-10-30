@@ -1,6 +1,6 @@
 # Builds squelch-relay — the blind APNs push relay. It is the only piece of
-# squelch that runs on shared/public infrastructure (Railway), so this is the
-# repo-root Dockerfile; squelchd deploys bare on the box (see deploy/DEPLOY.md).
+# squelch that runs on shared/public infrastructure (AWS ECS, deployed by
+# .github/workflows/deploy-aws.yml), so this is the repo-root Dockerfile; squelchd deploys bare on the box (see deploy/DEPLOY.md).
 #
 # The build context must be the workspace root: squelch-relay is a workspace
 # member and cargo needs the root manifest + lockfile to resolve it.

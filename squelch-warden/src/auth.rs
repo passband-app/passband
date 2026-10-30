@@ -1,7 +1,7 @@
 //! The bearer gate on every control-plane route.
 //!
 //! One credential, shared with exactly one caller: `SQUELCH_WARDEN_TOKEN`,
-//! held by the control plane on Railway and by this process. There is no second
+//! held by the control plane on AWS and by this process. There is no second
 //! tier and no per-caller token, because there is no second caller: a warden is
 //! a private appliance for one control plane.
 //!

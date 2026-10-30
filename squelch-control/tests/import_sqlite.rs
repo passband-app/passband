@@ -1,8 +1,8 @@
 //! The one-time move off the SQLite control store, end to end: a real legacy
 //! file on disk, a real Postgres schema, and the importer between them.
 //!
-//! This runs ONCE, in production, against the file on the Railway volume, and
-//! there is no second chance at it: the ids in that file are pointed at by
+//! This ran ONCE, in production, against the file on the control plane's old
+//! volume (before the move to AWS), and there was no second chance at it: the ids in that file are pointed at by
 //! every soft pointer the store has (a funnel row's `invite_id` names an invite,
 //! `invite_codes.used_by_label` names a tenant), and by the pairing codes and
 //! links already in people's inboxes. So the properties asserted here are the

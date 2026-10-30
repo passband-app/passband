@@ -201,8 +201,7 @@ resource "aws_lb_target_group" "this" {
   }
 }
 
-# Open hosts: anyone may reach these (control's signup, relay's opens, Grafana's
-# own login page).
+# Open hosts: anyone may reach these (control's signup, relay's opens).
 resource "aws_lb_listener_rule" "host" {
   for_each = { for k, v in local.target_groups : k => v if !contains(keys(local.source_restricted), k) }
 

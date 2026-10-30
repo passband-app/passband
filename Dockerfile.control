@@ -1,8 +1,8 @@
 # Builds squelch-control — the Passband hosted signup control plane. It is the
-# third piece of squelch that runs on shared/public infrastructure: its own
-# Railway service at signup.<base domain>, separate from the APNs relay (root
-# Dockerfile) and the consent broker (Dockerfile.broker). Railway selects this
-# one per-service with RAILWAY_DOCKERFILE_PATH.
+# third piece of squelch that runs on shared/public infrastructure: its own ECS
+# service at signup.<base domain>, separate from the APNs relay (root
+# Dockerfile) and the consent broker (Dockerfile.broker).
+# .github/workflows/deploy-aws.yml names this Dockerfile for the control service.
 #
 # The build context must be the workspace root: squelch-control is a workspace
 # member and cargo needs the root manifest + lockfile to resolve it.

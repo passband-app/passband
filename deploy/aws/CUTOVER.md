@@ -1,5 +1,11 @@
 # Railway → AWS cutover runbook
 
+> **Historical record.** Phases 0 to 9 ran 2026-10-23 to 2026-10-26 and
+> production has served from AWS since. Phase 10 (deleting the Railway
+> project, its tokens and the GitHub App) is the only part left. For how
+> production works today, read `DESIGN.md` and the root `CLAUDE.md`, not this
+> file; the commands below assume a Railway that is going away.
+
 The operator runs this top to bottom. The design is `deploy/aws/DESIGN.md`; how
 tofu is laid out is `deploy/aws/tofu/README.md`. This file is the order of
 operations, the commands, and how to prove each step on the real system.
@@ -1195,6 +1201,10 @@ resolves to AWS (ALB or CloudFront); no `railway` header on any of them. `grep -
 `[]` and `false`, and `tofu -chdir=$TF plan` says "No changes".
 
 ### Docs and code owed (list only; each is its own PR)
+
+**Done 2026-10-30** (the `update-docs` branch): every item below, including
+the `railway*.toml` and Railway-only Dockerfiles. The NoTls branch stays, for
+local dev and tests.
 
 - Root `CLAUDE.md`: the deploy table (every row says Railway; `bifrost` is no
   longer a `railway up` exception) and the Grafana `railway ssh` verification.

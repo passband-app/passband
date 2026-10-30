@@ -1,7 +1,7 @@
 # Copy to terraform.tfvars (gitignored). NON-secret values only: every secret
 # goes straight into Secrets Manager (README.md). Placeholders below are
-# obviously fake; replace with the live Railway values (`railway variables -s
-# <svc> --json`, never the truncating table view).
+# obviously fake; replace with the live values (the current terraform.tfvars,
+# or `aws ecs describe-task-definition --task-definition <svc>`).
 
 state_bucket      = "passband-tofu-state-000000000000"
 state_kms_key_arn = "arn:aws:kms:us-west-2:000000000000:key/00000000-0000-0000-0000-000000000000"
@@ -25,8 +25,8 @@ control_base_domain = "passband.email"
 control_client_id   = "000000000000-placeholder.apps.googleusercontent.com"
 control_warden_url  = "https://warden.passband.app"
 control_invite_from = "Passband <invites@passband.app>"
-# control_llm_models       = "copy from Railway"
-# control_assistant_models = "copy from Railway"
+# control_llm_models       = "copy the live value"
+# control_assistant_models = "copy the live value"
 # control_llm_budget_usd       = "5.00"
 # control_assistant_budget_usd = "10.00"
 

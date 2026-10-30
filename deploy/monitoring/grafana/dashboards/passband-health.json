@@ -30,7 +30,7 @@
   },
   {
    "type": "stat",
-   "title": "Signup (Railway)",
+   "title": "Signup (AWS)",
    "id": 2,
    "datasource": {
     "type": "prometheus",

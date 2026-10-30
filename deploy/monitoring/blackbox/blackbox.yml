@@ -1,8 +1,8 @@
-# Blackbox exporter modules. No public domain is ever minted for this service —
-# Prometheus reaches it over Railway private networking only.
+# Blackbox exporter modules. This service has no published port and no ALB
+# route: Prometheus reaches it over the monitor box's compose network only.
 #
 # THIS FILE IS A TEMPLATE: entrypoint.sh renders __BIFROST_CANARY_KEY__ and
-# __CANARY_MODEL__ from Railway service variables at boot (same pattern as
+# __CANARY_MODEL__ from env at boot (Secrets Manager, via the box's fetch-secrets) (same pattern as
 # prometheus's web.yml). Never put the key itself here.
 modules:
   # follow redirects, require a 2xx, record TLS expiry

@@ -3,15 +3,13 @@
 **Status: v1 implemented, and the daemon now has a caller.** `squelchd` ships an
 APNs pusher (`squelch_core::push`) that registers devices on the human door and
 POSTs `/v1/push` for each new event; it is off unless `SQUELCH_RELAY_URL` is set.
-Deployment is a root `Dockerfile` + `railway.toml` (Railway), so the service can
-go up whenever the phone needs it. Still nothing in production, and no `.p8`
-minted.
+It runs in production at `relay.squelch.sh`: the root `Dockerfile`, on ECS
+Fargate behind the ALB (see "Deployment" below).
 
-The iOS app now exists — Passband ships to TestFlight from the same source tree
-as the Mac app — but it is not yet the caller this was built for: it registers
-for no push, carries no notification service extension, and so nothing on the
-phone has ever asked this relay for anything. What remains is on the app's side,
-not here.
+The iOS app (Passband ships to TestFlight from the same source tree as the Mac
+app) is now the caller this was built for: it registers for push
+(`passband/Sources/PassbandiOS/App/PushRegistration.swift`) and carries a
+notification service extension (`passband/Sources/PassbandiOSNotify/`).
 
 A tiny, blind APNs relay. It exists so that the Passband iOS app can receive
 push notifications without any user's mail content — or any user's daemon — ever
@@ -136,7 +134,7 @@ to gate. Unset, the relay behaves exactly as it did before the variable
 existed. The startup line reports `push_token=true|false`, never the value.
 
 **Set `SQUELCH_RELAY_TRUSTED_PROXY_HOPS` when you deploy behind a TLS proxy**
-(`1` on Railway). Without it the rate limiters key on the TCP peer, which behind
+(`1` in production, behind the ALB). Without it the rate limiters key on the TCP peer, which behind
 a proxy is the proxy: every client in the world then shares one bucket, and one
 of them can 429 all the rest. It is opt-in because `X-Forwarded-For` is
 caller-supplied — believing it wholesale would let anyone mint unlimited
@@ -170,7 +168,7 @@ a header value.
 | `SQUELCH_RELAY_PUSH_TOKEN` | no | — | A push-only bearer: accepted by `POST /v1/push`, refused (`401`) by `GET /v1/opens`. Same length and character rules. Requires `SQUELCH_RELAY_AUTH_TOKEN`, must differ from it, and is an error with `SQUELCH_RELAY_ALLOW_ANONYMOUS=1`. Unset changes nothing. |
 | `SQUELCH_RELAY_ALLOW_ANONYMOUS` | no | `0` | `1` serves `POST /v1/push` open-but-rate-limited, and is the *only* way to omit the bearer. Setting both is an error. |
 | `SQUELCH_RELAY_DB_PATH` | no | — | SQLite file for the open buffer. Unset keeps it in memory: the binary warns at startup, and opens the daemon has not drained are lost on restart. |
-| `SQUELCH_RELAY_TRUSTED_PROXY_HOPS` | no | `0` | How many proxies you run in front of this listener. `0` trusts nothing and rate-limits on the TCP peer. `N` keys on the Nth-from-the-right `X-Forwarded-For` entry; `1` is the single-TLS-proxy case (Railway). Max 8. Setting it above `0` is a promise that **this listener is not reachable except through the declared proxies** — anything that can connect directly from a trusted address chooses its own rate-limit identity. |
+| `SQUELCH_RELAY_TRUSTED_PROXY_HOPS` | no | `0` | How many proxies you run in front of this listener. `0` trusts nothing and rate-limits on the TCP peer. `N` keys on the Nth-from-the-right `X-Forwarded-For` entry; `1` is the single-TLS-proxy case (production, behind the ALB). Max 8. Setting it above `0` is a promise that **this listener is not reachable except through the declared proxies**: anything that can connect directly from a trusted address chooses its own rate-limit identity. |
 | `SQUELCH_RELAY_TRUSTED_PROXY_CIDRS` | no | loopback + RFC1918 + RFC4193 | Comma-separated CIDR blocks (or bare addresses) whose `X-Forwarded-For` is read at all; every other peer is metered by its own address. Only consulted when `SQUELCH_RELAY_TRUSTED_PROXY_HOPS` is above `0`, and setting it without one is an error. Naming a list replaces the default outright, so include loopback if you still want it. |
 | `SQUELCH_RELAY_LOG` | no | `info` | `tracing` env filter. |
 | `SQUELCH_RELAY_APNS_URL_OVERRIDE` | no | — | **Test only.** Points the relay at a mock APNs base URL instead of Apple. Never set in production; the binary logs a warning when it is. |
@@ -269,9 +267,8 @@ need no setup. It is not an Apple credential and never was.
 
 ## Daemon and client integration (lives in the main repo, not here)
 
-In dependency order. **Steps 1-4 are done**; what remains is step 4's phone half
-— push registration in the iOS app, the NSE, and the shared rendering package.
-The app itself exists now; it simply does not speak APNs yet.
+In dependency order. **Steps 1-4 are done**, step 4's phone half included: the
+iOS app registers its device token and carries the NSE.
 
 1. **Done.** `events` table + triage emission rules + in-process broadcast
    (`squelch-core`). Emission rules decided up front: never on initial
@@ -302,28 +299,40 @@ The app itself exists now; it simply does not speak APNs yet.
    registered the cursor advances without any request at all. Configured
    entirely by `SQUELCH_RELAY_URL` / `SQUELCH_RELAY_TOKEN` (+ optional
    `SQUELCH_RELAY_TOPIC` / `SQUELCH_RELAY_APNS_ENV`) — no relay URL, no task.
-   **Remaining:** device registration and the NSE in the iOS app, plus the
-   shared rendering package. Everything the daemon owes this path is written.
+   The iOS app's half (device registration and the NSE) is written too.
 
 **Per-channel cursors, not a global "delivered" flag** — the Mac's SSE consumer
 and each phone track their own `after=<id>` independently. A single-consumer
 assumption is the one thing that would make iOS a refactor instead of a bolt-on.
 
-## Deployment sketch
+## Deployment
 
 A single small binary (Rust/axum to match the rest of the codebase). It is a
 workspace member so it shares the lockfile and one `cargo test`, but it stays a
 separate deployable on its own release cadence: nothing in the daemon links
 against it, and it links against nothing of the daemon's — no `squelch-core`,
 no store, no mail types. Any small VPS or fly.io-class host works; scale is a
-rounding error. TLS terminated by the host. The `.p8` key is the only secret.
+rounding error. TLS terminated by the host. The secrets are the `.p8` key and the bearer(s).
 The one piece of state is the open buffer: point `SQUELCH_RELAY_DB_PATH` at a
 persistent volume, or accept that a restart drops whatever the daemon had not
 drained yet (a missed open, never a wrong one).
 
-Concretely: the repo root carries a `Dockerfile` and `railway.toml` that build
-and run only this crate, so `railway up` is the whole deploy. Nothing is
-deployed yet.
+Concretely: the repo root's `Dockerfile` builds and runs only this crate. In
+production that image (ECR `passband-relay`) runs as the `relay` service on ECS
+Fargate (ARM64, private subnets) behind the ALB at `relay.squelch.sh`, one task
+at a time, with `/data` on EFS holding `SQUELCH_RELAY_DB_PATH=/data/opens.sqlite3`.
+A deploy stops the old task before starting the new one, so two SQLite writers
+never share the file (brief downtime per deploy).
+`.github/workflows/deploy-aws.yml` deploys it on a push to `main` that touches
+this crate, the crates it links (`squelch-httpauth`, `squelch-ratelimit`), the
+root `Dockerfile` or the workspace manifests, or by hand with
+`gh workflow run deploy-aws.yml -f service=relay`. Non-secret env (APNs key id,
+team id, topics, environment, proxy hops) is tofu variables in
+`deploy/aws/tofu/main/`; the `.p8` and both bearers are Secrets Manager
+containers (`passband/relay/SQUELCH_RELAY_APNS_KEY`,
+`passband/relay/SQUELCH_RELAY_AUTH_TOKEN`,
+`passband/relay/SQUELCH_RELAY_PUSH_TOKEN`). Logs:
+`aws logs tail /passband/relay --follow`. Architecture: `deploy/aws/DESIGN.md`.
 
 ## Open questions
 

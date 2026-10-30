@@ -2,9 +2,10 @@
 //! `squelch-control import-sqlite <path>`.
 //!
 //! THIS MODULE IS TEMPORARY AND SAYS SO. It exists to carry the rows that are
-//! already on the Railway volume into the Postgres this crate now talks to, and
-//! it is the only reason `rusqlite` is still a dependency. When the volume is
-//! retired, this file and that dependency go together.
+//! on the control plane's old volume (before the move to AWS) into the Postgres
+//! this crate now talks to, and it is the only reason `rusqlite` is still a
+//! dependency. That volume stayed behind with the old host, so this file and
+//! that dependency can go together.
 //!
 //! THE FILE IS OPENED READ-ONLY, which is what makes the cutover reversible: if
 //! anything about the new store is wrong, the old image is redeployed and the

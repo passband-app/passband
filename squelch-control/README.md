@@ -166,14 +166,15 @@ browser  ── GET /agent/auth?external_auth_id=<opaque> ──► 302 to Googl
 - `/agent/auth` shares the login hops' rate-limit bucket and counts against
   the session table's login ceiling.
 
-**Setup.** Set `SQUELCH_CONTROL_WORKOS_API_KEY` in the `control` service's
-Railway variables; unset, neither `/agent/auth` nor `/agent/confirm` is mounted
-(404). In the WorkOS
+**Setup.** Put `SQUELCH_CONTROL_WORKOS_API_KEY` in its Secrets Manager
+container, `passband/control/SQUELCH_CONTROL_WORKOS_API_KEY`; unset, neither
+`/agent/auth` nor `/agent/confirm` is mounted (404). In the WorkOS
 dashboard, under *Connect* → *Configuration*, set the **External Sign-in URI**
 (the docs call it the Standalone Connect Login URI) to
 `https://<control origin>/agent/auth` (today `https://signup.passband.app/agent/auth`).
-The `control` service deploys itself from `main`: merge the change, set the
-variable, and let it redeploy. Do not `railway up`. The WorkOS API origin is a
+Secrets are read when a task starts, so set the value and then redeploy
+`control` (`gh workflow run deploy-aws.yml -f service=control`, or the next
+merge that touches it). The WorkOS API origin is a
 pinned constant (`https://api.workos.com`), not a variable, for the reason the
 Google and Resend ones are.
 
@@ -236,8 +237,8 @@ hands the invite code back, and says all three permissions are needed. A tenant
 sealed on a partial grant would look fine until the first archive or send, with
 no way back to Google from the app.
 
-The corollary worth stating plainly: **a full compromise of this Railway service
-yields no mailbox.** It yields the ability to provision new tenants and to seal
+The corollary worth stating plainly: **a full compromise of this service yields
+no mailbox.** It yields the ability to provision new tenants and to seal
 things nobody can open, plus a list of labels and addresses. The refresh tokens
 are in the cluster, each encrypted to a key that is not here and that opens
 nothing else.
@@ -248,7 +249,7 @@ Everything is validated at startup and a bad value is a refusal to boot.
 
 | Variable | Required | Meaning |
 |---|---|---|
-| `SQUELCH_CONTROL_BIND` | no | Listener. Default `127.0.0.1:8852`; the container entrypoint widens it to `0.0.0.0:$PORT`. |
+| `SQUELCH_CONTROL_BIND` | no | Listener. Default `127.0.0.1:8852`; the container entrypoint widens it to `0.0.0.0:${PORT:-8852}` (ECS sets no `PORT`, so `8852`, which is the port the ALB targets). |
 | `SQUELCH_CONTROL_PUBLIC_URL` | **yes** | This service's externally visible origin, e.g. `https://signup.passband.app`. Deliberately NOT on the tenant base domain: wildcard subdomains there mean "a tenant" and nothing else. The Google `redirect_uri` is this plus `/oauth/callback`. |
 | `SQUELCH_CONTROL_BASE_DOMAIN` | **yes** | The hosted base domain, e.g. `passband.email`. Tenant URLs are `https://<label>.<base domain>`. Never hardcoded. |
 | `SQUELCH_CONTROL_CLIENT_ID` | **yes** | The confidential **web** OAuth client id (not the desktop client the self-hosted daemon uses). |
@@ -258,7 +259,7 @@ Everything is validated at startup and a bad value is a refusal to boot.
 | `SQUELCH_CONTROL_COOKIE_KEY` | **yes** | HMAC key for the signup cookie. base64 or hex, at least 32 bytes decoded. `openssl rand -base64 48`. |
 | `SQUELCH_CONTROL_WARDEN_URL` | **yes** | The warden's base URL, e.g. `https://warden.passband.app` (product domain, same reasoning as the public URL). |
 | `SQUELCH_CONTROL_WARDEN_TOKEN` | **yes** | Bearer presented to the warden. Must match `SQUELCH_WARDEN_TOKEN` in the cluster. |
-| `SQUELCH_CONTROL_DATABASE_URL` | **yes** | The control store's Postgres URL. Falls back to `DATABASE_URL`, so a Railway service that references the Postgres service the default way needs no second variable — set it to `${{Postgres.DATABASE_URL}}` (the **private** URL, which carries no `sslmode` and so is dialed without TLS, exactly as before). TLS is chosen by the URL's own `sslmode`, with no separate variable: absent or `disable` = no TLS; `require` or `verify-full` = TLS against the AWS RDS CA bundle baked into the binary (`certs/rds-global-bundle.pem`), chain **and hostname** verified in both (stricter than libpq's `require`, on purpose), never falling back to plaintext; any other value (`prefer`, `allow`, `verify-ca`, …) refuses to start, naming the value and never the URL. No default: a database URL cannot be guessed. |
+| `SQUELCH_CONTROL_DATABASE_URL` | **yes** | The control store's Postgres URL. Falls back to `DATABASE_URL`. In production it is the RDS instance's URL with `sslmode=verify-full`, held in `passband/control/SQUELCH_CONTROL_DATABASE_URL` (the URL embeds a password; RDS enforces TLS with `rds.force_ssl=1`). TLS is chosen by the URL's own `sslmode`, with no separate variable: absent or `disable` = no TLS; `require` or `verify-full` = TLS against the AWS RDS CA bundle baked into the binary (`certs/rds-global-bundle.pem`), chain **and hostname** verified in both (stricter than libpq's `require`, on purpose), never falling back to plaintext; any other value (`prefer`, `allow`, `verify-ca`, …) refuses to start, naming the value and never the URL. No default: a database URL cannot be guessed. |
 | `SQUELCH_CONTROL_BIFROST_URL` | pair | The Bifrost LLM gateway's governance origin, `https://` only. With the token below it is all-or-nothing: both set mints a per-tenant virtual key at signup, neither set provisions keyless tenants, anything partial (including a budget or model list on their own) refuses to boot. |
 | `SQUELCH_CONTROL_BIFROST_ADMIN_TOKEN` | pair | The gateway admin's `username:password`, sent as HTTP Basic on every governance call (a session bearer expires after 30 days and does not belong here). Exactly one `:` between two nonempty halves, at least 32 characters total. It can mint unbounded LLM spend; treat it like the warden bearer. |
 | `SQUELCH_CONTROL_LLM_BUDGET_USD` | no | Monthly USD budget stamped on each minted triage key. Default `5.00`. Only meaningful with the gateway pair set; set alone it refuses to boot. |
@@ -269,8 +270,8 @@ Everything is validated at startup and a bad value is a refusal to boot.
 | `SQUELCH_CONTROL_RESEND_API_KEY` | trio | Resend sending key, used for the one call that mails an approved applicant their invite. Printable ASCII, no spaces. Mint it sending-only and domain-restricted. |
 | `SQUELCH_CONTROL_INVITE_FROM` | trio | The `From:` invites are sent as, e.g. `Passband <invites@passband.app>`. Must be an address on a domain **verified at Resend** or every send is refused. |
 | `SQUELCH_CONTROL_WAITLIST_ORIGIN` | no | The one browser origin allowed to post the public waitlist form, echoed as `Access-Control-Allow-Origin` on that route only, and the origin the signup page's "join the waitlist" link is built from (`<origin>/waitlist`). Default `https://passband.app`. Only meaningful with the trio above set; set alone it refuses to boot. |
-| `SQUELCH_CONTROL_WORKOS_API_KEY` | no | The WorkOS API key (`sk_live_...`), sent as a bearer on the one AuthKit completion call `/agent/auth` makes. Set: the agent door is mounted. Unset: `/agent/auth` is a 404. Printable ASCII, no spaces. A SECRET: it acts on the whole WorkOS environment. Set it in the `control` service's Railway variables. |
-| `SQUELCH_CONTROL_TRUSTED_PROXY_HOPS` | no | How many proxies write `X-Forwarded-For` in front of this listener. `0` (default) meters the TCP peer, which behind a platform edge means one shared rate-limit bucket. Set `1` on Railway. |
+| `SQUELCH_CONTROL_WORKOS_API_KEY` | no | The WorkOS API key (`sk_live_...`), sent as a bearer on the one AuthKit completion call `/agent/auth` makes. Set: the agent door is mounted. Unset: `/agent/auth` is a 404. Printable ASCII, no spaces. A SECRET: it acts on the whole WorkOS environment. In production it lives in `passband/control/SQUELCH_CONTROL_WORKOS_API_KEY`. |
+| `SQUELCH_CONTROL_TRUSTED_PROXY_HOPS` | no | How many proxies write `X-Forwarded-For` in front of this listener. `0` (default) meters the TCP peer, which behind a platform edge means one shared rate-limit bucket. Production sets `1` (the ALB). |
 | `SQUELCH_CONTROL_ALERT_WEBHOOK_URL` | no | A Slack incoming webhook (https only). When set, control posts there when a signup ends half-finished, hits an already-set-up mailbox, or provisions a tenant it then cannot record, and on every finished signup. Label and VK ids only, never the mailbox. Fire and forget: Slack being down never slows or fails a signup. A SECRET: the URL is the whole credential. Unset = log lines only. |
 | `SQUELCH_CONTROL_LOG` | no | `tracing` filter. Default `info`. |
 
@@ -405,35 +406,58 @@ cargo test -p squelch-control
 Unset, the tests panic with this same remedy rather than skipping: a suite
 that can be silently skipped is a suite CI could silently skip too.
 
-## Deploying to Railway
+## Deploying
 
-A **separate Railway service** off this same repo, alongside the APNs relay
-(root `Dockerfile`) and the consent broker (`Dockerfile.broker`). The one thing
-that decides which of the three a service builds is its **config-as-code file**,
-so that is step 1:
+Production runs this as the `control` service on ECS Fargate (ARM64, private
+subnets) behind the ALB at `signup.passband.app`, built from
+`Dockerfile.control` and pushed to ECR `passband-control`. The infrastructure
+is OpenTofu in `deploy/aws/tofu/main/`; the architecture is
+`deploy/aws/DESIGN.md`.
 
-1. New service from the repo. Set its **Config-as-code file path** to
-   `railway.control.toml`, which pins `dockerfilePath = "Dockerfile.control"`
-   along with the health check and restart policy.
+1. **Deploys.** `.github/workflows/deploy-aws.yml` builds and rolls it on a
+   push to `main` that touches what the binary is built from (this crate,
+   `squelch-core`, `squelch-httpauth`, `Dockerfile.control`, the workspace
+   manifests), or by hand:
+   `gh workflow run deploy-aws.yml -f service=control`. The job waits for the
+   service to reach steady state and fails if the new task never serves. The
+   trigger does not wait for CI: green CI on the PR is the gate.
+2. **Environment.** Non-secret values (`PUBLIC_URL`, `BASE_DOMAIN`,
+   `CLIENT_ID`, `WARDEN_URL`, `BIFROST_URL`, the budgets and model lists,
+   `TRUSTED_PROXY_HOPS`, `INVITE_FROM`, `WAITLIST_ORIGIN`, `LOG`) are tofu
+   variables (`terraform.tfvars`) written into the task definition; an
+   env change reaches the running task on the next CI deploy of `control`, not
+   on `tofu apply`. Every secret, the database URL included, is its own
+   Secrets Manager container named `passband/control/<ENV_NAME>`. Tofu creates
+   the containers only; set a value out of band, piped and never echoed:
 
-   Do not rely on `RAILWAY_DOCKERFILE_PATH` for this. Left at the default,
-   a service inherits the root `railway.toml` — which belongs to the relay and
-   pins `dockerfilePath = "Dockerfile"` — and **config-as-code outranks the
-   service variable**. This service's first deploys built and shipped the relay
-   image with the variable set correctly, which is a green deploy serving the
-   wrong binary and no error anywhere. Setting the variable as well is harmless;
-   it is just not what makes this work.
-2. Add a Railway Postgres service to the project and set
-   `SQUELCH_CONTROL_DATABASE_URL = ${{Postgres.DATABASE_URL}}` on this service.
-   (The `/data` volume is only a transition artifact: it holds the pre-Postgres
-   SQLite file until `import-sqlite` has run once, then it is retired.)
-3. Set every required variable from the table above.
-4. Add the custom domain for the signup surface (`signup.passband.app` — the
-   product domain, never the tenant base domain) and point a CNAME at the
-   Railway target. The same hostname must be registered as an authorized
-   redirect URI (`https://signup.passband.app/oauth/callback`) on the web
-   OAuth client in Google Cloud Console.
-5. Health check: `GET /healthz`.
+   ```sh
+   aws secretsmanager put-secret-value \
+     --secret-id passband/control/SQUELCH_CONTROL_COOKIE_KEY \
+     --secret-string file:///dev/stdin
+   ```
+3. **Store.** RDS Postgres 16, private, `rds.force_ssl=1`. The database URL
+   carries `sslmode=verify-full` (see the table above for what that verifies).
+   The `/data` mount point in the image is a transition artifact from the
+   SQLite days and nothing mounts it.
+4. **Operator CLI.** ECS Exec is enabled on `control` only, so the CLI below
+   runs inside the live task:
+
+   ```sh
+   t=$(aws ecs list-tasks --cluster passband --service-name control \
+     --desired-status RUNNING --query 'taskArns[0]' --output text)
+   aws ecs execute-command --cluster passband --task "$t" --container control \
+     --interactive --command "squelch-control tenants"
+   ```
+
+   Session output is logged to `/passband/ecs-exec`, so never print a secret
+   there (no `env`, no `printenv`). Service logs: `aws logs tail
+   /passband/control --follow`.
+5. **Domain and OAuth.** `signup.passband.app` (the product domain, never the
+   tenant base domain) points at the ALB; DNS is at the registrar, not in
+   tofu. The same hostname must be registered as an authorized redirect URI
+   (`https://signup.passband.app/oauth/callback`) on the web OAuth client in
+   Google Cloud Console.
+6. Health check: `GET /healthz`.
 
 DNS for the rest of the hosted tier (`*.<base domain>` tenant wildcard and
 `warden.passband.app` pointing at the k3s node) is in `deploy/hosted/SETUP.md`;

@@ -222,32 +222,83 @@ bigger one is the shared embedder, then disk measured for a month. Raise off
 wanting one more tenant. Existing tenants take a changed bound the way they
 take any pod-shape change: see "Shipping a tenant-shape change".
 
-## Railway
+## AWS
+
+The planes that are not tenants run on AWS (account `824648488986`, region
+`us-west-2`). They moved off Railway after its 2026-10-21 breach; the design
+is `deploy/aws/DESIGN.md`, the infrastructure is OpenTofu in
+`deploy/aws/tofu/main` (`deploy/aws/tofu/README.md` says how to apply), and
+`deploy/aws/CUTOVER.md` is the migration as it was run. Tenants still run on
+`carrier`, above.
+
+| Service | Runs on | Host |
+|---|---|---|
+| `control` (`squelch-control`, the signup plane) | ECS Fargate ARM64, private subnets, stateless | `signup.passband.app` via the ALB |
+| `relay` (`squelch-relay`) | ECS Fargate ARM64, `/data` on EFS, one task | `relay.squelch.sh` via the ALB |
+| `bifrost` (the LLM gateway) | ECS Fargate ARM64, `/app/data` on EFS, one task | `bifrost.passband.app` via the ALB, source-restricted |
+| Postgres (control's store) | RDS Postgres 16, private, `rds.force_ssl=1` | none |
+| prometheus, grafana, blackbox | EC2 box `monitor`, docker compose | `grafana.passband.app`, `metrics.passband.app` |
+| landing site | S3 + CloudFront | `passband.app` |
+
+**Deploys.** A merge to `main` is the deploy: `.github/workflows/deploy-aws.yml`
+is path-filtered per service, builds the ECS images for arm64, pushes them to
+ECR by commit sha and waits for the service to go steady. It does not wait for
+CI, so green CI on the PR is the gate. A redeploy without a code change is
+`gh workflow run deploy-aws.yml -f service=<control|relay|bifrost|monitor|site|all>`.
+Tofu registers each task definition once and CI owns it after that, so a
+non-secret env change made in tofu reaches the running service on the next
+deploy of that service, not on `tofu apply`.
+
+**Operator access** (after `aws login --profile passband` and
+`export AWS_PROFILE=passband AWS_REGION=us-west-2`):
+
+```sh
+# a squelch-control command, inside the running control task (ECS Exec)
+cexec() { local t; t=$(aws ecs list-tasks --cluster passband --service-name control \
+    --desired-status RUNNING --query 'taskArns[0]' --output text)
+  aws ecs execute-command --cluster passband --task "$t" --container control \
+    --interactive --command "$*"; }
+cexec "squelch-control tenants"
+
+aws logs tail /passband/control --follow   # also /passband/relay, /passband/bifrost
+```
+
+ECS Exec is enabled on `control` only, and its sessions are logged to
+`/passband/ecs-exec`, so never print a secret in one (no `env`, no
+`printenv`). Every Secrets Manager read or write, ECS Exec session, SSM session
+and console sign-in mails a security alert; that is expected, and one you
+cannot match to something you ran is an incident.
+
+### control
 
 | | |
 |---|---|
-| Service | `control` — `squelch-control`, the signup plane |
-| Build | `railway.control.toml`, set as the service's **Config-as-code file path** |
-| Domain | `signup.passband.app` (CNAME to the Railway target) |
-| Store | the project's Railway **Postgres** service, referenced as `SQUELCH_CONTROL_DATABASE_URL = ${{Postgres.DATABASE_URL}}` (private URL). The `/data` volume only survives until the one-time `import-sqlite` cutover, then it is retired |
-| Health check | `GET /healthz` |
+| Image | `Dockerfile.control`, built by `deploy-aws.yml` into ECR `passband-control` |
+| Domain | `signup.passband.app`, a CNAME to the ALB |
+| Store | RDS Postgres 16; `SQUELCH_CONTROL_DATABASE_URL` uses `sslmode=verify-full` against the RDS hostname, with the RDS CA bundle checked into the repo (`squelch-control/src/pg_tls.rs`) |
+| Health check | ALB `GET /healthz` |
 
-**The config file is what selects the image, not `RAILWAY_DOCKERFILE_PATH`.**
-This service's first two deploys shipped the **relay** image with the variable
-set correctly, because the root `railway.toml` is inherited by default and its
-config-as-code outranks the variable. Any future service off this repo (the
-broker) needs its own `railway.*.toml` the same way. `deploy/DEPLOY.md` §8 has
-the long version.
-
-Environment (names only — values are in Railway):
+Secrets live in AWS Secrets Manager, one per value, named
+`passband/control/<ENV_NAME>`, and ECS injects them as env vars:
+`SQUELCH_CONTROL_CLIENT_SECRET`, `SQUELCH_CONTROL_COOKIE_KEY`,
+`SQUELCH_CONTROL_WARDEN_TOKEN`, `SQUELCH_CONTROL_BIFROST_ADMIN_TOKEN`,
+`SQUELCH_CONTROL_ADMIN_TOKEN`, `SQUELCH_CONTROL_RESEND_API_KEY`,
+`SQUELCH_CONTROL_WORKOS_API_KEY`, `SQUELCH_CONTROL_ALERT_WEBHOOK_URL`,
+`SQUELCH_CONTROL_DATABASE_URL`. Tofu creates the containers only; a value is
+set by hand, piped and never echoed
+(`aws secretsmanager put-secret-value --secret-id <id> --secret-string file:///dev/stdin`).
+The rest is plain env: tofu variables (`deploy/aws/tofu/main/variables.tf`,
+set in `terraform.tfvars`) that `ecs.tf` writes into the task definition:
 `SQUELCH_CONTROL_PUBLIC_URL`, `SQUELCH_CONTROL_BASE_DOMAIN`,
-`SQUELCH_CONTROL_CLIENT_ID`, `SQUELCH_CONTROL_CLIENT_SECRET`,
-`SQUELCH_CONTROL_COOKIE_KEY`, `SQUELCH_CONTROL_WARDEN_URL`,
-`SQUELCH_CONTROL_WARDEN_TOKEN`, `SQUELCH_CONTROL_TRUSTED_PROXY_HOPS=1`,
-plus the Bifrost pair — `SQUELCH_CONTROL_BIFROST_URL`,
-`SQUELCH_CONTROL_BIFROST_ADMIN_TOKEN` — which is all-or-nothing: one
-without the other is a refusal to boot. Four budget/model knobs ride on
-top, all defaulted: `SQUELCH_CONTROL_LLM_BUDGET_USD` ($5) and
+`SQUELCH_CONTROL_CLIENT_ID`, `SQUELCH_CONTROL_WARDEN_URL`,
+`SQUELCH_CONTROL_BIFROST_URL`, `SQUELCH_CONTROL_TRUSTED_PROXY_HOPS=1` (the
+ALB's hop), `SQUELCH_CONTROL_INVITE_FROM`, `SQUELCH_CONTROL_WAITLIST_ORIGIN`
+and the budget/model knobs.
+
+The Bifrost pair, `SQUELCH_CONTROL_BIFROST_URL` and
+`SQUELCH_CONTROL_BIFROST_ADMIN_TOKEN`, is all-or-nothing: one without the
+other is a refusal to boot. Four budget/model knobs ride on top, all
+defaulted: `SQUELCH_CONTROL_LLM_BUDGET_USD` ($5) and
 `SQUELCH_CONTROL_LLM_MODELS` for the triage key,
 `SQUELCH_CONTROL_ASSISTANT_BUDGET_USD` ($10) and
 `SQUELCH_CONTROL_ASSISTANT_MODELS` (haiku + opus) for the assistant key
@@ -257,47 +308,19 @@ webhook: failed and finished signups post there (label only, never the
 mailbox). Unset, they are log lines, which is how 2026-09-28 went unnoticed.
 Full table: `squelch-control/README.md`.
 
-### The Postgres cutover (one-time, then delete this section)
-
-The store moved from the volume's SQLite file to the project's Postgres
-service. The order matters:
-
-1. Add the Railway Postgres service; on `control` set
-   `SQUELCH_CONTROL_DATABASE_URL = ${{Postgres.DATABASE_URL}}` — the
-   **private** URL (the store speaks no TLS; `DATABASE_PUBLIC_URL` is the
-   TCP proxy plus egress fees). Private DNS is IPv6-only and can lag a fresh
-   boot by a beat; the `on_failure` restart policy absorbs a failed first
-   connect.
-2. Deploy. The service is live on an empty store from here until step 3 —
-   minutes, and a signup that lands in the window makes the importer refuse
-   on a non-empty table, which is the designed failure: reconcile by hand,
-   re-run.
-3. `railway ssh` into `control` (lands as root, env present):
-   `squelch-control import-sqlite /data/control.sqlite3`. It copies all
-   three tables with ids preserved, re-arms the sequences, and prints counts
-   only.
-4. Verify: `squelch-control tenants`, `squelch-control invite list`, and the
-   `/admin` board against known counts.
-5. Copy `control.sqlite3` off the box **before** touching the volume —
-   deleting a Railway volume destroys it. After a soak (one invite issued,
-   one signup completed on Postgres), remove the volume; a cleanup PR then
-   drops the entrypoint chown, `rusqlite`, and `import.rs`.
-
-Rollback until step 5: redeploy the previous image — the importer opened the
-file read-only, so it is exactly as it was, minus rows that landed in
-Postgres after cutover.
-
 ### The LLM gateway
 
 | | |
 |---|---|
-| Service | `bifrost` — [Bifrost](https://github.com/maximhq/bifrost) `v1.6.9`, via `Dockerfile.bifrost` |
-| Build | `railway.bifrost.toml`, set as the service's **Config-as-code file path** — the same landmine as `control` above: the variable alone ships the relay image |
-| Volume | mounted at `/app/data` — the governance state: virtual keys, per-tenant budgets, recorded spend |
-| Health check | none, deliberately: Bifrost's `GET /health` sits behind its session auth once auth is on, and Railway's probe cannot present credentials |
+| Service | `bifrost` on ECS: [Bifrost](https://github.com/maximhq/bifrost) `v1.6.9`, from `deploy/aws/docker/Dockerfile.bifrost` (the upstream image pinned by digest), built by `deploy-aws.yml` into ECR `passband-bifrost` |
+| Store | EFS at `/app/data` (`bifrost_store = "efs"`), one task, and a deploy stops the old task before starting the new one so two SQLite writers never overlap. It holds the governance state: virtual keys, per-tenant budgets, recorded spend |
+| Health check | ALB `GET /`, matcher `200-499`: Bifrost's `GET /health` sits behind its session auth once auth is on, and the ALB's probe cannot present credentials |
+| Reachable from | only the NAT Elastic IP (control and blackbox egress through it), carrier's egress, and any temporary `operator_cidrs`; every other source gets the ALB's 404. Operators use the Bifrost UI over the tailnet (`deploy/aws/CUTOVER.md`, "Operator access to the Bifrost and Grafana UIs") |
 
-Environment: `ANTHROPIC_API_KEY` — **the only place our real Anthropic key
-lives, anywhere** — plus `APP_HOST` and `APP_PORT`.
+Environment: `ANTHROPIC_API_KEY`, from Secrets Manager
+`passband/bifrost/ANTHROPIC_API_KEY`, **the only place our real Anthropic key
+lives, anywhere**, plus `APP_HOST` and `APP_PORT`. ECS Exec is off on this
+service on purpose: a shell there would hold that key.
 
 Tenant daemons reach it over public 443, which their egress policy already
 allows; there is no cluster-side plumbing to the gateway at all. Each daemon
@@ -355,7 +378,7 @@ of somebody's mail, and Bifrost's defaults are to log it: `enable_logging` on,
 `disable_content_logging` off, `log_retention_days` 365, all into
 `/app/data/logs.db` on the volume. In September 2026 that file was 7.36 GB. The
 setting lives in Bifrost's UI config database, not in an env var, so it
-survives redeploys and is invisible to `railway variables`: check it in the UI
+survives redeploys and is invisible in the task definition: check it in the UI
 under Config → Logs. Keep request logging for token and spend metadata if
 wanted, with **content logging disabled**. `passband.app/trust` and `/privacy`
 both promise that request and response bodies are not retained, so turning
@@ -452,7 +475,7 @@ the tenant's virtual key is right, and the call still dies at the gateway. Run
 
 | | |
 |---|---|
-| Service | `squelch` on Railway, `https://relay.squelch.sh`, deployed from `main` (root `railway.toml`) |
+| Service | `relay` on ECS (see "AWS" above), `https://relay.squelch.sh`, built from the root `Dockerfile` and deployed from `main` by `deploy-aws.yml` |
 | Holds | the APNs signing key; `SQUELCH_RELAY_AUTH_TOKEN`, the full bearer (push AND drain opens), for self-hosted daemons and the operator; `SQUELCH_RELAY_PUSH_TOKEN`, the push-only bearer, for hosted tenants |
 | Topics | `SQUELCH_RELAY_APNS_TOPICS=app.passband.client,app.passband.client.ios`; the first is the default |
 
@@ -490,7 +513,8 @@ deliver it.
 
 Verify on a restarted tenant: `squelchd: APNs pusher enabled (relay
 configured)` in `kubectl -n tenants logs deploy/<label> -c squelchd`, then
-`push` lines with `topic=app.passband.client.ios` in `railway logs -s squelch`.
+`push` lines with `topic=app.passband.client.ios` in the relay's logs
+(`aws logs tail /passband/relay --since 15m`).
 
 **The `apns-relay` Secret holds the PUSH-ONLY token, and only that.** A Secret
 created from `SQUELCH_RELAY_AUTH_TOKEN` before the push token existed must be
@@ -526,7 +550,7 @@ Records:
 |---|---|---|
 | `*.passband.email` | A | `5.78.205.240` — **DNS-only / grey cloud** |
 | `warden.passband.app` | A | `5.78.205.240` |
-| `signup.passband.app` | CNAME | the Railway target |
+| `signup.passband.app` | CNAME | the AWS ALB's DNS name (`tofu -chdir=deploy/aws/tofu/main output -json service_dns_records`) |
 
 **The wildcard must never be proxied.** Cloudflare's orange cloud would
 terminate TLS in front of every tenant mailbox and fight cert-manager's
@@ -552,7 +576,7 @@ it is repointed.
 |---|---|---|
 | `ghcr.io/passband-app/squelchd:<tag>` | amd64 + arm64 | `squelchd-image`; the Dockerfile cross-compiles, so no emulation |
 | `ghcr.io/passband-app/squelch-warden:<tag>` | **amd64 only** | `warden-image`; builds natively, and emulating the ONNX build risks the six-hour job ceiling |
-| `ghcr.io/passband-app/squelch-control:<tag>` | **amd64 only** | `control-image`; same reason. Railway still builds its own copy from source, so this tag is for reproducibility and for running the plane elsewhere |
+| `ghcr.io/passband-app/squelch-control:<tag>` | **amd64 only** | `control-image`; same reason. Production does not run it: `deploy-aws.yml` builds its own arm64 copy from source into ECR, so this tag is for reproducibility and for running the plane elsewhere |
 
 `carrier` is amd64, so the two amd64-only images cover everything hosted
 actually runs. Moving the hosted planes to an arm box means giving those
@@ -610,7 +634,7 @@ bounds — lands on new signups and on nobody else, silently. Asking is two
 commands, run where the tenant list is:
 
 ```sh
-railway ssh --service control
+# inside the control task: cexec "<command>" (see "AWS" above)
 squelch-control drift                 # every tenant; exit 1 if anything has drifted
 squelch-control drift alice           # one tenant, in full
 squelch-control reconcile alice       # put that tenant back on today's render
@@ -1421,7 +1445,7 @@ a chat window.
 
 | Namespace | Secret | Keys | Created by |
 |---|---|---|---|
-| `warden` | `squelch-warden` | `token` | operator (`openssl rand -base64 32`); the same value is `SQUELCH_CONTROL_WARDEN_TOKEN` on Railway |
+| `warden` | `squelch-warden` | `token` | operator (`openssl rand -base64 32`); the same value is `SQUELCH_CONTROL_WARDEN_TOKEN` in Secrets Manager (`passband/control/SQUELCH_CONTROL_WARDEN_TOKEN`) |
 | `tenants` | `google-oauth-client` | `client_id`, `client_secret` | operator; the confidential **web** client, the same one the control plane consents with |
 | `tenants` | `apns-relay` | `token` | operator; the relay's PUSH-ONLY `SQUELCH_RELAY_PUSH_TOKEN`, never its `SQUELCH_RELAY_AUTH_TOKEN`. Optional: missing means no pushes, not a down tenant. Rotate by NEW name, never by restarting tenants |
 | `cert-manager` | `acme-dns-token` | `api-token` | operator; Cloudflare token scoped to the `passband.email` zone, DNS:Edit |
@@ -1448,17 +1472,24 @@ The rule: nothing that judges carrier's health lives on carrier. Full design:
 - **On carrier**, ns `monitoring` (from `80-monitoring.yaml`): node-exporter,
   kube-state-metrics, and `prometheus-agent`, which scrapes locally and pushes
   via `remote_write` — outbound only, the firewall stays 22/80/443.
-- **On Railway**, three more services in the same project, each with its own
-  config-as-code file (the §8 lesson): `prometheus` (receiver + 30d storage,
-  volume at `/prometheus`, `prometheus-production-2d43.up.railway.app`, basic
-  auth on every route), `blackbox` (probes signup/warden/landing from outside;
-  **no public domain, ever**), `grafana` (volume at `/var/lib/grafana`,
-  `grafana-production-00b9.up.railway.app`, the `passband-health` dashboard
-  provisioned from the repo — edit the JSON and redeploy, never the UI).
+- **On AWS**, the `monitor` box (EC2 t4g.small, private subnet, no SSH, SSM
+  Session Manager only) runs prometheus, grafana and blackbox under docker
+  compose (`deploy/aws/monitor/`), from images that bake in the shared configs
+  in `deploy/monitoring/`. `prometheus` is the remote-write receiver with 30
+  days of storage on the box's EBS volume, at `https://metrics.passband.app`
+  (basic auth on every route, and the ALB admits only carrier's egress).
+  `blackbox` probes signup/warden/landing from outside; **no public route,
+  ever**. `grafana` is `https://grafana.passband.app`, reachable from the NAT
+  Elastic IP only, so in practice over the tailnet; the `passband-health`
+  dashboard is provisioned from the repo: edit the JSON and merge, never the
+  UI. A merge touching the monitor files redeploys the box through
+  `deploy-aws.yml` (SSM document `passband-monitor-deploy`); a shell on it is
+  `aws ssm start-session --target <instance id>` (`tofu -chdir=deploy/aws/tofu/main output -raw monitor_instance_id`).
 - Secrets: `monitoring`/`remote-write-auth` (key `password`) on carrier; the
-  same value as `PROM_REMOTE_WRITE_PASSWORD` + its bcrypt `PROM_WEB_BCRYPT`
-  on the prometheus service; same value again as `PROM_PASSWORD` plus
-  `GF_SECURITY_ADMIN_PASSWORD` on the grafana service.
+  same value as `passband/monitor/PROM_REMOTE_WRITE_PASSWORD` plus its bcrypt
+  `passband/monitor/PROM_WEB_BCRYPT` in Secrets Manager for prometheus; same
+  value again as `PROM_PASSWORD`, plus `GF_SECURITY_ADMIN_PASSWORD`, for
+  grafana. The box fetches them at boot into env files on tmpfs.
 - **Inside the daemon**: every tenant pod runs with
   `SQUELCH_METRICS_BIND=0.0.0.0:9464` and serves `squelchd_*` Prometheus text on
   container port `metrics` (sync timestamps, Gmail API errors by kind, LLM
@@ -1475,10 +1506,13 @@ The rule: nothing that judges carrier's health lives on carrier. Full design:
 
 ## Invites
 
-Minted on the control service, not locally — the store is on its volume:
+Minted on the control service, not locally, because the store is control's
+Postgres, reachable only from inside the VPC. ECS Exec logs its sessions to
+`/passband/ecs-exec`, so a code issued this way also lands in that log, one
+more reason `/admin` below is the everyday path:
 
 ```sh
-railway ssh --service control
+# inside the control task: cexec "<command>" (see "AWS" above)
 squelch-control invite issue --count 5      # printed ONCE, on stdout
 squelch-control invite list                 # ids and status, never codes
 squelch-control invite revoke <id>
@@ -1523,7 +1557,7 @@ cannot share, which is what the command below is for.
 same shape `llm mint` has:
 
 ```sh
-railway ssh --service control
+# inside the control task: cexec "<command>" (see "AWS" above)
 squelch-control share mint <label>      # mint, record the hash, install it
 squelch-control share revoke <label>    # forget the hash, pull it from the pod
 ```
@@ -1677,7 +1711,7 @@ request.
    aws --endpoint-url "https://${LITESTREAM_R2_ENDPOINT}" \
        s3 ls "s3://${LITESTREAM_R2_BUCKET}/tenants/<label>/"   # must print nothing
    ```
-6. **Delete the control-plane rows** (Railway Postgres): the `tenants` row for
+6. **Delete the control-plane rows** (control's RDS Postgres): the `tenants` row for
    `<label>`, the `users` row whose `tenant_label` is `<label>`, and any
    `waitlist` row for the same address. `invite_codes.used_by_label` keeps only
    the label, which after this names nothing.

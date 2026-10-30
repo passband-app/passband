@@ -1,17 +1,18 @@
 # Hosted Passband: a fresh Debian box to the first tenant
 
 This is the runbook for the cluster half of hosted Passband. The other half,
-`squelch-control`, runs on Railway and is not installed here.
+`squelch-control`, runs on AWS (ECS, behind an ALB; `deploy/aws/DESIGN.md`)
+and is not installed here.
 
 ## What you are building
 
 ```
                     signup.passband.app                warden.passband.app
                           |                            |
-                    (CNAME to Railway)            (A to this box)
+                    (CNAME to the AWS ALB)        (A to this box)
                           |                            |
                    squelch-control  ---- HTTPS ---> Traefik --> squelch-warden
-                   (Railway)          bearer token             (pod, ns warden)
+                   (AWS ECS)          bearer token             (pod, ns warden)
                           |                                          |
                           |                                          | kube API
                           |                                          v
@@ -64,7 +65,7 @@ re-consent with Google and costs nobody else anything.
   Not "a provider with an API" — a wildcard can only be issued over DNS-01, and
   cert-manager can only drive the providers it (or a webhook) implements. See
   "Your registrar is probably not your DNS provider" under §1.
-- The Railway service for `squelch-control` already created.
+- The AWS side already up, `squelch-control` included (`deploy/aws/tofu/README.md`).
 
 ## 1. DNS
 
@@ -73,7 +74,7 @@ re-consent with Google and costs nobody else anything.
 | `passband.email` | A | your box IP (or the marketing site) | optional |
 | `*.passband.email` | A | your box IP | every tenant's subdomain — DNS-only, never proxied |
 | `warden.passband.app` | A | your box IP | the control plane's way in |
-| `signup.passband.app` | CNAME | your Railway app hostname | signup never touches this box |
+| `signup.passband.app` | CNAME | the AWS ALB's DNS name (`tofu -chdir=deploy/aws/tofu/main output -json service_dns_records`) | signup never touches this box |
 
 The wildcard is what makes a new tenant instant: provisioning creates an Ingress
 for `alice.passband.email` and DNS already answers for it.
@@ -91,7 +92,8 @@ zone's DNS lives:
 - **The product zone does not.** `warden.passband.app` is a single host, so it
   issues over the HTTP-01 catch-all solver in `40-wildcard-certificate.yaml`,
   which needs port 80 open to Traefik and no DNS credential at all.
-  `signup.passband.app` is a CNAME to Railway, which handles its own TLS. So this
+  `signup.passband.app` is a CNAME to the AWS ALB, which terminates TLS with an
+  ACM certificate. So this
   zone can stay wherever it was registered.
 
 This install is the concrete case: both domains are registered at Namecheap,
@@ -795,9 +797,12 @@ Optional: without it, hosted is Gmail only and nothing below changes.
      `Mail.Send`, `Calendars.ReadWrite`, `User.Read`, `offline_access`,
      `openid`, `email`.
    - Authentication: "Allow public client flows" stays OFF.
-2. **Control** (Railway `control` service): `SQUELCH_CONTROL_MICROSOFT_CLIENT_ID`
+2. **Control** (the ECS `control` service): `SQUELCH_CONTROL_MICROSOFT_CLIENT_ID`
    (the Application (client) ID) and `SQUELCH_CONTROL_MICROSOFT_CLIENT_SECRET`.
-   Both or neither; half refuses to boot.
+   Both or neither; half refuses to boot. Neither is wired into tofu yet: the
+   id needs a plain variable in `deploy/aws/tofu/main/ecs.tf`, the secret a
+   container in `secrets.tf` (`passband/control/SQUELCH_CONTROL_MICROSOFT_CLIENT_SECRET`)
+   with its value piped in, then a control deploy.
 3. **Tenants** (the cluster), the same pair, which every Outlook tenant's pod
    reads as `SQUELCH_CLIENT_ID`/`SQUELCH_CLIENT_SECRET`:
 
@@ -820,27 +825,36 @@ approve it.
 
 Tenant daemons never hold our Anthropic key. Each pod gets a **Bifrost virtual
 key** with a monthly dollar budget, and sends its unchanged Anthropic-wire
-traffic to a Bifrost gateway we run on Railway; Bifrost holds the real key,
+traffic to a Bifrost gateway we run on AWS; Bifrost holds the real key,
 swaps it in, meters spend per tenant, and refuses a tenant that has blown its
 budget. The daemon's own daily call caps are the second, inner layer. Notably
 there is **no cluster-side operator secret for any of this**: the per-tenant
 `<label>-llm` Secrets are written by the warden when the control plane mints
-keys, and the real key lives only in the Railway service's environment.
+keys, and the real key lives only in Secrets Manager
+(`passband/bifrost/ANTHROPIC_API_KEY`), injected into the gateway's task.
 
-The gateway, on Railway:
+The gateway, on AWS (the layout is `PRODUCTION.md` → "The LLM gateway"; the
+first stand-up as it was run is `deploy/aws/CUTOVER.md` Phase 4):
 
-1. New service `bifrost` from this repo, built by `Dockerfile.bifrost`. Set
-   `railway.bifrost.toml` as the service's **Config-as-code file path** before
-   the first deploy — the root `railway.toml` pins the relay's Dockerfile and
-   config-as-code outranks the `RAILWAY_DOCKERFILE_PATH` variable, so skipping
-   this ships the relay image (again).
-2. Volume mounted at `/app/data`. This is the governance state — every virtual
-   key, budget, and recorded cent of spend. Losing it revokes the whole fleet's
-   keys at once, so treat it like a database, not a cache.
-3. Environment: `APP_HOST=0.0.0.0`, `APP_PORT=8080`, and `ANTHROPIC_API_KEY` —
-   the only place the real key lives, anywhere.
-4. Generate the service's public domain (port 8080). Tenant egress already
-   allows any public 443 host, so the cluster needs nothing.
+1. The ECS service `bifrost` is tofu's (`deploy/aws/tofu/main`), and its image
+   is `deploy/aws/docker/Dockerfile.bifrost`: the upstream image pinned by
+   digest, built and deployed by `.github/workflows/deploy-aws.yml` on a merge
+   to `main` that touches it. There is no service to create by hand.
+2. State lives on EFS at `/app/data`, one task, never two at once. This is
+   the governance state: every virtual key, budget, and recorded cent of
+   spend. Losing it revokes the whole fleet's keys at once, so treat it like a
+   database, not a cache.
+3. Environment: `APP_HOST=0.0.0.0` and `APP_PORT=8080` come from tofu;
+   `ANTHROPIC_API_KEY`, the only place the real key lives, anywhere, is set by
+   piping it into
+   `aws secretsmanager put-secret-value --secret-id passband/bifrost/ANTHROPIC_API_KEY --secret-string file:///dev/stdin`
+   and then forcing a new deployment of the service.
+4. `bifrost.passband.app` is a CNAME to the ALB, and the ALB answers it only
+   for the NAT Elastic IP (control, blackbox), carrier's egress and any
+   temporary `operator_cidrs`; everyone else gets a 404. Tenant egress already
+   allows any public 443 host, so the cluster needs nothing. Operators reach
+   the UI over the tailnet (`deploy/aws/CUTOVER.md`, "Operator access to the
+   Bifrost and Grafana UIs").
 5. First boot: enable auth with an admin credential (`PUT /api/config` with
    `auth_config` — or the web UI) and turn on `enforce_auth_on_inference`
    (Settings → Client Settings, or `client_config` in the same call) so a
@@ -862,7 +876,9 @@ The gateway, on Railway:
    `squelch-control llm sync` is for, and it is not a one-time setup step.
    Run it once here, and again after **every** change to the model the fleet
    runs. `squelch-control llm sync --check` reports and exits 1 without
-   writing, so it can run as a check.
+   writing, so it can run as a check. Both run inside the control task over
+   ECS Exec (`cexec "squelch-control llm sync"`, the helper in
+   `PRODUCTION.md` → "AWS"), as does `llm mint` below.
 
    **A model is allow-listed twice, and the second list is the one that gets
    forgotten.** A virtual key's `allowed_models` is matched against the id
@@ -894,8 +910,9 @@ The gateway, on Railway:
      reference alone and refuses a key stored any other way; if you `PUT` it
      by hand, do the same.
 
-   Verify with a curl through a test virtual key before pointing any tenant
-   at it.
+   Verify with a request through a test virtual key before pointing any
+   tenant at it, from an address the ALB admits (`deploy/aws/CUTOVER.md`
+   Phase 4, step 6, has the exact request).
 
 Then point both planes at it:
 
@@ -906,7 +923,9 @@ Then point both planes at it:
   (`SQUELCH_WARDEN_LLM_STAGE1_MODEL`, `SQUELCH_WARDEN_LLM_STAGE2_MODEL`,
   `SQUELCH_WARDEN_LLM_STAGE1_DAILY_CAP`, `SQUELCH_WARDEN_LLM_STAGE2_DAILY_CAP`)
   are set without it.
-- Control plane (Railway `control` service): the all-or-nothing trio
+- Control plane (the ECS `control` service; `SQUELCH_CONTROL_BIFROST_URL` and
+  the budget are tofu variables, the admin token is Secrets Manager
+  `passband/control/SQUELCH_CONTROL_BIFROST_ADMIN_TOKEN`): the all-or-nothing trio
   `SQUELCH_CONTROL_BIFROST_URL` (the bare gateway origin, no `/anthropic`),
   `SQUELCH_CONTROL_BIFROST_ADMIN_TOKEN`, and `SQUELCH_CONTROL_LLM_BUDGET_USD`
   (monthly, per tenant). A partial trio refuses to boot: a control plane that
@@ -934,7 +953,7 @@ simply does not appear until the tenant is re-minted.
 ## 6c. iOS push through the relay
 
 A tenant daemon never holds our APNs key. It posts pings to the relay
-(`https://relay.squelch.sh`, the `squelch` service on Railway) with a bearer,
+(`https://relay.squelch.sh`, the `relay` service on AWS ECS) with a bearer,
 and the relay signs and forwards them to Apple. The daemon spawns its pusher
 only when `SQUELCH_RELAY_URL` is set, and the warden renders that only when it
 is configured to, so **until this step is done no hosted tenant receives an iOS
@@ -958,36 +977,44 @@ Two steps, in this order. The value travels on stdin and through a pipe only:
 it is never an argument, never in a file and never on the screen.
 
 ```sh
-# 1. Mint the push token on the relay. This REDEPLOYS the relay; wait for it.
+# 1. Mint the push token into Secrets Manager, then roll the relay so its task
+#    picks it up. Wait for the service to go stable.
 openssl rand -hex 32 | tr -d '\n' \
-  | railway variable set -s squelch SQUELCH_RELAY_PUSH_TOKEN --stdin
+  | aws secretsmanager put-secret-value --secret-id passband/relay/SQUELCH_RELAY_PUSH_TOKEN \
+      --secret-string file:///dev/stdin --query VersionId --output text
+aws ecs update-service --cluster passband --service relay --force-new-deployment --query 'service.deployments[0].id'
+aws ecs wait services-stable --cluster passband --services relay
 
-# 2. Read it back (JSON: the table view truncates) into the tenant Secret.
-railway variable list -s squelch --json \
-  | jq -r '.SQUELCH_RELAY_PUSH_TOKEN // empty' | tr -d '\n' \
+# 2. Read it back, through the pipe only, into the tenant Secret.
+aws secretsmanager get-secret-value --secret-id passband/relay/SQUELCH_RELAY_PUSH_TOKEN \
+    --query SecretString --output text | tr -d '\n' \
   | kubectl -n tenants create secret generic apns-relay --from-file=token=/dev/stdin
 ```
 
-**Check the Secret before going on, without printing it.** If the variable was
-never set (step 1 failed, or the wrong service was named), an unguarded `jq -r`
-prints the word `null` and the Secret's token becomes "null"; if `railway`
-fails, it is empty. Either way every tenant 401s exactly as it would on a
-stale Secret, and the repair is a rename and a roll of the whole fleet. The
-length gives it away:
+The token already exists in production (it was minted at the AWS cutover), so
+on a running system skip step 1 and run step 2 only, under whatever name
+`SQUELCH_WARDEN_RELAY_SECRET_NAME` says (`apns-relay-2` today).
+
+**Check the Secret before going on, without printing it.** If the read fails
+(an expired AWS session, the wrong secret id), the Secret's token is empty;
+a stray newline makes it 65 bytes. Either way every tenant 401s exactly as it
+would on a stale Secret, and the repair is a rename and a roll of the whole
+fleet. The length gives it away:
 
 ```sh
 kubectl -n tenants get secret apns-relay -o jsonpath='{.data.token}' | base64 -d | wc -c
 # 64
 ```
 
-The second `tr -d '\n'` matters. `jq -r` ends its output with a newline and
-`--from-file` keeps every byte, so without it the Secret is the token plus a
-newline, and a newline cannot appear in an HTTP header value. Today's daemon
-trims its environment; the Secret should not rely on that. The relay's startup
-line says `push_token=true` once step 1 has deployed (`railway logs -s
-squelch`), and never prints the value. A `serving` line with no `push_token`
-field at all is a relay build that predates the variable and ignores it: the
-relay auto-deploys from `main`, so the change that added it has to be merged
+The second `tr -d '\n'` matters. `--output text` ends its output with a
+newline and `--from-file` keeps every byte, so without it the Secret is the
+token plus a newline, and a newline cannot appear in an HTTP header value.
+Today's daemon trims its environment; the Secret should not rely on that. The
+relay's startup line says `push_token=true` once step 1 has deployed
+(`aws logs tail /passband/relay --since 15m`), and never prints the value. A
+`serving` line with no `push_token` field at all is a relay build that
+predates the variable and ignores it: the relay deploys from `main`, so the
+change that added it has to be merged
 first, or every tenant 401s.
 
 The Secret sits in the tenant namespace beside the OAuth client and reaches
@@ -1060,7 +1087,8 @@ kubectl -n tenants logs deploy/<label> -c squelchd | grep 'APNs pusher'
 ```
 
 Then trigger a notification for that tenant and look for a `push` line with
-`topic=app.passband.client.ios` in the relay's logs (`railway logs -s squelch`).
+`topic=app.passband.client.ios` in the relay's logs
+(`aws logs tail /passband/relay --since 15m`).
 A pusher line and no `push` line is a device that never registered; a `push`
 line with the Mac topic is a missing `SQUELCH_WARDEN_RELAY_TOPIC`; 401s in the
 tenant's log are a missing or stale `apns-relay` Secret.
@@ -2916,15 +2944,19 @@ set, the new daemon's `/mcp` behaves byte for byte as the old one's did.
 Skip this and set the issuer anyway, and every tenant still on the old image
 answers 403 on `/mcp` until it is rolled.
 
-**2. Give the control plane its WorkOS API key.** The control service (Railway,
+**2. Give the control plane its WorkOS API key.** The control service (AWS ECS,
 `signup.passband.app`) mounts `/agent/auth` only when
 `SQUELCH_CONTROL_WORKOS_API_KEY` is set; without it the route is a 404, and
 every agent sign-in dead-ends there after the user has already said yes to
 AuthKit. Set it from the WorkOS dashboard's API keys page for the production
-environment that is dedicated to the agent door (see "DEDICATED" below), then check what actually deployed rather than trusting the status:
+environment that is dedicated to the agent door (see "DEDICATED" below), piped into
+Secrets Manager `passband/control/SQUELCH_CONTROL_WORKOS_API_KEY`, then roll
+control (`gh workflow run deploy-aws.yml -f service=control`) and check what
+actually deployed rather than trusting the status:
 
 ```sh
-railway variables -s control --json | jq 'has("SQUELCH_CONTROL_WORKOS_API_KEY")'   # true
+aws secretsmanager list-secret-version-ids --secret-id passband/control/SQUELCH_CONTROL_WORKOS_API_KEY \
+  --query 'length(Versions)'                                                     # 1 or more: a value is set
 curl -sS -o /dev/null -w '%{http_code}\n' https://signup.passband.app/agent/auth  # anything but 404
 ```
 

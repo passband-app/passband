@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 
-/// Loopback by design: TLS is terminated by the platform edge (Railway) or a
+/// Loopback by design: TLS is terminated by the platform edge (the AWS ALB) or a
 /// proxy, so binding a public interface would serve signup in the clear. The
 /// container entrypoint widens this to `0.0.0.0:$PORT` for platforms that
 /// inject a port, which is an explicit act rather than a default.
@@ -530,7 +530,7 @@ fn require(name: &str, what: &str) -> Result<String, ConfigError> {
 /// TWO NAMES, IN THIS ORDER. `SQUELCH_CONTROL_DATABASE_URL` is ours and wins,
 /// so an operator can point one deployment at a different database without
 /// fighting the platform. `DATABASE_URL` is the fallback because it is what
-/// every platform injects by convention, Railway included, and a deployment
+/// every platform injects by convention, and a deployment
 /// that works because the convention was followed should not need a second
 /// variable spelling the same string.
 pub fn database_url_from_env() -> Result<String, ConfigError> {
@@ -539,9 +539,8 @@ pub fn database_url_from_env() -> Result<String, ConfigError> {
         .ok_or_else(|| {
             ConfigError::invalid(
                 "SQUELCH_CONTROL_DATABASE_URL is required (the control store's Postgres \
-                 connection string, e.g. postgres://user:pass@host:5432/railway). On Railway set \
-                 it to the reference ${{Postgres.DATABASE_URL}} — the PRIVATE one, not \
-                 DATABASE_PUBLIC_URL. DATABASE_URL is read as a fallback.",
+                 connection string, e.g. postgres://user:pass@host:5432/db; in production the \
+                 RDS URL with sslmode=verify-full). DATABASE_URL is read as a fallback.",
             )
         })
 }
@@ -616,7 +615,7 @@ impl Config {
                 })?;
                 if hops > MAX_TRUSTED_PROXY_HOPS {
                     return Err(ConfigError::invalid(format!(
-                        "SQUELCH_CONTROL_TRUSTED_PROXY_HOPS `{hops}` exceeds {MAX_TRUSTED_PROXY_HOPS}; set it to the number of proxies in front of this listener (1 behind Railway's edge)"
+                        "SQUELCH_CONTROL_TRUSTED_PROXY_HOPS `{hops}` exceeds {MAX_TRUSTED_PROXY_HOPS}; set it to the number of proxies in front of this listener (1 behind the AWS ALB)"
                     )));
                 }
                 hops

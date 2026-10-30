@@ -47,7 +47,7 @@ reqwest = { workspace = true }
 # purpose, and a workspace dep would read as an invitation to that changing.
 #
 # TLS IS THE URL'S `sslmode` (see src/pg_tls.rs): absent/`disable` is NoTls,
-# Railway's private network (`postgres.railway.internal`), unchanged;
+# for local dev and the CI test Postgres, unchanged;
 # `require`/`verify-full` is rustls against the AWS RDS CA bundle baked in from
 # certs/rds-global-bundle.pem. rustls with RING and default features off, because
 # ring is the workspace's one crypto backend: rustls's default would pull in
@@ -59,17 +59,18 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # own parser does (already in the graph through tokio-postgres and url).
 percent-encoding = "2"
 # A POOL FOR RESILIENCE, NOT THROUGHPUT. One `Client` whose connection task dies
-# — Railway restarts Postgres for maintenance, and a private-network blip does
-# the same — is permanently broken, and every request after it would fail with a
+# (RDS restarts Postgres for maintenance, and a network blip does
+# the same) is permanently broken, and every request after it would fail with a
 # closed connection until the process restarted. The pool notices and dials
 # again. `max_size` is 4 because this service's concurrency is a handful of
 # signups, not a fleet.
 deadpool-postgres = "0.14"
 # READ-ONLY, AND ONLY FOR `import-sqlite`. The control store used to be a SQLite
-# file on a Railway volume; this dependency is what the one-time importer opens
-# it with, and it has to be in the SHIPPED IMAGE because the import is run with
-# `railway ssh` against the live volume. It dies with the volume: when that is
-# retired, this line and `src/import.rs` go together.
+# file on a volume (before the move to AWS); this dependency is what the
+# one-time importer opened it with, and it had to be in the SHIPPED IMAGE
+# because the import ran inside the live service against that volume. The
+# volume stayed behind with the old host, so this line and `src/import.rs` can
+# go together.
 rusqlite = { workspace = true }
 url = { workspace = true }
 clap = { workspace = true }

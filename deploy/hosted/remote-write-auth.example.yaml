@@ -1,10 +1,16 @@
-# The basic-auth password prometheus-agent uses to push metrics to the Railway
-# Prometheus receiver. Same value as PROM_REMOTE_WRITE_PASSWORD on the Railway
-# prometheus service (which also holds its bcrypt hash as PROM_WEB_BCRYPT).
+# The basic-auth password prometheus-agent uses to push metrics to the
+# Prometheus receiver at https://metrics.passband.app (the AWS monitor box).
+# Same value as Secrets Manager passband/monitor/PROM_REMOTE_WRITE_PASSWORD
+# (passband/monitor/PROM_WEB_BCRYPT holds its bcrypt hash).
 #
-# Create imperatively — never commit the real value:
-#   kubectl -n monitoring create secret generic remote-write-auth \
-#     --from-literal=password='<the value>'
+# Create imperatively, never commit the real value, and never print it:
+#   aws secretsmanager get-secret-value \
+#       --secret-id passband/monitor/PROM_REMOTE_WRITE_PASSWORD \
+#       --query SecretString --output text | tr -d '\n' \
+#     | kubectl -n monitoring create secret generic remote-write-auth \
+#         --from-file=password=/dev/stdin --dry-run=client -o yaml \
+#     | kubectl apply -f -
+# then restart the agent: kubectl -n monitoring rollout restart deploy/prometheus-agent
 apiVersion: v1
 kind: Secret
 metadata:

@@ -18,8 +18,10 @@ if [ -n "${SQUELCH_RELAY_DB_PATH:-}" ]; then
     chown -R relay:relay "$dir" 2>/dev/null || true
 fi
 
-# Railway injects PORT and terminates TLS at its edge; bind whatever it gives us
-# on all interfaces unless the operator pinned SQUELCH_RELAY_BIND themselves.
+# TLS terminates at the load balancer, so bind all interfaces: on a
+# platform-injected PORT if set, else 8850 (what the ECS task and its ALB target
+# use, since ECS injects no PORT), unless the operator pinned SQUELCH_RELAY_BIND
+# themselves.
 SQUELCH_RELAY_BIND="${SQUELCH_RELAY_BIND:-0.0.0.0:${PORT:-8850}}"
 export SQUELCH_RELAY_BIND
 

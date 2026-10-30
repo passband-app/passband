@@ -887,8 +887,8 @@ impl CredentialStore for KeyringCredentialStore {
 // a disk we operate. The control plane holds only the age RECIPIENT (a public
 // key) and seals the blob the instant Google's token exchange returns; the age
 // IDENTITY (the private key) lives on the daemon box outside every tenant data
-// dir, and systemd hands its path to each tenant daemon. Warden, Railway, and
-// the JSON wire in between only ever carry ciphertext.
+// dir, and systemd hands its path to each tenant daemon. Warden, AWS, and the
+// JSON wire in between only ever carry ciphertext.
 //
 // Self-host is untouched: the env var is unset, no encryption happens, and the
 // bytes on disk are exactly the bytes that shipped before this existed.

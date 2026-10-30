@@ -295,6 +295,10 @@ pub struct ApiState {
     /// for it, or can fail on one. Shared by every clone of the state; a
     /// failed read is not cached.
     pub(crate) mail_provider: Arc<std::sync::OnceLock<squelch_core::mail::MailProvider>>,
+    /// The IMAP sends in flight and those settled in the last two minutes,
+    /// by request (final review N4; `crate::send_dedupe`). Shared by every
+    /// clone of the state.
+    pub(crate) imap_send_dedupe: Arc<crate::send_dedupe::SendDedupe>,
     /// Where an IMAP account's sealed `#imap` slot lives (backend, file and
     /// address; never its contents). The write door reads the slot per
     /// action, as it loads a Gmail token per action, so a `squelchd auth
@@ -681,6 +685,7 @@ impl ApiState {
             sync_metrics: None,
             gmail_budget: None,
             mail_provider: Arc::new(std::sync::OnceLock::new()),
+            imap_send_dedupe: Default::default(),
             imap_write: None,
             console_allow_insecure_cookie: false,
             console_signin_limiter: Arc::new(std::sync::Mutex::new(

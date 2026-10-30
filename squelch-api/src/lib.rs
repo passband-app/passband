@@ -27,6 +27,7 @@ mod markdown;
 mod pair;
 mod renotify;
 mod scheduled_send;
+mod send_dedupe;
 mod serve;
 mod sharing;
 mod state;

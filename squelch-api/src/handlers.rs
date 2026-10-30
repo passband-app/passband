@@ -6004,6 +6004,21 @@ pub async fn action_send(
         return Err(f.into());
     }
 
+    // AN IMAP SEND IS ONE SEND PER COMPOSITION (final review N4): it outlives
+    // its request, so a client's retry would be a second copy. The same
+    // request in flight, or settled within two minutes, is answered from the
+    // first; see `crate::send_dedupe`. Claimed before the staged files are
+    // read: a send that went has consumed them, and its repeat must still get
+    // its answer.
+    if matches!(account_provider(&state).await, Ok(MailProvider::Imap)) {
+        let key = crate::send_dedupe::send_key(state.account_id, &body);
+        let dedupe = state.imap_send_dedupe.clone();
+        let json = dedupe
+            .run_once(key, imap_send_now(state, body, target))
+            .await?;
+        return Ok(Json(json));
+    }
+
     // OUTBOUND GUARD: report only REDACTED kinds, never the matched text. Scanned
     // here, before any Gmail spend. A FORWARD'S VERDICT WAITS — most of what it
     // sends is the original, which has not been read yet — so its kinds are
@@ -6041,51 +6056,59 @@ pub async fn action_send(
         SendGuard::Settled
     };
 
-    let outcome = if matches!(account_provider(&state).await, Ok(MailProvider::Imap)) {
-        detached_send(state, body, attachments, owed).await?
-    } else {
-        // Gmail's path is as it was: in the request. (It has the same latent
-        // shape, a cut after `messages.send` returned; a much shorter window,
-        // and Gmail files Sent itself.)
-        perform_send(&state, &body, attachments, owed, None).await?
-    };
+    // Gmail's path is as it was: in the request. (It has the same latent
+    // shape, a cut after `messages.send` returned; a much shorter window, and
+    // Gmail files Sent itself.)
+    let outcome = perform_send(&state, &body, attachments, owed, None).await?;
     // 200 for a fan-out too, as it always has been: the Groups page reads
     // `status: "sending"`, not the code.
     Ok(Json(outcome.to_json()))
 }
 
-/// AN IMAP SEND OUTLIVES ITS REQUEST (correctness review F2): run on its own
-/// task, which the handler awaits. A client that gives up (Passband's 15 s
-/// idle) drops the handler's future, and with an inline send that cancels
-/// whatever was next: after SMTP accepted the mail, the Sent copy, the audit
-/// and the echo, so the user sees a failure for mail that went and sends it
-/// again. On a task, the send finishes and settles whoever is listening.
-async fn detached_send(
+/// AN IMAP SEND OUTLIVES ITS REQUEST (correctness review F2): this runs on
+/// its own task ([`crate::send_dedupe::SendDedupe::run_once`]), which the
+/// handler awaits. A client that gives up (Passband's 15 s idle) drops the
+/// handler's future, and with an inline send that cancels whatever was next:
+/// after SMTP accepted the mail, the Sent copy, the audit and the echo. On a
+/// task, the send finishes and settles whoever is listening, the retry
+/// included.
+///
+/// The files, the guard and the send, as `action_send` does them for Gmail.
+/// The error says whether it stands for the dedupe window: only a send that
+/// may have gone does; a refusal can be fixed and sent again.
+async fn imap_send_now(
     state: ApiState,
     body: SendBody,
-    attachments: Vec<MailAttachment>,
-    owed: SendGuard,
-) -> Result<SendOutcome, ApiError> {
-    detach(async move {
-        perform_send(&state, &body, attachments, owed, None)
-            .await
-            .map_err(ApiError::from)
-    })
+    target: Option<String>,
+) -> Result<serde_json::Value, (ApiError, bool)> {
+    let refused = |e: ApiError| (e, false);
+    let attachments = load_send_attachments(
+        &state,
+        "send",
+        &body.attachment_ids,
+        body.draft_id,
+        target.clone(),
+    )
     .await
-}
-
-/// Run `work` on its own task and await it: dropping the returned future
-/// stops the waiting, never the work.
-async fn detach<T: Send + 'static>(
-    work: impl std::future::Future<Output = Result<T, ApiError>> + Send + 'static,
-) -> Result<T, ApiError> {
-    tokio::spawn(work).await.unwrap_or_else(|_| {
-        eprintln!("squelch-api: a detached send task failed");
-        Err(ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal error",
-        ))
-    })
+    .map_err(refused)?;
+    let matches = composition_kinds(&body.body, &attachments);
+    let owed = if body.forward_of_message_id.is_some() {
+        SendGuard::ForwardOwed(matches)
+    } else {
+        if let Some(err) =
+            guard_verdict(&state, "send", &matches, body.override_guard, target).await
+        {
+            return Err(refused(err));
+        }
+        SendGuard::Settled
+    };
+    match perform_send(&state, &body, attachments, owed, None).await {
+        Ok(outcome) => Ok(outcome.to_json()),
+        Err(f) => {
+            let keep = f.maybe_sent;
+            Err((f.error, keep))
+        }
+    }
 }
 
 /// Everything a send does once it has been validated and judged: resolve the
@@ -8017,30 +8040,6 @@ mod write_client_tests {
                 assert!(!write_ready(&state).await);
             }
         }
-    }
-
-    /// A CLIENT THAT GIVES UP DOES NOT CANCEL AN IMAP SEND (correctness
-    /// review F2): the handler's future is dropped mid-send (hyper does
-    /// this when the connection closes), and the work behind it, the part
-    /// after SMTP accepted the mail, still runs to its end.
-    #[tokio::test]
-    async fn dropping_a_detached_send_midway_lets_it_finish() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let finished = Arc::new(AtomicBool::new(false));
-        let done = finished.clone();
-        let waiting = detach(async move {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            done.store(true, Ordering::SeqCst);
-            Ok(())
-        });
-        // The client hangs up 50 ms in.
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), waiting)
-                .await
-                .is_err()
-        );
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        assert!(finished.load(Ordering::SeqCst), "the send was cancelled");
     }
 
     /// A SLOT THAT COULD NOT BE READ IS NOT A MISSING ONE (security review

@@ -21,6 +21,8 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# The IMAP send dedupe key (src/send_dedupe.rs); already in the lock via squelch-core.
+sha2 = "0.10"
 chrono = { workspace = true }
 thiserror = { workspace = true }
 # Full-feature axum for JSON extractors, query, path, and routing. Tracks the

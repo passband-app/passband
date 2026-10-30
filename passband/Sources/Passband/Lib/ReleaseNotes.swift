@@ -80,6 +80,7 @@ enum ReleaseVignette: String, CaseIterable, Sendable {
     case smartBlock
     case loginCode, agentWrite, smartUnsubscribe
     case smartClear, autoTranslate, archiveSearch, autoDone
+    case calendar, eventReminder, outlookSignIn
     /// Not a drawn scene: the agent ad's own conversation, live.
     case agentSession
 }
@@ -270,15 +271,15 @@ enum ReleaseNotes {
                 ReleaseItem(
                     .app, "Calendar",
                     detail: "A calendar just as magical as Passband Mail",
-                    symbol: "calendar"),
+                    symbol: "calendar", vignette: .calendar),
                 ReleaseItem(
                     .app, "Reminders that know the event",
                     detail: "A heads-up timed to each event, with a helper like a Tickets button that opens your tickets email",
-                    symbol: "ticket"),
+                    symbol: "ticket", vignette: .eventReminder),
                 ReleaseItem(
                     .app, "Sign in with Outlook",
                     detail: "Outlook and Hotmail accounts work alongside Gmail",
-                    symbol: "person.crop.circle.badge.plus"),
+                    symbol: "person.crop.circle.badge.plus", vignette: .outlookSignIn),
                 ReleaseItem(.app, "A warning when mail is not really from who it says"),
                 ReleaseItem(.app, "Opens from security scanners are no longer counted"),
                 ReleaseItem(.app, "Opens to your last board instantly"),

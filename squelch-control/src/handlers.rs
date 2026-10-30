@@ -147,9 +147,12 @@ pub const MAX_BODY: usize = 8 * 1024;
 /// a megabyte of "label" is not run through Unicode case folding.
 const MAX_FIELD: usize = 128;
 
-/// Ceiling on an authorization code, matching what the broker accepts for the
-/// same value. Google's run around 250 characters today.
-const MAX_CODE: usize = 512;
+/// Ceiling on an authorization code. Google's run around 250 characters;
+/// Microsoft's (Entra work and school accounts especially) run past 1,000, and
+/// 512 refused every hosted Outlook signup on 2026-10-30 with the generic
+/// "could not be verified" page. 4096 is slack for both, and still small enough
+/// that nothing large reaches the token exchange.
+const MAX_CODE: usize = 4096;
 
 /// The longest address anybody may submit, RFC 5321's limit. It is read one
 /// character OVER this so that too long arrives too long and is REFUSED: a
@@ -1366,6 +1369,11 @@ pub async fn oauth_callback(
         return done(refused_session_for(&state, voice));
     }
     let Some(code) = code.filter(|c| is_code(c)) else {
+        // The LENGTH only: the code itself is a credential until it is spent.
+        tracing::warn!(
+            code_len = param(query, "code").map(|c| c.len()),
+            "callback code missing or not code-shaped"
+        );
         release().await;
         return done(refused_session_for(&state, voice));
     };
@@ -3488,6 +3496,15 @@ mod tests {
         assert!(!is_code("with space"));
         assert!(!is_code("with\nnewline"));
         assert!(!is_code(&"a".repeat(MAX_CODE + 1)));
+        // A Microsoft-shaped code: dotted, and longer than Google's ever are.
+        let microsoft = format!(
+            "1.AXcA{}.AgABAwEAAAApTwJmzXqdR4BN2miheQMYAgDs_wUA9P",
+            "x".repeat(1400)
+        );
+        assert!(
+            is_code(&microsoft),
+            "a 1,450-character Microsoft code is a code"
+        );
     }
 
     /// THE SETTLE ALWAYS RUNS: a guard given an outcome writes it; one that is

@@ -575,6 +575,8 @@ struct World {
     creds: Arc<CalendarCredentials>,
     path: PathBuf,
     metrics: Arc<squelch_core::metrics::SyncMetrics>,
+    /// What `sync` follows: `calendar_own` granted, unless a test takes it away.
+    features: squelch_core::features::Features,
 }
 
 impl Drop for World {
@@ -625,9 +627,14 @@ async fn world_with(
     );
     let google: Fake = Arc::default();
     let base = spawn_google(google.clone()).await;
-    // NO HIDDEN FEATURE: calendar is on for every mailbox, so the door and
-    // the loop are built with none at all.
+    // Calendar is on for every mailbox, so the door is built with no hidden
+    // feature. The loop follows a live feature set, `calendar_own` granted: the
+    // ownership tests are about what it does when on. The off case is its own
+    // test below.
+    let features = squelch_core::features::Features::none();
+    features.replace_granted([squelch_core::features::CALENDAR_OWN]);
     let sync = CalendarSync::with_api_base(store.clone(), acct, creds.clone(), &base)
+        .map(|s| s.with_features(features.clone()))
         .unwrap()
         .with_test_timing(StdDuration::from_millis(50));
     let metrics = squelch_core::metrics::SyncMetrics::new();
@@ -649,6 +656,7 @@ async fn world_with(
         creds,
         path,
         metrics,
+        features,
     }
 }
 
@@ -5587,6 +5595,7 @@ async fn a_noisy_location_is_served_as_a_clean_place_and_boilerplate_notes_go() 
     let (url, bodies) = spawn_place_model("Dingles Public House", "").await;
     let sync = CalendarSync::with_api_base(w.store.clone(), w.acct, w.creds.clone(), &w.base)
         .unwrap()
+        .with_features(w.features.clone())
         .with_places(Some(PlaceClient::new(
             reqwest::Client::new(),
             url,
@@ -5659,6 +5668,7 @@ async fn a_place_answer_that_adds_a_word_keeps_the_location() {
     let (url, _) = spawn_place_model("Harbor Tavern", "12 Water St").await;
     let sync = CalendarSync::with_api_base(w.store.clone(), w.acct, w.creds.clone(), &w.base)
         .unwrap()
+        .with_features(w.features.clone())
         .with_places(Some(PlaceClient::new(
             reqwest::Client::new(),
             url,
@@ -5702,6 +5712,7 @@ async fn a_place_keeps_its_address_apart_and_on_the_adopted_event() {
     let (url, _) = spawn_place_model("Harbor Tavern", "12 Water St, Portland").await;
     let sync = CalendarSync::with_api_base(w.store.clone(), w.acct, w.creds.clone(), &w.base)
         .unwrap()
+        .with_features(w.features.clone())
         .with_places(Some(PlaceClient::new(
             reqwest::Client::new(),
             url,
@@ -5736,7 +5747,8 @@ async fn a_place_keeps_its_address_apart_and_on_the_adopted_event() {
 /// Passband's event, which nobody is emailed about and which the audit log
 /// records; an invitation Gmail added from someone else's mail is left
 /// alone; a second pass changes nothing; and when Gmail adds its copy again,
-/// it is deleted as a duplicate.
+/// it is deleted as a duplicate. Without the `calendar_own` hidden feature,
+/// nothing is written at all.
 #[tokio::test]
 async fn passband_takes_over_gmails_own_events_and_leaves_invitations_alone() {
     use squelch_core::gcal::own::{AUDIT_ACTOR, OWNED_NOTE};
@@ -5760,6 +5772,14 @@ async fn passband_takes_over_gmails_own_events_and_leaves_invitations_alone() {
     seed_ghost(&w.store, w.acct, "g1", "Dinner at Dingles", rfc(start));
     seed_ghost(&w.store, w.acct, "g2", "Drinks at Bemelmans", rfc(later));
     assert_eq!(w.pass().await, PassOutcome::Synced);
+
+    // Without the `calendar_own` hidden feature, nothing is written: no
+    // event made, and above all none of Gmail's deleted.
+    w.features.replace_granted(Vec::<String>::new());
+    w.sync.own_events(Utc::now()).await;
+    assert!(w.google().writes.is_empty(), "off without calendar_own");
+    w.features
+        .replace_granted([squelch_core::features::CALENDAR_OWN]);
 
     w.sync.own_events(Utc::now()).await;
     let new_id = {

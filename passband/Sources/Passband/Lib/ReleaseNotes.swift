@@ -288,7 +288,6 @@ enum ReleaseNotes {
                 ReleaseItem(.app, "Bug fixes"),
                 ReleaseItem(.daemon, "Calendar for everyone"),
                 ReleaseItem(.daemon, "Smart event reminders"),
-                ReleaseItem(.daemon, "Events Gmail makes from your mail join your calendar, without duplicates"),
                 ReleaseItem(.daemon, "Your agent can search your calendar"),
                 ReleaseItem(.daemon, "Amazon packages show up on Shipments, one per box"),
                 ReleaseItem(.daemon, "Flags mail sent on someone else's behalf"),

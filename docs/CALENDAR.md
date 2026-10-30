@@ -840,7 +840,7 @@ list, Esc closes the place list, then the delete question, then the pane.
   editable (Google refuses the change), and its card names it "added by
   Gmail". Where Passband owns such events (below), it does not stay.
 - **Passband owns the events mail makes** (2026-10-28, the owner's
-  decision; `gcal/own.rs`, on for every mailbox with the calendar). Gmail's
+  decision; `gcal/own.rs`, behind the `calendar_own` hidden feature, ticked per tenant: it deletes Gmail's copy, and a deleted event is not ours to restore). Gmail's
   frozen copy beside Passband's ghost is two items for one thing, and gets in
   the way of Passband running the calendar. So after each calendar pass:
   - **Adopt.** A Gmail event on the user's PRIMARY calendar that is the

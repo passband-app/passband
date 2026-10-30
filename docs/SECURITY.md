@@ -1498,7 +1498,7 @@ whether the user organizes it) and the subjects, sender display names and
 attachment filenames of the mail linked to it (see "Calendar reminders"
 below). Nothing calendar-related is on `/mcp` or `/client/agent/*`. The daemon writes to a calendar when the user creates,
 edits or deletes one event from the human door, and, ONE EXCEPTION (the owner's
-decision, 2026-10-28, on for every mailbox with the calendar), when it
+decision, 2026-10-28, behind the `calendar_own` hidden feature since 2026-10-30), when it
 replaces Gmail's own copy of an event with its own and keeps that event current
 from authenticated mail (see "Passband's own events" below). Nothing else
 writes on its own. Google emails an event's guests only when a human-door
@@ -1535,8 +1535,8 @@ it, and Passband's own writes always send `sendUpdates=none`.
   boilerplate on an event it made from mail ("To see detailed information for
   automatically created events like this one...") is dropped with its link
   (`triage/ghost.rs:strip_google_boilerplate`).
-- **Passband's own events** (`gcal/own.rs`, `gcal/sync.rs:own_events`). On
-  whenever the `calendar` feature is, with no flag of its own. It touches only events
+- **Passband's own events** (`gcal/own.rs`, `gcal/sync.rs:own_events`). Off
+  unless the `calendar_own` hidden feature is ticked for the tenant. It touches only events
   on the PRIMARY calendar: Gmail's own (`fromGmail`) that are the user's by
   every organizer test and carry no other guest, and the events Passband made
   in their place. An invitation from anyone else is never written. Every

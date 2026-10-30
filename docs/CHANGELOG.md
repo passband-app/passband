@@ -32,7 +32,6 @@ Stella's Update
 
 - Calendar for everyone
 - Smart event reminders
-- Events Gmail makes from your mail join your calendar, without duplicates
 - Your agent can search your calendar
 - Amazon packages show up on Shipments, one per box
 - Flags mail sent on someone else's behalf

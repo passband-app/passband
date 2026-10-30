@@ -3142,7 +3142,12 @@ fn cmd_serve(
             // The card's places ride the same key and the notify model, like
             // the sitrep headline. No key: locations are shown as they are.
             Ok(sync) => {
-                Some(sync.with_places(squelch_core::gcal::place::PlaceClient::from_config(&config)))
+                // Taking over Gmail's own events (and deleting Gmail's copy)
+                // waits for the `calendar_own` hidden feature.
+                Some(
+                    sync.with_places(squelch_core::gcal::place::PlaceClient::from_config(&config))
+                        .with_features(api_state.features().clone()),
+                )
             }
             Err(e) => {
                 eprintln!(

@@ -52,6 +52,8 @@ struct SealedEventTests {
         genericPushStillIdentifiesItsAccountAndEvent()
         anAuthTapNeverRoutesToTheReader()
         aDraftPushParsesOnlyItsOwnShape()
+        aClearPushParsesOnlyItsOwnShape()
+        aClearFindsTheBannerItNames()
         aDraftTapOpensTheDraftAndNothingElse()
         aDraftBannerSaysWhoAndWhat()
         var taps = NotificationTapQueue<Int>()
@@ -510,6 +512,45 @@ struct SealedEventTests {
         expect(K.draftPush("\(a):42") == nil, "an event id is not a draft")
         expect(K.unresolvedPush("\(a):draft:12:1761600000") == nil, "a draft id never resolves as an event")
         expect(K.unresolvedPush("\(a):draft:12") == nil, "nor does a shorter one")
+    }
+
+    static func aClearPushParsesOnlyItsOwnShape() {
+        typealias K = EventBanner
+        let account = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let a = account.uuidString
+        expect(K.clearPush("\(a):clear:41") == K.ClearPush(accountId: account, eventId: 41), "the pusher's shape parses")
+        expect(K.clearPush("\(a.lowercased()):clear:41")?.accountId == account, "a lowercased tag is the same account")
+        for bad in [
+            "\(a):clear", "\(a):clear:41:9", "\(a):Clear:41", "\(a):clear:041", "\(a):clear:0",
+            "\(a):clear:-41", "\(a):clear:", "not-a-uuid:clear:41", "clear:41", "\(a):41",
+            "\(a):draft:12:1761600000", "",
+        ] {
+            expect(K.clearPush(bad) == nil, "rejects \(bad)")
+        }
+        expect(K.clearPush(nil) == nil, "nil is nothing")
+        // A clear is never read as an event, a draft or a reminder.
+        expect(K.unresolvedPush("\(a):clear:41") == nil, "a clear never resolves as an event")
+        expect(K.draftPush("\(a):clear:41") == nil, "nor as a draft")
+        expect(K.calendarPush("\(a):clear:41") == nil, "nor as a reminder")
+    }
+
+    static func aClearFindsTheBannerItNames() {
+        typealias K = EventBanner
+        let account = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let other = UUID(uuidString: "99999999-2222-3333-4444-555555555555")!
+        let clear = K.ClearPush(accountId: account, eventId: 41)
+        // The extension's enriched banner.
+        expect(K.isCleared(by: clear, [K.accountKey: account.uuidString, K.eventKey: 41]), "the enriched banner")
+        // The relay's generic banner, unenriched.
+        expect(K.isCleared(by: clear, ["event_id": "\(account.uuidString):41"]), "the raw push")
+        // An auth banner, which carries no event key.
+        expect(
+            K.isCleared(by: clear, [K.clearIdentityKey: K.eventIdentity(account: account, event: 41)]),
+            "the auth banner")
+        // Not another event, and not the same event number in another mailbox.
+        expect(!K.isCleared(by: clear, [K.accountKey: account.uuidString, K.eventKey: 42]), "another event")
+        expect(!K.isCleared(by: clear, [K.accountKey: other.uuidString, K.eventKey: 41]), "another mailbox")
+        expect(!K.isCleared(by: clear, [:]), "a banner about nothing")
     }
 
     static func aDraftTapOpensTheDraftAndNothingElse() {

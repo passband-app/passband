@@ -80,4 +80,31 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     ) {
         Task { @MainActor in PushRegistration.shared.registrationFailed() }
     }
+
+    /// A SILENT push: the owner dealt with an event on another device (copied
+    /// its login code on the Mac), so the banner this phone still shows for
+    /// it is spent. Take it down. Anything else that arrives here is not ours
+    /// to act on and is answered with no data.
+    ///
+    /// iOS only delivers this while the app is in memory or can be woken; a
+    /// phone where Passband was swiped away keeps the banner. That is the
+    /// platform's rule for background pushes, not a bug to work around.
+    func application(
+        _ application: UIApplication,
+        didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+        fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
+    ) {
+        guard let clear = EventBanner.clearPush(userInfo["event_id"] as? String) else {
+            return completionHandler(.noData)
+        }
+        nonisolated(unsafe) let done = completionHandler
+        let center = UNUserNotificationCenter.current()
+        center.getDeliveredNotifications { delivered in
+            let spent = delivered
+                .filter { EventBanner.isCleared(by: clear, $0.request.content.userInfo) }
+                .map(\.request.identifier)
+            if !spent.isEmpty { center.removeDeliveredNotifications(withIdentifiers: spent) }
+            DispatchQueue.main.async { done(spent.isEmpty ? .noData : .newData) }
+        }
+    }
 }

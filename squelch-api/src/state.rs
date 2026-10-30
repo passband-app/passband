@@ -176,6 +176,11 @@ pub struct ApiState {
     /// `draft_opens`; with no pusher running (no relay configured) a send
     /// finds no receiver and is simply the answer "no phone was told".
     pub(crate) draft_pings: tokio::sync::broadcast::Sender<squelch_core::push::DraftPing>,
+    /// Banners for the PHONE to take down (see
+    /// [`squelch_core::push::ClearPing`]): the owner dealt with an event on
+    /// another device. With no pusher running a send finds no receiver and
+    /// nothing happens, which is the right answer: no phone holds a banner.
+    pub(crate) clear_pings: tokio::sync::broadcast::Sender<squelch_core::push::ClearPing>,
     /// What the phone has already been told; see [`DraftPingLedger`].
     pub(crate) draft_pinged: Arc<std::sync::Mutex<DraftPingLedger>>,
     /// The daemon's shutdown signal. An SSE stream is infinite and axum's
@@ -659,6 +664,7 @@ impl ApiState {
             renotify: crate::renotify::RenotifyShared::default(),
             calendar_remind: Default::default(),
             draft_pings: tokio::sync::broadcast::channel(16).0,
+            clear_pings: tokio::sync::broadcast::channel(16).0,
             draft_pinged: Default::default(),
             shutdown: None,
             scheduled_wake: Arc::new(tokio::sync::Notify::new()),
@@ -861,6 +867,14 @@ impl ApiState {
         &self,
     ) -> tokio::sync::broadcast::Receiver<squelch_core::push::DraftPing> {
         self.draft_pings.subscribe()
+    }
+
+    /// The APNs pusher's end of the banner clears (see
+    /// [`squelch_core::push::Pusher::with_clear_pings`]).
+    pub fn subscribe_clear_pings(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<squelch_core::push::ClearPing> {
+        self.clear_pings.subscribe()
     }
 
     /// The APNs pusher's end of the calendar reminders (see

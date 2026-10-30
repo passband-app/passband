@@ -26,6 +26,7 @@ struct SenderIdentityTests {
         theKnownRemainder()
         namesStayCorrect()
         notificationsNeverShowAnAddress()
+        aliasedBrandsAskForTheirRealLogo()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -245,6 +246,19 @@ struct SenderIdentityTests {
     }
 
     // MARK: - harness
+
+    static func aliasedBrandsAskForTheirRealLogo() {
+        let aws = "no-reply@login.awsapps.com"
+        // Still a service sender, still labelled by its own domain...
+        expect(SenderID.eligibleFaviconDomain(aws) == "awsapps.com", "awsapps is a service")
+        // ...but the icon comes from where the brand actually lives.
+        expect(
+            SenderID.faviconURL("awsapps.com")?.absoluteString
+                == "https://icons.duckduckgo.com/ip3/aws.amazon.com.ico", "awsapps asks for AWS's logo")
+        expect(
+            SenderID.faviconURL("stripe.com")?.absoluteString
+                == "https://icons.duckduckgo.com/ip3/stripe.com.ico", "an unaliased domain is unchanged")
+    }
 
     static func expect(_ ok: Bool, _ label: String) {
         checks += 1

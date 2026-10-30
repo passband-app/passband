@@ -84,6 +84,14 @@
 	<array>
 		<string>INSendMessageIntent</string>
 	</array>
+	<!-- A silent push wakes the app to take a banner down: the owner copied
+	     that login code on the Mac, so the one on the lock screen is spent
+	     (`EventBanner.clearPush`, AppDelegate). Background pushes carry no
+	     alert and no content, only which event. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 	<!-- HTTPS-only (standard exempt encryption), so App Store Connect skips the
 	     export-compliance questionnaire on every upload instead of asking. -->
 	<key>ITSAppUsesNonExemptEncryption</key>

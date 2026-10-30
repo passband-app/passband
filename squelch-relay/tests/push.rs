@@ -152,6 +152,31 @@ async fn forwards_apns_headers_and_a_content_free_payload() {
 }
 
 #[tokio::test]
+async fn a_clear_goes_out_as_a_silent_background_push() {
+    let (relay, mock) = harness().await;
+    let (status, _) = push(
+        &relay,
+        json!({
+            "device_tokens": [LIVE],
+            "event_id": "acct:clear:4711",
+            "collapse_id": "clear-4711",
+            "kind": "clear",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let seen = mock.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    let c = &seen[0];
+    assert_eq!(c.headers["apns-push-type"], "background");
+    assert_eq!(c.headers["apns-priority"], "5");
+    assert_eq!(c.body["aps"]["content-available"], 1);
+    assert_eq!(c.body["aps"].as_object().unwrap().len(), 1);
+    assert_eq!(c.body["event_id"], "acct:clear:4711");
+}
+
+#[tokio::test]
 async fn omits_the_collapse_header_when_unset_and_defaults_the_topic() {
     let (relay, mock) = harness().await;
     let (status, _) = push(

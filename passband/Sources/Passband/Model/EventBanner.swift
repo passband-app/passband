@@ -341,6 +341,44 @@ enum EventBanner {
         return DraftPush(accountId: account, draftId: id, created: created)
     }
 
+    /// The pusher's banner clear, `"<account>:clear:<event id>"`, delivered
+    /// as a SILENT push: the owner dealt with that event on another device
+    /// (copied its login code on the Mac), so the banner for it comes down.
+    /// Strict like `draftPush`, and never mistaken for an event push:
+    /// `unresolvedPush` splits at the LAST colon, so this shape's account half
+    /// is never a UUID there.
+    struct ClearPush: Equatable, Sendable {
+        var accountId: UUID
+        var eventId: Int
+    }
+
+    static func clearPush(_ raw: String?) -> ClearPush? {
+        guard let raw, raw.count <= 256 else { return nil }
+        let parts = raw.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[1] == "clear",
+            let account = UUID(uuidString: String(parts[0])),
+            let event = plainNumber(parts[2], maxDigits: 18)
+        else { return nil }
+        return ClearPush(accountId: account, eventId: event)
+    }
+
+    /// Which event a banner is about, for a CLEAR only. Auth banners carry it
+    /// under their own key, because `eventIdentity` deliberately reads them
+    /// as about no single event (it decides de-duplication, and the auth
+    /// lane's banners are not de-duplicated against the feed's).
+    static let clearIdentityKey = "passband.clear_identity"
+
+    /// Whether a delivered notification is the banner `clear` names: the
+    /// enriched banner, the relay's generic one the extension could not
+    /// enrich, or an auth banner.
+    static func isCleared(by clear: ClearPush, _ userInfo: [AnyHashable: Any]) -> Bool {
+        let target = eventIdentity(account: clear.accountId, event: clear.eventId)
+        if let identity = userInfo[clearIdentityKey] as? String, identity.lowercased() == target {
+            return true
+        }
+        return eventIdentity(userInfo) == target
+    }
+
     /// A positive integer written the one plain way: ASCII digits, no sign,
     /// no leading zero.
     private static func plainNumber(_ text: Substring, maxDigits: Int) -> Int? {

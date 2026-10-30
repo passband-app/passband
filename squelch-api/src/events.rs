@@ -1,5 +1,7 @@
 //! Notification delivery on the human door: `GET /client/events` (SSE) and
-//! `GET /client/events/{id}`, the iOS NSE's by-id fetch after an opaque push.
+//! `GET /client/events/{id}`, the iOS NSE's by-id fetch after an opaque push,
+//! and `POST /client/events/{id}/handled`, which asks phones to take that
+//! event's banner down.
 //! A pure READER of core's `events` table: no delivered/cursor flag is written
 //! here, every client carries its own `after=<id>`.
 //!
@@ -21,7 +23,7 @@ use std::time::Duration;
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::{
         IntoResponse, Sse,
         sse::{Event as SseEvent, KeepAlive},
@@ -408,6 +410,32 @@ pub async fn get_event(
     let account_id = state.account_id;
     let event = blocking(&state, move || store.event_by_id(account_id, id)).await?;
     event.map(Json).ok_or_else(ApiError::not_found)
+}
+
+/// `POST /client/events/{id}/handled`: the owner dealt with this event on
+/// this device (copied its login code on the Mac), so any OTHER device still
+/// showing a banner for it should take it down. Today that means one silent
+/// push to every registered phone ([`squelch_core::push::ClearPing`]).
+///
+/// 204 whether or not a phone was told: no relay, no phone, or a phone that
+/// never showed this event are all "nothing to clear", not errors. 404 for an
+/// id this mailbox does not hold, so a client cannot push clears for events
+/// that never existed.
+pub async fn event_handled(
+    State(state): State<ApiState>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    let store = state.store.clone();
+    let account_id = state.account_id;
+    let event = blocking(&state, move || store.event_by_id(account_id, id)).await?;
+    if event.is_none() {
+        return Err(ApiError::not_found());
+    }
+    // An Err here only means no pusher is listening.
+    let _ = state
+        .clear_pings
+        .send(squelch_core::push::ClearPing { event_id: id });
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]

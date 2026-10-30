@@ -178,6 +178,9 @@ final class Notifier {
                     login, sender: event.sender,
                     account: accounts.count > 1
                         ? accounts.first { $0.id == accountId }?.displayName : nil,
+                    // A code copied here is spent: take the phone's banner
+                    // for it down (see HandledSignal).
+                    onCopy: { HandledSignal.send(accountId: accountId, eventId: event.id) },
                     // Silent: the panel already chimed for this code.
                     onMissed: { [weak self] in
                         self?.banner(event, accountId: accountId, silent: true)

@@ -3187,7 +3187,8 @@ fn cmd_serve(
                 let pusher = pusher
                     .with_metrics(sync_metrics.clone())
                     .with_draft_pings(api_state.subscribe_draft_pings())
-                    .with_calendar_pings(api_state.subscribe_calendar_pings());
+                    .with_calendar_pings(api_state.subscribe_calendar_pings())
+                    .with_clear_pings(api_state.subscribe_clear_pings());
                 let shutdown_rx = shutdown_rx.clone();
                 Some(tokio::spawn(async move {
                     pusher.run(pusher_wake, shutdown_rx).await

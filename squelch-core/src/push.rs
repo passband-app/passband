@@ -98,7 +98,8 @@ pub struct PushRequest<'a> {
     pub environment: Option<&'a str>,
     /// Which of the relay's FIXED fallback lines the alert carries: absent for
     /// mail, `"draft"` for a [`DraftPing`], `"calendar"` for a
-    /// [`CalendarPing`]. A closed set the relay enforces;
+    /// [`CalendarPing`], `"clear"` for a [`ClearPing`] (no line at all: a
+    /// silent push). A closed set the relay enforces;
     /// it picks a line and can never carry one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<&'static str>,
@@ -161,6 +162,33 @@ impl CalendarPing {
     /// fire 3 never replace each other's banner.
     fn collapse_id(&self) -> String {
         format!("cal-{}-{}", self.fire_id, self.fired)
+    }
+}
+
+/// The owner dealt with one event on another device (copied its login code
+/// on the Mac), so the phone's banner for it should come down. Not durable,
+/// like [`DraftPing`]: a clear that cannot go out now is not worth sending
+/// later, when the banner has likely been swiped away anyway.
+///
+/// On the wire it is `"<tag>:clear:<event_id>"`, sent as a SILENT background
+/// push (the relay's `kind: "clear"`): the phone app wakes, finds the banner
+/// it holds for that event, and removes it. Untagged devices are skipped, for
+/// the reason draft pings skip them: an event id means nothing without the
+/// account it belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClearPing {
+    pub event_id: i64,
+}
+
+impl ClearPing {
+    fn event_id(&self, tag: Option<&str>) -> Option<PushEventId> {
+        tag.map(|tag| PushEventId::Tagged(format!("{tag}:clear:{}", self.event_id)))
+    }
+
+    /// Its own collapse id, never the banner's `thread-…` one: APNs replacing
+    /// the banner with a background push would not take it down.
+    fn collapse_id(&self) -> String {
+        format!("clear-{}", self.event_id)
     }
 }
 
@@ -366,6 +394,9 @@ pub struct Pusher {
     /// Calendar reminders from the human door's reminder worker; see
     /// [`CalendarPing`]. `None` until [`Pusher::with_calendar_pings`].
     calendar_pings: Option<broadcast::Receiver<CalendarPing>>,
+    /// Banners to take down; see [`ClearPing`]. `None` until
+    /// [`Pusher::with_clear_pings`].
+    clear_pings: Option<broadcast::Receiver<ClearPing>>,
 }
 
 impl Pusher {
@@ -401,6 +432,7 @@ impl Pusher {
             metrics: SyncMetrics::new(),
             draft_pings: None,
             calendar_pings: None,
+            clear_pings: None,
         }))
     }
 
@@ -421,6 +453,7 @@ impl Pusher {
             metrics: SyncMetrics::new(),
             draft_pings: None,
             calendar_pings: None,
+            clear_pings: None,
         }
     }
 
@@ -439,6 +472,12 @@ impl Pusher {
     /// Listen for calendar reminders (see [`CalendarPing`]).
     pub fn with_calendar_pings(mut self, pings: broadcast::Receiver<CalendarPing>) -> Self {
         self.calendar_pings = Some(pings);
+        self
+    }
+
+    /// Listen for banners to take down (see [`ClearPing`]).
+    pub fn with_clear_pings(mut self, pings: broadcast::Receiver<ClearPing>) -> Self {
+        self.clear_pings = Some(pings);
         self
     }
 
@@ -636,7 +675,16 @@ impl Pusher {
         .await;
     }
 
-    /// The non-durable push both pings make: every TAGGED device, once, the
+    /// Push one [`ClearPing`] to every tagged device, ONCE, as
+    /// [`Self::push_draft`] does.
+    async fn push_clear(&self, ping: ClearPing) {
+        self.push_once("clear", ping.collapse_id(), "a banner clear", |tag| {
+            ping.event_id(tag)
+        })
+        .await;
+    }
+
+    /// The non-durable push every ping makes: every TAGGED device, once, the
     /// relay's `kind` line, a failure logged and dropped.
     async fn push_once(
         &self,
@@ -784,6 +832,7 @@ impl Pusher {
     ) -> Result<()> {
         let mut pings = self.draft_pings.take();
         let mut reminders = self.calendar_pings.take();
+        let mut clears = self.clear_pings.take();
         let mut backoff: Option<Duration> = None;
         loop {
             if *shutdown.borrow() {
@@ -818,6 +867,9 @@ impl Pusher {
                             Some(ping) = next_ping(&mut reminders) => {
                                 if let Some(ping) = ping { self.push_calendar(ping).await; }
                             }
+                            Some(ping) = next_ping(&mut clears) => {
+                                if let Some(ping) = ping { self.push_clear(ping).await; }
+                            }
                             _ = shutdown.changed() => {
                                 if *shutdown.borrow() { return Ok(()); }
                             }
@@ -840,6 +892,9 @@ impl Pusher {
                         Some(ping) = next_ping(&mut reminders) => {
                             if let Some(ping) = ping { self.push_calendar(ping).await; }
                         }
+                        Some(ping) = next_ping(&mut clears) => {
+                            if let Some(ping) = ping { self.push_clear(ping).await; }
+                        }
                         _ = shutdown.changed() => {
                             if *shutdown.borrow() { return Ok(()); }
                         }
@@ -850,7 +905,7 @@ impl Pusher {
     }
 }
 
-/// The next ping (a draft or a calendar reminder): `Some(Some(p))` for a
+/// The next ping (a draft, a calendar reminder or a clear): `Some(Some(p))` for a
 /// ping, `Some(None)` when some were missed (lagged: dropped, they are not
 /// durable), and pending forever once there is no channel, so a `select!` arm
 /// on it simply never fires.
@@ -1005,6 +1060,17 @@ mod tests {
             serde_json::json!("acct-a:cal:7:1793210000")
         );
         assert_eq!(ping.collapse_id(), "cal-7-1793210000");
+    }
+
+    #[test]
+    fn a_clear_ping_is_tagged_only_and_never_shares_the_banner_collapse_id() {
+        let ping = ClearPing { event_id: 41 };
+        assert_eq!(ping.event_id(None), None);
+        assert_eq!(
+            serde_json::to_value(ping.event_id(Some("acct-a")).unwrap()).unwrap(),
+            serde_json::json!("acct-a:clear:41")
+        );
+        assert_eq!(ping.collapse_id(), "clear-41");
     }
 
     fn route(tag: Option<&str>, environment: Option<&str>) -> Route {

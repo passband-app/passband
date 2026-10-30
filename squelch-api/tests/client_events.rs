@@ -35,6 +35,8 @@ struct Harness {
     acct: i64,
     /// Held so the daemon-side shutdown signal stays alive for the connection.
     shutdown: watch::Sender<bool>,
+    /// The pusher's end of the banner clears, as squelchd subscribes it.
+    clears: broadcast::Receiver<squelch_core::push::ClearPing>,
 }
 
 impl Harness {
@@ -83,11 +85,13 @@ fn harness(seed: impl FnOnce(&SqliteStore, i64)) -> Harness {
     let state = state
         .with_event_notifier(event_tx)
         .with_shutdown(shutdown_rx);
+    let clears = state.subscribe_clear_pings();
     Harness {
         app: router(state),
         store,
         acct,
         shutdown,
+        clears,
     }
 }
 
@@ -318,6 +322,59 @@ async fn unknown_event_id_is_404() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+// --- POST /client/events/{id}/handled -----------------------------------------
+
+#[tokio::test]
+async fn handling_an_event_asks_the_pusher_to_clear_it() {
+    let mut h = harness(|_, _| {});
+    let id = h.emit(7);
+    let resp = h
+        .app
+        .clone()
+        .oneshot(authed("POST", &format!("/client/events/{id}/handled")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        h.clears.try_recv().unwrap(),
+        squelch_core::push::ClearPing { event_id: id }
+    );
+}
+
+#[tokio::test]
+async fn handling_an_unknown_or_foreign_event_is_404_and_clears_nothing() {
+    let mut h = harness(|_, _| {});
+    let other = h.store.ensure_account("other@example.com").unwrap();
+    let theirs = h
+        .store
+        .append_event(&event_for(&h.store, other, 42))
+        .unwrap()
+        .unwrap();
+    for id in [999_999, theirs] {
+        let resp = h
+            .app
+            .clone()
+            .oneshot(authed("POST", &format!("/client/events/{id}/handled")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+    assert!(h.clears.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn handling_an_event_requires_bearer() {
+    let h = harness(|_, _| {});
+    let id = h.emit(1);
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/client/events/{id}/handled"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 #[tokio::test]
 async fn another_accounts_event_is_404() {
     let h = harness(|_, _| {});
@@ -428,11 +485,13 @@ async fn live_works_off_a_store_attached_notifier_alone() {
     let (event_tx, _) = broadcast::channel::<i64>(16);
     store.attach_event_notifier(event_tx).unwrap();
     let (shutdown, _shutdown_rx) = watch::channel(false);
+    let clears = state.subscribe_clear_pings();
     let h = Harness {
         app: router(state),
         store,
         acct,
         shutdown,
+        clears,
     };
 
     let mut r = open(&h, "/client/events").await;
@@ -447,11 +506,13 @@ async fn no_notifier_at_all_still_replays_and_holds_the_connection() {
     // stream must NOT report end-of-stream the moment it opens.
     let (state, store, acct) = state_with(|_, _| {});
     let (shutdown, _rx) = watch::channel(false);
+    let clears = state.subscribe_clear_pings();
     let h = Harness {
         app: router(state),
         store,
         acct,
         shutdown,
+        clears,
     };
     // No notifier anywhere: this append can only be seen by the replay drain.
     let seeded = h.emit(1);

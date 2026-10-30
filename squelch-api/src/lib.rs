@@ -368,6 +368,7 @@ fn client_router(state: ApiState) -> Router {
         // Human door only — the agent door gains no access to the event log.
         .route("/client/events", get(events::events_stream))
         .route("/client/events/{id}", get(events::get_event))
+        .route("/client/events/{id}/handled", post(events::event_handled))
         // Smart re-notify: the app's tap report and the habit stats. Human
         // door only, and 404 with the `renotify` feature off.
         .route(

@@ -333,8 +333,11 @@ decides every endpoint, scope set and identity check:
    an Outlook daemon back past this build.
 5. **Client copy.** Passband still says "Gmail" in places (Trash, the auth
    pane); `/client/stats` does not advertise the provider yet.
-6. **Hosted** stays Gmail-only: squelch-control's signup and tenant model are
-   Google-shaped, and need their security argument re-made for a second IdP.
+6. **Hosted** has Outlook in a stacked PR ("Hosted signup with Outlook"):
+   the confidential "Passband Hosted" Entra app, tenants keyed by Microsoft
+   account id (a Microsoft login is never matched to a mailbox by address),
+   and an Outlook signup filed under the address mail ARRIVES at, not
+   Microsoft's sign-in label. See `docs/HOSTED.md`, "Outlook on hosted".
 7. **No profile photo** for Outlook accounts (Graph `/me/photo` is not wired).
 8. **A body Exchange cannot render as MIME** fails the batch every poll
    (any non-404 error on `$value` does), which would hold the cursor. If live

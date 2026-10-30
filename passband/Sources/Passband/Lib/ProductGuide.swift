@@ -629,7 +629,7 @@ enum ProductGuide {
 
     private static let appAndAccounts = """
         Accounts:
-        - Add one from the Accounts menu ("Add Account…") or Settings > Accounts: sign in with Gmail, or connect a self-hosted server with a pairing code or an API token.
+        - Add one from the Accounts menu ("Add Account…") or Settings > Accounts: sign in with Gmail or Outlook, or connect a self-hosted server with a pairing code or an API token.
         - Switch with ⌘1 to ⌘9, in the order listed in Settings > Accounts, or from the account badge at the bottom of the rail once there are two or more. Switching starts a fresh assistant chat.
         - Rename an account by editing its name in Settings > Accounts. "remove", then confirm, takes it off this Mac. On the last account the button reads "disconnect".
         - The account badge and the switcher show the photo from the mailbox's Google profile when Passband has been allowed to read it, and the account's initial otherwise. An account connected before this existed shows its initial until it is reconnected.

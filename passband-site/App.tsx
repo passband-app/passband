@@ -9,6 +9,7 @@ import {
   type PointerEvent,
 } from "react";
 import { CARRIERS, createScope, markerPoint, type ScopeLayout } from "./scope";
+import { SF_SYMBOLS } from "./sf-symbols";
 
 // The "before" panel is a procedurally repeated fake inbox: the drudgery
 // Passband exists to kill. Snippets are written long so rows run the full
@@ -301,7 +302,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
    So the mock is the app at one fixed layout, scaled as a picture would be,
    rather than a web page that reflows into something the app never draws.
    Colours are sampled from the same shot. */
-.pb-after .pb-window { background: #262c35; }
+.pb-after .pb-window { background: #101826; }
 /* THE SHOT: the window plus the two things that float over it. It is the
    container the points are measured against, so the login code panel can hang
    off the window's bottom edge and still be drawn in the same points. */
@@ -322,7 +323,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-app-tools svg { width: 17pt; height: 17pt; }
 /* The rail: three destinations on the digit keys, then the discovery ring,
    a hairline, and the account's own group. Rules and Groups live in Settings. */
-.pb-side { background: #2c323f; border-right: 1px solid #363b48; border-top-right-radius: 12pt;
+.pb-side { background: #0c131e; border-right: 1px solid #1b2636; border-top-right-radius: 12pt;
   display: flex; flex-direction: column; align-items: center; gap: 6pt; padding: 10pt 0; }
 .pb-side span { width: 44pt; height: 36pt; display: grid; place-items: center; border-radius: 11pt; color: #9aa6b6; }
 .pb-side span.on { background: rgba(78, 155, 234, 0.26); color: var(--accent); }
@@ -330,18 +331,19 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-side svg { width: 17pt; height: 17pt; }
 .pb-side .pb-side-gap { flex: 1; }
 .pb-side hr { width: 22pt; height: 0; margin: 4pt 0; border: 0; border-top: 1px solid var(--hair-strong); }
-.pb-side .pb-me { width: 26pt; height: 26pt; margin-top: 5pt; border-radius: 50%; background: #24384F;
-  color: #A9CBF0; font-size: 13pt; font-weight: 600; }
+.pb-side .pb-me { width: 26pt; height: 26pt; margin-top: 5pt; border-radius: 50%; overflow: hidden;
+  display: block; box-shadow: inset 0 0 0 0.5pt rgba(255, 255, 255, 0.12); }
+.pb-side .pb-me { object-fit: cover; }
 .pb-page { padding: 0 24pt 0; display: grid; grid-template-columns: minmax(0, 1fr) 306pt;
   column-gap: 18pt; align-items: start; }
-.pb-dash-hero { grid-column: 1 / -1; padding: 4pt 4pt 34pt; }
+.pb-dash-hero { grid-column: 1 / -1; padding: 20pt 4pt 34pt; }
 .pb-dash-hero small { display: block; font-size: 10pt; font-weight: 500; letter-spacing: 0.12em;
   text-transform: uppercase; color: var(--accent); margin-bottom: 2pt; }
 .pb-dash-hero b { position: relative; display: inline-block; font-family: var(--serif); font-weight: 500;
   font-size: 38pt; letter-spacing: -0.01em; line-height: 1.08; }
 .pb-col { display: flex; flex-direction: column; gap: 16pt; min-width: 0; }
-.pb-zone { position: relative; border-radius: 18pt; padding: 12pt 12pt 10pt; background: #1f2c3a;
-  box-shadow: inset 0 0 0 0.75pt #2f4459; }
+.pb-zone { position: relative; border-radius: 18pt; padding: 12pt 12pt 10pt; background: #152234;
+  box-shadow: inset 0 0 0 0.75pt #24374f; }
 .pb-zone-h { display: flex; align-items: center; gap: 8pt; padding: 0 4pt 10pt; font-size: 13pt; font-weight: 600; }
 .pb-zone-h svg { width: 14pt; height: 14pt; color: var(--zone, var(--accent)); flex: none; }
 .pb-zone-h em { font-style: normal; font-size: 11pt; font-weight: 600; color: var(--faint);
@@ -392,10 +394,10 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-rec { position: relative; border-radius: 18pt; padding: 12pt 11pt 9pt; background: var(--bg-c);
   box-shadow: inset 0 0 0 0.75pt var(--edge); }
 .pb-rec .pb-zone-h { padding: 0 3pt 8pt; }
-.pb-rec-cal { --bg-c: #253341; --edge: #3b5673; --zone: var(--accent); }
-.pb-rec-ship { --bg-c: #35332d; --edge: #6a5a3e; --zone: var(--warn); }
-.pb-rec-bill { --bg-c: #2a3540; --edge: #3f566d; --zone: var(--accent-ink); }
-.pb-rec-rcpt { --bg-c: #233635; --edge: #2f5a49; --zone: var(--positive); }
+.pb-rec-cal { --bg-c: #17283e; --edge: #2f5580; --zone: var(--accent); }
+.pb-rec-ship { --bg-c: #282620; --edge: #5c4b30; --zone: var(--warn); }
+.pb-rec-bill { --bg-c: #1e2b3f; --edge: #34507a; --zone: var(--accent-ink); }
+.pb-rec-rcpt { --bg-c: #172b2c; --edge: #275446; --zone: var(--positive); }
 .pb-rec-row { display: flex; align-items: center; gap: 7pt; padding: 5pt 7pt; white-space: nowrap; }
 .pb-rec-row b { flex: 1; min-width: 0; font-weight: 400; color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
 .pb-rec-row span { font-size: 10pt; color: var(--faintest); font-variant-numeric: tabular-nums; }
@@ -1328,7 +1330,7 @@ function Waitlist({ focus = true }: { focus?: boolean }) {
             name="name"
             required
             autoComplete="name"
-            placeholder="Ada Lovelace"
+            placeholder="Margaret Hamilton"
             aria-label="your name"
             // The control plane's own ceiling is 128 CHARACTERS and this counts
             // UTF-16 units, so the two agree on every name and the browser is
@@ -1376,41 +1378,35 @@ function Waitlist({ focus = true }: { focus?: boolean }) {
 // Stand-ins for the SF Symbols the app draws: gauge, envelope, key, the
 // discovery ring, the update arrow, waveform and gear in the side rail; eye, envelope.open, calendar,
 // shippingbox, building.columns and receipt on the zones.
-const GLYPHS = {
-  sitrep: "M8 14.2A6.2 6.2 0 1 0 8 1.8a6.2 6.2 0 0 0 0 12.4Zm0-3.6 2.8-5M3.8 8h1M8 3.8v1m4.2 3.2h-1",
-  mail: "M2 3.8h12v8.4H2V3.8Zm0 0 6 4.6 6-4.6",
-  key: "M8 6.6a2.6 2.6 0 1 0 0-5.2 2.6 2.6 0 0 0 0 5.2Zm0 0v7.8l1.6-1.3M8 10.4h1.6",
-  sliders: "M2 4.5h12M2 8h12M2 11.5h12M5 3.3v2.4M10.5 6.8v2.4M6.5 10.3v2.4",
-  people: "M6 7.2a2.4 2.4 0 1 0 0-4.8 2.4 2.4 0 0 0 0 4.8Zm-4.2 6.4c.3-2.6 2-4 4.2-4s3.9 1.4 4.2 4M11 7.2a2 2 0 1 0 0-4m1.6 6.6c1 .5 1.6 1.7 1.8 3.8",
-  pulse: "M1.5 8.5h3l1.6-4.4 3 8.4 1.8-4h3.6",
-  gear: "M8 10.3a2.3 2.3 0 1 0 0-4.6 2.3 2.3 0 0 0 0 4.6ZM8 2v2m0 8v2M2 8h2m8 0h2M3.8 3.8l1.4 1.4m5.6 5.6 1.4 1.4m0-8.4-1.4 1.4m-5.6 5.6-1.4 1.4",
-  eye: "M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8Zm6.5 2a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z",
-  reading: "M2 6.5 8 2.5l6 4v7H2v-7Zm0 0 6 4 6-4",
-  calendar: "M2.5 3.5h11v10h-11v-10Zm0 3h11M5 2v2.5M11 2v2.5",
-  box: "M8 1.8 14 4.6v6.8L8 14.2 2 11.4V4.6L8 1.8ZM2 4.6 8 7.4l6-2.8M8 7.4v6.8",
-  bank: "M2 6 8 2.5 14 6H2Zm1.2 0v6m3.2-6v6m3.2-6v6M12.8 6v6M2 13.5h12",
-  receipt: "M3.5 1.8h9v12.4l-1.5-1-1.5 1-1.5-1-1.5 1-1.5-1-1.5 1V1.8Zm2.5 4h4m-4 3h4",
-  compose: "M13.6 8.6v4.2a1.2 1.2 0 0 1-1.2 1.2H3.2A1.2 1.2 0 0 1 2 12.8V3.6a1.2 1.2 0 0 1 1.2-1.2h4.2M11.9 1.9l2.2 2.2-5.6 5.6-2.7.5.5-2.7 5.6-5.6Z",
-  search: "M7 12A5 5 0 1 0 7 2a5 5 0 0 0 0 10Zm3.6-1.4L14 14",
-  wind: "M1.8 6.2h7.4a2 2 0 1 0-2-2M1.8 9.2h10.4a2 2 0 1 1-2 2M1.8 12.2h4.2",
-  clip: "M13 7.4 7.9 12.5a3 3 0 0 1-4.3-4.3l5.3-5.3a2 2 0 0 1 2.9 2.9L6.6 11a1 1 0 0 1-1.5-1.5l4.6-4.6",
-  ring: "M8 2.2a5.8 5.8 0 1 1-5 2.9M5.2 2.9l.1 0M3.4 4.3l.1 0",
-  update: "M8 14.2A6.2 6.2 0 1 0 8 1.8a6.2 6.2 0 0 0 0 12.4ZM8 4.8v6m0 0L5.6 8.4M8 10.8l2.4-2.4",
-  done: "M8 14.2A6.2 6.2 0 1 0 8 1.8a6.2 6.2 0 0 0 0 12.4ZM5.3 8.2l1.9 1.9 3.6-3.9",
-  copy: "M5.5 5.5v-2a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2m-7-5h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-6a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1Z",
-};
+// The app's icons are SF Symbols, so the mocks draw the same ones: each is a
+// white mask rendered from the system by tools/sf-symbols.swift and filled
+// with currentColor, which keeps every colour rule below in charge. Only the
+// discovery ring is the app's own drawing, so it stays a path here.
+type GlyphName = keyof typeof SF_SYMBOLS | "ring";
+const RING = "M8 2.2a5.8 5.8 0 1 1-5 2.9M5.2 2.9l.1 0M3.4 4.3l.1 0";
 
-function Glyph({ name }: { name: keyof typeof GLYPHS }) {
+function Glyph({ name }: { name: GlyphName }) {
+  if (name === "ring") {
+    return (
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.25"
+        strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d={RING} />
+      </svg>
+    );
+  }
+  const id = `sf-${name}`;
   return (
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.25"
-      strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d={GLYPHS[name]} />
+    <svg viewBox="0 0 96 96" aria-hidden="true">
+      <mask id={id} maskUnits="userSpaceOnUse" x="0" y="0" width="96" height="96">
+        <image href={SF_SYMBOLS[name]} width="96" height="96" />
+      </mask>
+      <rect width="96" height="96" fill="currentColor" mask={`url(#${id})`} />
     </svg>
   );
 }
 
 function ZoneHead({ glyph, title, count, sub }: {
-  glyph: keyof typeof GLYPHS; title: string; count: number; sub?: string;
+  glyph: GlyphName; title: string; count: number; sub?: string;
 }) {
   return (
     <div className="pb-zone-h">
@@ -1418,6 +1414,26 @@ function ZoneHead({ glyph, title, count, sub }: {
       {title} <em>{count}</em>
       {sub && <small>{sub}</small>}
     </div>
+  );
+}
+
+// The app's rail: Sitrep, Calendar, Mail and Login codes on the digit keys,
+// then the discovery ring, a hairline, and the account's own group.
+function Rail({ on }: { on: "sitrep" | "calendar" }) {
+  return (
+    <nav className="pb-side" aria-hidden="true">
+      <span className={on === "sitrep" ? "on" : undefined}><Glyph name="sitrep" /></span>
+      <span className={on === "calendar" ? "on" : undefined}><Glyph name="calendar" /></span>
+      <span><Glyph name="mail" /></span>
+      <span><Glyph name="key" /></span>
+      <i className="pb-side-gap" />
+      <span><Glyph name="ring" /></span>
+      <hr />
+      <span className="up"><Glyph name="update" /></span>
+      <span><Glyph name="pulse" /></span>
+      <span><Glyph name="gear" /></span>
+      <img className="pb-me" src="/sam.jpg" alt="" />
+    </nav>
   );
 }
 
@@ -1576,18 +1592,7 @@ function AppMock() {
         </div>
       </div>
 
-      <nav className="pb-side" aria-hidden="true">
-        <span className="on"><Glyph name="sitrep" /></span>
-        <span><Glyph name="mail" /></span>
-        <span><Glyph name="key" /></span>
-        <i className="pb-side-gap" />
-        <span><Glyph name="ring" /></span>
-        <hr />
-        <span className="up"><Glyph name="update" /></span>
-        <span><Glyph name="pulse" /></span>
-        <span><Glyph name="gear" /></span>
-        <span className="pb-me">S</span>
-      </nav>
+      <Rail on="sitrep" />
 
       <div className="pb-page">
         <div className="pb-dash-hero">
@@ -1755,7 +1760,7 @@ function AgentPanel() {
 // the reading line (mid-screen, or lower on a phone where the window holds
 // the top) is the one the window shows. Before the first and after the last
 // the window is just the sitrep.
-function Showcase() {
+function useTourFocus() {
   const stepsRef = useRef<HTMLOListElement>(null);
   const [focus, setFocus] = useState(-1);
 
@@ -1785,6 +1790,12 @@ function Showcase() {
       removeEventListener("resize", queue);
     };
   }, []);
+
+  return { stepsRef, focus };
+}
+
+function Showcase() {
+  const { stepsRef, focus } = useTourFocus();
 
   return (
     <div className="pb-pair">
@@ -1819,6 +1830,385 @@ function Showcase() {
       </div>
       <ol className="pb-steps" ref={stepsRef}>
         {TOUR.map(({ key, title, line }, i) => (
+          <li key={key} className="pb-step" data-on={i === focus || undefined}>
+            <i aria-hidden="true">{String(i + 1).padStart(2, "0")}</i>
+            <h3>{title}</h3>
+            <p>{line}</p>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+// MARK: - the calendar tour
+
+// THE CALENDAR PAGE, as a second tour. Same frame as the sitrep's: captions
+// scroll on the left, the window holds still on the right and picks out what
+// each caption is about. Measured off the Mac's Calendar page (Month, with the
+// event pane open) and drawn in the same points as the sitrep mock. Chip
+// colours are sampled from the app; a ghost from mail is an outline (maybe),
+// hatched (likely) or folded into "1 unlikely" until opened, as in
+// CalendarMarks.swift. Every name in it is invented.
+const CAL_CSS = `
+.pb-pair.pb-cal .pb-steps { grid-row: 1; padding-top: 8svh; }
+.pb-pair.pb-cal .pb-hold { grid-row: 1; }
+.pb-calshot .pb-app-title b { font-family: var(--sans); font-weight: 700; font-size: 17pt; }
+.pb-seg { margin-left: auto; display: flex; padding: 3pt; border-radius: 99pt; background: #1a2535;
+  font-size: 12pt; font-weight: 600; color: var(--ink); }
+.pb-seg span { padding: 4pt 13pt; border-radius: 99pt; }
+.pb-seg span.on { background: #296798; }
+.pb-calpage { display: grid; grid-template-columns: minmax(0, 1fr) 300pt; column-gap: 18pt;
+  padding: 0 18pt 0 20pt; min-height: 0; }
+.pb-caltool { grid-column: 1 / -1; display: flex; align-items: center; gap: 10pt; height: 46pt; }
+.pb-caltool .nav { width: 34pt; height: 26pt; border-radius: 7pt; background: #172131;
+  display: grid; place-items: center; color: var(--dim); }
+.pb-caltool .nav svg { width: 13pt; height: 13pt; }
+.pb-caltool .new { display: flex; align-items: center; gap: 5pt; }
+.pb-caltool .new svg { width: 11pt; height: 11pt; }
+.pb-evpane > header svg { width: 13pt; height: 13pt; margin-left: -3pt; }
+.pb-caltool b { font-size: 17pt; font-weight: 700; margin: 0 4pt; }
+.pb-caltool .today { padding: 5pt 12pt; border-radius: 7pt; background: #172131; font-size: 11pt; color: var(--dim); }
+.pb-caltool .new { margin-left: auto; padding: 6pt 13pt; border-radius: 7pt; background: #172131;
+  font-size: 11pt; font-weight: 600; }
+.pb-month { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); grid-auto-rows: auto; align-content: start; }
+.pb-wd { padding: 0 6pt 6pt; font-size: 10.5pt; font-weight: 500; color: #4d5865; border-bottom: 1px solid #1e2b3c; }
+.pb-day { position: relative; height: 104pt; padding: 6pt 3pt 0; border-bottom: 1px solid #1e2b3c;
+  display: flex; flex-direction: column; gap: 3pt; min-width: 0; }
+.pb-day > header { display: flex; align-items: baseline; justify-content: space-between; padding: 0 4pt 2pt;
+  font-size: 11.5pt; font-weight: 500; color: #818c9a; white-space: nowrap; gap: 4pt; }
+.pb-day.out > header { color: #46515d; }
+.pb-day.out .pb-ev { filter: brightness(0.7) saturate(0.6); }
+.pb-day > header small { font-size: 9.5pt; color: var(--faintest); transition: color 0.4s ease; }
+.pb-day::after { content: ""; position: absolute; inset: 1pt; border-radius: 9pt; pointer-events: none;
+  box-shadow: inset 0 0 0 1pt rgba(155, 178, 205, 0); transition: box-shadow 0.4s ease; }
+.pb-day.sel::after { box-shadow: inset 0 0 0 1pt rgba(155, 178, 205, 0.85); }
+.pb-ev { --fill: #263244; --ink: #a9b6c8; --edge: #4b5d76;
+  display: block; height: 19pt; line-height: 19pt; padding: 0 5pt; border-radius: 5pt;
+  font-size: 10.5pt; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  background: var(--fill); color: #eef1f6; transition: opacity 0.45s ease, box-shadow 0.45s ease; }
+.pb-ev span { font-weight: 500; color: var(--ink); margin-right: 4pt; }
+.pb-ev.maybe { background: none; box-shadow: inset 0 0 0 1pt var(--edge); }
+.pb-ev.likely { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--fill) 70%, transparent) 0 3pt,
+  transparent 3pt 6pt); box-shadow: inset 0 0 0 1pt var(--edge); }
+.pb-ev.thin { background: none; box-shadow: inset 0 0 0 0.75pt color-mix(in srgb, var(--edge) 55%, transparent);
+  color: #8a8f9f; }
+.pb-ev.thin span { color: #6e7584; }
+.pb-ev.picked { box-shadow: inset 0 0 0 1.25pt #c9d6e6; }
+.pb-ev.fold { max-height: 0; opacity: 0; margin-top: -3pt; transition: max-height 0.45s ease, opacity 0.45s ease,
+  margin 0.45s ease, box-shadow 0.45s ease; }
+.pb-ev.red { --fill: #552d3b; --ink: #e79aad; --edge: #b5607a; }
+.pb-ev.purple { --fill: #36375b; --ink: #caccfe; --edge: #8a8de0; }
+.pb-ev.teal { --fill: #0d3b44; --ink: #7fc8ca; --edge: #3f9a9c; }
+.pb-ev.brown { --fill: #513514; --ink: #e6b980; --edge: #b5844a; }
+.pb-ev.green { --fill: #284425; --ink: #a5d69e; --edge: #5c9a55; }
+.pb-ev.gray { --fill: #263244; --ink: #a9b6c8; --edge: #5a6d88; }
+
+/* THE EVENT PANE, beside the month. */
+.pb-evpane { min-width: 0; padding-top: 2pt; }
+.pb-evpane > header { display: flex; align-items: center; gap: 6pt; padding: 0 2pt 10pt; font-size: 14pt;
+  font-weight: 600; color: var(--dim); }
+.pb-evcard { border-radius: 16pt; padding: 18pt; background: #152234;
+  box-shadow: inset 0 0 0 0.75pt #24374f; animation: pb-cal-in 0.45s ease both; }
+@keyframes pb-cal-in { from { opacity: 0; transform: translateY(5pt); } }
+.pb-evsec { padding: 11pt; margin: -11pt; transition: opacity 0.45s ease, box-shadow 0.45s ease; border-radius: 10pt; }
+.pb-evkind { display: flex; align-items: center; gap: 6pt; font-size: 10.5pt; color: var(--dim); padding-bottom: 11pt; }
+.pb-evkind i { width: 9pt; height: 9pt; border-radius: 2.5pt; box-shadow: inset 0 0 0 1pt var(--accent); }
+.pb-evkind i.on { background: var(--positive); box-shadow: none; }
+.pb-evkind small { margin-left: auto; font-size: 10pt; color: var(--faintest); }
+.pb-flyer { position: relative; border-radius: 9pt; overflow: hidden; margin-bottom: 12pt; }
+.pb-flyer img { display: block; width: 100%; height: auto; }
+.pb-flyer em { position: absolute; left: 7pt; bottom: 7pt; font-style: normal; font-size: 9.5pt; font-weight: 600;
+  padding: 2pt 7pt; border-radius: 99pt; background: rgba(0, 0, 0, 0.45); color: #fff; }
+.pb-evtitle { font-size: 16pt; font-weight: 700; line-height: 1.15; }
+.pb-evtime { font-size: 11.5pt; color: var(--dim); margin-top: 2pt; }
+.pb-tickets { display: inline-flex; align-items: center; gap: 5pt; margin-top: 9pt; padding: 5pt 11pt;
+  border-radius: 8pt; background: var(--accent); color: #fff; font-size: 11pt; font-weight: 600;
+  transition: box-shadow 0.45s ease; }
+.pb-tickets svg { width: 12pt; height: 12pt; }
+.pb-evfacts { display: grid; grid-template-columns: 62pt minmax(0, 1fr); gap: 8pt 8pt; margin-top: 13pt; font-size: 11pt; }
+.pb-evfacts dt { color: var(--faint); }
+.pb-evfacts dd { margin: 0; color: var(--ink); }
+.pb-likely { display: flex; align-items: center; gap: 5pt; font-weight: 600; }
+.pb-likely i { width: 9pt; height: 9pt; border-radius: 2.5pt; box-shadow: inset 0 0 0 1pt var(--accent); }
+.pb-likely i.thin { box-shadow: inset 0 0 0 0.75pt var(--faintest); }
+.pb-likely i.on { background: var(--positive); box-shadow: none; }
+.pb-reason { margin-top: 3pt; font-weight: 400; color: var(--dim); line-height: 1.35; }
+.pb-reason small { display: block; font-size: 9.5pt; color: var(--faintest); margin-top: 2pt; }
+.pb-evsec.mail { margin-top: 3pt; }
+.pb-behind { margin-top: 0; padding: 9pt 10pt 4pt; border-radius: 11pt; background: #101b2a; }
+.pb-behind > b { display: block; font-size: 10.5pt; font-weight: 500; color: var(--dim); padding-bottom: 6pt; }
+.pb-brow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 8pt; padding: 5pt 4pt; border-radius: 7pt;
+  transition: background 0.45s ease; }
+.pb-brow b { font-size: 11pt; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pb-brow small { grid-column: 1; font-size: 9.5pt; color: var(--faint); }
+.pb-brow em { grid-column: 2; grid-row: 1; font-style: normal; font-size: 9.5pt; color: var(--faintest); }
+.pb-evkeys { display: flex; gap: 12pt; margin-top: 10pt; font-size: 10pt; color: var(--dim); }
+.pb-evkeys kbd { font: 600 9pt/1 var(--mono); padding: 2pt 5pt; margin-right: 4pt; border-radius: 4pt;
+  background: #1e2b3d; color: var(--dim); }
+
+/* THE REMINDER, as the iPhone shows it: the system's own banner, dark
+   material, the app icon, title, time, and the line the model wrote. Hung off
+   the window's top right. */
+.pb-remind { --pt: calc(100cqw / 1040); position: absolute; right: 22pt; top: -34pt; z-index: 4; width: 350pt;
+  padding: 12pt 14pt 13pt 12pt; border-radius: 24pt; display: grid; grid-template-columns: 38pt minmax(0, 1fr) auto;
+  column-gap: 11pt; align-items: start; font-family: var(--sans); font-size: 13pt; line-height: 1.28; color: #f5f5f7;
+  background: rgba(46, 46, 50, 0.72); -webkit-backdrop-filter: blur(24px) saturate(1.8); backdrop-filter: blur(24px) saturate(1.8);
+  box-shadow: inset 0 0 0 0.5pt rgba(255, 255, 255, 0.14), 0 24pt 60pt -12pt rgba(0, 0, 0, 0.75),
+    0 0 50pt -14pt rgba(78, 155, 234, 0.45);
+  opacity: 0; transform: translateY(-16pt) scale(0.97); pointer-events: none;
+  transition: opacity 0.4s ease, transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.pb-remind img { grid-row: 1 / span 3; align-self: center; width: 38pt; height: 38pt; border-radius: 9pt; }
+.pb-remind b { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pb-remind time { font-size: 11.5pt; color: rgba(235, 235, 245, 0.55); padding-left: 8pt; }
+.pb-remind small { grid-column: 2 / -1; font-size: 13pt; font-weight: 600; }
+.pb-remind p { grid-column: 2 / -1; margin: 0; }
+
+/* WHAT THE TOUR DOES TO THE PICTURE. As on the sitrep: the rest steps back
+   and the part the caption is about keeps its light, ringed and glowing. */
+.pb-calshot[data-focus] .pb-ev { opacity: 0.3; }
+.pb-calshot[data-focus] .pb-evsec { opacity: 0.3; }
+.pb-calshot:is([data-focus="plans"], [data-focus="behind"], [data-focus="remind"]) .pb-ev.night,
+.pb-calshot[data-focus="unlikely"] .pb-ev.summit { opacity: 1; }
+.pb-calshot:is([data-focus="plans"], [data-focus="unlikely"], [data-focus="remind"]) .pb-evsec.top,
+.pb-calshot[data-focus="behind"] .pb-evsec.mail { opacity: 1; }
+.pb-calshot[data-focus="plans"] .pb-ev.night,
+.pb-calshot[data-focus="unlikely"] .pb-ev.summit {
+  box-shadow: inset 0 0 0 1pt rgba(130, 186, 245, 0.9), 0 0 22pt -4pt rgba(78, 155, 234, 0.8); }
+.pb-calshot[data-focus="plans"] .pb-evsec.top,
+.pb-calshot[data-focus="behind"] .pb-behind {
+  box-shadow: inset 0 0 0 1pt rgba(130, 186, 245, 0.75), 0 0 44pt -8pt rgba(78, 155, 234, 0.65); }
+.pb-calshot[data-focus="behind"] .pb-brow.update { background: rgba(78, 155, 234, 0.2); }
+.pb-calshot[data-focus="unlikely"] .pb-ev.fold { max-height: 19pt; opacity: 1; margin-top: 0; }
+.pb-calshot[data-focus="unlikely"] .pb-day.summitday > header small { color: var(--accent-ink); }
+.pb-calshot[data-focus="remind"] .pb-remind { opacity: 1; transform: none; }
+.pb-calshot[data-focus="remind"] .pb-tickets { box-shadow: 0 0 0 1pt rgba(130, 186, 245, 0.6), 0 0 28pt -4pt rgba(78, 155, 234, 0.9); }
+
+@media (prefers-reduced-motion: reduce) {
+  .pb-ev, .pb-evsec, .pb-remind, .pb-day::after, .pb-tickets, .pb-brow { transition: none; }
+  .pb-evcard { animation: none; }
+}
+`;
+const CAL_CSS_RESOLVED = CAL_CSS.replace(/(-?\d*\.?\d+)pt\b/g, "calc($1 * var(--pt))");
+
+type Chip = { t?: string; name: string; hue: string; kind?: "maybe" | "likely" | "thin" | "fold"; id?: string };
+// November 2026, Sunday first, as the app lays it out: five weeks, the last
+// running into December. Index 0 is Sunday November 1.
+// November 2026, Sunday first, as the app lays it out: five weeks, the last
+// running into December. Index 0 is Sunday November 1. A working month, with
+// one night out.
+const CAL_DAYS: Array<{ label: string; out?: boolean; unlikely?: number; chips: Chip[] }> = [
+  { label: "Nov 1", chips: [{ t: "10am", name: "Long run", hue: "teal" }] },
+  { label: "2", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "2pm", name: "1:1 Jamie", hue: "purple" }] },
+  { label: "3", chips: [{ name: "Election Day", hue: "brown" }, { t: "11am", name: "Pipeline", hue: "red" }] },
+  { label: "4", chips: [{ t: "10am", name: "Design crit", hue: "purple" }, { t: "3pm", name: "Interview", hue: "green" }] },
+  { label: "5", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "1pm", name: "Priya", hue: "red" }, { t: "4pm", name: "Security", hue: "gray" }] },
+  { label: "6", chips: [{ t: "4pm", name: "Demo day", hue: "teal" }] },
+  { label: "7", chips: [] },
+  { label: "8", chips: [] },
+  { label: "9", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "1pm", name: "Board prep", hue: "red" }] },
+  { label: "10", chips: [{ t: "11am", name: "Pipeline", hue: "red" }, { t: "4pm", name: "Investors", hue: "red" }] },
+  { label: "11", unlikely: 1, chips: [{ name: "Veterans Day", hue: "brown" }, { t: "9am", name: "Cost Summit", hue: "gray", kind: "fold", id: "summit" }, { t: "10am", name: "Design crit", hue: "purple" }] },
+  { label: "12", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "2pm", name: "Acme call", hue: "teal" }] },
+  { label: "13", chips: [{ t: "12pm", name: "Team lunch", hue: "green" }] },
+  { label: "14", chips: [] },
+  { label: "15", chips: [] },
+  { label: "16", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "2pm", name: "1:1 Jamie", hue: "purple" }] },
+  { label: "17", chips: [{ t: "10am", name: "Board", hue: "red" }, { t: "3pm", name: "Hiring", hue: "green" }] },
+  { label: "18", chips: [{ t: "10am", name: "Design crit", hue: "purple" }, { t: "5pm", name: "Demo", hue: "teal" }] },
+  { label: "19", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "2:30pm", name: "Dr. Ortiz", hue: "teal" }] },
+  { label: "20", chips: [{ t: "10am", name: "Roadmap", hue: "purple" }, { t: "10pm", name: "Endzeit x Non Series", hue: "purple", kind: "maybe", id: "night" }] },
+  { label: "21", chips: [] },
+  { label: "22", chips: [] },
+  { label: "23", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "3pm", name: "Offsite prep", hue: "green" }] },
+  { label: "24", chips: [{ t: "11am", name: "Pipeline", hue: "red" }] },
+  { label: "25", chips: [{ t: "8:05am", name: "SFO to JFK", hue: "gray", kind: "likely" }] },
+  { label: "26", chips: [{ name: "Thanksgiving", hue: "brown" }, { t: "4pm", name: "Mom's", hue: "green" }] },
+  { label: "27", chips: [] },
+  { label: "28", chips: [] },
+  { label: "29", chips: [{ t: "6:40pm", name: "JFK to SFO", hue: "gray", kind: "likely" }] },
+  { label: "30", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "2pm", name: "1:1 Jamie", hue: "purple" }] },
+  { label: "Dec 1", out: true, chips: [{ t: "11am", name: "Pipeline", hue: "red" }] },
+  { label: "Dec 2", out: true, chips: [{ t: "10am", name: "Design crit", hue: "purple" }] },
+  { label: "Dec 3", out: true, chips: [{ t: "9:30", name: "Standup", hue: "purple" }] },
+  { label: "Dec 4", out: true, unlikely: 1, chips: [] },
+  { label: "Dec 5", out: true, chips: [] },
+];
+
+const CAL_TOUR: Array<{ key: string; title: string; line: ReactNode }> = [
+  { key: "plans", title: "Your inbox already knows your plans",
+    line: "Invitations, tickets and bookings show up on your calendar as they arrive, with the flyer, the place, and a line on how likely you are to go." },
+  { key: "behind", title: "When plans change, the event keeps up",
+    line: "Every email about an event stays attached to it. A corrected lineup or a new start time lands on the event, not at the bottom of your inbox." },
+  { key: "unlikely", title: "Not every invite is a plan",
+    line: "The summit a vendor sent to everyone on its list folds away as unlikely. It is there if you want it, and out of the way if you don't." },
+  { key: "remind", title: "Reminders that know the event",
+    line: "Passband picks the moment, an hour before doors or ten minutes before a call, and says what will help. Tap to see your tickets." },
+];
+
+
+// What the pane shows for each step. Before the first and through the second
+// it is the invitation as a maybe; the third opens the unlikely one; the last
+// is the same invitation after you said you are going and bought tickets.
+function EventPane({ focus }: { focus: string | undefined }) {
+  if (focus === "unlikely") {
+    return (
+      <div className="pb-evpane">
+        <header><Glyph name="back" />Wed Nov 11</header>
+        <div className="pb-evcard" key="summit">
+          <div className="pb-evsec top">
+            <div className="pb-evkind"><i />Invitation, from your mail<small>not on your calendar</small></div>
+            <div className="pb-evtitle">Cloud Cost Summit</div>
+            <div className="pb-evtime">Wed Nov 11, 9am to 5pm</div>
+            <dl className="pb-evfacts">
+              <dt>Likelihood</dt>
+              <dd>
+                <span className="pb-likely"><i className="thin" />Unlikely</span>
+                <div className="pb-reason">
+                  “a vendor's mass mailing, and the user has never registered for one of their events”
+                  <small>the triage model's words</small>
+                </div>
+              </dd>
+              <dt>Place</dt><dd>Online</dd>
+            </dl>
+          </div>
+          <div className="pb-evsec mail">
+            <div className="pb-behind">
+              <b>Mail behind it</b>
+              <div className="pb-brow"><b>Last call: Cloud Cost Summit seats</b><small>Stackwise, Oct 19</small><em>first</em></div>
+            </div>
+          </div>
+          <div className="pb-evkeys"><span><kbd>↵</kbd>open mail</span><span><kbd>y</kbd>going</span><span><kbd>x</kbd>dismiss</span></div>
+        </div>
+      </div>
+    );
+  }
+  const going = focus === "remind";
+  return (
+    <div className="pb-evpane">
+      <header><Glyph name="back" />Fri Nov 20</header>
+      <div className="pb-evcard" key={going ? "going" : "night"}>
+        <div className="pb-evsec top">
+          <div className="pb-evkind">
+            <i className={going ? "on" : undefined} />
+            {going ? "Going, from your mail" : "Invitation, from your mail"}
+            <small>{going ? "on your calendar" : "not on your calendar"}</small>
+          </div>
+          <div className="pb-flyer"><img src="/endzeit-flyer.jpg" alt="" /></div>
+          <div className="pb-evtitle">Endzeit x Non Series</div>
+          <div className="pb-evtime">Fri Nov 20, 10pm to Sat 6am</div>
+          {going && (
+            <span className="pb-tickets">
+              <Glyph name="ticket" />
+              Tickets
+            </span>
+          )}
+          <dl className="pb-evfacts">
+            <dt>Likelihood</dt>
+            <dd>
+              {going ? (
+                <span className="pb-likely"><i className="on" />Going</span>
+              ) : (
+                <>
+                  <span className="pb-likely"><i />Maybe</span>
+                  <div className="pb-reason">
+                    “mass mailing-list invite, though the user has a history with Endzeit events”
+                    <small>the triage model's words</small>
+                  </div>
+                </>
+              )}
+            </dd>
+            <dt>Place</dt><dd>Downtown San Francisco</dd>
+          </dl>
+        </div>
+        <div className="pb-evsec mail">
+          <div className="pb-behind">
+            <b>Mail behind it</b>
+            <div className="pb-brow"><b>Endzeit x Non Series, November 20</b><small>Endzeit, Oct 23</small><em>first</em></div>
+            <div className="pb-brow update"><b>A correction on the Non Series lineup</b><small>Endzeit, Oct 23</small><em>update</em></div>
+            {going && <div className="pb-brow"><b>Your tickets: Endzeit x Non Series</b><small>Endzeit, Oct 26</small><em>tickets</em></div>}
+          </div>
+        </div>
+        {!going && <div className="pb-evkeys"><span><kbd>↵</kbd>open mail</span><span><kbd>y</kbd>going</span><span><kbd>x</kbd>dismiss</span></div>}
+      </div>
+    </div>
+  );
+}
+
+function CalMock({ focus }: { focus: string | undefined }) {
+  const selected = focus === "unlikely" ? 10 : 19;
+  return (
+    <div
+      className="pb-app"
+      role="img"
+      aria-label="The Passband calendar, November. A working month: standups, reviews, a board meeting, two flights. An Endzeit invitation found in the mail sits on Friday the 20th as a maybe, with its flyer, the reason it is a maybe, and the two emails behind it, one of them a lineup correction. Wednesday the 11th holds one unlikely event, folded away."
+    >
+      <div className="pb-app-bar">
+        <div className="pb-lights" aria-hidden="true"><i /><i /><i /></div>
+        <div className="pb-app-title"><b>Calendar</b><small>MONTH</small></div>
+        <div className="pb-seg" aria-hidden="true"><span className="on">Month</span><span>Week</span><span>Agenda</span></div>
+      </div>
+      <Rail on="calendar" />
+      <div className="pb-calpage">
+        <div className="pb-caltool">
+          <span className="nav"><Glyph name="back" /></span><span className="nav"><Glyph name="forward" /></span>
+          <b>November 2026</b>
+          <span className="today">Today</span>
+          <span className="new"><Glyph name="plus" />New event</span>
+        </div>
+        <div className="pb-month">
+          {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => <div key={d} className="pb-wd">{d}</div>)}
+          {CAL_DAYS.map((day, i) => (
+            <div key={day.label}
+              className={`pb-day${day.out ? " out" : ""}${i === selected ? " sel" : ""}${i === 10 ? " summitday" : ""}`}>
+              <header>{day.label}{day.unlikely ? <small>{day.unlikely} unlikely</small> : null}</header>
+              {day.chips.map((c) => (
+                <div key={c.name}
+                  className={`pb-ev ${c.hue}${c.kind === "fold" ? " fold thin" : c.kind ? ` ${c.kind}` : ""}${c.id ? ` ${c.id}` : ""}${c.id === "night" && i === selected && focus !== "unlikely" ? " picked" : ""}`}>
+                  {c.t && <span>{c.t}</span>}{c.name}
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+        <EventPane focus={focus} />
+      </div>
+    </div>
+  );
+}
+
+// The reminder an hour before doors. The line is the kind the
+// reminder model writes: short, no links, no codes.
+function RemindBanner() {
+  return (
+    <div className="pb-remind" aria-hidden="true">
+      <img src="/icon-180.png" alt="" />
+      <b>Endzeit x Non Series</b>
+      <time>now</time>
+      <small>In 1 hr · Downtown San Francisco</small>
+      <p>Doors at 10. Tap to see your tickets in the Endzeit email.</p>
+    </div>
+  );
+}
+
+function CalShowcase() {
+  const { stepsRef, focus } = useTourFocus();
+  const key = focus < 0 ? undefined : CAL_TOUR[focus].key;
+  return (
+    <div className="pb-pair pb-cal">
+      <div className="pb-hold">
+        <figure className="pb-panel pb-after">
+          <figcaption><b>Calendar</b> built from your mail</figcaption>
+          <div className="pb-shot pb-calshot" data-focus={key}>
+            <div className="pb-window">
+              <CalMock focus={key} />
+            </div>
+            <RemindBanner />
+          </div>
+        </figure>
+      </div>
+      <ol className="pb-steps" ref={stepsRef}>
+        {CAL_TOUR.map(({ key, title, line }, i) => (
           <li key={key} className="pb-step" data-on={i === focus || undefined}>
             <i aria-hidden="true">{String(i + 1).padStart(2, "0")}</i>
             <h3>{title}</h3>
@@ -1968,6 +2358,7 @@ export function App() {
   return (
     <main className="pb">
       <style href="pb-page" precedence="default">{PAGE_CSS_RESOLVED}</style>
+      <style href="pb-cal" precedence="default">{CAL_CSS_RESOLVED}</style>
 
       <section ref={storyRef} className="pb-story">
         <div
@@ -2052,6 +2443,18 @@ export function App() {
           need you, and files the rest where you can find them when you want to.
         </p>
         <Showcase />
+      </section>
+
+      <section className="pb-section">
+        <h2 className="pb-h2">
+          Plans arrive by email. <em>So does your calendar.</em>
+        </h2>
+        <p className="pb-intro">
+          Passband lays out the invitations, tickets and bookings in your mail, says how
+          likely you are to go, keeps each one current as the mail changes, and reminds you
+          when it counts.
+        </p>
+        <CalShowcase />
       </section>
 
       <section className="pb-section pb-join">

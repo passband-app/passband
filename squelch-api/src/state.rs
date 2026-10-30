@@ -1207,6 +1207,19 @@ impl ApiState {
 
     /// Override the Stage-2 per-MTok prices behind `est_cost_usd_today`, so
     /// switching model reflects in the surfaced cost.
+    /// Record the account's provider (just bound by [`Self::from_config`]),
+    /// so pages that are not async (the console's login page) can name it.
+    pub(crate) fn with_known_provider(self, provider: squelch_core::mail::MailProvider) -> Self {
+        let _ = self.mail_provider.set(provider);
+        self
+    }
+
+    /// The account's provider as far as this door knows it: Gmail until
+    /// [`Self::with_known_provider`] or the first write says otherwise.
+    pub(crate) fn known_provider(&self) -> squelch_core::mail::MailProvider {
+        self.mail_provider.get().copied().unwrap_or_default()
+    }
+
     pub fn with_stage2_prices(mut self, price_in_per_mtok: f64, price_out_per_mtok: f64) -> Self {
         self.stage2_price_in_per_mtok = price_in_per_mtok;
         self.stage2_price_out_per_mtok = price_out_per_mtok;
@@ -1413,10 +1426,11 @@ impl ApiState {
         // any credential is attached, or an Outlook token would be handed to a
         // Gmail writer on a fresh database.
         let account_id = store.ensure_account(account_email)?;
-        if cfg.provider == squelch_core::mail::MailProvider::Outlook {
-            store.bind_account_provider(account_id, cfg.provider)?;
+        if let Some(provider) = cfg.provider {
+            store.bind_account_provider(account_id, provider)?;
         }
         let state = Self::from_env(store, account_email)?
+            .with_known_provider(cfg.mail_provider())
             .with_stage2_prices(cfg.stage2.price_in_per_mtok, cfg.stage2.price_out_per_mtok)
             .with_agent_triage(cfg.triage.clone())
             .with_archive_days(cfg.sync.archive_days)

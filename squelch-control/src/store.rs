@@ -190,6 +190,12 @@ CREATE TABLE IF NOT EXISTS tenants (
     -- tenant owns.
     share_token_hash        TEXT,
     share_token_minted_at   TEXT COLLATE \"C\",
+    -- WHICH COMPANY the mailbox is at: 'gmail' (every tenant before Outlook)
+    -- or 'outlook'. Logins are matched within it, never across it.
+    provider                TEXT NOT NULL DEFAULT 'gmail',
+    -- An Outlook tenant's Microsoft account id (Graph /me id): the identity a
+    -- Microsoft login is matched by, because Microsoft vouches for no address.
+    ms_account_id           TEXT,
     -- NAMED, and the name is `TENANTS_LABEL_KEY`. An anonymous UNIQUE would
     -- still be told apart by whatever name Postgres invented for it, which is
     -- a thing to guess rather than a thing to read.
@@ -351,13 +357,15 @@ const USER_ADDED_COLUMNS: [(&str, &str); 1] = [("name", "TEXT")];
 /// The same, for `tenants`: the triage virtual-key columns arrived after the
 /// first hosted deployment, the assistant pair after them, and the share token
 /// after that.
-const TENANT_ADDED_COLUMNS: [(&str, &str); 6] = [
+const TENANT_ADDED_COLUMNS: [(&str, &str); 8] = [
     ("bifrost_vk_id", "TEXT"),
     ("vk_minted_at", "TEXT COLLATE \"C\""),
     ("bifrost_assistant_vk_id", "TEXT"),
     ("assistant_vk_minted_at", "TEXT COLLATE \"C\""),
     ("share_token_hash", "TEXT"),
     ("share_token_minted_at", "TEXT COLLATE \"C\""),
+    ("provider", "TEXT NOT NULL DEFAULT 'gmail'"),
+    ("ms_account_id", "TEXT"),
 ];
 
 /// Columns `reconnect_jobs` gained after it shipped. Same shape as
@@ -912,6 +920,83 @@ impl ControlStore {
         row.map(|r| Ok(r.try_get(0)?)).transpose()
     }
 
+    /// The ACTIVE tenant for this mailbox, and which company it is at, if
+    /// any: the duplicate check names the company in its refusal.
+    pub async fn active_tenant_and_provider_for_email(
+        &self,
+        account_email: &str,
+    ) -> Result<Option<(String, String)>> {
+        let row = self
+            .client()
+            .await?
+            .query_opt(
+                "SELECT label, provider FROM tenants WHERE account_email = $1 AND status = $2",
+                &[&normalize_email(account_email), &STATUS_ACTIVE],
+            )
+            .await?;
+        row.map(|r| Ok((r.try_get(0)?, r.try_get(1)?))).transpose()
+    }
+
+    /// The label of the ACTIVE GMAIL tenant for this address: what a GOOGLE
+    /// login may open. Gmail only, so a Google account registered on some
+    /// other company's address can never open an Outlook mailbox at it.
+    pub async fn active_gmail_tenant_for_email(
+        &self,
+        account_email: &str,
+    ) -> Result<Option<String>> {
+        let row = self
+            .client()
+            .await?
+            .query_opt(
+                "SELECT label FROM tenants
+                 WHERE account_email = $1 AND status = $2 AND provider = 'gmail'",
+                &[&normalize_email(account_email), &STATUS_ACTIVE],
+            )
+            .await?;
+        row.map(|r| Ok(r.try_get(0)?)).transpose()
+    }
+
+    /// The label of the ACTIVE OUTLOOK tenant for this Microsoft account id:
+    /// what a MICROSOFT login may open. Never looked up by address.
+    pub async fn active_outlook_tenant_for_ms_id(
+        &self,
+        ms_account_id: &str,
+    ) -> Result<Option<String>> {
+        let row = self
+            .client()
+            .await?
+            .query_opt(
+                "SELECT label FROM tenants
+                 WHERE ms_account_id = $1 AND status = $2 AND provider = 'outlook'",
+                &[&ms_account_id, &STATUS_ACTIVE],
+            )
+            .await?;
+        row.map(|r| Ok(r.try_get(0)?)).transpose()
+    }
+
+    /// Who owns the ACTIVE tenant with this label: its address, company, and
+    /// (Outlook) Microsoft account id. The console login's question, asked
+    /// with the company in it.
+    pub async fn active_tenant_owner(&self, label: &str) -> Result<Option<TenantOwner>> {
+        let row = self
+            .client()
+            .await?
+            .query_opt(
+                "SELECT account_email, provider, ms_account_id FROM tenants
+                 WHERE label = $1 AND status = $2",
+                &[&label, &STATUS_ACTIVE],
+            )
+            .await?;
+        row.map(|r| {
+            Ok(TenantOwner {
+                account_email: r.try_get(0)?,
+                provider: r.try_get(1)?,
+                ms_account_id: r.try_get(2)?,
+            })
+        })
+        .transpose()
+    }
+
     /// The mailbox that owns the ACTIVE tenant with this label, if there is one.
     ///
     /// The console login's whole question, asked twice: once before the user is
@@ -940,14 +1025,35 @@ impl ControlStore {
     /// races are expected (two tabs, two signups) and the pages above say
     /// different things about them.
     pub async fn insert_tenant(&self, label: &str, account_email: &str) -> Result<()> {
+        self.insert_tenant_for(label, account_email, "gmail", None)
+            .await
+    }
+
+    /// [`Self::insert_tenant`] with the company and, for Outlook, the
+    /// Microsoft account id. Both unique indexes on an active tenant (its
+    /// address, and its Microsoft account) map to [`StoreError::AccountTaken`].
+    pub async fn insert_tenant_for(
+        &self,
+        label: &str,
+        account_email: &str,
+        provider: &str,
+        ms_account_id: Option<&str>,
+    ) -> Result<()> {
         let email = normalize_email(account_email);
         let res = self
             .client()
             .await?
             .execute(
-                "INSERT INTO tenants(label, account_email, status, created_at)
-                 VALUES($1, $2, $3, $4)",
-                &[&label, &email, &STATUS_ACTIVE, &stamp(Utc::now())],
+                "INSERT INTO tenants(label, account_email, status, created_at, provider, ms_account_id)
+                 VALUES($1, $2, $3, $4, $5, $6)",
+                &[
+                    &label,
+                    &email,
+                    &STATUS_ACTIVE,
+                    &stamp(Utc::now()),
+                    &provider,
+                    &ms_account_id,
+                ],
             )
             .await;
         match res {
@@ -1889,6 +1995,15 @@ fn invite_row(r: &Row) -> Result<InviteRow> {
 
 /// One `tenants` row in the column order [`ControlStore::list_tenants`]
 /// selects.
+/// The owner of an active tenant (see [`ControlStore::active_tenant_owner`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TenantOwner {
+    pub account_email: String,
+    /// `gmail` or `outlook`.
+    pub provider: String,
+    pub ms_account_id: Option<String>,
+}
+
 fn tenant_row(r: &Row) -> Result<TenantRow> {
     Ok(TenantRow {
         label: r.try_get(0)?,
@@ -1935,6 +2050,7 @@ async fn migrate(tx: &Transaction<'_>) -> Result<()> {
     add_missing_columns(tx, "users", &USER_ADDED_COLUMNS).await?;
     add_missing_columns(tx, "reconnect_jobs", &RECONNECT_ADDED_COLUMNS).await?;
     add_share_token_index(tx).await?;
+    add_ms_account_index(tx).await?;
     add_invited_by_index(tx).await?;
     backfill_expiry(tx).await?;
     backfill_users(tx).await
@@ -1977,6 +2093,20 @@ async fn add_share_token_index(tx: &Transaction<'_>) -> Result<()> {
     tx.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_tenants_share_token
              ON tenants(share_token_hash) WHERE share_token_hash IS NOT NULL",
+        &[],
+    )
+    .await?;
+    Ok(())
+}
+
+/// One Microsoft account, one active Outlook mailbox: the account-id twin of
+/// `idx_tenants_active_email`, here for the share-token index's reason (the
+/// column arrives by migration).
+async fn add_ms_account_index(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_tenants_active_ms_account
+             ON tenants(ms_account_id)
+             WHERE status = 'active' AND provider = 'outlook' AND ms_account_id IS NOT NULL",
         &[],
     )
     .await?;

@@ -2013,10 +2013,13 @@ fn open_account_store(
     let email = config.require_account_email()?;
     let store = SqliteStore::open(&config.db_path)?;
     let account_id = store.ensure_account(&email)?;
-    // Before anything syncs or writes: the account is the provider the config
-    // says, or this refuses (a mailbox never changes provider).
-    if config.provider == squelch_core::mail::MailProvider::Outlook {
-        store.bind_account_provider(account_id, config.provider)?;
+    // Before anything syncs or writes: when the config names a provider, or
+    // it was inferred from the stored credential, the account is that
+    // provider, or this refuses (a mailbox never changes provider). Unset
+    // leaves the row as `squelchd auth` left it, which is how an IMAP account
+    // is set.
+    if let Some(provider) = config.provider {
+        store.bind_account_provider(account_id, provider)?;
     }
     Ok((store, account_id))
 }
@@ -2317,12 +2320,13 @@ fn run_daemon(config: Config) -> Result<(), squelch_core::CoreError> {
 
     let mut store = SqliteStore::open(&config.db_path)?;
     let account_id = store.ensure_account(&email)?;
-    // Before anything syncs or writes: a config that says Outlook binds the
-    // account to Outlook, or this refuses (a mailbox never changes provider).
-    // Gmail is the config's default, so it binds nothing: the row stays as
-    // `squelchd auth` left it, which is how an IMAP account is set.
-    if config.provider == squelch_core::mail::MailProvider::Outlook {
-        store.bind_account_provider(account_id, config.provider)?;
+    // Before anything syncs or writes: when the config names a provider, or
+    // it was inferred from the stored credential, the account is that
+    // provider, or this refuses (a mailbox never changes provider). Unset
+    // leaves the row as `squelchd auth` left it, which is how an IMAP account
+    // is set.
+    if let Some(provider) = config.provider {
+        store.bind_account_provider(account_id, provider)?;
     }
     let client = oauth_client_for(&config, known_provider(store.account_provider(account_id))?)?;
 
@@ -2851,12 +2855,13 @@ fn cmd_serve(
 
     let store = SqliteStore::open(&config.db_path)?;
     let account_id = store.ensure_account(&email)?;
-    // Before anything syncs or writes: a config that says Outlook binds the
-    // account to Outlook, or this refuses (a mailbox never changes provider).
-    // Gmail is the config's default, so it binds nothing: the row stays as
-    // `squelchd auth` left it, which is how an IMAP account is set.
-    if config.provider == squelch_core::mail::MailProvider::Outlook {
-        store.bind_account_provider(account_id, config.provider)?;
+    // Before anything syncs or writes: when the config names a provider, or
+    // it was inferred from the stored credential, the account is that
+    // provider, or this refuses (a mailbox never changes provider). Unset
+    // leaves the row as `squelchd auth` left it, which is how an IMAP account
+    // is set.
+    if let Some(provider) = config.provider {
+        store.bind_account_provider(account_id, provider)?;
     }
     let provider = known_provider(store.account_provider(account_id))?;
     let client = oauth_client_for(&config, provider)?;

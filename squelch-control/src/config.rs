@@ -45,6 +45,17 @@ pub const GMAIL_PROFILE_URL: &str = "https://gmail.googleapis.com/gmail/v1/users
 /// comes from must not be an environment variable.
 pub const GOOGLE_USERINFO_URL: &str = "https://openidconnect.googleapis.com/v1/userinfo";
 
+/// Microsoft's authorization endpoint (`common`: personal and work accounts
+/// alike). Pinned for the same reasons as Google's.
+pub const MICROSOFT_AUTH_URL: &str =
+    "https://login.microsoftonline.com/common/oauth2/v2.0/authorize";
+
+/// Microsoft's token endpoint. Pinned: it receives the confidential secret.
+pub const MICROSOFT_TOKEN_URL: &str = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
+
+/// Microsoft Graph, which names the account behind a Microsoft token.
+pub const GRAPH_BASE_URL: &str = "https://graph.microsoft.com/v1.0";
+
 /// Ceiling on `SQUELCH_CONTROL_TRUSTED_PROXY_HOPS`. Same reasoning as the
 /// broker's: nobody stacks eight proxies, a larger number is a typo, and a typo
 /// degrades silently into one shared rate-limit bucket for the whole internet.
@@ -215,6 +226,69 @@ impl ConfigError {
     }
 }
 
+/// The Microsoft half of a deployment: the confidential Entra app hosted
+/// signup authorizes as, and where its endpoints are. The endpoints are fields
+/// for the same reason Google's are (tests point them at a mock); `from_env`
+/// pins Microsoft's.
+#[derive(Clone)]
+pub struct MicrosoftConfig {
+    pub client_id: String,
+    /// Redacted from `Debug`.
+    pub client_secret: String,
+    pub auth_url: String,
+    pub token_url: String,
+    pub graph_base: String,
+}
+
+impl std::fmt::Debug for MicrosoftConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MicrosoftConfig")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("auth_url", &self.auth_url)
+            .field("token_url", &self.token_url)
+            .field("graph_base", &self.graph_base)
+            .finish()
+    }
+}
+
+/// The Microsoft app from `SQUELCH_CONTROL_MICROSOFT_CLIENT_ID` and
+/// `..._SECRET`: both or neither, since half an app is a refusal to boot
+/// rather than a silent off.
+pub fn microsoft_from(
+    id: Option<String>,
+    secret: Option<String>,
+) -> Result<Option<MicrosoftConfig>, ConfigError> {
+    let id = id.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let secret = secret
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    match (id, secret) {
+        (None, None) => Ok(None),
+        (Some(client_id), Some(client_secret)) => {
+            if !squelch_core::config::is_entra_app_id(&client_id) {
+                return Err(ConfigError::invalid(
+                    "SQUELCH_CONTROL_MICROSOFT_CLIENT_ID must be the Entra app's Application \
+                     (client) ID, a GUID"
+                        .to_string(),
+                ));
+            }
+            Ok(Some(MicrosoftConfig {
+                client_id,
+                client_secret,
+                auth_url: MICROSOFT_AUTH_URL.to_string(),
+                token_url: MICROSOFT_TOKEN_URL.to_string(),
+                graph_base: GRAPH_BASE_URL.to_string(),
+            }))
+        }
+        _ => Err(ConfigError::invalid(
+            "set both SQUELCH_CONTROL_MICROSOFT_CLIENT_ID and \
+             SQUELCH_CONTROL_MICROSOFT_CLIENT_SECRET, or neither"
+                .to_string(),
+        )),
+    }
+}
+
 /// Validated startup configuration.
 #[derive(Clone)]
 pub struct Config {
@@ -256,6 +330,10 @@ pub struct Config {
     /// OIDC's userinfo endpoint, pinned by `from_env` the same way. The console
     /// login reads it; the signup flow never touches it.
     pub userinfo_url: String,
+    /// The confidential "Passband Hosted" Entra app, when this deployment has
+    /// one. `None` means Outlook is OFF: its buttons are not drawn and its
+    /// routes refuse, exactly as a missing Bifrost turns LLM keys off.
+    pub microsoft: Option<MicrosoftConfig>,
     /// The Bifrost LLM gateway, when this deployment has one. `None` means the
     /// feature is OFF and signup provisions tenants with no LLM key at all;
     /// a partial configuration is a refusal to boot, never a silent off.
@@ -412,6 +490,8 @@ impl std::fmt::Debug for Config {
             .field("auth_url", &self.auth_url)
             .field("profile_url", &self.profile_url)
             .field("userinfo_url", &self.userinfo_url)
+            // MicrosoftConfig's own Debug redacts the secret.
+            .field("microsoft", &self.microsoft)
             // BifrostConfig's own Debug redacts the admin token.
             .field("bifrost", &self.bifrost)
             // WaitlistConfig's own Debug redacts the admin token and the
@@ -559,6 +639,10 @@ impl Config {
             auth_url: GOOGLE_AUTH_URL.to_string(),
             profile_url: GMAIL_PROFILE_URL.to_string(),
             userinfo_url: GOOGLE_USERINFO_URL.to_string(),
+            microsoft: microsoft_from(
+                var("SQUELCH_CONTROL_MICROSOFT_CLIENT_ID"),
+                var("SQUELCH_CONTROL_MICROSOFT_CLIENT_SECRET"),
+            )?,
             bifrost,
             waitlist,
             alert_webhook_url: alert_webhook_from(var("SQUELCH_CONTROL_ALERT_WEBHOOK_URL"))?,
@@ -1034,6 +1118,7 @@ mod tests {
             auth_url: GOOGLE_AUTH_URL.into(),
             profile_url: GMAIL_PROFILE_URL.into(),
             userinfo_url: GOOGLE_USERINFO_URL.into(),
+            microsoft: None,
             bifrost: Some(BifrostConfig {
                 url: "https://bifrost.passband.email".into(),
                 admin_token: "admin:BIFROST-ADMIN-VALUE".into(),

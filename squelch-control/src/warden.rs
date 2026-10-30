@@ -224,6 +224,16 @@ struct RecipientRequest<'a> {
 struct CreateRequest<'a> {
     label: &'a str,
     account_email: &'a str,
+    /// `outlook` for an Outlook tenant, so the warden renders it with the
+    /// Microsoft client. OMITTED for Gmail, so a Gmail signup sends exactly
+    /// the bytes it always did and a warden that predates the field reads it
+    /// the same way.
+    #[serde(skip_serializing_if = "is_gmail")]
+    provider: &'a str,
+}
+
+fn is_gmail(p: &&str) -> bool {
+    *p == "gmail"
 }
 
 /// `POST /v1/tenants` 201 body.
@@ -455,8 +465,12 @@ const REPLACEMENT: char = '\u{fffd}';
 pub trait Warden: Send + Sync {
     /// Call 1: record the tenant and learn the recipient to seal to. Idempotent
     /// for a pending label with the same `account_email`.
-    async fn create_tenant(&self, label: &str, account_email: &str)
-    -> Result<Created, WardenError>;
+    async fn create_tenant(
+        &self,
+        label: &str,
+        account_email: &str,
+        provider: &str,
+    ) -> Result<Created, WardenError>;
 
     /// The age recipient of a tenant that ALREADY EXISTS, so a REPLACEMENT
     /// credential can be sealed to it.
@@ -594,6 +608,7 @@ impl Warden for HttpWarden {
         &self,
         label: &str,
         account_email: &str,
+        provider: &str,
     ) -> Result<Created, WardenError> {
         // Already guaranteed upstream; asserted here so the guarantee does not
         // depend on every future caller remembering it. The label reaches a URL
@@ -608,6 +623,7 @@ impl Warden for HttpWarden {
             .json(&CreateRequest {
                 label,
                 account_email,
+                provider,
             })
             .send()
             .await
@@ -1220,7 +1236,7 @@ mod tests {
             let armor = format!("{}\nbody\n", crate::seal::ARMOR_HEADER);
             assert!(
                 matches!(
-                    w.create_tenant(bad, "ada@example.com").await,
+                    w.create_tenant(bad, "ada@example.com", "gmail").await,
                     Err(WardenError::LabelRefused)
                 ),
                 "{bad:?}"

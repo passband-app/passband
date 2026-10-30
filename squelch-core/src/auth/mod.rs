@@ -389,12 +389,16 @@ fn google_client_at(
         OAuthIssuer::Microsoft => client.issuer.auth_url(),
     };
     let oauth = BasicClient::new(ClientId::new(client.client_id.clone()));
-    // A public client (Microsoft) presents no secret: its token endpoint
-    // refuses one, and there is none to present.
+    // Microsoft: a public app presents NO secret (its endpoint refuses one);
+    // a confidential one (`microsoft_client_secret`, or a hosted tenant's) does,
+    // in the body, which every Entra app accepts.
     let oauth = match client.issuer {
         OAuthIssuer::Google => {
             oauth.set_client_secret(ClientSecret::new(client.client_secret.clone()))
         }
+        OAuthIssuer::Microsoft if !client.client_secret.is_empty() => oauth
+            .set_client_secret(ClientSecret::new(client.client_secret.clone()))
+            .set_auth_type(oauth2::AuthType::RequestBody),
         OAuthIssuer::Microsoft => oauth,
     };
     Ok(oauth
@@ -3839,6 +3843,33 @@ mod microsoft_tests {
             "{req}"
         );
         assert!(!req.contains("client_secret"), "{req}");
+        assert!(
+            !req.to_ascii_lowercase().contains("authorization: basic"),
+            "{req}"
+        );
+    }
+
+    /// The hosted app is confidential: its secret goes in the body, never a
+    /// Basic header.
+    #[test]
+    fn a_confidential_microsoft_refresh_presents_its_secret_in_the_body() {
+        let (base, rx) = capturing(vec![(
+            "200 OK",
+            r#"{"access_token":"a","token_type":"Bearer","expires_in":3600}"#.into(),
+        )]);
+        let client = OAuthClientConfig {
+            client_secret: "hosted-secret".into(),
+            ..ms_client()
+        };
+        crate::credentials::refresh_stored_token_detailed_at(
+            &client,
+            "r1",
+            &format!("{base}/token"),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let req = rx.recv().unwrap();
+        assert!(req.contains("client_secret=hosted-secret"), "{req}");
         assert!(
             !req.to_ascii_lowercase().contains("authorization: basic"),
             "{req}"

@@ -278,6 +278,7 @@ impl Harness {
             auth_url: format!("{google}/authorize"),
             profile_url: format!("{google}/profile"),
             userinfo_url: format!("{google}/userinfo"),
+            microsoft: None,
             alert_webhook_url: None,
             // No agent door: `/agent/auth` is not mounted.
             workos: None,

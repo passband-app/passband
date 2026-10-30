@@ -1598,12 +1598,24 @@ it, and Passband's own writes always send `sendUpdates=none`.
   IN CODE (`remind::settle`): the lead is one of 10, 30, 60, 120, 180
   minutes; the line, which reaches the lock screen, loses control, bidi and
   invisible characters (`order_link::plain`), is NFKC-folded, and is DROPPED
-  whole by `remind::line_shaped`: the `basis` rule (`ghost::mail_shaped`,
-  unchanged for triage) plus any dotted host with a 2+ letter top-level
-  label, `[.]`/`(.)`/`[dot]`/` dot ` obfuscations, `hxxp`, `@` or `[at]`, a
-  run of 6 or more digits across the separators a number is printed with
-  (`/ , _ ·` included, look-alike `l I o` counted inside a run), and
-  `1-8xx-` vanity numbers; then cut to 90 characters. The title, place and
+  whole by `remind::line_shaped` (its own rule; triage's `ghost::mail_shaped`
+  is unchanged), tested after invisible characters and combining marks are
+  dropped: a URL or any dotted host (last label a country code, 3+ ASCII
+  letters, or any non-ASCII letters), a dot written or spaced out before a
+  top-level domain (with a space before the dot in any case, else with the
+  domain in lower case), `hxxp`, `[at]`, an `@` touching a letter or digit,
+  6+ digits unbroken or in 3+ hyphen-joined groups, 7+ across the
+  separators a number is printed with (`/ , _ ·` and every dash included,
+  look-alike `l I o` counted inside a run, dates with a year masked first),
+  and vanity or keypad-spelled numbers; then cut to
+  90 characters (docs/CALENDAR.md has the measured corpus). An entry code
+  (`remind::settle_code`) is served only when it appears word for word in
+  the item's own title, location or description (not a piece of a longer
+  hyphenated number), is at most 2 letters then digits, `#` or `*`, 3 to 12
+  characters with 2 to 6 digits (no phone number in any country, no spelled
+  number), and comes from a current plan; its label uses only a closed list
+  of words naming what a code opens, else "Code", so it can never ask the
+  reader to call or pay. The title, place and
   line are stripped of bidi controls and invisible marks again on the
   device; every mail, attachment and booking number is bounds-checked
   (out of range is none), and a booking's mail counts only once the answer

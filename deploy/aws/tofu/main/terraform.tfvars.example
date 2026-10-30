@@ -23,6 +23,7 @@ services_running = false
 # control
 control_base_domain = "passband.email"
 control_client_id   = "000000000000-placeholder.apps.googleusercontent.com"
+# control_microsoft_client_id = "00000000-0000-0000-0000-000000000000"   # Outlook signup, SETUP.md §6a
 control_warden_url  = "https://warden.passband.app"
 control_invite_from = "Passband <invites@passband.app>"
 # control_llm_models       = "copy the live value"

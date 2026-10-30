@@ -799,10 +799,22 @@ Optional: without it, hosted is Gmail only and nothing below changes.
    - Authentication: "Allow public client flows" stays OFF.
 2. **Control** (the ECS `control` service): `SQUELCH_CONTROL_MICROSOFT_CLIENT_ID`
    (the Application (client) ID) and `SQUELCH_CONTROL_MICROSOFT_CLIENT_SECRET`.
-   Both or neither; half refuses to boot. Neither is wired into tofu yet: the
-   id needs a plain variable in `deploy/aws/tofu/main/ecs.tf`, the secret a
-   container in `secrets.tf` (`passband/control/SQUELCH_CONTROL_MICROSOFT_CLIENT_SECRET`)
-   with its value piped in, then a control deploy.
+   Both or neither; half refuses to boot. Tofu ties them together: setting
+   `control_microsoft_client_id` in `terraform.tfvars` adds the id to control's
+   environment AND creates the secret container
+   `passband/control/SQUELCH_CONTROL_MICROSOFT_CLIENT_SECRET`. A container with
+   no value fails the task at start, so create it first, fill it, then apply
+   the rest, then deploy control:
+
+   ```sh
+   cd deploy/aws/tofu/main
+   tofu apply -target='aws_secretsmanager_secret.this["control/SQUELCH_CONTROL_MICROSOFT_CLIENT_SECRET"]'
+   pbpaste | tr -d '\n' | aws secretsmanager put-secret-value \
+     --secret-id passband/control/SQUELCH_CONTROL_MICROSOFT_CLIENT_SECRET \
+     --secret-string file:///dev/stdin
+   tofu apply   # the task definition revision and the IAM read grant
+   gh workflow run deploy-aws.yml -f service=control
+   ```
 3. **Tenants** (the cluster), the same pair, which every Outlook tenant's pod
    reads as `SQUELCH_CLIENT_ID`/`SQUELCH_CLIENT_SECRET`:
 

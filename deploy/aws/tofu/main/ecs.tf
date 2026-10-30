@@ -61,6 +61,7 @@ locals {
       SQUELCH_CONTROL_PUBLIC_URL           = var.control_public_url
       SQUELCH_CONTROL_BASE_DOMAIN          = var.control_base_domain
       SQUELCH_CONTROL_CLIENT_ID            = var.control_client_id
+      SQUELCH_CONTROL_MICROSOFT_CLIENT_ID  = var.control_microsoft_client_id
       SQUELCH_CONTROL_WARDEN_URL           = var.control_warden_url
       SQUELCH_CONTROL_BIFROST_URL          = var.control_bifrost_url
       SQUELCH_CONTROL_TRUSTED_PROXY_HOPS   = tostring(var.control_trusted_proxy_hops)

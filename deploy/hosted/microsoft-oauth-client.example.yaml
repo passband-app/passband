@@ -1,0 +1,33 @@
+# The Microsoft app every OUTLOOK tenant daemon refreshes with: "Passband
+# Hosted", the confidential Entra app squelch-control's Outlook signups run
+# through (deploy/hosted/SETUP.md §6a).
+#
+# DO NOT apply this file as it stands, and do not commit a filled-in copy.
+# Create it from the command line so the value never reaches a file:
+#
+#     kubectl -n tenants create secret generic microsoft-oauth-client \
+#       --from-literal=client_id="<the Passband Hosted application id>" \
+#       --from-literal=client_secret="<its secret>"
+#
+# Why it is inside a tenant pod at all is google-oauth-client.example.yaml's
+# reason, word for word: a Microsoft refresh token only refreshes for the app
+# that minted it, so an Outlook tenant holding its token and not this app's id
+# and secret cannot renew access. The warden hands it to OUTLOOK tenants only,
+# under the same SQUELCH_CLIENT_ID / SQUELCH_CLIENT_SECRET names a Gmail
+# tenant gets Google's under; a Gmail tenant never references this Secret.
+#
+# The NAME is fixed (`microsoft-oauth-client`), with no warden variable for it.
+# Rotating the secret: Entra keeps more than one client secret valid at once,
+# so add the new secret in Entra, update this Secret and control's
+# SQUELCH_CONTROL_MICROSOFT_CLIENT_SECRET, let pods pick it up on their next
+# roll, then delete the old secret in Entra. Do not `kubectl rollout restart`
+# tenant Deployments (google-oauth-client.example.yaml, "Rotation").
+apiVersion: v1
+kind: Secret
+metadata:
+  name: microsoft-oauth-client
+  namespace: tenants
+type: Opaque
+stringData:
+  client_id: 00000000-0000-0000-0000-000000000000
+  client_secret: REPLACE_ME

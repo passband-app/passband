@@ -4080,9 +4080,14 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
             // reason.
             // `hint` names this mailbox so the control plane pre-selects it at
             // Google and refuses a consent from any other account.
+            // An Outlook mailbox reconnects with Microsoft, which takes no
+            // hint (the control plane finds it by Microsoft account).
             if let Some(origin) = state.console_sso_url() {
-                gmail["reconnect_url"] =
-                    json!(format!("{origin}/reconnect?hint={}", url_component(&email)));
+                gmail["reconnect_url"] = if state.known_provider() == MailProvider::Outlook {
+                    json!(format!("{origin}/reconnect?provider=microsoft"))
+                } else {
+                    json!(format!("{origin}/reconnect?hint={}", url_component(&email)))
+                };
             }
         }
         body["gmail"] = gmail;
@@ -4187,7 +4192,10 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
         Some(calendar) => calendar.granted().await,
         None => false,
     };
-    let connect_url = state.console_sso_url().map(|origin| {
+    // No calendar connect for an Outlook mailbox: its consent already
+    // carries calendar, and Passband's calendar is Google's (#638).
+    let outlook = state.known_provider() == MailProvider::Outlook;
+    let connect_url = state.console_sso_url().filter(|_| !outlook).map(|origin| {
         format!(
             "{origin}/reconnect?calendar=1&hint={}",
             url_component(&email)

@@ -899,11 +899,15 @@ fn an_ordinary_line_passes_the_drop_test() {
 
 #[test]
 fn triage_basis_laundering_is_not_widened() {
-    // The reminder line is stricter than the shared `basis` rule, which
-    // still lets a bare host with no path through: widening it would change
-    // triage.
+    // The reminder line has its own rule, stricter where a stranger could
+    // steer it and looser where `basis` drops ordinary lines. Changing either
+    // must not change the other, so both directions are pinned.
     assert!(!ghost::mail_shaped("Pay at evil-tickets.com now"));
     assert!(line_shaped("Pay at evil-tickets.com now"));
+    assert!(ghost::mail_shaped("Dinner @ 7"));
+    assert!(!line_shaped("Dinner @ 7"));
+    assert!(ghost::mail_shaped("Your 2 tickets, seats 101-104"));
+    assert!(!line_shaped("Your 2 tickets, seats 101-104"));
 }
 
 #[test]
@@ -1246,4 +1250,163 @@ fn a_claimed_ghost_keeps_its_own_tickets_when_the_plan_names_none() {
     assert_eq!(pick.message_id, 50, "the dinner booking's own mail");
     // The claimed ghost's plan is kept, for when the claim lets go.
     assert!(built.keep(now(), LA).contains("g:2"));
+}
+
+/// The line rule over what the model plausibly writes: every ordinary line
+/// survives (dates with a year, seat ranges, "Dinner @ 7", "polka dot",
+/// "Node.js", sentence breaks before words that are also domains), and every
+/// steered one goes. Not caught, by design: a short code ("Text 55512") and
+/// plain words ("Your account is locked"); see docs/CALENDAR.md.
+#[test]
+fn the_line_rule_keeps_ordinary_lines_and_drops_steered_ones() {
+    let good = [
+        // concerts / shows
+        "Your 2 tickets are in the Ticketmaster email",
+        "Doors open at 7, show at 8",
+        "Doors open Oct 30, 2026",
+        "Doors at 7:30pm, bring your ID",
+        "Your 2 tickets, seats 101-104",
+        "Seats 101, 102 in section 12",
+        "Section 104, Row G, seats 5-6",
+        "Floor GA, no re-entry",
+        "Bag policy: clear bags only, 12x6x12 or smaller",
+        "Will call opens at 6pm",
+        "Wear polka dot or stripes, it's the dress code",
+        "Meet at the red dot in Hall B",
+        "Mobile tickets are in the AXS app",
+        "Parking pass is in the SeatGeek email",
+        "Starts at 8, opener at 7:15",
+        // flights / travel
+        "Boarding pass is in the United email",
+        "Flight 1234, 10:05 departure",
+        "UA 1532 boards at 6:25 from gate B12",
+        "Check in opens 24 hours before",
+        "Terminal 3, arrive 2 hours early for international",
+        "Confirmation is in the Delta email",
+        "Train 2150 leaves from track 12",
+        "Car rental pickup at Hertz, Terminal 1 lot",
+        "Hotel check in is after 3pm",
+        "Your seat is 23A",
+        // dining
+        "Table for 4 under Boynton",
+        "Dinner @ 7",
+        "Reservation for 2 at 7:30, 15 minute grace period",
+        "Booking is in the Resy email",
+        "Dress code: smart casual",
+        "Prepaid, $85 per person plus tip",
+        // meetings
+        "Zoom link is in the invite",
+        "Agenda: Q4 planning, bring the deck",
+        "Node.js meetup notes are in the description",
+        "Review the doc before you join",
+        "1:1 with Sam, 30 min",
+        "Room 4.12 on the fourth floor",
+        "Building 2, floor 3, room 301",
+        "Prep: 3 slides, 10 minutes",
+        // appointments
+        "Bring your insurance card and photo ID",
+        "Arrive 15 minutes early to fill out forms",
+        "Fasting from midnight, water is fine",
+        "Dr. Patel, suite 200",
+        "Copay is $40",
+        // generic / other
+        "Leave by 6:15 to make it on time",
+        "It's 25 minutes away with traffic",
+        "Bring a gift, it's her 30th",
+        "Rain expected, bring an umbrella",
+        "St. Louis time is an hour behind",
+        "Kickoff 1:05pm, gates open 11:30am",
+        "Race bib pickup 7-9am, start 9:30",
+        "Version 2.0 launch, demo at 3",
+        "Ticket for 1 adult, 2 children",
+        "Open until 10, last entry 9:15",
+        "Pickup order #4521 at the counter",
+        "Bring $20 cash for the coat check",
+        "Gate 4, Row 12, Seat 7",
+        "Event runs 6-9pm",
+        "Show starts 8pm, runtime 2 hr 15 min",
+        "Nov 4, 2026 at the Fillmore",
+        "Tuesday 11/4 at 8pm",
+        "Season opener, 2026-27 season",
+        "Room 101A",
+        "10.30am start",
+        "Bring ID. Cash only at the bar",
+        "Doors at 7. Show at 8",
+        "Arrive early. Info desk is by the entrance",
+        "Great seats. Club level, section 204",
+        "Bring snacks. Top tier has no food",
+        "See you there. Live music after",
+        "Lots of parking. Shop opens at 9",
+        "Party. Co-hosted by Sam and Alex",
+        "Dress warm. Site is outdoors",
+        "Pickup at 5. Ma and Pa will drive",
+        "Early start. App check in is open",
+        "Gift ideas. Link in the invite",
+        "It's casual. No jacket needed",
+        "Wear sneakers, net courts are outside",
+        "Online check in, then bag drop",
+        "Covid test required. Org is strict about it",
+        "Bring a jacket, it gets cold",
+        "Meet by the fountain, then walk over",
+        "Water, snacks, sunscreen",
+        "Park on Elm St. Net fee is $10",
+    ];
+    let bad = [
+        "Pay at evil-tickets.com now",
+        "see bit.ly",
+        "Visit paypal.com.evil.ru today",
+        "evil-tickets . com",
+        "evil. com",
+        "evil .com",
+        "evil-tickets·com",
+        "visit evil\u{2027}com",
+        "evil-tickets,com",
+        "Call 888-TICKETS",
+        "Call 800 FLOWERS",
+        "Call 1-800-FLOWERS",
+        "Call 415 555 1234",
+        "Call 555-1234",
+        "Text 55512 to confirm",
+        "Email support@evil.com",
+        "hxxps://evil[.]com/pay",
+        "Your account is locked, verify in Passband",
+        "evil dot com",
+        "evil dot co",
+        "Use code 482913",
+        "Call 415, 555, 1234",
+        "Call (415) 555-1234 now",
+        "Call +44 20 7946 0958",
+        "Call 555 1234",
+        "Text 4155551234",
+        "go to evil.co",
+        "evil.io/pay",
+        "Visit evil dot io",
+        "evil · net",
+        "evil ・ com",
+        "pay at evil.me",
+        "write to x@y",
+        "DM @evilsupport",
+        "Call 1 800 TICKETS",
+        "evil-tickets.ru",
+        "evil. org",
+    ];
+    let dropped: Vec<&str> = good
+        .iter()
+        .copied()
+        .filter(|l| launder_line(l).is_none())
+        .collect();
+    assert!(dropped.is_empty(), "ordinary lines dropped: {dropped:#?}");
+    let kept: Vec<&str> = bad
+        .iter()
+        .copied()
+        .filter(|l| launder_line(l).is_some())
+        .collect();
+    assert_eq!(
+        kept,
+        vec![
+            "Text 55512 to confirm",
+            "Your account is locked, verify in Passband"
+        ],
+        "steered lines kept"
+    );
 }

@@ -924,97 +924,195 @@ fn fold(text: &str) -> String {
     plain(&folded)
 }
 
-/// Common top-level domains, for the spelled-out ` dot ` obfuscation (any
-/// two letters count too, the country codes).
-const SPELLED_TLDS: [&str; 14] = [
+/// Common generic top-level domains: the right side of a dot written out
+/// (` dot com`) or spaced out (`evil . com`).
+const COMMON_TLDS: [&str; 14] = [
     "com", "net", "org", "info", "biz", "app", "xyz", "online", "site", "shop", "link", "live",
     "club", "top",
 ];
 
-/// THE LINE'S DROP TEST, stricter than triage's `basis` rule
-/// ([`ghost::mail_shaped`], which it also applies), over folded text. A
-/// reminder line never needs a domain, an address, a phone number or a
-/// code, and a stranger's invitation can steer what the model writes, so a
-/// line holding any of these goes:
+/// The two-letter country-code top-level domains (ISO 3166-1 alpha-2, plus
+/// `ac`, `eu`, `su` and `uk`). A two-letter last label is a host only when
+/// it is one of these, so "Node.js" and "Vue.js" are text.
+const COUNTRY_TLDS: &str = "ac ad ae af ag ai al am ao aq ar as at au aw ax az ba bb bd be bf \
+    bg bh bi bj bl bm bn bo bq br bs bt bv bw by bz ca cc cd cf cg ch ci ck cl cm cn co cr cu cv \
+    cw cx cy cz de dj dk dm do dz ec ee eg eh er es et eu fi fj fk fm fo fr ga gb gd ge gf gg gh \
+    gi gl gm gn gp gq gr gs gt gu gw gy hk hm hn hr ht hu id ie il im in io iq ir is it je jm jo \
+    jp ke kg kh ki km kn kp kr kw ky kz la lb lc li lk lr ls lt lu lv ly ma mc md me mf mg mh mk \
+    ml mm mn mo mp mq mr ms mt mu mv mw mx my mz na nc ne nf ng ni nl no np nr nu nz om pa pe pf \
+    pg ph pk pl pm pn pr ps pt pw py qa re ro rs ru rw sa sb sc sd se sg sh si sj sk sl sm sn so \
+    sr ss st su sv sx sy sz tc td tf tg th tj tk tl tm tn to tr tt tv tw tz ua ug uk um us uy uz \
+    va vc ve vg vi vn vu wf ws ye yt za zm zw";
+
+/// Country codes that are also everyday English words. After a written-out
+/// or spaced-out dot they read as English ("polka dot or stripes", "the red
+/// dot in Hall B", "Bring ID. At the door"), so they never count there. In a
+/// joined host (`evil.me`) they still do.
+const ENGLISH_TLDS: [&str; 16] = [
+    "am", "an", "as", "at", "be", "by", "do", "go", "in", "is", "it", "me", "my", "no", "so", "to",
+];
+
+fn country_tld(label: &str) -> bool {
+    label.len() == 2 && COUNTRY_TLDS.split_whitespace().any(|c| c == label)
+}
+
+/// A top-level domain as the right side of a dot written or spaced out: a
+/// common generic one, or a country code that is not an English word.
+fn loose_tld(word: &str) -> bool {
+    COMMON_TLDS.contains(&word) || (country_tld(word) && !ENGLISH_TLDS.contains(&word))
+}
+
+/// THE LINE'S DROP TEST, over folded text, stricter than triage's `basis`
+/// rule ([`ghost::mail_shaped`]) where a stranger could steer the line and
+/// looser where that rule drops ordinary lines. A reminder line never needs
+/// a domain, an address or a phone number, so a line holding one goes:
 ///
+/// - a URL or a bare host with a path ([`ghost::has_url`]);
 /// - a dotted host anywhere (`evil-tickets.com`, `bit.ly`,
-///   `paypal.com.evil.ru`): labels joined by dots, the last of 2 or more
-///   letters; "St. Louis" and "7.30" are not;
-/// - a dot written out to dodge that: `[.]`, `(.)`, `[dot]`, `(dot)`, or
-///   ` dot ` before a top-level domain;
-/// - `hxxp`, or an `@` (`[at]` too);
-/// - a run of 6 or more digits counted across the separators a number is
-///   printed with (space, `- . / , _ · + ( )`), the look-alike letters `l`,
-///   `I` and `o` counting inside a run;
-/// - a vanity number, `1-8xx-` and letters (`1-800-FLOWERS`).
+///   `paypal.com.evil.ru`): labels joined by dots, the last a country code or
+///   3 or more letters; "St. Louis", "7.30" and "Node.js" are not;
+/// - a dot written or spaced out before a top-level domain: `[.]`, `(.)`,
+///   `[dot]`, `evil dot com`, `evil . com`, `evil. com`, `evil·com`,
+///   `evil,com`; the English-word country codes never count here;
+/// - `hxxp`, `[at]`, or an `@` touching a letter or digit (`a@b`, `@evil`):
+///   "Dinner @ 7" is the word "at";
+/// - a phone number or a code ([`digit_run`]);
+/// - a vanity number ([`vanity_number`]).
 pub fn line_shaped(text: &str) -> bool {
-    if ghost::mail_shaped(text) {
+    if ghost::has_url(text) {
         return true;
     }
     let lower = text.to_lowercase();
-    if lower.contains('@')
-        || lower.contains("hxxp")
+    if lower.contains("hxxp")
         || ["[.]", "(.)", "[dot]", "(dot)", "{.}", "[at]", "(at)"]
             .iter()
             .any(|o| lower.contains(o))
+        || address_at(&lower)
     {
         return true;
     }
     let words: Vec<&str> = lower
         .split(|c: char| !c.is_alphanumeric() && c != '.' && c != '-')
         .collect();
-    if words.iter().any(|w| dotted_host(w)) {
+    if words.iter().any(|w| dotted_host(w)) || loose_host(text) {
         return true;
     }
-    // ` dot ` between a word and a top-level domain.
-    let tokens: Vec<&str> = lower.split_whitespace().collect();
-    if tokens.windows(3).any(|w| {
-        let tld = w[2].trim_matches(|c: char| !c.is_alphanumeric());
-        w[1] == "dot"
-            && w[0].chars().any(char::is_alphanumeric)
-            && (SPELLED_TLDS.contains(&tld)
-                || (tld.chars().count() == 2 && tld.chars().all(char::is_alphabetic)))
-    }) {
-        return true;
-    }
-    digit_run(text) || vanity_number(&lower)
+    digit_run(text) || vanity_number(text)
 }
 
-/// `label(.label)+` with a last label of 2 or more letters, over one run of
-/// letters, digits, dots and hyphens.
+/// An `@` with a letter or digit right before or after it.
+fn address_at(lower: &str) -> bool {
+    let chars: Vec<char> = lower.chars().collect();
+    chars.iter().enumerate().any(|(i, &c)| {
+        c == '@'
+            && (i > 0 && chars[i - 1].is_alphanumeric()
+                || chars.get(i + 1).is_some_and(|n| n.is_alphanumeric()))
+    })
+}
+
+/// `label(.label)+` with a last label that is a country code or 3 or more
+/// letters, over one run of letters, digits, dots and hyphens.
 fn dotted_host(word: &str) -> bool {
     let word = word.trim_matches(['.', '-']);
     let labels: Vec<&str> = word.split('.').collect();
     labels.len() >= 2
         && labels.iter().all(|l| !l.is_empty())
-        && labels
-            .last()
-            .is_some_and(|tld| tld.chars().count() >= 2 && tld.chars().all(char::is_alphabetic))
+        && labels.last().is_some_and(|tld| {
+            tld.chars().all(|c| c.is_ascii_alphabetic()) && (tld.len() >= 3 || country_tld(tld))
+        })
 }
 
-/// A run of 6 or more digits across the separators a number is printed
-/// with; inside a run, `l`, `I` and `o`/`O` count as digits.
+/// A dot written out or spaced out between a word and a top-level domain
+/// ([`loose_tld`]), the domain not followed by a letter or a hyphen ("Party.
+/// Co-hosted" is a sentence):
+///
+/// - written out, any case: `evil dot com`, `evil DOT io`;
+/// - spaced, or one of the look-alikes `·` `‧` `∙` `・` with or without
+///   spaces, or a bare comma: `evil . com`, `evil. com`, `evil .com`,
+///   `evil·com`, `evil,com`, but only with the domain in LOWER case. A
+///   sentence starts its next word with a capital ("Arrive early. Info desk",
+///   "Great seats. Club level"); an address written to dodge the filter
+///   does not.
+///
+/// Over the text as written, since the case is the signal.
+fn loose_host(text: &str) -> bool {
+    static WRITTEN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?i)[a-z0-9]\s+dot\s+([a-z]{2,6})(?:[^a-z-]|$)")
+            .expect("written dot regex")
+    });
+    static SPACED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"[A-Za-z0-9](?:\s*[.\u{B7}\u{2027}\u{2219}\u{30FB}]\s*|,)([a-z]{2,6})(?:[^A-Za-z-]|$)",
+        )
+        .expect("spaced dot regex")
+    });
+    // SPACED captures lower case only, so folding the case changes nothing
+    // there; WRITTEN takes any case.
+    let hit = |re: &regex::Regex| {
+        re.captures_iter(text).any(|c| {
+            c.get(1)
+                .is_some_and(|tld| loose_tld(&tld.as_str().to_lowercase()))
+        })
+    };
+    hit(&WRITTEN) || hit(&SPACED)
+}
+
+/// A phone number or a code: an unbroken run of 6 or more digits (a code,
+/// "482913"), 6 or more in 3 or more groups joined only by hyphens (a code,
+/// "12-34-56"), or 7 or more counted across the separators a number is
+/// printed with (space, `- . / , _ · + ( )`; every phone number has 7). The
+/// look-alike letters `l`, `I` and `o` count inside a run. Two short numbers
+/// side by side ("Oct 30, 2026", "seats 101-104", "2026-27") make 6 and are
+/// text.
 fn digit_run(text: &str) -> bool {
-    let mut run = 0;
+    let (mut run, mut group, mut groups) = (0, 0, 0);
+    let mut hyphens_only = true;
+    let mut gap: Option<char> = None;
     text.chars().any(|c| {
         if c.is_numeric() || (run > 0 && matches!(c, 'l' | 'I' | 'o' | 'O')) {
+            if group == 0 {
+                groups += 1;
+                if let Some(sep) = gap.take() {
+                    hyphens_only &= sep == '-';
+                }
+            }
             run += 1;
-        } else if !matches!(
-            c,
-            ' ' | '-' | '.' | '+' | '(' | ')' | '/' | ',' | '_' | '\u{B7}'
-        ) {
-            run = 0;
+            group += 1;
+        } else if run > 0
+            && matches!(
+                c,
+                ' ' | '-' | '.' | '+' | '(' | ')' | '/' | ',' | '_' | '\u{B7}'
+            )
+        {
+            // A separator inside a run: the next digit starts a new group.
+            // Two separators in a row ("1, 2") are joined by the last one
+            // unless either is not a hyphen.
+            if group > 0 || gap.is_some() {
+                gap = Some(match gap {
+                    Some(prev) if prev != c => ' ',
+                    _ => c,
+                });
+            }
+            group = 0;
+        } else {
+            (run, group, groups, hyphens_only, gap) = (0, 0, 0, true, None);
         }
-        run >= 6
+        group >= 6 || run >= 7 || (run >= 6 && groups >= 3 && hyphens_only)
     })
 }
 
-/// `1-8xx-` and then a letter, the separators a space, `-` or `.`.
-fn vanity_number(lower: &str) -> bool {
+/// A vanity phone number: `1-8xx-` and then a letter (`1-800-flowers`), or a
+/// toll-free prefix and a capitalized word of 4 or more letters with no
+/// leading 1 (`888-TICKETS`, `800 FLOWERS`). Over the text as written: the
+/// capitals are what tell `800 FLOWERS` from "800 people".
+fn vanity_number(text: &str) -> bool {
     static VANITY: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"(?:^|[^0-9])1[ .-]?8[0-9]{2}[ .-]+[a-z]").expect("vanity regex")
+        regex::Regex::new(
+            r"(?:^|[^0-9])(?:1[ .-]?8[0-9]{2}[ .-]+[A-Za-z]|8(?:00|33|44|55|66|77|88)[ .-]+[A-Z]{4})",
+        )
+        .expect("vanity regex")
     });
-    VANITY.is_match(lower)
+    VANITY.is_match(text)
 }
 
 /// A 1-based number into a list of `len`, as an index. None out of range.

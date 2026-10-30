@@ -997,15 +997,28 @@ input in code:
 - `line`: at most 90 characters, cut on a character boundary, laundered with
   `order_link::plain` (control, bidi and invisible characters gone) and
   NFKC-folded (fullwidth `ｅｖｉｌ．ｃｏｍ` reads as `evil.com`). Dropped, leaving
-  no line, by `remind::line_shaped`, which is the `basis` rule of §3.6 plus a
-  stricter set of its own (the `basis` rule itself is unchanged for triage):
-  any dotted host (`evil-tickets.com`, `bit.ly`; not "St. Louis" or "7.30"),
-  a dot written out (`[.]`, `(.)`, `[dot]`, ` dot ` before a top-level
-  domain), `hxxp`, an `@` or `[at]`, a run of 6 or more digits counted across
-  the separators a number is printed with (space, `- . / , _ · + ( )`, with
-  `l`, `I` and `o` counting inside a run), and a vanity number (`1-800-` and
-  letters). A real line never needs any of these. The banner then shows the
-  title and time only.
+  no line, by `remind::line_shaped`, its own rule (the `basis` rule of §3.6
+  is unchanged for triage, and was both too loose and too strict here):
+  - a URL, or a dotted host whose last label is a country code or 3+
+    letters (`evil-tickets.com`, `bit.ly`; not "St. Louis", "7.30" or
+    "Node.js");
+  - a dot written out (`[.]`, `(.)`, `[dot]`, `evil dot com`) or spaced out
+    (`evil . com`, `evil. com`, `evil·com`, `evil,com`) before a top-level
+    domain. The spaced forms count only a LOWER-case domain, since a sentence
+    capitalizes its next word ("Arrive early. Info desk"); country codes
+    that are English words ("polka dot or stripes") never count here;
+  - `hxxp`, `[at]`, or an `@` touching a letter or digit ("Dinner @ 7" stays);
+  - a phone number or code: 6+ digits unbroken, 6+ in 3+ hyphen-joined
+    groups ("12-34-56"), or 7+ across the separators a number is printed
+    with (every phone number has 7, while "Oct 30, 2026", "seats 101-104"
+    and "2026-27" make 6);
+  - a vanity number (`1-800-flowers`, or `888-TICKETS` in capitals).
+  The banner then shows the title and time only. Measured 2026-10-30 over 84
+  ordinary lines and 37 steered ones (`remind::tests::
+  the_line_rule_keeps_ordinary_lines_and_drops_steered_ones`): every ordinary
+  line kept, every steered one dropped but two no filter can catch, an SMS
+  short code ("Text 55512") and plain words ("Your account is locked,
+  verify in Passband"). The earlier rule dropped 9 of the first 64.
 - `open` and `ticket`: `{mail, attachment?}` indexes into the numbered lists.
   An index out of range is null. `open` is what tapping the banner shows;
   `ticket` is what the Tickets button shows.

@@ -962,6 +962,94 @@ async fn live_mail_that_lands_between_the_listing_and_the_cursor_is_the_next_wal
     let _ = other.logout().await;
 }
 
+/// MAIL FLAGGED \Deleted IS NEVER LISTED (final matrix row 11): another
+/// client marked it for removal, so neither a listing nor the poll walk
+/// hands it to ingest. Undeleted, it shows up at the next listing (the walk
+/// has moved past its UID).
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_mail_flagged_deleted_is_never_listed_until_undeleted() {
+    let user = fresh_user("deleted");
+    let mut other = other_client(&user).await;
+    other
+        .append(
+            INBOX,
+            Some("(\\Deleted)"),
+            None,
+            &mail(Some("gone-1@x.org"), "gone"),
+        )
+        .await
+        .unwrap();
+    append(&mut other, INBOX, &mail(Some("kept-1@x.org"), "kept"), None).await;
+    let (src, _) = live(&user);
+
+    let listed = src
+        .list(inbox_listing(), None, Urgency::Window)
+        .await
+        .unwrap();
+    assert_eq!(listed, vec![stable_id_for_message_id("kept-1@x.org")]);
+    let within = src
+        .list(
+            Listing::Folder {
+                folder: Folder::Inbox,
+                within_days: Some(30_000),
+            },
+            None,
+            Urgency::Window,
+        )
+        .await
+        .unwrap();
+    assert_eq!(within, listed, "a SINCE listing skips it too");
+
+    // The poll walk: a \Deleted arrival is not new mail.
+    let cursor = src.current_cursor().await.unwrap();
+    other
+        .append(
+            INBOX,
+            Some("(\\Deleted)"),
+            None,
+            &mail(Some("gone-2@x.org"), "gone 2"),
+        )
+        .await
+        .unwrap();
+    append(
+        &mut other,
+        INBOX,
+        &mail(Some("kept-2@x.org"), "kept 2"),
+        None,
+    )
+    .await;
+    let walk = src.changes(&cursor, Folder::Inbox).await.unwrap();
+    assert_eq!(walk.ids, vec![stable_id_for_message_id("kept-2@x.org")]);
+
+    // Undeleted elsewhere: the next listing has it.
+    other.select(INBOX).await.unwrap();
+    other
+        .uid_store("1:*", "-FLAGS (\\Deleted)")
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    let mut relisted = src
+        .list(inbox_listing(), None, Urgency::Window)
+        .await
+        .unwrap();
+    relisted.sort();
+    let mut want: Vec<String> = [
+        "gone-1@x.org",
+        "gone-2@x.org",
+        "kept-1@x.org",
+        "kept-2@x.org",
+    ]
+    .into_iter()
+    .map(stable_id_for_message_id)
+    .collect();
+    want.sort();
+    assert_eq!(relisted, want);
+    let _ = other.logout().await;
+}
+
 #[tokio::test]
 #[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
 async fn live_the_change_feed_walks_each_folder_and_proves_an_idle_mailbox() {

@@ -2256,6 +2256,21 @@ fn uid_set(uids: &[u32]) -> String {
         .join(",")
 }
 
+/// WHAT A LISTING OR A CHANGE WALK SEARCHES FOR, never mail flagged
+/// `\Deleted` (#575 phase 3 final review, matrix row 11): a message another
+/// client marked for removal is waiting for an EXPUNGE that will come, and
+/// showing it would be showing deleted mail. Appended to each listing's
+/// criteria (search keys AND together, RFC 3501 §6.4.4).
+///
+/// A message that is UNDELETED later shows up at the next listing of its
+/// folder (a backfill, a catch-up, an archive window), not on the poll walk:
+/// that walk reads only UIDs above its cursor, and the cursor moved past the
+/// message while it was flagged. The location lookups for a known id
+/// ([`find_by_message_id`]) do not filter: they resolve mail already shown.
+fn live_mail(criteria: &str) -> String {
+    format!("{criteria} UNDELETED")
+}
+
 /// `UID SEARCH` in the open folder, as a sorted list.
 async fn search(session: &mut ImapSession, query: String) -> Result<Vec<u32>> {
     let mut uids: Vec<u32> = session
@@ -3035,7 +3050,11 @@ async fn reset_walk(c: &mut Conn, folder: Folder) -> Result<Walk> {
     };
     let days = c.relist_days;
     let since = Utc::now() - chrono::Duration::days(days);
-    let uids = search(&mut c.session, format!("SINCE {}", imap_date(since))).await?;
+    let uids = search(
+        &mut c.session,
+        live_mail(&format!("SINCE {}", imap_date(since))),
+    )
+    .await?;
     let seen = stable_ids(&mut c.session, &name, validity, &uids).await?;
     eprintln!(
         "squelch: imap folder {name:?} was reset; re-listing its last {days} days \
@@ -3126,7 +3145,7 @@ impl MailSource for ImapSource {
                             ),
                             None => "ALL".to_string(),
                         };
-                        let mut uids = search(&mut c.session, query).await?;
+                        let mut uids = search(&mut c.session, live_mail(&query)).await?;
                         // Newest first: UIDs ascend with arrival in a folder.
                         uids.reverse();
                         if let Some(cap) = cap {
@@ -3176,7 +3195,7 @@ impl MailSource for ImapSource {
                                 let Some(validity) = c.examine(&folder).await? else {
                                     return Ok(Vec::new());
                                 };
-                                let uids = search(&mut c.session, query).await?;
+                                let uids = search(&mut c.session, live_mail(&query)).await?;
                                 stable_ids(&mut c.session, &folder, validity, &uids).await
                             })
                         })
@@ -3327,12 +3346,14 @@ impl MailSource for ImapSource {
                         }
                         // `n:*` always matches the highest UID even when it is
                         // below n, hence the filter.
-                        let uids: Vec<u32> =
-                            search(&mut c.session, format!("UID {}:*", pos.last_uid + 1))
-                                .await?
-                                .into_iter()
-                                .filter(|u| *u > pos.last_uid)
-                                .collect();
+                        let uids: Vec<u32> = search(
+                            &mut c.session,
+                            live_mail(&format!("UID {}:*", pos.last_uid + 1)),
+                        )
+                        .await?
+                        .into_iter()
+                        .filter(|u| *u > pos.last_uid)
+                        .collect();
                         last_uid = last_uid.max(uids.last().copied().unwrap_or(0));
                         seen = stable_ids(&mut c.session, &name, pos.uidvalidity, &uids).await?;
                     }

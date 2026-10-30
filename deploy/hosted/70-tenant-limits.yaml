@@ -171,17 +171,20 @@ spec:
     # A reservation against the 80 GB root disk, where images and logs live.
     requests.ephemeral-storage: 24Gi
     # Limits may oversubscribe, because tenants are idle most of the time and a
-    # sync burst is short. Memory limits are a little past 4x requests on one
-    # node, which is what 49152Mi against 11520Mi is: forty-seven tenants at
-    # the in-process 1Gi limit and ninety-four at the shared embedder's 512Mi,
-    # after its 768Mi and the seed pod's 128Mi. CPU limits are a different
+    # sync burst is short. Memory limits are about 8x requests on one node,
+    # which is what 98304Mi against 11520Mi is: ninety-five tenants at 1Gi,
+    # after the shared embedder's 768Mi and the seed pod's 128Mi. 1Gi in BOTH
+    # states since daemon-0.0.15 (15-warden-config.yaml pins
+    # SQUELCH_WARDEN_MEMORY_LIMIT until the daemon memory fix lands; busy
+    # tenants' heap reached 600-930 MiB), so memory REQUESTS stay what binds.
+    # Back to 49152Mi when that pin goes. CPU limits are a different
     # thing: the kernel throttles a pod at its limit and kills nothing, so the
     # sum against 4 vCPU is no promise, and the line only has to admit more
     # than eighty-seven tenants at the warden's 1000m limit each, after the
     # shared embedder's 2000m (the 12 the patch before this file carried would
     # have refused the thirteenth signup).
     limits.cpu: "96"
-    limits.memory: 49152Mi
+    limits.memory: 98304Mi
     # 1Gi a tenant, plus the two other pods' 128Mi each: ninety-five.
     limits.ephemeral-storage: 96Gi
     # The mail: a claim at the warden's 10Gi (`SQUELCH_WARDEN_STORAGE_SIZE`)

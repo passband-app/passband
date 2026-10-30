@@ -108,7 +108,7 @@ data:
   # To go below it, comment the knob out first, let the roller converge the
   # fleet back to the in-process shape (a run exiting 0), and only then move
   # this line. SETUP.md §10b, Rollback; ROLLOUT.md, "Rolling back".
-  SQUELCH_WARDEN_IMAGE: "ghcr.io/passband-app/squelchd:daemon-0.0.14"
+  SQUELCH_WARDEN_IMAGE: "ghcr.io/passband-app/squelchd:daemon-0.0.15"
   # Everything below is a default, restated so this file is the one place an
   # operator has to look. See squelch-warden/README.md.
   SQUELCH_WARDEN_TENANT_NAMESPACE: "tenants"
@@ -305,7 +305,12 @@ data:
   # SQUELCH_WARDEN_CPU_REQUEST: "100m"
   SQUELCH_WARDEN_CPU_LIMIT: "1000m"
   # SQUELCH_WARDEN_MEMORY_REQUEST: "384Mi"
-  # SQUELCH_WARDEN_MEMORY_LIMIT: "1Gi"
+  # PINNED at 1Gi on purpose (2026-10-30, daemon-0.0.15): busy tenants' heap
+  # reached 600-930 MiB on 2026-10-29 (glibc arena growth), so the shared-
+  # embedder default of 512Mi would OOM them. Unset, the default is 1Gi
+  # anyway. The quota needs no redo: requests still drop to 128Mi. Comment
+  # it back out once the daemon memory fix has held a day of flat heap.
+  SQUELCH_WARDEN_MEMORY_LIMIT: "1Gi"
   SQUELCH_WARDEN_EPHEMERAL_REQUEST: "256Mi"
   SQUELCH_WARDEN_EPHEMERAL_LIMIT: "1Gi"
   SQUELCH_WARDEN_TMP_SIZE: "512Mi"

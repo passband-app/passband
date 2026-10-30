@@ -44,7 +44,7 @@ extension PhoneVignette {
         case .smartClear: SmartClearPhoneScene.self
         case .calendar: CalendarPhoneScene.self
         case .quickLookDock: QuickLookDockScene.self
-        case .eventReminder: EventReminderScene.self
+        case .eventReminder: EventReminderPhoneScene.self
         }
     }
 }
@@ -1566,7 +1566,7 @@ enum QuickLookDockScene: VignetteDrawing {
 ///
 /// The seam: the phone locks again, with nothing on it, which is the frame
 /// the loop began on.
-enum EventReminderScene: VignetteDrawing {
+enum EventReminderPhoneScene: VignetteDrawing {
     static let canvas = PhoneKit.canvas
     static let loop: Double = 5.6
 

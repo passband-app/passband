@@ -11,7 +11,7 @@
 
 locals {
   secret_names = {
-    control = [
+    control = concat([
       "SQUELCH_CONTROL_CLIENT_SECRET",
       "SQUELCH_CONTROL_COOKIE_KEY",
       "SQUELCH_CONTROL_WARDEN_TOKEN",
@@ -21,7 +21,12 @@ locals {
       "SQUELCH_CONTROL_WORKOS_API_KEY",
       "SQUELCH_CONTROL_ALERT_WEBHOOK_URL",
       "SQUELCH_CONTROL_DATABASE_URL",
-    ]
+      ],
+      # Outlook signup (deploy/hosted/SETUP.md §6a). Control refuses to boot
+      # with one half of the Microsoft pair, so the secret exists exactly when
+      # the client id is set, and both reach the task together.
+      var.control_microsoft_client_id == null ? [] : ["SQUELCH_CONTROL_MICROSOFT_CLIENT_SECRET"],
+    )
     relay = [
       "SQUELCH_RELAY_APNS_KEY",
       "SQUELCH_RELAY_AUTH_TOKEN",

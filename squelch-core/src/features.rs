@@ -50,17 +50,34 @@ pub struct Feature {
 /// `features.enabled(features::THE_KEY)` wherever the daemon gates on it. The
 /// clients gate on the same key string; a flag only a client reads still gets
 /// an entry here, because this list is the only thing the admin page offers.
-pub const KNOWN: &[Feature] = &[Feature {
-    key: RENOTIFY,
-    summary: "Smart re-notify: a second banner for mail that still needs handling, when the \
+pub const KNOWN: &[Feature] = &[
+    Feature {
+        key: RENOTIFY,
+        summary: "Smart re-notify: a second banner for mail that still needs handling, when the \
                   Mac comes online or a meeting ends.",
-}];
+    },
+    Feature {
+        key: CALENDAR_OWN,
+        summary: "Passband replaces the events Gmail adds to the calendar from mail with its \
+                  own, DELETING Gmail's copy, and keeps them current from the mail.",
+    },
+];
 
 /// Smart re-notify (issue #625, docs/RENOTIFY.md): the daemon records the Mac
 /// app's connections and, at a moment the owner can act, sends a `renotify`
 /// frame naming mail that still needs them. OFF IS AS IF IT DID NOT EXIST: no
 /// session is recorded and no frame is sent.
 pub const RENOTIFY: &str = "renotify";
+
+/// Passband owns the events mail makes ([`crate::gcal::own`]): after each
+/// calendar pass it replaces Gmail's own copies on the user's primary
+/// calendar with events of its own, DELETING Gmail's, and keeps them current
+/// from the mail. The one place the daemon writes to, and deletes from, a
+/// calendar without the user asking for that write, and a deleted event is
+/// not ours to restore, so it ships dark and is ticked per tenant (owner's
+/// call, 2026-10-30). The key was added and removed inside PR #647 before
+/// any build offered it, so no tenant row can predate this.
+pub const CALENDAR_OWN: &str = "calendar_own";
 
 /// Keys that were hidden features once and have LAUNCHED (or been dropped),
 /// and so must never be handed out again.

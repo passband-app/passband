@@ -32,6 +32,7 @@ import Foundation
 /// maps each case to its scene (PassbandiOS/Views/PhoneVignettes.swift).
 enum PhoneVignette: String, CaseIterable, Sendable {
     case chainReply, messageSwipe, clearStack, remind, smartClear
+    case calendar, quickLookDock, eventReminder
 }
 
 /// One page of the walk: a thing the phone can now do, and how.
@@ -100,6 +101,30 @@ struct PhoneReleaseNote: VersionedNote, Identifiable, Sendable {
 enum PhoneReleaseNotes {
     /// THE TABLE. Newest first, and the only place a phone note is written.
     static let all: [PhoneReleaseNote] = [
+        PhoneReleaseNote(
+            version: "0.0.11",
+            date: "2026-10-30",
+            headline: "Stella's Update",
+            features: [
+                PhoneFeature(
+                    "Calendar",
+                    detail: "Month, week and day views. Tap a day to see it, tap the grid to make an event, add guests.",
+                    symbol: "calendar", vignette: .calendar),
+                PhoneFeature(
+                    "Quick Look at the foot of the board",
+                    detail: "Your packages, bills and codes sit in a strip under the cards. Drag it up to open it.",
+                    symbol: "rectangle.bottomhalf.filled", vignette: .quickLookDock),
+                PhoneFeature(
+                    "Reminders that know the event",
+                    detail: "A heads-up on your phone before each event, with your tickets one tap away.",
+                    symbol: "ticket", vignette: .eventReminder),
+            ],
+            also: [
+                PhoneAside("Notifications lead with the sender's photo", symbol: "person.crop.circle"),
+                PhoneAside("Your agent's drafts ping your phone for review", symbol: "square.and.pencil"),
+                PhoneAside("Sign in with Outlook", symbol: "envelope"),
+                PhoneAside("Bug fixes"),
+            ]),
         PhoneReleaseNote(
             version: "0.0.10",
             date: "2026-10-27",
@@ -215,23 +240,22 @@ enum PhoneReleaseNotes {
         case nothing
     }
 
-    /// THE PHONE'S GATE. The Mac asks `tourCompleted`: has the app already
-    /// introduced itself to whoever is sitting here. The phone has no tour, so
-    /// it asks the thing the tour stood for. A NEWCOMER is somebody this
-    /// install met at the Connect gate with no mailbox on it; they are owed
-    /// the cold open, not release notes, and they are stamped current without
-    /// a word so the release they installed is never announced to them.
-    /// Everybody else is read by their stamp, exactly as on the Mac: no stamp
-    /// on an install that already had a mailbox is one that predates this
-    /// feature, owed the release it just took and nothing older.
-    ///
-    /// The newcomer is stamped with the RUNNING version, not the newest note
-    /// at or below it. They have seen everything this build is, whether or
-    /// not a note was written for it, and a stamp below the build would let a
-    /// note written late announce itself to them after all.
+    /// THE PHONE'S GATE. A NEWCOMER is somebody this install met at the
+    /// Connect gate with no mailbox on it. They are shown the LATEST release
+    /// when they first reach the Sitrep (owner's call, 2026-10-30: new users
+    /// see what is new too), and nothing older: they are stamped with the
+    /// release just below it, so the first sync after connecting raises one
+    /// release. On a build below the whole table there is nothing to show, so
+    /// they are stamped with the build and meet the first note when they
+    /// update to it. Everybody else is read by their stamp, exactly as on the
+    /// Mac: no stamp on an install that already had a mailbox is one that
+    /// predates this feature, owed the release it just took and nothing older.
     static func arrival(lastSeen: String?, running: String, newcomer: Bool) -> Arrival {
         guard ReleaseVersion(running) != nil else { return .nothing }
-        if newcomer, lastSeen.flatMap(ReleaseVersion.init) == nil { return .stamp(running) }
+        if newcomer, lastSeen.flatMap(ReleaseVersion.init) == nil {
+            guard newest(atOrBelow: running) != nil else { return .stamp(running) }
+            return ReleaseLedger.newcomerStamp(all, running: running).map(Arrival.stamp) ?? .nothing
+        }
         let owed = unseen(lastSeen: lastSeen, running: running)
         return owed.isEmpty ? .nothing : .show(owed)
     }

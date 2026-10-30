@@ -215,6 +215,12 @@ variable "control_client_id" {
   type        = string
 }
 
+variable "control_microsoft_client_id" {
+  description = "SQUELCH_CONTROL_MICROSOFT_CLIENT_ID: the Passband Hosted Entra app's Application (client) id, an id, not a secret. Null = Gmail-only signup. Setting it also creates the passband/control/SQUELCH_CONTROL_MICROSOFT_CLIENT_SECRET container, which needs a value before control's next deploy (SETUP.md §6a)."
+  type        = string
+  default     = null
+}
+
 variable "control_warden_url" {
   description = "SQUELCH_CONTROL_WARDEN_URL"
   type        = string

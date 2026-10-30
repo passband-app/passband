@@ -30,6 +30,9 @@ extension ReleaseVignette {
         case .autoTranslate: AutoTranslateScene.self
         case .archiveSearch: ArchiveSearchScene.self
         case .autoDone: AutoDoneScene.self
+        case .calendar: CalendarScene.self
+        case .eventReminder: EventReminderScene.self
+        case .outlookSignIn: OutlookSignInScene.self
         case .agentSession: nil
         }
     }
@@ -1413,24 +1416,8 @@ enum SmartUnsubscribeScene: VignetteDrawing {
             VignettePalette.ink.opacity(0.7 * ease(t, done + 0.3, done + 0.5)))
     }
 
-    /// The pointer: an arrow in the actor colour with an even light edge.
-    /// Down, it shrinks a touch toward its tip and glows.
     private static func drawPointer(_ ctx: inout GraphicsContext, tip: CGPoint, down: Double, opacity: Double) {
-        guard opacity > 0.001 else { return }
-        let s = 0.86 * VignetteClock.mix(1, 0.93, down)
-        let shape: [(CGFloat, CGFloat)] = [(0, 0), (0, 10.4), (2.7, 8), (4.6, 12), (6.5, 11.1), (4.6, 7.2), (8, 7.2)]
-        var arrow = Path()
-        for (index, p) in shape.enumerated() {
-            let point = CGPoint(x: tip.x + p.0 * s, y: tip.y + p.1 * s)
-            if index == 0 { arrow.move(to: point) } else { arrow.addLine(to: point) }
-        }
-        arrow.closeSubpath()
-        var layer = ctx
-        layer.opacity *= opacity
-        layer.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.45 + 0.5 * down), radius: 2.5 + 2.5 * down))
-        layer.fill(arrow, with: .color(down > 0.5 ? VignettePalette.phosphorHot : VignettePalette.phosphor))
-        layer.stroke(
-            arrow, with: .color(Color.white.opacity(0.9)), style: StrokeStyle(lineWidth: 0.6, lineJoin: .round))
+        VignetteKit.pointer(&ctx, tip: tip, down: down, opacity: opacity)
     }
 }
 
@@ -2202,5 +2189,952 @@ enum AutoDoneScene: VignetteDrawing {
         VignetteKit.bar(&ctx, CGRect(x: 65, y: mid - 1.4, width: subject, height: 2.8), VignettePalette.ink.opacity(0.6))
         VignetteKit.bar(&ctx, CGRect(x: 65 + subject + 4, y: mid - 1.2, width: 150 - subject - 4, height: 2.4), VignettePalette.dim.opacity(0.7))
         VignetteKit.bar(&ctx, CGRect(x: 217, y: mid - 1.2, width: 11, height: 2.4), VignettePalette.dim)
+    }
+}
+
+// MARK: - parts the 0.0.16 scenes share
+
+extension VignetteKit {
+    /// The pointer: an arrow in the actor colour with an even light edge.
+    /// Down, it shrinks a touch toward its tip and glows. Nobody's hand.
+    static func pointer(_ ctx: inout GraphicsContext, tip: CGPoint, down: Double, opacity: Double) {
+        guard opacity > 0.001 else { return }
+        let s = 0.86 * VignetteClock.mix(1, 0.93, down)
+        let shape: [(CGFloat, CGFloat)] = [(0, 0), (0, 10.4), (2.7, 8), (4.6, 12), (6.5, 11.1), (4.6, 7.2), (8, 7.2)]
+        var arrow = Path()
+        for (index, p) in shape.enumerated() {
+            let point = CGPoint(x: tip.x + p.0 * s, y: tip.y + p.1 * s)
+            if index == 0 { arrow.move(to: point) } else { arrow.addLine(to: point) }
+        }
+        arrow.closeSubpath()
+        var layer = ctx
+        layer.opacity *= opacity
+        layer.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.45 + 0.5 * down), radius: 2.5 + 2.5 * down))
+        layer.fill(arrow, with: .color(down > 0.5 ? VignettePalette.phosphorHot : VignettePalette.phosphor))
+        layer.stroke(
+            arrow, with: .color(Color.white.opacity(0.9)), style: StrokeStyle(lineWidth: 0.6, lineJoin: .round))
+    }
+
+    /// An envelope: a mail account, as a mark. Solid or in outline, the way
+    /// the welcome screen's two doors draw theirs (`envelope.fill` for Gmail,
+    /// `envelope` for Outlook). Nobody's logo.
+    static func envelopeMark(
+        _ ctx: inout GraphicsContext, center: CGPoint, size: CGFloat, color: Color, filled: Bool
+    ) {
+        let rect = CGRect(x: center.x - size / 2, y: center.y - size * 0.36, width: size, height: size * 0.72)
+        let body = Path(roundedRect: rect, cornerRadius: size * 0.12, style: .continuous)
+        var flap = Path()
+        flap.move(to: CGPoint(x: rect.minX + size * 0.1, y: rect.minY + size * 0.12))
+        flap.addLine(to: CGPoint(x: center.x, y: rect.minY + rect.height * 0.56))
+        flap.addLine(to: CGPoint(x: rect.maxX - size * 0.1, y: rect.minY + size * 0.12))
+        let line = StrokeStyle(lineWidth: max(0.5, size * 0.075), lineCap: .round, lineJoin: .round)
+        if filled {
+            ctx.fill(body, with: .color(color))
+            ctx.stroke(flap, with: .color(VignettePalette.groundBottom.opacity(0.75)), style: line)
+        } else {
+            ctx.stroke(body, with: .color(color), style: line)
+            ctx.stroke(flap, with: .color(color), style: line)
+        }
+    }
+
+    /// A ticket: a stub with a bite out of either end and a perforation.
+    static func ticketMark(_ ctx: inout GraphicsContext, center: CGPoint, size: CGFloat, color: Color) {
+        let rect = CGRect(x: center.x - size / 2, y: center.y - size * 0.32, width: size, height: size * 0.64)
+        ctx.stroke(ticketPath(rect), with: .color(color), style: StrokeStyle(lineWidth: max(0.5, size * 0.08), lineJoin: .round))
+        var tear = Path()
+        tear.move(to: CGPoint(x: rect.minX + size * 0.66, y: rect.minY + size * 0.12))
+        tear.addLine(to: CGPoint(x: rect.minX + size * 0.66, y: rect.maxY - size * 0.12))
+        ctx.stroke(tear, with: .color(color), style: StrokeStyle(lineWidth: max(0.4, size * 0.06), dash: [size * 0.08, size * 0.08]))
+    }
+
+    /// A ticket's outline in `rect`: square shoulders, a half-round bite out
+    /// of the middle of each end.
+    static func ticketPath(_ rect: CGRect) -> Path {
+        let r = rect.height * 0.18
+        let c = min(rect.height * 0.14, 3)
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX + c, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX - c, y: rect.minY))
+        path.addQuadCurve(to: CGPoint(x: rect.maxX, y: rect.minY + c), control: CGPoint(x: rect.maxX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.midY - r))
+        path.addArc(
+            center: CGPoint(x: rect.maxX, y: rect.midY), radius: r, startAngle: .degrees(-90), endAngle: .degrees(90),
+            clockwise: true)
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - c))
+        path.addQuadCurve(to: CGPoint(x: rect.maxX - c, y: rect.maxY), control: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX + c, y: rect.maxY))
+        path.addQuadCurve(to: CGPoint(x: rect.minX, y: rect.maxY - c), control: CGPoint(x: rect.minX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.midY + r))
+        path.addArc(
+            center: CGPoint(x: rect.minX, y: rect.midY), radius: r, startAngle: .degrees(90), endAngle: .degrees(-90),
+            clockwise: true)
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + c))
+        path.addQuadCurve(to: CGPoint(x: rect.minX + c, y: rect.minY), control: CGPoint(x: rect.minX, y: rect.minY))
+        path.closeSubpath()
+        return path
+    }
+
+    /// A place pin: a drop with a hole in it.
+    static func pinMark(_ ctx: inout GraphicsContext, tip: CGPoint, size: CGFloat, color: Color, filled: Bool = false) {
+        let r = size * 0.36
+        let head = CGPoint(x: tip.x, y: tip.y - size + r)
+        var drop = Path()
+        drop.move(to: tip)
+        drop.addCurve(
+            to: CGPoint(x: head.x - r, y: head.y), control1: CGPoint(x: tip.x - r * 0.35, y: tip.y - size * 0.3),
+            control2: CGPoint(x: head.x - r, y: head.y + r * 0.7))
+        drop.addArc(center: head, radius: r, startAngle: .degrees(180), endAngle: .degrees(0), clockwise: false)
+        drop.addCurve(
+            to: tip, control1: CGPoint(x: head.x + r, y: head.y + r * 0.7),
+            control2: CGPoint(x: tip.x + r * 0.35, y: tip.y - size * 0.3))
+        drop.closeSubpath()
+        if filled {
+            ctx.fill(drop, with: .color(color))
+            ctx.fill(
+                Path(ellipseIn: CGRect(x: head.x - r * 0.4, y: head.y - r * 0.4, width: r * 0.8, height: r * 0.8)),
+                with: .color(VignettePalette.groundBottom.opacity(0.8)))
+        } else {
+            ctx.stroke(drop, with: .color(color), style: StrokeStyle(lineWidth: max(0.5, size * 0.1), lineJoin: .round))
+        }
+    }
+
+    /// A point `p` of the way along a quadratic curve.
+    static func quad(_ a: CGPoint, _ control: CGPoint, _ b: CGPoint, _ p: Double) -> CGPoint {
+        let s = CGFloat(p), u = 1 - s
+        return CGPoint(
+            x: u * u * a.x + 2 * u * s * control.x + s * s * b.x,
+            y: u * u * a.y + 2 * u * s * control.y + s * s * b.y)
+    }
+}
+
+// MARK: - calendar
+
+/// CALENDAR: the month, the way the page draws it: seven columns of days,
+/// each listing its day top-down as chips in its calendar's colour, a trip as
+/// a bar across the days it covers, today's date in the actor colour. Beside
+/// it, mail. A concert's confirmation is on top, its photo in the corner and
+/// a calendar mark saying there is an event in it.
+///
+/// The email lights, and its event lifts out of it: a GHOST, outlined and
+/// striped the way the page draws an event it found in your mail, gliding
+/// along its own trail to its day. It lands, takes the day's selection and
+/// fills solid, and its card opens over the mail it came from: the picture
+/// strip on top (the photo from the email, the map of where), then its name,
+/// its time, its place and who is going.
+///
+/// No key and no pointer: nobody typed this event in. That is the magic.
+///
+/// The seam: the card closes, the email cools, and the month pages to the
+/// next one, drawn as the month the loop began on.
+enum CalendarScene: VignetteDrawing {
+    /// The event on its day, its card open with the picture strip.
+    static let posterTime: Double = 2.75
+
+    private static let column = CGRect(x: 10, y: 22, width: 62, height: 88)
+    private static let grid = CGRect(x: 82, y: 30, width: 148, height: 80)
+    private static let cellW: CGFloat = 148 / 7
+    private static let cellH: CGFloat = 16
+
+    private struct Chip { let row: Int; let col: Int; let slot: Int; let tint: Int }
+    /// The month's own events: placed the way a real month falls, a busy
+    /// day here and a quiet run there, not a pattern.
+    private static let chips: [Chip] = [
+        Chip(row: 0, col: 1, slot: 0, tint: 2), Chip(row: 0, col: 4, slot: 0, tint: 1),
+        Chip(row: 0, col: 4, slot: 1, tint: 2), Chip(row: 1, col: 0, slot: 0, tint: 1),
+        Chip(row: 1, col: 5, slot: 1, tint: 2), Chip(row: 1, col: 6, slot: 0, tint: 1),
+        Chip(row: 2, col: 2, slot: 0, tint: 2), Chip(row: 2, col: 3, slot: 0, tint: 1),
+        Chip(row: 2, col: 3, slot: 1, tint: 2), Chip(row: 2, col: 6, slot: 0, tint: 2),
+        Chip(row: 3, col: 1, slot: 0, tint: 1), Chip(row: 3, col: 4, slot: 0, tint: 2),
+        Chip(row: 4, col: 0, slot: 0, tint: 2), Chip(row: 4, col: 2, slot: 0, tint: 2),
+        Chip(row: 4, col: 5, slot: 0, tint: 1), Chip(row: 4, col: 5, slot: 1, tint: 2),
+    ]
+    /// A stay across three days, as one bar.
+    private static let trip = (row: 1, from: 1, to: 3, tint: 2)
+    private static let today = (row: 1, col: 5)
+    /// Where the concert lands: the second row of a day that has one thing.
+    private static let target = (row: 3, col: 4, slot: 1)
+    private static let photoTint = 2
+
+    // The beats.
+    private static let lightFrom: Double = 0.3
+    private static let depart: Double = 0.7
+    private static let land: Double = 1.5
+    private static let cardIn: Double = 1.9
+    private static let cardOut: Double = 3.6
+    private static let pageFrom: Double = 3.95
+    private static let pageTo: Double = 4.5
+
+    private static func cell(_ row: Int, _ col: Int) -> CGRect {
+        CGRect(x: grid.minX + CGFloat(col) * cellW, y: grid.minY + CGFloat(row) * cellH, width: cellW, height: cellH)
+    }
+
+    private static func chipRect(_ row: Int, _ col: Int, _ slot: Int) -> CGRect {
+        let c = cell(row, col)
+        return CGRect(x: c.minX + 1.6, y: c.minY + 5.4 + CGFloat(slot) * 5.2, width: c.width - 3.2, height: 4.4)
+    }
+
+    /// The calendar mark in the corner of the concert's email: where the
+    /// ghost lifts from.
+    private static let source = CGPoint(x: column.maxX - 8, y: column.minY + 19)
+
+    static func draw(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let card = ease(t, cardIn, cardIn + 0.32) * (1 - ease(t, cardOut, cardOut + 0.3))
+        drawColumn(&ctx, t: t, under: card)
+        drawMonth(&ctx, t: t)
+        drawFlight(&ctx, t: t)
+        drawCard(&ctx, t: t, shown: card)
+    }
+
+    // MARK: the mail
+
+    private static func drawColumn(_ ctx: inout GraphicsContext, t: Double, under: Double) {
+        let ease = VignetteClock.ease
+        var layer = ctx
+        layer.opacity *= 1 - 0.7 * under
+        VignetteKit.bar(
+            &layer, CGRect(x: column.minX + 1, y: 14.2, width: 22, height: 3),
+            VignettePalette.ink.opacity(0.55 * (1 - under)))
+        let lit = ease(t, lightFrom, lightFrom + 0.2) * (1 - ease(t, land + 0.1, land + 0.5))
+        let designs: [(tint: Int, title: CGFloat, lines: (CGFloat, CGFloat))] = [
+            (photoTint, 26, (34, 22)), (0, 30, (26, 32)), (1, 22, (34, 18)),
+        ]
+        for (index, d) in designs.enumerated() {
+            let rect = CGRect(x: column.minX, y: column.minY + CGFloat(index) * 30, width: column.width, height: 26)
+            let shape = Path(roundedRect: rect, cornerRadius: 6, style: .continuous)
+            layer.fill(shape, with: .color(VignettePalette.card))
+            layer.fill(shape, with: .color(VignettePalette.faint))
+            layer.stroke(shape, with: .color(VignettePalette.edge), lineWidth: 0.5)
+            let hero = CGRect(x: rect.minX + 4, y: rect.minY + 4, width: 13, height: 13)
+            if index == 0 {
+                if lit > 0 {
+                    layer.stroke(shape, with: .color(VignettePalette.phosphor.opacity(0.85 * lit)), lineWidth: 0.7)
+                }
+                photo(&layer, hero, corner: 3)
+            } else {
+                layer.fill(
+                    Path(roundedRect: hero, cornerRadius: 3, style: .continuous),
+                    with: .color(VignettePalette.avatar[d.tint].opacity(0.45)))
+            }
+            let x = rect.minX + 21
+            VignetteKit.bar(&layer, CGRect(x: x, y: rect.minY + 5.5, width: d.title, height: 2.6), VignettePalette.ink.opacity(0.8))
+            VignetteKit.bar(&layer, CGRect(x: x, y: rect.minY + 11.5, width: d.lines.0, height: 2.2), VignettePalette.dim)
+            VignetteKit.bar(&layer, CGRect(x: x, y: rect.minY + 16.5, width: d.lines.1, height: 2.2), VignettePalette.dim)
+        }
+        VignetteKit.calendarMark(
+            &layer, center: source, size: 6,
+            color: VignetteClock.mix(0, 1, lit) > 0.5 ? VignettePalette.phosphorHot : VignettePalette.ink.opacity(0.6))
+    }
+
+    /// The email's photo: a warm sky, a sun and a ridge. A picture, not a
+    /// colour swatch.
+    static func photo(_ ctx: inout GraphicsContext, _ rect: CGRect, corner: CGFloat) {
+        var layer = ctx
+        let shape = Path(roundedRect: rect, cornerRadius: corner, style: .continuous)
+        layer.clip(to: shape)
+        layer.fill(
+            shape,
+            with: .linearGradient(
+                Gradient(colors: [VignettePalette.avatar[1].opacity(0.75), VignettePalette.avatar[photoTint].opacity(0.7)]),
+                startPoint: CGPoint(x: rect.midX, y: rect.minY), endPoint: CGPoint(x: rect.midX, y: rect.maxY)))
+        let r = rect.height * 0.17
+        layer.fill(
+            Path(ellipseIn: CGRect(x: rect.minX + rect.width * 0.62 - r, y: rect.minY + rect.height * 0.34 - r, width: 2 * r, height: 2 * r)),
+            with: .color(Color.white.opacity(0.7)))
+        var ridge = Path()
+        ridge.move(to: CGPoint(x: rect.minX, y: rect.maxY))
+        ridge.addLine(to: CGPoint(x: rect.minX, y: rect.minY + rect.height * 0.72))
+        ridge.addLine(to: CGPoint(x: rect.minX + rect.width * 0.32, y: rect.minY + rect.height * 0.5))
+        ridge.addLine(to: CGPoint(x: rect.minX + rect.width * 0.58, y: rect.minY + rect.height * 0.74))
+        ridge.addLine(to: CGPoint(x: rect.minX + rect.width * 0.8, y: rect.minY + rect.height * 0.6))
+        ridge.addLine(to: CGPoint(x: rect.maxX, y: rect.minY + rect.height * 0.7))
+        ridge.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        ridge.closeSubpath()
+        layer.fill(ridge, with: .color(VignettePalette.groundTop.opacity(0.75)))
+    }
+
+    // MARK: the month
+
+    private static func drawMonth(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        // The bar over the grid: the month's name, and Month / Week with
+        // Month on.
+        let paged = CGFloat(ease(t, pageFrom, pageTo))
+        var head = ctx
+        head.clip(to: Path(CGRect(x: grid.minX, y: 8, width: 100, height: 14)))
+        for k in 0...1 {
+            VignetteKit.bar(
+                &head, CGRect(x: grid.minX + 1 + 100 * (CGFloat(k) - paged), y: 13.8, width: 34, height: 3.4),
+                VignettePalette.ink.opacity(0.8))
+        }
+        let toggle = CGRect(x: grid.maxX - 36, y: 10.5, width: 36, height: 10)
+        ctx.fill(Path(roundedRect: toggle, cornerRadius: 5), with: .color(VignettePalette.faint))
+        ctx.stroke(Path(roundedRect: toggle, cornerRadius: 5), with: .color(VignettePalette.edge), lineWidth: 0.5)
+        let on = CGRect(x: toggle.minX + 1, y: toggle.minY + 1, width: 17, height: 8)
+        ctx.fill(Path(roundedRect: on, cornerRadius: 4), with: .color(Color.white.opacity(0.12)))
+        VignetteKit.bar(&ctx, CGRect(x: on.minX + 4, y: on.midY - 1, width: 9, height: 2), VignettePalette.ink.opacity(0.85))
+        VignetteKit.bar(&ctx, CGRect(x: toggle.minX + 23, y: on.midY - 1, width: 8, height: 2), VignettePalette.dim)
+
+        // Weekday initials, then the grid's hairlines. Neither moves when
+        // the month pages: the days line up under them either way.
+        for col in 0..<7 {
+            VignetteKit.bar(
+                &ctx, CGRect(x: grid.minX + CGFloat(col) * cellW + cellW / 2 - 2.5, y: grid.minY - 5, width: 5, height: 1.8),
+                VignettePalette.dim.opacity(0.8))
+        }
+        for row in 0...5 {
+            ctx.fill(
+                Path(CGRect(x: grid.minX, y: grid.minY + CGFloat(row) * cellH - 0.25, width: grid.width, height: 0.5)),
+                with: .color(VignettePalette.edge))
+        }
+        for col in 1..<7 {
+            ctx.fill(
+                Path(CGRect(x: grid.minX + CGFloat(col) * cellW - 0.25, y: grid.minY, width: 0.5, height: grid.height)),
+                with: .color(VignettePalette.edge))
+        }
+
+        var days = ctx
+        days.clip(to: Path(grid))
+        drawDays(&days, t: t, dx: -grid.width * paged, live: true)
+        if paged > 0 { drawDays(&days, t: t, dx: grid.width * (1 - paged), live: false) }
+    }
+
+    /// One month's contents: dates, today, the trip, the chips, and (for the
+    /// live month) the concert once it has landed and the day's selection.
+    private static func drawDays(_ ctx: inout GraphicsContext, t: Double, dx: CGFloat, live: Bool) {
+        let ease = VignetteClock.ease
+        var layer = ctx
+        layer.translateBy(x: dx, y: 0)
+        for row in 0..<5 {
+            for col in 0..<7 {
+                let c = cell(row, col)
+                if row == today.row && col == today.col {
+                    var glow = layer
+                    glow.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.7), radius: 2))
+                    glow.fill(Path(ellipseIn: CGRect(x: c.minX + 1.4, y: c.minY + 1.2, width: 4, height: 4)), with: .color(VignettePalette.phosphor))
+                } else {
+                    VignetteKit.bar(&layer, CGRect(x: c.minX + 2, y: c.minY + 2.4, width: col % 2 == 0 ? 3 : 4, height: 1.6), VignettePalette.dim)
+                }
+            }
+        }
+        // The stay: one bar across its days, flat where it runs on.
+        let from = chipRect(trip.row, trip.from, 0), to = chipRect(trip.row, trip.to, 0)
+        let stay = CGRect(x: from.minX, y: from.minY, width: to.maxX - from.minX, height: from.height)
+        layer.fill(Path(roundedRect: stay, cornerRadius: 1.6, style: .continuous), with: .color(VignettePalette.avatar[trip.tint].opacity(0.4)))
+        VignetteKit.bar(&layer, CGRect(x: stay.minX + 2.5, y: stay.midY - 0.7, width: 20, height: 1.4), VignettePalette.ink.opacity(0.75))
+        for chip in chips {
+            let rect = chipRect(chip.row, chip.col, chip.slot)
+            layer.fill(Path(roundedRect: rect, cornerRadius: 1.6, style: .continuous), with: .color(VignettePalette.avatar[chip.tint].opacity(0.36)))
+            VignetteKit.bar(
+                &layer, CGRect(x: rect.minX + 1.6, y: rect.midY - 0.7, width: CGFloat(6 + (chip.row * 3 + chip.col) % 6), height: 1.4),
+                VignettePalette.ink.opacity(0.7))
+        }
+        guard live else { return }
+        let landed = ease(t, land - 0.02, land + 0.02)
+        if landed > 0 {
+            ghost(&layer, chipRect(target.row, target.col, target.slot), solid: ease(t, land + 0.08, land + 0.36), glow: 1 - ease(t, land + 0.3, land + 0.9))
+        }
+        // The day's selection: an even edge in ink, all the way round.
+        let selected = ease(t, land + 0.05, land + 0.3) * (1 - ease(t, cardOut, cardOut + 0.3))
+        if selected > 0 {
+            let c = cell(target.row, target.col).insetBy(dx: 0.5, dy: 0.5)
+            layer.stroke(
+                Path(roundedRect: c, cornerRadius: 2, style: .continuous),
+                with: .color(VignettePalette.ink.opacity(0.75 * selected)), lineWidth: 0.8)
+        }
+    }
+
+    /// The concert as the page draws it: outlined and striped while it is
+    /// a ghost (found in mail), solid once it is on the calendar.
+    private static func ghost(_ ctx: inout GraphicsContext, _ rect: CGRect, solid: Double, glow: Double) {
+        let shape = Path(roundedRect: rect, cornerRadius: 1.6, style: .continuous)
+        var layer = ctx
+        if glow > 0 { layer.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.85 * glow), radius: 3)) }
+        layer.fill(shape, with: .color(VignettePalette.phosphor.opacity(0.14 + 0.66 * solid)))
+        var stripes = ctx
+        stripes.clip(to: shape)
+        stripes.opacity *= 1 - solid
+        var x = rect.minX - rect.height
+        while x < rect.maxX {
+            var line = Path()
+            line.move(to: CGPoint(x: x, y: rect.maxY))
+            line.addLine(to: CGPoint(x: x + rect.height, y: rect.minY))
+            stripes.stroke(line, with: .color(VignettePalette.phosphor.opacity(0.7)), lineWidth: 0.6)
+            x += 2.2
+        }
+        ctx.stroke(shape, with: .color(VignettePalette.phosphorHot.opacity(0.9 - 0.5 * solid)), lineWidth: 0.6)
+        VignetteKit.bar(
+            &ctx, CGRect(x: rect.minX + 1.6, y: rect.midY - 0.7, width: 10, height: 1.4),
+            Color.white.opacity(0.4 + 0.5 * solid))
+    }
+
+    // MARK: the flight
+
+    private static func drawFlight(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let to = chipRect(target.row, target.col, target.slot)
+        let end = CGPoint(x: to.midX, y: to.midY)
+        let control = CGPoint(x: (source.x + end.x) / 2 + 6, y: min(source.y, end.y) - 8)
+        let p = ease(t, depart, land)
+
+        // The trail, drawn on behind it and fading once it has landed.
+        let trail = ease(t, depart - 0.05, depart + 0.05) * (1 - ease(t, land + 0.1, land + 0.6))
+        if trail > 0, p > 0 {
+            var path = Path()
+            path.move(to: source)
+            let steps = 40
+            for i in 1...steps {
+                path.addLine(to: VignetteKit.quad(source, control, end, p * Double(i) / Double(steps)))
+            }
+            var layer = ctx
+            layer.opacity *= trail
+            layer.stroke(
+                path, with: .color(VignettePalette.phosphor.opacity(0.55)),
+                style: StrokeStyle(lineWidth: 0.7, lineCap: .round, dash: [1.6, 2.2]))
+        }
+        // The ghost in the air: in as it lifts, gone the instant it lands
+        // (the month's own copy takes over in the same place).
+        guard t > depart - 0.1, t < land else { return }
+        let at = VignetteKit.quad(source, control, end, p)
+        let rect = CGRect(x: at.x - to.width / 2, y: at.y - to.height / 2, width: to.width, height: to.height)
+        var layer = ctx
+        layer.opacity *= ease(t, depart - 0.1, depart + 0.1)
+        ghost(&layer, rect, solid: 0, glow: 1)
+    }
+
+    // MARK: the event's card
+
+    /// The event, open: the picture strip, its name, when, where and who.
+    private static func drawCard(_ ctx: inout GraphicsContext, t: Double, shown: Double) {
+        guard shown > 0.001 else { return }
+        let ease = VignetteClock.ease
+        let rect = CGRect(x: 10, y: 14, width: 64, height: 96)
+        var layer = ctx
+        layer.opacity *= shown
+        layer.translateBy(x: 0, y: 8 * CGFloat(1 - ease(t, cardIn, cardIn + 0.32)))
+        let shape = Path(roundedRect: rect, cornerRadius: 8, style: .continuous)
+        var lifted = layer
+        lifted.addFilter(.shadow(color: Color.black.opacity(0.5), radius: 6))
+        lifted.fill(shape, with: .color(VignettePalette.cap))
+        layer.stroke(shape, with: .color(Color.white.opacity(0.14)), lineWidth: 0.5)
+
+        // The picture strip: the email's photo, and the map of where.
+        let photoRect = CGRect(x: rect.minX + 5, y: rect.minY + 5, width: 26, height: 24)
+        photo(&layer, photoRect, corner: 4)
+        let map = CGRect(x: rect.minX + 33, y: rect.minY + 5, width: 26, height: 24)
+        let mapShape = Path(roundedRect: map, cornerRadius: 4, style: .continuous)
+        layer.fill(mapShape, with: .color(Color(hex: 0x1D2A3C)))
+        var streets = layer
+        streets.clip(to: mapShape)
+        let lines: [(CGPoint, CGPoint, CGFloat)] = [
+            (CGPoint(x: map.minX, y: map.minY + 8), CGPoint(x: map.maxX, y: map.minY + 5), 1.2),
+            (CGPoint(x: map.minX, y: map.minY + 18), CGPoint(x: map.maxX, y: map.minY + 20), 0.8),
+            (CGPoint(x: map.minX + 9, y: map.minY), CGPoint(x: map.minX + 7, y: map.maxY), 0.8),
+            (CGPoint(x: map.minX + 19, y: map.minY), CGPoint(x: map.minX + 22, y: map.maxY), 1.2),
+        ]
+        for line in lines {
+            var path = Path()
+            path.move(to: line.0)
+            path.addLine(to: line.1)
+            streets.stroke(path, with: .color(Color.white.opacity(0.13)), lineWidth: line.2)
+        }
+        layer.stroke(mapShape, with: .color(VignettePalette.edge), lineWidth: 0.5)
+        var pin = layer
+        pin.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.8), radius: 2))
+        VignetteKit.pinMark(&pin, tip: CGPoint(x: map.midX + 1, y: map.midY + 4), size: 8, color: VignettePalette.phosphor, filled: true)
+
+        // Its name, when, where, and who is going.
+        let x = rect.minX + 6
+        VignetteKit.bar(&layer, CGRect(x: x, y: rect.minY + 36, width: 42, height: 3.6), VignettePalette.ink.opacity(0.9))
+        VignetteKit.ring(
+            &layer, center: CGPoint(x: x + 2.2, y: rect.minY + 47), radius: 2, progress: 1,
+            color: VignettePalette.dim, lineWidth: 0.6)
+        VignetteKit.bar(&layer, CGRect(x: x + 7, y: rect.minY + 46, width: 30, height: 2.2), VignettePalette.ink.opacity(0.6))
+        VignetteKit.pinMark(&layer, tip: CGPoint(x: x + 2.2, y: rect.minY + 57.5), size: 4.6, color: VignettePalette.dim)
+        VignetteKit.bar(&layer, CGRect(x: x + 7, y: rect.minY + 54, width: 38, height: 2.2), VignettePalette.ink.opacity(0.6))
+        for index in 0..<3 {
+            let c = CGPoint(x: x + 4 + CGFloat(index) * 5.4, y: rect.minY + 68)
+            layer.fill(Path(ellipseIn: CGRect(x: c.x - 4, y: c.y - 4, width: 8, height: 8)), with: .color(VignettePalette.cap))
+            VignetteKit.avatar(&layer, center: c, diameter: 7, tint: index)
+        }
+        VignetteKit.bar(&layer, CGRect(x: x + 22, y: rect.minY + 67, width: 18, height: 2.2), VignettePalette.dim)
+        // The note, from the email.
+        VignetteKit.bar(&layer, CGRect(x: x, y: rect.minY + 79, width: 50, height: 2.2), VignettePalette.dim.opacity(0.8))
+        VignetteKit.bar(&layer, CGRect(x: x, y: rect.minY + 84.5, width: 34, height: 2.2), VignettePalette.dim.opacity(0.8))
+    }
+}
+
+// MARK: - reminders that know the event
+
+/// REMINDERS THAT KNOW THE EVENT: the day as a strip sliding past a fixed
+/// now, a concert coming up on it. The model's mark glints over the event and
+/// three lead times tick in before it (an hour, half an hour, ten minutes);
+/// it picks one, which lights, and the stretch from there to the doors lights
+/// with it. The day runs on until now reaches the pick, and the banner drops
+/// in: the line the model wrote writing itself on, under it the time and the
+/// place as the app sets them ("8pm · The Fillmore"), and the helper, a
+/// Tickets button. A pointer presses it and the email that holds the tickets
+/// opens, the ticket itself front and centre.
+///
+/// The one press is the helper's: the reminder chose its own moment.
+///
+/// The seam: the email closes, and the strip runs on exactly one event's
+/// period, so the next concert sits where this one began, its lead time not
+/// yet chosen. Every event on the strip is drawn alike.
+enum EventReminderScene: VignetteDrawing {
+    /// The banner down, the line written, Tickets about to be pressed.
+    static let posterTime: Double = 2.6
+
+    private static let strip = CGRect(x: 10, y: 50, width: 220, height: 54)
+    private static let nowX: CGFloat = 56
+    /// An hour, in units.
+    private static let hour: CGFloat = 40
+    private static let leads: [CGFloat] = [40, 20, 40.0 / 6]
+    private static let picked = 1
+    private static let eventStart: CGFloat = 142
+    private static let eventWidth: CGFloat = 66
+    private static let period: CGFloat = 176
+    private static let concert = 1
+    private static let banner = CGRect(x: 122, y: 10, width: 108, height: 32)
+    private static let button = CGRect(x: 144, y: 29.5, width: 32, height: 9)
+    private static let mail = CGRect(x: 22, y: 12, width: 112, height: 96)
+
+    // The beats.
+    private static let glint: Double = 0.25
+    private static let ticks: [Double] = [0.35, 0.45, 0.55]
+    private static let pick: Double = 0.82
+    private static let runFrom: Double = 1.15
+    private static let runTo: Double = 1.8
+    private static let bannerIn: Double = 1.86
+    private static let press: Double = 2.75
+    private static let open: Double = 2.9
+    private static let close: Double = 3.7
+    private static let onFrom: Double = 3.95
+    private static let onTo: Double = 4.6
+
+    /// How far the day has slid: up to the pick, then on to one period.
+    private static func scrolled(_ t: Double) -> CGFloat {
+        let first = eventStart - leads[picked] - nowX
+        return first * CGFloat(VignetteClock.ease(t, runFrom, runTo))
+            + (period - first) * CGFloat(VignetteClock.ease(t, onFrom, onTo))
+    }
+
+    static func draw(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let reading = ease(t, open, open + 0.3) * (1 - ease(t, close, close + 0.25))
+        var day = ctx
+        day.opacity *= 1 - 0.6 * reading
+        // The day's heading: today, and how much is on it.
+        VignetteKit.bar(&day, CGRect(x: 11, y: 14.2, width: 28, height: 3), VignettePalette.ink.opacity(0.55))
+        VignetteKit.bar(&day, CGRect(x: 43, y: 14.5, width: 16, height: 2.4), VignettePalette.dim)
+        drawStrip(&day, t: t, offset: scrolled(t))
+        drawBanner(&ctx, t: t)
+        drawMail(&ctx, t: t, shown: reading)
+
+        // The pointer, in for the one press and gone once the email opens.
+        let arrive = ease(t, press - 0.6, press - 0.4) * (1 - ease(t, open, open + 0.15))
+        if arrive > 0 {
+            let from = CGPoint(x: 204, y: 96), to = CGPoint(x: button.midX + 6, y: button.midY + 1.5)
+            let move = ease(t, press - 0.5, press - 0.06)
+            VignetteKit.pointer(
+                &ctx, tip: CGPoint(x: VignetteClock.mix(from.x, to.x, move), y: VignetteClock.mix(from.y, to.y, move)),
+                down: VignetteClock.press(t, at: press), opacity: arrive)
+        }
+    }
+
+    // MARK: the day
+
+    private static func drawStrip(_ ctx: inout GraphicsContext, t: Double, offset: CGFloat) {
+        let ease = VignetteClock.ease
+        var band = ctx
+        band.clipToLayer { mask in
+            mask.fill(
+                Path(strip.insetBy(dx: 0, dy: -12)),
+                with: .linearGradient(
+                    Gradient(stops: [
+                        .init(color: .clear, location: 0), .init(color: .black, location: 0.12),
+                        .init(color: .black, location: 0.88), .init(color: .clear, location: 1),
+                    ]),
+                    startPoint: CGPoint(x: strip.minX, y: 0), endPoint: CGPoint(x: strip.maxX, y: 0)))
+        }
+        let base = strip.maxY - 6
+        // Quarter hours, the hours taller.
+        let quarter = hour / 4
+        var k = Int(((strip.minX + offset) / quarter).rounded(.down))
+        while true {
+            let x = CGFloat(k) * quarter - offset
+            if x > strip.maxX { break }
+            let tall: CGFloat = k % 4 == 0 ? 4 : 2
+            band.fill(Path(CGRect(x: x - 0.25, y: base - tall, width: 0.5, height: tall)), with: .color(Color.white.opacity(k % 4 == 0 ? 0.2 : 0.1)))
+            k += 1
+        }
+        band.fill(Path(CGRect(x: strip.minX, y: base - 0.25, width: strip.width, height: 0.5)), with: .color(VignettePalette.edge))
+
+        // The events, one a period, all alike.
+        for n in -1...1 {
+            let left = eventStart + period * CGFloat(n) - offset
+            guard left < strip.maxX + 2, left + eventWidth > strip.minX - 2 else { continue }
+            let rect = CGRect(x: left, y: strip.minY + 8, width: eventWidth, height: 30)
+            let under = left <= nowX && left + eventWidth >= nowX
+            let past = left + eventWidth < nowX
+            let shape = Path(roundedRect: rect, cornerRadius: 5, style: .continuous)
+            let ink = past ? 0.35 : 1.0
+            band.fill(shape, with: .color(VignettePalette.card))
+            band.fill(shape, with: .color(VignettePalette.avatar[concert].opacity(past ? 0.1 : under ? 0.34 : 0.24)))
+            band.stroke(shape, with: .color(under ? VignettePalette.phosphor.opacity(0.8) : VignettePalette.edge), lineWidth: under ? 0.7 : 0.5)
+            var art = band
+            art.opacity *= ink
+            CalendarScene.photo(&art, CGRect(x: rect.minX + 4, y: rect.minY + 4, width: 22, height: 22), corner: 3.5)
+            let x = rect.minX + 30
+            VignetteKit.bar(&band, CGRect(x: x, y: rect.minY + 6, width: 30, height: 3), VignettePalette.ink.opacity(0.85 * ink))
+            VignetteKit.bar(&band, CGRect(x: x, y: rect.minY + 13.4, width: 12, height: 2.2), VignettePalette.ink.opacity(0.55 * ink))
+            VignetteKit.pinMark(&band, tip: CGPoint(x: x + 1.6, y: rect.minY + 23.4), size: 4, color: VignettePalette.ink.opacity(0.5 * ink))
+            VignetteKit.bar(&band, CGRect(x: x + 5, y: rect.minY + 20.2, width: 24, height: 2.2), VignettePalette.ink.opacity(0.55 * ink))
+
+            // Only the coming concert is the one being reminded about.
+            guard n == 0 else { continue }
+            let gone = ease(t, onFrom, onFrom + 0.3)
+            for (index, lead) in leads.enumerated() {
+                let x = left - lead
+                let shown = ease(t, ticks[index], ticks[index] + 0.12)
+                let chosen = index == picked ? ease(t, pick, pick + 0.14) : 0
+                let dropped = index == picked ? 0 : ease(t, pick + 0.05, pick + 0.25)
+                let alpha = shown * (1 - dropped) * (1 - gone)
+                guard alpha > 0 else { continue }
+                var dot = band
+                dot.opacity *= alpha
+                if chosen > 0 { dot.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.85 * chosen), radius: 2.5)) }
+                dot.fill(Path(CGRect(x: x - 0.3, y: base - 7, width: 0.6, height: 7)), with: .color(VignettePalette.ink.opacity(VignetteClock.mix(0.35, 0, chosen))))
+                dot.fill(Path(CGRect(x: x - 0.4, y: base - 7, width: 0.8, height: 7)), with: .color(VignettePalette.phosphor.opacity(chosen)))
+                let r = VignetteClock.mix(1.5, 2.1, chosen)
+                dot.fill(Path(ellipseIn: CGRect(x: x - r, y: base - r, width: 2 * r, height: 2 * r)), with: .color(VignettePalette.ink.opacity(0.55 * (1 - chosen))))
+                dot.fill(Path(ellipseIn: CGRect(x: x - r, y: base - r, width: 2 * r, height: 2 * r)), with: .color(VignettePalette.phosphorHot.opacity(chosen)))
+            }
+            // The lead, lit from the pick to the doors.
+            let span = ease(t, pick + 0.05, pick + 0.32) * (1 - gone)
+            if span > 0 {
+                let from = left - leads[picked]
+                var glow = band
+                glow.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.8), radius: 2))
+                glow.fill(
+                    Path(roundedRect: CGRect(x: from, y: base - 0.7, width: leads[picked] * CGFloat(span), height: 1.4), cornerRadius: 0.7),
+                    with: .color(VignettePalette.phosphor))
+            }
+            // The model's mark, over the event while it chooses.
+            let mark = ease(t, glint, glint + 0.2) * (1 - ease(t, pick + 0.2, pick + 0.45))
+            if mark > 0 {
+                var glow = band
+                glow.opacity *= mark
+                glow.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.8), radius: 2.5))
+                VignetteKit.sparkles(&glow, center: CGPoint(x: left + eventWidth - 4, y: strip.minY + 4), size: 5.5, color: VignettePalette.phosphorHot)
+            }
+        }
+
+        // Now: a fixed line, and the day goes by under it.
+        var glow = ctx
+        glow.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.8), radius: 2.5))
+        glow.fill(Path(roundedRect: CGRect(x: nowX - 0.5, y: strip.minY, width: 1, height: strip.height), cornerRadius: 0.5),
+                  with: .color(VignettePalette.phosphor))
+        glow.fill(Path(ellipseIn: CGRect(x: nowX - 2, y: strip.minY - 2, width: 4, height: 4)), with: .color(VignettePalette.phosphorHot))
+    }
+
+    // MARK: the banner
+
+    /// The notification: the app's mark, the model's line, the time and the
+    /// place, and Tickets.
+    private static func drawBanner(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let arrive = ease(t, bannerIn, bannerIn + 0.3)
+        let leave = ease(t, open, open + 0.25)
+        guard arrive > 0, leave < 1 else { return }
+        var layer = ctx
+        layer.opacity *= arrive * (1 - leave)
+        layer.translateBy(x: 0, y: -8 * CGFloat(1 - arrive))
+        let shape = Path(roundedRect: banner, cornerRadius: 8, style: .continuous)
+        var lifted = layer
+        lifted.addFilter(.shadow(color: Color.black.opacity(0.5), radius: 6))
+        lifted.fill(shape, with: .color(VignettePalette.cap))
+        layer.stroke(shape, with: .color(Color.white.opacity(0.14)), lineWidth: 0.5)
+
+        let icon = CGRect(x: banner.minX + 6, y: banner.minY + 6, width: 12, height: 12)
+        layer.fill(
+            Path(roundedRect: icon, cornerRadius: 3, style: .continuous),
+            with: .linearGradient(
+                Gradient(colors: [VignettePalette.phosphorHot, VignettePalette.phosphor]),
+                startPoint: CGPoint(x: icon.midX, y: icon.minY), endPoint: CGPoint(x: icon.midX, y: icon.maxY)))
+        VignetteKit.calendarMark(&layer, center: CGPoint(x: icon.midX, y: icon.midY + 0.4), size: 6.4, color: .white)
+
+        // The line the model wrote, writing itself on, actor colour cooling
+        // to ink.
+        let x = banner.minX + 22
+        let written = ease(t, bannerIn + 0.12, bannerIn + 0.5)
+        let cooled = ease(t, bannerIn + 0.45, bannerIn + 0.75)
+        let title = CGRect(x: x, y: banner.minY + 6.5, width: max(3, 60 * CGFloat(written)), height: 3)
+        VignetteKit.bar(&layer, title, VignettePalette.phosphorHot.opacity(1 - cooled))
+        VignetteKit.bar(&layer, title, VignettePalette.ink.opacity(0.92 * cooled))
+        VignetteKit.bar(&layer, CGRect(x: banner.maxX - 15, y: banner.minY + 6.8, width: 9, height: 2.2), VignettePalette.dim)
+        // "8pm · The Fillmore".
+        VignetteKit.bar(&layer, CGRect(x: x, y: banner.minY + 13.2, width: 10, height: 2.4), VignettePalette.ink.opacity(0.6))
+        layer.fill(Path(ellipseIn: CGRect(x: x + 12.4, y: banner.minY + 13.8, width: 1.3, height: 1.3)), with: .color(VignettePalette.dim))
+        VignetteKit.bar(&layer, CGRect(x: x + 16, y: banner.minY + 13.2, width: 34, height: 2.4), VignettePalette.ink.opacity(0.6))
+
+        // Tickets: the helper, the one thing to press.
+        let pressed = VignetteClock.press(t, at: press)
+        VignetteKit.pill(&layer, button, label: 13, labelX: button.minX + 14, pressed: pressed)
+        VignetteKit.ticketMark(
+            &layer, center: CGPoint(x: button.minX + 7.5, y: button.midY + CGFloat(pressed)), size: 6,
+            color: pressed > 0.5 ? .white : VignettePalette.phosphorHot)
+    }
+
+    // MARK: the tickets email
+
+    private static func drawMail(_ ctx: inout GraphicsContext, t: Double, shown: Double) {
+        guard shown > 0.001 else { return }
+        let ease = VignetteClock.ease
+        var layer = ctx
+        layer.opacity *= shown
+        let rise = ease(t, open, open + 0.3), lift = ease(t, close, close + 0.25)
+        layer.translateBy(x: 0, y: 8 * CGFloat(1 - rise) - 8 * CGFloat(lift))
+        let shape = Path(roundedRect: mail, cornerRadius: 8, style: .continuous)
+        var lifted = layer
+        lifted.addFilter(.shadow(color: Color.black.opacity(0.5), radius: 6))
+        lifted.fill(shape, with: .color(VignettePalette.card))
+        layer.fill(shape, with: .color(VignettePalette.faint))
+        layer.stroke(shape, with: .color(Color.white.opacity(0.12)), lineWidth: 0.5)
+
+        let x = mail.minX + 10
+        VignetteKit.avatar(&layer, center: CGPoint(x: x + 5, y: mail.minY + 12), diameter: 10, tint: 2)
+        VignetteKit.bar(&layer, CGRect(x: x + 14, y: mail.minY + 8.6, width: 30, height: 2.8), VignettePalette.ink.opacity(0.8))
+        VignetteKit.bar(&layer, CGRect(x: x + 14, y: mail.minY + 14.2, width: 44, height: 2.2), VignettePalette.dim)
+        VignetteKit.bar(&layer, CGRect(x: mail.maxX - 24, y: mail.minY + 9, width: 14, height: 2.2), VignettePalette.dim)
+        VignetteKit.bar(&layer, CGRect(x: x, y: mail.minY + 25, width: 64, height: 3.6), VignettePalette.ink.opacity(0.9))
+
+        // The ticket, lit as it arrives.
+        let stub = CGRect(x: x, y: mail.minY + 36, width: mail.width - 20, height: 38)
+        let ticket = VignetteKit.ticketPath(stub)
+        let lit = ease(t, open + 0.15, open + 0.35) * (1 - ease(t, open + 0.6, close))
+        var glow = layer
+        if lit > 0 { glow.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.7 * lit), radius: 4)) }
+        glow.fill(ticket, with: .color(VignettePalette.phosphor.opacity(0.13)))
+        layer.stroke(ticket, with: .color(VignettePalette.phosphor.opacity(0.55 + 0.35 * lit)), lineWidth: 0.7)
+        let tear = stub.minX + stub.width * 0.68
+        var perforation = Path()
+        perforation.move(to: CGPoint(x: tear, y: stub.minY + 4))
+        perforation.addLine(to: CGPoint(x: tear, y: stub.maxY - 4))
+        layer.stroke(perforation, with: .color(VignettePalette.phosphor.opacity(0.6)), style: StrokeStyle(lineWidth: 0.6, dash: [1.4, 1.6]))
+        let sx = stub.minX + 9
+        VignetteKit.bar(&layer, CGRect(x: sx, y: stub.minY + 8, width: 40, height: 3.4), VignettePalette.ink.opacity(0.9))
+        VignetteKit.bar(&layer, CGRect(x: sx, y: stub.minY + 17, width: 22, height: 2.4), VignettePalette.ink.opacity(0.6))
+        VignetteKit.bar(&layer, CGRect(x: sx, y: stub.minY + 24, width: 34, height: 2.4), VignettePalette.ink.opacity(0.6))
+        // A barcode on the stub, end on.
+        var bx = tear + 6
+        let widths: [CGFloat] = [1.2, 0.6, 0.6, 1.6, 0.6, 1.2, 0.6, 0.9, 1.6, 0.6, 1.2]
+        for w in widths where bx + w < stub.maxX - 6 {
+            layer.fill(Path(CGRect(x: bx, y: stub.minY + 8, width: w, height: stub.height - 16)), with: .color(VignettePalette.ink.opacity(0.75)))
+            bx += w + 0.9
+        }
+        VignetteKit.bar(&layer, CGRect(x: x, y: mail.maxY - 16, width: 78, height: 2.2), VignettePalette.dim)
+        VignetteKit.bar(&layer, CGRect(x: x, y: mail.maxY - 10.5, width: 52, height: 2.2), VignettePalette.dim)
+    }
+}
+
+// MARK: - sign in with Outlook
+
+/// SIGN IN WITH OUTLOOK: the add-account sheet over the window, and two
+/// doors on it, side by side: Gmail, its envelope solid, and Outlook, its
+/// envelope in outline, each with its name, as the app's own buttons are
+/// drawn. A pointer goes to Outlook and presses; the door works for a breath
+/// and takes its check. The sheet goes, and in the window's account switcher
+/// the Outlook account joins the Gmail one, wearing the same envelope it was
+/// signed in with, and becomes the one you are looking at: its inbox comes
+/// up under it.
+///
+/// The seam: the sheet comes back for the next account, and the window
+/// behind it is the one the loop began on.
+enum OutlookSignInScene: VignetteDrawing {
+    /// Outlook chosen and checked, beside Gmail: the door is the news.
+    static let posterTime: Double = 1.62
+
+    private static let window = CGRect(x: 10, y: 10, width: 220, height: 100)
+    private static let sheet = CGRect(x: 40, y: 12, width: 160, height: 94)
+    private static let gmail = CGRect(x: 50, y: 50, width: 66, height: 36)
+    private static let outlook = CGRect(x: 124, y: 50, width: 66, height: 36)
+    private static let switcherY: CGFloat = 19.5
+
+    // The beats.
+    private static let press: Double = 0.95
+    private static let checked: Double = 1.45
+    private static let sheetOut: Double = 1.75
+    private static let join: Double = 2.05
+    private static let inbox: Double = 2.4
+    private static let sheetBack: Double = 3.95
+    /// Behind the returning sheet, once it covers the switcher.
+    private static let reset: Double = 4.3
+
+    static func draw(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let sheetShown = 1 - ease(t, sheetOut, sheetOut + 0.3) + ease(t, sheetBack, sheetBack + 0.32)
+        let joined = t < reset ? ease(t, join, join + 0.4) : 0
+        let switched = t < reset ? ease(t, inbox, inbox + 0.5) : 0
+        drawWindow(&ctx, joined: joined, switched: switched, t: t)
+
+        guard sheetShown > 0.001 else { return }
+        ctx.fill(Path(roundedRect: window, cornerRadius: 8, style: .continuous), with: .color(Color.black.opacity(0.45 * sheetShown)))
+        var layer = ctx
+        layer.opacity *= sheetShown
+        let leaving = t < sheetBack
+        layer.translateBy(x: 0, y: (leaving ? 8 : 6) * CGFloat(1 - sheetShown))
+        drawSheet(&layer, t: t, fresh: !leaving || t < press - 0.6)
+    }
+
+    // MARK: the window
+
+    private static func drawWindow(_ ctx: inout GraphicsContext, joined: Double, switched: Double, t: Double) {
+        let ease = VignetteClock.ease
+        let shape = Path(roundedRect: window, cornerRadius: 8, style: .continuous)
+        ctx.fill(shape, with: .color(VignettePalette.card.opacity(0.7)))
+        ctx.stroke(shape, with: .color(VignettePalette.edge), lineWidth: 0.5)
+        for index in 0..<3 {
+            ctx.fill(
+                Path(ellipseIn: CGRect(x: window.minX + 7 + CGFloat(index) * 5.5, y: window.minY + 7.5, width: 3, height: 3)),
+                with: .color(Color.white.opacity(0.16)))
+        }
+        ctx.fill(Path(CGRect(x: window.minX, y: window.minY + 19, width: window.width, height: 0.5)), with: .color(VignettePalette.edge))
+
+        // The switcher: Gmail alone, then Outlook beside it, then Outlook on.
+        let capsuleW: CGFloat = VignetteClock.mix(18, 34, joined)
+        let capsule = CGRect(x: window.midX - capsuleW / 2, y: switcherY - 7.5, width: capsuleW, height: 15)
+        ctx.fill(Path(roundedRect: capsule, cornerRadius: 7.5), with: .color(VignettePalette.faint))
+        ctx.stroke(Path(roundedRect: capsule, cornerRadius: 7.5), with: .color(VignettePalette.edge), lineWidth: 0.5)
+        let gx = VignetteClock.mix(window.midX, window.midX - 8, joined)
+        account(&ctx, center: CGPoint(x: gx, y: switcherY), tint: 0, filled: true, on: 1 - switched, opacity: 1)
+        if joined > 0 {
+            let ox = VignetteClock.mix(window.midX + 14, window.midX + 8, joined)
+            var glow = ctx
+            let flash = ease(t, join + 0.2, join + 0.4) * (1 - ease(t, join + 0.6, join + 1.2))
+            if flash > 0 { glow.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.9 * flash), radius: 4)) }
+            account(&glow, center: CGPoint(x: ox, y: switcherY), tint: 1, filled: false, on: switched, opacity: joined)
+        }
+
+        // The sidebar and the inbox: Gmail's mail, then Outlook's, row by row.
+        let rail = CGRect(x: window.minX, y: window.minY + 19.5, width: 38, height: window.height - 19.5)
+        ctx.fill(Path(CGRect(x: rail.maxX - 0.25, y: rail.minY, width: 0.5, height: rail.height)), with: .color(VignettePalette.edge))
+        for (index, w) in [CGFloat(20), 16, 22, 14].enumerated() {
+            let y = rail.minY + 9 + CGFloat(index) * 9
+            if index == 0 {
+                ctx.fill(Path(roundedRect: CGRect(x: rail.minX + 4, y: y - 3.5, width: rail.width - 8, height: 7), cornerRadius: 3.5), with: .color(Color.white.opacity(0.07)))
+            }
+            VignetteKit.bar(&ctx, CGRect(x: rail.minX + 8, y: y - 1.1, width: w, height: 2.2), index == 0 ? VignettePalette.ink.opacity(0.7) : VignettePalette.dim)
+        }
+        let rows: [[(tint: Int, sender: CGFloat, subject: CGFloat)]] = [
+            [(0, 26, 54), (2, 20, 66), (0, 30, 46), (2, 22, 60), (0, 24, 50), (2, 28, 58)],
+            [(1, 22, 60), (2, 28, 48), (1, 24, 64), (1, 30, 52), (2, 20, 58), (1, 26, 46)],
+        ]
+        var list = ctx
+        VignetteKit.clipFading(&list, CGRect(x: rail.maxX, y: rail.minY, width: window.maxX - rail.maxX, height: rail.height - 2), fade: 14)
+        for index in 0..<6 {
+            let p = ease(switched, Double(index) * 0.08, 0.5 + Double(index) * 0.08)
+            let y = rail.minY + 6 + CGFloat(index) * 13
+            for (which, set) in rows.enumerated() {
+                let alpha = which == 0 ? 1 - p : p
+                guard alpha > 0.001 else { continue }
+                var row = list
+                row.opacity *= alpha
+                row.translateBy(x: 0, y: which == 0 ? 0 : 4 * CGFloat(1 - p))
+                let r = set[index]
+                let mid = y + 4
+                VignetteKit.avatar(&row, center: CGPoint(x: rail.maxX + 10, y: mid), diameter: 6, tint: r.tint)
+                VignetteKit.bar(&row, CGRect(x: rail.maxX + 18, y: mid - 1.4, width: r.sender, height: 2.8), VignettePalette.ink.opacity(0.7))
+                VignetteKit.bar(&row, CGRect(x: rail.maxX + 54, y: mid - 1.4, width: r.subject, height: 2.8), VignettePalette.ink.opacity(0.55))
+                VignetteKit.bar(
+                    &row, CGRect(x: rail.maxX + 58 + r.subject, y: mid - 1.2, width: 110 - r.subject, height: 2.4),
+                    VignettePalette.dim.opacity(0.7))
+            }
+        }
+    }
+
+    /// One account in the switcher: its colour, its envelope, and an even
+    /// ring when it is the one on.
+    private static func account(
+        _ ctx: inout GraphicsContext, center: CGPoint, tint: Int, filled: Bool, on: Double, opacity: Double
+    ) {
+        var layer = ctx
+        layer.opacity *= opacity
+        let d: CGFloat = 11.5
+        layer.fill(
+            Path(ellipseIn: CGRect(x: center.x - d / 2, y: center.y - d / 2, width: d, height: d)),
+            with: .color(VignettePalette.avatar[tint].opacity(0.85)))
+        VignetteKit.envelopeMark(&layer, center: center, size: 6, color: .white, filled: filled)
+        if on > 0 {
+            layer.stroke(
+                Path(ellipseIn: CGRect(x: center.x - d / 2 - 1.6, y: center.y - d / 2 - 1.6, width: d + 3.2, height: d + 3.2)),
+                with: .color(VignettePalette.ink.opacity(0.8 * on)), lineWidth: 0.7)
+        }
+    }
+
+    // MARK: the sheet
+
+    /// The sheet: a headline, a line, the two doors, and self-hosting as the
+    /// quieter way in under them. `fresh` draws it as it opens, untouched.
+    private static func drawSheet(_ ctx: inout GraphicsContext, t: Double, fresh: Bool) {
+        let ease = VignetteClock.ease
+        let shape = Path(roundedRect: sheet, cornerRadius: 10, style: .continuous)
+        var lifted = ctx
+        lifted.addFilter(.shadow(color: Color.black.opacity(0.55), radius: 8))
+        lifted.fill(shape, with: .color(VignettePalette.cap))
+        ctx.stroke(shape, with: .color(Color.white.opacity(0.14)), lineWidth: 0.5)
+
+        VignetteKit.bar(&ctx, CGRect(x: sheet.midX - 34, y: sheet.minY + 14, width: 68, height: 4.6), VignettePalette.ink.opacity(0.9))
+        VignetteKit.bar(&ctx, CGRect(x: sheet.midX - 48, y: sheet.minY + 25, width: 96, height: 2.4), VignettePalette.dim)
+        VignetteKit.bar(&ctx, CGRect(x: sheet.midX - 30, y: sheet.minY + 30.5, width: 60, height: 2.4), VignettePalette.dim)
+
+        let pressed = fresh ? 0 : VignetteClock.press(t, at: press)
+        let chosen = fresh ? 0 : ease(t, press, press + 0.12)
+        let working = fresh ? 0 : ease(t, press + 0.1, press + 0.2) * (1 - ease(t, checked - 0.08, checked))
+        let check = fresh ? 0 : ease(t, checked, checked + 0.16)
+        door(&ctx, gmail, name: "Gmail", filled: true, chosen: 0, pressed: 0, working: 0, check: 0, t: t)
+        door(&ctx, outlook, name: "Outlook", filled: false, chosen: chosen, pressed: pressed, working: working, check: check, t: t)
+
+        let quiet = CGRect(x: sheet.midX - 36, y: sheet.maxY - 16, width: 72, height: 9)
+        ctx.stroke(Path(roundedRect: quiet, cornerRadius: 4.5), with: .color(VignettePalette.edge), lineWidth: 0.5)
+        VignetteKit.bar(&ctx, CGRect(x: quiet.minX + 14, y: quiet.midY - 1.1, width: 44, height: 2.2), VignettePalette.dim)
+
+        // The pointer: from where it rests to Outlook, one press, then away.
+        guard !fresh else { return }
+        let from = CGPoint(x: 182, y: 104), to = CGPoint(x: outlook.maxX - 16, y: outlook.minY + 12)
+        let move = ease(t, press - 0.55, press - 0.06)
+        let alpha = ease(t, press - 0.7, press - 0.5) * (1 - ease(t, press + 0.2, press + 0.36))
+        VignetteKit.pointer(
+            &ctx, tip: CGPoint(x: VignetteClock.mix(from.x, to.x, move), y: VignetteClock.mix(from.y, to.y, move)),
+            down: pressed, opacity: alpha)
+    }
+
+    /// One door: an envelope and its name. Chosen, it lights all the way
+    /// round, works, and takes its check.
+    private static func door(
+        _ ctx: inout GraphicsContext, _ rect: CGRect, name: String, filled: Bool, chosen: Double, pressed: Double,
+        working: Double, check: Double, t: Double
+    ) {
+        let rect = rect.offsetBy(dx: 0, dy: CGFloat(pressed))
+        let shape = Path(roundedRect: rect, cornerRadius: 7, style: .continuous)
+        var glow = ctx
+        if pressed > 0 { glow.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.75 * pressed), radius: 5)) }
+        glow.fill(shape, with: .color(Color.white.opacity(0.05)))
+        glow.fill(shape, with: .color(VignettePalette.phosphor.opacity(0.16 * chosen + 0.5 * pressed)))
+        ctx.stroke(shape, with: .color(VignettePalette.edge.opacity(1 - chosen)), lineWidth: 0.5)
+        ctx.stroke(shape, with: .color(VignettePalette.phosphor.opacity(0.85 * chosen)), lineWidth: 0.7)
+
+        let mark = CGPoint(x: rect.midX, y: rect.minY + 13)
+        var envelope = ctx
+        envelope.opacity *= (1 - working) * (1 - check)
+        VignetteKit.envelopeMark(&envelope, center: mark, size: 11, color: VignettePalette.ink.opacity(0.85), filled: filled)
+        VignetteKit.arc(
+            &ctx, center: mark, radius: 3.6, head: t * 2.4, sweep: 0.3, color: VignettePalette.phosphorHot,
+            lineWidth: 0.9, opacity: working)
+        VignetteKit.check(&ctx, center: mark, size: 3.6, progress: check)
+        let label = Text(name)
+            .font(.system(size: 6.5, weight: .semibold))
+            .foregroundStyle(VignettePalette.ink.opacity(0.85))
+        ctx.draw(label, at: CGPoint(x: rect.midX, y: rect.minY + 27), anchor: .center)
     }
 }

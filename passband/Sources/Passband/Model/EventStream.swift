@@ -243,6 +243,15 @@ final class EventStream {
                 return
             }
             connectedAt = Date()
+            #if os(macOS)
+                // The event reminders switch, read again on every connect (so
+                // at launch too): one turned back on elsewhere ends a local
+                // "off" here (`CalendarReminderPref`). Only the mailbox on
+                // screen, whose daemon the shared client speaks to.
+                if accountId == AccountManager.shared.activeId {
+                    Task { await AppStore.shared.refreshCalendarReminderPref() }
+                }
+            #endif
             // THE BYTE LOOP IS OFF THE MAIN ACTOR. This class is main-actor
             // (it writes the store and posts notifications), and the loop
             // used to run here too — which meant one main-actor hop PER BYTE

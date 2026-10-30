@@ -46,6 +46,8 @@ struct CalendarReminderTests {
         theBannersWords()
         whereATapGoes()
         ticketsOnTheTimeline()
+        theSameFire()
+        invisibleMarks()
         print("calendar-reminder: \(checks) checks, \(failures) failures")
         if failures > 0 { exit(1) }
     }
@@ -314,5 +316,34 @@ struct CalendarReminderTests {
             return expect(false, "the feed round-trips")
         }
         expect(again == feed, "tickets survive an encode and decode")
+    }
+
+    /// A push names its fire by id AND second: a late tap on an old
+    /// undressed banner must never open a different reminder under that id.
+    static func theSameFire() {
+        guard let signal = CalendarReminderSignal.parse(contract) else {
+            return expect(false, "the contract decodes")
+        }
+        expect(EventBanner.isPushedFire(signal, fireId: 7, fired: 1793210000), "the same fire")
+        expect(!EventBanner.isPushedFire(signal, fireId: 7, fired: 1793210001), "another second")
+        expect(!EventBanner.isPushedFire(signal, fireId: 8, fired: 1793210000), "another id")
+        var undated = signal
+        undated.at = nil
+        expect(!EventBanner.isPushedFire(undated, fireId: 7, fired: 1793210000), "no date is no match")
+    }
+
+    /// The marks `stripBidi` leaves are gone from a reminder's words too;
+    /// an emoji's joiner stays.
+    static func invisibleMarks() {
+        let raw = "Gate\u{200E} B12\u{200F}\u{061C}\u{200B}\u{2060}\u{FEFF}\u{E0041}\u{202E}!"
+        expect(EventBanner.stripInvisible(raw) == "Gate B12!", "marks gone: \(EventBanner.stripInvisible(raw))")
+        let family = "\u{1F468}\u{200D}\u{1F469}"
+        expect(EventBanner.stripInvisible(family) == family, "a joiner stays")
+        var signal = CalendarReminderSignal.parse(contract)!
+        signal.item.title = "Phoebe\u{200B} Bridgers\u{200E}"
+        signal.item.place = "The\u{2060} Greek"
+        let copy = EventBanner.calendarReminderCopy(signal, now: hourBefore)
+        expect(copy.title == "Phoebe Bridgers", "title: \(copy.title)")
+        expect(copy.subtitle.hasSuffix("The Greek"), "place: \(copy.subtitle)")
     }
 }

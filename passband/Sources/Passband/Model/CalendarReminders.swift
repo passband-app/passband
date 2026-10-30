@@ -24,23 +24,36 @@ enum CalendarReminderPrefState: Sendable, Equatable {
     case loaded(Bool)
 }
 
-/// The last answer each account's daemon gave, kept on this device so a frame
-/// that arrives in the second after the switch went off is not shown. The
-/// daemon is the authority (it stops firing); this is only the echo.
+/// The switch turned off ON THIS DEVICE a moment ago, so a frame already on
+/// its way when it went off is not shown. The daemon is the authority: it
+/// stops firing at its next pass, and a frame that arrives is itself proof it
+/// is on. So this holds for `window` seconds after the toggle and no longer:
+/// a switch turned back on from another device is never shadowed here.
 enum CalendarReminderPref {
-    private static let base = "passband.calendar.remindersOff"
+    private static let base = "passband.calendar.remindersOffAt"
+    /// How long a local "off" outranks a frame that arrives.
+    static let window: TimeInterval = 60
 
-    static func knownOff(_ account: UUID) -> Bool {
-        UserDefaults.standard.bool(forKey: AccountIndex.scopedKey(base, account))
+    static func knownOff(_ account: UUID, now: Date = Date()) -> Bool {
+        let at = UserDefaults.standard.double(forKey: AccountIndex.scopedKey(base, account))
+        return at > 0 && now.timeIntervalSince1970 - at >= 0
+            && now.timeIntervalSince1970 - at <= window
     }
 
-    static func remember(enabled: Bool, for account: UUID) {
+    /// A toggle on this device: off starts the window, on ends it.
+    static func toggled(enabled: Bool, for account: UUID, now: Date = Date()) {
         let key = AccountIndex.scopedKey(base, account)
         if enabled {
             UserDefaults.standard.removeObject(forKey: key)
         } else {
-            UserDefaults.standard.set(true, forKey: key)
+            UserDefaults.standard.set(now.timeIntervalSince1970, forKey: key)
         }
+    }
+
+    /// The daemon's answer, read: "on" ends any window ("off" starts none,
+    /// since the daemon already stops firing).
+    static func read(enabled: Bool, for account: UUID) {
+        if enabled { UserDefaults.standard.removeObject(forKey: AccountIndex.scopedKey(base, account)) }
     }
 }
 
@@ -150,7 +163,7 @@ extension AppStore {
             let next = try await APIClient.shared.getCalendarReminderSettings()
             guard e == epoch else { return }
             calendarReminderPref = .loaded(next.enabled)
-            if let account { CalendarReminderPref.remember(enabled: next.enabled, for: account) }
+            if let account { CalendarReminderPref.read(enabled: next.enabled, for: account) }
         } catch {
             guard e == epoch else { return }
             if (error as? APIError)?.kind == .notFound {
@@ -171,6 +184,6 @@ extension AppStore {
         try await APIClient.shared.setCalendarReminderSettings(enabled: enabled)
         guard e == epoch else { return }
         calendarReminderPref = .loaded(enabled)
-        if let account { CalendarReminderPref.remember(enabled: enabled, for: account) }
+        if let account { CalendarReminderPref.toggled(enabled: enabled, for: account) }
     }
 }

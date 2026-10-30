@@ -373,8 +373,8 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
 
     /// The banner the Mac would post for this reminder (CalendarReminder.swift),
     /// or nil to keep the relay's "An event is coming up". The push names a
-    /// fire by id; what is shown is what THIS account's daemon serves under
-    /// it, and only when the ids agree.
+    /// fire by id and second; what is shown is what THIS account's daemon
+    /// serves under it, and only when both agree.
     ///
     /// The raw push's `event_id` survives a nil here, so a tap on the generic
     /// banner still opens the reminder (`EventBanner.tapRoute`).
@@ -393,7 +393,7 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
         guard let (data, response) = try? await Self.session.data(for: request),
             (response as? HTTPURLResponse)?.statusCode == 200,
             let signal = CalendarReminderSignal.decode(data),
-            signal.calendar_reminder == push.fireId
+            EventBanner.isPushedFire(signal, fireId: push.fireId, fired: push.fired)
         else { return nil }
 
         let account = push.accountId.uuidString

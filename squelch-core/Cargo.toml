@@ -21,6 +21,10 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 rusqlite = { workspace = true }
 regex = { workspace = true }
+# NFKC for the calendar reminder line's drop test (gcal/remind.rs), so a
+# fullwidth `ｅｖｉｌ．ｃｏｍ` is read as the host it is. Already in the tree
+# under `idna` (url); named here only to call it.
+unicode-normalization = "0.1"
 async-trait = { workspace = true }
 oauth2 = { workspace = true }
 keyring-core = { workspace = true }

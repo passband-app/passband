@@ -919,6 +919,30 @@ recommendation where noted:
 No feature flag, no env var: it takes hold when the
 daemon rolls. One owner preference turns it off.
 
+#### Whose events (DECIDED 2026-10-29, after review)
+
+**THE ATTENDANCE RULE.** A real event is reminded (planned, fired, or given
+the fallback), links ghosts for reminding and tickets, and may claim
+candidates with `same_as`, ONLY when it is the user's own to go to
+(`remind::attends`): it sits on one of the owner's OWN calendars (the
+primary, or one they are `owner` of: renotify's busy-time rule) AND one of
+
+- the user accepted it or said maybe;
+- it is their own (`SyncedEvent::users_own`: they organize it, or it names
+  no organizer);
+- they have not answered and its organizer is a KNOWN CONTACT (the owner has
+  written to them: the store's `is_known_contact`, "emailed = known").
+
+A declined event never is. Google puts anyone's invitation on the calendar
+unasked, so without this a stranger could put a title and a place of their
+choosing on the lock screen with a chime, and capture the user's real booking
+by copying its title and start. An event that fails the rule is no reminder
+item at all (no plan, no model call, no fire); the timeline's `matched_event`
+display match is unchanged; its `tickets` are only ever the fallback from its
+own linked ghosts, never a plan's pick or a claim; and a ghost linked to it
+stands alone and reminds itself. Ghosts keep their own rule (committed or
+going, from authenticated mail).
+
 #### Linked mail
 
 An event's **linked mail** is the source messages of the ghosts linked to it:
@@ -937,23 +961,29 @@ that matches no event stands alone: its linked mail is its own sources.
 #### The plan (`squelch-core/src/gcal/remind.rs`)
 
 Once per event version (a hash of the title, times, location, description,
-the user's answer, free/busy, the linked message ids and the candidate ids),
+the user's answer, free/busy, the linked message ids, and each candidate's id
+with its eligible source message ids),
 the `notify` model, on the provider that already reads the owner's mail, is
 asked. This is `place.rs`'s pattern: usage category `calendar_remind`, prompt
 version `calendar-remind-v1` stored on each row, a daily cap (200 calls per
-account), a per-pass cap (15, nearest first), a short timeout, all of it
-untrusted text fenced with `neutralize`.
+account, counted per ATTEMPT in `calendar_reminder_calls`, so timeouts and
+restarts buy no more), a per-pass cap (15, nearest first), a short timeout,
+all of it untrusted text fenced with `neutralize`. An item whose ask failed
+is not asked again for 30 minutes, doubling each time to 4 hours
+(`calendar_reminder_backoff`, cleared by a plan).
 
-Who gets planned: every event and committed ghost starting in the next 14
-days, and every one with linked mail at any distance (the tickets button
-needs the plan's pick). Past events, cancelled ones, and events the user
-declined get no plan.
+Who gets planned: every one of the user's events (the attendance rule) and
+every committed ghost starting in the next 14 days, and every one with linked
+mail at any distance (the tickets button needs the plan's pick). Past events,
+cancelled ones, events the user declined and events that are not theirs get
+no plan.
 
 **In:** title, start and end in the owner's zone, all-day, the card's place
 (else the location), the description, the user's answer, busy or free, how
 many other guests (a count, never names or addresses), whether the user
 organizes it, event or ghost (and the ghost's kind); the linked mail, each
-numbered: subject, sender's display name, received date, and its
+numbered: subject, sender's display name (none when it holds an `@`),
+received date, and its
 non-inline attachments numbered (filename, type); the candidate ghosts,
 numbered (title, start, kind).
 
@@ -965,35 +995,67 @@ input in code:
 - `lead_minutes` is one of 10, 30, 60, 120, 180. Anything else becomes the
   nearest one.
 - `line`: at most 90 characters, cut on a character boundary, laundered with
-  `order_link::plain` (control, bidi and invisible characters gone). Dropped,
-  leaving no line, when it holds a URL or a bare host, an `@`, or a run of 6
-  or more digits counted across separators (the `basis` rule in §3.6). The
-  banner then shows the title and time only.
+  `order_link::plain` (control, bidi and invisible characters gone) and
+  NFKC-folded (fullwidth `ｅｖｉｌ．ｃｏｍ` reads as `evil.com`). Dropped, leaving
+  no line, by `remind::line_shaped`, which is the `basis` rule of §3.6 plus a
+  stricter set of its own (the `basis` rule itself is unchanged for triage):
+  any dotted host (`evil-tickets.com`, `bit.ly`; not "St. Louis" or "7.30"),
+  a dot written out (`[.]`, `(.)`, `[dot]`, ` dot ` before a top-level
+  domain), `hxxp`, an `@` or `[at]`, a run of 6 or more digits counted across
+  the separators a number is printed with (space, `- . / , _ · + ( )`, with
+  `l`, `I` and `o` counting inside a run), and a vanity number (`1-800-` and
+  letters). A real line never needs any of these. The banner then shows the
+  title and time only.
 - `open` and `ticket`: `{mail, attachment?}` indexes into the numbered lists.
   An index out of range is null. `open` is what tapping the banner shows;
   `ticket` is what the Tickets button shows.
 - `same_as`: candidate indexes. Out of range ones are dropped.
 
-**Failure:** no model, a timeout or a refusal stores nothing, and the next pass
-asks again within the caps. If an event is 30 minutes out and has never had a
-plan, it gets the fallback: a 30-minute reminder with no line, opening the
+**Failure:** no model, a timeout or a refusal stores no plan, backs the item
+off, and a later pass asks again within the caps. If an event is 30 minutes
+out and has never had a plan, it gets the fallback: a 30-minute reminder with no line, opening the
 fallback ticket (below) if there is one. Only an item worth it gets the
 fallback: one with linked mail, or a timed one the user is busy for. With no
 model every item is unplanned, and a fallback for everything would buzz for
 each holiday and focus block.
 
+**Stale plans.** A version moves whenever anything the plan read does (a
+description edit, a new booking that day). Until the item is planned again,
+its STALE plan still governs: its `remind` (a "no" stays silent), its lead,
+its `same_as` claims (only of ghosts still among its candidates) and its
+picks (while their mail is still the item's: a linked source, or a source of
+a claimed candidate; sources are only ever eligible mail, so a pick whose
+mail went spam or sealed falls back). Its `line` is not shown: it was written
+from what has since changed. The fallback is for an item that has never had
+a plan (or only one from another prompt). A fire pass about to fire an item
+with no plan or a stale one asks the model first (at most 4 a pass, within
+the caps and the backoff), so a late-synced event fires as planned.
+
 Stored in `calendar_reminders`, keyed by account and item (`e:<calendar>/<event>`
-or `g:<ghost id>`), and pruned when the item is gone or over.
+or `g:<ghost id>`), and pruned when the item is gone or OVER: at its end; with
+no end, three hours after a timed start or the end of an all-day one's day,
+owner-local. Not at its start: the tickets button is wanted at the door. A
+pass that could not list the calendar (no grant, a keychain read that failed)
+prunes no event's plan.
+
+Every reader (the planner, the fire pass, the timeline) lists ghosts and
+events two days past its range on both sides (`remind::LISTING_PAD`), so an
+item's linked mail and same-day candidates, and so its version, are the same
+whoever reads it.
 
 #### Firing
 
-A worker checks every 30 seconds. A reminder fires once per start instant:
-when the start moves, it can fire again. It fires when now is past
+A worker checks at start and every 30 seconds. A reminder fires once per start
+instant: when the start moves, it can fire again, but an item fires at most
+TWICE a day (owner-local), however often its start moves. One real thing has
+two keys (a ghost's `g:` and its event's `e:`): a firing records the ghost
+keys its item stands for (`covers`: its matched and claimed ghosts), and for
+24 hours neither fires under the other key. It fires when now is past
 `start - lead` (or 08:00 on an all-day event's day) and the event has not
 started (an all-day one: before noon that day). A plan that lands late, or a
 daemon that was down, fires at once if the event is still ahead. Each firing
-is a row in `calendar_reminder_fires` (kept 7 days) so the phone can fetch
-it by id. The owner preference `calendar_reminders` (default on) stops all of
+is a row in `calendar_reminder_fires` (kept 7 days, ids AUTOINCREMENT so one
+is never reused) so the phone can fetch it by id. The owner preference `calendar_reminders` (default on) stops all of
 it.
 
 - **Mac:** a non-durable `calendar_reminder` frame on `/client/events`, like
@@ -1022,8 +1084,13 @@ A ghost's `item` is `{"kind": "ghost", "id": <ghost id>, ...}`.
 
 The banner reads: title = the event's title; subtitle = "8pm · The Greek
 Theatre" (the start in the device's zone, "Today" for all-day; a countdown
-would go stale on the lock screen); body = the line. Tapping it shows `open` (an attachment in Quick
-Look, mail in the reader), else the event's card. When there is a `ticket`,
+would go stale on the lock screen); body = the line. The title, place and
+line are stripped of bidi controls and invisible marks on the device too.
+Tapping it shows `open` (an attachment in Quick Look, mail in the reader),
+else the event's card. A push the extension could not dress is fetched by the
+app on tap, and shown only when the fetched frame's `at` is the push's
+`fired` (the extension checks the same): an old notification never opens a
+different reminder. When there is a `ticket`,
 the notification carries a "Show tickets" action. Analytics:
 `calendar_reminder_shown`, `calendar_reminder_opened`.
 
@@ -1033,7 +1100,10 @@ the notification carries a "Show tickets" action. Analytics:
 thread_id, kind, attachment: {id, filename, mime} | null}` or null. `kind` is
 the linked ghost's (`ticket`, `travel`, `reservation`), and the card labels the
 button by it: "Tickets", "Boarding pass", "Booking". It is the plan's `ticket`
-when the stored plan is for the current version; otherwise the fallback, from
+(current or stale, while its mail is still the item's), null when the plan
+named none; a ghost an event's plan claims keeps its own fallback when that
+plan names none. Otherwise, and always for an event that is not the user's,
+the fallback, from
 linked ghosts of those kinds: the newest source message with a `.pkpass`
 attachment, else one with a PDF, else the newest source message alone. One
 tap opens it: an attachment in Quick Look (a `.pkpass` offers Wallet on the
@@ -1049,8 +1119,9 @@ and leaving out events Google's own app already reminds about.
 Where the build settled something the design left open, or differs from it:
 
 - **The planner runs in the reminder worker, not after a sync pass**
-  (`squelch-api/src/calendar_remind.rs`). One worker: a fire pass every 30
-  seconds, a plan pass first on every tenth (5 minutes) and at start. A sync
+  (`squelch-api/src/calendar_remind.rs`). One worker: a plan pass and a fire
+  pass at start, then a fire pass every 30 seconds, a plan pass first on
+  every tenth (5 minutes). A sync
   pass only runs with a calendar grant, and committed ghosts are reminded
   without one. Events are read only while calendar is granted, as the
   timeline serves them. The worker idles while the `calendar` hidden
@@ -1058,9 +1129,13 @@ Where the build settled something the design left open, or differs from it:
 - **A ghost from mail that failed authentication is never reminded**, not
   only kept from linking mail: its title would otherwise reach the lock
   screen on a stranger's say-so.
-- **A ghost the event's current plan names in `same_as` is that event's**:
-  it is not reminded on its own (one banner, not two), and its tickets are
-  the event's.
+- **A ghost the event's plan names in `same_as` is that event's** (stale
+  plans too, while it is still a candidate): it is not reminded on its own
+  (one banner, not two), and its tickets are the event's, or its own fallback
+  when the plan names none. Its own plan is kept.
+- **A ghost bound to a Passband event that the listing does not hold**
+  (`calendar_owned` state `owned`, calendar granted) is not reminded on its
+  own: that event, wherever it now is, reminds for it.
 - **Numbering.** The prompt numbers mail from 1: the linked mail first
   (newest first, at most 6), then each candidate booking's mail (at most 2
   each), listed under that booking; attachments from 1 within their mail (at
@@ -1072,9 +1147,14 @@ Where the build settled something the design left open, or differs from it:
   frame has `lead_minutes: null`.
 - **The version** also folds in the ghost's kind for a ghost item, and a
   ghost's "answer" is `going` (the user said so) or `booked` (committed).
-- **No current plan, any reason** (never planned, the event changed since,
-  an older prompt): the 30-minute fallback with no line. A plan that says
-  `remind: false` never fires.
+- **No plan** (never planned, or only one from an older prompt): the
+  30-minute fallback with no line. A plan that says `remind: false` never
+  fires, current or stale.
+- **The model's answer** may write `null` for `line`, `open`, `ticket` or
+  `same_as` (an endpoint that does not enforce the schema); it reads as none.
+- **A moved-then-moved-back start** does not fire again for the start that
+  already fired (once per start instant), and the two-a-day cap holds either
+  way.
 - **`kind` on a pick** is the kind of the ghost the mail came from when that
   is ticket, travel or reservation, else `ticket`.
 - **Trash.** The store keeps no trash state for a message, so "never

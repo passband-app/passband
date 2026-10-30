@@ -4957,6 +4957,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "toml 0.8.23",
+ "unicode-normalization",
  "url",
  "webbrowser",
  "webpki-roots 1.0.11",

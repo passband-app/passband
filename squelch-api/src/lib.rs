@@ -43,7 +43,8 @@ pub mod write;
 
 pub use assistant::AssistantRelay;
 pub use auth::{DEVICE_AUTH_CONCURRENCY, require_bearer};
-/// Smart re-notify's worker and its pass (issue #625).
+/// Calendar reminders' worker and its passes (docs/CALENDAR.md, "Reminders
+/// and tickets").
 pub use calendar_remind::{
     CalendarRemindTiming, RemindOutcome, calendar_remind_worker, run_fire_pass, run_plan_pass,
 };
@@ -57,6 +58,7 @@ pub use limits::{
     LONG_REQUEST_TIMEOUT, REQUEST_TIMEOUT, ROUTE_CEILINGS, RequestCeiling, RequestTimeouts,
     STORE_CALL_SLOTS, UPSTREAM_REQUEST_TIMEOUT, route_ceiling,
 };
+/// Smart re-notify's worker and its pass (issue #625).
 pub use renotify::{
     PassOutcome, RenotifyTiming, close_stale_renotify_sessions, renotify_worker, run_renotify_pass,
 };

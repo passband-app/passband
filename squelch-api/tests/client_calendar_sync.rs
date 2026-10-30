@@ -6464,7 +6464,9 @@ async fn an_event_is_planned_once_fires_once_and_serves_its_tickets() {
         "lead_minutes": 55,
         "line": "Your booking is in\u{202E} the Alice email",
         "open": {"mail": 1, "attachment": 1},
-        "ticket": {"mail": 1, "attachment": 1},
+        // The mail without its PDF: NOT what the fallback would pick, so the
+        // tickets below are the plan's or nothing.
+        "ticket": {"mail": 1, "attachment": null},
         "same_as": [4],
     }))
     .await;
@@ -6575,8 +6577,19 @@ async fn an_event_is_planned_once_fires_once_and_serves_its_tickets() {
     assert_eq!(frame["item"]["title"], "Dinner at Dingles");
     assert_eq!(frame["open"]["message_id"], message);
     assert_eq!(frame["open"]["attachment_id"], pdf);
-    assert_eq!(frame["ticket"]["filename"], "booking.pdf");
+    assert_eq!(frame["ticket"]["message_id"], message);
+    assert_eq!(
+        frame["ticket"]["attachment_id"],
+        Value::Null,
+        "the plan's pick"
+    );
     assert_eq!(frame["ticket"]["kind"], "reservation");
+    // The firing recorded the ghost it stood for, so that ghost never fires
+    // on its own for it.
+    let fires = w.store.calendar_reminder_fired(w.acct).unwrap();
+    assert_eq!(fires.len(), 1);
+    assert_eq!(fires[0].covers.len(), 1);
+    assert!(fires[0].covers[0].starts_with("g:"));
     let ping = pings.try_recv().expect("a ping for the phone");
     assert_eq!(ping.fire_id, id);
     assert_eq!(ping.fired, now.timestamp());
@@ -6602,17 +6615,33 @@ async fn an_event_is_planned_once_fires_once_and_serves_its_tickets() {
     );
     assert!(pings.try_recv().is_err());
 
-    // The tickets button: the plan's pick, on the event and on its ghost.
+    // The tickets button: the plan's pick (the mail, not the fallback's
+    // PDF), on the event and on its ghost.
     let body = w.timeline().await;
     let tickets = json!({
         "message_id": message,
         "thread_id": "t-g1",
         "kind": "reservation",
-        "attachment": {"id": pdf, "filename": "booking.pdf", "mime": "application/pdf"},
+        "attachment": null,
     });
     assert_eq!(body["events"][0]["tickets"], tickets);
     assert_eq!(body["ghosts"][0]["matched_event"]["id"], "dinner");
     assert_eq!(body["ghosts"][0]["tickets"], tickets);
+
+    // At the door: a plan pass after the start keeps the plan (it is
+    // pruned once the dinner is over), so the button does not change.
+    let seated = start + Duration::minutes(10);
+    run_plan_pass(&state, seated).await.unwrap();
+    assert!(
+        w.store
+            .calendar_reminder_plans(w.acct)
+            .unwrap()
+            .contains_key("e:primary/dinner")
+    );
+    assert_eq!(w.timeline().await["events"][0]["tickets"], tickets);
+    let over = start + Duration::minutes(91);
+    run_plan_pass(&state, over).await.unwrap();
+    assert!(w.store.calendar_reminder_plans(w.acct).unwrap().is_empty());
 
     // Nothing of it on the agent door.
     let resp = w
@@ -6625,4 +6654,200 @@ async fn an_event_is_planned_once_fires_once_and_serves_its_tickets() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// A world whose door plans reminders with the fake model at `url`, and that
+/// door's state.
+async fn remind_world(tag: &str, url: String) -> (World, squelch_api::ApiState) {
+    use squelch_core::config::Stage2Provider;
+    use squelch_core::gcal::remind::RemindClient;
+    let door_state: Arc<Mutex<Option<squelch_api::ApiState>>> = Arc::default();
+    let keep = door_state.clone();
+    let w = world_with(tag, GRANTED, move |state, _| {
+        let state = state.with_calendar_reminders(Some(RemindClient::new(
+            reqwest::Client::new(),
+            url,
+            "sk-test",
+            Stage2Provider::Anthropic,
+            "claude-haiku-4-5",
+            None,
+        )));
+        *keep.lock().unwrap() = Some(state.clone());
+        state
+    })
+    .await;
+    let state = door_state.lock().unwrap().clone().unwrap();
+    (w, state)
+}
+
+/// An invitation organized by `organizer` that the user has not answered.
+fn invite(id: &str, title: &str, start: DateTime<Utc>, organizer: &str) -> Value {
+    let mut e = timed(id, title, start, 60);
+    e["organizer"] = json!({"email": organizer});
+    e["attendees"] = json!([
+        {"email": organizer, "organizer": true, "responseStatus": "accepted"},
+        {"email": "me@example.com", "self": true, "responseStatus": "needsAction"},
+    ]);
+    e
+}
+
+/// THE ATTENDANCE RULE end to end: of two unanswered invitations on the
+/// primary calendar, the stranger's is never put to the model and never
+/// fires (Google adds anyone's invitation unasked); the one from somebody the
+/// owner has written to is planned and fires.
+#[tokio::test]
+async fn only_the_users_own_events_are_planned_and_fired() {
+    use squelch_api::{RemindOutcome, run_fire_pass, run_plan_pass};
+    let (url, bodies) = spawn_remind_model(json!({
+        "remind": true, "lead_minutes": 30, "line": "", "open": null,
+        "ticket": null, "same_as": [],
+    }))
+    .await;
+    let (w, state) = remind_world("remind-attend", url).await;
+    w.store
+        .merge_harvested_contacts(
+            w.acct,
+            &[squelch_core::store::ContactEntry {
+                addr: "pal@example.com".into(),
+                display_name: None,
+                sent_count: 3,
+                last_sent_at: None,
+            }],
+        )
+        .unwrap();
+    let start = minute(Utc::now() + Duration::minutes(20));
+    w.google().full.insert(
+        PRIMARY.into(),
+        vec![vec![
+            invite(
+                "phish",
+                "Apple ID locked, call now",
+                start,
+                "x@evil.example",
+            ),
+            invite("pal", "Coffee with Pal", start, "pal@example.com"),
+        ]],
+    );
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    assert_eq!(
+        run_plan_pass(&state, Utc::now()).await.unwrap(),
+        RemindOutcome::Planned {
+            asked: 1,
+            stored: 1
+        }
+    );
+    {
+        let bodies = bodies.lock().unwrap();
+        assert!(bodies[0].contains("Coffee with Pal"));
+        assert!(!bodies.iter().any(|b| b.contains("Apple ID")));
+    }
+    let RemindOutcome::Fired(ids) = run_fire_pass(&state, Utc::now()).await.unwrap() else {
+        panic!("a fire pass");
+    };
+    assert_eq!(ids.len(), 1);
+    let frame = get(&w.app, &format!("/client/calendar/reminders/{}", ids[0])).await;
+    assert_eq!(frame["item"]["id"], "pal");
+    assert_eq!(
+        bodies.lock().unwrap().len(),
+        1,
+        "the stranger's never asked"
+    );
+}
+
+/// An event about to fire whose plan went stale (its description changed) is
+/// asked about again by the fire pass first, so it fires with the new plan's
+/// line rather than without one.
+#[tokio::test]
+async fn a_stale_plan_is_planned_again_before_it_fires() {
+    use squelch_api::{RemindOutcome, run_fire_pass};
+    use squelch_core::gcal::remind::Plan;
+    let (url, bodies) = spawn_remind_model(json!({
+        "remind": true, "lead_minutes": 30, "line": "Bring the gift",
+        "open": null, "ticket": null, "same_as": [],
+    }))
+    .await;
+    let (w, state) = remind_world("remind-stale", url).await;
+    let start = minute(Utc::now() + Duration::minutes(20));
+    w.google().full.insert(
+        PRIMARY.into(),
+        vec![vec![timed("party", "Party", start, 60)]],
+    );
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    let old = Plan {
+        remind: true,
+        lead_minutes: 30,
+        line: Some("Old words".into()),
+        open: None,
+        ticket: None,
+        same_as: Vec::new(),
+    };
+    w.store
+        .calendar_reminder_put(w.acct, "e:primary/party", "old", &old, Utc::now())
+        .unwrap();
+    let RemindOutcome::Fired(ids) = run_fire_pass(&state, Utc::now()).await.unwrap() else {
+        panic!("a fire pass");
+    };
+    assert_eq!(ids.len(), 1);
+    assert_eq!(bodies.lock().unwrap().len(), 1, "asked before firing");
+    let frame = get(&w.app, &format!("/client/calendar/reminders/{}", ids[0])).await;
+    assert_eq!(frame["line"], "Bring the gift");
+    let plans = w.store.calendar_reminder_plans(w.acct).unwrap();
+    assert_ne!(plans["e:primary/party"].version, "old");
+}
+
+/// A model that answers nonsense backs the item off: the next plan pass does
+/// not ask again, and every attempt counts against the durable daily cap.
+#[tokio::test]
+async fn a_failed_plan_backs_off_and_counts_against_the_cap() {
+    use squelch_api::{RemindOutcome, run_plan_pass};
+    let (url, bodies) = spawn_remind_model(json!("not a plan")).await;
+    let (w, state) = remind_world("remind-backoff", url).await;
+    let start = minute(Utc::now() + Duration::hours(5));
+    w.google()
+        .full
+        .insert(PRIMARY.into(), vec![vec![timed("talk", "Talk", start, 60)]]);
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    let first = Utc::now();
+    assert_eq!(
+        run_plan_pass(&state, first).await.unwrap(),
+        RemindOutcome::Planned {
+            asked: 1,
+            stored: 0
+        }
+    );
+    assert_eq!(
+        run_plan_pass(&state, first).await.unwrap(),
+        RemindOutcome::Planned {
+            asked: 0,
+            stored: 0
+        },
+        "backed off"
+    );
+    assert_eq!(bodies.lock().unwrap().len(), 1);
+    // Half an hour on, it is asked again.
+    let later = first + Duration::minutes(31);
+    assert_eq!(
+        run_plan_pass(&state, later).await.unwrap(),
+        RemindOutcome::Planned {
+            asked: 1,
+            stored: 0
+        }
+    );
+    // Two attempts are two of today's calls, though no usage was billed
+    // (one, when the half hour crossed midnight UTC).
+    let day = later.format("%Y-%m-%d").to_string();
+    let attempts = if day == first.format("%Y-%m-%d").to_string() {
+        2
+    } else {
+        1
+    };
+    let mut left = 0;
+    while w
+        .store
+        .calendar_reminder_take_call(w.acct, &day, squelch_core::gcal::remind::DAILY_CAP)
+        .unwrap()
+    {
+        left += 1;
+    }
+    assert_eq!(left, squelch_core::gcal::remind::DAILY_CAP - attempts);
 }

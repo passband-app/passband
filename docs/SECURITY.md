@@ -1573,14 +1573,23 @@ it, and Passband's own writes always send `sendUpdates=none`.
 - **Calendar reminders** (`gcal/remind.rs`, `squelch-api/src/calendar_remind.rs`,
   `store/sqlite/calendar_remind.rs`; the owner's decision of 2026-10-29,
   against the recommendation to leave the description out and to template
-  the banner's line). Once per item version (a hash of what it read), the
-  worker sends each upcoming event and committed or going ghost to the
+  the banner's line). ONLY THE USER'S EVENTS (`remind::attends`): an event
+  is planned, fired, given the fallback, links ghosts or claims one only when
+  it is on one of the owner's own calendars (primary, or `owner` access) and
+  they accepted or said maybe, or it is their own (`users_own`), or it is
+  unanswered and its organizer is a known contact (the owner has written to
+  them); never when declined. A stranger's invitation, which Google adds
+  unasked, gets no model call and no banner, cannot capture the user's
+  booking, and its tickets are only ever the fallback from its own linked
+  ghosts. Once per item version (a hash of what it read), the
+  worker sends each upcoming event of the user's and committed or going ghost to the
   provider and `notify` model that already read the owner's mail, fenced as
   untrusted: title, start and end, place, description (at most 1500
   characters), the user's answer, busy or free, how many other guests (a
   number: never a guest's name or address, never the organizer's address),
   whether the user organizes it; for each linked mail its subject, sender
-  DISPLAY NAME (never the address), received date and non-inline attachment
+  DISPLAY NAME (never the address, and none when the name holds an `@`),
+  received date and non-inline attachment
   filenames and types (never a body, never bytes); and the same day's other
   bookings (title, start, kind). Linked mail is only the sources of ghosts
   from mail that passed authentication, and the store's read of it
@@ -1588,20 +1597,33 @@ it, and Passband's own writes always send `sendUpdates=none`.
   sealed (`SEALED_SQL`) or unreviewed mail. The answer is HELD TO THE INPUT
   IN CODE (`remind::settle`): the lead is one of 10, 30, 60, 120, 180
   minutes; the line, which reaches the lock screen, loses control, bidi and
-  invisible characters (`order_link::plain`) and is DROPPED whole when it
-  holds a URL or bare host, an `@`, or a run of 6 or more digits across
-  separators (`ghost::mail_shaped`, the `basis` rule), then cut to 90
-  characters; every mail, attachment and booking number is bounds-checked
+  invisible characters (`order_link::plain`), is NFKC-folded, and is DROPPED
+  whole by `remind::line_shaped`: the `basis` rule (`ghost::mail_shaped`,
+  unchanged for triage) plus any dotted host with a 2+ letter top-level
+  label, `[.]`/`(.)`/`[dot]`/` dot ` obfuscations, `hxxp`, `@` or `[at]`, a
+  run of 6 or more digits across the separators a number is printed with
+  (`/ , _ ·` included, look-alike `l I o` counted inside a run), and
+  `1-8xx-` vanity numbers; then cut to 90 characters. The title, place and
+  line are stripped of bidi controls and invisible marks again on the
+  device; every mail, attachment and booking number is bounds-checked
   (out of range is none), and a booking's mail counts only once the answer
-  names that booking as the same thing. At most 200 calls per account per
-  day (attempts counted in memory, spend in the usage ledger under
-  `calendar_remind`) and 15 per pass, nearest first. No key: no call, and
-  every reminder is a fixed 30-minute one with no line. Failure stores
-  nothing. Logs carry counts only. The plan (`calendar_reminders`) and each
+  names that booking as the same thing; a stored pick is served only while
+  its mail is still one of the item's (eligible) sources. At most 200 calls
+  per account per UTC day, every ATTEMPT counted durably
+  (`calendar_reminder_calls`, so timeouts and restarts buy none; spend in the
+  usage ledger under `calendar_remind`) and 15 per pass, nearest first; an
+  item whose ask failed backs off 30 minutes, doubling to 4 hours. No key:
+  no call, and every reminder is a fixed 30-minute one with no line. Failure
+  stores no plan. BANNER CAPS: once per start instant, at most two per item
+  per owner-local day however its start moves, and never twice for one real
+  thing under its ghost's and its event's keys within 24 hours. Logs carry
+  counts only. The plan (`calendar_reminders`) and each
   firing (`calendar_reminder_fires`, its frame kept 7 days) are human door
   only: the frame goes to open Mac streams (`calendar_reminder`, no `id:`) and
   is served by `GET /client/calendar/reminders/{id}`, account-scoped, the
-  same 404 for unknown, expired and another mailbox's. The phone's push
+  same 404 for unknown, expired and another mailbox's; fire ids are
+  AUTOINCREMENT (never reused), and the app and the extension show a fetched
+  frame only when its `at` is the push's `fired`. The phone's push
   carries only `"<tag>:cal:<fire id>:<fired>"` and the relay's fixed
   `kind: "calendar"` line ("An event is coming up"); no title, time or place
   crosses the relay. A booking from mail that failed authentication is never

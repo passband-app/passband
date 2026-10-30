@@ -291,8 +291,9 @@ final class Notifier {
     /// sender on it would read as the event being from them.
     ///
     /// The owner's preference is the daemon's to honour (it stops firing);
-    /// this also drops a frame for an account whose switch it last read as
-    /// off, so a toggle flipped a moment ago is believed at once.
+    /// this also drops a frame for an account whose switch was turned off on
+    /// this Mac in the last minute (`CalendarReminderPref.knownOff`), so a
+    /// toggle flipped a moment ago is believed at once.
     func postCalendarReminder(_ signal: CalendarReminderSignal, accountId: UUID) {
         guard !CalendarReminderPref.knownOff(accountId) else { return }
         let account = accountId.uuidString
@@ -447,8 +448,9 @@ final class Notifier {
         case agentDraft(draftId: Int, created: Int)
         /// An event reminder's tap, already resolved to what it shows.
         case calendar(EventBanner.CalendarReminderTap.Target)
-        /// A reminder push the extension could not dress: fetched first.
-        case calendarPush(fireId: Int, showTickets: Bool)
+        /// A reminder push the extension could not dress: fetched first, and
+        /// shown only when the fire is the one the push was sent for.
+        case calendarPush(fireId: Int, fired: Int, showTickets: Bool)
     }
 
     /// A tap: front the app, restore the window if it was closed, open the
@@ -496,7 +498,9 @@ final class Notifier {
     /// The relay's generic reminder, tapped: the app asks the daemon which
     /// reminder it was once that mailbox is on screen.
     func handleCalendarPushTap(_ push: EventBanner.CalendarPush, showTickets: Bool) {
-        deliver(.calendarPush(fireId: push.fireId, showTickets: showTickets), accountId: push.accountId)
+        deliver(
+            .calendarPush(fireId: push.fireId, fired: push.fired, showTickets: showTickets),
+            accountId: push.accountId)
     }
 
     private static func captureReminderOpened(
@@ -636,7 +640,7 @@ final class Notifier {
             AppStore.shared.openAgentDraftFromPush(draftId: draftId, created: created, accountId: account)
         case .calendar(let target):
             AppStore.shared.openCalendarReminder(target)
-        case .calendarPush(let fireId, let showTickets):
+        case .calendarPush(let fireId, let fired, let showTickets):
             // Delivered once the push's mailbox is on screen, so the shared
             // client is that mailbox's daemon.
             guard let account = AccountManager.shared.activeId else { return }
@@ -645,10 +649,12 @@ final class Notifier {
             Task {
                 guard let signal = try? await APIClient.shared.getCalendarReminder(
                     fireId, as: CalendarReminderSignal.self),
-                    store.isCurrent(epoch)
+                    store.isCurrent(epoch),
+                    EventBanner.isPushedFire(signal, fireId: fireId, fired: fired)
                 else {
-                    // Gone (kept a week) or unreachable: the calendar itself
-                    // is the next best thing to show.
+                    // Gone (kept a week), unreachable, or a different reminder
+                    // under the same id: the calendar itself is the next best
+                    // thing to show.
                     if store.isCurrent(epoch) { store.openCalendarReminder(.none) }
                     return
                 }

@@ -24,8 +24,13 @@
 //!
 //! WHAT COMES OUT is held to the input in code ([`settle`]): a lead from a
 //! fixed set, a line laundered and dropped when it is mail-shaped, indexes
-//! bounds-checked. FAILURE STORES NOTHING: the next pass asks again within
-//! the caps, and a reminder 30 minutes out with no plan fires the fallback.
+//! bounds-checked. FAILURE STORES NO PLAN: the item backs off
+//! ([`backoff`]) and a later pass asks again within the caps; a STALE plan
+//! keeps governing meanwhile ([`StoredPlan::governs`]), and a reminder 30
+//! minutes out that never had a plan fires the fallback.
+//!
+//! WHOSE EVENTS: only the user's own ([`attends`]); a stranger's invitation
+//! is never planned, fired or a claimer.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -37,7 +42,7 @@ use sha2::{Digest, Sha256};
 
 use super::own::Owned;
 use super::place::Place;
-use super::{SelfResponse, SyncedEvent};
+use super::{AccessRole, SelfResponse, SyncedEvent};
 use crate::config::{Config, Stage2Provider};
 use crate::triage::decision::{EventCommitment, EventRecordKind};
 use crate::triage::ghost::{self, EventTime};
@@ -172,6 +177,10 @@ pub struct Candidate {
     pub title: String,
     pub start: EventTime,
     pub kind: EventRecordKind,
+    /// Its sources, sorted (already only eligible mail: the ghost listing
+    /// holds sources to `ghosts::ELIGIBLE`). In the version, and what a
+    /// pick of its mail is checked against.
+    pub source_ids: Vec<i64>,
 }
 
 /// One event or ghost, as the reminder reads it.
@@ -204,8 +213,17 @@ pub struct Item {
     /// numbers. Only mail the store could read (never spam or sealed).
     pub mails: Vec<ItemMail>,
     pub candidates: Vec<Candidate>,
+    /// THE ATTENDANCE RULE ([`attends`]): an event that is the user's own to
+    /// go to. Always true for a ghost (its own rule is in `remindable`). An
+    /// event that is not is never planned, fired or a claimer, and its
+    /// tickets are only ever the fallback.
+    pub theirs: bool,
     /// Reminders may fire for it (see [`build`]).
     pub remindable: bool,
+    /// The ghost keys this item stands for when it fires: an event's matched
+    /// and claimed ghosts. A firing records them, so a ghost and its event
+    /// never both fire ([`may_fire`]).
+    pub covers: Vec<String>,
     pub version: String,
 }
 
@@ -238,6 +256,14 @@ pub struct Input<'a> {
     pub mail: &'a HashMap<i64, LinkedMail>,
     /// The stored plans by key, for the `same_as` claims.
     pub plans: &'a HashMap<String, StoredPlan>,
+    /// The mailbox's address, for [`SyncedEvent::users_own`].
+    pub account_email: &'a str,
+    /// The events' organizers that are KNOWN CONTACTS (the owner has written
+    /// to them, the store's `is_known_contact`), lowercased.
+    pub known: &'a HashSet<String>,
+    /// Calendar is granted, so `events` is the calendar as it is (not empty
+    /// for want of a grant).
+    pub granted: bool,
 }
 
 /// What [`build`] makes: one item per event (in the input's order), and for
@@ -253,8 +279,9 @@ pub struct Built {
 pub enum GhostLink {
     /// The same thing as `events[i]` ([`super::link_ghosts`]).
     Matched(usize),
-    /// Claimed by `events[i]`'s current plan (`same_as`): the same thing too.
-    Claimed(usize),
+    /// Claimed by `events[i]`'s plan (`same_as`): the same thing too. Its
+    /// own item is kept for its own tickets fallback.
+    Claimed(usize, Box<Item>),
     /// Stands alone.
     Alone(Box<Item>),
 }
@@ -273,9 +300,85 @@ impl Built {
     /// The item a ghost's tickets come from: its event's, or its own.
     pub fn ghost_item(&self, index: usize) -> Option<&Item> {
         match self.ghosts.get(index)? {
-            GhostLink::Matched(e) | GhostLink::Claimed(e) => self.events.get(*e),
+            GhostLink::Matched(e) | GhostLink::Claimed(e, _) => self.events.get(*e),
             GhostLink::Alone(item) => Some(item),
         }
+    }
+
+    /// A ghost's tickets button: its event's ([`tickets`]), and for a ghost
+    /// an event's plan claimed, its own fallback when that plan names none.
+    pub fn ghost_tickets(&self, index: usize, plans: &HashMap<String, StoredPlan>) -> Option<Pick> {
+        match self.ghosts.get(index)? {
+            GhostLink::Matched(e) => {
+                let event = self.events.get(*e)?;
+                tickets(event, plans.get(&event.key))
+            }
+            GhostLink::Claimed(e, own) => self
+                .events
+                .get(*e)
+                .and_then(|event| tickets(event, plans.get(&event.key)))
+                .or_else(|| fallback_ticket(own)),
+            GhostLink::Alone(item) => tickets(item, plans.get(&item.key)),
+        }
+    }
+
+    /// Every item key whose plan is worth keeping at `now`: the user's
+    /// events and every ghost (alone or claimed) that is not [`over`].
+    pub fn keep(&self, now: DateTime<Utc>, zone: Tz) -> HashSet<String> {
+        let claimed = self.ghosts.iter().filter_map(|g| match g {
+            GhostLink::Claimed(_, own) => Some(own.as_ref()),
+            _ => None,
+        });
+        self.items()
+            .chain(claimed)
+            .filter(|i| i.theirs && !over(i, now, zone))
+            .map(|i| i.key.clone())
+            .collect()
+    }
+}
+
+/// THE ATTENDANCE RULE (docs/CALENDAR.md, "Reminders and tickets"): an event
+/// is the user's to be reminded of only when it sits on one of their OWN
+/// calendars (the primary, or one they own: renotify's busy-time rule, so a
+/// teammate's or a team calendar they only view is never theirs) AND they
+/// accepted it or said maybe, OR it is their own (they organize it, or it
+/// names no organizer: [`SyncedEvent::users_own`]), OR they have not
+/// answered and its organizer is a KNOWN CONTACT. A declined event never is.
+/// A stranger's invitation, which Google puts on the calendar unasked, is
+/// none of these until the user accepts it.
+pub fn attends(event: &SyncedEvent, account_email: &str, known: &HashSet<String>) -> bool {
+    let own_calendar = event.calendar_primary || event.calendar_access == Some(AccessRole::Owner);
+    if !own_calendar {
+        return false;
+    }
+    match event.row.self_response {
+        Some(SelfResponse::Declined) => false,
+        Some(SelfResponse::Accepted | SelfResponse::Tentative) => true,
+        Some(SelfResponse::NeedsAction) | None => {
+            event.users_own(account_email)
+                || (!event.row.organizer_unreadable
+                    && event
+                        .row
+                        .organizer_email
+                        .as_deref()
+                        .is_some_and(|org| known.contains(&org.trim().to_ascii_lowercase())))
+        }
+    }
+}
+
+/// How long a timed item with no end is taken to last, for [`over`].
+pub const NO_END_HOURS: i64 = 3;
+
+/// THE OVER TEST, for keeping a plan (the tickets button is wanted at the
+/// door): a timed item is over at its end, or [`NO_END_HOURS`] after its
+/// start with none; an all-day one at the end of its last day, owner-local.
+/// Not [`Item::remindable`], which is about firing and ends at the start.
+pub fn over(item: &Item, now: DateTime<Utc>, zone: Tz) -> bool {
+    let today = now.with_timezone(&zone).date_naive();
+    match (item.end.as_ref(), &item.start) {
+        (Some(EventTime::At(end)), _) => *end <= now,
+        (Some(EventTime::Date(day)), _) | (None, EventTime::Date(day)) => *day < today,
+        (None, EventTime::At(start)) => *start + chrono::Duration::hours(NO_END_HOURS) <= now,
     }
 }
 
@@ -308,7 +411,7 @@ fn version_of(
     answer: Option<&str>,
     busy: bool,
     linked_ids: &[i64],
-    candidate_ids: &[i64],
+    candidates: &[(i64, &[i64])],
 ) -> String {
     let mut h = Sha256::new();
     // Length-prefixed, so no two different inputs hash alike by sliding text
@@ -325,7 +428,9 @@ fn version_of(
     field(answer.unwrap_or_default());
     field(if busy { "busy" } else { "free" });
     field(&format!("{linked_ids:?}"));
-    field(&format!("{candidate_ids:?}"));
+    // Each candidate with its (eligible) sources: a candidate's mail going
+    // spam or sealed changes what a pick may name.
+    field(&format!("{candidates:?}"));
     let digest = h.finalize();
     digest[..16].iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -397,26 +502,45 @@ fn set_aside(ghost: &GhostEvent, now: DateTime<Utc>) -> bool {
 /// Every event and ghost as the reminder reads it, linked by
 /// [`super::link_ghosts`], the timeline's own link. PURE.
 ///
-/// An event is REMINDABLE when it has not started and the user did not
-/// decline it (a cancelled event is never a row). A ghost is remindable when
-/// it stands alone (matched to no event and claimed by no event's current
-/// plan), is committed or going, is from mail that passed authentication
-/// ([`GhostEvent::verified`]), has not been dismissed, cancelled or passed,
-/// and has not started.
+/// An event is THE USER'S when [`attends`] says so; only then may it be
+/// reminded, link ghosts for reminding, offer candidates or claim them. One
+/// that is not is still an item (the timeline's tickets fallback reads its
+/// linked mail), but never remindable, and a ghost linked to it stands alone.
+///
+/// An event is REMINDABLE when it is the user's, has not started and was not
+/// declined (a cancelled event is never a row). A ghost is remindable when
+/// it stands alone (matched to none of the user's events and claimed by no
+/// event's plan), is committed or going, is from mail that passed
+/// authentication ([`GhostEvent::verified`]), has not been dismissed,
+/// cancelled or passed, has not started, and is not bound to a Passband event
+/// that this listing does not hold (that event reminds for it).
+///
+/// THE LISTING should reach [`LISTING_PAD`] past the range the caller cares
+/// about on both sides, so an item's linked mail and same-day candidates,
+/// and so its version, do not depend on which reader listed it.
 pub fn build(input: &Input<'_>, zone: Tz, now: DateTime<Utc>) -> Built {
     let links = super::link_ghosts(input.ghosts, input.events, input.owned);
-    // The ghosts that may be the same thing as an event: unmatched, from
-    // authenticated mail, of a kind whose mail holds tickets, not put aside.
+    let theirs: Vec<bool> = input
+        .events
+        .iter()
+        .map(|e| attends(e, input.account_email, input.known))
+        .collect();
+    // A ghost is matched only to one of the user's events.
+    let matched: Vec<Option<usize>> = links.iter().map(|l| l.filter(|&i| theirs[i])).collect();
+    // The ghosts that may be the same thing as an event: matched to none of
+    // the user's, from authenticated mail, of a kind whose mail holds
+    // tickets, not put aside.
     let candidates: Vec<&GhostEvent> = input
         .ghosts
         .iter()
-        .zip(&links)
+        .zip(&matched)
         .filter(|(g, link)| {
             link.is_none() && g.verified() && ticket_kind(g.kind) && !set_aside(g, now)
         })
         .map(|(g, _)| g)
         .collect();
-    // Indexed once, so each event looks up rather than scans.
+    // Indexed once, so each event looks up rather than scans. Every event's
+    // linked ghosts, the user's or not: the tickets fallback reads them.
     let mut linked_to: Vec<Vec<&GhostEvent>> = vec![Vec::new(); input.events.len()];
     for (g, link) in input.ghosts.iter().zip(&links) {
         if let Some(i) = link {
@@ -441,7 +565,12 @@ pub fn build(input: &Input<'_>, zone: Tz, now: DateTime<Utc>) -> Built {
                 .and_hms_opt(12, 0, 0)
                 .map_or(0, |n| n.and_utc().timestamp()),
         };
-        let mut near: Vec<&GhostEvent> = candidates_on.get(&day).cloned().unwrap_or_default();
+        // Candidates only for the user's events: no other may claim one.
+        let mut near: Vec<&GhostEvent> = if theirs[i] {
+            candidates_on.get(&day).cloned().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         near.sort_by_key(|g| ((instant(&g.start) - instant(&row.start)).abs(), g.id));
         near.truncate(MAX_CANDIDATES);
         let place = row.location.as_ref().and_then(|raw| input.places.get(raw));
@@ -452,7 +581,16 @@ pub fn build(input: &Input<'_>, zone: Tz, now: DateTime<Utc>) -> Built {
         };
         let answer = row.self_response.map(SelfResponse::as_str);
         let linked_ids = source_ids(linked.iter().copied());
-        let candidate_ids: Vec<i64> = near.iter().map(|g| g.id).collect();
+        let candidates: Vec<Candidate> = near
+            .iter()
+            .map(|g| Candidate {
+                ghost_id: g.id,
+                title: g.title.clone(),
+                start: g.start,
+                kind: g.kind,
+                source_ids: source_ids([*g]),
+            })
+            .collect();
         let version = version_of(
             row.summary.as_deref().unwrap_or_default(),
             &row.start,
@@ -462,7 +600,10 @@ pub fn build(input: &Input<'_>, zone: Tz, now: DateTime<Utc>) -> Built {
             answer,
             !row.transparent,
             &linked_ids,
-            &candidate_ids,
+            &candidates
+                .iter()
+                .map(|c| (c.ghost_id, c.source_ids.as_slice()))
+                .collect::<Vec<_>>(),
         );
         let mut mails = mails_of(linked.iter().copied(), input.mail, None, MAX_LINKED_MAIL);
         for (c, g) in near.iter().enumerate() {
@@ -489,39 +630,68 @@ pub fn build(input: &Input<'_>, zone: Tz, now: DateTime<Utc>) -> Built {
             organizer_is_you,
             linked_ids,
             mails,
-            candidates: near
-                .iter()
-                .map(|g| Candidate {
-                    ghost_id: g.id,
-                    title: g.title.clone(),
-                    start: g.start,
-                    kind: g.kind,
-                })
-                .collect(),
-            remindable: row.self_response != Some(SelfResponse::Declined)
+            candidates,
+            theirs: theirs[i],
+            remindable: theirs[i]
+                && row.self_response != Some(SelfResponse::Declined)
                 && upcoming(&row.start, now, zone),
+            covers: if theirs[i] {
+                linked.iter().map(|g| ghost_key(g.id)).collect()
+            } else {
+                Vec::new()
+            },
             version,
         });
     }
-    // A ghost an event's CURRENT plan says is the same thing is that event's.
+    // A ghost one of the user's events' plans says is the same thing is that
+    // event's. A STALE plan still claims until it is planned again (a
+    // version moves whenever anything that day does, and dropping the claim
+    // meanwhile would remind twice), but only a ghost that is still one of
+    // its candidates.
     let mut claimed: HashMap<i64, usize> = HashMap::new();
-    for (i, item) in events.iter().enumerate() {
-        if let Some(plan) = input.plans.get(&item.key).filter(|p| p.current(item)) {
-            for id in &plan.plan.same_as {
-                claimed.entry(*id).or_insert(i);
+    for (i, item) in events.iter_mut().enumerate() {
+        if !item.theirs {
+            continue;
+        }
+        let Some(plan) = input
+            .plans
+            .get(&item.key)
+            .filter(|p| p.prompt_version == PROMPT_VERSION)
+        else {
+            continue;
+        };
+        for id in &plan.plan.same_as {
+            if item.candidates.iter().any(|c| c.ghost_id == *id) && !claimed.contains_key(id) {
+                claimed.insert(*id, i);
+                item.covers.push(ghost_key(*id));
             }
         }
     }
+    // Ghosts bound to a Passband event: when calendar is granted and that
+    // event is not listed, the event (wherever it is now) reminds for it.
+    let bound_elsewhere: HashSet<i64> = if input.granted {
+        let listed: HashSet<(&str, &str)> = input
+            .events
+            .iter()
+            .map(|e| (e.calendar_id.as_str(), e.row.event_id.as_str()))
+            .collect();
+        input
+            .owned
+            .iter()
+            .filter(|o| o.state == super::own::OwnState::Owned)
+            .filter(|o| !listed.contains(&(o.calendar_id.as_str(), o.event_id.as_str())))
+            .map(|o| o.ghost_id)
+            .collect()
+    } else {
+        HashSet::new()
+    };
     let ghosts = input
         .ghosts
         .iter()
-        .zip(&links)
+        .zip(&matched)
         .map(|(g, link)| {
             if let Some(i) = link {
                 return GhostLink::Matched(*i);
-            }
-            if let Some(i) = claimed.get(&g.id) {
-                return GhostLink::Claimed(*i);
             }
             let going = g.user_state == Some(crate::types::GhostUserState::Going);
             let answer = if going {
@@ -545,11 +715,14 @@ pub fn build(input: &Input<'_>, zone: Tz, now: DateTime<Utc>) -> Built {
                 &[],
             );
             let state = g.state(now.fixed_offset());
-            let remindable = g.verified()
+            let claimer = claimed.get(&g.id).copied();
+            let remindable = claimer.is_none()
+                && !bound_elsewhere.contains(&g.id)
+                && g.verified()
                 && answer.is_some()
                 && matches!(state, GhostState::Ghost | GhostState::Going)
                 && upcoming(&g.start, now, zone);
-            GhostLink::Alone(Box::new(Item {
+            let item = Box::new(Item {
                 key: ghost_key(g.id),
                 what: ItemRef::Ghost { id: g.id },
                 ghost_kind: Some(g.kind),
@@ -567,13 +740,24 @@ pub fn build(input: &Input<'_>, zone: Tz, now: DateTime<Utc>) -> Built {
                 linked_ids,
                 mails: mails_of([g], input.mail, None, MAX_LINKED_MAIL),
                 candidates: Vec::new(),
+                theirs: true,
                 remindable,
+                covers: Vec::new(),
                 version,
-            }))
+            });
+            match claimer {
+                Some(i) => GhostLink::Claimed(i, item),
+                None => GhostLink::Alone(item),
+            }
         })
         .collect();
     Built { events, ghosts }
 }
+
+/// How far past its range a reader lists ghosts and events, so the items in
+/// the range see all their same-day candidates and same-start links: two
+/// days covers a day read in any zone (offsets run -12h to +14h).
+pub const LISTING_PAD: chrono::Duration = chrono::Duration::days(2);
 
 /// Should this item be planned now? Remindable, and starting within
 /// [`HORIZON_DAYS`] or holding linked mail.
@@ -640,21 +824,52 @@ impl StoredPlan {
     pub fn current(&self, item: &Item) -> bool {
         self.version == item.version && self.prompt_version == PROMPT_VERSION
     }
+
+    /// The plan that governs `item` while it waits to be planned again: a
+    /// STALE plan (its version moved) still decides whether to remind, how
+    /// long before, and what it claims; only a plan from another prompt is
+    /// none at all. The fallback is for an item that has never had a plan.
+    pub fn governs(&self) -> bool {
+        self.prompt_version == PROMPT_VERSION
+    }
 }
 
-/// The model's answer as it arrives.
+/// Whether a plan's pick may still be served for `item`: its mail is one of
+/// the item's linked sources, or a source of a candidate the plan claims.
+/// Sources are only ever eligible mail, so a pick whose mail went spam or
+/// sealed since is dropped.
+fn pick_holds(item: &Item, plan: &Plan, pick: &Pick) -> bool {
+    item.linked_ids.contains(&pick.message_id)
+        || item
+            .candidates
+            .iter()
+            .any(|c| plan.same_as.contains(&c.ghost_id) && c.source_ids.contains(&pick.message_id))
+}
+
+/// The model's answer as it arrives. Every field but `remind` and
+/// `lead_minutes` may be absent OR null (an endpoint that does not enforce
+/// the schema writes either), and both read as nothing.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RemindOutput {
     pub remind: bool,
     pub lead_minutes: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub line: String,
     #[serde(default)]
     pub open: Option<PickOutput>,
     #[serde(default)]
     pub ticket: Option<PickOutput>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub same_as: Vec<i64>,
+}
+
+/// A JSON null as the type's default.
+fn null_default<'de, D, T>(d: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
 /// `{mail, attachment?}`, 1-based as the prompt numbers them.
@@ -681,17 +896,125 @@ pub fn snap_lead(minutes: i64) -> u32 {
 }
 
 /// THE LINE RULE. Control, bidi and invisible characters go
-/// ([`plain`]); a line holding a URL or a bare host, an `@`, or a run of 6
-/// or more digits across separators is DROPPED whole
-/// ([`ghost::mail_shaped`], the `basis` rule); what is left is cut to
-/// [`LINE_CAP`] characters on a character boundary. None for no line.
+/// ([`plain`]), and the text is NFKC-folded (fullwidth `ｅｖｉｌ．ｃｏｍ` is
+/// `evil.com`). A line that is [`line_shaped`] is DROPPED whole; what is
+/// left is cut to [`LINE_CAP`] characters on a character boundary. None for
+/// no line.
 pub fn launder_line(raw: &str) -> Option<String> {
-    let text = plain(raw);
-    if text.is_empty() || ghost::mail_shaped(&text) {
+    let text = fold(&plain(raw));
+    if text.is_empty() || line_shaped(&text) {
         return None;
     }
     let text = truncate_trimmed(&text, LINE_CAP);
     (!text.is_empty()).then_some(text)
+}
+
+/// NFKC, then the full stops NFKC leaves alone (the ideographic `。` and
+/// the halfwidth `｡`) as `.`, then [`plain`] again (folding can make a
+/// space).
+fn fold(text: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    let folded: String = text
+        .nfkc()
+        .map(|c| match c {
+            '\u{3002}' | '\u{FF61}' => '.',
+            c => c,
+        })
+        .collect();
+    plain(&folded)
+}
+
+/// Common top-level domains, for the spelled-out ` dot ` obfuscation (any
+/// two letters count too, the country codes).
+const SPELLED_TLDS: [&str; 14] = [
+    "com", "net", "org", "info", "biz", "app", "xyz", "online", "site", "shop", "link", "live",
+    "club", "top",
+];
+
+/// THE LINE'S DROP TEST, stricter than triage's `basis` rule
+/// ([`ghost::mail_shaped`], which it also applies), over folded text. A
+/// reminder line never needs a domain, an address, a phone number or a
+/// code, and a stranger's invitation can steer what the model writes, so a
+/// line holding any of these goes:
+///
+/// - a dotted host anywhere (`evil-tickets.com`, `bit.ly`,
+///   `paypal.com.evil.ru`): labels joined by dots, the last of 2 or more
+///   letters; "St. Louis" and "7.30" are not;
+/// - a dot written out to dodge that: `[.]`, `(.)`, `[dot]`, `(dot)`, or
+///   ` dot ` before a top-level domain;
+/// - `hxxp`, or an `@` (`[at]` too);
+/// - a run of 6 or more digits counted across the separators a number is
+///   printed with (space, `- . / , _ · + ( )`), the look-alike letters `l`,
+///   `I` and `o` counting inside a run;
+/// - a vanity number, `1-8xx-` and letters (`1-800-FLOWERS`).
+pub fn line_shaped(text: &str) -> bool {
+    if ghost::mail_shaped(text) {
+        return true;
+    }
+    let lower = text.to_lowercase();
+    if lower.contains('@')
+        || lower.contains("hxxp")
+        || ["[.]", "(.)", "[dot]", "(dot)", "{.}", "[at]", "(at)"]
+            .iter()
+            .any(|o| lower.contains(o))
+    {
+        return true;
+    }
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric() && c != '.' && c != '-')
+        .collect();
+    if words.iter().any(|w| dotted_host(w)) {
+        return true;
+    }
+    // ` dot ` between a word and a top-level domain.
+    let tokens: Vec<&str> = lower.split_whitespace().collect();
+    if tokens.windows(3).any(|w| {
+        let tld = w[2].trim_matches(|c: char| !c.is_alphanumeric());
+        w[1] == "dot"
+            && w[0].chars().any(char::is_alphanumeric)
+            && (SPELLED_TLDS.contains(&tld)
+                || (tld.chars().count() == 2 && tld.chars().all(char::is_alphabetic)))
+    }) {
+        return true;
+    }
+    digit_run(text) || vanity_number(&lower)
+}
+
+/// `label(.label)+` with a last label of 2 or more letters, over one run of
+/// letters, digits, dots and hyphens.
+fn dotted_host(word: &str) -> bool {
+    let word = word.trim_matches(['.', '-']);
+    let labels: Vec<&str> = word.split('.').collect();
+    labels.len() >= 2
+        && labels.iter().all(|l| !l.is_empty())
+        && labels
+            .last()
+            .is_some_and(|tld| tld.chars().count() >= 2 && tld.chars().all(char::is_alphabetic))
+}
+
+/// A run of 6 or more digits across the separators a number is printed
+/// with; inside a run, `l`, `I` and `o`/`O` count as digits.
+fn digit_run(text: &str) -> bool {
+    let mut run = 0;
+    text.chars().any(|c| {
+        if c.is_numeric() || (run > 0 && matches!(c, 'l' | 'I' | 'o' | 'O')) {
+            run += 1;
+        } else if !matches!(
+            c,
+            ' ' | '-' | '.' | '+' | '(' | ')' | '/' | ',' | '_' | '\u{B7}'
+        ) {
+            run = 0;
+        }
+        run >= 6
+    })
+}
+
+/// `1-8xx-` and then a letter, the separators a space, `-` or `.`.
+fn vanity_number(lower: &str) -> bool {
+    static VANITY: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?:^|[^0-9])1[ .-]?8[0-9]{2}[ .-]+[a-z]").expect("vanity regex")
+    });
+    VANITY.is_match(lower)
 }
 
 /// A 1-based number into a list of `len`, as an index. None out of range.
@@ -1121,20 +1444,21 @@ pub fn start_key(start: &EventTime) -> String {
     }
 }
 
-/// THE FIRE RULE: whether `item` should fire at `now`, given its CURRENT
-/// plan (None: it has none for this version). A timed item fires from
-/// `start - lead` until it starts; an all-day one from 08:00 on its day,
-/// owner-local, until noon. A plan that says no reminder never fires; no
-/// plan at all fires the fallback, 30 minutes before, but only for an item
-/// worth one ([`fallback_worthy`]). Whether it already fired for this start
-/// is the caller's to check. PURE.
-pub fn due(item: &Item, plan: Option<&Plan>, now: DateTime<Utc>, zone: Tz) -> Option<Due> {
+/// THE FIRE RULE: whether `item` should fire at `now`, given its stored
+/// plan. A timed item fires from `start - lead` until it starts; an all-day
+/// one from 08:00 on its day, owner-local, until noon. A plan that says no
+/// reminder never fires, CURRENT OR STALE ([`StoredPlan::governs`]): a
+/// version that moved is planned again soon, and until then the model's
+/// "no" holds. No plan at all fires the fallback, 30 minutes before, but
+/// only for an item worth one ([`fallback_worthy`]). Whether it may fire
+/// again is [`may_fire`]'s. PURE.
+pub fn due(item: &Item, plan: Option<&StoredPlan>, now: DateTime<Utc>, zone: Tz) -> Option<Due> {
     if !item.remindable {
         return None;
     }
-    let (lead, fallback) = match plan {
-        Some(p) if !p.remind => return None,
-        Some(p) => (p.lead_minutes, false),
+    let (lead, fallback) = match plan.filter(|p| p.governs()) {
+        Some(p) if !p.plan.remind => return None,
+        Some(p) => (p.plan.lead_minutes, false),
         None if !fallback_worthy(item) => return None,
         None => (FALLBACK_LEAD, true),
     };
@@ -1158,6 +1482,55 @@ pub fn due(item: &Item, plan: Option<&Plan>, now: DateTime<Utc>, zone: Tz) -> Op
         lead_minutes,
         fallback,
     })
+}
+
+/// One recorded firing, as [`may_fire`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fire {
+    pub item_key: String,
+    pub start_key: String,
+    pub fired_at: DateTime<Utc>,
+    /// The ghost keys the item stood for ([`Item::covers`]).
+    pub covers: Vec<String>,
+}
+
+/// Firings per item per owner-local day at most, however its start moves.
+pub const FIRES_PER_DAY: usize = 2;
+/// How long a firing speaks for the ghosts it covered, and they for it.
+pub const COVER_HOURS: i64 = 24;
+
+/// THE SPAM CAPS: whether `item`, [`due`] for `due`, may fire given the
+/// firings kept. Not when this start has fired; not when the item has fired
+/// [`FIRES_PER_DAY`] times today, owner-local (an organizer moving the start
+/// again and again buys no more banners); and not when the same real thing
+/// has fired under the other key in the last [`COVER_HOURS`] (a ghost that
+/// fired alone, then matched to its event, or the reverse). PURE.
+pub fn may_fire(item: &Item, due: &Due, fires: &[Fire], now: DateTime<Utc>, zone: Tz) -> bool {
+    let today = now.with_timezone(&zone).date_naive();
+    let since = now - chrono::Duration::hours(COVER_HOURS);
+    let mut today_count = 0;
+    for f in fires {
+        if f.item_key == item.key {
+            if f.start_key == due.start_key {
+                return false;
+            }
+            if f.fired_at.with_timezone(&zone).date_naive() == today {
+                today_count += 1;
+            }
+        }
+        if f.fired_at > since && (item.covers.contains(&f.item_key) || f.covers.contains(&item.key))
+        {
+            return false;
+        }
+    }
+    today_count < FIRES_PER_DAY
+}
+
+/// THE PLANNING BACKOFF: after `failures` failed asks in a row, an item is
+/// not asked again for 30 minutes, doubling each time, at most 4 hours.
+pub fn backoff(failures: u32) -> chrono::Duration {
+    let minutes = 30i64.saturating_mul(1i64 << failures.saturating_sub(1).min(4));
+    chrono::Duration::minutes(minutes.min(240))
 }
 
 /// Whether an item with no plan gets the fallback reminder. With no model
@@ -1199,11 +1572,18 @@ pub fn fallback_ticket(item: &Item) -> Option<Pick> {
     })
 }
 
-/// The tickets button's pick: the plan's when it is current, else the
-/// fallback.
+/// The tickets button's pick. For the user's item with a plan (current or
+/// stale, [`StoredPlan::governs`]), the plan's pick while its mail is still
+/// the item's ([`pick_holds`]; else the fallback), and none when the plan
+/// says none. Else, and always for an event that is not the user's (no plan
+/// of its own, never a claim), [`fallback_ticket`].
 pub fn tickets(item: &Item, plan: Option<&StoredPlan>) -> Option<Pick> {
-    match plan.filter(|p| p.current(item)) {
-        Some(p) => p.plan.ticket.clone(),
+    match plan.filter(|p| item.theirs && p.governs()) {
+        Some(p) => match &p.plan.ticket {
+            Some(pick) if pick_holds(item, &p.plan, pick) => Some(pick.clone()),
+            Some(_) => fallback_ticket(item),
+            None => None,
+        },
         None => fallback_ticket(item),
     }
 }
@@ -1239,14 +1619,16 @@ fn frame_time(t: &EventTime, zone: Tz) -> String {
 
 /// THE `calendar_reminder` FRAME, the wire contract for the Mac's event
 /// stream and the phone's fetch (`GET /client/calendar/reminders/{id}`).
-/// `open` and `ticket` are the plan's, or for the fallback both the
-/// [`fallback_ticket`].
+/// `open` and `ticket` are the plan's while their mail is still the item's
+/// ([`pick_holds`]), else, and for the fallback, both the
+/// [`fallback_ticket`]. The `line` only from a CURRENT plan: one made from
+/// what has since changed is not shown.
 pub fn frame(
     fire_id: i64,
     at: DateTime<Utc>,
     item: &Item,
     due: &Due,
-    plan: Option<&Plan>,
+    plan: Option<&StoredPlan>,
     zone: Tz,
 ) -> serde_json::Value {
     let mut what = match &item.what {
@@ -1261,8 +1643,19 @@ pub fn frame(
     what["end"] = serde_json::json!(item.end.as_ref().map(|e| frame_time(e, zone)));
     what["all_day"] = serde_json::json!(item.all_day());
     what["place"] = serde_json::json!(item.place_name);
-    let (line, open, ticket) = match plan {
-        Some(p) => (p.line.clone(), p.open.clone(), p.ticket.clone()),
+    let (line, open, ticket) = match plan.filter(|p| !due.fallback && p.governs()) {
+        Some(p) => {
+            let held = |pick: &Option<Pick>| match pick {
+                Some(pick) if pick_holds(item, &p.plan, pick) => Some(pick.clone()),
+                Some(_) => fallback_ticket(item),
+                None => None,
+            };
+            (
+                p.plan.line.clone().filter(|_| p.current(item)),
+                held(&p.plan.open),
+                held(&p.plan.ticket),
+            )
+        }
         None => {
             let t = fallback_ticket(item);
             (None, t.clone(), t)

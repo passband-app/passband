@@ -206,6 +206,33 @@ extension EventBanner {
         var sound: Bool
     }
 
+    /// THE SAME FIRE: the reminder a push named, by id AND by the second it
+    /// fired (`at`, which the daemon sets to the push's `fired`). An id alone
+    /// is not enough: a tap long after on an old notification must never
+    /// open a different reminder.
+    static func isPushedFire(_ signal: CalendarReminderSignal, fireId: Int, fired: Int) -> Bool {
+        signal.calendar_reminder == fireId && signal.at == fired
+    }
+
+    /// `stripBidi`, and the invisible marks it leaves: the directional marks
+    /// (LRM, RLM, ALM), zero-width space and non-joiner, word joiner and
+    /// invisible operators, the BOM and tag characters. The daemon strips
+    /// them at sync; a reminder's words are stripped again here, as the
+    /// Mac and the phone draw them. The zero-width JOINER stays: emoji are
+    /// made with it.
+    static func stripInvisible(_ s: String) -> String {
+        String(
+            String.UnicodeScalarView(
+                stripBidi(s).unicodeScalars.filter { scalar in
+                    switch scalar.value {
+                    case 0x200B, 0x200C, 0x200E, 0x200F, 0x061C, 0x2060...0x2064, 0xFEFF,
+                        0xE0000...0xE007F:
+                        return false
+                    default: return true
+                    }
+                }))
+    }
+
     /// The relay's alert, which is also the extension's fallback when the
     /// daemon cannot be asked.
     static let calendarFallbackBody = "An event is coming up"
@@ -226,18 +253,18 @@ extension EventBanner {
     static func calendarReminderCopy(
         _ signal: CalendarReminderSignal, now: Date = Date(), zone: TimeZone = .current
     ) -> ReminderCopy {
-        let title = flatten(stripBidi(signal.item.title ?? ""), max: 80)
+        let title = flatten(stripInvisible(signal.item.title ?? ""), max: 80)
         let lead =
             reminderClock(start: signal.item.start, allDay: signal.item.all_day, zone: zone)
             ?? reminderLead(
                 start: signal.item.start, allDay: signal.item.all_day, leadMinutes: signal.lead_minutes,
                 now: now)
-        let place = flatten(stripBidi(signal.item.place ?? ""), max: 60)
+        let place = flatten(stripInvisible(signal.item.place ?? ""), max: 60)
         let subtitle = [lead, place.isEmpty ? nil : place].compactMap { $0 }.joined(separator: " · ")
         return ReminderCopy(
             title: title.isEmpty ? "Untitled event" : title,
             subtitle: subtitle,
-            body: flatten(stripBidi(signal.line ?? ""), max: 120),
+            body: flatten(stripInvisible(signal.line ?? ""), max: 120),
             threadIdentifier: calendarGroup,
             // Time-bound by definition: it chimes.
             sound: true)

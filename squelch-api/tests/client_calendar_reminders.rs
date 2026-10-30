@@ -375,3 +375,56 @@ async fn with_the_calendar_feature_off_nothing_exists() {
         "the PUT wrote nothing"
     );
 }
+
+/// A STALE plan still governs firing (correctness review m1): one that said
+/// no reminder stays silent inside the fallback's window, and one that said
+/// yes fires on its own lead, not as the fallback, and without its line,
+/// which was made from what has since changed. No model here, so nothing is
+/// planned again.
+#[tokio::test]
+async fn a_stale_plan_still_decides_whether_and_when_it_fires() {
+    use squelch_core::gcal::remind::Plan;
+    let (state, app, store, acct) = setup(calendar_on());
+    seed(
+        &store,
+        acct,
+        "g1",
+        "Big Thief",
+        rfc(Utc::now() + Duration::minutes(20)),
+        EventCommitment::Committed,
+        true,
+    );
+    let (_, body) = call(&app, "GET", "/client/timeline", None).await;
+    let id = body["ghosts"][0]["id"].as_i64().unwrap();
+    let key = format!("g:{id}");
+    let plan = |remind, lead_minutes| Plan {
+        remind,
+        lead_minutes,
+        line: Some("Old words".into()),
+        open: None,
+        ticket: None,
+        same_as: Vec::new(),
+    };
+    store
+        .calendar_reminder_put(acct, &key, "stale", &plan(false, 30), Utc::now())
+        .unwrap();
+    assert_eq!(
+        fired(run_fire_pass(&state, Utc::now()).await.unwrap()),
+        Vec::<i64>::new(),
+        "a stale no stays no"
+    );
+    store
+        .calendar_reminder_put(acct, &key, "stale", &plan(true, 60), Utc::now())
+        .unwrap();
+    let ids = fired(run_fire_pass(&state, Utc::now()).await.unwrap());
+    assert_eq!(ids.len(), 1);
+    let (_, frame) = call(
+        &app,
+        "GET",
+        &format!("/client/calendar/reminders/{}", ids[0]),
+        None,
+    )
+    .await;
+    assert_eq!(frame["lead_minutes"], 60, "its lead, not the fallback's 30");
+    assert_eq!(frame["line"], Value::Null);
+}

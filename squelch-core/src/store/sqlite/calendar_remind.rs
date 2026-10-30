@@ -8,7 +8,9 @@
 use super::ghosts::{ELIGIBLE, ELIGIBLE_JOINS};
 use super::translations::SEALED_SQL;
 use super::*;
-use crate::gcal::remind::{LinkedAttachment, LinkedMail, PROMPT_VERSION, Plan, StoredPlan};
+use crate::gcal::remind::{
+    Fire, LinkedAttachment, LinkedMail, PROMPT_VERSION, Plan, StoredPlan, backoff,
+};
 use std::collections::{HashMap, HashSet};
 
 /// The owner preference: `'0'` is off; absent (or anything else) is on.
@@ -82,7 +84,12 @@ impl SqliteStore {
                         message_id: id,
                         thread_id,
                         subject,
-                        sender_name: from_name.filter(|n| !n.trim().is_empty()),
+                        // A display name that is an address ("tix@x.com",
+                        // "Jane (jane@corp.com)") is no name: the prompt
+                        // never carries an address.
+                        sender_name: from_name.filter(|n| {
+                            !n.trim().is_empty() && !n.contains(['@', '\u{FF20}', '\u{FE6B}'])
+                        }),
                         received_at: received_at.with_timezone(&Utc),
                         attachments,
                     },
@@ -130,7 +137,7 @@ impl SqliteStore {
     }
 
     /// Store an item's plan for `version`, under the current prompt,
-    /// replacing whatever it had.
+    /// replacing whatever it had, and clear its backoff.
     pub fn calendar_reminder_put(
         &self,
         account: AccountId,
@@ -150,61 +157,183 @@ impl SqliteStore {
                  planned_at=excluded.planned_at",
             params![account, key, version, PROMPT_VERSION, json, now.to_rfc3339()],
         )?;
+        conn.execute(
+            "DELETE FROM calendar_reminder_backoff WHERE account_id=?1 AND item_key=?2",
+            params![account, key],
+        )?;
         Ok(())
     }
 
-    /// Forget the plans of items that are gone or over: every key not in
-    /// `keep`. How many went.
+    /// An ask about `key` failed (no answer, a refusal, a timeout): back it
+    /// off ([`backoff`]) from `now`.
+    pub fn calendar_reminder_failed(
+        &self,
+        account: AccountId,
+        key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        let failures: u32 = conn
+            .query_row(
+                "SELECT failures FROM calendar_reminder_backoff WHERE account_id=?1 AND item_key=?2",
+                params![account, key],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0)
+            + 1;
+        let retry_at = (now + backoff(failures)).timestamp();
+        conn.execute(
+            "INSERT INTO calendar_reminder_backoff(account_id,item_key,failures,retry_at)
+             VALUES(?1,?2,?3,?4)
+             ON CONFLICT(account_id,item_key) DO UPDATE SET failures=excluded.failures,
+                 retry_at=excluded.retry_at",
+            params![account, key, failures, retry_at],
+        )?;
+        Ok(())
+    }
+
+    /// The items backed off at `now`: not to be asked about yet.
+    pub fn calendar_reminder_backed_off(
+        &self,
+        account: AccountId,
+        now: DateTime<Utc>,
+    ) -> Result<HashSet<String>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT item_key FROM calendar_reminder_backoff WHERE account_id=?1 AND retry_at>?2",
+        )?;
+        let rows = stmt.query_map(params![account, now.timestamp()], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// THE DAILY CAP, durable: take one of `day`'s `cap` model calls, in one
+    /// statement, counting every ATTEMPT (a timeout or a failure too). False
+    /// when none is left. Days before `day` are forgotten as it goes.
+    pub fn calendar_reminder_take_call(
+        &self,
+        account: AccountId,
+        day: &str,
+        cap: u32,
+    ) -> Result<bool> {
+        let conn = self.lock()?;
+        conn.execute(
+            "DELETE FROM calendar_reminder_calls WHERE account_id=?1 AND day<?2",
+            params![account, day],
+        )?;
+        let taken = conn.execute(
+            "INSERT INTO calendar_reminder_calls(account_id,day,calls) VALUES(?1,?2,1)
+             ON CONFLICT(account_id,day) DO UPDATE SET calls=calls+1 WHERE calls<?3",
+            params![account, day, cap],
+        )?;
+        Ok(taken > 0 && cap > 0)
+    }
+
+    /// Of `addrs`, the ones that are KNOWN CONTACTS (the owner has written to
+    /// them: the store's one definition, `is_known_contact`), lowercased.
+    pub fn calendar_known_among(
+        &self,
+        account: AccountId,
+        addrs: &[String],
+    ) -> Result<HashSet<String>> {
+        let conn = self.lock()?;
+        let mut out = HashSet::new();
+        for addr in addrs {
+            let addr = addr.trim().to_ascii_lowercase();
+            if !addr.is_empty()
+                && !out.contains(&addr)
+                && super::messages::is_known_contact_conn(&conn, account, &addr)?
+            {
+                out.insert(addr);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Forget the plans (and backoffs) of items that are gone or over: every
+    /// key not in `keep`. With `events` false the events' keys (`e:`) are
+    /// all kept: a pass that could not list the calendar (no grant, a
+    /// keychain read that failed) knows nothing of them. How many plans went.
     pub fn calendar_reminders_prune(
         &self,
         account: AccountId,
         keep: &HashSet<String>,
+        events: bool,
     ) -> Result<usize> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
-        let keys: Vec<String> = tx
-            .prepare("SELECT item_key FROM calendar_reminders WHERE account_id=?1")?
-            .query_map(params![account], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
         let mut gone = 0;
-        for key in keys.iter().filter(|k| !keep.contains(*k)) {
-            gone += tx.execute(
-                "DELETE FROM calendar_reminders WHERE account_id=?1 AND item_key=?2",
-                params![account, key],
-            )?;
+        for table in ["calendar_reminders", "calendar_reminder_backoff"] {
+            let keys: Vec<String> = tx
+                .prepare(&format!("SELECT item_key FROM {table} WHERE account_id=?1"))?
+                .query_map(params![account], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for key in keys
+                .iter()
+                .filter(|k| !keep.contains(*k) && (events || !k.starts_with("e:")))
+            {
+                let n = tx.execute(
+                    &format!("DELETE FROM {table} WHERE account_id=?1 AND item_key=?2"),
+                    params![account, key],
+                )?;
+                if table == "calendar_reminders" {
+                    gone += n;
+                }
+            }
         }
         tx.commit()?;
         Ok(gone)
     }
 
-    /// The (item key, start key) pairs that have fired and are still kept.
-    pub fn calendar_reminder_fired(&self, account: AccountId) -> Result<HashSet<(String, String)>> {
+    /// The firings still kept, oldest first.
+    pub fn calendar_reminder_fired(&self, account: AccountId) -> Result<Vec<Fire>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT item_key, start_key FROM calendar_reminder_fires WHERE account_id=?1",
+            "SELECT item_key, start_key, fired_at, covers FROM calendar_reminder_fires
+             WHERE account_id=?1 ORDER BY id",
         )?;
-        let rows = stmt.query_map(params![account], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let rows = stmt
+            .query_map(params![account], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows
+            .into_iter()
+            .map(|(item_key, start_key, fired_at, covers)| Fire {
+                item_key,
+                start_key,
+                fired_at: DateTime::from_timestamp(fired_at, 0).unwrap_or_default(),
+                covers: serde_json::from_str(&covers).unwrap_or_default(),
+            })
+            .collect())
     }
 
-    /// FIRE ONCE: record a firing of `key` for the start `start_key`, its
-    /// frame made by `frame` from the new row's id, in one transaction. None
-    /// when that start has already fired (nothing written): a reminder fires
-    /// once per start instant.
+    /// FIRE ONCE: record a firing of `key` for the start `start_key`, with
+    /// the ghost keys it `covers`, its frame made by `frame` from the new
+    /// row's id, in one transaction. None when that start has already fired
+    /// (nothing written): a reminder fires once per start instant.
     pub fn calendar_reminder_fire(
         &self,
         account: AccountId,
         key: &str,
         start_key: &str,
+        covers: &[String],
         now: DateTime<Utc>,
         frame: impl FnOnce(i64) -> String,
     ) -> Result<Option<(i64, String)>> {
+        let covers = serde_json::to_string(covers)
+            .map_err(|e| CoreError::Other(anyhow::anyhow!("reminder covers: {e}")))?;
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
         let inserted = tx.execute(
-            "INSERT OR IGNORE INTO calendar_reminder_fires(account_id,item_key,start_key,fired_at,frame)
-             VALUES(?1,?2,?3,?4,'')",
-            params![account, key, start_key, now.timestamp()],
+            "INSERT OR IGNORE INTO calendar_reminder_fires(account_id,item_key,start_key,fired_at,covers,frame)
+             VALUES(?1,?2,?3,?4,?5,'')",
+            params![account, key, start_key, now.timestamp(), covers],
         )?;
         if inserted == 0 {
             return Ok(None);
@@ -300,6 +429,7 @@ mod tests {
                 a,
                 "e:primary/abc",
                 "2026-10-31T03:00:00+00:00",
+                &["g:4".to_string()],
                 now(),
                 |id| format!("{{\"calendar_reminder\":{id}}}"),
             )
@@ -311,6 +441,7 @@ mod tests {
                 a,
                 "e:primary/abc",
                 "2026-10-31T03:00:00+00:00",
+                &[],
                 now(),
                 |_| panic!("a start that fired is not built again"),
             )
@@ -321,12 +452,17 @@ mod tests {
                 a,
                 "e:primary/abc",
                 "2026-10-31T04:00:00+00:00",
+                &[],
                 now(),
                 |id| id.to_string(),
             )
             .unwrap();
         assert!(moved.is_some());
-        assert_eq!(s.calendar_reminder_fired(a).unwrap().len(), 2);
+        let fires = s.calendar_reminder_fired(a).unwrap();
+        assert_eq!(fires.len(), 2);
+        assert_eq!(fires[0].covers, vec!["g:4"], "what it stood for is kept");
+        assert_eq!(fires[0].fired_at, now());
+        assert!(fires[1].covers.is_empty());
     }
 
     #[test]
@@ -334,7 +470,7 @@ mod tests {
         let (s, a) = store();
         let b = s.ensure_account("other@example.com").unwrap();
         let (id, _) = s
-            .calendar_reminder_fire(a, "g:1", "2026-10-31", now(), |id| format!("f{id}"))
+            .calendar_reminder_fire(a, "g:1", "2026-10-31", &[], now(), |id| format!("f{id}"))
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -369,7 +505,9 @@ mod tests {
         assert_eq!(plans["g:2"].plan, plan);
         assert_eq!(plans["g:2"].prompt_version, PROMPT_VERSION);
         let keep = HashSet::from(["g:2".to_string()]);
-        assert_eq!(s.calendar_reminders_prune(a, &keep).unwrap(), 1);
+        // A pass that could not list the calendar keeps the events' plans.
+        assert_eq!(s.calendar_reminders_prune(a, &keep, false).unwrap(), 0);
+        assert_eq!(s.calendar_reminders_prune(a, &keep, true).unwrap(), 1);
         assert_eq!(
             s.calendar_reminder_plans(a)
                 .unwrap()
@@ -377,6 +515,141 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["g:2"]
         );
+    }
+
+    #[test]
+    fn a_fire_id_is_never_reused_once_the_week_is_pruned() {
+        let (s, a) = store();
+        let (first, _) = s
+            .calendar_reminder_fire(a, "g:1", "2026-10-31", &[], now(), |_| "f".into())
+            .unwrap()
+            .unwrap();
+        let later = now() + FIRES_KEPT + chrono::Duration::seconds(1);
+        assert_eq!(s.calendar_reminder_fires_prune(a, later).unwrap(), 1);
+        let (second, _) = s
+            .calendar_reminder_fire(a, "g:1", "2026-11-09", &[], later, |_| "f".into())
+            .unwrap()
+            .unwrap();
+        assert!(second > first, "{second} after {first}");
+    }
+
+    #[test]
+    fn an_old_fires_table_is_rebuilt_with_covers() {
+        let (s, a) = store();
+        exec(
+            &s,
+            "DROP TABLE calendar_reminder_fires;
+             CREATE TABLE calendar_reminder_fires (
+                 id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL,
+                 item_key TEXT NOT NULL, start_key TEXT NOT NULL,
+                 fired_at INTEGER NOT NULL, frame TEXT NOT NULL,
+                 UNIQUE(account_id, item_key, start_key));
+             INSERT INTO calendar_reminder_fires(account_id,item_key,start_key,fired_at,frame)
+                 VALUES(1,'g:1','2026-10-31',0,'f');",
+        );
+        let conn = s.lock().unwrap();
+        super::super::migrate::rebuild_calendar_reminder_fires(&conn).unwrap();
+        // Twice is once.
+        super::super::migrate::rebuild_calendar_reminder_fires(&conn).unwrap();
+        drop(conn);
+        assert!(s.calendar_reminder_fired(a).unwrap().is_empty());
+        s.calendar_reminder_fire(a, "g:1", "2026-10-31", &["g:2".into()], now(), |_| {
+            "f".into()
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(s.calendar_reminder_fired(a).unwrap()[0].covers, vec!["g:2"]);
+    }
+
+    #[test]
+    fn a_failed_ask_backs_off_doubling_and_a_plan_clears_it() {
+        let (s, a) = store();
+        let t = now();
+        s.calendar_reminder_failed(a, "g:1", t).unwrap();
+        let off = |at| s.calendar_reminder_backed_off(a, at).unwrap();
+        assert!(off(t).contains("g:1"));
+        assert!(off(t + chrono::Duration::minutes(29)).contains("g:1"));
+        assert!(off(t + chrono::Duration::minutes(30)).is_empty());
+        s.calendar_reminder_failed(a, "g:1", t).unwrap();
+        assert!(off(t + chrono::Duration::minutes(59)).contains("g:1"));
+        for _ in 0..6 {
+            s.calendar_reminder_failed(a, "g:1", t).unwrap();
+        }
+        assert!(off(t + chrono::Duration::minutes(239)).contains("g:1"));
+        assert!(
+            off(t + chrono::Duration::minutes(240)).is_empty(),
+            "at most 4h"
+        );
+        let plan = Plan {
+            remind: true,
+            lead_minutes: 30,
+            line: None,
+            open: None,
+            ticket: None,
+            same_as: Vec::new(),
+        };
+        s.calendar_reminder_failed(a, "g:1", t).unwrap();
+        s.calendar_reminder_put(a, "g:1", "v", &plan, t).unwrap();
+        assert!(off(t).is_empty(), "a plan clears it");
+        // Pruned with the plans.
+        s.calendar_reminder_failed(a, "g:9", t).unwrap();
+        s.calendar_reminders_prune(a, &HashSet::new(), true)
+            .unwrap();
+        assert!(off(t).is_empty());
+    }
+
+    #[test]
+    fn the_daily_cap_counts_every_attempt_and_survives_a_reopen() {
+        let (s, a) = store();
+        for _ in 0..3 {
+            assert!(s.calendar_reminder_take_call(a, "2026-10-30", 3).unwrap());
+        }
+        assert!(!s.calendar_reminder_take_call(a, "2026-10-30", 3).unwrap());
+        // Another account, and the next day, have their own.
+        let b = s.ensure_account("other@example.com").unwrap();
+        assert!(s.calendar_reminder_take_call(b, "2026-10-30", 3).unwrap());
+        assert!(s.calendar_reminder_take_call(a, "2026-10-31", 3).unwrap());
+        assert!(!s.calendar_reminder_take_call(a, "2026-10-31", 0).unwrap());
+    }
+
+    #[test]
+    fn known_organizers_are_the_known_contact_floor() {
+        let (s, a) = store();
+        exec(
+            &s,
+            "INSERT INTO contacts(account_id,addr,sent_count,first_seen) VALUES(1,'Pal@Example.com',2,'2026-01-01');
+             INSERT INTO contacts(account_id,addr,sent_count,first_seen) VALUES(1,'lurker@example.com',0,'2026-01-01');",
+        );
+        let got = s
+            .calendar_known_among(
+                a,
+                &[
+                    "pal@example.com".into(),
+                    " PAL@example.com".into(),
+                    "lurker@example.com".into(),
+                    "stranger@example.com".into(),
+                ],
+            )
+            .unwrap();
+        assert_eq!(got, HashSet::from(["pal@example.com".to_string()]));
+    }
+
+    #[test]
+    fn a_display_name_that_is_an_address_is_no_name() {
+        let (s, a) = store();
+        seed(&s, a, 1);
+        seed(&s, a, 2);
+        exec(
+            &s,
+            "UPDATE messages SET from_name='tix@ticketmaster.example' WHERE id=1",
+        );
+        exec(
+            &s,
+            "UPDATE messages SET from_name='Jane (jane\u{FF20}corp.example)' WHERE id=2",
+        );
+        let got = s.calendar_linked_mail(a, &[1, 2]).unwrap();
+        assert_eq!(got[&1].sender_name, None);
+        assert_eq!(got[&2].sender_name, None);
     }
 
     /// Seed a received, reviewed message with one PDF, one inline image and

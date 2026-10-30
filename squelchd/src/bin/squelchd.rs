@@ -5413,6 +5413,7 @@ mod tests {
                 list_unsubscribe: None,
                 list_unsub_one_click: false,
                 auth_pass: None,
+                sender_signals: None,
             })
             .unwrap();
         let err = imap_setup_allowed(&store, b, "mail@x.org", &config).unwrap_err();

@@ -4,18 +4,85 @@
 //! proposals and removes an agent-created row when its last proposal disappears.
 use super::*;
 use crate::triage::ShipmentStatus;
+use crate::triage::amazon::{self, AmazonPackage};
 use crate::triage::decision::{MessageDecision, RecordProposal};
 use crate::triage::extract::shipments::sanitize_tracking_number;
 use std::collections::BTreeSet;
 
-fn tracking_numbers(decision: &MessageDecision) -> impl Iterator<Item = String> {
-    decision.records.iter().filter_map(|record| match record {
-        RecordProposal::Delivery {
-            tracking_number: Some(number),
-            ..
-        } => sanitize_tracking_number(Some(number), None),
-        _ => None,
+/// The key one delivery record files under: its tracking number, or, when it
+/// has none and its mail is about one Amazon box, that box's key
+/// ([`AmazonPackage::key`]). A model-written number can never collide with a
+/// box key: the sanitizer upper-cases, and the prefix is lower-case.
+fn delivery_key(number: Option<&str>, package: Option<&AmazonPackage>) -> Option<String> {
+    match number.and_then(|n| sanitize_tracking_number(Some(n), None)) {
+        Some(number) => Some(number),
+        None => package.map(AmazonPackage::key),
+    }
+}
+
+fn tracking_numbers<'a>(
+    decision: &'a MessageDecision,
+    package: Option<&'a AmazonPackage>,
+) -> impl Iterator<Item = String> + 'a {
+    decision
+        .records
+        .iter()
+        .filter_map(move |record| match record {
+            RecordProposal::Delivery {
+                tracking_number, ..
+            } => delivery_key(tracking_number.as_deref(), package),
+            _ => None,
+        })
+}
+
+/// Does this decision hold a delivery record with no usable number? Only then
+/// is its mail worth reading for an Amazon box.
+fn has_trackless_delivery(decision: &MessageDecision) -> bool {
+    decision.records.iter().any(|record| {
+        matches!(record, RecordProposal::Delivery { tracking_number, .. }
+            if delivery_key(tracking_number.as_deref(), None).is_none())
     })
+}
+
+/// SQL columns that load a message's body only when it could be Amazon mail.
+/// The exact test is `amazon::package_from_mail`; this only spares reading
+/// every other body. The HTML part loads only when the plain-text part has no
+/// tracker link: it is many times the size, and this runs on every rebuild.
+const AMAZON_BODY_COLUMNS: &str = "m.from_addr,m.auth_pass,
+    CASE WHEN lower(m.from_addr) LIKE '%amazon.com%' THEN m.body END,
+    CASE WHEN lower(m.from_addr) LIKE '%amazon.com%'
+          AND coalesce(m.body,'') NOT LIKE '%progress-tracker%' THEN m.body_html END";
+
+fn package_from_row(
+    from_addr: &str,
+    auth_pass: Option<bool>,
+    body: Option<String>,
+    body_html: Option<String>,
+) -> Option<AmazonPackage> {
+    amazon::package_from_mail(
+        from_addr,
+        auth_pass,
+        body.as_deref().unwrap_or(""),
+        body_html.as_deref().unwrap_or(""),
+    )
+}
+
+/// The Amazon box message `message` is about, if any.
+fn message_package(
+    conn: &Connection,
+    account: AccountId,
+    message: i64,
+) -> Result<Option<AmazonPackage>> {
+    let row = conn
+        .query_row(
+            &format!(
+                "SELECT {AMAZON_BODY_COLUMNS} FROM messages m WHERE m.account_id=?1 AND m.id=?2"
+            ),
+            params![account, message],
+            |r| Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    Ok(row.and_then(|(from, auth, body, html)| package_from_row(&from, auth, body, html)))
 }
 
 /// Write what the newest retained mail about a package says onto its row. ONE
@@ -223,28 +290,82 @@ fn record_identity(
     Ok(())
 }
 
+/// Rebuild every shipment `message`'s decision touched, before (`previous`)
+/// and now (`current`), from all retained decisions of the account.
 pub(super) fn reconcile(
     conn: &Connection,
     account: AccountId,
+    message: i64,
     previous: Option<&MessageDecision>,
     current: &MessageDecision,
 ) -> Result<()> {
-    use crate::triage::order_link::{
-        sanitize_agent_item_name, sanitize_merchant, sanitize_order_refs,
+    let package = if previous.is_some_and(has_trackless_delivery) || has_trackless_delivery(current)
+    {
+        message_package(conn, account, message)?
+    } else {
+        None
     };
     let affected: BTreeSet<String> = previous
         .into_iter()
-        .flat_map(tracking_numbers)
-        .chain(tracking_numbers(current))
+        .flat_map(|decision| tracking_numbers(decision, package.as_ref()))
+        .chain(tracking_numbers(current, package.as_ref()))
         .collect();
+    rebuild(conn, account, &affected)
+}
+
+/// ONE-TIME BACKFILL (see `migrate::project_amazon_boxes`): project every
+/// Amazon box the account's stored decisions already describe. The agent
+/// always wrote these records; they only lacked a key, so no model call is
+/// needed. Returns how many boxes were rebuilt.
+pub(super) fn project_amazon_boxes(conn: &Connection, account: AccountId) -> Result<usize> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT d.decision_json,{AMAZON_BODY_COLUMNS}
+         FROM agent_message_decisions d JOIN messages m ON m.id=d.message_id AND m.account_id=d.account_id
+         WHERE d.account_id=?1 AND m.is_sent=0 AND m.is_spam=0
+           AND lower(m.from_addr) LIKE '%amazon.com%'"
+    ))?;
+    let rows = statement
+        .query_map([account], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<bool>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut boxes = BTreeSet::new();
+    for (encoded, from, auth, body, html) in rows {
+        // One undecodable decision costs only its own box.
+        let Ok(decision) = serde_json::from_str::<MessageDecision>(&encoded) else {
+            continue;
+        };
+        if has_trackless_delivery(&decision)
+            && let Some(package) = package_from_row(&from, auth, body, html)
+        {
+            boxes.extend(
+                tracking_numbers(&decision, Some(&package)).filter(|k| amazon::is_package_key(k)),
+            );
+        }
+    }
+    rebuild(conn, account, &boxes)?;
+    Ok(boxes.len())
+}
+
+/// Rebuild the rows keyed by `affected` from every retained decision.
+fn rebuild(conn: &Connection, account: AccountId, affected: &BTreeSet<String>) -> Result<()> {
+    use crate::triage::order_link::{
+        sanitize_agent_item_name, sanitize_merchant, sanitize_order_refs,
+    };
     if affected.is_empty() {
         return Ok(());
     }
-    let mut statement = conn.prepare(
-        "SELECT d.message_id,d.decision_json,m.received_at,m.subject
+    let mut statement = conn.prepare(&format!(
+        "SELECT d.message_id,d.decision_json,m.received_at,m.subject,{AMAZON_BODY_COLUMNS}
          FROM agent_message_decisions d JOIN messages m ON m.id=d.message_id AND m.account_id=d.account_id
          WHERE d.account_id=?1 AND m.is_sent=0 AND m.is_spam=0 ORDER BY m.received_at DESC,m.id DESC",
-    )?;
+    ))?;
     let decisions = statement
         .query_map([account], |row| {
             Ok((
@@ -252,33 +373,70 @@ pub(super) fn reconcile(
                 row.get::<_, String>(1)?,
                 dt(row, 2)?,
                 row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                (
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<bool>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                ),
             ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let mut proposals = Vec::new();
-    for (message, encoded, received, subject) in decisions {
+    for (message, encoded, received, subject, (from, auth, body, html)) in decisions {
         let decision: MessageDecision =
             serde_json::from_str(&encoded).map_err(|e| CoreError::Other(e.into()))?;
+        let package = if has_trackless_delivery(&decision) {
+            package_from_row(&from, auth, body, html)
+        } else {
+            None
+        };
         for record in decision.records {
-            if let RecordProposal::Delivery {
-                carrier: Some(carrier),
-                tracking_number: Some(number),
+            let RecordProposal::Delivery {
+                carrier,
+                tracking_number,
                 status,
                 item_name,
                 merchant,
                 order_refs,
                 ..
             } = record
-                && let Some(number) = sanitize_tracking_number(Some(&number), None)
-                && affected.contains(&number)
-                && matches!(
-                    carrier.as_str(),
-                    "ups" | "usps" | "fedex" | "dhl" | "amazon"
-                )
+            else {
+                continue;
+            };
+            let Some(number) = delivery_key(tracking_number.as_deref(), package.as_ref()) else {
+                continue;
+            };
+            // A box key is Amazon's whatever the model called the carrier
+            // (it often says null or "unknown" for Amazon Logistics).
+            let boxed = package.as_ref().filter(|_| amazon::is_package_key(&number));
+            let carrier = match boxed {
+                Some(_) => "amazon".to_string(),
+                None => match carrier {
+                    Some(carrier)
+                        if matches!(
+                            carrier.as_str(),
+                            "ups" | "usps" | "fedex" | "dhl" | "amazon"
+                        ) =>
+                    {
+                        carrier
+                    }
+                    _ => continue,
+                },
+            };
+            if affected.contains(&number)
                 && let Some(status) = crate::triage::ShipmentStatus::parse(&status)
             {
-                let merchant = sanitize_merchant(merchant.as_deref());
-                let order_refs = sanitize_order_refs(&order_refs);
+                // Amazon is the seller of a box Amazon's own mail tracks, and
+                // the box's order is the one in its tracker link.
+                let merchant = sanitize_merchant(merchant.as_deref())
+                    .or_else(|| boxed.map(|_| "Amazon".to_string()));
+                let mut order_refs = sanitize_order_refs(&order_refs);
+                if let Some(package) = boxed
+                    && !order_refs.contains(&package.order_id)
+                {
+                    order_refs.push(package.order_id.clone());
+                }
                 let item_name = sanitize_agent_item_name(
                     item_name.as_deref(),
                     &subject,
@@ -291,7 +449,10 @@ pub(super) fn reconcile(
                     message,
                     received,
                     info: crate::triage::ShipmentInfo {
-                        tracking_url: crate::triage::shipment::tracking_url(&carrier, &number),
+                        tracking_url: match boxed {
+                            Some(package) => Some(package.tracking_url()),
+                            None => crate::triage::shipment::tracking_url(&carrier, &number),
+                        },
                         carrier,
                         tracking_number: number,
                         status,
@@ -313,7 +474,7 @@ pub(super) fn reconcile(
             .optional()?;
         let mine: Vec<&Proposal> = proposals
             .iter()
-            .filter(|p| p.info.tracking_number == number)
+            .filter(|p| p.info.tracking_number == *number)
             .collect();
         let Some(latest) = mine.first() else {
             if let Some(id) = existing {
@@ -521,7 +682,7 @@ mod tests {
                 params![old, Utc::now().to_rfc3339()],
             )
             .unwrap();
-            reconcile(&tx, 1, None, &decision).unwrap();
+            reconcile(&tx, 1, 1, None, &decision).unwrap();
             tx.commit().unwrap();
         }
         // A NEW decision about the same package re-reads the old one too.
@@ -1118,7 +1279,7 @@ mod tests {
              VALUES(1,?1,1,?2,?3) ON CONFLICT(account_id,message_id) DO UPDATE SET decision_json=excluded.decision_json",
             params![id,serde_json::to_string(current).unwrap(),Utc::now().to_rfc3339()],
         ).unwrap();
-        reconcile(&tx, 1, previous, current).unwrap();
+        reconcile(&tx, 1, id, previous, current).unwrap();
         tx.commit().unwrap();
     }
 
@@ -1566,5 +1727,341 @@ mod tests {
             .unwrap();
         assert_eq!(records, 2);
         assert_eq!(shipments, 0);
+    }
+
+    // ---- Amazon boxes: trackless records keyed by Amazon's shipment id ----
+
+    fn tracker(order: &str, shipment: &str) -> String {
+        format!(
+            "Order #\n{order}\n\nTrack package\nhttps://www.amazon.com/progress-tracker/package?_encoding=UTF8&orderId={order}&packageIndex=0&shipmentId={shipment}&vt=NOTIFICATIONS\n"
+        )
+    }
+
+    fn add_amazon(
+        store: &SqliteStore,
+        id: i64,
+        from: &str,
+        auth: Option<bool>,
+        subject: &str,
+        body: &str,
+        age: chrono::Duration,
+    ) {
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body,auth_pass)
+                 VALUES(?1,1,?2,?2,?3,?4,?5,'',?6,?7)",
+                params![id, id.to_string(), from, subject, (Utc::now() - age).to_rfc3339(), body, auth],
+            )
+            .unwrap();
+    }
+
+    /// What the agent writes for Amazon mail: no number, and as often as not
+    /// no carrier either.
+    fn trackless(
+        status: &str,
+        carrier: Option<&str>,
+        item: &str,
+        refs: &[&str],
+    ) -> MessageDecision {
+        MessageDecision {
+            records: vec![RecordProposal::Delivery {
+                carrier: carrier.map(str::to_string),
+                tracking_number: None,
+                status: status.into(),
+                item_name: Some(item.into()),
+                merchant: None,
+                order_refs: refs.iter().map(|r| r.to_string()).collect(),
+                evidence: vec![],
+            }],
+            ..Default::default()
+        }
+    }
+
+    const ORDER: &str = "113-1810790-1724205";
+    const KEY: &str = "amazon:113-1810790-1724205:N4RLGpMz1";
+
+    /// THE BUG. Shipped, then Delivered, for one box, neither printing a
+    /// tracking number: one Amazon row that ends delivered, named, sold by
+    /// Amazon, carrying its order, and clickable through to Amazon's tracker.
+    #[test]
+    fn an_amazon_box_is_one_row_from_shipped_to_delivered() {
+        let store = fixture();
+        let body = tracker(ORDER, "N4RLGpMz1");
+        add_amazon(
+            &store,
+            10,
+            "shipment-tracking@amazon.com",
+            Some(true),
+            "Shipped: \"Wire Brushes\"",
+            &body,
+            chrono::Duration::hours(5),
+        );
+        add_amazon(
+            &store,
+            11,
+            "order-update@amazon.com",
+            Some(true),
+            "Delivered: \"Wire Brushes\"",
+            &body,
+            chrono::Duration::hours(1),
+        );
+        write(
+            &store,
+            10,
+            None,
+            &trackless("shipped", None, "Wire Brushes", &[ORDER]),
+        );
+        let rows = store.list_shipments(1, true, Default::default()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tracking_number, KEY);
+        assert_eq!(rows[0].carrier, "amazon", "a null carrier becomes Amazon's");
+        assert_eq!(rows[0].status, "shipped");
+
+        write(
+            &store,
+            11,
+            None,
+            &trackless("delivered", Some("unknown"), "Wire Brushes", &[]),
+        );
+        let rows = store.list_shipments(1, true, Default::default()).unwrap();
+        assert_eq!(rows.len(), 1, "the delivered mail lands on the same box");
+        let row = &rows[0];
+        assert_eq!(row.status, "delivered");
+        assert_eq!(row.item_name, "Wire Brushes");
+        assert_eq!(row.merchant.as_deref(), Some("Amazon"));
+        assert_eq!(
+            row.tracking_url.as_deref(),
+            Some(
+                "https://www.amazon.com/progress-tracker/package?orderId=113-1810790-1724205&shipmentId=N4RLGpMz1"
+            )
+        );
+        assert!(
+            row.orders.iter().any(|o| o.order_ref == ORDER),
+            "the order comes from the tracker link even when the record names none"
+        );
+        // Never polled: Amazon has no carrier API.
+        let pollable = store
+            .list_pollable_shipments(1, Utc::now() - chrono::Duration::days(30), 5)
+            .unwrap();
+        assert!(pollable.is_empty());
+    }
+
+    /// Two boxes of one order (the Charmin and the hair dye) are two rows
+    /// with two ids, folded into one card by the order they share.
+    #[test]
+    fn two_amazon_boxes_of_one_order_are_two_rows_one_card() {
+        let store = fixture();
+        let order = "113-0712375-7928267";
+        add_amazon(
+            &store,
+            10,
+            "shipment-tracking@amazon.com",
+            Some(true),
+            "Shipped: Charmin",
+            &tracker(order, "Nh06jx4Hr"),
+            chrono::Duration::hours(5),
+        );
+        add_amazon(
+            &store,
+            11,
+            "shipment-tracking@amazon.com",
+            Some(true),
+            "Shipped: Pulp Riot",
+            &tracker(order, "NHlzjr4sr"),
+            chrono::Duration::hours(4),
+        );
+        write(
+            &store,
+            10,
+            None,
+            &trackless("shipped", Some("amazon"), "Charmin", &[order]),
+        );
+        write(
+            &store,
+            11,
+            None,
+            &trackless("shipped", Some("amazon"), "Pulp Riot", &[order]),
+        );
+        let count: i64 = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM shipments WHERE carrier='amazon'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+        let cards = listed(&store);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].legs.len(), 1);
+    }
+
+    /// A look-alike, or mail that did not authenticate as amazon.com, mints
+    /// nothing however Amazon-shaped its body is.
+    #[test]
+    fn unauthenticated_amazon_lookalikes_mint_no_box() {
+        let store = fixture();
+        let body = tracker(ORDER, "N4RLGpMz1");
+        add_amazon(
+            &store,
+            10,
+            "shipment-tracking@amazon.com",
+            None,
+            "Shipped",
+            &body,
+            chrono::Duration::hours(2),
+        );
+        add_amazon(
+            &store,
+            11,
+            "shipment-tracking@amazon.com.evil.test",
+            Some(true),
+            "Shipped",
+            &body,
+            chrono::Duration::hours(1),
+        );
+        write(
+            &store,
+            10,
+            None,
+            &trackless("shipped", Some("amazon"), "Lure", &[]),
+        );
+        write(
+            &store,
+            11,
+            None,
+            &trackless("shipped", Some("amazon"), "Lure", &[]),
+        );
+        assert!(
+            store
+                .list_shipments(1, true, Default::default())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Retracting the only decision about a box retires its row, with the
+    /// box key worked out from the message, since the record holds none.
+    #[test]
+    fn retracting_an_amazon_decision_retires_its_box() {
+        let store = fixture();
+        add_amazon(
+            &store,
+            10,
+            "shipment-tracking@amazon.com",
+            Some(true),
+            "Shipped",
+            &tracker(ORDER, "N4RLGpMz1"),
+            chrono::Duration::hours(1),
+        );
+        let decision = trackless("shipped", None, "Wire Brushes", &[]);
+        write(&store, 10, None, &decision);
+        assert_eq!(listed(&store).len(), 1);
+        write(&store, 10, Some(&decision), &MessageDecision::default());
+        assert!(
+            store
+                .list_shipments(1, true, Default::default())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Mail whose tracker link is only in the HTML part (no plain-text part)
+    /// still keys its box.
+    #[test]
+    fn a_tracker_only_in_the_html_part_still_keys_the_box() {
+        let store = fixture();
+        add_amazon(
+            &store,
+            10,
+            "shipment-tracking@amazon.com",
+            Some(true),
+            "Shipped",
+            "",
+            chrono::Duration::hours(1),
+        );
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE messages SET body_html=?1 WHERE id=10",
+                [format!(
+                    "<a href=\"https://www.amazon.com/progress-tracker/package?orderId={ORDER}&amp;shipmentId=N4RLGpMz1\">Track</a>"
+                )],
+            )
+            .unwrap();
+        write(
+            &store,
+            10,
+            None,
+            &trackless("shipped", None, "Wire Brushes", &[]),
+        );
+        let rows = listed(&store);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tracking_number, KEY);
+    }
+
+    /// THE BACKFILL. A decision stored before box keys existed has no row;
+    /// the one-time pass projects it without a model call, and a second pass
+    /// changes nothing.
+    #[test]
+    fn the_backfill_projects_stored_amazon_decisions() {
+        let store = fixture();
+        add_amazon(
+            &store,
+            10,
+            "order-update@amazon.com",
+            Some(true),
+            "Delivered",
+            &tracker(ORDER, "N4RLGpMz1"),
+            chrono::Duration::hours(1),
+        );
+        let decision = trackless("delivered", Some("amazon"), "Wire Brushes", &[]);
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO agent_message_decisions(account_id,message_id,revision,decision_json,decided_at)
+                 VALUES(1,10,1,?1,?2)",
+                params![serde_json::to_string(&decision).unwrap(), Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        assert!(
+            store
+                .list_shipments(1, true, Default::default())
+                .unwrap()
+                .is_empty()
+        );
+        for _ in 0..2 {
+            let conn = store.lock().unwrap();
+            assert_eq!(project_amazon_boxes(&conn, 1).unwrap(), 1);
+        }
+        let rows = store.list_shipments(1, true, Default::default()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tracking_number, KEY);
+        assert_eq!(rows[0].status, "delivered");
+    }
+
+    /// A real carrier number on Amazon mail still wins: it can be polled.
+    #[test]
+    fn a_carrier_number_on_amazon_mail_keeps_its_number() {
+        let store = fixture();
+        add_amazon(
+            &store,
+            10,
+            "shipment-tracking@amazon.com",
+            Some(true),
+            "Shipped",
+            &tracker(ORDER, "N4RLGpMz1"),
+            chrono::Duration::hours(1),
+        );
+        write(&store, 10, None, &delivery("1Z999AA10123456784", "shipped"));
+        let rows = listed(&store);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tracking_number, "1Z999AA10123456784");
+        assert_eq!(rows[0].carrier, "ups");
     }
 }

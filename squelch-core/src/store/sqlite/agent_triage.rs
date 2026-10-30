@@ -1129,6 +1129,7 @@ fn retire_inbound_verdict(conn: &Connection, account: AccountId, message: i64) -
         let rebuilt = super::agent_deliveries::reconcile(
             conn,
             account,
+            message,
             Some(&previous),
             &MessageDecision::default(),
         );
@@ -2427,6 +2428,7 @@ impl AgentTriageStore for SqliteStore {
         super::agent_deliveries::reconcile(
             &tx,
             job.account_id,
+            job.message_id,
             current.previous_decision.as_ref(),
             decision,
         )?;

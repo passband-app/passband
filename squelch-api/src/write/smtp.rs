@@ -839,7 +839,7 @@ const MAX_LINE: usize = 998;
 /// time; anything else (an attachment, a part already encoded) is left
 /// exactly as it is. `raw` is CRLF-only ([`crlf_only`]).
 pub fn transfer_safe(raw: &[u8]) -> Vec<u8> {
-    reencode_entity(raw, 0).unwrap_or_else(|| raw.to_vec())
+    reencode_entity(raw, 0, false).unwrap_or_else(|| raw.to_vec())
 }
 
 /// How deep [`transfer_safe`] follows multiparts (mixed > related >
@@ -847,7 +847,14 @@ pub fn transfer_safe(raw: &[u8]) -> Vec<u8> {
 const MAX_MIME_DEPTH: usize = 4;
 
 /// `entity` re-encoded, or `None` when nothing in it needed to be.
-fn reencode_entity(entity: &[u8], depth: usize) -> Option<Vec<u8>> {
+/// `in_digest`: the entity is a part of a `multipart/digest`, where a part
+/// with no Content-Type is `message/rfc822` (RFC 2046 §5.1.5), not text.
+///
+/// NEVER TOUCHED (final review N5): a `multipart/signed` or
+/// `multipart/encrypted` subtree (RFC 1847) is left byte for byte, since a
+/// re-encoded signed part no longer verifies; and a message part is never
+/// re-encoded.
+fn reencode_entity(entity: &[u8], depth: usize, in_digest: bool) -> Option<Vec<u8>> {
     let (head_end, body_start) = split_header(entity);
     if body_start == head_end {
         return None;
@@ -868,6 +875,12 @@ fn reencode_entity(entity: &[u8], depth: usize) -> Option<Vec<u8>> {
     if !plain_cte {
         return None;
     }
+    if ctype.starts_with("multipart/signed") || ctype.starts_with("multipart/encrypted") {
+        return None;
+    }
+    if ctype.is_empty() && in_digest {
+        return None;
+    }
     if ctype.starts_with("multipart/") {
         if depth >= MAX_MIME_DEPTH {
             return None;
@@ -878,7 +891,8 @@ fn reencode_entity(entity: &[u8], depth: usize) -> Option<Vec<u8>> {
                 .next()
                 .unwrap_or_default(),
         )?;
-        let body = reencode_multipart(body, boundary.as_bytes(), depth)?;
+        let digest = ctype.starts_with("multipart/digest");
+        let body = reencode_multipart(body, boundary.as_bytes(), depth, digest)?;
         let mut out = entity[..body_start].to_vec();
         out.extend_from_slice(&body);
         return Some(out);
@@ -919,7 +933,7 @@ fn boundary_of(ctype: &str) -> Option<String> {
 /// `None` when none changed. The delimiters, the preamble and the epilogue
 /// are kept byte for byte; a part is what lies between one delimiter line's
 /// CRLF and the CRLF that starts the next delimiter (RFC 2046 §5.1.1).
-fn reencode_multipart(body: &[u8], boundary: &[u8], depth: usize) -> Option<Vec<u8>> {
+fn reencode_multipart(body: &[u8], boundary: &[u8], depth: usize, digest: bool) -> Option<Vec<u8>> {
     let mut dash = b"--".to_vec();
     dash.extend_from_slice(boundary);
     // Every delimiter line: (its start, the index after its CRLF, closing?).
@@ -957,7 +971,7 @@ fn reencode_multipart(body: &[u8], boundary: &[u8], depth: usize) -> Option<Vec<
         // The CRLF before the next delimiter belongs to the delimiter.
         let part_end = next_start.saturating_sub(2).max(part_start);
         let part = &body[part_start..part_end];
-        match reencode_entity(part, depth + 1) {
+        match reencode_entity(part, depth + 1, digest) {
             Some(p) => {
                 changed = true;
                 out.extend_from_slice(&p);

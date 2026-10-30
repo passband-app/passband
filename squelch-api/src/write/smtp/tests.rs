@@ -680,6 +680,57 @@ fn only_unencoded_text_is_reencoded() {
     }
 }
 
+/// N5: A SIGNED OR ENCRYPTED SUBTREE IS NEVER RE-ENCODED (a re-encoded
+/// signed part no longer verifies), at the top or nested in a mixed; a part
+/// next to it still is.
+#[test]
+fn signed_and_encrypted_subtrees_are_left_byte_for_byte() {
+    let long = "s".repeat(2500);
+    for kind in [
+        "multipart/signed; protocol=\"application/pgp-signature\"; micalg=pgp-sha256",
+        "multipart/encrypted; protocol=\"application/pgp-encrypted\"",
+    ] {
+        let signed = format!(
+            "Content-Type: {kind}; boundary=\"SIG\"\r\n\r\n\
+             --SIG\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n\r\n{long} caf\u{e9}\r\n\
+             --SIG\r\nContent-Type: application/pgp-signature\r\n\r\nsig\r\n\
+             --SIG--\r\n"
+        );
+        let top = format!("To: a@x.test\r\nMIME-Version: 1.0\r\n{signed}");
+        assert_eq!(transfer_safe(top.as_bytes()), top.as_bytes(), "{kind}");
+
+        let nested = format!(
+            "To: a@x.test\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"MIX\"\r\n\r\n\
+             --MIX\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n\r\n{long}\r\n\
+             --MIX\r\n{signed}\
+             --MIX--\r\n"
+        );
+        let out = String::from_utf8(transfer_safe(nested.as_bytes())).unwrap();
+        assert_eq!(out.matches("quoted-printable").count(), 1, "{out}");
+        assert!(
+            out.contains(&signed),
+            "the signed subtree is untouched: {out}"
+        );
+    }
+}
+
+/// N5: in a multipart/digest a part with no Content-Type is message/rfc822
+/// (RFC 2046 §5.1.5) and is left alone; outside a digest it is text.
+#[test]
+fn a_digest_part_with_no_content_type_is_a_message() {
+    let long = "d".repeat(2500);
+    let digest = format!(
+        "To: a@x.test\r\nMIME-Version: 1.0\r\nContent-Type: multipart/digest; boundary=\"DG\"\r\n\r\n\
+         --DG\r\n\r\nFrom: b@x.test\r\nSubject: inner\r\n\r\n{long} caf\u{e9}\r\n\
+         --DG--\r\n"
+    );
+    assert_eq!(transfer_safe(digest.as_bytes()), digest.as_bytes());
+
+    let mixed = digest.replace("multipart/digest", "multipart/mixed");
+    let out = String::from_utf8(transfer_safe(mixed.as_bytes())).unwrap();
+    assert!(out.contains("quoted-printable"), "{out}");
+}
+
 /// A multipart/alternative's text and html parts are each re-encoded; the
 /// boundaries, the other parts and the structure are byte-for-byte kept,
 /// and the message still parses to the same text.

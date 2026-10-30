@@ -38,6 +38,7 @@ use crate::group_send;
 use crate::guard;
 use crate::state::ApiState;
 use crate::write::gmail::GmailWriteClient;
+use crate::write::imap::{IMAP_NO_SMTP, ImapWriter, StoreOutbox};
 use crate::write::mime::{
     ForwardParts, ForwardedOriginal, MailAttachment, ReplyParts, addrs_excluding,
     build_forward_rfc822, build_references, build_reply_rfc822, cc_excluding, count_addrs,
@@ -45,6 +46,7 @@ use crate::write::mime::{
     parse_forwarded_original, reply_subject,
 };
 use crate::write::{MailWriter, SentRef, WriteError};
+use squelch_core::mail::imap::{ImapCredential, ImapSource, StoredImapSlot};
 
 /// Default page size when `limit` is omitted, and the hard ceiling we clamp to.
 const DEFAULT_LIMIT: u32 = 50;
@@ -4832,35 +4834,38 @@ async fn resolve_sender_done(state: &ApiState, sender: &str) {
 ///
 /// THE WRITER IS THE ACCOUNT'S PROVIDER'S (`accounts.provider`, read on the
 /// first call and kept in [`ApiState::mail_provider`]). A provider this build
-/// does not know, or cannot write to yet (IMAP, issue #575 phase 2), is
-/// refused with a 501 whether or not a write credential is configured: the
-/// credential is Gmail OAuth, and "run `squelchd auth`" would send an IMAP
-/// user to the wrong fix. See [`writer_unavailable`].
+/// does not know is refused with a 501 whether or not a write credential is
+/// configured. See [`writer_unavailable`].
 ///
 /// A Gmail door with no credential answers exactly the 403 it always has;
-/// the only new effect on that path is the (cached) provider read, and a
-/// failed read leaves it the 403 too.
+/// the only effect on that path is the (cached) provider read, and a failed
+/// read leaves it the 403 too.
+///
+/// AN IMAP ACCOUNT'S CREDENTIAL IS ITS SEALED `#imap` SLOT, never the Gmail
+/// OAuth store, so `write_creds` plays no part for it: the slot with SMTP
+/// config is the write credential, and one without (set up before sending
+/// existed) is the 403 [`IMAP_NO_SMTP`]. See [`imap_writer`].
 pub(crate) async fn write_client(state: &ApiState) -> Result<Arc<dyn MailWriter>, ApiError> {
     let Some(creds) = state.write_creds().cloned() else {
         let no_credential = ApiError::new(
             StatusCode::FORBIDDEN,
             "write credential not configured; run `squelchd auth`",
         );
-        return Err(match account_provider(state).await {
-            Ok(MailProvider::Gmail | MailProvider::Outlook) => no_credential,
-            Ok(MailProvider::Imap) => imap_has_no_writer(),
+        return match account_provider(state).await {
+            Ok(MailProvider::Gmail | MailProvider::Outlook) => Err(no_credential),
+            Ok(MailProvider::Imap) => imap_writer(state).await,
             // A provider this build does not know: the 501, as with a
             // credential.
-            Err(e) if e.status == StatusCode::NOT_IMPLEMENTED => e,
+            Err(e) if e.status == StatusCode::NOT_IMPLEMENTED => Err(e),
             // The read itself failed (the store): the credential is still
             // what is missing.
-            Err(_) => no_credential,
-        });
+            Err(_) => Err(no_credential),
+        };
     };
     match account_provider(state).await? {
+        MailProvider::Imap => imap_writer(state).await,
         // Over the state's one shared HTTP client (see `ApiState::write_http`);
         // what is built per action is two `Arc` clones and a base URL.
-        MailProvider::Imap => Err(imap_has_no_writer()),
         MailProvider::Gmail => Ok(Arc::new(
             GmailWriteClient::with_http(
                 creds,
@@ -4887,7 +4892,7 @@ pub(crate) async fn write_client(state: &ApiState) -> Result<Arc<dyn MailWriter>
 
 /// The account's mail provider, read once per door and kept in
 /// [`ApiState::mail_provider`]; a failed read is not cached.
-async fn account_provider(state: &ApiState) -> Result<MailProvider, ApiError> {
+pub(crate) async fn account_provider(state: &ApiState) -> Result<MailProvider, ApiError> {
     if let Some(provider) = state.mail_provider.get() {
         return Ok(*provider);
     }
@@ -4902,19 +4907,112 @@ async fn account_provider(state: &ApiState) -> Result<MailProvider, ApiError> {
     Ok(*state.mail_provider.get_or_init(|| provider))
 }
 
-/// What an IMAP account's write attempt is told, in phase 2.
-pub(crate) const IMAP_READ_ONLY: &str =
-    "this is an IMAP account: sending mail and mail actions are not supported for IMAP yet";
+/// An IMAP account's write refusal when its slot cannot send: no slot, or
+/// one from before SMTP was asked for (contract §1). The 403, so it is
+/// audited `rejected:no_write_credential` like any missing credential.
+fn imap_no_smtp() -> ApiError {
+    ApiError::new(StatusCode::FORBIDDEN, IMAP_NO_SMTP)
+}
 
-/// Read only in phase 2 (issue #575): no SMTP writer yet, so the door answers
-/// 501 for an IMAP account, as for an unknown provider (and audited the same,
-/// `rejected:unsupported_provider`). Its own text, though: "upgrade squelchd"
-/// would send an IMAP user after a fix that does not exist yet.
-fn imap_has_no_writer() -> ApiError {
-    eprintln!(
-        "squelch-api: no writer for this account: mail provider \"imap\" has no write path in this build"
-    );
-    ApiError::new(StatusCode::NOT_IMPLEMENTED, IMAP_READ_ONLY)
+/// What an IMAP write is told when the sealed slot could not be read (a
+/// locked keychain, a credentials file that would not open): a retry, not a
+/// setup step. Audited `failed:store` ([`write_refusal`]).
+pub(crate) const IMAP_CREDENTIAL_UNREADABLE: &str =
+    "couldn't read the stored credential; try again";
+
+/// The account's IMAP credential, read from its sealed slot (a blocking
+/// keyring or file read). `Ok(None)`: there is no slot, or no SMTP in it
+/// (the 403). A slot that is there but could not be read is the 503
+/// [`IMAP_CREDENTIAL_UNREADABLE`] (security review F4): telling the user to
+/// re-run setup over a locked keychain sends them the wrong way.
+async fn imap_credential(state: &ApiState) -> Result<Option<ImapCredential>, ApiError> {
+    let Some(slot) = state.imap_write.clone() else {
+        return Ok(None);
+    };
+    tokio::task::spawn_blocking(move || {
+        let text = match squelch_core::credentials::find_imap_slot_backend(
+            slot.backend,
+            &slot.credentials_path,
+            &slot.account_email,
+        ) {
+            Ok(Some(t)) => t,
+            Ok(None) => return Ok(None),
+            // Core's line names no secret.
+            Err(e) => {
+                eprintln!("squelch-api: imap write credential: {e}");
+                return Err(ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    IMAP_CREDENTIAL_UNREADABLE,
+                ));
+            }
+        };
+        Ok(match ImapCredential::from_slot(&text) {
+            StoredImapSlot::Credential(c) if c.config.smtp.is_some() => Some(c),
+            // A slot from before SMTP setup, or from before the config moved
+            // into it (the sync engine moves that one, still with no SMTP).
+            _ => None,
+        })
+    })
+    .await
+    .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?
+}
+
+/// Whether this account could send now: its write credential is there. For
+/// Gmail that is the OAuth write store being wired (as it always was); for
+/// IMAP, a slot with SMTP config. What `GET /client/invites` asks.
+pub(crate) async fn write_ready(state: &ApiState) -> bool {
+    match account_provider(state).await {
+        Ok(MailProvider::Imap) => matches!(imap_credential(state).await, Ok(Some(_))),
+        _ => state.write_creds().is_some(),
+    }
+}
+
+/// THE IMAP ACCOUNT'S WRITER, built per action from the slot as it is now.
+///
+/// ITS OWN [`ImapSource`], NOT THE SYNC ENGINE'S. The engine's source lives
+/// inside the engine (built lazily on its own task, after the door is up),
+/// and handing it across would put the write door's verify reads on the
+/// one connection the sync loop and IDLE pace themselves around. What makes
+/// a copy the id's own is not in the source's memory: the prints and the
+/// location table are in the store, which both sources read, so a write
+/// verifies against exactly what sync recorded. What the per-action source
+/// gives up is its in-memory verified cache, so each write re-reads the
+/// copy it acts on: one FETCH, and the safer side. Built per action like a
+/// Gmail token is loaded per action, so a re-run `squelchd auth --imap`
+/// under a running daemon takes effect on the next write.
+async fn imap_writer(state: &ApiState) -> Result<Arc<dyn MailWriter>, ApiError> {
+    let Some(credential) = imap_credential(state).await? else {
+        return Err(imap_no_smtp());
+    };
+    let Some(slot) = state.imap_write.as_ref() else {
+        return Err(imap_no_smtp());
+    };
+    let source = ImapSource::from_config(
+        state.account_id,
+        &credential.config,
+        credential.password.clone(),
+        state.store.clone(),
+        Arc::new(squelch_core::mail::SourceRefusals::default()),
+    )
+    .map_err(|e| {
+        eprintln!("squelch-api: imap writer: {e}");
+        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+    })?;
+    let ledger = Arc::new(StoreOutbox {
+        store: state.store.clone(),
+        account_id: state.account_id,
+    });
+    match ImapWriter::new(Arc::new(source), &credential, slot.account_email.clone()) {
+        Ok(w) => Ok(Arc::new(w.with_outbox(ledger))),
+        Err(WriteError::MissingCredential(_)) => Err(imap_no_smtp()),
+        Err(e) => {
+            eprintln!("squelch-api: imap writer: {e}");
+            Err(ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error",
+            ))
+        }
+    }
 }
 
 /// Why the account has no writer.
@@ -4949,6 +5047,40 @@ pub(crate) fn write_refusal(e: &ApiError) -> &'static str {
         StatusCode::FORBIDDEN => "rejected:no_write_credential",
         StatusCode::NOT_IMPLEMENTED => "rejected:unsupported_provider",
         _ => "failed:store",
+    }
+}
+
+/// Map a [`WriteError`] to an [`ApiError`] in the words of the account's
+/// provider: Gmail's mapping ([`write_error`]) for Gmail, unchanged to the
+/// byte, and the IMAP writer's own wording for IMAP ([`imap_write_error`]).
+/// The provider is known by now: every `WriteError` comes from a writer that
+/// [`write_client`] built, which read it.
+fn write_error_in(state: &ApiState, e: &WriteError) -> ApiError {
+    write_error_as(state.mail_provider.get().copied(), e)
+}
+
+/// [`write_error_in`] for a known provider (`None`: not read, so Gmail's).
+fn write_error_as(provider: Option<MailProvider>, e: &WriteError) -> ApiError {
+    match provider {
+        Some(MailProvider::Imap) => imap_write_error(e),
+        Some(MailProvider::Gmail | MailProvider::Outlook) | None => write_error(e),
+    }
+}
+
+/// AN IMAP ACCOUNT'S WRITE ERRORS, in their own words (amendment A4): the
+/// same statuses Gmail's get, so the client's handling is unchanged, but the
+/// writer's text rather than "gmail request failed". Safe to show because
+/// every message the IMAP writer and its SMTP half produce is ours (at most a
+/// reply code, never server text or a credential; see `write/imap.rs`).
+fn imap_write_error(e: &WriteError) -> ApiError {
+    match e {
+        WriteError::MissingCredential(_) => imap_no_smtp(),
+        WriteError::Invalid(m) => ApiError::bad_request(m.clone()),
+        // Gmail's budget only; an IMAP writer is never paced.
+        WriteError::Paced { .. } => write_error(e),
+        WriteError::Api { message, .. } | WriteError::Transport(message) => {
+            ApiError::new(StatusCode::BAD_GATEWAY, message.clone())
+        }
     }
 }
 
@@ -5054,7 +5186,7 @@ where
         }
         Err(e) => {
             audit_action(state, action, target, "failed:gmail").await;
-            Err(write_error(&e))
+            Err(write_error_in(state, &e))
         }
     }
 }
@@ -5303,6 +5435,85 @@ pub struct SendBody {
     pub(crate) attachment_ids: Vec<i64>,
 }
 
+/// [`echo_sent`]'s fetch back of a message the writer did not hand over:
+/// the bytes, the thread and the server's date, or `None` once the failure
+/// is audited.
+async fn echo_fetch(
+    state: &ApiState,
+    client: &dyn MailWriter,
+    target: &Option<String>,
+    fire: Option<Fire<'_>>,
+    gmail_msg_id: &str,
+    sent: &SentRef,
+) -> Option<(Vec<u8>, Option<String>, Option<DateTime<Utc>>)> {
+    let echo_audit = |detail: &str| fired(fire, detail);
+    // TIMEOUT BUDGET: the Swift client's POST timeout is 15s and `action_send` has
+    // already spent two serial Gmail calls (parent headers, then the send) before
+    // getting here. The echo is bookkeeping, so it may not spend what is left —
+    // past 5s it gives up and the reply lands on the next backfill instead.
+    let fetched = match tokio::time::timeout(
+        Duration::from_secs(ECHO_FETCH_TIMEOUT_SECS),
+        client.fetch_raw(gmail_msg_id),
+    )
+    .await
+    {
+        Ok(Ok(f)) => f,
+        Ok(Err(e)) => {
+            eprintln!("squelch-api: echo of sent message {gmail_msg_id} failed to fetch: {e}");
+            audit_action(
+                state,
+                "send.echo",
+                target.clone(),
+                &echo_audit("failed:fetch"),
+            )
+            .await;
+            return None;
+        }
+        Err(_elapsed) => {
+            eprintln!("squelch-api: echo of sent message {gmail_msg_id} timed out");
+            audit_action(
+                state,
+                "send.echo",
+                target.clone(),
+                &echo_audit("failed:fetch"),
+            )
+            .await;
+            return None;
+        }
+    };
+    let raw = match decode_raw_b64url(&fetched.raw_b64) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!("squelch-api: echo of sent message {gmail_msg_id} failed to decode: {e}");
+            audit_action(
+                state,
+                "send.echo",
+                target.clone(),
+                &echo_audit("failed:fetch"),
+            )
+            .await;
+            return None;
+        }
+    };
+    // A `format=raw` read that carried no `raw` field decodes to zero bytes, which
+    // would ingest as a message with no headers and no body. Nothing to echo.
+    if raw.is_empty() {
+        eprintln!("squelch-api: echo of sent message {gmail_msg_id} returned no bytes");
+        audit_action(
+            state,
+            "send.echo",
+            target.clone(),
+            &echo_audit("failed:fetch"),
+        )
+        .await;
+        return None;
+    }
+
+    let thread_id = fetched.thread_id.clone().or_else(|| sent.thread_id.clone());
+    let internal_date = parse_internal_date(fetched.internal_date.as_deref());
+    Some((raw, thread_id, internal_date))
+}
+
 /// ECHO the just-sent message into the local store so the thread view shows the
 /// reply without waiting for the next Sent poll: fetch it back `format=raw` on
 /// the write token, decode, ingest with `is_sent: true`.
@@ -5332,46 +5543,13 @@ pub(crate) async fn echo_sent(
         }
     };
 
-    // TIMEOUT BUDGET: the Swift client's POST timeout is 15s and `action_send` has
-    // already spent two serial Gmail calls (parent headers, then the send) before
-    // getting here. The echo is bookkeeping, so it may not spend what is left —
-    // past 5s it gives up and the reply lands on the next backfill instead.
-    let fetched = match tokio::time::timeout(
-        Duration::from_secs(ECHO_FETCH_TIMEOUT_SECS),
-        client.fetch_raw(&gmail_msg_id),
-    )
-    .await
-    {
-        Ok(Ok(f)) => f,
-        Ok(Err(e)) => {
-            eprintln!("squelch-api: echo of sent message {gmail_msg_id} failed to fetch: {e}");
-            audit_action(state, "send.echo", target, &echo_audit("failed:fetch")).await;
-            return None;
-        }
-        Err(_elapsed) => {
-            eprintln!("squelch-api: echo of sent message {gmail_msg_id} timed out");
-            audit_action(state, "send.echo", target, &echo_audit("failed:fetch")).await;
-            return None;
-        }
+    // THE WRITER'S OWN COPY, when it handed one back (an IMAP send): those
+    // are the bytes it saved, Bcc and all, which no fetch could return (the
+    // copy a fetch prefers is the delivered one). Nothing to fetch.
+    let (raw, thread_id, internal_date) = match sent.raw.clone() {
+        Some(raw) if !raw.is_empty() => (raw, sent.thread_id.clone(), Some(Utc::now())),
+        _ => echo_fetch(state, client, &target, fire, &gmail_msg_id, sent).await?,
     };
-    let raw = match decode_raw_b64url(&fetched.raw_b64) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            eprintln!("squelch-api: echo of sent message {gmail_msg_id} failed to decode: {e}");
-            audit_action(state, "send.echo", target, &echo_audit("failed:fetch")).await;
-            return None;
-        }
-    };
-    // A `format=raw` read that carried no `raw` field decodes to zero bytes, which
-    // would ingest as a message with no headers and no body. Nothing to echo.
-    if raw.is_empty() {
-        eprintln!("squelch-api: echo of sent message {gmail_msg_id} returned no bytes");
-        audit_action(state, "send.echo", target, &echo_audit("failed:fetch")).await;
-        return None;
-    }
-
-    let thread_id = fetched.thread_id.clone().or_else(|| sent.thread_id.clone());
-    let internal_date = parse_internal_date(fetched.internal_date.as_deref());
     // Kept back for the log line; the closure takes ownership of the id itself.
     let log_id = gmail_msg_id.clone();
     let ingested = store_call(state, move |store, account_id| {
@@ -5592,7 +5770,13 @@ async fn finish_send(
     target: Option<String>,
     fire: Option<Fire<'_>>,
 ) -> Result<SendOutcome, SendFailure> {
-    match client.send(raw, thread_id.as_deref()).await {
+    let rebuild = fire.and_then(|f| f.copy_at);
+    let went = match rebuild {
+        // Saved, never submitted: the mail already went.
+        Some(at) => client.save_sent_copy(raw, at).await,
+        None => client.send(raw, thread_id.as_deref()).await,
+    };
+    match went {
         Ok(sent) => {
             if let Some(id) = resolve {
                 resolve_done(state, id).await;
@@ -5601,17 +5785,27 @@ async fn finish_send(
                 discard_sent_draft(state, draft_id).await;
             }
             discard_sent_attachments(state, draft_id, attachment_ids.to_vec()).await;
-            audit_action(state, "send", target.clone(), &outcome).await;
+            if rebuild.is_none() {
+                audit_action(state, "send", target.clone(), &outcome).await;
+            }
             let echo_message_id = echo_sent(state, client, target, &sent, fire).await;
             if let (Some((token, _)), Some(message_id)) = (&tracker, echo_message_id) {
                 link_tracker(state, token, message_id).await;
             }
             // A send with no thread of its own — a cold send, or a forward —
             // falls back to the thread Gmail just created, so the client can
-            // open what it just sent.
+            // open what it just sent. An IMAP send names no thread (ingest
+            // threads it by its headers), so there it is the echo's.
+            let thread_id = match (thread_id.or(sent.thread_id), echo_message_id) {
+                (None, Some(local)) if state.mail_provider.get() == Some(&MailProvider::Imap) => {
+                    resolve_target(state, local).await.ok().map(|m| m.thread_id)
+                }
+                (t, _) => t,
+            };
             Ok(SendOutcome::Sent {
                 echo_message_id,
-                thread_id: thread_id.or(sent.thread_id),
+                thread_id,
+                warning: sent.warning,
             })
         }
         Err(e) => {
@@ -5620,7 +5814,8 @@ async fn finish_send(
             }
             // The ledger says what the row will: `paced` when the budget held
             // the call (nothing posted), `failed:gmail` for Gmail's answer.
-            let failure = SendFailure::after_post("failed:gmail", &e);
+            let failure =
+                SendFailure::after_post(state.mail_provider.get().copied(), "failed:gmail", &e);
             audit_action(state, "send", target, &fired(fire, failure.reason)).await;
             Err(failure)
         }
@@ -5639,6 +5834,10 @@ pub(crate) enum SendOutcome {
     Sent {
         echo_message_id: Option<i64>,
         thread_id: Option<String>,
+        /// What the sender should know about mail that DID go (an IMAP
+        /// send whose Sent copy could not be saved). On the wire only when
+        /// there is one, so Gmail's answer is the bytes it always was.
+        warning: Option<String>,
     },
     /// An `individual` group fan-out, handed to its job (the `202`).
     Sending {
@@ -5655,11 +5854,18 @@ impl SendOutcome {
             SendOutcome::Sent {
                 echo_message_id,
                 thread_id,
-            } => json!({
-                "status": "sent",
-                "echo_message_id": echo_message_id,
-                "thread_id": thread_id,
-            }),
+                warning,
+            } => {
+                let mut v = json!({
+                    "status": "sent",
+                    "echo_message_id": echo_message_id,
+                    "thread_id": thread_id,
+                });
+                if let Some(w) = warning {
+                    v["warning"] = json!(w);
+                }
+                v
+            }
             SendOutcome::Sending {
                 group_send_id,
                 recipients,
@@ -5722,11 +5928,13 @@ impl SendFailure {
     /// A failure answered by `messages.send` itself, classified by whether
     /// the post may have landed. A paced send is [`Self::paced`], whatever
     /// `reason` the caller had for a real failure.
-    fn after_post(reason: &'static str, e: &WriteError) -> Self {
+    /// `provider` picks the error's words ([`write_error_as`]), never the
+    /// classification.
+    fn after_post(provider: Option<MailProvider>, reason: &'static str, e: &WriteError) -> Self {
         if matches!(e, WriteError::Paced { .. }) {
             return Self::paced(e);
         }
-        let mut f = Self::new(reason, write_error(e));
+        let mut f = Self::new(reason, write_error_as(provider, e));
         match e {
             // A transport error can come after Gmail took the whole body (a
             // timeout on the answer, a reset, an undecodable 2xx), and a 5xx
@@ -5780,6 +5988,13 @@ pub(crate) enum SendGuard {
 pub(crate) struct Fire<'a> {
     pub(crate) id: i64,
     pub(crate) message_id: &'a str,
+    /// A REBUILD, NOT A SEND (IMAP recovery, #575 phase 3 final matrix 7b):
+    /// the row's mail went at this time and its Sent copy was lost, so the
+    /// message is composed again exactly as it was and only SAVED
+    /// ([`MailWriter::save_sent_copy`]), never submitted. Its ledger lines
+    /// read `scheduled:<id>:rebuild:...`, and the success line is the
+    /// worker's `recovered`, not a second `ok`.
+    pub(crate) copy_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// The success ledger detail for a send, marked when it was a fired scheduled
@@ -5792,6 +6007,7 @@ pub(crate) struct Fire<'a> {
 /// `reply_all:N`) the plain detail records.
 fn fired_outcome(fire: Option<Fire<'_>>, outcome: String) -> String {
     match fire {
+        Some(f) if f.copy_at.is_some() => format!("scheduled:{}:rebuild:{outcome}", f.id),
         Some(f) => format!("scheduled:{}:{outcome}", f.id),
         None => outcome,
     }
@@ -5911,6 +6127,21 @@ pub async fn action_send(
         return Err(f.into());
     }
 
+    // AN IMAP SEND IS ONE SEND PER COMPOSITION (final review N4): it outlives
+    // its request, so a client's retry would be a second copy. The same
+    // request in flight, or settled within two minutes, is answered from the
+    // first; see `crate::send_dedupe`. Claimed before the staged files are
+    // read: a send that went has consumed them, and its repeat must still get
+    // its answer.
+    if matches!(account_provider(&state).await, Ok(MailProvider::Imap)) {
+        let key = crate::send_dedupe::send_key(state.account_id, &body);
+        let dedupe = state.imap_send_dedupe.clone();
+        let json = dedupe
+            .run_once(key, imap_send_now(state, body, target))
+            .await?;
+        return Ok(Json(json));
+    }
+
     // OUTBOUND GUARD: report only REDACTED kinds, never the matched text. Scanned
     // here, before any Gmail spend. A FORWARD'S VERDICT WAITS — most of what it
     // sends is the original, which has not been read yet — so its kinds are
@@ -5948,10 +6179,59 @@ pub async fn action_send(
         SendGuard::Settled
     };
 
+    // Gmail's path is as it was: in the request. (It has the same latent
+    // shape, a cut after `messages.send` returned; a much shorter window, and
+    // Gmail files Sent itself.)
     let outcome = perform_send(&state, &body, attachments, owed, None).await?;
     // 200 for a fan-out too, as it always has been: the Groups page reads
     // `status: "sending"`, not the code.
     Ok(Json(outcome.to_json()))
+}
+
+/// AN IMAP SEND OUTLIVES ITS REQUEST (correctness review F2): this runs on
+/// its own task ([`crate::send_dedupe::SendDedupe::run_once`]), which the
+/// handler awaits. A client that gives up (Passband's 15 s idle) drops the
+/// handler's future, and with an inline send that cancels whatever was next:
+/// after SMTP accepted the mail, the Sent copy, the audit and the echo. On a
+/// task, the send finishes and settles whoever is listening, the retry
+/// included.
+///
+/// The files, the guard and the send, as `action_send` does them for Gmail.
+/// The error says whether it stands for the dedupe window: only a send that
+/// may have gone does; a refusal can be fixed and sent again.
+async fn imap_send_now(
+    state: ApiState,
+    body: SendBody,
+    target: Option<String>,
+) -> Result<serde_json::Value, (ApiError, bool)> {
+    let refused = |e: ApiError| (e, false);
+    let attachments = load_send_attachments(
+        &state,
+        "send",
+        &body.attachment_ids,
+        body.draft_id,
+        target.clone(),
+    )
+    .await
+    .map_err(refused)?;
+    let matches = composition_kinds(&body.body, &attachments);
+    let owed = if body.forward_of_message_id.is_some() {
+        SendGuard::ForwardOwed(matches)
+    } else {
+        if let Some(err) =
+            guard_verdict(&state, "send", &matches, body.override_guard, target).await
+        {
+            return Err(refused(err));
+        }
+        SendGuard::Settled
+    };
+    match perform_send(&state, &body, attachments, owed, None).await {
+        Ok(outcome) => Ok(outcome.to_json()),
+        Err(f) => {
+            let keep = f.maybe_sent;
+            Err((f.error, keep))
+        }
+    }
 }
 
 /// Everything a send does once it has been validated and judged: resolve the
@@ -6485,7 +6765,7 @@ pub(crate) async fn read_forward_original(
             .await;
             return Err(SendFailure::new(
                 "rejected:no_write_credential",
-                write_error(&e),
+                write_error_in(state, &e),
             ));
         }
         // PACING IS NOT A MISSING ORIGINAL. The budget held the read and
@@ -6760,7 +7040,7 @@ pub async fn reply_recipients(
     let headers = client
         .parent_headers(&msg.gmail_msg_id)
         .await
-        .map_err(|e| write_error(&e))?;
+        .map_err(|e| write_error_in(&state, &e))?;
     let derived = derive_reply_recipients(&headers, &own, q.all);
     // Headers too broken to yield an address fall back to the stored From, the
     // same recipient a plain reply would have used all along.
@@ -7532,10 +7812,23 @@ mod send_split_tests {
         let sent = SendOutcome::Sent {
             echo_message_id: None,
             thread_id: Some("t1".into()),
+            warning: None,
         };
         assert_eq!(
             sent.to_json(),
             json!({"status": "sent", "echo_message_id": null, "thread_id": "t1"})
+        );
+        // A warning (an IMAP send with no Sent copy) is one more key, and
+        // only then.
+        let warned = SendOutcome::Sent {
+            echo_message_id: Some(4),
+            thread_id: None,
+            warning: Some("sent, but the copy in Sent could not be saved".into()),
+        };
+        assert_eq!(
+            warned.to_json(),
+            json!({"status": "sent", "echo_message_id": 4, "thread_id": null,
+                   "warning": "sent, but the copy in Sent could not be saved"})
         );
         let sending = SendOutcome::Sending {
             group_send_id: 7,
@@ -7570,9 +7863,14 @@ mod send_split_tests {
 
     #[test]
     fn a_paced_send_is_paced_not_a_gmail_failure() {
-        let f = SendFailure::after_post("failed:gmail", &WriteError::Paced { retry_in_secs: 3 });
+        let f = SendFailure::after_post(
+            None,
+            "failed:gmail",
+            &WriteError::Paced { retry_in_secs: 3 },
+        );
         assert_eq!((f.reason, f.paced, f.maybe_sent), (PACED, true, false));
         let f = SendFailure::after_post(
+            None,
             "failed:gmail",
             &WriteError::Api {
                 status: 503,
@@ -7765,22 +8063,187 @@ mod write_client_tests {
         assert_eq!(handle.await.unwrap(), None, "nothing reached the API");
     }
 
-    /// An IMAP account is read only in phase 2 (issue #575): the door has no
-    /// writer for it and says 501, and nothing goes to Gmail.
-    #[tokio::test]
-    async fn an_imap_account_has_no_writer_yet() {
-        let fx = Fixture::new("imap");
-        fx.set_provider("imap");
-        let (base, handle) = mock_api().await;
-        let state = fx
-            .state()
-            .with_write_test_harness(Arc::new(StubCreds), base);
-        let err = match write_client(&state).await {
-            Ok(_) => panic!("an imap account must not get a writer"),
-            Err(e) => e,
+    /// An IMAP account's slot, written where `fx.imap_state` will look.
+    fn write_imap_slot(fx: &Fixture, smtp: bool) {
+        use squelch_core::mail::imap::{
+            ImapAccountConfig, ImapPassword, ImapServer, ImapTls, SmtpServer,
         };
-        assert_eq!(err.status, StatusCode::NOT_IMPLEMENTED);
-        assert_eq!(handle.await.unwrap(), None, "nothing reached the API");
+        let credential = ImapCredential {
+            config: ImapAccountConfig {
+                server: ImapServer {
+                    host: "127.0.0.1".into(),
+                    port: 9,
+                    tls: ImapTls::Plain,
+                    username: "me@example.com".into(),
+                },
+                ca_pem: None,
+                smtp: smtp.then(|| SmtpServer {
+                    host: "127.0.0.1".into(),
+                    port: 9,
+                    tls: ImapTls::Plain,
+                }),
+            },
+            password: ImapPassword::new("pw"),
+            smtp_password: None,
+        };
+        squelch_core::credentials::store_imap_slot_backend(
+            squelch_core::config::CredentialBackend::File,
+            &fx.dir.join("credentials.json"),
+            "me@example.com",
+            &credential.to_slot().unwrap(),
+        )
+        .unwrap();
+    }
+
+    impl Fixture {
+        fn imap_state(&self) -> ApiState {
+            self.state().with_imap_write_slot(
+                squelch_core::config::CredentialBackend::File,
+                "me@example.com".into(),
+                self.dir.join("credentials.json"),
+            )
+        }
+    }
+
+    /// AN IMAP ACCOUNT WITH SMTP IN ITS SLOT GETS ITS WRITER (contract §10),
+    /// whether or not a Gmail write store is wired, and nothing goes to
+    /// Gmail.
+    #[tokio::test]
+    async fn an_imap_account_with_smtp_gets_the_imap_writer() {
+        for gmail_store in [false, true] {
+            let fx = Fixture::new("imap-smtp");
+            fx.set_provider("imap");
+            write_imap_slot(&fx, true);
+            let (base, handle) = mock_api().await;
+            let state = if gmail_store {
+                fx.imap_state()
+                    .with_write_test_harness(Arc::new(StubCreds), base)
+            } else {
+                drop(base);
+                fx.imap_state()
+            };
+            assert!(write_client(&state).await.is_ok(), "{gmail_store}");
+            assert!(write_ready(&state).await);
+            if gmail_store {
+                handle.abort();
+            }
+        }
+    }
+
+    /// NO SMTP, NO WRITER: a slot from before SMTP setup, no slot at all, and
+    /// a door that was never told where the slot is all get the 403 that
+    /// says how to fix it (contract §1), audited as a missing credential, and
+    /// never Gmail's text, whether or not a Gmail write store is wired.
+    #[tokio::test]
+    async fn an_imap_account_without_smtp_is_the_no_credential_403() {
+        for (slot, gmail_store) in [
+            (Some(false), false),
+            (None, false),
+            (Some(false), true),
+            (None, true),
+        ] {
+            let fx = Fixture::new("imap-no-smtp");
+            fx.set_provider("imap");
+            if let Some(smtp) = slot {
+                write_imap_slot(&fx, smtp);
+            }
+            for state in [fx.imap_state(), fx.state()] {
+                let state = if gmail_store {
+                    state.with_write_test_harness(Arc::new(StubCreds), "http://127.0.0.1:9".into())
+                } else {
+                    state
+                };
+                let err = refused(write_client(&state).await);
+                assert_eq!(err.status, StatusCode::FORBIDDEN);
+                assert_eq!(
+                    err.message,
+                    "run `squelchd auth --imap` again to enable sending and mail actions"
+                );
+                assert_eq!(write_refusal(&err), "rejected:no_write_credential");
+                assert!(!write_ready(&state).await);
+            }
+        }
+    }
+
+    /// A SLOT THAT COULD NOT BE READ IS NOT A MISSING ONE (security review
+    /// F4): a credentials file that will not open is the 503 that says try
+    /// again, audited `failed:store`, not the 403 that sends the user to
+    /// setup. (A locked keychain takes the same arm.)
+    #[tokio::test]
+    async fn an_unreadable_imap_slot_is_a_retry_not_the_setup_403() {
+        let fx = Fixture::new("imap-unreadable");
+        fx.set_provider("imap");
+        std::fs::write(
+            fx.dir.join("credentials.json"),
+            b"{ this is not a credentials file",
+        )
+        .unwrap();
+        let state = fx.imap_state();
+        let err = refused(write_client(&state).await);
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            err.message,
+            "couldn't read the stored credential; try again"
+        );
+        assert_eq!(write_refusal(&err), "failed:store");
+        assert!(!write_ready(&state).await);
+    }
+
+    /// A4: an IMAP account's write errors carry the writer's words, at
+    /// Gmail's statuses; Gmail's stay byte for byte what they were.
+    #[test]
+    fn imap_write_errors_have_their_own_words_and_gmails_are_unchanged() {
+        let api = |status: u16, m: &str| WriteError::Api {
+            status,
+            message: m.into(),
+        };
+        let cases = [
+            api(404, "no copy of this message on the mail server"),
+            api(400, "smtp server refused the recipient (550)"),
+            WriteError::Transport("the mail server could not be reached; try again".into()),
+        ];
+        for e in &cases {
+            let gmail = write_error_as(Some(MailProvider::Gmail), e);
+            assert_eq!(
+                (gmail.status, gmail.message.as_str()),
+                (StatusCode::BAD_GATEWAY, "gmail request failed")
+            );
+            let unread = write_error_as(None, e);
+            assert_eq!(unread.message, "gmail request failed");
+            let imap = write_error_as(Some(MailProvider::Imap), e);
+            assert_eq!(imap.status, StatusCode::BAD_GATEWAY);
+            assert!(!imap.message.contains("gmail"), "{}", imap.message);
+            let (WriteError::Api { message, .. } | WriteError::Transport(message)) = e else {
+                unreachable!()
+            };
+            assert_eq!(&imap.message, message);
+        }
+        let missing = WriteError::MissingCredential(IMAP_NO_SMTP.into());
+        let gmail = write_error_as(Some(MailProvider::Gmail), &missing);
+        assert_eq!(
+            gmail.message,
+            "write credential not configured; run `squelchd auth`"
+        );
+        let imap = write_error_as(Some(MailProvider::Imap), &missing);
+        assert_eq!(
+            (imap.status, imap.message.as_str()),
+            (StatusCode::FORBIDDEN, IMAP_NO_SMTP)
+        );
+        // A capability refusal is the 400 with its own text, for both.
+        let refusal = WriteError::Invalid(
+            "this mail server has no Trash folder, and Passband never deletes mail outright".into(),
+        );
+        for p in [Some(MailProvider::Gmail), Some(MailProvider::Imap)] {
+            let e = write_error_as(p, &refusal);
+            assert_eq!(e.status, StatusCode::BAD_REQUEST);
+            assert!(e.message.contains("no Trash folder"), "{}", e.message);
+        }
+        // Pacing is Gmail's, and reads the same whoever asks.
+        let paced = WriteError::Paced { retry_in_secs: 4 };
+        assert_eq!(
+            write_error_as(Some(MailProvider::Imap), &paced).message,
+            write_error_as(Some(MailProvider::Gmail), &paced).message
+        );
     }
 
     fn refused(r: Result<Arc<dyn MailWriter>, ApiError>) -> ApiError {
@@ -7814,28 +8277,18 @@ mod write_client_tests {
         }
     }
 
-    /// AN IMAP ACCOUNT IS NOT SENT TO GMAIL OAUTH: without a write
-    /// credential it gets the provider's 501, audited as such, not the 403
-    /// that says to run `squelchd auth`. So does a provider this build does
-    /// not know.
+    /// A PROVIDER THIS BUILD DOES NOT KNOW is not sent to Gmail OAuth:
+    /// without a write credential it gets the provider's 501, audited as
+    /// such, not the 403 that says to run `squelchd auth`.
     #[tokio::test]
-    async fn a_non_gmail_account_without_a_write_credential_gets_the_provider_refusal() {
-        for provider in ["imap", "exchange-ews"] {
-            let fx = Fixture::new("no-creds-other");
-            fx.set_provider(provider);
-            let err = refused(write_client(&fx.state()).await);
-            assert_eq!(err.status, StatusCode::NOT_IMPLEMENTED, "{provider}");
-            assert!(!err.message.contains("squelchd auth"), "{}", err.message);
-            assert_eq!(write_refusal(&err), "rejected:unsupported_provider");
-            // IMAP is told IMAP writes are not supported yet; only a provider
-            // this build does not know is told to upgrade.
-            if provider == "imap" {
-                assert_eq!(err.message, IMAP_READ_ONLY);
-                assert!(!err.message.contains("upgrade"), "{}", err.message);
-            } else {
-                assert!(err.message.contains("upgrade squelchd"), "{}", err.message);
-            }
-        }
+    async fn an_unknown_provider_without_a_write_credential_gets_the_provider_refusal() {
+        let fx = Fixture::new("no-creds-other");
+        fx.set_provider("exchange-ews");
+        let err = refused(write_client(&fx.state()).await);
+        assert_eq!(err.status, StatusCode::NOT_IMPLEMENTED);
+        assert!(!err.message.contains("squelchd auth"), "{}", err.message);
+        assert_eq!(write_refusal(&err), "rejected:unsupported_provider");
+        assert!(err.message.contains("upgrade squelchd"), "{}", err.message);
     }
 
     /// A provider read that fails (the account row gone) does not turn the

@@ -573,6 +573,8 @@ impl MailWriter for GraphWriteClient {
             Ok(_) => Ok(SentRef {
                 id: Some(draft.id),
                 thread_id: draft.conversation_id,
+                raw: None,
+                warning: None,
             }),
             Err(e) => {
                 // Refused outright (a 4xx other than a timeout, or pacing):

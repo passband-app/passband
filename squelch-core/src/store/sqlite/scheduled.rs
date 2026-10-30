@@ -735,6 +735,56 @@ impl SqliteStore {
         Ok(n > 0)
     }
 
+    /// THE STALE-MARKER SWEEP (IMAP phase 3): drop at most `limit`
+    /// `app_settings` rows whose key starts with `prefix` and is no live
+    /// row's key, where a live row is one `scheduled`, `sending` or `failed`
+    /// and its key is `key_of(message_id_header)`. A settled row is never
+    /// fired again, so its marker answers nothing; a swept row is gone.
+    /// Markers and rows are read under one lock, markers first, so a row
+    /// that fires (and writes its marker) after the read is never in doubt.
+    /// Returns how many went.
+    pub fn sweep_orphan_settings(
+        &self,
+        account_id: AccountId,
+        prefix: &str,
+        key_of: &dyn Fn(&str) -> Option<String>,
+        limit: usize,
+    ) -> Result<usize> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let keys: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT key FROM app_settings
+                 WHERE account_id = ?1 AND substr(key, 1, length(?2)) = ?2
+                 ORDER BY key",
+            )?;
+            stmt.query_map(params![account_id, prefix], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        let live: std::collections::HashSet<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT message_id_header FROM scheduled_sends
+                 WHERE account_id = ?1 AND state IN ('scheduled', 'sending', 'failed')",
+            )?;
+            let headers: Vec<String> = stmt
+                .query_map(params![account_id], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            headers.iter().filter_map(|h| key_of(h)).collect()
+        };
+        let mut n = 0;
+        for key in keys.iter().filter(|k| !live.contains(*k)).take(limit) {
+            n += tx.execute(
+                "DELETE FROM app_settings WHERE account_id = ?1 AND key = ?2",
+                params![account_id, key],
+            )?;
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
     /// Drop settled (`sent`, `cancelled`) rows whose last move is older than
     /// [`SCHEDULED_SETTLED_TTL`], and `failed` rows older than
     /// [`SCHEDULED_FAILED_TTL`], with any files still claimed by them (a

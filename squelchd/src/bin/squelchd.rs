@@ -295,8 +295,8 @@ struct AuthArgs {
     expose_consent_listener: bool,
 
     /// Set this account up on a plain IMAP server with an app password
-    /// instead of Google (issue #575; read only for now, so the write door
-    /// answers 501).
+    /// instead of Google (issue #575), then the SMTP server it sends
+    /// through.
     ///
     /// Prompts for the host, port, TLS mode (implicit TLS, STARTTLS, or none
     /// for a server on this machine only), username and app password (not
@@ -1271,6 +1271,49 @@ fn ask(label: &str, default: Option<&str>) -> Result<String, squelch_core::CoreE
     }
 }
 
+/// A hidden answer that may be left empty: `None` on an empty line. A closed
+/// stdin is still an error.
+fn ask_secret_optional(label: &str) -> Result<Option<String>, squelch_core::CoreError> {
+    use std::io::{IsTerminal, Write};
+    let _echo = std::io::stdin()
+        .is_terminal()
+        .then(TerminalEcho::suppressed);
+    eprint!("{label}: ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    let read = std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| other_err(format!("reading stdin: {e}")));
+    eprintln!();
+    if read? == 0 {
+        return Err(other_err(format!(
+            "stdin closed before \"{label}\" was answered; nothing was stored"
+        )));
+    }
+    let answer = line.trim_end_matches(['\r', '\n']);
+    Ok((!answer.is_empty()).then(|| answer.to_string()))
+}
+
+/// The SMTP host `squelchd auth --imap` offers first (contract §1): the IMAP
+/// host with a leading `imap.` turned into `smtp.`, else the same host.
+fn default_smtp_host(imap_host: &str) -> String {
+    match imap_host.get(..5) {
+        Some(p) if p.eq_ignore_ascii_case("imap.") => format!("smtp.{}", &imap_host[5..]),
+        _ => imap_host.to_string(),
+    }
+}
+
+/// The TLS mode an SMTP port implies: 465 is implicit TLS and 587 STARTTLS;
+/// any other port is asked about.
+fn smtp_tls_for_port(port: u16) -> Option<squelch_core::mail::imap::ImapTls> {
+    use squelch_core::mail::imap::ImapTls;
+    match port {
+        465 => Some(ImapTls::Implicit),
+        587 => Some(ImapTls::StartTls),
+        _ => None,
+    }
+}
+
 /// The TLS mode an answer names.
 fn parse_imap_tls(answer: &str) -> Option<squelch_core::mail::imap::ImapTls> {
     use squelch_core::mail::imap::ImapTls;
@@ -1290,7 +1333,7 @@ fn cmd_auth_imap(config: &Config, args: &AuthArgs) -> Result<(), squelch_core::C
     use squelch_core::mail::MailProvider;
     use squelch_core::mail::imap::{
         ImapAccountConfig, ImapCredential, ImapPassword, ImapServer, ImapSource, ImapTls,
-        parse_ca_pem, plaintext_allowed,
+        SmtpServer, parse_ca_pem, plaintext_allowed,
     };
     let email = config.require_account_email()?;
     let backend = config.credential_backend;
@@ -1322,7 +1365,7 @@ fn cmd_auth_imap(config: &Config, args: &AuthArgs) -> Result<(), squelch_core::C
         None => None,
     };
 
-    eprintln!("squelchd: setting up {email} on an IMAP server (read only for now)");
+    eprintln!("squelchd: setting up {email} on an IMAP server");
     let host = ask("IMAP host", None)?;
     let tls = loop {
         let answer = ask("TLS mode (implicit, starttls, plain)", Some("implicit"))?;
@@ -1356,7 +1399,7 @@ fn cmd_auth_imap(config: &Config, args: &AuthArgs) -> Result<(), squelch_core::C
         eprintln!();
         pw?
     };
-    let credential = ImapCredential {
+    let mut credential = ImapCredential {
         config: ImapAccountConfig {
             server: ImapServer {
                 host,
@@ -1365,8 +1408,10 @@ fn cmd_auth_imap(config: &Config, args: &AuthArgs) -> Result<(), squelch_core::C
                 username,
             },
             ca_pem,
+            smtp: None,
         },
         password: ImapPassword::new(password),
+        smtp_password: None,
     };
 
     // THE TEST LOGIN, before anything is stored.
@@ -1391,6 +1436,60 @@ fn cmd_auth_imap(config: &Config, args: &AuthArgs) -> Result<(), squelch_core::C
         eprintln!("  {role:<9} {}", folder.as_deref().unwrap_or("(none)"));
     }
 
+    // SENDING (phase 3, contract §1): the SMTP server, tested before
+    // anything is stored, and sealed into the same slot.
+    let smtp_host = ask(
+        "SMTP host",
+        Some(&default_smtp_host(&credential.config.server.host)),
+    )?;
+    let smtp_port: u16 = ask("SMTP port (587 STARTTLS, 465 TLS)", Some("587"))?
+        .parse()
+        .map_err(|_| squelch_core::CoreError::InvalidInput("the port is a number".into()))?;
+    let smtp_tls = match smtp_tls_for_port(smtp_port) {
+        Some(t) => t,
+        None => loop {
+            let answer = ask(
+                "SMTP TLS mode (starttls, implicit, plain)",
+                Some("starttls"),
+            )?;
+            match parse_imap_tls(&answer) {
+                Some(t) => break t,
+                None => eprintln!("squelchd: answer starttls, implicit or plain"),
+            }
+        },
+    };
+    if smtp_tls == ImapTls::Plain && !plaintext_allowed(&smtp_host) {
+        return Err(squelch_core::CoreError::InvalidInput(
+            "plain (no TLS) SMTP is only allowed for a server on this machine; use 587 or 465"
+                .into(),
+        ));
+    }
+    credential.smtp_password =
+        ask_secret_optional("SMTP password (empty: the same app password)")?.map(ImapPassword::new);
+    credential.config.smtp = Some(SmtpServer {
+        host: smtp_host,
+        port: smtp_port,
+        tls: smtp_tls,
+    });
+    let endpoint = squelch_api::write::smtp::SmtpEndpoint::from_config(
+        &credential.config,
+        credential.smtp_login_password(),
+    )
+    .map_err(|e| squelch_core::CoreError::InvalidInput(e.to_string()))?
+    .expect("smtp set above");
+    // THE SMTP TEST LOGIN: EHLO, TLS, AUTH, QUIT. No mail is sent.
+    runtime
+        .block_on(squelch_api::write::smtp::check_login(
+            &endpoint,
+            squelch_api::write::smtp::SmtpTimeouts::default(),
+        ))
+        .map_err(|e| squelch_core::CoreError::Credential(format!("{e}; nothing was stored")))?;
+    let smtp = credential.config.smtp.as_ref().expect("set above");
+    eprintln!(
+        "squelchd: logged in to SMTP {}:{} as {}",
+        smtp.host, smtp.port, credential.config.server.username
+    );
+
     squelch_core::credentials::store_imap_slot_backend(
         backend,
         &creds_path,
@@ -1402,8 +1501,8 @@ fn cmd_auth_imap(config: &Config, args: &AuthArgs) -> Result<(), squelch_core::C
     store.delete_app_setting(account_id, squelch_core::mail::imap::IMAP_ACCOUNT_SETTING)?;
     store.set_account_provider(account_id, MailProvider::Imap)?;
     println!(
-        "Stored: the IMAP server and password together in the {backend:?} backend for {email}. \
-         `squelchd serve` now syncs it over IMAP."
+        "Stored: the IMAP and SMTP servers and the password together in the {backend:?} \
+         backend for {email}. `squelchd serve` now syncs it over IMAP."
     );
     Ok(())
 }
@@ -3315,8 +3414,8 @@ fn cmd_serve(
         // Auth-mail retention runs here because this process owns the write
         // credential (sync is bound to gmail.readonly by hard invariant). No-op
         // unless the shredder is enabled AND a write credential exists. Not
-        // for an IMAP account, whose write door is 501 until SMTP lands: the
-        // pass would fail every hour.
+        // for an IMAP account (yet): its door can trash now, but turning the
+        // shredder on for IMAP mail is its own decision, not part of #575.
         if is_gmail {
             let shred_state = api_state.clone();
             tokio::spawn(async move {
@@ -5378,6 +5477,22 @@ mod tests {
             )
             .await;
         assert!(refused(&reply) && text.contains("not found"), "{text}");
+    }
+
+    /// The SMTP defaults `auth --imap` offers (contract §1): `imap.` becomes
+    /// `smtp.`, any other host is offered as is, and the two standard ports
+    /// pick their TLS mode without asking.
+    #[test]
+    fn smtp_setup_defaults_follow_the_imap_host_and_the_port() {
+        use squelch_core::mail::imap::ImapTls;
+        assert_eq!(default_smtp_host("imap.fastmail.com"), "smtp.fastmail.com");
+        assert_eq!(default_smtp_host("IMAP.example.org"), "smtp.example.org");
+        assert_eq!(default_smtp_host("mail.example.org"), "mail.example.org");
+        assert_eq!(default_smtp_host("localhost"), "localhost");
+        assert_eq!(default_smtp_host("imap"), "imap");
+        assert_eq!(smtp_tls_for_port(587), Some(ImapTls::StartTls));
+        assert_eq!(smtp_tls_for_port(465), Some(ImapTls::Implicit));
+        assert_eq!(smtp_tls_for_port(10587), None);
     }
 
     /// `auth --imap` ONLY TURNS A CLEAN ACCOUNT INTO AN IMAP ONE (security

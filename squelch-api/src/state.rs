@@ -298,6 +298,16 @@ pub struct ApiState {
     /// for it, or can fail on one. Shared by every clone of the state; a
     /// failed read is not cached.
     pub(crate) mail_provider: Arc<std::sync::OnceLock<squelch_core::mail::MailProvider>>,
+    /// The IMAP sends in flight and those settled in the last two minutes,
+    /// by request (final review N4; `crate::send_dedupe`). Shared by every
+    /// clone of the state.
+    pub(crate) imap_send_dedupe: Arc<crate::send_dedupe::SendDedupe>,
+    /// Where an IMAP account's sealed `#imap` slot lives (backend, file and
+    /// address; never its contents). The write door reads the slot per
+    /// action, as it loads a Gmail token per action, so a `squelchd auth
+    /// --imap` under a running daemon takes effect at once. `None` (tests,
+    /// a door with no config): an IMAP account has no write credential.
+    pub(crate) imap_write: Option<Arc<ImapWriteSlot>>,
     /// THE ESCAPE HATCH, from `[console] allow_insecure_cookie` /
     /// `SQUELCH_CONSOLE_ALLOW_INSECURE_COOKIE`: the operator's declaration that
     /// this console is served over plain http on an origin that is not loopback.
@@ -679,6 +689,8 @@ impl ApiState {
             sync_metrics: None,
             gmail_budget: None,
             mail_provider: Arc::new(std::sync::OnceLock::new()),
+            imap_send_dedupe: Default::default(),
+            imap_write: None,
             console_allow_insecure_cookie: false,
             console_signin_limiter: Arc::new(std::sync::Mutex::new(
                 ConsoleRateLimiter::per_minute(crate::console::CONSOLE_SIGNIN_REQUESTS_PER_MINUTE),
@@ -1370,6 +1382,22 @@ impl ApiState {
         Ok(self.with_write_store(creds))
     }
 
+    /// Where this account's IMAP credential slot is, for the write door (see
+    /// the field). Holds no secret: the slot is read per action.
+    pub fn with_imap_write_slot(
+        mut self,
+        backend: CredentialBackend,
+        account_email: String,
+        credentials_path: std::path::PathBuf,
+    ) -> Self {
+        self.imap_write = Some(Arc::new(ImapWriteSlot {
+            backend,
+            account_email,
+            credentials_path,
+        }));
+        self
+    }
+
     /// The WRITE-bound credential store, if action capability is enabled.
     pub(crate) fn write_creds(&self) -> Option<&Arc<dyn CredentialStore>> {
         self.write_creds.as_ref()
@@ -1558,6 +1586,14 @@ impl ApiState {
             );
         }
 
+        // Always wired: it names where the slot would be, and an account that
+        // is not IMAP never reads it.
+        let state = state.with_imap_write_slot(
+            cfg.credential_backend,
+            account_email.to_string(),
+            cfg.resolve_credentials_path(),
+        );
+
         Ok(match cfg.oauth_client() {
             Ok(client) => {
                 let account_id = state.account_id;
@@ -1596,6 +1632,15 @@ impl ApiState {
     pub fn account_id(&self) -> AccountId {
         self.account_id
     }
+}
+
+/// Where an IMAP account's credential slot is: what the write door needs to
+/// read it ([`squelch_core::credentials::load_imap_slot_backend`]).
+#[derive(Debug, Clone)]
+pub(crate) struct ImapWriteSlot {
+    pub(crate) backend: CredentialBackend,
+    pub(crate) account_email: String,
+    pub(crate) credentials_path: std::path::PathBuf,
 }
 
 /// The phone's side of the agent door's review requests: which drafts it was

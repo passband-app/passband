@@ -1506,7 +1506,12 @@ const QP_MAX_LINE: usize = 76;
 /// through as a hard break; lines soft-break with `=\r\n` before they can reach
 /// [`QP_MAX_LINE`], and a `=XX` token is never split across one.
 fn qp_encode(text: &str) -> String {
-    let bytes = text.as_bytes();
+    qp_encode_bytes(text.as_bytes())
+}
+
+/// [`qp_encode`] over bytes that need not be UTF-8: the SMTP path re-encodes
+/// a composed body it did not build (`smtp::transfer_safe`).
+pub(crate) fn qp_encode_bytes(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() + bytes.len() / 4);
     let mut line = 0usize;
     let mut i = 0usize;

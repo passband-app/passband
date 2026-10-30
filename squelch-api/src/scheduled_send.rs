@@ -42,13 +42,16 @@ use crate::error::ApiError;
 use crate::group_send;
 use crate::handlers::{
     Fire, MAX_FORWARD_RAW_BYTES, OutboundAttachmentView, SendBody, SendGuard, SendOutcome,
-    audit_action, composition_kinds, dedup_ids, echo_sent, forward_original_kinds, guard_verdict,
-    load_send_attachments, mail_attachment, perform_send, read_forward_original, resolve_target,
-    send_target, store_call, validate_send, write_client, write_refusal,
+    account_provider, audit_action, composition_kinds, dedup_ids, echo_sent,
+    forward_original_kinds, guard_verdict, load_send_attachments, mail_attachment, perform_send,
+    read_forward_original, resolve_target, send_target, store_call, validate_send, write_client,
+    write_refusal,
 };
 use crate::state::ApiState;
 use crate::write::gmail::SCAN_SLACK;
+use crate::write::imap::{OUTBOX_MARKER_PREFIX, is_may_have_been_sent, outbox_marker_key};
 use crate::write::{MailWriter, SentRef, WriteError, send_budget};
+use squelch_core::mail::MailProvider;
 
 /// Audit action for scheduling, and for every refusal on the way to it.
 const AUDIT_SCHEDULE: &str = "schedule";
@@ -544,6 +547,7 @@ pub async fn cancel_scheduled_send(
     let target = Some(id.to_string());
     match outcome {
         CancelOutcome::Cancelled(row) => {
+            clear_outbox_marker(&state, &row.message_id_header).await;
             audit_action(&state, AUDIT_CANCEL, target, "ok").await;
             let mut request = serde_json::from_str::<serde_json::Value>(&row.request)
                 .unwrap_or(serde_json::Value::Null);
@@ -697,6 +701,55 @@ async fn sweep(state: &ApiState, report: &mut ScheduledPassReport) {
     {
         Ok(n) => report.swept = n,
         Err(_) => eprintln!("squelch-api: scheduled send sweep failed"),
+    }
+    sweep_outbox_markers(state).await;
+}
+
+/// The most stale IMAP outbox markers one maintenance pass drops.
+const MARKER_SWEEP_LIMIT: usize = 100;
+
+/// AN IMAP ACCOUNT'S STALE OUTBOX MARKERS (correctness review F6): a marker
+/// is cleared when its row settles ([`clear_outbox_marker`]); one whose
+/// clear was missed, or whose row the sweep above dropped, goes here, at
+/// most [`MARKER_SWEEP_LIMIT`] a pass. Gmail accounts have none and are
+/// never asked.
+async fn sweep_outbox_markers(state: &ApiState) {
+    if !matches!(account_provider(state).await, Ok(MailProvider::Imap)) {
+        return;
+    }
+    let swept = store_call(state, |store, account_id| {
+        store.sweep_orphan_settings(
+            account_id,
+            OUTBOX_MARKER_PREFIX,
+            &outbox_marker_key,
+            MARKER_SWEEP_LIMIT,
+        )
+    })
+    .await;
+    if swept.is_err() {
+        eprintln!("squelch-api: imap outbox marker sweep failed");
+    }
+}
+
+/// A SETTLED ROW'S MARKER GOES (IMAP only; correctness review F6): the
+/// writer keeps a fired send's marker until here, so a copy moved out of
+/// Sent before recovery still reads as sent. Best effort: a miss is the
+/// sweep's.
+pub(crate) async fn clear_outbox_marker(state: &ApiState, message_id_header: &str) {
+    if !matches!(account_provider(state).await, Ok(MailProvider::Imap)) {
+        return;
+    }
+    let Some(key) = outbox_marker_key(message_id_header) else {
+        return;
+    };
+    if store_call(state, move |store, account_id| {
+        use squelch_core::store::Store as _;
+        store.delete_app_setting(account_id, &key)
+    })
+    .await
+    .is_err()
+    {
+        eprintln!("squelch-api: imap outbox marker not cleared; the sweep will");
     }
 }
 
@@ -1079,6 +1132,24 @@ async fn recover(state: &ApiState, report: &mut ScheduledPassReport) {
                     Err(_) => eprintln!("squelch-api: scheduled send {id} requeue failed"),
                 }
             }
+            // MAYBE SENT (IMAP; correctness review F5): the writer cannot
+            // rule it out and never will, so asking again each minute is
+            // pointless. Terminal now, maybe sent: never fired again.
+            Err(e) if is_may_have_been_sent(&e) => {
+                eprintln!(
+                    "squelch-api: scheduled send {} may have been sent; failed",
+                    row.id
+                );
+                fail_unsent(
+                    state,
+                    &row,
+                    "failed:recovery",
+                    true,
+                    row.lease_until,
+                    report,
+                )
+                .await;
+            }
             Err(_) => {
                 eprintln!(
                     "squelch-api: scheduled send {} recovery search failed; still sending",
@@ -1137,18 +1208,40 @@ async fn settle_recovered(
     let target = serde_json::from_str::<SendBody>(&row.request)
         .ok()
         .and_then(|b| send_target(&b));
-    let sent = SentRef {
-        id: Some(gmail_id),
-        thread_id: None,
+    // IMAP, sent by the marker alone with no copy in Sent (a crash between
+    // SMTP and the APPEND): the copy is rebuilt and saved, and its echo is
+    // the row. Anything short of that settles it sent all the same, with no
+    // copy: never a second send.
+    let rebuilt = if client.sent_without_copy(&row.message_id_header) {
+        rebuild_sent_copy(state, row).await
+    } else {
+        None
     };
-    let fired = Fire {
-        id: row.id,
-        message_id: &row.message_id_header,
-    };
-    let echo_message_id = echo_sent(state, client, target.clone(), &sent, Some(fired)).await;
-    let thread_id = match echo_message_id {
-        Some(local) => resolve_target(state, local).await.ok().map(|m| m.thread_id),
-        None => None,
+    let (echo_message_id, thread_id) = match rebuilt {
+        Some(Some(local)) => (
+            Some(local),
+            resolve_target(state, local).await.ok().map(|m| m.thread_id),
+        ),
+        _ => {
+            let sent = SentRef {
+                id: Some(gmail_id),
+                thread_id: None,
+                warning: None,
+                raw: None,
+            };
+            let fired = Fire {
+                id: row.id,
+                message_id: &row.message_id_header,
+                copy_at: None,
+            };
+            let echo_message_id =
+                echo_sent(state, client, target.clone(), &sent, Some(fired)).await;
+            let thread_id = match echo_message_id {
+                Some(local) => resolve_target(state, local).await.ok().map(|m| m.thread_id),
+                None => None,
+            };
+            (echo_message_id, thread_id)
+        }
     };
     let (id, attempts) = (row.id, row.attempts);
     let ids: Vec<i64> = row.attachments.iter().map(|a| a.id).collect();
@@ -1167,6 +1260,7 @@ async fn settle_recovered(
     .await;
     match settled {
         Ok(true) => {
+            clear_outbox_marker(state, &row.message_id_header).await;
             audit_action(state, "send", target, &format!("scheduled:{id}:recovered")).await;
             eprintln!("squelch-api: scheduled send {id} was already sent; recovered");
             true
@@ -1175,6 +1269,77 @@ async fn settle_recovered(
         Err(_) => {
             eprintln!("squelch-api: scheduled send {id} recovered but not settled");
             false
+        }
+    }
+}
+
+/// THE SENT COPY A CRASH LOST (IMAP, #575 phase 3 final matrix 7b): compose
+/// the row's request again exactly as the fire did (same Message-ID, same
+/// outbox token, same parent and files, through the same builder) and SAVE
+/// it to Sent ([`Fire::copy_at`]: never submitted). `Some(echo)` when the
+/// copy was saved (or found) and echoed; `None` when it could not be
+/// (an unreadable request, a lost file, a parent gone), which the caller
+/// settles as sent with no copy.
+///
+/// Not rebuilt: the read-tracking pixel (its token was minted for the
+/// delivered copy; a second one would be a tracker for mail nobody got) and
+/// the group attribution (`finish_send`'s caller writes it after a send; a
+/// recovered row's history is the row). The Date is the attempt's (or the
+/// row's `send_at`).
+async fn rebuild_sent_copy(state: &ApiState, row: &ScheduledSend) -> Option<Option<i64>> {
+    let id = row.id;
+    let Ok(mut body) = serde_json::from_str::<SendBody>(&row.request) else {
+        eprintln!(
+            "squelch-api: scheduled send {id} was sent; its request is unreadable, so Sent has \
+             no copy of it"
+        );
+        return None;
+    };
+    body.include_tracker = None;
+    body.group_id = None;
+    body.group_mode = None;
+    body.draft_id = None;
+    let ids = dedup_ids(&body.attachment_ids);
+    let attachments = if ids.is_empty() {
+        Vec::new()
+    } else {
+        let wanted = ids.clone();
+        match store_call(state, move |store, account_id| {
+            store.scheduled_outbound_attachments(account_id, id, &wanted)
+        })
+        .await
+        {
+            Ok(rows) if rows.len() == ids.len() => rows.into_iter().map(mail_attachment).collect(),
+            _ => {
+                eprintln!(
+                    "squelch-api: scheduled send {id} was sent; a file is gone, so Sent has no \
+                     copy of it"
+                );
+                return None;
+            }
+        }
+    };
+    // The attempt's start when the row recorded it, else when it fell due
+    // (a fire claims a due row within a second of `send_at`; a lapsed lease
+    // ends minutes after the send).
+    let at = row.last_attempt_at.unwrap_or(row.send_at);
+    let fired = Fire {
+        id,
+        message_id: &row.message_id_header,
+        copy_at: Some(at),
+    };
+    match perform_send(state, &body, attachments, SendGuard::Settled, Some(fired)).await {
+        Ok(SendOutcome::Sent {
+            echo_message_id, ..
+        }) => {
+            eprintln!("squelch-api: scheduled send {id} was sent; its Sent copy was rebuilt");
+            Some(echo_message_id)
+        }
+        Ok(SendOutcome::Sending { .. }) | Err(_) => {
+            eprintln!(
+                "squelch-api: scheduled send {id} was sent; its Sent copy could not be rebuilt"
+            );
+            None
         }
     }
 }
@@ -1253,6 +1418,20 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
                 return;
             }
             Ok(None) => {}
+            // Maybe sent (IMAP): terminal, as in `recover`.
+            Err(e) if is_may_have_been_sent(&e) => {
+                eprintln!("squelch-api: scheduled send {id} may have been sent; failed");
+                fail_unsent(
+                    state,
+                    &row,
+                    "failed:recovery",
+                    true,
+                    row.last_attempt_at,
+                    report,
+                )
+                .await;
+                return;
+            }
             Err(e) => {
                 search_failed(state, &row, &e, report).await;
                 return;
@@ -1299,11 +1478,13 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
     let fired = Fire {
         id,
         message_id: &row.message_id_header,
+        copy_at: None,
     };
     match perform_send(state, &body, attachments, SendGuard::Settled, Some(fired)).await {
         Ok(SendOutcome::Sent {
             echo_message_id,
             thread_id,
+            ..
         }) => {
             // `finish_send` consumed only unclaimed files (it knows no
             // scheduled id); this row's own go here.
@@ -1322,7 +1503,10 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
             })
             .await
             {
-                Ok(true) => report.sent += 1,
+                Ok(true) => {
+                    report.sent += 1;
+                    clear_outbox_marker(state, &row.message_id_header).await;
+                }
                 Ok(false) => eprintln!("squelch-api: scheduled send {id} sent; row had moved"),
                 Err(_) => eprintln!("squelch-api: scheduled send {id} sent but not settled"),
             }
@@ -1562,6 +1746,11 @@ async fn settle_failed(
     {
         Ok(true) => {
             report.failed += 1;
+            // A failure with no doubt has no marker worth keeping; a maybe-
+            // sent one keeps it, so a send-now still reads the doubt.
+            if !maybe_sent && !row.maybe_sent {
+                clear_outbox_marker(state, &row.message_id_header).await;
+            }
             true
         }
         Ok(false) => false,
@@ -2100,5 +2289,72 @@ mod tests {
                 (at(0) - lease - SCAN_SLACK, at(0) + lease + SCAN_SLACK)
             );
         }
+    }
+
+    /// AN IMAP ROW'S MARKER GOES WHEN THE ROW SETTLES (correctness review
+    /// F6), here a cancel; and the maintenance sweep drops markers whose row
+    /// is not live, keeping a live row's. A Gmail account's settings are
+    /// never touched, by either.
+    #[tokio::test]
+    async fn imap_outbox_markers_go_with_their_rows_and_gmail_is_untouched() {
+        use squelch_core::store::Store as _;
+        for provider in [MailProvider::Imap, MailProvider::Gmail] {
+            let (state, store, acct) = idle_state();
+            store.set_account_provider(acct, provider).unwrap();
+            let cancelled = schedule_row(&store, acct, Utc::now() + chrono::Duration::hours(1));
+            let live = schedule_row(&store, acct, Utc::now() + chrono::Duration::hours(2));
+            let header = |id: i64| {
+                store
+                    .scheduled_send_by_id(acct, id)
+                    .unwrap()
+                    .unwrap()
+                    .message_id_header
+            };
+            let (c_key, l_key) = (
+                outbox_marker_key(&header(cancelled)).unwrap(),
+                outbox_marker_key(&header(live)).unwrap(),
+            );
+            let orphan = format!("{OUTBOX_MARKER_PREFIX}feedface");
+            for k in [&c_key, &l_key, &orphan] {
+                store.set_app_setting(acct, k, "submitting x@y").unwrap();
+            }
+            let cancel = cancel_scheduled_send(State(state.clone()), Path(cancelled)).await;
+            assert!(cancel.is_ok(), "{provider:?}");
+            let imap = provider == MailProvider::Imap;
+            assert_eq!(
+                store.get_app_setting(acct, &c_key).unwrap().is_none(),
+                imap,
+                "{provider:?}: the cancelled row's marker"
+            );
+            let mut report = ScheduledPassReport::default();
+            sweep(&state, &mut report).await;
+            assert_eq!(
+                store.get_app_setting(acct, &orphan).unwrap().is_none(),
+                imap,
+                "{provider:?}: the orphan"
+            );
+            assert!(
+                store.get_app_setting(acct, &l_key).unwrap().is_some(),
+                "{provider:?}: a live row keeps its marker"
+            );
+        }
+    }
+
+    /// The worker's one IMAP question: only the writer's maybe-sent 409 is
+    /// terminal; a transport failure (or any other 409) is not.
+    #[test]
+    fn only_the_maybe_sent_answer_is_terminal() {
+        use crate::write::imap::MAY_HAVE_BEEN_SENT;
+        assert!(is_may_have_been_sent(&WriteError::Api {
+            status: 409,
+            message: MAY_HAVE_BEEN_SENT.into(),
+        }));
+        assert!(!is_may_have_been_sent(&WriteError::Transport(
+            MAY_HAVE_BEEN_SENT.into()
+        )));
+        assert!(!is_may_have_been_sent(&WriteError::Api {
+            status: 409,
+            message: "the message moved on the server; try again".into(),
+        }));
     }
 }

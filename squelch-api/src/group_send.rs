@@ -225,15 +225,18 @@ async fn run(state: ApiState, client: Arc<dyn MailWriter>, group_send_id: i64, p
             tokio::time::sleep(FAN_OUT_GAP).await;
         }
         match send_one(&state, &*client, &plan, addr).await {
-            Ok(message_id) => {
+            Ok((message_id, warning)) => {
                 sent += 1;
+                // A sent row's note is what the sender should know about
+                // mail that went (an IMAP send with no Sent copy); Gmail's
+                // rows carry none, as before.
                 settle(
                     &state,
                     group_send_id,
                     addr,
                     GroupSendStatus::Sent,
                     message_id,
-                    None,
+                    warning.as_deref(),
                 )
                 .await;
             }
@@ -264,14 +267,15 @@ async fn run(state: ApiState, client: Arc<dyn MailWriter>, group_send_id: i64, p
 }
 
 /// One message to one member. Returns the echoed local message id when the echo
-/// landed, or a REDACTED reason on failure — the string is stored and shown, so
-/// upstream detail never rides along in it.
+/// landed (and the writer's warning about mail that went, if any), or a
+/// REDACTED reason on failure — the string is stored and shown, so upstream
+/// detail never rides along in it.
 async fn send_one(
     state: &ApiState,
     client: &dyn MailWriter,
     plan: &FanOut,
     addr: &str,
-) -> Result<Option<i64>, String> {
+) -> Result<(Option<i64>, Option<String>), String> {
     let parts = ReplyParts {
         to: addr.to_string(),
         // A fan-out is one-to-one BY CONSTRUCTION. That is the whole reason to
@@ -295,7 +299,8 @@ async fn send_one(
         .send(&raw, None)
         .await
         .map_err(|_| "gmail refused the message".to_string())?;
-    Ok(crate::handlers::echo_sent(state, client, None, &sent, None).await)
+    let echoed = crate::handlers::echo_sent(state, client, None, &sent, None).await;
+    Ok((echoed, sent.warning))
 }
 
 /// Write one recipient's outcome. Best-effort in the sense that a failed write

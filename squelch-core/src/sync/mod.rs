@@ -6274,8 +6274,10 @@ Q0/00yfa39rgtJLa0DnOoA==
             config: crate::mail::imap::ImapAccountConfig {
                 server: imap_server(),
                 ca_pem: Some(TEST_CA_PEM.into()),
+                smtp: None,
             },
             password: crate::mail::imap::ImapPassword::new("pw"),
+            smtp_password: None,
         };
         crate::credentials::store_imap_slot_backend(
             crate::config::CredentialBackend::File,

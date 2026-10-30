@@ -124,6 +124,89 @@ fn a_server_with_no_junk_folder_watches_two() {
     assert_eq!(roles.watched().len(), 2);
 }
 
+/// AN INBOX.-NAMESPACE SERVER (Courier, Cyrus without altnamespace) with no
+/// SPECIAL-USE: every role is a child of INBOX, found by its last path
+/// component, and a new folder goes under `INBOX.`.
+#[test]
+fn an_inbox_namespace_server_resolves_its_roles_under_inbox() {
+    let listed = names(&[
+        ("INBOX", &[]),
+        ("INBOX.Sent Messages", &[]),
+        ("INBOX.Trash", &[]),
+        ("INBOX.Spam", &[]),
+        ("INBOX.Drafts", &[]),
+        ("INBOX.Projects", &[]),
+    ]);
+    let roles = resolve_roles_in(&listed, Some(".".into()));
+    assert_eq!(roles.sent.as_deref(), Some("INBOX.Sent Messages"));
+    assert_eq!(roles.trash.as_deref(), Some("INBOX.Trash"));
+    assert_eq!(roles.junk.as_deref(), Some("INBOX.Spam"));
+    assert_eq!(roles.drafts.as_deref(), Some("INBOX.Drafts"));
+    assert_eq!(roles.archive, None);
+    assert_eq!(roles.create_prefix().as_deref(), Some("INBOX."));
+    // A "/" server the same way; Junk and Archive by name too.
+    let roles = resolve_roles_in(
+        &names(&[
+            ("INBOX", &[]),
+            ("INBOX/Sent", &[]),
+            ("INBOX/Junk", &[]),
+            ("INBOX/Archive", &[]),
+        ]),
+        Some("/".into()),
+    );
+    assert_eq!(roles.sent.as_deref(), Some("INBOX/Sent"));
+    assert_eq!(roles.junk.as_deref(), Some("INBOX/Junk"));
+    assert_eq!(roles.archive.as_deref(), Some("INBOX/Archive"));
+    assert_eq!(roles.create_prefix().as_deref(), Some("INBOX/"));
+    // Deeper is not a role: INBOX.Clients.Trash is somebody's folder.
+    let roles = resolve_roles_in(
+        &names(&[("INBOX", &[]), ("INBOX.Clients.Trash", &[])]),
+        Some(".".into()),
+    );
+    assert_eq!(roles.trash, None);
+}
+
+/// THE OLD ANSWERS STAND: SPECIAL-USE wins over an INBOX child, and a
+/// top-level folder named like the role wins over one too. A server with
+/// top-level folders creates at the top level.
+#[test]
+fn special_use_and_top_level_names_still_win_over_inbox_children() {
+    let listed = names(&[
+        ("INBOX", &[]),
+        ("INBOX.Sent", &[]),
+        ("Gesendet", &["\\Sent"]),
+        ("INBOX.Trash", &[]),
+        ("Trash", &[]),
+        ("Archive", &[]),
+    ]);
+    let roles = resolve_roles_in(&listed, Some(".".into()));
+    assert_eq!(roles.sent.as_deref(), Some("Gesendet"));
+    assert_eq!(roles.trash.as_deref(), Some("Trash"));
+    assert_eq!(roles.archive.as_deref(), Some("Archive"));
+    assert_eq!(roles.create_prefix(), None);
+    // Same roles with or without the delimiter: sync never reads it.
+    let plain = resolve_roles(&listed);
+    assert_eq!(
+        (
+            plain.sent,
+            plain.trash,
+            plain.junk,
+            plain.archive,
+            plain.all
+        ),
+        (
+            roles.sent,
+            roles.trash,
+            roles.junk,
+            roles.archive,
+            roles.all
+        )
+    );
+    // Only INBOX: nothing to infer a namespace from.
+    let roles = resolve_roles_in(&names(&[("INBOX", &[])]), Some(".".into()));
+    assert_eq!(roles.create_prefix(), None);
+}
+
 #[test]
 fn the_cursor_round_trips_and_refuses_what_it_did_not_write() {
     let mut c = ImapCursor {
@@ -876,6 +959,94 @@ async fn live_mail_that_lands_between_the_listing_and_the_cursor_is_the_next_wal
     // The snapshot was spent: a second cursor is live STATUS.
     let live_cursor = ImapCursor::decode(&src.current_cursor().await.unwrap()).unwrap();
     assert_eq!(live_cursor.folders["inbox"].last_uid, 3);
+    let _ = other.logout().await;
+}
+
+/// MAIL FLAGGED \Deleted IS NEVER LISTED (final matrix row 11): another
+/// client marked it for removal, so neither a listing nor the poll walk
+/// hands it to ingest. Undeleted, it shows up at the next listing (the walk
+/// has moved past its UID).
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_mail_flagged_deleted_is_never_listed_until_undeleted() {
+    let user = fresh_user("deleted");
+    let mut other = other_client(&user).await;
+    other
+        .append(
+            INBOX,
+            Some("(\\Deleted)"),
+            None,
+            &mail(Some("gone-1@x.org"), "gone"),
+        )
+        .await
+        .unwrap();
+    append(&mut other, INBOX, &mail(Some("kept-1@x.org"), "kept"), None).await;
+    let (src, _) = live(&user);
+
+    let listed = src
+        .list(inbox_listing(), None, Urgency::Window)
+        .await
+        .unwrap();
+    assert_eq!(listed, vec![stable_id_for_message_id("kept-1@x.org")]);
+    let within = src
+        .list(
+            Listing::Folder {
+                folder: Folder::Inbox,
+                within_days: Some(30_000),
+            },
+            None,
+            Urgency::Window,
+        )
+        .await
+        .unwrap();
+    assert_eq!(within, listed, "a SINCE listing skips it too");
+
+    // The poll walk: a \Deleted arrival is not new mail.
+    let cursor = src.current_cursor().await.unwrap();
+    other
+        .append(
+            INBOX,
+            Some("(\\Deleted)"),
+            None,
+            &mail(Some("gone-2@x.org"), "gone 2"),
+        )
+        .await
+        .unwrap();
+    append(
+        &mut other,
+        INBOX,
+        &mail(Some("kept-2@x.org"), "kept 2"),
+        None,
+    )
+    .await;
+    let walk = src.changes(&cursor, Folder::Inbox).await.unwrap();
+    assert_eq!(walk.ids, vec![stable_id_for_message_id("kept-2@x.org")]);
+
+    // Undeleted elsewhere: the next listing has it.
+    other.select(INBOX).await.unwrap();
+    other
+        .uid_store("1:*", "-FLAGS (\\Deleted)")
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    let mut relisted = src
+        .list(inbox_listing(), None, Urgency::Window)
+        .await
+        .unwrap();
+    relisted.sort();
+    let mut want: Vec<String> = [
+        "gone-1@x.org",
+        "gone-2@x.org",
+        "kept-1@x.org",
+        "kept-2@x.org",
+    ]
+    .into_iter()
+    .map(stable_id_for_message_id)
+    .collect();
+    want.sort();
+    assert_eq!(relisted, want);
     let _ = other.logout().await;
 }
 
@@ -2491,8 +2662,10 @@ fn the_credential_slot_holds_where_the_password_goes() {
         config: ImapAccountConfig {
             server: server("imap.example.org", ImapTls::Implicit),
             ca_pem: Some("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n".into()),
+            smtp: None,
         },
         password: ImapPassword::new("s3cret-app-pw"),
+        smtp_password: None,
     };
     assert!(!format!("{c:?}").contains("s3cret"));
     let text = c.to_slot().unwrap();

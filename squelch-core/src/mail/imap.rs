@@ -155,6 +155,26 @@ pub struct ImapAccountConfig {
     /// trust anchor the owner named, it does not accept an unverified chain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_pem: Option<String>,
+    /// Where the account SENDS (phase 3, contract §1), set by `squelchd auth
+    /// --imap`. `None` in a slot written before sending existed: such an
+    /// account reads fine and every write is refused until setup is run
+    /// again. It is kept here, sealed with the password, for the same reason
+    /// the IMAP server is: whatever decides where the password goes must be as
+    /// hard to change as the password is to read. `ca_pem` covers it too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smtp: Option<SmtpServer>,
+}
+
+/// An account's SMTP submission server. Everything here is safe to log. The
+/// username is the IMAP one; the password is the IMAP one unless the slot
+/// holds a separate [`ImapCredential::smtp_password`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmtpServer {
+    pub host: String,
+    pub port: u16,
+    /// The same three modes and the same rule as IMAP (contract §9):
+    /// `Implicit` for 465, `StartTls` for 587, `Plain` for loopback only.
+    pub tls: ImapTls,
 }
 
 impl ImapAccountConfig {
@@ -187,6 +207,9 @@ pub fn parse_ca_pem(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>> {
 pub struct ImapCredential {
     pub config: ImapAccountConfig,
     pub password: ImapPassword,
+    /// A separate SMTP password, when the user gave one at setup. `None`
+    /// means SMTP logs in with [`Self::password`].
+    pub smtp_password: Option<ImapPassword>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -195,6 +218,8 @@ struct SlotV1 {
     #[serde(flatten)]
     config: ImapAccountConfig,
     password: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    smtp_password: Option<String>,
 }
 
 /// The phase-2-step-3 `app_settings` shape: a CA by PATH.
@@ -221,6 +246,7 @@ impl ImapCredential {
             v: 1,
             config: self.config.clone(),
             password: self.password.0.clone(),
+            smtp_password: self.smtp_password.as_ref().map(|p| p.0.clone()),
         })
         .map_err(|_| CoreError::Other(anyhow::anyhow!("imap credential: could not encode")))
     }
@@ -231,6 +257,7 @@ impl ImapCredential {
             Ok(slot) if slot.v == 1 => StoredImapSlot::Credential(ImapCredential {
                 config: slot.config,
                 password: ImapPassword(slot.password),
+                smtp_password: slot.smtp_password.map(ImapPassword),
             }),
             _ => StoredImapSlot::LegacyPassword(ImapPassword(text.to_string())),
         }
@@ -258,9 +285,17 @@ impl ImapCredential {
             config: ImapAccountConfig {
                 server: legacy.server,
                 ca_pem,
+                smtp: None,
             },
             password,
+            smtp_password: None,
         })
+    }
+
+    /// The password SMTP logs in with: the separate one if setup stored one,
+    /// else the IMAP password (contract §1).
+    pub fn smtp_login_password(&self) -> &ImapPassword {
+        self.smtp_password.as_ref().unwrap_or(&self.password)
     }
 }
 
@@ -271,6 +306,12 @@ pub struct ImapPassword(String);
 impl ImapPassword {
     pub fn new(secret: impl Into<String>) -> Self {
         Self(secret.into())
+    }
+
+    /// The secret itself, for the one place that has to hand it to a server:
+    /// the SMTP login (squelch-api's `write::smtp`). Never format it.
+    pub fn expose_secret(&self) -> &str {
+        &self.0
     }
 }
 
@@ -295,7 +336,7 @@ enum Stream {
 /// session. Progress is any byte read, or a write accepted, so a large FETCH
 /// over a slow link never trips it: only silence does. `None` for the IDLE
 /// connection, which is silent by design and bounded by its own deadline.
-struct Transport {
+pub struct Transport {
     stream: Stream,
     stall: Option<Duration>,
     /// When the stream last moved (or the timer was first needed).
@@ -538,7 +579,10 @@ fn set_keepalive(tcp: &TcpStream) {
     let _ = socket2::SockRef::from(tcp).set_tcp_keepalive(&ka);
 }
 
-type ImapSession = Session<Transport>;
+/// An authenticated IMAP session over this module's transport (TLS policy,
+/// stall timer and all). Public for the write door, which opens its own
+/// ([`ImapSource::open_writer_session`]).
+pub type ImapSession = Session<Transport>;
 
 /// Is `host` this machine, by its literal spelling? The connect also checks
 /// the address it actually reached ([`ImapSource::connect_tcp`]), so a
@@ -609,7 +653,7 @@ fn imap_err(context: &'static str) -> impl FnOnce(async_imap::error::Error) -> C
 
 /// The folders a source watches or skips, resolved per connection.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct FolderRoles {
+pub struct FolderRoles {
     pub sent: Option<String>,
     pub junk: Option<String>,
     pub trash: Option<String>,
@@ -620,6 +664,10 @@ pub(crate) struct FolderRoles {
     pub all: Option<String>,
     /// Every selectable folder, for the archive window's walk.
     pub selectable: Vec<String>,
+    /// The hierarchy delimiter LIST gave INBOX (`"."`, `"/"`), if any: where
+    /// a folder the writer creates goes on a server that keeps every folder
+    /// under INBOX (phase 3). Never read by sync.
+    pub delimiter: Option<String>,
 }
 
 impl FolderRoles {
@@ -658,6 +706,30 @@ impl FolderRoles {
         out
     }
 
+    /// THE PREFIX A NEW FOLDER NEEDS (phase 3's `CREATE`): `INBOX.` on a
+    /// server whose personal namespace is INBOX's children (Courier, Cyrus
+    /// without altnamespace), which refuses a top-level `CREATE`. Inferred
+    /// from LIST, since NAMESPACE is not parsed: at least one folder besides
+    /// INBOX, and every one of them under `INBOX<delimiter>`. `None` is the
+    /// top level.
+    pub fn create_prefix(&self) -> Option<String> {
+        let d = self.delimiter.as_deref().filter(|d| !d.is_empty())?;
+        let prefix = format!("{INBOX}{d}");
+        let mut others = self
+            .selectable
+            .iter()
+            .filter(|n| !n.eq_ignore_ascii_case(INBOX))
+            .peekable();
+        others.peek()?;
+        others
+            .all(|n| {
+                n.len() > prefix.len()
+                    && n.is_char_boundary(prefix.len())
+                    && n[..prefix.len()].eq_ignore_ascii_case(&prefix)
+            })
+            .then_some(prefix)
+    }
+
     /// The folders the archive window walks: every selectable folder but
     /// junk, trash and drafts (Gmail's `-in:draft` plus its default exclusion
     /// of spam and trash), and with `filed_only` the inbox and sent folder too.
@@ -690,8 +762,20 @@ const WATCHED: [Folder; 3] = [Folder::Inbox, Folder::Sent, Folder::Spam];
 
 /// Resolve roles from one `LIST` reply: `SPECIAL-USE` attributes (RFC 6154)
 /// win; a folder named like the role is the fallback, first match in the
-/// order given.
+/// order given, and only then a child of INBOX named like it (`INBOX.Sent`,
+/// `INBOX/Trash`: the personal namespace of Courier and Cyrus), so a server
+/// with SPECIAL-USE, or with the role's name at the top level, resolves
+/// exactly as it always has.
+#[cfg(test)]
 pub(crate) fn resolve_roles(names: &[(String, Vec<String>)]) -> FolderRoles {
+    resolve_roles_in(names, None)
+}
+
+/// [`resolve_roles`] with the hierarchy delimiter LIST gave INBOX.
+pub(crate) fn resolve_roles_in(
+    names: &[(String, Vec<String>)],
+    delimiter: Option<String>,
+) -> FolderRoles {
     // A folder that cannot be opened (`\Noselect`, `\NonExistent`) never
     // holds a role (review N4): STATUS on it answers NO forever.
     let selectable = |attrs: &[String]| {
@@ -712,13 +796,33 @@ pub(crate) fn resolve_roles(names: &[(String, Vec<String>)]) -> FolderRoles {
             .find(|(_, attrs)| attrs.iter().any(|a| a.eq_ignore_ascii_case(attr)))
             .map(|(n, _)| n.clone())
     };
+    // `INBOX.<c>` or `INBOX/<c>`, whatever the delimiter: on a server whose
+    // delimiter is the other one it is still a top-level folder of that name.
+    let inbox_child = |n: &str, c: &str| {
+        n.len() == INBOX.len() + 1 + c.len()
+            && n.is_char_boundary(INBOX.len())
+            && n.is_char_boundary(INBOX.len() + 1)
+            && n[..INBOX.len()].eq_ignore_ascii_case(INBOX)
+            && matches!(&n[INBOX.len()..INBOX.len() + 1], "." | "/")
+            && n[INBOX.len() + 1..].eq_ignore_ascii_case(c)
+    };
     let by_name = |candidates: &[&str]| {
-        candidates.iter().find_map(|c| {
-            names
-                .iter()
-                .find(|(n, _)| n.eq_ignore_ascii_case(c))
-                .map(|(n, _)| n.clone())
-        })
+        candidates
+            .iter()
+            .find_map(|c| {
+                names
+                    .iter()
+                    .find(|(n, _)| n.eq_ignore_ascii_case(c))
+                    .map(|(n, _)| n.clone())
+            })
+            .or_else(|| {
+                candidates.iter().find_map(|c| {
+                    names
+                        .iter()
+                        .find(|(n, _)| inbox_child(n, c))
+                        .map(|(n, _)| n.clone())
+                })
+            })
     };
     let pick = |attr: &str, fallback: &[&str]| by_attr(attr).or_else(|| by_name(fallback));
     FolderRoles {
@@ -732,6 +836,7 @@ pub(crate) fn resolve_roles(names: &[(String, Vec<String>)]) -> FolderRoles {
         archive: pick("\\Archive", &["Archive"]),
         all: pick("\\All", &["All Mail", "[Gmail]/All Mail"]),
         selectable: names.iter().map(|(n, _)| n.clone()).collect(),
+        delimiter,
     }
 }
 
@@ -871,7 +976,7 @@ pub(crate) const DIGEST_PREFIX: &str = "h1:";
 
 /// Where a raw message's header block ends: after the EARLIEST empty line,
 /// CRLF or bare LF (review N6), or the whole of it.
-fn header_block(raw: &[u8]) -> &[u8] {
+pub fn header_block(raw: &[u8]) -> &[u8] {
     let crlf = raw.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4);
     let lf = raw.windows(2).position(|w| w == b"\n\n").map(|i| i + 2);
     let end = match (crlf, lf) {
@@ -1017,7 +1122,8 @@ pub(crate) fn parse_header_block(header: &[u8]) -> Vec<(String, String)> {
     out
 }
 
-fn header_values(header: &[u8], name: &str) -> Vec<String> {
+/// Every value of header `name` in a header block, unfolded, in order.
+pub fn header_values(header: &[u8], name: &str) -> Vec<String> {
     parse_header_block(header)
         .into_iter()
         .filter(|(n, _)| n.eq_ignore_ascii_case(name))
@@ -1644,6 +1750,14 @@ impl std::fmt::Debug for ImapSource {
     }
 }
 
+/// THE TLS POLICY an account's connections are made under, IMAP and SMTP
+/// alike (contract §9): the public web PKI plus the account's own `ca_pem`,
+/// rustls on ring, verification always on. Public for the SMTP half of the
+/// write door, so both protocols trust exactly the same anchors.
+pub fn tls_client_config(config: &ImapAccountConfig) -> Result<Arc<ClientConfig>> {
+    tls_config(&config.extra_roots()?)
+}
+
 fn tls_config(extra_roots: &[CertificateDer<'static>]) -> Result<Arc<ClientConfig>> {
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -2023,6 +2137,38 @@ impl ImapSource {
         Ok(seen)
     }
 
+    /// THE WRITE DOOR'S CONNECTION (phase 3): a fresh session, secured and
+    /// logged in exactly as the source's own are (the same TLS policy,
+    /// loopback rule, timeouts and stall timer), with this login's folder
+    /// roles. It is the caller's alone: never the source's command session,
+    /// which only ever `EXAMINE`s. A refused login is not counted in
+    /// [`SourceRefusals::auth`], which is the sync's health signal.
+    ///
+    /// This crate issues no write command on it: squelch-core stays
+    /// write-free, and every state change is squelch-api's `write::imap`.
+    pub async fn open_writer_session(&self) -> Result<(ImapSession, FolderRoles)> {
+        let (mut session, _caps) = self.open_session(Some(self.timeouts.stall), false).await?;
+        let roles = list_roles(&mut session).await?;
+        Ok((session, roles))
+    }
+
+    /// Record a location this account's own writer just put a message at (a
+    /// sent message's copy in Sent), with the copy's identity digest when the
+    /// id has none yet. First-seen rules still hold: an id already located
+    /// keeps its earlier location as the one fetches prefer.
+    pub fn record_own_copy(&self, id: &str, raw: &[u8], loc: MessageLocation) -> Result<()> {
+        if self
+            .locations
+            .content_digest(self.account_id, id)?
+            .is_none()
+        {
+            self.locations
+                .record_content_digest(self.account_id, id, &header_digest(raw))?;
+        }
+        self.locations
+            .record_message_locations(self.account_id, &[(id.to_string(), loc)])
+    }
+
     /// The roles as of the current connection (connecting if needed).
     #[cfg(test)]
     pub(crate) async fn roles(&self) -> Result<FolderRoles> {
@@ -2068,21 +2214,34 @@ async fn read_greeting(client: &mut Client<Transport>) -> Result<()> {
     }
 }
 
+/// The folder roles a session's LIST gives now: the write door's re-list
+/// after it creates an Archive folder (phase 3).
+pub async fn list_folder_roles(session: &mut ImapSession) -> Result<FolderRoles> {
+    list_roles(session).await
+}
+
 async fn list_roles(session: &mut ImapSession) -> Result<FolderRoles> {
-    let names: Vec<(String, Vec<String>)> = session
+    let listed: Vec<(String, Option<String>, Vec<String>)> = session
         .list(Some(""), Some("*"))
         .await
         .map_err(imap_err("list"))?
         .map_ok(|n| {
             (
                 n.name().to_string(),
+                n.delimiter().map(str::to_string),
                 n.attributes().iter().map(attr_text).collect(),
             )
         })
         .try_collect()
         .await
         .map_err(imap_err("list"))?;
-    Ok(resolve_roles(&names))
+    let delimiter = listed
+        .iter()
+        .find(|(n, _, _)| n.eq_ignore_ascii_case(INBOX))
+        .or_else(|| listed.first())
+        .and_then(|(_, d, _)| d.clone());
+    let names: Vec<(String, Vec<String>)> = listed.into_iter().map(|(n, _, a)| (n, a)).collect();
+    Ok(resolve_roles_in(&names, delimiter))
 }
 
 /// IMAP's `SEARCH` date (`DD-Mon-YYYY`, English month).
@@ -2095,6 +2254,21 @@ fn uid_set(uids: &[u32]) -> String {
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// WHAT A LISTING OR A CHANGE WALK SEARCHES FOR, never mail flagged
+/// `\Deleted` (#575 phase 3 final review, matrix row 11): a message another
+/// client marked for removal is waiting for an EXPUNGE that will come, and
+/// showing it would be showing deleted mail. Appended to each listing's
+/// criteria (search keys AND together, RFC 3501 §6.4.4).
+///
+/// A message that is UNDELETED later shows up at the next listing of its
+/// folder (a backfill, a catch-up, an archive window), not on the poll walk:
+/// that walk reads only UIDs above its cursor, and the cursor moved past the
+/// message while it was flagged. The location lookups for a known id
+/// ([`find_by_message_id`]) do not filter: they resolve mail already shown.
+fn live_mail(criteria: &str) -> String {
+    format!("{criteria} UNDELETED")
 }
 
 /// `UID SEARCH` in the open folder, as a sorted list.
@@ -2577,6 +2751,11 @@ struct BodyGuard<T> {
     /// Locations already checked against `want` in this process, as
     /// (folder, UIDVALIDITY, UID).
     verified: HashSet<(String, u32, u32)>,
+    /// Stop at the first copy that passes: no other location is examined or
+    /// downloaded, so nothing is learned about them (no placement). For a
+    /// read that wants one verified copy's bytes and nothing else
+    /// ([`ImapSource::verified_copy`]).
+    first_only: bool,
 }
 
 fn place_key(l: &MessageLocation) -> (String, u32, u32) {
@@ -2634,9 +2813,9 @@ where
         verified: Vec::new(),
         body_mismatch: Vec::new(),
     };
-    let (print_of, mut want, verified) = match guard {
-        Some(g) => (Some(g.print_of), g.want, g.verified),
-        None => (None, None, HashSet::new()),
+    let (print_of, mut want, verified, first_only) = match guard {
+        Some(g) => (Some(g.print_of), g.want, g.verified, g.first_only),
+        None => (None, None, HashSet::new(), false),
     };
     // Does this copy's header digest match the id's (none recorded: yes)?
     async fn header_ok(c: &mut Conn, want: &Option<String>, loc: &MessageLocation) -> Result<bool> {
@@ -2651,6 +2830,9 @@ where
         })
     }
     for row in rows {
+        if first_only && out.got.is_some() {
+            break;
+        }
         if c.examine(&row.folder).await? != Some(row.uidvalidity) {
             out.stale.push(row);
             continue;
@@ -2770,6 +2952,9 @@ where
                 break;
             };
             for loc in hits {
+                if first_only && out.got.is_some() {
+                    break;
+                }
                 if placed.contains(&loc.folder)
                     || c.examine(&loc.folder).await? != Some(loc.uidvalidity)
                 {
@@ -2865,7 +3050,11 @@ async fn reset_walk(c: &mut Conn, folder: Folder) -> Result<Walk> {
     };
     let days = c.relist_days;
     let since = Utc::now() - chrono::Duration::days(days);
-    let uids = search(&mut c.session, format!("SINCE {}", imap_date(since))).await?;
+    let uids = search(
+        &mut c.session,
+        live_mail(&format!("SINCE {}", imap_date(since))),
+    )
+    .await?;
     let seen = stable_ids(&mut c.session, &name, validity, &uids).await?;
     eprintln!(
         "squelch: imap folder {name:?} was reset; re-listing its last {days} days \
@@ -2956,7 +3145,7 @@ impl MailSource for ImapSource {
                             ),
                             None => "ALL".to_string(),
                         };
-                        let mut uids = search(&mut c.session, query).await?;
+                        let mut uids = search(&mut c.session, live_mail(&query)).await?;
                         // Newest first: UIDs ascend with arrival in a folder.
                         uids.reverse();
                         if let Some(cap) = cap {
@@ -3006,7 +3195,7 @@ impl MailSource for ImapSource {
                                 let Some(validity) = c.examine(&folder).await? else {
                                     return Ok(Vec::new());
                                 };
-                                let uids = search(&mut c.session, query).await?;
+                                let uids = search(&mut c.session, live_mail(&query)).await?;
                                 stable_ids(&mut c.session, &folder, validity, &uids).await
                             })
                         })
@@ -3157,12 +3346,14 @@ impl MailSource for ImapSource {
                         }
                         // `n:*` always matches the highest UID even when it is
                         // below n, hence the filter.
-                        let uids: Vec<u32> =
-                            search(&mut c.session, format!("UID {}:*", pos.last_uid + 1))
-                                .await?
-                                .into_iter()
-                                .filter(|u| *u > pos.last_uid)
-                                .collect();
+                        let uids: Vec<u32> = search(
+                            &mut c.session,
+                            live_mail(&format!("UID {}:*", pos.last_uid + 1)),
+                        )
+                        .await?
+                        .into_iter()
+                        .filter(|u| *u > pos.last_uid)
+                        .collect();
                         last_uid = last_uid.max(uids.last().copied().unwrap_or(0));
                         seen = stable_ids(&mut c.session, &name, pos.uidvalidity, &uids).await?;
                     }
@@ -3240,81 +3431,7 @@ impl MailSource for ImapSource {
     }
 
     async fn fetch_raw(&self, id: &str, _urgency: Urgency) -> Result<FetchedMessage> {
-        let rows = self.locations.message_locations(self.account_id, id)?;
-        if rows.is_empty() {
-            // Never seen by this source: there is nowhere to look.
-            return Err(CoreError::NotFound);
-        }
-        let expected = self.locations.content_digest(self.account_id, id)?;
-        let guard = BodyGuard {
-            print_of: |b: &Body| match b {
-                Body::Bytes(bytes, _) if !bytes.is_empty() => Some(BodyPrint::of(bytes)),
-                _ => None,
-            },
-            want: self.locations.body_print(self.account_id, id)?,
-            verified: self
-                .verified
-                .lock()
-                .map(|mut v| v.for_id(id))
-                .unwrap_or_default(),
-        };
-        let (resolved, placement) = self
-            .with_conn(|c| {
-                Box::pin(async move {
-                    let r = resolve(
-                        c,
-                        rows,
-                        expected,
-                        |b: &Body| match b {
-                            Body::Bytes(bytes, _) if !bytes.is_empty() => {
-                                Some(header_digest(bytes))
-                            }
-                            _ => None,
-                        },
-                        Some(guard),
-                        |s, uid| Box::pin(fetch_body(s, uid)),
-                    )
-                    .await?;
-                    let placement = placement_for(&c.roles, &r.live);
-                    Ok((r, placement))
-                })
-            })
-            .await?;
-        self.settle(id, &resolved)?;
-        // THE LAST WORD IS THE STORE'S: bytes are served only if they print
-        // as the id's recorded print. Two lanes fetching a never-fetched id
-        // at once can each read a different copy; the first print recorded
-        // wins and the other lane's bytes are not served (review fix3 F5).
-        let stored = self.locations.body_print(self.account_id, id)?;
-        if let Ok(mut v) = self.verified.lock() {
-            for row in &resolved.stale {
-                v.forget(id, &row.folder);
-            }
-            // Copies checked against a print that lost the race are not the
-            // id's: only a check against the STORED print is kept (review
-            // fix4 R3).
-            if stored.is_some() && stored == resolved.checked_against {
-                v.insert(id, &resolved.verified);
-            }
-        }
-        if stored.is_some() && !resolved.body_mismatch.is_empty() {
-            let first = self
-                .mismatch_said
-                .lock()
-                .map(|mut said| said.insert(id.to_string()))
-                .unwrap_or(false);
-            if first {
-                // A canary for servers that rebuild a message's bytes (an
-                // Exchange content conversion, say): the copy is dropped, so
-                // say so, once per id. The id's prefix and the folder only.
-                eprintln!(
-                    "squelch: imap copy of {} in {:?} has the id's headers but another body; \
-                     not served or placed",
-                    id.chars().take(12).collect::<String>(),
-                    resolved.body_mismatch[0]
-                );
-            }
-        }
+        let (resolved, placement, stored) = self.guarded_resolve(id, false).await?;
         let mut thread_id = None;
         let (raw, received_at) = match resolved.got {
             Some(Body::Bytes(bytes, received))
@@ -3737,6 +3854,155 @@ impl ImapSource {
     #[cfg(test)]
     pub(crate) fn idle_connects(&self) -> u64 {
         self.idle_connects.load(Ordering::Relaxed)
+    }
+
+    /// `fetch_raw`'s resolve under the [`BodyGuard`], with its bookkeeping
+    /// (the rows settled, the placement cache, the mismatch canary): what
+    /// was found, where the id is placed, and the id's STORED body print
+    /// afterwards. Shared with [`ImapSource::verified_locations`], so the
+    /// write door acts on exactly the copies a fetch would serve.
+    async fn guarded_resolve(
+        &self,
+        id: &str,
+        first_only: bool,
+    ) -> Result<(Resolved<Body>, Placement, Option<BodyPrint>)> {
+        let rows = self.locations.message_locations(self.account_id, id)?;
+        if rows.is_empty() {
+            // Never seen by this source: there is nowhere to look.
+            return Err(CoreError::NotFound);
+        }
+        let expected = self.locations.content_digest(self.account_id, id)?;
+        let guard = BodyGuard {
+            print_of: |b: &Body| match b {
+                Body::Bytes(bytes, _) if !bytes.is_empty() => Some(BodyPrint::of(bytes)),
+                _ => None,
+            },
+            want: self.locations.body_print(self.account_id, id)?,
+            verified: self
+                .verified
+                .lock()
+                .map(|mut v| v.for_id(id))
+                .unwrap_or_default(),
+            first_only,
+        };
+        let (resolved, placement) = self
+            .with_conn(|c| {
+                Box::pin(async move {
+                    let r = resolve(
+                        c,
+                        rows,
+                        expected,
+                        |b: &Body| match b {
+                            Body::Bytes(bytes, _) if !bytes.is_empty() => {
+                                Some(header_digest(bytes))
+                            }
+                            _ => None,
+                        },
+                        Some(guard),
+                        |s, uid| Box::pin(fetch_body(s, uid)),
+                    )
+                    .await?;
+                    let placement = placement_for(&c.roles, &r.live);
+                    Ok((r, placement))
+                })
+            })
+            .await?;
+        self.settle(id, &resolved)?;
+        // THE LAST WORD IS THE STORE'S: bytes are served only if they print
+        // as the id's recorded print. Two lanes fetching a never-fetched id
+        // at once can each read a different copy; the first print recorded
+        // wins and the other lane's bytes are not served (review fix3 F5).
+        let stored = self.locations.body_print(self.account_id, id)?;
+        if let Ok(mut v) = self.verified.lock() {
+            for row in &resolved.stale {
+                v.forget(id, &row.folder);
+            }
+            // Copies checked against a print that lost the race are not the
+            // id's: only a check against the STORED print is kept (review
+            // fix4 R3).
+            if stored.is_some() && stored == resolved.checked_against {
+                v.insert(id, &resolved.verified);
+            }
+        }
+        if stored.is_some() && !resolved.body_mismatch.is_empty() {
+            let first = self
+                .mismatch_said
+                .lock()
+                .map(|mut said| said.insert(id.to_string()))
+                .unwrap_or(false);
+            if first {
+                // A canary for servers that rebuild a message's bytes (an
+                // Exchange content conversion, say): the copy is dropped, so
+                // say so, once per id. The id's prefix and the folder only.
+                eprintln!(
+                    "squelch: imap copy of {} in {:?} has the id's headers but another body; \
+                     not served or placed",
+                    id.chars().take(12).collect::<String>(),
+                    resolved.body_mismatch[0]
+                );
+            }
+        }
+        Ok((resolved, placement, stored))
+    }
+
+    /// THE WRITE DOOR'S TARGETS (phase 3, contract §5): every location of
+    /// `id` whose copy is the id's own, headers AND body, checked by the
+    /// same guarded resolve `fetch_raw` serves through. A lookalike (the
+    /// same Message-ID and identity headers over another body) is never in
+    /// it. Empty when nothing checks out, including a copy too big to read
+    /// (it cannot be checked) and a print that lost a race to another lane.
+    /// [`CoreError::NotFound`] for an id this source has never seen.
+    ///
+    /// Read-only, like everything here: the resolve only `EXAMINE`s.
+    pub async fn verified_locations(&self, id: &str) -> Result<Vec<MessageLocation>> {
+        let (resolved, _, stored) = self.guarded_resolve(id, false).await?;
+        match (&stored, &resolved.checked_against) {
+            (Some(s), Some(c)) if s == c => Ok(resolved.live),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// ONE VERIFIED COPY'S BYTES (phase 3, a reply's parent headers): the
+    /// first location of `id` whose headers and body are the id's own, by
+    /// the same guarded resolve, and no other location read at all, where
+    /// [`Self::verified_locations`] downloads every copy to place each one.
+    /// `None` when no copy checks out. [`CoreError::NotFound`] for an id
+    /// this source has never seen.
+    pub async fn verified_copy(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        let (resolved, _, stored) = self.guarded_resolve(id, true).await?;
+        let checked = resolved.checked_against;
+        Ok(match (resolved.got, stored) {
+            (Some(Body::Bytes(bytes, _)), Some(p))
+                if !bytes.is_empty()
+                    && checked.as_ref() == Some(&p)
+                    && p.body == body_fingerprint(&bytes) =>
+            {
+                Some(bytes)
+            }
+            _ => None,
+        })
+    }
+
+    /// The writer moved `id`'s copy out of `from.folder`: forget that place
+    /// (and its body check), and record where it went when the server said
+    /// (`COPYUID`). With no `to`, the next sighting records it.
+    pub fn note_moved(
+        &self,
+        id: &str,
+        from: &MessageLocation,
+        to: Option<MessageLocation>,
+    ) -> Result<()> {
+        self.locations
+            .forget_message_location(self.account_id, id, &from.folder)?;
+        if let Ok(mut v) = self.verified.lock() {
+            v.forget(id, &from.folder);
+        }
+        match to {
+            Some(to) => self
+                .locations
+                .record_message_locations(self.account_id, &[(id.to_string(), to)]),
+            None => Ok(()),
+        }
     }
 
     /// Bring the location rows in line with what a resolve found: stale rows

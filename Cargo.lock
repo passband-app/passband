@@ -1408,6 +1408,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "email_address"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e079f19b08ca6239f47f8ba8509c11cf3ea30095831f7fed61441475edd8c449"
+
+[[package]]
 name = "encode_unicode"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2691,6 +2697,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 dependencies = [
  "spin",
+]
+
+[[package]]
+name = "lettre"
+version = "0.11.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2c646bd5cc763b1087b15493e29a64be6147ba8f19342004fa52048ee596eae"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "email_address",
+ "futures-io",
+ "futures-util",
+ "idna",
+ "nom 8.0.0",
+ "percent-encoding",
+ "socket2",
+ "tokio",
+ "url",
 ]
 
 [[package]]
@@ -4833,6 +4858,7 @@ name = "squelch-api"
 version = "0.0.14"
 dependencies = [
  "anyhow",
+ "async-imap",
  "async-trait",
  "axum",
  "base64 0.22.1",
@@ -4841,6 +4867,7 @@ dependencies = [
  "futures",
  "http-body-util",
  "hyper-util",
+ "lettre",
  "mail-parser",
  "pulldown-cmark",
  "regex",
@@ -4848,10 +4875,13 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "socket2",
  "squelch-core",
  "squelch-httpauth",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-tungstenite",
  "tokio-util",

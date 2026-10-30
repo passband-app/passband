@@ -1370,3 +1370,81 @@ fn a_requeue_stamps_the_lapsed_leases_end_as_the_attempts_end() {
     assert_eq!(row.last_attempt_at, Some(t(0) + LEASE));
     assert_eq!(row.lease_until, None);
 }
+
+/// THE STALE-MARKER SWEEP: a marker whose row is live (scheduled, sending,
+/// failed) stays; one whose row settled or is gone goes, at most `limit` a
+/// call; other settings and other accounts are never touched.
+#[test]
+fn the_orphan_settings_sweep_keeps_live_rows_markers_only() {
+    let (store, acct) = store();
+    let key_of = |h: &str| {
+        let bare = h.trim().trim_start_matches('<').trim_end_matches('>');
+        bare.split('@')
+            .next()
+            .filter(|t| !t.is_empty())
+            .map(|t| format!("mark:{t}"))
+    };
+    let waiting = schedule(&store, acct, "waiting", t(30));
+    let failed = schedule(&store, acct, "failed", t(30));
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE scheduled_sends SET state = 'failed' WHERE id = ?1",
+            params![failed.id],
+        )
+        .unwrap();
+    let sent = schedule(&store, acct, "sent", t(30));
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE scheduled_sends SET state = 'sent' WHERE id = ?1",
+            params![sent.id],
+        )
+        .unwrap();
+    for k in [
+        "mark:waiting",
+        "mark:failed",
+        "mark:sent",
+        "mark:gone1",
+        "mark:gone2",
+    ] {
+        store.set_app_setting(acct, k, "accepted x@y").unwrap();
+    }
+    store.set_app_setting(acct, "other", "v").unwrap();
+    let _ = waiting;
+
+    assert_eq!(
+        store
+            .sweep_orphan_settings(acct, "mark:", &key_of, 2)
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        store
+            .sweep_orphan_settings(acct, "mark:", &key_of, 2)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .sweep_orphan_settings(acct, "mark:", &key_of, 2)
+            .unwrap(),
+        0
+    );
+    for (k, kept) in [
+        ("mark:waiting", true),
+        ("mark:failed", true),
+        ("mark:sent", false),
+        ("mark:gone1", false),
+        ("mark:gone2", false),
+        ("other", true),
+    ] {
+        assert_eq!(
+            store.get_app_setting(acct, k).unwrap().is_some(),
+            kept,
+            "{k}"
+        );
+    }
+}

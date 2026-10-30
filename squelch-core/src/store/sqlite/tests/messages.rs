@@ -1309,6 +1309,63 @@ fn the_upsert_refuses_a_bcc_on_received_mail() {
     );
 }
 
+/// A RECORDED BCC NEVER SHRINKS (#575 phase 3 final review N3): a server
+/// that files its own Sent copy saves the Bcc-stripped wire, so a later
+/// sighting of the sent message reads "named nobody" (""), and that must not
+/// erase who the send echo recorded. A sighting that names someone still
+/// writes them, and "" still fills a row never read.
+#[test]
+fn a_later_sighting_without_a_bcc_header_keeps_the_recorded_bcc() {
+    let (store, acct) = store();
+    let bcc_of = |id: i64| -> Option<String> {
+        store
+            .lock()
+            .unwrap()
+            .query_row("SELECT bcc_addrs FROM messages WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    };
+    let sent = || triaged(acct, "s-1", "t-1").is_sent(true);
+
+    // The echo wrote the Bcc; the server's own Sent copy has none.
+    let id = sent().bcc_addrs("bob@x.com").seed(&store);
+    sent().bcc_addrs("").seed(&store);
+    assert_eq!(bcc_of(id).as_deref(), Some("bob@x.com"));
+
+    // The normal paths read as before. A fresh insert with a Bcc stores it.
+    let with = triaged(acct, "s-2", "t-2")
+        .is_sent(true)
+        .bcc_addrs("Ana <ana@x.com>")
+        .seed(&store);
+    assert_eq!(bcc_of(with).as_deref(), Some("Ana <ana@x.com>"));
+    // A fresh insert without one stores "" (read, named nobody).
+    let without = triaged(acct, "s-3", "t-3")
+        .is_sent(true)
+        .bcc_addrs("")
+        .seed(&store);
+    assert_eq!(bcc_of(without).as_deref(), Some(""));
+    // A re-ingest with a Bcc writes it, over "" or over an older list.
+    triaged(acct, "s-3", "t-3")
+        .is_sent(true)
+        .bcc_addrs("carol@x.com")
+        .seed(&store);
+    assert_eq!(bcc_of(without).as_deref(), Some("carol@x.com"));
+    triaged(acct, "s-2", "t-2")
+        .is_sent(true)
+        .bcc_addrs("Ana <ana@x.com>, dan@x.com")
+        .seed(&store);
+    assert_eq!(bcc_of(with).as_deref(), Some("Ana <ana@x.com>, dan@x.com"));
+    // A row never read (NULL) takes "" as before.
+    let unread = triaged(acct, "s-4", "t-4").is_sent(true).seed(&store);
+    assert_eq!(bcc_of(unread), None);
+    triaged(acct, "s-4", "t-4")
+        .is_sent(true)
+        .bcc_addrs("")
+        .seed(&store);
+    assert_eq!(bcc_of(unread).as_deref(), Some(""));
+}
+
 #[test]
 fn a_bcc_is_never_kept_on_received_mail() {
     let (store, acct) = store();

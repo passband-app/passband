@@ -1,0 +1,23 @@
+
+# ---- squelch imap-dev overrides (scripts/imap-dev/smtp) ----
+compatibility_level = 3.6
+myhostname = mx.dev.test
+mydestination =
+maillog_file = /dev/stdout
+# Only Dovecot's submission service, on the private Docker network, talks to
+# this; no port is published to the host.
+mynetworks = 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8
+smtpd_relay_restrictions = permit_mynetworks, reject
+smtpd_recipient_restrictions = permit_mynetworks, reject
+# Every @dev.test address is a mailbox in the Dovecot container, delivered
+# over LMTP (Dovecot's static userdb accepts any user).
+virtual_mailbox_domains = dev.test
+virtual_transport = lmtp:inet:squelch-imap-dev:24
+# Nothing ever leaves the bed: any other domain bounces at once.
+default_transport = error:the imap-dev bed delivers to @dev.test only
+relay_transport = error:the imap-dev bed delivers to @dev.test only
+message_size_limit = 52428800
+# Postfix's cleanup drops every Bcc header on its own, which would hide a
+# client that leaked one. Header checks run first, so a Bcc that reaches the
+# bed is turned into a marker the live tests look for instead.
+header_checks = regexp:/etc/postfix/bed_header_checks

@@ -287,6 +287,65 @@ fn auth_pass_round_trips_through_the_thread_view_and_self_heals_on_re_upsert() {
 }
 
 #[test]
+fn sender_signals_reach_both_doors_and_survive_a_writer_that_did_not_read_them() {
+    use crate::types::SenderSignals;
+    let (store, acct) = store();
+    let at = |n: i64| Utc::now() - chrono::Duration::minutes(10 - n);
+    let flagged = SenderSignals {
+        via: Some("sendgrid.net".into()),
+        reply_to: Some("pay@elsewhere.example".into()),
+        ..SenderSignals::default()
+    };
+    let id = triaged(acct, "g-sig", "t-sig")
+        .received_at(at(1))
+        .sender_signals(Some(flagged.clone()))
+        .seed(&store);
+    // Read, nothing disagreed: stored as {}, served as absent.
+    triaged(acct, "g-clean", "t-sig")
+        .received_at(at(2))
+        .sender_signals(Some(SenderSignals::default()))
+        .upsert(&store);
+
+    let view = store.thread_view_with_html(acct, "t-sig").unwrap();
+    assert_eq!(view.messages[0].sender_signals.as_ref(), Some(&flagged));
+    assert_eq!(view.messages[1].sender_signals, None);
+
+    // A writer that never parsed the headers keeps what is stored.
+    triaged(acct, "g-sig", "t-sig")
+        .received_at(at(1))
+        .sender_signals(None)
+        .upsert(&store);
+    let view = store.thread_view_with_html(acct, "t-sig").unwrap();
+    assert_eq!(view.messages[0].sender_signals.as_ref(), Some(&flagged));
+    let stored: Option<String> = store
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT sender_signals FROM messages WHERE gmail_msg_id='g-clean'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored.as_deref(), Some("{}"));
+
+    // The agent door carries the same facts.
+    assess_external(&store, acct, id, "allowed");
+    let other = store
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT id FROM messages WHERE gmail_msg_id='g-clean'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap();
+    assess_external(&store, acct, other, "allowed");
+    let tv = store.thread_view(acct, "t-sig").unwrap();
+    let agent = tv.messages.iter().find(|m| m.id == id).unwrap();
+    assert_eq!(agent.sender_signals.as_ref(), Some(&flagged));
+}
+
+#[test]
 fn thread_view_carries_is_sent_per_message() {
     // The reader right-aligns on this bit, so a mixed thread must answer it
     // message by message, not thread-wide.

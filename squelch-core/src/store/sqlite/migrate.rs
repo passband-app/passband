@@ -144,6 +144,10 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // tracking-pixel bypass, no ghost sender scope, no timezone observation),
     // and a re-sync refills it through the message upsert.
     add_column_if_missing(conn, "messages", "auth_pass", "INTEGER")?;
+    // Where From and the real sender disagree (#639), as JSON. NULL on every
+    // pre-existing row and NOT backfilled here: the raw mail is not stored,
+    // so only a re-fetch can fill it, and the message upsert does that.
+    add_column_if_missing(conn, "messages", "sender_signals", "TEXT")?;
     // Automatic-unsubscribe job state. NULL on every pre-existing row, which is
     // exactly a legacy browser unsubscribe: no job, and the detector armed.
     for col in ["status", "status_url", "status_reason", "status_at"] {

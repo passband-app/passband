@@ -62,6 +62,26 @@ fn migrate_adds_auth_pass_null_to_a_preexisting_messages_table() {
 }
 
 #[test]
+fn migrate_adds_sender_signals_null_to_a_preexisting_messages_table() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE messages(
+             id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL,
+             gmail_msg_id TEXT NOT NULL, body TEXT);
+         INSERT INTO messages(id, account_id, gmail_msg_id, body) VALUES (1, 1, 'g1', 'old');",
+    )
+    .unwrap();
+    migrate(&conn).unwrap();
+    migrate(&conn).unwrap(); // idempotent
+    let existing: Option<String> = conn
+        .query_row("SELECT sender_signals FROM messages WHERE id=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(existing, None, "old rows were never read, so NULL");
+}
+
+#[test]
 fn migrate_adds_to_addrs_null_so_old_sent_mail_enters_the_backfill_queue() {
     // An install predating the display-recipients column. The migration adds it,
     // every historical row rests at NULL — which IS the backfill queue predicate

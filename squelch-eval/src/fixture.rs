@@ -175,6 +175,7 @@ pub fn carry_forward() -> (Fixture, String) {
                 list_unsubscribe: None,
                 list_unsub_one_click: false,
                 auth_pass: None,
+                sender_signals: None,
             })
             .unwrap();
         conn.execute(
@@ -290,6 +291,7 @@ pub fn build() -> Fixture {
                 list_unsubscribe: None,
                 list_unsub_one_click: false,
                 auth_pass: None,
+                sender_signals: None,
             })
             .unwrap();
         conn.execute(

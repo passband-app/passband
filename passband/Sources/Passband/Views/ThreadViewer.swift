@@ -3872,6 +3872,10 @@ private struct MessageCard: View, Equatable {
                     .font(Typo.num(11))
                     .foregroundStyle(Palette.inkFaintest)
             }
+            // WHO REALLY SENT IT, when that is not simply the From line (#639).
+            // On the sender name's x, like the recipients under it.
+            SenderSignalLine(message: message, compact: false)
+                .padding(.leading, MessageSenderHeading.nameInset)
             // The second line: recipients on the left, under the sender, and
             // the open count on the right, under the date. Sharing a row keeps
             // the first line exactly as tall as it always was.
@@ -3920,6 +3924,8 @@ private struct MessageCard: View, Equatable {
                     .font(Typo.num(10))
                     .foregroundStyle(Palette.inkFaintest)
             }
+            // WHO REALLY SENT IT (#639), under the name on the bubble's side.
+            SenderSignalLine(message: message, compact: true)
             // Under the time, on the bubble's own side.
             OpensLink(
                 opens: opens, recipients: message.audience?.recipients, me: me, compact: true)

@@ -13,6 +13,7 @@ pub mod html;
 pub mod ingest;
 pub mod notify_lane;
 mod profile;
+pub mod sender_signals;
 mod translate_pass;
 /// Public for `squelch-eval`, which replays triage through the production
 /// evidence reader and snapshot builder rather than copies of them.
@@ -7125,6 +7126,7 @@ Q0/00yfa39rgtJLa0DnOoA==
                 list_unsubscribe: None,
                 list_unsub_one_click: false,
                 auth_pass: None,
+                sender_signals: None,
             })
             .unwrap();
         store
@@ -7338,6 +7340,7 @@ Q0/00yfa39rgtJLa0DnOoA==
                 list_unsubscribe: None,
                 list_unsub_one_click: false,
                 auth_pass: None,
+                sender_signals: None,
             })
             .unwrap();
         store
@@ -8474,6 +8477,7 @@ Q0/00yfa39rgtJLa0DnOoA==
                 list_unsubscribe: None,
                 list_unsub_one_click: false,
                 auth_pass: None,
+                sender_signals: None,
             })
             .unwrap();
         store
@@ -8547,6 +8551,7 @@ Q0/00yfa39rgtJLa0DnOoA==
                 list_unsubscribe: None,
                 list_unsub_one_click: false,
                 auth_pass: Some(true),
+                sender_signals: None,
             })
             .unwrap();
         store

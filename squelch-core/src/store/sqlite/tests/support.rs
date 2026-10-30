@@ -97,6 +97,7 @@ pub(super) fn triaged(account_id: AccountId, gmail: &str, thread: &str) -> Triag
             list_unsubscribe: None,
             list_unsub_one_click: false,
             auth_pass: None,
+            sender_signals: None,
         },
         sensitivity: Sensitivity::Normal,
         sealed_kind: None,
@@ -180,6 +181,11 @@ impl TriagedBuilder {
     }
     pub(super) fn auth_pass(mut self, auth_pass: Option<bool>) -> Self {
         self.msg.auth_pass = auth_pass;
+        self
+    }
+
+    pub(super) fn sender_signals(mut self, signals: Option<crate::types::SenderSignals>) -> Self {
+        self.msg.sender_signals = signals;
         self
     }
 

@@ -610,6 +610,26 @@ struct ThreadMessageView {
     /// computed per request, so a newly-written-to sender takes effect on the
     /// next open with no re-ingest.
     sender_known: bool,
+    /// Whether the reader should draw this message's sender signals as a
+    /// WARNING rather than a quiet line. Decided here, once, so every client
+    /// and later the agent agree: any `name_spoof`; or a `reply_to` at
+    /// another organization unless the sender is a contact whose mail did
+    /// not FAIL authentication. Unknown authentication (IMAP, Outlook, rows
+    /// older than the verdict) from a contact stays quiet; a contact whose
+    /// mail failed authentication is how a spoofed colleague looks, so it
+    /// warns. Absent when the message has no signals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sender_signals_warn: Option<bool>,
+}
+
+/// See [`ThreadMessageView::sender_signals_warn`].
+fn signals_warn(
+    sig: &squelch_core::types::SenderSignals,
+    known_contact: bool,
+    auth_pass: Option<bool>,
+) -> bool {
+    sig.name_spoof.is_some()
+        || (sig.reply_to.is_some() && (!known_contact || auth_pass == Some(false)))
 }
 
 /// `ClientThreadView` on the wire, message-for-message, with the extra bit.
@@ -673,9 +693,14 @@ pub async fn get_thread(
             // ingested before the column existed — reads as NO bypass, the safe
             // default for a permissive feature, so nothing is backfilled.
             let sender_known = known && message.auth_pass == Some(true);
+            let sender_signals_warn = message
+                .sender_signals
+                .as_ref()
+                .map(|sig| signals_warn(sig, known, message.auth_pass));
             messages.push(ThreadMessageView {
                 message,
                 sender_known,
+                sender_signals_warn,
             });
         }
         Ok(ThreadResponse {
@@ -7840,5 +7865,37 @@ mod write_client_tests {
         let err = refused(write_client(&fx.state()).await);
         assert_eq!(err.status, StatusCode::FORBIDDEN);
         assert_eq!(write_refusal(&err), "rejected:no_write_credential");
+    }
+}
+
+#[cfg(test)]
+mod signals_warn_tests {
+    use super::signals_warn;
+    use squelch_core::types::SenderSignals;
+
+    #[test]
+    fn warning_is_name_claims_or_a_foreign_reply_to_without_a_trusted_contact() {
+        let spoof = SenderSignals {
+            name_spoof: Some("support@bank.example".into()),
+            ..SenderSignals::default()
+        };
+        let reply = SenderSignals {
+            reply_to: Some("pay@elsewhere.example".into()),
+            ..SenderSignals::default()
+        };
+        let via = SenderSignals {
+            via: Some("sendgrid.net".into()),
+            ..SenderSignals::default()
+        };
+        // A name claim warns whoever sent it.
+        assert!(signals_warn(&spoof, true, Some(true)));
+        // A foreign Reply-To from a stranger warns.
+        assert!(signals_warn(&reply, false, None));
+        // From a contact: quiet unless their mail FAILED authentication.
+        assert!(!signals_warn(&reply, true, Some(true)));
+        assert!(!signals_warn(&reply, true, None));
+        assert!(signals_warn(&reply, true, Some(false)));
+        // Via alone never warns.
+        assert!(!signals_warn(&via, false, Some(false)));
     }
 }

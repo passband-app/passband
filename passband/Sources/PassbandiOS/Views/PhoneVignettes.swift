@@ -42,6 +42,9 @@ extension PhoneVignette {
         case .clearStack: ClearStackPhoneScene.self
         case .remind: RemindScene.self
         case .smartClear: SmartClearPhoneScene.self
+        case .calendar: CalendarPhoneScene.self
+        case .quickLookDock: QuickLookDockScene.self
+        case .eventReminder: EventReminderScene.self
         }
     }
 }
@@ -937,5 +940,812 @@ enum SmartClearPhoneScene: VignetteDrawing {
         VignetteKit.bar(
             &layer, CGRect(x: receipt.maxX - 12 - 54, y: undo.midY - 1.1, width: 54, height: 2.2),
             VignettePalette.dim.opacity(0.7))
+    }
+}
+
+// MARK: - the calendar tab
+
+/// CALENDAR: the phone's new tab, open on the month, which is where it opens
+/// the first time and wherever you left it after. Each day is a date and a
+/// few dots in its calendars' colours. The thumb taps a day with two plans
+/// on it and the month gives way to that day as hours, which scroll by
+/// themselves to its first plan. The thumb taps an empty stretch of the
+/// afternoon: a new hour is outlined there and the event sheet comes up over
+/// it. Its title is written, two guests join the guest line, and save goes
+/// down. The sheet goes, the hour fills in its calendar's colour, and the
+/// mode glyph in the corner takes the thumb back to the month, where the day
+/// has a third dot.
+///
+/// Blue is state here, as in the app (today, the outline of an event being
+/// made), never a calendar: the plans wear the avatar tints.
+///
+/// The seam: the month turns to the next, drawn as the one the loop began on.
+enum CalendarPhoneScene: VignetteDrawing {
+    static let canvas = PhoneKit.canvas
+    static let loop: Double = 7.0
+
+    private static let tapDay: Double = 0.6
+    private static let toDayFrom: Double = 0.74
+    private static let toDayTo: Double = 1.14
+    private static let scrollFrom: Double = 1.3
+    private static let scrollTo: Double = 1.95
+    private static let tapGrid: Double = 2.4
+    private static let sheetUp: Double = 2.62
+    private static let typeFrom: Double = 3.0
+    private static let typeTo: Double = 3.38
+    private static let guests: [Double] = [3.46, 3.68]
+    private static let tapSave: Double = 4.26
+    private static let sheetDown: Double = 4.4
+    private static let tapMode: Double = 5.05
+    private static let toMonthFrom: Double = 5.19
+    private static let toMonthTo: Double = 5.59
+    private static let turnFrom: Double = 6.1
+    private static let turnTo: Double = 6.66
+
+    /// The day open, the sheet up with its title and both guests.
+    static let posterTime: Double = 3.9
+
+    // The month: seven columns, five weeks.
+    private static let gridX: CGFloat = 10
+    private static let cellW: CGFloat = 200 / 7
+    private static let gridTop: CGFloat = 42
+    private static let cellH: CGFloat = 30
+    private static let today = 9
+    private static let picked = 18
+    /// Each day's dots, by cell: avatar tints, up to three.
+    private static let dots: [Int: [Int]] = [
+        3: [1], 5: [2, 1], 8: [2], 9: [1], 12: [1, 2], 15: [2], 18: [2, 1], 20: [1],
+        23: [2, 2, 1], 26: [1], 29: [2], 31: [1, 2],
+    ]
+    private static let modeButton = CGPoint(x: 194, y: 16)
+
+    // The day: hours under a week strip.
+    private static let hoursTop: CGFloat = 56
+    private static let hourH: CGFloat = 24
+    private static let scrolled: CGFloat = 4.5 * hourH
+    /// How much further the hours go once the sheet is up.
+    private static let lift: CGFloat = 55
+
+    private struct Plan {
+        /// In hours from the top of the day's list.
+        let start: CGFloat
+        let length: CGFloat
+        let tint: Int
+        let title: CGFloat
+    }
+
+    private static let plans = [Plan(start: 5, length: 1.5, tint: 2, title: 64), Plan(start: 8.5, length: 1, tint: 1, title: 52)]
+    private static let made = Plan(start: 7, length: 1, tint: 1, title: 58)
+    private static let sheet = CGRect(x: 12, y: 92, width: 196, height: 100)
+
+    static func draw(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let inDay = ease(t, toDayFrom, toDayTo) - ease(t, toMonthFrom, toMonthTo)
+        let back = t >= toMonthFrom
+
+        // The month: the one the loop began on, then (after the day) the same
+        // month with the new dot, turning away as the next comes in.
+        if inDay < 1 {
+            var month = ctx
+            // One goes before the other comes: two screens at half strength
+            // on top of each other is neither of them.
+            month.opacity *= 1 - ease(inDay, 0, 0.6)
+            if back {
+                let turn = ease(t, turnFrom, turnTo)
+                let gone = ease(turn, 0, 0.6), come = ease(turn, 0.4, 1)
+                if gone < 1 {
+                    var leaving = month
+                    leaving.opacity *= 1 - gone
+                    leaving.translateBy(x: -60 * CGFloat(turn), y: 0)
+                    drawMonth(&leaving, t: t, returned: true)
+                }
+                if come > 0 {
+                    var arriving = month
+                    arriving.opacity *= come
+                    arriving.translateBy(x: 60 * CGFloat(1 - turn), y: 0)
+                    drawMonth(&arriving, t: 0, returned: false)
+                }
+            } else {
+                // Leaving for the day, it grows a little about the day picked.
+                let cell = cellRect(picked)
+                let grow = 1 + 0.04 * CGFloat(inDay)
+                month.translateBy(x: cell.midX, y: cell.midY)
+                month.scaleBy(x: grow, y: grow)
+                month.translateBy(x: -cell.midX, y: -cell.midY)
+                drawMonth(&month, t: t, returned: false)
+            }
+        }
+        if inDay > 0 {
+            var day = ctx
+            day.opacity *= ease(inDay, 0.4, 1)
+            day.translateBy(x: 0, y: 8 * CGFloat(1 - inDay))
+            drawDay(&day, t: t)
+        }
+
+        // The mode glyph: the shape of what is on screen, and the way back.
+        let pressed = VignetteClock.press(t, at: tapMode)
+        let disc = Path(ellipseIn: CGRect(x: modeButton.x - 10, y: modeButton.y - 10, width: 20, height: 20))
+        var glow = ctx
+        if pressed > 0 {
+            glow.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.7 * pressed), radius: 5))
+        }
+        glow.fill(disc, with: .color(VignettePalette.cap))
+        glow.fill(disc, with: .color(VignettePalette.phosphor.opacity(0.22 * pressed)))
+        ctx.stroke(disc, with: .color(Color.white.opacity(0.14)), lineWidth: 0.5)
+        var monthGlyph = ctx
+        monthGlyph.opacity *= 1 - ease(inDay, 0, 0.6)
+        PhoneKit.glyph(&monthGlyph, "calendar", at: modeButton, size: 8.5, color: VignettePalette.phosphor)
+        var dayGlyph = ctx
+        dayGlyph.opacity *= ease(inDay, 0.4, 1)
+        PhoneKit.glyph(&dayGlyph, "clock", at: modeButton, size: 8.5, color: VignettePalette.phosphor)
+
+        drawSheet(&ctx, t: t)
+
+        // The thumb: a day, the empty afternoon, save, the mode glyph.
+        let dayAt = cellRect(picked)
+        thumb(&ctx, t: t, at: tapDay, point: CGPoint(x: dayAt.midX + 2, y: dayAt.midY + 3))
+        thumb(&ctx, t: t, at: tapGrid, point: CGPoint(x: 128, y: hourY(made.start + 0.45) + 3))
+        thumb(&ctx, t: t, at: tapSave, point: CGPoint(x: savePill.midX + 2, y: savePill.midY + 3))
+        thumb(&ctx, t: t, at: tapMode, point: CGPoint(x: modeButton.x - 1, y: modeButton.y + 3))
+    }
+
+    private static func thumb(_ ctx: inout GraphicsContext, t: Double, at: Double, point: CGPoint) {
+        let ease = VignetteClock.ease
+        let on = ease(t, at - 0.34, at - 0.18) * (1 - ease(t, at + 0.22, at + 0.4))
+        PhoneKit.touch(&ctx, at: point, presence: on, down: VignetteClock.press(t, at: at))
+    }
+
+    private static func cellRect(_ index: Int) -> CGRect {
+        CGRect(
+            x: gridX + CGFloat(index % 7) * cellW, y: gridTop + CGFloat(index / 7) * cellH, width: cellW,
+            height: cellH)
+    }
+
+    /// A date, as a bar: one figure or two.
+    private static func dateWidth(_ index: Int) -> CGFloat {
+        let n = index < 2 ? 29 + index : (index > 32 ? index - 32 : index - 1)
+        return n < 10 ? 3.2 : 5.8
+    }
+
+    /// The month's name, and its year, softer.
+    private static func heading(_ ctx: inout GraphicsContext) {
+        VignetteKit.bar(&ctx, CGRect(x: 14, y: 13.8, width: 50, height: 4.2), VignettePalette.ink.opacity(0.9))
+        VignetteKit.bar(&ctx, CGRect(x: 68, y: 14.6, width: 18, height: 2.8), VignettePalette.dim)
+    }
+
+    /// The month's grid. `returned` is the month after the day was visited:
+    /// the day still picked, and the new plan's dot, lit as it arrives.
+    private static func drawMonth(_ ctx: inout GraphicsContext, t: Double, returned: Bool) {
+        let ease = VignetteClock.ease
+        heading(&ctx)
+        for column in 0..<7 {
+            let x = gridX + cellW * (CGFloat(column) + 0.5)
+            VignetteKit.bar(&ctx, CGRect(x: x - 3, y: 32, width: 6, height: 2), VignettePalette.dim)
+        }
+        let pressed = returned ? 0 : VignetteClock.press(t, at: tapDay)
+        let held = returned ? 1 : ease(t, tapDay + 0.04, tapDay + 0.14)
+        for index in 0..<35 {
+            let cell = cellRect(index)
+            if index % 7 == 0 {
+                ctx.fill(
+                    Path(CGRect(x: gridX, y: cell.minY, width: cellW * 7, height: 0.5)),
+                    with: .color(VignettePalette.edge))
+            }
+            if index == picked, held > 0 {
+                let well = Path(roundedRect: cell.insetBy(dx: 1.5, dy: 2.5), cornerRadius: 5, style: .continuous)
+                var lit = ctx
+                lit.opacity *= held
+                lit.fill(well, with: .color(VignettePalette.phosphor.opacity(0.14 + 0.14 * pressed)))
+                lit.stroke(well, with: .color(VignettePalette.phosphor.opacity(0.5)), lineWidth: 0.5)
+            }
+            let outside = index < 2 || index > 32
+            let date = CGRect(x: cell.minX + 5, y: cell.minY + 6.5, width: dateWidth(index), height: 2.6)
+            if index == today {
+                ctx.fill(
+                    Path(ellipseIn: CGRect(x: date.midX - 5.5, y: date.midY - 5.5, width: 11, height: 11)),
+                    with: .color(VignettePalette.phosphor))
+                VignetteKit.bar(&ctx, date, Color.white.opacity(0.95))
+            } else {
+                VignetteKit.bar(&ctx, date, outside ? VignettePalette.dim.opacity(0.6) : VignettePalette.ink.opacity(0.78))
+            }
+            var tints = dots[index] ?? []
+            let fresh = index == picked && returned
+            if fresh { tints.append(made.tint) }
+            for (n, tint) in tints.enumerated() {
+                let center = CGPoint(x: cell.minX + 6.6 + CGFloat(n) * 5.4, y: cell.minY + 19)
+                if fresh, n == tints.count - 1 {
+                    let arrive = ease(t, toMonthTo - 0.1, toMonthTo + 0.2)
+                    let glow = 1 - ease(t, toMonthTo + 0.3, toMonthTo + 0.7)
+                    var dot = ctx
+                    dot.opacity *= arrive
+                    dot.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.9 * glow), radius: 3))
+                    VignetteKit.avatar(&dot, center: center, diameter: 3.4, tint: tint)
+                } else {
+                    VignetteKit.avatar(&ctx, center: center, diameter: 3.4, tint: tint, opacity: outside ? 0.4 : 0.9)
+                }
+            }
+        }
+    }
+
+    /// Where an hour sits on screen with the list scrolled by `scroll`.
+    private static func hourY(_ hours: CGFloat, scroll: CGFloat = scrolled) -> CGFloat {
+        hoursTop + 3 + hours * hourH - scroll
+    }
+
+    /// The day: its week as a strip with the day picked, then its hours.
+    private static func drawDay(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        heading(&ctx)
+        for column in 0..<7 {
+            let index = 14 + column
+            let x = gridX + cellW * (CGFloat(column) + 0.5)
+            VignetteKit.bar(&ctx, CGRect(x: x - 3, y: 31, width: 6, height: 2), VignettePalette.dim)
+            let width = dateWidth(index)
+            let date = CGRect(x: x - width / 2, y: 40.7, width: width, height: 2.6)
+            if index == picked {
+                ctx.fill(
+                    Path(ellipseIn: CGRect(x: x - 6.5, y: date.midY - 6.5, width: 13, height: 13)),
+                    with: .color(VignettePalette.phosphor))
+                VignetteKit.bar(&ctx, date, Color.white.opacity(0.95))
+            } else {
+                VignetteKit.bar(&ctx, date, VignettePalette.ink.opacity(0.7))
+            }
+        }
+        ctx.fill(Path(CGRect(x: 0, y: hoursTop - 3, width: canvas.width, height: 0.5)), with: .color(VignettePalette.edge))
+
+        // The hours, scrolled to the first plan by themselves, under a fade
+        // at the foot so the list runs on rather than stopping.
+        // and once the sheet comes up, a little further, so the hour being
+        // made stays in sight above it.
+        let scroll = scrolled * CGFloat(ease(t, scrollFrom, scrollTo))
+            + lift * CGFloat(ease(t, sheetUp - 0.04, sheetUp + 0.4))
+        let outlined = ease(t, tapGrid + 0.04, tapGrid + 0.24)
+        let saved = ease(t, sheetDown + 0.06, sheetDown + 0.36)
+        let lit = saved * (1 - ease(t, sheetDown + 0.6, sheetDown + 0.95))
+        var hours = ctx
+        hours.clip(to: Path(CGRect(x: 0, y: hoursTop - 2.5, width: canvas.width, height: canvas.height - hoursTop)))
+        hours.drawLayer { layer in
+            for hour in 0..<18 {
+                let y = hourY(CGFloat(hour), scroll: scroll)
+                VignetteKit.bar(&layer, CGRect(x: 12, y: y - 1.1, width: 9, height: 2.2), VignettePalette.dim)
+                layer.fill(Path(CGRect(x: 28, y: y, width: 180, height: 0.5)), with: .color(VignettePalette.edge))
+            }
+            for plan in plans {
+                block(&layer, plan, scroll: scroll, fill: 1, lit: 0)
+            }
+            // The new hour: an outline where the thumb went down, filled in
+            // its calendar's colour once it is saved.
+            if outlined > 0.01 {
+                var draft = layer
+                draft.opacity *= outlined
+                let shape = Path(roundedRect: blockRect(made, scroll: scroll), cornerRadius: 5, style: .continuous)
+                draft.fill(shape, with: .color(VignettePalette.phosphor.opacity(0.14 * (1 - saved))))
+                draft.stroke(
+                    shape, with: .color(VignettePalette.phosphor.opacity(0.9 * (1 - saved))),
+                    style: StrokeStyle(lineWidth: 0.8, dash: [3, 2]))
+                block(&draft, made, scroll: scroll, fill: saved, lit: lit)
+            }
+            layer.blendMode = .destinationOut
+            layer.fill(
+                Path(CGRect(x: 0, y: canvas.height - 26, width: canvas.width, height: 26)),
+                with: .linearGradient(
+                    Gradient(colors: [.clear, .white]), startPoint: CGPoint(x: 0, y: canvas.height - 26),
+                    endPoint: CGPoint(x: 0, y: canvas.height)))
+        }
+    }
+
+    private static func blockRect(_ plan: Plan, scroll: CGFloat) -> CGRect {
+        CGRect(x: 32, y: hourY(plan.start, scroll: scroll) + 1, width: 174, height: plan.length * hourH - 2)
+    }
+
+    /// One plan on the hours: its calendar's colour, evenly edged, its title
+    /// and its time.
+    private static func block(_ ctx: inout GraphicsContext, _ plan: Plan, scroll: CGFloat, fill: Double, lit: Double) {
+        guard fill > 0.01 else { return }
+        let rect = blockRect(plan, scroll: scroll)
+        let shape = Path(roundedRect: rect, cornerRadius: 5, style: .continuous)
+        let tint = VignettePalette.avatar[plan.tint]
+        var layer = ctx
+        layer.opacity *= fill
+        layer.fill(shape, with: .color(VignettePalette.card))
+        layer.fill(shape, with: .color(tint.opacity(0.34)))
+        layer.stroke(shape, with: .color(tint.opacity(0.55)), lineWidth: 0.6)
+        if lit > 0 {
+            layer.stroke(shape, with: .color(VignettePalette.phosphorHot.opacity(0.8 * lit)), lineWidth: 0.8)
+        }
+        VignetteKit.bar(
+            &layer, CGRect(x: rect.minX + 8, y: rect.minY + 6, width: plan.title, height: 3),
+            VignettePalette.ink.opacity(0.88))
+        VignetteKit.bar(
+            &layer, CGRect(x: rect.minX + 8, y: rect.minY + 13, width: 34, height: 2.4), VignettePalette.ink.opacity(0.45))
+    }
+
+    private static var savePill: CGRect { CGRect(x: sheet.maxX - 46, y: sheet.minY + 11, width: 34, height: 13) }
+
+    /// The event sheet: cancel and save, the title being written, when, and
+    /// the guest line, where two people join.
+    private static func drawSheet(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let up = ease(t, sheetUp, sheetUp + 0.36) - ease(t, sheetDown, sheetDown + 0.32)
+        guard up > 0.01 else { return }
+        var outer = ctx
+        outer.opacity *= min(1, up * 1.6)
+        outer.translateBy(x: 0, y: 40 * CGFloat(1 - up))
+        outer.drawLayer { layer in drawSheetBody(&layer, t: t) }
+    }
+
+    private static func drawSheetBody(_ layer: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let shape = Path(roundedRect: sheet, cornerRadius: 13, style: .continuous)
+        var lifted = layer
+        lifted.addFilter(.shadow(color: Color.black.opacity(0.5), radius: 8, y: 2))
+        lifted.fill(shape, with: .color(VignettePalette.cap))
+        layer.stroke(shape, with: .color(Color.white.opacity(0.14)), lineWidth: 0.5)
+        VignetteKit.bar(
+            &layer, CGRect(x: sheet.midX - 10, y: sheet.minY + 4.5, width: 20, height: 2.2), Color.white.opacity(0.22))
+
+        // Cancel, and save.
+        let x = sheet.minX + 12
+        VignetteKit.bar(&layer, CGRect(x: x, y: savePill.midY - 1.2, width: 24, height: 2.4), VignettePalette.dim)
+        VignetteKit.pill(
+            &layer, savePill, label: 16, labelX: savePill.midX - 8, pressed: VignetteClock.press(t, at: tapSave))
+
+        // The title, a word at a time, the caret at its end.
+        let width = max(2.6, 88 * CGFloat(VignetteClock.ramp(t, typeFrom, typeTo)))
+        VignetteKit.bar(
+            &layer, CGRect(x: x, y: sheet.minY + 33, width: width, height: 4.2), VignettePalette.ink.opacity(0.9))
+        if t < tapSave {
+            layer.fill(
+                Path(roundedRect: CGRect(x: x + width + 2, y: sheet.minY + 31, width: 1.1, height: 8), cornerRadius: 0.5),
+                with: .color(VignettePalette.phosphorHot))
+        }
+        for y in [sheet.minY + 46, sheet.minY + 66] {
+            layer.fill(Path(CGRect(x: x, y: y, width: sheet.width - 24, height: 0.5)), with: .color(VignettePalette.edge))
+        }
+
+        // When: the day, and the hour the thumb went down on.
+        PhoneKit.glyph(&layer, "clock", at: CGPoint(x: x + 4, y: sheet.minY + 56), size: 7, color: VignettePalette.dim)
+        VignetteKit.bar(
+            &layer, CGRect(x: x + 14, y: sheet.minY + 54.8, width: 34, height: 2.6), VignettePalette.ink.opacity(0.75))
+        VignetteKit.bar(
+            &layer, CGRect(x: sheet.maxX - 12 - 40, y: sheet.minY + 54.8, width: 40, height: 2.6),
+            VignettePalette.ink.opacity(0.75))
+
+        // Guests: each one a chip, coming in as they are added.
+        PhoneKit.glyph(&layer, "person.2", at: CGPoint(x: x + 4, y: sheet.minY + 80), size: 7, color: VignettePalette.dim)
+        let names: [CGFloat] = [22, 28]
+        var chipX = x + 14
+        for (index, at) in guests.enumerated() {
+            let shown = ease(t, at, at + 0.2)
+            let chip = CGRect(x: chipX, y: sheet.minY + 73.5, width: 17 + names[index], height: 13)
+            chipX = chip.maxX + 5
+            guard shown > 0.01 else { continue }
+            var one = layer
+            one.opacity *= shown
+            let s = VignetteClock.mix(0.93, 1, shown)
+            one.translateBy(x: chip.minX, y: chip.midY)
+            one.scaleBy(x: s, y: s)
+            one.translateBy(x: -chip.minX, y: -chip.midY)
+            let capsule = Path(roundedRect: chip, cornerRadius: chip.height / 2, style: .continuous)
+            one.fill(capsule, with: .color(VignettePalette.faint))
+            one.stroke(capsule, with: .color(VignettePalette.edge), lineWidth: 0.5)
+            VignetteKit.avatar(&one, center: CGPoint(x: chip.minX + 7, y: chip.midY), diameter: 8, tint: index == 0 ? 2 : 0)
+            VignetteKit.bar(
+                &one, CGRect(x: chip.minX + 14, y: chip.midY - 1.2, width: names[index], height: 2.4),
+                VignettePalette.ink.opacity(0.8))
+        }
+        // Where the next one would be typed.
+        VignetteKit.bar(
+            &layer, CGRect(x: chipX + 2, y: sheet.minY + 78.8, width: 30, height: 2.4), VignettePalette.dim.opacity(0.6))
+    }
+}
+
+// MARK: - Quick Look at the foot of the board
+
+/// QUICK LOOK AT THE FOOT OF THE BOARD: the Sitrep, the day's line and For
+/// Your Eyes, and under the cards a strip that says Quick Look and what is
+/// in it: a parcel, a bill and a code, each with its count. The thumb goes
+/// down on the strip and drags it up; let go, it opens the rest of the way,
+/// over the board, which dims under it. Inside are the records the Mac keeps
+/// on its rail: packages with how far along they are, bills with what is
+/// owed, and the newest login code. A breath to look, then the thumb drags
+/// the header down and the strip docks where it was.
+///
+/// The seam is the docked board, which is where the loop began.
+enum QuickLookDockScene: VignetteDrawing {
+    static let canvas = PhoneKit.canvas
+    static let loop: Double = 5.4
+
+    private static let downAt: Double = 0.5
+    private static let dragFrom: Double = 0.62
+    private static let dragTo: Double = 1.08
+    private static let liftAt: Double = 1.16
+    private static let openTo: Double = 1.56
+    private static let closeDown: Double = 3.3
+    private static let closeFrom: Double = 3.42
+    private static let closeTo: Double = 3.8
+    private static let closeLift: Double = 3.88
+    private static let dockTo: Double = 4.28
+
+    /// Open over the board, every record in view.
+    static let posterTime: Double = 2.4
+
+    private static let docked: CGFloat = 158
+    private static let raised: CGFloat = 8
+    private static let dragged: CGFloat = 104
+    private static let dropped: CGFloat = 70
+    private static let foot: CGFloat = 194
+    private static let marks = ["shippingbox", "creditcard", "key"]
+
+    static func draw(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        // Where the strip's top edge is: following the thumb, then the rest
+        // of the way on its own once let go.
+        let top: CGFloat
+        if t < liftAt {
+            top = VignetteClock.mix(docked, dragged, ease(t, dragFrom, dragTo))
+        } else if t < closeDown {
+            top = VignetteClock.mix(dragged, raised, ease(t, liftAt, openTo))
+        } else if t < closeLift {
+            top = VignetteClock.mix(raised, dropped, ease(t, closeFrom, closeTo))
+        } else {
+            top = VignetteClock.mix(dropped, docked, ease(t, closeLift, dockTo))
+        }
+        let open = Double((docked - top) / (docked - raised))
+
+        drawBoard(&ctx)
+        ctx.fill(Path(CGRect(origin: .zero, size: canvas)), with: .color(Color.black.opacity(0.32 * open)))
+        drawDock(&ctx, top: top, open: open)
+
+        // The thumb: up from the strip, then down from the header.
+        let up = ease(t, downAt - 0.24, downAt - 0.1) * (1 - ease(t, liftAt, liftAt + 0.18))
+        PhoneKit.touch(
+            &ctx, at: CGPoint(x: 112, y: VignetteClock.mix(docked + 19, dragged + 19, ease(t, dragFrom, dragTo))),
+            presence: up, down: VignetteClock.hold(t, from: downAt, to: liftAt - 0.06))
+        let down = ease(t, closeDown - 0.24, closeDown - 0.1) * (1 - ease(t, closeLift, closeLift + 0.18))
+        PhoneKit.touch(
+            &ctx, at: CGPoint(x: 112, y: VignetteClock.mix(raised + 19, dropped + 19, ease(t, closeFrom, closeTo))),
+            presence: down, down: VignetteClock.hold(t, from: closeDown, to: closeLift - 0.06))
+    }
+
+    /// The board: the day's line, then For Your Eyes and its rows.
+    private static func drawBoard(_ ctx: inout GraphicsContext) {
+        VignetteKit.bar(&ctx, CGRect(x: 14, y: 12, width: 34, height: 2.4), VignettePalette.dim)
+        VignetteKit.bar(&ctx, CGRect(x: 14, y: 20, width: 132, height: 6), VignettePalette.ink.opacity(0.9))
+        VignetteKit.bar(&ctx, CGRect(x: 14, y: 30, width: 92, height: 6), VignettePalette.ink.opacity(0.9))
+
+        let zone = CGRect(x: 12, y: 46, width: 196, height: 104)
+        PhoneKit.surface(&ctx, zone, radius: 11)
+        PhoneKit.glyph(
+            &ctx, "eye", at: CGPoint(x: zone.minX + 15, y: zone.minY + 13), size: 7.5, color: VignettePalette.phosphor)
+        VignetteKit.bar(
+            &ctx, CGRect(x: zone.minX + 25, y: zone.minY + 11.4, width: 44, height: 3.2), VignettePalette.ink.opacity(0.85))
+        let titles: [CGFloat] = [62, 48, 70]
+        let subs: [CGFloat] = [112, 124, 96]
+        for index in 0..<3 {
+            let rect = CGRect(
+                x: zone.minX + 8, y: zone.minY + 25 + CGFloat(index) * 26, width: zone.width - 16, height: 22)
+            if index > 0 {
+                ctx.fill(
+                    Path(CGRect(x: rect.minX + 4, y: rect.minY - 2, width: rect.width - 8, height: 0.5)),
+                    with: .color(VignettePalette.edge))
+            }
+            VignetteKit.avatar(&ctx, center: CGPoint(x: rect.minX + 10, y: rect.midY), diameter: 11, tint: index)
+            VignetteKit.bar(
+                &ctx, CGRect(x: rect.minX + 22, y: rect.minY + 6, width: titles[index], height: 3.2),
+                VignettePalette.ink.opacity(0.85))
+            VignetteKit.bar(
+                &ctx, CGRect(x: rect.minX + 22, y: rect.minY + 13, width: subs[index], height: 2.6), VignettePalette.dim)
+            VignetteKit.bar(
+                &ctx, CGRect(x: rect.maxX - 18, y: rect.minY + 6.3, width: 12, height: 2.4), VignettePalette.dim)
+        }
+    }
+
+    /// The tray: its header (the name, what is in it, the chevron), and once
+    /// it is open, the records.
+    private static func drawDock(_ ctx: inout GraphicsContext, top: CGFloat, open: Double) {
+        let ease = VignetteClock.ease
+        let rect = CGRect(x: 8, y: top, width: 204, height: foot - top)
+        let shape = Path(roundedRect: rect, cornerRadius: 15, style: .continuous)
+        var lifted = ctx
+        lifted.addFilter(.shadow(color: Color.black.opacity(0.45 + 0.15 * open), radius: 10))
+        lifted.fill(shape, with: .color(VignettePalette.cap))
+        ctx.fill(shape, with: .color(VignettePalette.faint))
+        ctx.stroke(shape, with: .color(Color.white.opacity(0.14)), lineWidth: 0.5)
+
+        VignetteKit.bar(&ctx, CGRect(x: rect.midX - 10, y: top + 4.5, width: 20, height: 2.2), Color.white.opacity(0.22))
+
+        var inside = ctx
+        inside.clip(to: shape)
+        let x = rect.minX + 14
+        // The name grows a size as the tray opens, as the app's does.
+        VignetteKit.bar(
+            &inside,
+            CGRect(x: x, y: top + 11.5, width: VignetteClock.mix(46, 56, open), height: VignetteClock.mix(3.6, 4.6, open)),
+            VignettePalette.ink.opacity(0.9))
+        // Docked, what is inside in a few words: a parcel, a bill, a code.
+        var summary = inside
+        summary.opacity *= 1 - ease(open, 0, 0.35)
+        for (index, mark) in marks.enumerated() {
+            let mx = x + 3 + CGFloat(index) * 26
+            PhoneKit.glyph(
+                &summary, mark, at: CGPoint(x: mx, y: top + 24.5), size: 6, color: VignettePalette.dim, weight: .medium)
+            VignetteKit.bar(&summary, CGRect(x: mx + 6, y: top + 23.3, width: 10, height: 2.4), VignettePalette.dim)
+        }
+        let chevron = CGPoint(x: rect.maxX - 18, y: top + VignetteClock.mix(19, 14, open))
+        var upward = inside
+        upward.opacity *= 1 - ease(open, 0, 0.5)
+        PhoneKit.glyph(&upward, "chevron.up", at: chevron, size: 7.5, color: VignettePalette.dim, weight: .bold)
+        var downward = inside
+        downward.opacity *= ease(open, 0.5, 1)
+        PhoneKit.glyph(&downward, "chevron.down", at: chevron, size: 7.5, color: VignettePalette.dim, weight: .bold)
+
+        // Open, the records: each card arriving a beat after the last.
+        let cards: [(y: CGFloat, height: CGFloat, name: CGFloat)] = [(34, 50, 40), (90, 40, 26), (136, 38, 30)]
+        for (index, card) in cards.enumerated() {
+            let shown = ease(open, 0.55 + 0.1 * Double(index), 0.85 + 0.1 * Double(index))
+            guard shown > 0.01 else { continue }
+            var layer = inside
+            layer.opacity *= shown
+            let r = CGRect(
+                x: rect.minX + 8, y: top + card.y + 6 * CGFloat(1 - shown), width: rect.width - 16, height: card.height)
+            PhoneKit.surface(&layer, r, radius: 9)
+            PhoneKit.glyph(
+                &layer, marks[index], at: CGPoint(x: r.minX + 12, y: r.minY + 10), size: 6.5,
+                color: VignettePalette.phosphor)
+            VignetteKit.bar(
+                &layer, CGRect(x: r.minX + 21, y: r.minY + 8.6, width: card.name, height: 2.8),
+                VignettePalette.ink.opacity(0.85))
+            switch index {
+            case 0: packages(&layer, r)
+            case 1: bills(&layer, r)
+            default: code(&layer, r)
+            }
+        }
+    }
+
+    /// Two parcels: who sent it, and its way along, as the app's track.
+    private static func packages(_ ctx: inout GraphicsContext, _ r: CGRect) {
+        let names: [CGFloat] = [46, 36]
+        let along = [3, 2]
+        for row in 0..<2 {
+            let y = r.minY + 23 + CGFloat(row) * 14
+            VignetteKit.avatar(&ctx, center: CGPoint(x: r.minX + 12, y: y + 1.3), diameter: 7, tint: row + 1)
+            VignetteKit.bar(
+                &ctx, CGRect(x: r.minX + 21, y: y, width: names[row], height: 2.6), VignettePalette.ink.opacity(0.75))
+            for step in 0..<4 {
+                let seg = CGRect(x: r.maxX - 74 + CGFloat(step) * 16, y: y + 0.2, width: 13, height: 2.2)
+                VignetteKit.bar(&ctx, seg, step < along[row] ? VignettePalette.phosphor : Color.white.opacity(0.1))
+            }
+        }
+    }
+
+    /// Two bills: who, when, and how much.
+    private static func bills(_ ctx: inout GraphicsContext, _ r: CGRect) {
+        let names: [CGFloat] = [40, 52]
+        for row in 0..<2 {
+            let y = r.minY + 21 + CGFloat(row) * 11
+            VignetteKit.bar(
+                &ctx, CGRect(x: r.minX + 12, y: y, width: names[row], height: 2.6), VignettePalette.ink.opacity(0.75))
+            VignetteKit.bar(
+                &ctx, CGRect(x: r.minX + 18 + names[row], y: y + 0.2, width: 22, height: 2.2), VignettePalette.dim)
+            VignetteKit.bar(
+                &ctx, CGRect(x: r.maxX - 12 - 20, y: y, width: 20, height: 2.6), VignettePalette.ink.opacity(0.85))
+        }
+    }
+
+    /// The newest login code: who it is for, and the code itself as its
+    /// figures' boxes.
+    private static func code(_ ctx: inout GraphicsContext, _ r: CGRect) {
+        let y = r.minY + 26
+        VignetteKit.avatar(&ctx, center: CGPoint(x: r.minX + 12, y: y), diameter: 7, tint: 0)
+        VignetteKit.bar(
+            &ctx, CGRect(x: r.minX + 21, y: y - 1.3, width: 38, height: 2.6), VignettePalette.ink.opacity(0.75))
+        for n in 0..<6 {
+            let box = CGRect(
+                x: r.maxX - 76 + CGFloat(n) * 10.5 + (n > 2 ? 3 : 0), y: y - 5.5, width: 8, height: 11)
+            let shape = Path(roundedRect: box, cornerRadius: 2.5, style: .continuous)
+            ctx.fill(shape, with: .color(VignettePalette.phosphor.opacity(0.16)))
+            ctx.stroke(shape, with: .color(VignettePalette.phosphor.opacity(0.45)), lineWidth: 0.5)
+            VignetteKit.bar(
+                &ctx, CGRect(x: box.midX - 2, y: box.midY - 1.3, width: 4, height: 2.6),
+                VignettePalette.phosphorHot.opacity(0.9))
+        }
+    }
+}
+
+// MARK: - reminders that know the event
+
+/// REMINDERS THAT KNOW THE EVENT: a locked phone, its date and its time, and
+/// nothing on it. Then, ahead of the evening's plan by as long as getting
+/// there takes, a banner comes up: a calendar tile, a short line, and under
+/// it the time and the place, with the ticket beside them. The thumb taps it
+/// and the phone opens on the mail the tickets came in, its ticket lit: the
+/// event's name, the same time and place, the seats, and the code at the
+/// door.
+///
+/// The seam: the phone locks again, with nothing on it, which is the frame
+/// the loop began on.
+enum EventReminderScene: VignetteDrawing {
+    static let canvas = PhoneKit.canvas
+    static let loop: Double = 5.6
+
+    private static let arrive: Double = 0.55
+    private static let tap: Double = 1.9
+    private static let openFrom: Double = 2.04
+    private static let openTo: Double = 2.44
+    private static let lockFrom: Double = 4.3
+    private static let lockTo: Double = 4.75
+
+    /// The banner on the lock screen, before the thumb.
+    static let posterTime: Double = 1.45
+
+    private static let banner = CGRect(x: 12, y: 98, width: 196, height: 48)
+    private static let ticket = CGRect(x: 18, y: 76, width: 184, height: 112)
+
+    static func draw(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let inApp = ease(t, openFrom, openTo) - ease(t, lockFrom, lockTo)
+
+        if inApp < 1 {
+            var lock = ctx
+            // One goes before the other comes.
+            lock.opacity *= 1 - ease(inApp, 0, 0.6)
+            let s = VignetteClock.mix(1, 0.95, inApp)
+            lock.translateBy(x: canvas.width / 2, y: canvas.height / 2)
+            lock.scaleBy(x: s, y: s)
+            lock.translateBy(x: -canvas.width / 2, y: -canvas.height / 2)
+            drawLock(&lock, t: t, showing: t < lockFrom)
+        }
+        if inApp > 0 {
+            var app = ctx
+            app.opacity *= ease(inApp, 0.4, 1)
+            let s = VignetteClock.mix(0.95, 1, inApp)
+            app.translateBy(x: banner.midX, y: banner.midY)
+            app.scaleBy(x: s, y: s)
+            app.translateBy(x: -banner.midX, y: -banner.midY)
+            drawReader(&app, t: t)
+        }
+
+        let on = ease(t, tap - 0.34, tap - 0.18) * (1 - ease(t, tap + 0.2, tap + 0.36))
+        PhoneKit.touch(
+            &ctx, at: CGPoint(x: banner.midX - 8, y: banner.midY + 4), presence: on,
+            down: VignetteClock.press(t, at: tap))
+    }
+
+    /// The lock screen: the date, the time as one tall line, the two corner
+    /// buttons, and the banner when there is one.
+    private static func drawLock(_ ctx: inout GraphicsContext, t: Double, showing: Bool) {
+        let ease = VignetteClock.ease
+        VignetteKit.bar(
+            &ctx, CGRect(x: canvas.width / 2 - 26, y: 22, width: 52, height: 3), VignettePalette.ink.opacity(0.6))
+        VignetteKit.bar(
+            &ctx, CGRect(x: canvas.width / 2 - 46, y: 33, width: 92, height: 16), VignettePalette.ink.opacity(0.88))
+        for (x, symbol) in [(CGFloat(30), "flashlight.off.fill"), (190, "camera.fill")] {
+            let disc = Path(ellipseIn: CGRect(x: x - 11, y: 168, width: 22, height: 22))
+            ctx.fill(disc, with: .color(VignettePalette.cap.opacity(0.9)))
+            ctx.stroke(disc, with: .color(Color.white.opacity(0.14)), lineWidth: 0.5)
+            PhoneKit.glyph(&ctx, symbol, at: CGPoint(x: x, y: 179), size: 7.5, color: VignettePalette.ink.opacity(0.75))
+        }
+        guard showing else { return }
+        let shown = ease(t, arrive, arrive + 0.42)
+        guard shown > 0.01 else { return }
+        var layer = ctx
+        layer.opacity *= shown
+        let s = VignetteClock.mix(0.94, 1, shown)
+        layer.translateBy(x: banner.midX, y: banner.midY + 14 * CGFloat(1 - shown))
+        layer.scaleBy(x: s, y: s)
+        layer.translateBy(x: -banner.midX, y: -banner.midY)
+        drawBanner(&layer, pressed: VignetteClock.press(t, at: tap))
+    }
+
+    /// The heads up: a calendar tile, the app and how long ago, the short
+    /// line, the time and the place, and the ticket's thumbnail.
+    private static func drawBanner(_ ctx: inout GraphicsContext, pressed: Double) {
+        let shape = Path(roundedRect: banner, cornerRadius: 14, style: .continuous)
+        var glow = ctx
+        glow.addFilter(.shadow(color: Color.black.opacity(0.4), radius: 8, y: 2))
+        if pressed > 0 {
+            glow.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.6 * pressed), radius: 6))
+        }
+        glow.fill(shape, with: .color(VignettePalette.cap))
+        ctx.fill(shape, with: .color(Color.white.opacity(0.05 + 0.06 * pressed)))
+        ctx.stroke(shape, with: .color(Color.white.opacity(0.16)), lineWidth: 0.5)
+
+        let tile = CGRect(x: banner.minX + 10, y: banner.midY - 12, width: 24, height: 24)
+        let tileShape = Path(roundedRect: tile, cornerRadius: 6, style: .continuous)
+        ctx.fill(tileShape, with: .color(VignettePalette.card))
+        ctx.stroke(tileShape, with: .color(VignettePalette.edge), lineWidth: 0.5)
+        VignetteKit.calendarMark(
+            &ctx, center: CGPoint(x: tile.midX, y: tile.midY), size: 12, color: VignettePalette.phosphorHot)
+
+        let x = tile.maxX + 9
+        VignetteKit.bar(&ctx, CGRect(x: x, y: banner.minY + 10, width: 30, height: 2.2), VignettePalette.dim)
+        VignetteKit.bar(
+            &ctx, CGRect(x: banner.maxX - 44 - 14, y: banner.minY + 10, width: 14, height: 2.2), VignettePalette.dim)
+        VignetteKit.bar(
+            &ctx, CGRect(x: x, y: banner.minY + 19, width: 84, height: 3.4), VignettePalette.ink.opacity(0.92))
+        timeAndPlace(&ctx, at: CGPoint(x: x, y: banner.minY + 31))
+
+        // The ticket, one tap away.
+        let thumb = CGRect(x: banner.maxX - 38, y: banner.midY - 13, width: 28, height: 26)
+        let thumbShape = Path(roundedRect: thumb, cornerRadius: 6, style: .continuous)
+        ctx.fill(thumbShape, with: .color(VignettePalette.phosphor.opacity(0.16)))
+        ctx.stroke(thumbShape, with: .color(VignettePalette.phosphor.opacity(0.5)), lineWidth: 0.5)
+        PhoneKit.glyph(
+            &ctx, "ticket", at: CGPoint(x: thumb.midX, y: thumb.midY), size: 9, color: VignettePalette.phosphorHot)
+    }
+
+    /// The time, a dot, the place: the same words on the banner and on the
+    /// ticket.
+    private static func timeAndPlace(_ ctx: inout GraphicsContext, at origin: CGPoint) {
+        VignetteKit.bar(&ctx, CGRect(x: origin.x, y: origin.y, width: 14, height: 2.6), VignettePalette.phosphorHot)
+        ctx.fill(
+            Path(ellipseIn: CGRect(x: origin.x + 18, y: origin.y + 0.4, width: 1.8, height: 1.8)),
+            with: .color(VignettePalette.dim))
+        VignetteKit.bar(
+            &ctx, CGRect(x: origin.x + 24, y: origin.y, width: 46, height: 2.6), VignettePalette.ink.opacity(0.7))
+    }
+
+    /// The ticket email: who sent it, its subject, and the ticket.
+    private static func drawReader(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let back = Path(ellipseIn: CGRect(x: 15, y: 7, width: 20, height: 20))
+        ctx.fill(back, with: .color(VignettePalette.cap))
+        ctx.stroke(back, with: .color(Color.white.opacity(0.14)), lineWidth: 0.5)
+        PhoneKit.glyph(
+            &ctx, "chevron.left", at: CGPoint(x: 25, y: 17), size: 8.5, color: VignettePalette.ink.opacity(0.7),
+            weight: .bold)
+
+        VignetteKit.avatar(&ctx, center: CGPoint(x: 26, y: 43), diameter: 14, tint: 2)
+        VignetteKit.bar(&ctx, CGRect(x: 38, y: 38.5, width: 52, height: 3.2), VignettePalette.ink.opacity(0.85))
+        VignetteKit.bar(&ctx, CGRect(x: 38, y: 45.5, width: 30, height: 2.4), VignettePalette.dim)
+        VignetteKit.bar(&ctx, CGRect(x: 182, y: 39, width: 20, height: 2.4), VignettePalette.dim)
+        VignetteKit.bar(&ctx, CGRect(x: 18, y: 60, width: 128, height: 4.2), VignettePalette.ink.opacity(0.9))
+
+        // The ticket: two notches where it tears, lit as it is landed on.
+        let lit = ease(t, openTo - 0.1, openTo + 0.2) * (1 - ease(t, openTo + 1.1, openTo + 1.6))
+        let tear = ticket.minY + 72
+        let notches = Path(ellipseIn: CGRect(x: ticket.minX - 6, y: tear - 6, width: 12, height: 12))
+            .union(Path(ellipseIn: CGRect(x: ticket.maxX - 6, y: tear - 6, width: 12, height: 12)))
+        let body = Path(roundedRect: ticket, cornerRadius: 10, style: .continuous).subtracting(notches)
+        var glow = ctx
+        if lit > 0 { glow.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.55 * lit), radius: 7)) }
+        glow.fill(body, with: .color(VignettePalette.card))
+        ctx.fill(body, with: .color(VignettePalette.faint))
+        ctx.stroke(body, with: .color(VignettePalette.edge), lineWidth: 0.5)
+        if lit > 0 {
+            ctx.stroke(body, with: .color(VignettePalette.phosphor.opacity(0.85 * lit)), lineWidth: 0.7)
+        }
+
+        let x = ticket.minX + 14
+        VignetteKit.calendarMark(
+            &ctx, center: CGPoint(x: x + 4, y: ticket.minY + 16), size: 8, color: VignettePalette.phosphorHot)
+        VignetteKit.bar(
+            &ctx, CGRect(x: x + 14, y: ticket.minY + 14.2, width: 92, height: 4), VignettePalette.ink.opacity(0.92))
+        timeAndPlace(&ctx, at: CGPoint(x: x + 14, y: ticket.minY + 26))
+        // The seats: three small labels over what they say.
+        for (index, width) in [CGFloat(16), 12, 14].enumerated() {
+            let cx = x + CGFloat(index) * 52
+            VignetteKit.bar(&ctx, CGRect(x: cx, y: ticket.minY + 44, width: 18, height: 2), VignettePalette.dim)
+            VignetteKit.bar(
+                &ctx, CGRect(x: cx, y: ticket.minY + 51, width: width, height: 3.4), VignettePalette.ink.opacity(0.85))
+        }
+        // Where it tears, and the code at the door.
+        var perforation = Path()
+        perforation.move(to: CGPoint(x: ticket.minX + 10, y: tear))
+        perforation.addLine(to: CGPoint(x: ticket.maxX - 10, y: tear))
+        ctx.stroke(
+            perforation, with: .color(Color.white.opacity(0.16)), style: StrokeStyle(lineWidth: 0.6, dash: [2.5, 2.5]))
+        let widths: [CGFloat] = [1.2, 0.6, 1.8, 0.6, 0.9, 2.2, 0.6, 1.2, 0.6, 1.8, 0.9, 0.6, 2.2, 0.9, 0.6, 1.2]
+        var bx = ticket.minX + 46
+        var n = 0
+        while bx < ticket.maxX - 46 {
+            let w = widths[n % widths.count]
+            ctx.fill(
+                Path(CGRect(x: bx, y: tear + 11, width: w, height: 18)), with: .color(VignettePalette.ink.opacity(0.78)))
+            bx += w + 1.3
+            n += 1
+        }
     }
 }

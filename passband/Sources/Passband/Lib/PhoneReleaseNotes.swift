@@ -32,6 +32,7 @@ import Foundation
 /// maps each case to its scene (PassbandiOS/Views/PhoneVignettes.swift).
 enum PhoneVignette: String, CaseIterable, Sendable {
     case chainReply, messageSwipe, clearStack, remind, smartClear
+    case calendar, quickLookDock, eventReminder
 }
 
 /// One page of the walk: a thing the phone can now do, and how.
@@ -108,15 +109,15 @@ enum PhoneReleaseNotes {
                 PhoneFeature(
                     "Calendar",
                     detail: "Month, week and day views. Tap a day to see it, tap the grid to make an event, add guests.",
-                    symbol: "calendar"),
+                    symbol: "calendar", vignette: .calendar),
                 PhoneFeature(
                     "Quick Look at the foot of the board",
                     detail: "Your packages, bills and codes sit in a strip under the cards. Drag it up to open it.",
-                    symbol: "rectangle.bottomhalf.filled"),
+                    symbol: "rectangle.bottomhalf.filled", vignette: .quickLookDock),
                 PhoneFeature(
                     "Reminders that know the event",
                     detail: "A heads-up on your phone before each event, with your tickets one tap away.",
-                    symbol: "ticket"),
+                    symbol: "ticket", vignette: .eventReminder),
             ],
             also: [
                 PhoneAside("Notifications lead with the sender's photo", symbol: "person.crop.circle"),

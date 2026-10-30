@@ -961,6 +961,17 @@ enum ReleaseLedger {
         ordered(all).first { $0.version < version }?.version
     }
 
+    /// The stamp a NEWCOMER gets at onboarding: the release just below the
+    /// newest note this build is at or past, so their first arrival on the
+    /// Sitrep shows exactly that one note and nothing older. Nil when that
+    /// note is the oldest on record (no stamp then shows it alone anyway) or
+    /// when no note is at or below the build.
+    static func newcomerStamp<Note: VersionedNote>(_ all: [Note], running: String) -> String? {
+        guard let current = newest(all, atOrBelow: running), let version = ReleaseVersion(current.version)
+        else { return nil }
+        return previous(all, before: version)?.text
+    }
+
     static func newest<Note: VersionedNote>(_ all: [Note], atOrBelow running: String) -> Note? {
         guard let ceiling = ReleaseVersion(running) else { return nil }
         return ordered(all).first { $0.version <= ceiling }?.note

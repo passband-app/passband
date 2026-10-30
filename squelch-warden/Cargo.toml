@@ -66,4 +66,4 @@ http-body-util = "0.1"
 # bump that moves it must move this line too, or two copies are linked. It is
 # a dev-dependency because the rule above holds: nothing in the warden itself
 # reads or renders YAML.
-serde-saphyr = "0.0.29"
+serde-saphyr = "2.0.0"

@@ -2416,7 +2416,7 @@ export function App() {
               </div>
               <div className="pb-slot">
                 {joining ? <Waitlist /> : <JoinButton onClick={go(true)} />}
-                <p className="pb-fine">For Gmail, on Mac and iPhone.</p>
+                <p className="pb-fine">For Mac and iPhone.</p>
               </div>
             </div>
           </div>
@@ -2461,7 +2461,7 @@ export function App() {
         <h2 className="pb-h2">That’s an inbox built in the <em>modern era.</em></h2>
         <p className="pb-intro">Join the waitlist and we will email you when a spot opens.</p>
         <Waitlist focus={false} />
-        <p className="pb-fine">For Gmail, on Mac and iPhone.</p>
+        <p className="pb-fine">For Mac and iPhone.</p>
       </section>
 
       <section className="pb-section pb-layer">

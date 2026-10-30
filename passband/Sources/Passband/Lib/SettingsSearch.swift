@@ -224,6 +224,15 @@ enum SettingsSearch {
             ]),
         SettingsEntry(
             card: .notifications,
+            title: "Event reminders",
+            blurb: "A banner before each event on your calendar, with the tickets one tap away.",
+            keywords: [
+                "reminder", "reminders", "event reminder", "calendar", "calendar notification",
+                "event", "events", "before an event", "upcoming", "coming up", "alert before",
+                "tickets", "boarding pass", "remind me",
+            ]),
+        SettingsEntry(
+            card: .notifications,
             title: "Test banner",
             blurb: "Posts a notification right now to prove banners reach you.",
             keywords: [

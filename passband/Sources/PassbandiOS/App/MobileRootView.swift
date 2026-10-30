@@ -394,6 +394,9 @@ private struct MobileShell: View {
         .overlay {
             if !store.authQueue.isEmpty { AuthCodeModal() }
         }
+        // Where a ticket opens (the event page's Tickets button, a reminder's
+        // tap): Quick Look in a sheet, or Add to Wallet for a pass.
+        .background { TicketPreviewHost() }
         // AUTH MAIL OPENED FROM OUTSIDE THE LOGIN-CODES PAGE: an auth row in
         // For your eyes, or a notification tap on auth mail. The same audited
         // one-time panel, as the same full-screen cover the page uses.

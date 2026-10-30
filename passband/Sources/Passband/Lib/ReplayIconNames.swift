@@ -8,6 +8,7 @@
 
 enum ReplayIconNames {
     static let candidates: [String] = [
+        "airplane",
         "antenna.radiowaves.left.and.right",
         "app.connected.to.app.below.fill",
         "archivebox",
@@ -28,6 +29,7 @@ enum ReplayIconNames {
         "bell.fill",
         "bolt.horizontal.circle",
         "book",
+        "bookmark",
         "bubble.left",
         "bubble.left.and.bubble.right",
         "building.columns",
@@ -112,6 +114,7 @@ enum ReplayIconNames {
         "sun.max.fill",
         "tag",
         "terminal",
+        "ticket",
         "translate",
         "trash",
         "tray",

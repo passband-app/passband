@@ -27,7 +27,8 @@ struct CalendarDiskTests {
       "end_estimated":false,"location":"Nopa","commitment":"committed",
       "state":"ghost","mail_state":"live","verified":true,"likelihood":null,
       "sources":[{"message_id":3,"thread_id":"t3","role":"created"}],
-      "matched_event":null}],
+      "matched_event":null,
+      "tickets":{"message_id":3,"thread_id":"t3","kind":"reservation","attachment":null}}],
      "events":[{"id":"e1","calendar_id":"primary","calendar_name":"Me",
       "title":"Standup","start":"2026-10-29T09:00:00-07:00",
       "end":"2026-10-29T09:15:00-07:00","all_day":false,"location":null,
@@ -36,7 +37,9 @@ struct CalendarDiskTests {
       "editable":true,"description":"daily",
       "guests":[{"email":"sam@x.com","name":"Sam","response":"accepted",
         "organizer":false,"self":false}],
-      "guests_truncated":false,"guest_editable":true}],
+      "guests_truncated":false,"guest_editable":true,
+      "tickets":{"message_id":5,"thread_id":"t5","kind":"ticket",
+        "attachment":{"id":2,"filename":"tickets.pdf","mime":"application/pdf"}}}],
      "calendars":[{"id":"primary","name":"Me","color":"#4285f4",
       "primary":true,"writable":true,"can_invite":true}],
      "calendar":{"granted":true,"synced_at":"2026-10-28T20:00:00Z",
@@ -60,6 +63,12 @@ struct CalendarDiskTests {
         await disk.save(feed, for: me)
         let back = await disk.feed(for: me)
         check(back == feed, "a saved feed comes back equal: \(String(describing: back))")
+        // The Tickets button's field, which a decoder once dropped without a
+        // word: on the wire, and still there after a night on disk.
+        check(feed.events?.first?.tickets?.attachment?.filename == "tickets.pdf", "an event's tickets decode")
+        check(feed.ghosts.first?.tickets?.label == "Booking", "a ghost's tickets decode")
+        check(back?.events?.first?.tickets == feed.events?.first?.tickets, "an event's tickets survive the cache")
+        check(back?.ghosts.first?.tickets?.message_id == 3, "a ghost's tickets survive the cache")
         check(await disk.feed(for: other) == nil, "another account does not read it")
         let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
         check(names.count == 1 && !names[0].contains(me.uuidString),

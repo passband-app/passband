@@ -45,6 +45,11 @@ struct CalendarDetail: View {
                 }
             }
             facts
+            // The tickets, boarding pass or booking the mail holds: one tap
+            // to what the door wants to see.
+            if let tickets = item.tickets {
+                TicketsRow(tickets: tickets) { store.openTickets(tickets) }
+            }
             // A ghost's own mail, or the mail behind the ghost matched to a
             // real event (Gmail's reservation event, say).
             if !item.sources.isEmpty {
@@ -477,6 +482,60 @@ struct HintButton: View {
             }
             .buttonStyle(.plain)
         #endif
+    }
+}
+
+/// The Tickets button (docs/CALENDAR.md, "The Tickets button"), named by
+/// what the mail holds: "Tickets", "Boarding pass", "Booking". Beside it,
+/// what a tap opens: the file by its name, or the email. One tap, no menu:
+/// an attachment opens in Quick Look (on the phone a wallet pass offers
+/// Wallet), the email in the reader.
+private struct TicketsRow: View {
+    let tickets: CalendarTickets
+    let action: () -> Void
+
+    var body: some View {
+        HStack(spacing: Space.s10) {
+            Button(action: action) {
+                Label(tickets.label, systemImage: symbol)
+                    .font(Typo.ui(13, weight: .semibold))
+            }
+            .buttonStyle(.glass)
+            #if os(macOS)
+                .controlSize(.regular)
+                .pointingHand()
+            #else
+                .controlSize(.large)
+            #endif
+            .accessibilityHint(hint)
+            // The file's name is the sender's: plain Text, never markup.
+            Text(verbatim: detail)
+                .font(Typo.micro)
+                .foregroundStyle(Palette.inkFaint)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var symbol: String {
+        switch tickets.kind {
+        case .travel: "airplane"
+        case .reservation: "bookmark"
+        default: "ticket"
+        }
+    }
+
+    private var detail: String {
+        guard let file = tickets.attachment else { return "in the email" }
+        #if os(iOS)
+            if file.isWalletPass { return "Add to Wallet" }
+        #endif
+        return file.filename
+    }
+
+    private var hint: String {
+        tickets.attachment.map { "Opens \($0.filename)" } ?? "Opens the email"
     }
 }
 

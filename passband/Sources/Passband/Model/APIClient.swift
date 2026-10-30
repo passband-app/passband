@@ -1292,6 +1292,30 @@ actor APIClient {
         try await post("/client/tracking-config", body: TrackingConfigBody(default_enabled: enabled))
     }
 
+    // MARK: - event reminders (docs/CALENDAR.md, "Reminders and tickets")
+
+    /// One fired reminder, by its fire id: the same JSON as the Mac's
+    /// `calendar_reminder` frame. Kept a week on the daemon; a 404 after.
+    /// Generic over the frame type so this file (and the suites that compile
+    /// it) need not carry the banner code: the caller names
+    /// `CalendarReminderSignal`.
+    func getCalendarReminder<T: Decodable>(_ fireId: Int, as type: T.Type) async throws -> T {
+        try await get(CalendarReminderRoute.fire(fireId))
+    }
+
+    /// THE OWNER'S SWITCH (`CalendarReminderRoute.settings`, an assumed
+    /// route). A daemon older than the setting answers 404, which the card
+    /// reads as "not offered here".
+    func getCalendarReminderSettings() async throws -> CalendarReminderSettings {
+        try await get(CalendarReminderRoute.settings)
+    }
+
+    /// Writes the switch. Whatever the daemon answers with (its stored view,
+    /// or nothing at all) a 2xx means it now holds `enabled`.
+    func setCalendarReminderSettings(enabled: Bool) async throws {
+        try await putNoContent(CalendarReminderRoute.settings, body: CalendarReminderSettings(enabled: enabled))
+    }
+
     // MARK: - translation languages
 
     /// The languages left untranslated. A daemon older than the setting

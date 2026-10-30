@@ -778,6 +778,14 @@ final class AppStore {
     /// pushes the detail. Its own field because `calendarMonthItem` is also set
     /// by every event save (`landEvent`), which must not push a page.
     var calendarSearchOpen: String?
+    /// A ticket to show, ONE SHOT: the card's Tickets button or a reminder's
+    /// tap writes it, and `TicketPreviewHost` (Views/TicketPreview.swift),
+    /// mounted once at the root, opens it in Quick Look (or Wallet) and
+    /// clears it.
+    var ticketPreview: TicketPreviewRequest?
+    /// The owner's event reminder switch, as the daemon holds it. Fetched by
+    /// the settings card (Model/CalendarReminders.swift).
+    var calendarReminderPref: CalendarReminderPrefState = .unknown
     /// The connect card, while it is up. Its own property, apart from the
     /// feed: `modalOverlayOpen` reads it, and the whole shell reads that.
     var calendarConnectAsk: CalendarConnectAsk?
@@ -3165,6 +3173,8 @@ final class AppStore {
         authQueue = []
         tracking = nil
         translateConfig = .unknown
+        calendarReminderPref = .unknown
+        ticketPreview = nil
         // `route(to:)` first: it is what turns a closed calendar into the
         // sitrep, and the history has to name the page actually shown.
         route(to: page)

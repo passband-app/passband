@@ -1820,6 +1820,10 @@ struct TimelineGhost: Codable, Sendable, Hashable, Identifiable {
     var sources: [GhostSource]
     /// Slice B. Absent until the daemon syncs real events.
     var matched_event: GhostMatchedEvent?
+    /// What the card's Tickets button opens (docs/CALENDAR.md, "The Tickets
+    /// button"). LENIENT: absent on an older daemon, and a value of the wrong
+    /// shape is nil rather than the ghost dropped from the page.
+    @LenientDecoded var tickets: CalendarTickets? = nil
 }
 
 enum TimelineEventStatus: String, LenientRawEnum {
@@ -1886,6 +1890,10 @@ struct TimelineEvent: Codable, Sendable, Hashable, Identifiable {
     /// Passband made this event in place of Gmail's copy and keeps it current
     /// from the mail (the daemon's gcal/own.rs). Nil means no.
     var passband_owned: Bool?
+    /// What the card's Tickets button opens: the mail (or its attachment)
+    /// with the tickets, boarding pass or booking in it. Nil from an older
+    /// daemon and on an event with none.
+    var tickets: CalendarTickets? = nil
 }
 
 /// How a guest answered, in the daemon's four words.
@@ -2020,6 +2028,7 @@ extension TimelineEvent {
         place = try? c.decodeIfPresent(TimelinePlace.self, forKey: .place)
         from_gmail = try? c.decodeIfPresent(Bool.self, forKey: .from_gmail)
         passband_owned = try? c.decodeIfPresent(Bool.self, forKey: .passband_owned)
+        tickets = try? c.decodeIfPresent(CalendarTickets.self, forKey: .tickets)
     }
 
     private struct OneGuest: Decodable {
@@ -2048,6 +2057,85 @@ struct TimelinePlace: Codable, Sendable, Hashable {
         address = try? c.decodeIfPresent(String.self, forKey: .address)
         original = try? c.decodeIfPresent(String.self, forKey: .original)
     }
+}
+
+/// `tickets` on a timeline event or ghost (docs/CALENDAR.md, "The Tickets
+/// button"): the one message, and maybe the one attachment in it, that a tap
+/// on the card's Tickets button shows. `kind` is the linked ghost's and
+/// names the button. Only the ids are required: a `kind` or an `attachment`
+/// of the wrong shape costs only itself.
+struct CalendarTickets: Codable, Sendable, Hashable {
+    struct File: Codable, Sendable, Hashable {
+        var id: Int
+        var filename: String
+        var mime: String
+
+        init(id: Int, filename: String, mime: String) {
+            self.id = id
+            self.filename = filename
+            self.mime = mime
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = try c.decode(Int.self, forKey: .id)
+            filename = (try? c.decodeIfPresent(String.self, forKey: .filename)) ?? "attachment"
+            mime = (try? c.decodeIfPresent(String.self, forKey: .mime)) ?? "application/octet-stream"
+        }
+
+        /// A wallet pass, by its type or its name: some mailers send a
+        /// `.pkpass` as `application/octet-stream`.
+        var isWalletPass: Bool {
+            mime.lowercased().hasPrefix("application/vnd.apple.pkpass")
+                || filename.lowercased().hasSuffix(".pkpass")
+        }
+    }
+
+    var message_id: Int
+    var thread_id: String
+    var kind: GhostKind
+    var attachment: File?
+
+    init(message_id: Int, thread_id: String, kind: GhostKind, attachment: File? = nil) {
+        self.message_id = message_id
+        self.thread_id = thread_id
+        self.kind = kind
+        self.attachment = attachment
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        message_id = try c.decode(Int.self, forKey: .message_id)
+        thread_id = try c.decode(String.self, forKey: .thread_id)
+        kind = (try? c.decodeIfPresent(GhostKind.self, forKey: .kind)) ?? .ticket
+        attachment = try? c.decodeIfPresent(File.self, forKey: .attachment)
+    }
+
+    /// The button's word, by the linked ghost's kind. A kind the daemon has
+    /// not promised (anything but these three) still reads "Tickets".
+    var label: String {
+        switch kind {
+        case .travel: "Boarding pass"
+        case .reservation: "Booking"
+        default: "Tickets"
+        }
+    }
+}
+
+/// EVENT REMINDER ROUTES, in one place for the app (APIClient) and the
+/// phone's notification extension. The settings route is an assumption the
+/// daemon's contract left open: `GET` answers `{"enabled": bool}`, `PUT`
+/// takes the same. Repoint it here.
+enum CalendarReminderRoute {
+    /// One fired reminder: the same JSON as the Mac's `calendar_reminder`
+    /// frame (CalendarReminderSignal). Kept a week on the daemon.
+    static func fire(_ fireId: Int) -> String { "/client/calendar/reminders/\(fireId)" }
+    static let settings = "/client/calendar/reminders/settings"
+}
+
+/// `{"enabled": bool}` on `CalendarReminderRoute.settings`.
+struct CalendarReminderSettings: Codable, Sendable, Hashable {
+    var enabled: Bool
 }
 
 /// Wave 3: one calendar being synced, from the feed's `calendars`. Primary

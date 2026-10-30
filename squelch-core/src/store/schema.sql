@@ -2257,6 +2257,62 @@ CREATE TABLE IF NOT EXISTS calendar_places (
     PRIMARY KEY(account_id, raw)
 );
 
+-- CALENDAR REMINDERS (gcal/remind.rs, docs/CALENDAR.md "Reminders and
+-- tickets"): the small model's plan for one item, `e:<calendar>/<event>` or
+-- `g:<ghost id>`, made for one `version` (a hash of what it read) under one
+-- prompt. `plan_json` holds whether to remind, the lead, the laundered line,
+-- what a tap opens, the tickets pick and the ghosts it said are the same
+-- thing, all held to the input in code. Pruned when the item is gone or over
+-- (its end, not its start: the tickets button is wanted at the door).
+-- HUMAN DOOR ONLY.
+CREATE TABLE IF NOT EXISTS calendar_reminders (
+    account_id     INTEGER NOT NULL,
+    item_key       TEXT NOT NULL,
+    version        TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    plan_json      TEXT NOT NULL,
+    planned_at     TEXT NOT NULL,
+    PRIMARY KEY(account_id, item_key)
+);
+-- Each reminder that fired: once per item per start (`start_key`, the start
+-- as a UTC instant or a date), so a moved event can fire again, at most
+-- twice a day (gcal/remind.rs `may_fire`). `covers` is a JSON array of the
+-- ghost keys the item stood for, so a ghost and its event never both fire.
+-- `frame` is the `calendar_reminder` frame as sent, which the phone fetches
+-- by `id` (`GET /client/calendar/reminders/{id}`): AUTOINCREMENT, so an id is
+-- never reused once a quiet week's prune empties the table, and a late tap
+-- on an old notification cannot open a newer reminder. `fired_at` is Unix
+-- seconds. Kept 7 days. HUMAN DOOR ONLY.
+CREATE TABLE IF NOT EXISTS calendar_reminder_fires (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    item_key   TEXT NOT NULL,
+    start_key  TEXT NOT NULL,
+    fired_at   INTEGER NOT NULL,
+    covers     TEXT NOT NULL DEFAULT '[]',
+    frame      TEXT NOT NULL,
+    UNIQUE(account_id, item_key, start_key)
+);
+-- The planning backoff (gcal/remind.rs `backoff`): an item whose last asks
+-- failed, how many in a row, and when it may be asked again (Unix seconds).
+-- Cleared by a plan; pruned with the plans. HUMAN DOOR ONLY.
+CREATE TABLE IF NOT EXISTS calendar_reminder_backoff (
+    account_id INTEGER NOT NULL,
+    item_key   TEXT NOT NULL,
+    failures   INTEGER NOT NULL,
+    retry_at   INTEGER NOT NULL,
+    PRIMARY KEY(account_id, item_key)
+);
+-- The reminder planner's model calls ATTEMPTED per UTC day (timeouts and
+-- failures too, which the usage ledger never hears of), so the daily cap
+-- holds across restarts. Days before yesterday are pruned. HUMAN DOOR ONLY.
+CREATE TABLE IF NOT EXISTS calendar_reminder_calls (
+    account_id INTEGER NOT NULL,
+    day        TEXT NOT NULL,
+    calls      INTEGER NOT NULL,
+    PRIMARY KEY(account_id, day)
+);
+
 -- CALENDAR SEARCH (docs/CALENDAR.md §10.1): a word index over the synced
 -- events, for the search box, the assistant and Agent MCP. `calendar_search_keys`
 -- gives each event a stable integer id, because `calendar_events` has none (an

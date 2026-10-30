@@ -167,6 +167,9 @@ pub struct ApiState {
     /// channel its banners reach the Mac on, and the wake the event stream
     /// pokes when a Mac arrives. See the module for the contract.
     pub(crate) renotify: crate::renotify::RenotifyShared,
+    /// Calendar reminders ([`crate::calendar_remind`]): the frames to the
+    /// Mac, the pings to the phone, and the notify model that plans them.
+    pub(crate) calendar_remind: crate::calendar_remind::CalendarRemindShared,
     /// The same requests, for the owner's PHONE: handed to the APNs pusher
     /// (see [`squelch_core::push::DraftPing`]), which pushes them to every
     /// registered iPhone. Not durable either, for the same reason as
@@ -644,6 +647,7 @@ impl ApiState {
             draft_opens: tokio::sync::broadcast::channel(16).0,
             draft_open_clock: Arc::new(std::sync::Mutex::new(None)),
             renotify: crate::renotify::RenotifyShared::default(),
+            calendar_remind: Default::default(),
             draft_pings: tokio::sync::broadcast::channel(16).0,
             draft_pinged: Default::default(),
             shutdown: None,
@@ -845,6 +849,25 @@ impl ApiState {
         &self,
     ) -> tokio::sync::broadcast::Receiver<squelch_core::push::DraftPing> {
         self.draft_pings.subscribe()
+    }
+
+    /// The APNs pusher's end of the calendar reminders (see
+    /// [`squelch_core::push::Pusher::with_calendar_pings`]).
+    pub fn subscribe_calendar_pings(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<squelch_core::push::CalendarPing> {
+        self.calendar_remind.pings.subscribe()
+    }
+
+    /// Plan calendar reminders with this client (the notify model; None:
+    /// every reminder is the 30-minute fallback). Whether they run at all is
+    /// the owner's preference and the `calendar` hidden feature.
+    pub fn with_calendar_reminders(
+        mut self,
+        client: Option<squelch_core::gcal::remind::RemindClient>,
+    ) -> Self {
+        self.calendar_remind = crate::calendar_remind::CalendarRemindShared::new(client);
+        self
     }
 
     pub fn with_event_notifier(mut self, tx: tokio::sync::broadcast::Sender<i64>) -> Self {
@@ -1460,6 +1483,8 @@ impl ApiState {
                 cfg.notify.price_out_per_mtok,
             )
             .with_renotify_config(cfg.renotify.clone())
+            // Calendar reminders plan on the notify model too.
+            .with_calendar_reminders(squelch_core::gcal::remind::RemindClient::from_config(cfg))
             // Smart clear's own model and prices, for the same reason.
             .with_smart_clear_config(
                 cfg.smart_clear.model.clone(),

@@ -111,6 +111,10 @@ enum Analytics {
         // tapped. A trigger word, a message count and one bool (a deadline
         // was a reason); never who or what.
         "renotify_shown", "renotify_opened",
+        // Event reminders (docs/CALENDAR.md, "Reminders and tickets"): a
+        // banner posted, and tapped. The lead in minutes and a few bools; the
+        // tap says only which kind of thing it opened. Never the event.
+        "calendar_reminder_shown", "calendar_reminder_opened",
         "shipment_cleared",
         // Smart clear on the Reading zone: how much it cleared, split by the
         // daemon's reason codes as counts, and whether it was taken back.
@@ -165,6 +169,8 @@ enum Analytics {
         // Whether the second banner earns its interruption is the "does it
         // work" question for re-notify, so both ride with the first banner's.
         "renotify_shown", "renotify_opened",
+        // And whether a reminder is worth its interruption, the same way.
+        "calendar_reminder_shown", "calendar_reminder_opened",
         "connect_succeeded", "connection_lost", "connection_restored",
         "account_added",
         // Onboarding carries where it started from and the practice step it
@@ -254,6 +260,9 @@ enum Analytics {
             "rail", "settings", "nudge",
             // renotify_* triggers: the daemon's closed Trigger set.
             "client_online", "meeting_end",
+            // calendar_reminder_opened targets: what the tap showed.
+            // "event" and "none" are named here; nothing else says them.
+            "attachment", "mail", "event", "none",
             // feature_found / feature_kept sets: `FeatureSet`'s raw values, the
             // discovery page's seven rows. Listed by hand like the undo kinds,
             // so a new set must land here too or its find trips the debug assert.

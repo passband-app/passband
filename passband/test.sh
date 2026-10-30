@@ -672,6 +672,25 @@ run_suite renotify-banner \
   Sources/Passband/Model/RenotifyBanner.swift \
   Tests/RenotifyBannerTests.swift
 
+# Event reminders and the Tickets button (docs/CALENDAR.md, "Reminders and
+# tickets"): the `calendar_reminder` frame, the phone's `<tag>:cal:<fire>:<at>`
+# push id (tag-less and malformed ones refused), the banner's words, where a
+# tap and "Show tickets" go, and `tickets` on timeline events and ghosts, kept
+# through a decode error of their own and through an encode (the disk cache).
+run_suite calendar-reminder \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Sources/Passband/Lib/SenderIdentity.swift \
+  Sources/Passband/Lib/AuthLabels.swift \
+  Sources/Passband/Lib/AgentDraftLink.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Model/EventBanner.swift \
+  Sources/Passband/Model/RenotifyBanner.swift \
+  Sources/Passband/Model/CalendarReminder.swift \
+  Tests/CalendarReminderTests.swift
+
 # What auth mail asks of the owner (docs/AUTH-MAIL-HANDLING.md, "Clients"): the
 # sealed row from both daemon versions, which kinds open a question and for
 # how long, explained alerts, new-device bursts, critical changes, and the move

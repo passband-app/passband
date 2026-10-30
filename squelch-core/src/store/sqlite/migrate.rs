@@ -124,6 +124,7 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     retire_records_destination(conn)?;
     relabel_scanner_opens(conn)?;
     retire_preference_retriage(conn)?;
+    rebuild_calendar_reminder_fires(conn)?;
     // The account's mail provider. 'gmail' on every pre-existing row, which is
     // the honest reading: Gmail was the only provider this daemon ever had.
     add_column_if_missing(
@@ -1906,6 +1907,35 @@ pub(super) fn retire_preference_retriage(conn: &Connection) -> Result<()> {
         "UPDATE agent_triage_jobs SET state='completed',lease_token=NULL,lease_until=NULL
          WHERE state='queued' AND trigger LIKE 'preference:%'",
         [],
+    )?;
+    Ok(())
+}
+
+/// `calendar_reminder_fires` GREW `covers` and became AUTOINCREMENT (a fire
+/// id the phone fetches by must never be reused). Neither can be ALTERed in,
+/// so a table without `covers` is DROPPED and recreated, discarding its rows:
+/// it only ever existed on development databases of the unreleased branch
+/// that made it, and a row is a week-long record of a banner already shown.
+/// Guarded on the column, so it runs at most once per DB; schema.sql already
+/// ran this open, hence the CREATE here.
+pub(super) fn rebuild_calendar_reminder_fires(conn: &Connection) -> Result<()> {
+    if !tables_exist(conn, &["calendar_reminder_fires"])?
+        || has_columns(conn, "calendar_reminder_fires", &["covers"])?
+    {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "DROP TABLE calendar_reminder_fires;
+         CREATE TABLE calendar_reminder_fires (
+             id         INTEGER PRIMARY KEY AUTOINCREMENT,
+             account_id INTEGER NOT NULL,
+             item_key   TEXT NOT NULL,
+             start_key  TEXT NOT NULL,
+             fired_at   INTEGER NOT NULL,
+             covers     TEXT NOT NULL DEFAULT '[]',
+             frame      TEXT NOT NULL,
+             UNIQUE(account_id, item_key, start_key)
+         );",
     )?;
     Ok(())
 }

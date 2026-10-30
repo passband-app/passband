@@ -2189,13 +2189,22 @@ pub async fn get_timeline(
     let to = to.min(later(TIMELINE_MAX_SPAN)?);
     // Real events are served only while calendar is granted: a grant taken
     // back hides what was synced under it.
-    let granted = match state.calendar() {
-        Some(calendar) => calendar.granted().await,
-        None => false,
-    };
-    let (ghosts, events, calendars, status, places, owned) =
+    let (granted, reminder_email) = crate::calendar_remind::calendar_reach(&state).await;
+    let (ghosts, events, calendars, status, places, owned, tickets) =
         store_call(&state, move |store, account_id| {
             let ghosts = store.list_ghost_events(account_id, from, to)?;
+            // The tickets button (docs/CALENDAR.md, "Reminders and
+            // tickets"): the reminder plan's pick, else the fallback from
+            // the linked mail, built as the reminder worker builds it.
+            let tickets = crate::calendar_remind::timeline_tickets(
+                store,
+                account_id,
+                from,
+                to,
+                now,
+                granted,
+                &reminder_email,
+            )?;
             if !granted {
                 return Ok((
                     ghosts,
@@ -2204,6 +2213,7 @@ pub async fn get_timeline(
                     Default::default(),
                     Default::default(),
                     Vec::new(),
+                    tickets,
                 ));
             }
             let (events, cut) = store.list_calendar_events(account_id, from, to, now)?;
@@ -2217,64 +2227,31 @@ pub async fn get_timeline(
                 .collect();
             let places = store.calendar_places(account_id)?;
             let owned = store.calendar_owned(account_id)?;
-            Ok((ghosts, events, calendars, status, places, owned))
+            Ok((ghosts, events, calendars, status, places, owned, tickets))
         })
         .await?;
-    // The display match, computed here and never stored, so it can never go
-    // stale and never changes a ghost.
-    let mut matched = squelch_core::gcal::match_ghosts(
-        ghosts.iter().map(|g| (g.title.as_str(), &g.start)),
-        &events,
-    );
-    // Two more ways a ghost is the same thing as an event: Passband made the
-    // event for it and keeps it (gcal/own.rs), whatever its time or title
-    // now; or Gmail made the event from the same mail, which titles it its
-    // own way (`own::same_event`: the same start and a distinctive word).
-    use squelch_core::gcal::own::{self, OwnState};
-    // Indexed once, so each ghost looks up rather than scans.
-    let position: std::collections::HashMap<(&str, &str), usize> = events
-        .iter()
-        .enumerate()
-        .map(|(i, e)| ((e.calendar_id.as_str(), e.row.event_id.as_str()), i))
-        .collect();
-    let bound_to: std::collections::HashMap<i64, (&str, &str)> = owned
+    // The display match (`gcal::link_ghosts`): computed here and never
+    // stored, so it can never go stale and never changes a ghost. The
+    // calendar reminders link mail to events by the same function.
+    let matched = squelch_core::gcal::link_ghosts(&ghosts, &events, &owned);
+    use squelch_core::gcal::own::OwnState;
+    let mine: std::collections::HashSet<(&str, &str)> = owned
         .iter()
         .filter(|o| o.state == OwnState::Owned)
-        .map(|o| (o.ghost_id, (o.calendar_id.as_str(), o.event_id.as_str())))
+        .map(|o| (o.calendar_id.as_str(), o.event_id.as_str()))
         .collect();
-    let mine: std::collections::HashSet<(&str, &str)> = bound_to.values().copied().collect();
-    // Gmail's events by start (an instant in UTC, or a date), the only ones
-    // `same_event` can match.
-    let start_key = |t: &squelch_core::triage::ghost::EventTime| match t {
-        squelch_core::triage::ghost::EventTime::At(at) => (Some(at.with_timezone(&Utc)), None),
-        squelch_core::triage::ghost::EventTime::Date(day) => (None, Some(*day)),
-    };
-    let mut gmail_at: std::collections::HashMap<_, Vec<usize>> = Default::default();
-    for (i, e) in events.iter().enumerate() {
-        if e.row.from_gmail {
-            gmail_at.entry(start_key(&e.row.start)).or_default().push(i);
-        }
-    }
-    for (ghost, slot) in ghosts.iter().zip(matched.iter_mut()) {
-        let bound = bound_to
-            .get(&ghost.id)
-            .and_then(|key| position.get(key).copied());
-        if bound.is_some() {
-            *slot = bound;
-        } else if slot.is_none() {
-            *slot = gmail_at.get(&start_key(&ghost.start)).and_then(|at| {
-                at.iter()
-                    .copied()
-                    .find(|&i| own::same_event(ghost, &events[i].row))
-            });
-        }
-    }
     let now = now.with_timezone(from.offset());
     let ghosts: Vec<_> = ghosts
         .iter()
         .zip(matched)
         .map(|(g, matched)| {
             let mut view = ghost_view(g, now);
+            // A ghost that is an event's shares its tickets.
+            view["tickets"] = tickets
+                .ghosts
+                .get(&g.id)
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             view["matched_event"] = match matched.map(|i| &events[i]) {
                 Some(event) => {
                     json!({ "calendar_id": event.calendar_id, "id": event.row.event_id })
@@ -2292,6 +2269,14 @@ pub async fn get_timeline(
         .iter()
         .map(|e| {
             let mut view = calendar_event_view(e, &account_email);
+            view["tickets"] = tickets
+                .events
+                .get(&squelch_core::gcal::remind::event_key(
+                    &e.calendar_id,
+                    &e.row.event_id,
+                ))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             // The card's place (gcal/place.rs), once the model has made one
             // of this location: its name and street address, each null when
             // the location gives none (both null: it names no place), and the

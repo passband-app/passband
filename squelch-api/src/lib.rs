@@ -10,6 +10,7 @@ mod agent_write;
 mod assistant;
 mod auth;
 mod calendar_connect;
+mod calendar_remind;
 mod calendar_search;
 mod calendar_write;
 mod console;
@@ -42,6 +43,11 @@ pub mod write;
 
 pub use assistant::AssistantRelay;
 pub use auth::{DEVICE_AUTH_CONCURRENCY, require_bearer};
+/// Calendar reminders' worker and its passes (docs/CALENDAR.md, "Reminders
+/// and tickets").
+pub use calendar_remind::{
+    CalendarRemindTiming, RemindOutcome, calendar_remind_worker, run_fire_pass, run_plan_pass,
+};
 pub use error::ApiError;
 /// The auth-mail retention pass. Exported for the daemon's timer: it uses the
 /// WRITE credential, which the readonly-bound sync loop must never touch.
@@ -512,6 +518,18 @@ fn calendar_routes() -> Router<ApiState> {
         .route(
             "/client/calendar/people",
             get(handlers::get_calendar_people),
+        )
+        // Calendar reminders (docs/CALENDAR.md, "Reminders and tickets"):
+        // the owner's on/off, and one firing's frame by id, which the phone's
+        // notification extension fetches. HUMAN DOOR ONLY: the agent door
+        // gets no plan, no firing and no preference.
+        .route(
+            "/client/calendar/reminders/settings",
+            get(calendar_remind::get_settings).put(calendar_remind::put_settings),
+        )
+        .route(
+            "/client/calendar/reminders/{fire_id}",
+            get(calendar_remind::get_reminder),
         )
         // The user's correction of a person's inferred timezone (docs/
         // CALENDAR.md §7). A local write, human door only, for the reason the

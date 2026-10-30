@@ -889,6 +889,10 @@ private struct DensityTile: View {
 /// that posts one.
 struct NotificationsSection: View {
     @Environment(Prefs.self) private var prefs
+    @Environment(AppStore.self) private var store
+    /// An event reminder switch write in flight, and why the last one failed.
+    @State private var remindersBusy = false
+    @State private var remindersError: String?
     /// Held for the duration of playback: the sound stops when deallocated.
     @State private var player: PlatformSound?
     /// What the last test banner did, shown until the next one. nil before the
@@ -937,6 +941,7 @@ struct NotificationsSection: View {
                     }
                 }
             #endif
+            eventReminders
             RowDivider()
             // Three states, because two of them look identical from the outside:
             // a banner that never came because the grant is off, and one that
@@ -951,6 +956,9 @@ struct NotificationsSection: View {
             }
         }
         .onChange(of: prefs.notificationSound) { _, choice in preview(choice) }
+        // Keyed on the account, so a switch with the pane open reads the new
+        // daemon's answer.
+        .task(id: store.epoch) { await store.refreshCalendarReminderPref() }
         #if os(macOS)
             // Turning it on is the moment to ask: a switch that reads on while
             // the system refuses to say whether a Focus is up would be a lie.
@@ -963,6 +971,60 @@ struct NotificationsSection: View {
                 }
             }
         #endif
+    }
+
+    /// The daemon's switch for event reminders (docs/CALENDAR.md, "Reminders
+    /// and tickets"), per mailbox. Not drawn at all on a daemon too old to
+    /// remind, nor before the first answer: a switch that might be a lie is
+    /// worse than none.
+    @ViewBuilder
+    private var eventReminders: some View {
+        switch store.calendarReminderPref {
+        case .loaded(let enabled):
+            RowDivider()
+            SettingsRow(
+                title: "Event reminders",
+                detail: remindersError
+                    ?? "A banner before each event on your calendar, timed for the event. When the mail has tickets or a boarding pass, they are one tap away."
+            ) {
+                Toggle(
+                    "Event reminders",
+                    isOn: Binding(get: { enabled }, set: { saveReminders($0) })
+                )
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .disabled(remindersBusy)
+            }
+        case .unreadable:
+            RowDivider()
+            SettingsRow(
+                title: "Event reminders",
+                detail: "Could not read this setting from the server."
+            ) {
+                Button("Try again") { Task { await store.refreshCalendarReminderPref() } }
+                    .buttonStyle(.glass)
+                    .controlSize(.small)
+            }
+        case .unknown, .notOffered:
+            EmptyView()
+        }
+    }
+
+    /// Fire and wait, like read tracking's: the switch shows what the daemon
+    /// holds, so a failed write leaves it where it was.
+    private func saveReminders(_ enabled: Bool) {
+        guard !remindersBusy else { return }
+        remindersBusy = true
+        remindersError = nil
+        Task {
+            do {
+                try await store.setCalendarReminders(enabled)
+            } catch {
+                remindersError = errText(error, "Could not save. Try again.")
+            }
+            remindersBusy = false
+        }
     }
 
     private var hint: String {

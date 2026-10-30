@@ -21,7 +21,7 @@
 //! reservation names its holder by fingerprint, which is all equality needs).
 //! The refresh token this service
 //! handles lives in memory for the length of one request and leaves as age
-//! armor addressed to one tenant. There is nothing at rest on Railway that opens a
+//! armor addressed to one tenant. There is nothing at rest on AWS that opens a
 //! mailbox.
 //!
 //! THE ONE EXCEPTION IS `users`, and it is a deliberate one: it holds the
@@ -37,7 +37,7 @@
 //! THE OTHER EXCEPTION IS `reconnect_jobs`, which holds CIPHERTEXT - and only
 //! ciphertext, and only for a while. A reconnect seals the new refresh token to
 //! the tenant's own pod key before anything is stored, so what sits in this
-//! row is age armor that nothing on Railway can open; it is there so that a
+//! row is age armor that nothing on AWS can open; it is there so that a
 //! rollout the browser did not wait for, or a control process that restarted
 //! mid-call, can be finished from the row rather than by asking Google again.
 //! Every terminal outcome NULLs it, and the worker's attempt cap
@@ -565,9 +565,9 @@ impl ControlStore {
     /// signup.
     ///
     /// TLS IS THE URL'S CHOICE, read from its `sslmode` by [`crate::pg_tls`]:
-    /// absent or `disable` is `NoTls` (Railway's private network, where the
-    /// URL carries no `sslmode` and this is byte-for-byte the path it always
-    /// was); `require` and `verify-full` are rustls against the AWS RDS CA
+    /// absent or `disable` is `NoTls` (local dev and the CI test Postgres,
+    /// where the URL carries no `sslmode` and this is byte-for-byte the path it
+    /// always was); `require` and `verify-full` are rustls against the AWS RDS CA
     /// bundle with the hostname checked and plaintext refused; anything else
     /// fails here, naming the value and never the URL.
     pub async fn connect(database_url: &str) -> Result<Self> {
@@ -604,7 +604,7 @@ impl ControlStore {
     ///
     /// ONE TRANSACTION HOLDING [`INIT_LOCK_KEY`], because `IF NOT EXISTS` is a
     /// promise about the state of the catalog and not a lock on it: two
-    /// deployments overlapping (Railway starts the new pod before it stops the
+    /// deployments overlapping (ECS starts the new task before it stops the
     /// old one) run these statements against each other, and Postgres answers
     /// the loser with a duplicate-object error instead of the no-op the clause
     /// promises. The lock serializes them; the transaction is what releases it
@@ -2785,7 +2785,7 @@ SQUELCH_TEST_PG_URL is not set, and these tests run against a real Postgres.
         server.await.unwrap()
     }
 
-    /// THE CONNECTOR WIRING, with no database: no `sslmode` (today's Railway
+    /// THE CONNECTOR WIRING, with no database: no `sslmode` (a local dev
     /// URL) and `disable` never start TLS, and `require`/`verify-full` do.
     #[tokio::test]
     async fn only_the_tls_modes_start_a_tls_handshake() {

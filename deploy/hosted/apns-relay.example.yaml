@@ -1,7 +1,7 @@
 # The APNs relay's PUSH-ONLY bearer, which every tenant daemon pushes with.
 #
 # DO NOT apply this file as it stands, and do not commit a filled-in copy. The
-# value is created on the relay and piped straight into the Secret, so it never
+# value lives in AWS Secrets Manager and is piped straight into the Secret, so it never
 # reaches a file, an argument list or a terminal.
 #
 # ## What goes in it
@@ -24,35 +24,48 @@
 #
 # ## Creating it
 #
-# 1. Mint the push token on the relay. This redeploys the `squelch` service
-#    (the relay); with the variable set, the relay logs `push_token=true` on its
-#    `serving` line. A `serving` line with no `push_token` field is a relay
-#    build that predates the variable and ignores it (the relay deploys from
-#    `main`, so merge first). The value goes in on stdin, never as an argument:
+# 1. The push token lives in AWS Secrets Manager as
+#    passband/relay/SQUELCH_RELAY_PUSH_TOKEN, and ECS injects it into the
+#    `relay` service's task. It already exists in production (minted at the
+#    AWS cutover), so normally skip to step 2. Minting a new one means piping
+#    a fresh value in (stdin, never an argument) and rolling the relay:
 #
 #        openssl rand -hex 32 | tr -d '\n' \
-#          | railway variable set -s squelch SQUELCH_RELAY_PUSH_TOKEN --stdin
+#          | aws secretsmanager put-secret-value \
+#              --secret-id passband/relay/SQUELCH_RELAY_PUSH_TOKEN \
+#              --secret-string file:///dev/stdin --query VersionId --output text
+#        aws ecs update-service --cluster passband --service relay \
+#          --force-new-deployment --query 'service.deployments[0].id'
+#        aws ecs wait services-stable --cluster passband --services relay
 #
-# 2. Once that deploy is live, read it back from Railway (JSON: the table view
-#    truncates) and pipe it straight into the Secret:
+#    With the value set, the relay logs `push_token=true` on its `serving`
+#    line (`aws logs tail /passband/relay --since 15m`). A `serving` line with
+#    no `push_token` field is a relay build that predates the variable and
+#    ignores it (the relay deploys from `main`, so merge first).
 #
-#        railway variable list -s squelch --json \
-#          | jq -r '.SQUELCH_RELAY_PUSH_TOKEN // empty' | tr -d '\n' \
+# 2. Read it from Secrets Manager and pipe it straight into the Secret; it
+#    is never printed:
+#
+#        aws secretsmanager get-secret-value \
+#            --secret-id passband/relay/SQUELCH_RELAY_PUSH_TOKEN \
+#            --query SecretString --output text | tr -d '\n' \
 #          | kubectl -n tenants create secret generic apns-relay \
 #              --from-file=token=/dev/stdin
 #
-#    Then CHECK IT, without printing it. A variable that was never set makes
-#    an unguarded `jq -r` print the word `null`, and a failed `railway` prints
-#    nothing; either gives a Secret every tenant 401s on. The length tells:
+#    Then CHECK IT, without printing it. A failed read (an expired AWS
+#    session, the wrong secret id) gives an empty token, and a stray newline
+#    a 65-byte one; either gives a Secret every tenant 401s on. The length
+#    tells:
 #
 #        kubectl -n tenants get secret apns-relay -o jsonpath='{.data.token}' \
 #          | base64 -d | wc -c        # 64
 #
-#    The `tr -d '\n'` is load-bearing. `jq -r` ends its output with a newline
-#    and `--from-file` keeps every byte, so without it the Secret holds the
-#    token plus a newline. A newline is not legal inside an HTTP header value,
-#    so a bearer carrying one is a request that cannot be sent; today's daemon
-#    happens to trim its environment, and the Secret should not depend on that.
+#    The `tr -d '\n'` is load-bearing. `--output text` ends its output with a
+#    newline and `--from-file` keeps every byte, so without it the Secret holds
+#    the token plus a newline. A newline is not legal inside an HTTP header
+#    value, so a bearer carrying one is a request that cannot be sent; today's
+#    daemon happens to trim its environment, and the Secret should not depend
+#    on that.
 #
 # Create the Secret BEFORE the warden keys are uncommented. If it is missing
 # when they land, see "A Secret that was missing" below: nothing will pick it
@@ -60,7 +73,7 @@
 #
 # ## How it reaches a pod
 #
-# The relay (https://relay.squelch.sh, the `squelch` service on Railway) holds
+# The relay (https://relay.squelch.sh, the `relay` service on AWS ECS) holds
 # the APNs signing key. A daemon never talks to Apple: it POSTs a ping for a
 # device token it already holds, with this bearer, and the relay signs and
 # forwards it. The warden injects it into every tenant pod as
@@ -105,11 +118,12 @@
 # Change the Secret's NAME instead, which changes the rendered pod, so the
 # roller delivers it one tenant per tick:
 #
-# 1. Mint the new value on the relay (step 1 above). Note that this REPLACES
+# 1. Mint the new value (step 1 above). Note that this REPLACES
 #    the push token the relay accepts, so tenants still on the old value 401
 #    until they roll: pushes stop, mail does not, and see "Failure recovery".
-# 2. Create it under a NEW name, `apns-relay-2` (step 2 above, new name).
-# 3. Set SQUELCH_WARDEN_RELAY_SECRET_NAME: "apns-relay-2" in
+# 2. Create it under a NEW name (step 2 above, new name). Production has been
+#    on `apns-relay-2` since the AWS cutover, so the next is `apns-relay-3`.
+# 3. Set SQUELCH_WARDEN_RELAY_SECRET_NAME to that name in
 #    15-warden-config.yaml, then apply it and restart the serving WARDEN in the
 #    same minute (SETUP.md §8). The warden is not a tenant, and restarting it
 #    is how it rereads its config:

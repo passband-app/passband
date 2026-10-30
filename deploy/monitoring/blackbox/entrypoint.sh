@@ -1,6 +1,6 @@
 #!/bin/sh
 # Renders the blackbox config from env at boot: the bifrost_llm canary module
-# needs the canary virtual key, which lives only in Railway service variables
+# needs the canary virtual key, which lives only in Secrets Manager
 # (BLACKBOX_BIFROST_CANARY_KEY). Same adapter pattern as prometheus's web.yml.
 #
 # An UNSET key must not stop the exporter: the other probes (site/warden
@@ -23,7 +23,8 @@ fi
 # canary's own virtual key is hand-made in the gateway UI and `llm mint` never
 # touches it, so a new default here goes red at merge (blackbox redeploys the
 # moment main moves) until that key's allow-list gains the new id. Move the
-# canary with the BLACKBOX_CANARY_MODEL service variable once the key has it.
+# canary with BLACKBOX_CANARY_MODEL (passband/monitor/BLACKBOX_CANARY_MODEL)
+# once the key has it.
 MODEL="${BLACKBOX_CANARY_MODEL:-anthropic/claude-opus-5}"
 echo "blackbox: bifrost_llm canary will probe model ${MODEL}" >&2
 

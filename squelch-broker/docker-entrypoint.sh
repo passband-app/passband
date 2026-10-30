@@ -1,8 +1,8 @@
 #!/bin/sh
 # The broker's own default bind is loopback, which is correct for a box with a
-# TLS proxy in front and unreachable inside a container. Railway injects PORT
-# and terminates TLS at its edge, so bind whatever port it hands us on all
-# interfaces — unless the operator pinned SQUELCH_BROKER_BIND themselves, which
+# TLS proxy in front and unreachable inside a container. Behind a TLS-terminating
+# edge, bind all interfaces on a platform-injected PORT if set, else the default
+# below, unless the operator pinned SQUELCH_BROKER_BIND themselves, which
 # always wins.
 #
 # There is nothing else for this script to do: the broker has no volume and no

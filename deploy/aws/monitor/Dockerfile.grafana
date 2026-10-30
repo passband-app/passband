@@ -1,20 +1,15 @@
 # Grafana for the AWS `monitor` box (compose.yaml here). Build context is the
 # REPO ROOT: docker build -f deploy/aws/monitor/Dockerfile.grafana .
 #
-# Mirrors the root Dockerfile.grafana. The dashboards, alert rules, contact
-# points, templates and dashboard provider are the SAME files Railway bakes
-# (deploy/monitoring/grafana/**, the single source of truth); only the
-# datasource is laid over with the AWS one, whose URL is the compose service
-# name. Runs as the image's own user (472, group 0), unlike Railway's root
-# image: compose.yaml's data-perms one-shot hands /data/grafana to 472:0
-# before this starts.
+# The dashboards, alert rules, contact points, templates, datasource and
+# dashboard provider all come from deploy/monitoring/grafana/ (the single
+# source of truth). Runs as the image's own user (472, group 0): compose.yaml's
+# data-perms one-shot hands /data/grafana to 472:0 before this starts.
 # Pinned by the multi-arch index digest (fetched from Docker Hub 2026-10-23):
 # the tag is for humans, the digest is what is pulled. Bump both together.
 FROM grafana/grafana:13.2.4@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
-# Same reason as the root Dockerfile.grafana: must outlast repeat_interval in
-# provisioning/alerting/policies.yml.
+# Must outlast repeat_interval in provisioning/alerting/policies.yml.
 ENV GF_UNIFIED_ALERTING_NOTIFICATION_LOG_RETENTION=54w
 COPY deploy/monitoring/grafana/provisioning /etc/grafana/provisioning
-COPY deploy/aws/monitor/grafana/datasources/prometheus.yml /etc/grafana/provisioning/datasources/prometheus.yml
 COPY deploy/monitoring/grafana/dashboards /etc/grafana/dashboards
 EXPOSE 3000

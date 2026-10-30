@@ -1,16 +1,14 @@
 # Prometheus for the AWS `monitor` box (compose.yaml here). Build context is
 # the REPO ROOT: docker build -f deploy/aws/monitor/Dockerfile.prometheus .
 #
-# Mirrors the root Dockerfile.prometheus (which Railway builds until cutover)
-# with the AWS prometheus.yml swapped in; the entrypoint is the shared one.
-# Runs as the image's own user (nobody, 65534), unlike Railway's root image:
-# compose.yaml's data-perms one-shot hands /data/prometheus to nobody before
+# Config and entrypoint come from deploy/monitoring/prometheus/.
+# Runs as the image's own user (nobody, 65534): compose.yaml's data-perms one-shot hands /data/prometheus to nobody before
 # this starts, and the base image already gives nobody /etc/prometheus, where
 # entrypoint.sh writes web.yml and the password file.
 # Pinned by the multi-arch index digest (fetched from Docker Hub 2026-10-23):
 # the tag is for humans, the digest is what is pulled. Bump both together.
 FROM prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
-COPY deploy/aws/monitor/prometheus/prometheus.yml /etc/prometheus/prometheus.yml
+COPY deploy/monitoring/prometheus/prometheus.yml /etc/prometheus/prometheus.yml
 COPY deploy/monitoring/prometheus/entrypoint.sh /entrypoint.sh
 # Carried here, not run here: the box's bin/up copies this file out of the
 # image at IMAGE_TAG (docker create + docker cp) before `compose up`, so a

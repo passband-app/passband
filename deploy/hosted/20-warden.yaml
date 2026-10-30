@@ -130,10 +130,9 @@ spec:
 # externalTrafficPolicy: Local) FIRST, or every caller looks like a cluster
 # address and this list refuses control too.
 #
-# Apply only once control calls from a fixed address: after the AWS cutover
-# (deploy/aws/CUTOVER.md Phase 6) control egresses through the NAT EIP,
-# `tofu -chdir=deploy/aws/tofu/main output -raw nat_egress_ip`. On Railway
-# its egress address is not fixed.
+# Control calls from a fixed address: since the AWS cutover
+# (deploy/aws/CUTOVER.md Phase 6) it egresses through the NAT EIP,
+# `tofu -chdir=deploy/aws/tofu/main output -raw nat_egress_ip`.
 #
 # Operators: call the API from the box itself through a port-forward,
 #   kubectl -n warden port-forward svc/squelch-warden 8852:8852

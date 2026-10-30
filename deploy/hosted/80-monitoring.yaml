@@ -1,5 +1,6 @@
 # Monitoring: the on-box half. Everything heavy (storage, dashboards, alerting,
-# external probes) lives on Railway (deploy/monitoring/); this file is only the
+# external probes) lives on the AWS monitor box (deploy/aws/monitor/, configs in
+# deploy/monitoring/); this file is only the
 # collectors, sized to steal as little tenant headroom as possible. That
 # sizing is not free and it is not automatic: prometheus-agent's working set
 # was 213 MiB against its 256Mi limit on 2026-08-26, on a box that has already
@@ -16,8 +17,9 @@
 # (node-exporter binds :9100 on the host, which the Hetzner firewall drops).
 #
 # The push needs one secret, created imperatively (see
-# remote-write-auth.example.yaml): the basic-auth password for the Railway
-# Prometheus receiver, same value as PROM_REMOTE_WRITE_PASSWORD there.
+# remote-write-auth.example.yaml): the basic-auth password for the Prometheus
+# receiver at https://metrics.passband.app, same value as Secrets Manager
+# passband/monitor/PROM_REMOTE_WRITE_PASSWORD.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -257,7 +259,7 @@ data:
       # series with a pod label" was still every cadvisor family for every
       # container: network, filesystem, blkio, per-cpu, tasks_state, spec_*,
       # the lot. Two of those families are charted; the rest were shipped to
-      # Railway, stored for 30 days, and never queried once. What share of the
+      # the central Prometheus, stored for 30 days, and never queried once. What share of the
       # 213 MiB was those series rather than page cache over the agent WAL is
       # unmeasured, so read the effect after the restart rather than assuming
       # it: prometheus_agent_active_series and process_resident_memory_bytes,

@@ -1,7 +1,9 @@
-# Railway → AWS: the locked design
+# AWS: the production design
 
-Why: Railway's customer env-var store was breached on 2026-10-21. Every secret
-on it has been or is being rotated, and every Railway service moves to AWS.
+Production (control, relay, bifrost, monitoring, the landing site) runs on AWS
+as described here. Why AWS: our previous host's customer env-var store was
+breached on 2026-10-21, so every secret was rotated and every service moved.
+The move finished 2026-10-26; `CUTOVER.md` is its record.
 Tenants (the k3s box `carrier` on Hetzner) stay put for now; they move later as
 k3s on EC2, and EKS only when a second node is needed.
 
@@ -17,7 +19,7 @@ a question for the operator, not a judgement call.
 | IaC | OpenTofu, in `deploy/aws/tofu/`. State in S3 (versioned, SSE-KMS, `use_lockfile = true`) with OpenTofu state encryption on |
 | DNS | Stays where it is today. Tofu does NOT manage DNS; it OUTPUTS every record the operator must create (ACM validation CNAMEs, service CNAMEs) |
 | Secrets | AWS Secrets Manager, one secret per value, named `passband/<service>/<ENV_NAME>`. Tofu creates the secret CONTAINERS only, never a version: no secret value ever enters tofu state, a plan, a variable, or a file. The operator sets values with `aws secretsmanager put-secret-value --secret-string file:///dev/stdin` |
-| Bifrost | On AWS with the rest, started FRESH (new admin credential, new virtual keys minted for every tenant). The Railway volume is not copied: it may hold sessions minted with the leaked admin credential |
+| Bifrost | On AWS with the rest, started FRESH (new admin credential, new virtual keys minted for every tenant). The old host's volume was not copied: it may hold sessions minted with the leaked admin credential |
 
 ## Topology
 
@@ -50,7 +52,7 @@ Hostnames (ALB host-based routing, one ACM cert with all SANs):
 | `metrics.passband.app` | monitor :9090 (remote-write receiver, basic auth on every route) | `GET /-/healthy`, matcher `200,401` |
 | `passband.app` (+ `www`) | CloudFront | n/a |
 
-Blackbox has NO public route, ever (same rule as on Railway).
+Blackbox has NO public route, ever.
 
 ## Per-service contract
 
@@ -67,28 +69,27 @@ Blackbox has NO public route, ever (same rule as on Railway).
   include anything else it marks required.
 - NOT carried over: `SQUELCH_CONTROL_ALERT_WEBHOOK` (legacy name),
   `BIFROST_ADMIN_USERNAME`/`_PASSWORD` (read by nothing).
-- **Postgres TLS (code change).** The store dials with `NoTls` today
-  (`squelch-control/src/store.rs`, `connect`). Add TLS via
-  `tokio-postgres-rustls`, chosen by the URL's `sslmode`: absent/`disable` keeps
-  today's `NoTls` exactly (Railway keeps working unchanged until cutover);
+- **Postgres TLS** (`squelch-control/src/pg_tls.rs`, used by `store.rs`
+  `connect`). TLS via `tokio-postgres-rustls`, chosen by the URL's `sslmode`: absent/`disable` keeps
+  plaintext `NoTls` (local dev and tests);
   `require` and `verify-full` use rustls with the **AWS RDS global CA bundle**
   checked into the repo (document its source URL and fetch date beside it);
   `verify-full` also checks the hostname. Any other value is a startup error
   that names the value, never the URL (the URL carries the password).
-- ECS Exec ON (the replacement for `railway ssh` when running operator commands
+- ECS Exec ON (how the operator runs commands
   like `squelch-control llm mint`).
 
 ### relay
 - Image from the existing root `Dockerfile`, unchanged.
 - Secrets: `SQUELCH_RELAY_APNS_KEY`, `_AUTH_TOKEN`, `_PUSH_TOKEN`.
   Env: `_APNS_KEY_ID`, `_APNS_TEAM_ID`, `_APNS_TOPICS`, `_DB_PATH=/data/opens.sqlite3`,
-  plus anything else `squelch-relay/README.md` lists that Railway had.
+  plus anything else `squelch-relay/README.md` lists.
 - `/data` on EFS (encrypted, access point, single task, `desired_count = 1`,
   deployment min 0 / max 100 so two writers never overlap).
 
 ### bifrost
-- Image from `Dockerfile.bifrost` (FROM-only, pinned `maximhq/bifrost:v1.6.9`),
-  pushed to ECR.
+- Image from `deploy/aws/docker/Dockerfile.bifrost` (FROM-only, pinned
+  `maximhq/bifrost:v1.6.9` by digest), pushed to ECR.
 - Secret: `ANTHROPIC_API_KEY`. Env: `APP_HOST`, `APP_PORT`.
 - **Store:** if Bifrost v1.6.9 supports a Postgres config store AND log store
   (check its source/docs at that tag, cite what you found), use the same RDS
@@ -126,8 +127,8 @@ Blackbox has NO public route, ever (same rule as on Railway).
 
 - `.github/workflows/deploy-aws.yml`: on push to `main` (path-filtered per
   service) and `workflow_dispatch` (per service). Every job is gated on the repo
-  variable `AWS_DEPLOY_ENABLED == 'true'`, so the workflow is INERT until
-  cutover.
+  variable `AWS_DEPLOY_ENABLED == 'true'` (set since 2026-10-24); unset it to
+  stop all AWS deploys at once.
 - GitHub → AWS via OIDC, one role, trust restricted to
   the customized immutable sub (`repo:passband-app@<id>/passband@<id>:environment:aws-production:job_workflow_ref:...deploy-aws.yml@refs/heads/main`; CUTOVER.md 0d) (and the `workflow_dispatch`
   environment). Permissions: push to these ECR repos, update these ECS
@@ -142,11 +143,8 @@ Blackbox has NO public route, ever (same rule as on Railway).
 
 ## Standing invariants
 
-1. **Railway keeps running off `main` until cutover.** Nothing merged may change
-   what any Railway service builds or serves. Do not edit `Dockerfile*`,
-   `railway*.toml`, or `deploy/monitoring/**` in a way that changes Railway's
-   behaviour. AWS-only configs live under `deploy/aws/`. The one exception is
-   `.dockerignore`, which may gain `!deploy/aws/...` re-include lines.
+1. **One copy of every monitoring config.** `deploy/monitoring/` is the source;
+   `deploy/aws/monitor/Dockerfile.*` bake it in and carry no copies of their own.
 2. **No secret value in the repo, in tofu state, or in CI logs.** Not even
    examples that look real.
 3. **No NAT gateway, no public IPs on tasks or the monitor box.**
@@ -164,7 +162,7 @@ Roughly $70–100/month: ALB, 3 small Fargate ARM tasks, db.t4g.micro, t4g.small
 t4g.nano NAT, EFS/EBS pennies. Add an AWS Budgets alarm at $150/month to the
 operator's email. Flag anything that pushes past this.
 
-## Out of scope for this wave
+## Out of scope (for now)
 
-The cutover itself (the operator runs it from `deploy/aws/CUTOVER.md`), moving
-tenants off Hetzner, WAF, multi-AZ RDS.
+Moving tenants off Hetzner (later k3s on EC2, EKS only at 2+ nodes), WAF,
+multi-AZ RDS.

@@ -3,7 +3,7 @@
 //! One single-node k3s cluster runs one squelchd pod per tenant, each with its
 //! own volume, its own age identity, its own NetworkPolicy, and its own
 //! subdomain. The warden is the small in-cluster service that makes that
-//! happen: the control plane (`squelch-control`, on Railway) calls the JSON
+//! happen: the control plane (`squelch-control`, on AWS) calls the JSON
 //! routes in [`handlers`], and the warden does the two things kube cannot do
 //! for itself, which are minting a tenant's key and rendering a tenant's
 //! manifests.

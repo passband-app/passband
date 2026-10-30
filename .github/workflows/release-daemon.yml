@@ -143,9 +143,9 @@ jobs:
           cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/squelch-warden:buildcache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/squelch-warden:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
 
-  # The hosted signup plane. Railway builds its own image from this repo, so
-  # this tag is for reproducibility and for anyone running the control plane
-  # somewhere Railway is not.
+  # The hosted signup plane. Production builds its own image from this repo
+  # (deploy-aws.yml pushes to ECR), so this tag is for reproducibility and for
+  # anyone running the control plane elsewhere.
   control-image:
     runs-on: ubuntu-latest
     # Deploys to the release-daemon environment, limited to daemon-* tags,

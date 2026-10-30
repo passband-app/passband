@@ -4,7 +4,7 @@ The cluster-side tenant provisioner for hosted Passband. One single-node k3s
 box, one warden pod, one squelchd pod per tenant, each with its own volume, its
 own age identity, its own NetworkPolicy, and its own subdomain.
 
-The control plane (`squelch-control`, on Railway) is the only caller of the API.
+The control plane (`squelch-control`, on ECS Fargate in AWS) is the only caller of the API.
 It makes two calls to create a tenant, and three more to run one.
 
 One other thing runs this binary, and it is not a caller: `squelch-warden roll`,

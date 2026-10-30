@@ -64,7 +64,7 @@ pub const ADMIN_COOKIE_NAME: &str = "passband_admin";
 /// not an admin session next week. The first half was wrong about how this page
 /// is actually used: approving a waitlist is a minute of work a few times a
 /// week, not a morning of it, so twelve hours meant the operator fetched the
-/// token out of Railway nearly every visit. A credential that has to be looked
+/// token out of the secret store nearly every visit. A credential that has to be looked
 /// up that often is a credential that ends up somewhere convenient, which is a
 /// worse outcome than a long session.
 ///

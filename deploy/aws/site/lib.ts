@@ -1,7 +1,7 @@
 // Pure pieces of the landing-site build for AWS (S3 + CloudFront), shared by
 // build.ts and the test. Everything here is DERIVED from passband-site/server.ts
-// and passband-site/appcast.xml rather than restated, so the Railway server and
-// the CloudFront Function cannot drift apart silently: the route map and the
+// and passband-site/appcast.xml rather than restated, so server.ts (the local dev
+// server) and the CloudFront Function cannot drift apart silently: the route map and the
 // releases repo are parsed out of server.ts's source, the version regex is the
 // one server.ts uses, and content types come from Bun's own MIME table (the
 // same one Bun.file() hands server.ts at runtime).
@@ -13,8 +13,8 @@ const VERSION_RE = /<sparkle:shortVersionString>(\d+\.\d+\.\d+)</;
 export const WOFF2_CACHE_CONTROL = "public, max-age=604800";
 
 /**
- * appcast.xml: server.ts sends no Cache-Control, so on Railway nothing caches
- * it. Behind CloudFront an object with no Cache-Control gets the cache
+ * appcast.xml: server.ts sends no Cache-Control, so served directly nothing
+ * caches it. Behind CloudFront an object with no Cache-Control gets the cache
  * policy's default TTL (a day on the managed policies), which would hide a
  * release from Sparkle for that long. DESIGN.md asks for it short-cached.
  */

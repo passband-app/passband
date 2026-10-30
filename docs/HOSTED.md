@@ -181,7 +181,8 @@ being trusted:
 The broker only ever sees an auth code that is cryptographically useless without the
 verifier, which never leaves the daemon. We are not trusted with tokens because we're
 nice; we are incapable of minting them. This sentence belongs on the website. The
-relay deploys next to the existing APNs relay (Railway).
+relay was to deploy next to the existing APNs relay; it never was (see the
+correction below and `deploy/DEPLOY.md` §8).
 
 > **Correction, 2026-08-04: steps 3 and 4 above cannot be built.** Google permits
 > Desktop-type clients to redirect only to loopback, so `auth.passband.email/callback`
@@ -242,7 +243,8 @@ a feature: hard tenant isolation, one user's mail can never leak into another's
 process, and the sealed-mail / two-door guarantees carry over untouched. One SQLite
 per user.
 
-**Two new crates.** `squelch-control` (on Railway) is signup, OAuth and the
+**Two new crates.** `squelch-control` (on ECS Fargate in AWS,
+`deploy/aws/DESIGN.md`) is signup, OAuth and the
 tenant record. `squelch-warden` is a small in-cluster provisioner on the box;
 it is the only thing that touches Kubernetes, and it renders no YAML at all
 (every tenant object is a typed `k8s-openapi` struct, so a tenant label can only

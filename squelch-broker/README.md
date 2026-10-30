@@ -24,11 +24,12 @@ Config is environment-only and validated at startup: a bad value is a refusal to
 boot, never a surprise on somebody's first consent.
 
 In a container it is `Dockerfile.broker` at the repo root, whose entrypoint binds
-`0.0.0.0:$PORT` because the default below is loopback and would be unreachable.
-The Railway service is [`deploy/DEPLOY.md` §8](../deploy/DEPLOY.md).
+`0.0.0.0:${PORT:-8851}` because the default below is loopback and would be
+unreachable. It is not deployed anywhere today; what a deployment needs is
+[`deploy/DEPLOY.md` §8](../deploy/DEPLOY.md).
 
 **Set `SQUELCH_BROKER_TRUSTED_PROXY_HOPS` when you deploy behind a TLS proxy**
-(`1` on Railway). Without it the rate limiters key on the TCP peer, which behind
+(`1` behind a single TLS-terminating proxy or load balancer). Without it the rate limiters key on the TCP peer, which behind
 a proxy is the proxy: every client in the world then shares one bucket, one of
 them can 429 all the rest, and the per-client session cap stays off because
 there is no client to count. It is opt-in because `X-Forwarded-For` is
@@ -42,7 +43,7 @@ address) falls back to the peer.
 |---|---|---|---|
 | `SQUELCH_BROKER_PUBLIC_URL` | yes | — | The externally visible base URL. It is what `redirect_uri` must equal (`<url>/callback`) and what the `/link` URL is built from, so it cannot be derived from the bind address. `http(s)`, origin only: a path, query, fragment, or userinfo is a refusal to boot. |
 | `SQUELCH_BROKER_BIND` | no | `127.0.0.1:8851` | Listen address. Loopback by design, TLS terminated by a proxy in front. |
-| `SQUELCH_BROKER_TRUSTED_PROXY_HOPS` | no | `0` | How many proxies you run in front of this listener. `0` trusts nothing, meters the TCP peer, and disables the per-client session cap. `N` keys on the Nth-from-the-right `X-Forwarded-For` entry; `1` is the single-TLS-proxy case (Railway). Max 8. |
+| `SQUELCH_BROKER_TRUSTED_PROXY_HOPS` | no | `0` | How many proxies you run in front of this listener. `0` trusts nothing, meters the TCP peer, and disables the per-client session cap. `N` keys on the Nth-from-the-right `X-Forwarded-For` entry; `1` is the single-TLS-proxy case. Max 8. |
 | `SQUELCH_BROKER_LOG` | no | `info` | `tracing` env filter. |
 
 ## Endpoints
@@ -54,8 +55,10 @@ Nothing else is authenticated either, and that is the design: every stranger's
 self-hosted daemon is a legitimate client, so there is no credential anyone
 could be asked for. The defenses are strict validation of the registered consent
 URL (including a **scope allowlist**: a registration may only ask for the scopes
-`squelchd` itself asks for, `gmail.readonly` / `gmail.modify` / `gmail.send` and
-the optional `userinfo.profile`, so
+`squelchd` asks for or has asked for: `gmail.modify` (today's only Gmail
+scope), the older `gmail.readonly` / `gmail.send` kept for older self-hosts, the
+calendar pair `calendar.events` / `calendar.calendarlist.readonly`, and the
+optional `userinfo.profile`, so
 nobody can park a link on our domain requesting full mailbox control),
 high-entropy identifiers minted by the daemon, a session table capped at 4096
 with a 10 minute TTL, a per-client ceiling of 16 live sessions, and per-client

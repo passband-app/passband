@@ -1,6 +1,6 @@
 # deploy/aws/tofu
 
-OpenTofu for the AWS side of the Railway move. The contract is
+OpenTofu for everything Passband runs on AWS. The contract is
 `deploy/aws/DESIGN.md`; this file is how to apply it.
 
 **No secret value ever goes through tofu.** Tofu creates Secrets Manager
@@ -31,8 +31,10 @@ Files in `main/`: `network.tf` (VPC, subnets, hand-rolled fck-nat),
 
 ## Apply order
 
-**The procedure is `deploy/aws/CUTOVER.md`**, and only there, so there are not
-two versions to drift apart. In outline, and where each step lives:
+**The first-time procedure is `deploy/aws/CUTOVER.md`** (it built the
+production account, 2026-10-23 to 26), and only there, so there are not two
+versions to drift apart. Day to day, a change here is `tofu plan` then `tofu
+apply` from `main/`. In outline, and where each first-time step lives:
 
 | Step | CUTOVER.md |
 |---|---|
@@ -46,8 +48,8 @@ two versions to drift apart. In outline, and where each step lives:
 | `services_running = true` (the apply waits for steady state) | Phase 3d |
 | Bifrost first-run config with `operator_cidrs` set to your /32, then back to `[]` | Phase 4 |
 
-Run as an Identity Center admin session (`aws sso login`), never with access
-keys. Requires OpenTofu >= 1.8.
+Run as the operator's session (`aws login --profile passband`), never with
+access keys. Requires OpenTofu >= 1.8.
 
 ## Who owns what after the first apply
 

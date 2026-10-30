@@ -20,9 +20,10 @@ if [ -n "${SQUELCH_CONTROL_DB_PATH:-}" ]; then
 fi
 
 # The control plane's own default bind is loopback, which is correct for a box
-# with a TLS proxy in front and unreachable inside a container. Railway injects
-# PORT and terminates TLS at its edge, so bind whatever port it hands us on all
-# interfaces unless the operator pinned SQUELCH_CONTROL_BIND themselves.
+# with a TLS proxy in front and unreachable inside a container. TLS terminates
+# at the load balancer, so bind all interfaces: on a platform-injected PORT if
+# set, else 8852 (what the ECS task and its ALB target use, since ECS injects no
+# PORT), unless the operator pinned SQUELCH_CONTROL_BIND themselves.
 SQUELCH_CONTROL_BIND="${SQUELCH_CONTROL_BIND:-0.0.0.0:${PORT:-8852}}"
 export SQUELCH_CONTROL_BIND
 

@@ -1,14 +1,17 @@
-# Provisioned datasource: the Prometheus service in this same Railway project,
-# over private networking. PROM_PASSWORD is a Grafana service variable holding
-# the same value as Prometheus's PROM_REMOTE_WRITE_PASSWORD (one credential,
-# two names, because each service names its own env).
+# Provisioned datasource for Grafana on the AWS `monitor` box: the Prometheus
+# container in the same compose project (deploy/aws/monitor/compose.yaml),
+# addressed by its compose service name.
+#
+# PROM_PASSWORD holds the same value as Prometheus's PROM_REMOTE_WRITE_PASSWORD
+# (one credential, two names). Both come from Secrets Manager
+# (passband/monitor/PROM_PASSWORD and passband/monitor/PROM_REMOTE_WRITE_PASSWORD).
 apiVersion: 1
 datasources:
   - name: Prometheus
     uid: prometheus
     type: prometheus
     access: proxy
-    url: http://prometheus.railway.internal:9090
+    url: http://prometheus:9090
     isDefault: true
     basicAuth: true
     basicAuthUser: remote

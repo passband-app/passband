@@ -47,13 +47,18 @@ Ordered by what stops the submission soonest.
       exactly what the automated home page check looks for. `/about` is static
       HTML (added 2026-08-25) and carries the description, the scope table, and
       the policy links without executing a bundle.
-- [ ] **Confirm what Bifrost retains.** The gateway's `/app/data` volume is
-      documented as "governance state: virtual keys, budgets, spend," but
-      nothing in this repo establishes whether request and response *bodies* are
-      persisted. If they are, Gmail message content is sitting in a Railway
-      volume, undisclosed, and an assessor will find it. Turn body logging off,
-      or disclose it in the privacy policy and scope it into CASA. **Do this
-      before the assessment, not during.**
+- [ ] **Confirm what Bifrost retains.** The gateway keeps its config and log
+      stores as SQLite under `/app/data` on EFS (`bifrost_store = "efs"`,
+      `deploy/aws/tofu/main/ecs.tf`). Bifrost's defaults log every request
+      body, i.e. Gmail message content, to `/app/data/logs.db` for 365 days.
+      On the AWS gateway content logging was turned off at cutover
+      (`disable_content_logging: true`, `log_retention_days: 7`, 2026-10-26,
+      `deploy/aws/CUTOVER.md`). The setting lives in Bifrost's config store,
+      not in the task definition, so before the assessment re-check it under
+      Config → Logs and keep the evidence. The Railway volume the gateway ran
+      on before the move goes with the Railway project's deletion (CUTOVER.md
+      Phase 10); confirm that has happened. **Do this before the assessment,
+      not during.**
 - [ ] **`/mcp` bearer auth** (`deploy/hosted/PRODUCTION.md`). An unauthenticated
       agent door is not something to be explaining to an assessor. Tenant
       Ingresses currently route around it; make that structural, or build the
@@ -244,7 +249,7 @@ the daemon:
 |---|---|
 | `signup.passband.app` (`squelch-control`) | Runs the OAuth exchange, seals the refresh token |
 | `*.passband.email` tenant vhosts | Serve `/client`, `/console`, `/t` off the tenant's own mail |
-| `bifrost.passband.app` | Message content in transit to Anthropic |
+| `bifrost.passband.app` | Message content in transit to Anthropic. Source-restricted: it answers only our own egress and `carrier`, so it is not publicly reachable |
 | The push/read-receipt relay | Opaque tokens only, but it is our surface |
 | `carrier` (Hetzner) and the k3s cluster | Where the mail and the sealed tokens rest |
 

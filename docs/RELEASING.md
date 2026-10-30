@@ -10,7 +10,7 @@ all of them; know which one you are doing before you start.
 | Hosted carrier | manual ops on `carrier` | warden + tenant pods | every hosted tenant |
 | Passband for Mac | push tag `passband-mac-X.Y.Z` | GitHub Release + appcast + Homebrew cask | every Mac user, via Sparkle |
 | Passband for iOS | push tag `passband-ios-X.Y.Z` | a TestFlight build | every TestFlight tester |
-| Railway services | git push to `main`, or `railway up` | control, landing site, relay, monitoring | signup, passband.app, push relay |
+| AWS services | git push to `main` (`deploy-aws.yml`), or `workflow_dispatch` | control, relay, bifrost, monitoring, landing site | signup, push relay, hosted LLM gateway, passband.app |
 
 Every tag namespace names its surface, and the three never overlap: pushing a
 phone build never rebuilds three Docker images, and cutting a daemon never
@@ -321,10 +321,17 @@ how a verification becomes an incident.
 
 The canonical path is the tag; CI (`release-passband-mac.yml`) builds, signs,
 notarizes, staples, creates the GitHub Release, regenerates the appcast
-against ALL prior releases, commits it to `main` (which redeploys the site,
-which publishes the feed), and bumps the Homebrew cask. Local fallback:
+against ALL prior releases, commits it to `main`, and bumps the Homebrew cask. Local fallback:
 `passband/release.sh`, same steps from this machine. Details and credentials:
 `passband/RELEASING.md`.
+
+That appcast commit is pushed with `GITHUB_TOKEN`, and a `GITHUB_TOKEN` push
+starts no other workflow, so it does not trigger `deploy-aws.yml` by itself.
+Instead `deploy-aws.yml` has a `workflow_run` trigger on
+`release-passband-mac`: when that run completes **successfully**, it deploys
+the site (and only the site), which publishes the new feed. A failed or
+cancelled release run deploys nothing. If the feed is stale after a good
+release, `gh workflow run deploy-aws.yml -f service=site`.
 
 Things that bite:
 
@@ -336,8 +343,10 @@ Things that bite:
   `SPARKLE_PRIVATE_KEY` repo secret. Losing both means every installed app
   rejects every future update. It is not in the repo, on purpose.
 - The appcast enclosure URLs go through `passband.app/download/*` (302 to
-  GitHub Releases), so the site must be up for updates to install; the feed
-  itself is baked into the site image at deploy time.
+  GitHub Releases), so the site must be up for updates to install. The site is S3 +
+  CloudFront; `/download` routing is a CloudFront Function
+  (`deploy/aws/site/function.js`) into which `deploy/aws/site/build.ts` bakes
+  the newest appcast version at deploy time.
 - Verify after: `curl -s https://passband.app/appcast.xml | grep <VERSION>`,
   then Passband → Check for Updates on a machine running the previous build.
 
@@ -355,20 +364,25 @@ equivalent: `passband/release-ios.sh`. Two things differ from the Mac path:
   Connect refuses a marketing version that ever goes backwards. The verify job
   exists so the tag cannot free-float away from what a local build would stamp.
 
-## Surface 5: Railway services
+## Surface 5: AWS services
 
-| Service | Deploys when |
-|---|---|
-| `control` (signup.passband.app) | git push to `main` (repo-connected) |
-| landing site (passband.app) | git push to `main` (root dir `passband-site/`) |
-| relay | `railway up` only |
-| prometheus / blackbox / grafana | `railway up -s <name>` only |
+Everything runs from `.github/workflows/deploy-aws.yml`; the architecture is
+`deploy/aws/DESIGN.md`.
 
-The standing lesson (DEPLOY.md §8): every service must have its
-config-as-code file path set in service settings; the root `railway.toml`
-builds the RELAY, and a service without its own file inherits it and ships
-the wrong image. `Dockerfile.broker` has no railway toml yet — create
-`railway.broker.toml` before its first deploy.
+| Service | Runs on | Deploys when |
+|---|---|---|
+| `control` (signup.passband.app) | ECS Fargate | push to `main` touching `squelch-control`, `squelch-core`, `squelch-httpauth`, `Dockerfile.control` or the workspace manifests |
+| `relay` (relay.squelch.sh) | ECS Fargate, `/data` on EFS | push to `main` touching `squelch-relay`, `squelch-httpauth`, `squelch-ratelimit`, the root `Dockerfile` or the workspace manifests |
+| `bifrost` (LLM gateway) | ECS Fargate, store on EFS | push to `main` touching `deploy/aws/docker/Dockerfile.bifrost` |
+| prometheus / grafana / blackbox | EC2 `monitor` box, docker compose | push to `main` touching `deploy/aws/monitor/` or `deploy/monitoring/{grafana,prometheus,blackbox}/` (via the SSM document `passband-monitor-deploy`) |
+| landing site (passband.app) | S3 + CloudFront | push to `main` touching `passband-site/` or `deploy/aws/site/`, and after every successful `release-passband-mac` run (`workflow_run`) |
+
+Any of them by hand: `gh workflow run deploy-aws.yml -f
+service=<control|relay|bifrost|monitor|site|all>`. The ECS jobs wait for
+steady state and fail if the new task never serves. **None of these wait for
+CI**: green CI on the PR is the gate. The `squelch-control` image a `daemon-*`
+tag publishes to GHCR is not what production runs; production builds its own
+from `main` into ECR.
 
 Note that `control` deploying on every push to `main` means server-side
 changes land on signup as soon as they merge, independent of any `daemon-*`
@@ -431,11 +445,14 @@ roll the carrier promptly.
   containing the old behavior. Budget an hour, not a minute. iOS is the same
   shape with Apple in the loop: a new `passband-ios-*` build, or expire the bad
   one in TestFlight.
-- **Railway:** each service's dashboard can redeploy the previous deployment;
-  for repo-connected services, revert the commit on `main`.
-- **Control DB** is the project's Railway Postgres service. Railway keeps its
-  own backups of managed Postgres, which is more restore path than the old
-  volume file ever had — but a migration that corrupts data still deserves
+- **AWS services:** revert the commit on `main` and let `deploy-aws.yml`
+  redeploy. A deploy whose new task never becomes healthy is rolled back by
+  the ECS deployment circuit breaker on its own. For an ECS service you can
+  also point it at the previous task definition revision.
+- **Control DB** is RDS Postgres 16 with 7 days of automated backups
+  (point-in-time restore), deletion protection, and a final snapshot on
+  delete (`deploy/aws/tofu/main/rds.tf`). That is more restore path than the
+  old volume file ever had, but a migration that corrupts data still deserves
   the same one-way-door respect as tenant schemas: verify against a copy
   before shipping schema changes.
 

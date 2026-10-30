@@ -1,7 +1,6 @@
 #!/usr/bin/env bun
 // Builds the landing site for S3 + CloudFront (deploy/aws/DESIGN.md, "landing
-// site"). Railway keeps building passband-site/Dockerfile until cutover; this
-// script does not touch that path, it only runs the same `bun run build`.
+// site"). It runs passband-site's own `bun run build` and packages the output.
 //
 //   bun deploy/aws/site/build.ts [--skip-site-build] [--out <dir>]
 //

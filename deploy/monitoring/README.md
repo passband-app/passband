@@ -3,51 +3,55 @@
 Two halves, split by one rule: **nothing that judges carrier's health may live
 on carrier.**
 
-## The Railway half (this directory)
+## The AWS half (this directory, run by `deploy/aws/monitor/`)
 
-Three services in the existing `squelch` Railway project, each built from a
-root-level Dockerfile and its own config-as-code file (the `railway.*.toml`
-lesson from `deploy/DEPLOY.md` §8 applies — the file path is set in service
-settings, `RAILWAY_DOCKERFILE_PATH` is ignored):
+One EC2 box, `monitor` (t4g.small, private subnet, no SSH: SSM Session Manager
+only), running three containers under docker compose
+(`deploy/aws/monitor/compose.yaml`). Each image is built by
+`deploy/aws/monitor/Dockerfile.<name>`, which bakes in the configs from this
+directory. This directory is the single source of truth for every config; the
+Dockerfiles carry no copies.
 
-| Service | Image base | Config | Public domain |
-|---|---|---|---|
-| `prometheus` | `prom/prometheus:v3.5.0` | `railway.prometheus.toml` | yes — carrier pushes here (port 9090) |
-| `blackbox` | `prom/blackbox-exporter:v0.25.0` | `railway.blackbox.toml` | **never** — private networking only |
-| `grafana` | `grafana/grafana:12.2.0` | `railway.grafana.toml` | yes — the dashboard (port 3000) |
+| Container | Image base | Reachable at |
+|---|---|---|
+| `prometheus` | `prom/prometheus:v3.15.1` | `https://metrics.passband.app` (ALB to :9090), and only from carrier's egress address: carrier pushes here |
+| `blackbox` | `prom/blackbox-exporter:v0.29.1` | **never**: no published port, no ALB route, compose network only |
+| `grafana` | `grafana/grafana:13.2.4` | tailnet only: `https://passband-monitor.<tailnet>.ts.net:8443/`. `grafana.passband.app` (ALB to :3000) admits only the NAT EIP and `operator_cidrs`, so from a laptop it is a 404 |
 
-Prometheus stores 30 days on its volume, receives `remote_write` from carrier
-(basic auth, every route), and scrapes blackbox probes of
-`signup.passband.app/healthz`, `warden.passband.app/healthz` and
-`passband.app` — so uptime is measured from outside the box.
+Prometheus stores 30 days on the box's encrypted data volume, receives
+`remote_write` from carrier (basic auth, every route), and scrapes blackbox
+probes of `signup.passband.app/healthz`, `warden.passband.app/healthz` and
+`passband.app`, so uptime is measured from outside the box being watched.
 
 Grafana provisions its datasource and the `passband-health` dashboard from
 files baked into the image. Edit the dashboard by editing
 `grafana/dashboards/passband-health.json` and **merging it to `main`**, not in
-the UI — UI edits die with the next deploy (`allowUiUpdates: false` says so out
+the UI: UI edits die with the next deploy (`allowUiUpdates: false` says so out
 loud).
 
-All three of these services deploy themselves when `main` moves; they are wired
-to this repo with a deployment trigger on `main`, so a merge is the deploy.
-(This paragraph used to say `railway up -s grafana`, which sent at least one
-person down a staging-dir rabbit hole to do by hand what a merge does on its
-own. `railway up` uploads your working tree, so it can put a build into
-production that exists in no commit, and from the repo root it is silently
-SKIPPED on these services. See the root `CLAUDE.md`.)
+A merge to `main` that touches this directory or `deploy/aws/monitor/` is the
+deploy: `.github/workflows/deploy-aws.yml` builds the three images, pushes them
+to ECR, and tells the box to pull them through the `passband-monitor-deploy`
+SSM document (which pins `IMAGE_TAG` to the commit). To redeploy by hand:
+`gh workflow run deploy-aws.yml -f service=monitor`.
 
 Because the dashboard ships inside the image, **merging a panel change is not
-the same as seeing it** — the service has to finish rebuilding. Check the thing
-itself rather than the deploy status:
+the same as seeing it**: the deploy job has to finish. Check the thing itself
+rather than the job status, from an SSM session on the box
+(`aws ssm start-session --target <AWS_MONITOR_INSTANCE_ID>`):
 
 ```sh
-railway ssh --service grafana -- grep -c last_over_time \
-  /etc/grafana/dashboards/passband-health.json
+cd /opt/passband-monitor && sudo docker compose exec -T grafana \
+  grep -c last_over_time /etc/grafana/dashboards/passband-health.json
 ```
 
-Credentials: `PROM_REMOTE_WRITE_PASSWORD` (plain) + `PROM_WEB_BCRYPT` (its
-bcrypt) on prometheus; the same plain value as `PROM_PASSWORD` on grafana,
-plus `GF_SECURITY_ADMIN_PASSWORD`. All live in Railway variables and in the
-`monitoring/remote-write-auth` Secret on carrier — nowhere else.
+Credentials: `PROM_REMOTE_WRITE_PASSWORD` (plain) and `PROM_WEB_BCRYPT` (its
+bcrypt) for prometheus; the same plain value as `PROM_PASSWORD` for grafana,
+plus `GF_SECURITY_ADMIN_PASSWORD` and `SLACK_ALERTS_WEBHOOK_URL`; the canary's
+`BLACKBOX_BIFROST_CANARY_KEY` for blackbox. All live in Secrets Manager under
+`passband/monitor/*` (the box fetches them at boot into a tmpfs env file per
+container) and, for the remote-write password, in the
+`monitoring/remote-write-auth` Secret on carrier. Nowhere else.
 
 ## The carrier half
 
@@ -120,7 +124,7 @@ families.
 
 The agent scrapes itself on a job of its own (`prometheus-agent`, under ten
 series), because the allow-lists are a memory argument and it should be possible
-to read whether they worked. On the Railway Prometheus:
+to read whether they worked. On the monitor box's Prometheus:
 
 ```promql
 prometheus_agent_active_series{cluster="carrier"}
@@ -332,11 +336,11 @@ per tenant rather than per pod, so a pod restart does not resolve and re-fire a
 tenant who was stale throughout. What is still firing right now is in Grafana
 under Alerting, not in the channel's scrollback.
 
-**`SLACK_ALERTS_WEBHOOK_URL` must be set on the Grafana service before any
+**`passband/monitor/SLACK_ALERTS_WEBHOOK_URL` must have a value before any
 change to these files deploys.** Grafana exits at startup when the Slack
-receiver has no URL (checked against 12.2.0), the deploy fails its healthcheck,
-and the previous image keeps serving without the change. Nothing breaks, and
-nothing alerts either.
+receiver has no URL (checked against 12.2.0), and the monitor deploy job fails
+("not healthy after 3 minutes"). Nothing alerts while it is down. Set the
+secret, then `systemctl reload passband-monitor` on the box.
 
 Two escapes that were tested rather than assumed, both against 12.2.0:
 env-var interpolation DOES run over `contact-points.yml` (that is how the URL

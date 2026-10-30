@@ -268,7 +268,7 @@ sync loop finish in-flight work and flush before exit.
 
 ---
 
-## 8. The consent relay (`squelch-broker`) on Railway
+## 8. The consent relay (`squelch-broker`): not deployed
 
 > **Do not deploy this for self-host** — Google's desktop-client redirect
 > policy makes the code-parking flow unusable for the client type self-host
@@ -279,6 +279,11 @@ sync loop finish in-flight work and flush before exit.
 > stays as the operational reference for the hosted-tier callback, which is
 > where the crate lands next.
 
+**Status: nothing runs it.** No production service has ever served the broker,
+and nothing answers at `auth.passband.email`, its planned host. It is not part
+of the AWS deployment (`deploy/aws/DESIGN.md`) and `deploy-aws.yml` has no job
+for it. This section is what a deployment needs, for whoever builds one.
+
 Optional, and not part of the box above: this is the service that makes
 `squelchd auth --broker <url>` work, so §4's `ssh -L` tunnel stops being the only
 way to consent on a host with no browser. It parks one Google authorization code
@@ -287,33 +292,22 @@ no tokens: the code it parks is useless without the PKCE verifier, which never
 leaves the daemon. Wire contract: [../docs/BROKER.md](../docs/BROKER.md);
 operational reference: [../squelch-broker/README.md](../squelch-broker/README.md).
 
-It is a SECOND Railway service from the same repo, not another copy of the relay.
-The two share a posture and nothing else, and they must not share a service:
-`railway.toml` at the repo root builds the relay.
+It is its own service with its own image, `Dockerfile.broker` at the repo root,
+not another copy of the APNs relay (the root `Dockerfile`). The two share a
+posture and nothing else, and must not share a service or an image. Whatever
+platform runs it, check that the image it built is the broker's: a green deploy
+of the wrong Dockerfile serves the wrong binary with no error anywhere.
 
-> **Which Dockerfile a service builds: config-as-code wins, and it is not close.**
-> Proven the hard way on 2026-08-10 by the `control` service, which was configured
-> with `RAILWAY_DOCKERFILE_PATH=Dockerfile.control` and shipped the **relay** image
-> anyway, twice. The root `railway.toml` pins `dockerfilePath = "Dockerfile"`, every
-> service off this repo inherits that file by default, and its config-as-code
-> OUTRANKS the service variable. Setting the variable and nothing else is a deploy
-> that looks green and serves the wrong binary.
->
-> The only reliable mechanism is a **per-service config file** selected in that
-> service's settings under "Config-as-code file path". `squelch-control` has
-> `railway.control.toml` (its header comment records this lesson); the broker needs
-> its own `railway.broker.toml`, pinning `dockerfilePath = "Dockerfile.broker"`,
-> created and pointed at before its first deploy.
+**What it needs**
 
-**Service settings**
-
-| Setting | Value |
+| Need | Value |
 |---|---|
-| Config-as-code path | `railway.broker.toml` — **this is the setting that decides the image.** Left at the default the service picks up the root `railway.toml` and builds the relay. |
-| `RAILWAY_DOCKERFILE_PATH` | `Dockerfile.broker`. Belt-and-braces only: it is overridden by any config-as-code file the service resolves, so it is not what makes this work. |
-| Healthcheck path | `/healthz` — unauthenticated and outside both rate limiters, so it answers while a client is being throttled |
-| Restart policy | on failure. A restart drops every pending consent, which is the design: the recovery is re-running `squelchd auth`. |
-| Custom domain | `auth.passband.email` |
+| Image | `Dockerfile.broker`. Its entrypoint binds `0.0.0.0:${PORT:-8851}`, so it listens on 8851 unless the platform injects `PORT`. |
+| Public HTTPS host | `auth.passband.email` is the planned one. TLS is terminated in front of the listener (load balancer or reverse proxy); the listener itself speaks plain HTTP. |
+| Health check | `GET /healthz`, unauthenticated and outside every rate limiter, so it answers while a client is being throttled. |
+| Restart policy | Restart on failure. A restart drops every pending consent, which is the design: the recovery is re-running `squelchd auth`. |
+| Instances | One. Sessions live in that process's memory, so two instances behind one host would each miss the other's sessions. |
+| Secrets | None. It holds no credential of any kind. |
 
 **Environment**
 
@@ -324,21 +318,22 @@ The two share a posture and nothing else, and they must not share a service:
 # userinfo is a refusal to boot.
 SQUELCH_BROKER_PUBLIC_URL=https://auth.passband.email
 
-# Railway terminates TLS in front of this listener, so without this every daemon
-# in the world shares one rate-limit bucket (one of them can 429 all the rest)
-# and the per-client session cap has no client to count. `1` = one proxy: only
-# the rightmost X-Forwarded-For entry is read, and anything that does not
+# Set to the number of proxies that write X-Forwarded-For in front of the
+# listener: `1` for a single TLS-terminating load balancer or proxy. Without it
+# every daemon in the world shares one rate-limit bucket (one of them can 429
+# all the rest) and the per-client session cap has no client to count. Only the
+# rightmost N X-Forwarded-For entries are read, and anything that does not
 # resolve falls back to the peer.
 SQUELCH_BROKER_TRUSTED_PROXY_HOPS=1
 
 # SQUELCH_BROKER_BIND is deliberately NOT set: the image entrypoint derives it
-# from Railway's injected PORT (0.0.0.0:$PORT), because the broker's own default
-# is loopback. Set it only to override that.
+# (0.0.0.0:${PORT:-8851}), because the broker's own default is loopback. Set it
+# only to override that.
 # SQUELCH_BROKER_LOG=info
 ```
 
 Two things must agree with `SQUELCH_BROKER_PUBLIC_URL` exactly, or consent fails
-before the broker is ever involved: the custom domain, and the redirect URI
+before the broker is ever involved: the public host, and the redirect URI
 `https://auth.passband.email/callback` registered on the Google OAuth client the
 daemons use.
 
@@ -378,7 +373,7 @@ authorization codes to `/callback` in the clear.
 One operational property worth knowing before this is public: every route has
 its own bucket (`/v1/sessions` 30/min, `/v1/claim` 600/min, `/link` 300/min,
 `/callback` 1200/min), and they key on the TCP peer unless
-`SQUELCH_BROKER_TRUSTED_PROXY_HOPS` is set. Behind Railway's edge, unset means
+`SQUELCH_BROKER_TRUSTED_PROXY_HOPS` is set. Behind a proxy, unset means
 every daemon in the world shares each bucket and the per-client session cap (16
 live sessions) is inert, which is why the environment above sets it to `1`.
 Those are the numbers to revisit first if legitimate polling ever gets throttled.

@@ -2717,7 +2717,7 @@ mod tests {
 
     /// A DELIBERATE SIGN OUT IS NOT A REFUSAL. The session runs for a month
     /// now, so ending one on a borrowed machine had to become a press rather
-    /// than a trip to Railway to rotate the token; and the page that press lands
+    /// than a trip to Secrets Manager to rotate the token; and the page that press lands
     /// on answers 200, because the request did exactly what was asked. The
     /// expired-session door is the 401, and still says so.
     #[tokio::test]

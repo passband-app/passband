@@ -347,7 +347,7 @@ groups:
           description: >-
             Every other alert is blind until this clears. The box, the Prometheus agent
             (monitoring namespace), or kube-state-metrics is down, or remote write to
-            Railway's Prometheus is failing.
+            metrics.passband.app (the monitor box's Prometheus) is failing.
         data:
           - refId: A
             datasourceUid: prometheus

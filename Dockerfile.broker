@@ -1,8 +1,8 @@
 # Builds squelch-broker — the consent relay. It is the second piece of squelch
-# that runs on shared/public infrastructure: its own Railway service at
+# meant for shared/public infrastructure: its own service at
 # auth.passband.email, separate from the APNs relay (see deploy/DEPLOY.md §8).
-# The root Dockerfile builds the relay; Railway selects this one per-service
-# with RAILWAY_DOCKERFILE_PATH.
+# The root Dockerfile builds the relay. The broker is not deployed anywhere
+# today; this file is here for whoever deploys it.
 #
 # The build context must be the workspace root: squelch-broker is a workspace
 # member and cargo needs the root manifest + lockfile to resolve it.

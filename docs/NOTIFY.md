@@ -830,8 +830,8 @@ label, one `AtomicU64` per combination, every series rendered even at zero,
 
 ### 11.11 Rollout, in order
 
-Merging is deploying for every Railway service, but nothing in this PR runs
-there: the daemon ships as a tagged image and the client as a tagged app, so
+Merging is deploying for every AWS service (`deploy-aws.yml`), but nothing in
+this PR runs there: the daemon ships as a tagged image and the client as a tagged app, so
 the merge itself changes nothing a user sees. The steps below are what does,
 and only the first is automatic.
 

@@ -1,16 +1,13 @@
 # Bifrost for AWS (ECS service `bifrost`; deploy-aws.yml builds this file).
 #
-# The root Dockerfile.bifrost with the base image pinned by DIGEST. The root
-# file stays as it is because Railway still builds it until cutover
-# (deploy/aws/DESIGN.md, invariant 1). Bifrost sees every mail body that
+# The upstream image, pinned by DIGEST. Bifrost sees every mail body that
 # goes to triage and holds the Anthropic key, so a re-pushed upstream tag
 # must not reach production silently: the digest below is what gets pulled.
 #
 # Multi-arch index digest fetched from Docker Hub 2026-10-23. Bump the tag and
-# the digest together, and keep the version in step with the root
-# Dockerfile.bifrost while both exist.
+# the digest together.
 #
-# Unlike the root (Railway) file, NOT root: the upstream image runs as
+# NOT root: the upstream image runs as
 # 1000:0 (its appuser), and the data directory is an EFS access point that
 # performs every operation as uid 1000 (tofu var.bifrost_uid) anyway, so the
 # process and its files already agree. Root bought nothing here except a

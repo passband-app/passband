@@ -3,7 +3,7 @@
 //!
 //! WHY THIS EXISTS. On 2026-09-28 the `tenants` quota was full, a signup's pod
 //! was refused at admission, and the only record was a WARN and two ERRORs in
-//! Railway's log for this service. The operator found out because the person
+//! this service's log. The operator found out because the person
 //! signing up said so. Every state this module announces is one that nothing
 //! else in the system will heal: an orphaned half-signup, a running tenant with
 //! no control row. Those should reach a phone, not wait in a log.

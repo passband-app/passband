@@ -931,7 +931,8 @@ fn gmail_slots(scopes: AuthScopes) -> Vec<CredentialKind> {
 
 /// Whether a Gmail run (plain `auth` or `--write`) should end by OFFERING
 /// the optional calendar consent, so a new self-host is asked for calendar at
-/// setup rather than on the Calendar page later. Offered only while no calendar credential is stored, so
+/// setup even while the `calendar` hidden feature is off (sync calls nothing
+/// until it is on). Offered only while no calendar credential is stored, so
 /// a repair run does not ask again, and never on `--calendar`, which is that
 /// consent already.
 ///
@@ -3142,8 +3143,10 @@ fn cmd_serve(
             // The card's places ride the same key and the notify model, like
             // the sitrep headline. No key: locations are shown as they are.
             Ok(sync) => {
-                // Taking over Gmail's own events (and deleting Gmail's copy)
-                // waits for the `calendar_own` hidden feature.
+                // The same live feature set the human door gates on, asked
+                // at every pass: a pass waits for the `calendar` hidden
+                // feature, and taking over Gmail's own events (and deleting
+                // Gmail's copy) for `calendar_own` as well.
                 Some(
                     sync.with_places(squelch_core::gcal::place::PlaceClient::from_config(&config))
                         .with_features(api_state.features().clone()),

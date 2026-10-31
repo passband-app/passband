@@ -166,9 +166,12 @@ impl Snapshot {
     }
 }
 
-/// Reminders run for this mailbox: the owner has not turned them off. A
-/// store error reads as off.
+/// Reminders run for this mailbox: the `calendar` feature is on and the
+/// owner has not turned them off. A store error reads as off.
 async fn on(state: &ApiState) -> bool {
+    if !state.features().enabled(squelch_core::features::CALENDAR) {
+        return false;
+    }
     store_call(state, |store, account| {
         store.calendar_reminders_enabled(account)
     })

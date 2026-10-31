@@ -1189,8 +1189,8 @@ Where the build settled something the design left open, or differs from it:
   every tenth (5 minutes). A sync
   pass only runs with a calendar grant, and committed ghosts are reminded
   without one. Events are read only while calendar is granted, as the
-  timeline serves them. No flag gates it (the `calendar` hidden feature
-  was retired by #637); the owner preference is the only off switch.
+  timeline serves them. The worker idles while the `calendar` hidden
+  feature is off, like every route it depends on.
 - **A ghost from mail that failed authentication is never reminded**, not
   only kept from linking mail: its title would otherwise reach the lock
   screen on a stranger's say-so.
@@ -1230,7 +1230,7 @@ Where the build settled something the design left open, or differs from it:
   no place).
 - **The preference** is the `app_settings` row `calendar_reminders` (`0` is
   off), `GET`/`PUT /client/calendar/reminders/settings` `{"enabled": bool}`,
-  human door only.
+  human door, behind the `calendar` feature.
 
 ## 6. Scheduling from the sitrep
 

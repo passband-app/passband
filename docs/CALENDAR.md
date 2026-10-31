@@ -512,8 +512,8 @@ is still needed (a refund pending, a later leg's tickets, a question to
 answer) is a judgment, and hand-written rules for it were never as accurate
 as asking. Code does two things around the model: it schedules the question
 from the model's own dates, and it enforces a few rails on the answer. It is
-NOT behind the (now retired) `calendar` flag: it runs for every mailbox,
-like ghost projection does.
+NOT behind the `calendar` flag: it runs for every mailbox, like ghost
+projection does.
 
 - **The question.** A triage job whose trigger starts with `revisit:` is a
   scheduled re-check. On one, and only on one, the agent may answer `done`
@@ -632,7 +632,7 @@ founder says otherwise:
 - Accounts are two muted fills. Blue is reserved for state: now, next, holds
   and suggested slots.
 
-**Built so far** (Mac client; for every mailbox since the `calendar` flag was retired, §11): a Calendar destination
+**Built so far** (Mac client; for every mailbox with the `calendar` flag, §11): a Calendar destination
 second in the rail. The page opens on a conventional month (Month | Agenda in
 the header, `m` and `a`): each cell lists its day top-down as chips in the
 calendar's colour, trips and stays as named bars across the cells they cover,
@@ -2283,69 +2283,48 @@ nothing:
   no event pane for the assistant to draft into. It was once also gated on
   the Calendar page being on; the page is unconditional now.
 
-## 11. Feature flag (RETIRED: calendar is for everyone)
+## 11. Feature flag: `calendar`
 
-The calendar was the hidden feature `calendar` from its first merge (#360)
-until October 2026, when it launched for every tenant and every app ("everyone
-should get it", the founder, 2026-10-28). The key is RETIRED and listed in
-`squelch_core::features::RETIRED`; it is never to be reused (docs/FEATURES.md,
-"Launching"). With no users yet there was no staged rollout: the flag and
-every check on it were deleted in one change.
+The calendar is the hidden feature `calendar` (`squelch_core::features::CALENDAR`,
+docs/FEATURES.md). It was behind the flag from its first merge (#360), launched
+for every tenant on 2026-10-28 (#637, shipped in Mac 0.0.16, iPhone 0.0.11 and
+daemon 0.0.15), and went back behind the flag on 2026-10-31. It came back under
+the SAME key on purpose, so the `tenant_features` rows ticked before the launch
+turn it on again for the testers who had it. Check `/admin/features` before
+assuming who has it: an "Everyone" default for `calendar`, if one was ever
+saved, is the whole fleet.
 
-What that means now:
+What the flag gates:
 
 - **The daemon.** Every route behind the page (`GET /client/timeline`, `PATCH
-  /client/timeline/ghosts/{id}`, `POST /client/timeline/refresh`, `POST
-  /client/calendar/connect`, `GET /client/calendar/people`, `POST
+  /client/timeline/ghosts/{id}`, `POST /client/timeline/refresh`, `GET
+  /client/calendar/search` and the agent door's `/client/agent/calendar/search`,
+  `POST /client/calendar/connect`, `GET /client/calendar/people`, `POST
   /client/calendar/events`, `PATCH` and `DELETE
-  /client/calendar/events/{calendar_id}/{id}`, `PUT /client/person/timezone`)
-  is served to every mailbox, after bearer auth like every human-door route
-  (`calendar_routes` in `squelch-api/src/lib.rs`). `/client/stats` always says
-  `timeline: true` and always carries the `calendar` object (granted or not,
-  and how to connect). `GET /client/person` serves the inferred `timezone`.
-  The sync loop needs no flag: it idles until calendar is GRANTED and then
-  syncs. Ghost projection and timezone inference ran regardless of the flag
-  all along, so every mailbox has its history from the day those shipped.
-- **The hosted calendar consent** (`/reconnect?calendar=1`) installs for any
-  tenant. It used to be refused at the callback for a tenant without the
-  feature ("Calendar isn't available for this mailbox yet"); that refusal is
-  gone, and the callback no longer reads `tenant_features` at all. The
-  unticked-calendar, Gmail-floor and hint guards are unchanged. Signup has
-  asked for calendar since 2026-10-27.
-- **The apps have no gate at all.** The Calendar page is unconditional: no
-  hidden feature, no `timeline` check (the client no longer decodes
-  `timeline`). The Mac's rail always has it second, number key 2 and `⇧C`
-  open it, and the Go menu, the `?` sheet, the product guide and the
-  assistant's calendar tool always include it. The iPhone's bar is always
-  Sitrep · Calendar · Mail; the Quick Look tab is gone, its record zones and
-  the login-codes key live on the sitrep. An app on a daemon too old to serve
-  the timeline would show a calendar of errors rather than hide the page; with
-  no users on such a daemon, that was accepted. The daemon keeps sending
-  `timeline: true`, which apps from before this change still need.
-- **Asking for Google Calendar.** Both apps raise the connect card on the
-  calendar's FIRST VISIT for an account that has not granted it, once per
-  account (`raiseCalendarCardIfOwed`, `calendarOffer == .card`), and offer it
-  after that from a banner (Mac) or an inline card at the top of the list
-  (iPhone). The card is `Views/CalendarConnectCard.swift`, the same view on
-  both: the Mac's action layer mounts it, and the iPhone's `MobileShell`
-  mounts it over the Calendar tab only. Practice mode and a granted calendar
-  are never offered it.
-- **Leftover rows.** `tenant_features` rows (and an "Everyone" default) for
-  `calendar` may still exist. They are harmless: nothing asks for the key. They
-  are still served on `GET /tenant/features` and listed in `/client/stats`
-  `features`, which the apps ignore. Saving `/admin/features` does not touch
-  them, since `calendar` is no longer a column there.
-- **Rollout: both halves, or the flag.** The control-plane half deploys
-  itself from `main`. The daemon half needs a daemon release and a fleet roll;
-  until then a hosted tenant's daemon still gates on the flag and says
-  `timeline: false` without it. The app half needs a Mac and an iOS release;
-  an app from before it still asks for `calendar` in `/client/stats`
-  `features` as well as the timeline. A new app shows the page whatever the
-  daemon says, so on an un-rolled daemon without the flag its routes 404 and
-  the page has nothing to show until the roll. So a mailbox has a working
-  page once its daemon AND its app are both new, or, in the meantime, wherever a
-  `calendar` row is still served (the leftover rows above keep an old app or
-  an old daemon working, which is the one thing they are good for).
+  /client/calendar/events/{calendar_id}/{id}`, the reminder routes, `PUT
+  /client/person/timezone`) answers the opaque 404 without it, after bearer
+  auth (`calendar_routes` in `squelch-api/src/lib.rs`). `/client/stats` says
+  `timeline: false` and carries no `calendar` object. The sync loop idles
+  (`PassOutcome::Disabled`) and asks again at every pass and before each
+  calendar, so a flip reaches a running daemon with no restart; the reminder
+  worker idles too. `calendar_own` rides on it: with `calendar` off nothing of
+  the user's calendar is written, whatever `calendar_own` says. Ghost
+  projection and timezone inference run regardless, so a mailbox switched on
+  sees its recent history at once. Turning it off deletes nothing.
+- **The hosted calendar consent** (`/reconnect?calendar=1`) installs only for a
+  tenant with the feature; one without it is told "Calendar isn't available for
+  this mailbox yet" and nothing is installed. The check is at the callback,
+  after Google, never at the start (the start names no tenant). Signup and the
+  Gmail reconnect still ask for calendar, optionally, so the grant is in hand
+  the day the flag turns on.
+- **The apps** read the daemon's `timeline` (`CalendarGate.pageAvailable`, into
+  `AppStore.calendarPageAvailable`). Off, the Mac's rail, Go menu, number keys
+  and `⇧C` are the ones from before the calendar (Emails is 2), the `?` sheet,
+  the product guide and the assistant's calendar tools leave it out, search
+  shows no Events block, and a route to the page lands on the sitrep. The
+  iPhone's bar is Sitrep · Mail; the record zones and the Quick Look dock stay
+  on the sitrep either way. The gate closing under an open page leaves it and
+  drops everything the page held.
 
 ## 12. Build order
 

@@ -1627,7 +1627,7 @@ Two mechanisms, split by which disk they cover:
 | How | **one** systemd service on `carrier` (`litestream.service`), not a sidecar per pod — see below |
 | Discovery | `litestream-config.timer` → `/usr/local/bin/litestream-sync-config.sh` re-renders `/etc/litestream.yml` from the PVC directories every 2 min |
 | Litestream state | `/var/lib/litestream/<label>` (`meta-path`) — off the tenant volume, so a tenant pod cannot touch its own backup bookkeeping |
-| Units | `/etc/systemd/system/{litestream,litestream-config}.service`, `litestream-config.timer`, from `deploy/hosted/litestream/` |
+| Units | `/etc/systemd/system/{litestream,litestream-config}.service`, `litestream-config.timer`, `/usr/local/bin/litestream-replicate.sh`, from `deploy/hosted/litestream/` |
 | Version | litestream **v0.3.13**, upstream `.deb`, `apt-mark hold` |
 
 **Why 0.3.13 and not the current line.** 0.3.x is the last release series with
@@ -1653,7 +1653,7 @@ owns the disk.
 |---|---|---|
 | R2 token (Object Read & Write, scoped to `passband-tenant-backups`) | `/etc/litestream/env` on `carrier`, root:root 0600. Never in git, never in a Secret | mint a new one in the Cloudflare dashboard; nothing is lost |
 | **backup age recipient** (public) | `LITESTREAM_AGE_RECIPIENT` in `/etc/litestream/env` | re-derive with `age-keygen -y` from the identity |
-| **backup age identity** (private) | `/etc/litestream/backup-age.key` on `carrier`, root:root 0600, **and the password manager**. Read by nothing automatically; exported by hand for the minutes a restore takes | **unrecoverable, fleet-wide.** Every backup in R2 becomes permanently unreadable, and nothing tells you until you try to restore |
+| **backup age identity** (private) | `/etc/litestream/backup-age.key` on `carrier`, root:root 0600, **and the password manager**. Loaded by `litestream.service` (`LoadCredential=`), which needs it to resume replicas (issue #696); exported by hand for restores | **unrecoverable, fleet-wide.** Every backup in R2 becomes permanently unreadable, and nothing tells you until you try to restore |
 | tenant identity Secrets (`<label>-identity`, ns `tenants`) | k3s datastore, encrypted at rest. Covered by the Hetzner snapshot only | **unrecoverable.** Every affected tenant re-consents with Google. No escrow, by design |
 
 **Backups are age-encrypted client-side.** Every snapshot and WAL segment is

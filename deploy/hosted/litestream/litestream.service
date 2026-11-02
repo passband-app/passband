@@ -40,23 +40,30 @@ RequiresMountsFor=/mnt/tenant-data
 [Service]
 Type=simple
 
-# The whole point of the split: /etc/litestream.yml is generated, contains only
-# ${LITESTREAM_R2_*} and ${LITESTREAM_AGE_RECIPIENT} placeholders, and is safe
-# to read. The actual R2 keys enter the process here and nowhere else.
-# root:root 0600 -- litestream-sync-config.sh refuses to run if it is anything
-# looser.
-#
-# What is NOT in that file, deliberately: the age IDENTITY. This process needs
-# only the public recipient to seal a backup, so the daemon that runs around the
-# clock cannot open one. Restores load the identity by hand, into one shell,
-# for minutes. See README.md -> "Encryption".
+# /etc/litestream.yml is generated, contains only ${LITESTREAM_R2_*} and
+# ${LITESTREAM_AGE_*} placeholders, and is safe to read. The R2 keys and the
+# age recipient enter the process here. root:root 0600 --
+# litestream-sync-config.sh refuses to run if it is anything looser.
 EnvironmentFile=/etc/litestream/env
+
+# The age IDENTITY, which replication needs as well as restores (issue #696).
+# Litestream 0.3.13 finds where each replica left off by decrypting the last
+# WAL segment it uploaded -- on every start, and after every failed sync.
+# Without the identity that fails as "cannot determine replica position: lz4:
+# bad magic number", once a second, and the tenant silently stops backing up.
+# See litestream-replicate.sh and README.md -> "Encryption".
+#
+# LoadCredential copies the key into a private directory only this unit can
+# read, and fails the start if the file is missing: loud, rather than a
+# running service that backs up nothing.
+LoadCredential=backup-age-identity:/etc/litestream/backup-age.key
 
 # No -config flag: /etc/litestream.yml is litestream's default, which keeps
 # every ad-hoc `litestream databases` / `generations` / `snapshots` you type at
 # 3am pointed at the same file the daemon is using. (0.3.x has no `status` and
-# no `ltx`; those are 0.5 commands.)
-ExecStart=/usr/bin/litestream replicate
+# no `ltx`; those are 0.5 commands.) The wrapper exports the identity from the
+# credential above and execs `/usr/bin/litestream replicate`.
+ExecStart=/usr/local/bin/litestream-replicate.sh
 
 Restart=always
 RestartSec=5

@@ -42,10 +42,8 @@
 #   sudo VERBOSE=1 /usr/local/bin/litestream-sync-config.sh # say what it sees
 #   sudo DRY_RUN=1 /usr/local/bin/litestream-sync-config.sh # print, change nothing
 #
-#   # A restore config: same tenants, plus the age identity reference that
-#   # decryption needs and replication does not. Writes nothing itself.
-#   umask 077
-#   sudo DRY_RUN=1 WITH_IDENTITY=1 /usr/local/bin/litestream-sync-config.sh > /root/restore.yml
+#   # Restores use /etc/litestream.yml itself: it already references the age
+#   # identity, which replication needs too (issue #696). See README.md.
 #
 # See deploy/hosted/SETUP.md -> "Backups: Litestream to R2".
 
@@ -90,10 +88,16 @@ META_ROOT="${META_ROOT:-/var/lib/litestream}"
 # The unit to bounce when the render changes.
 SERVICE="${SERVICE:-litestream.service}"
 
-# Emit the age IDENTITY reference as well as the recipient. Off for the config
-# litestream replicates with -- replication needs only the public recipient, so
-# the running daemon never holds the private key. Turn it on to render a config
-# for `litestream restore`, which cannot decrypt without it.
+# The age identity (private key). Never read into this script or written into
+# the config: the config names ${LITESTREAM_AGE_IDENTITY}, and
+# litestream-replicate.sh exports it from this file (via systemd's
+# LoadCredential=) when litestream starts. This script only checks the file is
+# there and root-only, because without it litestream.service will not start.
+KEY_FILE="${KEY_FILE:-/etc/litestream/backup-age.key}"
+
+# Retired. The identity used to be rendered only into restore configs; every
+# config carries it now (issue #696), so this has nothing left to switch.
+# Accepted and ignored so that old runbook lines still work.
 WITH_IDENTITY="${WITH_IDENTITY:-0}"
 
 # Every variable the rendered config expands. A typo'd or absent one expands to
@@ -116,12 +120,10 @@ VERBOSE="${VERBOSE:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 FORCE="${FORCE:-0}"
 
-# The age identity is deliberately NOT in REQUIRED_VARS and deliberately NOT in
-# /etc/litestream/env. It lives in exactly one place on this box
-# (/etc/litestream/backup-age.key, root:root 0600) plus your password manager,
-# and the operator exports it into the restore shell for the minutes a restore
-# takes. A second on-box copy is a second thing to rotate and a second thing to
-# leak.
+# The age identity is deliberately NOT in REQUIRED_VARS and NOT in
+# /etc/litestream/env. It lives in exactly one place on this box, KEY_FILE
+# (root:root 0600), plus your password manager. A second on-box copy is a
+# second thing to rotate and a second thing to leak.
 
 # ---------------------------------------------------------------------------
 # Output. Goes to stderr so that `systemctl status` and `journalctl -u
@@ -151,14 +153,8 @@ stat_field() {
 [[ "${EUID:-$(id -u)}" -eq 0 ]] ||
   die "must run as root: it writes ${CONFIG_FILE} and talks to systemd"
 
-# A restore config is a thing you capture on stdout, never a thing you install.
-# Installed at ${CONFIG_FILE} it would put the private key in the replicating
-# daemon's environment, and it would do so invisibly.
-if [[ "$WITH_IDENTITY" == "1" && "$DRY_RUN" != "1" ]]; then
-  log "WITH_IDENTITY=1 renders a RESTORE config and must not overwrite ${CONFIG_FILE}."
-  log "  umask 077"
-  log "  DRY_RUN=1 WITH_IDENTITY=1 $0 > /root/restore.yml"
-  die "WITH_IDENTITY=1 requires DRY_RUN=1"
+if [[ "$WITH_IDENTITY" == "1" ]]; then
+  vlog "WITH_IDENTITY=1 is retired and ignored: every config references the identity now"
 fi
 
 # The env file. This is the loud refusal the design asks for: a world-readable
@@ -190,6 +186,24 @@ for var in "${REQUIRED_VARS[@]}"; do
     esac
   fi
 done
+
+# The age identity. litestream.service loads it with LoadCredential= and will
+# not start without it, so a missing or loose key file is caught here, where
+# the message can say which file and what to do. Tested, never read: the
+# secret does not enter this process.
+[[ -e "$KEY_FILE" ]] ||
+  die "${KEY_FILE} does not exist. litestream needs the backup age identity to resume replicas (issue #696). Restore it from the password manager: see SETUP.md 11 step 3."
+[[ -f "$KEY_FILE" ]] ||
+  die "${KEY_FILE} is not a regular file."
+key_owner="$(stat_field u "$KEY_FILE")"
+key_mode="$(stat_field a "$KEY_FILE")"
+[[ "$key_owner" == "0" ]] ||
+  die "${KEY_FILE} is owned by uid ${key_owner}, not root. Run: chown root:root ${KEY_FILE}"
+if (( 8#$key_mode & 8#077 )); then
+  die "${KEY_FILE} is mode ${key_mode} -- group or world readable. Run: chmod 0600 ${KEY_FILE}"
+fi
+grep -q '^AGE-SECRET-KEY-1' "$KEY_FILE" ||
+  die "${KEY_FILE} holds no AGE-SECRET-KEY-1... line. That is not an age identity."
 
 # ONE canonical spelling of the endpoint: a bare host, no scheme. Litestream
 # itself does not care (aws-sdk-go prepends https:// when a custom endpoint
@@ -326,26 +340,21 @@ chmod 0644 "$tmp"
 # from /etc/litestream/env (root:root, 0600). That is the entire reason this
 # file is boring enough to paste into a ticket.
 #
-# LITESTREAM_AGE_RECIPIENT is the PUBLIC half of the backup keypair: this
-# process can seal a backup and cannot open one. Restoring needs the identity,
-# which is not here and not in /etc/litestream/env -- see README.md.
+# Both halves of the backup age keypair are named here, never spelled out.
+# LITESTREAM_AGE_RECIPIENT (public) comes from /etc/litestream/env.
+# LITESTREAM_AGE_IDENTITY (private) is exported by litestream-replicate.sh from
+# /etc/litestream/backup-age.key. Litestream 0.3.13 needs the identity to work
+# out where each replica left off after a restart or a failed upload; without
+# it every tenant stops backing up with "lz4: bad magic number" (issue #696).
+#
+# For a hand-run `litestream restore` against this file, export the identity
+# in that shell first -- see README.md -> "Restore".
 #
 # One litestream process on the HOST replicates every tenant. Not a sidecar in
 # each tenant pod, on purpose: a sidecar needs the R2 write credential inside
 # the pod, and one compromised tenant could then delete every other tenant's
 # backups. Root already owns this disk. See deploy/hosted/litestream/README.md.
 HEADER
-
-  if [[ "$WITH_IDENTITY" == "1" ]]; then
-    cat <<'IDENTITY_HEADER'
-#
-# RENDERED WITH WITH_IDENTITY=1: this is a RESTORE config, not the one
-# litestream replicates with. It references ${LITESTREAM_AGE_IDENTITY}, which
-# the restoring shell must export from /etc/litestream/backup-age.key. The key
-# itself is still not in this file; an unset variable fails loudly with
-# "no secret keys found" rather than handing you an unreadable download.
-IDENTITY_HEADER
-  fi
 
   printf '#\n# Rendered for %d tenant database(s).\n\n' "$tenant_count"
 
@@ -387,29 +396,21 @@ EMPTY
         access-key-id: \${LITESTREAM_R2_ACCESS_KEY_ID}
         secret-access-key: \${LITESTREAM_R2_SECRET_ACCESS_KEY}
         # Client-side encryption. Everything above this line describes where the
-        # bytes go; this is why Cloudflare cannot read them.
+        # bytes go; this is why Cloudflare cannot read them. The identity is
+        # needed to resume after a restart or failed upload, not only to
+        # restore: without it, "lz4: bad magic number" (issue #696).
         age:
-ENTRY
-      if [[ "$WITH_IDENTITY" == "1" ]]; then
-        cat <<'IDENTITY_ENTRY'
           identities:
-            - ${LITESTREAM_AGE_IDENTITY}
-IDENTITY_ENTRY
-      fi
-      cat <<'RECIPIENT_ENTRY'
+            - \${LITESTREAM_AGE_IDENTITY}
           recipients:
-            - ${LITESTREAM_AGE_RECIPIENT}
-RECIPIENT_ENTRY
+            - \${LITESTREAM_AGE_RECIPIENT}
+ENTRY
     done <<< "$discovered"
   fi
 } > "$tmp"
 
 if [[ "$DRY_RUN" == "1" ]]; then
   log "DRY_RUN=1: ${tenant_count} tenant(s), ${skipped} directory(ies) without a database yet"
-  if [[ "$WITH_IDENTITY" == "1" ]]; then
-    log "WITH_IDENTITY=1: restore config. Before using it, in the SAME shell:"
-    log "  export LITESTREAM_AGE_IDENTITY=\"\$(grep -v '^#' /etc/litestream/backup-age.key | tr -d '[:space:]')\""
-  fi
   cat "$tmp"
   exit 0
 fi
@@ -470,6 +471,12 @@ fi
 #   - Empty LITESTREAM_AGE_RECIPIENT is a hard failure ("no recipients found"),
 #     not silent plaintext. Empty LITESTREAM_AGE_IDENTITY is likewise
 #     "no secret keys found". Both observed, not assumed.
+#
+# Added 2026-11-02 (issue #696), from reading v0.3.13 replica.go, NOT from
+# running the binary: Replica.calcPos decrypts the last uploaded WAL segment
+# with the replica's identities to find its position, and Replica.Sync clears
+# that position on any error, so calcPos runs after every start and every
+# failed sync. With recipients only, it fails "lz4: bad magic number".
 #
 # systemd-analyze verify was NOT run: this laptop is macOS and has no systemd.
 # The units in this directory are unverified in that specific sense.

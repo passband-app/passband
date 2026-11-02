@@ -42,13 +42,14 @@ backs up nothing. Verified, not assumed — see the footer.
 | File | Installs to | What it is |
 |---|---|---|
 | `litestream.service` | `/etc/systemd/system/` | the replicator. Overrides the .deb's unit at `/usr/lib/systemd/system/` |
+| `litestream-replicate.sh` | `/usr/local/bin/` (0755) | the unit's `ExecStart`: exports the age identity, execs `litestream replicate` |
 | `litestream-sync-config.sh` | `/usr/local/bin/` (0755) | renders `/etc/litestream.yml` from the tenant PVCs that exist now |
 | `litestream-config.service` | `/etc/systemd/system/` | oneshot wrapper for the script |
 | `litestream-config.timer` | `/etc/systemd/system/` | runs it every 2 minutes |
 | `env.example` | `/etc/litestream/env` (0600, root) | R2 endpoint, bucket, key id, secret, **age recipient** |
 
 Not in here, and not in git: `/etc/litestream/backup-age.key`, the age identity.
-See "The identity" below.
+The replicator loads it at start (see "Encryption" below).
 
 ## Why one process on the host, and not a sidecar per pod
 
@@ -123,20 +124,46 @@ Refusals worth knowing before you meet them, all loud, all exit non-zero:
 - Zero tenants found while the current config replicates some. That is an
   unmounted volume, not an empty box. `FORCE=1` overrides, once you are sure.
 
-## Encryption: the recipient replicates, the identity restores
+## Encryption: the replicator holds both halves
 
 Every snapshot and every WAL segment is age-encrypted before it leaves the box.
 The R2 objects begin `age-encryption.org/v1`; a leaked bucket, or a subpoenaed
 Cloudflare, yields ciphertext.
 
-The split is the point:
+- **`/etc/litestream/env` holds `LITESTREAM_AGE_RECIPIENT`**, the public key,
+  which seals what is uploaded.
+- **`/etc/litestream/backup-age.key` holds the identity**, the private key,
+  root:root 0600. systemd hands it to `litestream.service` with
+  `LoadCredential=`, and `litestream-replicate.sh` exports it as
+  `LITESTREAM_AGE_IDENTITY` for the config to reference. It is never written
+  into `/etc/litestream.yml` or the env file.
 
-- **`/etc/litestream/env` holds `LITESTREAM_AGE_RECIPIENT`** — the public key.
-  The generated config references it, the always-running replicator uses it, and
-  that process therefore **cannot open a single backup it writes**.
-- **`/etc/litestream/backup-age.key` holds the identity** — the private key,
-  root:root 0600, read by nothing automatically. It goes into the process
-  environment only for the minutes a human is running a restore.
+### Why the replicator needs the identity (issue #696)
+
+This file used to say the replicator held only the recipient, so the daemon
+could not open a backup it wrote. On 0.3.13 that configuration breaks every
+tenant's backup the first time anything goes wrong:
+
+- Litestream works out where a replica left off by **downloading the last WAL
+  segment it uploaded and decompressing it** to measure it (`Replica.calcPos`
+  in `replica.go`). With age on, that segment is ciphertext, and without an
+  identity the decompress fails:
+  `cannot determine replica position: lz4: bad magic number`. Once a second,
+  per tenant, and nothing uploads.
+- `calcPos` runs on **every start** (the config timer restarts litestream on
+  every signup and erasure) and **after every failed sync**, because
+  `Replica.Sync` clears its position on any error. One transient R2 error is
+  enough to break an idle tenant with no restart at all. That was the
+  2026-11-02 03:06 breakage.
+- It fails silently: `litestream generations` only lists metadata, so it looks
+  fine.
+
+And the split protected nothing. The replicator runs as root with
+`CAP_DAC_OVERRIDE`, on the box where the key file sits, and it already reads
+every tenant's **live** database. Anything that can take over that process
+could read the key file anyway. What the encryption is for, keeping the bytes
+in R2 unreadable to Cloudflare and to anyone holding the bucket, is unchanged:
+the key still never leaves this box and the password manager.
 
 > ### THE IDENTITY IS THE WHOLE BACKUP
 >
@@ -153,6 +180,9 @@ The split is the point:
 If the identity is ever exposed: mint a new pair, change
 `LITESTREAM_AGE_RECIPIENT`, restart litestream — and keep the old identity
 forever, because everything written before the swap is still sealed to it.
+Note that after a swap, litestream cannot resume an existing generation sealed
+to the old key (same `lz4: bad magic number`). Start fresh generations: stop
+litestream, move every `/var/lib/litestream/<tenant>/` aside, start it.
 
 ## Restore, the short version
 
@@ -163,18 +193,14 @@ backups, are in `../SETUP.md`. The shape of it:
 # Credentials for the CLI, exactly as the daemon gets them.
 set -a; . /etc/litestream/env; set +a
 
-# The identity, for as long as this shell lives. /etc/litestream.yml does not
-# have it -- deliberately -- so a restore needs its own config.
+# The identity, for as long as this shell lives. /etc/litestream.yml names
+# ${LITESTREAM_AGE_IDENTITY}; the daemon gets it from systemd, your shell
+# does not, so export it here.
 export LITESTREAM_AGE_IDENTITY="$(grep -v '^#' /etc/litestream/backup-age.key | tr -d '[:space:]')"
-
-# Same tenants, same replicas, plus the identities: line. Renders to stdout and
-# installs nothing. It still contains no key material, only the ${VAR} name.
-umask 077
-DRY_RUN=1 WITH_IDENTITY=1 /usr/local/bin/litestream-sync-config.sh > /root/restore.yml
 
 # Look, without touching anything: restore a tenant to a scratch path.
 DB=/mnt/tenant-data/pvc-<uid>_tenants_alice-data/squelch.db
-litestream restore -config /root/restore.yml -o /root/scratch-alice.db "$DB"
+litestream restore -o /root/scratch-alice.db "$DB"
 sqlite3 /root/scratch-alice.db 'pragma integrity_check; select count(*) from messages;'
 ```
 
@@ -184,22 +210,25 @@ sqlite3 /root/scratch-alice.db 'pragma integrity_check; select count(*) from mes
 cannot restore snapshot: lz4: bad magic number
 ```
 
-That is litestream trying to decompress age ciphertext. It means your config had
-no `identities:`, or `LITESTREAM_AGE_IDENTITY` was empty in that shell. It does
-**not** mean the backup is corrupt.
+That is litestream trying to decompress age ciphertext. It means
+`LITESTREAM_AGE_IDENTITY` was empty in that shell (or the config had no
+`identities:`). It does **not** mean the backup is corrupt. The replicator's
+version of the same error is `cannot determine replica position: lz4: bad
+magic number`: see issue #696 above.
 
 What actually reached R2, per tenant — 0.3.x spells this `generations` /
 `snapshots` / `wal`, not `ltx`:
 
 ```sh
-litestream generations -config /root/restore.yml "$DB"   # lag and time range
-litestream snapshots   -config /root/restore.yml "$DB"
-litestream wal         -config /root/restore.yml "$DB"
+litestream generations "$DB"   # lag and time range
+litestream snapshots   "$DB"
+litestream wal         "$DB"
 ```
 
-Those three only list object metadata, so they work against `/etc/litestream.yml`
-too — no identity needed. Delete `/root/restore.yml` when you are done; it is
-harmless (no key material) but it is a config that drifts.
+Those three only list object metadata, so they need the R2 credentials but not
+the identity. They also **do not show the #696 failure**: a tenant stuck on
+`lz4: bad magic number` still lists its old generation. Check the journal:
+`journalctl -u litestream --since -1h | grep -c 'bad magic'` should be 0.
 
 ## Day-to-day
 

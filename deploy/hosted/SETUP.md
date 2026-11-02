@@ -2227,16 +2227,18 @@ chown root:root /etc/litestream/backup-age.key
 `age-keygen` prints the public key and also writes it into the file's header
 comment; `age-keygen -y /etc/litestream/backup-age.key` re-derives it any time.
 
-The split that makes this worth doing:
+Where each half lives:
 
 | | Where it lives | Who uses it |
 |---|---|---|
-| **recipient** (public) | `LITESTREAM_AGE_RECIPIENT` in `/etc/litestream/env` | the always-running replicator, to seal |
-| **identity** (private) | `/etc/litestream/backup-age.key`, root 0600, read by nothing automatically | a human, exported into one shell, for the minutes a restore takes |
+| **recipient** (public) | `LITESTREAM_AGE_RECIPIENT` in `/etc/litestream/env` | the replicator, to seal |
+| **identity** (private) | `/etc/litestream/backup-age.key`, root 0600 | the replicator (via `LoadCredential=`), to find where each replica left off; a human, for restores |
 
-The replicating daemon therefore **cannot decrypt a single backup it writes**.
-That is deliberate, and it is why the identity is not in `/etc/litestream/env`
-next to the R2 keys.
+The replicator **does** hold the identity. Litestream 0.3.13 resumes a replica
+by decrypting the last WAL segment it uploaded, on every start and after every
+failed sync; without the identity every tenant silently stops backing up with
+`lz4: bad magic number` (issue #696). It runs as root on the box with the key
+file anyway, so this widens nothing. See `litestream/README.md` → "Encryption".
 
 > ## ⚠ THE IDENTITY IS THE BACKUP. PUT IT IN THE PASSWORD MANAGER NOW.
 >
@@ -2293,8 +2295,9 @@ ${EDITOR:-vi} /etc/litestream/env        # four values from step 2, plus the
 # Litestream's own state, off the tenant volume on purpose (see below).
 install -d -m 0700 -o root -g root /var/lib/litestream
 
-# The generator, and the units.
-install -m 0755 -o root -g root litestream-sync-config.sh /usr/local/bin/
+# The generator, the replicator's launcher, and the units.
+install -m 0755 -o root -g root litestream-sync-config.sh \
+  litestream-replicate.sh /usr/local/bin/
 install -m 0644 -o root -g root litestream.service litestream-config.service \
   litestream-config.timer /etc/systemd/system/
 systemctl daemon-reload
@@ -2435,22 +2438,18 @@ journalctl -u litestream -f                       # replication, live
 Do this now, on the canary, while nothing is on fire. A backup you have never
 restored is a hypothesis.
 
-**A restore needs the age identity, and `/etc/litestream.yml` does not have it.**
-That is the design (step 3), so every restore starts with two extra lines: load
-the identity into this shell, and render a config that references it.
+**A restore needs the age identity in your shell.** `/etc/litestream.yml`
+references `${LITESTREAM_AGE_IDENTITY}` by name; the daemon gets the value from
+systemd, your shell does not. So every restore starts with:
 
 ```sh
 set -a; . /etc/litestream/env; set +a
 export LITESTREAM_AGE_IDENTITY="$(grep -v '^#' /etc/litestream/backup-age.key | tr -d '[:space:]')"
-
-umask 077
-DRY_RUN=1 WITH_IDENTITY=1 /usr/local/bin/litestream-sync-config.sh > /root/restore.yml
+cp /etc/litestream.yml /root/restore.yml   # a stable copy for the drill
 ```
 
-`/root/restore.yml` is the same tenants and the same replicas as the live config,
-plus an `identities:` line. It still contains no key material — only the
-`${LITESTREAM_AGE_IDENTITY}` name — so the secret exists in that shell's
-environment and nowhere on disk but the key file.
+The config holds no key material, only the variable name, so the secret exists
+in that shell's environment and nowhere on disk but the key file.
 
 Restoring to a **scratch path** then touches no tenant and needs no downtime:
 

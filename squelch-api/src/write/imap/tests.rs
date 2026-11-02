@@ -314,7 +314,13 @@ async fn a_send_whose_sent_copy_fails_is_still_sent_with_a_warning() {
         assert!(rcpts.contains(r), "{rcpts}");
     }
     let msg = seen.messages.lock().unwrap()[0].clone();
-    assert!(!msg.to_ascii_lowercase().contains("bcc"), "{msg}");
+    // Look for a Bcc header, not the letters: the random Message-ID is hex
+    // and contains "bcc" about one run in a hundred.
+    assert!(
+        !msg.lines()
+            .any(|l| l.to_ascii_lowercase().starts_with("bcc:")),
+        "{msg}"
+    );
     assert!(
         !msg.contains("s@y.test") && !msg.contains("t@y.test"),
         "{msg}"

@@ -187,7 +187,7 @@ enum ProductGuide {
         case .triage: triage
         case .senderRules: senderRules
         case .reminders: reminders
-        case .search: search + "\n\n" + searchEvents
+        case .search: calendar ? search + "\n\n" + searchEvents : search
         case .loginCodes: loginCodes
         case .assistant: assistant
         case .appAndAccounts: appAndAccounts

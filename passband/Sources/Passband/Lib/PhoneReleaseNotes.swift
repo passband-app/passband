@@ -112,11 +112,17 @@ enum PhoneReleaseNotes {
                     "Quick Look at the foot of the board",
                     detail: "Your packages, bills and codes sit in a strip under the cards. Drag it up to open it.",
                     symbol: "rectangle.bottomhalf.filled", vignette: .quickLookDock),
+                PhoneFeature(
+                    "Sign in with Outlook",
+                    detail: "Outlook and Hotmail accounts work alongside Gmail.",
+                    symbol: "envelope"),
+                PhoneFeature(
+                    "Notifications lead with the sender's photo",
+                    detail: "A new mail banner shows who it is from at a glance.",
+                    symbol: "person.crop.circle"),
             ],
             also: [
-                PhoneAside("Notifications lead with the sender's photo", symbol: "person.crop.circle"),
                 PhoneAside("Your agent's drafts ping your phone for review", symbol: "square.and.pencil"),
-                PhoneAside("Sign in with Outlook", symbol: "envelope"),
                 PhoneAside("Bug fixes"),
             ]),
         PhoneReleaseNote(

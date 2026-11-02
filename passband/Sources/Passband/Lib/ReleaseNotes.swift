@@ -290,6 +290,7 @@ enum ReleaseNotes {
                 ReleaseItem(.daemon, "Outlook support"),
                 ReleaseItem(.daemon, "IMAP support for self-host"),
                 ReleaseItem(.daemon, "Sealed mail is never added to search vectors"),
+                ReleaseItem(.daemon, "Self-host: the calendar is off until you set SQUELCH_FEATURES=calendar"),
                 ReleaseItem(.daemon, "Bug fixes"),
             ]),
         ReleaseNote(

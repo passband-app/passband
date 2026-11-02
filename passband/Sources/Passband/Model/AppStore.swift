@@ -675,7 +675,12 @@ final class AppStore {
     /// every reader to look again.
     private func noteStats() {
         let open = CalendarGate.pageAvailable(timeline: stats?.timeline)
-        if open != calendarPageAvailable { calendarPageAvailable = open }
+        if open != calendarPageAvailable {
+            calendarPageAvailable = open
+            // Opening, the reminders switch is asked for again: closing set it
+            // to not offered (`calendarGateClosed`).
+            if open { Task { await refreshCalendarReminderPref() } }
+        }
         warmCalendarIfDue()
         let email = stats?.account_email
         if email != accountEmail { accountEmail = email }

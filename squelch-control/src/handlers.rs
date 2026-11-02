@@ -2201,9 +2201,13 @@ async fn reconnect_install(
     };
 
     // THE CALENDAR HIDDEN FEATURE. Calendar is behind the `calendar` flag
-    // (`squelch_core::features::CALENDAR`): a tenant without it (its own row
-    // or the Everyone default) gets no calendar grant installed, because its
-    // daemon would hide everything the grant is for.
+    // (`squelch_core::features::CALENDAR`): the explicit calendar connect
+    // (`?calendar=1`) is refused for a tenant without it (its own row or the
+    // Everyone default), because its daemon would hide everything the grant
+    // is for and the page that asked for it should not exist. Signup and the
+    // Gmail reconnect still ask for calendar optionally whatever the flag
+    // (see `requested_scopes_for`): that grant is held unused until the flag
+    // turns on, and is not what this check is about.
     //
     // CHECKED HERE, AFTER GOOGLE, NOT AT `/reconnect`. The start of this flow
     // names no tenant on purpose (see `reconnect_start`): the only input that

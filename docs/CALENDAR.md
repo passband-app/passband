@@ -2303,7 +2303,9 @@ What the flag gates:
   /client/calendar/events`, `PATCH` and `DELETE
   /client/calendar/events/{calendar_id}/{id}`, the reminder routes, `PUT
   /client/person/timezone`) answers the opaque 404 without it, after bearer
-  auth (`calendar_routes` in `squelch-api/src/lib.rs`). `/client/stats` says
+  auth (`calendar_routes` in `squelch-api/src/lib.rs`). Agent MCP's
+  `search_calendar` is neither listed, described nor answered (`CalendarDoor`
+  reads the same live feature set). `/client/stats` says
   `timeline: false` and carries no `calendar` object. The sync loop idles
   (`PassOutcome::Disabled`) and asks again at every pass and before each
   calendar, so a flip reaches a running daemon with no restart; the reminder

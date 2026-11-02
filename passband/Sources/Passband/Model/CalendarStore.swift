@@ -86,6 +86,9 @@ extension AppStore {
             setView(.sitrep)
         }
         dropCalendarState()
+        // The reminders switch in Settings belongs to the calendar too: off
+        // with it, rather than a switch that writes to a route now 404ing.
+        calendarReminderPref = .notOffered
     }
 
     // MARK: - warm before the page opens

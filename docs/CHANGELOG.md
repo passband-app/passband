@@ -35,6 +35,7 @@ Stella's Update
 - Outlook support
 - IMAP support for self-host
 - Sealed mail is never added to search vectors
+- Self-host: the calendar is off until you set SQUELCH_FEATURES=calendar
 - Bug fixes
 
 ## 0.0.15 (2026-10-27)

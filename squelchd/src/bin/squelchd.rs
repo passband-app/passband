@@ -2919,10 +2919,11 @@ fn build_serve_router(
         Some(api_state.agent_mailer()),
         // And the human door's own archive settings: one depth, one poke.
         api_state.archive_surfacing(),
-        // The human door's own calendar grant, so `search_calendar` reads
-        // real events exactly when the timeline does.
+        // The human door's own feature set and calendar grant, so
+        // `search_calendar` is offered exactly while the `calendar` feature
+        // is on, and reads real events exactly when the timeline does.
         squelch_mcp::CalendarDoor {
-            enabled: true,
+            features: api_state.features().clone(),
             credentials: api_state.calendar().cloned(),
         },
     )?;
@@ -5381,8 +5382,8 @@ mod tests {
             "get_shipments",
             "get_thread",
             "list_sender_rules",
-            // Calendar for everyone: the daemon's door always serves it.
-            "search_calendar",
+            // No `search_calendar`: it is offered only with the `calendar`
+            // hidden feature on, and this daemon has none.
             "search_mail",
             "set_sender_rule",
         ];

@@ -69,15 +69,37 @@ jobs:
   # What this run has to do. On a push the workflow-level path filter has
   # already decided; on a schedule only `deny` runs; on a PR the same path set
   # is checked here, so the workflow (and `gate`) always reports.
+  #
+  # `tested` is the push-to-main shortcut. A PR run tests refs/pull/N/merge,
+  # which is the PR merged onto main as main stood then. When nothing else
+  # landed in between, the merge commit on main has that exact tree, and
+  # running the same tree twice buys nothing. A passing PR run records its
+  # tree as an artifact named rust-passed-<tree>; a push whose tree has one
+  # sets `tested`, and `rust` skips its build. A tree no PR tested (main moved
+  # under the PR, a direct push) runs in full as before.
   changes:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read # paths-filter lists a PR's files through the API
+      actions: read # the rust-passed-<tree> artifact lookup
     outputs:
       rust: ${{ steps.out.outputs.rust }}
       deny: ${{ steps.out.outputs.deny }}
+      tested: ${{ steps.tested.outputs.tested }}
     steps:
+      - id: tested
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TREE: ${{ github.event.head_commit.tree_id }}
+        run: |
+          n=$(gh api "repos/$REPO/actions/artifacts?name=rust-passed-$TREE" \
+            --jq '[.artifacts[] | select(.expired | not)] | length' || echo 0)
+          tested=$([ "${n:-0}" -gt 0 ] && echo true || echo false)
+          echo "tested=$tested" >> "$GITHUB_OUTPUT"
+          echo "tree=$TREE passing PR runs=$n tested=$tested"
       - id: filter
         if: github.event_name == 'pull_request'
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
@@ -159,11 +181,49 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # No-arg install reads rust-toolchain.toml — the pinned channel and its
+      # clippy/rustfmt components — so the workflow never states a version the
+      # toml would then fight. A floating `stable` here broke the very first
+      # run: its newer clippy knew lints the local toolchain does not.
+      # (Before the cache probe: rustc's version is part of the cache key.)
+      - name: toolchain
+        run: rustup toolchain install
+
+      # The skip has one cost: main's run is what saves the cache every PR
+      # restores from (a PR can read main's cache, never another PR's). So a
+      # tested tree skips only when main already holds the exact cache key.
+      # When it does not (Cargo.lock or the toolchain changed, or the entry
+      # aged out after 7 idle days) the job runs in full and saves it.
+      - name: cache probe
+        id: probe
+        if: needs.changes.outputs.tested == 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          lookup-only: true
+          save-if: false
+
+      - name: decide
+        id: run
+        env:
+          TESTED: ${{ needs.changes.outputs.tested }}
+          CACHED: ${{ steps.probe.outputs.cache-hit }}
+        run: |
+          if [ "$TESTED" = true ] && [ "$CACHED" = true ]; then
+            echo "full=false" >> "$GITHUB_OUTPUT"
+            echo "a passing PR run tested this exact tree and main's cache is warm: skipping"
+          else
+            echo "full=true" >> "$GITHUB_OUTPUT"
+            echo "tested=$TESTED cache-hit=$CACHED: full run"
+          fi
+
       # One directory at a time, with the clock and df after each, so the log
       # keeps saying which of these are worth their seconds. If the build
       # outgrows the headroom (see "disk after"), /usr/local/lib/android is
       # the next 11 GB, at ~130 s.
       - name: free disk
+        if: steps.run.outputs.full == 'true'
         run: |
           df -h / | tail -1
           for d in /usr/share/dotnet /usr/local/.ghcup /opt/hostedtoolcache/CodeQL; do
@@ -172,19 +232,11 @@ jobs:
             echo "$d: $(( $(date +%s) - start ))s, $(df -h / | tail -1 | awk '{print $4}') free"
           done
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # No-arg install reads rust-toolchain.toml — the pinned channel and its
-      # clippy/rustfmt components — so the workflow never states a version the
-      # toml would then fight. A floating `stable` here broke the very first
-      # run: its newer clippy knew lints the local toolchain does not.
-      - name: toolchain
-        run: rustup toolchain install
-
       # Caches ~/.cargo and target/ keyed on the lockfile; the ONNX (ort)
       # build under fastembed is the expensive part, and this is what keeps
       # it from recompiling on every PR.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: steps.run.outputs.full == 'true'
 
       # `cargo test` links one binary per test target (fifty-odd here), each
       # carrying the whole dependency tree, ONNX included. mold links them in a
@@ -193,15 +245,18 @@ jobs:
       # make-default (the action's default) puts it on PATH as `ld`, so no
       # RUSTFLAGS change and the rust-cache key stays what it was.
       - uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        if: steps.run.outputs.full == 'true'
 
       # BEFORE clippy on purpose: a formatting diff is the cheapest possible
       # failure and there is no reason to spend a compile discovering it. The
       # toolchain install above carries rustfmt from rust-toolchain.toml, so
       # the gate and a local `cargo fmt` can never disagree about the version.
       - name: fmt
+        if: steps.run.outputs.full == 'true'
         run: cargo fmt --all --check
 
       - name: clippy
+        if: steps.run.outputs.full == 'true'
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       # --no-fail-fast so a red PR reports every failing binary, not the first.
@@ -213,9 +268,28 @@ jobs:
       # Not cargo-nextest: it was tried (process per test) and the spawn cost
       # of 3,650 tests on binaries this large doubled the work instead.
       - name: test
+        if: steps.run.outputs.full == 'true'
         run: cargo test --locked --workspace --no-fail-fast -- --test-threads=8
         env:
           SQUELCH_TEST_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
+
+      # The PR half of `tested` (see the changes job): this tree passed fmt,
+      # clippy and the tests, so a push to main with the same tree need not
+      # run them again. Fourteen days covers a PR that sits ready a while.
+      - name: record tested tree
+        id: tree
+        if: github.event_name == 'pull_request' && steps.run.outputs.full == 'true'
+        run: |
+          tree=$(git rev-parse 'HEAD^{tree}')
+          echo "$tree" > tested-tree
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.tree.outcome == 'success'
+        with:
+          name: rust-passed-${{ steps.tree.outputs.tree }}
+          path: tested-tree
+          retention-days: 14
+          overwrite: true
 
       # Headroom check for the comment above: what the job left free, and
       # what target/ came to.

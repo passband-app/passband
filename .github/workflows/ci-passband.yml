@@ -8,6 +8,12 @@
 # workflow-level path filter does. `gate` always reports, and is the check
 # branch protection requires (same pattern as ci.yml): it passes when `test`
 # passed or was correctly skipped (no client change, or a draft PR).
+#
+# A push to main also skips `test` when a PR run already passed on the same
+# tree: a PR tests refs/pull/N/merge, which is exactly the merge commit's tree
+# when nothing else landed in between. The passing PR run records the tree as
+# an artifact named passband-passed-<tree>, and the push looks it up. Same
+# idea as `tested` in ci.yml; here it saves a 10x-billed macOS run per merge.
 
 name: ci-passband
 
@@ -36,9 +42,22 @@ jobs:
     permissions:
       contents: read
       pull-requests: read # paths-filter lists a PR's files through the API
+      actions: read # the passband-passed-<tree> artifact lookup
     outputs:
       client: ${{ steps.out.outputs.client }}
     steps:
+      - id: tested
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TREE: ${{ github.event.head_commit.tree_id }}
+        run: |
+          n=$(gh api "repos/$REPO/actions/artifacts?name=passband-passed-$TREE" \
+            --jq '[.artifacts[] | select(.expired | not)] | length' || echo 0)
+          tested=$([ "${n:-0}" -gt 0 ] && echo true || echo false)
+          echo "tested=$tested" >> "$GITHUB_OUTPUT"
+          echo "tree=$TREE passing PR runs=$n tested=$tested"
       - id: filter
         if: github.event_name == 'pull_request'
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
@@ -53,9 +72,10 @@ jobs:
           EVENT: ${{ github.event_name }}
           DRAFT: ${{ github.event.pull_request.draft }}
           F_CLIENT: ${{ steps.filter.outputs.client }}
+          TESTED: ${{ steps.tested.outputs.tested }}
         run: |
           case "$EVENT" in
-            push) client=true ;;
+            push) if [ "$TESTED" = true ]; then client=false; else client=true; fi ;;
             pull_request) if [ "$DRAFT" = true ]; then client=false; else client=$F_CLIENT; fi ;;
             *) client=false ;;
           esac
@@ -79,6 +99,23 @@ jobs:
       # catches the document drifting behind the table; this does.
       - name: changelog is current
         run: ./passband/make-changelog.sh --check
+
+      # The PR half of the skip above. Fourteen days covers a PR that sits
+      # ready a while before merging.
+      - name: record tested tree
+        id: tree
+        if: github.event_name == 'pull_request'
+        run: |
+          tree=$(git rev-parse 'HEAD^{tree}')
+          echo "$tree" > tested-tree
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.tree.outcome == 'success'
+        with:
+          name: passband-passed-${{ steps.tree.outputs.tree }}
+          path: tested-tree
+          retention-days: 14
+          overwrite: true
 
   # The required check. Always runs; skipped counts as a pass.
   gate:

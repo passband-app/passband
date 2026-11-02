@@ -28,8 +28,8 @@ struct ProductGuideTests {
         thePromptIsAPointer()
         shortcutsAreTheOverlaysTable()
         theGuideAgreesWithTheKeymapTable()
-        theCalendarIsInTheTable()
-        theTopicsAndThePagesList()
+        theCalendarIsListedOnlyWhereItIsOffered()
+        withTheCalendarOffTheGuideIsMains()
         aPagesDigitIsTheSheets()
         settingsAreFoundByDescription()
         settingsWithNoQueryOrNoMatchListEverything()
@@ -46,11 +46,11 @@ struct ProductGuideTests {
 
     static func everyTopicAnswers() {
         for topic in ProductGuide.Topic.allCases {
-            let text = ProductGuide.text(topic, runningVersion: "0.0.12")
+            let text = ProductGuide.text(topic, runningVersion: "0.0.12", calendar: true)
             expect(text.count > 200, "\(topic.rawValue) has something to say")
             expect(!topic.title.isEmpty, "\(topic.rawValue) has a title for its chip")
             expect(
-                ProductGuide.topicIndex.contains(topic.rawValue + ":"),
+                ProductGuide.topicIndex(calendar: true).contains(topic.rawValue + ":"),
                 "\(topic.rawValue) is in the index the model picks from")
             // A wire name the model has to spell: lowercase and underscores.
             expect(
@@ -65,18 +65,20 @@ struct ProductGuideTests {
         expect(writing.contains("enter"), "and names the key that does it")
         expect(writing.contains("forward"), "and forwarding")
         expect(
-            ProductGuide.topicIndex.lowercased().contains("reply all"),
+            ProductGuide.topicIndex(calendar: false).lowercased().contains("reply all"),
             "the index says where reply all lives, so the model picks the topic in one call")
     }
 
     /// Every word a help tool can return, and the two lines the prompt carries.
     static func houseStyle() {
         var texts: [(String, String)] = []
-        texts += ProductGuide.topics.map {
-            ($0.rawValue, ProductGuide.text($0, runningVersion: "0.0.12"))
+        for calendar in [false, true] {
+            texts += ProductGuide.topics(calendar: calendar).map {
+                ($0.rawValue, ProductGuide.text($0, runningVersion: "0.0.12", calendar: calendar))
+            }
+            texts.append(("shortcuts", ProductGuide.shortcuts(calendar: calendar)))
+            texts.append(("topic index", ProductGuide.topicIndex(calendar: calendar)))
         }
-        texts.append(("shortcuts", ProductGuide.shortcuts))
-        texts.append(("topic index", ProductGuide.topicIndex))
         texts.append(("settings", ProductGuide.settings(matching: nil)))
         texts.append(("prompt intro", ProductGuide.promptIntro))
         texts.append(("prompt tools", ProductGuide.promptTools))
@@ -100,7 +102,7 @@ struct ProductGuideTests {
     // MARK: - shortcuts
 
     static func shortcutsAreTheOverlaysTable() {
-        let text = ProductGuide.shortcuts
+        let text = ProductGuide.shortcuts()
         for group in ShortcutCatalog.groups {
             expect(text.contains(group.title), "the \(group.title) group is recited")
             for item in group.items {
@@ -128,23 +130,30 @@ struct ProductGuideTests {
         expect(writing.contains("press f"), "the guide says f forwards")
     }
 
-    /// The calendar's keys are in the table, with Calendar at 2 and ⇧C under
-    /// Navigate; the assistant recites them, and the guide's prose agrees
-    /// with the table about the event pane's keys.
-    static func theCalendarIsInTheTable() {
-        let titles = ShortcutCatalog.groups.map(\.title)
-        expect(titles == ["Sitrep & inbox", "Thread viewer", "Calendar", "Navigate", "App"],
-               "the Calendar group third, after the reader: \(titles)")
-        let navigate = ShortcutCatalog.groups.first { $0.title == "Navigate" }
-        expect(navigate?.items.first?.keys.count == 6, "six digits")
-        expect(navigate?.items.first?.desc.hasPrefix("sitrep · calendar · emails") == true, "Calendar is 2")
+    /// The calendar's keys follow the page: absent from the overlay while it
+    /// is not offered, and with Calendar at 2 when it is. The assistant, with
+    /// no account in hand, recites them with their condition, and the guide's
+    /// prose agrees with the table about the event pane's keys.
+    static func theCalendarIsListedOnlyWhereItIsOffered() {
+        let off = ShortcutCatalog.groups(calendar: false)
+        expect(off.map(\.title) == ShortcutCatalog.groups.map(\.title), "no calendar, the table as it was")
+        expect(!off.contains { $0.title == "Calendar" }, "no Calendar group while it is not offered")
+
+        let on = ShortcutCatalog.groups(calendar: true)
+        expect(on.contains { $0.title == "Calendar" }, "the Calendar group while it is offered")
+        let navigate = on.first { $0.title == "Navigate" }
+        expect(navigate?.items.first?.keys.count == 6, "six digits with the calendar")
+        expect(navigate?.items.first?.desc.hasPrefix("sitrep · calendar") == true, "Calendar is 2")
         expect(navigate?.items.contains { $0.keys == ["⇧C"] } == true, "⇧C opens it")
 
-        let text = ProductGuide.shortcuts
+        let text = ProductGuide.shortcuts(calendar: true)
         for item in ShortcutCatalog.calendarGroup.items {
             expect(text.contains(item.desc), "the calendar's \"\(item.desc)\" is recited")
         }
         expect(text.contains("- ⇧C: calendar"), "and ⇧C, under Navigate")
+        let quiet = ProductGuide.shortcuts(calendar: false)
+        expect(!quiet.contains("\nCalendar\n"), "no Calendar group recited while the page is off")
+        expect(!quiet.contains("⇧C"), "nor ⇧C")
         func key(_ desc: String) -> [String] {
             ShortcutCatalog.calendarGroup.items.first { $0.desc == desc }?.keys ?? []
         }
@@ -156,63 +165,97 @@ struct ProductGuideTests {
         expect(guide.contains("plain Enter does nothing"), "plain Enter never tells guests")
     }
 
-    /// Every topic is on offer, the calendar's third; the getting-around list
-    /// numbers Calendar 2 to Groups 6.
-    static func theTopicsAndThePagesList() {
+    /// THE CALENDAR PAGE OFF IS MAIN, BYTE FOR BYTE (fix round 1, C1). The
+    /// guide, the topic list and the product_help schema built from them go
+    /// to every tenant's assistant, and before the flag is on for a mailbox
+    /// none of it may mention a page that mailbox does not have. The list is
+    /// main's own, spelled out; the prose is held to having no calendar page
+    /// in it, and was diffed against main's output when this was written.
+    static func withTheCalendarOffTheGuideIsMains() {
+        let mains = [
+            "getting_around", "sitrep", "reading_mail", "writing_mail", "mail_list", "triage",
+            "sender_rules", "reminders", "search", "login_codes", "assistant", "app_and_accounts",
+            "whats_new",
+        ]
+        expect(ProductGuide.topics(calendar: false).map(\.rawValue) == mains, "off: main's topics, in main's order")
         expect(
-            ProductGuide.topics.map(\.rawValue) == [
-                "getting_around", "sitrep", "calendar", "reading_mail", "writing_mail", "mail_list", "triage",
-                "sender_rules", "reminders", "search", "login_codes", "assistant", "app_and_accounts",
-                "whats_new",
-            ], "every topic, the calendar third")
-        expect(ProductGuide.topicIndex.contains("calendar: the Calendar page"), "the schema describes the page")
-        let around = ProductGuide.text(.gettingAround, runningVersion: nil)
-        expect(around.contains("modifier):\n- 1 Sitrep"), "the list sits right under its heading")
-        expect(around.contains("- 2 Calendar:") && around.contains("- 3 Emails:"), "Calendar 2, Emails 3")
-        expect(around.contains("- 6 Groups:"), "Groups 6")
-        expect(!around.contains("- 7 "), "no seventh page")
-        expect(around.contains("the key opens Settings > Groups.\n- Usage and Settings"), "and runs straight on")
-        expect(!ProductGuide.text(.calendar, runningVersion: nil).contains("per mailbox"),
-               "the guide no longer says the page is switched on per mailbox")
+            ProductGuide.topics(calendar: true).map(\.rawValue)
+                == ["getting_around", "sitrep", "calendar"] + mains.dropFirst(2),
+            "on: the calendar topic third")
+        let index = ProductGuide.topicIndex(calendar: false)
+        expect(!index.contains("calendar:"), "off: the schema offers no calendar topic")
+        expect(!index.contains("Calendar page"), "nor describes the page")
+        expect(ProductGuide.topicIndex(calendar: true).contains("calendar: the Calendar page"), "on: it does")
+        for topic in ProductGuide.topics(calendar: false) {
+            let text = ProductGuide.text(topic, runningVersion: "0.0.12", calendar: false)
+            expect(!text.contains("Calendar page"), "off: \(topic.rawValue) says nothing of the page")
+            expect(!text.contains("⇧C"), "off: \(topic.rawValue) teaches no ⇧C")
+        }
+        let off = ProductGuide.text(.gettingAround, runningVersion: nil, calendar: false)
+        expect(off.contains("- 1 Sitrep:"), "off: 1 is the sitrep")
+        expect(off.contains("- 2 Emails:") && off.contains("- 5 Groups:"), "off: Emails 2 to Groups 5")
+        expect(!off.contains("- 6 "), "off: no sixth page")
+        expect(off.contains("modifier):\n- 1 Sitrep"), "the list sits right under its heading")
+        expect(off.contains("the key opens Settings > Groups.\n- Usage and Settings"), "and runs straight on")
+        let on = ProductGuide.text(.gettingAround, runningVersion: nil, calendar: true)
+        expect(on.contains("- 2 Calendar:") && on.contains("- 3 Emails:"), "on: Calendar 2, Emails 3")
+        expect(on.contains("- 6 Groups:"), "on: Groups 6")
     }
 
     /// verify8 V8-14: every topic that names the digit of a page takes it
-    /// from the Navigate row the `?` sheet draws: Emails is 3, Auth 4, Rules
-    /// 5 and Groups 6 in the prose as on the keys.
+    /// from the Navigate row the `?` sheet draws for this mailbox. With the
+    /// Calendar page on, Emails is 3, Auth 4, Rules 5 and Groups 6 in the
+    /// prose as on the keys; with it off, the sentences are main's own.
     static func aPagesDigitIsTheSheets() {
-        func text(_ topic: ProductGuide.Topic) -> String {
-            ProductGuide.text(topic, runningVersion: "0.0.12")
+        func text(_ topic: ProductGuide.Topic, _ calendar: Bool) -> String {
+            ProductGuide.text(topic, runningVersion: "0.0.12", calendar: calendar)
         }
-        let sentences: [(ProductGuide.Topic, String)] = [
+        // Main's sentences, spelled out: the page off changes no byte of them.
+        let mains: [(ProductGuide.Topic, String)] = [
+            (.writingMail, "- Groups are made in Settings > Groups (key 5): n new"),
+            (.writingMail, "- Scheduled mail waits on the Emails page (key 2) under \"sent\""),
+            (.mailList, "The Emails page (key 2) is every message in one list."),
+            (.senderRules, "- From Settings > Rules (key 4, or T on the Emails page): n."),
+            (.reminders, "- Emails page (key 2), then the Reminders pill"),
+            (.loginCodes, "on the Auth page (key 3, or g on the Emails page)"),
+        ]
+        for (topic, sentence) in mains {
+            expect(text(topic, false).contains(sentence), "off: \(topic.rawValue) says main's \"\(sentence)\"")
+            expect(!text(topic, true).contains(sentence), "on: \(topic.rawValue) no longer gives the page-off digit")
+        }
+        let shifted: [(ProductGuide.Topic, String)] = [
             (.writingMail, "Settings > Groups (key 6)"),
             (.writingMail, "the Emails page (key 3) under"),
             (.mailList, "The Emails page (key 3) is"),
             (.senderRules, "Settings > Rules (key 5, or T"),
             (.reminders, "- Emails page (key 3), then"),
             (.loginCodes, "the Auth page (key 4, or g"),
-            (.calendar, "key 2, or ⇧C from anywhere. Emails is key 3, Auth 4, Rules 5 and Groups 6."),
+            (.calendar, "key 2, or ⇧C from anywhere. Emails is then key 3, Auth 4, Rules 5 and Groups 6."),
         ]
-        for (topic, phrase) in sentences {
-            expect(text(topic).contains(phrase), "\(topic.rawValue) says \"\(phrase)\"")
+        for (topic, phrase) in shifted {
+            expect(text(topic, true).contains(phrase), "on: \(topic.rawValue) says \"\(phrase)\"")
         }
         // The digits ARE the sheet's: each page's key in the prose is the key
-        // beside its name in the Navigate row.
-        let row = ShortcutCatalog.groups.first { $0.title == "Navigate" }!.items[0]
-        let names = row.desc.components(separatedBy: " · ")
-        expect(names.count == row.keys.count, "one digit a page")
-        for (name, key) in zip(names, row.keys) {
-            expect(ProductGuide.keyed("x {key:\(name)} y") == "x \(key) y", "\(name) is \(key)")
+        // beside its name in the Navigate row, for both tables.
+        for calendar in [false, true] {
+            let row = ShortcutCatalog.groups(calendar: calendar).first { $0.title == "Navigate" }!.items[0]
+            let names = row.desc.components(separatedBy: " · ")
+            expect(names.count == row.keys.count, "one digit a page (calendar \(calendar))")
+            for (name, key) in zip(names, row.keys) {
+                expect(ProductGuide.keyed("x {key:\(name)} y", calendar: calendar) == "x \(key) y",
+                       "\(name) is \(key) (calendar \(calendar))")
+            }
+            for topic in ProductGuide.topics(calendar: calendar) {
+                expect(!text(topic, calendar).contains("{key:"), "\(topic.rawValue): every digit was filled in (calendar \(calendar))")
+            }
+            // The getting-around list, numbered on its own, agrees with it.
+            let around = text(.gettingAround, calendar)
+            for (name, key) in zip(names, row.keys) {
+                expect(around.contains("- \(key) \(name.prefix(1).uppercased() + name.dropFirst()):"),
+                       "the pages list puts \(name) on \(key) too (calendar \(calendar))")
+            }
         }
-        for topic in ProductGuide.topics {
-            expect(!text(topic).contains("{key:"), "\(topic.rawValue): every digit was filled in")
-        }
-        // The getting-around list, numbered on its own, agrees with it.
-        let around = text(.gettingAround)
-        for (name, key) in zip(names, row.keys) {
-            expect(around.contains("- \(key) \(name.prefix(1).uppercased() + name.dropFirst()):"),
-                   "the pages list puts \(name) on \(key) too")
-        }
-        expect(ProductGuide.keyed("{key:nowhere}") == "{key:nowhere}", "a page the row lacks is left to be caught")
+        expect(ProductGuide.keyed("{key:nowhere}", calendar: true) == "{key:nowhere}", "a page the row lacks is left to be caught")
     }
 
     // MARK: - settings

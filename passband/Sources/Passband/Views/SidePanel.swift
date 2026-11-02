@@ -379,7 +379,9 @@ struct SearchView: View {
     /// the blip as "no events"; it is never an error over the mail results.
     private func runEventSearch() async {
         let field = store.search.query.trimmed
-        guard let asked = CalendarSearch.eventQuery(field) else {
+        // No Events block while this mailbox has no Calendar page: the
+        // daemon 404s the search, and there is no page to open a hit on.
+        guard store.calendarPageAvailable, let asked = CalendarSearch.eventQuery(field) else {
             clearEvents()
             return
         }

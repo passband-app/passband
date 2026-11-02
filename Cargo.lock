@@ -3993,9 +3993,9 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.13.5"
+version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "278e9268c93b9e498a2da46c34d90ba93a3255eb99009646398f34bc73ab36eb"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
 dependencies = [
  "bitflags 2.13.0",
  "memchr",
@@ -5189,7 +5189,7 @@ dependencies = [
 
 [[package]]
 name = "squelch-api"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "anyhow",
  "async-imap",
@@ -5226,7 +5226,7 @@ dependencies = [
 
 [[package]]
 name = "squelch-broker"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "anyhow",
  "axum",
@@ -5245,7 +5245,7 @@ dependencies = [
 
 [[package]]
 name = "squelch-control"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "age",
  "anyhow",
@@ -5283,7 +5283,7 @@ dependencies = [
 
 [[package]]
 name = "squelch-core"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "age",
  "ammonia",
@@ -5331,7 +5331,7 @@ dependencies = [
 
 [[package]]
 name = "squelch-embed"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "axum",
  "fastembed",
@@ -5346,7 +5346,7 @@ dependencies = [
 
 [[package]]
 name = "squelch-eval"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "anyhow",
  "axum",
@@ -5364,14 +5364,14 @@ dependencies = [
 
 [[package]]
 name = "squelch-httpauth"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "subtle",
 ]
 
 [[package]]
 name = "squelch-mcp"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5397,14 +5397,14 @@ dependencies = [
 
 [[package]]
 name = "squelch-ratelimit"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "http",
 ]
 
 [[package]]
 name = "squelch-relay"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "anyhow",
  "axum",
@@ -5425,7 +5425,7 @@ dependencies = [
 
 [[package]]
 name = "squelch-tui"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5437,7 +5437,7 @@ dependencies = [
 
 [[package]]
 name = "squelch-warden"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "age",
  "anyhow",
@@ -5462,7 +5462,7 @@ dependencies = [
 
 [[package]]
 name = "squelchd"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "anyhow",
  "axum",

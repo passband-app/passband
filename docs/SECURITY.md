@@ -1852,15 +1852,15 @@ write (`passband/Sources/Passband/Lib/EventProposal.swift`,
   earlier proposal, on screen or parked) refuses the tool with a fixed sentence
   the model relays.
 - **Mac only.** Offered only on the Mac (`AgentTools.Tool.isAvailable`); on
-  the phone a call naming it is answered as any unknown tool. (It was once
-  also gated on the `calendar` flag, now retired.) No edit or delete tool.
+  the phone a call naming it is answered as any unknown tool. It is also gated
+  on the `calendar` flag (CALENDAR.md §11). No edit or delete tool.
   Nothing was added to `/mcp`, `/client/agent/*` or the relay.
 
 **Who a name is: `GET /client/calendar/people` (wave 6).** The event pane reads
 "with steven" out of a new event's title (a deterministic parser in the client,
 no model) and asks the daemon who that most likely is, to SUGGEST a guest.
-- With the other calendar routes (`calendar_routes`; the `calendar` flag that
-  once 404ed them is retired), bearer authed on the human door, `no-store`, at most three answers. Not
+- With the other calendar routes (`calendar_routes`, behind the `calendar`
+  flag), bearer authed on the human door, `no-store`, at most three answers. Not
   on the agent door, `/mcp` or the assistant relay.
 - **A candidate is somebody the user has written to** (`contacts`, `sent_count >
   0`), never the account's own address. Receiving mail from someone never makes

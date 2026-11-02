@@ -25,7 +25,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tower::ServiceExt;
 
 mod common;
-use common::{TOKEN, authed, msg, state_with};
+use common::{TOKEN, authed, calendar_on, msg, state_with};
 
 /// Serve `app` the way the daemon does, forever.
 async fn serve_app(app: axum::Router) -> std::net::SocketAddr {
@@ -382,10 +382,9 @@ async fn every_ceiling_row_is_a_real_route() {
     let _serial = SERIAL.lock().await;
     let (state, _store, _acct) = state_with(|_, _| {});
     let metrics = SyncMetrics::new();
-    let app = router(state).layer(axum::middleware::from_fn_with_state(
-        metrics.clone(),
-        record_http_metrics,
-    ));
+    let app = router(state.with_features(calendar_on())).layer(
+        axum::middleware::from_fn_with_state(metrics.clone(), record_http_metrics),
+    );
 
     for (method, template, _) in ROUTE_CEILINGS {
         let uri = template

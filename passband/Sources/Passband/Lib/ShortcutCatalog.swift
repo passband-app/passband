@@ -57,7 +57,7 @@ enum ShortcutCatalog {
                 Item(["c"], "new message"),
                 Item(["e", "d"], "done, and close the reader"),
                 Item(["E", "D"], "done, and open the next email"),
-                Item(["S"], "skip to the next email, leave this one"),
+                Item(["S"], "save for later, and open the next email"),
                 Item(["h"], "remind + next"),
                 Item(["u"], "unsubscribe from this sender"),
                 Item(["t"], "new rule for this sender"),

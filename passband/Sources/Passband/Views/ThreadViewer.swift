@@ -2027,7 +2027,7 @@ struct ThreadViewer: View {
             // notification, a contact card): there is nothing to skip to, and
             // a skip that quietly closed the reader would read as Esc. A
             // Reading sender with one email still has the next sender's card.
-            KeyBinding(declining: "S", "skip to next", exactCase: true) {
+            KeyBinding(declining: "S", "save for later + next", exactCase: true) {
                 guard store.threadQueue.count > 1 || store.nextReadingSender != nil else {
                     return false
                 }
@@ -2037,7 +2037,7 @@ struct ThreadViewer: View {
             // IN FLOW MODE the bare letter is the skip: Space said "walk me
             // through these", so there is no other verb for `s` to be mistaken
             // for. Outside a walk it declines, and a stray `s` stays a typo.
-            KeyBinding(declining: "s", "skip to next (flow mode)", exactCase: true) {
+            KeyBinding(declining: "s", "save for later + next (flow mode)", exactCase: true) {
                 guard store.walk != nil, store.threadQueue.count > 1 else { return false }
                 Task { await skipToNext() }
                 return true
@@ -2871,7 +2871,7 @@ struct ThreadViewer: View {
             // otherwise be the reader on `next` asking for it.
             if store.walk != nil, let row = queue.first(where: { $0.thread_id == outgoing }) {
                 store.pushUndo(
-                    kind: .skip, messageId: row.id, label: "skipped \(row.sender)",
+                    kind: .skip, messageId: row.id, label: "saved \(row.sender) for later",
                     rewind: WalkRewind(back: outgoing, from: next.thread_id, step: .skip)
                 ) {}
             }
@@ -4903,7 +4903,7 @@ private final class LandingHold {
                 .foregroundStyle(Palette.accent.opacity(0.85))
                 VStack(alignment: .leading, spacing: Space.s6) {
                     row("e", "done + next")
-                    if canSkip { row("s", "skip") }
+                    if canSkip { row("s", "save for later") }
                 }
             }
             .padding(.horizontal, Space.scaled(11))
@@ -4913,7 +4913,7 @@ private final class LandingHold {
             .allowsHitTesting(false)
             .accessibilityElement(children: .combine)
             .accessibilityLabel(
-                canSkip ? "Flow mode. E: done and next. S: skip." : "Flow mode. E: done and next.")
+                canSkip ? "Flow mode. E: done and next. S: save for later." : "Flow mode. E: done and next.")
         }
 
         private func row(_ key: String, _ label: String) -> some View {

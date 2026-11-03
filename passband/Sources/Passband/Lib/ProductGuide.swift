@@ -75,7 +75,7 @@ enum ProductGuide {
                 "the Calendar page: month, week and agenda, events guessed from mail, connecting "
                     + "Google Calendar, new, edited and deleted events, guests"
             case .readingMail:
-                "an open email: moving between messages and emails, done, skip, unsubscribe, "
+                "an open email: moving between messages and emails, done, save for later, unsubscribe, "
                     + "attachments, images, chat or email style, the contact card, translated "
                     + "mail, show original, languages you read"
             case .writingMail:
@@ -275,7 +275,7 @@ enum ProductGuide {
 
         Flow mode:
         - Space, or the "flow mode" pill at the top of For your eyes, walks the list one email at a time, starting at the highlighted row or the first one.
-        - In the reader during the walk, e is done and next, and s skips and leaves the email on the board. A small "FLOW MODE" card shows both keys. A summary card shows at the end.
+        - In the reader during the walk, e is done and next, and s saves the email for later: it stays on the board and the walk moves on. A small "FLOW MODE" card shows both keys. A summary card shows at the end.
 
         Hover tricks:
         - Hover a package and press e to clear it until its next update. Right-click has "Clear this package".
@@ -365,9 +365,9 @@ enum ProductGuide {
         Finishing:
         - e or d: done, and close the reader. The header has an "e done" button too.
         - E or D (with Shift): done, and open the next email.
-        - S (Shift+S): skip to the next email and leave this one as it is.
+        - S (Shift+S): save for later. The email stays on the board as it is, and the next one opens.
         - h: remind me later, then move on. See the reminders topic.
-        - In flow mode (Space on the Sitrep) plain e is done and next, and plain s skips.
+        - In flow mode (Space on the Sitrep) plain e is done and next, and plain s saves for later.
         - On a Reading sender's stack, tapping e moves to that sender's next email, and holding e fills a ring and marks the whole stack done. E does the same and carries on to the next sender's card.
         - Done is Passband's own status. The email leaves the board and stays in the mailbox; nothing is archived or deleted in Gmail.
 

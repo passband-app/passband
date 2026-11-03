@@ -104,6 +104,22 @@ struct ComposePane: View {
             #endif
             .keyContext(.modal)
             .keyBindings(.modal, bindings)
+            #if !os(macOS)
+                .confirmationDialog(
+                    store.mailtoAsk.map { MailtoAskCopy.title($0.link) } ?? "",
+                    isPresented: mailtoAsked, titleVisibility: .visible
+                ) {
+                    // Pinned at presentation, for the reason the delete
+                    // dialog's ask is: dismissal may clear it first.
+                    Button(MailtoAskCopy.confirm) { [ask = store.mailtoAsk] in
+                        store.mailtoAsk = ask
+                        store.confirmMailtoAsk()
+                    }
+                    Button(MailtoAskCopy.cancel, role: .cancel) { store.cancelMailtoAsk() }
+                } message: {
+                    Text(MailtoAskCopy.message(keepsDraft: store.mailtoAsk?.keepsDraft ?? true))
+                }
+            #endif
             .onAppear {
                 focusedField = .recipient(.to)
                 settleFocus()
@@ -352,6 +368,12 @@ struct ComposePane: View {
     }
 
     #if !os(macOS)
+        private var mailtoAsked: Binding<Bool> {
+            Binding(
+                get: { store.liveMailtoAsk != nil },
+                set: { if !$0 { store.cancelMailtoAsk() } })
+        }
+
         /// The confirm's presence, derived from the store so a dismissal by
         /// tapping off runs the same `cancelDiscardAsk()` Keep writing does.
         private var discardAsked: Binding<Bool> {
@@ -801,7 +823,9 @@ struct ComposePane: View {
     /// it falls through to the bindings below, and none of them may act on
     /// the mail underneath. Least of all send it while it is asking to be
     /// deleted.
-    private var modalAbove: Bool { store.askBarOpen || store.discardAsk != nil }
+    private var modalAbove: Bool {
+        store.askBarOpen || store.discardAsk != nil || store.liveMailtoAsk != nil
+    }
 
     /// ⌘Enter sends from anywhere in the pane, the body included. Plain Enter
     /// is left alone everywhere: it used to open review from the to/subject
@@ -1002,6 +1026,67 @@ struct DiscardConfirm: View {
         .keyBindings(.modal, [
             KeyBinding("Escape", "keep writing", allowInInput: true) { store.cancelDiscardAsk() },
             KeyBinding("Enter", "delete message", allowInInput: true) { store.confirmDiscard() },
+        ])
+    }
+}
+
+// MARK: - a mailto: link over a composer
+
+/// The words of the mailto question, one set for the Mac card and the phone
+/// dialog.
+enum MailtoAskCopy {
+    static func title(_ link: Mailto) -> String {
+        let everyone = link.to + link.cc + link.bcc
+        guard let first = everyone.first else { return "Start a new email?" }
+        let more = everyone.count - 1
+        return more == 0
+            ? "Start a new email to \(first)?"
+            : "Start a new email to \(first) and \(more) more?"
+    }
+
+    static func message(keepsDraft: Bool) -> String {
+        keepsDraft
+            ? "The one you're writing will be kept in drafts."
+            : "This daemon can't keep a forward as a draft, so the one you're writing will be lost."
+    }
+
+    static let confirm = "Start new"
+    static let cancel = "Keep writing"
+}
+
+/// Asked when a mailto: link is clicked while the composer holds writing.
+/// Window-level, from `ActionLayer`, for the reason `DiscardConfirm` is.
+struct MailtoConfirm: View {
+    @Environment(AppStore.self) private var store
+    let ask: AppStore.MailtoAsk
+
+    var body: some View {
+        OverlayScrim(onDismiss: { store.cancelMailtoAsk() }) {
+            ModalCard(width: 380) {
+                Text(MailtoAskCopy.title(ask.link))
+                    .font(Typo.modalTitle)
+                    .foregroundStyle(Palette.ink)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(MailtoAskCopy.message(keepsDraft: ask.keepsDraft))
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                ModalButtons {
+                    Button(MailtoAskCopy.cancel) { store.cancelMailtoAsk() }
+                        .buttonStyle(.glass)
+                    Button(MailtoAskCopy.confirm) { store.confirmMailtoAsk() }
+                        .buttonStyle(.glassProminent)
+                        .tint(ask.keepsDraft ? Palette.accent : Palette.danger)
+                }
+            }
+        }
+        .keyContext(.modal)
+        .keyBindings(.modal, [
+            KeyBinding("Escape", "keep writing", allowInInput: true) { store.cancelMailtoAsk() },
+            KeyBinding("Enter", "start new email", allowInInput: true) { store.confirmMailtoAsk() },
         ])
     }
 }

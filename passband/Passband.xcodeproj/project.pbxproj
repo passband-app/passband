@@ -146,6 +146,7 @@
 		3E86ED3B31C4CFD8E08695DF /* AttachmentThumbs.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE85FBF58B14F2DC27FC16FB /* AttachmentThumbs.swift */; };
 		3F02CE2BCEB2A2903CA15A38 /* CalendarMonth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F39A78CE5F9F2D59F7DA8A3 /* CalendarMonth.swift */; };
 		3F3CDF4B6911349A9481A225 /* InlineReply.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5B001C6ABDDB051E2B57205 /* InlineReply.swift */; };
+		3F4A1B8C7E94E982946B54DB /* Mailto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C229EB225D28FC28ADBE84D /* Mailto.swift */; };
 		3F947C6A0FEA54FDD53DB071 /* Transcript.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E0780DC48411C969D9B6001 /* Transcript.swift */; };
 		3FBFC0C93CC79B3FD2624085 /* DeeperSearchBand.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE90BEFCBE860D7F852028C5 /* DeeperSearchBand.swift */; };
 		3FF1A5AFB7412C3BABDA8352 /* Sparkle.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 82CD5D3AEF359995F968DB53 /* Sparkle.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
@@ -493,6 +494,7 @@
 		D0797905A0AFC74B229FC0B3 /* HiddenFeatures.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4BFB7F8DEBF73425B2ED67C /* HiddenFeatures.swift */; };
 		D1722EF952905C3BCED61CD5 /* AuthCodeModal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A47FA6986F50A4E81628452 /* AuthCodeModal.swift */; };
 		D229AE3C967617AE228AC01A /* HostedServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B2016745A95BE31B7869ECF /* HostedServer.swift */; };
+		D46DE05A4B60111DB4FEA9D6 /* Mailto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C229EB225D28FC28ADBE84D /* Mailto.swift */; };
 		D4A4EA8324A57E2B01720266 /* ImageRepeats.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFF2F03B0D68F54C0DC28777 /* ImageRepeats.swift */; };
 		D4CB64316C37E4438ADF419D /* KeyDispatch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E2AB71004C775ABFABB73D9 /* KeyDispatch.swift */; };
 		D52ECED560FD5574D03D0A08 /* EventStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE462B9CE6C195F53B48B801 /* EventStream.swift */; };
@@ -837,6 +839,7 @@
 		9AC75F572A768A3A2EEB001F /* Reading.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Reading.swift; sourceTree = "<group>"; };
 		9B11AE47A064BB58DD81A6DB /* ActionLayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionLayer.swift; sourceTree = "<group>"; };
 		9BEFFF28230357ABC4413CD4 /* IntroHaptics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntroHaptics.swift; sourceTree = "<group>"; };
+		9C229EB225D28FC28ADBE84D /* Mailto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Mailto.swift; sourceTree = "<group>"; };
 		9C4011E6AF1CD8193898F627 /* SearchLanePrompt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchLanePrompt.swift; sourceTree = "<group>"; };
 		9C92A36DDD1B4FF9A1BD99B0 /* ThreadStyleLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadStyleLedger.swift; sourceTree = "<group>"; };
 		9C9C77BCE41A573ED04E49AA /* CidImages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CidImages.swift; sourceTree = "<group>"; };
@@ -1148,6 +1151,7 @@
 				1A74374DEAEE21CDF9A5067D /* Loadable.swift */,
 				C10C0C8780CCB9C6BAB2709C /* MailCSP.swift */,
 				35224D41EE816E52C2396950 /* MailList.swift */,
+				9C229EB225D28FC28ADBE84D /* Mailto.swift */,
 				804C8223C341E4978DF39DC5 /* MapKitPlaces.swift */,
 				BE74212A3CE62E8F28EC8D7E /* Markdown.swift */,
 				4EF8CFFF47055FF070BD9E8F /* MinimapGeometry.swift */,
@@ -1781,6 +1785,7 @@
 				46D44A7303D12ED7AD0C0852 /* MailList.swift in Sources */,
 				865AD21BDE6B66D287E33641 /* MailListCursor.swift in Sources */,
 				90229A34F9C4E9629C862665 /* MailRow.swift in Sources */,
+				3F4A1B8C7E94E982946B54DB /* Mailto.swift in Sources */,
 				7212E886802DBD6F6E869BD0 /* MainWindow.swift in Sources */,
 				B2AB2894B55FCFB6BBDE8AE2 /* MapKitPlaces.swift in Sources */,
 				C14EABCB7D1F6C3C4B800311 /* Markdown.swift in Sources */,
@@ -2061,6 +2066,7 @@
 				39106BE6F52C41CBE345A57E /* MailList.swift in Sources */,
 				CBE4D470D5B20719C4BB6364 /* MailListCursor.swift in Sources */,
 				C002CBB0D207E2B3863EAC7A /* MailRow.swift in Sources */,
+				D46DE05A4B60111DB4FEA9D6 /* Mailto.swift in Sources */,
 				3E7D6E670F1E4248D8722D25 /* MapKitPlaces.swift in Sources */,
 				063C1CF09D6E7CE57C547486 /* Markdown.swift in Sources */,
 				84F6860CDCC32C143703EF41 /* MarkdownStyle.swift in Sources */,

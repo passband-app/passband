@@ -3169,6 +3169,7 @@ final class AppStore {
         remindTarget = nil
         schedulePicker = nil
         discardAsk = nil
+        mailtoAsk = nil
         ruleEditor = nil
         // A draft's pattern names the old account's senders and rule ids.
         ruleDrafts = [:]
@@ -3740,7 +3741,8 @@ final class AppStore {
             || ruleEditor != nil
             || groupEditor != nil
             || !authQueue.isEmpty || retriage != nil || retriageAsk != nil
-            || reconnectAsk != nil || discardAsk != nil || calendarCardUp
+            || reconnectAsk != nil || discardAsk != nil || liveMailtoAsk != nil
+            || calendarCardUp
             || calendarDeleteAsk != nil
             || tour.wantsBlur || whatsNew.active
     }
@@ -5054,6 +5056,106 @@ final class AppStore {
         Analytics.capture("compose_opened", ["kind": next.analyticsKind])
     }
 
+    /// A mailto: link clicked while a composer with something in it was up:
+    /// the question of whether to put that one away and start this one.
+    /// Drawn by `ActionLayer` (Mac) and the pane's own dialog (phone), like
+    /// `discardAsk`. Tied to the composer it asked about by id.
+    struct MailtoAsk: Equatable {
+        let link: Mailto
+        let composerId: UUID
+        /// False only for a forward an older daemon cannot keep, which the
+        /// question then has to own up to.
+        let keepsDraft: Bool
+    }
+    var mailtoAsk: MailtoAsk?
+
+    /// The ask, only while the composer it asked about is still the one up.
+    /// Every reader goes through this: an ask left behind by a composer an
+    /// agent's draft replaced must neither draw a card nor hold keys.
+    var liveMailtoAsk: MailtoAsk? {
+        guard let ask = mailtoAsk, ask.composerId == compose?.id else { return nil }
+        return ask
+    }
+
+    /// A mailto: link clicked in a message: a new composer, addressed and
+    /// titled as the link asks. Nothing restores into it: the link said who
+    /// to write to, and an unrelated half-written draft would say otherwise.
+    ///
+    /// A composer already up with nothing in it is simply replaced. One with
+    /// writing in it is never blanked out by a click: the person is asked
+    /// first, and a yes keeps it in drafts the way Esc does.
+    func openComposeMailto(_ url: String) {
+        // A new click is a new question; an older one left behind is dropped.
+        mailtoAsk = nil
+        guard let link = Mailto(url) else { return }
+        guard let open = compose else {
+            openMailto(link)
+            return
+        }
+        // A send in flight owns its composer; there is nothing to put away.
+        guard !open.sending else { return }
+        // ASK ONLY ABOUT WRITING: what the person typed, not what a composer
+        // opened holding. A composer seeded by an earlier link (or restored
+        // from a draft) and left alone is not "the one you're writing", and
+        // its close saves nothing a question could promise. Put away through
+        // `closeCompose` all the same, so a typed-then-cleared composer's
+        // pending blank save still deletes its row.
+        let writing =
+            (DraftSaver.shared.isTouched(.compose) && DraftSaver.hasContent(open))
+            || !open.attachments.isEmpty
+        guard writing else {
+            closeCompose()
+            openMailto(link)
+            return
+        }
+        // The card has no field, so the caret would stay in the mail under it
+        // and keys would edit it blind (`askDiscardCompose` does the same).
+        #if os(macOS)
+            for window in NSApp.windows where window.firstResponder is NSText {
+                window.makeFirstResponder(nil)
+            }
+        #endif
+        // A reply keeps its own row, keyed by its parent, on any daemon. New
+        // mail and forwards need `drafts_v2`: an older daemon has ONE
+        // new-message slot, which the link's composer would save over.
+        mailtoAsk = MailtoAsk(
+            link: link, composerId: open.id,
+            keepsDraft: open.replyToMessageId != nil || draftsV2Available)
+    }
+
+    func cancelMailtoAsk() {
+        mailtoAsk = nil
+    }
+
+    /// Confirmed: the open composer goes to drafts (an Esc, toast and all)
+    /// and the link's composer takes its place. Only for the composer the
+    /// question was about; one replaced or sent meanwhile agreed to nothing.
+    func confirmMailtoAsk() {
+        guard let ask = mailtoAsk else { return }
+        mailtoAsk = nil
+        // The composer asked about went away on its own: nothing left to put
+        // away, and the person did say yes to the link.
+        guard let open = compose else {
+            openMailto(ask.link)
+            return
+        }
+        guard open.id == ask.composerId, !open.sending else { return }
+        closeCompose()
+        openMailto(ask.link)
+    }
+
+    private func openMailto(_ link: Mailto) {
+        var state = ComposeState()
+        state.to = link.to.joined(separator: ", ")
+        state.cc = link.cc.joined(separator: ", ")
+        state.bcc = link.bcc.joined(separator: ", ")
+        state.subject = link.subject
+        // The link's body is a suggestion the sender of the mail wrote, so the
+        // signature still goes under it (`openCompose` only seeds an EMPTY one).
+        if !link.body.isEmpty { state.body = link.body + Prefs.shared.signatureSeed }
+        openCompose(state)
+    }
+
     /// `c` / ⌘N — the new-message composer, RESTORED, but only from the recent
     /// past. A `drafts_v2` daemon holds any number of new-message drafts, so
     /// "the" draft to restore is the most recently edited one, and only when
@@ -5095,7 +5197,8 @@ final class AppStore {
         let state = ComposeState()
         openCompose(state)
         let opened = state.page
-        Task { await restoreNewMessage(openedOn: opened) }
+        let openedId = state.id
+        Task { await restoreNewMessage(openedOn: opened, composerId: openedId) }
     }
 
     /// The newest plain new-message draft edited within `restoreWindow`, not
@@ -5251,7 +5354,7 @@ final class AppStore {
     /// Fill the just-opened new-message composer from its saved draft. Silent on
     /// failure: a restore that cannot happen leaves a blank composer, which is
     /// what the reader asked for anyway.
-    private func restoreNewMessage(openedOn opened: ComposePage) async {
+    private func restoreNewMessage(openedOn opened: ComposePage, composerId: UUID) async {
         let e = epoch
         // No verdict on the daemon yet, no rule to apply: which rows count as
         // candidates depends on whether it keeps one slot or many. WAIT for it
@@ -5296,7 +5399,11 @@ final class AppStore {
         // an untouched body, so a `c` fired a moment earlier could land its
         // restore in it and quietly re-address someone else's mail. The subject
         // this seeds would survive as the only visible trace.
-        guard var next = compose, next.replyToMessageId == nil, next.forwardOfMessageId == nil,
+        // And THE SAME composer, by identity: a blank one swapped for a
+        // mailto: link's passes every test below, and filling it would
+        // re-address the mail the link asked for.
+        guard var next = compose, next.id == composerId,
+            next.replyToMessageId == nil, next.forwardOfMessageId == nil,
             next.draftId == nil, !DraftSaver.hasContent(next),
             // A file dropped in the meantime is composing too, even before it
             // finishes staging: overwriting the tray with the draft's would

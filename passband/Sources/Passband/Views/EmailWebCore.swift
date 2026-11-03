@@ -366,9 +366,15 @@ struct EmailWebView: View {
                 },
                 onQuotedFound: { hasQuoted = $0 },
                 onLink: {
+                    // An address in the mail is somebody to write to: it opens
+                    // Passband's own composer, never the system mail app.
+                    if Mailto.isMailto($0) {
+                        store.openComposeMailto($0)
+                        return
+                    }
                     // Counted only when it is a link `Opener` will actually
-                    // open: a mailto: or an in-page anchor reaches here too
-                    // and goes nowhere, and "clicked" should mean they went.
+                    // open: an in-page anchor reaches here too and goes
+                    // nowhere, and "clicked" should mean they went.
                     // And not the footer's unsubscribe link, which is the
                     // reader leaving, not engaging.
                     if let attentionMessageId, Opener.isHTTP($0),
@@ -1162,7 +1168,7 @@ enum EmailFrame {
             if (!a) return;
             e.preventDefault();
             var href = a.getAttribute('href') || '';
-            if (/^https?:\\/\\//i.test(href)) send({ kind: 'link', value: href });
+            if (/^(https?:\\/\\/|mailto:)/i.test(href)) send({ kind: 'link', value: href });
           }, true);
         })();
         """

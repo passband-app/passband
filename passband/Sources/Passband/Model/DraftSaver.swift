@@ -42,6 +42,10 @@ final class DraftSaver {
     /// restored draft and left it alone — must not write anything, or every glance
     /// at a draft would bump its `updated_at`.
     private var touched: Set<Slot> = []
+
+    /// Whether this slot has been edited since it opened: typed into, not
+    /// merely opened holding something.
+    func isTouched(_ slot: Slot) -> Bool { touched.contains(slot) }
     /// The save currently on the wire per slot, so the next one waits for it. Two
     /// PUTs racing on one key can land out of order, and the loser would be the
     /// newer text. This closes the overlap that actually happens — a debounced save

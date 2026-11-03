@@ -407,8 +407,8 @@ struct ClientMessage: Codable, Sendable, Identifiable, Hashable, SenderStringCon
     /// over a line it does not draw.
     @LenientOptional var sender_signals: SenderSignals? = nil
     /// The daemon's call on whether `sender_signals` is a WARNING (a name
-    /// claim, or replies routed elsewhere by someone who is not a trusted
-    /// contact). ABSENT on a daemon that predates it, which falls back to the
+    /// claim, or replies routed elsewhere by a contact whose mail failed
+    /// authentication). ABSENT on a daemon that predates it, which falls back to the
     /// local rule in `senderLine`.
     var sender_signals_warn: Bool?
 
@@ -416,14 +416,13 @@ struct ClientMessage: Codable, Sendable, Identifiable, Hashable, SenderStringCon
 
     /// The lines the reader draws under the From line, or nil for none. The
     /// daemon decides warning versus quiet (`sender_signals_warn`); an older
-    /// daemon that does not say falls back to "anyone it has not vouched for
-    /// is a stranger", which errs toward warning.
+    /// daemon that does not say falls back to warning on name claims only.
     var senderLine: SenderSignals.Line? {
         guard let line = sender_signals?.line(senderKnown: sender_known ?? false) else {
             return nil
         }
         guard let warn = sender_signals_warn else { return line }
-        return SenderSignals.Line(parts: line.parts, warning: warn)
+        return SenderSignals.Line(parts: line.parts, warning: warn, detail: line.detail)
     }
 
     /// The translation the reader may show INSTEAD of the original: one that
@@ -521,11 +520,34 @@ struct SenderSignals: Codable, Sendable, Hashable {
     }
 
     /// One row per signal, and whether they are drawn as a warning. `text`
-    /// joins them for the tooltip and VoiceOver.
+    /// joins them for VoiceOver; `detail` is the same with every address in
+    /// full, for the tooltip.
     struct Line: Equatable, Sendable {
         let parts: [String]
         let warning: Bool
+        var detail: String
         var text: String { parts.joined(separator: " · ") }
+
+        init(parts: [String], warning: Bool, detail: String? = nil) {
+            self.parts = parts
+            self.warning = warning
+            self.detail = detail ?? parts.joined(separator: " · ")
+        }
+    }
+
+    /// A Reply-To as the reader draws it: just the domain when the mailbox
+    /// is a machine-made routing tag (Postmark's
+    /// `e6f8…fd9f+296450@inbound.postmarkapp.com`, a ticket desk's
+    /// `reply+8a7d6c5b4e3f@…`), the whole address otherwise. Machine-made
+    /// means six or more digits, or longer than any person's mailbox name.
+    /// The full address stays in the tooltip.
+    static func readableAddress(_ address: String) -> String {
+        guard let at = address.lastIndex(of: "@") else { return address }
+        let local = address[..<at]
+        let domain = address[address.index(after: at)...]
+        guard !domain.isEmpty else { return address }
+        let digits = local.filter(\.isNumber).count
+        return digits >= 6 || local.count > 32 ? String(domain) : address
     }
 
     /// A value safe to draw: bidi overrides and zero-width characters
@@ -549,25 +571,33 @@ struct SenderSignals: Codable, Sendable, Hashable {
     }
 
     /// What the reader says, most alarming first, or nil when there is
-    /// nothing to say. Only two things are WARNINGS: an address in the name
-    /// that is not the sender's, and replies routed to another organization
-    /// by someone the owner has never written to. "via" and "sent by" are
-    /// how mail services and assistants work, so they stay quiet.
-    func line(senderKnown: Bool) -> Line? {
+    /// nothing to say. Locally only a name claim is a WARNING: a foreign
+    /// Reply-To is how ticketing and transactional relays work, like "via"
+    /// and "sent by". (The daemon's `sender_signals_warn` can still flag a
+    /// contact's Reply-To when their mail failed authentication.)
+    func line(senderKnown _: Bool) -> Line? {
         var parts: [String] = []
+        var full: [String] = []
         var warning = false
         if let spoof = Self.clean(name_spoof) {
             parts.append("Name claims \(spoof)")
+            full.append("Name claims \(spoof)")
             warning = true
         }
         if let replyTo = Self.clean(reply_to) {
-            parts.append("Replies go to \(replyTo)")
-            if !senderKnown { warning = true }
+            parts.append("Replies go to \(Self.readableAddress(replyTo))")
+            full.append("Replies go to \(replyTo)")
         }
-        if let sender = Self.clean(sender) { parts.append("Sent by \(sender)") }
-        if let via = Self.clean(via) { parts.append("via \(via)") }
+        if let sender = Self.clean(sender) {
+            parts.append("Sent by \(sender)")
+            full.append("Sent by \(sender)")
+        }
+        if let via = Self.clean(via) {
+            parts.append("via \(via)")
+            full.append("via \(via)")
+        }
         guard !parts.isEmpty else { return nil }
-        return Line(parts: parts, warning: warning)
+        return Line(parts: parts, warning: warning, detail: full.joined(separator: " · "))
     }
 }
 

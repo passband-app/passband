@@ -21,6 +21,7 @@ struct SenderSignalsWireTests {
         onlyTheScamShapesWarn()
         theMostAlarmingPartLeads()
         theDaemonsWarnCallWins()
+        relayAddressesShowTheirDomain()
         oneBadFieldKeepsTheRest()
         bidiAndLengthAreCleaned()
 
@@ -48,7 +49,7 @@ struct SenderSignalsWireTests {
         let m = message(#","sender_known":false,"sender_signals":{"via":"sendgrid.net","reply_to":"pay@elsewhere.example","envelope_domain":"em.sendgrid.net"}"#)
         expect(m?.sender_signals?.via == "sendgrid.net", "via decodes")
         expect(m?.sender_signals?.reply_to == "pay@elsewhere.example", "reply_to decodes")
-        expect(m?.senderLine?.warning == true, "a stranger's foreign reply-to warns")
+        expect(m?.senderLine?.warning == false, "a stranger's foreign reply-to is quiet")
         expect(m?.senderLine?.text.contains("em.sendgrid.net") == false, "the bounce domain is not drawn")
     }
 
@@ -71,7 +72,7 @@ struct SenderSignalsWireTests {
         expect(quiet.line(senderKnown: false)?.warning == false, "via and sent-by stay quiet")
         let known = SenderSignals(reply_to: "billing@help.example")
         expect(known.line(senderKnown: true)?.warning == false, "a contact's reply-to is quiet")
-        expect(known.line(senderKnown: false)?.warning == true, "a stranger's is not")
+        expect(known.line(senderKnown: false)?.warning == false, "nor is a stranger's")
         let spoof = SenderSignals(name_spoof: "support@paypal.com")
         expect(spoof.line(senderKnown: true)?.warning == true, "a name spoof always warns")
     }
@@ -92,6 +93,17 @@ struct SenderSignalsWireTests {
         expect(quietContact?.senderLine?.warning == false, "the daemon said quiet")
         let warned = message(#","sender_known":true,"sender_signals_warn":true,"sender_signals":{"reply_to":"pay@elsewhere.example"}"#)
         expect(warned?.senderLine?.warning == true, "the daemon said warn")
+    }
+
+    static func relayAddressesShowTheirDomain() {
+        let pm = "e6f85070728474e32e7ac94e8835fd9f+296450@inbound.postmarkapp.com"
+        let line = SenderSignals(reply_to: pm).line(senderKnown: false)
+        expect(line?.parts == ["Replies go to inbound.postmarkapp.com"], "a routing tag shows its domain: \(line?.parts ?? [])")
+        expect(line?.detail == "Replies go to \(pm)", "the tooltip keeps the whole address")
+        expect(SenderSignals.readableAddress("reply+8a7d6c5b4e3f2a1b@help.example") == "help.example", "a ticket tag")
+        expect(SenderSignals.readableAddress("support@taxfyle.zendesk.com") == "support@taxfyle.zendesk.com", "a person-shaped mailbox stays")
+        expect(SenderSignals.readableAddress("jane.doe2024@corp.example") == "jane.doe2024@corp.example", "a few digits stay")
+        expect(SenderSignals.readableAddress("no-at-sign") == "no-at-sign", "not an address")
     }
 
     static func oneBadFieldKeepsTheRest() {

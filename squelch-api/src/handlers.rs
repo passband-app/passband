@@ -615,11 +615,12 @@ struct ThreadMessageView {
     /// Whether the reader should draw this message's sender signals as a
     /// WARNING rather than a quiet line. Decided here, once, so every client
     /// and later the agent agree: any `name_spoof`; or a `reply_to` at
-    /// another organization unless the sender is a contact whose mail did
-    /// not FAIL authentication. Unknown authentication (IMAP, Outlook, rows
-    /// older than the verdict) from a contact stays quiet; a contact whose
-    /// mail failed authentication is how a spoofed colleague looks, so it
-    /// warns. Absent when the message has no signals.
+    /// another organization from a contact whose mail FAILED authentication,
+    /// which is how a spoofed colleague looks. A stranger's foreign Reply-To
+    /// is quiet: ticketing and transactional senders (Postmark inbound,
+    /// Zendesk, HubSpot) all do it, so warning on it was noise. Unknown
+    /// authentication (IMAP, Outlook, older rows) stays quiet. Absent when
+    /// the message has no signals.
     #[serde(skip_serializing_if = "Option::is_none")]
     sender_signals_warn: Option<bool>,
 }
@@ -631,7 +632,7 @@ fn signals_warn(
     auth_pass: Option<bool>,
 ) -> bool {
     sig.name_spoof.is_some()
-        || (sig.reply_to.is_some() && (!known_contact || auth_pass == Some(false)))
+        || (sig.reply_to.is_some() && known_contact && auth_pass == Some(false))
 }
 
 /// `ClientThreadView` on the wire, message-for-message, with the extra bit.
@@ -8321,7 +8322,7 @@ mod signals_warn_tests {
     use squelch_core::types::SenderSignals;
 
     #[test]
-    fn warning_is_name_claims_or_a_foreign_reply_to_without_a_trusted_contact() {
+    fn warning_is_name_claims_or_a_contacts_reply_to_that_failed_auth() {
         let spoof = SenderSignals {
             name_spoof: Some("support@bank.example".into()),
             ..SenderSignals::default()
@@ -8336,8 +8337,9 @@ mod signals_warn_tests {
         };
         // A name claim warns whoever sent it.
         assert!(signals_warn(&spoof, true, Some(true)));
-        // A foreign Reply-To from a stranger warns.
-        assert!(signals_warn(&reply, false, None));
+        // A foreign Reply-To from a stranger is quiet: relays do this.
+        assert!(!signals_warn(&reply, false, None));
+        assert!(!signals_warn(&reply, false, Some(false)));
         // From a contact: quiet unless their mail FAILED authentication.
         assert!(!signals_warn(&reply, true, Some(true)));
         assert!(!signals_warn(&reply, true, None));

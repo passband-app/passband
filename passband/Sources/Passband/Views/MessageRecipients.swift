@@ -248,16 +248,22 @@ struct SenderSignalLine: View {
                 VStack(alignment: .leading, spacing: 1) {
                     ForEach(Array(line.parts.enumerated()), id: \.offset) { _, part in
                         Text(part)
-                            .font(Typo.ui(compact ? 10 : 11))
+                            .font(Typo.ui(textSize(line.warning)))
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
                 }
             }
-            .foregroundStyle(line.warning ? Palette.warn : Palette.inkFaint)
-            .help(line.text)
+            // Quiet lines sit in the date's ink, a point under the warning,
+            // so a relay's Reply-To reads as a footnote, not a headline.
+            .foregroundStyle(line.warning ? Palette.warn : Palette.inkFaintest)
+            .help(line.detail)
             .accessibilityElement(children: .combine)
             .accessibilityLabel(line.warning ? "Caution: \(line.text)" : line.text)
         }
+    }
+
+    private func textSize(_ warning: Bool) -> CGFloat {
+        (compact ? 10 : 11) - (warning ? 0 : 1)
     }
 }

@@ -94,7 +94,7 @@ extension AppStore {
         case .mail(let file): openTicketMail(file, from: .notification)
         case .event(let id, let start): openCalendarItem(id, start: start)
         case .none:
-            if activeView != .calendar { setView(.calendar) }
+            if calendarPageAvailable, activeView != .calendar { setView(.calendar) }
         }
     }
 
@@ -103,6 +103,7 @@ extension AppStore {
     /// (`openCalendarSearchHit`). Turning the page is what fetches the
     /// month, so the row is found once the feed lands.
     func openCalendarItem(_ id: String, start: String?, now: Date = Date()) {
+        guard calendarPageAvailable else { return }
         if activeView != .calendar { setView(.calendar) }
         guard activeView == .calendar else { return }
         if !calendarMode.isGrid { setCalendarMode(.month) }

@@ -1866,6 +1866,12 @@ CREATE TABLE IF NOT EXISTS agent_thread_attention (
     attention_json TEXT NOT NULL,
     relevant_activity TEXT NOT NULL,
     unresolved_since TEXT,
+    -- THE THREAD IS FIRST-LOAD MAIL: its attention was written by triage of
+    -- the first-run backfill and no live mail or human re-triage has touched
+    -- it since. Such threads share a small FYE allowance
+    -- (`FIRST_LOAD_FYE_CAP`), so a new account opens on a short board rather
+    -- than a month of backlog. 0 on every pre-existing row (migrate.rs).
+    first_load INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(account_id,thread_id)
 );
 CREATE TABLE IF NOT EXISTS agent_decision_sources (

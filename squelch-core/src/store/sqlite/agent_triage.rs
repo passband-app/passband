@@ -2375,12 +2375,14 @@ impl AgentTriageStore for SqliteStore {
                 tx.execute("INSERT OR IGNORE INTO agent_message_destinations(account_id,message_id,destination) VALUES(?1,?2,?3)",
         params![job.account_id,job.message_id,value])?;
             }
+            let first_load = FirstLoad::of_trigger(&job.trigger);
             apply_attention(
                 &tx,
                 job.account_id,
                 &current.message.thread_id,
                 job.message_id,
                 &decision.attention,
+                first_load,
             )?;
             replace_attention_sources(&tx, job.account_id, &current.message.thread_id, sources)?;
             for update in &decision.related_updates {
@@ -2390,9 +2392,11 @@ impl AgentTriageStore for SqliteStore {
                     &update.thread_id,
                     job.message_id,
                     &update.attention,
+                    first_load,
                 )?;
                 replace_attention_sources(&tx, job.account_id, &update.thread_id, sources)?;
             }
+            cap_first_load_fye(&tx, job.account_id, Utc::now())?;
         }
         tx.execute(
             "DELETE FROM agent_decision_sources WHERE account_id=?1 AND message_id=?2",
@@ -3136,6 +3140,7 @@ fn apply_attention(
     thread: &str,
     fallback_message: i64,
     attention: &ThreadAttentionDecision,
+    first_load: FirstLoad,
 ) -> Result<()> {
     let existing:Option<String>=conn.query_row("SELECT attention_json FROM agent_thread_attention WHERE account_id=?1 AND thread_id=?2",
         params![account,thread],
@@ -3240,9 +3245,10 @@ fn apply_attention(
     conn.execute(
         "INSERT INTO agent_thread_attention(
              account_id,thread_id,message_id,show_in_fye,attention_json,
-             relevant_activity,unresolved_since,decision_message_id)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+             relevant_activity,unresolved_since,decision_message_id,first_load)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9='mark')
          ON CONFLICT(account_id,thread_id) DO UPDATE SET
+             first_load=CASE WHEN ?9='clear' THEN 0 ELSE agent_thread_attention.first_load END,
              message_id=excluded.message_id,
              decision_message_id=excluded.decision_message_id,
              revision=agent_thread_attention.revision+1,
@@ -3252,8 +3258,103 @@ fn apply_attention(
              unresolved_since=CASE WHEN excluded.unresolved_since IS NULL THEN NULL
                  ELSE COALESCE(agent_thread_attention.unresolved_since,excluded.unresolved_since) END",
         params![account,thread,id,attention.show_in_fye,json(&attention)?,
-            activity,unresolved_since,decision_message],
+            activity,unresolved_since,decision_message,first_load.as_sql()],
     )?;
+    Ok(())
+}
+
+/// THE MOST FIRST-LOAD THREADS FYE SHOWS AT ONCE. A new account's first run
+/// triages a month of mail in one sitting, and every thread the model would
+/// have surfaced on the day it arrived lands on the board together: forty
+/// rows of backlog is not a sitrep, it is a chore list on day one. So the
+/// backfill's picks compete for this many places, by the board's own rank,
+/// and the rest stay in All mail. Mail that arrives after the first run is
+/// never counted against it.
+pub(super) const FIRST_LOAD_FYE_CAP: usize = 15;
+
+/// What a write to a thread's attention does to its `first_load` flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FirstLoad {
+    /// Triage of first-run backfill mail: a new thread is first-load, and an
+    /// existing one keeps whatever it was (live mail already in it wins).
+    Mark,
+    /// Live mail arrived in the thread, or a person asked for a re-triage:
+    /// the thread is out of the first-load allowance for good.
+    Clear,
+    /// Background churn (refreshes, heals, translations, revisits): the
+    /// flag is the thread's history, not this job's, so it stands.
+    Keep,
+}
+
+impl FirstLoad {
+    fn of_trigger(trigger: &str) -> Self {
+        match trigger {
+            "backfill" => Self::Mark,
+            "ingest" | "arrival" => Self::Clear,
+            t if t.starts_with("manual:") => Self::Clear,
+            _ => Self::Keep,
+        }
+    }
+    fn as_sql(self) -> &'static str {
+        match self {
+            Self::Mark => "mark",
+            Self::Clear => "clear",
+            Self::Keep => "keep",
+        }
+    }
+}
+
+/// Hold first-load mail to [`FIRST_LOAD_FYE_CAP`] places in FYE: rank the
+/// board the way it is served, and take the model's FYE pick back from every
+/// first-load thread past the cap. Runs in every triage commit, so the board
+/// never shows more than the cap from the backfill, even mid-run, and a
+/// background re-run that puts a demoted thread back is demoted again unless
+/// it now outranks the cap.
+///
+/// Only the MODEL's pick is taken back. A thread the owner pinned or hid
+/// (`agent_thread_preferences`) is theirs and neither counts nor moves, and
+/// the arms that list a thread whatever the model said (an auth ruling, a
+/// fired reminder) still list it. Done mail is off the board, so closing a
+/// first-load row frees its place for the next backfill pick.
+fn cap_first_load_fye(conn: &Connection, account: AccountId, now: DateTime<Utc>) -> Result<()> {
+    let capped: std::collections::HashSet<String> = conn
+        .prepare_cached(
+            "SELECT a.thread_id FROM agent_thread_attention a
+             WHERE a.account_id=?1 AND a.first_load=1 AND a.show_in_fye=1
+               AND NOT EXISTS(SELECT 1 FROM agent_thread_preferences p
+                              WHERE p.account_id=a.account_id AND p.thread_id=a.thread_id)",
+        )?
+        .query_map([account], |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    if capped.len() <= FIRST_LOAD_FYE_CAP {
+        return Ok(());
+    }
+    let mut items = list_items(conn, account, "fye", now)?;
+    rank_items(&mut items, &RankingConfig::default(), now);
+    let mut seen = std::collections::HashSet::new();
+    let over: Vec<String> = items
+        .into_iter()
+        .filter(|item| capped.contains(&item.thread_id) && seen.insert(item.thread_id.clone()))
+        .skip(FIRST_LOAD_FYE_CAP)
+        .map(|item| item.thread_id)
+        .collect();
+    // Column and JSON together: the sitrep's tiering reads the JSON copy.
+    // No revision bump: this is not new evidence about the thread, and a
+    // bump would turn every in-flight job that read it stale for nothing.
+    let mut demote = conn.prepare_cached(
+        "UPDATE agent_thread_attention SET show_in_fye=0,
+         attention_json=json_set(attention_json,'$.show_in_fye',json('false'))
+         WHERE account_id=?1 AND thread_id=?2",
+    )?;
+    for thread in &over {
+        demote.execute(params![account, thread])?;
+    }
+    if !over.is_empty() {
+        eprintln!(
+            "squelch: first-load FYE cap held {} thread(s) back",
+            over.len()
+        );
+    }
     Ok(())
 }
 pub(super) fn list_items(
@@ -10165,5 +10266,149 @@ mod auto_done_tests {
             )
             .unwrap();
         assert_eq!(theirs, "new");
+    }
+}
+
+/// The first-load allowance (`FIRST_LOAD_FYE_CAP`): a new account's backfill
+/// fills at most that many FYE places, by rank, and live mail is never
+/// counted against it.
+#[cfg(test)]
+mod first_load_cap_tests {
+    use super::tests::decision;
+    use super::*;
+
+    const BACKLOG: i64 = 20;
+
+    /// One account, `BACKLOG` single-message threads `t1..`, all received now.
+    fn fixture() -> SqliteStore {
+        let store = SqliteStore::open_in_memory().unwrap();
+        {
+            let conn = store.lock().unwrap();
+            conn.execute(
+                "INSERT INTO accounts(id,email,created_at) VALUES(1,'a@test','2026-01-01')",
+                [],
+            )
+            .unwrap();
+            for id in 1..=BACKLOG + 2 {
+                conn.execute(
+                    "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body)
+                     VALUES(?1,1,?1,'t'||?1,'sender@test','subject',?2,'snippet','body')",
+                    params![id, Utc::now().to_rfc3339()],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO triage(account_id,message_id,created_at) VALUES(1,?1,?2)",
+                    params![id, Utc::now().to_rfc3339()],
+                )
+                .unwrap();
+            }
+        }
+        store
+    }
+
+    /// Triage message `id` under `trigger`, surfacing it with `urgency`.
+    fn triage(store: &SqliteStore, id: i64, trigger: &str, urgency: f64) {
+        store.enqueue_agent_triage(1, id, trigger, false).unwrap();
+        let job = store
+            .claim_agent_job(1, "investigation", Utc::now(), 60)
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.message_id, id);
+        let context = store.load_agent_context(&job).unwrap();
+        let mut verdict = decision(id);
+        verdict.attention.factors.urgency = urgency;
+        assert_eq!(
+            store
+                .commit_agent_decision(&job, &context, &verdict, &[])
+                .unwrap(),
+            AgentCommitOutcome::Applied
+        );
+    }
+
+    fn board(store: &SqliteStore) -> Vec<String> {
+        let conn = store.lock().unwrap();
+        let mut items = list_items(&conn, 1, "fye", Utc::now()).unwrap();
+        rank_items(&mut items, &RankingConfig::default(), Utc::now());
+        items.into_iter().map(|item| item.thread_id).collect()
+    }
+
+    fn backlog(store: &SqliteStore) {
+        // Urgency rises with the id, so the last FIRST_LOAD_FYE_CAP are the
+        // board's best and arrive last: the cap must evict, not just refuse.
+        for id in 1..=BACKLOG {
+            triage(store, id, "backfill", id as f64 / BACKLOG as f64);
+        }
+    }
+
+    #[test]
+    fn the_backfill_keeps_only_its_best_ranked_threads() {
+        let store = fixture();
+        backlog(&store);
+        let shown = board(&store);
+        assert_eq!(shown.len(), FIRST_LOAD_FYE_CAP);
+        let best: Vec<String> = (BACKLOG - FIRST_LOAD_FYE_CAP as i64 + 1..=BACKLOG)
+            .rev()
+            .map(|id| format!("t{id}"))
+            .collect();
+        assert_eq!(shown, best);
+        // Both copies of the pick moved: the sitrep tiers off the JSON one.
+        let json_says_shown: i64 = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM agent_thread_attention
+                 WHERE json_extract(attention_json,'$.show_in_fye')=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(json_says_shown, FIRST_LOAD_FYE_CAP as i64);
+    }
+
+    #[test]
+    fn live_mail_is_never_counted_against_the_cap() {
+        let store = fixture();
+        backlog(&store);
+        // A brand-new thread, and live mail in a thread the cap held back.
+        triage(&store, BACKLOG + 1, "arrival", 0.0);
+        triage(&store, 1, "manual:requested", 0.0);
+        let shown = board(&store);
+        assert_eq!(shown.len(), FIRST_LOAD_FYE_CAP + 2);
+        assert!(shown.contains(&format!("t{}", BACKLOG + 1)));
+        assert!(shown.contains(&"t1".to_string()));
+        // And a later backfill pick still competes only with the backlog.
+        triage(&store, BACKLOG + 2, "backfill", 0.0);
+        assert!(!board(&store).contains(&format!("t{}", BACKLOG + 2)));
+    }
+
+    #[test]
+    fn a_pinned_thread_neither_counts_nor_moves() {
+        let store = fixture();
+        triage(&store, 1, "backfill", 0.0);
+        // The owner's pin, as the `show_in_fye` correction writes it.
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO agent_thread_preferences(account_id,thread_id,show_in_fye,updated_at)
+                 VALUES(1,'t1',1,?1)",
+                [Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        for id in 2..=BACKLOG {
+            triage(&store, id, "backfill", 1.0);
+        }
+        let shown = board(&store);
+        assert_eq!(shown.len(), FIRST_LOAD_FYE_CAP + 1);
+        assert!(shown.contains(&"t1".to_string()));
+    }
+
+    #[test]
+    fn an_existing_board_is_left_whole() {
+        let store = fixture();
+        for id in 1..=BACKLOG {
+            triage(&store, id, "arrival", 0.5);
+        }
+        assert_eq!(board(&store).len(), BACKLOG as usize);
     }
 }

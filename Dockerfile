@@ -5,7 +5,7 @@
 # The build context must be the workspace root: squelch-relay is a workspace
 # member and cargo needs the root manifest + lockfile to resolve it.
 
-FROM rust:1-slim-bookworm@sha256:86234e857a413004348b471d11a4ebe1aa92d2eae2b6b143cac68fd1ac3c48be AS builder
+FROM rust:1-slim-bookworm@sha256:24707e70a4f1e23d9a7b25202ec43126d28a52294b96aad5c670df1fd1f1d400 AS builder
 WORKDIR /build
 
 # The compiler is rust-toolchain.toml's, not the image's; see that file's
@@ -32,7 +32,7 @@ COPY squelch-relay ./squelch-relay
 
 RUN cargo build --release --locked -p squelch-relay
 
-FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
+FROM debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
 # rustls everywhere, so the only runtime need is the CA roots for api.push.apple.com.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \

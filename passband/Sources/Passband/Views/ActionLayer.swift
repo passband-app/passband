@@ -109,7 +109,7 @@ struct ActionLayer: View {
             if store.discardAsk != nil { DiscardConfirm() }
             if store.askBarOpen { AskBar { store.askBarOpen = false } }
             if store.shortcutsOpen {
-                ShortcutsOverlay { store.shortcutsOpen = false }
+                ShortcutsOverlay(calendar: store.calendarPageAvailable) { store.shortcutsOpen = false }
             }
             // Above everything else in this layer, because it is shown at most
             // once per version at a moment nothing else has been raised yet, and
@@ -248,6 +248,9 @@ struct ActionLayer: View {
 /// assistant's list_shortcuts tool also reads, so the two cannot disagree.
 struct ShortcutsOverlay: View {
     @Environment(AppStore.self) private var store
+    /// Whether the Calendar page is offered, so its keys are listed only where
+    /// they do something.
+    var calendar = false
     let onClose: () -> Void
 
     /// The sheet's way out to the assistant. It CLOSES THE SHEET FIRST: the
@@ -270,7 +273,7 @@ struct ShortcutsOverlay: View {
                     columns: [GridItem(.flexible(), spacing: Space.scaled(22)), GridItem(.flexible())],
                     alignment: .leading, spacing: Space.scaled(18)
                 ) {
-                    ForEach(ShortcutCatalog.groups) { group in
+                    ForEach(ShortcutCatalog.groups(calendar: calendar)) { group in
                         VStack(alignment: .leading, spacing: Space.scaled(5)) {
                             Text(group.title)
                                 .font(Typo.sectionLabel)

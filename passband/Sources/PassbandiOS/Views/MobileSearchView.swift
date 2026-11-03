@@ -641,7 +641,9 @@ struct MobileSearchView: View {
     /// unset, so the next pass asks again instead of reading it as none.
     private func runEventSearch() async {
         let field = term
-        guard let asked = CalendarSearch.eventQuery(field) else {
+        // No Events block while this mailbox has no Calendar page: the
+        // daemon 404s the search, and there is no page to open a hit on.
+        guard store.calendarPageAvailable, let asked = CalendarSearch.eventQuery(field) else {
             clearEvents()
             return
         }

@@ -134,6 +134,21 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         "TEXT NOT NULL DEFAULT 'gmail'",
     )?;
     add_column_if_missing(conn, "messages", "list_unsubscribe", "TEXT")?;
+    // First-load mail's FYE allowance (`FIRST_LOAD_FYE_CAP`). 0 on every
+    // pre-existing row: an account that already has a board keeps it whole.
+    add_column_if_missing(
+        conn,
+        "agent_thread_attention",
+        "first_load",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(conn, "triage", "first_load", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(
+        conn,
+        "agent_thread_attention",
+        "held",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     add_column_if_missing(
         conn,
         "messages",

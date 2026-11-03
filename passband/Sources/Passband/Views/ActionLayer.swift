@@ -107,6 +107,8 @@ struct ActionLayer: View {
             // The composer's trash can asking first. Here for the reason
             // the clock above is: the pane is too narrow to hold a scrim.
             if store.discardAsk != nil { DiscardConfirm() }
+            // A mailto: link clicked over a composer with writing in it.
+            if let ask = store.liveMailtoAsk { MailtoConfirm(ask: ask) }
             if store.askBarOpen { AskBar { store.askBarOpen = false } }
             if store.shortcutsOpen {
                 ShortcutsOverlay(calendar: store.calendarPageAvailable) { store.shortcutsOpen = false }

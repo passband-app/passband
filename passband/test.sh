@@ -866,6 +866,13 @@ run_suite agent-draft-link \
   Sources/Passband/Lib/AgentDraftLink.swift \
   Tests/AgentDraftLinkTests.swift
 
+# A mailto: link clicked in a message, read into a new composer's fields. The
+# link is untrusted mail: only to/cc/bcc/subject/body, addresses checked, and
+# every other header it names dropped.
+run_suite mailto \
+  Sources/Passband/Lib/Mailto.swift \
+  Tests/MailtoTests.swift
+
 # Which hidden features this mailbox has been let into. Off for every doubt:
 # no stats, an old daemon, an empty list.
 run_suite hidden-features \

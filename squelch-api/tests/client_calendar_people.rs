@@ -51,7 +51,7 @@ fn stevens(store: &SqliteStore, account: i64) {
 
 #[tokio::test]
 async fn people_answers_three_at_most_best_first_and_is_never_cached() {
-    let h = harness(stevens);
+    let h = calendar_harness(stevens);
     let resp = h
         .app
         .clone()
@@ -85,7 +85,7 @@ async fn people_answers_three_at_most_best_first_and_is_never_cached() {
 /// Mail TO the user makes nobody a suggested guest, whatever name it carries.
 #[tokio::test]
 async fn somebody_who_only_wrote_to_the_user_is_not_suggested() {
-    let h = harness(|store, account| {
+    let h = calendar_harness(|store, account| {
         store
             .upsert_message(&NewMessage {
                 from_addr: "steven@stranger.test".into(),
@@ -119,7 +119,7 @@ async fn a_name_that_is_not_a_name_answers_nobody() {
     let long = "x".repeat(65);
     let longest_allowed = "y".repeat(64);
     let (long_name, allowed_name) = (long.clone(), longest_allowed.clone());
-    let h = harness(move |store, account| {
+    let h = calendar_harness(move |store, account| {
         stevens(store, account);
         seed(
             store,
@@ -162,7 +162,7 @@ async fn a_name_that_is_not_a_name_answers_nobody() {
 
 #[tokio::test]
 async fn people_require_the_client_credential() {
-    let h = harness(stevens);
+    let h = calendar_harness(stevens);
     for bearer in [None, Some("Bearer nope")] {
         let mut req = Request::builder()
             .method("GET")
@@ -184,13 +184,15 @@ async fn people_require_the_client_credential() {
     }
 }
 
-/// The route is there with no hidden feature at all (`calendar` is a retired
-/// key), and without a credential it is the 401 every route gives.
+/// Off, the route is not there, for the same people the tests above find.
 #[tokio::test]
-async fn people_need_no_hidden_feature_and_no_credential_gets_nothing() {
+async fn people_are_not_there_until_the_calendar_flag_is_on() {
     let h = harness(stevens);
     let (status, body) = get(&h.app, &format!("{PEOPLE}?name=steven")).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, json!({ "error": "not found" }));
+    // And with no credential it is the 401 every route gives: the flag is not
+    // something an unauthenticated caller can read.
     let resp = h
         .app
         .clone()
@@ -207,7 +209,7 @@ async fn people_need_no_hidden_feature_and_no_credential_gets_nothing() {
 
 #[tokio::test]
 async fn another_accounts_people_are_never_served() {
-    let h = harness(stevens);
+    let h = calendar_harness(stevens);
     let other = h.store.ensure_account("other@example.com").unwrap();
     seed(
         &h.store,
@@ -232,7 +234,7 @@ async fn another_accounts_people_are_never_served() {
 /// Human door only: nothing on the agent's paths answers for it.
 #[tokio::test]
 async fn the_agent_door_has_no_people_route() {
-    let h = harness(stevens);
+    let h = calendar_harness(stevens);
     for uri in [
         "/client/agent/calendar/people?name=steven",
         "/client/agent/people?name=steven",
@@ -255,7 +257,7 @@ async fn the_agent_door_has_no_people_route() {
 /// "s" WOULD match every Steven in the store, so the refusal is the handler's.
 #[tokio::test]
 async fn a_name_under_two_characters_is_a_400() {
-    let h = harness(stevens);
+    let h = calendar_harness(stevens);
     for uri in [
         PEOPLE.to_string(),
         format!("{PEOPLE}?name="),

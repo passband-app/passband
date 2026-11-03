@@ -127,9 +127,12 @@ enum Lane: String, Sendable {
     /// The definitions the model is SHOWN. Filtered from the one inventory by
     /// name, so a tool renamed in AgentTools cannot leave a lane quietly
     /// offering a tool that no longer exists.
-    var definitions: [Wire.ToolDef] {
+    ///
+    /// `calendar` is `AppStore.calendarPageAvailable`: whether the guide's
+    /// topic list may name the Calendar page (`AgentTools.definitions`).
+    func definitions(calendar: Bool) -> [Wire.ToolDef] {
         let allowed = toolNames
-        return AgentTools.definitions.filter { allowed.contains($0.name) }
+        return AgentTools.definitions(calendar: calendar).filter { allowed.contains($0.name) }
     }
 
     /// The lane's own model preference. The search lane runs on every deeper
@@ -556,11 +559,13 @@ final class AssistantSession {
     /// Whether `snapshot` can be picked up HERE: a version this build reads,
     /// and a history that calls only tools the next request will define. A
     /// follow-up replays every tool_use in the history to the provider, and one
-    /// naming a tool no longer offered (a tool renamed since) is a request the provider may reject; the caller
+    /// naming a tool no longer offered (the Calendar tools with the page off,
+    /// a tool renamed since) is a request the provider may reject; the caller
     /// asks the question again instead.
     func canRestore(_ snapshot: ConversationSnapshot) -> Bool {
         guard snapshot.version == ConversationSnapshot.currentVersion else { return false }
-        let offered = Set(lane.definitions.map(\.name))
+        let offered = Set(
+            lane.definitions(calendar: AppStore.shared.calendarPageAvailable).map(\.name))
         return snapshot.onlyCalls(offered)
     }
 
@@ -1251,7 +1256,7 @@ final class AssistantSession {
         return try Wire.Request.encoder().encode(
             Wire.Request(
                 model: model.rawValue, max_tokens: Self.maxTokens, system: system(),
-                tools: lane.definitions,
+                tools: lane.definitions(calendar: AppStore.shared.calendarPageAvailable),
                 messages: Wire.withContext(sent, turnContext)))
     }
 
@@ -1371,11 +1376,13 @@ final class AssistantSession {
         AgentTools.Tool.productHelp.isAvailable ? ProductGuide.promptIntro : ""
     }
 
-    /// The one line the prompt gains for the calendar tool, where the tool is
-    /// offered (the Mac); empty elsewhere, so the prompt never names a tool
-    /// the request does not carry.
-    private static var calendarTools: String {
-        AgentTools.Tool.createCalendarEvent.isAvailable ? "\n" + EventProposals.promptLine : ""
+    /// The one line the prompt gains while this mailbox has the Calendar
+    /// page, and so the calendar tool. Empty otherwise: with the page off the
+    /// prompt is the one from before the tool existed, and never names a
+    /// tool the request does not carry.
+    @MainActor private static var calendarTools: String {
+        AgentTools.Tool.createCalendarEvent.isAvailable && AppStore.shared.calendarPageAvailable
+            ? "\n" + EventProposals.promptLine : ""
     }
 
     private static var helpTools: String {

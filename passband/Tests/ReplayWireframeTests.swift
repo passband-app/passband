@@ -42,6 +42,7 @@ struct ReplayWireframeTests {
         webSnapshotShape()
         onlyOurOwnImagesPass()
         gzipIsAGzipMember()
+        unreasonableGeometryNeverTraps()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -367,6 +368,41 @@ struct ReplayWireframeTests {
         expect(!ReplayWireframe.validate([theirs], extra: []), "an image we did not render fails")
         let jpeg: [String: Any] = ["type": "image", "base64": "data:image/jpeg;base64,T1VSUw=="]
         expect(!ReplayWireframe.validate([jpeg], extra: []), "nor does any other encoding of it")
+    }
+
+    /// The walk reads geometry off layers it does not own, and SwiftUI does
+    /// not promise those are finite: 0.0.16 crashed on a layer whose
+    /// cornerRadius would not convert to an Int (Double to Int traps on NaN,
+    /// infinity, or anything past Int.max). Every such value must come out
+    /// as a box, never a trap.
+    static func unreasonableGeometryNeverTraps() {
+        let root = layer(0, 0, 800, 600)
+        root.isGeometryFlipped = true
+        for radius in [CGFloat.infinity, -.infinity, .nan, 1e300, -1e300] {
+            let card = layer(20, 20, 200, 100)
+            card.backgroundColor = CGColor(gray: 0.5, alpha: 1)
+            card.borderWidth = 1
+            card.borderColor = CGColor(gray: 0.5, alpha: 1)
+            card.cornerRadius = radius
+            root.addSublayer(card)
+        }
+        let nodes = walk(root)
+        expect(nodes.count == 10, "every card keeps its fill and border (\(nodes.count))")
+        expect(nodes.allSatisfy { (0...24).contains($0.radius) }, "radii clamp to 0...24")
+
+        // A clip that is not a rect at all yields nothing rather than a trap.
+        let odd = layer(0, 0, 800, 600)
+        let card = layer(20, 20, 200, 100)
+        card.backgroundColor = CGColor(gray: 0.5, alpha: 1)
+        odd.addSublayer(card)
+        for clip in [
+            CGRect(x: 0, y: 0, width: CGFloat.infinity, height: .infinity),
+            CGRect(x: CGFloat.nan, y: 0, width: 800, height: 600),
+            CGRect(x: -1e300, y: -1e300, width: 1e301, height: 1e301),
+        ] {
+            _ = walk(odd, clip: clip)
+        }
+        expect(true, "non-finite clips do not trap")
     }
 
     static func boxesSnapToTheGrid() {

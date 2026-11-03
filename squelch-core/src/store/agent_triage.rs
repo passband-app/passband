@@ -157,12 +157,19 @@ pub struct AgentListQuery {
     /// None explicitly requests all dates. Default is the preceding 30 days.
     pub since: Option<DateTime<Utc>>,
     pub include_done: bool,
+    /// Reading only: shape the answer as the owner's Reading BOARD (the
+    /// window shrinks to keep it short; see `READING_BOARD_MAX`), in place of
+    /// `since`. The human door's default Reading view sets it; smart clear
+    /// (which cleans the whole month), a caller that names its own dates,
+    /// and the agent door do not.
+    pub reading_board: bool,
 }
 impl Default for AgentListQuery {
     fn default() -> Self {
         Self {
             since: Some(Utc::now() - chrono::Duration::days(30)),
             include_done: false,
+            reading_board: false,
         }
     }
 }

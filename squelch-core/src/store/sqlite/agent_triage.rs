@@ -2752,15 +2752,58 @@ pub(super) fn reading_items(
     query: &AgentListQuery,
     now: DateTime<Utc>,
 ) -> Result<Vec<AgentListItem>> {
-    let mut items = list_items_with_query(conn, account, "reading", now, query)?;
+    let board = query.reading_board.then(|| AgentListQuery {
+        since: Some(now - Duration::days(READING_BOARD_DAYS)),
+        ..query.clone()
+    });
+    let mut items = list_items_with_query(
+        conn,
+        account,
+        "reading",
+        now,
+        board.as_ref().unwrap_or(query),
+    )?;
 
     items.sort_by(|a, b| {
         b.received_at
             .cmp(&a.received_at)
             .then_with(|| b.message_id.cmp(&a.message_id))
     });
+    if board.is_some() {
+        items.truncate(reading_board_len(&items, now));
+    }
     items.truncate(limit);
     Ok(items)
+}
+
+/// The most days of mail the Reading board reaches back.
+pub const READING_BOARD_DAYS: i64 = 7;
+/// The most messages the Reading board shows. Reading is the low-stakes
+/// pile (newsletters, announcements, promotions), and a month of it is a
+/// guilt list, not a reading list.
+pub const READING_BOARD_MAX: usize = 49;
+
+/// How many of `items` (newest first) the Reading board keeps: the last
+/// [`READING_BOARD_DAYS`] days, ONE WHOLE DAY AT A TIME fewer while that is
+/// more than [`READING_BOARD_MAX`] messages, so the board never stops in the
+/// middle of a day. A day is the 24 hours back from `now`. If the last day
+/// alone is over the cap, the newest [`READING_BOARD_MAX`] of it.
+///
+/// What falls off is not touched: it is still open in All mail and search.
+fn reading_board_len(items: &[AgentListItem], now: DateTime<Utc>) -> usize {
+    let at = |item: &AgentListItem| {
+        DateTime::parse_from_rfc3339(&item.received_at)
+            .map(|t| t.with_timezone(&Utc))
+            .unwrap_or(now)
+    };
+    for days in (1..=READING_BOARD_DAYS).rev() {
+        let since = now - Duration::days(days);
+        let within = items.partition_point(|item| at(item) >= since);
+        if within <= READING_BOARD_MAX {
+            return within;
+        }
+    }
+    READING_BOARD_MAX
 }
 
 /// A blank display name is no display name.
@@ -8668,6 +8711,7 @@ mod dependency_tests {
         let all = AgentListQuery {
             since: None,
             include_done: true,
+            reading_board: false,
         };
         assert_eq!(
             store.agent_reading_with_query(1, 10, &all).unwrap().len(),
@@ -8684,7 +8728,8 @@ mod dependency_tests {
                     10,
                     &AgentListQuery {
                         since: None,
-                        include_done: false
+                        include_done: false,
+                        reading_board: false,
                     }
                 )
                 .unwrap()
@@ -8698,7 +8743,8 @@ mod dependency_tests {
                     10,
                     &AgentListQuery {
                         since: Some(Utc::now() - Duration::days(30)),
-                        include_done: true
+                        include_done: true,
+                        reading_board: false,
                     }
                 )
                 .unwrap()
@@ -10165,5 +10211,71 @@ mod auto_done_tests {
             )
             .unwrap();
         assert_eq!(theirs, "new");
+    }
+}
+
+/// The Reading board's window (`reading_board_len`): seven days, a whole day
+/// fewer at a time while that is over the cap, and never a partial day
+/// unless one day alone is.
+#[cfg(test)]
+mod reading_board_tests {
+    use super::*;
+
+    /// `per_day[d]` messages received `d` days back (in the middle of that
+    /// 24-hour slot), newest first as `reading_items` sorts them.
+    fn board(per_day: &[usize], now: DateTime<Utc>) -> Vec<AgentListItem> {
+        let mut items = Vec::new();
+        for (day, &n) in per_day.iter().enumerate() {
+            for i in 0..n {
+                let at = now - Duration::hours(24 * day as i64 + 1) - Duration::seconds(i as i64);
+                items.push(AgentListItem {
+                    message_id: items.len() as i64 + 1,
+                    decision_source_message_id: 0,
+                    thread_id: String::new(),
+                    from_addr: String::new(),
+                    from_name: None,
+                    subject: String::new(),
+                    received_at: at.to_rfc3339(),
+                    decision: MessageDecision::default(),
+                    attention: ThreadAttentionDecision::default(),
+                    score: 0.0,
+                    unresolved_since: None,
+                    ranking: None,
+                });
+            }
+        }
+        items
+    }
+
+    #[test]
+    fn a_quiet_week_is_shown_whole() {
+        let now = Utc::now();
+        assert_eq!(reading_board_len(&board(&[3; 7], now), now), 21);
+        assert_eq!(
+            reading_board_len(&board(&[7; 7], now), now),
+            READING_BOARD_MAX
+        );
+    }
+
+    #[test]
+    fn a_busy_week_drops_whole_days_from_the_old_end() {
+        let now = Utc::now();
+        // 10 a day: 70, 60, 50 are over; four days, 40, is the board.
+        assert_eq!(reading_board_len(&board(&[10; 7], now), now), 40);
+        // The old end is what goes: one heavy day a week ago costs only itself.
+        assert_eq!(
+            reading_board_len(&board(&[5, 5, 5, 5, 5, 5, 40], now), now),
+            30
+        );
+    }
+
+    #[test]
+    fn one_flooded_day_is_cut_at_the_cap() {
+        let now = Utc::now();
+        assert_eq!(
+            reading_board_len(&board(&[80, 2, 2], now), now),
+            READING_BOARD_MAX
+        );
+        assert_eq!(reading_board_len(&[], now), 0);
     }
 }

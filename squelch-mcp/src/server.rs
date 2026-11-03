@@ -995,6 +995,7 @@ impl SquelchServer {
         let query = AgentListQuery {
             since: Some(params.since.max(floor)),
             include_done: false,
+            reading_board: false,
         };
         let items = self
             .store
@@ -1103,6 +1104,7 @@ impl SquelchServer {
                 &squelch_core::store::agent_triage::AgentListQuery {
                     since: None,
                     include_done: false,
+                    reading_board: false,
                 },
             )
             .map_err(Self::map_err)?;
@@ -1206,6 +1208,7 @@ impl SquelchServer {
                 &squelch_core::store::agent_triage::AgentListQuery {
                     since: None,
                     include_done: false,
+                    reading_board: false,
                 },
             )
             .map_err(Self::map_err)?;

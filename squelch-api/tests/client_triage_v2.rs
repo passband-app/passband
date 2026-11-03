@@ -891,3 +891,49 @@ async fn sealed_verdict_round_trips_and_moves_fye() {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }
+
+/// The Reading board is the last week, at most `READING_BOARD_MAX` messages;
+/// a caller naming its own dates gets those dates, uncapped.
+#[tokio::test]
+async fn the_reading_board_is_capped_and_named_dates_are_not() {
+    use squelch_core::store::sqlite::READING_BOARD_MAX;
+    let h = harness(|_, _| {});
+    let total = READING_BOARD_MAX as i64 + 6;
+    for i in 0..total {
+        let id = h
+            .store
+            .upsert_message(&msg(
+                h.acct,
+                &format!("offer-{i}"),
+                &format!("t{i}"),
+                "A sale",
+                "An offer",
+            ))
+            .unwrap();
+        assess(&h.store, h.acct, id, false);
+    }
+    let count = |path: String| {
+        let app = h.app.clone();
+        async move {
+            let body = body_json(app.oneshot(authed("GET", &path)).await.unwrap()).await;
+            (
+                body["total_count"].as_i64().unwrap(),
+                body["items"].as_array().unwrap().len() as i64,
+            )
+        }
+    };
+    assert_eq!(
+        count("/client/v2/feed?destination=reading".into()).await,
+        (READING_BOARD_MAX as i64, READING_BOARD_MAX as i64)
+    );
+    let since = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+    let since = since.replace('+', "%2B");
+    assert_eq!(
+        count(format!("/client/v2/feed?destination=reading&since={since}")).await,
+        (total, total)
+    );
+    assert_eq!(
+        count("/client/v2/feed?destination=reading&all_time=true".into()).await,
+        (total, total)
+    );
+}

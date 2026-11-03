@@ -8,7 +8,7 @@
 //! - [`Flow::Signup`] is a GRANT. It asks for the Gmail scope (`gmail.modify`) and
 //!   `access_type=offline`, because what it is for is a refresh token a daemon
 //!   will use for years. It also asks, optionally, for Google Calendar, so a
-//!   new mailbox has its Calendar page connected from the first launch.
+//!   new mailbox has it the day the `calendar` feature turns on.
 //! - [`Flow::Reconnect`] is THE SAME GRANT, asked for again: signup's scopes and
 //!   parameters, calendar included and optional; only the callback differs,
 //!   re-sealing a mailbox that already exists instead of provisioning one. It exists because a refresh
@@ -390,9 +390,11 @@ fn requested_scopes_for(flow: Flow, provider: Provider) -> Vec<&'static str> {
         // of an initial), and a person who unticks either has still granted a
         // whole working mailbox.
         //
-        // SIGNUP ASKS FOR CALENDAR TOO: the grant is one consent now instead
-        // of a second trip through Google later, and the Calendar page works
-        // from the first launch.
+        // SIGNUP ASKS FOR CALENDAR TOO, even while the `calendar` hidden
+        // feature is off for the tenant: the grant is one consent now instead
+        // of a second trip through Google later. A daemon without the feature
+        // holds the scope and uses none of it (sync calls nothing), and the
+        // day the feature turns on, calendar simply works.
         //
         // A RECONNECT ASKS FOR CALENDAR TOO, for the same reason and one more:
         // `include_granted_scopes` cannot keep a grant that was revoked, and

@@ -7,6 +7,15 @@
         <title>Passband</title>
         <link>https://passband.app/appcast.xml</link>
         <item>
+            <title>0.0.17</title>
+            <pubDate>Mon, 02 Nov 2026 22:00:35 +0000</pubDate>
+            <sparkle:version>2528</sparkle:version>
+            <sparkle:shortVersionString>0.0.17</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://passband.app/download/Passband-0.0.17.zip" length="9986310" type="application/octet-stream" sparkle:edSignature="IZU4MG96FCRPLo7avqbot4c0Whh8/38Bq3QunI2sn8XinEg/as7QSzan3pHDLu4MKGSJDQUfcAFCNyuJty2SBQ=="/>
+        </item>
+        <item>
             <title>0.0.16</title>
             <pubDate>Fri, 30 Oct 2026 22:26:05 +0000</pubDate>
             <sparkle:version>2515</sparkle:version>
@@ -23,15 +32,6 @@
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <enclosure url="https://passband.app/download/Passband-0.0.15.zip" length="12392827" type="application/octet-stream" sparkle:edSignature="dVC82vWBMrNhHGBZx+kuhI4o5YEBRRcZK1m4EK4BO6bIrNErrYyrL+nEow3dY1TBTHLPBI5RUak4YUXyvq31Bw=="/>
-        </item>
-        <item>
-            <title>0.0.14</title>
-            <pubDate>Thu, 08 Oct 2026 21:57:06 +0000</pubDate>
-            <sparkle:version>1836</sparkle:version>
-            <sparkle:shortVersionString>0.0.14</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://passband.app/download/Passband-0.0.14.zip" length="11791376" type="application/octet-stream" sparkle:edSignature="28emaAZ/EGmmAgc/LeXdadoulXUoz4P1Kds8/JHEDyfHigfqJqDtmepmIn3EIJ2G4fjudpTQ2NUgdUT5BhrIAg=="/>
         </item>
     </channel>
 </rss>

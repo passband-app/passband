@@ -200,13 +200,18 @@ private struct MobileShell: View {
                 .tabSlide(.sitrep, selection: tab)
                 .environment(readers[.sitrep])
             }
-            Tab("Calendar", systemImage: "calendar", value: MobileTab.calendar) {
-                NavigationStack {
-                    MobileCalendarView()
-                        .threadDestination(root: true)
+            // Only while this mailbox has the Calendar page (the `calendar`
+            // hidden feature, which the daemon reports as `timeline`): off,
+            // the bar is Sitrep and Mail, as it was before the calendar.
+            if store.calendarPageAvailable {
+                Tab("Calendar", systemImage: "calendar", value: MobileTab.calendar) {
+                    NavigationStack {
+                        MobileCalendarView()
+                            .threadDestination(root: true)
+                    }
+                    .tabSlide(.calendar, selection: tab)
+                    .environment(readers[.calendar])
                 }
-                .tabSlide(.calendar, selection: tab)
-                .environment(readers[.calendar])
             }
             Tab("Mail", systemImage: MainView.emails.symbol, value: MobileTab.mail) {
                 NavigationStack {
@@ -286,9 +291,17 @@ private struct MobileShell: View {
             switch store.activeView {
             case .sitrep: tab = .sitrep
             case .emails: tab = .mail
-            case .calendar: tab = .calendar
+            case .calendar: if store.calendarPageAvailable { tab = .calendar }
             default: break
             }
+        }
+        // The gate closing (the `calendar` feature turned off, or an older
+        // daemon) takes the Calendar tab away: off it, and drop everything
+        // the page held, as the Mac's shell does.
+        .onChange(of: store.calendarPageAvailable) { _, available in
+            guard !available else { return }
+            if tab == .calendar { tab = .sitrep }
+            store.calendarGateClosed()
         }
         .onChange(of: tab, initial: true) { _, _ in syncReaders() }
         // THE CALENDAR'S FIRST VISIT ASKS FOR GOOGLE CALENDAR, as the Mac's

@@ -109,7 +109,7 @@ spec:
         - name: squelch-embed
           # Must match the daemon-* tag that first ships this image (the
           # release-daemon workflow's embed-image job). Pinned, never :latest.
-          image: ghcr.io/passband-app/squelch-embed:daemon-0.0.15
+          image: ghcr.io/passband-app/squelch-embed:daemon-0.0.16
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8850

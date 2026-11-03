@@ -113,7 +113,10 @@ enum ReplayWireframe {
         guard out.count < nodeCap, !layer.isHidden, layer.opacity > 0.02 else { return }
         let frame = toCanvas(root.convert(layer.bounds, from: layer))
         let visible = frame.intersection(clip)
-        let empty = visible.isNull || visible.width < 1 || visible.height < 1
+        // A box that does not land on the canvas as plain numbers is treated
+        // as off-screen: every edge here ends in an Int, and Int(Double)
+        // traps on NaN, infinity, or anything past Int.max.
+        let empty = visible.isNull || visible.width < 1 || visible.height < 1 || !onCanvas(visible)
 
         // A web view is where a mail renders; a text field or text view is
         // where a reply, a search or an address is typed. One box at the
@@ -157,7 +160,9 @@ enum ReplayWireframe {
         }
 
         // Paint is read only as "is there any": the box gets a fixed grey.
-        let radius = min(Int(layer.cornerRadius.rounded()), 24)
+        // Layer geometry is SwiftUI's, not ours, and is not promised finite:
+        // 0.0.16 crashed here on a radius Int() could not hold.
+        let radius = cornerRadius(layer.cornerRadius)
         if visibleInk(layer.backgroundColor) {
             out.append(node(visible, .fill, fill: panelPaint, radius: radius))
         }
@@ -168,7 +173,7 @@ enum ReplayWireframe {
             let path = shape.path
         {
             let box = toCanvas(root.convert(path.boundingBoxOfPath, from: layer)).intersection(clip)
-            if !box.isNull, box.width >= 1, box.height >= 1 {
+            if !box.isNull, box.width >= 1, box.height >= 1, onCanvas(box) {
                 out.append(node(box, .fill, fill: panelPaint, radius: radius))
             }
         }
@@ -192,6 +197,21 @@ enum ReplayWireframe {
         for sub in layer.sublayers ?? [] {
             walk(sub, root: root, clip: childClip, toCanvas: toCanvas, icon: icon, into: &out)
         }
+    }
+
+    /// A corner radius as the 0...24 the wire carries. Infinite means fully
+    /// round, so it takes the cap; NaN has no shape and takes none.
+    static func cornerRadius(_ r: CGFloat) -> Int {
+        guard !r.isNaN else { return 0 }
+        return Int(min(max(r, 0), 24).rounded())
+    }
+
+    /// Whether every edge of a box is a number an Int can hold once snapped
+    /// to the grid. A real window is a few thousand points; a million is
+    /// already nonsense, and well inside Int.
+    private static func onCanvas(_ r: CGRect) -> Bool {
+        let limit: CGFloat = 1_000_000
+        return [r.minX, r.minY, r.maxX, r.maxY].allSatisfy { $0.isFinite && abs($0) < limit }
     }
 
     /// SwiftUI draws Text (and vector glyphs) into `CGDrawingLayer`s and real

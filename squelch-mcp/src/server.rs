@@ -83,19 +83,20 @@ pub struct SquelchServer {
 }
 
 /// What `search_calendar` (docs/CALENDAR.md §10.1) needs from the host:
-/// whether it serves a calendar at all (the daemon always does; the
-/// standalone binary does not), and the calendar grant, since real events
-/// are read only while it holds (ghosts need no grant). The default offers
-/// no calendar.
+/// the live hidden-feature set, since the tool is listed, told of and
+/// answered only while the `calendar` feature is on (asked at each listing
+/// and each call, so a flag flipped on the admin page reaches a running
+/// door), and the calendar grant, since real events are read only while it
+/// holds (ghosts need no grant). The default offers no calendar.
 #[derive(Clone, Default)]
 pub struct CalendarDoor {
-    pub enabled: bool,
+    pub features: squelch_core::features::Features,
     pub credentials: Option<Arc<squelch_core::credentials::CalendarCredentials>>,
 }
 
 impl CalendarDoor {
     fn enabled(&self) -> bool {
-        self.enabled
+        self.features.enabled(squelch_core::features::CALENDAR)
     }
 
     async fn granted(&self) -> bool {
@@ -2048,7 +2049,7 @@ mod tests {
             SquelchServer::new(store, "me@localhost")
                 .unwrap()
                 .with_calendar(CalendarDoor {
-                    enabled: false,
+                    features: squelch_core::features::Features::none(),
                     credentials: None,
                 })
         };
@@ -2072,7 +2073,9 @@ mod tests {
         let server = SquelchServer::new(store, "me@localhost")
             .unwrap()
             .with_calendar(CalendarDoor {
-                enabled: true,
+                features: squelch_core::features::Features::pinned([
+                    squelch_core::features::CALENDAR,
+                ]),
                 credentials: None,
             });
         assert!(
@@ -4476,7 +4479,9 @@ mod tests {
         let (server, _mailer) = {
             let mailer = Arc::new(RecordingMailer::default());
             let calendar = CalendarDoor {
-                enabled: true,
+                features: squelch_core::features::Features::pinned([
+                    squelch_core::features::CALENDAR,
+                ]),
                 credentials: None,
             };
             let server = SquelchServer::new(store.clone(), "me@localhost")

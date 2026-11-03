@@ -52,7 +52,7 @@ pub async fn feed(
         },
         include_done: query.include_done.unwrap_or(false),
         // Asked for no dates of its own: the Reading board, not 30 days.
-        reading_board: query.all_time.is_none() && query.since.is_none(),
+        reading_board: query.all_time != Some(true) && query.since.is_none(),
     };
     let mut items = store_call(&state, move |store, account| {
         match query.destination.as_str() {

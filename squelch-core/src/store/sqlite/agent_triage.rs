@@ -2740,11 +2740,13 @@ impl AgentTriageStore for SqliteStore {
     }
 }
 
-/// The Reading inventory, newest first: the ONE answer to "what is in Reading".
-/// `GET /client/v2/feed?destination=reading` reads it through
-/// `agent_reading_with_query`, and the per-sender purge read
-/// (`reading_senders`) calls it under the lock it already holds, so the two
-/// cannot disagree about which mail is open there.
+/// The Reading inventory, newest first: the ONE query for "what is in
+/// Reading". `GET /client/v2/feed?destination=reading` reads it through
+/// `agent_reading_with_query`, and smart clear and the per-sender purge read
+/// (`reading_senders`) call it under the lock they already hold. Two shapes of
+/// one answer: the 30-day inventory those cleaners work on, and, with
+/// `query.reading_board`, the shorter Reading BOARD the owner sees (the
+/// default feed), which is a newest-first prefix of it.
 pub(super) fn reading_items(
     conn: &Connection,
     account: AccountId,
@@ -2752,8 +2754,15 @@ pub(super) fn reading_items(
     query: &AgentListQuery,
     now: DateTime<Utc>,
 ) -> Result<Vec<AgentListItem>> {
-    let board = query.reading_board.then(|| AgentListQuery {
-        since: Some(now - Duration::days(READING_BOARD_DAYS)),
+    // The board's day starts, newest first, in the owner's zone.
+    let starts = if query.reading_board {
+        let zone = super::device_tokens::owner_zone_conn(conn, account)?;
+        Some(reading_board_starts(now, zone.zone))
+    } else {
+        None
+    };
+    let board = starts.as_ref().map(|starts| AgentListQuery {
+        since: starts.last().copied(),
         ..query.clone()
     });
     let mut items = list_items_with_query(
@@ -2769,8 +2778,8 @@ pub(super) fn reading_items(
             .cmp(&a.received_at)
             .then_with(|| b.message_id.cmp(&a.message_id))
     });
-    if board.is_some() {
-        items.truncate(reading_board_len(&items, now));
+    if let Some(starts) = &starts {
+        items.truncate(reading_board_len(&items, starts));
     }
     items.truncate(limit);
     Ok(items)
@@ -2783,27 +2792,55 @@ pub const READING_BOARD_DAYS: i64 = 7;
 /// guilt list, not a reading list.
 pub const READING_BOARD_MAX: usize = 49;
 
-/// How many of `items` (newest first) the Reading board keeps: the last
-/// [`READING_BOARD_DAYS`] days, ONE WHOLE DAY AT A TIME fewer while that is
-/// more than [`READING_BOARD_MAX`] messages, so the board never stops in the
-/// middle of a day. A day is the 24 hours back from `now`. If the last day
-/// alone is over the cap, the newest [`READING_BOARD_MAX`] of it.
+/// Where each of the board's days begins: midnight in the owner's zone today,
+/// yesterday, and so on back [`READING_BOARD_DAYS`] days, newest first.
+/// CALENDAR DAYS, not 24-hour slots back from now: a sliding window would drop
+/// and restore mail hour to hour with nobody touching anything. A midnight a
+/// clock change skips is the first instant after it.
+fn reading_board_starts(now: DateTime<Utc>, zone: chrono_tz::Tz) -> Vec<DateTime<Utc>> {
+    use chrono::TimeZone;
+    let today = now.with_timezone(&zone).date_naive();
+    (0..READING_BOARD_DAYS)
+        .map(|back| {
+            let day = today - Duration::days(back);
+            let midnight = day.and_hms_opt(0, 0, 0).expect("midnight exists");
+            zone.from_local_datetime(&midnight)
+                .earliest()
+                .or_else(|| {
+                    zone.from_local_datetime(&(midnight + Duration::hours(1)))
+                        .earliest()
+                })
+                .map(|at| at.with_timezone(&Utc))
+                .unwrap_or_else(|| midnight.and_utc())
+        })
+        .collect()
+}
+
+/// `at` as the list stores its activity time (`strftime('%Y-%m-%dT%H:%M:%fZ')`),
+/// so a bound compares as text in the order the list is sorted in.
+fn list_time(at: DateTime<Utc>) -> String {
+    at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+}
+
+/// How many of `items` (newest first) the Reading board keeps: every day in
+/// `starts` (see [`reading_board_starts`]), ONE WHOLE DAY AT A TIME fewer
+/// from the old end while that is more than [`READING_BOARD_MAX`] messages,
+/// so the board never stops in the middle of a day. If today alone is over
+/// the cap, the newest [`READING_BOARD_MAX`] of it.
+///
+/// Compared as stored text, which is the order the list is sorted in, so the
+/// cut is a clean prefix whatever a row holds.
 ///
 /// What falls off is not touched: it is still open in All mail and search.
-fn reading_board_len(items: &[AgentListItem], now: DateTime<Utc>) -> usize {
-    let at = |item: &AgentListItem| {
-        DateTime::parse_from_rfc3339(&item.received_at)
-            .map(|t| t.with_timezone(&Utc))
-            .unwrap_or(now)
-    };
-    for days in (1..=READING_BOARD_DAYS).rev() {
-        let since = now - Duration::days(days);
-        let within = items.partition_point(|item| at(item) >= since);
+fn reading_board_len(items: &[AgentListItem], starts: &[DateTime<Utc>]) -> usize {
+    for start in starts.iter().rev() {
+        let since = list_time(*start);
+        let within = items.partition_point(|item| item.received_at >= since);
         if within <= READING_BOARD_MAX {
             return within;
         }
     }
-    READING_BOARD_MAX
+    items.len().min(READING_BOARD_MAX)
 }
 
 /// A blank display name is no display name.
@@ -10214,20 +10251,28 @@ mod auto_done_tests {
     }
 }
 
-/// The Reading board's window (`reading_board_len`): seven days, a whole day
-/// fewer at a time while that is over the cap, and never a partial day
-/// unless one day alone is.
+/// The Reading board's window (`reading_board_len`): seven calendar days in
+/// the owner's zone, a whole day fewer at a time while that is over the cap,
+/// and never a partial day unless today alone is.
 #[cfg(test)]
 mod reading_board_tests {
     use super::*;
 
-    /// `per_day[d]` messages received `d` days back (in the middle of that
-    /// 24-hour slot), newest first as `reading_items` sorts them.
-    fn board(per_day: &[usize], now: DateTime<Utc>) -> Vec<AgentListItem> {
+    /// Noon UTC on a Tuesday, so every day's slot is wholly in the past.
+    fn noon() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-11-03T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    /// `per_day[d]` messages from `d` days back (an hour after that day's
+    /// midnight, a second apart), newest first and in the list's own time
+    /// format, as `reading_items` hands them over.
+    fn board(per_day: &[usize], starts: &[DateTime<Utc>]) -> Vec<AgentListItem> {
         let mut items = Vec::new();
         for (day, &n) in per_day.iter().enumerate() {
             for i in 0..n {
-                let at = now - Duration::hours(24 * day as i64 + 1) - Duration::seconds(i as i64);
+                let at = starts[day] + Duration::hours(1) - Duration::seconds(i as i64);
                 items.push(AgentListItem {
                     message_id: items.len() as i64 + 1,
                     decision_source_message_id: 0,
@@ -10235,7 +10280,7 @@ mod reading_board_tests {
                     from_addr: String::new(),
                     from_name: None,
                     subject: String::new(),
-                    received_at: at.to_rfc3339(),
+                    received_at: list_time(at),
                     decision: MessageDecision::default(),
                     attention: ThreadAttentionDecision::default(),
                     score: 0.0,
@@ -10247,35 +10292,42 @@ mod reading_board_tests {
         items
     }
 
+    fn len(per_day: &[usize]) -> usize {
+        let starts = reading_board_starts(noon(), chrono_tz::Tz::UTC);
+        reading_board_len(&board(per_day, &starts), &starts)
+    }
+
     #[test]
     fn a_quiet_week_is_shown_whole() {
-        let now = Utc::now();
-        assert_eq!(reading_board_len(&board(&[3; 7], now), now), 21);
-        assert_eq!(
-            reading_board_len(&board(&[7; 7], now), now),
-            READING_BOARD_MAX
-        );
+        assert_eq!(len(&[3; 7]), 21);
+        assert_eq!(len(&[7; 7]), READING_BOARD_MAX);
+        assert_eq!(len(&[]), 0);
     }
 
     #[test]
     fn a_busy_week_drops_whole_days_from_the_old_end() {
-        let now = Utc::now();
         // 10 a day: 70, 60, 50 are over; four days, 40, is the board.
-        assert_eq!(reading_board_len(&board(&[10; 7], now), now), 40);
+        assert_eq!(len(&[10; 7]), 40);
         // The old end is what goes: one heavy day a week ago costs only itself.
-        assert_eq!(
-            reading_board_len(&board(&[5, 5, 5, 5, 5, 5, 40], now), now),
-            30
-        );
+        assert_eq!(len(&[5, 5, 5, 5, 5, 5, 40]), 30);
     }
 
     #[test]
     fn one_flooded_day_is_cut_at_the_cap() {
-        let now = Utc::now();
-        assert_eq!(
-            reading_board_len(&board(&[80, 2, 2], now), now),
-            READING_BOARD_MAX
-        );
-        assert_eq!(reading_board_len(&[], now), 0);
+        assert_eq!(len(&[80, 2, 2]), READING_BOARD_MAX);
+    }
+
+    /// Days are the owner's: 05:00 UTC on the 3rd is the evening of the 2nd
+    /// in Los Angeles, so "today" began at the 2nd's local midnight.
+    #[test]
+    fn days_begin_at_the_owners_midnight() {
+        let now = DateTime::parse_from_rfc3339("2026-11-03T05:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let starts = reading_board_starts(now, chrono_tz::America::Los_Angeles);
+        assert_eq!(starts.len(), READING_BOARD_DAYS as usize);
+        assert_eq!(list_time(starts[0]), "2026-11-02T08:00:00.000Z");
+        // A week back crosses the end of daylight time (1 November).
+        assert_eq!(list_time(starts[6]), "2026-10-27T07:00:00.000Z");
     }
 }

@@ -937,3 +937,58 @@ async fn the_reading_board_is_capped_and_named_dates_are_not() {
         (total, total)
     );
 }
+
+/// A busy week end to end: ten Reading messages on each of the last seven
+/// days drops the three oldest days (70, 60 and 50 are all over the cap).
+#[tokio::test]
+async fn a_busy_reading_week_drops_its_oldest_days() {
+    let h = harness(|_, _| {});
+    let today = Utc::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc();
+    for day in 0..7i64 {
+        for i in 0..10i64 {
+            let mut m = msg(
+                h.acct,
+                &format!("offer-{day}-{i}"),
+                &format!("t{day}-{i}"),
+                "A sale",
+                "An offer",
+            );
+            // Today's mail a moment ago; earlier days' an hour into the day.
+            m.received_at = if day == 0 {
+                Utc::now() - chrono::Duration::seconds(i + 1)
+            } else {
+                today - chrono::Duration::days(day) + chrono::Duration::hours(1)
+                    - chrono::Duration::seconds(i)
+            };
+            let id = h.store.upsert_message(&m).unwrap();
+            assess(&h.store, h.acct, id, false);
+        }
+    }
+    let body = body_json(
+        h.app
+            .clone()
+            .oneshot(authed("GET", "/client/v2/feed?destination=reading"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(body["total_count"], 40);
+    let body = body_json(
+        h.app
+            .oneshot(authed(
+                "GET",
+                "/client/v2/feed?destination=reading&all_time=false",
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        body["total_count"], 40,
+        "all_time=false is the default view"
+    );
+}

@@ -366,8 +366,10 @@ make an in-flight triage commit stale. Human door only.
 What is stored is two counts per message. No URL, link host, scroll position or
 timestamp of a report is kept, and only the owner's own client can write them.
 
-Smart clear scores each sender with open mail in Reading (the same inventory
-`/client/v2/feed?destination=reading` returns), at most 100 senders, from
+Smart clear scores each sender with open mail in Reading (the 30-day
+inventory `/client/v2/feed?destination=reading&since=...` returns, not the
+shorter board the default feed shows: see "The Reading board" below), at most
+100 senders, from
 per-sender statistics read in `store/sqlite/reading_senders.rs`. Nothing about
 them is served to a client.
 
@@ -700,3 +702,16 @@ remains available, but never includes a message solely because of a placement
 label. On upgrade, legacy Records placements and corrections are removed while
 preserving typed facts and other choices. Messages with a legacy Records label
 but no typed facts are queued once for re-triage (`records_cleanup`).
+
+## The Reading board
+
+The default Reading feed (`/client/v2/feed?destination=reading` with no `since`
+or `all_time`) is the BOARD the owner sees, not the whole inventory: the last
+7 calendar days in the owner's zone, dropping a whole day at a time from the old
+end while that is more than 49 messages, and the newest 49 if today alone is.
+`READING_BOARD_DAYS` and `READING_BOARD_MAX` in `store/sqlite/agent_triage.rs`.
+Nothing off the board is changed: it stays open in All mail and search, and
+smart clear still cleans it (its stale-promotion rule only fires on mail a week
+old, which the board never shows). A caller naming its own dates, and the agent
+door's `get_reading`, get the inventory.
+

@@ -3533,7 +3533,7 @@ fn the_external_vector_leg_over_ten_thousand_readable_rows() {
             .unwrap()
             .query_row(
                 "SELECT vec_distance_l2(embedding, ?2) FROM message_vecs WHERE message_id=?1",
-                params![id, zerocopy::AsBytes::as_bytes(query.as_slice())],
+                params![id, zerocopy::IntoBytes::as_bytes(query.as_slice())],
                 |r| r.get::<_, f64>(0),
             )
             .unwrap() as f32

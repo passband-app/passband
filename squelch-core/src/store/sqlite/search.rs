@@ -7,7 +7,7 @@ use crate::store::recency;
 use rusqlite::params_from_iter;
 use rusqlite::types::Value;
 use std::collections::{HashMap, HashSet};
-use zerocopy::AsBytes;
+use zerocopy::IntoBytes;
 
 /// THE FTS5 MATCH WINDOW over the body column (column 1): up to 24 tokens
 /// around the matched terms, `…` where the window jumps a gap. Internal markers

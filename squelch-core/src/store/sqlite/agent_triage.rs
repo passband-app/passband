@@ -581,8 +581,9 @@ pub(super) fn correct_agent_triage_conn(
         // Visibility is a human preference, not new model evidence. Preserve the
         // representative, provenance, actions and activity even before the
         // representative has a classification or after it becomes spam.
+        // The owner's say also ends a first-load hold: the thread is theirs now.
         conn.execute(
-            "UPDATE agent_thread_attention SET show_in_fye=?3,
+            "UPDATE agent_thread_attention SET show_in_fye=?3,held=0,
              attention_json=json_set(attention_json,'$.show_in_fye',json(?4)),
              revision=revision+1 WHERE account_id=?1 AND thread_id=?2",
             params![account, thread, value.as_bool().unwrap(), json(value)?],
@@ -10577,6 +10578,18 @@ mod first_load_cap_tests {
         assert!(!board(&store).contains(&"t1".to_string()));
         // A person asking again is not background: their answer stands.
         triage(&store, 1, "manual:requested", 0.1);
+        assert!(board(&store).contains(&"t1".to_string()));
+    }
+
+    #[test]
+    fn pinning_a_held_thread_ends_the_hold() {
+        let store = fixture();
+        backlog(&store);
+        assert!(held(&store).contains(&"t1".to_string()));
+        store
+            .correct_agent_triage(1, 1, "show_in_fye", &serde_json::json!(true), Utc::now())
+            .unwrap();
+        assert!(!held(&store).contains(&"t1".to_string()));
         assert!(board(&store).contains(&"t1".to_string()));
     }
 

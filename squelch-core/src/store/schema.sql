@@ -1872,6 +1872,12 @@ CREATE TABLE IF NOT EXISTS agent_thread_attention (
     -- (`FIRST_LOAD_FYE_CAP`), so a new account opens on a short board rather
     -- than a month of backlog. 0 on every pre-existing row (migrate.rs).
     first_load INTEGER NOT NULL DEFAULT 0,
+    -- HELD BACK BY THAT ALLOWANCE: the model picked FYE (so `show_in_fye` is
+    -- 0 only because of the cap) and the thread waits to be let in. A held
+    -- thread comes back when it turns time-sensitive (`time_sensitive`) or
+    -- when something asks for more of the backlog; closing other rows never
+    -- refills the board on its own. Always 0 when `first_load` is 0.
+    held INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(account_id,thread_id)
 );
 CREATE TABLE IF NOT EXISTS agent_decision_sources (

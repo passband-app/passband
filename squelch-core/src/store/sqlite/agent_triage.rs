@@ -3249,11 +3249,17 @@ fn apply_attention(
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9='mark')
          ON CONFLICT(account_id,thread_id) DO UPDATE SET
              first_load=CASE WHEN ?9='clear' THEN 0 ELSE agent_thread_attention.first_load END,
+             held=CASE WHEN ?9!='clear' AND agent_thread_attention.held=1
+                       AND excluded.show_in_fye=1 THEN 1 ELSE 0 END,
              message_id=excluded.message_id,
              decision_message_id=excluded.decision_message_id,
              revision=agent_thread_attention.revision+1,
-             show_in_fye=excluded.show_in_fye,
-             attention_json=excluded.attention_json,
+             show_in_fye=CASE WHEN ?9!='clear' AND agent_thread_attention.held=1
+                              AND excluded.show_in_fye=1 THEN 0 ELSE excluded.show_in_fye END,
+             attention_json=CASE WHEN ?9!='clear' AND agent_thread_attention.held=1
+                                 AND excluded.show_in_fye=1
+                 THEN json_set(excluded.attention_json,'$.show_in_fye',json('false'))
+                 ELSE excluded.attention_json END,
              relevant_activity=excluded.relevant_activity,
              unresolved_since=CASE WHEN excluded.unresolved_since IS NULL THEN NULL
                  ELSE COALESCE(agent_thread_attention.unresolved_since,excluded.unresolved_since) END",
@@ -3304,55 +3310,108 @@ impl FirstLoad {
     }
 }
 
-/// Hold first-load mail to [`FIRST_LOAD_FYE_CAP`] places in FYE: rank the
-/// board the way it is served, and take the model's FYE pick back from every
-/// first-load thread past the cap. Runs in every triage commit, so the board
-/// never shows more than the cap from the backfill, even mid-run, and a
-/// background re-run that puts a demoted thread back is demoted again unless
-/// it now outranks the cap.
+/// How far ahead a first-load thread's stated date makes it too pressing to
+/// hold back: a bill due this week is on the board whatever the cap says.
+const FIRST_LOAD_DUE_WITHIN_DAYS: i64 = 7;
+
+/// The model's urgency at or above which a first-load thread is never held.
+/// The prompt asks for "high urgency" on fraud checks and security
+/// incidents; this is where that lands.
+const FIRST_LOAD_URGENT: f64 = 0.8;
+
+/// A first-load thread too pressing to hold: its stated date (`attention_at`)
+/// is past or within [`FIRST_LOAD_DUE_WITHIN_DAYS`], or the model rated it
+/// [`FIRST_LOAD_URGENT`]. Such a thread neither counts against the cap nor
+/// waits behind it. A date the parser cannot read is not a reason to show
+/// mail early, so it falls back to urgency alone.
+fn time_sensitive(factors: &crate::triage::decision::AttentionFactors, now: DateTime<Utc>) -> bool {
+    use crate::triage::decision::StatedTime;
+    if factors.urgency.is_finite() && factors.urgency >= FIRST_LOAD_URGENT {
+        return true;
+    }
+    let horizon = (now + Duration::days(FIRST_LOAD_DUE_WITHIN_DAYS)).date_naive();
+    match factors.attention_at.as_ref().and_then(|at| at.stated()) {
+        Some(StatedTime::Instant(at)) => at.date_naive() <= horizon,
+        Some(StatedTime::Local(at)) => at.date() <= horizon,
+        Some(StatedTime::Day(day)) => day <= horizon,
+        None => false,
+    }
+}
+
+/// Hold first-load mail to [`FIRST_LOAD_FYE_CAP`] places in FYE. Runs in every
+/// triage commit, in two steps:
 ///
-/// Only the MODEL's pick is taken back. A thread the owner pinned or hid
+/// 1. LET IN what turned pressing: a held thread that is now
+///    [`time_sensitive`] gets its FYE pick back. The check rides on triage
+///    commits, so a held bill surfaces on the first commit after it comes
+///    within the window, not at a tick of its own.
+/// 2. HOLD BACK the excess: rank the board the way it is served, and every
+///    first-load thread past the cap that is not time-sensitive is held
+///    (`held=1`, FYE pick off). The cap counts only the threads it can move.
+///
+/// IT NEVER REFILLS. A held thread that is not pressing stays held when the
+/// owner closes the rows ahead of it: a board that tops itself up after each
+/// Done never empties, and reaching the end of it is the point. During the
+/// first run, places freed that way go to backfill picks still arriving.
+///
+/// Only the MODEL's pick is held. A thread the owner pinned or hid
 /// (`agent_thread_preferences`) is theirs and neither counts nor moves, and
 /// the arms that list a thread whatever the model said (an auth ruling, a
-/// fired reminder) still list it. Done mail is off the board, so closing a
-/// first-load row frees its place for the next backfill pick.
+/// fired reminder) still list it.
 fn cap_first_load_fye(conn: &Connection, account: AccountId, now: DateTime<Utc>) -> Result<()> {
-    let capped: std::collections::HashSet<String> = conn
+    let candidates: Vec<(String, bool, String)> = conn
         .prepare_cached(
-            "SELECT a.thread_id FROM agent_thread_attention a
-             WHERE a.account_id=?1 AND a.first_load=1 AND a.show_in_fye=1
+            "SELECT a.thread_id,a.held,a.attention_json FROM agent_thread_attention a
+             WHERE a.account_id=?1 AND a.first_load=1 AND (a.show_in_fye=1 OR a.held=1)
                AND NOT EXISTS(SELECT 1 FROM agent_thread_preferences p
                               WHERE p.account_id=a.account_id AND p.thread_id=a.thread_id)",
         )?
-        .query_map([account], |r| r.get(0))?
+        .query_map([account], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<std::result::Result<_, _>>()?;
-    if capped.len() <= FIRST_LOAD_FYE_CAP {
+    // `movable`: shown and not pressing, the only threads the cap counts.
+    let mut release = Vec::new();
+    let mut movable = std::collections::HashSet::new();
+    for (thread, held, attention) in candidates {
+        let attention: ThreadAttentionDecision = decode(&attention)?;
+        match (held, time_sensitive(&attention.factors, now)) {
+            (true, true) => release.push(thread),
+            (false, false) => {
+                movable.insert(thread);
+            }
+            _ => {}
+        }
+    }
+    // Column and JSON together: the sitrep's tiering reads the JSON copy.
+    // No revision bump: this is not new evidence about the thread, and a
+    // bump would turn every in-flight job that read it stale for nothing.
+    let mut set = conn.prepare_cached(
+        "UPDATE agent_thread_attention SET show_in_fye=?3,held=NOT ?3,
+         attention_json=json_set(attention_json,'$.show_in_fye',json(CASE WHEN ?3 THEN 'true' ELSE 'false' END))
+         WHERE account_id=?1 AND thread_id=?2",
+    )?;
+    for thread in &release {
+        set.execute(params![account, thread, true])?;
+    }
+    if movable.len() <= FIRST_LOAD_FYE_CAP {
         return Ok(());
     }
     let mut items = list_items(conn, account, "fye", now)?;
     rank_items(&mut items, &RankingConfig::default(), now);
     let mut seen = std::collections::HashSet::new();
-    let over: Vec<String> = items
+    let hold: Vec<String> = items
         .into_iter()
-        .filter(|item| capped.contains(&item.thread_id) && seen.insert(item.thread_id.clone()))
+        .filter(|item| movable.contains(&item.thread_id) && seen.insert(item.thread_id.clone()))
         .skip(FIRST_LOAD_FYE_CAP)
         .map(|item| item.thread_id)
         .collect();
-    // Column and JSON together: the sitrep's tiering reads the JSON copy.
-    // No revision bump: this is not new evidence about the thread, and a
-    // bump would turn every in-flight job that read it stale for nothing.
-    let mut demote = conn.prepare_cached(
-        "UPDATE agent_thread_attention SET show_in_fye=0,
-         attention_json=json_set(attention_json,'$.show_in_fye',json('false'))
-         WHERE account_id=?1 AND thread_id=?2",
-    )?;
-    for thread in &over {
-        demote.execute(params![account, thread])?;
+    for thread in &hold {
+        set.execute(params![account, thread, false])?;
     }
-    if !over.is_empty() {
+    if !hold.is_empty() || !release.is_empty() {
         eprintln!(
-            "squelch: first-load FYE cap held {} thread(s) back",
-            over.len()
+            "squelch: first-load FYE cap held {} thread(s), let in {}",
+            hold.len(),
+            release.len()
         );
     }
     Ok(())
@@ -10289,7 +10348,7 @@ mod first_load_cap_tests {
                 [],
             )
             .unwrap();
-            for id in 1..=BACKLOG + 2 {
+            for id in 1..=BACKLOG + 3 {
                 conn.execute(
                     "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body)
                      VALUES(?1,1,?1,'t'||?1,'sender@test','subject',?2,'snippet','body')",
@@ -10308,6 +10367,17 @@ mod first_load_cap_tests {
 
     /// Triage message `id` under `trigger`, surfacing it with `urgency`.
     fn triage(store: &SqliteStore, id: i64, trigger: &str, urgency: f64) {
+        triage_due(store, id, trigger, urgency, None);
+    }
+
+    /// [`triage`], with a stated date `due_in_days` from today.
+    fn triage_due(
+        store: &SqliteStore,
+        id: i64,
+        trigger: &str,
+        urgency: f64,
+        due_in_days: Option<i64>,
+    ) {
         store.enqueue_agent_triage(1, id, trigger, false).unwrap();
         let job = store
             .claim_agent_job(1, "investigation", Utc::now(), 60)
@@ -10317,6 +10387,16 @@ mod first_load_cap_tests {
         let context = store.load_agent_context(&job).unwrap();
         let mut verdict = decision(id);
         verdict.attention.factors.urgency = urgency;
+        verdict.attention.factors.attention_at =
+            due_in_days.map(|days| crate::triage::decision::SupportedTime {
+                value: (Utc::now() + Duration::days(days))
+                    .date_naive()
+                    .format("%Y-%m-%d")
+                    .to_string(),
+                timezone: None,
+                source_message_id: id,
+                interpreted_relative: false,
+            });
         assert_eq!(
             store
                 .commit_agent_decision(&job, &context, &verdict, &[])
@@ -10335,8 +10415,9 @@ mod first_load_cap_tests {
     fn backlog(store: &SqliteStore) {
         // Urgency rises with the id, so the last FIRST_LOAD_FYE_CAP are the
         // board's best and arrive last: the cap must evict, not just refuse.
+        // All of it stays under FIRST_LOAD_URGENT: none of it is pressing.
         for id in 1..=BACKLOG {
-            triage(store, id, "backfill", id as f64 / BACKLOG as f64);
+            triage(store, id, "backfill", 0.5 * id as f64 / BACKLOG as f64);
         }
     }
 
@@ -10396,11 +10477,107 @@ mod first_load_cap_tests {
             )
             .unwrap();
         for id in 2..=BACKLOG {
-            triage(&store, id, "backfill", 1.0);
+            triage(&store, id, "backfill", 0.5);
         }
         let shown = board(&store);
         assert_eq!(shown.len(), FIRST_LOAD_FYE_CAP + 1);
         assert!(shown.contains(&"t1".to_string()));
+    }
+
+    fn held(store: &SqliteStore) -> Vec<String> {
+        let conn = store.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT thread_id FROM agent_thread_attention WHERE held=1 ORDER BY thread_id")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn pressing_mail_skips_the_cap() {
+        let store = fixture();
+        backlog(&store);
+        // Urgent, due in three days, and overdue: all on the board, none
+        // costing the backlog a place. Due in a month is just backlog.
+        triage(&store, BACKLOG + 1, "backfill", 0.9);
+        triage_due(&store, BACKLOG + 2, "backfill", 0.0, Some(3));
+        triage_due(&store, BACKLOG + 3, "backfill", 0.0, Some(-2));
+        let shown = board(&store);
+        assert_eq!(shown.len(), FIRST_LOAD_FYE_CAP + 3);
+        for id in [BACKLOG + 1, BACKLOG + 2, BACKLOG + 3] {
+            assert!(shown.contains(&format!("t{id}")), "t{id}");
+        }
+        let store = fixture();
+        backlog(&store);
+        triage_due(&store, BACKLOG + 1, "backfill", 0.0, Some(30));
+        assert!(!board(&store).contains(&format!("t{}", BACKLOG + 1)));
+        assert!(held(&store).contains(&format!("t{}", BACKLOG + 1)));
+    }
+
+    #[test]
+    fn a_held_thread_comes_back_when_it_turns_pressing() {
+        let store = fixture();
+        backlog(&store);
+        assert!(held(&store).contains(&"t1".to_string()));
+        // Its due date arrives (stood in for by the urgency it now carries).
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE agent_thread_attention
+                 SET attention_json=json_set(attention_json,'$.factors.urgency',0.95)
+                 WHERE thread_id='t1'",
+                [],
+            )
+            .unwrap();
+        // The next commit, about anything, lets it in.
+        triage(&store, BACKLOG + 1, "arrival", 0.0);
+        assert!(board(&store).contains(&"t1".to_string()));
+        assert!(!held(&store).contains(&"t1".to_string()));
+    }
+
+    #[test]
+    fn closing_rows_never_refills_the_board() {
+        let store = fixture();
+        backlog(&store);
+        let before = held(&store);
+        assert_eq!(before.len(), BACKLOG as usize - FIRST_LOAD_FYE_CAP);
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE triage SET status='done' WHERE message_id IN (16,17,18,19,20)",
+                [],
+            )
+            .unwrap();
+        triage(&store, BACKLOG + 1, "arrival", 0.0);
+        assert_eq!(held(&store), before);
+        assert_eq!(board(&store).len(), FIRST_LOAD_FYE_CAP - 5 + 1);
+    }
+
+    #[test]
+    fn background_reruns_keep_a_held_thread_held() {
+        let store = fixture();
+        backlog(&store);
+        assert!(held(&store).contains(&"t1".to_string()));
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE triage SET status='done' WHERE message_id IN (16,17,18,19,20)",
+                [],
+            )
+            .unwrap();
+        // A refresh re-decides it, still FYE-worthy and still not pressing:
+        // with places free on the board it must not slip back in.
+        triage(&store, 1, "source_changed:2:1", 0.1);
+        assert!(held(&store).contains(&"t1".to_string()));
+        assert!(!board(&store).contains(&"t1".to_string()));
+        // A person asking again is not background: their answer stands.
+        triage(&store, 1, "manual:requested", 0.1);
+        assert!(board(&store).contains(&"t1".to_string()));
     }
 
     #[test]

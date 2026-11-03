@@ -144,6 +144,12 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     )?;
     add_column_if_missing(
         conn,
+        "agent_thread_attention",
+        "held",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(
+        conn,
         "messages",
         "list_unsub_one_click",
         "INTEGER NOT NULL DEFAULT 0",

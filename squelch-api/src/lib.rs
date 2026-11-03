@@ -225,8 +225,9 @@ fn client_router(state: ApiState) -> Router {
         .route("/client/receipts", get(handlers::get_receipts))
         .route("/client/banking", get(handlers::get_banking))
         .route("/client/calendar", get(handlers::get_calendar))
-        // Everything behind the Calendar page: see `calendar_routes`.
-        .merge(calendar_routes())
+        // Everything behind the Calendar page, behind the `calendar` hidden
+        // feature: see `calendar_routes`.
+        .merge(calendar_routes(state.clone()))
         .route("/client/search", get(handlers::search))
         // The user's own sent mail. Human door only — this is the one listing
         // that reads `is_sent = 1`, and the agent door gets no such route: what
@@ -468,14 +469,22 @@ fn compression_layer()
         )
 }
 
-/// The Calendar page's routes, ON FOR EVERY MAILBOX. They were once behind the
-/// `calendar` hidden feature; that key is retired
-/// ([`squelch_core::features::RETIRED`]), and a leftover row granting it
-/// changes nothing here.
+/// The Calendar page's routes, ALL BEHIND THE `calendar` HIDDEN FEATURE
+/// ([`squelch_core::features::CALENDAR`]). Off is as if the feature did not
+/// exist: every route here answers [`ApiError::not_found`], the opaque 404 a
+/// missing thread or a hidden sealed message gets, asked at the moment of each request (a flag flipped under a running daemon
+/// changes the next answer), and BEFORE ANY OTHER WORK. The gate is a route
+/// layer rather than a line in each handler because the handlers' extractors
+/// (the query, the JSON body, the path) run before a handler body could ask,
+/// and a refused request should not have its body read at all. For the same
+/// reason a write refused here writes NO audit row: a path the daemon does
+/// not serve writes none either, and the audit log records attempts at
+/// actions that exist (the calendar writes audit their own refusals, from
+/// inside a feature that is on).
 ///
-/// Merged inside [`client_router`], so bearer auth runs first like every other
-/// human-door route.
-fn calendar_routes() -> Router<ApiState> {
+/// Merged inside [`client_router`], so bearer auth still runs first: a caller
+/// with no credential gets the 401 and learns nothing about the flag.
+fn calendar_routes(state: ApiState) -> Router<ApiState> {
     Router::new()
         // Calendar ghosts: the timeline read and the user's word on one ghost
         // (dismissed, going, a corrected end). HUMAN DOOR ONLY in both
@@ -535,9 +544,24 @@ fn calendar_routes() -> Router<ApiState> {
         // The user's correction of a person's inferred timezone (docs/
         // CALENDAR.md §7). A local write, human door only, for the reason the
         // contact card is; part of the calendar feature, so it is here. The
-        // inference itself runs at ingest.
+        // inference itself runs at ingest whatever the flag says, and
+        // `GET /client/person` serves the zone only while the flag is on.
         .route(
             "/client/person/timezone",
             put(handlers::put_person_timezone),
         )
+        .route_layer(middleware::from_fn_with_state(state, require_calendar))
+}
+
+/// The `calendar` gate itself. See [`calendar_routes`].
+async fn require_calendar(
+    axum::extract::State(state): axum::extract::State<ApiState>,
+    req: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !state.features().enabled(squelch_core::features::CALENDAR) {
+        return ApiError::not_found().into_response();
+    }
+    next.run(req).await
 }

@@ -1,7 +1,7 @@
 //! Calendar reminders for ghosts, with no calendar granted (docs/CALENDAR.md,
 //! "Reminders and tickets"): a committed booking from authenticated mail is
 //! reminded on its own, with the fallback when no model planned it; the
-//! owner's preference stops all of it; and the
+//! owner's preference and the `calendar` feature each stop all of it; and the
 //! timeline's tickets button falls back to the booking's PDF. The planned
 //! path, against a synced event and a model, is
 //! `client_calendar_sync::an_event_is_planned_once_fires_once_and_serves_its_tickets`.
@@ -11,6 +11,7 @@ use chrono::{DateTime, Duration, Utc};
 use common::*;
 use serde_json::{Value, json};
 use squelch_api::{ApiState, RemindOutcome, router, run_fire_pass, run_plan_pass};
+use squelch_core::features::Features;
 use squelch_core::store::{
     SqliteStore, Store,
     agent_triage::{AgentCommitOutcome, AgentTriageStore},
@@ -113,8 +114,9 @@ fn seed(
     id
 }
 
-fn setup() -> (ApiState, axum::Router, Arc<SqliteStore>, i64) {
+fn setup(features: Features) -> (ApiState, axum::Router, Arc<SqliteStore>, i64) {
     let (state, store, acct) = state_with(|_, _| {});
+    let state = state.with_features(features);
     let app = router(state.clone());
     (state, app, store, acct)
 }
@@ -146,7 +148,7 @@ fn fired(outcome: RemindOutcome) -> Vec<i64> {
 /// phone fetches by id. A second one 40 minutes out is not due yet.
 #[tokio::test]
 async fn a_committed_ghost_fires_the_fallback_once_without_a_calendar() {
-    let (state, app, store, acct) = setup();
+    let (state, app, store, acct) = setup(calendar_on());
     let start = Utc::now() + Duration::minutes(20);
     let message = seed(
         &store,
@@ -247,7 +249,7 @@ async fn a_committed_ghost_fires_the_fallback_once_without_a_calendar() {
 /// authentication, are never reminded.
 #[tokio::test]
 async fn an_uncommitted_or_unauthenticated_ghost_is_not_reminded() {
-    let (state, app, store, acct) = setup();
+    let (state, app, store, acct) = setup(calendar_on());
     let start = rfc(Utc::now() + Duration::minutes(20));
     seed(
         &store,
@@ -288,7 +290,7 @@ async fn an_uncommitted_or_unauthenticated_ghost_is_not_reminded() {
 /// The owner preference: on by default, and off stops every firing.
 #[tokio::test]
 async fn the_preference_turns_it_all_off_and_on() {
-    let (state, app, store, acct) = setup();
+    let (state, app, store, acct) = setup(calendar_on());
     seed(
         &store,
         acct,
@@ -336,6 +338,44 @@ async fn the_preference_turns_it_all_off_and_on() {
     );
 }
 
+/// With the `calendar` feature off, every route 404s and nothing runs.
+#[tokio::test]
+async fn with_the_calendar_feature_off_nothing_exists() {
+    let (state, app, store, acct) = setup(Features::none());
+    seed(
+        &store,
+        acct,
+        "g1",
+        "Big Thief",
+        rfc(Utc::now() + Duration::minutes(20)),
+        EventCommitment::Committed,
+        true,
+    );
+    assert_eq!(
+        run_fire_pass(&state, Utc::now()).await.unwrap(),
+        RemindOutcome::Off
+    );
+    for (method, uri, body) in [
+        ("GET", "/client/calendar/reminders/settings", None),
+        (
+            "PUT",
+            "/client/calendar/reminders/settings",
+            Some(json!({"enabled": false})),
+        ),
+        ("GET", "/client/calendar/reminders/1", None),
+    ] {
+        assert_eq!(
+            call(&app, method, uri, body).await.0,
+            StatusCode::NOT_FOUND,
+            "{method} {uri}"
+        );
+    }
+    assert!(
+        store.calendar_reminders_enabled(acct).unwrap(),
+        "the PUT wrote nothing"
+    );
+}
+
 /// A STALE plan still governs firing (correctness review m1): one that said
 /// no reminder stays silent inside the fallback's window, and one that said
 /// yes fires on its own lead, not as the fallback, and without its line,
@@ -344,7 +384,7 @@ async fn the_preference_turns_it_all_off_and_on() {
 #[tokio::test]
 async fn a_stale_plan_still_decides_whether_and_when_it_fires() {
     use squelch_core::gcal::remind::Plan;
-    let (state, app, store, acct) = setup();
+    let (state, app, store, acct) = setup(calendar_on());
     seed(
         &store,
         acct,

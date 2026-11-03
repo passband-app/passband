@@ -1531,6 +1531,10 @@ struct StoreStats: Codable, Sendable, Hashable {
     /// rather than offered as a 404 on the click. See
     /// `AppStore.scheduledSendAvailable`.
     var scheduled_send: Bool?
+    /// Whether `GET /client/timeline` and `PATCH /client/timeline/ghosts/{id}`
+    /// exist. ABSENT on an older daemon, which 404s both, and absence reads as
+    /// no: the calendar page is not offered at all (`AppStore.calendarPageAvailable`).
+    var timeline: Bool?
     /// Whether this mailbox has granted Google Calendar, and how to grant it.
     /// ABSENT on a daemon too old to have the grant path, and absence reads as
     /// "do not know", never as "not granted": with no way to connect there is

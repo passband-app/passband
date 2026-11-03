@@ -79,7 +79,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # header and body ingests as U+FFFD replacement characters ("??" senders).
 mail-parser = { version = "0.11", features = ["full_encoding"] }
 futures = "0.3"
-base64 = "0.22"
+base64 = "0.23"
 # Local on-box semantic recall (v1). fastembed runs ONNX embeddings on CPU with
 # no network at inference time (weights download once to a cache under the data
 # dir); sqlite-vec statically links the vec0 virtual-table extension; zerocopy
@@ -91,7 +91,7 @@ base64 = "0.22"
 # the tree pure-Rust everywhere. `image-models` is dropped: we only do text embeddings.
 fastembed = { version = "7", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
 sqlite-vec = "0.1.9"
-zerocopy = "0.7"
+zerocopy = "0.8"
 # Kubernetes client for squelch-warden, which is a thin provisioner over a
 # single-node k3s: kube-rs drives the API, k8s-openapi supplies the TYPED
 # objects. Typed objects are the whole point — the warden never templates YAML,

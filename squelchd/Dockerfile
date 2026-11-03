@@ -11,7 +11,7 @@
 
 # Trixie, not bookworm: ort's prebuilt static onnxruntime is compiled against
 # glibc >= 2.38 (__isoc23_strtol and friends); bookworm's 2.36 can't link it.
-FROM --platform=$BUILDPLATFORM rust:1-slim-trixie@sha256:1a939748a7cbab172de91a014e3804a97af1394a8c844faa67fce9401c4e40fb AS chef
+FROM --platform=$BUILDPLATFORM rust:1-slim-trixie@sha256:b8e062b1c3a80183df83d9ba187cadd2b5ab84bc78d453dbfeb2fccd5f982247 AS chef
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
 WORKDIR /build
@@ -96,7 +96,7 @@ RUN set -eux; . /cross-env; triple="$(cat /rust-triple)"; \
     cp "target/$triple/release/squelchd" /squelchd; \
     rm -rf target
 
-FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
+FROM debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
 # rustls everywhere — the only runtime need is CA roots for Google's APIs (and
 # the one-time fastembed weights download). Trixie to match the builder's glibc.
 RUN apt-get update \

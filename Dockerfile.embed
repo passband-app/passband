@@ -31,7 +31,7 @@
 # outside /tmp, and only if the runtime wants scratch there), no CA bundle,
 # because there is nothing to connect to.
 
-FROM --platform=$BUILDPLATFORM rust:1-slim-trixie@sha256:1a939748a7cbab172de91a014e3804a97af1394a8c844faa67fce9401c4e40fb AS chef
+FROM --platform=$BUILDPLATFORM rust:1-slim-trixie@sha256:b8e062b1c3a80183df83d9ba187cadd2b5ab84bc78d453dbfeb2fccd5f982247 AS chef
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
 WORKDIR /build
@@ -98,7 +98,7 @@ RUN set -eux; . /cross-env; triple="$(cat /rust-triple)"; \
     rm -rf target
 
 # Native, whatever the target: the bytes are the same on every arch.
-FROM --platform=$BUILDPLATFORM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS weights
+FROM --platform=$BUILDPLATFORM debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS weights
 # protocol::MODEL_CODE, at the revision the fleet runs (header).
 ARG HF_REPO=Xenova/bge-small-en-v1.5
 ARG HF_REVISION=ea104dacec62c0de699686887e3f920caeb4f3e3
@@ -128,7 +128,7 @@ RUN set -eux; \
     done; \
     chmod -R a+rX,go-w /models
 
-FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
+FROM debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
 COPY --from=builder /squelch-embed /usr/local/bin/squelch-embed
 # Root-owned and world-readable: the service reads them as an unprivileged uid
 # and could not change them if it tried.

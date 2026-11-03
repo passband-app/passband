@@ -95,8 +95,10 @@ jobs:
           REPO: ${{ github.repository }}
           TREE: ${{ github.event.head_commit.tree_id }}
         run: |
+          # Same-repo runs only: a fork's PR could otherwise upload the name
+          # for a tree it never tested.
           n=$(gh api "repos/$REPO/actions/artifacts?name=rust-passed-$TREE" \
-            --jq '[.artifacts[] | select(.expired | not)] | length' || echo 0)
+            --jq '[.artifacts[] | select((.expired | not) and .workflow_run.head_repository_id == .workflow_run.repository_id)] | length' || echo 0)
           tested=$([ "${n:-0}" -gt 0 ] && echo true || echo false)
           echo "tested=$tested" >> "$GITHUB_OUTPUT"
           echo "tree=$TREE passing PR runs=$n tested=$tested"

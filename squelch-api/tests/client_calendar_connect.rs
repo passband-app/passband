@@ -131,7 +131,8 @@ fn self_host(tag: &str, google: GoogleEndpoints) -> SelfHost {
             .with_calendar_credentials(resolver)
             .with_calendar_sync_kick(kick.clone())
             .with_calendar_consent_port(0)
-            .with_calendar_consent_endpoints(google),
+            .with_calendar_consent_endpoints(google)
+            .with_features(calendar_on()),
     );
     SelfHost { app, path, kick }
 }
@@ -200,7 +201,8 @@ async fn a_hosted_daemon_answers_409_and_stores_nothing() {
         state
             .with_calendar_credentials(resolver)
             .with_console_sso_url(Some("https://signup.example".into()))
-            .with_calendar_consent_port(0),
+            .with_calendar_consent_port(0)
+            .with_features(calendar_on()),
     );
     let (status, body) = post_connect(&app).await;
     eprintln!("hosted connect: {status} {body}");
@@ -228,7 +230,7 @@ async fn a_hosted_daemon_answers_409_and_stores_nothing() {
 /// No OAuth client: no resolver, nothing to run a consent with.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_daemon_with_no_oauth_client_cannot_self_connect() {
-    let Harness { app, .. } = harness(|_, _| {});
+    let Harness { app, .. } = calendar_harness(|_, _| {});
     let (status, body) = post_connect(&app).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(

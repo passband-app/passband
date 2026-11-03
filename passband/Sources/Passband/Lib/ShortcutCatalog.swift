@@ -72,13 +72,11 @@ enum ShortcutCatalog {
                 Item(["⌘F"], "find in this email"),
                 Item(["Esc"], "back"),
             ]),
-        calendarGroup,
         Group(
             title: "Navigate",
             items: [
                 // Rules and Groups are Settings panes; their digits still open them.
-                Item(["1", "2", "3", "4", "5", "6"], "sitrep · calendar · emails · auth · rules · groups"),
-                Item(["⇧C"], "calendar"),
+                Item(["1", "2", "3", "4", "5"], "sitrep · emails · auth · rules · groups"),
                 Item(["⌘["], "back"),
                 Item(["⌘]"], "forward"),
                 Item(["a"], "browse all mail"),
@@ -99,10 +97,11 @@ enum ShortcutCatalog {
             ]),
     ]
 
-    // MARK: - the calendar
+    // MARK: - the calendar, while it is offered
 
-    /// The Calendar page's own keys, third in the table (after the thread
-    /// viewer, before Navigate).
+    /// The Calendar page's own keys. Listed only while the page is offered
+    /// (`AppStore.calendarPageAvailable`), so nothing is advertised where it
+    /// does nothing.
     static let calendarGroup = Group(
         title: "Calendar",
         items: [
@@ -122,4 +121,26 @@ enum ShortcutCatalog {
             Item(["t"], "month, week: today"),
             Item(["Enter"], "month: open the day"),
         ])
+
+    /// The Navigate digits while the calendar is offered: Calendar is 2 and
+    /// every later page one higher (`CalendarGate.numbered`).
+    static let calendarDigits = Item(
+        ["1", "2", "3", "4", "5", "6"], "sitrep · calendar · emails · auth · rules · groups")
+
+    /// The table as the `?` overlay draws it for one account: exactly
+    /// `groups` while the calendar is not offered, and with the calendar in
+    /// the digits (and ⇧C) under Navigate plus the page's own group while it
+    /// is.
+    static func groups(calendar: Bool) -> [Group] {
+        guard calendar else { return groups }
+        var out = groups.map { group in
+            guard group.title == "Navigate" else { return group }
+            var g = group
+            g.items[0] = calendarDigits
+            g.items.insert(Item(["⇧C"], "calendar"), at: 1)
+            return g
+        }
+        out.insert(calendarGroup, at: min(2, out.count))
+        return out
+    }
 }

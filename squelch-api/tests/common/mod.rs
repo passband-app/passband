@@ -46,6 +46,22 @@ pub fn harness(seed: impl FnOnce(&SqliteStore, i64)) -> Harness {
     }
 }
 
+/// The `calendar` hidden feature, pinned on. Everything behind the Calendar
+/// page 404s without it (`squelch_core::features::CALENDAR`).
+pub fn calendar_on() -> squelch_core::features::Features {
+    squelch_core::features::Features::pinned([squelch_core::features::CALENDAR])
+}
+
+/// [`harness`] for a mailbox with the `calendar` hidden feature on.
+pub fn calendar_harness(seed: impl FnOnce(&SqliteStore, i64)) -> Harness {
+    let (state, store, acct) = state_with(seed);
+    Harness {
+        app: router(state.with_features(calendar_on())),
+        store,
+        acct,
+    }
+}
+
 /// An authed request with no body.
 pub fn authed(method: &str, uri: &str) -> Request<Body> {
     Request::builder()

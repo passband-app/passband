@@ -112,7 +112,7 @@ check on it, in the daemon and the apps, and add the key to `RETIRED` in
 `squelch-core/src/features.rs` (a test there fails if a `KNOWN` key is ever a
 retired one). Leftover rows in the two tables are harmless and saving the admin
 page does not touch them. (With no users yet, a launch can skip the "Everyone"
-step and go straight to deleting the flag, as `calendar` did.)
+step and go straight to deleting the flag.)
 
 **Never reuse a key.** Those leftover rows are still served to daemons, so a
 retired key given to a new feature arrives already switched on for whoever had
@@ -120,14 +120,11 @@ the old one, which after an "Everyone" launch is the whole fleet.
 
 ## Retired keys
 
-These were hidden features and have launched. Do not give their keys to anything
-new. Any `tenant_features` or `feature_defaults` rows for them are leftovers:
-still stored, still served on `GET /tenant/features` and in `/client/stats`
-`features`, and read by nothing.
-
-| Key | What it was | Retired |
-|---|---|---|
-| `calendar` | The Calendar page, the timeline, and the Google Calendar connection (docs/CALENDAR.md §11) | 2026-10, launched for everyone |
+None today. `calendar` was retired for a few days after it launched for
+everyone (2026-10-28) and came back as a hidden feature on 2026-10-31 under the
+same key, deliberately, so the testers who had it before keep it
+(docs/CALENDAR.md §11). That is the one case where reusing a key is right: it
+is the same feature, and the leftover rows mean what they meant.
 
 ## What this is not
 

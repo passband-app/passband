@@ -1,6 +1,6 @@
 //! Hidden features: what this mailbox has been let into ahead of everyone else.
 //!
-//! A FEATURE HERE IS A KEY AND NOTHING ELSE. `renotify` is on for a tenant or it
+//! A FEATURE HERE IS A KEY AND NOTHING ELSE. `calendar` is on for a tenant or it
 //! is not; there are no percentages, no variants, and no payloads. The moment a
 //! flag needs a value it has stopped being a gate and become configuration,
 //! which already has a home ([`crate::config`]).
@@ -43,14 +43,18 @@ pub struct Feature {
 /// THE ADMIN PAGE IS DRAWN FROM THIS, so a flag exists for an operator the
 /// moment the control plane deploys a build that lists it, and stops being
 /// offered the moment it is deleted from here (which is what launching a
-/// feature is: delete the entry and the checks on it, and everybody has it;
-/// then add its key to [`RETIRED`], so it is never handed out again).
+/// feature is: delete the entry and the checks on it, and everybody has it).
 ///
 /// Adding one is a `pub const` beside this list, an entry in it, and a
 /// `features.enabled(features::THE_KEY)` wherever the daemon gates on it. The
 /// clients gate on the same key string; a flag only a client reads still gets
 /// an entry here, because this list is the only thing the admin page offers.
 pub const KNOWN: &[Feature] = &[
+    Feature {
+        key: CALENDAR,
+        summary: "The Calendar page: events from mail, a Google Calendar connection, and creating \
+                  and editing events.",
+    },
     Feature {
         key: RENOTIFY,
         summary: "Smart re-notify: a second banner for mail that still needs handling, when the \
@@ -68,6 +72,16 @@ pub const KNOWN: &[Feature] = &[
 /// frame naming mail that still needs them. OFF IS AS IF IT DID NOT EXIST: no
 /// session is recorded and no frame is sent.
 pub const RENOTIFY: &str = "renotify";
+
+/// The Calendar page and everything behind it on the human door: the
+/// timeline, the user's word on a ghost, the Google Calendar connection and
+/// sync, and the user's own event writes. OFF IS AS IF IT DID NOT EXIST: those
+/// routes 404, `/client/stats` says `timeline: false` and carries no
+/// `calendar` object, and the sync loop calls Google for nothing. What keeps
+/// running regardless is the cheap, local half: ghost projection in the
+/// triage commit and correspondent timezone inference, so a mailbox switched
+/// on sees its recent history at once (docs/CALENDAR.md section 11).
+pub const CALENDAR: &str = "calendar";
 
 /// Passband owns the events mail makes ([`crate::gcal::own`]): after each
 /// calendar pass it replaces Gmail's own copies on the user's primary
@@ -88,10 +102,11 @@ pub const CALENDAR_OWN: &str = "calendar_own";
 /// on `GET /tenant/features` and `/client/stats`. A new feature under an old
 /// name would arrive already switched on for whoever had the old one.
 ///
-/// - `calendar`: the Calendar page, the timeline and the Google Calendar
-///   connection (docs/CALENDAR.md section 11). Launched for every mailbox in
-///   October 2026; nothing gates on it.
-pub const RETIRED: &[&str] = &["calendar"];
+/// Empty today. `calendar` sat here for a few days after it launched for
+/// everyone in October 2026; it went back behind its flag on 2026-10-31, under
+/// the SAME key on purpose, so the testers who had it ticked before the launch
+/// keep it.
+pub const RETIRED: &[&str] = &[];
 
 /// The environment variable naming keys that are on for this daemon no matter
 /// what. Comma separated; whitespace around a key is ignored.
@@ -285,20 +300,6 @@ mod tests {
         let list = features.list();
         assert_eq!(list.len(), MAX_KEYS);
         assert!(list.iter().all(|k| is_valid_key(k)));
-    }
-
-    #[test]
-    fn no_known_feature_reuses_a_retired_key() {
-        for feature in KNOWN {
-            assert!(
-                !RETIRED.contains(&feature.key),
-                "{} was retired and must not be reused",
-                feature.key
-            );
-        }
-        for key in RETIRED {
-            assert!(is_valid_key(key), "{key}");
-        }
     }
 
     #[test]

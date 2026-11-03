@@ -66,13 +66,24 @@ enum EventProposals {
 
     // MARK: who is offered it
 
-    /// The assistant's tools in the order the model is shown them: `tools`
-    /// with the calendar tool placed once, right after `after` (or last).
-    static func inventory(_ tools: [String], after: String) -> [String] {
-        var out = tools.filter { $0 != toolName }
-        let at = out.firstIndex(of: after).map { $0 + 1 } ?? out.count
+    /// The assistant's tools for one mailbox: `tools` exactly as given while
+    /// the Calendar page is off, and with the calendar tool after `after`
+    /// (or last) while it is on. With the page off the list, and so the
+    /// schema the model is sent, is the one from before the tool existed.
+    static func inventory(_ tools: [String], calendar: Bool, after: String) -> [String] {
+        let base = tools.filter { $0 != toolName }
+        guard calendar else { return base }
+        var out = base
+        let at = base.firstIndex(of: after).map { $0 + 1 } ?? base.count
         out.insert(toolName, at: at)
         return out
+    }
+
+    /// Whether a call to `name` may run. The calendar tool only while the
+    /// page is on: off, it is a tool that does not exist, and is answered as
+    /// any invented name is.
+    static func mayRun(_ name: String, calendar: Bool) -> Bool {
+        name != toolName || calendar
     }
 
     // MARK: what it answers

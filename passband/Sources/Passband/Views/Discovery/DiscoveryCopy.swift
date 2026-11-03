@@ -67,7 +67,7 @@ extension FeatureSet {
         case .flow: [
             .init("space", "On the board, press Space. For Your Eyes opens one email at a time."),
             .init("E", "Done, and straight on to the next one."),
-            .init("S", "Not sure yet? Set it aside and keep walking."),
+            .init("S", "Not sure yet? Save it for later and keep walking."),
             .init(nil, "At the end you are back on the board, with the list behind you."),
         ]
         case .later: [

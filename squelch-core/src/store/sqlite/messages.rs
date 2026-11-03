@@ -1470,8 +1470,8 @@ impl SqliteStore {
                  sealed_kind, one_line, reason, deadline, matched_rule_id,
                  stage1_model_used, needs_stage2, model_used,
                  status, resolved_at, created_at, field_reasons, ship_extract_model,
-                 notify_eligible_at)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,NULL,?13,?14,?15,?16,?17,?18)
+                 notify_eligible_at, first_load)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,NULL,?13,?14,?15,?16,?17,?18,?19)
              ON CONFLICT(message_id) DO UPDATE SET
                  importance=CASE WHEN {PROCESSED} THEN triage.importance ELSE excluded.importance END,
                  tier=CASE WHEN {PROCESSED} THEN triage.tier ELSE excluded.tier END,
@@ -1533,7 +1533,10 @@ impl SqliteStore {
                  -- window a fresh hour of notify eligibility, which is the storm
                  -- the guard exists to prevent. A NULL stays NULL for the same
                  -- reason, from the other direction.
-                 notify_eligible_at = triage.notify_eligible_at"
+                 notify_eligible_at = triage.notify_eligible_at,
+                 -- Also first insert only: which path FIRST brought the mail
+                 -- in. A later re-sighting by a poll is the same mail.
+                 first_load = triage.first_load"
         );
         tx.execute(
             &triage_upsert,
@@ -1560,6 +1563,7 @@ impl SqliteStore {
                     .notify_eligible_at
                     .filter(|_| !archive)
                     .map(|t| t.to_rfc3339()),
+                triaged.first_load && !archive,
             ],
         )?;
 

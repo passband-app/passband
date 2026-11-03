@@ -377,6 +377,10 @@ CREATE TABLE IF NOT EXISTS triage (
     -- NOT BACKFILLED: every row that predates the column is NULL, which is the
     -- silent direction.
     notify_eligible_at TEXT,
+    -- BROUGHT IN BY THE FIRST-RUN BACKFILL, written on first insert only. A
+    -- thread whose live mail is all first-load shares a small FYE allowance
+    -- (`agent_thread_attention.first_load`). 0 on every pre-existing row.
+    first_load      INTEGER NOT NULL DEFAULT 0,
     status          TEXT NOT NULL DEFAULT 'new',
     surfaced_at     TEXT,
     resolved_at     TEXT,

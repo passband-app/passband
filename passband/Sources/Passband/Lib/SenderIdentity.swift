@@ -516,7 +516,23 @@ enum SenderID {
 
     /// DuckDuckGo icon service URL for a base domain.
     static func faviconURL(_ domain: String) -> URL? {
-        URL(string: "https://icons.duckduckgo.com/ip3/\(domain).ico")
+        URL(string: "https://icons.duckduckgo.com/ip3/\(logoDomain(domain)).ico")
+    }
+
+    /// Sending domains whose brand lives on a different site. Their apex
+    /// serves no icon of its own, so every banner from them wore initials
+    /// ("AW" for an AWS login code from login.awsapps.com). Only for the icon
+    /// lookup: the label and the rule pattern still use the sending domain.
+    /// Short on purpose; add a domain when its mail is seen wearing initials.
+    static let logoAliases: [String: String] = [
+        "awsapps.com": "aws.amazon.com",
+        "signin.aws": "aws.amazon.com",
+        "amazonaws.com": "aws.amazon.com",
+    ]
+
+    /// The domain to ask the icon service about for `domain`.
+    static func logoDomain(_ domain: String) -> String {
+        logoAliases[domain.lowercased()] ?? domain
     }
 
     /// The favicon domain to use for a sender, or nil when it must stay local

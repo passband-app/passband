@@ -31,8 +31,54 @@ enum SenderAvatar {
     /// A short leash for the logo: the banner is already late by one daemon
     /// round trip, and a logo is a nicety. Its own session so the ceiling is
     /// unambiguous, as the badge count's is in NotificationService.
+    ///
+    /// 1.5s turned out to be shorter than a cold cellular fetch from a locked
+    /// phone, so a brand's banner wore initials more often than not. 3s still
+    /// sits far inside the extension's budget, and the disk cache below means
+    /// a sender pays it once.
     private nonisolated(unsafe) static let session = Sessions.ephemeral(
-        timeout: 1, resource: 1.5, emptyHeaders: true)
+        timeout: 2, resource: 3, emptyHeaders: true)
+
+    /// Logos already fetched, on disk in THIS extension's own caches
+    /// directory, keyed by domain. The extension is a fresh process for most
+    /// pushes, so an in-memory memo would forget every time; this one lets a
+    /// brand's second banner draw its logo with no network at all. A domain
+    /// with no logo is remembered too (an empty file), for a day, so it does
+    /// not spend the leash on every banner. The system may purge the
+    /// directory whenever it likes; a purge costs one fetch.
+    private static var cacheRoot: URL? {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("sender-logos", isDirectory: true)
+    }
+
+    private static let missRetry: TimeInterval = 24 * 60 * 60
+
+    private static func cacheFile(_ domain: String) -> URL? {
+        // Domains are lowercase host names; anything else is not cached.
+        guard domain.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "." || $0 == "-") })
+        else { return nil }
+        return cacheRoot?.appendingPathComponent(domain.lowercased())
+    }
+
+    /// `.some(image)` for a cached logo, `.some(nil)` for a recent miss, nil
+    /// when the cache has no answer.
+    private static func cached(_ domain: String) -> UIImage?? {
+        guard let file = cacheFile(domain),
+            let attrs = try? FileManager.default.attributesOfItem(atPath: file.path),
+            let data = try? Data(contentsOf: file)
+        else { return nil }
+        if data.isEmpty {
+            let stamp = attrs[.modificationDate] as? Date ?? .distantPast
+            return stamp.timeIntervalSinceNow > -missRetry ? .some(nil) : nil
+        }
+        return UIImage(data: data).map { .some($0) }
+    }
+
+    private static func remember(_ domain: String, _ data: Data?) {
+        guard let file = cacheFile(domain), let root = cacheRoot else { return }
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try? (data ?? Data()).write(to: file, options: .atomic)
+    }
 
     /// `content` re-derived as a communication notification from `sender`, or
     /// `content` unchanged when iOS refuses. `name` is the readable title the
@@ -106,14 +152,21 @@ enum SenderAvatar {
     /// The domain's logo, the same request the app's FaviconLoader makes, with
     /// the same filter for the service's blank fallback.
     private static func logo(_ domain: String) async -> UIImage? {
+        if let hit = cached(domain) { return hit }
         guard let url = SenderID.faviconURL(domain) else { return nil }
         var request = URLRequest(url: url)
         request.setValue("", forHTTPHeaderField: "Referer")
         guard let (data, response) = try? await session.data(for: request),
-            (response as? HTTPURLResponse)?.statusCode == 200,
-            let image = UIImage(data: data),
+            let status = (response as? HTTPURLResponse)?.statusCode
+        else { return nil }  // No answer (offline, timed out): not a miss.
+        guard status == 200, let image = UIImage(data: data),
             image.size.width > 1, image.size.height > 1
-        else { return nil }
+        else {
+            // The service answered and has no logo: remember that.
+            remember(domain, nil)
+            return nil
+        }
+        remember(domain, data)
         return image
     }
 

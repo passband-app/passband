@@ -1407,7 +1407,7 @@ struct FlowLayout: Layout {
         private var tally: String {
             var parts: [String] = []
             if summary.done > 0 { parts.append("\(summary.done) done") }
-            if summary.skipped > 0 { parts.append("\(summary.skipped) set aside") }
+            if summary.skipped > 0 { parts.append("\(summary.skipped) saved for later") }
             parts.append(Self.duration(summary.duration))
             return parts.joined(separator: " · ")
         }
@@ -1442,7 +1442,7 @@ struct FlowLayout: Layout {
                     HStack(spacing: 0) {
                         stat(counted ? summary.done : 0, "done")
                         divider
-                        stat(counted ? summary.skipped : 0, "set aside")
+                        stat(counted ? summary.skipped : 0, "for later")
                         divider
                         VStack(spacing: Space.s2) {
                             Text(Self.duration(summary.duration))

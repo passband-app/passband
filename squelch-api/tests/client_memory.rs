@@ -202,10 +202,25 @@ async fn an_edit_bumps_the_revision_and_rerenders_or_takes_the_owners_line() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let resp = put("01NOSUCHENTRY", json!({"confirm": true}))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    // An id we never mint, and a well-formed one we do not hold: both 404,
+    // and neither reaches the audit log.
+    let before = h.store.list_audit(h.acct, 50).unwrap().len();
+    for id in [
+        "01NOSUCHENTRY",
+        "x'%20OR%201=1",
+        "01ZZZZZZZZZZZZZZZZZZZZZZZZ",
+    ] {
+        let resp = put(id, json!({"confirm": true})).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{id}");
+        let resp = h
+            .app
+            .clone()
+            .oneshot(authed("DELETE", &format!("/client/memory/{id}")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{id}");
+    }
+    assert_eq!(h.store.list_audit(h.acct, 50).unwrap().len(), before);
 }
 
 #[tokio::test]

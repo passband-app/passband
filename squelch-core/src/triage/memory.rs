@@ -963,6 +963,16 @@ pub fn new_ulid(now: DateTime<Utc>) -> String {
         .collect()
 }
 
+/// Whether `s` is shaped like an id [`new_ulid`] mints: 26 Crockford base32
+/// characters. The human door checks a path id with this before it reaches
+/// the store or the audit log's `target`, so neither ever holds arbitrary
+/// client text.
+pub fn is_ulid(s: &str) -> bool {
+    s.len() == 26
+        && s.bytes()
+            .all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b))
+}
+
 // ---------------------------------------------------------------------------
 // Serving.
 // ---------------------------------------------------------------------------

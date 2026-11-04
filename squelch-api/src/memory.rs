@@ -29,6 +29,7 @@ use serde::Deserialize;
 use serde_json::json;
 use squelch_core::store::memory::MemoryStore as _;
 use squelch_core::store::sqlite::memory::MemoryEdit;
+use squelch_core::triage::memory::is_ulid;
 use squelch_core::triage::sender_fatigue::MIN_COVERED_DAYS;
 
 use crate::error::ApiError;
@@ -77,6 +78,11 @@ pub async fn update_memory(
     Path(id): Path<String>,
     Json(body): Json<MemoryBody>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Not an id we mint: the same 404 as an id we do not hold, before the
+    // client's text reaches the store or the audit log.
+    if !is_ulid(&id) {
+        return Err(ApiError::not_found());
+    }
     let edit = MemoryEdit {
         line: body.line,
         body: body.body,
@@ -114,6 +120,9 @@ pub async fn delete_memory(
     State(state): State<ApiState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if !is_ulid(&id) {
+        return Err(ApiError::not_found());
+    }
     let target = id.clone();
     let deleted = store_call(&state, move |store, account_id| {
         store.delete_memory_entry(account_id, &id, Utc::now())

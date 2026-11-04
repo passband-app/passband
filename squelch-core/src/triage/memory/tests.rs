@@ -569,6 +569,16 @@ fn ulids_are_26_crockford_characters_and_sort_by_time() {
     );
     assert!(a < b);
     assert_ne!(new_ulid(now()), new_ulid(now()));
+    assert!(is_ulid(&a));
+    for bad in [
+        "",
+        "01NOSUCHENTRY",
+        &a.to_lowercase(),
+        &format!("{a}X"),
+        "0123456789ABCDEFGHJKMNPQRI",
+    ] {
+        assert!(!is_ulid(bad), "{bad}");
+    }
 }
 
 // ---- serving ----------------------------------------------------------------

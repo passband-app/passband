@@ -581,13 +581,17 @@ groups:
               conditions:
                 - evaluator: { type: gte, params: [0] }
 
-      # The lanes under the total: background (backfill and refreshes),
-      # access (sent, spam and archive rows an agent asked to read), and
-      # revisits, which answer to `[revisit].daily_cap` and export no run
-      # gauge, so they are read from the jobs they hold. Background at its cap
-      # is how an onboarding backlog drains (200 a day, so a new mailbox does
-      # this for a week or more): info, not warning, and one message a day
-      # per tenant per lane at most, since it resolves at the reset.
+      # The lanes under the total: access (sent, spam and archive rows an
+      # agent asked to read) and revisits, which answer to
+      # `[revisit].daily_cap` and export no run gauge, so they are read from
+      # the jobs they hold. One message a day per tenant per lane at most,
+      # since it resolves at the reset.
+      #
+      # The BACKGROUND lane is left out on purpose (2026-11-04). Its cap is
+      # how an onboarding backlog drains (200 a day, so a new mailbox sits at
+      # it daily for weeks), which made it a message a day per new signup
+      # saying the design was working. Its share-of-cap panel is still on the
+      # dashboard.
       - uid: tenant-triage-lane-cap
         title: Tenant triage lane at its daily cap
         condition: C
@@ -599,9 +603,7 @@ groups:
         annotations:
           summary: 'tenant {{ $labels.tenant }}: triage {{ $labels.scope }} lane at its daily cap'
           description: >-
-            background: backlog (a new signup's backfill, a refresh) draining at the background
-            cap; expected for days after a signup, worth a look on an old tenant. access: a
-            heavy day of access checks waiting for tomorrow. revisit: autonomous revisits
+            access: a heavy day of access checks waiting for tomorrow. revisit: autonomous revisits
             parked by [revisit].daily_cap, which a grant does not raise. New mail is not held by
             any of these; that is `tenant-triage-daily-cap`.
         data:
@@ -613,8 +615,8 @@ groups:
               instant: true
               expr: >-
                 (
-                  max by (cluster, tenant, scope) (last_over_time(squelchd_triage_daily_runs{scope=~"background|access"}[10m]))
-                    - max by (cluster, tenant, scope) (last_over_time(squelchd_triage_daily_run_cap{scope=~"background|access"}[10m]) > 0)
+                  max by (cluster, tenant, scope) (last_over_time(squelchd_triage_daily_runs{scope="access"}[10m]))
+                    - max by (cluster, tenant, scope) (last_over_time(squelchd_triage_daily_run_cap{scope="access"}[10m]) > 0)
                 ) >= 0
                   or
                 max by (cluster, tenant, scope) (last_over_time(squelchd_triage_jobs_held{scope="revisit"}[10m])) > 0

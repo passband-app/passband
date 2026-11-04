@@ -793,6 +793,60 @@ pub fn normalize_decision(decision: &mut MessageDecision) {
     if !decision.auth.kinds.contains(&AuthKind::AccountChange) {
         decision.auth.critical = false;
     }
+    event_dates_are_not_deadlines(decision);
+}
+
+/// A ticket's date is when the event happens, not when anything is due: it
+/// belongs on the calendar (the event record), never as a "due" chip or an
+/// FYE row. So on mail carrying a ticket the owner already bought, a thread
+/// `attention_at` on the event's day is cleared, an open action due that day
+/// is dropped (it is only "go to the event"), and with no open action left the
+/// thread is not FYE: there is nothing to do but turn up. Only tickets: a
+/// flight or a booking can carry a real task on its day, such as a check-in.
+fn event_dates_are_not_deadlines(decision: &mut MessageDecision) {
+    let days: Vec<_> = decision
+        .records
+        .iter()
+        .filter_map(|record| match record {
+            RecordProposal::Event {
+                start: Some(start),
+                event_kind: EventRecordKind::Ticket,
+                commitment: EventCommitment::Committed,
+                change,
+                ..
+            } if *change != EventChange::Cancelled => stated_day(start),
+            _ => None,
+        })
+        .collect();
+    if days.is_empty() {
+        return;
+    }
+    let on_event_day = |time: &Option<SupportedTime>| {
+        time.as_ref()
+            .and_then(stated_day)
+            .is_some_and(|day| days.contains(&day))
+    };
+    let attention = &mut decision.attention;
+    if on_event_day(&attention.factors.attention_at) {
+        attention.factors.attention_at = None;
+    }
+    attention
+        .actions
+        .retain(|action| action.resolved || !on_event_day(&action.due));
+    if attention.actions.iter().all(|action| action.resolved) {
+        attention.show_in_fye = false;
+        if attention.state == AttentionState::NeedsUser {
+            attention.state = AttentionState::Informational;
+        }
+    }
+}
+
+fn stated_day(time: &SupportedTime) -> Option<chrono::NaiveDate> {
+    Some(match time.stated()? {
+        StatedTime::Instant(at) => at.date_naive(),
+        StatedTime::Local(at) => at.date(),
+        StatedTime::Day(day) => day,
+    })
 }
 
 /// `now` is the run's clock ([`run_clock`]), which a revisit must follow.
@@ -2090,6 +2144,83 @@ mod tests {
         normalize_decision(&mut decision);
         assert!(decision.auth.critical);
         assert!(decision.auth.is_critical());
+    }
+    fn ticket(start: &str, commitment: EventCommitment) -> RecordProposal {
+        RecordProposal::Event {
+            title: "RA Tickets".into(),
+            start: Some(SupportedTime {
+                value: start.into(),
+                timezone: None,
+                source_message_id: 7,
+                interpreted_relative: false,
+            }),
+            location: Some("Gray Area".into()),
+            end: None,
+            duration_estimate: None,
+            event_kind: EventRecordKind::Ticket,
+            commitment,
+            change: EventChange::Created,
+            identity_refs: vec![],
+            likelihood: None,
+            evidence: vec![],
+        }
+    }
+    fn day(value: &str) -> Option<SupportedTime> {
+        Some(SupportedTime {
+            value: value.into(),
+            timezone: None,
+            source_message_id: 7,
+            interpreted_relative: false,
+        })
+    }
+    /// A bought ticket's event day is not a due date, and the ticket is not
+    /// FYE: the screenshot that started this was "RA Tickets ... due Nov 6".
+    #[test]
+    fn a_bought_ticket_is_not_due_and_not_fye() {
+        assert!(SYSTEM.contains("An event's date is when it happens, never a due date"));
+        let mut decision = valid();
+        decision.records = vec![ticket("2026-11-06T19:00", EventCommitment::Committed)];
+        decision.attention.show_in_fye = true;
+        decision.attention.state = AttentionState::NeedsUser;
+        decision.attention.factors.attention_at = day("2026-11-06");
+        decision.attention.actions = vec![AttentionAction {
+            description: "Attend the event".into(),
+            due: day("2026-11-06T19:00:00"),
+            ..Default::default()
+        }];
+        normalize_decision(&mut decision);
+        assert_eq!(decision.attention.factors.attention_at, None);
+        assert!(decision.attention.actions.is_empty());
+        assert!(!decision.attention.show_in_fye);
+        assert_eq!(decision.attention.state, AttentionState::Informational);
+        // The event itself, the calendar's fact, is untouched.
+        assert_eq!(decision.records.len(), 1);
+    }
+    /// A real task on a ticket thread (a transfer cutoff the day before) keeps
+    /// its date and its FYE place; an event only invited to is not touched.
+    #[test]
+    fn a_real_ticket_task_or_an_invite_keeps_its_date() {
+        let mut decision = valid();
+        decision.records = vec![ticket("2026-11-06", EventCommitment::Committed)];
+        decision.attention.show_in_fye = true;
+        decision.attention.factors.attention_at = day("2026-11-05");
+        decision.attention.actions = vec![AttentionAction {
+            description: "Transfer a ticket before the cutoff".into(),
+            due: day("2026-11-05"),
+            ..Default::default()
+        }];
+        normalize_decision(&mut decision);
+        assert_eq!(decision.attention.factors.attention_at, day("2026-11-05"));
+        assert_eq!(decision.attention.actions.len(), 1);
+        assert!(decision.attention.show_in_fye);
+
+        let mut invited = valid();
+        invited.records = vec![ticket("2026-11-06", EventCommitment::Invited)];
+        invited.attention.show_in_fye = true;
+        invited.attention.factors.attention_at = day("2026-11-06");
+        normalize_decision(&mut invited);
+        assert_eq!(invited.attention.factors.attention_at, day("2026-11-06"));
+        assert!(invited.attention.show_in_fye);
     }
     #[test]
     fn reading_kind_is_offered_and_defaults_on_stored_rows() {

@@ -103,6 +103,12 @@ pub const RECOMPUTE_CHUNK: usize = 25;
 /// restarting a walk the size of the address book.
 pub const RELATIONSHIPS_WALK_CURSOR_KEY: &str = "relationships_walk_cursor";
 
+/// `app_settings` key holding the ledger day (`yyyymmdd`) a running full
+/// walk STARTED on. The walk stamps that day when it completes, not the day
+/// it finishes on: a walk that started on Monday's slot and ran past 03:00
+/// Tuesday would otherwise stamp Tuesday, and Tuesday's walk would never run.
+pub const RELATIONSHIPS_WALK_DAY_KEY: &str = "relationships_walk_day";
+
 /// `app_settings` key holding when a failed full walk may try again
 /// (RFC 3339). A walk that fails keeps its cursor and waits
 /// [`WALK_RETRY_SECS`], rather than starting over from the first address

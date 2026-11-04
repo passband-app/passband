@@ -38,8 +38,8 @@ use crate::error::Result;
 use crate::owner_clock::{OwnerClock, OwnerZone};
 use crate::store::sqlite::relationships::{
     DIRTY_DRAIN_MAX, RECOMPUTE_CHUNK, RELATIONSHIPS_BACKFILL_KEY, RELATIONSHIPS_DAILY_KEY,
-    RELATIONSHIPS_WALK_CURSOR_KEY, RELATIONSHIPS_WALK_RETRY_KEY, WALK_CHUNKS_PER_ROUND,
-    WALK_RETRY_SECS,
+    RELATIONSHIPS_WALK_CURSOR_KEY, RELATIONSHIPS_WALK_DAY_KEY, RELATIONSHIPS_WALK_RETRY_KEY,
+    WALK_CHUNKS_PER_ROUND, WALK_RETRY_SECS,
 };
 use crate::store::{Store, SyncState};
 use crate::types::AccountId;
@@ -99,7 +99,12 @@ pub(crate) fn ledger_round<S: Store + ?Sized>(
     // only when one is owed.
     let start = match cursor {
         Some(cursor) => Some(cursor),
-        None if full_recompute_due(backfilled, last_day, today) => Some(String::new()),
+        None if full_recompute_due(backfilled, last_day, today) => {
+            // A new walk: remember the day it is for, which is the day it
+            // stamps however many rounds it takes.
+            store.set_app_setting(account, RELATIONSHIPS_WALK_DAY_KEY, &today.to_string())?;
+            Some(String::new())
+        }
         None => None,
     };
     // A wait that will not parse is no wait: the failure falls toward trying.
@@ -149,12 +154,19 @@ pub(crate) fn ledger_round<S: Store + ?Sized>(
                         },
                     )
                 };
-                stamp(RELATIONSHIPS_DAILY_KEY, today)?;
+                // The day the walk STARTED on (a walk from an earlier build has
+                // none recorded, and takes today).
+                let started = store
+                    .get_app_setting(account, RELATIONSHIPS_WALK_DAY_KEY)?
+                    .and_then(|day| day.parse::<u64>().ok())
+                    .unwrap_or(today);
+                stamp(RELATIONSHIPS_DAILY_KEY, started)?;
                 if !backfilled {
                     stamp(RELATIONSHIPS_BACKFILL_KEY, 1)?;
                 }
                 store.delete_app_setting(account, RELATIONSHIPS_WALK_CURSOR_KEY)?;
                 store.delete_app_setting(account, RELATIONSHIPS_WALK_RETRY_KEY)?;
+                store.delete_app_setting(account, RELATIONSHIPS_WALK_DAY_KEY)?;
                 WalkProgress::Completed
             } else {
                 store.set_app_setting(account, RELATIONSHIPS_WALK_CURSOR_KEY, &after)?;
@@ -318,6 +330,14 @@ mod walk_tests {
                 .unwrap()
                 .is_some()
         );
+        // It started and finished on the 4th, so the 4th is stamped.
+        assert_eq!(
+            store
+                .sync_state(account, RELATIONSHIPS_DAILY_KEY)
+                .unwrap()
+                .map(|s| s.last_uid),
+            Some(20261104)
+        );
         // The same ledger day again: nothing owed.
         assert_eq!(
             ledger_round(&store, account, 20261104, Utc::now()).unwrap(),
@@ -378,5 +398,57 @@ mod backoff_tests {
                 "{key}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod walk_day_tests {
+    use super::*;
+    use crate::store::SqliteStore;
+
+    /// A walk that starts on one ledger day and finishes after 03:00 the next
+    /// stamps the day it STARTED, so the next day's walk still runs.
+    #[test]
+    fn a_walk_that_runs_past_three_stamps_the_day_it_started() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let account = store.ensure_account("me@example.com").unwrap();
+        for i in 0..(WALK_CHUNKS_PER_ROUND * RECOMPUTE_CHUNK + 5) {
+            store
+                .merge_harvested_contacts(
+                    account,
+                    &[crate::store::ContactEntry {
+                        addr: format!("c{i:04}@example.com"),
+                        display_name: None,
+                        sent_count: 1,
+                        last_sent_at: None,
+                    }],
+                )
+                .unwrap();
+        }
+        let now = Utc::now();
+        assert!(matches!(
+            ledger_round(&store, account, 20261104, now).unwrap(),
+            WalkProgress::Paused(_)
+        ));
+        // 03:00 passes; the walk finishes on the 5th.
+        assert_eq!(
+            ledger_round(&store, account, 20261105, now).unwrap(),
+            WalkProgress::Completed
+        );
+        assert_eq!(
+            store
+                .sync_state(account, RELATIONSHIPS_DAILY_KEY)
+                .unwrap()
+                .map(|s| s.last_uid),
+            Some(20261104),
+            "stamped the day it started"
+        );
+        assert!(
+            matches!(
+                ledger_round(&store, account, 20261105, now).unwrap(),
+                WalkProgress::Paused(_)
+            ),
+            "the 5th's own walk still runs"
+        );
     }
 }

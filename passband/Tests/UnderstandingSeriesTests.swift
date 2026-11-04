@@ -145,6 +145,11 @@ struct UnderstandingSeriesTests {
         let fixture = UnderstandingSeries(UnderstandingFixture.relationships(now: now), now: now)
         expect(zip(fixture.answered, fixture.answered.dropFirst()).allSatisfy { $0.value >= $1.value },
             "the fixture's bars read in the order of their own percentages")
+        let onChart = Set(fixture.points.filter { $0.region == .answer }.map(\.id))
+        expect(fixture.answered.allSatisfy { onChart.contains($0.id) },
+            "everyone on the Answered list sits in People you answer on the chart")
+        expect(!fixture.answered.contains { $0.row.display_name == "Alex Moreno" },
+            "one reply in six is placed by reads, and off the Answered list too")
         expect(s.answered.first?.value == 31.0 / 33.0, "the bar is the real share")
         expect(s.answered.first?.sentence == "replied to 31 of 33, usually within the hour", "and says it")
 

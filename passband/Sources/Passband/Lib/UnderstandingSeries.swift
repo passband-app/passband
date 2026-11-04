@@ -195,7 +195,7 @@ struct UnderstandingSeries: Equatable {
     /// Ranked by the share the bar shows, so the list reads top-down in the
     /// order of its own percentages; ties go to the sender answered more often.
     static func rankAnswered(_ rows: [RelationshipRow]) -> [PersonBar] {
-        rows.filter { $0.replied_threads > 0 && $0.inbound_threads >= answeredFloor }
+        rows.filter { isAnswered($0) && $0.inbound_threads >= answeredFloor }
             .sorted { a, b in
                 let sa = replyShare(a), sb = replyShare(b)
                 return sa != sb ? sa > sb : a.replied_threads > b.replied_threads

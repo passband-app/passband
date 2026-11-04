@@ -16,6 +16,7 @@ struct CatchUpEstimateTests {
         aRestartedWalkStartsOver()
         repeatedPollsAreOneSample()
         phrases()
+        theSharedLine()
         print("Catch-up estimate tests passed")
     }
 
@@ -86,6 +87,15 @@ struct CatchUpEstimateTests {
             expect(got == want, "\(String(describing: seconds))s reads \(want), got \(got)")
             expect(!got.contains("\u{2014}") && !got.contains("\u{2013}"), "no dashes in copy")
         }
+    }
+
+    /// The veil and the board's banner print the same line from one estimate.
+    static func theSharedLine() {
+        var e = CatchUpEstimate()
+        expect(e.line(done: 1510, total: 4200).hasSuffix("emails · estimating…"), "no pace yet: \(e.line(done: 1510, total: 4200))")
+        for i in 0..<4 { e.record(done: 1000 + i * 120, at: t0.addingTimeInterval(Double(i) * 10)) }
+        let line = e.line(done: 1360, total: 4200)
+        expect(line.hasSuffix("emails · about 4 minutes left"), "12 a second over 2,840 left: \(line)")
     }
 
     static func expect(_ condition: Bool, _ message: String) {

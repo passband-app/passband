@@ -133,6 +133,7 @@
 		396BF899A7D7540E0DBCBB5B /* Badge.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3B428F6536347775B3EA5DC /* Badge.swift */; };
 		39808BC8E64BACBC8B8DCB4F /* ReadReceipt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 759702EBD03C1CECFD041E57 /* ReadReceipt.swift */; };
 		39B48BCF60CA5737C7088687 /* RemindTimes.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDDAB6C380027F87A19022BF /* RemindTimes.swift */; };
+		3B9FFF5FBA83E1B2BA094FDD /* CatchUpProgressRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 149B084F47F6D25F0A650BD0 /* CatchUpProgressRow.swift */; };
 		3C204A6AD74A49F279C52A7E /* HandledSignal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D79E5DFC7FA1CC324A1388A /* HandledSignal.swift */; };
 		3CCC79739F2A8447B7612842 /* DiscoveryLedger.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE22230F3A496CA31B65874 /* DiscoveryLedger.swift */; };
 		3CDDFF0122107A439FA384A2 /* CalendarConnectCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A98F14CACFFA523492B5C673 /* CalendarConnectCard.swift */; };
@@ -524,6 +525,7 @@
 		DD971CBBDF48F7F74F7D1190 /* Pairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5512C13F456F49B6DF7B182B /* Pairing.swift */; };
 		DDAFF63C3911FD2DB3D264A7 /* ReadVignette.swift in Sources */ = {isa = PBXBuildFile; fileRef = 797786C6B7274A10DE3FD270 /* ReadVignette.swift */; };
 		DE7473541B0436222CDBFC6D /* SidebarRail.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB2FD6FC0F4BAE985E3E8E70 /* SidebarRail.swift */; };
+		DF51B3D78F4EEADE89701830 /* CatchUpProgressRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 149B084F47F6D25F0A650BD0 /* CatchUpProgressRow.swift */; };
 		E06B672EFDF1D3BA3EDC52E1 /* AccountPhotos.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DD4E0E5420B4FB060E661BB /* AccountPhotos.swift */; };
 		E10D08C181CF74A1540E37BB /* UpdateAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4DCCB43DE3B800210E77D2D /* UpdateAlert.swift */; };
 		E110A6B6999F73DD1F995502 /* TriageFixPalette.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DD819E65C2460A88F79805 /* TriageFixPalette.swift */; };
@@ -652,6 +654,7 @@
 		10544C7DF8CDBA851AF0D9D8 /* Actions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Actions.swift; sourceTree = "<group>"; };
 		12468DFB107CC662204BCE84 /* MobileRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileRootView.swift; sourceTree = "<group>"; };
 		133F67D29E63121188F93025 /* SearchHighlight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchHighlight.swift; sourceTree = "<group>"; };
+		149B084F47F6D25F0A650BD0 /* CatchUpProgressRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatchUpProgressRow.swift; sourceTree = "<group>"; };
 		151C06F2A835787B0FDEDB24 /* FindInThread.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindInThread.swift; sourceTree = "<group>"; };
 		15B8541C2F7C988507905103 /* RefinementSlot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RefinementSlot.swift; sourceTree = "<group>"; };
 		15D14DE02E72E63FE53D5C8D /* AttachmentStrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentStrip.swift; sourceTree = "<group>"; };
@@ -1019,6 +1022,7 @@
 				7F39A78CE5F9F2D59F7DA8A3 /* CalendarMonth.swift */,
 				EF3AEBAA095F871B94011983 /* CalendarPage.swift */,
 				43EE54BAA61177B3112BEE9F /* CalendarWeek.swift */,
+				149B084F47F6D25F0A650BD0 /* CatchUpProgressRow.swift */,
 				3E1FEEC087CEB684B1D4F861 /* ClearBand.swift */,
 				B97BB8DF0B7CB3C4E9EC791B /* ComposePane.swift */,
 				E076DAB13B2768EAD01C88F3 /* CompositionSummary.swift */,
@@ -1689,6 +1693,7 @@
 				EB6F1BBD2CD99900B963C28B /* CalendarWeek.swift in Sources */,
 				B0919D77396F03B78D92E19B /* CalendarWrite.swift in Sources */,
 				1018E9534A341106A25780F1 /* CatchUpEstimate.swift in Sources */,
+				DF51B3D78F4EEADE89701830 /* CatchUpProgressRow.swift in Sources */,
 				4DF190F34838471A99C7213B /* Chrome.swift in Sources */,
 				8CCC6315E27DD5683F55D274 /* CidImages.swift in Sources */,
 				5B202D84CFC2EA02FC66A6F4 /* ClearBand.swift in Sources */,
@@ -1971,6 +1976,7 @@
 				71A43CA3F1C212D97518FB20 /* CalendarWeek.swift in Sources */,
 				4E74166D70310E6FC2819BE1 /* CalendarWrite.swift in Sources */,
 				26D2540EBB94CCBECB1F89FD /* CatchUpEstimate.swift in Sources */,
+				3B9FFF5FBA83E1B2BA094FDD /* CatchUpProgressRow.swift in Sources */,
 				CE7A1954C5F02C1ADB43F8E6 /* ChainFoot.swift in Sources */,
 				BDE91DE1BD59B4CD5D50F21D /* Chrome.swift in Sources */,
 				A32CA97991D874737EE663DA /* CidImages.swift in Sources */,

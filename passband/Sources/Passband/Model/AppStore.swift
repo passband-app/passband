@@ -7332,7 +7332,7 @@ final class AppStore {
     /// and anything waiting on a verdict is waiting on this — which is the one
     /// thing a stalled-looking progress bar needs to be able to say.
     var catchUp: (done: Int, total: Int)? {
-        guard let c = stats?.catch_up, c.total > 0 else { return nil }
+        guard let c = syntheticCatchUp ?? stats?.catch_up, c.total > 0 else { return nil }
         return (c.done, c.total)
     }
 
@@ -7406,9 +7406,35 @@ final class AppStore {
     @ObservationIgnored private var syncStatusExpiry: Task<Void, Never>?
     @ObservationIgnored private var syncStatusExpiresAt: Date?
 
+    /// THE ONE ESTIMATE OF A CATCH-UP'S PACE, fed by every stats poll and
+    /// read by both the first-load veil and the board's banner, so pressing
+    /// Start now hands the bar to the board without it starting over at
+    /// "estimating…". Reset when no walk is running, so a later catch-up (a
+    /// reconnect, a long absence) is measured fresh.
+    private(set) var catchUpEstimate = CatchUpEstimate()
+
+    /// A made-up walk, for `PASSBAND_FIRST_LOAD` only (FirstLoad's preview).
+    /// Wins over the stats while set, for the banner and the veil alike.
+    private(set) var syntheticCatchUp: CatchUpProgress?
+
+    func stageSyntheticCatchUp(_ progress: CatchUpProgress?) {
+        syntheticCatchUp = progress
+        noteSyncStatus()
+    }
+
+    private func noteCatchUpPace(_ now: Date) {
+        if let c = syntheticCatchUp ?? stats?.catch_up, c.total > 0, c.done < c.total {
+            catchUpEstimate.record(done: c.done, at: now)
+        } else if !catchUpEstimate.samples.isEmpty {
+            catchUpEstimate.reset()
+        }
+    }
+
     private func noteSyncStatus() {
         let now = Date()
-        let status = SyncStatus.derive(daemonDown: daemonDown, stats: stats, now: now, date: Fmt.date)
+        noteCatchUpPace(now)
+        var status = SyncStatus.derive(daemonDown: daemonDown, stats: stats, now: now, date: Fmt.date)
+        if let c = syntheticCatchUp, c.done < c.total { status = .catchingUp(done: c.done, total: c.total) }
         if status != syncStatus { syncStatus = status }
         var expiry: Date?
         if case .coolingDown(let until?, _) = status, until > now { expiry = until }

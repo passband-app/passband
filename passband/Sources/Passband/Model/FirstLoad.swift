@@ -39,7 +39,6 @@ final class FirstLoad {
     /// the veil lifts.
     private(set) var finishing = false
     private(set) var snapshot: Snapshot?
-    private(set) var estimate = CatchUpEstimate()
 
     /// How long a mailbox with no mail and no catch-up is waited on before
     /// the board is simply shown.
@@ -52,11 +51,6 @@ final class FirstLoad {
     @ObservationIgnored private var settleTask: Task<Void, Never>?
     @ObservationIgnored private var synthetic: Task<Void, Never>?
 
-    /// The line under the bar.
-    var remainingPhrase: String {
-        guard let snapshot else { return CatchUpEstimate.phrase(nil) }
-        return CatchUpEstimate.phrase(estimate.remaining(total: snapshot.total))
-    }
 
     /// Called on connect and on every poll (RootView's ShellWatchers). Cheap
     /// and idempotent: after the decision it only feeds a veil that is up.
@@ -90,10 +84,9 @@ final class FirstLoad {
                 done: progress.done, total: progress.total, sorted: store.stats?.total ?? 0,
                 noise: store.stats?.tier_counts["noise"] ?? 0,
                 attention: store.stats?.bands.standing ?? 0)
-            if progress.done < progress.total {
-                estimate.record(done: progress.done, at: now)
-                return
-            }
+            // The pace itself is the store's (`catchUpEstimate`), fed by the
+            // same polls, so the board's banner carries it on after Start now.
+            if progress.done < progress.total { return }
         }
         // Gone, or reporting itself complete: the walk is over.
         if store.stats != nil { finish(store) }
@@ -134,8 +127,6 @@ final class FirstLoad {
         if !Self.forced { Analytics.capture("first_load_ended", ["early": early]) }
         settleTask?.cancel()
         settleTask = nil
-        synthetic?.cancel()
-        synthetic = nil
         active = false
         finishing = false
         conclude(store)
@@ -157,7 +148,9 @@ final class FirstLoad {
 
     /// Made-up numbers on a clock, so the card can be looked at with no
     /// daemon: a walk of 4,200 that started a while ago, moving about twelve
-    /// a second, sampled the way the poller would be.
+    /// a second, staged on the store the way a poll would land it. It keeps
+    /// counting after Start now, so the board's banner can be looked at too,
+    /// and ends the way a real walk does.
     /// Once per launch: a preview that was dismissed stays dismissed.
     private func startSynthetic(_ store: AppStore) {
         guard !decided else { return }
@@ -165,15 +158,18 @@ final class FirstLoad {
         active = true
         let started = Date()
         synthetic = Task { @MainActor in
-            while !Task.isCancelled, self.active, !self.finishing {
+            while !Task.isCancelled {
                 let elapsed = Date().timeIntervalSince(started)
                 let done = min(4_200, 1_180 + Int(elapsed * 12))
-                self.estimate.record(done: done, at: Date())
-                self.snapshot = Snapshot(
-                    done: done, total: 4_200, sorted: done * 9 / 10,
-                    noise: done * 6 / 10, attention: max(1, done / 140))
+                store.stageSyntheticCatchUp(CatchUpProgress(done: done, total: 4_200))
+                if self.active, !self.finishing {
+                    self.snapshot = Snapshot(
+                        done: done, total: 4_200, sorted: done * 9 / 10,
+                        noise: done * 6 / 10, attention: max(1, done / 140))
+                }
                 if done >= 4_200 {
-                    self.finish(store)
+                    if self.active { self.finish(store) }
+                    store.stageSyntheticCatchUp(nil)
                     return
                 }
                 try? await Task.sleep(for: .seconds(3))

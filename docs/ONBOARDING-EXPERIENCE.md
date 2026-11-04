@@ -46,7 +46,12 @@ The experience starts with relief, then opens onto the person's own mail:
   between polls. A count that goes backwards (a restarted walk) starts the
   samples over.
 - **Leaving.** "Start now", Enter, Esc, a click on the scrim, or walking to
-  another page dismisses it early. When the catch-up ends the bar is shown full
+  another page dismisses it early. A catch-up still running carries on at the
+  top of the board: the sync banner's catch-up state is the same progress row
+  (`Views/CatchUpProgressRow.swift`), with the same line from the same
+  estimate (`AppStore.catchUpEstimate`, fed by every stats poll), so the pace
+  does not start over. A later catch-up with no veil uses that banner too,
+  measured fresh. When the catch-up ends the bar is shown full
   with "All caught up." for a second, then the veil lifts.
 - **Degraded states.** Daemon down: "Connection interrupted. Your inbox will
   update when we reconnect." Gmail disconnected: "Your mail connection needs
@@ -61,7 +66,8 @@ The experience starts with relief, then opens onto the person's own mail:
 To look at the card without a fresh mailbox, launch with
 `PASSBAND_FIRST_LOAD=1`: it raises the veil with synthetic numbers (a walk of
 4,200 moving about twelve a second) over whatever board is connected, and
-stamps nothing.
+stamps nothing. After Start now the made-up walk keeps counting in the
+board's banner until it ends.
 
 What is deliberately not here: done stays the `e` key (the reader's verb bar
 is unchanged), and sender rules are not taught. Teaching rules is meant to

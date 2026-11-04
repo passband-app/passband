@@ -68,24 +68,9 @@ struct FirstLoadVeil: View {
 
     /// The bar, and under it how far along and roughly how long is left. The
     /// estimate is only ever the last poll's: it does not tick between them.
-    @ViewBuilder
     private var progress: some View {
         let shown = firstLoad.snapshot
-        VStack(alignment: .leading, spacing: Space.s8) {
-            ProgressView(
-                value: Double(shown?.done ?? 0),
-                total: Double(max(shown?.total ?? 1, 1))
-            )
-            .progressViewStyle(.linear)
-            .tint(Palette.accent)
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.6), value: shown?.done)
-            Text(caption(shown))
-                .font(Typo.ui(13))
-                .foregroundStyle(Palette.inkDim)
-                .monospacedDigit()
-                .contentTransition(.numericText())
-        }
-        .accessibilityElement(children: .combine)
+        return CatchUpProgressRow(done: shown?.done ?? 0, total: shown?.total ?? 1, line: caption(shown))
     }
 
     private func caption(_ shown: FirstLoad.Snapshot?) -> String {
@@ -94,7 +79,8 @@ struct FirstLoadVeil: View {
         if firstLoad.finishing { return "\(count). All caught up." }
         // A daemon that is not answering has no pace to report.
         if trouble != nil { return count }
-        return "\(count) · \(firstLoad.remainingPhrase)"
+        // The store's estimate, the one the board's banner reads after Start now.
+        return store.catchUpEstimate.line(done: shown.done, total: shown.total)
     }
 
     /// Why the bar may not move, when there is a reason. The old summary

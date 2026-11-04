@@ -62,7 +62,13 @@ struct CatchUpEstimate: Sendable, Equatable {
         return Double(max(0, total - last.done)) / rate
     }
 
-    /// The line under the bar. Rounded to what a person plans around: the
+    /// The whole line under the bar, the same on the veil and on the board's
+    /// banner: "1,510 of 4,200 emails · about 4 minutes left".
+    func line(done: Int, total: Int) -> String {
+        "\(done.formatted()) of \(total.formatted()) emails · \(Self.phrase(remaining(total: total)))"
+    }
+
+    /// The pace half of the line. Rounded to what a person plans around: the
     /// minute under an hour, the half hour past it.
     static func phrase(_ seconds: TimeInterval?) -> String {
         guard let seconds else { return "estimating…" }

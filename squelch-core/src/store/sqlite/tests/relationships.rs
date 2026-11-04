@@ -819,11 +819,19 @@ fn a_decision_that_seals_mail_marks_its_sender_for_a_full_recount() {
 
     // And back: a re-triage that lifts the restriction unseals it, which
     // moves no count either, so that mark must be full too.
+    //
+    // A TRIGGER OF ITS OWN, not `into_reading_with`'s "test". Re-enqueuing a
+    // COMPLETED job under the same trigger with unchanged content is a no-op
+    // (`queue_investigation`, store/sqlite/agent_triage.rs:709-711); a
+    // different trigger takes the requeue branch at agent_triage.rs:688-708,
+    // which sets `available_at` to now, so the job is claimable at once. Real
+    // corrections always differ: their trigger is `correction:<timestamp>`
+    // (agent_triage.rs:573).
     store
         .enqueue_agent_triage(acct, code, "test-unseal", false)
         .unwrap();
     let job = store
-        .claim_agent_job(acct, "triage", Utc::now() + Duration::days(2), 60)
+        .claim_agent_job(acct, "triage", Utc::now(), 60)
         .unwrap()
         .expect("the re-triage is claimable");
     assert_eq!(job.message_id, code);

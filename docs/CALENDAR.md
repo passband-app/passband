@@ -848,7 +848,10 @@ list, Esc closes the place list, then the delete question, then the pane.
     guests, has not ended, and matches exactly ONE live, undismissed ghost
     (`own::same_event`: the same start, and the display match's titles or a
     distinctive word shared across title and place) is replaced. Passband
-    creates its own event (Gmail's title, times, colour and free/busy; the
+    creates its own event (Gmail's title, start, colour and free/busy; the
+    end the mail states, or the user set, when it falls after that start,
+    else Gmail's, since Gmail reads "Fri - Sun, 19:00 - 02:00" as one span
+    to Sunday morning where the mail and the tickets say Friday night; the
     card's cleaned place as one line, its name then its address, or Gmail's
     location when there is none; the note "Kept up to date by Passband from your
     mail."; a private extended property naming the ghost) under an id made

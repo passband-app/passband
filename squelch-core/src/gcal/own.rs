@@ -307,8 +307,23 @@ fn end_or_default(row: &EventRow) -> EventTime {
     })
 }
 
-/// Passband's event in place of Gmail's `gmail`: its title, times, colour
-/// and free/busy, the cleaned `place` as one line ([`Place::line`]: its name,
+/// The adopted event's end: the one the mail states (or the user set) when
+/// it fits Gmail's start, else Gmail's. Gmail reads "Fri - Sun, 19:00 -
+/// 02:00" as one span to Sunday morning; the mail's own read is Friday's
+/// night, and the start is the same either way (adoption needs it).
+fn adopted_end(ghost: &GhostEvent, gmail: &EventRow) -> EventTime {
+    let fits = |end: &EventTime| match (gmail.start, end) {
+        (EventTime::At(s), EventTime::At(e)) => *e > s,
+        (EventTime::Date(s), EventTime::Date(e)) => *e >= s,
+        _ => false,
+    };
+    ghost_end(ghost)
+        .filter(fits)
+        .unwrap_or_else(|| end_or_default(gmail))
+}
+
+/// Passband's event in place of Gmail's `gmail`: its title, start, colour
+/// and free/busy, the end the mail states ([`adopted_end`]), the cleaned `place` as one line ([`Place::line`]: its name,
 /// then its address) when the card has one, else Gmail's location (also when
 /// the model judged it names no place: Gmail's copy is about to be deleted,
 /// and a wrong judgment must not lose the address), and Passband's note.
@@ -330,7 +345,7 @@ pub fn adopt_body(
     );
     body.insert(
         "end".into(),
-        google_time(&end_or_default(gmail), true, false).ok()?,
+        google_time(&adopted_end(ghost, gmail), true, false).ok()?,
     );
     let location = place
         .and_then(Place::line)
@@ -1076,5 +1091,39 @@ mod tests {
         let g = ghost(7, "Dinner at Dingles", day);
         assert!(!same_event(&g, &dingles().row));
         assert!(plan_of(std::slice::from_ref(&g), &[dingles()], &[]).is_empty());
+    }
+
+    #[test]
+    fn adoption_writes_the_end_the_mail_states_not_gmails() {
+        // RA: "Fri 6 Nov - Sun 8 Nov, 19:00 - 02:00", tickets for Friday.
+        // Gmail made one span to Sunday morning; the mail says Friday night.
+        let (fri, sat, sun) = (
+            "2026-11-06T19:00:00-08:00",
+            "2026-11-07T02:00:00-08:00",
+            "2026-11-08T02:00:00-08:00",
+        );
+        let gmail = event("gm9", "Polar Inertia", fri, sun, true);
+        let end_of = |g: &GhostEvent| {
+            let body = adopt_body(g, &gmail.row, None, "x").unwrap();
+            let raw = body["end"]["dateTime"].as_str().unwrap().to_string();
+            chrono::DateTime::parse_from_rfc3339(&raw).unwrap()
+        };
+        let parse = |raw| chrono::DateTime::parse_from_rfc3339(raw).unwrap();
+        let mut g = ghost(7, "Polar Inertia", fri);
+        g.stated_end = Some(at(sat));
+        assert_eq!(end_of(&g), parse(sat));
+        // No end from the mail: Gmail's stands.
+        g.stated_end = None;
+        assert_eq!(end_of(&g), parse(sun));
+        // An end that does not fit the start (before it, or a date against
+        // a time) is no evidence: Gmail's stands.
+        g.stated_end = Some(at("2026-11-06T18:00:00-08:00"));
+        assert_eq!(end_of(&g), parse(sun));
+        g.stated_end = Some(at("2026-11-07"));
+        assert_eq!(end_of(&g), parse(sun));
+        // The user's own end beats the mail's.
+        g.stated_end = Some(at(sat));
+        g.user_end = Some(at("2026-11-07T01:00:00-08:00"));
+        assert_eq!(end_of(&g), parse("2026-11-07T01:00:00-08:00"));
     }
 }

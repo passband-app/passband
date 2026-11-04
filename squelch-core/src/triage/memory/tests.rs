@@ -237,7 +237,10 @@ fn links_codes_and_credentials_are_rejected() {
         "Gets one-time links",
         "Stores the API token",
         "Reads the OTP mail",
-        "Shares a PIN with Jo",
+        "Says my pin is 123456",
+        "Says the PIN is 4821",
+        "Calls +1 (415) 555-0100",
+        "Sends people to acme.example/reset",
         "Visits evil.example/reset often",
     ] {
         assert_eq!(
@@ -256,6 +259,11 @@ fn ordinary_prose_is_not_mistaken_for_a_secret() {
         "Answers within a day; prefers mornings",
         "Works with acme.example and its partners",
         "Splits time 50/50 between hiring and sales",
+        "Pin this",
+        "Closing the round by 2026-11-30",
+        "Hiring for the 2025-26 season",
+        "Runs the 2025-2026 budget",
+        "Works in Node.js/React",
     ] {
         assert!(!forbidden_content(what), "{what}");
     }

@@ -274,13 +274,24 @@ pub fn clean_field(raw: &str) -> String {
 /// one would otherwise ride every future triage run.
 ///
 /// - A LINK is a scheme (`://`), a `www.`, or a bare domain with a path
-///   (`evil.example/reset`): a word with a dot before its first slash and a
-///   letter after the last dot of that host.
+///   (`acme.example/reset`): a host with a dot, a top-level label of two or
+///   more letters that is not a file extension prose names (`Node.js/React`,
+///   `notes.md/drafts`), and a path that starts with a letter or digit.
 /// - A CODE is six digits counted across the separators a code is written
 ///   with (`123 456`, `123-456`, `12.34.56`): a run breaks only on anything
-///   else.
-/// - A CREDENTIAL word is matched whole (`pin`, not `spinning`).
+///   else. Dates and year ranges are not codes and are left out of the count
+///   (`2026-11-30`, `2026-11`, `2025-26`, `2025-2026`).
+/// - A CREDENTIAL word is matched whole. `pin` only counts with a digit
+///   within twenty characters ("my pin is 4821"), because "Pin this" is
+///   prose.
 pub fn forbidden_content(s: &str) -> bool {
+    static DATES: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\b\d{4}-\d{2}(?:-\d{2})?\b|\b\d{4}-\d{2,4}\b")
+            .expect("static date pattern")
+    });
+    static PIN: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\bpins?\b").expect("static pin pattern"));
+    const PROSE_EXTENSIONS: [&str; 6] = ["js", "ts", "py", "rs", "md", "txt"];
     let lower = s.to_lowercase();
     if lower.contains("://") || lower.contains("www.") {
         return true;
@@ -294,7 +305,8 @@ pub fn forbidden_content(s: &str) -> bool {
         host.contains('.')
             && tld.len() >= 2
             && tld.chars().all(|c| c.is_ascii_alphabetic())
-            && !path.is_empty()
+            && !PROSE_EXTENSIONS.contains(&tld)
+            && path.chars().next().is_some_and(|c| c.is_alphanumeric())
     });
     if bare_link {
         return true;
@@ -312,15 +324,24 @@ pub fn forbidden_content(s: &str) -> bool {
     if PHRASES.iter().any(|w| lower.contains(w)) {
         return true;
     }
-    const WORDS: [&str; 4] = ["token", "otp", "pin", "2fa"];
+    const WORDS: [&str; 3] = ["token", "otp", "2fa"];
     if lower
         .split(|c: char| !c.is_alphanumeric())
-        .any(|w| WORDS.contains(&w) || w == "tokens" || w == "pins")
+        .any(|w| WORDS.contains(&w) || w == "tokens")
     {
         return true;
     }
+    let pin_with_digits = PIN.find_iter(&lower).any(|m| {
+        let from = lower.floor_char_boundary(m.start().saturating_sub(20));
+        let to = lower.ceil_char_boundary((m.end() + 20).min(lower.len()));
+        lower[from..to].chars().any(|c| c.is_ascii_digit())
+    });
+    if pin_with_digits {
+        return true;
+    }
+    let undated = DATES.replace_all(s, "#");
     let mut run = 0usize;
-    for c in s.chars() {
+    for c in undated.chars() {
         if c.is_ascii_digit() {
             run += 1;
             if run >= 6 {

@@ -152,6 +152,14 @@ a successful claim and connect, with one `$create_alias` folding the anonymous
 history in. First aid wins per install. PostHog never sees an address; the
 control plane never sees an event. `Analytics.isHosted` is that adoption flag.
 
+Nothing reports until the process is armed (`Analytics.arm`): at launch on the
+Mac, at the first activation on iOS. iOS prewarms apps in the background,
+sometimes before the first unlock, when UserDefaults reads back empty. Before
+this gate each prewarm minted a fresh id and sent a 3-event session under it,
+so PostHog holds many one-session iOS persons from builds before the gate. Filter
+them out of old data by requiring an `Application Opened` event: a prewarm
+never sent one.
+
 ## Person properties
 
 Sent as `$set` on every launch and activation, and whenever the account list

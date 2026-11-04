@@ -36,7 +36,33 @@ enum Analytics {
     private static let apiKey = "phc_uuYkpwXQYxrz33f4bQsi5ozAQ6LL5kPsnrnU7vVvshni"
     private static let host = "https://us.i.posthog.com"
 
-    private static let client: PostHogClient? = {
+    /// Whether this process may report at all. Nothing is read, minted or sent
+    /// until it is set: `client` answers nil and `level` answers `.none`.
+    ///
+    /// WHY: iOS prewarms apps, launching them in the background with nobody
+    /// looking, sometimes before the phone's first unlock after a reboot. In
+    /// that state UserDefaults reads back EMPTY. The client then found no saved
+    /// id, minted a fresh one and reported a 3-event "session" under it, so
+    /// PostHog grew a new one-session person on every prewarm, which is what
+    /// wrecked retention. The empty read also made `level` fall back to
+    /// `.full`, so an install that had turned telemetry off still sent them.
+    /// Becoming active needs an unlocked phone and a person looking at it, so
+    /// that is when iOS arms (`arm()`, from the app delegate and the
+    /// didBecomeActive observer). The Mac has neither prewarming nor data
+    /// protection and arms in `start()`.
+    private static let armed = LockedValue(false)
+
+    /// Arm reporting for this process. Idempotent; safe from any thread.
+    static func arm() {
+        guard !armed.get() else { return }
+        armed.set(true)
+        guard client != nil else { return }
+        _ = installDay  // stamp the install on the first launch that can report
+    }
+
+    private static var client: PostHogClient? { armed.get() ? builtClient : nil }
+
+    private static let builtClient: PostHogClient? = {
         // A tester rehearsing the onboarding is not a user onboarding: no
         // uploader at all for that launch. The customer's practice inbox runs
         // in the ordinary app and reports like the rest of it (see `capture`).
@@ -64,29 +90,38 @@ enum Analytics {
     /// event — thread-safe where the main-actor Prefs is not, and a change in
     /// the pane applies to the very next capture without any plumbing.
     private static var level: TelemetryLevel {
-        TelemetryLevel(
+        // Unarmed reads as off: before arming, UserDefaults may be unreadable
+        // and an empty read would otherwise mean `.full` (see `armed`).
+        guard armed.get() else { return .none }
+        return TelemetryLevel(
             rawValue: UserDefaults.standard.string(forKey: TelemetryLevel.prefKey) ?? "")
             ?? .full
     }
 
-    /// Install lifecycle observers and record the first screen. Call once from
-    /// the app delegate; every other entry point is safe to call regardless.
+    /// Install lifecycle observers. Call once from the app delegate; every
+    /// other entry point is safe to call regardless. On iOS this does NOT arm
+    /// reporting (see `armed`): the first didBecomeActive does.
     static func start() {
-        guard let client else { return }
-        _ = installDay  // stamp the install on the first launch that can report
+        guard builtClient != nil else { return }
+        #if !os(iOS)
+            arm()
+        #endif
         let nc = NotificationCenter.default
         nc.addObserver(
             forName: Platform.didBecomeActiveNotification, object: nil, queue: nil
-        ) { _ in lifecycle("Application Opened") }
+        ) { _ in
+            arm()
+            lifecycle("Application Opened")
+        }
         nc.addObserver(
             forName: Platform.didResignActiveNotification, object: nil, queue: nil
         ) { _ in
             lifecycle("Application Backgrounded")
-            client.flush()
+            client?.flush()
         }
         nc.addObserver(
             forName: Platform.willTerminateNotification, object: nil, queue: nil
-        ) { _ in client.flushBlocking() }
+        ) { _ in client?.flushBlocking() }
     }
 
     /// Lifecycle events ride at the `minimal` level — they are what makes a
@@ -514,6 +549,9 @@ enum Analytics {
         // person we invited started using the app", so the FIRST hosted account
         // is the one that answers it — a second account's aid is simply not
         // adopted, and the person keeps the identity their history is under.
+        // No client (unarmed, or a dev build without a key): leave the aid
+        // unspent rather than stamp it adopted with nothing switched.
+        guard let client else { return }
         let defaults = UserDefaults.standard
         guard !defaults.bool(forKey: adoptedKey) else { return }
         defaults.set(true, forKey: adoptedKey)
@@ -523,7 +561,7 @@ enum Analytics {
         // the user later turns telemetry back on, what they send arrives as
         // THEM rather than opening a third identity. The alias is a real event,
         // so it waits — while the user has said nothing leaves, nothing leaves.
-        client?.adoptDistinctId(analyticsId.lowercased(), mergeHistory: level != .none)
+        client.adoptDistinctId(analyticsId.lowercased(), mergeHistory: level != .none)
     }
 }
 

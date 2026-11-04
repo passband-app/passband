@@ -12,6 +12,29 @@ updates itself, the phone comes through TestFlight, and the daemon is
 rolled onto hosted accounts or pulled as an image on a self-host box,
 so every note says which one it landed in.
 
+## 0.0.19 (2026-11-04)
+
+First-Run Update
+
+### Mac
+
+- Your first open shows your real inbox while it catches up
+- The assistant can take you straight to a page
+- Click a guest on an event to open their contact card
+- Event pictures arrive with the event
+- Smoother flow mode and faster scrolling in All mail
+- UI improvements
+- Bug fixes
+
+### Daemon
+
+- One calendar entry per event, even when several senders mail about it
+- Multi-night tickets read as nights
+- Bought tickets go on your calendar, not For your eyes
+- Account setup and security mail reach For your eyes when it matters
+- A new account's Reading board starts with the last week
+- Bug fixes
+
 ## 0.0.18 (2026-11-03)
 
 Ashley's Update

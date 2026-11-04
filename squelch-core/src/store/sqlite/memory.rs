@@ -772,8 +772,12 @@ impl SqliteStore {
         Ok(updated)
     }
 
-    /// The owner removes an entry: `deleted_at`, never served to anything
-    /// again (the row stays so the audit row has something to point at).
+    /// The owner removes an entry, FOR REAL (docs/UNDERSTANDING.md §3): the
+    /// sentence, the fields and the receipts are blanked in the same write
+    /// that stamps `deleted_at`, so neither the store nor a Litestream backup
+    /// taken after it still holds what Passband thought about a person or
+    /// which of their mail it rested on. The row itself stays, empty, with its
+    /// id, scope, kind and dates, so the audit row has something to point at.
     /// `false` when there was nothing to delete.
     pub fn delete_memory_entry(
         &self,
@@ -782,7 +786,8 @@ impl SqliteStore {
         now: DateTime<Utc>,
     ) -> Result<bool> {
         let n = self.lock()?.execute(
-            "UPDATE memory_entries SET deleted_at = ?3, updated_at = ?3
+            "UPDATE memory_entries SET deleted_at = ?3, updated_at = ?3,
+                 line = '', body = '{}', provenance = '{}'
              WHERE account_id = ?1 AND id = ?2 AND deleted_at IS NULL",
             params![account_id, id, rfc(now)],
         )?;

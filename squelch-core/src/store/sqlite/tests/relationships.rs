@@ -656,3 +656,56 @@ fn an_unchanged_recount_skips_the_window_but_refreshes_attention() {
         1
     );
 }
+
+#[test]
+fn an_address_that_fails_its_recount_is_skipped_not_left_blocking_the_drain() {
+    let (store, acct) = store();
+    inbound(&store, acct, "a", "a", "aaa@example.com", 1);
+    inbound(&store, acct, "b", "b", "bbb@example.com", 1);
+    store.recompute_all_relationships(acct).unwrap();
+    // A stored row that will not read back makes its own recount fail; it
+    // sorts first, where it would hold every later mark forever.
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE relationships SET computed_at = 'garbage' WHERE addr = 'aaa@example.com'",
+            [],
+        )
+        .unwrap();
+    inbound(&store, acct, "a2", "a2", "aaa@example.com", 1);
+    inbound(&store, acct, "b2", "b2", "bbb@example.com", 1);
+    for addr in ["aaa@example.com", "bbb@example.com"] {
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO relationship_dirty(account_id, addr) VALUES(?1, ?2)",
+                params![acct, addr],
+            )
+            .unwrap();
+    }
+    assert_eq!(dirty(&store, acct), ["aaa@example.com", "bbb@example.com"]);
+
+    assert_eq!(store.drain_relationship_dirty(acct, 10).unwrap(), 2);
+    assert!(dirty(&store, acct).is_empty(), "the failing mark went too");
+    let stuck: String = store
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT computed_at FROM relationships WHERE addr = 'aaa@example.com'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stuck, "garbage", "control: the first address really failed");
+    assert_eq!(
+        store
+            .relationship(acct, "bbb@example.com")
+            .unwrap()
+            .unwrap()
+            .received_count,
+        2,
+        "the address after it was recounted"
+    );
+}

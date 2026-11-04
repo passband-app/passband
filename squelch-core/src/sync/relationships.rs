@@ -38,7 +38,8 @@ use crate::error::Result;
 use crate::owner_clock::{OwnerClock, OwnerZone};
 use crate::store::sqlite::relationships::{
     DIRTY_DRAIN_MAX, RECOMPUTE_CHUNK, RELATIONSHIPS_BACKFILL_KEY, RELATIONSHIPS_DAILY_KEY,
-    RELATIONSHIPS_WALK_CURSOR_KEY, WALK_CHUNKS_PER_ROUND,
+    RELATIONSHIPS_WALK_CURSOR_KEY, RELATIONSHIPS_WALK_RETRY_KEY, WALK_CHUNKS_PER_ROUND,
+    WALK_RETRY_SECS,
 };
 use crate::store::{Store, SyncState};
 use crate::types::AccountId;
@@ -73,6 +74,9 @@ pub enum WalkProgress {
     Paused(String),
     /// The walk reached the end this round and stamped the day.
     Completed,
+    /// The walk failed this round, or an earlier failure's wait has not run
+    /// out; its cursor is kept for when it has.
+    BackingOff,
 }
 
 /// One round of ledger work, synchronously: the walk's share for this round
@@ -82,6 +86,7 @@ pub(crate) fn ledger_round<S: Store + ?Sized>(
     store: &S,
     account: AccountId,
     today: u64,
+    now: DateTime<Utc>,
 ) -> Result<WalkProgress> {
     let backfilled = store
         .sync_state(account, RELATIONSHIPS_BACKFILL_KEY)?
@@ -97,20 +102,43 @@ pub(crate) fn ledger_round<S: Store + ?Sized>(
         None if full_recompute_due(backfilled, last_day, today) => Some(String::new()),
         None => None,
     };
+    // A wait that will not parse is no wait: the failure falls toward trying.
+    let waiting = store
+        .get_app_setting(account, RELATIONSHIPS_WALK_RETRY_KEY)?
+        .and_then(|at| DateTime::parse_from_rfc3339(&at).ok())
+        .is_some_and(|at| now < at.with_timezone(&Utc));
     let progress = match start {
         None => WalkProgress::Idle,
+        Some(_) if waiting => WalkProgress::BackingOff,
         Some(mut after) => {
             let mut done = false;
+            let mut failed = false;
             for _ in 0..WALK_CHUNKS_PER_ROUND {
-                match store.recompute_relationship_chunk(account, Some(&after), RECOMPUTE_CHUNK)? {
-                    Some(last) => after = last,
-                    None => {
+                match store.recompute_relationship_chunk(account, Some(&after), RECOMPUTE_CHUNK) {
+                    Ok(Some(last)) => after = last,
+                    Ok(None) => {
                         done = true;
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "squelch: relationship ledger walk failed ({e}); \
+                             retrying in {WALK_RETRY_SECS}s from where it stopped"
+                        );
+                        failed = true;
                         break;
                     }
                 }
             }
-            if done {
+            if failed {
+                store.set_app_setting(account, RELATIONSHIPS_WALK_CURSOR_KEY, &after)?;
+                store.set_app_setting(
+                    account,
+                    RELATIONSHIPS_WALK_RETRY_KEY,
+                    &(now + ChronoDuration::seconds(WALK_RETRY_SECS)).to_rfc3339(),
+                )?;
+                WalkProgress::BackingOff
+            } else if done {
                 let stamp = |key: &str, last_uid: u64| {
                     store.set_sync_state(
                         account,
@@ -126,6 +154,7 @@ pub(crate) fn ledger_round<S: Store + ?Sized>(
                     stamp(RELATIONSHIPS_BACKFILL_KEY, 1)?;
                 }
                 store.delete_app_setting(account, RELATIONSHIPS_WALK_CURSOR_KEY)?;
+                store.delete_app_setting(account, RELATIONSHIPS_WALK_RETRY_KEY)?;
                 WalkProgress::Completed
             } else {
                 store.set_app_setting(account, RELATIONSHIPS_WALK_CURSOR_KEY, &after)?;
@@ -142,8 +171,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// logged and the next round tries again.
     pub(super) async fn relationship_round(&self) {
         let zone = self.store.owner_zone(self.account_id).unwrap_or_default();
-        let today = ledger_day(Utc::now(), zone);
-        if let Err(e) = ledger_round(&*self.store, self.account_id, today) {
+        let now = Utc::now();
+        let today = ledger_day(now, zone);
+        if let Err(e) = ledger_round(&*self.store, self.account_id, today, now) {
             eprintln!("squelch: relationship ledger round failed ({e})");
         }
     }
@@ -244,7 +274,7 @@ mod walk_tests {
     fn the_walk_runs_a_bounded_share_per_round_and_resumes_from_its_cursor() {
         let per_round = WALK_CHUNKS_PER_ROUND * RECOMPUTE_CHUNK;
         let (store, account) = store_with_senders(per_round + 10);
-        let first = ledger_round(&store, account, 20261104).unwrap();
+        let first = ledger_round(&store, account, 20261104, Utc::now()).unwrap();
         let WalkProgress::Paused(cursor) = first else {
             panic!("a backfill bigger than a round must pause: {first:?}");
         };
@@ -272,7 +302,7 @@ mod walk_tests {
         );
 
         assert_eq!(
-            ledger_round(&store, account, 20261104).unwrap(),
+            ledger_round(&store, account, 20261104, Utc::now()).unwrap(),
             WalkProgress::Completed
         );
         assert_eq!(rows(&store, account), per_round + 10);
@@ -290,13 +320,63 @@ mod walk_tests {
         );
         // The same ledger day again: nothing owed.
         assert_eq!(
-            ledger_round(&store, account, 20261104).unwrap(),
+            ledger_round(&store, account, 20261104, Utc::now()).unwrap(),
             WalkProgress::Idle
         );
         // The next day walks again.
         assert!(matches!(
-            ledger_round(&store, account, 20261105).unwrap(),
+            ledger_round(&store, account, 20261105, Utc::now()).unwrap(),
             WalkProgress::Paused(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::*;
+    use crate::store::SqliteStore;
+
+    /// A failed walk's wait holds every walk round until it runs out, and
+    /// the cursor it saved is where the walk picks up, not the first address.
+    #[test]
+    fn a_failed_walk_waits_an_hour_and_resumes_from_its_cursor() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let account = store.ensure_account("me@example.com").unwrap();
+        let now = Utc::now();
+        store
+            .set_app_setting(account, RELATIONSHIPS_WALK_CURSOR_KEY, "m@example.com")
+            .unwrap();
+        store
+            .set_app_setting(
+                account,
+                RELATIONSHIPS_WALK_RETRY_KEY,
+                &(now + ChronoDuration::minutes(30)).to_rfc3339(),
+            )
+            .unwrap();
+        assert_eq!(
+            ledger_round(&store, account, 20261104, now).unwrap(),
+            WalkProgress::BackingOff
+        );
+        assert_eq!(
+            store
+                .get_app_setting(account, RELATIONSHIPS_WALK_CURSOR_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("m@example.com"),
+            "the cursor is kept through the wait"
+        );
+        // Once the wait has run out the walk resumes, finishes (the store is
+        // empty past the cursor), and clears both keys.
+        let later = now + ChronoDuration::minutes(31);
+        assert_eq!(
+            ledger_round(&store, account, 20261104, later).unwrap(),
+            WalkProgress::Completed
+        );
+        for key in [RELATIONSHIPS_WALK_CURSOR_KEY, RELATIONSHIPS_WALK_RETRY_KEY] {
+            assert!(
+                store.get_app_setting(account, key).unwrap().is_none(),
+                "{key}"
+            );
+        }
     }
 }

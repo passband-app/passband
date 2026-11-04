@@ -97,6 +97,15 @@ pub const RECOMPUTE_CHUNK: usize = 25;
 /// restarting a walk the size of the address book.
 pub const RELATIONSHIPS_WALK_CURSOR_KEY: &str = "relationships_walk_cursor";
 
+/// `app_settings` key holding when a failed full walk may try again
+/// (RFC 3339). A walk that fails keeps its cursor and waits
+/// [`WALK_RETRY_SECS`], rather than starting over from the first address
+/// every round with no pause.
+pub const RELATIONSHIPS_WALK_RETRY_KEY: &str = "relationships_walk_retry_at";
+
+/// How long a failed full walk waits before it tries again.
+pub const WALK_RETRY_SECS: i64 = 3_600;
+
 /// How many [`RECOMPUTE_CHUNK`]-address chunks of the full walk one refine
 /// round runs. The rest wait for later rounds, so triage interleaves with a
 /// backfill of any size instead of stalling behind it.
@@ -683,7 +692,14 @@ impl SqliteStore {
             }
             let mut recomputer = Recomputer::new(&conn, account_id, Utc::now())?;
             for (addr, full) in &addrs {
-                recomputer.recompute(addr, *full)?;
+                // ONE ADDRESS NEVER BLOCKS THE REST. The set is drained in
+                // address order, so an address whose recount fails would
+                // sort first every round and hold every later mark behind
+                // it forever. Its mark goes with the others; the nightly walk
+                // tries it again.
+                if let Err(e) = recomputer.recompute(addr, *full) {
+                    eprintln!("squelch: relationship recount of one address failed ({e}); skipped");
+                }
                 conn.prepare_cached(
                     "DELETE FROM relationship_dirty WHERE account_id = ?1 AND addr = ?2",
                 )?
@@ -720,7 +736,11 @@ impl SqliteStore {
         // The nightly walk always counts in full: it is what catches every
         // change no mark saw.
         for addr in &addrs {
-            recomputer.recompute(addr, true)?;
+            // Skipped, not fatal, for the drain's reason: a walk that stopped
+            // on one address would stop on it every night.
+            if let Err(e) = recomputer.recompute(addr, true) {
+                eprintln!("squelch: relationship recount of one address failed ({e}); skipped");
+            }
         }
         Ok(if addrs.len() < max.max(1) {
             None

@@ -63,10 +63,6 @@ enum Analytics {
     private static var client: PostHogClient? { armed.get() ? builtClient : nil }
 
     private static let builtClient: PostHogClient? = {
-        // A tester rehearsing the onboarding is not a user onboarding: no
-        // uploader at all for that launch. The customer's practice inbox runs
-        // in the ordinary app and reports like the rest of it (see `capture`).
-        guard !RehearsalMode.launchedStandalone else { return nil }
         let env = ProcessInfo.processInfo.environment
         // A dev build is not a user: its launches and clicks landed in the
         // same project as the fleet's and read as real usage on the
@@ -156,7 +152,7 @@ enum Analytics {
         "smart_clear", "smart_clear_undone",
         "connect_succeeded", "connection_lost", "connection_restored",
         "account_added",
-        "tour_started", "tour_completed", "tour_skipped", "whats_new_shown",
+        "first_load_shown", "first_load_ended", "whats_new_shown",
         "invite_sent", "invite_nudge_accepted", "invite_nudge_dismissed",
         "ios_nudge_closed", "agent_nudge_closed",
         "group_created", "group_updated", "group_deleted",
@@ -208,13 +204,11 @@ enum Analytics {
         "calendar_reminder_shown", "calendar_reminder_opened",
         "connect_succeeded", "connection_lost", "connection_restored",
         "account_added",
-        // Onboarding carries where it started from and the practice step it
-        // ended on. Whether the first run explains itself is exactly the
-        // "does the product work" question this level exists for. Every
-        // other event captured while the practice inbox is up carries
-        // `practice: true` (see `capture`), so a fixture rule or a fixture
-        // done never counts as the real thing.
-        "tour_started", "tour_completed", "tour_skipped",
+        // The first-load veil over a newly connected mailbox: shown, and
+        // ended with one bool, whether it was dismissed before the catch-up
+        // finished. Whether a first run waits out its own backfill is
+        // exactly the "does the product work" question this level exists for.
+        "first_load_shown", "first_load_ended",
         // Sharing carries counts and nothing else: how many invites went, how
         // many did not, and whether the one-time ask was taken up. No address
         // is anywhere near this, at any level.
@@ -273,11 +267,6 @@ enum Analytics {
             "marketing", "general", "sealed", "normal", "unset",
             // rule_created dispositions
             "surface", "squelch", "filtered",
-            // tour_started sources (TourSource). "settings" is a MainView
-            // above; "rehearsal" never leaves the machine (no client on a
-            // standalone launch) but has to be in the vocabulary or the
-            // debug assert fires on the tester's own build.
-            "first_run", "rehearsal",
             // assistant_asked models — and search_deeper_started's, which is
             // the same closed set because it is the same picker's vocabulary.
             "haiku", "opus",
@@ -308,7 +297,7 @@ enum Analytics {
             // "groups" was a MainView until the page moved into Settings. "reader" is the walk from one queued thread to the
             // next, which is an open the reader made, not the person.
             "sitrep_card", "search", "browse", "assistant", "deeper_search",
-            "notification", "reader", "tour", "groups",
+            "notification", "reader", "groups",
             // Verb origins (Via): how the verb was INPUT, and (Surface) which
             // page it was input on. "process", "sitrep", "emails" are
             // MainViews; "archive"/"done" already exist as undo kinds.
@@ -320,18 +309,6 @@ enum Analytics {
             // ThreadStyleDefault raw values, nothing else.
             "full", "minimal", "none", "auto", "classic", "bubbles",
         ])
-
-    /// The funnel events that describe onboarding rather than happen inside
-    /// it — never tagged `practice`, whatever mode the app is in.
-    ///
-    /// The two discovery events ride with them. Practice mail never reaches the
-    /// ledger (`DiscoveryLedger.counts`), so the only find that can fire while
-    /// the practice inbox is up is the tour's own completion granting `clear`,
-    /// and that one is as real as `tour_completed` is.
-    private static let onboardingEvents: Set<String> = [
-        "tour_started", "tour_completed", "tour_skipped",
-        "feature_found", "feature_kept",
-    ]
 
     /// Screen views ride at `minimal` alongside lifecycle events.
     static func screen(_ name: String) {
@@ -386,6 +363,9 @@ enum Analytics {
             assertionFailure("analytics: event outside vocabulary: \(event)")
             return
         }
+        // The fixture inbox (the phone's debug screenshot harness) is not the
+        // product working: a fixture `e` or rule save is not a real one.
+        guard !FixtureMode.isEnabled else { return }
         var safe: [String: Any] = [:]
         for (key, value) in properties {
             switch value {
@@ -396,14 +376,6 @@ enum Analytics {
             default:
                 assertionFailure("analytics: value outside vocabulary for \(key)")
             }
-        }
-        // The practice inbox is the real app on fixture mail, so its `e`, its
-        // rule save and its undo all arrive here as the ordinary events. One
-        // bool keeps them out of the real counts without a second vocabulary.
-        // The onboarding funnel itself is the exception: those three ARE the
-        // real thing, and a dashboard that filters practice out must keep them.
-        if RehearsalMode.isEnabled, !onboardingEvents.contains(event) {
-            safe["practice"] = true
         }
         client?.capture(event, properties: safe)
         noteMilestone(event, safe)
@@ -436,9 +408,6 @@ enum Analytics {
         ]
 
     private static func noteMilestone(_ event: String, _ props: [String: Any]) {
-        // The practice inbox is not the product working, and its events carry
-        // `practice: true` for the same reason.
-        guard !RehearsalMode.isEnabled else { return }
         for m in milestones where m.event == event && m.when(props) {
             let key = "app.passband.analytics.milestone.\(m.kind)"
             let defaults = UserDefaults.standard
@@ -493,10 +462,9 @@ enum Analytics {
     /// the level gate stays in `capture`.
     static func daily(_ event: String, _ properties: [String: Any] = [:]) {
         guard level != .none else { return }  // don't stamp a day we sent nothing
-        // Not from the practice inbox: a digest of fixture counts would burn
-        // the day's stamp and silence the real one — on a first run, the
-        // install's first real digest of all.
-        guard !RehearsalMode.isEnabled else { return }
+        // Not from the fixture inbox: a digest of fixture counts would burn
+        // the day's stamp and silence the real one.
+        guard !FixtureMode.isEnabled else { return }
         let key = "app.passband.analytics.daily.\(event)"
         let last = UserDefaults.standard.double(forKey: key)
         let now = Date().timeIntervalSince1970

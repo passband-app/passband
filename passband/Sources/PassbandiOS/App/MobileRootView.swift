@@ -308,7 +308,7 @@ private struct MobileShell: View {
         // page does: once per account that has not connected, the card. Asked
         // only while the Calendar tab is the one on screen, so it never lands
         // over a tab it says nothing about; `calendarOffer` is `.none` in
-        // practice, once granted, and until this account's own stats land.
+        // the fixture inbox, once granted, and until this account's own stats land.
         .onChange(of: tab == .calendar && store.calendarOffer == .card, initial: true) { _, owed in
             if owed { store.raiseCalendarCardIfOwed() }
         }

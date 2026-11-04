@@ -30,13 +30,12 @@ struct SidebarRail: View {
     /// Bumped once when the update tile appears, for its single bounce.
     @State private var updateArrived = 0
     @ObservedObject private var updater = Updater.shared
-    @State private var accountDeniedAttempts = 0
 
     /// THE TILE AND THE RAIL HOLD STILL ACROSS DENSITY. The glyphs grow with
     /// the type and the gaps between tiles open with the ladder, but a 17pt
     /// symbol already sits in a 44x36 tile with room to spare, and the rail's
     /// width is spoken for by every surface that insets past it (the reader,
-    /// the expanded composer, the tour). Comfortable is about room between
+    /// the expanded composer). Comfortable is about room between
     /// things; the rail was never where the crowding was.
     static let railWidth: CGFloat = 60
     static let iconWidth: CGFloat = 44
@@ -178,7 +177,7 @@ struct SidebarRail: View {
     /// the card says what Restart does before it is pressed.
     @ViewBuilder
     private var updateButton: some View {
-        if let version = updater.pending, !RehearsalMode.isEnabled {
+        if let version = updater.pending {
             Button { updater.showAgain() } label: {
                 Image(systemName: "arrow.down.circle")
                     .font(Typo.ui(17, weight: .medium))
@@ -212,15 +211,6 @@ struct SidebarRail: View {
     private var accountBadge: some View {
         let manager = AccountManager.shared
         if manager.accounts.count > 1 {
-            if RehearsalMode.isEnabled {
-                Button { accountDeniedAttempts += 1 } label: { accountMark }
-                    .buttonStyle(.plain)
-                    .frame(width: Self.iconWidth, height: Self.iconHeight)
-                    .help("Account switching is available after onboarding")
-                    .accessibilityLabel("switch account")
-                    .accessibilityHint("Available after onboarding.")
-                    .modifier(PracticeRailFeedback(attempts: accountDeniedAttempts))
-            } else {
             Menu {
                 // No `.keyboardShortcut` on these, deliberately: the Accounts
                 // menu in the menu bar owns the ⌘numbers, and a second
@@ -241,7 +231,6 @@ struct SidebarRail: View {
             .frame(width: Self.iconWidth, height: Self.iconHeight)
             .help(manager.active.map { "account: \($0.displayName)" } ?? "accounts")
             .accessibilityLabel("switch account")
-            }
         }
     }
 
@@ -404,14 +393,9 @@ private struct RailButton<Icon: View>: View {
     @ViewBuilder let icon: (Bool) -> Icon
 
     @State private var hovering = false
-    @State private var deniedAttempts = 0
 
     var body: some View {
         Button {
-            guard !RehearsalMode.isEnabled else {
-                deniedAttempts += 1
-                return
-            }
             store.setView(view, viaPointer: true)
         } label: {
             ZStack {
@@ -447,8 +431,6 @@ private struct RailButton<Icon: View>: View {
         .onHover { hovering = $0 }
         .help(keyHint.map { "\(view.label) · \($0)" } ?? view.label)
         .accessibilityLabel(view.label)
-        .accessibilityHint(RehearsalMode.isEnabled ? "Available after onboarding." : "")
-        .modifier(PracticeRailFeedback(attempts: deniedAttempts))
     }
 }
 
@@ -470,44 +452,6 @@ private struct RailSymbol: View {
         Image(systemName: symbol)
             .font(Typo.ui(17, weight: active ? .semibold : .regular))
             .foregroundStyle(active ? Palette.accent : Palette.inkDim)
-    }
-}
-
-/// Keep practice navigation recognizable and responsive without leaving the
-/// lesson. With Reduce Motion the same refusal is a short, stationary outline.
-struct PracticeRailFeedback: ViewModifier {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    let attempts: Int
-    @State private var highlighted = false
-
-    func body(content: Content) -> some View {
-        content
-            .overlay {
-                RoundedRectangle(cornerRadius: SidebarRail.selectorRadius, style: .continuous)
-                    .strokeBorder(Palette.accent.opacity(highlighted ? 0.65 : 0), lineWidth: 1.5)
-                    .allowsHitTesting(false)
-            }
-            .modifier(PracticeRailShake(progress: reduceMotion ? 0 : CGFloat(attempts)))
-            .animation(reduceMotion ? nil : .linear(duration: 0.28), value: attempts)
-            .task(id: attempts) {
-                guard attempts > 0, reduceMotion else { return }
-                highlighted = true
-                do { try await Task.sleep(for: .milliseconds(350)) }
-                catch { return }
-                highlighted = false
-            }
-    }
-}
-
-private struct PracticeRailShake: GeometryEffect {
-    var progress: CGFloat
-    var animatableData: CGFloat {
-        get { progress }
-        set { progress = newValue }
-    }
-
-    func effectValue(size: CGSize) -> ProjectionTransform {
-        ProjectionTransform(CGAffineTransform(translationX: 3 * sin(progress * .pi * 4), y: 0))
     }
 }
 

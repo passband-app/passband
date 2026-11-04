@@ -4,14 +4,15 @@
 // launch after taking that version, and never again. Everything below is the
 // ways that sentence can be got wrong.
 //
-// A NEW USER MEETS IT AFTER THE TOUR, never over it. `tourCompleted` is the
-// gate: a fresh install gets the tour first, and the two overlays can never
-// stack, because one runs only where the other has finished. Finishing the tour
-// for the first time (`meetNewcomer`) stamps the release just below the latest,
+// A NEW USER MEETS IT AFTER THEIR FIRST LOOK, never over it. `firstLoadSeen`
+// is the gate: a fresh install gets the first-load veil (or straight to the
+// board) first, and the two overlays can never stack, because one runs only
+// where the other has finished. That first look ending for the first time
+// (`meetNewcomer`) stamps the release just below the latest,
 // so their first time on the Sitrep shows the latest release and nothing older
 // (owner's call, 2026-10-30; it used to stamp current and show nothing). It also settles the transition INTO this
 // feature, which has no other honest signal: an install that predates the stamp
-// but has finished the tour is an established install, owed the release it just
+// but has had its first look is an established install, owed the release it just
 // took and nothing older (see ReleaseNotes.unseen).
 //
 // THE IPHONE IS THE SAME SENTENCE OVER A DIFFERENT TABLE. It ships on its own
@@ -21,7 +22,7 @@
 // THIS object, `store.whatsNew`, and still `active`, `replay` and `dismiss`:
 // everything that asks "is the changelog up" (the blur, the ads that wait their
 // turn, Settings' button) asks one thing on both platforms. Only the trigger
-// is spelled twice, because the phone has no tour to gate on; see
+// is spelled twice, because the phone has no first-load veil to gate on; see
 // `maybeShowOnPhone`.
 
 import Foundation
@@ -30,7 +31,8 @@ import Observation
 @MainActor
 @Observable
 final class WhatsNew {
-    /// Env escape hatch for development and screenshots, matching the tour's.
+    /// Env escape hatch for development and screenshots, like the first-load
+    /// veil's.
     /// It takes the card past the STAMP, not past the "must be on the board,
     /// must have synced" part of the gate, and it fabricates nothing: with no
     /// note for this build there is still no card.
@@ -85,13 +87,13 @@ final class WhatsNew {
 
     /// The trigger, called when the first sync of the session lands. Every
     /// clause is a reason NOT to interrupt: already up, already answered, a new
-    /// user who is owed the tour instead, a tour actually running, or the human
+    /// user whose first look is not over, the first-load veil up, or the human
     /// is somewhere other than the board this is shown over.
     func maybeShow() {
-        guard !RehearsalMode.isEnabled else { return }
+        guard !FixtureMode.isEnabled else { return }
         let store = AppStore.shared
         guard !active, !dismissedThisSession else { return }
-        guard Prefs.shared.tourCompleted, !store.tour.active else { return }
+        guard Prefs.shared.firstLoadSeen, !store.firstLoad.active else { return }
         guard store.activeView == .sitrep, !store.daemonDown else { return }
         guard let running = runningVersion else { return }
 
@@ -103,7 +105,8 @@ final class WhatsNew {
         Analytics.capture("whats_new_shown", ["releases": unseen.count])
     }
 
-    /// The tour has just been finished for the first time. New users are
+    /// The first look at a mailbox has just ended, for the first time on this
+    /// Mac (`FirstLoad`). New users are
     /// shown the LATEST release when they reach the Sitrep (owner's call,
     /// 2026-10-30), and nothing older: stamp the release just below it, then
     /// ask. If they are not on the Sitrep yet, arriving there asks again
@@ -163,7 +166,7 @@ final class WhatsNew {
     // MARK: - the iPhone
 
     /// THE PHONE'S TRIGGER, called by the shell when the first sync of a
-    /// session lands. The Mac's clauses, less the tour and plus what a phone
+    /// session lands. The Mac's clauses, less the first look and plus what a phone
     /// can be doing instead of looking at its board: the shell says whether
     /// the Sitrep TAB is the one showing (`activeView` cannot, since Quick
     /// Look and search are tabs the store has no page for), and a reader or a
@@ -174,7 +177,7 @@ final class WhatsNew {
     /// (`meetNewcomer`), so by here a missing stamp means what it means on the
     /// Mac: an install older than the feature.
     func maybeShowOnPhone(sitrepShowing: Bool) {
-        guard !RehearsalMode.isEnabled else { return }
+        guard !FixtureMode.isEnabled else { return }
         let store = AppStore.shared
         guard !active, !dismissedThisSession else { return }
         guard sitrepShowing, !store.daemonDown else { return }
@@ -197,7 +200,7 @@ final class WhatsNew {
     /// just updated looks like, and the cold open would be followed by release
     /// notes for the only version they have ever run.
     func meetNewcomer() {
-        guard !RehearsalMode.isEnabled, let running = runningVersion else { return }
+        guard !FixtureMode.isEnabled, let running = runningVersion else { return }
         let arrival = PhoneReleaseNotes.arrival(
             lastSeen: Prefs.shared.lastSeenPhoneNotes, running: running, newcomer: true)
         if case .stamp(let version) = arrival { Prefs.shared.lastSeenPhoneNotes = version }

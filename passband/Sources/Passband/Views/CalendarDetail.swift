@@ -356,7 +356,7 @@ struct CalendarDetail: View {
             }
         } else if let event = item.event {
             let link = event.html_link.flatMap { Opener.isHTTP($0) ? $0 : nil }
-            let editable = CalendarWrite.canEdit(event) && !RehearsalMode.isEnabled
+            let editable = CalendarWrite.canEdit(event) && !FixtureMode.isEnabled
             if link != nil || editable {
                 HStack(spacing: Space.s14) {
                     if editable {

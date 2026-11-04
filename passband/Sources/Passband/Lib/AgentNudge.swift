@@ -10,7 +10,7 @@
 //   * it has been asked before, ever, on this install;
 //   * the person has opened Settings > Agents already, so they know (stamped
 //     by the pane itself, see `notePaneSeen`);
-//   * the practice inbox is up, where there is no real door to point at;
+//   * the fixture inbox is up, where there is no real door to point at;
 //   * another one-time card is on screen, or the iPhone ad went up in the last
 //     three days: two ads in one week is a campaign, not a tip;
 //   * the door is shut. Only the probe can say (`AgentConnect.probe`), and only
@@ -81,12 +81,12 @@ final class AgentNudge {
         firstUse: Date?,
         asked: Bool,
         paneSeen: Bool,
-        practice: Bool,
+        fixtures: Bool,
         othersShowing: Bool,
         iPhoneAdAskedAt: Date?,
         now: Date
     ) -> Bool {
-        guard !asked, !paneSeen, !practice, !othersShowing, let firstUse else { return false }
+        guard !asked, !paneSeen, !fixtures, !othersShowing, let firstUse else { return false }
         guard now.timeIntervalSince(firstUse) > askAfter else { return false }
         // An iPhone ad from before its stamp existed has no date, and counts
         // as long ago.
@@ -108,7 +108,7 @@ final class AgentNudge {
         firstUse: Date?,
         asked: Bool,
         paneSeen: Bool,
-        practice: Bool,
+        fixtures: Bool,
         othersShowing: Bool,
         iPhoneAdAskedAt: Date?,
         door: AgentDoorStatus,
@@ -116,7 +116,7 @@ final class AgentNudge {
         now: Date
     ) -> Bool {
         prerequisites(
-            firstUse: firstUse, asked: asked, paneSeen: paneSeen, practice: practice,
+            firstUse: firstUse, asked: asked, paneSeen: paneSeen, fixtures: fixtures,
             othersShowing: othersShowing, iPhoneAdAskedAt: iPhoneAdAskedAt, now: now)
             && usable(door) && agentSeen == false
     }
@@ -136,7 +136,7 @@ final class AgentNudge {
             firstUse: defaults.object(forKey: ShareNudge.firstUseKey) as? Date,
             asked: defaults.bool(forKey: Self.askedKey),
             paneSeen: defaults.bool(forKey: Self.paneSeenKey),
-            practice: RehearsalMode.isEnabled,
+            fixtures: FixtureMode.isEnabled,
             othersShowing: othersShowing,
             iPhoneAdAskedAt: TestFlightNudge.askedAt,
             now: now)
@@ -170,7 +170,7 @@ final class AgentNudge {
                 firstUse: defaults.object(forKey: ShareNudge.firstUseKey) as? Date,
                 asked: defaults.bool(forKey: Self.askedKey),
                 paneSeen: defaults.bool(forKey: Self.paneSeenKey),
-                practice: RehearsalMode.isEnabled,
+                fixtures: FixtureMode.isEnabled,
                 othersShowing: othersShowing(),
                 iPhoneAdAskedAt: TestFlightNudge.askedAt,
                 door: found,

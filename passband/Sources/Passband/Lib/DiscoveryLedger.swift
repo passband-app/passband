@@ -28,8 +28,10 @@ enum FeatureSet: String, CaseIterable, Sendable, Codable {
 /// One thing a person did that counts toward a set. Raw values are persisted
 /// (as dictionary keys), so the same caution applies.
 enum Move: String, CaseIterable, Sendable, Codable {
-    // clear: the basics the tour teaches
-    case tourCompleted, emailDone
+    // clear: the basics. (`tourCompleted` was one too, before the tour went;
+    // a ledger that still holds it decodes fine, since unknown keys are
+    // skipped.)
+    case emailDone
     // flow: the Space walk through For Your Eyes
     case walkDeep, walkFinished
     // later
@@ -46,7 +48,7 @@ enum Move: String, CaseIterable, Sendable, Codable {
     /// Exhaustive on purpose: a new move that forgets its set does not compile.
     var set: FeatureSet {
         switch self {
-        case .tourCompleted, .emailDone: .clear
+        case .emailDone: .clear
         case .walkDeep, .walkFinished: .flow
         case .reminderSet: .later
         case .ruleSaved, .triageCorrected, .unsubscribed: .teach
@@ -133,25 +135,8 @@ struct DiscoveryLedger: Equatable, Sendable {
         return .kept(set)
     }
 
-    /// Record a move that happened BEFORE this ledger existed: an existing user
-    /// who finished the tour months ago did not just discover anything. The
-    /// move lands exactly as `note` would land it, minus the freshness; the
-    /// caller gets no event because there is nothing to announce.
-    mutating func backfill(_ move: Move, day: String, now: Date) {
-        let wasFresh = fresh.contains(move.set)
-        _ = note(move, day: day, now: now)
-        if !wasFresh { fresh.remove(move.set) }
-    }
-
     /// The page was visited: nothing is fresh any more.
     mutating func acknowledge() { fresh.removeAll() }
-
-    /// Practice mail never counts: an `e` on a fixture email teaches the hand,
-    /// it is not somebody finding done. The one exception is the tour's own
-    /// completion, which can only ever happen in practice.
-    static func counts(_ move: Move, practice: Bool) -> Bool {
-        !practice || move == .tourCompleted
-    }
 
     /// At most one celebration per local day. Nil means never celebrated.
     static func mayCelebrate(lastCelebratedDay: String?, today: String) -> Bool {

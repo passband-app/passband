@@ -656,9 +656,9 @@ struct AgendaTests {
         expect(CalendarGate.connectRoute(CalendarAccess(granted: true, self_connect: true)) == nil,
                "granted self-host offers nothing")
         expect(CalendarGate.offer(route: CalendarGate.connectRoute(CalendarAccess(
-            granted: false, connect_command: "squelchd auth --calendar")), cardSeen: false, practice: false)
+            granted: false, connect_command: "squelchd auth --calendar")), cardSeen: false, fixtures: false)
                == .none, "so an older daemon gets no card and no banner")
-        expect(CalendarGate.offer(route: .daemon, cardSeen: false, practice: false) == .card,
+        expect(CalendarGate.offer(route: .daemon, cardSeen: false, fixtures: false) == .card,
                "self-host gets the same card")
         expect(CalendarGate.consentURL(" https://accounts.google.com/o/oauth2/auth?x=1 ")
                == "https://accounts.google.com/o/oauth2/auth?x=1", "the daemon's link is opened, trimmed")
@@ -666,13 +666,13 @@ struct AgendaTests {
                && CalendarGate.consentURL("") == nil && CalendarGate.consentURL(nil) == nil,
                "a daemon answer with no http link is no link")
 
-        expect(CalendarGate.offer(route: .link(link), cardSeen: false, practice: false) == .card,
+        expect(CalendarGate.offer(route: .link(link), cardSeen: false, fixtures: false) == .card,
                "first visit: the card")
-        expect(CalendarGate.offer(route: .link(link), cardSeen: true, practice: false) == .banner,
+        expect(CalendarGate.offer(route: .link(link), cardSeen: true, fixtures: false) == .banner,
                "after that: the banner, never the card again")
-        expect(CalendarGate.offer(route: .link(link), cardSeen: false, practice: true) == .none,
-               "practice: nothing")
-        expect(CalendarGate.offer(route: nil, cardSeen: false, practice: false) == .none,
+        expect(CalendarGate.offer(route: .link(link), cardSeen: false, fixtures: true) == .none,
+               "fixtures: nothing")
+        expect(CalendarGate.offer(route: nil, cardSeen: false, fixtures: false) == .none,
                "nothing to offer: nothing")
 
         expect(CalendarGate.isWaiting(since: now, now: now.addingTimeInterval(9 * 60)), "waiting")
@@ -714,14 +714,14 @@ struct AgendaTests {
         let stale = CalendarGate.access(previous, statsEpoch: 3, epoch: 4)
         expect(stale == nil, "stats from before the switch are no answer")
         expect(CalendarGate.connectRoute(stale) == nil, "so there is no connect route")
-        expect(CalendarGate.offer(route: CalendarGate.connectRoute(stale), cardSeen: false, practice: false)
+        expect(CalendarGate.offer(route: CalendarGate.connectRoute(stale), cardSeen: false, fixtures: false)
                == .none, "and no card is offered to the new account from them")
         expect(CalendarGate.renewRoute(stale) == nil, "nor a renewal")
         expect(CalendarGate.access(previous, statsEpoch: nil, epoch: 0) == nil,
                "no poll landed yet is no answer")
         let own = CalendarGate.access(previous, statsEpoch: 4, epoch: 4)
         expect(own == previous, "the active account's own stats are the answer")
-        expect(CalendarGate.offer(route: CalendarGate.connectRoute(own), cardSeen: false, practice: false)
+        expect(CalendarGate.offer(route: CalendarGate.connectRoute(own), cardSeen: false, fixtures: false)
                == .card, "and offer its card")
 
         let granted = CalendarAccess(granted: true, connect_url: link)
@@ -820,7 +820,7 @@ struct AgendaTests {
             from: Data("{\(base),\"calendar\":{\"granted\":true,\"connect_command\":\"squelchd auth --calendar\"}}".utf8))
         expect(good?.calendar == CalendarAccess(granted: true, connect_command: "squelchd auth --calendar"),
                "a good one still decodes")
-        // And it encodes back as a plain optional would (practice mode's
+        // And it encodes back as a plain optional would (the fixture inbox's
         // fixture daemon encodes its stats).
         if let good, let data = try? JSONEncoder().encode(good),
             let again = try? JSONDecoder().decode(StoreStats.self, from: data)

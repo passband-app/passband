@@ -128,7 +128,9 @@ final class Prefs {
         static let loadRemoteImages = "passband.pref.loadRemoteImages"
         static let settingsSection = "passband.pref.settingsSection"
         static let developerMode = "passband.pref.developerMode"
-        static let tourCompleted = "passband.pref.tourCompleted"
+        /// Still the tour's old key, on purpose: an install that finished the
+        /// tour has already had its first look and is owed no first-load veil.
+        static let firstLoadSeen = "passband.pref.tourCompleted"
         static let lastSeenReleaseNotes = "passband.pref.lastSeenReleaseNotes"
         static let lastSeenPhoneNotes = "passband.pref.lastSeenPhoneNotes"
         static let theme = "passband.pref.theme"
@@ -156,7 +158,7 @@ final class Prefs {
             Key.loadRemoteImages: true,
             Key.settingsSection: SettingsSection.general.rawValue,
             Key.developerMode: false,
-            Key.tourCompleted: false,
+            Key.firstLoadSeen: false,
             // Dark by default: the app (and its onboarding scene) is designed
             // night-first. A stored choice, including an explicit Auto, wins.
             Key.theme: ThemeChoice.dark.rawValue,
@@ -176,7 +178,7 @@ final class Prefs {
             SettingsSection(rawValue: defaults.string(forKey: Key.settingsSection) ?? "")
             ?? .general
         _developerMode = defaults.bool(forKey: Key.developerMode)
-        _tourCompleted = defaults.bool(forKey: Key.tourCompleted)
+        _firstLoadSeen = defaults.bool(forKey: Key.firstLoadSeen)
         _lastSeenReleaseNotes = defaults.string(forKey: Key.lastSeenReleaseNotes)
         _lastSeenPhoneNotes = defaults.string(forKey: Key.lastSeenPhoneNotes)
         _theme = ThemeChoice(rawValue: defaults.string(forKey: Key.theme) ?? "") ?? .dark
@@ -201,7 +203,7 @@ final class Prefs {
         // A NAME TYPED BEFORE THE FLAG EXISTED is a chosen name. Deliberately
         // NOT in `register(defaults:)` above: a registered default reads exactly
         // like a stored one, and this needs to see absence — the same reason
-        // `tourCompleted` is written the way it is.
+        // `lastSeenReleaseNotes` is written the way it is.
         _nameChosen = defaults.object(forKey: Key.nameChosen) as? Bool ?? !storedName.isEmpty
         // ABSENT, NOT EMPTY, is what earns the default. The Settings editor
         // stores on every keystroke, so a signature somebody cleared is a
@@ -283,15 +285,15 @@ final class Prefs {
         }
     }
 
-    /// Whether the first-run tour has been seen. Set by finishing OR skipping
-    /// it: both are answers, and re-asking somebody who said no is worse than
-    /// never asking. Settings' replay ignores it.
-    private var _tourCompleted: Bool
-    var tourCompleted: Bool {
-        get { _tourCompleted }
+    /// Whether this Mac has had its first look at a mailbox: the first-load
+    /// veil was seen through, dismissed early, or never needed (the mailbox
+    /// had nothing to catch up on). Either way it is never shown again here.
+    private var _firstLoadSeen: Bool
+    var firstLoadSeen: Bool {
+        get { _firstLoadSeen }
         set {
-            _tourCompleted = newValue
-            defaults.set(newValue, forKey: Key.tourCompleted)
+            _firstLoadSeen = newValue
+            defaults.set(newValue, forKey: Key.firstLoadSeen)
         }
     }
 

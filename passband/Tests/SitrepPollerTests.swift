@@ -1,5 +1,5 @@
 // Exercise the production poller with an intentionally cancellation-oblivious
-// transport: the old account may answer after practice warmup has begun. Then
+// transport: the old account may answer after fixture warmup has begun. Then
 // the loop's cadence against fake presence, on the production schedule run
 // twenty times faster (`PollTiming`), so the whole of it takes about twenty
 // seconds.
@@ -21,11 +21,11 @@ struct SitrepPollerTests {
         store.epoch += 1
         let fresh = Task { await poller.pull() }
         await until { api.requests == 2 }
-        expect(api.pending.count == 2, "practice starts before the old request finishes")
+        expect(api.pending.count == 2, "fixtures start before the old request finishes")
 
         api.finish(1)
         _ = await old.value
-        expect(store.stats == nil, "stale response must not populate practice")
+        expect(store.stats == nil, "stale response must not populate fixtures")
         expect(ThreadPrefetch.shared.retired.isEmpty, "a stale answer's rows retire nothing")
         expect(Badge.refreshes == 0, "stale response must not update badge")
         expect(store.lastRefresh == nil, "stale response must not mark a refresh")

@@ -1,4 +1,4 @@
-// The discovery ledger's shell: UserDefaults, the practice gate, analytics, and
+// The discovery ledger's shell: UserDefaults, the fixture gate, analytics, and
 // the one pending celebration. The rules are `DiscoveryLedger`'s; this file only
 // decides where a move comes from and where its answer goes.
 //
@@ -35,7 +35,7 @@ final class Discovery {
     private(set) var ledger: DiscoveryLedger
 
     /// A set found and waiting for its moment. The VIEW layer decides when the
-    /// app is at rest (no sheet, no flight, no tour) and calls
+    /// app is at rest (no sheet, no flight, no veil) and calls
     /// `celebrationShown()`; a find mid-action is held here rather than
     /// interrupting the thing that earned it.
     private(set) var pendingCelebration: FeatureSet?
@@ -55,17 +55,9 @@ final class Discovery {
         } else {
             ledger = DiscoveryLedger.decoded(from: defaults.data(forKey: Self.ledgerKey))
             persists = true
-            // BACKFILL. Somebody who finished the tour before this ledger
-            // existed has found the basics; they did not find them just now,
-            // so no event, no glow, no confetti.
-            if Prefs.shared.tourCompleted, ledger.state(of: .clear) == .unseen {
-                let now = Date()
-                ledger.backfill(.tourCompleted, day: DiscoveryLedger.dayKey(now), now: now)
-                save()
-            }
         }
         // Debug only, never persisted: put a celebration on screen without
-        // earning one. Same posture as `PASSBAND_FORCE_TOUR`.
+        // earning one. Same posture as `PASSBAND_FIRST_LOAD`.
         if let raw = env["PASSBAND_DISCOVERY_CELEBRATE"], let set = FeatureSet(rawValue: raw) {
             pendingCelebration = set
         }
@@ -92,7 +84,9 @@ final class Discovery {
     }
 
     private func record(_ move: Move) {
-        guard DiscoveryLedger.counts(move, practice: RehearsalMode.isEnabled) else { return }
+        // Fixture mail never counts: an `e` on a fixture email is not
+        // somebody finding done.
+        guard !FixtureMode.isEnabled else { return }
         let now = Date()
         let today = DiscoveryLedger.dayKey(now)
         let event = ledger.note(move, day: today, now: now)

@@ -70,7 +70,7 @@ struct MailRow: View {
             .font(Typo.rowSub)
             .foregroundStyle(Palette.inkFaint)
         guard let subject else {
-            // No subject on the wire (an older daemon, a rehearsal row): the
+            // No subject on the wire (an older daemon, a fixture row): the
             // one-liner takes the subject's place and its ink.
             return Text(verbatim: gist)
                 .font(Typo.ui(12.5, weight: weight))

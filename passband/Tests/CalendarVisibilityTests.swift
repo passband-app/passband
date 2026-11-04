@@ -53,17 +53,17 @@ struct CalendarVisibilityTests {
                                    timezone: zone, now: midnight.addingTimeInterval(-1)))
         precondition(!window.admits(account: "c", item: 1, startValue: "2026-09-15",
                                     timezone: zone, now: midnight))
-        // A practice session starts its stamps over; other accounts keep theirs.
-        let practice = CalendarVisibility.practiceAccount
-        window.markSeen(account: practice, item: 17000, now: now)
-        window.markSeen(account: practice, item: 18000, now: now)
-        precondition(!window.admits(account: practice, item: 17000, start: future, allDay: false,
-                                    now: now.addingTimeInterval(2 * 86400)), "A day-old practice stamp hides the item")
-        window.forget(account: practice)
-        precondition(window.admits(account: practice, item: 17000, start: future, allDay: false,
-                                   now: now.addingTimeInterval(2 * 86400)), "Forgetting restarts the practice timer")
-        precondition(window.admits(account: practice, item: 18000, start: future, allDay: false,
-                                   now: now.addingTimeInterval(2 * 86400)), "Every practice item is forgotten")
+        // A fixture session starts its stamps over; other accounts keep theirs.
+        let fixtures = CalendarVisibility.fixtureAccount
+        window.markSeen(account: fixtures, item: 17000, now: now)
+        window.markSeen(account: fixtures, item: 18000, now: now)
+        precondition(!window.admits(account: fixtures, item: 17000, start: future, allDay: false,
+                                    now: now.addingTimeInterval(2 * 86400)), "A day-old fixture stamp hides the item")
+        window.forget(account: fixtures)
+        precondition(window.admits(account: fixtures, item: 17000, start: future, allDay: false,
+                                   now: now.addingTimeInterval(2 * 86400)), "Forgetting restarts the fixture timer")
+        precondition(window.admits(account: fixtures, item: 18000, start: future, allDay: false,
+                                   now: now.addingTimeInterval(2 * 86400)), "Every fixture item is forgotten")
         precondition(!window.admits(account: "a", item: 1, start: future, allDay: false,
                                     now: now.addingTimeInterval(86400)), "Forgetting one account leaves the others")
         print("Calendar visibility: 25 checks passed")

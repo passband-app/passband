@@ -101,11 +101,6 @@ targets:
           # of this list (AuthView, UsageView) cannot come over yet. Zoom's
           # AppKit verbs live here too; its ladder is Lib/ZoomSteps.swift.
           - "App/**"
-          # The guided practice inbox is a Mac lesson over the Mac shell (it
-          # places its card past the sidebar rail). The phone has no tour at
-          # all, by choice: its onboarding is the cold open (OnboardingIntroView,
-          # inside ConnectView) and then the live app.
-          - "Views/PracticeProductTour.swift"
           # Sparkle. iOS has no sideloaded updater; the App Store is the updater.
           - "Model/Updater.swift"
           # Its card, for the same reason: it reads Updater's phase, and the
@@ -144,7 +139,7 @@ targets:
           # (MobileRootView.swift) mounts the pieces the phone has taken on,
           # on the same store flags. Among them: the TOASTS re-laid out for a
           # thumb in MobileToastHost, and the rule editor and code modal as-is.
-          # Not all of it has a phone mount. The tour overlay and the
+          # Not all of it has a phone mount. The first-load veil and the
           # re-triage confirm/modal do not, for example. What's New does, as
           # a view of the phone's own (PassbandiOS/Views/WhatsNewWalk.swift)
           # over the phone's own notes; the Mac's card compiles here unmounted.

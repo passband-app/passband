@@ -652,6 +652,7 @@ enum ProductGuide {
         - Rename an account by editing its name in Settings > Accounts. "remove", then confirm, takes it off this Mac. On the last account the button reads "disconnect".
         - The account badge and the switcher show the photo from the mailbox's Google profile when Passband has been allowed to read it, and the account's initial otherwise. An account connected before this existed shows its initial until it is reconnected.
         - Notifications arrive for every account, not only the one on screen.
+        - The first time a mailbox is connected on a Mac, while Passband is still working through its mail, a card over the Sitrep says so: how many emails of how many are in, roughly how long is left, and how many have been sorted, set aside as noise, or need the user's attention so far. The Sitrep fills in behind it. "Start now", Enter or Esc closes it early; it closes by itself when the mail is all in, and it is not shown again on that Mac. There is no guided tour.
         - If the account's server is not answering at launch, Passband keeps retrying on its own. After a couple of seconds the loading screen offers "Try again now", "Switch to" each other account, and "Connect a different server". The Accounts menu and ⌘1 to ⌘9 switch from there too. Nothing is removed: the Connect screen's "Try saved connection again" goes back to the saved account.
         - If the Google sign-in expires, a banner on the Sitrep says Passband cannot read the mail. On a hosted account it has a Reconnect button.
 
@@ -666,8 +667,8 @@ enum ProductGuide {
         - When one is ready, a card at the bottom of the window offers "Restart" to install it now. "Later" hides the card for an hour.
         - While a new version is waiting, a down-arrow icon sits near the bottom of the sidebar. Clicking it brings the card back.
         - The Passband menu has "Check for Updates…". The installed version is printed at the bottom right of Settings.
-        - Settings > General > Help has "What's new" for the release notes and "Practice inbox" to replay the tour.
-        - On the iPhone, "What's new" is in Settings (the person icon at the top left of the Sitrep, then Settings at the bottom), in General. It shows the iPhone's own release notes full screen: swipe left for the next page, right to go back, and the x at the top right closes it. The iPhone has no practice inbox.
+        - Settings > General > Help has "What's new" for the release notes.
+        - On the iPhone, "What's new" is in Settings (the person icon at the top left of the Sitrep, then Settings at the bottom), in General. It shows the iPhone's own release notes full screen: swipe left for the next page, right to go back, and the x at the top right closes it.
 
         Usage and audit:
         - Usage, at the bottom of the rail: mail in and out, signal against noise, triage spend and assistant usage, over 7, 30 or 90 days.

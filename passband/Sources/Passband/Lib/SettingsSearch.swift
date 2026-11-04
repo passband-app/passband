@@ -95,7 +95,7 @@ enum SettingsCard: String, CaseIterable, Sendable {
     }
 
     /// Whether this card renders at all on the platform in hand. The help
-    /// card's tour and what's-new are driven by the desktop's ActionLayer,
+    /// card's what's-new is driven by the desktop's ActionLayer,
     /// which has no iOS host: the phone's settings never mount it, so a phone
     /// search must never offer it either.
     ///
@@ -239,15 +239,6 @@ enum SettingsSearch {
                 "test", "test notification", "post a banner", "banner", "notifications",
                 "not working", "no notifications", "permission", "allow notifications",
                 "do not disturb", "focus", "alerts",
-            ]),
-        SettingsEntry(
-            card: .help,
-            title: "Replay the tour",
-            blurb: "Opens the guided practice inbox, then returns to your live inbox.",
-            keywords: [
-                "tour", "walkthrough", "onboarding", "tutorial", "guide", "intro",
-                "introduction", "first run", "getting started", "replay", "help", "again",
-                "how it works",
             ]),
         SettingsEntry(
             card: .help,
@@ -672,7 +663,7 @@ enum SettingsSearch {
     /// Words somebody types on the way to the word they mean. They are dropped
     /// from the QUERY only, never from the index, and only when something else
     /// survives — "how much does this cost" has to answer the same as "cost",
-    /// while "how" on its own is still a fair search for "how it works".
+    /// while "how" on its own is still a fair search.
     ///
     /// This matters because matching is AND: without it, one throwaway word in
     /// a sentence-shaped query zeroes every card, and the person who typed a

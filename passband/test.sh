@@ -47,13 +47,8 @@ run_one() {
   {
     echo "==> $name"
     xcrun swiftc -swift-version 6 -parse-as-library -Onone \
-      -o "$BUILD/$name" Sources/Passband/Lib/RehearsalMode.swift "$@" \
-      && "$BUILD/$name" \
-      && case "$name" in
-        # Full connection rehearsal must work even when normal onboarding was
-        # completed.
-        tour-controller) "$BUILD/$name" --onboarding-rehearsal --rehearse-connection ;;
-      esac
+      -o "$BUILD/$name" Sources/Passband/Lib/FixtureMode.swift "$@" \
+      && "$BUILD/$name"
   } > "$log" 2>&1 || status=$?
   cat "$log"
   return $status
@@ -229,17 +224,17 @@ run_suite image-warmer \
   Sources/Passband/Model/ImageWarmer.swift \
   Tests/ImageWarmerTests.swift
 
-run_suite onboarding-rehearsal \
-  Sources/Passband/Model/OnboardingRehearsal.swift \
-  Tests/OnboardingRehearsalTests.swift
+run_suite fixture-mail \
+  Sources/Passband/Model/FixtureMail.swift \
+  Tests/FixtureMailTests.swift
 
-run_suite rehearsal-api \
+run_suite fixture-api \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/APIError.swift \
-  Sources/Passband/Model/OnboardingRehearsal.swift \
-  Sources/Passband/Model/RehearsalAPI.swift \
-  Tests/RehearsalAPITests.swift
+  Sources/Passband/Model/FixtureMail.swift \
+  Sources/Passband/Model/FixtureAPI.swift \
+  Tests/FixtureAPITests.swift
 
 # The shipment row with and without the order-linking fields, and the card's
 # title and order line built from it.
@@ -780,13 +775,12 @@ run_suite rule-pattern-suggest \
   Sources/Passband/Lib/RulePatternSuggest.swift \
   Tests/RulePatternSuggestTests.swift
 
-# The actual onboarding controller with in-memory collaborators: the store
-# stub flips the real RehearsalMode flag the way the real one does.
-run_suite tour-controller \
-  Sources/Passband/Lib/DiscoveryLedger.swift \
-  Sources/Passband/Model/PracticeTourStep.swift \
-  Sources/Passband/Model/TourController.swift \
-  Tests/TourControllerTests.swift
+# The first-load veil's time estimate: no estimate until two polls a few
+# seconds apart saw the count move, a window that smooths one slow page, a
+# restarted walk that starts the samples over, and the rounded phrase.
+run_suite catch-up-estimate \
+  Sources/Passband/Lib/CatchUpEstimate.swift \
+  Tests/CatchUpEstimateTests.swift
 
 # The ring behind the search panel's empty state: what a submitted query does to
 # the remembered ones. Pure Foundation, one file — the fold is kept out of the

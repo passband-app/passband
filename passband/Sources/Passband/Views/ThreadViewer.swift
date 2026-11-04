@@ -895,7 +895,6 @@ struct ThreadViewer: View {
             }
             .buttonStyle(.textAction)
             .help("write a rule for this sender — shows the ones already in effect")
-            .tourTarget(.readerRule)
 
             Button {
                 // A job waiting on the user finishes from here too; anything
@@ -942,7 +941,6 @@ struct ThreadViewer: View {
                 }
                 .buttonStyle(.textAction)
                 .help("mark done and close — d works too, and E moves to the next")
-                .tourTarget(.readerDone)
             #endif
         }
     }

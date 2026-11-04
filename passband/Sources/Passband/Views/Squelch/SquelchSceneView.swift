@@ -2,7 +2,7 @@
 //
 // The scene renders on its own thread, driven by a CAMetalDisplayLink, never
 // on the main thread. The intro opens while the rest of the app is still
-// starting (and, in rehearsal, while the practice mailbox loads), and a single
+// starting, and a single
 // main-thread stall used to freeze the waves for a quarter second right at the
 // moment they first appear. Time advances by the display's target presentation
 // timestamps, not by when a callback happened to run, so motion stays even

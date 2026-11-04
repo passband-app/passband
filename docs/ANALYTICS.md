@@ -39,9 +39,9 @@ to the next capture.
 | `minimal` | App opens, screen views, sessions, the counter events below marked M, milestones, and the person properties. |
 | `full` | Everything: adds the action verbs (`compose_opened`, `email_labeled`, `whats_new_shown`, `search_deeper_started`) and every `via` / `surface` / `source` property still rides on the M events. On the Mac, also session replay (below) and its two frustration events. |
 
-Every event captured while the practice inbox is up carries `practice: true`,
-except the three onboarding-funnel events, which are the real thing. `daily`
-events and milestones are not emitted at all from the practice inbox.
+Nothing is captured while the fixture inbox (the phone's debug screenshot
+harness) is up: not events, not `daily` events, not milestones. Older events
+may still carry `practice: true`, from the product tour this replaced.
 
 ## Session replay (Mac, `full` only)
 
@@ -218,8 +218,8 @@ named.
 | `connection_lost` / `connection_restored` (M) | | Transitions only; a healthy poll is not an event. |
 | `account_added` (M) | | Second and later mailboxes. |
 | `catchup_completed` (M) | `messages`, `minutes` | How long a new install stares at "catching up". Measured by the active mailbox's poller from the first stats poll that reported a backfill to the first that did not; the start survives a relaunch. A backfill shorter than one poll interval is never seen, and a background account's is not measured. |
-| `tour_started` (M) | `source`: `first_run` `settings` `rehearsal` | Onboarding funnel. |
-| `tour_completed` / `tour_skipped` (M) | `step` | Where the practice inbox loses people. |
+| `first_load_shown` (M) | | The first-load veil went up over a newly connected mailbox still catching up (docs/ONBOARDING-EXPERIENCE.md). |
+| `first_load_ended` (M) | `early` | It came down: `early` when dismissed before the catch-up finished, false when the catch-up ending lifted it. |
 | `whats_new_shown` | `releases` | |
 
 ### Triage
@@ -249,7 +249,7 @@ card in the ask bar), `deeper_search` (the reader's search strip), `groups`
 (a group's send history), `notification` (banner or push), `reply` (`r` on a
 row: opens the reader on its composer), `reader` (the walk from one queued
 thread to the next: an open the reader made, not the person; subtract it from
-"threads people chose to open"), `tour` (the practice inbox's examples).
+"threads people chose to open").
 
 **`via` / `surface`** on the verbs (`Actions.Via`, `Actions.Surface`):
 `via` is how the verb was input: `key`, `click`, `swipe` (a phone rail), `assistant` (an agent tool; no surface). `surface` is
@@ -311,7 +311,8 @@ questions above:
 
 6. **Mac vs iOS.** Every event already carries `$os_name` (`macOS` / `iOS`),
    compiled per target, so no event is needed for this, only a breakdown.
-   Filter `practice` is not set on all of them.
+   Filter `practice` is not set on all of them (it marks old product-tour
+   events only).
    - Reach: unique users of `Application Opened`, weekly, broken down by
      `$os_name`.
    - Overlap: the same series with breakdown off and a formula, `A + B - C`

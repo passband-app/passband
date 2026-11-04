@@ -1136,7 +1136,7 @@ the call goes out.
   install. The file goes when the account is removed, when the same daemon is
   connected again or re-validated (the credentials may open another mailbox),
   and whenever the daemon refuses the saved credentials. Never written for the
-  practice inbox.
+  fixture inbox.
 - **The last calendar on disk.** The client keeps the calendar feed it last
   loaded for each account, so the Calendar page paints before the daemon
   answers (`passband/Sources/Passband/Model/CalendarDisk.swift`): events
@@ -1149,7 +1149,7 @@ the call goes out.
   when the account is removed, when the same daemon is connected again or
   re-validated (and nothing written again under that epoch), when the daemon
   refuses the saved credentials, and when the `calendar` feature turns off;
-  never written for the practice inbox. Only what the daemon answered is
+  never written for the fixture inbox. Only what the daemon answered is
   written.
 
 **What a maintainer must not break.**

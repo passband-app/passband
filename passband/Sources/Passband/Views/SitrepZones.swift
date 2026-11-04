@@ -16,8 +16,8 @@ struct CalendarZone: View {
     /// the whole rail is empty by the SAME rule each card draws with.
     @MainActor
     private static var accountScope: String {
-        RehearsalMode.isEnabled
-            ? CalendarVisibility.practiceAccount
+        FixtureMode.isEnabled
+            ? CalendarVisibility.fixtureAccount
             : AccountManager.shared.activeId?.uuidString ?? "disconnected"
     }
     private var accountScope: String { Self.accountScope }
@@ -285,14 +285,7 @@ private struct ShipmentCard: View {
         // line only when they have something else to say.
         VStack(alignment: .leading, spacing: Space.scaled(7)) {
             HStack(spacing: Space.scaled(7)) {
-                if RehearsalMode.isEnabled, shipment.thread_id == "practice-5" {
-                    RehearsalNewsletterLogo(brand: .exfed, size: 18, tile: false)
-                } else if RehearsalMode.isEnabled,
-                   shipment.thread_id == "practice-13" || shipment.thread_id == "practice-14" {
-                    RehearsalNewsletterLogo(brand: .rainforest, size: 18)
-                } else {
-                    CarrierBadge(carrier: shipment.carrier)
-                }
+                CarrierBadge(carrier: shipment.carrier)
                 // The order line sits UNDER the title in the same column, so
                 // the badge and chip stay beside the name rather than floating
                 // over a separate row.
@@ -676,10 +669,10 @@ struct ReadingZone: View {
     }
 
     /// The zone's door, smart clear, on both platforms. Gone with the mail:
-    /// on an empty zone there is nothing for it to do. Not in the practice
+    /// on an empty zone there is nothing for it to do. Not in the fixture
     /// inbox, whose senders are fixtures.
     private var actions: AnyView? {
-        guard !senders.isEmpty, !RehearsalMode.isEnabled else { return nil }
+        guard !senders.isEmpty, !FixtureMode.isEnabled else { return nil }
         return AnyView(ReadingActions())
     }
 
@@ -890,7 +883,7 @@ private struct ReadingHero: View {
     var body: some View {
         content
             .task(id: threadId) {
-                guard !RehearsalMode.isEnabled else { return }
+                guard !FixtureMode.isEnabled else { return }
                 // Already answered — `hero` is drawing that answer, and resolving
                 // again costs a second body pass. The guard is INSIDE the task,
                 // not around it: a conditional modifier would change this view's
@@ -909,9 +902,7 @@ private struct ReadingHero: View {
     /// starts with no image, so the fetch that produces one would never run.
     @ViewBuilder
     private var content: some View {
-        if let brand = RehearsalNewsletterBrand.matching(sender) {
-            RehearsalNewsletterLogo(brand: brand, size: Self.side)
-        } else if let hero {
+        if let hero {
             art(hero)
                 .frame(width: Self.side, height: Self.side)
                 // The rest of the square, in the art's own dominant colour, or

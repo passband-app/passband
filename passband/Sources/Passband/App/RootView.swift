@@ -10,56 +10,20 @@ import SwiftUI
 
 struct RootView: View {
     @Environment(AppStore.self) private var store
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// Tester rehearsal only (`--onboarding-rehearsal`): the opening beats
-    /// ahead of the practice inbox, with no account loaded underneath.
-    @State private var rehearsal = RehearsalSession.shared
 
     var body: some View {
         @Bindable var store = store
 
         ZStack {
-            if rehearsal.showingIntro {
-                OnboardingIntroView(
-                    onContinue: { rehearsal.enterMailbox() },
-                    continueTitle: rehearsal.entryRequested && !rehearsal.mailboxReady
-                        ? "Preparing your guide…" : "Try the practice inbox",
-                    continueHint: "Continue to the guided product tour")
-                    .id(rehearsal.runID)
-                    .task(id: rehearsal.runID) { await rehearsal.prepareMailbox() }
-                    // No blur on this side: the intro is a live Metal layer,
-                    // and re-blurring it every frame of the flight cost the
-                    // compositor a dozen dropped frames. Zoom and fade only.
-                    .transition(reduceMotion ? .opacity : .modifier(
-                        active: IntroMailboxFlight(scale: 1.22, blur: 0, opacity: 0),
-                        identity: IntroMailboxFlight(scale: 1, blur: 0, opacity: 1)))
-                    .zIndex(1)
-            } else {
-                Group {
-                    switch store.connStatus {
-                    case .loading:
-                        LoadingGate()
-                    case .connected:
-                        if store.tour.blocksMailboxForPractice {
-                            LoadingGate()
-                        } else {
-                            MainShell()
-                        }
-                    default:
-                        ConnectView()
-                    }
-                }
-                .transition(reduceMotion ? .opacity : .modifier(
-                    active: IntroMailboxFlight(scale: 0.90, blur: 16, opacity: 0),
-                    identity: IntroMailboxFlight(scale: 1, blur: 0, opacity: 1)))
+            switch store.connStatus {
+            case .loading:
+                LoadingGate()
+            case .connected:
+                MainShell()
+            default:
+                ConnectView()
             }
         }
-        .animation(reduceMotion ? .easeOut(duration: 0.18) : .timingCurve(0.2, 0.7, 0.2, 1, duration: 0.75),
-                   value: rehearsal.showingIntro)
-        // THE PRACTICE VEIL. Entering the practice inbox and leaving it both
-        // swap the whole read model under the shell; this hides the swap
-        // behind one line of copy instead of letting the board flip mid-frame.
-        .modifier(PracticeVeil(text: store.tour.veil))
         // THE APP DRAWS FROM THE WINDOW'S TOP EDGE. SwiftUI insets a window's
         // content below the titlebar strip macOS keeps clear for the traffic
         // lights, which left every page carrying an empty band above its own
@@ -121,8 +85,8 @@ struct RootView: View {
                 othersShowing: ShareNudge.shared.showingNudge || AgentNudge.shared.showingNudge)
         }
         // THE AGENT-DOOR AD, a week in, for a mailbox whose door an agent can
-        // actually use. Asked at the first sync (ShellWatchers, after the tour
-        // and What's New have had their turn) and on every return to the app,
+        // actually use. Asked at the first sync (ShellWatchers, after the
+        // first-load veil and What's New have had their turn) and on every return to the app,
         // below.
         .overlay { AgentNudgeModal() }
         // And on every return to the app, because the answer above changes
@@ -138,29 +102,22 @@ struct RootView: View {
             // Pay WebKit's process-launch cost at boot rather than on the first
             // email the reader opens.
             EmailWebView.warmProcess()
-            if RehearsalMode.includesConnection {
-                await rehearsal.restartConnection()
-            } else {
-                await store.loadSettings()
-            }
+            await store.loadSettings()
         }
         .onChange(of: store.accountActionsBlocked) { _, blocked in
             if !blocked { Notifier.shared.drainPendingTap() }
         }
         .onChange(of: store.connStatus) { _, status in
             if status == .connected {
-                store.tour.maybeStart()
-                guard !store.tour.preparingPractice else { return }
                 SitrepPoller.shared.start()
                 // EVERY account's ears, not just the live one's: the poller
                 // above follows whichever mailbox is on screen, while the event
                 // feeds are
                 // how the human hears about mail in the ones that are not.
-                // NOT while the practice inbox is up: the feeds are the real
-                // accounts', and a banner for real mail would point at a thread
-                // the practice board cannot open. `exitPractice` comes back
-                // through this same transition and starts them then.
-                if !RehearsalMode.isEnabled { AccountManager.shared.startAllFeeds() }
+                // NOT while the fixture inbox is up: the feeds are the real
+                // accounts', and a banner for real mail would point at a
+                // thread the fixture board cannot open.
+                if !FixtureMode.isEnabled { AccountManager.shared.startAllFeeds() }
                 // Warm the emails page at CONNECT, not on its first visit: the
                 // list lives in the store, so fetching it now means opening the
                 // page lands on rows instead of on "loading mail…". This also
@@ -181,45 +138,6 @@ struct RootView: View {
                 store.addAccountSheetOpen = false
             }
         }
-    }
-}
-
-/// One continuous flight from the opening slides into the prepared mailbox.
-private struct IntroMailboxFlight: ViewModifier {
-    let scale: CGFloat
-    let blur: CGFloat
-    let opacity: Double
-
-    func body(content: Content) -> some View {
-        content.scaleEffect(scale).blur(radius: blur).opacity(opacity)
-    }
-}
-
-/// The shell zoomed back and faded behind one line while the practice inbox
-/// is set up or the live one put back. Reduce Motion keeps the fade and drops
-/// the zoom and blur.
-private struct PracticeVeil: ViewModifier {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    let text: String?
-
-    func body(content: Content) -> some View {
-        let veiled = text != nil
-        content
-            .scaleEffect(veiled && !reduceMotion ? 0.92 : 1)
-            .blur(radius: veiled && !reduceMotion ? 12 : 0)
-            .opacity(veiled ? 0 : 1)
-            .allowsHitTesting(!veiled)
-            .background {
-                if let text {
-                    VStack(spacing: Space.s14) {
-                        ProgressView(text)
-                            .foregroundStyle(Palette.inkDim)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .transition(.opacity)
-                }
-            }
-            .animation(.easeInOut(duration: reduceMotion ? 0.18 : 0.5), value: veiled)
     }
 }
 
@@ -274,8 +192,6 @@ private struct ShellWatchers: View {
                 // again without the reader retyping anything.
                 if move == .stop { store.resetSearchLane(keepingVerdict: true) }
             }
-            // Connection starts onboarding before the shell is revealed.
-            // Refreshes can still resume a pending live summary.
             // THE CALENDAR GRANT, heard wherever the user is: the card and
             // the "waiting for Google" line go away and the real events load.
             .onChange(of: store.calendarGranted) { _, granted in
@@ -292,7 +208,10 @@ private struct ShellWatchers: View {
             // leaving it over a page it says nothing about. A wait already
             // started is kept, and the page's waiting line carries it.
             .onChange(of: store.activeView) { _, view in
-                // Notes still owed (a newcomer who finished the tour on
+                // The first-load veil is over the board; walking off the
+                // board is as good as saying "start now".
+                if view != .sitrep { store.firstLoad.dismiss(store) }
+                // Notes still owed (a newcomer whose first look ended on
                 // another page) wait for the Sitrep. A no-op for everyone
                 // already stamped, and once per session for the rest.
                 if view == .sitrep, store.lastRefresh != nil { store.whatsNew.maybeShow() }
@@ -323,10 +242,15 @@ private struct ShellWatchers: View {
             .onChange(of: store.composeOpen) { _, open in
                 if !open, store.activeView == .calendar, store.threadId == nil { store.returnParkedEventEditor() }
             }
+            // On mount too: `PASSBAND_FIRST_LOAD` raises the veil with no
+            // poll behind it, and a real first look decides at the first one.
+            .onAppear { store.firstLoad.observe(store) }
             .onChange(of: store.lastRefresh) { old, new in
+                // Every poll: the first-load veil decides at the first stats
+                // and then reads its progress off each one after.
+                if new != nil { store.firstLoad.observe(store) }
                 if old == nil, new != nil {
-                    store.tour.maybeStart()
-                    // Onboarding claims the moment before release notes.
+                    // The first look claims the moment before release notes.
                     store.whatsNew.maybeShow()
                     // The agent-door ad waits out both: it checks for them.
                     AgentNudge.shared.askIfEarned(store: store)
@@ -428,7 +352,7 @@ struct MainShell: View {
                 // under them, on every frame the reader is up and every
                 // frame of a done+next resolve re-rendering the board beneath
                 // it. Opacity keeps the page's state, layout and geometry
-                // reports (the tour measures it) and drops only the drawing.
+                // reports and drops only the drawing.
                 // Visible again the moment the reader is in flight, so the
                 // board is there under a departing email.
                 .opacity(
@@ -662,10 +586,6 @@ struct MainShell: View {
             ActionLayer()
                 .zIndex(30)
         }
-        // The tour measures dashboard regions and places its coach marks in
-        // ONE space, and this ZStack is the closest common ancestor of the
-        // sitrep that reports them and the action layer that draws on them.
-        .coordinateSpace(.named(tourSpace))
         .animation(.easeOut(duration: 0.18), value: store.modalOverlayOpen)
         // Mail landing on a quiet board fades the scene out, never cuts it.
         .animation(.easeInOut(duration: 0.9), value: QuietBoard.shared.isQuiet)
@@ -726,16 +646,6 @@ struct MainShell: View {
         // replaced. Refusing the whole set HERE is the only place that covers
         // every one of them at once.
         guard store.retriage == nil else { return [] }
-        if RehearsalMode.isEnabled {
-            return [
-                KeyBinding(declining: "u", "undo last action") {
-                    guard !store.undos.isEmpty else { return false }
-                    Task { await store.fireUndo() }
-                    return true
-                },
-                KeyBinding("\\", "toggle light/dark theme") { Prefs.shared.flipTheme() },
-            ]
-        }
         // THE DIGITS FOLLOW THE RAIL: Sitrep 1, then Calendar 2 while it is
         // offered and every later page one higher; with the gate closed the
         // numbers are the ones from before the calendar existed

@@ -193,10 +193,8 @@ struct SitrepView: View {
                 ScrollView(.vertical) {
                     VStack(spacing: Space.s16) {
                         leftZones(visible: visible, overflow: overflow)
-                        // Same key as the pinned rail below: whichever layout is
-                        // on screen is the one the tour's ring finds.
                         if !recordsEmpty {
-                            railCards.tourTarget(.records)
+                            railCards
                         }
                     }
                     .padding(.top, Space.s14)
@@ -240,9 +238,6 @@ struct SitrepView: View {
                     .scrollIndicators(.hidden)
                     .scrollShadowRoom(topFade: Space.s14)
                     .frame(width: Self.railWidth)
-                    // The COLUMN, not its content: a rail taller than the window
-                    // would put the ring's bottom edge off screen.
-                    .tourTarget(.records)
                     }
                 }
                 .padding(.horizontal, Space.page)
@@ -378,7 +373,6 @@ struct SitrepView: View {
     private func leftZones(visible: [AttentionUpdate], overflow: Int) -> some View {
         if !store.sitrep.standing.isEmpty {
             forYourEyes(visible: visible, overflow: overflow)
-                .tourTarget(.eyes)
         } else if isClear {
             ClearNote()
                 .transition(.opacity)
@@ -389,17 +383,16 @@ struct SitrepView: View {
         let senders = readingSenders
         if !(senders.isEmpty && store.sitrep.standing.isEmpty) {
             ReadingZone(senders: senders, cursor: cursor)
-                .tourTarget(.reading)
         }
     }
 
     /// The records zones as the pinned rail shows them: full-width rows.
     @ViewBuilder
     private var railZones: some View {
-        CalendarZone().tourTarget(.calendar)
-        ShipmentsZone(cursor: cursor).tourTarget(.shipments)
-        BankingZone().tourTarget(.banking)
-        ReceiptsZone().tourTarget(.receipts)
+        CalendarZone()
+        ShipmentsZone(cursor: cursor)
+        BankingZone()
+        ReceiptsZone()
     }
 
     /// The records as HALF-WIDTH cards for the stacked layout. Two top-aligned
@@ -409,13 +402,13 @@ struct SitrepView: View {
     private var railCards: some View {
         HStack(alignment: .top, spacing: Space.s16) {
             VStack(spacing: Space.s16) {
-                CalendarZone().tourTarget(.calendar)
-                BankingZone().tourTarget(.banking)
+                CalendarZone()
+                BankingZone()
             }
             .frame(maxWidth: .infinity)
             VStack(spacing: Space.s16) {
-                ShipmentsZone(cursor: cursor).tourTarget(.shipments)
-                ReceiptsZone().tourTarget(.receipts)
+                ShipmentsZone(cursor: cursor)
+                ReceiptsZone()
             }
             .frame(maxWidth: .infinity)
         }
@@ -459,19 +452,10 @@ struct SitrepView: View {
             }
             Spacer(minLength: Space.s12)
             IngestIndicator()
-            // Only the practice board gets the rehearsal appearance control.
-            // The launch flag stays true after returning to the real inbox.
-            if RehearsalMode.launchedStandalone && RehearsalMode.isEnabled {
-                DemoAppearancePicker()
-            }
             RetriageButton()
             #if os(macOS)
-                // The practice board has no `/` (the global set is cut down to
-                // undo + theme there), so an icon for it would be a button
-                // that does nothing. The phone has its own sitrep.
-                if !RehearsalMode.isEnabled {
-                    MastheadShortcuts()
-                }
+                // The phone has its own sitrep.
+                MastheadShortcuts()
             #endif
         }
         .padding(.horizontal, Space.page)
@@ -491,6 +475,8 @@ struct SitrepView: View {
     private func forYourEyes(visible: [AttentionUpdate], overflow: Int) -> some View {
         ZoneCard(
             symbol: "eye", title: "For your eyes", count: store.sitrep.standing.count,
+            // What the zone is, in the Reading zone's register.
+            subtitle: "waiting on a reply or a decision from you",
             trailing: store.sitrep.standing.isEmpty
                 ? nil
                 : AnyView(
@@ -509,12 +495,6 @@ struct SitrepView: View {
                     // SwiftUI could not skip a single one when the parent redrew.
                     if let meta = store.authMeta(for: u) {
                         AuthEyesRow(update: u, meta: meta, index: i, cursor: cursor)
-                    } else if RehearsalMode.isEnabled && u.id == 1 {
-                        ObligationRow(update: u, index: i, cursor: cursor)
-                            .tourTarget(.maya)
-                    } else if RehearsalMode.isEnabled && u.id == 11 {
-                        ObligationRow(update: u, index: i, cursor: cursor)
-                            .tourTarget(.brightly)
                     } else {
                         ObligationRow(update: u, index: i, cursor: cursor)
                     }

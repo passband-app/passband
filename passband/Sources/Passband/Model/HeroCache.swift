@@ -90,7 +90,7 @@ final class HeroCache {
 
     /// The sender's last art off disk, under the same gates as a fetch.
     private func standIn(_ address: String?) -> Hero? {
-        guard let address, Prefs.shared.loadRemoteImages, !RehearsalMode.isEnabled else { return nil }
+        guard let address, Prefs.shared.loadRemoteImages, !FixtureMode.isEnabled else { return nil }
         return HeroDisk.shared.hero(sender: address)
     }
 

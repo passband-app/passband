@@ -1,8 +1,8 @@
 import Foundation
 
-/// A fully populated, entirely local mailbox for the product tour. Each
+/// A fully populated, entirely local mailbox for the fixture inbox. Each
 /// dashboard category has three readable examples from the moment it opens.
-struct OnboardingRehearsal: Sendable {
+struct FixtureMail: Sendable {
     enum Category: String, CaseIterable, Sendable {
         case attention, reading, calendar, shipments, banking, receipts
     }

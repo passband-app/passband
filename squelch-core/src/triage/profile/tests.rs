@@ -374,7 +374,11 @@ async fn failed_attempts_are_capped_per_day_and_config_failures_refunded() {
             kind: "http_401".into()
         }
     );
-    for later in [Duration::zero(), Duration::seconds(30), Duration::minutes(59)] {
+    for later in [
+        Duration::zero(),
+        Duration::seconds(30),
+        Duration::minutes(59),
+    ] {
         assert_eq!(
             run(&mailbox, noon() + later, &model).await,
             PassOutcome::CoolingDown

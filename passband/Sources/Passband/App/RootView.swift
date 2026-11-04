@@ -497,6 +497,11 @@ struct MainShell: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
+                    // FLOW MODE'S FIRST-WALK EXPLANATION, which lands on the
+                    // walk's corner hint below and hands over to it.
+                    .overlay {
+                        FlowHintLayer(canSkip: store.threadQueue.count > 1)
+                    }
                     // THE FIRST-OPEN HINT, outside the flight for the same reason
                     // as the walk's below, and lifted above it when both are up.
                     .overlay {
@@ -508,7 +513,10 @@ struct MainShell: View {
                     // under it and it holds still, which is what lets it read
                     // as part of the window rather than part of each email.
                     .overlay(alignment: .bottomTrailing) {
-                        if store.walk != nil, store.threadId != nil {
+                        // Not while the first-walk explanation is up or landing:
+                        // it is drawn as this hint for its last beat, and then
+                        // this one takes over in the same place.
+                        if store.walk != nil, store.threadId != nil, FlowHint.shared.placement == nil {
                             // S works on every email of a walk but a walk of
                             // one, where there is nothing to skip to or past.
                             WalkHint(canSkip: store.threadQueue.count > 1)

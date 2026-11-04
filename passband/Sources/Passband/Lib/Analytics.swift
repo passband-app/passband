@@ -153,8 +153,9 @@ enum Analytics {
         "connect_succeeded", "connection_lost", "connection_restored",
         "account_added",
         "first_load_shown", "first_load_ended", "whats_new_shown",
-        // The reader's one-time "press e" hint, the first time it is drawn.
-        "reader_hint_shown",
+        // The reader's one-time "press e" hint, the first time it is drawn,
+        // and flow mode's one-time explanation on a first walk.
+        "reader_hint_shown", "flow_hint_shown",
         "invite_sent", "invite_nudge_accepted", "invite_nudge_dismissed",
         "ios_nudge_closed", "agent_nudge_closed",
         "group_created", "group_updated", "group_deleted",
@@ -211,8 +212,9 @@ enum Analytics {
         // finished. Whether a first run waits out its own backfill is
         // exactly the "does the product work" question this level exists for.
         "first_load_shown", "first_load_ended",
-        // Whether a first reader open gets told about e. No properties.
-        "reader_hint_shown",
+        // Whether a first reader open gets told about e, and a first walk
+        // about flow mode. No properties.
+        "reader_hint_shown", "flow_hint_shown",
         // Sharing carries counts and nothing else: how many invites went, how
         // many did not, and whether the one-time ask was taken up. No address
         // is anywhere near this, at any level.

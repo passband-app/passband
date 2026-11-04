@@ -276,6 +276,7 @@ enum ProductGuide {
         Flow mode:
         - Space, or the "flow mode" pill at the top of For your eyes, walks the list one email at a time, starting at the highlighted row or the first one.
         - In the reader during the walk, e is done and next, and s saves the email for later: it stays on the board and the walk moves on. A small "FLOW MODE" card shows both keys. A summary card shows at the end.
+        - The first walk on a Mac starts with a short card over the email saying what flow mode is and which keys it uses; after two seconds it shrinks into the "FLOW MODE" card. It shows once.
 
         Hover tricks:
         - Hover a package and press e to clear it until its next update. Right-click has "Clear this package".

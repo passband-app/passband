@@ -134,6 +134,7 @@ final class Prefs {
         static let lastSeenReleaseNotes = "passband.pref.lastSeenReleaseNotes"
         static let lastSeenPhoneNotes = "passband.pref.lastSeenPhoneNotes"
         static let readerHint = "passband.pref.readerHint"
+        static let flowHintSeen = "passband.pref.flowHintSeen"
         static let theme = "passband.pref.theme"
         static let zoom = "passband.pref.zoom"
         static let density = "passband.pref.density"
@@ -310,6 +311,13 @@ final class Prefs {
     var readerHint: ReaderHintRule.Stored? {
         get { defaults.string(forKey: Key.readerHint).flatMap(ReaderHintRule.Stored.init) }
         set { defaults.set(newValue?.rawValue, forKey: Key.readerHint) }
+    }
+
+    /// Whether flow mode's one-time explanation has been shown on this Mac
+    /// (FlowHintRule). Never registered: false until it has.
+    var flowHintSeen: Bool {
+        get { defaults.bool(forKey: Key.flowHintSeen) }
+        set { defaults.set(newValue, forKey: Key.flowHintSeen) }
     }
 
     private var _lastSeenPhoneNotes: String?

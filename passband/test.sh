@@ -784,6 +784,13 @@ run_suite reader-hint-rule \
   Sources/Passband/Lib/ReaderHintRule.swift \
   Tests/ReaderHintRuleTests.swift
 
+# Flow mode's one-time explanation: a first walk on a Mac that has never
+# walked gets it, and nobody who has walked or has seen it ever does.
+run_suite flow-hint-rule \
+  Sources/Passband/Lib/DiscoveryLedger.swift \
+  Sources/Passband/Lib/FlowHintRule.swift \
+  Tests/FlowHintRuleTests.swift
+
 # The first-load veil's time estimate: no estimate until two polls a few
 # seconds apart saw the count move, a window that smooths one slow page, a
 # restarted walk that starts the samples over, and the rounded phrase.

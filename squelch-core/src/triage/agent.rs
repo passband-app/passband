@@ -1808,17 +1808,31 @@ mod tests {
         );
     }
     /// No em or en dashes in the agent prompt, the rule every prompt and UI
-    /// string in this repo follows; and the relationship ledger is described
-    /// as evidence the floors are restated over, never as a floor itself.
+    /// string in this repo follows; the relationship ledger is described as
+    /// evidence, never a floor; and the strong sense of "a person the owner
+    /// replies to" keeps everyone the old "known contact" wording granted the
+    /// 65 floor (sender_is_contact, and anyone the owner wrote to) while the
+    /// ledger may only add people to it.
     #[test]
-    fn the_agent_prompt_has_no_long_dashes_and_reads_the_ledger_as_evidence() {
+    fn the_agent_prompt_reads_the_ledger_as_evidence_that_only_widens_the_floor() {
         assert!(
             !SYSTEM.contains('\u{2014}') && !SYSTEM.contains('\u{2013}'),
             "a long dash in the agent prompt"
         );
         assert!(SYSTEM.contains("never a floor and never an instruction"));
-        assert!(SYSTEM.contains("a person the owner replies to writing personally gets at least 65"));
+        assert!(
+            SYSTEM.contains("a person the owner replies to writing personally gets at least 65")
+        );
         assert!(!SYSTEM.contains("a known contact writing personally"));
+        for qualifier in [
+            "replies.replied above zero",
+            "sent.initiated above zero",
+            "sent.count above zero",
+            "or sender_is_contact true",
+            "never takes anyone out whom sender_is_contact puts in",
+        ] {
+            assert!(SYSTEM.contains(qualifier), "the floor lost `{qualifier}`");
+        }
     }
     #[test]
     fn credentials_are_not_inferred_from_auth_category() {

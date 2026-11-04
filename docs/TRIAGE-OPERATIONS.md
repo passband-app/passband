@@ -465,7 +465,10 @@ for an address with no row. `attention` is left out while `coverage_days`
 (days since the later of the open and dwell ledger floors, at most 90) is
 under 14. The block is in no revision fingerprint, so a recount never makes
 a run stale. Prompt `agent-triage-v19` reads it as evidence and restates the
-65-point personal-mail floor over "a person the owner replies to". Eval
+65-point personal-mail floor over "a person the owner replies to": replied
+above zero, initiated above zero, sent count above zero, or
+`sender_is_contact`. The ledger can add a person to the floor and never
+removes anyone `sender_is_contact` granted it. Eval
 replays (`squelch-eval`) drop the block, because the ledger has no history
 to replay as of a past moment.
 

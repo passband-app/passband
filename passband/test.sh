@@ -292,6 +292,7 @@ run_suite credential-probe \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/APIError.swift \
   Sources/Passband/Lib/CalendarWrite.swift \
+  Sources/Passband/Model/UnderstandingWire.swift \
   Sources/Passband/Model/APIClient.swift \
   Sources/Passband/Lib/ClientIdentity.swift \
   Sources/Passband/Lib/TriageTargets.swift \

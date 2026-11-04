@@ -18,7 +18,7 @@ extension HiddenFeature {
     /// The owner profile (docs/UNDERSTANDING.md §5): the nightly pass, the
     /// memory routes, and "What Passband knows" on the Usage page. The
     /// relationship ledger under it ships on and is not behind this.
-    static let understanding = HiddenFeature(key: UnderstandingFlag.key)
+    static let understanding = HiddenFeature(key: "understanding")
 }
 
 /// The hidden features that are on for this mailbox, as the daemon reported

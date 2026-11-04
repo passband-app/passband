@@ -273,6 +273,8 @@ enum AccountIndex {
         Task { @MainActor in FrameHeightStore.shared.forget(account: id) }
         // And its saved calendar (CalendarDisk.swift).
         Task { await CalendarDisk.shared.forget(id) }
+        // And its events' pictures (EventVisuals.swift).
+        Task { @MainActor in EventVisualDisk.shared.forget(account: id) }
     }
 
     // MARK: - orphaned keychain slots

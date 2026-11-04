@@ -21,8 +21,15 @@ struct CalendarDetail: View {
     @Environment(AppStore.self) private var store
     let item: AgendaItem
     let calendar: Calendar
-    /// The card's picture once it is known (Model/EventVisuals.swift).
-    @State private var visual: EventVisual?
+    /// The card's picture as this session resolved it, with the key it was
+    /// resolved for (Model/EventVisuals.swift). Until then, `visual` is what
+    /// the disk remembers, read on the first frame so the card opens at its
+    /// final height instead of growing when the picture lands.
+    @State private var resolved: Resolved?
+    private struct Resolved {
+        let key: String
+        let visual: EventVisual?
+    }
     @State private var choosingMap = false
     @Environment(\.openURL) private var openURL
 
@@ -62,16 +69,23 @@ struct CalendarDetail: View {
         .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTint)
         .animation(.easeOut(duration: 0.2), value: visual != nil)
         .task(id: visualKey) {
+            let key = visualKey
             let visuals = EventVisuals.shared
-            if let known = visuals.cached(visualKey) {
-                visual = known
+            if let known = visuals.cached(key) {
+                resolved = Resolved(key: key, visual: known)
                 return
             }
-            visual = nil
             let found = await visuals.resolve(
-                key: visualKey, threadIds: item.sources.map(\.thread_id), place: item.placeQuery)
-            if !Task.isCancelled { visual = found }
+                key: key, threadIds: item.sources.map(\.thread_id), place: item.placeQuery)
+            if !Task.isCancelled { resolved = Resolved(key: key, visual: found) }
         }
+    }
+
+    /// What the card shows now: this session's answer for THIS event, else
+    /// the disk's, else nothing yet.
+    private var visual: EventVisual? {
+        if let resolved, resolved.key == visualKey { return resolved.visual }
+        return EventVisuals.shared.known(visualKey) ?? nil
     }
 
     /// What the picture depends on: the row, its place and its mail.
@@ -203,10 +217,9 @@ struct CalendarDetail: View {
     /// The venue Apple Maps already matched for the picture when there is
     /// one, so the pin is the same place; else a search for the place.
     private func openInAppleMaps() {
-        switch visual {
-        case .lookAround(_, let found), .map(let found):
+        if let found = visual?.mapItem {
             found.openInMaps()
-        default:
+        } else {
             open(Self.appleMaps, item.placeQuery)
         }
     }

@@ -280,13 +280,17 @@ pub fn clean_field(raw: &str) -> String {
 /// - A CODE is six digits counted across the separators a code is written
 ///   with (`123 456`, `123-456`, `12.34.56`): a run breaks only on anything
 ///   else. Dates and year ranges are not codes and are left out of the count
-///   (`2026-11-30`, `2026-11`, `2025-26`, `2025-2026`).
+///   (`2026-11-30`, `2026-11`, `2025-26`, `2025-2026`), but only when they
+///   start with a 19xx or 20xx year: `1234-5678` is still a code.
 /// - A CREDENTIAL word is matched whole. `pin` only counts with a digit
 ///   within twenty characters ("my pin is 4821"), because "Pin this" is
 ///   prose.
 pub fn forbidden_content(s: &str) -> bool {
     static DATES: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"\b\d{4}-\d{2}(?:-\d{2})?\b|\b\d{4}-\d{2,4}\b")
+        // YEAR-SHAPED only, so a 4-4 code (`1234-5678`) is still a code.
+        regex::Regex::new(
+            r"\b(?:19|20)\d{2}-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12]\d|3[01]))?\b|\b(?:19|20)\d{2}-(?:(?:19|20)\d{2}|\d{2})\b",
+        )
             .expect("static date pattern")
     });
     static PIN: std::sync::LazyLock<regex::Regex> =

@@ -240,6 +240,8 @@ fn links_codes_and_credentials_are_rejected() {
         "Says my pin is 123456",
         "Says the PIN is 4821",
         "Calls +1 (415) 555-0100",
+        "Was sent 1234-5678",
+        "Was sent 4821-0093",
         "Sends people to acme.example/reset",
         "Visits evil.example/reset often",
     ] {

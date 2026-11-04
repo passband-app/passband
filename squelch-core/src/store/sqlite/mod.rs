@@ -212,6 +212,54 @@ macro_rules! auth_mail_sql {
     };
 }
 
+/// Auth mail the model's FYE pick does NOT place, over alias `d`: the SQL
+/// form of `!AuthAssessment::takes_fye_pick`. The kind a client sees is the
+/// priority pick, and every kind that takes the pick (verification,
+/// account_change, app_grant) ranks below the three asked-for ones (otp,
+/// sign_in_link, password_reset) and above the rest, so "skips" is: an
+/// asked-for kind is present, or no kind that takes the pick is.
+/// `auth_kind_fye_pick_sql_matches_rust` pins it to the Rust form.
+///
+/// A CASE so ordinary mail (no auth kinds) costs one `json_array_length`:
+/// this runs per message over the whole window in the placement CTE.
+macro_rules! auth_kinds_skip_fye_pick_sql {
+    () => {
+        "(CASE WHEN COALESCE(json_array_length(d.decision_json,'$.auth.kinds'),0)=0 THEN 0 \
+           WHEN EXISTS(SELECT 1 FROM json_each(d.decision_json,'$.auth.kinds') \
+                        WHERE value IN ('otp','sign_in_link','password_reset')) THEN 1 \
+           ELSE NOT EXISTS(SELECT 1 FROM json_each(d.decision_json,'$.auth.kinds') \
+                        WHERE value IN ('verification','account_change','app_grant')) END)"
+    };
+}
+
+/// Mail the model's FYE pick does not place, over aliases `d` and the
+/// message alias `$m`: [`auth_kinds_skip_fye_pick_sql!`], or auth mail the
+/// owner ruled "That was me" (a ruling lets go of any auth mail, the kinds
+/// that take the pick included), or auth mail the first-run backfill brought
+/// in (history, not news: see [`auth_fye_threads_cte!`]). False for mail
+/// with no auth kind. One definition for the FYE list, the stats tiers and
+/// the sitrep's placement; an explicit thread pin still wins, applied by
+/// each caller.
+macro_rules! auth_off_fye_sql {
+    ($m:literal) => {
+        concat!(
+            "(",
+            auth_kinds_skip_fye_pick_sql!(),
+            " OR (",
+            auth_mail_sql!(),
+            " AND (EXISTS(SELECT 1 FROM auth_verdicts ov WHERE ov.account_id=",
+            $m,
+            ".account_id AND ov.message_id=",
+            $m,
+            ".id AND ov.verdict='mine') OR EXISTS(SELECT 1 FROM triage ot WHERE ot.account_id=",
+            $m,
+            ".account_id AND ot.message_id=",
+            $m,
+            ".id AND ot.first_load=1))))"
+        )
+    };
+}
+
 /// A takeover-class account change that holds FYE, over alias `d` and the
 /// message alias `$m`: `critical` beside `account_change`, from a sender
 /// that did not explicitly fail authentication (`auth_pass = 0`; NULL, never

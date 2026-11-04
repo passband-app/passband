@@ -654,6 +654,14 @@ impl<C: CredentialStore + ?Sized + 'static> MailSource for GmailSource<C> {
 
     /// One historyId spans the whole mailbox and only grows, so the max of the
     /// two walks covers both; `since` is behind both by construction.
+    /// The historyId must be taken before the window is listed: a backfill
+    /// is minutes of fetches, and a historyId asked for afterwards is past
+    /// every message that arrived during them. Replaying the overlap costs a
+    /// few re-fetches the store collapses (`UNIQUE(account_id, gmail_msg_id)`).
+    fn cursor_before_window(&self) -> bool {
+        true
+    }
+
     fn merge_cursors(&self, _since: &SyncCursor, a: &SyncCursor, b: &SyncCursor) -> SyncCursor {
         SyncCursor::new(
             advance_history_cursor(parse_history_id(a.as_str()), [parse_history_id(b.as_str())])

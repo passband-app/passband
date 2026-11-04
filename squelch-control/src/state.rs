@@ -16,6 +16,7 @@ use std::time::Instant;
 use crate::alert::{ALERT_TIMEOUT, AlertClient, AlertError};
 use crate::bifrost::{BifrostClient, BifrostError};
 use crate::config::{BifrostConfig, Config, OUTBOUND_TIMEOUT, WaitlistConfig};
+use crate::posthog::{POSTHOG_PROJECT_KEY, POSTHOG_TIMEOUT, PostHogClient, PostHogError};
 use crate::ratelimit::{
     ADMIN_LOGIN_REQUESTS_PER_MINUTE, ADMIN_REQUESTS_PER_MINUTE, CALLBACK_REQUESTS_PER_MINUTE,
     CONSOLE_AUTH_REQUESTS_PER_MINUTE, PAGE_REQUESTS_PER_MINUTE, RateLimiter,
@@ -37,6 +38,8 @@ pub enum StateError {
     Bifrost(#[from] BifrostError),
     #[error(transparent)]
     Resend(#[from] ResendError),
+    #[error(transparent)]
+    PostHog(#[from] PostHogError),
     #[error(transparent)]
     Alert(#[from] AlertError),
     #[error(transparent)]
@@ -70,6 +73,9 @@ struct Inner {
     /// The AuthKit completion client, DERIVED from `config.workos` on the same
     /// one-switch terms. `None` means `GET /agent/auth` is not mounted.
     workos: Option<Arc<WorkosClient>>,
+    /// PostHog identify, DERIVED from `config.posthog_url` on the same
+    /// one-switch terms. `None` means signups name nobody in PostHog.
+    posthog: Option<Arc<PostHogClient>>,
     sessions: Mutex<SessionStore>,
     page_limiter: Mutex<RateLimiter>,
     signup_limiter: Mutex<RateLimiter>,
@@ -146,6 +152,18 @@ impl ControlState {
                     .map(Arc::new)
             })
             .transpose()?;
+        let posthog = config
+            .posthog_url
+            .as_ref()
+            .map(|url| {
+                PostHogClient::new(
+                    url.clone(),
+                    POSTHOG_PROJECT_KEY.to_string(),
+                    POSTHOG_TIMEOUT,
+                )
+                .map(Arc::new)
+            })
+            .transpose()?;
         Ok(Self {
             inner: Arc::new(Inner {
                 reconnect_slots: Arc::new(tokio::sync::Semaphore::new(
@@ -158,6 +176,7 @@ impl ControlState {
                 resend,
                 alert,
                 workos,
+                posthog,
                 sessions: Mutex::new(SessionStore::new()),
                 page_limiter: Mutex::new(RateLimiter::per_minute(PAGE_REQUESTS_PER_MINUTE)),
                 signup_limiter: Mutex::new(RateLimiter::per_minute(SIGNUP_REQUESTS_PER_MINUTE)),
@@ -246,6 +265,12 @@ impl ControlState {
 
     /// Tell the operator, in the background, when this deployment has a
     /// webhook. Never waits and never fails: see [`crate::alert`].
+    /// The PostHog identify client, when this deployment names hosted people
+    /// in analytics.
+    pub fn posthog(&self) -> Option<&Arc<PostHogClient>> {
+        self.inner.posthog.as_ref()
+    }
+
     pub fn alert(&self, text: String) {
         if let Some(client) = &self.inner.alert {
             client.notify(text);

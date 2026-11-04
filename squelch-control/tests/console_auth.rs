@@ -280,6 +280,7 @@ impl Harness {
             userinfo_url: format!("{google}/userinfo"),
             microsoft: None,
             alert_webhook_url: None,
+            posthog_url: None,
             // No agent door: `/agent/auth` is not mounted.
             workos: None,
             // Console auth never touches the LLM gateway; feature off.

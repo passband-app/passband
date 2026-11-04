@@ -1717,8 +1717,12 @@ request.
    the label, which after this names nothing.
 7. **Let the rest age out, and say so.** Hetzner's root-disk snapshots hold the
    k3s datastore, so the deleted Secrets survive in them for up to 7 days;
-   nothing there holds mail. Analytics events are keyed to `analytics_id`, not
-   the address; delete the PostHog person for it if the request asks.
+   nothing there holds mail.
+8. **Delete the PostHog person.** Signup sets the person's email and name on it
+   (`squelch-control/src/posthog.rs`), and the privacy policy promises it goes
+   with the account. In PostHog, People, search the address, open the person,
+   and delete it with its events. The `analytics_id` is on the `users` row, so
+   note it before step 6 if the address search finds nobody.
 
 Not yet exercised end to end on production. The first real request is the
 drill: run it against a throwaway tenant first if one is to hand.

@@ -31,6 +31,7 @@ use clap::{Parser, Subcommand};
 use squelch_control::bifrost::BifrostClient;
 use squelch_control::config::{self, BifrostConfig, OUTBOUND_TIMEOUT};
 use squelch_control::import;
+use squelch_control::posthog::{POSTHOG_PROJECT_KEY, POSTHOG_TIMEOUT, POSTHOG_URL, PostHogClient};
 use squelch_control::warden::{DriftReport, HttpWarden, Warden as _};
 use squelch_control::{Config, ControlState, ControlStore, invites, labels, router};
 use tracing_subscriber::EnvFilter;
@@ -72,6 +73,11 @@ enum Command {
     },
     /// List provisioned tenants.
     Tenants,
+    /// Product analytics (PostHog) operator commands.
+    Analytics {
+        #[command(subcommand)]
+        command: AnalyticsCommand,
+    },
     /// Mint, install, and revoke tenants' LLM virtual keys.
     Llm {
         #[command(subcommand)]
@@ -190,6 +196,15 @@ enum ShareCommand {
 }
 
 #[derive(Subcommand)]
+enum AnalyticsCommand {
+    /// Set every hosted signup's email and name on their PostHog person. Signup
+    /// already does this as it happens; this is the backfill, and the repair
+    /// for any send that failed. Safe to re-run: the last write wins. Prints
+    /// counts and row ids only, never an address.
+    Identify,
+}
+
+#[derive(Subcommand)]
 enum InviteCommand {
     /// Mint new codes. Each is printed once and stored only as a hash.
     ///
@@ -243,6 +258,7 @@ fn main() -> anyhow::Result<()> {
         Command::Serve => serve(),
         Command::Invite { command } => invite(command),
         Command::Tenants => tenants(),
+        Command::Analytics { command } => analytics(command),
         Command::Llm { command } => llm(command),
         Command::Share { command } => share(command),
         Command::Drift { label } => drift(label),
@@ -364,6 +380,37 @@ fn tenants() -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+fn analytics(command: AnalyticsCommand) -> anyhow::Result<()> {
+    match command {
+        AnalyticsCommand::Identify => runtime()?.block_on(async {
+            let store = open_store().await?;
+            let client = PostHogClient::new(
+                POSTHOG_URL.to_string(),
+                POSTHOG_PROJECT_KEY.to_string(),
+                POSTHOG_TIMEOUT,
+            )?;
+            let people = store.hosted_identities().await?;
+            let mut failed = Vec::new();
+            for (user_id, who) in &people {
+                if let Err(e) = client.identify(who).await {
+                    eprintln!("squelch-control: user {user_id}: {e}");
+                    failed.push(*user_id);
+                }
+            }
+            println!(
+                "identified {} of {} hosted people in posthog",
+                people.len() - failed.len(),
+                people.len()
+            );
+            if failed.is_empty() {
+                Ok(())
+            } else {
+                anyhow::bail!("{} failed; re-run to retry", failed.len())
+            }
+        }),
+    }
 }
 
 /// An RFC3339 stamp in UTC, seconds resolution: precise enough to correlate

@@ -239,6 +239,7 @@ impl Harness {
             userinfo_url: format!("{google}/userinfo"),
             microsoft: None,
             alert_webhook_url: None,
+            posthog_url: None,
             bifrost: None,
             waitlist: None,
             workos: workos_on.then(|| WorkosConfig {

@@ -68,6 +68,7 @@ impl Harness {
             userinfo_url: "http://127.0.0.1:1/userinfo".into(),
             microsoft: None,
             alert_webhook_url: None,
+            posthog_url: None,
             bifrost: None,
             workos: None,
             waitlist: Some(WaitlistConfig {

@@ -168,6 +168,8 @@ struct Recorder {
     /// serves at `/hook` so every harness has alerts wired the way production
     /// does.
     alerts: Vec<String>,
+    /// Every event PostHog's `/batch/` was sent, which this mock also serves.
+    posthog: Vec<Value>,
     /// Form fields of the last exchange at the mock MICROSOFT token endpoint.
     ms_token_form: Vec<(String, String)>,
     /// What the mock Graph `/me` answers. `None` is a personal account that
@@ -319,6 +321,20 @@ async fn spawn_warden(rec: Shared) -> String {
                     let parsed: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
                     rec.lock().unwrap().alerts.push(str_field(&parsed, "text"));
                     "ok"
+                },
+            ),
+        )
+        // Not the warden's either: PostHog's ingest, for the hosted identify.
+        .route(
+            "/batch/",
+            post(
+                |AxumState(rec): AxumState<Shared>, body: String| async move {
+                    let parsed: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                    let mut r = rec.lock().unwrap();
+                    for e in parsed["batch"].as_array().cloned().unwrap_or_default() {
+                        r.posthog.push(e);
+                    }
+                    Json(json!({ "status": 1 }))
                 },
             ),
         )
@@ -748,6 +764,7 @@ impl Harness {
                 graph_base: format!("{google}/graph"),
             }),
             alert_webhook_url: Some(format!("{warden_url}/hook")),
+            posthog_url: Some(warden_url.clone()),
             // No agent door: `/agent/auth` is not mounted.
             workos: None,
             // The struct is constructed directly, so an http mock URL is fine
@@ -1617,6 +1634,35 @@ async fn the_operator_hears_about_a_half_finished_signup_and_its_retry() {
         assert!(!a.contains(MAILBOX), "the mailbox reached the webhook: {a}");
         assert!(!a.contains('@'), "an address-shaped token in: {a}");
     }
+}
+
+/// A hosted signup names its person in PostHog: one `$set` carrying the
+/// mailbox, under the same analytics id the funnel row holds and the app will
+/// adopt when it pairs.
+#[tokio::test]
+async fn a_signup_names_the_person_in_posthog_under_their_analytics_id() {
+    let h = Harness::new().await;
+    let invite = h.invite_code.clone();
+    let (status, body) = h.run_signup("ada", &invite).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let funnel = h.funnel().await;
+    let analytics_id = funnel[0].4.clone();
+
+    let mut events = Vec::new();
+    for _ in 0..200 {
+        events = h.rec.lock().unwrap().posthog.clone();
+        if !events.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(events.len(), 1, "{events:?}");
+    let e = &events[0];
+    assert_eq!(e["event"], "$set");
+    assert_eq!(e["distinct_id"], analytics_id.as_str());
+    assert_eq!(e["properties"]["$set"]["email"], MAILBOX);
+    assert_eq!(e["properties"]["$set"]["hosted"], true);
 }
 
 /// The webhook is posted from a spawned task, so a test waits for it rather

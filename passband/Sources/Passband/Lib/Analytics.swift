@@ -515,9 +515,10 @@ enum Analytics {
     /// WHY THIS EXISTS: PostHog otherwise sees a random per-install UUID, and
     /// the control plane sees an email address, and nothing joins them — so
     /// "did anyone we invited ever open the app" is unanswerable. The `aid` is
-    /// the join key, minted control-plane side and opaque on both ends. PostHog
-    /// still never sees an email; it sees an id that only the control plane can
-    /// resolve to a person, which is the whole design.
+    /// the join key, minted control-plane side. THIS APP never sends an email:
+    /// control sets the hosted person's email and name on the aid itself, at
+    /// signup (squelch-control/src/posthog.rs), so naming people stays out of
+    /// the one process that touches mail.
     ///
     /// THIS BYPASSES THE EVENT VOCABULARY ON PURPOSE. Every other string that
     /// leaves this file must appear in `allowedStrings`, because mail content
@@ -601,8 +602,8 @@ final class PostHogClient: @unchecked Sendable {
     /// hosted pairing hands over an `aid`, at which point `adoptDistinctId`
     /// swaps this for the control plane's opaque per-person id so the two
     /// halves of the funnel are the same row. Still a UUID, still carrying no
-    /// address: the control plane holds the email, PostHog holds the id, and
-    /// nothing on this machine can join them.
+    /// address from this machine: for hosted people, control names the aid in
+    /// PostHog, and the app never does.
     ///
     /// A `var`, but a queue-confined one: every read and write below happens
     /// inside `queue`. Initialized directly in `init` rather than on the queue,

@@ -11,6 +11,18 @@ use squelch_core::triage::decision::*;
 use tower::ServiceExt;
 
 fn assess(store: &squelch_core::store::SqliteStore, account: i64, id: i64, restricted: bool) {
+    let kinds = if restricted { vec![AuthKind::Otp] } else { vec![] };
+    assess_auth(store, account, id, restricted, kinds);
+}
+
+/// [`assess`] with the auth kinds given: the model's pick is always FYE.
+fn assess_auth(
+    store: &squelch_core::store::SqliteStore,
+    account: i64,
+    id: i64,
+    restricted: bool,
+    kinds: Vec<AuthKind>,
+) {
     store
         .enqueue_agent_triage(account, id, "test", false)
         .unwrap();
@@ -29,14 +41,14 @@ fn assess(store: &squelch_core::store::SqliteStore, account: i64, id: i64, restr
         destinations: vec![MessageDestination::Reading],
         summary: "An offer worth reading".into(),
         reason: "The user can curate promotions".into(),
-        auth: if restricted {
+        auth: if kinds.is_empty() {
+            AuthAssessment::default()
+        } else {
             AuthAssessment {
-                kinds: vec![AuthKind::Otp],
+                kinds,
                 evidence: evidence.clone(),
                 critical: false,
             }
-        } else {
-            AuthAssessment::default()
         },
         records: vec![squelch_core::triage::decision::RecordProposal::Receipt {
             merchant: "Shop".into(),
@@ -710,6 +722,69 @@ async fn a_human_opens_an_archive_message_and_no_model_work_is_queued() {
         serde_json::json!([]),
         "opening old mail must not buy an assessment of it"
     );
+}
+
+/// Setup mail the model put in FYE (a new tax account, not a password
+/// reset) is in the FYE feed, served as auth mail with no body text, still
+/// on the Auth page, and a "That was me" takes it out of FYE.
+#[tokio::test]
+async fn setup_mail_takes_the_fye_pick_and_stays_sealed() {
+    let h = harness(|_, _| {});
+    let id = h
+        .store
+        .upsert_message(&msg(
+            h.acct,
+            "ftb",
+            "ftb-thread",
+            "MyFTB Account Registration",
+            "Activate: https://ftb.example/activate?t=SECRETTOKEN",
+        ))
+        .unwrap();
+    assess_auth(&h.store, h.acct, id, true, vec![AuthKind::Verification]);
+    let item = |app: axum::Router| async move {
+        let body = body_json(
+            app.oneshot(authed("GET", "/client/v2/feed?destination=fye"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["message_id"] == id)
+            .cloned()
+    };
+    let row = item(h.app.clone()).await.expect("setup mail is in FYE");
+    assert_eq!(row["decision"]["auth"]["kinds"], serde_json::json!(["verification"]));
+    assert!(
+        !row.to_string().contains("SECRETTOKEN"),
+        "no body text on the feed row: {row}"
+    );
+    let sealed = body_json(
+        h.app
+            .clone()
+            .oneshot(authed("GET", "/client/sealed"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        sealed.as_array().unwrap().iter().any(|row| row["id"] == id),
+        "still on the Auth page"
+    );
+    let response = h
+        .app
+        .clone()
+        .oneshot(authed_json(
+            "PUT",
+            &format!("/client/sealed/{id}/verdict"),
+            serde_json::json!({"verdict": "mine"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(item(h.app.clone()).await.is_none(), "\"That was me\" lets go");
 }
 
 /// The owner's ruling lives on the server: `GET /client/sealed` serves it

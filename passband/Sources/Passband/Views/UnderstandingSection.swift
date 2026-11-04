@@ -630,7 +630,7 @@ private struct OriginBadge: View {
 }
 
 /// The receipts behind an entry: the senders it rests on, how many messages,
-/// and the newest of them a click from the reader.
+/// and one of them a click from the reader.
 private struct Receipts: View {
     let entry: MemoryEntry
     let open: (Int) -> Void
@@ -647,13 +647,19 @@ private struct Receipts: View {
                     }
                 }
             }
-            if let newest = entry.provenance.message_ids.max() {
+            if let first = entry.provenance.message_ids.first {
                 let n = entry.provenance.message_ids.count
                 Text(n == 1 ? "Resting on one message." : "Resting on \(UsageText.count(n)) messages.")
                     .font(Typo.micro).foregroundStyle(Palette.inkFaint)
-                Button(n == 1 ? "Open it" : "Open the newest") { open(newest) }
-                    .buttonStyle(.textAction)
-                    .font(Typo.micro)
+                // ANY ONE OF THEM, and labelled so. Message ids follow ingest,
+                // and a backfill ingests newest first, so the highest id is
+                // as likely the oldest mail as the newest. And not on the
+                // fixture stage, whose receipts point at mail it does not have.
+                if !FixtureMode.isEnabled {
+                    Button(n == 1 ? "Open it" : "Open a message") { open(first) }
+                        .buttonStyle(.textAction)
+                        .font(Typo.micro)
+                }
             }
         }
         .padding(Space.s14)

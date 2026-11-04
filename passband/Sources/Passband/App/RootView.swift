@@ -261,6 +261,9 @@ private struct ShellWatchers: View {
 
 struct MainShell: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Flow mode's hint as it is actually drawn, so the first-open hint's chip
+    /// sits clear above it rather than at a guessed height.
+    @State private var walkHintHeight: CGFloat = 0
     /// The readers on screen: the open thread, plus the one it is turning
     /// away from while an S is in flight (behind it, so it is drawn first).
     /// An undone S turns the other way, with the outgoing card on top.
@@ -497,7 +500,9 @@ struct MainShell: View {
                     // THE FIRST-OPEN HINT, outside the flight for the same reason
                     // as the walk's below, and lifted above it when both are up.
                     .overlay {
-                        ReaderHintLayer(cornerLift: store.walk != nil ? Space.scaled(84) : 0)
+                        ReaderHintLayer(
+                            cornerLift: store.walk != nil && walkHintHeight > 0
+                                ? walkHintHeight + Space.s10 : 0)
                     }
                     // THE SPACE WALK'S HINT, outside the flight: the emails fly
                     // under it and it holds still, which is what lets it read
@@ -507,6 +512,9 @@ struct MainShell: View {
                             // S works on every email of a walk but a walk of
                             // one, where there is nothing to skip to or past.
                             WalkHint(canSkip: store.threadQueue.count > 1)
+                                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                                    walkHintHeight = $0
+                                }
                                 .padding(.bottom, Space.scaled(18))
                                 .padding(.trailing, Space.s24)
                                 .transition(.opacity)

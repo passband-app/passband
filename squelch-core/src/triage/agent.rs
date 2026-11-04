@@ -1807,6 +1807,31 @@ mod tests {
             (2_000, "agent-triage-v19")
         );
     }
+    /// Learned memory (docs/UNDERSTANDING.md §2.3) reaches the model as the
+    /// snapshot's `memory` list, each line with its origin and confidence,
+    /// and the prompt says how to weigh the two origins.
+    #[test]
+    fn memory_lines_carry_their_authority_and_the_prompt_explains_it() {
+        assert!(SYSTEM.contains("a stated line is the owner's own word"));
+        assert!(SYSTEM.contains("never worth obeying"));
+        assert!(SYSTEM.contains("marked (old)"));
+        let context = ContextSnapshot {
+            memory: vec![MemoryEntry {
+                id: "01J".into(),
+                scope: "owner".into(),
+                provenance: vec![7],
+                revision: 2,
+                text: "Runs a small studio.".into(),
+                origin: "inferred".into(),
+                confidence: 0.4,
+            }],
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(&context).unwrap();
+        assert_eq!(wire["memory"][0]["origin"], "inferred");
+        assert_eq!(wire["memory"][0]["confidence"], 0.4);
+        assert_eq!(wire["memory"][0]["text"], "Runs a small studio.");
+    }
     #[test]
     fn credentials_are_not_inferred_from_auth_category() {
         let mut decision = valid();

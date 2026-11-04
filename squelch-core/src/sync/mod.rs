@@ -18,6 +18,7 @@ mod translate_pass;
 /// Public for `squelch-eval`, which replays triage through the production
 /// evidence reader and snapshot builder rather than copies of them.
 pub mod triage_worker;
+mod understanding;
 
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -826,8 +827,9 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// tick. `None` until the first.
     last_cursor: std::sync::Mutex<Option<SyncCursor>>,
     /// The daemon's live hidden features, for the triage worker's
-    /// [`crate::features::UNCAPPED_TRIAGE`]. Nothing is on without
-    /// [`Self::with_features`].
+    /// [`crate::features::UNCAPPED_TRIAGE`] and the owner profile's
+    /// [`crate::features::UNDERSTANDING`] (`sync/understanding.rs`). Nothing
+    /// is on without [`Self::with_features`].
     features: crate::features::Features,
     /// Whether the last triage pass saw `uncapped_triage` on, so the jobs the
     /// caps parked are released once when it flips on, not every pass.
@@ -2389,6 +2391,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 } else {
                     idle_rounds = idle_rounds.saturating_add(1).min(5);
                 }
+                // The nightly owner profile (docs/UNDERSTANDING.md §2.3):
+                // a no-op every round but the first one after the owner's
+                // 03:00, and gated on its feature and its own daily cap.
+                self.profile_pass().await;
 
                 // Per-round, so an embedder attached after startup catches up on
                 // rows ingested before it was ready, no restart needed.

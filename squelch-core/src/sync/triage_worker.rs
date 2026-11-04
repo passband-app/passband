@@ -544,12 +544,13 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             Utc::now(),
             self.store.owner_zone(self.account_id).unwrap_or_default(),
         );
-        let input = snapshot(
+        let mut input = snapshot(
             &context,
             job,
             config.context.initial_thread_messages,
             &clock,
         );
+        input.memory = self.memory_for(&context.message.thread_id, &context.message.from_addr);
         // A new account triages the jobs somebody is waiting on at the
         // onboarding effort for its first days (`Stage2Config::effort_for_job`):
         // the store's foreground lane, and nothing else. A person's

@@ -3306,7 +3306,8 @@ fn cmd_serve(
             let sync_metrics = sync_metrics.clone();
             let sync_budget = gmail_budget.clone();
             let vectors_dirty = vectors_dirty.clone();
-            // The human door's live feature set, for `uncapped_triage`.
+            // The human door's live feature set, for `uncapped_triage` and
+            // `understanding` (the profile pass and triage's memory lines).
             let features = api_state.features().clone();
             // Taken before the spawn and dropped by the task, so readiness
             // tracks the engine and not the intention to start one.

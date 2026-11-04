@@ -450,14 +450,21 @@ or more), attention, corrections, and the fatigue score. Attention and the
 fatigue score are one `SenderMeasurer` result, the purge flow's own, so the
 two never disagree. It is not email text and it is not a floor.
 
-A recount is bounded. `received_count` and the arrival dates are one
+A recount is bounded. `received_count` and the first arrival are one
 index-only walk of `idx_messages_from_received`, less the address's sealed
-mail, which is counted from partial indexes over the account's sealed rows
-(`idx_triage_sealed`, `idx_agent_decisions_sealed`,
-`idx_agent_state_restricted`, `idx_agent_corrections_sealed`), so the count
-follows the listings' rule without a probe per message. The last arrival is
-the newest mail the listings would show; the first may be a sealed message. Threads, replies, the name and the field corrections read only the
-address's newest 500 inbound messages. A recount whose received, sent and
+mail, so the count follows the listings' rule. The sealed count is taken one
+of two ways by the sender's size:
+
+- Under 2,000 inbound messages, each of the sender's messages is probed with
+  `known_sealed_mail_sql!`.
+- At or over 2,000, it reads partial indexes over the account's sealed rows
+  (`idx_triage_sealed`, `idx_agent_decisions_sealed`,
+  `idx_agent_state_restricted`, `idx_agent_corrections_sealed`), so a large
+  sender pays for the account's sealed mail rather than a probe per message.
+
+The last arrival is the newest mail the listings would show; the first may be
+a sealed message. Threads, replies, the name and the field corrections read
+only the address's newest 500 inbound messages. A recount whose received, sent and
 initiated counts have not changed skips those reads and refreshes only
 attention, fatigue and the monthly rate, unless its mark is full
 (`relationship_dirty.full`) or the nightly walk is running. On a synthetic
@@ -473,7 +480,9 @@ These add an address to `relationship_dirty`:
 - not-spam;
 - the Sent-history contacts harvest;
 - the attention POST;
-- a decision or access check that seals a message, and any owner correction.
+- a decision or access check that seals or unseals a message (the commit
+  compares known-sealed before and after it writes), and any owner
+  correction.
 
 Marks of the last kind, and the thread-sender marks, are full: the recount
 skips its unchanged-counts shortcut. The daemon has no mark-as-spam or
@@ -523,8 +532,9 @@ Known limits:
 - The recent window uses `known_sealed_mail_sql!`, so mail whose access check
   is pending counts. The dirty set drains before the triage pass, so a fresh
   arrival is always pending when its mark drains. A decision or access check
-  that seals a message, and any owner correction, marks the sender for a full
-  recount, so a sealed message leaves the threads within a round. The
+  that seals or unseals a message, and any owner correction, marks the sender
+  for a full recount, so the message leaves or rejoins the count and threads
+  within a round. The
   attention columns use the purge flow's strict statements.
 - `sent_count` and `sent_last_at` are the contacts row's, so a recipient the
   contacts seed filtered out has initiated threads but a zero sent count.

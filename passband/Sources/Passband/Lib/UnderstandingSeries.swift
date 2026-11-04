@@ -98,7 +98,11 @@ struct UnderstandingSeries: Equatable {
 
         // The strip's senders, oldest first, spread across it so two new
         // senders with the same count do not stack into one dot.
-        let arrivedRows = response.rows.filter { Self.isArrived($0, cut: arrivedCut) }
+        // ONLY PEOPLE WHO WRITE: the ledger also has a row for everyone the
+        // owner wrote to, and someone who has never sent anything has no mail
+        // a month to place and no reads to rank.
+        let drawn = response.rows.filter { $0.received_count > 0 }
+        let arrivedRows = drawn.filter { Self.isArrived($0, cut: arrivedCut) }
             .sorted { (UnderstandingText.date($0.received_first_at) ?? now) < (UnderstandingText.date($1.received_first_at) ?? now) }
         var stripX: [String: Double] = [:]
         let lo = log(Self.stripFloor * 1.15), hi = log(Self.axisFloor * 0.85)
@@ -108,7 +112,7 @@ struct UnderstandingSeries: Equatable {
         }
 
         var points: [PeoplePoint] = []
-        for row in response.rows {
+        for row in drawn {
             let (measure, y) = Self.ladder(row)
             let region: PeopleRegion
             let x: Double
@@ -137,10 +141,12 @@ struct UnderstandingSeries: Equatable {
 
     // MARK: - placement
 
+    /// New means a first message inside the window. A row with no first
+    /// sighting is not new: it is placed by its rate like any other, at the
+    /// once-a-month floor when it has none.
     static func isArrived(_ row: RelationshipRow, cut: Date) -> Bool {
-        if let first = UnderstandingText.date(row.received_first_at) { return first > cut }
-        // No first sighting and no rate: nothing to place it by.
-        return row.received_per_month == nil
+        guard let first = UnderstandingText.date(row.received_first_at) else { return false }
+        return first > cut
     }
 
     /// The point's height and what it stands on.

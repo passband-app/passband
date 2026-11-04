@@ -97,10 +97,13 @@ struct UnderstandingSeriesTests {
             row("new-ignored", perMonth: nil, firstDaysAgo: 6, attention: 2, received: 3),
             row("no-sighting", perMonth: nil, firstDaysAgo: 0).withFirst(nil),
             row("old", perMonth: 4, firstDaysAgo: 30),
+            row("sent-only", perMonth: nil, firstDaysAgo: 0, received: 0).withFirst(nil),
         ])
         expect(point(s, "new-answered")?.region == .arrived, "first mail 3 days ago is just arrived, even answered")
         expect(point(s, "new-ignored")?.region == .arrived, "first mail 6 days ago is just arrived")
-        expect(point(s, "no-sighting")?.region == .arrived, "no first sighting and no rate cannot be placed: the strip")
+        expect(point(s, "no-sighting").map { $0.region != .arrived && $0.x == UnderstandingSeries.axisFloor } == true,
+            "no first sighting is not new: placed at the once-a-month floor")
+        expect(point(s, "sent-only") == nil, "someone the owner only wrote to is not on the chart")
         expect(point(s, "old")?.region != .arrived, "30 days old is placed by what it does")
         let strip = s.points.filter { $0.region == .arrived }.map(\.x)
         expect(strip.allSatisfy { $0 > UnderstandingSeries.stripFloor && $0 < UnderstandingSeries.axisFloor },

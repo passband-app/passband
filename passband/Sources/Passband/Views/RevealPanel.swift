@@ -78,16 +78,6 @@ struct RevealPanel: View {
                 // frame sizes itself to its document and hands the wheel to
                 // this ScrollView (PassthroughWebView), so there is one scroll.
                 .frame(maxHeight: .infinity)
-
-                HStack {
-                    Text("cleared from memory when you close this.")
-                    Spacer()
-                    Text("audited server-side")
-                }
-                .font(Typo.micro)
-                .foregroundStyle(Palette.inkFaintest)
-                .padding(.horizontal, Space.modal)
-                .padding(.vertical, Space.s10)
             }
             // A READING SURFACE, NOT A DIALOG: the panel runs the height of the
             // page it floats over. On a Mac it is as wide as the reader's own

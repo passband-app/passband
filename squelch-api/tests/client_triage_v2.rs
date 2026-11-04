@@ -11,7 +11,11 @@ use squelch_core::triage::decision::*;
 use tower::ServiceExt;
 
 fn assess(store: &squelch_core::store::SqliteStore, account: i64, id: i64, restricted: bool) {
-    let kinds = if restricted { vec![AuthKind::Otp] } else { vec![] };
+    let kinds = if restricted {
+        vec![AuthKind::Otp]
+    } else {
+        vec![]
+    };
     assess_auth(store, account, id, restricted, kinds);
 }
 
@@ -756,7 +760,10 @@ async fn setup_mail_takes_the_fye_pick_and_stays_sealed() {
             .cloned()
     };
     let row = item(h.app.clone()).await.expect("setup mail is in FYE");
-    assert_eq!(row["decision"]["auth"]["kinds"], serde_json::json!(["verification"]));
+    assert_eq!(
+        row["decision"]["auth"]["kinds"],
+        serde_json::json!(["verification"])
+    );
     assert!(
         !row.to_string().contains("SECRETTOKEN"),
         "no body text on the feed row: {row}"
@@ -784,7 +791,10 @@ async fn setup_mail_takes_the_fye_pick_and_stays_sealed() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(item(h.app.clone()).await.is_none(), "\"That was me\" lets go");
+    assert!(
+        item(h.app.clone()).await.is_none(),
+        "\"That was me\" lets go"
+    );
 }
 
 /// The owner's ruling lives on the server: `GET /client/sealed` serves it

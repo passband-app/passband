@@ -448,8 +448,18 @@ the contacts row's sent count, threads the owner started, inbound threads and
 how many the owner later wrote into, the median reply time (3 replied threads
 or more), attention, corrections, and the fatigue score. Attention and the
 fatigue score are one `SenderMeasurer` result, the purge flow's own, so the
-two never disagree. It is not email
-text and it is not a floor.
+two never disagree. It is not email text and it is not a floor.
+
+A recount is bounded. `received_count` and the arrival dates are one
+index-only walk of `idx_messages_from_received`, so the count includes sealed
+mail. Threads, replies, the name and the field corrections read only the
+address's newest 500 inbound messages. A recount whose received, sent and
+initiated counts have not changed skips those reads and refreshes only
+attention, fatigue and the monthly rate, unless its mark is full
+(`relationship_dirty.full`) or the nightly walk is running. On a synthetic
+240,000-message store with one 40,000-message sender, a full recount takes
+about 36 ms and an unchanged one about 33 ms, of which about 28 ms is the
+purge flow's `SenderMeasurer`.
 
 Ingest, not-spam and the attention POST add the address to
 `relationship_dirty`. Every refine round, before the triage pass, recomputes

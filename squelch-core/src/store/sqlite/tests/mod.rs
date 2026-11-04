@@ -18,6 +18,7 @@ mod notify;
 mod people;
 mod reading_senders;
 mod relationships;
+mod relationships_bench;
 mod renotify;
 mod retention;
 mod rules;

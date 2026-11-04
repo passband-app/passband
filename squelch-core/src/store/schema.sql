@@ -2642,10 +2642,10 @@ CREATE TABLE IF NOT EXISTS relationships (
     -- the list read needs no join. NOT `senders.display_name`, which takes a
     -- name from sealed mail too (see `people.rs`).
     display_name      TEXT,
-    -- INBOUND, counted the way the listings count: inbound, not provider spam,
-    -- not known to be sealed (`known_sealed_mail_sql!`; why not the strict
-    -- macro is in `relationships`), not the owner's own mail, and NOT THE
-    -- ARCHIVE TIER, which is absent from every count.
+    -- INBOUND: not the owner's own mail, not provider spam, and NOT THE
+    -- ARCHIVE TIER, which is absent from every count. A bare index count
+    -- (`idx_messages_from_received`), so it includes sealed mail: excluding
+    -- it costs a probe per row of a sender's whole history.
     received_count    INTEGER NOT NULL,
     -- Off `messages.received_at`, NEVER `senders.first_seen`. The directory's
     -- date is the first SIGHTING, and the backfill walks newest first, so it
@@ -2662,8 +2662,11 @@ CREATE TABLE IF NOT EXISTS relationships (
     -- Threads whose FIRST message is the owner's and names this address as a
     -- recipient (`message_recipients`): conversations the owner started.
     initiated_count   INTEGER NOT NULL,
-    -- REPLIES: inbound threads from this address, and those of them that
-    -- carry a LATER owner-sent message.
+    -- REPLIES, over the address's newest 500 inbound messages not known to
+    -- be sealed: the threads they are in, and those of them that carry a
+    -- LATER owner-sent message. Bounded because a firehose sender is recounted
+    -- every round it is marked; the recent rate is how the owner treats them
+    -- now.
     inbound_threads   INTEGER NOT NULL,
     replied_threads   INTEGER NOT NULL,
     -- From the address first writing into a thread to the owner's first
@@ -2681,7 +2684,8 @@ CREATE TABLE IF NOT EXISTS relationships (
     opened_count      INTEGER NOT NULL,
     median_read_fraction REAL,                -- sender_fatigue's read fraction, NULL when none measurable
     link_clicks       INTEGER NOT NULL,
-    -- `triage_feedback` plus `agent_triage_corrections` rows on this address.
+    -- `triage_feedback` rows on this address plus `agent_triage_corrections`
+    -- rows on its newest 500 messages.
     corrections       INTEGER NOT NULL,
     -- `sender_fatigue::score` as the Reading purge computes it for this
     -- address (the same `SenderMeasurer`), scaled to 0..1, with its reasons as
@@ -2707,5 +2711,10 @@ CREATE INDEX IF NOT EXISTS idx_relationships_addr_nocase
 CREATE TABLE IF NOT EXISTS relationship_dirty (
     account_id INTEGER NOT NULL,
     addr       TEXT NOT NULL,
+    -- 1 when the change behind the mark is one the counts cannot see (a
+    -- message sealed or corrected, mail deleted or moved to spam), so the
+    -- recount must walk the recent window rather than take the
+    -- unchanged-counts shortcut. Never lowered by a later plain mark.
+    full       INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(account_id, addr)
 );

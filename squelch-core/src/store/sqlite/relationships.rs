@@ -9,25 +9,46 @@
 //! graph the agent door was never handed. Nothing here is reachable from a
 //! `/mcp` tool.
 //!
-//! EVERY RECOMPUTE IS INDEXED PROBES ON ONE ADDRESS, never a directory scan,
-//! the rule `people.rs` states for the contact card. The inbound statements
-//! pin `idx_messages_from_nocase` with `INDEXED BY` (see
-//! `rules::SENDER_RULE_DIGEST_SQL` for why the planner cannot be left to
-//! choose), the thread probes ride `idx_messages_thread_received`, Sent
-//! ride `idx_message_recipients_addr`, and the fatigue score is the Reading
-//! purge's own `SenderMeasurer`, whose bounds that module documents (bodies
-//! are read only to count words, by primary key, at most
-//! `reading_senders::DWELL_SAMPLE_CAP` per address).
+//! EVERY RECOMPUTE IS BOUNDED AND INDEXED, never a directory scan and never
+//! a walk of one sender's whole history, because a sender is recounted every
+//! round it is marked and a notifications firehose is marked every round. Off
+//! `idx_messages_from_received` (account, address, arrival, and the three
+//! flags the count filters on):
+//!
+//! - `received_count` and the first and last arrival are ONE index-only walk:
+//!   no table row, no per-row probe.
+//! - Everything that needs a row or a probe (threads and replies, the name,
+//!   corrections) reads only the address's newest [`RECENT_WINDOW`] inbound
+//!   messages, which are the index's own tail. The reply rate over the last
+//!   500 messages is the better signal anyway: it is how the owner treats
+//!   them now.
+//! - A recount whose received, sent and initiated counts are UNCHANGED since
+//!   the stored row skips those walks altogether and refreshes only what moves
+//!   without new mail (attention, fatigue, the monthly rate), unless the mark
+//!   asked for a full recount (`relationship_dirty.full`, set by the marks
+//!   that change a row without changing its counts) or the nightly walk is
+//!   running.
+//! - Thread replies ride `idx_messages_thread_received`, initiations
+//!   `idx_message_recipients_addr`, and the fatigue score is the Reading
+//!   purge's own `SenderMeasurer`, whose bounds that module documents.
+//!
+//! Measured on a synthetic 240,000-message store with one 40,000-message
+//! sender (`tests::relationships_bench`): see the numbers in PR #718.
 //!
 //! THE TRAPS, each a rule below:
 //!
 //! - DATES COME OFF `messages.received_at`, never `senders.first_seen`. The
 //!   backfill walks newest first, so the directory's first sighting dates a
 //!   ten-year correspondent to last Tuesday.
-//! - INBOUND IS THE LISTINGS' UNIVERSE: not the owner's own mail (by
-//!   authorship, `own_mail_sql!`), not provider spam, not KNOWN to be sealed
+//! - INBOUND is not the owner's own mail, not provider spam, and not the
+//!   archive tier, which is absent from every count. `received_count` stops
+//!   there, so it is a bare index count and INCLUDES sealed mail: a count is
+//!   all that leaves here, and excluding sealed mail costs a probe per row.
+//!   The bounded window also leaves out mail KNOWN to be sealed
 //!   (`known_sealed_mail_sql!`: a shop's login codes are not its newsletter),
-//!   and not the archive tier, which is absent from every count.
+//!   so threads, replies and the name never rest on one. "Not the owner's
+//!   own" is `is_sent = 0` here, and not `own_mail_sql!`: the account's own
+//!   address never has a row, and for any other address the two agree.
 //! - PENDING MAIL COUNTS, the one place this module takes the looser of the
 //!   two sealed macros, and the reason is the reply itself. Ingesting the
 //!   owner's reply re-queues the thread it lands in, so at the moment the
@@ -75,35 +96,53 @@ pub const RECOMPUTE_CHUNK: usize = 25;
 /// recompute, rather than by one round that holds the lane for seconds.
 pub const DIRTY_DRAIN_MAX: usize = 200;
 
-/// The listings' inbound universe for ONE address, over `messages m` and its
-/// `triage t` row: see the module header for each exclusion. `?1` account,
-/// `?2` address. A macro so the four statements over it cannot drift apart.
+/// How many of an address's newest inbound messages the row-reading walks
+/// (threads, replies, name, corrections) look at.
+pub const RECENT_WINDOW: i64 = 500;
+
+/// One address's inbound mail, over `messages m`, through the covering index:
+/// `?1` account, `?2` address. Everything here is a column of the index, so
+/// a walk over it never reads a table row.
 macro_rules! inbound_sql {
     () => {
+        " FROM messages m INDEXED BY idx_messages_from_received
+          WHERE m.account_id = ?1
+            AND m.from_addr = ?2 COLLATE NOCASE
+            AND m.is_sent = 0 AND m.is_spam = 0 AND m.is_archive = 0 "
+    };
+}
+
+/// The address's newest [`RECENT_WINDOW`] inbound messages that are not
+/// known to be sealed, newest first: the index's tail, a triage row and the
+/// sealed probes for each of at most 500 rows. A subquery other statements
+/// select from, aliased `w`, carrying `id`, `thread_id`, `received_at` and
+/// `from_name`.
+macro_rules! recent_sql {
+    () => {
         concat!(
-            " FROM messages m INDEXED BY idx_messages_from_nocase
+            "(SELECT m.id AS id, m.thread_id AS thread_id, m.received_at AS received_at,
+                     m.from_name AS from_name
+              FROM messages m INDEXED BY idx_messages_from_received
               LEFT JOIN triage t ON t.message_id = m.id
               WHERE m.account_id = ?1
                 AND m.from_addr = ?2 COLLATE NOCASE
-                AND NOT ",
-            own_mail_sql!(),
-            " AND m.is_spam = 0 AND m.is_archive = 0
+                AND m.is_sent = 0 AND m.is_spam = 0 AND m.is_archive = 0
                 AND NOT ",
             known_sealed_mail_sql!(),
-            " "
+            " ORDER BY m.received_at DESC LIMIT 500) w"
         )
     };
 }
 
-/// Count, first and last arrival.
+/// Count, first and last arrival: one index-only walk.
 pub(crate) const INBOUND_SQL: &str = concat!(
     "SELECT COUNT(*), MIN(m.received_at), MAX(m.received_at)",
     inbound_sql!()
 );
 
-/// One row per inbound thread from the address: when they first wrote into
-/// it, and the owner's first SENT message in it after that, if any. The inner
-/// group is the from-index walk; each outer probe is one seek on
+/// One row per thread in the recent window: when the address first wrote
+/// into it inside the window, and the owner's first SENT message in it after
+/// that, if any. Each reply probe is one seek on
 /// `idx_messages_thread_received`.
 pub(crate) const THREADS_SQL: &str = concat!(
     "SELECT i.first_at,
@@ -111,17 +150,16 @@ pub(crate) const THREADS_SQL: &str = concat!(
               WHERE s.account_id = ?1 AND s.thread_id = i.thread_id
                 AND s.is_sent = 1 AND s.is_archive = 0
                 AND s.received_at > i.first_at)
-     FROM (SELECT m.thread_id AS thread_id, MIN(m.received_at) AS first_at",
-    inbound_sql!(),
-    " GROUP BY m.thread_id) i"
+     FROM (SELECT w.thread_id AS thread_id, MIN(w.received_at) AS first_at FROM ",
+    recent_sql!(),
+    " GROUP BY w.thread_id) i"
 );
 
-/// The newest name on the address's counted mail.
-const NAME_SQL: &str = concat!(
-    "SELECT m.from_name",
-    inbound_sql!(),
-    " AND trim(COALESCE(m.from_name, '')) != ''
-      ORDER BY m.received_at DESC LIMIT 1"
+/// The newest name in the recent window.
+pub(crate) const NAME_SQL: &str = concat!(
+    "SELECT w.from_name FROM ",
+    recent_sql!(),
+    " WHERE trim(COALESCE(w.from_name, '')) != '' LIMIT 1"
 );
 
 /// Threads the owner started by writing to the address: a sent message that
@@ -142,23 +180,31 @@ pub(crate) const INITIATED_SQL: &str = "SELECT COUNT(DISTINCT m.thread_id)
                     ORDER BY f.received_at, f.id LIMIT 1)";
 
 /// The owner's corrections on the address: the feedback table by its NOCASE
-/// sender index, and field corrections by message, reached through the
-/// from-index walk so the corrections table is only ever probed by key.
-/// `CROSS JOIN` because SQLite keeps its left table outer for that join and
-/// no other: left to choose, the planner walked every correction of the
-/// account and probed each one's message.
-pub(crate) const CORRECTIONS_SQL: &str = "SELECT
+/// sender index (an index-only count), and field corrections on the recent
+/// window's messages, each probed by key.
+pub(crate) const CORRECTIONS_SQL: &str = concat!(
+    "SELECT
        (SELECT COUNT(*) FROM triage_feedback
          WHERE account_id = ?1 AND sender = ?2 COLLATE NOCASE)
-     + (SELECT COUNT(*) FROM messages m INDEXED BY idx_messages_from_nocase
-          CROSS JOIN agent_triage_corrections c
-            ON c.account_id = m.account_id AND c.message_id = m.id
-         WHERE m.account_id = ?1 AND m.from_addr = ?2 COLLATE NOCASE)";
+     + (SELECT COUNT(*) FROM ",
+    recent_sql!(),
+    " CROSS JOIN agent_triage_corrections c
+            ON c.account_id = ?1 AND c.message_id = w.id)"
+);
 
 /// The Sent-derived contacts row, `is_known_contact`'s source.
 const CONTACT_SQL: &str = "SELECT sent_count, last_sent_at, display_name FROM contacts
      WHERE account_id = ?1 AND addr = ?2 COLLATE NOCASE
      ORDER BY sent_count DESC LIMIT 1";
+
+/// The next `?3` addresses after `?2` in the full walk's universe.
+pub(crate) const CHUNK_SQL: &str = "SELECT a FROM (
+         SELECT lower(trim(addr)) AS a FROM senders WHERE account_id = ?1
+         UNION SELECT lower(trim(addr)) FROM contacts WHERE account_id = ?1
+         UNION SELECT addr FROM message_recipients WHERE account_id = ?1
+         UNION SELECT addr FROM relationships WHERE account_id = ?1)
+     WHERE a > ?2 AND a != ''
+     ORDER BY a LIMIT ?3";
 
 /// Columns of a stored row, in [`row_from_sql`]'s order.
 const ROW_COLUMNS: &str = "addr, display_name, received_count, received_first_at,
@@ -317,8 +363,9 @@ impl<'c> Recomputer<'c> {
         })
     }
 
-    /// Recount `addr` and write or remove its row.
-    fn recompute(&mut self, addr: &str) -> Result<()> {
+    /// Recount `addr` and write or remove its row. `full` refuses the
+    /// unchanged-counts shortcut.
+    fn recompute(&mut self, addr: &str, full: bool) -> Result<()> {
         let addr = sender_key(addr);
         if addr.is_empty() {
             return Ok(());
@@ -326,11 +373,8 @@ impl<'c> Recomputer<'c> {
         if addr == self.self_addr {
             return self.delete(&addr);
         }
-        match self.count(&addr)? {
-            Some((name, counts)) => {
-                let row = relationship::derive(&addr, name, counts, self.now);
-                write_row(self.conn, self.account_id, &row)
-            }
+        match self.count(&addr, full)? {
+            Some(row) => write_row(self.conn, self.account_id, &row),
             None => self.delete(&addr),
         }
     }
@@ -342,9 +386,8 @@ impl<'c> Recomputer<'c> {
         Ok(())
     }
 
-    /// Everything counted for `addr`, or `None` when it has no live mail
-    /// either way.
-    fn count(&mut self, addr: &str) -> Result<Option<(Option<String>, Counts)>> {
+    /// The row for `addr`, or `None` when it has no live mail either way.
+    fn count(&mut self, addr: &str, full: bool) -> Result<Option<Relationship>> {
         let conn = self.conn;
         let account = self.account_id;
         let (received_count, first, last): (i64, Option<String>, Option<String>) = conn
@@ -378,6 +421,29 @@ impl<'c> Recomputer<'c> {
             return Ok(None);
         }
 
+        // THE PURGE FLOW'S OWN MEASUREMENT, never a second one: the score a
+        // sender is shown and swept for is the score the ledger stores, and
+        // the attention columns are the counts that score was computed from.
+        // Always refreshed: opens, dwell and the window move without new mail.
+        let measured = self.measurer.measure(addr)?;
+        let signals = measured.signals;
+        counts.attention = AttentionCounts {
+            rows: signals.received,
+            opened: signals.opened,
+            median_read_fraction: signals.median_read_fraction,
+            link_clicks: signals.clicks,
+        };
+        counts.fatigue = (measured.score, measured.reasons);
+
+        // THE SHORTCUT: nothing arrived and nothing was sent either way since
+        // the stored row, so the window walks would find what they found.
+        if !full
+            && let Some(stored) = relationship_conn(conn, account, addr)?
+            && relationship::counts_unchanged(&stored, &counts)
+        {
+            return Ok(Some(relationship::refresh(stored, counts, self.now)));
+        }
+
         counts.threads = conn
             .prepare_cached(THREADS_SQL)?
             .query_map(params![account, addr], |r| {
@@ -396,19 +462,6 @@ impl<'c> Recomputer<'c> {
         counts.corrections = conn
             .prepare_cached(CORRECTIONS_SQL)?
             .query_row(params![account, addr], |r| r.get(0))?;
-        // THE PURGE FLOW'S OWN MEASUREMENT, never a second one: the score a
-        // sender is shown and swept for is the score the ledger stores, and
-        // the attention columns are the counts that score was computed from.
-        let measured = self.measurer.measure(addr)?;
-        let signals = measured.signals;
-        counts.attention = AttentionCounts {
-            rows: signals.received,
-            opened: signals.opened,
-            median_read_fraction: signals.median_read_fraction,
-            link_clicks: signals.clicks,
-        };
-        counts.fatigue = (measured.score, measured.reasons);
-
         let sender_name: Option<String> = conn
             .prepare_cached(NAME_SQL)?
             .query_row(params![account, addr], |r| r.get(0))
@@ -418,7 +471,7 @@ impl<'c> Recomputer<'c> {
             .flatten()
             .map(|n| n.trim().to_string())
             .find(|n| !n.is_empty());
-        Ok(Some((name, counts)))
+        Ok(Some(relationship::derive(addr, name, counts, self.now)))
     }
 }
 
@@ -552,7 +605,7 @@ impl SqliteStore {
     /// Recount one address now, whatever the dirty set says.
     pub fn recompute_relationship(&self, account_id: AccountId, addr: &str) -> Result<()> {
         let conn = self.lock()?;
-        Recomputer::new(&conn, account_id, Utc::now())?.recompute(addr)
+        Recomputer::new(&conn, account_id, Utc::now())?.recompute(addr, true)
     }
 
     /// Recompute up to `max` dirty addresses, [`RECOMPUTE_CHUNK`] per lock
@@ -563,19 +616,21 @@ impl SqliteStore {
         while drained < max {
             let conn = self.lock()?;
             let take = RECOMPUTE_CHUNK.min(max - drained);
-            let addrs: Vec<String> = conn
+            let addrs: Vec<(String, bool)> = conn
                 .prepare_cached(
-                    "SELECT addr FROM relationship_dirty WHERE account_id = ?1
+                    "SELECT addr, full FROM relationship_dirty WHERE account_id = ?1
                      ORDER BY addr LIMIT ?2",
                 )?
-                .query_map(params![account_id, take as i64], |r| r.get(0))?
+                .query_map(params![account_id, take as i64], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?
                 .collect::<std::result::Result<_, _>>()?;
             if addrs.is_empty() {
                 break;
             }
             let mut recomputer = Recomputer::new(&conn, account_id, Utc::now())?;
-            for addr in &addrs {
-                recomputer.recompute(addr)?;
+            for (addr, full) in &addrs {
+                recomputer.recompute(addr, *full)?;
                 conn.prepare_cached(
                     "DELETE FROM relationship_dirty WHERE account_id = ?1 AND addr = ?2",
                 )?
@@ -608,23 +663,17 @@ impl SqliteStore {
     ) -> Result<Option<String>> {
         let conn = self.lock()?;
         let addrs: Vec<String> = conn
-            .prepare_cached(
-                "SELECT a FROM (
-                     SELECT lower(trim(addr)) AS a FROM senders WHERE account_id = ?1
-                     UNION SELECT lower(trim(addr)) FROM contacts WHERE account_id = ?1
-                     UNION SELECT addr FROM message_recipients WHERE account_id = ?1
-                     UNION SELECT addr FROM relationships WHERE account_id = ?1)
-                 WHERE a > ?2 AND a != ''
-                 ORDER BY a LIMIT ?3",
-            )?
+            .prepare_cached(CHUNK_SQL)?
             .query_map(
                 params![account_id, after.unwrap_or(""), max.max(1) as i64],
                 |r| r.get(0),
             )?
             .collect::<std::result::Result<_, _>>()?;
         let mut recomputer = Recomputer::new(&conn, account_id, Utc::now())?;
+        // The nightly walk always counts in full: it is what catches every
+        // change no mark saw.
         for addr in &addrs {
-            recomputer.recompute(addr)?;
+            recomputer.recompute(addr, true)?;
         }
         Ok(if addrs.len() < max.max(1) {
             None

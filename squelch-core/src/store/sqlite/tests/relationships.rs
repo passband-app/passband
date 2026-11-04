@@ -4,8 +4,8 @@
 
 use super::super::reading_senders::SenderMeasurer;
 use super::super::relationships::{
-    CORRECTIONS_SQL, INBOUND_SQL, INITIATED_SQL, RELATIONSHIPS_BACKFILL_KEY, RelationshipSort,
-    THREADS_SQL,
+    CORRECTIONS_SQL, INBOUND_SQL, INITIATED_SQL, NAME_SQL, RECENT_WINDOW,
+    RELATIONSHIPS_BACKFILL_KEY, RelationshipSort, THREADS_SQL,
 };
 use super::super::*;
 use super::support::*;
@@ -106,7 +106,8 @@ fn inbound_counts_the_listings_mail_and_dates_it_from_the_messages() {
             .received_at(days_ago(days))
             .seed(&store);
     }
-    // None of these is mail the listings would show, so none is counted.
+    // Spam and the archive tier are never counted. Sealed mail is in the
+    // bare count, and in nothing that reads rows (threads, replies, name).
     triaged(acct, "spam", "spam")
         .from(DAN)
         .is_spam(true)
@@ -132,15 +133,15 @@ fn inbound_counts_the_listings_mail_and_dates_it_from_the_messages() {
         .unwrap();
     let row = store.relationship(acct, DAN).unwrap().expect("a row");
     assert_eq!(row.addr, DAN, "keyed by the lowercased address");
-    assert_eq!(row.received_count, 3);
+    assert_eq!(row.received_count, 4, "three ordinary, one sealed");
     let first = row.received_first_at.unwrap();
     assert!((first - days_ago(300)).num_minutes().abs() < 5, "{first}");
     let last = row.received_last_at.unwrap();
-    assert!((last - days_ago(20)).num_minutes().abs() < 5, "{last}");
+    assert!((last - days_ago(4)).num_minutes().abs() < 5, "{last}");
     assert_eq!(row.display_name.as_deref(), Some("Dan Smith"));
-    assert_eq!(row.inbound_threads, 3);
-    // Three mails over three hundred days.
-    assert_eq!(row.received_per_month, Some(0.3));
+    assert_eq!(row.inbound_threads, 3, "the sealed thread is not one");
+    // Four mails over three hundred days.
+    assert_eq!(row.received_per_month, Some(0.4));
 }
 
 #[test]
@@ -555,17 +556,33 @@ fn every_per_address_statement_is_an_indexed_probe() {
             .map(|line| line.unwrap())
             .collect()
     };
-    for sql in [INBOUND_SQL, THREADS_SQL, CORRECTIONS_SQL] {
+    for sql in [INBOUND_SQL, THREADS_SQL, NAME_SQL, CORRECTIONS_SQL] {
         let plan = plan(sql);
         assert!(
             plan.iter().any(|l| l.starts_with("SEARCH m USING")
-                && l.contains("idx_messages_from_nocase (account_id=? AND from_addr=?)")),
+                && l.contains("idx_messages_from_received (account_id=? AND from_addr=?)")),
             "walked instead of seeking\n{sql}\n{plan:#?}"
         );
         assert!(
             !plan.iter().any(|l| l.starts_with("SCAN m")),
             "a scan of messages\n{sql}\n{plan:#?}"
         );
+        // The newest window is the index's own tail, not a sort of the
+        // sender's whole history.
+        assert!(
+            !plan.iter().any(|l| l.contains("TEMP B-TREE FOR ORDER BY")),
+            "sorted the sender's mail\n{sql}\n{plan:#?}"
+        );
+    }
+    // The count is index-only: no table row, no probe, per message.
+    let inbound = plan(INBOUND_SQL);
+    assert!(
+        inbound.len() == 1 && inbound[0].contains("COVERING INDEX"),
+        "{inbound:#?}"
+    );
+    // Every walk that reads rows is bounded to the recent window.
+    for sql in [THREADS_SQL, NAME_SQL, CORRECTIONS_SQL] {
+        assert!(sql.contains(&format!("LIMIT {RECENT_WINDOW})")), "{sql}");
     }
     let corrections = plan(CORRECTIONS_SQL);
     assert!(
@@ -593,5 +610,49 @@ fn every_per_address_statement_is_an_indexed_probe() {
             .iter()
             .any(|l| l.starts_with("SCAN m") || l.starts_with("SCAN r")),
         "{initiated:#?}"
+    );
+}
+
+#[test]
+fn an_unchanged_recount_skips_the_window_but_refreshes_attention() {
+    let (store, acct) = store();
+    ledgers_since(&store, acct, 60, 60);
+    let id = inbound(&store, acct, "a", "a", DAN, 2);
+    store.recompute_relationship(acct, DAN).unwrap();
+    assert_eq!(
+        store.relationship(acct, DAN).unwrap().unwrap().corrections,
+        0
+    );
+
+    // A correction changes no count, so a plain mark's recount keeps the
+    // stored corrections; the open it also brings is refreshed.
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO agent_triage_corrections(account_id, message_id, field, value_json,
+                 source_revision, updated_at)
+             VALUES(?1, ?2, 'fye', 'true', 1, ?3)",
+            params![acct, id, Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+    store
+        .acknowledge_agent_message(acct, id, Utc::now())
+        .unwrap();
+    store.record_message_attention(acct, id, 5_000, 2).unwrap();
+    store.drain_relationship_dirty(acct, 10).unwrap();
+    let light = store.relationship(acct, DAN).unwrap().unwrap();
+    assert_eq!(light.corrections, 0, "the shortcut did not walk the window");
+    assert_eq!(
+        (light.opened_count, light.link_clicks),
+        (1, 2),
+        "attention moved"
+    );
+
+    // A full recount (the nightly walk, or a full mark) finds it.
+    store.recompute_all_relationships(acct).unwrap();
+    assert_eq!(
+        store.relationship(acct, DAN).unwrap().unwrap().corrections,
+        1
     );
 }

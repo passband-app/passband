@@ -486,6 +486,45 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // Whether a relationship mark asks for a full recount. 0 on any row an
+    // earlier build of the ledger wrote, which is the plain mark it was.
+    add_column_if_missing(
+        conn,
+        "relationship_dirty",
+        "full",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+
+    // THE RELATIONSHIP LEDGER'S PER-SENDER INDEX (`relationships`): one
+    // sender's mail in arrival order, COVERING the three flags its inbound
+    // count filters on. `idx_messages_from_nocase` orders a sender's rows by
+    // rowid, which the newest-first backfill makes OLDEST-first, so "the
+    // newest 500" off it was a sort of every row the sender ever sent, and
+    // the count a table lookup per row: on a 40,000-message notifications
+    // sender that was 70 ms a statement, every round it was marked. Here the
+    // count is an index-only walk and the newest 500 are the index's own
+    // tail. Here and not in schema.sql because it covers migrated columns
+    // (see `idx_triage_remind_at`). The first open after this ships builds it
+    // over the whole table, once.
+    if has_columns(
+        conn,
+        "messages",
+        &[
+            "from_addr",
+            "received_at",
+            "is_sent",
+            "is_spam",
+            "is_archive",
+        ],
+    )? {
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_from_received
+             ON messages(account_id, from_addr COLLATE NOCASE, received_at,
+                         is_sent, is_spam, is_archive)",
+            [],
+        )?;
+    }
+
     // stage2_usage grew `category` INSIDE ITS PRIMARY KEY. ALTER ADD COLUMN
     // cannot change a PK, and the bump upsert's ON CONFLICT(account_id, day,
     // category) needs that exact unique index, so an old table must be REBUILT —

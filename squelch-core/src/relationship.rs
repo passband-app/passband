@@ -71,8 +71,8 @@ pub struct Relationship {
     /// The lowercased bare address.
     pub addr: String,
     pub display_name: Option<String>,
-    /// Inbound, not spam, not sealed, not the archive tier, not the owner's
-    /// own mail: what the listings count.
+    /// Inbound, not spam, not the archive tier, not the owner's own mail: a
+    /// bare index count, which includes sealed mail.
     pub received_count: i64,
     /// Off `messages.received_at`, NEVER `senders.first_seen`: the backfill
     /// walks newest first, so the directory dates a ten-year correspondent to
@@ -86,6 +86,7 @@ pub struct Relationship {
     pub sent_last_at: Option<DateTime<Utc>>,
     /// Threads the owner opened by writing first, to this address.
     pub initiated_count: i64,
+    /// Threads among the address's newest 500 inbound messages.
     pub inbound_threads: i64,
     /// Of `inbound_threads`, the ones the owner wrote into later.
     pub replied_threads: i64,
@@ -100,8 +101,8 @@ pub struct Relationship {
     pub opened_count: i64,
     pub median_read_fraction: Option<f32>,
     pub link_clicks: i64,
-    /// `triage_feedback` plus `agent_triage_corrections` rows on this
-    /// address's mail.
+    /// `triage_feedback` rows on this address plus `agent_triage_corrections`
+    /// rows on its newest 500 messages.
     pub corrections: i64,
     /// `sender_fatigue::score` on its 0..=1 scale (the purge flow's 0..=100,
     /// divided by a hundred), `None` when the module declined to score.
@@ -201,6 +202,35 @@ pub fn derive(
 /// "known, and ignored".
 pub fn worth_a_row(counts: &Counts) -> bool {
     counts.received_count > 0 || counts.sent_count > 0 || counts.initiated_count > 0
+}
+
+/// Did nothing arrive and nothing go out since `stored` was counted? Then
+/// the walks over the recent window would find what they found, and the
+/// recount may take [`refresh`] instead.
+pub fn counts_unchanged(stored: &Relationship, counts: &Counts) -> bool {
+    stored.received_count == counts.received_count
+        && stored.sent_count == counts.sent_count
+        && stored.initiated_count == counts.initiated_count
+}
+
+/// `stored` with everything that moves WITHOUT new mail brought up to date:
+/// the arrival dates and the monthly rate (the clock moves), the attention
+/// columns and the fatigue score (opens, dwell and the window move), and the
+/// last send. Threads, replies, corrections and the name are kept as counted.
+pub fn refresh(mut stored: Relationship, counts: Counts, now: DateTime<Utc>) -> Relationship {
+    let fresh = derive(&stored.addr, stored.display_name.clone(), counts, now);
+    stored.received_first_at = fresh.received_first_at;
+    stored.received_last_at = fresh.received_last_at;
+    stored.received_per_month = fresh.received_per_month;
+    stored.sent_last_at = fresh.sent_last_at;
+    stored.attention_rows = fresh.attention_rows;
+    stored.opened_count = fresh.opened_count;
+    stored.median_read_fraction = fresh.median_read_fraction;
+    stored.link_clicks = fresh.link_clicks;
+    stored.fatigue_score = fresh.fatigue_score;
+    stored.fatigue_reasons = fresh.fatigue_reasons;
+    stored.computed_at = now;
+    stored
 }
 
 /// A reply gap the way a person says it: "40m", "3h", "2d". The agent reads

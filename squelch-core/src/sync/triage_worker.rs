@@ -316,6 +316,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             eprintln!("squelch: invalid triage configuration: {error}");
             return false;
         }
+        self.release_if_uncapped();
         let day = Utc::now().format("%Y-%m-%d").to_string();
         // The one definition of the history window, shared with the backfill
         // and the blank-body heal, so `sync.archive_days` cannot reach it.
@@ -374,6 +375,42 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         claimed
     }
 
+    /// The caps `job` is charged against: [`investigation_budget_limits`],
+    /// with the background and access lanes lifted while `uncapped_triage` is on.
+    fn budget_limits(&self, job: &AgentJob) -> Vec<(String, u32)> {
+        let limits = investigation_budget_limits(&self.config, job);
+        if self.features.enabled(crate::features::UNCAPPED_TRIAGE) {
+            lift_daily_caps(limits)
+        } else {
+            limits
+        }
+    }
+
+    /// When `uncapped_triage` has just come on, let every job the daily caps
+    /// parked run now instead of at midnight. Once per flip: a failed release
+    /// is tried again next pass.
+    pub(super) fn release_if_uncapped(&self) {
+        if !self.features.enabled(crate::features::UNCAPPED_TRIAGE) {
+            self.uncapped_seen.store(false, Ordering::Relaxed);
+            return;
+        }
+        if self.uncapped_seen.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        match self.store.release_budget_held_jobs(
+            self.account_id,
+            &self.config.triage.agent,
+            Utc::now(),
+        ) {
+            Ok(0) => {}
+            Ok(n) => eprintln!("squelch: uncapped_triage on: released {n} held triage jobs"),
+            Err(error) => {
+                self.uncapped_seen.store(false, Ordering::Relaxed);
+                eprintln!("squelch: uncapped_triage could not release held jobs: {error}");
+            }
+        }
+    }
+
     /// Runs one claimed job to a written state: committed, failed, retried
     /// or deferred. Dropped before that (the refine lane's future is dropped
     /// at shutdown, or when `run_lanes` ends the lanes), the job is handed
@@ -418,7 +455,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             );
             return;
         }
-        let limits = investigation_budget_limits(&self.config, job);
+        let limits = self.budget_limits(job);
         match self
             .store
             .reserve_agent_budget(self.account_id, day, &limits)
@@ -822,7 +859,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 return;
             }
         };
-        let limits = investigation_budget_limits(&self.config, job);
+        let limits = self.budget_limits(job);
         match self
             .store
             .reserve_agent_budget(self.account_id, day, &limits)
@@ -1416,6 +1453,22 @@ pub(super) fn is_provider_outage(kind: &str) -> bool {
             .is_some_and(|status| (500..600).contains(&status))
 }
 
+/// `limits` with the background and access caps raised out of reach, for a
+/// mailbox on `uncapped_triage`. Still charged, so the day's spend reads true.
+/// The total stays: it is a runaway breaker set far above any real day's mail
+/// (10,000), and without it one runaway would spend the month's LLM budget in
+/// a day and stop ALL triage, new mail included. The revisit and archive
+/// sub-caps stay too: neither is mail arriving.
+pub(crate) fn lift_daily_caps(mut limits: Vec<(String, u32)>) -> Vec<(String, u32)> {
+    use crate::triage::agent_config::{ACCESS_BUDGET_KEY, BACKGROUND_BUDGET_KEY};
+    for (key, cap) in &mut limits {
+        if [BACKGROUND_BUDGET_KEY, ACCESS_BUDGET_KEY].contains(&key.as_str()) {
+            *cap = u32::MAX;
+        }
+    }
+    limits
+}
+
 /// The total limit bounds all investigations. Background work has a second
 /// ceiling, leaving capacity for genuinely new inbound mail, and access
 /// checks a lane of their own, whatever their trigger or lane flag, so
@@ -1961,6 +2014,47 @@ mod budget_tests {
         // Every other access check is as it was: no sub-cap.
         job.trigger = "source_access".into();
         assert_eq!(investigation_budget_limits(&config, &job).len(), 2);
+    }
+
+    /// `uncapped_triage` lifts the background and access lanes out of reach
+    /// and leaves the total, revisit and archive caps where they were.
+    #[test]
+    fn uncapped_lifts_the_lanes_and_keeps_the_breaker() {
+        let config = Config::default();
+        let lifted = |kind: &str, trigger: &str, foreground: bool| {
+            let mut job = read_job(1, 1);
+            job.kind = kind.into();
+            job.trigger = trigger.into();
+            job.foreground = foreground;
+            lift_daily_caps(investigation_budget_limits(&config, &job))
+        };
+        let total = (
+            GLOBAL_BUDGET_KEY.to_string(),
+            config.triage.agent.daily_run_cap,
+        );
+        // New mail answers only to the total, which stays as the breaker.
+        assert_eq!(
+            lifted("triage", "arrival", true),
+            std::slice::from_ref(&total)
+        );
+        // Background work and access checks lose their lane caps.
+        for (kind, trigger, key) in [
+            ("triage", "migration", "__agent_background__"),
+            ("access", "source_access", "__agent_access__"),
+        ] {
+            assert_eq!(
+                lifted(kind, trigger, false),
+                [total.clone(), (key.to_string(), u32::MAX)],
+                "{trigger}"
+            );
+        }
+        let revisit = lifted("triage", "revisit:due", false);
+        assert!(revisit.contains(&("__agent_revisit__".into(), config.revisit.daily_cap)));
+        let archive = lifted("access", "archive_access", false);
+        assert!(archive.contains(&(
+            crate::store::ARCHIVE_ACCESS_BUDGET_KEY.into(),
+            config.triage.agent.archive_access_daily_cap
+        )));
     }
 
     #[test]

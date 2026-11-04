@@ -74,6 +74,7 @@ fn surfacing(poke: Option<RefinePoke>, wait: SurfaceWait) -> ArchiveSurfacing {
         poke,
         wait,
         caps: Default::default(),
+        features: Default::default(),
     }
 }
 
@@ -428,4 +429,21 @@ async fn an_old_message_is_found_by_subject_for_exactly_one_job() {
         )
         .unwrap();
     assert_eq!(jobs, 1, "one access check, and nothing else, ever");
+}
+
+/// `uncapped_triage` lifts the access lane for surfacing as the worker does,
+/// so a search is not refused for a lane the worker no longer holds it to;
+/// the archive sub-cap and the total stay.
+#[test]
+fn uncapped_triage_lifts_the_access_lane_for_surfacing() {
+    let mut surfacing = surfacing(None, SurfaceWait::default());
+    let caps = surfacing.caps;
+    assert_eq!(surfacing.effective_caps(), caps);
+    surfacing.features = crate::features::Features::pinned([crate::features::UNCAPPED_TRIAGE]);
+    let lifted = surfacing.effective_caps();
+    assert_eq!(lifted.access_daily, u32::MAX);
+    assert_eq!(
+        (lifted.daily, lifted.total_daily),
+        (caps.daily, caps.total_daily)
+    );
 }

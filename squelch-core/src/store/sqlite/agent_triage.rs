@@ -1699,11 +1699,14 @@ pub(crate) const NEXT_JOBS_DUE_SQL: &str = "SELECT j.kind,
        AND j.kind IN (SELECT value FROM json_each(?2))
      GROUP BY j.kind";
 
-/// [`SqliteStore::triage_budget_parked`], pinned for the same reason.
+/// [`SqliteStore::triage_budget_parked`], pinned for the same reason. A
+/// revisit is left out: its mail is already sorted, so "N emails will be
+/// sorted tomorrow" would be untrue of it, and its own cap is one
+/// `uncapped_triage` deliberately keeps.
 pub(crate) const TRIAGE_BUDGET_PARKED_SQL: &str = "SELECT COUNT(*), MIN(available_at)
      FROM agent_triage_jobs INDEXED BY idx_agent_jobs_account_ready
      WHERE account_id=?1 AND state='queued' AND kind IN ('triage','access')
-       AND trigger!='archive_access'
+       AND trigger!='archive_access' AND trigger NOT LIKE 'revisit:%'
        AND last_error='daily_budget_exhausted' AND available_at>?2";
 
 impl SqliteStore {
@@ -1780,6 +1783,14 @@ impl AgentTriageStore for SqliteStore {
         limits: &[(String, u32)],
     ) -> Result<bool> {
         super::agent_budget::reserve(self, account, day, limits)
+    }
+    fn release_budget_held_jobs(
+        &self,
+        account: AccountId,
+        config: &crate::triage::agent_config::AgentConfig,
+        now: DateTime<Utc>,
+    ) -> Result<usize> {
+        super::agent_budget::release_all_held(self, account, config, now)
     }
     fn refund_agent_budget(
         &self,
@@ -4967,6 +4978,15 @@ mod tests {
                 )
                 .unwrap();
             }
+            // A revisit held by its own cap: already sorted, not counted.
+            conn.execute(
+                "INSERT INTO agent_triage_jobs
+                (account_id,message_id,kind,trigger,input_revision,state,available_at,last_error)
+                VALUES(1,7,'triage','revisit:due',1,'queued','2098-01-01T00:00:00Z',
+                       'daily_budget_exhausted')",
+                [],
+            )
+            .unwrap();
         }
         let (parked, resumes) = store.triage_budget_parked(1).unwrap();
         assert_eq!(parked, 2);

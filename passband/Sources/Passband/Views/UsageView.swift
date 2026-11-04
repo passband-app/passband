@@ -38,6 +38,7 @@ struct UsageView: View {
             RoutedHeader(title: "Usage") {
                 GlassSegmented(options: Self.windows, selection: $days)
             }
+            ScrollViewReader { scroller in
             ScrollView {
                 content
                     .padding(.horizontal, Space.page)
@@ -47,6 +48,16 @@ struct UsageView: View {
                     // measure and grows with the text in comfortable.
                     .frame(maxWidth: Typo.measure(980), alignment: .leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            // The staged page (`--fixture-usage`) is a demo of the section at
+            // the bottom, so it opens there.
+            .task(id: series != nil) {
+                guard FixtureMode.stagesUsage, series != nil else { return }
+                try? await Task.sleep(for: .milliseconds(900))
+                withAnimation(.smooth(duration: 0.3)) {
+                    scroller.scrollTo(FixtureMode.stageValue("scroll") ?? UnderstandingSection.anchor, anchor: .top)
+                }
+            }
             }
         }
         // The window is the one filter, and it scopes everything below it.
@@ -92,6 +103,9 @@ struct UsageView: View {
                     categoryCard(series)
                     assistantCard.frame(width: Typo.measure(280))
                 }
+                // Not scoped by the window: who the mail says the owner is
+                // is the ledger's whole span, and the section says so.
+                UnderstandingSection().id(UnderstandingSection.anchor)
             }
             // A refetch keeps the frame: the last render dims rather than
             // dropping to a spinner, so nothing jumps when the window changes.
@@ -547,16 +561,32 @@ private struct DayAxis: ViewModifier {
     }
 }
 
-private struct LegendKey: Identifiable {
+/// One key in a chart card's inline legend. Shared with the Understanding
+/// section below the page's charts, which reads as part of the same page.
+struct LegendKey: Identifiable {
     let label: String
     let color: Color
     var line = false
+    /// Drawn as a point of this shape instead of a swatch.
+    var symbol: LegendSymbol?
     var id: String { label }
+}
+
+/// A legend key's point shape, matching the symbol the chart draws.
+enum LegendSymbol {
+    case circle, diamond
+
+    var shape: AnyShape {
+        switch self {
+        case .circle: AnyShape(Circle())
+        case .diamond: AnyShape(Rectangle().rotation(.degrees(45)).scale(0.78))
+        }
+    }
 }
 
 /// One chart on its own pane: title, an inline legend, and a table twin behind
 /// the "table" action so every number the plot shows is also readable exactly.
-private struct ChartCard<Plot: View, Table: View>: View {
+struct ChartCard<Plot: View, Table: View>: View {
     let title: String
     var note: String?
     var legend: [LegendKey] = []
@@ -576,6 +606,8 @@ private struct ChartCard<Plot: View, Table: View>: View {
                     HStack(spacing: Space.scaled(5)) {
                         if key.line {
                             Capsule().fill(key.color).frame(width: 10, height: 2)
+                        } else if let symbol = key.symbol {
+                            symbol.shape.fill(key.color).frame(width: 8, height: 8)
                         } else {
                             RoundedRectangle(cornerRadius: 2, style: .continuous)
                                 .fill(key.color).frame(width: 8, height: 8)
@@ -597,7 +629,7 @@ private struct ChartCard<Plot: View, Table: View>: View {
 
 /// The hover readout: the day, then every series at it — value first, in ink,
 /// keyed by a short stroke of the series colour.
-private struct ChartReadout: View {
+struct ChartReadout: View {
     struct Row {
         let value: String
         let label: String
@@ -726,10 +758,13 @@ private struct Sparkline: View {
 
 /// A chart's exact twin: one row per day, newest first, at the plot's height
 /// so switching between the two moves nothing on the page.
-private struct DayTable: View {
+struct DayTable: View {
     let columns: [String]
     let rows: [[String]]
     let height: CGFloat
+    /// The first column in mono, for day keys; a column of names reads in
+    /// the row face instead.
+    var monoFirst = true
 
     var body: some View {
         ScrollView {
@@ -746,7 +781,7 @@ private struct DayTable: View {
                     GridRow {
                         ForEach(rows[r].indices, id: \.self) { c in
                             Text(rows[r][c])
-                                .font(c == 0 ? Typo.mono(10) : Typo.num(11))
+                                .font(c == 0 ? (monoFirst ? Typo.mono(10) : Typo.rowSub) : Typo.num(11))
                                 .foregroundStyle(c == 0 ? Palette.inkDim : Palette.inkFaint)
                         }
                     }

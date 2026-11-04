@@ -270,6 +270,23 @@ struct ReleaseCatchUp: Sendable, Equatable {
 enum ReleaseNotes {
     /// THE TABLE. Newest first, and the only place a release note is written.
     static let all: [ReleaseNote] = [
+        // QUIET: onboarding fixes shipped ahead of a new user, no card.
+        ReleaseNote(
+            version: "0.0.18",
+            date: "2026-11-03",
+            headline: "Ashley's Update",
+            items: [
+                ReleaseItem(.app, "Click an email address to write to it"),
+                ReleaseItem(.app, "Logos for more senders"),
+                ReleaseItem(.app, "Copying a login code on the Mac clears it from your phone"),
+                ReleaseItem(.app, "UI improvements"),
+                ReleaseItem(.app, "Bug fixes"),
+                ReleaseItem(.daemon, "Reply-To warnings only when a known contact's mail fails its checks"),
+                ReleaseItem(.daemon, "Tells your phone when a login code has been copied"),
+                ReleaseItem(.daemon, "Security and dependency updates"),
+                ReleaseItem(.daemon, "Bug fixes"),
+            ],
+            quiet: true),
         // 0.0.17 IS 0.0.16 DONE AGAIN: the same release, with the calendar
         // back behind its hidden feature (docs/CALENDAR.md section 11), so its
         // notes leave out everything only the calendar brings. 0.0.16's own

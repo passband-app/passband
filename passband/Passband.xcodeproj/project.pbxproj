@@ -2263,7 +2263,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.0.12;
+				MARKETING_VERSION = 0.0.13;
 				PRODUCT_BUNDLE_IDENTIFIER = app.passband.client.ios.notify;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = 1;
@@ -2291,7 +2291,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.0.12;
+				MARKETING_VERSION = 0.0.13;
 				PRODUCT_BUNDLE_IDENTIFIER = app.passband.client.ios;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = 1;
@@ -2314,7 +2314,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.0.17;
+				MARKETING_VERSION = 0.0.18;
 				PRODUCT_BUNDLE_IDENTIFIER = app.passband.client;
 				PRODUCT_NAME = Passband;
 				SDKROOT = macosx;
@@ -2415,7 +2415,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.0.12;
+				MARKETING_VERSION = 0.0.13;
 				PRODUCT_BUNDLE_IDENTIFIER = app.passband.client.ios;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = 1;
@@ -2440,7 +2440,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.0.12;
+				MARKETING_VERSION = 0.0.13;
 				PRODUCT_BUNDLE_IDENTIFIER = app.passband.client.ios.notify;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = 1;
@@ -2463,7 +2463,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.0.17;
+				MARKETING_VERSION = 0.0.18;
 				PRODUCT_BUNDLE_IDENTIFIER = app.passband.client;
 				PRODUCT_NAME = Passband;
 				SDKROOT = macosx;

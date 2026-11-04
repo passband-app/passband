@@ -934,6 +934,86 @@ struct CalendarUpdate: Codable, Sendable, Identifiable, Hashable {
     var start_timezone: String? = nil
 }
 
+extension CalendarUpdate {
+    /// One row per event, not per email: a venue's ticket mail and its "get
+    /// the app for your tickets" reminder both carry the event, and were two
+    /// rows. The daemon's ghost fold (`gcal::fold_ghosts`) by the same test.
+    ///
+    /// Two rows are one event when their titles are equal (case and spacing
+    /// aside) or one holds the other, on the same day (a start's own date, so
+    /// 7pm Pacific stays that day). A row with no start joins only when
+    /// exactly one dated event matches its title, so it never bridges two
+    /// Fridays of a weekly thing. The row shown is the earliest received
+    /// with a start (the confirmation, which carries the tickets; reminders
+    /// come later), else the earliest. Order is the input's, at each event's
+    /// first row.
+    static func folded(_ rows: [CalendarUpdate]) -> [CalendarUpdate] {
+        func title(_ r: CalendarUpdate) -> String? {
+            let t = (r.event_title ?? "").lowercased()
+                .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            return t.isEmpty ? nil : t
+        }
+        func day(_ r: CalendarUpdate) -> Substring? {
+            guard let s = r.starts_at, s.count >= 10 else { return nil }
+            return s.prefix(10)
+        }
+        func matches(_ a: String, _ b: String) -> Bool {
+            a == b || a.contains(b) || b.contains(a)
+        }
+        // Each group: the indices of its rows, first-seen order.
+        var groups: [[Int]] = []
+        func titles(_ g: [Int]) -> [String] { g.compactMap { title(rows[$0]) } }
+        var undated: [Int] = []
+        for (i, row) in rows.enumerated() {
+            guard let t = title(row) else {
+                groups.append([i])
+                continue
+            }
+            guard let d = day(row) else {
+                undated.append(i)
+                continue
+            }
+            if let g = groups.firstIndex(where: { g in
+                g.contains { day(rows[$0]) == d } && titles(g).contains { matches($0, t) }
+            }) {
+                groups[g].append(i)
+            } else {
+                groups.append([i])
+            }
+        }
+        for i in undated {
+            let t = title(rows[i])!
+            let dated = groups.indices.filter { g in
+                groups[g].contains { day(rows[$0]) != nil }
+                    && titles(groups[g]).contains { matches($0, t) }
+            }
+            if dated.count == 1 {
+                groups[dated[0]].append(i)
+            } else if dated.isEmpty,
+                let g = groups.firstIndex(where: { g in
+                    g.allSatisfy { day(rows[$0]) == nil }
+                        && titles(g).contains { matches($0, t) }
+                })
+            {
+                groups[g].append(i)
+            } else {
+                groups.append([i])
+            }
+        }
+        return groups
+            .sorted { $0.min()! < $1.min()! }
+            .map { g in
+                let best = g.min { a, b in
+                    let (x, y) = (rows[a], rows[b])
+                    if (day(x) != nil) != (day(y) != nil) { return day(x) != nil }
+                    if x.received_at != y.received_at { return x.received_at < y.received_at }
+                    return a < b
+                }!
+                return rows[best]
+            }
+    }
+}
+
 enum BankingKind: String, LenientRawEnum {
     case statement, update, bill
     case transactionAlert = "transaction_alert"
@@ -3462,7 +3542,7 @@ extension AgentFeed {
     }
 
     var calendar: [CalendarUpdate] {
-        items.flatMap { item in
+        CalendarUpdate.folded(items.flatMap { item in
             (item.decision.records ?? []).enumerated().compactMap { index, record in
                 guard record.kind == "event" else { return nil }
                 return CalendarUpdate(id: item.message_id * 1000 + index,
@@ -3471,7 +3551,7 @@ extension AgentFeed {
                     organizer: nil, received_at: item.received_at,
                     start_timezone: record.start?.timezone)
             }
-        }
+        })
     }
 
     var banking: [BankingRecord] {

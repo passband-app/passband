@@ -2323,6 +2323,11 @@ impl AgentTriageStore for SqliteStore {
         }
         let mut decision = decision.clone();
         apply_corrections(&tx, job.account_id, job.message_id, &mut decision)?;
+        super::agent_deliveries::drop_sent_packages(
+            &mut decision,
+            &current.message.subject,
+            &current.message.body,
+        );
         let has_kind_correction: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM agent_triage_corrections WHERE account_id=?1 AND message_id=?2 AND field='kinds')",
             params![job.account_id,job.message_id], |row|row.get(0))?;

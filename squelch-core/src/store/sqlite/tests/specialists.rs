@@ -2904,3 +2904,107 @@ fn retired_detector_repairs_preserve_stored_facts() {
     );
     assert_eq!(triage_status(&store, acct, message).0, "new");
 }
+
+/// The UPS Store's receipt, as it arrived (trimmed): the package is going AWAY
+/// from the owner, so it never belongs on the Shipments rail.
+const DROP_OFF_SUBJECT: &str = "Thanks for choosing The UPS Store";
+const DROP_OFF_BODY: &str = "Drop-Off Package Receipt\r\n\r\nPlease save for your records\r\n\
+    DROP-OFF TIME:\r\n10:18 AM November 04, 2026\r\nTotal Packages:  1\r\n\r\n\
+    Below are the submitted packages for your records:\r\n\r\n * 1ZR0676H0301486638\r\n\r\n\
+    Thank you for choosing The UPS Store.";
+
+/// Ingest one message, then commit `records` for it through the real agent
+/// commit path, the way a triage run does.
+fn commit_delivery(
+    store: &SqliteStore,
+    acct: AccountId,
+    gmail: &str,
+    subject: &str,
+    body: &str,
+) -> crate::triage::decision::MessageDecision {
+    use crate::store::agent_triage::AgentTriageStore;
+    use crate::triage::decision::{EmailKind, MessageDecision, RecordProposal};
+    let now = Utc::now();
+    triaged(acct, gmail, gmail)
+        .from("store4546@theupsstore.com")
+        .subject(subject)
+        .body(body)
+        .received_at(now)
+        .ingest(store);
+    let job = store
+        .claim_agent_job(
+            acct,
+            "investigation",
+            now + chrono::Duration::minutes(1),
+            60,
+        )
+        .unwrap()
+        .unwrap();
+    let context = store.load_agent_context(&job).unwrap();
+    let decision = MessageDecision {
+        kinds: vec![EmailKind::Delivery],
+        summary: "A package".into(),
+        records: vec![RecordProposal::Delivery {
+            carrier: Some("ups".into()),
+            tracking_number: Some("1ZR0676H0301486638".into()),
+            status: "shipped".into(),
+            item_name: None,
+            merchant: None,
+            order_refs: vec![],
+            evidence: vec![],
+        }],
+        ..Default::default()
+    };
+    store
+        .commit_agent_decision(
+            &job,
+            &context,
+            &decision,
+            std::slice::from_ref(&context.message.source),
+        )
+        .unwrap();
+    let stored: String = store
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT decision_json FROM agent_message_decisions WHERE message_id=?1",
+            [job.message_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    serde_json::from_str(&stored).unwrap()
+}
+
+/// A drop-off receipt the model filed as a package on its way lands nowhere:
+/// not on the rail, and not in the stored decision the agent door reads.
+#[test]
+fn a_drop_off_receipt_is_not_a_shipment() {
+    let (store, acct) = store();
+    let stored = commit_delivery(&store, acct, "g-dropoff", DROP_OFF_SUBJECT, DROP_OFF_BODY);
+    assert!(stored.records.is_empty(), "{:?}", stored.records);
+    assert!(
+        store
+            .list_shipments(acct, true, KEEP_ALL_SHIPMENTS)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// The control: the same record on ordinary shipping mail still projects.
+#[test]
+fn an_inbound_shipment_with_the_same_record_still_projects() {
+    let (store, acct) = store();
+    let stored = commit_delivery(
+        &store,
+        acct,
+        "g-shipped",
+        "Your package has shipped",
+        "Your order is on its way via UPS. Tracking 1ZR0676H0301486638.",
+    );
+    assert_eq!(stored.records.len(), 1);
+    let rows = store
+        .list_shipments(acct, true, KEEP_ALL_SHIPMENTS)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].tracking_number, "1ZR0676H0301486638");
+}

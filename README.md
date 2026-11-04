@@ -214,7 +214,7 @@ Model triage has daily spend caps on by default, adjustable from the app's Setti
 |---|---|---|
 | **Gmail** | The steps above. | Calendar sync and the full feature set. |
 | **Outlook** (Outlook.com, Hotmail, Microsoft 365) | Put `provider = "outlook"` in the config file and run `squelchd auth`. No Google client needed; the build ships its own Entra app. | No calendar view yet. Bring your own Entra app if your work tenant blocks unverified ones. |
-| **IMAP** | `squelchd auth --imap` prompts for the server, TLS mode and an app password, and tests the login before storing anything. | Self-host only, and the newest of the three. |
+| **IMAP** (beta) | `squelchd auth --imap` prompts for the server, TLS mode and an app password, and tests the login before storing anything. | Fastmail, iCloud, Dovecot and friends. Reads with IDLE, sends over SMTP. Self-host only, set up from the terminal (not in the app yet), no calendar. The newest of the three, so expect rough edges. |
 
 One daemon is one mailbox. Several mailboxes are several daemons; the app keeps a list of them and switches with ⌘1 to ⌘9. Details in [GETTING-STARTED](docs/GETTING-STARTED.md#outlook-instead-of-gmail) and [MAIL-PROVIDERS](docs/MAIL-PROVIDERS.md).
 

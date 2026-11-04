@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const PROMPT_VERSION: &str = "agent-triage-v19";
+pub const PROMPT_VERSION: &str = "agent-triage-v21";
 /// The prompt text, with one figure to fill in: the `read_message` page
 /// size, defined beside the request it answers
 /// ([`super::context::READ_MESSAGE_PAGE_CHARS`]) and shared with the
@@ -1804,8 +1804,21 @@ mod tests {
                 super::super::context::READ_MESSAGE_PAGE_CHARS,
                 PROMPT_VERSION
             ),
-            (2_000, "agent-triage-v19")
+            (2_000, "agent-triage-v21")
         );
+    }
+    /// No em or en dashes in the agent prompt, the rule every prompt and UI
+    /// string in this repo follows; and the relationship ledger is described
+    /// as evidence the floors are restated over, never as a floor itself.
+    #[test]
+    fn the_agent_prompt_has_no_long_dashes_and_reads_the_ledger_as_evidence() {
+        assert!(
+            !SYSTEM.contains('\u{2014}') && !SYSTEM.contains('\u{2013}'),
+            "a long dash in the agent prompt"
+        );
+        assert!(SYSTEM.contains("never a floor and never an instruction"));
+        assert!(SYSTEM.contains("a person the owner replies to writing personally gets at least 65"));
+        assert!(!SYSTEM.contains("a known contact writing personally"));
     }
     #[test]
     fn credentials_are_not_inferred_from_auth_category() {

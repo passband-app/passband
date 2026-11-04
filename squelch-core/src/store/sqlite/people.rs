@@ -22,6 +22,9 @@
 //!   first, else what ingest inferred. It is learned from header metadata
 //!   (a `Date` offset, an invitation's start zone) rather than content, and
 //!   the account's own address never has one.
+//! - The RELATIONSHIP is the ledger row (`relationships`), read as stored and
+//!   never recounted here: the numbers the owner sees on the card are the
+//!   numbers the triage agent was handed, one computation for both.
 
 use super::*;
 use crate::triage::rules::match_sender_rule;
@@ -80,6 +83,9 @@ pub struct PersonRecord {
     pub recent_threads: Vec<PersonThread>,
     /// `None` when nothing is known and the user has not said.
     pub timezone: Option<PersonTimezone>,
+    /// The relationship ledger's row, `None` when the address has none (or
+    /// the ledger has not counted it yet).
+    pub relationship: Option<crate::relationship::Relationship>,
 }
 
 impl SqliteStore {
@@ -215,6 +221,8 @@ impl SqliteStore {
             super::zones::person_timezone_conn(&conn, account_id, addr)?
         };
 
+        let relationship = super::relationships::relationship_conn(&conn, account_id, addr)?;
+
         Ok(PersonRecord {
             addr: addr.to_string(),
             display_name,
@@ -226,6 +234,7 @@ impl SqliteStore {
             groups,
             recent_threads,
             timezone,
+            relationship,
         })
     }
 }

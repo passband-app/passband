@@ -440,6 +440,49 @@ them is served to a client.
   mail marked done. That is why 75 needs a second signal on top of "never
   opened", and why the sweep is undoable.
 
+### Relationship ledger
+
+`relationships` holds one row per address the owner has live mail with
+(docs/UNDERSTANDING.md §2.1): inbound count and dates (off `received_at`),
+the contacts row's sent count, threads the owner started, inbound threads and
+how many the owner later wrote into, the median reply time (3 replied threads
+or more), attention over the ledger floor, corrections, and the fatigue score
+computed by the same `SenderMeasurer` the purge flow uses. It is not email
+text and it is not a floor.
+
+Ingest, not-spam and the attention POST add the address to
+`relationship_dirty`. Every refine round, before the triage pass, recomputes
+up to 200 dirty addresses, 25 per store lock. Once per owner-local day from
+03:00 the whole table is recomputed in the same chunks; the day it last ran
+is `sync_state` mailbox `relationships_daily`. A store that predates the table
+is filled by the same walk on the first round, stamped
+`relationships_backfill` only when the walk completes.
+
+The triage context carries the row as `relationship` beside
+`sender_is_contact`, and `read_sender_history` returns it as `relationship`
+at the top of its result. The key is absent before the backfill stamp and
+for an address with no row. `attention` is left out while `coverage_days`
+(days since the later of the open and dwell ledger floors, at most 90) is
+under 14. The block is in no revision fingerprint, so a recount never makes
+a run stale. Prompt `agent-triage-v19` reads it as evidence and restates the
+65-point personal-mail floor over "a person the owner replies to". Eval
+replays (`squelch-eval`) drop the block, because the ledger has no history
+to replay as of a past moment.
+
+Known limits:
+
+- Archive-tier mail is not counted, so a correspondent whose history is all
+  older than the backfill window starts with only the window's counts.
+- Inbound counts use `known_sealed_mail_sql!`: mail whose access check is
+  pending counts. The reply that re-queues a thread would otherwise drop that
+  thread from `replied_threads` until the nightly pass. The attention columns
+  use the purge flow's strict statements.
+- A triage commit does not mark its sender dirty. A message that becomes auth
+  mail after its sender's last recount stays counted until the next mark or
+  the nightly pass.
+- `sent_count` and `sent_last_at` are the contacts row's, so a recipient the
+  contacts seed filtered out has initiated threads but a zero sent count.
+
 ### Kept senders
 
 A row in `reading_sender_keeps` records that the owner chose to keep a sender.

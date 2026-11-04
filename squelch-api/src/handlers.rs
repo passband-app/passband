@@ -3424,11 +3424,70 @@ fn timezone_view(tz: Option<squelch_core::timezone::InferredZone>) -> Option<Per
     })
 }
 
+/// One relationship-ledger row on the wire (docs/UNDERSTANDING.md §2.1), for
+/// the contact card and `/client/relationships`. Every key always present,
+/// `null` where the ledger does not know: an unknown median is not zero.
+/// Timestamps RFC 3339; `fatigue_score` on 0..1; `fatigue_reasons` the
+/// Reading purge's own reason list (`{"code": ..., <numbers>}`), whose copy
+/// the client owns.
+#[derive(Debug, Serialize)]
+pub struct RelationshipView {
+    addr: String,
+    display_name: Option<String>,
+    received_count: i64,
+    received_per_month: Option<f32>,
+    received_first_at: Option<String>,
+    received_last_at: Option<String>,
+    sent_count: i64,
+    sent_last_at: Option<String>,
+    initiated_count: i64,
+    inbound_threads: i64,
+    replied_threads: i64,
+    median_reply_ms: Option<i64>,
+    attention_rows: i64,
+    opened_count: i64,
+    median_read_fraction: Option<f32>,
+    link_clicks: i64,
+    corrections: i64,
+    fatigue_score: Option<f32>,
+    fatigue_reasons: Vec<squelch_core::triage::sender_fatigue::Reason>,
+}
+
+impl From<squelch_core::relationship::Relationship> for RelationshipView {
+    fn from(r: squelch_core::relationship::Relationship) -> Self {
+        let rfc = |at: Option<DateTime<Utc>>| at.map(|at| at.to_rfc3339());
+        Self {
+            addr: r.addr,
+            display_name: r.display_name,
+            received_count: r.received_count,
+            received_per_month: r.received_per_month,
+            received_first_at: rfc(r.received_first_at),
+            received_last_at: rfc(r.received_last_at),
+            sent_count: r.sent_count,
+            sent_last_at: rfc(r.sent_last_at),
+            initiated_count: r.initiated_count,
+            inbound_threads: r.inbound_threads,
+            replied_threads: r.replied_threads,
+            median_reply_ms: r.median_reply_ms,
+            attention_rows: r.attention_rows,
+            opened_count: r.opened_count,
+            median_read_fraction: r.median_read_fraction,
+            link_clicks: r.link_clicks,
+            corrections: r.corrections,
+            fatigue_score: r.fatigue_score,
+            fatigue_reasons: r.fatigue_reasons,
+        }
+    }
+}
+
 /// The wire shape of the reader's contact card. The optional parts are ABSENT,
 /// never null, when there is nothing to say: no mail from them, never written
-/// to, no rule covers them.
+/// to, no rule covers them. `relationship` is the one exception: always
+/// present, `null` when the ledger has no row, so a client can tell an older
+/// daemon (no key) from a person with no history (null).
 #[derive(Debug, Serialize)]
 pub struct PersonView {
+    relationship: Option<RelationshipView>,
     addr: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     display_name: Option<String>,
@@ -3472,6 +3531,7 @@ pub async fn get_person(
     })
     .await?;
     let view = PersonView {
+        relationship: p.relationship.map(RelationshipView::from),
         addr: p.addr,
         display_name: p.display_name,
         is_self: p.is_self,
@@ -3513,6 +3573,62 @@ pub async fn get_person(
         } else {
             None
         },
+    };
+    Ok((no_store(), Json(view)))
+}
+
+// --- GET /client/relationships -----------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct RelationshipsQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    sort: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RelationshipsView {
+    /// Whole days the attention columns cover; under 14 they say little.
+    coverage_days: i64,
+    /// The newest recount among the rows, `null` before the first one.
+    computed_at: Option<String>,
+    rows: Vec<RelationshipView>,
+}
+
+/// The most rows one read returns. The table is one row per correspondent, so
+/// this is a page of the owner's own address book, not a dump of it.
+const RELATIONSHIPS_MAX: usize = 200;
+
+/// GET /client/relationships?limit=50&sort=replies|volume|fatigue|recent — the
+/// relationship ledger, ranked (docs/UNDERSTANDING.md §2.1).
+///
+/// HUMAN DOOR ONLY, like `/client/person` and for its reason: who the owner
+/// answers, how fast, and whose mail they ignore is the correspondent graph
+/// the agent door is never handed. No `/mcp` tool serves any of it (an
+/// invariant test in squelch-mcp holds that). `no-store`, like the card.
+/// `sort` defaults to `replies`; an unknown one is a 400 rather than a quiet
+/// default, so a client typo is not mistaken for an empty ranking.
+pub async fn get_relationships(
+    State(state): State<ApiState>,
+    Query(params): Query<RelationshipsQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    use squelch_core::store::sqlite::relationships::RelationshipSort;
+    let sort = match params.sort.as_deref().map(str::trim) {
+        None | Some("") => RelationshipSort::Replies,
+        Some(s) => RelationshipSort::parse(s).ok_or_else(|| {
+            ApiError::bad_request("sort must be replies, volume, fatigue or recent")
+        })?,
+    };
+    let limit = params.limit.unwrap_or(50).clamp(1, RELATIONSHIPS_MAX);
+    let list = store_call(&state, move |store, account_id| {
+        store.list_relationships(account_id, sort, limit)
+    })
+    .await?;
+    let view = RelationshipsView {
+        coverage_days: list.coverage_days,
+        computed_at: list.computed_at.map(|at| at.to_rfc3339()),
+        rows: list.rows.into_iter().map(RelationshipView::from).collect(),
     };
     Ok((no_store(), Json(view)))
 }

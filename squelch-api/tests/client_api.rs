@@ -10163,6 +10163,122 @@ async fn sender_domains_roll_up_by_host_for_the_rule_editor() {
 }
 
 #[tokio::test]
+async fn the_relationship_ledger_reaches_the_card_and_its_own_list() {
+    // WIRE CONTRACT (docs/UNDERSTANDING.md §2.1): GET /client/person carries
+    // `relationship`, a row object or null; GET /client/relationships answers
+    // {coverage_days, computed_at, rows}, every row key present, null where
+    // unknown. Both no-store.
+    let Harness { app, .. } = harness(|store, acct| {
+        let earlier = chrono::Utc::now() - chrono::Duration::hours(2);
+        let mut first = msg(acct, "g1", "t1", "lunch?", "body");
+        first.received_at = earlier;
+        store.upsert_message(&first).unwrap();
+        let mut second = msg(acct, "g2", "t2", "the deck", "body");
+        second.received_at = earlier;
+        store.upsert_message(&second).unwrap();
+        let mut reply = sent_msg(acct, "s1", "t1", "re: lunch?", "alice@example.com");
+        reply.received_at = earlier + chrono::Duration::minutes(20);
+        store.upsert_message(&reply).unwrap();
+        let mut other = msg(acct, "g3", "t3", "hello", "body");
+        other.from_addr = "bulk@news.example".into();
+        for n in 0..3 {
+            other.gmail_msg_id = format!("b{n}");
+            other.thread_id = format!("b{n}");
+            store.upsert_message(&other).unwrap();
+        }
+        store.recompute_all_relationships(acct).unwrap();
+    });
+
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/person?addr=Alice%40Example.com"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let card = body_json(resp).await;
+    let row = &card["relationship"];
+    assert_eq!(row["addr"], "alice@example.com");
+    assert_eq!(row["display_name"], "Alice");
+    assert_eq!(row["received_count"], 2);
+    assert_eq!(row["inbound_threads"], 2);
+    assert_eq!(row["replied_threads"], 1);
+    for key in [
+        "received_per_month",
+        "received_first_at",
+        "received_last_at",
+        "sent_count",
+        "sent_last_at",
+        "initiated_count",
+        "median_reply_ms",
+        "attention_rows",
+        "opened_count",
+        "median_read_fraction",
+        "link_clicks",
+        "corrections",
+        "fatigue_score",
+        "fatigue_reasons",
+    ] {
+        assert!(row.get(key).is_some(), "{key} missing: {row}");
+    }
+    assert!(
+        row["median_reply_ms"].is_null(),
+        "one reply is not a median"
+    );
+
+    let stranger = body_json(
+        app.clone()
+            .oneshot(authed(
+                "GET",
+                "/client/person?addr=nobody%40nowhere.example",
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        stranger.as_object().unwrap().contains_key("relationship")
+            && stranger["relationship"].is_null(),
+        "{stranger}"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/relationships?sort=volume&limit=1"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+    let list = body_json(resp).await;
+    assert!(list["coverage_days"].is_i64());
+    assert!(list["computed_at"].is_string());
+    let rows = list["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "the limit holds");
+    assert_eq!(rows[0]["addr"], "bulk@news.example");
+
+    let replies = body_json(
+        app.clone()
+            .oneshot(authed("GET", "/client/relationships"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        replies["rows"][0]["addr"], "alice@example.com",
+        "replies by default"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/relationships?sort=loudest"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn person_card_reports_one_address_without_its_sealed_mail() {
     // WIRE CONTRACT: GET /client/person?addr= returns {addr, display_name?,
     // is_self, known_contact, received?, sent?, rule?, groups, recent_threads}.

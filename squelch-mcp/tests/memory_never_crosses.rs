@@ -36,8 +36,11 @@ const VISIBLE: &str = "kestrelvisible";
 const LINE_CANARY: &str = "ptarmiganline";
 const BODY_CANARY: &str = "dotterelbody";
 const SCOPE_CANARY: &str = "godwitscope";
+/// In each entry's provenance addresses: who it rests on.
+const PROVENANCE_CANARY: &str = "curlewprovenance@example.org";
 
-fn seeded_door() -> axum::Router {
+/// The door, and the ids of the entries seeded behind it.
+fn seeded_door() -> (axum::Router, Vec<String>) {
     let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
     let account = store.ensure_account(ACCOUNT).expect("account");
     let now: DateTime<Utc> = Utc::now();
@@ -82,6 +85,7 @@ fn seeded_door() -> axum::Router {
             AgentCommitOutcome::Applied
         );
     }
+    let mut ids = Vec::new();
     // A profile entry in every scope a run could be served, each carrying all
     // three canaries, both origins, citing the visible message.
     for (i, (scope, origin)) in [
@@ -94,11 +98,13 @@ fn seeded_door() -> axum::Router {
     .enumerate()
     {
         let at = now - Duration::days(1);
+        let entry_id = new_ulid(now + Duration::milliseconds(i as i64));
+        ids.push(entry_id.clone());
         store
             .insert_memory_entry_unchecked(
                 account,
                 &MemoryRecord {
-                    id: new_ulid(now + Duration::milliseconds(i as i64)),
+                    id: entry_id,
                     scope,
                     origin,
                     kind: "role".into(),
@@ -106,7 +112,7 @@ fn seeded_door() -> axum::Router {
                     line: format!("Works on {LINE_CANARY}."),
                     provenance: Provenance {
                         message_ids: vec![id],
-                        addrs: vec![SENDER.into()],
+                        addrs: vec![SENDER.into(), PROVENANCE_CANARY.into()],
                     },
                     confidence: 0.9,
                     revision: 1,
@@ -120,7 +126,7 @@ fn seeded_door() -> axum::Router {
             )
             .expect("memory entry");
     }
-    agent_door_router(
+    let router = agent_door_router(
         store,
         ACCOUNT,
         Default::default(),
@@ -131,11 +137,15 @@ fn seeded_door() -> axum::Router {
         Default::default(),
         Default::default(),
     )
-    .expect("router")
+    .expect("router");
+    (router, ids)
 }
 
-fn assert_no_memory(tool: &str, text: &str) {
-    for word in [LINE_CANARY, BODY_CANARY, SCOPE_CANARY] {
+fn assert_no_memory(tool: &str, text: &str, ids: &[String]) {
+    let words = [LINE_CANARY, BODY_CANARY, SCOPE_CANARY, PROVENANCE_CANARY]
+        .into_iter()
+        .chain(ids.iter().map(String::as_str));
+    for word in words {
         assert!(
             !text.contains(word),
             "{tool} served the owner profile (`{word}`) to the agent door:\n{text}"
@@ -145,7 +155,9 @@ fn assert_no_memory(tool: &str, text: &str) {
 
 #[tokio::test]
 async fn no_tool_response_carries_the_owner_profile() {
-    let mut session = Session::open(seeded_door(), HOST, None).await;
+    let (door, ids) = seeded_door();
+    assert_eq!(ids.len(), 4);
+    let mut session = Session::open(door, HOST, None).await;
     let since = "2000-01-01T00:00:00Z";
     let inbox = session
         .tool("get_inbox_updates", json!({"since": since}))
@@ -162,6 +174,8 @@ async fn no_tool_response_carries_the_owner_profile() {
                 VISIBLE,
                 LINE_CANARY,
                 BODY_CANARY,
+                PROVENANCE_CANARY,
+                &format!("from:{PROVENANCE_CANARY}"),
                 "Works on",
                 &format!("from:{SENDER}"),
             ]
@@ -174,7 +188,7 @@ async fn no_tool_response_carries_the_owner_profile() {
         };
         for args in calls {
             let text = session.tool(&name, args).await.0;
-            assert_no_memory(&name, &text);
+            assert_no_memory(&name, &text, &ids);
         }
         called.push(name);
     }

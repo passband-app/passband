@@ -86,6 +86,51 @@ const WROTE: &[&str] = &[
     "ha scritto",
     "schreef",
     "escreveu",
+    // Swedish, Danish and Norwegian share it.
+    "skrev",
+];
+
+/// The banners mail clients write over a quoted message, in the languages
+/// the header keys below know, and Thunderbird's spaced form.
+const QUOTE_BANNERS: &[&str] = &[
+    "-----Original Message-----",
+    "-----Ursprüngliche Nachricht-----",
+    "-----Message d'origine-----",
+    "-------- Original Message --------",
+];
+
+/// Header keys of a quoted header block, by role, lowercased, in English,
+/// German, French, Spanish, Italian, Dutch and Portuguese. Matched as the
+/// whole text before a line's first colon (`De :` with French spacing too).
+const HEADER_FROM: &[&str] = &["from", "von", "de", "da", "van"];
+const HEADER_DATED: &[&str] = &[
+    "sent",
+    "date",
+    "gesendet",
+    "datum",
+    "envoyé",
+    "enviado",
+    "enviada",
+    "inviato",
+    "data",
+    "verzonden",
+    "fecha",
+];
+const HEADER_ADDRESSED: &[&str] = &[
+    "to",
+    "subject",
+    "cc",
+    "an",
+    "betreff",
+    "à",
+    "a",
+    "objet",
+    "para",
+    "asunto",
+    "oggetto",
+    "aan",
+    "onderwerp",
+    "assunto",
 ];
 /// Bytes of attribution allowed between lead and tail: a date, a time, a
 /// name and an address, possibly wrapped once.
@@ -419,10 +464,13 @@ fn attribution_cut(body: &str) -> Option<usize> {
     best
 }
 
-/// The byte offset of the first line-start `From:` that heads a header block:
-/// within the next three lines, a `Sent:` or `Date:` AND a `To:` or
-/// `Subject:`. Outlook writes exactly this above a quoted message, often with
-/// no rule over it. For [`own_text`] only.
+/// The byte offset of the first quoted HEADER BLOCK: a line-start from key
+/// (`From:`, `Von:`, `De :`, ...) with, within three lines on EITHER side, a
+/// dated key (`Sent:`, `Gesendet:`, `Envoyé :`, ...) AND an addressed one
+/// (`To:`, `Betreff:`, `Objet :`, ...). Outlook writes it below the reply,
+/// often with no rule over it; Thunderbird writes Subject and Date ABOVE
+/// From. The cut is at the block's first header line, so the subject and date
+/// of the quoted message go with it. For [`own_text`] only.
 fn header_block_cut(body: &str) -> Option<usize> {
     let lines: Vec<(usize, &str)> = body
         .split_inclusive('\n')
@@ -432,19 +480,44 @@ fn header_block_cut(body: &str) -> Option<usize> {
             Some((start, line))
         })
         .collect();
-    let starts = |line: &str, keys: &[&str]| {
-        let line = line.trim_start().to_ascii_lowercase();
-        keys.iter().any(|k| line.starts_with(k))
+    // The text before a line's first colon, when it is short enough to be a
+    // header key at all.
+    let key = |line: &str| -> Option<String> {
+        let (head, _) = line.trim_start().split_once(':')?;
+        let head = head.trim_end();
+        (!head.is_empty() && head.chars().count() <= 12).then(|| head.to_lowercase())
     };
-    lines.iter().enumerate().find_map(|(i, (at, line))| {
-        if !starts(line, &["from:"]) {
+    let is = |line: &str, keys: &[&str]| key(line).is_some_and(|k| keys.contains(&k.as_str()));
+    let any_header =
+        |line: &str| is(line, HEADER_FROM) || is(line, HEADER_DATED) || is(line, HEADER_ADDRESSED);
+    lines.iter().enumerate().find_map(|(i, (_, line))| {
+        if !is(line, HEADER_FROM) {
             return None;
         }
-        let next = &lines[i + 1..(i + 4).min(lines.len())];
-        let dated = next.iter().any(|(_, l)| starts(l, &["sent:", "date:"]));
-        let addressed = next.iter().any(|(_, l)| starts(l, &["to:", "subject:"]));
+        let (mut dated, mut addressed) = (false, false);
+        for (j, (_, l)) in lines
+            .iter()
+            .enumerate()
+            .take((i + 4).min(lines.len()))
+            .skip(i.saturating_sub(3))
+        {
+            if j != i {
+                dated |= is(l, HEADER_DATED);
+                addressed |= is(l, HEADER_ADDRESSED);
+            }
+        }
+        if !(dated && addressed) {
+            return None;
+        }
+        // Back up over header lines directly above From (Thunderbird's
+        // Subject and Date), at most three.
+        let mut first = i;
+        while first > 0 && i - first < 3 && any_header(lines[first - 1].1) {
+            first -= 1;
+        }
+        let (at, line) = lines[first];
         // Cut where the header's own text starts, not at the line's indent.
-        (dated && addressed).then(|| at + (line.len() - line.trim_start().len()))
+        Some(at + (line.len() - line.trim_start().len()))
     })
 }
 
@@ -472,7 +545,7 @@ fn wrote_line_cut(body: &str) -> Option<usize> {
 /// underscores followed by a `From:` header block.
 fn outlook_cut(body: &str) -> Option<usize> {
     const RULE: &str = "________________";
-    let mut best = body.find("-----Original Message-----");
+    let mut best = QUOTE_BANNERS.iter().filter_map(|b| body.find(b)).min();
     let mut from = 0;
     while let Some(pos) = body[from..].find(RULE) {
         let at = from + pos;
@@ -557,16 +630,46 @@ mod tests {
                 "Sounds good.\n\nEm ter., 3 de nov. de 2026, Jo <jo@x.pt> escreveu:\n{inbound}"
             ),
             format!("Sounds good.\n\nIl giorno mar, Jo ha scritto:\n{inbound}"),
+            format!("Sounds good.\n\nDen tis 3 nov. 2026 skrev Jo <jo@x.se>:\n{inbound}"),
+            // Localized Outlook header blocks, French spacing included.
+            format!(
+                "Sounds good.\n\nVon: Jo <jo@x.de>\nGesendet: Dienstag, 3. November 2026\nAn: Me\nBetreff: AW: Plan\n\n{inbound}"
+            ),
+            format!(
+                "Sounds good.\n\nDe : Jo <jo@x.fr>\nEnvoyé : mardi 3 novembre 2026\nÀ : Moi\nObjet : RE: plan\n\n{inbound}"
+            ),
+            format!(
+                "Sounds good.\n\nDe: Jo <jo@x.es>\nEnviado: martes, 3 de noviembre de 2026\nPara: Yo\nAsunto: RE: plan\n\n{inbound}"
+            ),
+            format!(
+                "Sounds good.\n\nDa: Jo <jo@x.it>\nInviato: martedì 3 novembre 2026\nA: Me\nOggetto: R: piano\n\n{inbound}"
+            ),
+            format!(
+                "Sounds good.\n\nVan: Jo <jo@x.nl>\nVerzonden: dinsdag 3 november 2026\nAan: Mij\nOnderwerp: RE: plan\n\n{inbound}"
+            ),
+            format!(
+                "Sounds good.\n\nDe: Jo <jo@x.pt>\nEnviada: terça-feira, 3 de novembro de 2026\nPara: Eu\nAssunto: RE: plano\n\n{inbound}"
+            ),
+            // Banners: German, French, and Thunderbird's spaced one.
+            format!("Sounds good.\n\n-----Ursprüngliche Nachricht-----\n{inbound}"),
+            format!("Sounds good.\n\n-----Message d'origine-----\n{inbound}"),
+            format!("Sounds good.\n\n-------- Original Message --------\n{inbound}"),
+            // Thunderbird's block: Subject and Date ABOVE From.
+            format!(
+                "Sounds good.\n\nSubject: Re: plan\nDate: Tue, 3 Nov 2026 09:00\nFrom: Jo <jo@x.com>\nTo: Me\n\n{inbound}"
+            ),
         ] {
             let own = own_text(&body).unwrap();
             assert_eq!(own.trim(), "Sounds good.", "{body:?}");
             assert!(!own.contains("THEIR"), "{body:?}");
         }
         // Prose that merely mentions a header word is kept.
-        assert_eq!(
-            own_text("From: the team, thanks for everything.").as_deref(),
-            Some("From: the team, thanks for everything.")
-        );
+        for prose in [
+            "From: the team, thanks for everything.",
+            "De: nada.\nA: thanks again.",
+        ] {
+            assert_eq!(own_text(prose).as_deref(), Some(prose), "{prose:?}");
+        }
     }
 
     #[test]

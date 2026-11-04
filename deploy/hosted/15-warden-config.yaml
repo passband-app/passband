@@ -99,7 +99,7 @@ data:
   # poller against the shared relay, and the push-only bearer becomes the only
   # lock. Bump this and the warden images together, as a release always does.
   #
-  # A SECOND FLOOR, while SQUELCH_WARDEN_EMBED_URL below is set: daemon-0.0.16,
+  # A SECOND FLOOR, while SQUELCH_WARDEN_EMBED_URL below is set: daemon-0.0.15,
   # the first daemon with the shared-embedder client. A warden with that knob
   # renders every tenant at the light shape (512Mi limit, no model volume)
   # whatever image this names, and an older daemon ignores SQUELCH_EMBED_URL,
@@ -108,7 +108,7 @@ data:
   # To go below it, comment the knob out first, let the roller converge the
   # fleet back to the in-process shape (a run exiting 0), and only then move
   # this line. SETUP.md §10b, Rollback; ROLLOUT.md, "Rolling back".
-  SQUELCH_WARDEN_IMAGE: "ghcr.io/passband-app/squelchd:daemon-0.0.16"
+  SQUELCH_WARDEN_IMAGE: "ghcr.io/passband-app/squelchd:daemon-0.0.17"
   # Everything below is a default, restated so this file is the one place an
   # operator has to look. See squelch-warden/README.md.
   SQUELCH_WARDEN_TENANT_NAMESPACE: "tenants"
@@ -305,7 +305,7 @@ data:
   # SQUELCH_WARDEN_CPU_REQUEST: "100m"
   SQUELCH_WARDEN_CPU_LIMIT: "1000m"
   # SQUELCH_WARDEN_MEMORY_REQUEST: "384Mi"
-  # PINNED at 1Gi on purpose (2026-10-30, daemon-0.0.16): busy tenants' heap
+  # PINNED at 1Gi on purpose (2026-10-30, daemon-0.0.15): busy tenants' heap
   # reached 600-930 MiB on 2026-10-29 (glibc arena growth), so the shared-
   # embedder default of 512Mi would OOM them. Unset, the default is 1Gi
   # anyway. The quota needs no redo: requests still drop to 128Mi. Comment
@@ -423,7 +423,7 @@ data:
   # first: at 384Mi the box holds thirty, so a fleet that grew past that on the
   # service cannot all roll back, and the roller halts on the first tenant the
   # quota refuses. And this comes BEFORE any SQUELCH_WARDEN_IMAGE below
-  # daemon-0.0.16, never after or alongside (the second floor, above).
+  # daemon-0.0.15, never after or alongside (the second floor, above).
   # SQUELCH_WARDEN_EMBED_URL: "http://squelch-embed:8850"
   # How long a tenant daemon holds its idle ONNX embedding session before
   # dropping it and handing the heap back. Unset, the daemon's own default (600)

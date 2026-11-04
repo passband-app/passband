@@ -3306,6 +3306,8 @@ fn cmd_serve(
             let sync_metrics = sync_metrics.clone();
             let sync_budget = gmail_budget.clone();
             let vectors_dirty = vectors_dirty.clone();
+            // The human door's live feature set, for `uncapped_triage`.
+            let features = api_state.features().clone();
             // Taken before the spawn and dropped by the task, so readiness
             // tracks the engine and not the intention to start one.
             let sync_running = readiness.sync_started();
@@ -3320,6 +3322,7 @@ fn cmd_serve(
                     .with_metrics(sync_metrics)
                     .with_embedder_gate(embedder_gate)
                     .with_vectors_dirty(vectors_dirty)
+                    .with_features(features)
                     .run(shutdown_rx)
                     .await
             })

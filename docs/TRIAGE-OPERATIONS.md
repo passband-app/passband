@@ -207,6 +207,27 @@ the same numbers as `squelchd_triage_daily_runs`,
 `squelchd_triage_daily_run_cap` and `squelchd_triage_jobs_held` (scopes
 `arrival`, `background`, `access` and `revisit`).
 
+**Lifting the lanes for one tenant: `uncapped_triage`.** A hidden feature
+(docs/FEATURES.md), ticked per tenant on `/admin/features`, for a mailbox whose
+mail must never wait for tomorrow. While it is on the daemon drops the
+background and access lane caps, and the moment it comes on it releases every
+job those caps parked (archive search checks only as far as their own sub-cap
+has room). Untick it and the configured caps apply again from the next job.
+What it keeps:
+
+- The total, `daily_run_cap`. It never holds a real day's mail and is the one
+  breaker left between a runaway (a fan-out re-triage, a stuck loop) and the
+  tenant's monthly LLM budget, which, once spent, stops all triage, new mail
+  included, until it resets.
+- `[revisit].daily_cap` and `archive_access_daily_cap`. Neither is mail
+  arriving.
+
+Spend is still charged to every lane, so `squelchd triage status` and the
+`squelchd_triage_daily_*` gauges can read over a cap (`access 900 of 500`)
+while the flag is on. That is expected; the status command runs outside the
+daemon and does not know the flag. The flag works through the tenant's daemon,
+so a box ticked before that daemon carries this code does nothing yet.
+
 A sender rule applies to mail that arrives after it is written. Creating,
 editing, or deleting one re-triages nothing already stored: every re-triage is a
 full investigation, and a catch-all `*` rule (a content filter) once queued the

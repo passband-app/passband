@@ -1213,6 +1213,8 @@ impl ApiState {
     /// Use `features` as this daemon's hidden-feature set. The handle is
     /// shared, not copied: whatever refreshes it is seen here.
     pub fn with_features(mut self, features: Features) -> Self {
+        // Archive surfacing answers to `uncapped_triage` too, from the same set.
+        self.archive_surfacing.features = features.clone();
         self.features = features;
         self
     }

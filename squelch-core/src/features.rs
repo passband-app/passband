@@ -65,7 +65,24 @@ pub const KNOWN: &[Feature] = &[
         summary: "Passband replaces the events Gmail adds to the calendar from mail with its \
                   own, DELETING Gmail's copy, and keeps them current from the mail.",
     },
+    Feature {
+        key: UNCAPPED_TRIAGE,
+        summary: "No daily triage lanes: backfill, re-triage and access checks run the day they \
+                  are queued instead of waiting for tomorrow. The 10,000-run daily breaker and \
+                  the monthly LLM budget still apply.",
+    },
 ];
+
+/// The daemon's background and access lane caps (see
+/// [`crate::triage::agent_config::AgentConfig`]) are lifted for this mailbox,
+/// so no email waits for tomorrow's budget, and ticking it releases the jobs
+/// those caps already parked. The total (`daily_run_cap`) stays as the
+/// runaway breaker it is, as do the revisit and archive search sub-caps.
+/// Spend is still counted, so the day's numbers stay true. Hosted, it still
+/// answers to the tenant's monthly LLM budget at the gateway, which this does
+/// not touch. OFF IS THE CAPS AS CONFIGURED, which is every daemon that never
+/// heard of the key. docs/TRIAGE-OPERATIONS.md, "Spend and revisit limits".
+pub const UNCAPPED_TRIAGE: &str = "uncapped_triage";
 
 /// Smart re-notify (issue #625, docs/RENOTIFY.md): the daemon records the Mac
 /// app's connections and, at a moment the owner can act, sends a `renotify`
@@ -151,6 +168,12 @@ struct Inner {
     pinned: BTreeSet<String>,
     /// What the control plane last answered. Empty until it has.
     granted: RwLock<BTreeSet<String>>,
+}
+
+impl std::fmt::Debug for Features {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Features").field(&self.list()).finish()
+    }
 }
 
 impl Features {

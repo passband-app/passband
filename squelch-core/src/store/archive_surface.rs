@@ -116,11 +116,28 @@ pub struct ArchiveSurfacing {
     /// no sync engine runs in this process: checks are queued, never awaited.
     pub poke: Option<RefinePoke>,
     pub wait: SurfaceWait,
-    /// What surfacing may spend, from `triage.agent`.
+    /// What surfacing may spend, from `triage.agent`. Read through
+    /// [`Self::effective_caps`], which knows about `uncapped_triage`.
     pub caps: ArchiveAccessCaps,
+    /// The daemon's live hidden features, for `uncapped_triage`, which lifts
+    /// the access lane the worker charges these checks to. The archive
+    /// sub-cap and the total stay, as they do in the worker.
+    pub features: crate::features::Features,
 }
 
 impl ArchiveSurfacing {
+    /// The caps a request is held to right now.
+    pub fn effective_caps(&self) -> ArchiveAccessCaps {
+        if self.features.enabled(crate::features::UNCAPPED_TRIAGE) {
+            ArchiveAccessCaps {
+                access_daily: u32::MAX,
+                ..self.caps
+            }
+        } else {
+            self.caps
+        }
+    }
+
     /// The same settings with this door's own ceiling on the wait.
     pub fn capped(mut self, deadline: Duration) -> Self {
         self.wait = self.wait.capped(deadline);
@@ -203,7 +220,7 @@ pub async fn surface_archive_matches(
     let queued = {
         let store = store.clone();
         let pending = pending.to_vec();
-        let caps = surfacing.caps;
+        let caps = surfacing.effective_caps();
         blocking(move || store.request_archive_access(account, &pending, caps, Utc::now())).await?
     };
     wait_for_checks(store, account, queued, surfacing).await
@@ -223,7 +240,7 @@ pub async fn await_thread_access(
     let queued = {
         let store = store.clone();
         let thread_id = thread_id.to_string();
-        let caps = surfacing.caps;
+        let caps = surfacing.effective_caps();
         blocking(move || store.request_thread_access(account, &thread_id, caps)).await?
     };
     wait_for_checks(store, account, queued, surfacing).await?;

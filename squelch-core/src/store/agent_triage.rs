@@ -376,6 +376,16 @@ pub trait AgentTriageStore: Send + Sync {
         retry_at: DateTime<Utc>,
         error_code: &str,
     ) -> Result<bool>;
+    /// Make every job the daily caps parked due now, for a mailbox whose lane
+    /// caps were just lifted: all but revisits, which answer to a cap of their
+    /// own, and archive search checks past what their own sub-cap still has
+    /// room for. Returns how many were released.
+    fn release_budget_held_jobs(
+        &self,
+        account: AccountId,
+        config: &crate::triage::agent_config::AgentConfig,
+        now: DateTime<Utc>,
+    ) -> Result<usize>;
     /// Requeue work that could not start, refunding only this lease's attempt.
     fn defer_agent_job(
         &self,

@@ -825,6 +825,13 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// [`MailSource::wait_for_change`] between ticks without a store read per
     /// tick. `None` until the first.
     last_cursor: std::sync::Mutex<Option<SyncCursor>>,
+    /// The daemon's live hidden features, for the triage worker's
+    /// [`crate::features::UNCAPPED_TRIAGE`]. Nothing is on without
+    /// [`Self::with_features`].
+    features: crate::features::Features,
+    /// Whether the last triage pass saw `uncapped_triage` on, so the jobs the
+    /// caps parked are released once when it flips on, not every pass.
+    uncapped_seen: AtomicBool,
     /// Where [`Self::refresh_profile`] asks who the account is. Always
     /// [`profile::PEOPLE_ME_URL`] in production; only the tests in that module
     /// assign it, for the same reason `api_base` has no public setter.
@@ -941,6 +948,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             profile_url: profile::PEOPLE_ME_URL.to_string(),
             source: std::sync::OnceLock::new(),
             last_cursor: std::sync::Mutex::new(None),
+            features: crate::features::Features::none(),
+            uncapped_seen: AtomicBool::new(false),
         }
     }
 
@@ -949,6 +958,13 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// Without it the engine still counts, into a registry nobody scrapes.
     pub fn with_metrics(mut self, metrics: Arc<SyncMetrics>) -> Self {
         self.metrics = metrics;
+        self
+    }
+
+    /// Share the daemon's live hidden features (the human door's handle), so
+    /// the triage worker sees an operator's tick within one refresh.
+    pub fn with_features(mut self, features: crate::features::Features) -> Self {
+        self.features = features;
         self
     }
 
@@ -9613,6 +9629,7 @@ Q0/00yfa39rgtJLa0DnOoA==
                     interval: Duration::from_millis(20),
                 },
                 caps: Default::default(),
+                features: Default::default(),
             };
             let started = std::time::Instant::now();
             let rerun = surface_archive_matches(&store, account, &[id], &surfacing)
@@ -12978,6 +12995,89 @@ Q0/00yfa39rgtJLa0DnOoA==
             }
             server.abort();
         }
+    }
+
+    /// `uncapped_triage` end to end through the engine: with the background
+    /// cap spent, a window re-triage parks while the flag is off; ticking it
+    /// releases the parked job once, and the job then reaches the model
+    /// instead of parking again.
+    #[tokio::test]
+    async fn uncapped_triage_releases_parked_work_and_runs_it_past_a_spent_cap() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, account) = store_at_cursor(Some(100));
+        ingest_into(
+            &store,
+            account,
+            &fixture(
+                account,
+                "uncapped-mail",
+                "From: alice@example.com\r\nSubject: Hello\r\n\r\nA note",
+                false,
+            ),
+            Utc::now(),
+        );
+        while let Some(job) = store
+            .claim_agent_job(account, "investigation", Utc::now(), 120)
+            .unwrap()
+        {
+            store.complete_agent_job(&job).unwrap();
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = calls.clone();
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(move || {
+                count.fetch_add(1, Ordering::Relaxed);
+                async { StatusCode::SERVICE_UNAVAILABLE }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let features = crate::features::Features::none();
+        let engine =
+            engine(store.clone(), account, "http://127.0.0.1:1").with_features(features.clone());
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let background = vec![(
+            "__agent_background__".to_string(),
+            engine
+                .config
+                .triage
+                .agent
+                .effective_background_daily_run_cap(),
+        )];
+        while store
+            .reserve_agent_budget(account, &day, &background)
+            .unwrap()
+        {}
+        store.retriage_reset(account, None, 7).unwrap();
+        let claim = || {
+            store
+                .claim_agent_job(account, "investigation", Utc::now(), 120)
+                .unwrap()
+        };
+
+        // Off: the window request parks until tomorrow, and the flag's
+        // release does nothing.
+        engine.release_if_uncapped();
+        engine.process_agent_job(claim().unwrap(), &llm, &day).await;
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(store.retriage_progress(account).unwrap().budget_parked, 1);
+        assert!(claim().is_none(), "parked, not due");
+
+        // On: released at once, and run past the spent cap.
+        features.replace_granted([crate::features::UNCAPPED_TRIAGE]);
+        engine.release_if_uncapped();
+        assert_eq!(store.retriage_progress(account).unwrap().budget_parked, 0);
+        let job = claim().expect("released");
+        engine.process_agent_job(job, &llm, &day).await;
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "the model was asked");
+        assert_eq!(store.retriage_progress(account).unwrap().budget_parked, 0);
+        server.abort();
     }
 
     #[tokio::test]

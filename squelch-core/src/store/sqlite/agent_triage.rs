@@ -1781,6 +1781,14 @@ impl AgentTriageStore for SqliteStore {
     ) -> Result<bool> {
         super::agent_budget::reserve(self, account, day, limits)
     }
+    fn release_budget_held_jobs(
+        &self,
+        account: AccountId,
+        config: &crate::triage::agent_config::AgentConfig,
+        now: DateTime<Utc>,
+    ) -> Result<usize> {
+        super::agent_budget::release_all_held(self, account, config, now)
+    }
     fn refund_agent_budget(
         &self,
         account: AccountId,

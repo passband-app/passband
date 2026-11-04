@@ -3829,6 +3829,7 @@ mod tests {
                 interval: std::time::Duration::from_millis(10),
             },
             caps: Default::default(),
+            features: Default::default(),
         }
     }
 

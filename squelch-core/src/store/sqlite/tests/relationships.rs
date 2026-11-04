@@ -709,3 +709,54 @@ fn an_address_that_fails_its_recount_is_skipped_not_left_blocking_the_drain() {
         "the address after it was recounted"
     );
 }
+
+#[test]
+fn a_decision_that_seals_mail_marks_its_sender_for_a_full_recount() {
+    use super::reading_senders::into_reading_with;
+    let (store, acct) = store();
+    let ordinary = triaged(acct, "a", "t1")
+        .from(DAN)
+        .received_at(days_ago(2))
+        .ingest(&store);
+    let code = triaged(acct, "b", "t2")
+        .from(DAN)
+        .received_at(days_ago(1))
+        .ingest(&store);
+    into_reading_with(&store, acct, ordinary, |_| {});
+    // Drained while the second is still pending: counted, as the module
+    // header says it must be.
+    store.drain_relationship_dirty(acct, 10).unwrap();
+    assert_eq!(
+        store
+            .relationship(acct, DAN)
+            .unwrap()
+            .unwrap()
+            .inbound_threads,
+        2
+    );
+
+    into_reading_with(&store, acct, code, |d| d.external_access.restricted = true);
+    let full: bool = store
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT full FROM relationship_dirty WHERE account_id = ?1 AND addr = ?2",
+            params![acct, DAN],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        full,
+        "the counts do not move, so the mark must refuse the shortcut"
+    );
+    store.drain_relationship_dirty(acct, 10).unwrap();
+    assert_eq!(
+        store
+            .relationship(acct, DAN)
+            .unwrap()
+            .unwrap()
+            .inbound_threads,
+        1,
+        "the sealed thread is gone within a round"
+    );
+}

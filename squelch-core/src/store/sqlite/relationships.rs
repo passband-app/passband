@@ -49,16 +49,19 @@
 //!   so threads, replies and the name never rest on one. "Not the owner's
 //!   own" is `is_sent = 0` here, and not `own_mail_sql!`: the account's own
 //!   address never has a row, and for any other address the two agree.
-//! - PENDING MAIL COUNTS, the one place this module takes the looser of the
-//!   two sealed macros, and the reason is the reply itself. Ingesting the
-//!   owner's reply re-queues the thread it lands in, so at the moment the
-//!   Sent mark asks for a recount every inbound message of the thread just
-//!   answered is pending again. The strict macro would drop exactly the
-//!   thread that made the owner a replier, and nothing would recount it until
-//!   the nightly pass. A count is all that leaves here; a pending message
-//!   that turns out to be a login code costs one inflated count until the
-//!   next recount of that sender. The ATTENTION columns stay strict: they are
-//!   the Reading purge's own statements, which sweep on what they find.
+//! - PENDING MAIL COUNTS in the recent window, the one place this module
+//!   takes the looser of the two sealed macros, and the reason is the order
+//!   of a round: the refine lane drains the dirty set BEFORE its triage pass,
+//!   so a fresh arrival is still pending its access check when its sender's
+//!   mark is drained. The strict macro would leave every new message out of
+//!   the threads and replies it was marked to update, and nothing would
+//!   recount them until the next mark or the nightly walk. A pending message
+//!   that turns out to be a login code is caught the moment its decision
+//!   commits: a decision or access check that seals mail, and any owner
+//!   correction, marks the sender for a FULL recount
+//!   ([`mark_message_sender_dirty_conn`]). The ATTENTION columns stay strict:
+//!   they are the Reading purge's own statements, which sweep on what they
+//!   find.
 //! - ATTENTION IS THE PURGE'S OWN MEASUREMENT, the same `Measured` the
 //!   fatigue score comes from, so "opened 2 of 38" in the stored reasons and
 //!   the attention columns beside it agree by construction. `attention_rows`
@@ -337,19 +340,24 @@ pub(super) fn mark_dirty_conn(conn: &Connection, account_id: AccountId, addr: &s
 }
 
 /// Mark the sender of message `id` owed a recompute, in ONE statement: the
-/// attention POST knows the message, not the address, and must not pay a
-/// round trip to learn it.
+/// attention POST and the triage commits know the message, not the address,
+/// and must not pay a round trip to learn it. `full` when the change is one
+/// the counts cannot see (the message was sealed or corrected): the recount
+/// must walk the recent window, not take the unchanged-counts shortcut. A
+/// full mark is never lowered by a later plain one.
 pub(super) fn mark_message_sender_dirty_conn(
     conn: &Connection,
     account_id: AccountId,
     id: i64,
+    full: bool,
 ) -> Result<()> {
     conn.prepare_cached(
-        "INSERT OR IGNORE INTO relationship_dirty(account_id, addr)
-         SELECT account_id, lower(trim(from_addr)) FROM messages
-          WHERE account_id = ?1 AND id = ?2 AND is_sent = 0 AND trim(from_addr) != ''",
+        "INSERT INTO relationship_dirty(account_id, addr, full)
+         SELECT account_id, lower(trim(from_addr)), ?3 FROM messages
+          WHERE account_id = ?1 AND id = ?2 AND is_sent = 0 AND trim(from_addr) != ''
+         ON CONFLICT(account_id, addr) DO UPDATE SET full = MAX(full, excluded.full)",
     )?
-    .execute(params![account_id, id])?;
+    .execute(params![account_id, id, full])?;
     Ok(())
 }
 

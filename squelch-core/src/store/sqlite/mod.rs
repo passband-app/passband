@@ -104,7 +104,10 @@ macro_rules! known_sealed_mail_sql {
 /// swept until triage has said what it is. That costs nothing lasting: it
 /// corrects itself the moment the decision commits.
 ///
-/// THE ONE CALLER THAT USES THE LOOSER MACRO INSTEAD is the attention WRITE
+/// TWO CALLERS USE THE LOOSER MACRO INSTEAD, each on purpose. The relationship
+/// ledger's recent window (`relationships`) counts pending mail because its
+/// marks drain before the triage pass, and recounts the sender the moment a
+/// decision seals one. The other is the attention WRITE
 /// (`record_message_attention`), and the asymmetry is deliberate. A report
 /// refused is lost for good, and mail opened in its first moments, before
 /// triage has reached it, is exactly when dwell is real. A report accepted

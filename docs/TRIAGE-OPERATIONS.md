@@ -492,13 +492,12 @@ Known limits:
 
 - Archive-tier mail is not counted, so a correspondent whose history is all
   older than the backfill window starts with only the window's counts.
-- Inbound counts use `known_sealed_mail_sql!`: mail whose access check is
-  pending counts. The reply that re-queues a thread would otherwise drop that
-  thread from `replied_threads` until the nightly pass. The attention columns
-  use the purge flow's strict statements.
-- A triage commit does not mark its sender dirty. A message that becomes auth
-  mail after its sender's last recount stays counted until the next mark or
-  the nightly pass.
+- The recent window uses `known_sealed_mail_sql!`, so mail whose access check
+  is pending counts. The dirty set drains before the triage pass, so a fresh
+  arrival is always pending when its mark drains. A decision or access check
+  that seals a message, and any owner correction, marks the sender for a full
+  recount, so a sealed message leaves the threads within a round. The
+  attention columns use the purge flow's strict statements.
 - `sent_count` and `sent_last_at` are the contacts row's, so a recipient the
   contacts seed filtered out has initiated threads but a zero sent count.
 

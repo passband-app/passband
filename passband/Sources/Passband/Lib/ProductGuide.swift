@@ -286,7 +286,7 @@ enum ProductGuide {
         - "View full list" on that receipt opens a page listing every email that was cleared: its subject, its sender and why. The undo timer is paused while that page is open. On it, u undoes everything, and Return or Esc confirms and goes back with the timer carrying on from where it stopped.
 
         Other things on the page:
-        - Clicking the headline asks for a different one. The name in the greeting starts as the first name on the mailbox's Google profile (or the first part of the address when that is not available) and is changed in Settings > General > You.
+        - Clicking the headline asks for a different one. The name in the greeting starts as the first name on the mailbox's Google profile (with none, the greeting has no name) and is changed only in Settings > General > You.
         - With nothing in For your eyes the page says there is no important mail, shows the day's tally and links to all mail.
         - "ingesting" in the top bar means new mail is still being sorted and will land on the next refresh.
         - Unsubscribes Passband is carrying out show in a tray at the bottom right.

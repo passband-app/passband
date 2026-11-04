@@ -712,147 +712,24 @@ private struct IngestIndicator: View {
 
 // MARK: - GREETING
 
-/// "GOOD MORNING, BRAELYN" — the one line on either client that says the human's
-/// own name, and the one place they can set it without going to Settings.
+/// "GOOD MORNING, BRAELYN": the one line on either client that says the
+/// human's own name.
 ///
-/// THE NAME IS A GUESS UNTIL IT ISN'T. A fresh install has no name at all, and
-/// nobody opens Settings to introduce themselves, so the greeting used to read
-/// as an anonymous "GOOD MORNING" forever. It is now seeded from the mailbox's
-/// local part the first time the daemon names the account
-/// (`Prefs.seedUserName`), and a seed is a claim about someone that they never
-/// made — so it comes with a pencil, and the pencil edits IN PLACE rather than
-/// routing to Settings, because the thing being corrected is right there.
+/// The name is seeded once from the given name on the mailbox's Google
+/// profile when the daemon has one (`Prefs.seedUserName`), and changed only in
+/// Settings > You. With no name the greeting simply has none: it never falls
+/// back to the address, so it can never say "Good evening, bboynton97".
 ///
-/// The affordance is deliberately SINGLE-USE: it shows only while
-/// `prefs.nameChosen` is false, and the first answer — typed here or into the
-/// Settings row — retires it for good. A permanent edit button on a greeting is
-/// chrome; this is a question the app owes the human exactly once.
-///
-/// Shared by both clients (the Mac's `DashHero`, the phone's hero), so the
-/// nudge cannot ship on one surface and rot on the other.
+/// Shared by both clients (the Mac's `DashHero`, the phone's hero).
 struct GreetingLine: View {
     @Environment(Prefs.self) private var prefs
 
-    /// The edit buffer. Never bound straight to the pref: a live binding would
-    /// mark the name CHOSEN on the first keystroke, which is precisely the
-    /// state this view exists to end deliberately.
-    @State private var draft = ""
-    @State private var editing = false
-    @FocusState private var focused: Bool
-
     var body: some View {
-        HStack(spacing: Space.s6) {
-            if editing {
-                label(Self.greeting() + ",")
-                field
-            } else {
-                label(
-                    Self.greeting() + (prefs.userName.isEmpty ? "" : ", \(prefs.userName)"))
-                if !prefs.nameChosen { pencil }
-            }
-        }
-        #if os(macOS)
-            // Esc closes this, like everything else. It has to be a BINDING and
-            // not `.onExitCommand`: the app's key monitor sees the event first
-            // and Escape is the one key it never suppresses for a focused text
-            // field, so a surface that wants its own Escape must claim it.
-            // Registered in `.sitrep` (which outranks `.global` in dispatch
-            // order) and only while the editor is up.
-            .keyBindings(
-                .sitrep,
-                editing ? [KeyBinding("Escape", "cancel", allowInInput: true) { close() }] : []
-            )
-        #endif
-        // The board is kept mounted behind other pages: an editor left open
-        // there would keep the keyboard on a field nobody can see.
-        .onPageHidden { if editing { close() } }
-    }
-
-    private func label(_ text: String) -> some View {
-        Text(text)
+        Text(Self.greeting() + (prefs.userName.isEmpty ? "" : ", \(prefs.userName)"))
             .font(Typo.micro)
             .foregroundStyle(Palette.accent)
             .textCase(.uppercase)
             .tracking(0.6)
-    }
-
-    private var field: some View {
-        TextField("your name", text: $draft)
-            .textFieldStyle(.plain)
-            .autocorrectionDisabled()
-            .focused($focused)
-            .font(Typo.micro)
-            .foregroundStyle(Palette.accent)
-            .tracking(0.6)
-            .frame(maxWidth: Typo.measure(160))
-            // AN OVERLAY, not a border: it has to say "this is a field" without
-            // costing a single point of height, or the serif headline under it
-            // would hop down and back every time the editor opens and closes.
-            .overlay(alignment: .bottom) {
-                Rectangle()
-                    .fill(Palette.accent.opacity(0.4))
-                    .frame(height: 1)
-                    .offset(y: 3)
-            }
-            .onSubmit(commit)
-            // BLUR CANCELS, which is the opposite of the Settings rows' "click
-            // away saves" — and for the opposite reason. Saving on blur would
-            // commit a half-typed name AND retire the pencil that is the only
-            // way to see the mistake, so clicking away costs a retyped word
-            // rather than a wrong name you have to hunt through Settings to fix.
-            .onChange(of: focused) { _, nowFocused in
-                if !nowFocused { editing = false }
-            }
-            .submitLabel(.done)
-            .onAppear { focused = true }
-    }
-
-    private var pencil: some View {
-        Button {
-            draft = prefs.userName
-            editing = true
-        } label: {
-            Image(systemName: "pencil")
-                .font(Typo.ui(10, weight: .semibold))
-                .foregroundStyle(Palette.accent.opacity(0.8))
-                // Clickable past the glyph, but NOT past the line: a target
-                // taller than the label it sits beside would push the serif
-                // headline down by the height of a pencil nobody can see.
-                .padding(Space.scaled(3))
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("edit your name")
-        #if os(macOS)
-            // Honest either way. With nothing seeded — a daemon too old to name
-            // its mailbox — there is no guess to correct, only something to say.
-            .help(
-                prefs.userName.isEmpty
-                    ? "say what this greeting should call you"
-                    : "this is a guess from your email address; click to say what to call you"
-            )
-        #endif
-    }
-
-    /// Enter saves. An EMPTY box is a cancel, not an erasure: a name cleared
-    /// from here would take the pencil with it and leave Settings as the only
-    /// way back, which is a lot to charge for a stray Enter.
-    private func commit() {
-        let typed = draft.trimmed
-        close()
-        guard !typed.isEmpty else { return }
-        // The setter is what records the name as CHOSEN — see Prefs.userName.
-        prefs.userName = typed
-    }
-
-    /// Both exits go through here. Dropping `focused` EXPLICITLY rather than
-    /// leaning on SwiftUI to reset it when the field unmounts: cancel is the
-    /// one exit that leaves the pencil on screen, so it is the one exit with a
-    /// second open behind it, and a `focused` still stuck true would make that
-    /// open's `.onAppear` a no-op — a field you click into and cannot type in.
-    private func close() {
-        focused = false
-        editing = false
     }
 
     static func greeting(now: Date = Date()) -> String {

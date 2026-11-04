@@ -428,7 +428,6 @@ struct RefreshError { var message: String; var kind: ErrorKind }
 }
 @MainActor final class Prefs {
     static let shared = Prefs()
-    func seedUserName(fromEmail: String?) {}
     func seedUserName(fromGivenName: String?, email: String?) {}
 }
 @MainActor final class AccountPhotos {

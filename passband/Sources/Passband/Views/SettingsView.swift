@@ -724,8 +724,7 @@ struct RowDivider: View {
 
 // MARK: - general
 
-/// The name the sitrep greets you by. On the Mac the greeting's own pencil
-/// edits it too; the phone's sitrep has no greeting, so this is its only door.
+/// The name the sitrep greets you by, and the one place to change it.
 struct YouSection: View {
     @Environment(Prefs.self) private var prefs
 

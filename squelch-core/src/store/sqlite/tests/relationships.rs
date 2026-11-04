@@ -816,6 +816,37 @@ fn a_decision_that_seals_mail_marks_its_sender_for_a_full_recount() {
         (1, 1),
         "the sealed message leaves the count and its thread within a round"
     );
+
+    // And back: a re-triage that lifts the restriction unseals it, which
+    // moves no count either, so that mark must be full too.
+    store
+        .enqueue_agent_triage(acct, code, "test-unseal", false)
+        .unwrap();
+    let job = store
+        .claim_agent_job(acct, "triage", Utc::now() + Duration::days(2), 60)
+        .unwrap()
+        .expect("the re-triage is claimable");
+    assert_eq!(job.message_id, code);
+    let context = store.load_agent_context(&job).unwrap();
+    let decision = crate::triage::decision::MessageDecision {
+        summary: "Not a code after all".into(),
+        ..Default::default()
+    };
+    store
+        .commit_agent_decision(
+            &job,
+            &context,
+            &decision,
+            std::slice::from_ref(&context.message.source),
+        )
+        .unwrap();
+    store.drain_relationship_dirty(acct, 10).unwrap();
+    let unsealed = store.relationship(acct, DAN).unwrap().unwrap();
+    assert_eq!(
+        (unsealed.received_count, unsealed.inbound_threads),
+        (2, 2),
+        "the unsealed message is counted again within a round"
+    );
 }
 
 #[test]

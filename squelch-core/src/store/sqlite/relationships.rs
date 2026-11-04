@@ -423,6 +423,41 @@ pub(super) fn mark_message_sender_dirty_conn(
     Ok(())
 }
 
+/// Is message `id` KNOWN to be sealed right now, by `known_sealed_mail_sql!`
+/// itself? Primary-key probes on one message.
+pub(super) fn message_known_sealed_conn(
+    conn: &Connection,
+    account_id: AccountId,
+    id: i64,
+) -> Result<bool> {
+    Ok(conn
+        .prepare_cached(concat!(
+            "SELECT EXISTS(SELECT 1 FROM messages m LEFT JOIN triage t ON t.message_id = m.id
+              WHERE m.account_id = ?1 AND m.id = ?2 AND ",
+            known_sealed_mail_sql!(),
+            ")"
+        ))?
+        .query_row(params![account_id, id], |r| r.get(0))?)
+}
+
+/// After a triage or access commit: if message `id`'s sealing changed
+/// either way since `was_sealed` (read before the commit wrote anything),
+/// mark its sender for a FULL recount. Sealing takes the message out of the
+/// row's count and threads; UNSEALING (a re-triage that drops its auth
+/// kinds, an access check going back to allowed) puts it back, and neither
+/// changes a count the shortcut would notice.
+pub(super) fn mark_if_sealing_changed_conn(
+    conn: &Connection,
+    account_id: AccountId,
+    id: i64,
+    was_sealed: bool,
+) -> Result<()> {
+    if message_known_sealed_conn(conn, account_id, id)? != was_sealed {
+        mark_message_sender_dirty_conn(conn, account_id, id, true)?;
+    }
+    Ok(())
+}
+
 /// Mark, for a FULL recount, every address that wrote inbound mail into
 /// `thread_id`: the owner just wrote into it, so each of them may have gained
 /// a replied thread whatever address the reply went to. One statement, a seek

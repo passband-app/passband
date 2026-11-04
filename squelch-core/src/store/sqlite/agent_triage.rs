@@ -2181,6 +2181,8 @@ impl AgentTriageStore for SqliteStore {
         if current.source.content != original.source.content {
             return Ok(AgentCommitOutcome::Stale);
         }
+        let was_sealed =
+            super::relationships::message_known_sealed_conn(&tx, job.account_id, job.message_id)?;
         let restricted = explicit_access_override(&tx, job.account_id, job.message_id)?
             .unwrap_or(decision.restricted);
         tx.execute(
@@ -2191,16 +2193,14 @@ impl AgentTriageStore for SqliteStore {
                 if restricted { "restricted" } else { "allowed" }
             ],
         )?;
-        // Sealed by the access check: out of the sender's relationship row
-        // within a round, as at the decision commit.
-        if restricted {
-            super::relationships::mark_message_sender_dirty_conn(
-                &tx,
-                job.account_id,
-                job.message_id,
-                true,
-            )?;
-        }
+        // Sealed or unsealed by the access check: the sender's relationship
+        // row follows within a round, as at the decision commit.
+        super::relationships::mark_if_sealing_changed_conn(
+            &tx,
+            job.account_id,
+            job.message_id,
+            was_sealed,
+        )?;
         // Access changed outside the triage commit: the message's stored
         // decision is projected again now (matched afresh), not at its next
         // re-triage.
@@ -2361,6 +2361,10 @@ impl AgentTriageStore for SqliteStore {
             ));
         }
         let decision = &decision;
+        // Read BEFORE the decision and the access state are written, so the
+        // relationship mark below sees which way sealing moved.
+        let was_sealed =
+            super::relationships::message_known_sealed_conn(&tx, job.account_id, job.message_id)?;
         let revision: i64 = tx.query_row(
             "SELECT revision FROM agent_message_state WHERE account_id=?1 AND message_id=?2",
             params![job.account_id, job.message_id],
@@ -2393,17 +2397,15 @@ impl AgentTriageStore for SqliteStore {
         // A decision that SEALS the message deletes its vectors here, at the
         // event, like its translation above (`vector_forbidden_sql!`).
         super::search::purge_forbidden_vectors_conn(&tx, Some(job.message_id))?;
-        // And takes it out of its sender's relationship row within a round:
-        // the ledger counted it while it was pending (`relationships`), and
-        // its counts do not change when it is sealed, so the mark is full.
-        if decision.external_access.restricted || !decision.auth.kinds.is_empty() {
-            super::relationships::mark_message_sender_dirty_conn(
-                &tx,
-                job.account_id,
-                job.message_id,
-                true,
-            )?;
-        }
+        // And moves it into or out of its sender's relationship row within a
+        // round: the ledger counted it while it was pending (`relationships`),
+        // and a re-triage that drops its auth kinds puts it back.
+        super::relationships::mark_if_sealing_changed_conn(
+            &tx,
+            job.account_id,
+            job.message_id,
+            was_sealed,
+        )?;
         let done = apply_done(&tx, job, decision, Utc::now())?;
         // A RE-CHECK MOVES MAIL ONLY BY ITS DONE. For the owner, done and
         // leaving FYE are one act: a re-check writes no placement at all (no

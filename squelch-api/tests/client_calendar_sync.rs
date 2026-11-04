@@ -1887,6 +1887,13 @@ async fn a_ghost_names_the_real_event_it_duplicates_and_near_misses_name_none() 
         "Workshop",
         rfc(minute(day.and_hms_opt(16, 0, 0).unwrap().and_utc())),
     );
+    seed_ghost(
+        &w.store,
+        w.acct,
+        "g6",
+        "Retreat",
+        rfc(minute(day.and_hms_opt(16, 0, 0).unwrap().and_utc())),
+    );
     w.google().full.insert(
         PRIMARY.into(),
         vec![vec![
@@ -1896,8 +1903,10 @@ async fn a_ghost_names_the_real_event_it_duplicates_and_near_misses_name_none() 
                    "start": {"dateTime": at.to_rfc3339()},
                    "end": {"dateTime": (at + Duration::hours(2)).to_rfc3339()}}),
             all_day("conf", "Big Conference 2026", day, 1),
-            // All-day on the timed ghost's date: not a match.
+            // All-day on the timed ghost's date: a match.
             all_day("workshop", "Workshop", day, 1),
+            // All-day the day after the timed ghost: not one.
+            all_day("retreat", "Retreat", day + Duration::days(1), 1),
         ]],
     );
     assert_eq!(w.pass().await, PassOutcome::Synced);
@@ -1944,8 +1953,13 @@ async fn a_ghost_names_the_real_event_it_duplicates_and_near_misses_name_none() 
     );
     assert_eq!(
         matched("Workshop", None),
+        json!({"calendar_id": "primary", "id": "workshop"}),
+        "all-day against timed on its date"
+    );
+    assert_eq!(
+        matched("Retreat", None),
         Value::Null,
-        "all-day against timed"
+        "all-day against timed a day apart"
     );
     // The ghost's key set, wave 1's plus `matched_event`.
     assert_eq!(

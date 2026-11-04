@@ -816,10 +816,26 @@ pub fn same_start(a: &EventTime, b: &EventTime) -> bool {
     }
 }
 
-/// THE DISPLAY MATCH between a ghost and a real event: the same start (see
-/// [`same_start`]) and titles that are equal after [`normalize_title`], or one
-/// containing the other. An empty title matches nothing (every string
-/// contains the empty one).
+/// The DISPLAY start match: [`same_start`], or one start date-only and the
+/// other a time on that date, read in the time's own offset (the zone the
+/// mail or the calendar wrote it in). Mail often says only "Nov 6" for what
+/// the calendar holds as 7pm on Nov 6.
+///
+/// Display ONLY. Anything that writes to a calendar ([`own`]) keeps
+/// [`same_start`], where a date never matches an instant.
+pub fn display_same_start(a: &EventTime, b: &EventTime) -> bool {
+    match (a, b) {
+        (EventTime::Date(day), EventTime::At(at)) | (EventTime::At(at), EventTime::Date(day)) => {
+            at.date_naive() == *day
+        }
+        _ => same_start(a, b),
+    }
+}
+
+/// THE DISPLAY MATCH between a ghost and a real event: starts that match for
+/// display (see [`display_same_start`]) and titles that are equal after
+/// [`normalize_title`], or one containing the other. An empty title matches
+/// nothing (every string contains the empty one).
 ///
 /// Display de-duplication ONLY: it is computed when the timeline is listed
 /// and never stored, so it changes no ghost state and cannot go stale.
@@ -829,7 +845,7 @@ pub fn ghost_matches(
     event_title: Option<&str>,
     event_start: &EventTime,
 ) -> bool {
-    if !same_start(ghost_start, event_start) {
+    if !display_same_start(ghost_start, event_start) {
         return false;
     }
     let ghost = normalize_title(ghost_title);
@@ -841,8 +857,9 @@ pub fn ghost_matches(
 
 /// [`ghost_matches`] for a whole listing: for each ghost (its title and
 /// start), the index of the first event in `events` (in their served order)
-/// that it matches. Events are grouped by start first, so this is linear in
-/// the two listings rather than their product.
+/// that it matches, an event at its exact start before one that only shares
+/// its day across precisions. Events are grouped by start first, so this is
+/// linear in the two listings rather than their product.
 pub fn match_ghosts<'a>(
     ghosts: impl IntoIterator<Item = (&'a str, &'a EventTime)>,
     events: &[SyncedEvent],
@@ -857,20 +874,38 @@ pub fn match_ghosts<'a>(
         EventTime::Date(day) => Key::Date(*day),
     };
     let mut by_start: std::collections::HashMap<Key, Vec<usize>> = Default::default();
+    // The other precision on a day: timed events by the date in their own
+    // offset, all-day ones by their date.
+    let mut timed_on: std::collections::HashMap<chrono::NaiveDate, Vec<usize>> = Default::default();
+    let mut all_day_on: std::collections::HashMap<chrono::NaiveDate, Vec<usize>> =
+        Default::default();
     for (i, event) in events.iter().enumerate() {
         by_start.entry(key(&event.row.start)).or_default().push(i);
+        match event.row.start {
+            EventTime::At(at) => timed_on.entry(at.date_naive()).or_default().push(i),
+            EventTime::Date(day) => all_day_on.entry(day).or_default().push(i),
+        }
     }
     ghosts
         .into_iter()
         .map(|(title, start)| {
-            by_start.get(&key(start))?.iter().copied().find(|&i| {
-                ghost_matches(
-                    title,
-                    start,
-                    events[i].row.summary.as_deref(),
-                    &events[i].row.start,
-                )
-            })
+            let other = match start {
+                EventTime::Date(day) => timed_on.get(day),
+                EventTime::At(at) => all_day_on.get(&at.date_naive()),
+            };
+            [by_start.get(&key(start)), other]
+                .into_iter()
+                .flatten()
+                .flatten()
+                .copied()
+                .find(|&i| {
+                    ghost_matches(
+                        title,
+                        start,
+                        events[i].row.summary.as_deref(),
+                        &events[i].row.start,
+                    )
+                })
         })
         .collect()
 }
@@ -882,7 +917,8 @@ pub fn match_ghosts<'a>(
 ///
 /// 1. Passband made the event for it and keeps it ([`own`], an `owned`
 ///    binding), whatever its time or title now, when that event is listed.
-/// 2. The display match ([`match_ghosts`]): the same start and a title match.
+/// 2. The display match ([`match_ghosts`]): the same start (or day, across
+///    an all-day and a timed start) and a title match.
 /// 3. Gmail made the event from the same mail and titled it its own way
 ///    ([`own::same_event`]): the same start and a distinctive word.
 ///
@@ -1005,6 +1041,41 @@ mod tests {
         ));
         let day = at("2026-10-05");
         assert!(ghost_matches("Conference", &day, Some("Conference"), &day));
+        // All-day against timed on the same date, both ways: mail that says
+        // only "Oct 5" for what the calendar holds at 7pm.
+        assert!(ghost_matches("Dinner", &day, Some("Dinner"), &start));
+        assert!(ghost_matches("Dinner", &start, Some("Dinner"), &day));
+    }
+
+    #[test]
+    fn date_only_ghosts_match_the_timed_event_on_their_day() {
+        // Two ghosts from two threads, both date-only, and the party the user
+        // accepted at 7pm that day. Both are the event.
+        let party = SyncedEvent {
+            calendar_id: "primary".into(),
+            calendar_name: None,
+            calendar_color: None,
+            calendar_access: None,
+            calendar_primary: true,
+            row: EventRow {
+                summary: Some("Parameter & Endzeit Invite Polar Inertia".into()),
+                event_id: "party".into(),
+                ..row("2026-11-06T19:00:00-08:00")
+            },
+        };
+        let day = at("2026-11-06");
+        let next = at("2026-11-07");
+        assert_eq!(
+            match_ghosts(
+                [
+                    ("Polar Inertia", &day),
+                    ("Parameter & Endzeit Invite Polar Inertia", &day),
+                    ("Polar Inertia", &next),
+                ],
+                std::slice::from_ref(&party)
+            ),
+            [Some(0), Some(0), None]
+        );
     }
 
     #[test]
@@ -1026,10 +1097,27 @@ mod tests {
         ));
         // The same instant, unrelated titles.
         assert!(!ghost_matches("Dinner", &start, Some("Dentist"), &start));
-        // All-day against timed on the same date, both ways.
-        let day = at("2026-10-05");
+        // All-day against timed on ANOTHER date, both ways.
+        let day = at("2026-10-04");
         assert!(!ghost_matches("Dinner", &day, Some("Dinner"), &start));
         assert!(!ghost_matches("Dinner", &start, Some("Dinner"), &day));
+        // The date is the time's own: 19:00 PST on the 6th is the 7th in UTC,
+        // and still not the 7th.
+        let late = at("2026-11-06T19:00:00-08:00");
+        assert!(!ghost_matches(
+            "Show",
+            &at("2026-11-07"),
+            Some("Show"),
+            &late
+        ));
+        // A day match still needs the titles.
+        assert!(!ghost_matches(
+            "Dinner",
+            &at("2026-10-05"),
+            Some("Dentist"),
+            &start
+        ));
+        let day = at("2026-10-05");
         // All-day a date apart.
         assert!(!ghost_matches(
             "Trip",

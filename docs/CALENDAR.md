@@ -1597,9 +1597,12 @@ Read only (slice B). The only writes are the user's own, described under
   starts a pass, at most once per account per 30 seconds (202 either way,
   `kicked` says which).
 - **Match rule.** A ghost carries `matched_event {calendar_id, id}` when a real
-  event starts at the same instant (or on the same date, both all-day) and the
+  event starts at the same instant (or on the same date: both all-day, or one
+  all-day and the other a time on that date in the time's own offset, since
+  mail often says only "Nov 6" for what the calendar holds at 7pm) and the
   titles are equal after lowercasing and collapsing whitespace, or one contains
-  the other. Worked out when the timeline is listed, never stored: it hides a
+  the other. The day rule is display only: adoption (`own.rs`) still needs the
+  same start. Worked out when the timeline is listed, never stored: it hides a
   duplicate and changes no ghost.
 - **The card's place** (`gcal/place.rs`, 2026-10-28). A booking service
   often writes its marketing into the location ("Dingles Public House, Tock is

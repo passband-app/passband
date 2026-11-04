@@ -1066,4 +1066,15 @@ mod tests {
         named.location = None;
         assert!(same_event(&named, &dingles().row));
     }
+
+    #[test]
+    fn a_date_only_ghost_never_adopts_or_deletes_a_timed_event() {
+        // The timeline hides a date-only ghost behind the timed event on its
+        // day (`display_same_start`). Adoption deletes Gmail's copy, so it
+        // keeps the strict start: a date never matches an instant.
+        let day = &START[..10];
+        let g = ghost(7, "Dinner at Dingles", day);
+        assert!(!same_event(&g, &dingles().row));
+        assert!(plan_of(std::slice::from_ref(&g), &[dingles()], &[]).is_empty());
+    }
 }

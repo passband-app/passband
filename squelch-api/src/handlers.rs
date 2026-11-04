@@ -2159,7 +2159,7 @@ pub(crate) fn ghost_view(
 /// holds fewer events than Google has (its own cap, likewise nearest now).
 /// Each ghost
 /// carries `matched_event` (`{calendar_id, id}` or null): a real event at the
-/// same start whose title matches ([`squelch_core::gcal::ghost_matches`]),
+/// same start (or day, across all-day and timed) whose title matches ([`squelch_core::gcal::ghost_matches`]),
 /// computed here for display de-duplication and never stored. Each event
 /// carries `place` once the small model has cleaned its location
 /// ([`squelch_core::gcal::place`]): the text the detail card shows in place

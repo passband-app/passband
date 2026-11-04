@@ -28,7 +28,7 @@ UID each message was last seen at (`imap_locations`, behind the narrow
 `MessageLocations` trait the store implements), because an IMAP stable id is a
 hash and cannot be turned back into a place to fetch from.
 
-**Setting up an IMAP account** (self-host, read only until SMTP lands):
+**Setting up an IMAP account** (self-host only; sending goes over SMTP):
 `squelchd auth --imap [--ca-file PEM]` prompts for host, TLS mode, port,
 username and app password, logs in and lists the folders, and only then
 stores: the server (host, port, TLS mode, username, and the CA certificate's

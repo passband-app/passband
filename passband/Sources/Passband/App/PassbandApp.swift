@@ -75,6 +75,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // was not running is delivered the moment a delegate exists, and a
         // center without one drops it.
         Notifier.shared.install()
+        // On by default, once per install; see LoginItem.
+        LoginItem.shared.adoptDefault()
         // Look at the floating code panel without waiting for a login code:
         // same posture as PASSBAND_FORCE_TOUR, a launch environment only.
         if let code = ProcessInfo.processInfo.environment["PASSBAND_PREVIEW_LOGIN_CODE"] {

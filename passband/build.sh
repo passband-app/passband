@@ -61,6 +61,7 @@ SWIFT_FLAGS=(
   -framework UniformTypeIdentifiers
   -framework QuickLookUI
   -framework UserNotifications
+  -framework ServiceManagement
   -F "$SPARKLE_DIR"
   -framework Sparkle
   -Xlinker -rpath -Xlinker @executable_path/../Frameworks

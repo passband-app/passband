@@ -51,17 +51,28 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         MainActor.assumeIsolated {
             Notifier.shared.install()
             PushRegistration.shared.start()
+            // Observers only. Nothing reports from here: iOS prewarms apps in
+            // the background, before anyone looks and sometimes before the
+            // first unlock, when UserDefaults reads back empty. Reporting arms
+            // on the first activation below (see `Analytics.armed`).
             Analytics.start()
-            // The boot view never passes through route(to:), so its screen event
-            // is recorded here or not at all.
-            Analytics.screen(AppStore.shared.activeView.rawValue)
-            AppStore.shared.identifyPerson()
         }
         return true
     }
 
+    /// The boot view never passes through route(to:), so its screen event is
+    /// recorded on the first activation or not at all.
+    private var recordedBootScreen = false
+
     func applicationDidBecomeActive(_ application: UIApplication) {
         Task { @MainActor in
+            // Arm here too, not only in Analytics' own observer: UIKit does not
+            // promise which of the two hears about the activation first.
+            Analytics.arm()
+            if !recordedBootScreen {
+                recordedBootScreen = true
+                Analytics.screen(AppStore.shared.activeView.rawValue)
+            }
             AppStore.shared.identifyPerson()
             await PushRegistration.shared.registerAndSync()
         }

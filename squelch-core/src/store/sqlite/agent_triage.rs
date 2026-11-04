@@ -3691,14 +3691,18 @@ fn list_items_with_query(
     now: DateTime<Utc>,
     query: &AgentListQuery,
 ) -> Result<Vec<AgentListItem>> {
-    // AUTH MAIL does not take the model's FYE pick: it lives on the Auth
-    // page's decision rail, and listing every sign-in alert in both places
-    // means ruling on it twice. A thread is in FYE for its auth mail only when
-    // one of its not-done auth messages was ruled "Not me" or is a critical
-    // account change still unruled (`auth_fye_threads_cte!`, shared with the
-    // sitrep's placement and the stats), and that message is the row shown,
-    // whichever message represents the thread. An explicit thread preference
-    // (the human pinned it) and a fired reminder still win.
+    // AUTH MAIL takes the model's FYE pick only for the kinds that can be
+    // news (setup, account changes, app grants; `AuthKind::takes_fye_pick`),
+    // and never once the owner ruled it "That was me" (`auth_off_fye_sql!`).
+    // Codes, links and resets they asked for, and sign-in alerts and receipts,
+    // live on the Auth page's decision rail: listing every sign-in alert in
+    // both places means ruling on it twice. Beyond the pick, a thread is in
+    // FYE for its auth mail when one of its not-done auth messages was ruled
+    // "Not me" or is a critical account change still unruled
+    // (`auth_fye_threads_cte!`, shared with the sitrep's placement and the
+    // stats), and that message is the row shown, whichever message
+    // represents the thread. An explicit thread preference (the human pinned
+    // it) and a fired reminder still win.
     //
     // THE USER'S OWN MAIL gets the same treatment for a plainer reason: they
     // wrote it. A thread whose representative is theirs (see `OWN_MAIL` for how
@@ -3730,7 +3734,7 @@ fn list_items_with_query(
              pref.thread_id=a.thread_id WHERE a.account_id=?1 AND ?3='fye' AND
              (COALESCE(pref.show_in_fye,CASE WHEN ",own_mail_sql!()," THEN 0
              WHEN q.id IS NOT NULL THEN 1
-             WHEN ",auth_mail_sql!()," THEN 0 ELSE a.show_in_fye END)=1 OR t.reminded_at IS NOT NULL) AND m.is_sent=0 AND m.is_spam=0 AND ",archive_listable_sql!()," AND (q.id IS NOT NULL OR COALESCE(t.status,'new')!='done') AND
+             WHEN ",auth_off_fye_sql!("m")," THEN 0 ELSE a.show_in_fye END)=1 OR t.reminded_at IS NOT NULL) AND m.is_sent=0 AND m.is_spam=0 AND ",archive_listable_sql!()," AND (q.id IS NOT NULL OR COALESCE(t.status,'new')!='done') AND
              (q.id IS NOT NULL OR t.remind_at IS NULL OR t.remind_at<=?2) AND ?4 IS ?4 AND ?5 IS ?5")
     } else if destination == "records" {
         concat!("SELECT m.id,m.thread_id,m.from_addr,m.subject,
@@ -5566,6 +5570,20 @@ mod tests {
         auth: crate::triage::decision::AuthAssessment,
         restricted: bool,
     ) {
+        seed_auth_picked(store, id, thread, offset, auth, restricted, true);
+    }
+
+    /// [`seed_auth_in`] with the model's own FYE pick given: `true` is the
+    /// worst case for the kinds that must not take it.
+    fn seed_auth_picked(
+        store: &SqliteStore,
+        id: i64,
+        thread: &str,
+        offset: i64,
+        auth: crate::triage::decision::AuthAssessment,
+        restricted: bool,
+        pick: bool,
+    ) {
         {
             let conn = store.lock().unwrap();
             let at = (Utc::now() + chrono::Duration::seconds(offset)).to_rfc3339();
@@ -5585,8 +5603,8 @@ mod tests {
         let mut decision = decision(id);
         decision.auth = auth;
         decision.external_access.restricted = restricted;
-        // The model's own FYE pick, which auth mail must NOT take.
-        decision.attention.show_in_fye = true;
+        // The model's own FYE pick, which only some auth kinds take.
+        decision.attention.show_in_fye = pick;
         store
             .commit_agent_decision(
                 &job,
@@ -5687,6 +5705,72 @@ mod tests {
     /// FYE pick; it is in FYE on a "Not me", or as a critical change nobody
     /// has ruled on; "That was me" takes it out; the owner's thread pin wins
     /// either way.
+    /// Setup mail the model put in FYE is in the owner's FYE, link and all,
+    /// and still never reaches an agent: placement does not unseal.
+    #[test]
+    fn auth_mail_in_fye_stays_sealed_from_agents() {
+        use crate::triage::decision::AuthKind::*;
+        let store = fixture();
+        seed_auth(&store, 50, auth(&[Verification], false), true);
+        let ids = |items: Vec<AgentListItem>| -> Vec<i64> {
+            items.into_iter().map(|item| item.message_id).collect()
+        };
+        let config = RankingConfig::default();
+        assert_eq!(
+            ids(store.agent_fye(1, 10, &config, Utc::now()).unwrap()),
+            [50]
+        );
+        assert!(
+            ids(store
+                .external_agent_fye(1, 10, &config, Utc::now())
+                .unwrap())
+            .is_empty()
+        );
+    }
+
+    /// `auth_kinds_skip_fye_pick_sql!` is the SQL form of
+    /// `AuthAssessment::takes_fye_pick`: every kind alone and every ordered
+    /// pair, plus no kinds at all.
+    #[test]
+    fn auth_kind_fye_pick_sql_matches_rust() {
+        use crate::triage::decision::{AuthAssessment, AuthKind::*};
+        let all = [
+            Otp,
+            PasswordReset,
+            SignInLink,
+            Verification,
+            LoginAlert,
+            SecurityAlert,
+            AccountChange,
+            AppGrant,
+            SigninReceipt,
+        ];
+        let mut sets: Vec<Vec<_>> = vec![vec![]];
+        sets.extend(all.iter().map(|k| vec![*k]));
+        sets.extend(
+            all.iter()
+                .flat_map(|a| all.iter().map(move |b| vec![*a, *b])),
+        );
+        let store = fixture();
+        let conn = store.lock().unwrap();
+        let mut statement = conn
+            .prepare(concat!(
+                "SELECT ",
+                auth_kinds_skip_fye_pick_sql!(),
+                " FROM (SELECT ?1 AS decision_json) d"
+            ))
+            .unwrap();
+        for kinds in sets {
+            let assessment = AuthAssessment {
+                kinds: kinds.clone(),
+                ..Default::default()
+            };
+            let json = serde_json::json!({ "auth": assessment }).to_string();
+            let skips: bool = statement.query_row([json], |row| row.get(0)).unwrap();
+            assert_eq!(skips, !assessment.takes_fye_pick(), "{kinds:?}");
+        }
+    }
+
     #[test]
     fn auth_fye_list_and_placement_agree() {
         use crate::triage::decision::AuthKind::*;
@@ -5707,7 +5791,21 @@ mod tests {
             (12, &[AccountChange], true, None, None, true),
             (13, &[AccountChange], true, Some(Mine), None, false),
             (14, &[AccountChange], true, Some(Mine), Some(true), true),
-            (15, &[AccountChange], false, None, None, false),
+            // Setup, account changes and app grants can be news, so the
+            // model's pick places them (a new account with the tax
+            // authority is not a password reset) until "That was me".
+            (15, &[AccountChange], false, None, None, true),
+            (20, &[AccountChange], false, Some(Mine), None, false),
+            (21, &[Verification], false, None, None, true),
+            (22, &[AppGrant], false, None, None, true),
+            // The kind a client sees decides: a setup mail that also reports
+            // the sign-in takes the pick; a code beside setup does not.
+            (23, &[LoginAlert, Verification], false, None, None, true),
+            (24, &[Verification, Otp], false, None, None, false),
+            // Asked-for codes, links and resets never take it.
+            (25, &[SignInLink], false, None, None, false),
+            (26, &[PasswordReset], false, None, None, false),
+            (27, &[SecurityAlert], false, None, None, false),
             // A stray flag beside another kind means nothing.
             (16, &[LoginAlert], true, None, None, false),
             (17, &[Otp], false, Some(NotMine), Some(false), false),
@@ -5753,6 +5851,17 @@ mod tests {
         store
             .set_auth_verdict(1, 34, Some(Mine), Utc::now())
             .unwrap();
+        // The model passing on a setup mail keeps it out: the kind only
+        // lets the pick through, it never makes one.
+        seed_auth_picked(
+            &store,
+            36,
+            "t36",
+            0,
+            auth(&[Verification], false),
+            false,
+            false,
+        );
 
         // The row each qualifying thread shows, and every message placed in it.
         let mut expected: Vec<i64> = cases.iter().filter(|c| c.5).map(|c| c.0).collect();
@@ -8373,6 +8482,8 @@ fn human_inventory(
         /// messages is the owner's to see in FYE (a "Not me", or an unruled
         /// critical change). The representative is then that message.
         auth_fye: bool,
+        /// `auth_off_fye_sql!`: auth mail the model's FYE pick does not place.
+        auth_off: bool,
     }
     let mut statement=conn.prepare_cached(concat!(
         "WITH ",auth_fye_threads_cte!(),"
@@ -8381,7 +8492,7 @@ fn human_inventory(
              EXISTS(SELECT 1 FROM attachments at WHERE at.account_id=m.account_id AND at.message_id=m.id),
              d.decision_json,a.attention_json,
              COALESCE(q.id,a.message_id),",own_mail_sql!(),",
-             q.id IS NOT NULL
+             q.id IS NOT NULL,",auth_off_fye_sql!("m"),"
          FROM messages m
          LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
          LEFT JOIN agent_message_decisions d ON d.account_id=m.account_id AND d.message_id=m.id
@@ -8424,6 +8535,7 @@ fn human_inventory(
                 representative: row.get(15)?,
                 own: row.get(16)?,
                 auth_fye: row.get(17)?,
+                auth_off: row.get(18)?,
             })
         },
     )?;
@@ -8456,16 +8568,17 @@ fn human_inventory(
         if query.pending_reminders && row.reminder.is_none() {
             continue;
         }
-        // Same rule as the `fye` list in `list_items_with_query`: auth mail
-        // lives on the Auth page, so the model's FYE pick does not count for
-        // it. A thread is picked for its auth mail by `auth_fye_threads_cte!`
-        // (a "Not me", or an unruled critical change, anywhere in it), and
-        // the human's pin either way still wins. Nothing picks mail the user
-        // wrote themselves.
+        // Same rule as the `fye` list in `list_items_with_query`: the
+        // model's FYE pick counts for auth mail only where
+        // `auth_off_fye_sql!` lets it (setup, account changes and app
+        // grants, unruled and live). A thread is also picked for its auth
+        // mail by `auth_fye_threads_cte!` (a "Not me", or an unruled critical
+        // change, anywhere in it), and the human's pin either way still
+        // wins. Nothing picks mail the user wrote themselves.
         let wants_fye = attention.as_ref().is_some_and(|a| a.show_in_fye);
         let is_auth = decision.as_ref().is_some_and(|d| d.auth.is_auth());
         let pinned = thread_fye_override(conn, account, &row.thread)?;
-        let models_pick = !row.own && (row.auth_fye || (!is_auth && wants_fye));
+        let models_pick = !row.own && (row.auth_fye || (!row.auth_off && wants_fye));
         let selected = models_pick || (wants_fye && pinned == Some(true));
         let is_standing = ((selected && row.representative == Some(row.id))
             || row.reminded.is_some())

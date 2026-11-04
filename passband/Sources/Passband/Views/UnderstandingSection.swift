@@ -481,7 +481,7 @@ private struct KnowsCard: View {
         VStack(alignment: .leading, spacing: Space.s14) {
             HStack(spacing: Space.s12) {
                 Text("What Passband knows").font(Typo.zoneTitle).foregroundStyle(Palette.ink)
-                Text("\(UsageText.count(memory.entries.filter { !$0.isRetired }.count)) things, over \(UsageText.count(memory.coverage_days)) days")
+                Text("\(UsageText.count(MemoryGrouping.holding(memory.entries))) things, over \(UsageText.count(memory.coverage_days)) days")
                     .font(Typo.micro).foregroundStyle(Palette.inkFaintest)
                 Spacer(minLength: Space.s8)
             }
@@ -560,10 +560,11 @@ private struct MemoryRow: View {
     @State private var showReceipts = false
 
     var body: some View {
+        let withdrawn = entry.withdrawn(now: Date())
         HStack(alignment: .firstTextBaseline, spacing: Space.s12) {
             VStack(alignment: .leading, spacing: Space.s4) {
-                if entry.isRetired {
-                    (Text("No longer thinks: ").foregroundStyle(Palette.inkFaint)
+                if let withdrawn {
+                    (Text(UnderstandingText.withdrawnLead(withdrawn) + " ").foregroundStyle(Palette.inkFaint)
                         + Text(entry.line).strikethrough(true, color: Palette.inkFaintest)
                         .foregroundStyle(Palette.inkFaintest))
                         .font(Typo.row)
@@ -577,7 +578,7 @@ private struct MemoryRow: View {
                 HStack(spacing: Space.s8) {
                     OriginBadge(origin: entry.origin)
                     if let age = UnderstandingText.entryAge(entry, now: Date()) {
-                        Text(entry.isRetired ? "withdrawn, last held \(age)" : age)
+                        Text(withdrawn.map { UnderstandingText.withdrawnAge($0, age: age) } ?? age)
                             .font(Typo.micro).foregroundStyle(Palette.inkFaintest)
                     }
                     if let because = UnderstandingText.because(entry) {
@@ -594,7 +595,7 @@ private struct MemoryRow: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            if !entry.isRetired {
+            if withdrawn == nil {
                 HStack(spacing: Space.s10) {
                     if entry.origin == .inferred {
                         Button("Confirm", action: confirm).buttonStyle(.textAction).font(Typo.micro)

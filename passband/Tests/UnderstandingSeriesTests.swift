@@ -27,6 +27,7 @@ struct UnderstandingSeriesTests {
         sentencesComeFromTheNumbers()
         memoryGroupsInOrderLiveFirst()
         memoryWordsAndTheEmptyState()
+        withdrawnEntriesAreRetiredExpiredOrOver()
         nearestPicksTheClosestWithinReach()
         noDashesInAnythingTheSectionSays()
 
@@ -244,6 +245,33 @@ struct UnderstandingSeriesTests {
         expect(groups[1].title == "People" && groups[3].title == "Also noticed", "kind titles")
     }
 
+    static func withdrawnEntriesAreRetiredExpiredOrOver() {
+        func e(_ id: String, kind: MemoryKind = .role, expires: Double? = nil, until: String? = nil, retired: Bool = false) -> MemoryEntry {
+            MemoryEntry(
+                id: id, origin: .inferred, kind: kind, body: until.map { ["until": $0] } ?? [:], line: id,
+                affirmed_at: ago(3), expires_at: expires.map(ago), retired_at: retired ? ago(1) : nil)
+        }
+        expect(e("live").withdrawn(now: now) == nil, "an entry with no dates holds")
+        expect(e("r", retired: true).withdrawn(now: now) == .retired, "retired")
+        expect(e("x", expires: 1).withdrawn(now: now) == .expired, "an expires_at in the past is expired")
+        expect(e("y", expires: -10).withdrawn(now: now) == nil, "an expires_at ahead still holds")
+        let pastDay = String(ago(5).prefix(10)), nextWeek = String(ago(-7).prefix(10))
+        expect(e("p", kind: .project, until: pastDay).withdrawn(now: now) == .ended, "a project whose until has passed is over")
+        expect(e("q", kind: .project, until: nextWeek).withdrawn(now: now) == nil, "one still running holds")
+        expect(e("today", kind: .project, until: String(ago(0).prefix(10))).withdrawn(now: now) == nil,
+            "a date-only until lasts to the end of its day")
+        expect(e("n", kind: .role, until: pastDay).withdrawn(now: now) == nil, "until means nothing outside a project")
+        let order = MemoryGrouping.groups([e("x", expires: 1), e("live"), e("r", retired: true)], now: now)[0].entries.map(\.id)
+        expect(order.first == "live", "holding entries before withdrawn ones")
+        expect(MemoryGrouping.holding([e("x", expires: 1), e("live")], now: now) == 1, "the header counts only what holds")
+        expect(UnderstandingText.withdrawnLead(.retired) == "No longer thinks:"
+            && UnderstandingText.withdrawnLead(.expired) == "No longer holds:"
+            && UnderstandingText.withdrawnLead(.ended) == "No longer holds:", "leads")
+        let fixture = UnderstandingFixture.memory(now: now)
+        expect(fixture.entries.first { $0.id == "01JFIXHIRE" }?.withdrawn(now: now) == .ended, "the fixture shows a finished project")
+        expect(fixture.entries.first { $0.id == "01JFIXROUND" }?.withdrawn(now: now) == nil, "and a live one")
+    }
+
     static func memoryWordsAndTheEmptyState() {
         expect(UnderstandingText.because(entry("a", .role, messages: [1])) == "because of 1 message", "one message")
         expect(UnderstandingText.because(entry("a", .role, messages: [1, 2, 3])) == "because of 3 messages", "messages")
@@ -298,7 +326,7 @@ struct UnderstandingSeriesTests {
             == ["The Growth Letter", "SaaS Weekly", "Product Pulse"], "the three unopened newsletters lead the fading list")
         expect(fixture.points.first { $0.row.corrections > 0 }?.sentence.contains("corrected") == true,
             "the vendor's corrections are said")
-        expect(Set(MemoryGrouping.groups(memory.entries).map(\.kind)) == Set(MemoryKind.allCases),
+        expect(Set(MemoryGrouping.groups(memory.entries, now: now).map(\.kind)) == Set(MemoryKind.allCases),
             "the memory fixture fills every kind, the unknown one included")
     }
 

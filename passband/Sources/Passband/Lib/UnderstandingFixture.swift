@@ -137,8 +137,14 @@ enum UnderstandingFixture {
             entry(
                 "01JFIXROUND", .project, .inferred,
                 "Closing a seed round through November; investor and lawyer mail is live.",
-                body: ["name": "Seed round", "until": "2026-11-30"], messages: 11,
+                body: ["name": "Seed round", "until": String(ago(-26).prefix(10))], messages: 11,
                 addrs: ["priya@foundry-capital.example", "jordan@ellis-law.example"], confidence: 0.78, affirmed: 2),
+            // A project whose date went by: served, and drawn as over.
+            entry(
+                "01JFIXHIRE", .project, .inferred,
+                "Hiring a first designer; portfolio mail is worth a look this month.",
+                body: ["name": "Designer hire", "until": String(ago(9).prefix(10))], messages: 6,
+                addrs: ["maya@studio-oak.example"], confidence: 0.62, affirmed: 24),
             entry(
                 "01JFIXSAM", .person, .stated,
                 "Sam Rivera is a cofounder; replied to within the hour on 31 of 33 threads.",

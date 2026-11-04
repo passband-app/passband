@@ -143,7 +143,7 @@ struct FixtureAPITests {
         let mail = try await read("mail-activity?days=60", as: MailActivityResponse.self)
         precondition(mail.rows.count == 60 && mail.until == mail.rows.last?.day)
         let memory = try await read("memory", as: MemoryResponse.self)
-        let guess = memory.entries.first { $0.origin == .inferred && !$0.isRetired }!
+        let guess = memory.entries.first { $0.origin == .inferred && $0.withdrawn(now: Date()) == nil }!
         var confirm = request("memory/\(guess.id)", method: "PUT")
         confirm.httpBody = try JSONSerialization.data(withJSONObject: ["confirm": true])
         let (confirmedData, _) = try await api.response(for: confirm)

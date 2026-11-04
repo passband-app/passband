@@ -257,18 +257,25 @@ enum MemoryGrouping {
     /// Under this many days of ledger the list shows its empty state.
     static let minimumCoverageDays = 14
 
-    static func groups(_ entries: [MemoryEntry]) -> [MemoryGroup] {
+    static func groups(_ entries: [MemoryEntry], now: Date = Date()) -> [MemoryGroup] {
         let byKind = Dictionary(grouping: entries, by: \.kind)
         return order.compactMap { kind in
             guard let list = byKind[kind], !list.isEmpty else { return nil }
-            return MemoryGroup(kind: kind, entries: list.sorted(by: before))
+            return MemoryGroup(kind: kind, entries: list.sorted { before($0, $1, now: now) })
         }
     }
 
-    /// Live before retired; the owner's own words before the pass's guesses;
-    /// then the surer guess first; then id, so the order is stable.
-    static func before(_ a: MemoryEntry, _ b: MemoryEntry) -> Bool {
-        if a.isRetired != b.isRetired { return !a.isRetired }
+    /// How many entries still hold, for the card's header.
+    static func holding(_ entries: [MemoryEntry], now: Date = Date()) -> Int {
+        entries.filter { $0.withdrawn(now: now) == nil }.count
+    }
+
+    /// Holding before withdrawn (retired, expired, or a project whose date
+    /// passed); the owner's own words before the pass's guesses; then the
+    /// surer guess first; then id, so the order is stable.
+    static func before(_ a: MemoryEntry, _ b: MemoryEntry, now: Date) -> Bool {
+        let aw = a.withdrawn(now: now) != nil, bw = b.withdrawn(now: now) != nil
+        if aw != bw { return !aw }
         if a.origin != b.origin { return a.origin == .stated }
         if a.confidence != b.confidence { return a.confidence > b.confidence }
         return a.id < b.id
@@ -422,6 +429,24 @@ enum UnderstandingText {
         let a = entry.provenance.addrs.count
         if a > 0 { return a == 1 ? "because of 1 sender" : "because of \(UsageText.count(a)) senders" }
         return nil
+    }
+
+    /// The crossed-out entry's lead. The pass withdrew a retired one; an
+    /// expired guess or a finished project simply stopped holding.
+    static func withdrawnLead(_ w: MemoryEntry.Withdrawal) -> String {
+        switch w {
+        case .retired: "No longer thinks:"
+        case .expired, .ended: "No longer holds:"
+        }
+    }
+
+    /// The age line beside a crossed-out entry.
+    static func withdrawnAge(_ w: MemoryEntry.Withdrawal, age: String) -> String {
+        switch w {
+        case .retired: "withdrawn, last held \(age)"
+        case .expired: "expired, last held \(age)"
+        case .ended: "over, last held \(age)"
+        }
     }
 
     static func origin(_ origin: MemoryOrigin) -> String {

@@ -289,6 +289,51 @@ struct MemoryEntry: Codable, Sendable, Equatable, Identifiable {
     }
 
     var isRetired: Bool { retired_at != nil }
+
+    /// Why an entry no longer holds, or nil while it does. The daemon serves
+    /// all three: an entry the pass retired, an inferred entry past its
+    /// `expires_at` that no pass re-affirmed, and a project whose `until`
+    /// has gone by. Each is drawn crossed out, and none can be confirmed.
+    enum Withdrawal: Equatable, Sendable { case retired, expired, ended }
+
+    func withdrawn(now: Date) -> Withdrawal? {
+        if retired_at != nil { return .retired }
+        if let at = MemoryDates.instant(expires_at), at <= now { return .expired }
+        if kind == .project, let until = MemoryDates.endOfDay(body["until"]), until <= now { return .ended }
+        return nil
+    }
+}
+
+/// The few dates the memory wire carries, parsed here so the entry can say
+/// whether it holds without the section's formatting around it.
+enum MemoryDates {
+    nonisolated(unsafe) private static let iso: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+    nonisolated(unsafe) private static let isoFractional: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    static func instant(_ s: String?) -> Date? {
+        guard let s, !s.isEmpty else { return nil }
+        return iso.date(from: s) ?? isoFractional.date(from: s)
+    }
+
+    /// A project's `until`: an instant, or a "YYYY-MM-DD" day, which lasts to
+    /// the end of that day in the reader's zone.
+    static func endOfDay(_ s: String?, calendar: Calendar = .current) -> Date? {
+        guard let s, !s.isEmpty else { return nil }
+        if let at = instant(s) { return at }
+        let parts = s.split(separator: "-").compactMap { Int($0) }
+        guard parts.count == 3,
+            let day = calendar.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2]))
+        else { return nil }
+        return calendar.date(byAdding: .day, value: 1, to: day)
+    }
 }
 
 /// `PUT /client/memory/{id}`. Every field optional and left off the wire

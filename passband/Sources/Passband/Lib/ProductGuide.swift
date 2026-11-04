@@ -276,8 +276,8 @@ enum ProductGuide {
         - c starts a new message, with or without a highlight.
 
         Flow mode:
-        - Space, or the "flow mode" pill at the top of For your eyes, walks the list one email at a time, starting at the highlighted row or the first one.
-        - In the reader during the walk, e is done and next, and s saves the email for later: it stays on the board and the walk moves on. A small "FLOW MODE" card shows both keys. A summary card shows at the end.
+        - Space, or the "flow mode" pill at the top of For your eyes, walks the list one email at a time, starting at the row picked with the arrow keys or the first one. Mail that reaches the list during the walk joins the end of it.
+        - In the reader during the walk, e is done and next, and s saves the email for later: it stays on the board and the walk moves on. A small "FLOW MODE" card shows both keys. A key pressed while an email is still moving is kept and plays when the next one lands. A summary card shows at the end.
 
         Hover tricks:
         - Hover a package and press e to clear it until its next update. Right-click has "Clear this package".

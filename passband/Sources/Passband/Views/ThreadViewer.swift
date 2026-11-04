@@ -391,6 +391,11 @@ struct ThreadViewer: View {
         .onChange(of: threadId) { _, _ in find.close() }
         .onChange(of: messages.map(\.id)) { _, _ in find.adopt(findCorpus) }
         .onChange(of: find.query) { _, _ in find.queryChanged(from: index) }
+        // A flow mode key pressed while the last email was still moving: the
+        // reader it was meant for has landed, so it plays now. A short beat
+        // first, so the email is seen arriving before it goes, and the two
+        // steps read as two rather than one blur.
+        .onChange(of: store.threadFlight) { _, flight in playQueuedStep(flight) }
         // An undone walk step, addressed to the reader it landed on.
         .onChange(of: store.walkRewind) { _, r in
             // Not the card a turn is leaving behind; the one arriving takes
@@ -561,10 +566,7 @@ struct ThreadViewer: View {
             // A reader opening after a density flip it was not mounted for:
             // the heights on file are the other density's (ReaderMetrics.sync).
             ReaderMetrics.sync()
-            // Reading's passive preview fetches and warms the next thread itself.
-            if !store.readingStack, let next = store.nextQueuedThread {
-                ThreadPrefetch.shared.prefetch(next.thread_id)
-            }
+            warmAhead()
         }
     }
 
@@ -2404,11 +2406,54 @@ struct ThreadViewer: View {
         store.openThread(next.thread_id, queue: queue, readingMail: store.readingMail, from: .reader)
     }
 
+    /// Warm what comes after this email. Reading's passive preview fetches
+    /// and warms the next thread itself.
+    ///
+    /// FLOW MODE IS A PROMISE TO GO ON: two emails ahead, kept for the warm
+    /// lifetime, and the next one's page rendered ahead of whatever the board
+    /// wanted, so it walks in already drawn rather than as a card that fills
+    /// in after it lands.
+    private func warmAhead() {
+        guard !store.readingStack else { return }
+        if store.walk != nil {
+            let upcoming = store.upcomingQueuedThreads(2).map(\.thread_id)
+            for id in upcoming {
+                ThreadPrefetch.shared.prefetch(id, fresh: ThreadPrefetch.warmFresh)
+            }
+            FramePrewarmer.shared.prefer(Array(upcoming.prefix(1)))
+        } else if let next = store.nextQueuedThread {
+            ThreadPrefetch.shared.prefetch(next.thread_id)
+        }
+    }
+
+    /// Play a flow mode step kept from mid-flight (`AppStore.queuedWalkStep`)
+    /// once this reader has landed. A short beat first, so the email is seen
+    /// arriving before it goes, and the two steps read as two, not one blur.
+    private func playQueuedStep(_ flight: AppStore.ThreadFlight) {
+        guard flight == .settled, store.threadId == threadId, turn?.incoming != false,
+            store.queuedWalkStep != nil
+        else { return }
+        Task {
+            try? await Task.sleep(for: .milliseconds(90))
+            guard store.threadId == threadId, store.threadFlight == .settled,
+                let step = store.queuedWalkStep
+            else { return }
+            store.queuedWalkStep = nil
+            switch step {
+            case .done: await doneAndNext()
+            case .skip: await skipToNext()
+            }
+        }
+    }
+
     /// Plain done walks a Reading sender's stack, or closes an ordinary reader.
     /// In flow mode it is `E`: the walk is what Space started, and a done that
     /// closed the reader would end it on the first email.
     private func doneAndClose() async {
-        guard store.threadFlight == .settled else { return }
+        guard store.threadFlight == .settled else {
+            store.queueWalkStep(.done)
+            return
+        }
         if store.readingStack || store.walk != nil {
             await doneAndNext()
             return
@@ -2771,7 +2816,10 @@ struct ThreadViewer: View {
         // An S turn still settling is finished first, so the card it skipped
         // never shows through under this email as it lifts off.
         store.settleSkipTurn()
-        guard store.threadFlight == .settled else { return }
+        guard store.threadFlight == .settled else {
+            store.queueWalkStep(.done)
+            return
+        }
         store.topUpWalkQueue()
         let queue = store.threadQueue
         let cur = queue.firstIndex(where: { $0.thread_id == threadId })
@@ -2858,7 +2906,10 @@ struct ThreadViewer: View {
         // that turn is finished at once and this one starts, so tapping S as
         // fast as you can read is exactly as fast as it goes.
         store.settleSkipTurn()
-        guard store.threadFlight == .settled else { return }
+        guard store.threadFlight == .settled else {
+            store.queueWalkStep(.skip)
+            return
+        }
         // Counted BEFORE the end check: skipping the last email is a skip
         // too, and the tally it ends on has to include it.
         store.walk?.skipped += 1

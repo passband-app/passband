@@ -8,7 +8,7 @@
 //! 1. The `understanding` hidden feature is on. Off is as if it did not exist.
 //! 2. The dwell ledger covers at least [`sender_fatigue::MIN_COVERED_DAYS`].
 //!    Under that, "opened 2 of 38" is a young ledger talking, not the owner.
-//! 3. ONE SUCCESSFUL RUN PER ACCOUNT PER UTC DAY, and at most
+//! 3. ONE SUCCESSFUL RUN PER ACCOUNT PER OWNER-LOCAL DAY, and at most
 //!    [`ATTEMPTS_PER_DAY`] attempts, counted on the [`BUDGET_KEY`] sentinel in
 //!    `wake_budget` BEFORE the call, like every other cap here: a retry storm
 //!    (a crash loop, a daemon restarted ten times) cannot buy a second run.
@@ -68,14 +68,23 @@ pub fn system_prompt() -> &'static str {
 /// the reason every lane has one: nothing else's backlog may spend it, and it
 /// may spend nothing else's. Gmail thread ids are hex, so no thread collides.
 pub const BUDGET_KEY: &str = "__memory_profile__";
-/// Attempts per UTC day. Two, so one transport failure is retried once; never
-/// more, because each is a stage-2-sized call.
+/// Attempts per OWNER-LOCAL day. Two, so one transport failure is retried
+/// once; never more, because each is a stage-2-sized call.
+///
+/// EVERY DAILY RULE HERE IS KEYED ON THE OWNER'S LOCAL DATE, the attempt
+/// sentinel's `wake_budget.day` included, never the UTC date. The pass is due
+/// at local 03:00, so a UTC key splits one local night across two UTC days: an
+/// owner in California would get two attempts before 17:00 and two more after,
+/// and a run at local 20:00 (after UTC midnight) would mark tomorrow's local
+/// run as done. Usage alone stays on the UTC day, because the usage ledger is
+/// UTC everywhere.
 pub const ATTEMPTS_PER_DAY: u32 = 2;
 /// `app_settings` keys: the instant of the last successful run (the change
-/// gate's "since", and the once-a-UTC-day check), and the owner-local date the
-/// pass last finished deciding about (so a skipped day is not re-checked every
-/// refine round until midnight).
+/// gate's "since"); the owner-local date of that success (the once-a-day
+/// check); and the owner-local date the pass last finished deciding about (so
+/// a skipped day is not re-checked every refine round until midnight).
 pub const RAN_AT_KEY: &str = "memory_profile_ran_at";
+pub const RAN_DAY_KEY: &str = "memory_profile_ran_day";
 pub const DAY_KEY: &str = "memory_profile_day";
 /// The owner-local hour the pass becomes due. After the ledger's own nightly
 /// work, and before the owner is up.
@@ -409,7 +418,7 @@ pub enum PassOutcome {
     NotEnoughCoverage {
         days: f32,
     },
-    /// A run already succeeded this UTC day, or its attempts are spent.
+    /// A run already succeeded this owner-local day, or its attempts are spent.
     AlreadyRan,
     Unchanged,
     /// The model call or the store failed; `kind` is redacted.
@@ -487,13 +496,19 @@ pub async fn run_pass<S: Store + ?Sized>(
     if coverage < sender_fatigue::MIN_COVERED_DAYS {
         return decided(PassOutcome::NotEnoughCoverage { days: coverage });
     }
-    // 3. Once a UTC day, and the attempt cap.
+    // 3. Once an owner-local day, and the attempt cap (see ATTEMPTS_PER_DAY).
     let utc_day = now.format("%Y-%m-%d").to_string();
     let ran_at = setting_instant(store, account, RAN_AT_KEY);
-    if ran_at.is_some_and(|at| at.format("%Y-%m-%d").to_string() == utc_day) {
+    if store
+        .get_app_setting(account, RAN_DAY_KEY)
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some(local_day.as_str())
+    {
         return decided(PassOutcome::AlreadyRan);
     }
-    match store.stage2_budget_used(account, BUDGET_KEY, &utc_day) {
+    match store.stage2_budget_used(account, BUDGET_KEY, &local_day) {
         Ok(used) if used >= ATTEMPTS_PER_DAY => return decided(PassOutcome::AlreadyRan),
         Ok(_) => {}
         Err(e) => {
@@ -546,7 +561,7 @@ pub async fn run_pass<S: Store + ?Sized>(
     let exposed = input.exposed_ids();
 
     // CHARGED BEFORE THE CALL, so a call that never comes back still counts.
-    if let Err(e) = store.stage2_increment_budget(account, BUDGET_KEY, &utc_day) {
+    if let Err(e) = store.stage2_increment_budget(account, BUDGET_KEY, &local_day) {
         return PassOutcome::Failed {
             kind: format!("budget: {e}"),
         };
@@ -578,7 +593,7 @@ pub async fn run_pass<S: Store + ?Sized>(
             // A configuration failure spent nothing and is the same for every
             // try: give the attempt back, as every other cap here does.
             if llm::is_config_failure(&kind) {
-                let _ = store.stage2_refund_budget(account, BUDGET_KEY, &utc_day);
+                let _ = store.stage2_refund_budget(account, BUDGET_KEY, &local_day);
             }
             return PassOutcome::Failed { kind };
         }
@@ -586,6 +601,7 @@ pub async fn run_pass<S: Store + ?Sized>(
     match store.apply_profile_ops(account, &ops.ops, &exposed, now) {
         Ok(report) => {
             let _ = store.set_app_setting(account, RAN_AT_KEY, &now.to_rfc3339());
+            let _ = store.set_app_setting(account, RAN_DAY_KEY, &local_day);
             decided(PassOutcome::Applied(report))
         }
         Err(e) => PassOutcome::Failed {

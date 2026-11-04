@@ -193,15 +193,23 @@ fn on() -> Features {
 }
 
 async fn run(mailbox: &Mailbox, now: DateTime<Utc>, model: &Scripted) -> PassOutcome {
-    run_pass(
-        &mailbox.store,
-        mailbox.acct,
-        now,
-        OwnerZone::UTC,
-        &on(),
-        model,
-    )
-    .await
+    run_in(mailbox, now, OwnerZone::UTC, model).await
+}
+
+async fn run_in(
+    mailbox: &Mailbox,
+    now: DateTime<Utc>,
+    zone: OwnerZone,
+    model: &Scripted,
+) -> PassOutcome {
+    run_pass(&mailbox.store, mailbox.acct, now, zone, &on(), model).await
+}
+
+fn pacific() -> OwnerZone {
+    OwnerZone {
+        zone: chrono_tz::America::Los_Angeles,
+        source: crate::owner_clock::OwnerZoneSource::Client,
+    }
 }
 
 #[tokio::test]
@@ -265,11 +273,11 @@ async fn the_model_sees_the_owners_words_and_never_an_inbound_body_or_a_sealed_t
     assert!(user.len() <= MAX_INPUT_BYTES);
 }
 
-/// THE BUDGET TEST (docs/UNDERSTANDING.md §7): a second run in one UTC day is
-/// refused BEFORE any model call, even when the owner-local day stamp says
-/// otherwise (a zone change, a cleared setting, a restarted daemon).
+/// THE BUDGET TEST (docs/UNDERSTANDING.md §7): a second run in one day is
+/// refused BEFORE any model call, even with the "decided today" stamp gone (a
+/// cleared setting, a restarted daemon): the success stamp alone refuses.
 #[tokio::test]
-async fn a_second_run_in_one_utc_day_is_refused_without_a_model_call() {
+async fn a_second_run_in_one_day_is_refused_without_a_model_call() {
     let mailbox = mailbox();
     let model = Scripted::new(Answer::Ops(new_role(mailbox.reply)));
     assert!(matches!(
@@ -283,8 +291,8 @@ async fn a_second_run_in_one_utc_day_is_refused_without_a_model_call() {
         run(&mailbox, noon() + Duration::hours(2), &model).await,
         PassOutcome::NotDue
     );
-    // The local-day stamp gone, and something new to read: the UTC-day rule
-    // alone still refuses, and the model is not called.
+    // The decided-today stamp gone: the success stamp alone still refuses,
+    // and the model is not called.
     mailbox
         .store
         .delete_app_setting(mailbox.acct, DAY_KEY)
@@ -296,8 +304,43 @@ async fn a_second_run_in_one_utc_day_is_refused_without_a_model_call() {
     assert_eq!(model.calls(), 1);
 }
 
+/// One local night is one day, whatever UTC says. In California, local
+/// 03:30 and 20:00 on 4 November fall on two UTC dates.
 #[tokio::test]
-async fn failed_attempts_are_capped_per_utc_day_and_config_failures_refunded() {
+async fn attempts_and_successes_are_counted_on_the_owner_local_day() {
+    let early = at("2026-11-04T11:30:00Z"); // 03:30 PST, 4 Nov
+    let evening = at("2026-11-05T04:00:00Z"); // 20:00 PST, 4 Nov; UTC is the 5th
+    let next_night = at("2026-11-05T11:30:00Z"); // 03:30 PST, 5 Nov; UTC still the 5th
+
+    // Two failed attempts on local 4 Nov spend that night's cap, even though
+    // the third would land on a fresh UTC date.
+    let mailbox = mailbox();
+    let model = Scripted::new(Answer::Fail("transport"));
+    run_in(&mailbox, early, pacific(), &model).await;
+    run_in(&mailbox, early + Duration::hours(1), pacific(), &model).await;
+    assert_eq!(
+        run_in(&mailbox, evening, pacific(), &model).await,
+        PassOutcome::AlreadyRan
+    );
+    assert_eq!(model.calls(), 2);
+
+    // A success at local 20:00 on the 4th does not count as the 5th's run:
+    // the next night passes the once-a-day gate (and stops, unchanged, at the
+    // next one).
+    let mailbox = self::mailbox();
+    let model = Scripted::new(Answer::Ops(json!({"ops": []})));
+    assert!(matches!(
+        run_in(&mailbox, evening, pacific(), &model).await,
+        PassOutcome::Applied(_)
+    ));
+    assert_eq!(
+        run_in(&mailbox, next_night, pacific(), &model).await,
+        PassOutcome::Unchanged
+    );
+}
+
+#[tokio::test]
+async fn failed_attempts_are_capped_per_day_and_config_failures_refunded() {
     let mailbox = mailbox();
     let model = Scripted::new(Answer::Fail("transport"));
     for _ in 0..ATTEMPTS_PER_DAY {

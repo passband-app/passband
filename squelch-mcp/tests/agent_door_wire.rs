@@ -338,6 +338,7 @@ async fn no_read_tool_serves_the_relationship_ledger() {
             .is_some()
     );
 
+    // The calendar door on, so `search_calendar` is offered and walked too.
     let door = agent_door_router(
         store,
         ACCOUNT,
@@ -347,11 +348,38 @@ async fn no_read_tool_serves_the_relationship_ledger() {
         &AgentDoorAuth::Open,
         None,
         Default::default(),
-        Default::default(),
+        squelch_mcp::CalendarDoor {
+            features: squelch_core::features::Features::pinned([squelch_core::features::CALENDAR]),
+            credentials: None,
+        },
     )
     .expect("router");
     let mut session = Session::open(door, HOST, None).await;
     let since = "2000-01-01T00:00:00Z";
+
+    // CONTROL, asserted on its own call rather than OR'd across them: a door
+    // that errors on every tool would otherwise pass. `get_thread` must
+    // succeed and carry the sender's mail.
+    let (thread, reply) = session
+        .tool("get_thread", json!({"id": format!("t-{VISIBLE}")}))
+        .await;
+    assert!(
+        !refused(&reply),
+        "control: get_thread was refused: {thread}"
+    );
+    assert!(
+        thread.contains(VISIBLE),
+        "control: the door must serve the mail itself:\n{thread}"
+    );
+    assert!(
+        session
+            .tool_names()
+            .await
+            .iter()
+            .any(|n| n == "search_calendar"),
+        "control: the calendar tool is offered, so it is walked"
+    );
+
     let calls = [
         ("get_inbox_updates", json!({"since": since})),
         ("get_reading", json!({"since": since})),
@@ -364,11 +392,13 @@ async fn no_read_tool_serves_the_relationship_ledger() {
         ("get_deadlines", json!({})),
         ("get_shipments", json!({"include_delivered": true})),
         ("list_sender_rules", json!({})),
+        ("search_calendar", json!({"query": "alerts"})),
     ];
-    let mut served_the_sender = false;
     for (name, args) in calls {
-        let text = session.tool(name, args).await.0;
-        served_the_sender |= text.contains(VISIBLE);
+        // Each call must answer: a refusal carries no fields and would pass
+        // the check below vacuously.
+        let (text, reply) = session.tool(name, args).await;
+        assert!(!refused(&reply), "{name} was refused: {text}");
         for field in LEDGER_FIELDS {
             assert!(
                 !text.contains(field),
@@ -376,8 +406,10 @@ async fn no_read_tool_serves_the_relationship_ledger() {
             );
         }
     }
-    assert!(
-        served_the_sender,
-        "control: the door must serve the mail itself"
-    );
+    for field in LEDGER_FIELDS {
+        assert!(
+            !thread.contains(field),
+            "get_thread served `{field}`:\n{thread}"
+        );
+    }
 }

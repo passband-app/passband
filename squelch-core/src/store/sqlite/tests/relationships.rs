@@ -943,7 +943,7 @@ fn a_message_whose_date_will_not_parse_still_counts() {
 #[test]
 fn the_sealed_count_agrees_with_the_macro_arm_by_arm() {
     let (store, acct) = store();
-    let ids: Vec<i64> = (0..5)
+    let ids: Vec<i64> = (0..6)
         .map(|n| inbound(&store, acct, &format!("m{n}"), &format!("t{n}"), DAN, 1))
         .collect();
     let conn = store.lock().unwrap();
@@ -974,18 +974,21 @@ fn the_sealed_count_agrees_with_the_macro_arm_by_arm() {
         params![acct, ids[3]],
     )
     .unwrap();
-    // Arm 4: the owner sealed it, and also counted twice by arm 1, which the
-    // UNION must not double.
-    conn.execute(
-        "INSERT INTO agent_triage_corrections(account_id, message_id, field, value_json,
-             source_revision, updated_at)
-         VALUES(?1, ?2, 'external_access', 'true', 1, ?3)",
-        params![acct, ids[4], now],
-    )
-    .unwrap();
+    // Arm 4: the owner sealed it, and NOTHING ELSE did, so a broken
+    // correction arm loses this message. And a sixth sealed by the owner AND
+    // by arm 1, which the UNION must count once.
+    for id in [ids[4], ids[5]] {
+        conn.execute(
+            "INSERT INTO agent_triage_corrections(account_id, message_id, field, value_json,
+                 source_revision, updated_at)
+             VALUES(?1, ?2, 'external_access', 'true', 1, ?3)",
+            params![acct, id, now],
+        )
+        .unwrap();
+    }
     conn.execute(
         "UPDATE triage SET sensitivity = 'sealed' WHERE message_id = ?1",
-        [ids[4]],
+        [ids[5]],
     )
     .unwrap();
     let ours: i64 = conn
@@ -1007,7 +1010,7 @@ fn the_sealed_count_agrees_with_the_macro_arm_by_arm() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!((ours, macros), (5, 5));
+    assert_eq!((ours, macros), (6, 6));
     drop(conn);
     inbound(&store, acct, "open", "open", DAN, 1);
     store.recompute_relationship(acct, DAN).unwrap();

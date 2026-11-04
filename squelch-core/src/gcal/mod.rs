@@ -970,6 +970,107 @@ pub fn link_ghosts(
     matched
 }
 
+/// Where a ghost is SHOWN: for each ghost, the index of the ghost it folds
+/// into, or None when it stands for itself. Two live, undismissed ghosts
+/// fold when their starts match for display ([`display_same_start`]) and
+/// they share an event-page URL (`urls`, from `Store::ghost_url_refs`) or
+/// their titles match the way [`ghost_matches`] does.
+///
+/// Ghosts from DIFFERENT senders are the case this is for: a ref is scoped
+/// to its sender, so the venue's listing and a friend forwarding its link
+/// make two ghosts that matching mail can never join (by design: a stranger
+/// quoting a URL must not move the owner's ghost). Folding joins them on
+/// screen only. It is computed when listed and never stored, so it changes
+/// no ghost and cannot go stale.
+///
+/// The one shown is, first to last: the ISSUER's (its sender is the shared
+/// URL's own site), so a stranger's copy never hides the venue's; then a
+/// committed one, one the user said they are going to, an authenticated one,
+/// one with a clock time, and the oldest.
+pub fn fold_ghosts(
+    ghosts: &[crate::types::GhostEvent],
+    urls: &std::collections::HashMap<i64, Vec<String>>,
+) -> Vec<Option<usize>> {
+    use crate::triage::decision::EventCommitment;
+    use crate::types::{GhostMailState, GhostUserState};
+    let day = |t: &EventTime| match t {
+        EventTime::At(at) => at.date_naive(),
+        EventTime::Date(day) => *day,
+    };
+    let none: Vec<String> = Vec::new();
+    let urls_of = |i: usize| urls.get(&ghosts[i].id).unwrap_or(&none);
+    let foldable = |g: &crate::types::GhostEvent| {
+        g.mail_state == GhostMailState::Live && g.user_state != Some(GhostUserState::Dismissed)
+    };
+    let same = |a: usize, b: usize| {
+        let (x, y) = (&ghosts[a], &ghosts[b]);
+        display_same_start(&x.start, &y.start)
+            && (urls_of(a).iter().any(|u| urls_of(b).contains(u))
+                || ghost_matches(&x.title, &x.start, Some(&y.title), &y.start))
+    };
+    // A ghost whose own sender is the site of one of its URLs.
+    let issuer = |i: usize| {
+        let Some(scope) = ghosts[i].owner_scope.as_deref() else {
+            return false;
+        };
+        urls_of(i).iter().any(|u| {
+            let host = u.split('/').next().unwrap_or_default();
+            host == scope || host.ends_with(&format!(".{scope}"))
+        })
+    };
+    let rank = |i: usize| {
+        let g = &ghosts[i];
+        (
+            !issuer(i),
+            g.commitment != EventCommitment::Committed,
+            g.user_state != Some(GhostUserState::Going),
+            !g.verified(),
+            !g.start.has_clock(),
+            g.id,
+        )
+    };
+
+    // Union-find over the ghosts of each day.
+    let mut parent: Vec<usize> = (0..ghosts.len()).collect();
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    let mut by_day: std::collections::HashMap<chrono::NaiveDate, Vec<usize>> = Default::default();
+    for (i, g) in ghosts.iter().enumerate() {
+        if foldable(g) {
+            by_day.entry(day(&g.start)).or_default().push(i);
+        }
+    }
+    for members in by_day.values() {
+        for (n, &a) in members.iter().enumerate() {
+            for &b in &members[n + 1..] {
+                if same(a, b) {
+                    let (ra, rb) = (root(&mut parent, a), root(&mut parent, b));
+                    parent[ra] = rb;
+                }
+            }
+        }
+    }
+    let mut shown: std::collections::HashMap<usize, usize> = Default::default();
+    for i in 0..ghosts.len() {
+        let r = root(&mut parent, i);
+        let best = shown.entry(r).or_insert(i);
+        if rank(i) < rank(*best) {
+            *best = i;
+        }
+    }
+    (0..ghosts.len())
+        .map(|i| {
+            let best = shown[&root(&mut parent, i)];
+            (best != i).then_some(best)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

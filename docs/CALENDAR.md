@@ -1605,7 +1605,17 @@ Read only (slice B). The only writes are the user's own, described under
   mail often says only "Nov 6" for what the calendar holds at 7pm) and the
   titles are equal after lowercasing and collapsing whitespace, or one contains
   the other. The day rule is display only: adoption (`own.rs`) still needs the
-  same start. Worked out when the timeline is listed, never stored: it hides a
+  same start.
+- **Copies from different senders fold** (`gcal::fold_ghosts`). A ref is
+  scoped to its sender, so the venue's ticket mail and a friend's reply with
+  the venue's link are two ghosts that mail can never join, by design: a
+  stranger quoting a URL must not move the owner's ghost. The timeline and
+  calendar search show them as one when their starts match for display and
+  they share an event-page URL (the sender scope dropped) or their titles
+  match. The one shown is the issuer's (its sender is the URL's own site),
+  else committed, going, authenticated, timed, oldest, and it carries every
+  copy's mail and tickets, and the event match of any copy. Display only:
+  nothing is merged or stored. Worked out when the timeline is listed, never stored: it hides a
   duplicate and changes no ghost.
 - **The card's place** (`gcal/place.rs`, 2026-10-28). A booking service
   often writes its marketing into the location ("Dingles Public House, Tock is

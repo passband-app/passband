@@ -1689,6 +1689,15 @@ pub trait Store:
         to: DateTime<chrono::FixedOffset>,
     ) -> Result<Vec<crate::types::GhostEvent>>;
 
+    /// The event-page URLs each of these ghosts is keyed by, without the
+    /// sender scope, for display folding only (`gcal::fold_ghosts`). Ghosts
+    /// with none are absent.
+    fn ghost_url_refs(
+        &self,
+        account_id: AccountId,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, Vec<String>>>;
+
     /// The user's PATCH of a ghost, applied in ONE transaction. Each field is
     /// `None` to leave it alone, `Some(None)` to clear it (a cleared state
     /// clears its stamp), `Some(Some(_))` to set it. Returns `false` for an

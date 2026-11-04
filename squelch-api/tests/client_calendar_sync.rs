@@ -731,10 +731,35 @@ fn seed_ghost_as(
     start: String,
     commitment: EventCommitment,
 ) -> i64 {
+    seed_ghost_from(
+        store,
+        account,
+        gmail,
+        "alice@example.com",
+        title,
+        start,
+        commitment,
+        vec![format!("REF{gmail}12345")],
+    )
+}
+
+/// [`seed_ghost_as`] from a given sender with given identity refs.
+#[allow(clippy::too_many_arguments)]
+fn seed_ghost_from(
+    store: &SqliteStore,
+    account: i64,
+    gmail: &str,
+    from_addr: &str,
+    title: &str,
+    start: String,
+    commitment: EventCommitment,
+    identity_refs: Vec<String>,
+) -> i64 {
     let id = store
         .upsert_message(&NewMessage {
             received_at: Utc::now() - Duration::minutes(5),
             auth_pass: Some(true),
+            from_addr: from_addr.into(),
             ..msg(
                 account,
                 gmail,
@@ -770,7 +795,7 @@ fn seed_ghost_as(
         event_kind: EventRecordKind::Reservation,
         commitment,
         change: EventChange::Created,
-        identity_refs: vec![format!("REF{gmail}12345")],
+        identity_refs,
         likelihood: None,
         evidence: evidence.clone(),
     };
@@ -804,6 +829,86 @@ fn seed_ghost_as(
         AgentCommitOutcome::Applied
     );
     id
+}
+
+/// The venue's mail and a friend's with the venue's link: refs are scoped to
+/// their sender, so they stay two ghosts, and the timeline shows them as one
+/// carrying both mails (`gcal::fold_ghosts`).
+#[tokio::test]
+async fn copies_of_one_event_from_two_senders_show_as_one_ghost() {
+    let w = world("fold", GRANTED).await;
+    let day = (Utc::now() + Duration::days(4)).date_naive();
+    let date = day.format("%Y-%m-%d").to_string();
+    seed_ghost_from(
+        &w.store,
+        w.acct,
+        "friend",
+        "endzeitsf@gmail.com",
+        "Friday night",
+        date.clone(),
+        EventCommitment::Invited,
+        vec!["https://ra.co/events/2494673?p=paramzeit".into()],
+    );
+    seed_ghost_from(
+        &w.store,
+        w.acct,
+        "venue",
+        "noreply@ra.co",
+        "Polar Inertia",
+        date.clone(),
+        EventCommitment::Committed,
+        vec!["https://ra.co/events/2494673".into()],
+    );
+    // A third sender's copy by title alone.
+    seed_ghost_from(
+        &w.store,
+        w.acct,
+        "pal",
+        "pal@gmail.com",
+        "Polar Inertia tickets",
+        date.clone(),
+        // Committed, so search serves it (it serves no mere invitation).
+        EventCommitment::Committed,
+        Vec::new(),
+    );
+    // Another day's copy, from another sender, stays its own. (The venue's
+    // own mail a day apart would be the same ghost, moved.)
+    seed_ghost_from(
+        &w.store,
+        w.acct,
+        "other",
+        "buddy@gmail.com",
+        "Polar Inertia",
+        (day + Duration::days(3)).format("%Y-%m-%d").to_string(),
+        EventCommitment::Committed,
+        vec!["https://ra.co/events/2494673".into()],
+    );
+    let stored = w
+        .store
+        .list_ghost_events(
+            w.acct,
+            (Utc::now() - Duration::days(1)).fixed_offset(),
+            (Utc::now() + Duration::days(30)).fixed_offset(),
+        )
+        .unwrap();
+    assert_eq!(stored.len(), 4, "never merged in the store");
+    let body = w.timeline().await;
+    let ghosts = body["ghosts"].as_array().unwrap();
+    let on_day: Vec<&Value> = ghosts
+        .iter()
+        .filter(|g| g["start"].as_str() == Some(date.as_str()))
+        .collect();
+    assert_eq!(on_day.len(), 1, "{ghosts:#?}");
+    assert_eq!(on_day[0]["title"], "Polar Inertia", "the issuer's shows");
+    assert_eq!(on_day[0]["sources"].as_array().unwrap().len(), 3);
+    assert_eq!(ghosts.len(), 2);
+    // Search shows the one too.
+    let found = search(&w.app, "/client/calendar/search", "polar").await;
+    assert_eq!(
+        hit_titles(&found),
+        ["ghost:Polar Inertia", "ghost:Polar Inertia"],
+        "{found:#}"
+    );
 }
 
 fn sorted_keys(v: &Value) -> Vec<String> {

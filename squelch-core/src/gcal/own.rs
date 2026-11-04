@@ -1126,4 +1126,109 @@ mod tests {
         g.user_end = Some(at("2026-11-07T01:00:00-08:00"));
         assert_eq!(end_of(&g), parse("2026-11-07T01:00:00-08:00"));
     }
+
+    /// `fold_ghosts` lives in `gcal`; its tests are here for the ghost builder.
+    mod fold {
+        use super::*;
+        use crate::gcal::fold_ghosts;
+        use std::collections::HashMap;
+
+        const RA: &str = "ra.co/events/2494673";
+
+        fn from(id: i64, title: &str, start: &str, scope: &str) -> GhostEvent {
+            let mut g = ghost(id, title, start);
+            g.owner_scope = Some(scope.into());
+            g.location = None;
+            g
+        }
+
+        #[test]
+        fn the_venues_listing_and_a_friends_link_show_as_one() {
+            // The order from RA and Endzeit's reply with the RA link, from a
+            // gmail address: two scopes, so mail never joins them.
+            let endzeit = from(1, "Polar Inertia", "2026-11-06", "endzeitsf@gmail.com");
+            let mut ra = from(
+                2,
+                "Parameter & Endzeit Invite Polar Inertia",
+                "2026-11-06T19:00:00-08:00",
+                "ra.co",
+            );
+            ra.commitment = EventCommitment::Invited;
+            let urls = HashMap::from([(1, vec![RA.to_string()]), (2, vec![RA.to_string()])]);
+            // The issuer's wins even over an older, committed copy.
+            assert_eq!(
+                fold_ghosts(&[endzeit.clone(), ra.clone()], &urls),
+                [Some(1), None]
+            );
+            // By title alone too, with no URL.
+            assert_eq!(
+                fold_ghosts(&[endzeit.clone(), ra.clone()], &HashMap::new()),
+                [None, Some(0)],
+                "no issuer: the committed one"
+            );
+        }
+
+        #[test]
+        fn a_shared_url_folds_titles_that_do_not_match() {
+            let a = from(1, "Friday night", "2026-11-06", "endzeitsf@gmail.com");
+            let b = from(2, "Polar Inertia", "2026-11-06", "ra.co");
+            let urls = HashMap::from([(1, vec![RA.to_string()]), (2, vec![RA.to_string()])]);
+            assert_eq!(fold_ghosts(&[a.clone(), b.clone()], &urls), [Some(1), None]);
+            // No URL and no title match: two things.
+            assert_eq!(fold_ghosts(&[a, b], &HashMap::new()), [None, None]);
+        }
+
+        #[test]
+        fn near_misses_stay_apart() {
+            let urls = HashMap::from([(1, vec![RA.to_string()]), (2, vec![RA.to_string()])]);
+            // The same listing, another night.
+            let fri = from(1, "Polar Inertia", "2026-11-06", "ra.co");
+            let sat = from(2, "Polar Inertia", "2026-11-07", "ra.co");
+            assert_eq!(fold_ghosts(&[fri.clone(), sat], &urls), [None, None]);
+            // Two shows of one title the same day, at different times.
+            let early = from(1, "Phoebe Bridgers", "2026-11-06T14:00:00-08:00", "x.com");
+            let late = from(2, "Phoebe Bridgers", "2026-11-06T20:00:00-08:00", "x.com");
+            assert_eq!(fold_ghosts(&[early, late], &HashMap::new()), [None, None]);
+            // A dismissed or cancelled copy is never folded.
+            let mut gone = from(2, "Polar Inertia", "2026-11-06", "ra.co");
+            gone.user_state = Some(GhostUserState::Dismissed);
+            assert_eq!(
+                fold_ghosts(&[fri.clone(), gone.clone()], &urls),
+                [None, None]
+            );
+            gone.user_state = None;
+            gone.mail_state = GhostMailState::Cancelled;
+            assert_eq!(fold_ghosts(&[fri, gone], &urls), [None, None]);
+        }
+
+        #[test]
+        fn a_stranger_quoting_the_url_never_hides_the_issuers_ghost() {
+            let mine = from(5, "Polar Inertia", "2026-11-06", "ra.co");
+            let mut theirs = from(
+                1,
+                "Polar Inertia",
+                "2026-11-06T23:00:00-08:00",
+                "evil.example",
+            );
+            theirs.user_state = Some(GhostUserState::Going);
+            let urls = HashMap::from([(1, vec![RA.to_string()]), (5, vec![RA.to_string()])]);
+            assert_eq!(fold_ghosts(&[mine, theirs], &urls), [None, Some(0)]);
+        }
+
+        #[test]
+        fn three_copies_fold_into_one() {
+            let a = from(1, "Polar Inertia", "2026-11-06", "a@gmail.com");
+            let b = from(2, "Polar Inertia tickets", "2026-11-06", "b@gmail.com");
+            let c = from(
+                3,
+                "Parameter & Endzeit Invite Polar Inertia",
+                "2026-11-06",
+                "ra.co",
+            );
+            let urls = HashMap::from([(3, vec![RA.to_string()])]);
+            // a~b and a~c by title (b and c alone do not match): all three
+            // are one, and the issuer's shows.
+            assert_eq!(fold_ghosts(&[a, b, c], &urls), [Some(2), Some(2), None]);
+        }
+    }
 }

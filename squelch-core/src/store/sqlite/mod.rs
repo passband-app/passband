@@ -1458,6 +1458,14 @@ impl Store for SqliteStore {
         self.list_ghost_events(account_id, from, to)
     }
 
+    fn ghost_url_refs(
+        &self,
+        account_id: AccountId,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, Vec<String>>> {
+        self.ghost_url_refs(account_id, ids)
+    }
+
     fn patch_ghost_user(
         &self,
         account_id: AccountId,

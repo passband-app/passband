@@ -36,19 +36,31 @@ fn an_owner_delete_scrubs_the_words_and_the_receipts() {
         )
         .unwrap();
     assert!(store.delete_memory_entry(acct, &id, now).unwrap());
-    let (line, body, provenance, deleted_at): (String, String, String, Option<String>) = store
+    let (scope, line, body, provenance, deleted_at): (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+    ) = store
         .lock()
         .unwrap()
         .query_row(
-            "SELECT line, body, provenance, deleted_at FROM memory_entries
+            "SELECT scope, line, body, provenance, deleted_at FROM memory_entries
              WHERE account_id = ?1 AND id = ?2",
             params![acct, id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .unwrap();
+    // The address lived in the scope too.
     assert_eq!(
-        (line.as_str(), body.as_str(), provenance.as_str()),
-        ("", "{}", "{}")
+        (
+            scope.as_str(),
+            line.as_str(),
+            body.as_str(),
+            provenance.as_str()
+        ),
+        ("", "", "{}", "{}")
     );
     assert!(deleted_at.is_some());
     // Gone to every reader, and a second delete finds nothing.

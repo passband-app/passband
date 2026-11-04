@@ -787,11 +787,12 @@ impl SqliteStore {
     }
 
     /// The owner removes an entry, FOR REAL (docs/UNDERSTANDING.md §3): the
-    /// sentence, the fields and the receipts are blanked in the same write
-    /// that stamps `deleted_at`, so neither the store nor a Litestream backup
-    /// taken after it still holds what Passband thought about a person or
-    /// which of their mail it rested on. The row itself stays, empty, with its
-    /// id, scope, kind and dates, so the audit row has something to point at.
+    /// sentence, the fields, the receipts AND the scope (a `sender:` scope is
+    /// the person's address) are blanked in the same write that stamps
+    /// `deleted_at`, so no reader of the store, and no backup taken after it,
+    /// holds what Passband thought about a person or which of their mail it
+    /// rested on. The row itself stays, empty, with its id, kind and dates, so
+    /// the audit row has something to point at.
     /// `false` when there was nothing to delete.
     pub fn delete_memory_entry(
         &self,
@@ -800,8 +801,10 @@ impl SqliteStore {
         now: DateTime<Utc>,
     ) -> Result<bool> {
         let n = self.lock()?.execute(
+            // Best-effort for backups, complete for every reader: the old
+            // pages can survive in the file and the Litestream WAL until a VACUUM or retention drops them.
             "UPDATE memory_entries SET deleted_at = ?3, updated_at = ?3,
-                 line = '', body = '{}', provenance = '{}'
+                 scope = '', line = '', body = '{}', provenance = '{}'
              WHERE account_id = ?1 AND id = ?2 AND deleted_at IS NULL",
             params![account_id, id, rfc(now)],
         )?;

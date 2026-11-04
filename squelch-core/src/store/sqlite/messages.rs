@@ -1331,12 +1331,23 @@ impl SqliteStore {
         //       the counting (`relationships`). Not for the archive tier, which
         //       the ledger never counts, nor for spam, which it never counts
         //       either; a later sighting outside the label lands here again.
+        //
+        //       A SENT message also marks whoever wrote the thread's inbound
+        //       mail, because a reply goes to the Reply-To address: answering
+        //       `noreply@vendor` lands at `support@vendor`, and only the From
+        //       side's `replied_threads` moved. That mark is full, since none
+        //       of that sender's counts did.
         if !archive {
             let account = triaged.message.account_id;
             if triaged.message.is_sent {
                 for addr in &triaged.recipient_addrs {
                     super::relationships::mark_dirty_conn(&tx, account, addr)?;
                 }
+                super::relationships::mark_thread_senders_dirty_conn(
+                    &tx,
+                    account,
+                    &triaged.message.thread_id,
+                )?;
             } else if !triaged.message.is_spam {
                 super::relationships::mark_dirty_conn(&tx, account, &triaged.message.from_addr)?;
             }

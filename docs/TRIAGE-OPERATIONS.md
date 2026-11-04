@@ -461,8 +461,20 @@ attention, fatigue and the monthly rate, unless its mark is full
 about 36 ms and an unchanged one about 33 ms, of which about 28 ms is the
 purge flow's `SenderMeasurer`.
 
-Ingest, not-spam and the attention POST add the address to
-`relationship_dirty`. Every refine round, before the triage pass, recomputes
+These add an address to `relationship_dirty`:
+
+- ingest (the sender, or each recipient of Sent mail);
+- Sent ingest also marks the senders of the thread's inbound mail, so a reply
+  to a Reply-To address credits the From;
+- not-spam;
+- the Sent-history contacts harvest;
+- the attention POST;
+- a decision or access check that seals a message, and any owner correction.
+
+Marks of the last kind, and the thread-sender marks, are full: the recount
+skips its unchanged-counts shortcut. The daemon has no mark-as-spam or
+local-delete path, so neither marks anything; the nightly walk catches
+anything no mark saw. Every refine round, before the triage pass, recomputes
 up to 200 dirty addresses, 25 per store lock. Once per owner-local day from
 03:00 the whole table is recomputed in the same chunks; the day it last
 completed is `sync_state` mailbox `relationships_daily`. A store that

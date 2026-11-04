@@ -361,6 +361,26 @@ pub(super) fn mark_message_sender_dirty_conn(
     Ok(())
 }
 
+/// Mark, for a FULL recount, every address that wrote inbound mail into
+/// `thread_id`: the owner just wrote into it, so each of them may have gained
+/// a replied thread whatever address the reply went to. One statement, a seek
+/// on `idx_messages_thread` bounded by the thread's length.
+pub(super) fn mark_thread_senders_dirty_conn(
+    conn: &Connection,
+    account_id: AccountId,
+    thread_id: &str,
+) -> Result<()> {
+    conn.prepare_cached(
+        "INSERT INTO relationship_dirty(account_id, addr, full)
+         SELECT DISTINCT account_id, lower(trim(from_addr)), 1 FROM messages
+          WHERE account_id = ?1 AND thread_id = ?2
+            AND is_sent = 0 AND is_spam = 0 AND is_archive = 0 AND trim(from_addr) != ''
+         ON CONFLICT(account_id, addr) DO UPDATE SET full = 1",
+    )?
+    .execute(params![account_id, thread_id])?;
+    Ok(())
+}
+
 /// The floor `attention_rows` counts from: `SenderMeasurer::new`'s own, the
 /// later of the Reading window and the open ledger floor. Restated here only
 /// to report its age; the counts themselves come from the measurer.

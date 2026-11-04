@@ -2625,9 +2625,9 @@ CREATE INDEX IF NOT EXISTS idx_message_translations_claim
 -- and may read it; no /mcp tool response may carry a column of it, and an
 -- invariant test in squelch-mcp holds that.
 --
--- MAINTAINED BY A PASS, NOT AT INGEST. Ingest, the not-spam action and the
--- attention POST each add one row to `relationship_dirty` below and nothing
--- else; the refine lane drains that set every round and recomputes only those
+-- MAINTAINED BY A PASS, NOT AT INGEST. Ingest, the not-spam action, the
+-- Sent-history harvest, the attention POST and the triage commits that seal
+-- mail each add one row to `relationship_dirty` below and nothing else; the refine lane drains that set every round and recomputes only those
 -- addresses, each as indexed probes on ONE address, never a directory scan.
 -- A full recompute runs once per owner-local day at 03:00, chunked so no chunk
 -- holds the store mutex long, because the monthly rate and the ledger floors
@@ -2710,7 +2710,8 @@ CREATE INDEX IF NOT EXISTS idx_relationships_addr_nocase
     ON relationships(account_id, addr COLLATE NOCASE);
 
 -- THE LEDGER'S DIRTY SET: addresses whose row is owed a recompute. Written on
--- the hot paths (ingest, not-spam, the attention POST) as one
+-- the hot paths (ingest, not-spam, the harvest, the attention POST, the
+-- triage commits) as one
 -- `INSERT OR IGNORE` of a lowercased address and nothing more; drained by the
 -- refine lane, which deletes each address under the same lock it recomputed
 -- it under, so a mark that lands mid-drain is never lost. A duplicate mark is

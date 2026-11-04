@@ -760,3 +760,70 @@ fn a_decision_that_seals_mail_marks_its_sender_for_a_full_recount() {
         "the sealed thread is gone within a round"
     );
 }
+
+#[test]
+fn a_reply_to_a_reply_to_address_still_credits_the_sender_who_wrote() {
+    let (store, acct) = store();
+    triaged(acct, "n", "t1")
+        .from("noreply@vendor.example")
+        .received_at(days_ago(2))
+        .ingest(&store);
+    store.drain_relationship_dirty(acct, 10).unwrap();
+    assert_eq!(
+        store
+            .relationship(acct, "noreply@vendor.example")
+            .unwrap()
+            .unwrap()
+            .replied_threads,
+        0
+    );
+    // The owner answers at the Reply-To address, not at the From.
+    sent(
+        &store,
+        acct,
+        "r",
+        "t1",
+        "support@vendor.example",
+        days_ago(1),
+    );
+    assert!(
+        dirty(&store, acct).contains(&"noreply@vendor.example".to_string()),
+        "{:?}",
+        dirty(&store, acct)
+    );
+    store.drain_relationship_dirty(acct, 10).unwrap();
+    assert_eq!(
+        store
+            .relationship(acct, "noreply@vendor.example")
+            .unwrap()
+            .unwrap()
+            .replied_threads,
+        1
+    );
+}
+
+#[test]
+fn the_sent_history_harvest_marks_the_contacts_it_moves() {
+    let (store, acct) = store();
+    store
+        .merge_harvested_contacts(
+            acct,
+            &[ContactEntry {
+                addr: "Ann@Fund.com".into(),
+                display_name: None,
+                sent_count: 4,
+                last_sent_at: Some(days_ago(3)),
+            }],
+        )
+        .unwrap();
+    assert_eq!(dirty(&store, acct), ["ann@fund.com"]);
+    store.drain_relationship_dirty(acct, 10).unwrap();
+    assert_eq!(
+        store
+            .relationship(acct, "ann@fund.com")
+            .unwrap()
+            .unwrap()
+            .sent_count,
+        4
+    );
+}

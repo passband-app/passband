@@ -124,6 +124,35 @@ struct FixtureAPITests {
         let resetSnapshot = await api.snapshot()
         precondition(reset.total == 18 && reset.bands.standing == 3 && resetRules.isEmpty && resetShipments.count == 3)
         precondition(resetSnapshot.messages.allSatisfy { !$0.isDone && !$0.isRead })
+
+        // THE USAGE STAGE. Unstaged, the fixtures claim no understanding and
+        // have no ledger to serve; staged, the page's four reads answer from
+        // the fixture and confirm and delete act on the staged list.
+        precondition(!(reset.features ?? []).contains("understanding"))
+        do {
+            _ = try await api.response(for: request("relationships"))
+            preconditionFailure("The fixture inbox has no relationship ledger")
+        } catch let error as APIError { precondition(error.status == 400) }
+        await api.stageUnderstanding()
+        let staged = try await read("stats", as: StoreStats.self)
+        precondition((staged.features ?? []).contains("understanding"))
+        let people = try await read("relationships?limit=50&sort=replies", as: RelationshipsResponse.self)
+        precondition(people.rows.count >= 12 && people.coverage_days >= 14)
+        let usage = try await read("usage?days=60", as: UsageResponse.self)
+        precondition(usage.categories?["stage1"]?.rows.count == 60)
+        let mail = try await read("mail-activity?days=60", as: MailActivityResponse.self)
+        precondition(mail.rows.count == 60 && mail.until == mail.rows.last?.day)
+        let memory = try await read("memory", as: MemoryResponse.self)
+        let guess = memory.entries.first { $0.origin == .inferred && !$0.isRetired }!
+        var confirm = request("memory/\(guess.id)", method: "PUT")
+        confirm.httpBody = try JSONSerialization.data(withJSONObject: ["confirm": true])
+        let (confirmedData, _) = try await api.response(for: confirm)
+        let confirmed = try JSONDecoder().decode(MemoryEntry.self, from: confirmedData)
+        precondition(confirmed.origin == .stated && confirmed.expires_at == nil)
+        let (_, deleted) = try await api.response(for: request("memory/\(guess.id)", method: "DELETE"))
+        precondition(deleted.statusCode == 204)
+        let after = try await read("memory", as: MemoryResponse.self)
+        precondition(after.entries.count == memory.entries.count - 1 && !after.entries.contains { $0.id == guess.id })
         print("Fixture API tests passed")
     }
 }

@@ -241,6 +241,10 @@ run_suite fixture-api \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/APIError.swift \
   Sources/Passband/Model/FixtureMail.swift \
+  Sources/Passband/Lib/UsageSeries.swift \
+  Sources/Passband/Model/UnderstandingWire.swift \
+  Sources/Passband/Lib/UnderstandingSeries.swift \
+  Sources/Passband/Lib/UnderstandingFixture.swift \
   Sources/Passband/Model/FixtureAPI.swift \
   Tests/FixtureAPITests.swift
 

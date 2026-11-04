@@ -61,7 +61,9 @@ struct PassbandApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
+        // A staged page is for looking at, launched behind whatever the
+        // person is typing into: taking focus would hand it their keys.
+        if !FixtureMode.stagesUsage { NSApp.activate(ignoringOtherApps: true) }
         // Install before launch finishes: a notification tapped while Passband
         // was not running is delivered the moment a delegate exists, and a
         // center without one drops it.

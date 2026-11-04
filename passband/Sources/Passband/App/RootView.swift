@@ -102,7 +102,11 @@ struct RootView: View {
             // Pay WebKit's process-launch cost at boot rather than on the first
             // email the reader opens.
             EmailWebView.warmProcess()
-            await store.loadSettings()
+            if FixtureMode.stagesUsage {
+                await store.stageUsagePage()
+            } else {
+                await store.loadSettings()
+            }
         }
         .onChange(of: store.accountActionsBlocked) { _, blocked in
             if !blocked { Notifier.shared.drainPendingTap() }

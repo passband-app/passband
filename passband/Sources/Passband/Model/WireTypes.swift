@@ -2460,6 +2460,10 @@ struct SealedMeta: Codable, Sendable, Identifiable, Hashable {
     /// The message id of the code, link or receipt that explains this alert
     /// (the same service, within minutes). Never set on a critical change.
     var explained_by: Int? = nil
+    /// Brought in by the account's first load (the backfill), not arrived
+    /// since: history, so it asks nothing. ABSENT from an older daemon, which
+    /// reads as false (every message asks as it always did).
+    var first_load: Bool? = nil
 }
 
 /// POST /client/sealed/{id}/reveal's optional `?source=`: where the reveal came

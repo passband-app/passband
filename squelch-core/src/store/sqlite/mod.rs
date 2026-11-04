@@ -323,6 +323,14 @@ macro_rules! revisit_answer_sql {
 /// re-fetch (which bump the state revision) until the re-triage lands, the
 /// way the sweeps and the shredder read it.
 ///
+/// FIRST-LOAD MAIL IS HISTORY, NOT NEWS: an unruled critical change the
+/// first-run backfill brought in (`triage.first_load`) holds no FYE place.
+/// The account came with it; the owner did not just see it happen, and a
+/// new account's first board must not open on a month of "was this you?".
+/// A "Not me" they give it still holds, and `auth_fye_sql!` itself is
+/// unchanged, so such mail keeps its protection from thread-wide sweeps and
+/// the shredder.
+///
 /// ONE DEFINITION for the FYE list, the sitrep's placement and Standing
 /// band, and the stats tiers, so they cannot drift
 /// (`auth_fye_list_and_placement_agree` pins that they do). The owner's
@@ -350,7 +358,8 @@ macro_rules! auth_fye_threads_cte {
                  LEFT JOIN auth_verdicts v ON v.account_id=fm.account_id AND v.message_id=fm.id
                  LEFT JOIN triage ft ON ft.account_id=fm.account_id AND ft.message_id=fm.id
                  WHERE fm.is_sent=0 AND fm.is_spam=0 AND fm.is_archive=0
-                   AND COALESCE(ft.status,'new')!='done' AND ",
+                   AND COALESCE(ft.status,'new')!='done'
+                   AND (v.verdict='not_mine' OR COALESCE(ft.first_load,0)=0) AND ",
             auth_mail_sql!(),
             " AND ",
             auth_fye_sql!("fm"),

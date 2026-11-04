@@ -2458,7 +2458,8 @@ fn sealed_rows(
                     v.verdict, m.auth_pass,
                     (SELECT MIN(al.ts) FROM audit_log al WHERE al.account_id=m.account_id
                            AND al.action='reveal_sealed' AND al.target=CAST(m.id AS TEXT)
-                           AND al.detail IS NOT 'notification')
+                           AND al.detail IS NOT 'notification'),
+                    COALESCE(t.first_load, 0)
              FROM messages m
              LEFT JOIN triage t ON t.message_id = m.id AND t.account_id=m.account_id
              LEFT JOIN agent_message_state s ON s.message_id=m.id AND s.account_id=m.account_id
@@ -2498,6 +2499,7 @@ fn sealed_rows(
                 critical,
                 verdict,
                 explained_by: None,
+                first_load: r.get(12)?,
             };
             let pairing = crate::triage::auth_pairing::AuthMailRow {
                 id: message.id,

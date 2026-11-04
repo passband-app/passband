@@ -1435,6 +1435,10 @@ pub struct SealedMessage {
     /// sign-in receipt from the same service within minutes), computed at
     /// read time by [`crate::triage::auth_pairing`].
     pub explained_by: Option<i64>,
+    /// Brought in by the first-run backfill (`triage.first_load`): history
+    /// the account came with, not something that just happened. It asks the
+    /// owner nothing ("was this you?") and holds no FYE place.
+    pub first_load: bool,
 }
 
 /// One row of the user's OWN sent mail, for the human door's sent listing

@@ -5465,6 +5465,66 @@ mod tests {
         }
     }
 
+    /// FIRST-LOAD AUTH MAIL ASKS NOTHING. A critical change the first-run
+    /// backfill brought in is history: it holds no FYE place (list and sitrep
+    /// placement alike) and the sealed list marks it `first_load`, which the
+    /// client reads as "no question". A live one still holds; so does a
+    /// first-load one the owner called "Not me".
+    #[test]
+    fn first_load_auth_mail_holds_no_fye_place() {
+        use crate::triage::decision::AuthKind::*;
+        use crate::types::AuthVerdict::*;
+        let store = fixture();
+        // (id, from the backfill, verdict, expected in FYE)
+        let cases: &[(i64, bool, Option<crate::types::AuthVerdict>, bool)] = &[
+            (40, false, None, true),
+            (41, true, None, false),
+            (42, true, Some(NotMine), true),
+        ];
+        for &(id, backfilled, verdict, _) in cases {
+            seed_auth(&store, id, auth(&[AccountChange], true), false);
+            if backfilled {
+                store
+                    .lock()
+                    .unwrap()
+                    .execute("UPDATE triage SET first_load=1 WHERE message_id=?1", [id])
+                    .unwrap();
+            }
+            if verdict.is_some() {
+                store.set_auth_verdict(1, id, verdict, Utc::now()).unwrap();
+            }
+        }
+        let expected: Vec<i64> = cases.iter().filter(|c| c.3).map(|c| c.0).collect();
+        let mut listed: Vec<i64> = store
+            .agent_fye(1, 100, &RankingConfig::default(), Utc::now())
+            .unwrap()
+            .into_iter()
+            .map(|item| item.message_id)
+            .collect();
+        listed.sort();
+        assert_eq!(listed, expected, "the FYE list");
+        let mut eyes: Vec<i64> = store
+            .human_agent_updates(1, &inventory(None))
+            .unwrap()
+            .iter()
+            .filter(|item| item.placement.as_deref() == Some("eyes"))
+            .map(|item| item.update.id)
+            .collect();
+        eyes.sort();
+        assert_eq!(eyes, expected, "the sitrep's placement agrees");
+        let flags: Vec<(i64, bool)> = {
+            let mut rows: Vec<(i64, bool)> = store
+                .sealed_messages(1)
+                .unwrap()
+                .into_iter()
+                .map(|m| (m.id, m.first_load))
+                .collect();
+            rows.sort();
+            rows
+        };
+        assert_eq!(flags, [(40, false), (41, true), (42, true)]);
+    }
+
     /// FYE MEMBERSHIP FOR AUTH MAIL, and the pin that the FYE list and the
     /// sitrep's placement read it the same way. Auth mail ignores the model's
     /// FYE pick; it is in FYE on a "Not me", or as a critical change nobody

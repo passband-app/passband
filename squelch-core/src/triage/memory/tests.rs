@@ -457,6 +457,25 @@ fn keep_revise_and_retire_need_a_live_inferred_entry_once() {
 }
 
 #[test]
+fn a_failed_revise_does_not_spend_the_entrys_one_op() {
+    let mut world = World::new();
+    world.existing.push(record(
+        "01A",
+        Origin::Inferred,
+        "role",
+        "Runs a studio.",
+        0.6,
+    ));
+    let bad = role(&"x".repeat(MAX_WHAT_CHARS + 1));
+    let out = world.validate(&[op("revise", "01A", Some(bad)), op("keep", "01A", None)]);
+    assert_eq!(out.ops, vec![ValidOp::Keep { id: "01A".into() }]);
+    assert_eq!(
+        out.rejected,
+        vec![(0, Rejection::FieldOverCap { field: "what" })]
+    );
+}
+
+#[test]
 fn a_revise_may_recite_its_own_receipts_but_nothing_else_unseen() {
     let mut world = World::new();
     let mut existing = record("01A", Origin::Inferred, "role", "Runs a studio.", 0.6);

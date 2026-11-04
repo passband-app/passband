@@ -861,20 +861,20 @@ pub fn validate_ops(ops: &[RawOp], facts: &Facts<'_>) -> Validated {
             Ok(record)
         };
         let result = match op.op.as_str() {
+            // An id is SEEN only once an op on it has validated: a revise that
+            // fails its checks must not turn the keep after it into a
+            // duplicate, or the entry the model meant to stand by lapses.
             "keep" | "retire" | "revise" => target(&op.id).and_then(|record| {
-                if !seen.insert(record.id.clone()) {
+                if seen.contains(&record.id) {
                     return Err(Rejection::Duplicate);
                 }
                 match op.op.as_str() {
                     "keep" => Ok(ValidOp::Keep {
                         id: record.id.clone(),
                     }),
-                    "retire" => {
-                        retired.insert(record.id.clone());
-                        Ok(ValidOp::Retire {
-                            id: record.id.clone(),
-                        })
-                    }
+                    "retire" => Ok(ValidOp::Retire {
+                        id: record.id.clone(),
+                    }),
                     _ => {
                         let raw = op.entry.as_ref().ok_or(Rejection::MissingEntry)?;
                         // The entry's own receipts stay citable on a revise:
@@ -904,7 +904,18 @@ pub fn validate_ops(ops: &[RawOp], facts: &Facts<'_>) -> Validated {
         };
         match result {
             Ok(ValidOp::New { entry }) => news.push((index, entry)),
-            Ok(op) => out.ops.push(op),
+            Ok(op) => {
+                let id = match &op {
+                    ValidOp::Keep { id } | ValidOp::Revise { id, .. } => id,
+                    ValidOp::Retire { id } => {
+                        retired.insert(id.clone());
+                        id
+                    }
+                    ValidOp::New { .. } => unreachable!("matched above"),
+                };
+                seen.insert(id.clone());
+                out.ops.push(op);
+            }
             Err(why) => out.rejected.push((index, why)),
         }
     }

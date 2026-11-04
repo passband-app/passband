@@ -932,6 +932,8 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // See the function: Amazon's Shipped/Delivered decisions were always
     // stored, and only lacked a key to project on.
     project_amazon_boxes(conn);
+    // See the function: a drop-off receipt's box is going away, not coming.
+    drop_sent_packages(conn);
 
     // `skipped` came after the table's first form; a database a pre-release
     // build opened has the table without it. Guarded, like the rest, on the
@@ -1812,6 +1814,51 @@ fn project_amazon_boxes(conn: &Connection) {
 }
 
 fn project_amazon_boxes_once(conn: &Connection) -> Result<usize> {
+    once_per_account(
+        conn,
+        AMAZON_BOXES_KEY,
+        agent_deliveries::project_amazon_boxes,
+    )
+}
+
+/// The `app_settings` key marking an account whose stored drop-off receipts
+/// have lost their delivery records ([`drop_sent_packages`]).
+pub(super) const SENT_PACKAGES_KEY: &str = "sent_packages_dropped";
+
+/// ONE-TIME: take a shipping store's drop-off receipt off the Shipments rail
+/// (`agent_deliveries::retire_sent_packages`). Triage used to file the
+/// receipt's tracking number as a package on its way, but the box is going
+/// away from the owner and will never get another email. New receipts are
+/// stripped as they are decided; this cleans the ones already stored.
+///
+/// Gated and failure-tolerant exactly as [`project_amazon_boxes`] is.
+fn drop_sent_packages(conn: &Connection) {
+    match once_per_account(
+        conn,
+        SENT_PACKAGES_KEY,
+        agent_deliveries::retire_sent_packages,
+    ) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("squelch: migration retired {n} dropped-off package receipt(s)"),
+        Err(error) => {
+            eprintln!(
+                "squelch: dropped-off package cleanup failed ({error}); will retry next open"
+            );
+            if !conn.is_autocommit() {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+        }
+    }
+}
+
+/// Run `pass` once for every account not yet marked with `key`, marking each
+/// in the same `BEGIN IMMEDIATE` transaction (re-read inside it). Returns the
+/// sum of what `pass` reported.
+fn once_per_account(
+    conn: &Connection,
+    key: &str,
+    pass: fn(&Connection, AccountId) -> Result<usize>,
+) -> Result<usize> {
     if !tables_exist(
         conn,
         &[
@@ -1825,14 +1872,14 @@ fn project_amazon_boxes_once(conn: &Connection) -> Result<usize> {
     )? {
         return Ok(0);
     }
-    let pending = |conn: &Connection| -> Result<Vec<i64>> {
+    let pending = |conn: &Connection| -> Result<Vec<AccountId>> {
         let mut stmt = conn.prepare(
             "SELECT id FROM accounts WHERE NOT EXISTS(
                  SELECT 1 FROM app_settings s WHERE s.account_id=accounts.id AND s.key=?1)
              ORDER BY id",
         )?;
         Ok(stmt
-            .query_map([AMAZON_BOXES_KEY], |r| r.get(0))?
+            .query_map([key], |r| r.get(0))?
             .collect::<std::result::Result<_, _>>()?)
     };
     if pending(conn)?.is_empty() {
@@ -1840,16 +1887,16 @@ fn project_amazon_boxes_once(conn: &Connection) -> Result<usize> {
     }
     conn.execute_batch("BEGIN IMMEDIATE")?;
     let now = Utc::now().to_rfc3339();
-    let mut boxes = 0;
+    let mut total = 0;
     for account in pending(conn)? {
-        boxes += agent_deliveries::project_amazon_boxes(conn, account)?;
+        total += pass(conn, account)?;
         conn.execute(
             "INSERT OR IGNORE INTO app_settings(account_id, key, value) VALUES(?1, ?2, ?3)",
-            params![account, AMAZON_BOXES_KEY, now],
+            params![account, key, now],
         )?;
     }
     conn.execute_batch("COMMIT")?;
-    Ok(boxes)
+    Ok(total)
 }
 
 /// Re-run [`banking::sanitize_institution`] over every stored institution,

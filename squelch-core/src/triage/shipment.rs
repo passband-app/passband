@@ -329,6 +329,24 @@ fn is_return_or_outbound(hay: &str) -> bool {
     detector().return_signal.iter().any(|re| re.is_match(hay))
 }
 
+/// Is this a shipping store's DROP-OFF RECEIPT: proof the owner handed a
+/// package over to be sent (The UPS Store's "Drop-Off Package Receipt")? The
+/// box is going away from the owner and the receipt is the last word on it,
+/// so it is never a delivery to track.
+///
+/// Deliberately narrower than [`is_return_or_outbound`], whose `refund` and
+/// bare `drop off` also match inbound shipping mail ("we'll drop it off",
+/// a returns-policy footer). This one runs on the agent's records, where a
+/// false hit would silently drop a real package, so it keys only on the
+/// receipt's own headings.
+pub fn is_drop_off_receipt(subject: &str, body: &str) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        rx(r"\bdrop[- ]?off (?:package )?receipt\b|\bdrop[- ]?off time\b|\bthanks? (?:you )?for dropping off\b")
+    })
+    .is_match(&format!("{subject}\n{body}"))
+}
+
 /// LOOSE shipping signal: the `shipping_signal` battery minus the
 /// tracking-number requirement, still excluding returns and outbound mail.
 /// Drives the shipments-extractor trigger (`triage.ship_extract_model`), which
@@ -1246,6 +1264,35 @@ mod tests {
             detect_shipment("x@y.com", subject, body).is_none(),
             "return exclusion must win over the inbound-delivery language"
         );
+    }
+
+    #[test]
+    fn a_drop_off_receipt_is_recognized_and_inbound_mail_is_not() {
+        assert!(is_drop_off_receipt(
+            "Thanks for choosing The UPS Store",
+            "Drop-Off Package Receipt\r\nPlease save for your records\r\nDROP-OFF TIME:\r\n10:18 AM",
+        ));
+        assert!(is_drop_off_receipt(
+            "Receipt",
+            "Thanks for dropping off your package."
+        ));
+        // Inbound mail that merely says "drop off", or mentions refunds.
+        for (subject, body) in [
+            (
+                "Delivered: your package",
+                "Your driver dropped off your package at the front door.",
+            ),
+            (
+                "Arriving today",
+                "We'll drop off your order between 2 and 6 PM.",
+            ),
+            (
+                "Your order has shipped",
+                "Tracking 1Z999AA10123456784. Returns and refunds within 30 days.",
+            ),
+        ] {
+            assert!(!is_drop_off_receipt(subject, body), "{subject}");
+        }
     }
 
     // ---- the LOOSE trigger signal ----------------------------------------

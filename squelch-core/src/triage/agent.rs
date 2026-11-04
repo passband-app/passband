@@ -1781,6 +1781,7 @@ mod tests {
         // one-click join link) was classified sign_in_link and sealed. The prompt
         // must say what an invitation is, not only list the auth kinds.
         assert!(SYSTEM.contains("An invitation is not authentication"));
+        assert!(SYSTEM.contains("A package the owner sent is not one"));
         assert!(SYSTEM.contains("one-click join or accept link"));
         // A Passband invite (one-time signup code, 30-day expiry) was sealed as
         // verification: the code box looked like an OTP.

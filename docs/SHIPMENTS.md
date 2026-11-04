@@ -499,6 +499,23 @@ Decisions stored before box keys existed project once, on the open that
 introduces them (`migrate::project_amazon_boxes`, gated per account by the
 `amazon_boxes_projected` marker in `app_settings`). Every other open does one indexed read.
 
+### Packages the owner sent are not shipments
+
+The rail is for boxes coming to the owner. A shipping store's drop-off receipt
+(The UPS Store's "Drop-Off Package Receipt") prints a real UPS number, and the
+agent used to file it as a package on its way. It is the last mail that box
+will ever get, so it sat on the rail as "shipped" until it went silent.
+
+The prompt says a package the owner sent gets no delivery record, and a rail
+in code backs it: `commit_agent_decision` strips every delivery record from a
+decision about a drop-off receipt (`shipment::is_drop_off_receipt`) before the
+decision is stored, so neither door shows the box. The match keys only on the
+receipt's own headings ("drop-off receipt", "drop-off time", "thanks for
+dropping off"), not on the regex detector's wider return battery, whose
+`refund` and bare `drop off` also hit inbound mail ("we'll drop off
+your order"). Receipts already stored are cleaned once
+(`migrate::drop_sent_packages`, marker `sent_packages_dropped`).
+
 ## Identity: which package is this?
 
 ### Tracking number first, order reference second

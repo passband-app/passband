@@ -290,6 +290,70 @@ fn record_identity(
     Ok(())
 }
 
+/// A package the owner dropped off at a shipping store is going AWAY from
+/// them, and the store's receipt is the last mail it will ever get, so it is
+/// never a delivery. Strips the delivery records from a decision about a
+/// drop-off receipt, whatever the model proposed, before it is stored: both
+/// doors read the stored decision, so neither shows the box. Returns whether
+/// anything was dropped.
+pub(super) fn drop_sent_packages(
+    decision: &mut MessageDecision,
+    subject: &str,
+    body: &str,
+) -> bool {
+    let before = decision.records.len();
+    if crate::triage::shipment::is_drop_off_receipt(subject, body) {
+        decision
+            .records
+            .retain(|record| !matches!(record, RecordProposal::Delivery { .. }));
+    }
+    decision.records.len() != before
+}
+
+/// ONE-TIME BACKFILL (see `migrate::drop_sent_packages`): take the delivery
+/// records out of every stored decision about a drop-off receipt, then
+/// rebuild what they had put on the Shipments rail. Returns how many
+/// decisions changed.
+pub(super) fn retire_sent_packages(conn: &Connection, account: AccountId) -> Result<usize> {
+    let rows = conn
+        .prepare(
+            "SELECT d.message_id,d.decision_json,coalesce(m.subject,''),coalesce(m.body,'')
+             FROM agent_message_decisions d JOIN messages m ON m.id=d.message_id AND m.account_id=d.account_id
+             WHERE d.account_id=?1 AND d.decision_json LIKE '%\"delivery\"%'",
+        )?
+        .query_map([account], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut changed = 0;
+    for (message, encoded, subject, body) in rows {
+        // One undecodable decision costs only its own box.
+        let Ok(previous) = serde_json::from_str::<MessageDecision>(&encoded) else {
+            continue;
+        };
+        let mut current = previous.clone();
+        if !drop_sent_packages(&mut current, &subject, &body) {
+            continue;
+        }
+        conn.execute(
+            "UPDATE agent_message_decisions SET decision_json=?3 WHERE account_id=?1 AND message_id=?2",
+            params![
+                account,
+                message,
+                serde_json::to_string(&current).map_err(|e| CoreError::Other(e.into()))?
+            ],
+        )?;
+        reconcile(conn, account, message, Some(&previous), &current)?;
+        changed += 1;
+    }
+    Ok(changed)
+}
+
 /// Rebuild every shipment `message`'s decision touched, before (`previous`)
 /// and now (`current`), from all retained decisions of the account.
 pub(super) fn reconcile(
@@ -2043,6 +2107,45 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].tracking_number, KEY);
         assert_eq!(rows[0].status, "delivered");
+    }
+
+    /// THE DROP-OFF BACKFILL. A receipt stored with a delivery record had put
+    /// the box on the rail; the one-time pass strips the record from the
+    /// stored decision and retires the row. Ordinary shipping mail is left
+    /// alone, and a second pass changes nothing.
+    #[test]
+    fn the_backfill_retires_stored_drop_off_receipts() {
+        let store = fixture();
+        {
+            let conn = store.lock().unwrap();
+            conn.execute(
+                "UPDATE messages SET subject='Thanks for choosing The UPS Store',
+                     body='Drop-Off Package Receipt. DROP-OFF TIME: 10:18 AM' WHERE id=1",
+                [],
+            )
+            .unwrap();
+        }
+        write(&store, 1, None, &delivery("1ZR0676H0301486638", "shipped"));
+        write(&store, 2, None, &delivery("1Z999AA10123456784", "shipped"));
+        assert_eq!(listed(&store).len(), 2);
+        for expected in [1, 0] {
+            let conn = store.lock().unwrap();
+            assert_eq!(retire_sent_packages(&conn, 1).unwrap(), expected);
+        }
+        let rows = listed(&store);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tracking_number, "1Z999AA10123456784");
+        let stored: String = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT decision_json FROM agent_message_decisions WHERE message_id=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let stored: MessageDecision = serde_json::from_str(&stored).unwrap();
+        assert!(stored.records.is_empty());
     }
 
     /// A real carrier number on Amazon mail still wins: it can be polled.

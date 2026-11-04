@@ -2660,6 +2660,7 @@ CREATE TABLE IF NOT EXISTS relationships (
     -- date is the first SIGHTING, and the backfill walks newest first, so it
     -- would date a ten-year correspondent to last Tuesday.
     received_first_at TEXT,
+    -- The newest mail the listings would show, so never a hidden login code.
     received_last_at  TEXT,
     -- Thirty-day rate since the address first wrote. NULL under
     -- `sender_fatigue::MIN_COVERED_DAYS` of history with them.

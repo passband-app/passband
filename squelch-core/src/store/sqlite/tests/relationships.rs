@@ -4,7 +4,7 @@
 
 use super::super::reading_senders::SenderMeasurer;
 use super::super::relationships::{
-    CONTACT_SQL, CORRECTIONS_SQL, INBOUND_SQL, INITIATED_SQL, NAME_SQL, RECENT_WINDOW,
+    CONTACT_SQL, CORRECTIONS_SQL, INBOUND_SQL, INITIATED_SQL, LAST_SQL, NAME_SQL, RECENT_WINDOW,
     RELATIONSHIPS_BACKFILL_KEY, RelationshipSort, SEALED_COUNT_SQL, SEALED_PROBE_SQL, THREADS_SQL,
     WALK_SOURCES,
 };
@@ -136,10 +136,10 @@ fn inbound_counts_the_listings_mail_and_dates_it_from_the_messages() {
     assert_eq!(row.received_count, 3, "the sealed message is not counted");
     let first = row.received_first_at.unwrap();
     assert!((first - days_ago(300)).num_minutes().abs() < 5, "{first}");
-    // The arrival range comes off the same index walk as the count, so it
-    // may end on the sealed message (4 days ago), never on spam or archive.
+    // The last arrival is the newest mail the listings would show (20 days
+    // ago), not the sealed code that came after it (4 days ago).
     let last = row.received_last_at.unwrap();
-    assert!((last - days_ago(4)).num_minutes().abs() < 5, "{last}");
+    assert!((last - days_ago(20)).num_minutes().abs() < 5, "{last}");
     assert_eq!(row.display_name.as_deref(), Some("Dan Smith"));
     assert_eq!(row.inbound_threads, 3, "the sealed thread is not one");
     // Three mails over three hundred days.
@@ -560,6 +560,7 @@ fn every_per_address_statement_is_an_indexed_probe() {
     };
     for sql in [
         INBOUND_SQL,
+        LAST_SQL,
         SEALED_PROBE_SQL,
         THREADS_SQL,
         NAME_SQL,

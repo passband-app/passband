@@ -46,9 +46,10 @@
 //!   mail KNOWN to be sealed (`known_sealed_mail_sql!`: a shop's login codes
 //!   are not its newsletter). `received_count` is an index-only count less
 //!   the address's sealed mail, which is read from the sealed side
-//!   ([`SEALED_COUNT_SQL`]) rather than probed per message. The first and
-//!   last arrival come off the same index walk, so they may fall on a sealed
-//!   message. "Not the owner's own" is `is_sent = 0` here, and not
+//!   ([`SEALED_COUNT_SQL`]) rather than probed per message. The last arrival
+//!   is the newest mail of the sealed-filtered window ([`LAST_SQL`]), so it
+//!   is never a login code the listing hides; the FIRST comes off the bare
+//!   index walk and may fall on a sealed message. "Not the owner's own" is `is_sent = 0` here, and not
 //!   `own_mail_sql!`: the account's own address never has a row, and for any
 //!   other address the two agree.
 //! - PENDING MAIL COUNTS in the recent window, the one place this module
@@ -161,10 +162,7 @@ macro_rules! recent_sql {
 
 /// Count, first and last arrival: one index-only walk. The count is BEFORE
 /// sealed mail is taken out ([`SEALED_COUNT_SQL`]).
-pub(crate) const INBOUND_SQL: &str = concat!(
-    "SELECT COUNT(*), MIN(m.received_at), MAX(m.received_at)",
-    inbound_sql!()
-);
+pub(crate) const INBOUND_SQL: &str = concat!("SELECT COUNT(*), MIN(m.received_at)", inbound_sql!());
 
 /// Under this many inbound messages a sender's sealed mail is counted by
 /// probing its own messages ([`SEALED_PROBE_SQL`]); at or over it, from the
@@ -228,6 +226,11 @@ pub(crate) const THREADS_SQL: &str = concat!(
     recent_sql!(),
     " GROUP BY w.thread_id) i"
 );
+
+/// The newest arrival in the recent window: the last mail the listings
+/// would show, never a login code they hide. Off the index's own tail, so
+/// it reads one row unless the newest are sealed.
+pub(crate) const LAST_SQL: &str = concat!("SELECT w.received_at FROM ", recent_sql!(), " LIMIT 1");
 
 /// The newest name in the recent window.
 pub(crate) const NAME_SQL: &str = concat!(
@@ -539,11 +542,13 @@ impl<'c> Recomputer<'c> {
     fn count(&mut self, addr: &str, full: bool) -> Result<Option<Relationship>> {
         let conn = self.conn;
         let account = self.account_id;
-        let (all_inbound, first, last): (i64, Option<String>, Option<String>) = conn
+        let (all_inbound, first): (i64, Option<String>) = conn
             .prepare_cached(INBOUND_SQL)?
-            .query_row(params![account, addr], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })?;
+            .query_row(params![account, addr], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let last: Option<String> = conn
+            .prepare_cached(LAST_SQL)?
+            .query_row(params![account, addr], |r| r.get(0))
+            .optional()?;
         let sealed: i64 = conn
             .prepare_cached(if all_inbound < SEALED_PROBE_MAX {
                 SEALED_PROBE_SQL

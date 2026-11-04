@@ -195,6 +195,10 @@ struct MobileAgentView: View {
             citations(item.citations)
         case .emails:
             emailCards(item.emails)
+        // show_page is the Mac's (AgentTools.Tool.isAvailable): the phone's
+        // tabs are not the rail's pages, so it never offers the tool.
+        case .page:
+            EmptyView()
         }
     }
 

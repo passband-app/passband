@@ -640,6 +640,9 @@ struct EventGuestsTests {
         expect(list.rows.map(\.organizer) == [true, false, false, false] && list.more == nil, "the organizer is marked")
         expect(EventGuests.responseWord(.pending) == "no reply" && EventGuests.responseWord(nil) == "no reply", "no answer yet")
         expect(Set(list.rows.map(\.id)).count == 4, "rows have their own ids")
+        expect(list.rows[0].sender == nil, "the user has no contact card")
+        expect(list.rows[1].sender == "Sam Lee <sam@x.test>", "a named guest's card: name and address, as a sender reads")
+        expect(list.rows[2].sender == ana.email, "no name: the bare address")
 
         let many = event(guests: (1...14).map { guest("g\($0)@x.test") })
         expect(EventGuests.rows(many).rows.count == 10 && EventGuests.rows(many).more == "+4 more", "past ten: a count")

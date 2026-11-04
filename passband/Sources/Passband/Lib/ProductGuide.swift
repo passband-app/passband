@@ -135,6 +135,8 @@ enum ProductGuide {
           how to do something, which key does it, where a setting lives. You know
           nothing about this app's controls except what they return, so call one
           before answering any "how do I..." question, and never guess a key.
+          When the answer is a place in the app, add show_page so the user can
+          click straight there.
         """
 
     // MARK: - product_help
@@ -275,8 +277,8 @@ enum ProductGuide {
         - The first time on a Mac the user leaves a For your eyes email with Esc without marking it done, the board rings that row for a few seconds with "Stays here until you mark it done." It shows once.
 
         Flow mode:
-        - Space, or the "flow mode" pill at the top of For your eyes, walks the list one email at a time, starting at the highlighted row or the first one.
-        - In the reader during the walk, e is done and next, and s saves the email for later: it stays on the board and the walk moves on. A small "FLOW MODE" card shows both keys. A summary card shows at the end.
+        - Space, or the "flow mode" pill at the top of For your eyes, walks the list one email at a time, starting at the row picked with the arrow keys or the first one. Mail that reaches the list during the walk joins the end of it.
+        - In the reader during the walk, e is done and next, and s saves the email for later: it stays on the board and the walk moves on. A small "FLOW MODE" card shows both keys. A key pressed while an email is still moving is kept and plays when the next one lands. A summary card shows at the end.
         - The first walk on a Mac starts with a short card over the email saying what flow mode is and which keys it uses; after two seconds it shrinks into the "FLOW MODE" card. It shows once.
 
         Hover tricks:
@@ -377,7 +379,7 @@ enum ProductGuide {
         Acting on the sender:
         - u: unsubscribe. Passband asks first, then usually does it in the background, and the reader closes. Progress shows at the bottom right of the Sitrep. If the sender's page needs a choice, a card there offers "Finish on their site". For spam or a sender Passband cannot verify, it opens the unsubscribe page in the browser instead. If the email has no unsubscribe link, the dialog offers "Block sender".
         - t: write a rule for this sender. v: fix a wrong triage call. See sender_rules and triage.
-        - Clicking a sender's name or avatar opens their contact card: how much mail has gone each way, any rule that applies, recent threads, and buttons to email them or see their mail.
+        - Clicking a sender's name or avatar (or a guest's name on a calendar event) opens their contact card: how much mail has gone each way, any rule that applies, recent threads, and buttons to email them or see their mail.
 
         How the thread looks:
         - b switches this thread between email cards and chat bubbles, and so does the two-icon switch at the top right. The choice sticks to that thread. The default is Settings > Mail > Threads. Reading mail is always cards.

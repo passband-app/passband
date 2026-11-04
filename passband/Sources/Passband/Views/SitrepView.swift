@@ -585,7 +585,10 @@ struct SitrepView: View {
             // an empty board so Space keeps scrolling the page.
             KeyBinding(declining: "Space", "start with the first item") {
                 let walk = eyesWalk(store)
-                let u = eyesActionable ? reachable[safe: cursor.index] : walk.first
+                // THE KEYBOARD CURSOR ONLY, not a resting pointer: a mouse
+                // that happened to sit over row 6 started the walk there and
+                // quietly left rows 1 to 5 out of it.
+                let u = cursor.kbActive ? reachable[safe: cursor.index] : walk.first
                 guard let u else { return false }
                 // A highlighted auth row opens the reveal, not a walk.
                 if let meta = store.authMeta(for: u) {

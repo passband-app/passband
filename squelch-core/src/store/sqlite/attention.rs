@@ -25,7 +25,7 @@ pub(super) const CANONICAL_MAIL_CTE: &str = concat!(
       WHEN a.message_id IS NULL THEN COALESCE(t.tier,'pending')
       WHEN d.message_id IS NULL THEN 'pending'
       WHEN COALESCE(pref.show_in_fye,CASE WHEN q.id IS NOT NULL THEN 1 WHEN ",
-    auth_mail_sql!(),
+    auth_off_fye_sql!("m"),
     " THEN 0
         ELSE json_extract(att.attention_json,'$.show_in_fye') END,0)=1 THEN 'signal'
       ELSE 'noise' END AS display_tier

@@ -443,6 +443,35 @@ pub fn search(
             scored_ghosts.push((matched, ghost));
         }
     }
+    // Copies of one event from different senders are one result
+    // (`gcal::fold_ghosts`), carrying every copy's mail the caller may see.
+    let scored_ghosts = {
+        let ghosts: Vec<GhostEvent> = scored_ghosts.iter().map(|(_, g)| g.clone()).collect();
+        let ids: Vec<i64> = ghosts.iter().map(|g| g.id).collect();
+        let urls = crate::store::Store::ghost_url_refs(store, account, &ids)?;
+        let folded = super::fold_ghosts(&ghosts, &urls);
+        let mut kept = scored_ghosts;
+        for (i, into) in folded.iter().enumerate() {
+            let Some(w) = *into else { continue };
+            kept[w].0 = kept[w].0.max(kept[i].0);
+            let sources = kept[i].1.sources.clone();
+            for source in sources {
+                if !kept[w]
+                    .1
+                    .sources
+                    .iter()
+                    .any(|s| s.message_id == source.message_id)
+                {
+                    kept[w].1.sources.push(source);
+                }
+            }
+        }
+        kept.into_iter()
+            .zip(folded)
+            .filter(|(_, into)| into.is_none())
+            .map(|(pair, _)| pair)
+            .collect::<Vec<_>>()
+    };
 
     let best = scored_events
         .iter()

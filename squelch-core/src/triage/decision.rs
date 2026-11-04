@@ -79,6 +79,28 @@ impl AuthKind {
         }
     }
 
+    /// Whether mail of this kind (the priority-picked one) is placed in FYE
+    /// by the model's attention pick, like any other mail. A kind names what
+    /// the mail is; it is not a placement on its own.
+    ///
+    /// No for a code, sign-in link or reset the owner asked for (using it is
+    /// the whole task, and it is gone in minutes), and for sign-in alerts and
+    /// receipts (the Auth page's "That was me" card is where those are
+    /// answered). Yes for setup, account changes and app grants, which can be
+    /// news: a new account with the tax authority is not a password reset.
+    /// The SQL form is `auth_kinds_skip_fye_pick_sql!`, pinned to this.
+    pub fn takes_fye_pick(self) -> bool {
+        match self {
+            AuthKind::Verification | AuthKind::AccountChange | AuthKind::AppGrant => true,
+            AuthKind::Otp
+            | AuthKind::SignInLink
+            | AuthKind::PasswordReset
+            | AuthKind::LoginAlert
+            | AuthKind::SecurityAlert
+            | AuthKind::SigninReceipt => false,
+        }
+    }
+
     /// The snake_case name stored in decision JSON.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -114,6 +136,12 @@ pub struct AuthAssessment {
 impl AuthAssessment {
     pub fn is_auth(&self) -> bool {
         !self.kinds.is_empty()
+    }
+    /// Whether the model's FYE pick places this mail: always for mail with
+    /// no auth kind, else as [`AuthKind::takes_fye_pick`] says for the kind a
+    /// client sees.
+    pub fn takes_fye_pick(&self) -> bool {
+        AuthKind::priority_pick(&self.kinds).is_none_or(AuthKind::takes_fye_pick)
     }
     /// A takeover-class account change. `critical` is normalized at decision
     /// time, and read through this so a stray flag beside another kind still

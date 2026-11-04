@@ -142,6 +142,29 @@ the FYE list and `placement`; a test pins that they agree. The FYE headline
 still never uses auth mail. The agent door's access rules are unchanged:
 restricted mail never reaches it, wherever it is placed.
 
+#### The model's own pick (2026-11-04, prompt `agent-triage-v18`)
+
+A kind says what the mail is, not where it goes. The model's `show_in_fye`
+places auth mail whose priority-picked kind is `verification`,
+`account_change` or `app_grant`, the way it places any mail
+(`AuthKind::takes_fye_pick`, SQL `auth_off_fye_sql!`). It never places
+`otp`, `sign_in_link`, `password_reset`, `login_alert`, `security_alert` or
+`signin_receipt`: the code is the whole task, and alerts are answered on the
+Auth page. A `mine` verdict, or the mail coming in with the first-run
+backfill, takes away the pick for every kind.
+
+Why: every misfile so far (Railway's breach notice, fraud checks, a MyFTB
+registration confirmation) had the same shape. The model judged the mail
+worth seeing, and the auth gate overruled it, so each fix had been a new
+"this is not auth" line in the prompt. Placement does not unseal: mail with
+a live link is still kept from the agent door and search.
+
+Live probe, `claude-opus-5-5` at low effort, 6 synthetic mails x 2 reps:
+12/12 with v18. With v17's prompt and the new gate: the MyFTB mail asking
+for a PIN by post went to FYE (the model already wanted it), "registration
+complete" did not (the model did not), and app signup confirmations, an
+OTP and a sign-in alert stayed out either way.
+
 ### Clients (Mac and iOS)
 
 - New kinds with labels "Account change", "App access", "Sign-in receipt"

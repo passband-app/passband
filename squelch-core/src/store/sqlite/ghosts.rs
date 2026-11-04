@@ -1022,6 +1022,40 @@ impl SqliteStore {
         self.ghost_events_containing(account, from, to, None)
     }
 
+    /// The event-page URLs each ghost in `ids` is keyed by, WITHOUT the sender
+    /// scope: `ra.co/events/2494673` for a key
+    /// `ref:ra.co:ra.co/events/2494673`. Only URL refs (a text ref is
+    /// alphanumeric, a URL ref always has a `/`). For display folding
+    /// ([`crate::gcal::fold_ghosts`]) only: matching mail to a ghost keeps the
+    /// scope, so a stranger quoting a URL never reaches the owner's ghost.
+    pub(super) fn ghost_url_refs(
+        &self,
+        account: AccountId,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, Vec<String>>> {
+        let conn = self.lock()?;
+        let mut statement = conn.prepare_cached(
+            "SELECT key FROM ghost_event_keys WHERE account_id=?1 AND ghost_id=?2",
+        )?;
+        let mut out = std::collections::HashMap::new();
+        for &id in ids {
+            let mut refs: Vec<String> = statement
+                .query_map(params![account, id], |r| r.get::<_, String>(0))?
+                .filter_map(|key| {
+                    let key = key.ok()?;
+                    let (_, rest) = key.strip_prefix("ref:")?.split_once(':')?;
+                    rest.contains('/').then(|| rest.to_string())
+                })
+                .collect();
+            if !refs.is_empty() {
+                refs.sort();
+                refs.dedup();
+                out.insert(id, refs);
+            }
+        }
+        Ok(out)
+    }
+
     /// [`Self::list_ghost_events`], keeping only ghosts whose title or place
     /// contains at least one of `needles` (lowercase; matched against the
     /// ASCII-lowercased text, so a superset of any word test on it). The

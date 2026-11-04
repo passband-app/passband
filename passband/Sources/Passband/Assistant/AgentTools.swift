@@ -63,6 +63,7 @@ enum AgentTools {
         case productHelp = "product_help"
         case listShortcuts = "list_shortcuts"
         case findSetting = "find_setting"
+        case showPage = "show_page"
 
         /// The chip's glyph. On the tool rather than in the view: a second
         /// stringly-typed list of the same names is a list that drifts.
@@ -87,6 +88,7 @@ enum AgentTools {
             case .productHelp: "book"
             case .listShortcuts: "keyboard"
             case .findSetting: "gearshape"
+            case .showPage: "arrow.up.forward.square"
             }
         }
 
@@ -99,7 +101,7 @@ enum AgentTools {
             switch self {
             // The calendar tools are the Mac's: the drafting one opens its
             // event pane.
-            case .productHelp, .listShortcuts, .findSetting, .createCalendarEvent, .searchCalendar:
+            case .productHelp, .listShortcuts, .findSetting, .showPage, .createCalendarEvent, .searchCalendar:
                 #if os(macOS)
                     true
                 #else
@@ -126,6 +128,7 @@ enum AgentTools {
     static func run(
         name: String, input: [String: JSONValue], gate: ActionGate,
         cite: (ToolCitation) -> Void, show: ([EmailCard]) -> Void,
+        point: (PageLink) -> Void = { _ in },
         live: @MainActor () -> Bool = { true }
     ) async -> ToolOutcome {
         // Whether the guide may speak of the Calendar page, and whether the
@@ -160,6 +163,7 @@ enum AgentTools {
             case .productHelp: return productHelp(input, calendar: calendar)
             case .listShortcuts: return listShortcuts(calendar: calendar)
             case .findSetting: return findSetting(input)
+            case .showPage: return showPage(input, calendar: calendar, point: point)
             }
         } catch {
             // Compact, so the model can adapt (a sealed message reads as a 404).
@@ -575,6 +579,26 @@ enum AgentTools {
             content: ProductGuide.settings(matching: query), isError: false,
             summary: query.map { "looked up the setting for \(quoted($0))" }
                 ?? "listed the settings")
+    }
+
+    /// Put a button to one page of the app in the transcript. The model names
+    /// the page; the card's words come from `PageLink`, so it can only ever
+    /// point at a real page, described the way the app describes it. Moves
+    /// nothing by itself: the user clicks it or does not.
+    private static func showPage(
+        _ input: [String: JSONValue], calendar: Bool, point: (PageLink) -> Void
+    ) -> ToolOutcome {
+        guard let name = string(input, "page"),
+            let page = PageLink(rawValue: name), PageLink.offered(calendar: calendar).contains(page)
+        else {
+            return failure(
+                "unknown page: pass one of the names the page parameter lists",
+                summary: "no such page")
+        }
+        point(page)
+        return ok(
+            row(["shown": page.title, "note": "the card names the page; say in a line what to do there"]),
+            summary: "pointed to \(page.title)")
     }
 
     // MARK: - safe writes (local store only)
@@ -1042,6 +1066,7 @@ enum AgentTools {
         var byName: [String: Wire.ToolDef] = [:]
         for def in definitions { byName[def.name] = def }
         byName[Tool.productHelp.rawValue] = productHelpDefinition(calendar: true)
+        byName[Tool.showPage.rawValue] = showPageDefinition(calendar: true)
         byName[EventProposals.toolName] = calendarEventDefinition
         byName[Tool.searchCalendar.rawValue] = calendarSearchDefinition
         var names = EventProposals.inventory(
@@ -1144,6 +1169,27 @@ enum AgentTools {
                         values: ProductGuide.topics(calendar: calendar).map(\.rawValue))
                 ],
                 required: ["topic"]))
+    }
+
+    private static func showPageDefinition(calendar: Bool) -> Wire.ToolDef {
+        Wire.ToolDef(
+            name: Tool.showPage.rawValue,
+            description: """
+                Put a button in the chat that takes the user to one page of Passband \
+                when they click it. Use it whenever the answer is a PLACE in the app: \
+                "where are the rules", "take me to settings", "where do I change my \
+                signature" (after find_setting says which pane). The app draws the \
+                card with the page's own name, so don't repeat the path in text; \
+                say in a line what to do once there. One card per answer. It does \
+                not move the user by itself and changes nothing.
+                """,
+            input_schema: .init(
+                properties: [
+                    "page": .init(
+                        type: "string", description: PageLink.index(calendar: calendar),
+                        values: PageLink.offered(calendar: calendar).map(\.rawValue))
+                ],
+                required: ["page"]))
     }
 
     /// With the Calendar page off. `definitions(calendar:)` is what a lane
@@ -1493,5 +1539,7 @@ enum AgentTools {
                         description: "A few words for the setting or its effect.")
                 ],
                 required: nil)),
+
+        showPageDefinition(calendar: false),
     ]
 }

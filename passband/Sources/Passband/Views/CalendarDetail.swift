@@ -21,8 +21,15 @@ struct CalendarDetail: View {
     @Environment(AppStore.self) private var store
     let item: AgendaItem
     let calendar: Calendar
-    /// The card's picture once it is known (Model/EventVisuals.swift).
-    @State private var visual: EventVisual?
+    /// The card's picture as this session resolved it, with the key it was
+    /// resolved for (Model/EventVisuals.swift). Until then, `visual` is what
+    /// the disk remembers, read on the first frame so the card opens at its
+    /// final height instead of growing when the picture lands.
+    @State private var resolved: Resolved?
+    private struct Resolved {
+        let key: String
+        let visual: EventVisual?
+    }
     @State private var choosingMap = false
     @Environment(\.openURL) private var openURL
 
@@ -62,16 +69,23 @@ struct CalendarDetail: View {
         .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTint)
         .animation(.easeOut(duration: 0.2), value: visual != nil)
         .task(id: visualKey) {
+            let key = visualKey
             let visuals = EventVisuals.shared
-            if let known = visuals.cached(visualKey) {
-                visual = known
+            if let known = visuals.cached(key) {
+                resolved = Resolved(key: key, visual: known)
                 return
             }
-            visual = nil
             let found = await visuals.resolve(
-                key: visualKey, threadIds: item.sources.map(\.thread_id), place: item.placeQuery)
-            if !Task.isCancelled { visual = found }
+                key: key, threadIds: item.sources.map(\.thread_id), place: item.placeQuery)
+            if !Task.isCancelled { resolved = Resolved(key: key, visual: found) }
         }
+    }
+
+    /// What the card shows now: this session's answer for THIS event, else
+    /// the disk's, else nothing yet.
+    private var visual: EventVisual? {
+        if let resolved, resolved.key == visualKey { return resolved.visual }
+        return EventVisuals.shared.known(visualKey) ?? nil
     }
 
     /// What the picture depends on: the row, its place and its mail.
@@ -203,10 +217,9 @@ struct CalendarDetail: View {
     /// The venue Apple Maps already matched for the picture when there is
     /// one, so the pin is the same place; else a search for the place.
     private func openInAppleMaps() {
-        switch visual {
-        case .lookAround(_, let found), .map(let found):
+        if let found = visual?.mapItem {
             found.openInMaps()
-        default:
+        } else {
             open(Self.appleMaps, item.placeQuery)
         }
     }
@@ -404,12 +417,7 @@ private struct GuestRows: View {
         VStack(alignment: .leading, spacing: Space.s4) {
             ForEach(list.rows) { row in
                 HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
-                    Text(verbatim: row.name)
-                        .font(Typo.rowSub)
-                        .foregroundStyle(Palette.ink)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
+                    name(row)
                     Text(row.organizer ? "organizer, \(row.response)" : row.response)
                         .font(Typo.micro)
                         // The answers given read a step stronger than
@@ -425,6 +433,22 @@ private struct GuestRows: View {
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
             }
+        }
+    }
+
+    /// A guest's name is the door to their contact card, as a sender's is in
+    /// the reader: click for the card, right-click to copy. "You" has no card.
+    @ViewBuilder
+    private func name(_ row: GuestRow) -> some View {
+        let text = Text(verbatim: row.name)
+            .font(Typo.rowSub)
+            .foregroundStyle(Palette.ink)
+            .lineLimit(1)
+            .truncationMode(.middle)
+        if let sender = row.sender {
+            text.contactCard(for: sender)
+        } else {
+            text.textSelection(.enabled)
         }
     }
 }

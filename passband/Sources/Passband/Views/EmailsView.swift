@@ -536,8 +536,11 @@ struct EmailsView: View {
                     CursorScrollFollower(cursor: cursor, proxy: proxy, idAt: { rowId(at: $0) })
                 }
             }
-            .onContinuousHover { phase in
-                if case .ended = phase { hovering = false }
+            // Only LEAVING the list ends the hover, as on the sitrep: this was
+            // `.onContinuousHover`, which runs for every mouse-moved event
+            // over the list, and only ever needed its end.
+            .onHover { over in
+                if !over, hovering { hovering = false }
             }
         }
     #endif

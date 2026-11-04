@@ -816,10 +816,26 @@ pub fn same_start(a: &EventTime, b: &EventTime) -> bool {
     }
 }
 
-/// THE DISPLAY MATCH between a ghost and a real event: the same start (see
-/// [`same_start`]) and titles that are equal after [`normalize_title`], or one
-/// containing the other. An empty title matches nothing (every string
-/// contains the empty one).
+/// The DISPLAY start match: [`same_start`], or one start date-only and the
+/// other a time on that date, read in the time's own offset (the zone the
+/// mail or the calendar wrote it in). Mail often says only "Nov 6" for what
+/// the calendar holds as 7pm on Nov 6.
+///
+/// Display ONLY. Anything that writes to a calendar ([`own`]) keeps
+/// [`same_start`], where a date never matches an instant.
+pub fn display_same_start(a: &EventTime, b: &EventTime) -> bool {
+    match (a, b) {
+        (EventTime::Date(day), EventTime::At(at)) | (EventTime::At(at), EventTime::Date(day)) => {
+            at.date_naive() == *day
+        }
+        _ => same_start(a, b),
+    }
+}
+
+/// THE DISPLAY MATCH between a ghost and a real event: starts that match for
+/// display (see [`display_same_start`]) and titles that are equal after
+/// [`normalize_title`], or one containing the other. An empty title matches
+/// nothing (every string contains the empty one).
 ///
 /// Display de-duplication ONLY: it is computed when the timeline is listed
 /// and never stored, so it changes no ghost state and cannot go stale.
@@ -829,20 +845,56 @@ pub fn ghost_matches(
     event_title: Option<&str>,
     event_start: &EventTime,
 ) -> bool {
-    if !same_start(ghost_start, event_start) {
+    if !display_same_start(ghost_start, event_start) {
         return false;
     }
-    let ghost = normalize_title(ghost_title);
-    let event = normalize_title(event_title.unwrap_or_default());
-    !ghost.is_empty()
-        && !event.is_empty()
-        && (ghost == event || ghost.contains(&event) || event.contains(&ghost))
+    titles_match(
+        ghost_title,
+        event_title.unwrap_or_default(),
+        same_start(ghost_start, event_start),
+    )
+}
+
+/// Shortest title, in characters, that may match a longer one by being in
+/// it when the two starts are only the same DAY: "Polar Inertia" in RA's
+/// "Parameter & Endzeit Invite Polar Inertia", never a stray "Show".
+const DAY_MATCH_MIN_CHARS: usize = 8;
+
+/// Equal after [`normalize_title`], or one's words a run of the other's
+/// ("Dinner" in "Dinner with Sam", never "art" in "party"). When the starts
+/// are only the same day (`exact` false), a title held in another must be
+/// at least [`DAY_MATCH_MIN_CHARS`] long. An empty title matches nothing.
+fn titles_match(a: &str, b: &str, exact: bool) -> bool {
+    let (a, b) = (normalize_title(a), normalize_title(b));
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a == b {
+        return true;
+    }
+    let words = |t: &str| -> Vec<String> {
+        t.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    let (short, long) = if a.chars().count() <= b.chars().count() {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    if !exact && short.chars().count() < DAY_MATCH_MIN_CHARS {
+        return false;
+    }
+    let (short, long) = (words(&short), words(&long));
+    !short.is_empty() && long.windows(short.len()).any(|w| w == short.as_slice())
 }
 
 /// [`ghost_matches`] for a whole listing: for each ghost (its title and
 /// start), the index of the first event in `events` (in their served order)
-/// that it matches. Events are grouped by start first, so this is linear in
-/// the two listings rather than their product.
+/// that it matches, an event at its exact start before one that only shares
+/// its day across precisions. Events are grouped by start first, so this is
+/// linear in the two listings rather than their product.
 pub fn match_ghosts<'a>(
     ghosts: impl IntoIterator<Item = (&'a str, &'a EventTime)>,
     events: &[SyncedEvent],
@@ -857,20 +909,38 @@ pub fn match_ghosts<'a>(
         EventTime::Date(day) => Key::Date(*day),
     };
     let mut by_start: std::collections::HashMap<Key, Vec<usize>> = Default::default();
+    // The other precision on a day: timed events by the date in their own
+    // offset, all-day ones by their date.
+    let mut timed_on: std::collections::HashMap<chrono::NaiveDate, Vec<usize>> = Default::default();
+    let mut all_day_on: std::collections::HashMap<chrono::NaiveDate, Vec<usize>> =
+        Default::default();
     for (i, event) in events.iter().enumerate() {
         by_start.entry(key(&event.row.start)).or_default().push(i);
+        match event.row.start {
+            EventTime::At(at) => timed_on.entry(at.date_naive()).or_default().push(i),
+            EventTime::Date(day) => all_day_on.entry(day).or_default().push(i),
+        }
     }
     ghosts
         .into_iter()
         .map(|(title, start)| {
-            by_start.get(&key(start))?.iter().copied().find(|&i| {
-                ghost_matches(
-                    title,
-                    start,
-                    events[i].row.summary.as_deref(),
-                    &events[i].row.start,
-                )
-            })
+            let other = match start {
+                EventTime::Date(day) => timed_on.get(day),
+                EventTime::At(at) => all_day_on.get(&at.date_naive()),
+            };
+            [by_start.get(&key(start)), other]
+                .into_iter()
+                .flatten()
+                .flatten()
+                .copied()
+                .find(|&i| {
+                    ghost_matches(
+                        title,
+                        start,
+                        events[i].row.summary.as_deref(),
+                        &events[i].row.start,
+                    )
+                })
         })
         .collect()
 }
@@ -882,7 +952,8 @@ pub fn match_ghosts<'a>(
 ///
 /// 1. Passband made the event for it and keeps it ([`own`], an `owned`
 ///    binding), whatever its time or title now, when that event is listed.
-/// 2. The display match ([`match_ghosts`]): the same start and a title match.
+/// 2. The display match ([`match_ghosts`]): the same start (or day, across
+///    an all-day and a timed start) and a title match.
 /// 3. Gmail made the event from the same mail and titled it its own way
 ///    ([`own::same_event`]): the same start and a distinctive word.
 ///
@@ -932,6 +1003,127 @@ pub fn link_ghosts(
         }
     }
     matched
+}
+
+/// Where a ghost is SHOWN: for each ghost, the index of the ghost it folds
+/// into, or None when it stands for itself. Display only: computed when
+/// listed and never stored, so it changes no ghost and cannot go stale.
+///
+/// Ghosts from DIFFERENT senders are the case this is for. A ref is scoped
+/// to its sender, so the venue's ticket mail and a friend's reply with the
+/// venue's link are two ghosts that matching mail never joins, by design: a
+/// stranger quoting a URL must not move the owner's ghost. Folding must not
+/// let a stranger do it on screen either, so a ghost folds into another
+/// only when their starts match for display ([`display_same_start`]) and:
+///
+/// - from ANOTHER sender: they share an event-page URL (`urls`, from
+///   `Store::ghost_url_refs`) and the other's sender is that URL's own site
+///   (the ISSUER: `ra.co` for an `ra.co/events/...` page) and this one's is
+///   not. So the copy shown is always the venue's own, and a stranger can
+///   only ever fold their own copy away.
+/// - from the SAME sender (both authenticated): a shared URL or a title
+///   match ([`ghost_matches`]), into the timed copy over a date-only one,
+///   then the older.
+///
+/// One step at a time, never by chaining: a ghost folds only when everything
+/// it may fold into ends at ONE ghost shown, so a date-only "Hamilton" never
+/// joins the 2pm and the 8pm shows into one.
+pub fn fold_ghosts(
+    ghosts: &[crate::types::GhostEvent],
+    urls: &std::collections::HashMap<i64, Vec<String>>,
+) -> Vec<Option<usize>> {
+    use crate::types::{GhostMailState, GhostUserState};
+    let day = |t: &EventTime| match t {
+        EventTime::At(at) => at.date_naive(),
+        EventTime::Date(day) => *day,
+    };
+    let none: Vec<String> = Vec::new();
+    let urls_of = |i: usize| urls.get(&ghosts[i].id).unwrap_or(&none);
+    let foldable = |g: &crate::types::GhostEvent| {
+        g.mail_state == GhostMailState::Live && g.user_state != Some(GhostUserState::Dismissed)
+    };
+    // Is `i`'s sender the site of URL `u`?
+    let issues = |i: usize, u: &str| {
+        ghosts[i].owner_scope.as_deref().is_some_and(|scope| {
+            let host = u.split('/').next().unwrap_or_default();
+            host == scope || host.ends_with(&format!(".{scope}"))
+        })
+    };
+    let same_sender = |a: usize, b: usize| {
+        ghosts[a].owner_scope.is_some() && ghosts[a].owner_scope == ghosts[b].owner_scope
+    };
+    // Same sender: the timed copy over a date-only one, then the older.
+    let above = |a: usize, b: usize| {
+        let key = |i: usize| (ghosts[i].start.has_clock(), std::cmp::Reverse(ghosts[i].id));
+        key(a) > key(b)
+    };
+    // May `g` fold into `h`, one step?
+    let into = |g: usize, h: usize| {
+        let (x, y) = (&ghosts[g], &ghosts[h]);
+        if !display_same_start(&x.start, &y.start) {
+            return false;
+        }
+        let shared = || urls_of(g).iter().filter(|u| urls_of(h).contains(u));
+        if same_sender(g, h) {
+            above(h, g)
+                && (shared().next().is_some()
+                    || ghost_matches(&x.title, &x.start, Some(&y.title), &y.start))
+        } else {
+            shared().any(|u| issues(h, u) && !issues(g, u))
+        }
+    };
+
+    let mut by_day: std::collections::HashMap<chrono::NaiveDate, Vec<usize>> = Default::default();
+    for (i, g) in ghosts.iter().enumerate() {
+        if foldable(g) {
+            by_day.entry(day(&g.start)).or_default().push(i);
+        }
+    }
+    let mut out: Vec<Vec<usize>> = vec![Vec::new(); ghosts.len()];
+    for members in by_day.values() {
+        for &g in members {
+            out[g] = members
+                .iter()
+                .copied()
+                .filter(|&h| h != g && into(g, h))
+                .collect();
+        }
+    }
+    // Where each ghost ends up: itself when it folds into nothing, or into
+    // more than one ghost shown, or round a cycle.
+    fn resolve(
+        g: usize,
+        out: &[Vec<usize>],
+        memo: &mut [Option<usize>],
+        visiting: &mut [bool],
+    ) -> usize {
+        if let Some(r) = memo[g] {
+            return r;
+        }
+        if visiting[g] {
+            return g;
+        }
+        visiting[g] = true;
+        let ends: std::collections::BTreeSet<usize> = out[g]
+            .iter()
+            .map(|&h| resolve(h, out, memo, visiting))
+            .collect();
+        visiting[g] = false;
+        let r = match ends.iter().collect::<Vec<_>>().as_slice() {
+            [only] if **only != g => **only,
+            _ => g,
+        };
+        memo[g] = Some(r);
+        r
+    }
+    let mut memo = vec![None; ghosts.len()];
+    let mut visiting = vec![false; ghosts.len()];
+    (0..ghosts.len())
+        .map(|g| {
+            let r = resolve(g, &out, &mut memo, &mut visiting);
+            (r != g).then_some(r)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1005,6 +1197,41 @@ mod tests {
         ));
         let day = at("2026-10-05");
         assert!(ghost_matches("Conference", &day, Some("Conference"), &day));
+        // All-day against timed on the same date, both ways: mail that says
+        // only "Oct 5" for what the calendar holds at 7pm.
+        assert!(ghost_matches("Dinner", &day, Some("Dinner"), &start));
+        assert!(ghost_matches("Dinner", &start, Some("Dinner"), &day));
+    }
+
+    #[test]
+    fn date_only_ghosts_match_the_timed_event_on_their_day() {
+        // Two ghosts from two threads, both date-only, and the party the user
+        // accepted at 7pm that day. Both are the event.
+        let party = SyncedEvent {
+            calendar_id: "primary".into(),
+            calendar_name: None,
+            calendar_color: None,
+            calendar_access: None,
+            calendar_primary: true,
+            row: EventRow {
+                summary: Some("Parameter & Endzeit Invite Polar Inertia".into()),
+                event_id: "party".into(),
+                ..row("2026-11-06T19:00:00-08:00")
+            },
+        };
+        let day = at("2026-11-06");
+        let next = at("2026-11-07");
+        assert_eq!(
+            match_ghosts(
+                [
+                    ("Polar Inertia", &day),
+                    ("Parameter & Endzeit Invite Polar Inertia", &day),
+                    ("Polar Inertia", &next),
+                ],
+                std::slice::from_ref(&party)
+            ),
+            [Some(0), Some(0), None]
+        );
     }
 
     #[test]
@@ -1026,10 +1253,27 @@ mod tests {
         ));
         // The same instant, unrelated titles.
         assert!(!ghost_matches("Dinner", &start, Some("Dentist"), &start));
-        // All-day against timed on the same date, both ways.
-        let day = at("2026-10-05");
+        // All-day against timed on ANOTHER date, both ways.
+        let day = at("2026-10-04");
         assert!(!ghost_matches("Dinner", &day, Some("Dinner"), &start));
         assert!(!ghost_matches("Dinner", &start, Some("Dinner"), &day));
+        // The date is the time's own: 19:00 PST on the 6th is the 7th in UTC,
+        // and still not the 7th.
+        let late = at("2026-11-06T19:00:00-08:00");
+        assert!(!ghost_matches(
+            "Show",
+            &at("2026-11-07"),
+            Some("Show"),
+            &late
+        ));
+        // A day match still needs the titles.
+        assert!(!ghost_matches(
+            "Dinner",
+            &at("2026-10-05"),
+            Some("Dentist"),
+            &start
+        ));
+        let day = at("2026-10-05");
         // All-day a date apart.
         assert!(!ghost_matches(
             "Trip",

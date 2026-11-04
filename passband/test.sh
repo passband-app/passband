@@ -77,6 +77,14 @@ run_suite agenda \
   Sources/Passband/Lib/Agenda.swift \
   Tests/AgendaTests.swift
 
+# The sitrep Calendar card: one row per event, not per email (a venue's
+# ticket mail and its reminder were two), and the row shown is the one with
+# a start, earliest received.
+run_suite calendar-fold \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Tests/CalendarFoldTests.swift
+
 # The search panel's Events block: which query goes to which search
 # (`in:calendar`, the mail-only operators), the wire it reads, three rows
 # then "N more", and each row's day, time and place in the user's zone.

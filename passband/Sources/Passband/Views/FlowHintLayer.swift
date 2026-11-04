@@ -48,8 +48,11 @@ struct FlowHintLayer: View {
             reduceMotion ? .easeInOut(duration: 0.3) : .spring(duration: 0.7, bounce: 0.1),
             value: hint.placement)
         .allowsHitTesting(false)
-        .onChange(of: store.walk != nil) { was, now in
-            if now, !was {
+        // INITIAL, because this layer mounts with the reader, in the same
+        // tick the walk that opened it starts: a plain onChange never sees
+        // the change.
+        .onChange(of: store.walk != nil, initial: true) { was, now in
+            if now, !was || was == now {
                 hint.walkStarted { [store] in store.walk != nil && store.threadId != nil }
             } else if !now {
                 hint.walkEnded()

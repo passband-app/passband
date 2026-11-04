@@ -272,6 +272,7 @@ enum ProductGuide {
         - j / k or the arrows move. Enter opens the email.
         - e or d marks it done. r replies. h sets a reminder. v fixes a wrong triage call. t writes a rule for that sender.
         - c starts a new message, with or without a highlight.
+        - The first time on a Mac the user leaves a For your eyes email with Esc without marking it done, the board rings that row for a few seconds with "Stays here until you mark it done." It shows once.
 
         Flow mode:
         - Space, or the "flow mode" pill at the top of For your eyes, walks the list one email at a time, starting at the highlighted row or the first one.

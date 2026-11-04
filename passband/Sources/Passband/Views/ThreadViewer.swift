@@ -1920,6 +1920,9 @@ struct ThreadViewer: View {
                 } else if store.sideView.isOpen {
                     store.closeSide()
                 } else {
+                    // Leaving For your eyes mail undone, the first time: the
+                    // board says where it went (StaysHint).
+                    StaysHint.shared.leaving(store)
                     store.closeThread()
                 }
             },

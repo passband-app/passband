@@ -135,6 +135,7 @@ final class Prefs {
         static let lastSeenPhoneNotes = "passband.pref.lastSeenPhoneNotes"
         static let readerHint = "passband.pref.readerHint"
         static let flowHintSeen = "passband.pref.flowHintSeen"
+        static let staysHintSeen = "passband.pref.staysHintSeen"
         static let theme = "passband.pref.theme"
         static let zoom = "passband.pref.zoom"
         static let density = "passband.pref.density"
@@ -318,6 +319,13 @@ final class Prefs {
     var flowHintSeen: Bool {
         get { defaults.bool(forKey: Key.flowHintSeen) }
         set { defaults.set(newValue, forKey: Key.flowHintSeen) }
+    }
+
+    /// Whether the one-time "stays here until you mark it done" note has
+    /// been shown on this Mac (StaysHintRule). False until it has.
+    var staysHintSeen: Bool {
+        get { defaults.bool(forKey: Key.staysHintSeen) }
+        set { defaults.set(newValue, forKey: Key.staysHintSeen) }
     }
 
     private var _lastSeenPhoneNotes: String?

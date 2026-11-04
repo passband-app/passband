@@ -503,6 +503,7 @@ struct SitrepView: View {
                         AuthEyesRow(update: u, meta: meta, index: i, cursor: cursor)
                     } else {
                         ObligationRow(update: u, index: i, cursor: cursor)
+                            .staysHint(threadId: u.thread_id)
                     }
                 }
                 if overflow > 0 { expander(overflow) }

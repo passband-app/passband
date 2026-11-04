@@ -791,6 +791,12 @@ run_suite flow-hint-rule \
   Sources/Passband/Lib/FlowHintRule.swift \
   Tests/FlowHintRuleTests.swift
 
+# The one-time "stays here" note: a first esc out of For your eyes, by
+# somebody who has never pressed done, on a row that is in view.
+run_suite stays-hint-rule \
+  Sources/Passband/Lib/StaysHintRule.swift \
+  Tests/StaysHintRuleTests.swift
+
 # The first-load veil's time estimate: no estimate until two polls a few
 # seconds apart saw the count move, a window that smooths one slow page, a
 # restarted walk that starts the samples over, and the rounded phrase.

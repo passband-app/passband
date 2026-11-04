@@ -25,6 +25,7 @@ struct ReleaseNotesTests {
         thePhonesTable()
         thePhonesArrival()
         theMacsNewcomer()
+        quietReleases()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -55,6 +56,8 @@ struct ReleaseNotesTests {
     // MARK: - what gets shown
 
     static let table: [ReleaseNote] = ReleaseNotes.all
+    /// The rows the card can show: the table without its quiet releases.
+    static let announced: [ReleaseNote] = table.filter { !$0.quiet }
 
     static func selection() {
         // The ordinary case: one release taken, one release announced.
@@ -123,7 +126,7 @@ struct ReleaseNotesTests {
         // than as literals: spelled as the next version up, this assertion goes
         // red the day that version is written down, which it already did once.
         expect(
-            ReleaseNotes.unseen(lastSeen: table.first?.version, running: "999.0.0").isEmpty,
+            ReleaseNotes.unseen(lastSeen: announced.first?.version, running: "999.0.0").isEmpty,
             "a build past the table shows nothing and so stamps nothing")
 
         // Settings' button, which ignores the stamp entirely.
@@ -136,7 +139,7 @@ struct ReleaseNotesTests {
         // A hotfix or an early bump answers with the last thing that shipped
         // rather than with nothing.
         expect(
-            ReleaseNotes.newest(atOrBelow: "99.0.0")?.version == table.first?.version,
+            ReleaseNotes.newest(atOrBelow: "99.0.0")?.version == announced.first?.version,
             "a build past the table answers with the newest note")
         expect(
             ReleaseNotes.newest(atOrBelow: "0.0.0") == nil,
@@ -163,6 +166,13 @@ struct ReleaseNotesTests {
 
             expect(!note.headline.isEmpty, "\(note.version) has a headline")
             expect(!note.items.isEmpty, "\(note.version) says what it brought")
+            // A quiet release is never walked, so a page written for it is a
+            // page nobody sees.
+            if note.quiet {
+                expect(
+                    note.items.allSatisfy { $0.symbol == nil },
+                    "quiet \(note.version) has no headliners")
+            }
             // ISO, because the generated changelog and the card both print it
             // raw rather than reformatting it.
             expect(
@@ -362,10 +372,10 @@ struct ReleaseNotesTests {
                 note.date.count == 10 && note.date.filter { $0 == "-" }.count == 2,
                 "phone \(note.version) carries an ISO date")
             // A walk: fewer than three pages is not one, and more than five is
-            // the list again with pictures.
+            // the list again with pictures. A quiet release is not walked.
             expect(
-                (3...5).contains(note.features.count),
-                "phone \(note.version) walks three to five features")
+                note.quiet ? note.features.isEmpty : (3...5).contains(note.features.count),
+                "phone \(note.version) walks three to five features, or none when quiet")
             expect(
                 Set(note.features.map(\.title)).count == note.features.count,
                 "phone \(note.version) names each feature once")
@@ -419,8 +429,8 @@ struct ReleaseNotesTests {
     /// A Mac that just finished the tour is stamped just below the latest
     /// release, so its first time on the Sitrep shows that release alone.
     static func theMacsNewcomer() {
-        guard table.count > 1 else { return }
-        let newest = table[0].version, below = table[1].version
+        guard announced.count > 1 else { return }
+        let newest = announced[0].version, below = announced[1].version
         expect(
             ReleaseLedger.newcomerStamp(table, running: newest) == below,
             "a Mac newcomer is stamped just below the latest release")
@@ -433,6 +443,8 @@ struct ReleaseNotesTests {
     }
 
     static func thePhonesArrival() {
+        // What the walk can raise: the table without its quiet releases.
+        let phone = Self.phone.filter { !$0.quiet }
         guard let first = phone.last?.version, let newest = phone.first?.version else { return }
         let arrival = PhoneReleaseNotes.arrival
 
@@ -495,6 +507,54 @@ struct ReleaseNotesTests {
                 twin.headline != phone.last?.headline,
                 "the phone's \(first) is its own release, not the Mac's of the same number")
         }
+    }
+
+    // MARK: - quiet releases
+
+    /// A quiet release is recorded and never announced. Over a made-up table
+    /// (9.9.9 quiet, on top of two loud ones) so the rules hold whether or not
+    /// the real table has one right now.
+    static func quietReleases() {
+        let loud = ReleaseNote(
+            version: "9.9.8", date: "2026-01-02", headline: "loud",
+            items: [ReleaseItem(.app, "Flow mode", symbol: "wind")])
+        let older = ReleaseNote(
+            version: "9.9.7", date: "2026-01-01", headline: "older",
+            items: [ReleaseItem(.app, "Bug fixes")])
+        let quiet = ReleaseNote(
+            version: "9.9.9", date: "2026-01-03", headline: "quiet",
+            items: [ReleaseItem(.app, "Bug fixes")], quiet: true)
+        let made = [quiet, loud, older]
+        let versions = { (notes: [ReleaseNote]) in notes.map(\.version) }
+
+        expect(
+            ReleaseLedger.unseen(made, lastSeen: "9.9.8", running: "9.9.9").isEmpty,
+            "taking a quiet release shows nothing")
+        expect(
+            versions(ReleaseLedger.unseen(made, lastSeen: "9.9.7", running: "9.9.9")) == ["9.9.8"],
+            "somebody who skipped a loud release is still shown it, without the quiet one")
+        expect(
+            ReleaseLedger.unseen(made, lastSeen: nil, running: "9.9.9").isEmpty,
+            "an unstamped install on a quiet release is shown nothing")
+        expect(
+            ReleaseLedger.newest(made, atOrBelow: "9.9.9")?.version == "9.9.8",
+            "Settings replays the newest announced release")
+        expect(
+            ReleaseLedger.newcomerStamp(made, running: "9.9.9") == "9.9.7",
+            "a newcomer is stamped below the newest announced release")
+        expect(
+            versions(ReleaseLedger.unseen(made, lastSeen: "9.9.7", running: "9.9.9")) == ["9.9.8"],
+            "so they meet that one")
+
+        // The phone reads the same ledger.
+        let phoneQuiet = PhoneReleaseNote(
+            version: "9.9.9", date: "2026-01-03", headline: "quiet", features: [],
+            also: [PhoneAside("Bug fixes")], quiet: true)
+        let phoneLoud = PhoneReleaseNote(
+            version: "9.9.8", date: "2026-01-02", headline: "loud", features: [], also: [])
+        expect(
+            ReleaseLedger.unseen([phoneQuiet, phoneLoud], lastSeen: "9.9.8", running: "9.9.9").isEmpty,
+            "a quiet phone release raises no walk")
     }
 
     // MARK: - harness

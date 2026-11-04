@@ -80,9 +80,11 @@ struct PhoneReleaseNote: VersionedNote, Identifiable, Sendable {
     /// The release's name, in the app's own voice. It rides every page.
     let headline: String
     /// The pages, in the order they are walked. Three to five: fewer is not a
-    /// walk, and more is the list again with pictures.
+    /// walk, and more is the list again with pictures. None on a quiet release.
     let features: [PhoneFeature]
     let also: [PhoneAside]
+    /// Never walked, only recorded; see `ReleaseNote.quiet`.
+    var quiet: Bool = false
 
     var id: String { version }
 
@@ -101,6 +103,20 @@ struct PhoneReleaseNote: VersionedNote, Identifiable, Sendable {
 enum PhoneReleaseNotes {
     /// THE TABLE. Newest first, and the only place a phone note is written.
     static let all: [PhoneReleaseNote] = [
+        // QUIET, like the Mac's 0.0.18: recorded, never walked.
+        PhoneReleaseNote(
+            version: "0.0.13",
+            date: "2026-11-03",
+            headline: "Ashley's Update",
+            features: [],
+            also: [
+                PhoneAside("Click an email address to write to it"),
+                PhoneAside("Logos for more senders"),
+                PhoneAside("Copying a login code on the Mac clears it from your phone"),
+                PhoneAside("UI improvements"),
+                PhoneAside("Bug fixes"),
+            ],
+            quiet: true),
         // 0.0.12 is 0.0.11 done again, without the calendar (see the Mac's
         // 0.0.17 in ReleaseNotes.swift).
         PhoneReleaseNote(

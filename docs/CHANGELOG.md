@@ -12,6 +12,25 @@ updates itself, the phone comes through TestFlight, and the daemon is
 rolled onto hosted accounts or pulled as an image on a self-host box,
 so every note says which one it landed in.
 
+## 0.0.18 (2026-11-03)
+
+Ashley's Update
+
+### Mac
+
+- Click an email address to write to it
+- Logos for more senders
+- Copying a login code on the Mac clears it from your phone
+- UI improvements
+- Bug fixes
+
+### Daemon
+
+- Reply-To warnings only when a known contact's mail fails its checks
+- Tells your phone when a login code has been copied
+- Security and dependency updates
+- Bug fixes
+
 ## 0.0.17 (2026-10-31)
 
 Stella's Update

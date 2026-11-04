@@ -1311,6 +1311,30 @@ final class AppStore {
             board: readingOnBoard, notThread: threadId)
     }
 
+    /// A FLOW MODE WALK RUNS TO THE END OF THE BOARD, not the end of the board
+    /// as it stood when Space was pressed. The queue is a snapshot, and the
+    /// poll keeps filling the band behind it: a Space pressed before the first
+    /// full load, or mail that arrived mid-walk, left rows on the board that
+    /// the walk would never reach, so an `e` on the snapshot's last row closed
+    /// flow mode with mail still waiting. Rows the band holds that the queue
+    /// does not are appended at the end (the steps already taken keep their
+    /// order, so undo still finds them). Called by the reader's step verbs
+    /// just before they ask what comes next.
+    func topUpWalkQueue() {
+        guard walk != nil, !readingMail, threadId != nil else { return }
+        let have = Set(threadQueue.map(\.thread_id))
+        var seen = have
+        let fresh = sitrep.standing.filter { u in
+            guard !seen.contains(u.thread_id), !resolvedIds.contains(u.id),
+                authMeta(for: u) == nil
+            else { return false }
+            seen.insert(u.thread_id)
+            return true
+        }
+        guard !fresh.isEmpty else { return }
+        threadQueue += fresh
+    }
+
     /// Shared by the preview and advance action so resolved siblings never peek.
     var nextQueuedThread: AttentionUpdate? {
         guard let threadId,
@@ -1344,6 +1368,11 @@ final class AppStore {
         case departingTrailing
         /// Parked one window outside the frame, waiting to be walked in.
         case entering(ThreadEdge)
+
+        var isEntering: Bool {
+            if case .entering = self { return true }
+            return false
+        }
     }
 
     /// Which side a thread arrives from. The bottom is a new subject; the

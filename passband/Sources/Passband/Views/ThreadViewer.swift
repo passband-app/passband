@@ -2028,6 +2028,7 @@ struct ThreadViewer: View {
             // a skip that quietly closed the reader would read as Esc. A
             // Reading sender with one email still has the next sender's card.
             KeyBinding(declining: "S", "save for later + next", exactCase: true) {
+                store.topUpWalkQueue()
                 guard store.threadQueue.count > 1 || store.nextReadingSender != nil else {
                     return false
                 }
@@ -2038,6 +2039,7 @@ struct ThreadViewer: View {
             // through these", so there is no other verb for `s` to be mistaken
             // for. Outside a walk it declines, and a stray `s` stays a typo.
             KeyBinding(declining: "s", "save for later + next (flow mode)", exactCase: true) {
+                store.topUpWalkQueue()
                 guard store.walk != nil, store.threadQueue.count > 1 else { return false }
                 Task { await skipToNext() }
                 return true
@@ -2770,6 +2772,7 @@ struct ThreadViewer: View {
         // never shows through under this email as it lifts off.
         store.settleSkipTurn()
         guard store.threadFlight == .settled else { return }
+        store.topUpWalkQueue()
         let queue = store.threadQueue
         let cur = queue.firstIndex(where: { $0.thread_id == threadId })
         // THE NEXT DIFFERENT EMAIL, not merely the next row. Every band listing
@@ -2859,6 +2862,7 @@ struct ThreadViewer: View {
         // Counted BEFORE the end check: skipping the last email is a skip
         // too, and the tally it ends on has to include it.
         store.walk?.skipped += 1
+        store.topUpWalkQueue()
         let queue = store.threadQueue
         let inQueue = queue.contains(where: { $0.thread_id == threadId })
         let outgoing = threadId
@@ -2956,6 +2960,7 @@ struct ThreadViewer: View {
     /// read as a key that did nothing.
     private func remindAndNext() async {
         store.settleSkipTurn()
+        store.topUpWalkQueue()
         let queue = store.threadQueue
         if let cur = queue.firstIndex(where: { $0.thread_id == threadId }) {
             store.flightContinues = queue[safe: cur + 1] != nil

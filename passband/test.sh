@@ -596,6 +596,31 @@ run_suite usage-series \
   Sources/Passband/Lib/UsageSeries.swift \
   Tests/UsageSeriesTests.swift
 
+# The Understanding section under it: the ledger placed on the People chart's
+# ladder (answered, read, ignored, just arrived), the two ranked lists, the
+# reply-time words, every sentence said about a person, and the memory
+# entries grouped by kind. Foundation only, like the series above.
+run_suite understanding-series \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/UsageSeries.swift \
+  Sources/Passband/Model/UnderstandingWire.swift \
+  Sources/Passband/Lib/UnderstandingSeries.swift \
+  Sources/Passband/Lib/UnderstandingFixture.swift \
+  Tests/UnderstandingSeriesTests.swift
+
+# The two wire shapes it reads, as a daemon built beside this client sends
+# them: missing fields, nulls, unknown kinds and origins, one bad row among
+# good ones. Each costs only itself.
+run_suite understanding-wire \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/UsageSeries.swift \
+  Sources/Passband/Model/UnderstandingWire.swift \
+  Sources/Passband/Lib/UnderstandingSeries.swift \
+  Sources/Passband/Lib/UnderstandingFixture.swift \
+  Tests/UnderstandingWireTests.swift
+
 # The clear board: the streak of clear days and the tally under the carrier.
 run_suite clear-board \
   Sources/Passband/Lib/UsageSeries.swift \

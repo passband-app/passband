@@ -827,3 +827,35 @@ fn the_sent_history_harvest_marks_the_contacts_it_moves() {
         4
     );
 }
+
+#[test]
+fn sent_count_sums_every_spelling_of_the_address() {
+    let (store, acct) = store();
+    // The harvest lowercases; a per-message Sent ingest keeps the header's
+    // spelling. Under a BINARY key those are two rows for one person.
+    store
+        .merge_harvested_contacts(
+            acct,
+            &[
+                ContactEntry {
+                    addr: "ann@fund.com".into(),
+                    display_name: Some("Ann Lee".into()),
+                    sent_count: 3,
+                    last_sent_at: Some(days_ago(9)),
+                },
+                ContactEntry {
+                    addr: "Ann@Fund.com".into(),
+                    display_name: None,
+                    sent_count: 2,
+                    last_sent_at: Some(days_ago(2)),
+                },
+            ],
+        )
+        .unwrap();
+    store.recompute_relationship(acct, "ann@fund.com").unwrap();
+    let row = store.relationship(acct, "ann@fund.com").unwrap().unwrap();
+    assert_eq!(row.sent_count, 5);
+    let last = row.sent_last_at.unwrap();
+    assert!((last - days_ago(2)).num_minutes().abs() < 5, "{last}");
+    assert_eq!(row.display_name.as_deref(), Some("Ann Lee"));
+}

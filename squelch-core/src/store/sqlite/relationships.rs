@@ -215,10 +215,18 @@ pub(crate) const CORRECTIONS_SQL: &str = concat!(
             ON c.account_id = ?1 AND c.message_id = w.id)"
 );
 
-/// The Sent-derived contacts row, `is_known_contact`'s source.
-const CONTACT_SQL: &str = "SELECT sent_count, last_sent_at, display_name FROM contacts
-     WHERE account_id = ?1 AND addr = ?2 COLLATE NOCASE
-     ORDER BY sent_count DESC LIMIT 1";
+/// The Sent-derived contacts rows, `is_known_contact`'s source, SUMMED over
+/// every spelling. The table can hold one address twice: the Sent-history
+/// harvest lowercases, the per-message Sent ingest keeps the header's
+/// spelling, and the key is BINARY. Taking the largest row undercounted the
+/// sends split across the two. The name is the most-sent spelling's that has
+/// one. No contacts row gives one row of NULLs.
+pub(crate) const CONTACT_SQL: &str = "SELECT SUM(sent_count), MAX(last_sent_at),
+       (SELECT c2.display_name FROM contacts c2
+         WHERE c2.account_id = ?1 AND c2.addr = ?2 COLLATE NOCASE
+           AND trim(COALESCE(c2.display_name, '')) != ''
+         ORDER BY c2.sent_count DESC LIMIT 1)
+     FROM contacts WHERE account_id = ?1 AND addr = ?2 COLLATE NOCASE";
 
 /// The full walk's universe, one statement per source, each the next `?3`
 /// addresses after the cursor `?2` by a SEEK on that table's NOCASE (or
@@ -485,12 +493,12 @@ impl<'c> Recomputer<'c> {
             .query_row(params![account, addr], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })?;
-        let contact: Option<(i64, Option<String>, Option<String>)> = conn
-            .prepare_cached(CONTACT_SQL)?
-            .query_row(params![account, addr], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })
-            .optional()?;
+        let (summed, contact_last, contact_name): (Option<i64>, Option<String>, Option<String>) =
+            conn.prepare_cached(CONTACT_SQL)?
+                .query_row(params![account, addr], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })?;
+        let contact = summed.map(|n| (n, contact_last, contact_name));
         let initiated_count: i64 = conn
             .prepare_cached(INITIATED_SQL)?
             .query_row(params![account, addr], |r| r.get(0))?;

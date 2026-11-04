@@ -5,7 +5,8 @@
 use super::super::reading_senders::SenderMeasurer;
 use super::super::relationships::{
     CONTACT_SQL, CORRECTIONS_SQL, INBOUND_SQL, INITIATED_SQL, NAME_SQL, RECENT_WINDOW,
-    RELATIONSHIPS_BACKFILL_KEY, RelationshipSort, SEALED_COUNT_SQL, THREADS_SQL, WALK_SOURCES,
+    RELATIONSHIPS_BACKFILL_KEY, RelationshipSort, SEALED_COUNT_SQL, SEALED_PROBE_SQL, THREADS_SQL,
+    WALK_SOURCES,
 };
 use super::super::*;
 use super::support::*;
@@ -557,7 +558,13 @@ fn every_per_address_statement_is_an_indexed_probe() {
             .map(|line| line.unwrap())
             .collect()
     };
-    for sql in [INBOUND_SQL, THREADS_SQL, NAME_SQL, CORRECTIONS_SQL] {
+    for sql in [
+        INBOUND_SQL,
+        SEALED_PROBE_SQL,
+        THREADS_SQL,
+        NAME_SQL,
+        CORRECTIONS_SQL,
+    ] {
         let plan = plan(sql);
         assert!(
             plan.iter().any(|l| l.starts_with("SEARCH m USING")
@@ -984,6 +991,11 @@ fn the_sealed_count_agrees_with_the_macro_arm_by_arm() {
     let ours: i64 = conn
         .query_row(SEALED_COUNT_SQL, params![acct, DAN], |r| r.get(0))
         .unwrap();
+    // The small-sender probe is the macro itself; the two must agree.
+    let probed: i64 = conn
+        .query_row(SEALED_PROBE_SQL, params![acct, DAN], |r| r.get(0))
+        .unwrap();
+    assert_eq!(probed, ours, "the probe and the union disagree");
     let macros: i64 = conn
         .query_row(
             concat!(

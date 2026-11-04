@@ -166,6 +166,27 @@ pub(crate) const INBOUND_SQL: &str = concat!(
     inbound_sql!()
 );
 
+/// Under this many inbound messages a sender's sealed mail is counted by
+/// probing its own messages ([`SEALED_PROBE_SQL`]); at or over it, from the
+/// account's sealed side ([`SEALED_COUNT_SQL`]). Each is the cheap one on
+/// its own side of the line: the probe is four key lookups per message of
+/// the SENDER, the union one join per sealed message of the ACCOUNT. Without
+/// the switch every recount paid the account's sealed set, which made a
+/// three-message sender cost 1.5 ms instead of 0.1 and the 30,000-address
+/// walk 80 s; with it only the senders big enough to need it do.
+pub const SEALED_PROBE_MAX: i64 = 2_000;
+
+/// [`SEALED_COUNT_SQL`]'s answer for a small sender: its inbound mail, each
+/// probed with `known_sealed_mail_sql!` itself.
+pub(crate) const SEALED_PROBE_SQL: &str = concat!(
+    "SELECT COUNT(*) FROM messages m INDEXED BY idx_messages_from_received
+       LEFT JOIN triage t ON t.message_id = m.id
+      WHERE m.account_id = ?1 AND m.from_addr = ?2 COLLATE NOCASE
+        AND m.is_sent = 0 AND m.is_spam = 0 AND m.is_archive = 0
+        AND ",
+    known_sealed_mail_sql!()
+);
+
 /// How many of the address's inbound messages are KNOWN to be sealed, by the
 /// four arms of `known_sealed_mail_sql!`, read from the other side: the
 /// account's sealed rows in each marker table (a partial index apiece, see
@@ -524,7 +545,11 @@ impl<'c> Recomputer<'c> {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })?;
         let sealed: i64 = conn
-            .prepare_cached(SEALED_COUNT_SQL)?
+            .prepare_cached(if all_inbound < SEALED_PROBE_MAX {
+                SEALED_PROBE_SQL
+            } else {
+                SEALED_COUNT_SQL
+            })?
             .query_row(params![account, addr], |r| r.get(0))?;
         let received_count = (all_inbound - sealed).max(0);
         let (summed, contact_last, contact_name): (Option<i64>, Option<String>, Option<String>) =

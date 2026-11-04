@@ -15,8 +15,8 @@
 
 use super::super::reading_senders::SenderMeasurer;
 use super::super::relationships::{
-    CORRECTIONS_SQL, INBOUND_SQL, INITIATED_SQL, NAME_SQL, SEALED_COUNT_SQL, THREADS_SQL,
-    WALK_SOURCES, walk_addresses,
+    CORRECTIONS_SQL, INBOUND_SQL, INITIATED_SQL, NAME_SQL, SEALED_COUNT_SQL, SEALED_PROBE_SQL,
+    THREADS_SQL, WALK_SOURCES, walk_addresses,
 };
 use super::super::*;
 use super::support::*;
@@ -151,7 +151,8 @@ fn firehose_recompute() {
     {
         let conn = store.lock().unwrap();
         for (name, sql) in [
-            ("SEALED_COUNT", SEALED_COUNT_SQL),
+            ("SEALED_COUNT (union)", SEALED_COUNT_SQL),
+            ("SEALED_PROBE (would be)", SEALED_PROBE_SQL),
             ("CORRECTIONS", CORRECTIONS_SQL),
             ("INITIATED", INITIATED_SQL),
         ] {
@@ -187,6 +188,16 @@ fn firehose_recompute() {
         store.drain_relationship_dirty(acct, 10).unwrap();
     });
     eprintln!("BENCH re-marked drain, counts unchanged: {again:?}");
+    // A small sender: the common case, which must not pay the account's
+    // sealed set.
+    let small = "person43@example.com";
+    let took = best(5, || store.recompute_relationship(acct, small).unwrap());
+    let n = store
+        .relationship(acct, small)
+        .unwrap()
+        .unwrap()
+        .received_count;
+    eprintln!("BENCH recompute of a {n}-message sender (full, best of 5): {took:?}");
     let row = store.relationship(acct, FIREHOSE).unwrap().unwrap();
     eprintln!(
         "BENCH row: received {} threads {} replied {}",

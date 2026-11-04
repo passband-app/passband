@@ -3765,7 +3765,8 @@ pub async fn markdown_preview(
 /// `kind` is the one kind a client sees, picked by priority across the
 /// decision's kinds. `critical`, `verdict` and `explained_by` are always
 /// present (`false` / `null` when there is nothing to say), so a client can
-/// tell this daemon from one without verdicts by the key alone.
+/// tell this daemon from one without verdicts by the key alone. `first_load`
+/// is mail the first-run backfill brought in, which asks no question.
 #[derive(Debug, Serialize)]
 struct SealedMeta {
     id: i64,
@@ -3777,6 +3778,7 @@ struct SealedMeta {
     critical: bool,
     verdict: Option<squelch_core::types::AuthVerdict>,
     explained_by: Option<i64>,
+    first_load: bool,
 }
 
 pub async fn list_sealed(State(state): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
@@ -3796,6 +3798,7 @@ pub async fn list_sealed(State(state): State<ApiState>) -> Result<impl IntoRespo
             critical: m.critical,
             verdict: m.verdict,
             explained_by: m.explained_by,
+            first_load: m.first_load,
         })
         .collect();
     Ok(Json(items))

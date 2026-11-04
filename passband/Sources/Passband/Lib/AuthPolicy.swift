@@ -99,7 +99,16 @@ enum AuthPolicy {
     /// THE definition of an open question, shared by the Auth page's rail, the
     /// badge on the rail's Auth button and the phone, so none of them can
     /// disagree. `verdict` is whatever `AuthDecisions` holds for the message.
+    ///
+    /// NEVER FOR FIRST-LOAD MAIL, critical or not: what the account came with
+    /// is history, not something the owner just saw happen, so a new
+    /// account's first sync must not open on a stack of "Was this you?" and
+    /// an open count of a month of sign-ins. Only auth mail that arrives
+    /// after it opens a question; the server holds no FYE place for the rest
+    /// either. Still a question in every other sense (`asksQuestion`): opened
+    /// on purpose it can be answered (`offersAnswer`), and it is still risk.
     static func isOpen(_ m: SealedMeta, verdict: AuthVerdict?, now: Date = Date()) -> Bool {
+        guard m.first_load != true else { return false }
         guard asksQuestion(m), !isExplained(m), verdict == nil else { return false }
         guard let window = window(m) else { return true }
         guard let received = Fmt.date(m.received_at) else { return false }

@@ -25,6 +25,7 @@ struct AuthPolicyTests {
         clearingAVerdictPutsAnExplicitNull()
         questionsOpenByKindAndWindow()
         criticalStaysOpenAndIsNeverExplained()
+        firstLoadMailAsksNothing()
         aVerdictClosesTheQuestion()
         threeServicesInThreeDaysAreABurst()
         twoServicesAreNot()
@@ -64,11 +65,12 @@ struct AuthPolicyTests {
     static func meta(
         _ id: Int, _ kind: SealedKind?, from sender: String = "alerts@github.com",
         age: TimeInterval = 3600, critical: Bool? = false, verdict: String? = nil,
-        explainedBy: Int? = nil
+        explainedBy: Int? = nil, firstLoad: Bool? = nil
     ) -> SealedMeta {
         SealedMeta(
             id: id, thread_id: "t\(id)", sender: sender, subject: "subject \(id)", kind: kind,
-            received_at: ago(age), critical: critical, verdict: verdict, explained_by: explainedBy)
+            received_at: ago(age), critical: critical, verdict: verdict, explained_by: explainedBy,
+            first_load: firstLoad)
     }
 
     static func decode(_ json: String) -> [SealedMeta]? {
@@ -183,6 +185,24 @@ struct AuthPolicyTests {
         expect(open(meta(1, .accountChange, critical: true, explainedBy: 2)), "critical is never explained")
         expect(open(meta(1, .otp, critical: true)), "critical asks even under a code's kind")
         expect(!AuthPolicy.isExplained(meta(1, .accountChange, critical: true, explainedBy: 2)), "isExplained agrees")
+    }
+
+    /// What the account came with is history: no question, critical or not,
+    /// so neither the cards nor the badge count it. Mail since asks as ever,
+    /// and an older daemon (no key) asks as it always did.
+    static func firstLoadMailAsksNothing() {
+        expect(!open(meta(1, .loginAlert, firstLoad: true)), "a backfilled sign-in asks nothing")
+        expect(!open(meta(1, .accountChange, critical: true, firstLoad: true)), "nor a backfilled critical change")
+        expect(open(meta(1, .loginAlert, firstLoad: false)), "a live sign-in asks")
+        expect(open(meta(1, .accountChange, critical: true, firstLoad: false)), "a live critical change asks")
+        expect(open(meta(1, .loginAlert)), "no key (an older daemon) asks as before")
+        let rows = decode("""
+            [{"id":5,"thread_id":"e","sender":"no-reply@github.com","subject":"New sign-in","kind":"login_alert","received_at":"2026-10-26T10:00:00Z","critical":false,"verdict":null,"explained_by":null,"first_load":true}]
+            """)
+        expect(rows?.first?.first_load == true, "first_load decodes")
+        let old = meta(1, .accountChange, critical: true, firstLoad: true)
+        expect(AuthPolicy.offersAnswer(old), "opened on purpose, it can still be answered")
+        expect(AuthPolicy.asksQuestion(old), "and it is still risk mail")
     }
 
     static func aVerdictClosesTheQuestion() {

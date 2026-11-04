@@ -611,6 +611,7 @@ enum ProductGuide {
         - "Not me" opens the message. Once the user's Passband server is updated, it also puts the message in For your eyes, and an answer given on one device shows on the others; until then, answers stay on the device where they were given.
         - An answer can be taken back: the answered row on the Auth page, and the reveal panel, say what was answered and offer Undo. The reveal panel also asks the question itself, so an alert opened from For your eyes can be answered right there.
         - Login codes, verifications and sign-in receipts ("you shared Google Account data with X") do not ask, unless the same email is also a critical change: they are proof of something the user just did.
+        - Once the user's Passband server is updated, auth mail that came in with the account's first sync (the mail Passband downloaded when it was connected) opens no question in Needs a decision, critical changes included, and does not sit in For your eyes: it is history, not something that just happened. Only auth mail that arrives after the first sync asks and counts toward the open number. That older mail is still listed on the Auth page and can still be opened and answered from the reveal panel.
         - Auth mail in For your eyes shows its summary and a lock. Opening it reveals it once in the same panel, with the same audit entry.
 
         Arrival:

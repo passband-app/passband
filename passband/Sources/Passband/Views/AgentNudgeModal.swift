@@ -48,13 +48,11 @@ struct AgentNudgeModal: View {
 
 extension AgentNudge {
     /// Every other one-time card that can be on screen: the share ask, the
-    /// iPhone ad, the tour (or the practice inbox being set up), What's New,
-    /// and the update card. Two of these at once is a pile.
+    /// iPhone ad, the first-load veil, What's New, and the update card. Two of these at once is a pile.
     static func othersShowing(_ store: AppStore) -> Bool {
         ShareNudge.shared.showingNudge
             || TestFlightNudge.shared.showingNudge
-            || store.tour.active
-            || store.tour.preparingPractice
+            || store.firstLoad.active
             || store.whatsNew.active
             || Updater.shared.phase != .idle
     }
@@ -210,7 +208,7 @@ private struct AgentAdCard: View {
 /// ad's phone: it is a screen inside a night scene, whatever the Mac's
 /// appearance.
 ///
-/// The mail in it is the practice inbox's (Cedar Credit, Rainforest): invented,
+/// The mail in it is the fixture inbox's (Cedar Credit, Rainforest): invented,
 /// and already the house's.
 ///
 /// Not private: the What's New walk plays the same conversation on the agent

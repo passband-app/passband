@@ -3,7 +3,7 @@
 // raw values on `FeatureSet` are persisted and leave the machine, so the names
 // a person reads live here and are free to change.
 //
-// THE TOUR'S VOICE. Calm, plain, warm, second person, short. GOOD NEWS ONLY:
+// THE APP'S VOICE. Calm, plain, warm, second person, short. GOOD NEWS ONLY:
 // a line says what a set gives you, never how many are left or what you have
 // not done. No em dashes anywhere (a test-free rule, so read before you add).
 

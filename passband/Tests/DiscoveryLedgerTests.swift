@@ -1,6 +1,6 @@
 // The discovery ledger's rules: found on the first move, kept on the third
 // distinct day, nothing ever regresses, and a blob from some other build never
-// costs anybody their ring. The shell (UserDefaults, analytics, the practice
+// costs anybody their ring. The shell (UserDefaults, analytics, the fixture
 // flag) is out of reach of a headless suite, which is why every input here is
 // an argument.
 //
@@ -21,9 +21,8 @@ struct DiscoveryLedgerTests {
         threeDaysKeepsOnce()
         daysUnionWithinASet()
         everyMoveHasASet()
-        practiceOnlyCountsTheTour()
         oneCelebrationADay()
-        backfillIsSilent()
+        aTourEraLedgerSurvives()
         acknowledgeClearsFresh()
         roundTripAndTolerance()
         allKeptNeedsEverySet()
@@ -85,18 +84,9 @@ struct DiscoveryLedgerTests {
         for set in FeatureSet.allCases {
             expect(covered.contains(set), "\(set) has at least one move")
         }
-        expect(Move.tourCompleted.set == .clear, "the tour is clear")
+        expect(Move.emailDone.set == .clear, "done is clear")
         expect(Move.smartCleared.set == .sweep, "a smart clear is sweep")
         expect(Move.walkFinished.set == .flow, "a finished walk is flow")
-    }
-
-    static func practiceOnlyCountsTheTour() {
-        for move in Move.allCases {
-            expect(DiscoveryLedger.counts(move, practice: false), "\(move) counts on real mail")
-            expect(
-                DiscoveryLedger.counts(move, practice: true) == (move == .tourCompleted),
-                "\(move) in practice counts only if it is the tour")
-        }
     }
 
     static func oneCelebrationADay() {
@@ -115,16 +105,20 @@ struct DiscoveryLedgerTests {
         expect(DiscoveryLedger.dayKey(evening, calendar: tokyo) == "2026-10-2", "local day key")
     }
 
-    static func backfillIsSilent() {
-        var l = DiscoveryLedger()
-        l.backfill(.tourCompleted, day: "d1", now: now)
-        expect(l.state(of: .clear) == .found, "backfill finds clear")
-        expect(l.fresh.isEmpty, "but nothing glows: an old user found nothing just now")
-        // A set that was ALREADY fresh stays fresh through a backfill.
-        var m = DiscoveryLedger()
-        _ = m.note(.emailDone, day: "d1", now: now)
-        m.backfill(.tourCompleted, day: "d1", now: now)
-        expect(m.fresh == [.clear], "a backfill does not swallow a real find's glow")
+    /// A ledger written while the tour existed holds `tourCompleted`, a move
+    /// this build no longer has. The set it found stays found; the move is
+    /// skipped like any other unknown key.
+    static func aTourEraLedgerSurvives() {
+        let old = """
+            {"version": 1,
+             "sets": {"clear": {"foundAt": 1, "days": ["d1"]}},
+             "moves": {"tourCompleted": 1, "emailDone": 2},
+             "fresh": [],
+             "lastCelebratedDay": "d1"}
+            """
+        let l = DiscoveryLedger.decoded(from: Data(old.utf8))
+        expect(l.state(of: .clear) == .found, "the tour's find survives the tour")
+        expect(l.moveCounts == [.emailDone: 2], "the tour's move is skipped, not fatal")
     }
 
     static func acknowledgeClearsFresh() {

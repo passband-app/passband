@@ -902,8 +902,8 @@ enum ReleaseNotes {
     /// tag lands), and announcing features that are not installed is worse than
     /// announcing them late.
     ///
-    /// NO STAMP is one of two people. A fresh install, who should be reading the
-    /// tour rather than a back catalogue, and an install that predates this
+    /// NO STAMP is one of two people. A fresh install, who should be looking at
+    /// their own board rather than a back catalogue, and an install that predates this
     /// feature and is owed the release it just took. The caller separates them
     /// (see WhatsNew.maybeShow); the seed here is the second reading, floored at
     /// the release BEFORE the running one so this build announces itself and

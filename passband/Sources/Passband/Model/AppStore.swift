@@ -34,7 +34,7 @@ enum ShareOrigin: String, Sendable, Hashable {
 enum OpenSource: String, Sendable {
     case sitrep, sitrepCard = "sitrep_card", reading, emails, search, browse
     case assistant, deeperSearch = "deeper_search", groups, notification
-    case reply, reader, tour
+    case reply, reader
     /// A ghost's "mail behind it" on the calendar page.
     case calendar
 }
@@ -366,8 +366,7 @@ struct PendingUndo: Identifiable, Sendable {
     var messageId: Int
     var label: String
     var createdAt: Date = Date()
-    /// When the chip leaves on its own, for its countdown. nil for the one
-    /// the tour holds open until the learner presses `u`.
+    /// When the chip leaves on its own, for its countdown.
     var expiresAt: Date?
     /// Set for a Space walk's E and S: what to play backwards on undo.
     var rewind: WalkRewind?
@@ -556,8 +555,7 @@ final class AppStore {
     /// taps until it is true.
     var connectionVerified: Bool { unverifiedEpoch != epoch }
     /// The loading gate is up because a saved account's daemon is being
-    /// waited on (`recoverSavedConnection`), not because of a keychain read or
-    /// a practice swap. That wait has no end of its own, so this is what lets
+    /// waited on (`recoverSavedConnection`), not because of a keychain read. That wait has no end of its own, so this is what lets
     /// the gate and the Accounts menu offer a way out of it.
     private(set) var restoringSavedConnection = false
     /// The Connect gate is up because the person walked away from that wait
@@ -739,6 +737,11 @@ final class AppStore {
     var statsEpoch: Int? {
         didSet { warmCalendarIfDue() }
     }
+    /// The epoch of the last stats a LIVE poll wrote. Unlike `statsEpoch`, a
+    /// board restored from disk never sets it, so "the daemon has answered
+    /// this session" can be told from "we painted what it said last time"
+    /// (the first-load veil decides only on the former).
+    @ObservationIgnored var liveStatsEpoch: Int?
     var lastRefresh: Date? {
         // `derive` reads only whether there has been one (`daemonDown`).
         didSet { if (oldValue == nil) != (lastRefresh == nil) { noteSyncStatus() } }
@@ -1118,11 +1121,11 @@ final class AppStore {
     /// The press. Asks the daemon, takes what it cleared off the board at
     /// once, and puts up the receipt.
     ///
-    /// NEVER FROM THE PRACTICE INBOX: its mail is fixtures, and the real
+    /// NEVER FROM THE FIXTURE INBOX: its mail is fixtures, and the real
     /// daemon would be asked to clean a mailbox the person is not looking at.
     func runSmartClear() async {
         guard !smartClearWorking else { return }
-        guard !RehearsalMode.isEnabled else {
+        guard !FixtureMode.isEnabled else {
             pushToast(SmartClearCopy.unavailable, .info)
             return
         }
@@ -1538,14 +1541,14 @@ final class AppStore {
     /// nothing else the field could watch, and it must still take focus.
     var searchFocusRequest = 0
     var shortcutsOpen = false
-    /// The first-run tour. Held here for the same reason the assistant is: it
-    /// outlives every view it draws itself in, and the trigger that starts it
-    /// (the first sync of the session) fires from the shell, not from a step.
-    let tour = TourController()
+    /// The first-load veil over a newly connected mailbox. Held here for the
+    /// same reason the assistant is: it outlives every view it draws itself
+    /// in, and what drives it (the polls) fires from the shell.
+    let firstLoad = FirstLoad()
 
-    /// The what's-new card. Held here for the same reason the tour is, and
-    /// beside it on purpose: the two are mutually exclusive by construction
-    /// (see WhatsNew), and keeping them adjacent is what keeps that readable.
+    /// The what's-new card. Beside the first-load veil on purpose: the two
+    /// are mutually exclusive by construction (see WhatsNew), and keeping
+    /// them adjacent is what keeps that readable.
     let whatsNew = WhatsNew()
 
     // MARK: drafts
@@ -1667,7 +1670,7 @@ final class AppStore {
             if !switching { Notifier.shared.drainPendingTap() }
         }
     }
-    private(set) var practiceTransitioning = false
+    private(set) var fixtureTransitioning = false
     /// The account a switch is asking after, until it lands or is refused.
     private(set) var switchingTo: UUID?
     /// Counts switch requests, so the newest one is the only one that lands.
@@ -1675,9 +1678,9 @@ final class AppStore {
 
     /// Also enforced by account mutation entry points, not only menu items.
     var accountActionsBlocked: Bool {
-        RehearsalMode.isEnabled || practiceTransitioning || tour.veil != nil
+        FixtureMode.isEnabled || fixtureTransitioning || firstLoad.active
     }
-    private static let practiceAccountError = "Finish the practice inbox before changing accounts."
+    private static let fixtureAccountError = "Accounts can't change while your inbox is loading. Press Start now, then try again."
 
     /// Whether `e` is still the live epoch — the post-await check every
     /// account-scoped writer outside this file makes.
@@ -1809,89 +1812,33 @@ final class AppStore {
 
     // MARK: - settings
 
-    // MARK: - practice inbox
+    // MARK: - fixture inbox
 
-    /// Re-enter the real connection gate for a tester without deleting any
-    /// account, preference, or keychain entry.
-    func resetForConnectionRehearsal() async {
-        guard RehearsalMode.includesConnection else { return }
-        while switching { try? await Task.sleep(for: .milliseconds(25)) }
-        switching = true
-        practiceTransitioning = true
-        defer { switching = false; practiceTransitioning = false }
-        connStatus = .loading
-        epoch &+= 1
-        SitrepPoller.shared.stop()
-        AccountManager.shared.stopAllFeeds()
-        DraftSaver.shared.flush(.compose, compose)
-        DraftSaver.shared.flush(.inlineReply, inlineReply)
-        parkHeldSends()
-        await DraftSaver.shared.settle()
-        epoch &+= 1
-        SitrepPoller.shared.stop()
-        RehearsalMode.setEnabled(false)
-        assistant.clear()
-        wipeAccountState()
-        wipeAccountCaches()
-        closeOverlaysForPractice()
-        await APIClient.shared.deconfigure()
-        settings = nil
-        connError = nil
-        connStatus = .disconnected
-    }
-
-    /// Put the practice inbox on screen IN PLACE: the same shell, fixture mail
-    /// behind the same transport. Shaped like `switchAccount` because it is
-    /// one — the account arriving just happens to be fictional — and every
-    /// answer still in flight for the live mailbox has to be disowned before
-    /// a fixture row can be allowed anywhere near the read model.
-    ///
-    /// Calling it while already practicing starts the fixtures over (Start
-    /// fresh). Preferences and credentials are not touched: the person
-    /// practicing is the person who will read the live inbox a minute later.
-    func enterPractice() async {
-        // Share the account mutation gate: a probe/keychain write already in
-        // progress must finish before the fixture transport can take over.
+    /// Put the fixture inbox on screen IN PLACE: the same shell, `FixtureMail`
+    /// behind the same transport. For the phone's debug screenshot harness
+    /// (`FixtureStage`) and nothing else. Shaped like `switchAccount` because
+    /// it is one (the account arriving just happens to be fictional), and
+    /// every answer still in flight for a live mailbox has to be disowned
+    /// before a fixture row can be allowed anywhere near the read model.
+    func enterFixtures() async {
         while switching {
             if Task.isCancelled { return }
             try? await Task.sleep(for: .milliseconds(25))
         }
         guard !Task.isCancelled else { return }
         switching = true
-        practiceTransitioning = true
-        defer { switching = false; practiceTransitioning = false }
-        // The live mailbox's own address, so the greeting keeps seeding from
-        // the real account rather than from the fixture's. On a first run the
-        // live poller has never pulled (practice claims the connection before
-        // it starts), so the stats are asked for once, here, while the client
-        // still points at the real daemon. Read BEFORE the wipe either way.
-        var liveAddress = RehearsalMode.isEnabled ? nil : stats?.account_email
-        if liveAddress == nil, !RehearsalMode.isEnabled, connStatus == .connected {
-            liveAddress = (try? await APIClient.shared.getStats())?.account_email
-        }
-        guard !Task.isCancelled else { return }
-        let previousStatus = connStatus
+        fixtureTransitioning = true
+        defer { switching = false; fixtureTransitioning = false }
         epoch &+= 1
         SitrepPoller.shared.stop()
-        // The feeds too, unlike a switch: a banner for real mail landing mid-
-        // lesson would point at a thread the practice board cannot open.
+        // The feeds too, unlike a switch: a banner for real mail would point
+        // at a thread the fixture board cannot open.
         AccountManager.shared.stopAllFeeds()
         connStatus = .loading
         DraftSaver.shared.flush(.compose, compose)
         DraftSaver.shared.flush(.inlineReply, inlineReply)
         parkHeldSends()
         await DraftSaver.shared.settle()
-        // A cancel that landed during settlement: nothing has been swapped
-        // yet, so put the live board back the way a switch's restart does
-        // rather than leave a fixture world nobody asked for.
-        if Task.isCancelled {
-            connStatus = previousStatus
-            if previousStatus == .connected {
-                SitrepPoller.shared.start()
-                if !RehearsalMode.isEnabled { AccountManager.shared.startAllFeeds() }
-            }
-            return
-        }
         // Work queued during draft settlement belongs to the departing world
         // too. Fence again at the synchronous transport/read-model swap.
         epoch &+= 1
@@ -1899,25 +1846,23 @@ final class AppStore {
         assistant.clear()
         wipeAccountState()
         wipeAccountCaches()
-        closeOverlaysForPractice()
-        RehearsalMode.setEnabled(true)
-        await RehearsalAPI.shared.reset(accountEmail: liveAddress)
-        // The fixture's calendar items keep the same ids from session to
-        // session, and the zone retires an item a day after it was first
-        // shown. Without this, a second run more than a day after the first
-        // starts the calendar lesson over an empty card.
-        CalendarVisibility.shared.forget(account: CalendarVisibility.practiceAccount)
-        settings = ConnectionSettings(serverURL: "https://rehearsal.invalid", apiToken: "practice")
+        closeOverlaysForFixtures()
+        FixtureMode.setEnabled(true)
+        await FixtureAPI.shared.reset()
+        // The fixture's calendar items keep the same ids from launch to
+        // launch, and the zone retires an item a day after it was first shown.
+        CalendarVisibility.shared.forget(account: CalendarVisibility.fixtureAccount)
+        settings = ConnectionSettings(serverURL: "https://fixtures.invalid", apiToken: "fixtures")
         connError = nil
         connStatus = .connected
     }
 
-    /// Fill the practice board before the guide points at it: bands, zones,
-    /// the calendar bodies the reader lesson opens, and the inbox page the
-    /// examples resolve through. Starts the poller, which a live-to-practice
-    /// entry otherwise never would (`connStatus` never moved).
-    func warmPractice() async {
-        guard RehearsalMode.isEnabled else { return }
+    /// Fill the fixture board before a scene is raised over it: bands, zones,
+    /// the calendar bodies, and the inbox page. Starts the poller, which an
+    /// entry from a connected state otherwise never would (`connStatus`
+    /// never moved).
+    func warmFixtures() async {
+        guard FixtureMode.isEnabled else { return }
         let e = epoch
         SitrepPoller.shared.start()
         await SitrepPoller.shared.pull()
@@ -1930,42 +1875,7 @@ final class AppStore {
         await refreshMail(.inbox, force: true)
     }
 
-    /// Put the live account back. The fixture world is wiped under a bumped
-    /// epoch first, then the ordinary boot path re-reads the index and the
-    /// keychain — dropping to `.loading` on the way is what remounts the
-    /// shell clean and fires the `.connected` transition that starts the
-    /// poller and the feeds again.
-    func exitPractice() async {
-        while switching { try? await Task.sleep(for: .milliseconds(25)) }
-        guard RehearsalMode.isEnabled else { return }
-        switching = true
-        practiceTransitioning = true
-        defer { switching = false; practiceTransitioning = false }
-        connStatus = .loading
-        epoch &+= 1
-        SitrepPoller.shared.stop()
-        RehearsalMode.setEnabled(false)
-        assistant.clear()
-        wipeAccountState()
-        wipeAccountCaches()
-        closeOverlaysForPractice()
-        await APIClient.shared.deconfigure()
-        settings = nil
-        await loadSettings()
-        // By hand as well as by transition. The `.loading` frame above is what
-        // normally fires RootView's `.connected` observer, but a keychain read
-        // that returns before SwiftUI has rendered that frame collapses the
-        // two writes into `.connected → .connected` and nothing restarts —
-        // the summary would then wait for a first update that never comes.
-        // Both starts are idempotent, so the belt costs nothing when the
-        // braces held.
-        if connStatus == .connected {
-            SitrepPoller.shared.start()
-            AccountManager.shared.startAllFeeds()
-        }
-    }
-
-    private func closeOverlaysForPractice() {
+    private func closeOverlaysForFixtures() {
         toasts = []
         askBarOpen = false
         shortcutsOpen = false
@@ -1978,7 +1888,7 @@ final class AppStore {
     }
 
     func loadSettings() async {
-        guard !RehearsalMode.isEnabled else {
+        guard !FixtureMode.isEnabled else {
             LaunchSignpost.end(.skipped)
             return
         }
@@ -2012,9 +1922,9 @@ final class AppStore {
                 // Read only when it could be painted (not, say, from the error
                 // gate's retry), and every condition asked again after it.
                 var kept: PersistedBoard?
-                if connStatus == .loading, !RehearsalMode.isEnabled { kept = await keptBoard }
+                if connStatus == .loading, !FixtureMode.isEnabled { kept = await keptBoard }
                 if let board = kept, AccountManager.shared.activeId == active.id,
-                    connStatus == .loading, !RehearsalMode.isEnabled
+                    connStatus == .loading, !FixtureMode.isEnabled
                 {
                     restorePersistedBoard(board)
                     connError = nil
@@ -2073,10 +1983,9 @@ final class AppStore {
             addAccountOpen: addAccountSheetOpen,
             phone: phone)
         else { return }
-        // DROPPED, not parked, while the practice inbox is up: a link held
-        // through a lesson would be applied the moment the live account came
-        // back — the Add Account sheet over the summary card — and by then
-        // its code is a stale claim from a browser tab the person has
+        // DROPPED, not parked, while an account change is in flight: a link
+        // held through it would be applied over whatever came back, and by
+        // then its code is a stale claim from a browser tab the person has
         // forgotten. Pairing from a link is a click away again afterwards.
         guard !accountActionsBlocked else { return }
         pairLink = link
@@ -2315,7 +2224,7 @@ final class AppStore {
     /// swap the live client — WITHOUT dropping connStatus out of "connected" on
     /// failure, so Settings stays mounted instead of bouncing to the Connect gate.
     func revalidate(serverURL: String, apiToken: String) async -> (ok: Bool, error: String?) {
-        guard !accountActionsBlocked else { return (false, Self.practiceAccountError) }
+        guard !accountActionsBlocked else { return (false, Self.fixtureAccountError) }
         guard !switching else { return (false, "An account change is already in progress.") }
         switching = true
         defer { switching = false }
@@ -2418,7 +2327,7 @@ final class AppStore {
     func addAccount(serverURL: String, apiToken: String, label: String = "") async -> (
         ok: Bool, error: String?
     ) {
-        guard !accountActionsBlocked else { return (false, Self.practiceAccountError) }
+        guard !accountActionsBlocked else { return (false, Self.fixtureAccountError) }
         guard !switching else { return (false, "An account change is already in progress.") }
         switching = true
         defer { switching = false }
@@ -2445,7 +2354,7 @@ final class AppStore {
         Analytics.capture("account_added")
         identifyPerson()
         // Hold the same gate from the credential probe through persistence
-        // and switching, so practice cannot intercept any part of the add.
+        // and switching, so nothing can intercept any part of the add.
         // The switch can fail its credential read-back (a denied access panel
         // on the slots just written). The account exists either way — saying
         // `ok` while the old mailbox stays on screen would read as a failed
@@ -2696,7 +2605,7 @@ final class AppStore {
 
         // (7) The world itself, in one synchronous pass so no frame is
         //     ever painted showing a mix of two mailboxes. Fenced AGAIN
-        //     first, as `enterPractice` does: a refresh that started while
+        //     first, as `enterFixtures` does: a refresh that started while
         //     the drafts settled carries step (3)'s epoch and the old
         //     daemon's rows, and would write them into the world wiped here.
         epoch &+= 1
@@ -2840,7 +2749,7 @@ final class AppStore {
     /// are cut from: the in-memory one a switch back repaints, and the one on
     /// disk (`boardToKeep`).
     private func liveSnapshot() -> BoardSnapshot? {
-        guard connStatus == .connected, !RehearsalMode.isEnabled, statsEpoch == epoch,
+        guard connStatus == .connected, !FixtureMode.isEnabled, statsEpoch == epoch,
             lastRefresh != nil
         else { return nil }
         var bands = sitrep
@@ -2966,7 +2875,7 @@ final class AppStore {
         }
         if unverifiedEpoch == e { noteConnectionVerified() }
         noteBoardAnswered(epoch: e)
-        LaunchSignpost.end(RehearsalMode.isEnabled ? .skipped : .network)
+        LaunchSignpost.end(FixtureMode.isEnabled ? .skipped : .network)
     }
 
     /// What a save would do with the live board (`PersistedBoard.keeping`):
@@ -2996,7 +2905,7 @@ final class AppStore {
     /// of changes; what is written is the board when the delay is up.
     private func scheduleBoardSave() {
         boardDirty = true
-        guard boardSaveTask == nil, connStatus == .connected, !RehearsalMode.isEnabled else { return }
+        guard boardSaveTask == nil, connStatus == .connected, !FixtureMode.isEnabled else { return }
         boardSaveTask = Task { [weak self] in
             try? await Task.sleep(for: Self.boardSaveDelay)
             guard let self, !Task.isCancelled else { return }
@@ -3105,7 +3014,6 @@ final class AppStore {
         #if os(iOS)
             return .sitrep
         #else
-            guard !RehearsalMode.isEnabled else { return .sitrep }
             return view == .process ? .emails : view
         #endif
     }
@@ -3353,7 +3261,6 @@ final class AppStore {
     private(set) var routeAsks = 0
 
     func setView(_ view: MainView, viaPointer: Bool = false) {
-        guard !RehearsalMode.isEnabled || view == .sitrep else { return }
         guard view != .calendar || calendarPageAvailable else { return }
         // Navigating ANYWHERE dismisses an open thread viewer: the rail is visible
         // beside it, so a click there means "leave this email", not "change the
@@ -3673,10 +3580,10 @@ final class AppStore {
     /// tick of the selected card, so the clock answers whether anything
     /// closed and only then is a flush worth a task.
     ///
-    /// The practice inbox never starts a stint: its mail is fixtures, and its
+    /// The fixture inbox never starts a stint: its mail is fixtures, and its
     /// ids would be reported against whatever real message shares them.
     func attentionFocus(_ messageId: Int) {
-        guard !RehearsalMode.isEnabled else { return }
+        guard !FixtureMode.isEnabled else { return }
         if withAttention({ $0.focus(messageId, now: $1) }) { flushAttention() }
     }
 
@@ -3697,7 +3604,7 @@ final class AppStore {
     /// than with the stint: the click usually hands the user to a browser, and
     /// "when they come back and close the reader" may be never.
     func attentionClick(_ messageId: Int) {
-        guard !RehearsalMode.isEnabled else { return }
+        guard !FixtureMode.isEnabled else { return }
         withAttention { clock, _ in clock.click(messageId) }
         flushAttention()
     }
@@ -3709,7 +3616,7 @@ final class AppStore {
     /// account's daemon.
     private func flushAttention() {
         let reports = withAttention { clock, _ in clock.drain() }
-        guard !reports.isEmpty, !RehearsalMode.isEnabled else { return }
+        guard !reports.isEmpty, !FixtureMode.isEnabled else { return }
         let e = epoch
         let prior = attentionFlight
         attentionFlight = Task {
@@ -3790,9 +3697,8 @@ final class AppStore {
     /// surfaces you work beside, not overlays on one. The reader's `inlineReply` is absent for the same reason:
     /// it is part of the viewer, and blurring the email you are answering would
     /// be absurd.
-    /// The tour joins on `wantsBlur` alone: its three talking steps are modals
-    /// like any other, but its coach marks POINT AT the board, so blurring what
-    /// they are ringing would defeat them.
+    /// The first-load veil is one: the board filling in behind it is the
+    /// point, and the blur is what says "not yet" without hiding it.
     /// The smart clear list is NOT here: it is a page in the content area
     /// beside the real rail, opaque over the board, and a blur would smear
     /// the rail it sits next to.
@@ -3805,7 +3711,7 @@ final class AppStore {
             || reconnectAsk != nil || discardAsk != nil || liveMailtoAsk != nil
             || calendarCardUp
             || calendarDeleteAsk != nil
-            || tour.wantsBlur || whatsNew.active
+            || firstLoad.active || whatsNew.active
     }
 
     // MARK: - sitrep zones
@@ -6136,7 +6042,7 @@ final class AppStore {
     private func showAgentDraft(
         _ draftId: Int, accountId: UUID, link: AgentDraftLink?, pushCreated: Int? = nil
     ) async {
-        guard !RehearsalMode.isEnabled, !accountActionsBlocked else { return }
+        guard !FixtureMode.isEnabled, !accountActionsBlocked else { return }
         let asked = link != nil || pushCreated != nil
         guard AccountManager.shared.activeId == accountId else {
             pushToast("Your agent left a draft in another account. Switch to it to open the draft.")
@@ -7566,9 +7472,37 @@ final class AppStore {
     @ObservationIgnored private var syncStatusExpiry: Task<Void, Never>?
     @ObservationIgnored private var syncStatusExpiresAt: Date?
 
+    /// THE ONE ESTIMATE OF A CATCH-UP'S PACE, fed by every stats poll and
+    /// read by both the first-load veil and the board's banner, so pressing
+    /// Start now hands the bar to the board without it starting over at
+    /// "estimating…". Reset when no walk is running, so a later catch-up (a
+    /// reconnect, a long absence) is measured fresh.
+    private(set) var catchUpEstimate = CatchUpEstimate()
+
+    /// `PASSBAND_FIRST_LOAD`'s made-up walk, and nothing else: the one hook
+    /// the preview needs, so the banner after Start now has a pace to show.
+    /// Read in exactly one place, `noteSyncStatus`.
+    @ObservationIgnored private var previewCatchUp: CatchUpProgress?
+
+    func stageSyntheticCatchUp(_ progress: CatchUpProgress?) {
+        guard FirstLoad.forced else { return }
+        previewCatchUp = progress
+        noteSyncStatus()
+    }
+
     private func noteSyncStatus() {
         let now = Date()
-        let status = SyncStatus.derive(daemonDown: daemonDown, stats: stats, now: now, date: Fmt.date)
+        // The pace: one sample per poll while a walk runs, reset when none is.
+        // Present means running, even with done == total: the daemon meets
+        // its inbox count before it extends the walk by Sent (FirstLoadRule).
+        let walk = previewCatchUp ?? stats?.catch_up
+        if let c = walk, c.total > 0 {
+            catchUpEstimate.record(done: c.done, at: now)
+        } else if !catchUpEstimate.samples.isEmpty {
+            catchUpEstimate.reset()
+        }
+        var status = SyncStatus.derive(daemonDown: daemonDown, stats: stats, now: now, date: Fmt.date)
+        if let c = previewCatchUp, c.done < c.total { status = .catchingUp(done: c.done, total: c.total) }
         if status != syncStatus { syncStatus = status }
         var expiry: Date?
         if case .coolingDown(let until?, _) = status, until > now { expiry = until }
@@ -7709,25 +7643,7 @@ final class AppStore {
 
     func openRuleEditor(_ request: RuleEditorRequest) {
         var request = request
-        if RehearsalMode.isEnabled, tour.active, tour.practiceStep == .rule,
-           request.sender?.lowercased() == TourController.practiceRuleSender {
-            request.disposition = request.disposition ?? .squelch
-            request.want = request.want ?? "I don’t need to see routine terms of service updates."
-            let originalResult = request.onResult
-            let run = tour.practiceRunID
-            let savedEpoch = epoch
-            request.onResult = { [weak self] result, body in
-                guard let self, self.epoch == savedEpoch else { return }
-                originalResult?(result, body)
-                Task { @MainActor [weak self] in
-                    guard let self, self.epoch == savedEpoch else { return }
-                    let muted = await RehearsalAPI.shared.suppresses(messageID: 11, viaRuleID: result.rule_id)
-                    guard self.epoch == savedEpoch, self.tour.practiceRunID == run else { return }
-                    self.tour.notePracticeRuleSaved(run: run, muted: muted)
-                }
-            }
-        }
-        if RehearsalMode.isEnabled {
+        if FixtureMode.isEnabled {
             let onSaved = request.onSaved
             let savedEpoch = epoch
             request.onSaved = { [weak self] in
@@ -7762,14 +7678,9 @@ final class AppStore {
     ) -> UUID {
         var entry = PendingUndo(
             kind: kind, messageId: messageId, label: label, rewind: rewind, revert: revert)
-        // Let the guided undo lesson wait for the learner.
-        let held =
-            RehearsalMode.isEnabled && tour.active && kind == .done && messageId == 1
-            && tour.practiceStep == .done
-        if !held { entry.expiresAt = entry.createdAt.addingTimeInterval(Self.undoTTL) }
+        entry.expiresAt = entry.createdAt.addingTimeInterval(Self.undoTTL)
         undos.append(entry)
         let id = entry.id
-        if held { return id }
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(Self.undoTTL))
             self?.undos.removeAll { $0.id == id }

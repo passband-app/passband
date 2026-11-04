@@ -424,6 +424,8 @@ final class SitrepPoller {
             // even when the body is identical, because identical stats can
             // still belong to a mailbox switched to since they were written.
             if store.statsEpoch != e { store.statsEpoch = e }
+            // A live answer, which a board painted from disk never is.
+            if store.liveStatsEpoch != e { store.liveStatsEpoch = e }
             noteCatchUp(st.catch_up)
             // THE BADGE IS REFRESHED EVEN WHEN NOTHING CHANGED, and this is the
             // second write point rather than an accident. `AppStore.sitrep`'s
@@ -446,14 +448,12 @@ final class SitrepPoller {
             Badge.set(next.totalCount ?? next.standing.count)
             // FIRST SIGHT OF THE MAILBOX = the first chance to know the human's
             // name well enough to guess. Here rather than at connect time
-            // because this is where the address arrives, and unconditional
+            // because this is where the name arrives, and unconditional
             // because the pref itself is what fires once — see seedUserName.
             //
-            // The Google given name FIRST, when the daemon has one: it is a
-            // better guess than the mailbox's local part, and it also replaces
-            // that guess on an install which already made it.
+            // The Google given name, when the daemon has one. It also replaces
+            // the address guess older installs made. Never the address itself.
             Prefs.shared.seedUserName(fromGivenName: st.account_given_name, email: st.account_email)
-            Prefs.shared.seedUserName(fromEmail: st.account_email)
             // The same answer names this account's profile photo.
             AccountPhotos.shared.noteActive(tag: st.account_photo)
             // A REPLY THAT LANDED IN THE THREAD ON SCREEN. The live event feed

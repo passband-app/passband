@@ -48,7 +48,7 @@ final class TestFlightNudge {
     /// `PASSBAND_FORCE_TESTFLIGHT_NUDGE=1` puts the card up at launch without
     /// recording an ask, so it can be looked at without a two-day-old install
     /// and a daemon that has never seen a phone. Same posture as
-    /// `PASSBAND_FORCE_TOUR`: a launch environment nobody sets by accident.
+    /// `PASSBAND_FIRST_LOAD`: a launch environment nobody sets by accident.
     nonisolated static let forced =
         ProcessInfo.processInfo.environment["PASSBAND_FORCE_TESTFLIGHT_NUDGE"] == "1"
 

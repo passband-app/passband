@@ -127,10 +127,10 @@ enum CalendarGate {
 
     /// The card is raised UNPROMPTED once per account and never again: any
     /// way out of it (Not now, Escape, the scrim, or Connect itself) counts
-    /// as seen. After that the banner is the door. Practice mode offers
+    /// as seen. After that the banner is the door. The fixture inbox offers
     /// nothing: its daemon is a fixture.
-    static func offer(route: ConnectRoute?, cardSeen: Bool, practice: Bool) -> Offer {
-        guard route != nil, !practice else { return .none }
+    static func offer(route: ConnectRoute?, cardSeen: Bool, fixtures: Bool) -> Offer {
+        guard route != nil, !fixtures else { return .none }
         return cardSeen ? .banner : .card
     }
 

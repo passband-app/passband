@@ -35,10 +35,6 @@ struct PassbandApp: App {
                 .onAppear {
                     KeyMonitor.shared.onZoomIn = { Zoom.zoomIn() }
                     KeyMonitor.shared.install()
-                    // The tester's panel beside the window, never for a
-                    // customer: the flag is a launch argument only a
-                    // rehearsal script passes.
-                    if RehearsalMode.launchedStandalone { RehearsalControlPanel.shared.show() }
                 }
                 // passband://pair links. Parked on the store rather than acted
                 // on here: only the Connect gate can pair, and an install that
@@ -58,11 +54,6 @@ struct PassbandApp: App {
         .windowToolbarStyle(.unifiedCompact)
         .commands {
             PassbandCommands(store: store, prefs: prefs, accounts: accounts)
-            if RehearsalMode.launchedStandalone {
-                CommandMenu("Rehearsal") {
-                    Button("Show rehearsal controls") { RehearsalControlPanel.shared.show() }
-                }
-            }
         }
     }
 }
@@ -76,7 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // center without one drops it.
         Notifier.shared.install()
         // Look at the floating code panel without waiting for a login code:
-        // same posture as PASSBAND_FORCE_TOUR, a launch environment only.
+        // same posture as PASSBAND_FIRST_LOAD, a launch environment only.
         if let code = ProcessInfo.processInfo.environment["PASSBAND_PREVIEW_LOGIN_CODE"] {
             LoginCodePanel.shared.show(
                 .init(service: "GitHub", code: code), sender: "GitHub <noreply@github.com>",
@@ -223,12 +214,10 @@ struct PassbandCommands: Commands {
     /// reach them — ⌘1 would still switch accounts out from under a run that is
     /// counting the mailbox it started on, and ⌘K would still open the ask bar.
     /// Each one that navigates or writes is disabled for the duration.
-    /// Also the whole of the practice inbox and its veils
-    /// (`accountActionsBlocked`), ON PURPOSE for every command here and not
-    /// only the account ones: navigation is refused by `setView` for the
-    /// duration, a composer could only fail to send, the ask bar has no relay
-    /// behind it, and a refresh has nothing to refresh. A menu that greys out
-    /// is honest about that; one that silently does nothing is not.
+    /// Also while an account change is in flight (`accountActionsBlocked`),
+    /// ON PURPOSE for every command here and not only the account ones: a
+    /// menu that greys out is honest about that; one that silently does
+    /// nothing is not.
     private var blocked: Bool { store.retriage != nil || store.accountActionsBlocked }
 
     var body: some Commands {

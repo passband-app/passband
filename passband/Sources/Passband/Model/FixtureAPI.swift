@@ -1,50 +1,45 @@
 import Foundation
 
-/// An in-memory implementation of the human-door wire contract. The production
-/// API client, dashboard, reader, actions, and rules editor all use this transport
-/// in rehearsal. Unsupported operations fail here; none fall through to a server.
-actor RehearsalAPI {
-    static let shared = RehearsalAPI()
-    private var mailbox = OnboardingRehearsal()
+/// An in-memory implementation of the human-door wire contract, behind
+/// `FixtureMode`. The production API client, dashboard, reader, actions, and
+/// rules editor all use this transport while the fixture inbox is up (the
+/// phone's debug screenshot harness, `FixtureStage`). Unsupported operations
+/// fail here; none fall through to a server.
+actor FixtureAPI {
+    static let shared = FixtureAPI()
+    private var mailbox = FixtureMail()
     private var referenceDate: Date
     private var rules: [SenderRule] = []
     private var nextRuleID = 1
     /// Send groups, held WITH their membership; the list read strips it, the
-    /// way the daemon's does. Empty in the lesson, which never makes one: they
-    /// are here so the Groups page and its editor answer in rehearsal instead
+    /// way the daemon's does. Empty in the fixture mail, which never makes one: they
+    /// are here so the Groups page and its editor answer in the fixture inbox instead
     /// of failing a save that was never going anywhere.
     private var groups: [SendGroup] = []
     private var nextGroupID = 1
-    /// What a staged group has "sent". Nothing in rehearsal sends, so this is
+    /// What a staged group has "sent". Nothing in the fixture inbox sends, so this is
     /// only ever what `stage` put there.
     private var groupHistory: [Int: [GroupHistoryEntry]] = [:]
-    /// The drafts the practice composer saved, kept for the session only so
+    /// The drafts the fixture composer saved, kept for the session only so
     /// the picker is not empty right after a save. `reset` drops them, so a
-    /// practice draft never outlives the rehearsal.
+    /// fixture draft never outlives the launch.
     private var drafts: [Int: DraftView] = [:]
     private var nextDraftID = 1
     private var clearedShipments: Set<Int> = []
-    /// The practice "Languages I read", kept for the session so the card's
-    /// add and remove answer the way a daemon's do. Nothing in practice is
+    /// The fixture "Languages I read", kept for the session so the card's
+    /// add and remove answer the way a daemon's do. Nothing in the fixture inbox is
     /// translated by it; `reset` drops it.
     private var readLanguages: [String] = []
     private var statusOverrides: [Int: AttentionStatus] = [:]
     private var tierOverrides: [Int: Tier] = [:]
     private var importanceOverrides: [Int: Int] = [:]
     private var reminders: [Int: String] = [:]
-    private var newsletterPhotos: [String: String] = [:]
-    /// The live mailbox's address, when practice was entered from one: the
-    /// greeting seeds its name from `/client/stats`, and a fixture address
-    /// there would name the person after the fixture.
+    /// The address `/client/stats` reports, when `reset` is handed one: the
+    /// greeting seeds its name from it. Nil reports the fixture's own.
     private var accountEmail: String?
-    /// Where the newsletter photographs live when there is no app bundle to
-    /// ask — the test binary's checkout. The app passes nothing and reads
-    /// its bundle; a shipped binary carries no path into anyone's sources.
-    private let resourceDirectory: URL?
 
-    init(referenceDate: Date = Date(), resourceDirectory: URL? = nil) {
+    init(referenceDate: Date = Date()) {
         self.referenceDate = referenceDate
-        self.resourceDirectory = resourceDirectory
     }
 
     func reset(accountEmail: String? = nil) {
@@ -55,11 +50,11 @@ actor RehearsalAPI {
         groups = []; nextGroupID = 1; groupHistory = [:]; readLanguages = []
         statusOverrides = [:]; tierOverrides = [:]; importanceOverrides = [:]; reminders = [:]
     }
-    func snapshot() -> OnboardingRehearsal { mailbox }
+    func snapshot() -> FixtureMail { mailbox }
 
     #if DEBUG
         /// Rules and groups laid in for a screenshot (PassbandiOS/Lib/
-        /// FixtureStage.swift). The lesson never calls this: a practice inbox
+        /// FixtureStage.swift). The fixture mail never calls this: a fixture inbox
         /// that arrived with rules already written would be teaching someone
         /// to tune senders that were tuned for them.
         func stage(rules: [SenderRule], groups: [SendGroup], history: [Int: [GroupHistoryEntry]]) {
@@ -70,7 +65,7 @@ actor RehearsalAPI {
             groupHistory = history
         }
 
-        /// THREADS IN ANOTHER LANGUAGE, which the lesson does not have: each
+        /// THREADS IN ANOTHER LANGUAGE, which the fixture mail does not have: each
         /// is a run of versions served one per fetch, the last one sticking, so
         /// a pending translation can be seen to land the way a daemon's does.
         /// A version carrying a `deferred` translation is the daemon's archive
@@ -103,7 +98,7 @@ actor RehearsalAPI {
         }
 
         /// Sent mail and an outbox, for the same reason and the same caller:
-        /// the lesson sends nothing and schedules nothing, so its Sent page is
+        /// the fixture inbox sends nothing and schedules nothing, so its Sent page is
         /// the empty one. Only a screenshot ever fills these.
         private var stagedSent: [SentItem] = []
         private var stagedScheduled: [ScheduledSendView] = []
@@ -113,7 +108,7 @@ actor RehearsalAPI {
         }
 
         /// A timeline, and the stats that open the calendar to it (a daemon
-        /// that serves a timeline, a granted Google Calendar). The lesson never claims one; only the phone's
+        /// that serves a timeline, a granted Google Calendar). The fixture mail never claims one; only the phone's
         /// screenshot harness stages this (`--fixture-calendar`).
         private var stagedTimeline: TimelineFeed?
         func stage(timeline: TimelineFeed) {
@@ -131,7 +126,7 @@ actor RehearsalAPI {
             var granted: Bool
         }
 
-        /// Self-contained on purpose: the rehearsal suite compiles this file
+        /// Self-contained on purpose: the fixture-api suite compiles this file
         /// without the calendar's own rules.
         private func stagedCalendarSearch(_ q: String, limit: Int) -> StagedSearchPage {
             let words = q.lowercased().split(separator: " ").map(String.init).filter { !$0.contains(":") }
@@ -176,17 +171,8 @@ actor RehearsalAPI {
         #endif
     }
 
-    /// Confirm the saved rule, not the editor's requested/default disposition,
-    /// actually governs and suppresses this sample after specificity is resolved.
-    func suppresses(messageID: Int, viaRuleID: Int) -> Bool {
-        guard let message = mailbox.messages.first(where: { $0.id == messageID }),
-              let governing = ruleFor(message), governing.id == viaRuleID,
-              governing.disposition == .squelch else { return false }
-        return update(message).tier == .noise
-    }
-
     func response(for request: URLRequest) throws -> (Data, HTTPURLResponse) {
-        guard let url = request.url else { throw APIError(.badRequest, 400, "Missing practice request URL") }
+        guard let url = request.url else { throw APIError(.badRequest, 400, "Missing fixture request URL") }
         let path = url.path
         let method = request.httpMethod ?? "GET"
         let components = path.split(separator: "/").map(String.init)
@@ -230,7 +216,7 @@ actor RehearsalAPI {
                 }
             }.map { message in
                 let row = update(message)
-                let kinds: [OnboardingRehearsal.Category: String] = [
+                let kinds: [FixtureMail.Category: String] = [
                     .attention: "correspondence", .reading: "editorial", .calendar: "event_reservation",
                     .shipments: "delivery", .banking: "financial_update", .receipts: "receipt"]
                 return AgentFeedItem(message_id: message.id, thread_id: threadID(message.id),
@@ -238,7 +224,7 @@ actor RehearsalAPI {
                     decision: AgentMessageDecision(kinds: [kinds[message.category]!],
                         destinations: message.lane == .reading ? ["reading"] : [],
                         // The club night (id 6) is an event promotion, so the
-                        // practice board shows the content/promotion split.
+                        // fixture board shows the content/promotion split.
                         reading_kind: message.lane == .reading
                             ? (message.id == 6 ? "promotion" : "content") : nil,
                         summary: message.explanation, reason: message.explanation, records: recordFacts(message)),
@@ -260,7 +246,7 @@ actor RehearsalAPI {
                 assistant_relay: false, invite_sharing: false, forwarding: false,
                 gmail: GmailHealth(connected: true),
                 // Without it the saver falls back to the key-less PUT, which
-                // is not stubbed here: every practice save would fail
+                // is not stubbed here: every fixture save would fail
                 // silently under a "kept in drafts" toast.
                 drafts_v2: true)
             data = try encode(withStagedCalendar(stats))
@@ -304,7 +290,7 @@ actor RehearsalAPI {
         case ("POST", "/client/rules"):
             data = try saveRule(body, id: nil)
         case ("GET", "/client/rules/suggest"):
-            // No model in practice: the card shows its generic example.
+            // No model in the fixture inbox: the card shows its generic example.
             data = try encode(RuleSuggestion(suggestion: nil))
         case ("GET", "/client/search"):
             let term = (query["q"] ?? "").lowercased()
@@ -327,7 +313,7 @@ actor RehearsalAPI {
         case ("GET", "/client/sealed"), ("GET", "/client/marketing"), ("GET", "/client/unsubscribes"), ("GET", "/client/audit"), ("GET", "/client/triage-feedback"), ("GET", "/client/contacts"), ("GET", "/client/senders"), ("GET", "/client/sender-domains"):
             data = Data("[]".utf8)
         case ("GET", "/client/person"):
-            // The practice inbox has no history behind its senders: the card
+            // The fixture inbox has no history behind its senders: the card
             // shows who they are and nothing else.
             data = try json([
                 "addr": query["addr"] ?? "", "is_self": false, "known_contact": false,
@@ -335,12 +321,12 @@ actor RehearsalAPI {
             ])
         case ("GET", "/client/drafts"):
             // Newest first, like the daemon. `forwards=1` is not consulted:
-            // there is no older app in a rehearsal to hide forwards from.
+            // there is no older app in the fixture inbox to hide forwards from.
             data = try encode(drafts.values.sorted { $0.id > $1.id })
         case ("POST", "/client/drafts"):
-            // The draft routes, stubbed so a practice composer's autosave
+            // The draft routes, stubbed so a fixture composer's autosave
             // answers like a daemon's rather than failing (see `drafts`).
-            data = try practiceDraft(body, id: nil)
+            data = try fixtureDraft(body, id: nil)
         case ("PUT", "/client/drafts"):
             // The keyed upsert replies and forwards use. Key-less is the old
             // new-message slot, which a `drafts_v2` client never sends.
@@ -350,7 +336,7 @@ actor RehearsalAPI {
             let existing = drafts.values.first {
                 $0.reply_to_message_id == reply && $0.forward_of_message_id == forward
             }
-            data = try practiceDraft(body, id: existing?.id)
+            data = try fixtureDraft(body, id: existing?.id)
         #if DEBUG
             // Staged rows only (see `stage(sent:scheduled:)`); unstaged, the
             // Sent page answers exactly what it does in a shipped build.
@@ -368,9 +354,9 @@ actor RehearsalAPI {
         #endif
         case ("GET", "/client/sent"):
             data = try json(["items": []])
-        // The practice stats never claim a timeline, so the calendar page is
+        // The fixture stats never claim a timeline, so the calendar page is
         // not reachable here; these answer anyway, empty, so nothing that
-        // asks can crash the lesson.
+        // asks can crash the board.
         case ("GET", "/client/timeline"):
             data = try json(["ghosts": []])
         case ("POST", "/client/timeline/refresh"):
@@ -384,7 +370,7 @@ actor RehearsalAPI {
         case ("POST", "/client/translate-config"):
             // The daemon's rule: unknown codes and English are dropped, and the
             // body replaces the whole set.
-            let known = Set(Self.practiceLanguages.map(\.code))
+            let known = Set(Self.fixtureLanguages.map(\.code))
             var next: [String] = []
             for code in (body["read_languages"] as? [String] ?? []).map({ $0.lowercased() })
             where known.contains(code) && !next.contains(code) {
@@ -414,7 +400,7 @@ actor RehearsalAPI {
                     mailbox.open(id)
                     data = try json(["ok": true])
                 } else if components.count == 4, method == "GET" {
-                    let nested = URLRequest(url: URL(string: "https://rehearsal.invalid/client/thread/\(threadID(id))")!)
+                    let nested = URLRequest(url: URL(string: "https://fixtures.invalid/client/thread/\(threadID(id))")!)
                     let (threadData, _) = try response(for: nested)
                     let thread = try JSONDecoder().decode(ClientThreadView.self, from: threadData)
                     data = try encode(HumanMessageEnvelope(message_id: id, thread: thread))
@@ -431,7 +417,7 @@ actor RehearsalAPI {
                 for message in mailbox.messages where threadID(message.id) == components[2] { mailbox.open(message.id) }
                 data = try json(["ok": true])
             } else if components.count == 4, components[1] == "thread", components[3] == "translate", method == "POST" {
-                // The practice inbox is English: nothing is deferred, nothing moves.
+                // The fixture inbox is English: nothing is deferred, nothing moves.
                 data = try json(["promoted": 0])
             } else if components.count == 4, components[1] == "updates", let id = Int(components[2]), has(id) {
                 if components[3] == "status", method == "POST", let raw = body["status"] as? String, let status = AttentionStatus(rawValue: raw) {
@@ -447,7 +433,7 @@ actor RehearsalAPI {
             } else if components.count == 3, components[1] == "drafts", method == "PUT",
                       let id = Int(components[2]) {
                 guard drafts[id] != nil else { throw missing() }
-                data = try practiceDraft(body, id: id)
+                data = try fixtureDraft(body, id: id)
             } else if components.count == 3, components[1] == "drafts", method == "DELETE",
                       let id = Int(components[2]) {
                 guard drafts.removeValue(forKey: id) != nil else { throw missing() }
@@ -475,9 +461,9 @@ actor RehearsalAPI {
         return (data, HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!)
     }
 
-    /// A saved practice draft, stored for the session and echoed back as the
+    /// A saved fixture draft, stored for the session and echoed back as the
     /// daemon's `DraftView` would be. `id` nil mints one; an id is kept.
-    private func practiceDraft(_ body: [String: Any], id: Int?) throws -> Data {
+    private func fixtureDraft(_ body: [String: Any], id: Int?) throws -> Data {
         let draftID = id ?? nextDraftID
         if id == nil { nextDraftID += 1 }
         let now = stamp()
@@ -494,7 +480,7 @@ actor RehearsalAPI {
     }
 
     /// Fictional record facts use the same typed surface as real triage.
-    private func recordFacts(_ message: OnboardingRehearsal.Message) -> [AgentRecordProposal] {
+    private func recordFacts(_ message: FixtureMail.Message) -> [AgentRecordProposal] {
         switch message.category {
         case .receipts:
             return [AgentRecordProposal(kind: "receipt", merchant: message.sender,
@@ -510,7 +496,7 @@ actor RehearsalAPI {
         }
     }
 
-    private func update(_ message: OnboardingRehearsal.Message) -> AttentionUpdate {
+    private func update(_ message: FixtureMail.Message) -> AttentionUpdate {
         let rule = ruleFor(message)
         let tier = tierOverrides[message.id] ?? (rule?.disposition == .surface ? Tier.signal : rule?.disposition == .squelch ? .noise : message.lane == .attention ? .signal : .noise)
         let status = statusOverrides[message.id] ?? (message.isDone || message.lane == .records ? AttentionStatus.done : message.isRead ? .open : .new)
@@ -541,10 +527,10 @@ actor RehearsalAPI {
     }
     private func saveRule(_ body: [String: Any], id: Int?) throws -> Data {
         guard let pattern = body["match_pattern"] as? String, !pattern.isEmpty, let want = body["want"] as? String else {
-            throw APIError(.badRequest, 400, "A practice rule needs a sender and instruction")
+            throw APIError(.badRequest, 400, "A fixture rule needs a sender and instruction")
         }
         // Explicit dispositions are faithfully applied. Free-text filters are
-        // retained for editor rehearsal, without pretending a local fixture is AI.
+        // retained so the editor can save them, without pretending a local fixture is AI.
         let disposition = (body["disposition"] as? String).flatMap(Disposition.init(rawValue:)) ?? .filtered
         let ruleID = id ?? nextRuleID
         if id == nil { nextRuleID += 1 }
@@ -563,7 +549,7 @@ actor RehearsalAPI {
     /// history, which is exactly what an undone delete comes back as.
     private func saveGroup(_ body: [String: Any], id: Int?) throws -> Data {
         guard let name = (body["name"] as? String)?.trimmingCharacters(in: .whitespaces), !name.isEmpty else {
-            throw APIError(.badRequest, 400, "A practice group needs a name")
+            throw APIError(.badRequest, 400, "A fixture group needs a name")
         }
         let members = (body["members"] as? [[String: Any]] ?? []).compactMap { member in
             (member["addr"] as? String).map { GroupMember(addr: $0, display_name: member["display_name"] as? String) }
@@ -580,7 +566,7 @@ actor RehearsalAPI {
         groups.append(group)
         return try encode(group)
     }
-    private func ruleFor(_ message: OnboardingRehearsal.Message) -> SenderRule? {
+    private func ruleFor(_ message: FixtureMail.Message) -> SenderRule? {
         rules.filter { matches($0.match_pattern, address(message)) }.sorted {
             let a = $0.match_pattern.filter { $0 == "*" }.count
             let b = $1.match_pattern.filter { $0 == "*" }.count
@@ -593,7 +579,7 @@ actor RehearsalAPI {
     }
     private func has(_ id: Int) -> Bool { mailbox.messages.contains { $0.id == id } }
     private func threadID(_ id: Int) -> String { "practice-\(id)" }
-    private func address(_ message: OnboardingRehearsal.Message) -> String {
+    private func address(_ message: FixtureMail.Message) -> String {
         switch message.id {
         case 1: "maya@studio.example"
         case 2, 8: "receipts@cornercoffee.example"
@@ -614,24 +600,7 @@ actor RehearsalAPI {
         default: "receipts@maplebooks.example"
         }
     }
-    /// Inline photos are bundled with the app; cache their data URLs once per
-    /// process so reopening a newsletter does no file I/O or base64 work.
-    private func newsletterPhoto(_ name: String, alt: String) -> String {
-        if newsletterPhotos[name] == nil {
-            // The bundle (or the directory a test handed over), or nothing: a
-            // newsletter without its photograph is still a newsletter.
-            let url = Bundle.main.url(forResource: name, withExtension: "jpg")
-                ?? Bundle.main.url(forResource: name, withExtension: "jpg", subdirectory: "Resources")
-                ?? resourceDirectory?.appendingPathComponent("\(name).jpg")
-            if let url, let bytes = try? Data(contentsOf: url) {
-                newsletterPhotos[name] = "data:image/jpeg;base64," + bytes.base64EncodedString()
-            }
-        }
-        guard let dataURL = newsletterPhotos[name] else { return "" }
-        return "<img src=\"\(dataURL)\" alt=\"\(alt)\" width=\"600\" height=\"400\" style=\"display:block;width:100%;height:auto;aspect-ratio:3/2;object-fit:cover;border:0\">"
-    }
-
-    private func newsletterHTML(_ message: OnboardingRehearsal.Message) -> String {
+    private func newsletterHTML(_ message: FixtureMail.Message) -> String {
         let content: String
         switch message.id {
         case 3:
@@ -639,27 +608,24 @@ actor RehearsalAPI {
             <body style="margin:0;background:#f5efdf;padding:24px 12px;color:#293b30;font-family:Georgia,serif">
             <table role="presentation" style="max-width:600px;width:100%;margin:auto;border-collapse:collapse;background:#fffcf3">
             <tr><td style="padding:28px 30px 18px;border-bottom:2px solid #293b30;text-align:center"><div style="font:11px Arial,sans-serif;letter-spacing:3px">THE SUNDAY EDITION · VOL. 028</div><div style="font-size:52px;letter-spacing:-2px;margin:12px 0">Cats Weekly</div><div style="font-size:15px;font-style:italic">Good cats. Questionable decisions.</div></td></tr>
-            <tr><td>\(newsletterPhoto("rehearsal-cats", alt: "A cat enjoying a quiet sunlit afternoon"))</td></tr>
             <tr><td style="padding:30px"><div style="font:11px Arial,sans-serif;letter-spacing:2px;color:#956751">THE COVER STORY</div><h1 style="font-size:38px;line-height:1.08;margin:14px 0 18px">The box was the gift.<br>The cat has spoken.</h1><p style="font-size:17px;line-height:1.65">You bought the handwoven bed. You researched the orthopedic cushion. You read thirty-seven reviews. Miso has chosen the cardboard packaging, and would appreciate it if you respected the process.</p><hr style="border:0;border-top:1px solid #ded8c7;margin:28px 0"><h2 style="font-size:23px">Field notes: the sunbeam shift</h2><p style="font-size:16px;line-height:1.7">At 10:14, the warm square moves off the rug. At 10:15, so does the cat. We spent a week tracking this demanding schedule so you don’t have to.</p><div style="padding:22px;background:#e9eedb;margin:26px 0"><h2 style="font-size:23px;margin-top:0">Ask a cat</h2><p style="line-height:1.65"><b>Q:</b> Why knock a full glass off the table?<br><b>A:</b> It was up there. Now it’s down here. Please keep up.</p></div><h2 style="font-size:23px">This week’s small joy</h2><p style="font-size:16px;line-height:1.7">A slow blink from across the room. Send one back.</p></td></tr>
-            <tr><td style="padding:22px 30px;border-top:1px solid #ded8c7;font:11px/1.6 Arial,sans-serif;color:#6a7567">You’re receiving Cats Weekly because the internet needed one more cat newsletter.<br>Fictional practice edition · All the cats, none of the urgency.</td></tr></table></body>
+            <tr><td style="padding:22px 30px;border-top:1px solid #ded8c7;font:11px/1.6 Arial,sans-serif;color:#6a7567">You’re receiving Cats Weekly because the internet needed one more cat newsletter.<br>Fictional fixture edition · All the cats, none of the urgency.</td></tr></table></body>
             """
         case 6:
             content = """
             <body style="margin:0;background:#101010;padding:24px 12px;color:#eeeeea;font-family:Arial,Helvetica,sans-serif">
             <table role="presentation" style="max-width:600px;width:100%;margin:auto;border-collapse:collapse;background:#171717">
             <tr><td style="padding:24px;border-top:8px solid #d9ff43"><div style="font:11px monospace;letter-spacing:2px;color:#d9ff43">PROGRAM 041 / AFTER DARK</div><div style="font-size:49px;line-height:1;letter-spacing:-3px;font-weight:900;margin-top:22px">HAIGHTSSION</div></td></tr>
-            <tr><td>\(newsletterPhoto("rehearsal-club", alt: "Monochrome industrial club interior with dramatic light"))</td></tr>
             <tr><td style="padding:26px 24px"><h1 style="font-size:46px;font-weight:900;line-height:.98;letter-spacing:-2px;margin:0 0 24px">NO PHONES.<br>LONG NIGHT.</h1><p style="font-size:15px;line-height:1.7;color:#c9c9c5">Concrete. Low light. A room built around the sound. Our next all-night session moves from stripped percussion into the slow, heavy end of morning.</p><div style="border-top:1px solid #777;border-bottom:1px solid #777;padding:18px 0;margin:26px 0;font:12px/1.8 monospace;letter-spacing:1px">SATURDAY / DOORS 23:00 / UNTIL LATE</div><div style="color:#d9ff43;font:11px monospace;letter-spacing:2px">MAIN FLOOR</div><p style="font:18px/2 monospace">23:00 — NERA<br>02:00 — ECHO NULL [LIVE]<br>05:00 — SABLE FORM</p><div style="color:#d9ff43;font:11px monospace;letter-spacing:2px;margin-top:30px">ROOM TWO</div><p style="font-size:15px;line-height:1.7;color:#c9c9c5">An intimate listening room. Dub, broken rhythms, and somewhere to catch your breath.</p><h2 style="font-size:24px;letter-spacing:-.5px;margin-top:34px">COME AS YOU ARE.</h2><p style="font-size:14px;line-height:1.8;color:#c9c9c5">Respect the room. Ask before touching. Leave your camera in your pocket. If something feels wrong, speak to the door team or anyone wearing a green band.</p></td></tr>
-            <tr><td style="padding:20px 24px;border-top:1px solid #555;color:#999;font:10px/1.8 monospace">DOOR SALES ONLY / SUBJECT TO CAPACITY<br>FICTIONAL EVENT ANNOUNCEMENT · PRACTICE INBOX</td></tr></table></body>
+            <tr><td style="padding:20px 24px;border-top:1px solid #555;color:#999;font:10px/1.8 monospace">DOOR SALES ONLY / SUBJECT TO CAPACITY<br>FICTIONAL EVENT ANNOUNCEMENT · FIXTURE INBOX</td></tr></table></body>
             """
         default:
             content = """
             <body style="margin:0;background:#e8e5dc;padding:24px 12px;color:#181818;font-family:Georgia,'Times New Roman',serif">
             <table role="presentation" style="max-width:600px;width:100%;margin:auto;border-collapse:collapse;background:#fffdf6">
             <tr><td style="padding:22px 26px 16px;border-top:5px solid #181818;text-align:center"><div style="font:10px Arial,sans-serif;letter-spacing:2px">SATIRE / FICTION / AN ENTIRELY INVENTED EDITION</div><div style="font-size:38px;font-weight:bold;line-height:1.05;margin:14px 0">The Federal<br>Overstatement</div><div style="font-size:12px;font-style:italic;border-top:1px solid #181818;border-bottom:3px double #181818;padding:10px 0">All the news that confidently exceeds the available evidence.</div></td></tr>
-            <tr><td>\(newsletterPhoto("rehearsal-politics", alt: "An empty government-style chamber overwhelmed by paperwork"))</td></tr>
             <tr><td style="padding:26px"><div style="font:10px Arial,sans-serif;letter-spacing:2px">NATIONAL AFFAIRS</div><h1 style="font-size:34px;line-height:1.08;margin:12px 0 18px">Congress forms bipartisan committee to locate previous committee</h1><p style="font-size:16px;line-height:1.65"><b>WASHINGTON</b> — In a rare display of unity, lawmakers approved a new commission to determine which room the old commission was meeting in. Its first act was to request a larger room.</p><hr style="border:0;border-top:1px solid #aaa;margin:26px 0"><h2 style="font-size:24px;line-height:1.15">White House unveils strategic reserve of strongly worded statements</h2><p style="font-size:15px;line-height:1.65">Officials assured the public that supplies remain adequate for six consecutive news cycles, provided no one uses “deeply” more than twice per paragraph.</p><h2 style="font-size:24px;line-height:1.15;margin-top:28px">Nation’s infrastructure now 40% ceremonial scissors</h2><p style="font-size:15px;line-height:1.65">A new report praised the country’s readiness to open things while raising questions about whether the things themselves had been built.</p><div style="border:1px solid #181818;padding:20px;margin-top:28px"><div style="font:10px Arial,sans-serif;letter-spacing:2px">THE EDITORIAL BOARD</div><h2 style="font-size:24px;line-height:1.15">At last, a five-year plan for next week</h2><p style="font-size:15px;line-height:1.65">The plan’s authors described its first milestone as “scheduling the meeting about the milestones.”</p></div></td></tr>
-            <tr><td style="padding:20px 26px;border-top:3px double #181818;font:11px/1.6 Arial,sans-serif">SATIRE. Every story is fictional. No actual officials or current events are depicted.<br>The Federal Overstatement · Practice edition.</td></tr></table></body>
+            <tr><td style="padding:20px 26px;border-top:3px double #181818;font:11px/1.6 Arial,sans-serif">SATIRE. Every story is fictional. No actual officials or current events are depicted.<br>The Federal Overstatement · Fixture edition.</td></tr></table></body>
             """
         }
         return "<!doctype html><html>" + content + "</html>"
@@ -692,7 +658,7 @@ actor RehearsalAPI {
         """
     }
 
-    private func rainforestHTML(_ message: OnboardingRehearsal.Message) -> String {
+    private func rainforestHTML(_ message: FixtureMail.Message) -> String {
         let outForDelivery = message.id == 13
         let date = DateFormatter()
         date.dateStyle = .full
@@ -725,7 +691,7 @@ actor RehearsalAPI {
         """
     }
 
-    private func calendarExperienceHTML(_ message: OnboardingRehearsal.Message) -> String {
+    private func calendarExperienceHTML(_ message: FixtureMail.Message) -> String {
         let date = DateFormatter()
         date.dateStyle = .full
         date.timeStyle = .short
@@ -762,7 +728,7 @@ actor RehearsalAPI {
         let hour = id == 17 ? 10 : id == 18 ? 19 : 18
         return calendar.date(byAdding: .hour, value: hour, to: tomorrow)!
     }
-    private func renderedBody(_ message: OnboardingRehearsal.Message) -> String {
+    private func renderedBody(_ message: FixtureMail.Message) -> String {
         let date = DateFormatter()
         date.dateStyle = .full
         date.timeStyle = .short
@@ -778,7 +744,7 @@ actor RehearsalAPI {
     /// Provider-style email markup goes through the same production HTML reader
     /// as received mail. All styling is inline; there are no remote resources,
     /// links, tracking pixels, or scripts. The plain-text alternative stays intact.
-    private func renderedHTML(_ message: OnboardingRehearsal.Message) -> String? {
+    private func renderedHTML(_ message: FixtureMail.Message) -> String? {
         if message.category == .reading { return newsletterHTML(message) }
         if message.id == 11 { return brightlyHTML() }
         if [10, 18].contains(message.id) { return calendarExperienceHTML(message) }
@@ -800,37 +766,36 @@ actor RehearsalAPI {
         <table role="presentation" style="width:100%;max-width:560px;margin:auto;border-collapse:collapse;background:#ffffff;border:1px solid #e3e6e9">
         <tr><td style="padding:24px 30px;border-bottom:3px solid \(accent);font-size:24px;font-weight:700;color:\(accent)">\(providerHeader)</td></tr>
         <tr><td style="padding:28px 30px"><h1 style="margin:0 0 24px;font-size:22px;line-height:1.3">\(escape(message.subject))</h1><div style="white-space:pre-wrap;overflow-wrap:anywhere;font-family:\(type);font-size:14px;line-height:1.65">\(escape(renderedBody(message)))</div></td></tr>
-        <tr><td style="padding:18px 30px;background:#f8f9fa;border-top:1px solid #e3e6e9;font-size:11px;line-height:1.5;color:#68737d">Fictional email for your Passband practice inbox. No payment, delivery, or meeting is associated with this message.</td></tr>
+        <tr><td style="padding:18px 30px;background:#f8f9fa;border-top:1px solid #e3e6e9;font-size:11px;line-height:1.5;color:#68737d">Fictional email for your Passband fixture inbox. No payment, delivery, or meeting is associated with this message.</td></tr>
         </table></body></html>
         """
     }
     private func stamp(_ offset: TimeInterval = 0) -> String { referenceDate.addingTimeInterval(offset).ISO8601Format() }
     /// A short list rather than the detector's ~68: enough to try the card on.
     /// Sorted by name, the way the daemon sends it.
-    static let practiceLanguages: [TranslateLanguage] = [
+    static let fixtureLanguages: [TranslateLanguage] = [
         ("zh", "Chinese"), ("nl", "Dutch"), ("fr", "French"), ("de", "German"),
         ("hi", "Hindi"), ("it", "Italian"), ("ja", "Japanese"), ("ko", "Korean"),
         ("pt", "Portuguese"), ("es", "Spanish"),
     ].map { TranslateLanguage(code: $0.0, name: $0.1) }
 
-    /// Active, because the practice inbox shows translated mail.
+    /// Active, because the fixture inbox shows translated mail.
     private func translateConfig() throws -> Data {
-        try encode(TranslateConfig(active: true, read_languages: readLanguages, available: Self.practiceLanguages))
+        try encode(TranslateConfig(active: true, read_languages: readLanguages, available: Self.fixtureLanguages))
     }
 
     private func encode<T: Encodable>(_ value: T) throws -> Data { try JSONEncoder().encode(value) }
     private func json(_ value: [String: Any]) throws -> Data { try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) }
-    private func unsupported() -> APIError { APIError(.badRequest, 400, "This action isn't available in the practice inbox. Nothing was sent or changed outside this rehearsal.") }
-    private func missing() -> APIError { APIError(.notFound, 404, "This message is not in the practice inbox.") }
+    private func unsupported() -> APIError { APIError(.badRequest, 400, "This action isn't available in the fixture inbox. Nothing was sent or changed.") }
+    private func missing() -> APIError { APIError(.notFound, 404, "This message is not in the fixture inbox.") }
 }
 
 #if DEBUG
     /// MAIL IN FRENCH, for seeing the reader's translation strip without a
     /// daemon that translates (PassbandiOS FixtureStage's `translated` scenes,
     /// and any Mac hook that wants it). Debug only, and never part of the
-    /// lesson: the practice inbox is English, and a stranger's first look at
-    /// Passband is not the place to meet a language they may not read.
-    extension RehearsalAPI {
+    /// fixture mail itself, which is English.
+    extension FixtureAPI {
         enum TranslationFixture {
             enum Scene: String, CaseIterable, Sendable {
                 /// One message, translated, in HTML.
@@ -970,7 +935,7 @@ actor RehearsalAPI {
 
             /// The versions to stage for `scene` under `threadId`, first fetch
             /// first. Seed the prefetch cache with the first one too, so the
-            /// reader opens on it rather than on the practice thread it replaces.
+            /// reader opens on it rather than on the fixture thread it replaces.
             static func versions(_ scene: Scene, threadId: String) -> [ClientThreadView] {
                 func view(_ subject: String, _ messages: [ClientMessage]) -> ClientThreadView {
                     ClientThreadView(

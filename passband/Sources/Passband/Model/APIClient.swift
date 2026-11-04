@@ -116,7 +116,7 @@ actor APIClient {
     /// whole life of the process. That is how a build of a branch is pointed
     /// at a scratch daemon of the same branch without adding an account to
     /// the keychain or touching the account the user actually reads mail
-    /// through. Same posture as `PASSBAND_FORCE_TOUR`: a launch environment
+    /// through. Same posture as `PASSBAND_FIRST_LOAD`: a launch environment
     /// only a developer sets, never a preference, never persisted. A user
     /// double-clicking the app has neither variable.
     ///
@@ -149,7 +149,7 @@ actor APIClient {
     }
 
     private func requireConfig() throws -> Config {
-        if RehearsalMode.isEnabled { return Config(baseURL: "https://rehearsal.invalid", token: "practice") }
+        if FixtureMode.isEnabled { return Config(baseURL: "https://fixtures.invalid", token: "fixtures") }
         guard let config else { throw APIError(.network, 0, "client not configured") }
         return config
     }
@@ -201,12 +201,12 @@ actor APIClient {
 
     /// Perform a request and return the raw body. Non-2xx throws an APIError
     /// whose message comes from the server's `{"error": …}` body when present.
-    private func perform(_ req: URLRequest, allowPractice: Bool = true) async throws -> (Data, HTTPURLResponse) {
-        if RehearsalMode.isEnabled {
-            guard allowPractice else {
-                throw APIError(.badRequest, 400, "Finish the practice inbox before changing accounts.")
+    private func perform(_ req: URLRequest, allowFixtures: Bool = true) async throws -> (Data, HTTPURLResponse) {
+        if FixtureMode.isEnabled {
+            guard allowFixtures else {
+                throw APIError(.badRequest, 400, "Accounts can't change while the fixture inbox is up.")
             }
-            return try await RehearsalAPI.shared.response(for: req)
+            return try await FixtureAPI.shared.response(for: req)
         }
         let data: Data
         let response: URLResponse
@@ -356,11 +356,11 @@ actor APIClient {
     /// the request was out must not have the old daemon's 404 silence the new
     /// one.
     ///
-    /// Nothing is sent for the practice inbox. Its mail is fixtures and its
+    /// Nothing is sent for the fixture inbox. Its mail is fixtures and its
     /// message ids are made up; the fixture transport would only refuse the
     /// route, but refusing HERE means the request is never built at all.
     func reportAttention(messageId: Int, dwellMs: UInt64, linkClicks: UInt32) async {
-        guard !RehearsalMode.isEnabled, !attentionUnsupported, let asked = config?.baseURL else { return }
+        guard !FixtureMode.isEnabled, !attentionUnsupported, let asked = config?.baseURL else { return }
         do {
             try await postNoContent(
                 "/client/v2/messages/\(messageId)/attention",
@@ -570,8 +570,8 @@ actor APIClient {
     /// `retrying: false` asks exactly once, for a caller with a person waiting
     /// on the answer who can simply ask again.
     func probe(baseURL: String, token: String, retrying: Bool = true) async throws {
-        guard !RehearsalMode.isEnabled else {
-            throw APIError(.badRequest, 400, "Finish the practice inbox before changing accounts.")
+        guard !FixtureMode.isEnabled else {
+            throw APIError(.badRequest, 400, "Accounts can't change while the fixture inbox is up.")
         }
         var retry = CapabilityProbeRetry()
         while true {
@@ -598,8 +598,8 @@ actor APIClient {
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.identifyClient()
         do {
-            let (data, _) = try await perform(req, allowPractice: false)
-            guard !RehearsalMode.isEnabled else {
+            let (data, _) = try await perform(req, allowFixtures: false)
+            guard !FixtureMode.isEnabled else {
                 throw APIError(.badRequest, 400, "The mailbox changed during the credential check. Try again.")
             }
             guard let capabilities = try? decode(TriageCapabilities.self, from: data),
@@ -642,12 +642,12 @@ actor APIClient {
     }
 
     func getReceipts(days: Int? = nil) async throws -> [Receipt] {
-        if RehearsalMode.isEnabled { return try await get("/client/receipts") }
+        if FixtureMode.isEnabled { return try await get("/client/receipts") }
         return try await getFeed(destination: "records", limit: 1000).receipts
     }
 
     func getCalendar(hours: Int? = nil) async throws -> [CalendarUpdate] {
-        if RehearsalMode.isEnabled { return try await get("/client/calendar") }
+        if FixtureMode.isEnabled { return try await get("/client/calendar") }
         return try await getFeed(destination: "records", limit: 1000).calendar
     }
 
@@ -759,7 +759,7 @@ actor APIClient {
     }
 
     func getBanking() async throws -> [BankingRecord] {
-        if RehearsalMode.isEnabled { return try await get("/client/banking") }
+        if FixtureMode.isEnabled { return try await get("/client/banking") }
         return try await getFeed(destination: "records", limit: 1000).banking
     }
 
@@ -956,9 +956,9 @@ actor APIClient {
     /// Ask the daemon to mark expired and plainly unwanted Reading mail done.
     /// nil when this daemon predates the route.
     ///
-    /// Never asked of the practice inbox: its mail is fixtures.
+    /// Never asked of the fixture inbox: its mail is fixtures.
     func smartClear() async throws -> SmartClearResult? {
-        guard !RehearsalMode.isEnabled else { return nil }
+        guard !FixtureMode.isEnabled else { return nil }
         do {
             return try await post(
                 "/client/v2/reading/smart_clear", body: EmptyBody(),

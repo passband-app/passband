@@ -1,15 +1,11 @@
 import Foundation
 
 @main
-struct RehearsalAPITests {
+struct FixtureAPITests {
     static func main() async throws {
-        // test.sh runs from the passband directory; the photographs are read
-        // from the checkout because a bare test binary has no bundle.
-        let api = RehearsalAPI(
-            referenceDate: Date(timeIntervalSince1970: 1_789_200_000),
-            resourceDirectory: URL(fileURLWithPath: "Sources/Passband/Resources", isDirectory: true))
+        let api = FixtureAPI(referenceDate: Date(timeIntervalSince1970: 1_789_200_000))
         func request(_ path: String, method: String = "GET", body: [String: String]? = nil) -> URLRequest {
-            var request = URLRequest(url: URL(string: "https://rehearsal.invalid/client/" + path)!)
+            var request = URLRequest(url: URL(string: "https://fixtures.invalid/client/" + path)!)
             request.httpMethod = method
             if let body { request.httpBody = try! JSONSerialization.data(withJSONObject: body) }
             return request
@@ -29,7 +25,7 @@ struct RehearsalAPITests {
         precondition(exact.message_id == 1 && exact.thread.messages[0].id == 1)
         let initial = try await read("stats", as: StoreStats.self)
         precondition(initial.total == 18 && initial.bands.standing == 3 && initial.catch_up == nil)
-        // The calendar page is unreachable in practice (no timeline, no grant
+        // The calendar page is unreachable in the fixture inbox (no timeline, no grant
         // to ask for), and the timeline answers empty if anything asks.
         precondition(initial.timeline == nil && initial.calendar == nil)
         let timeline = try await read("timeline", as: TimelineFeed.self)
@@ -49,7 +45,7 @@ struct RehearsalAPITests {
             let merchant = try await read("thread/practice-\(id)", as: ClientThreadView.self)
             precondition(merchant.messages[0].from_name == "Rainforest" && merchant.messages[0].from_addr == "orders@rainforest.example")
         }
-        // The languages card answers in practice, and a save replaces the set
+        // The languages card answers in the fixture inbox, and a save replaces the set
         // with the daemon's rule: unknown codes and English dropped.
         let languages = try await read("translate-config", as: TranslateConfig.self)
         precondition(languages.active && languages.read_languages.isEmpty && !languages.available.isEmpty)
@@ -84,12 +80,6 @@ struct RehearsalAPITests {
                 let html = thread.messages[0].html ?? ""
                 precondition(html.contains("<table") && html.contains("<h1"))
                 precondition(!html.contains("<script") && !html.contains("src=\"http"))
-                let prefix = "data:image/jpeg;base64,"
-                guard let start = html.range(of: prefix), let end = html[start.upperBound...].firstIndex(of: "\""),
-                      let photo = Data(base64Encoded: String(html[start.upperBound..<end])) else {
-                    preconditionFailure("Every newsletter must contain its bundled JPEG photo")
-                }
-                precondition(photo.starts(with: [0xff, 0xd8]) && photo.count > 10_000)
                 let repeated = try await read("thread/practice-\(message.id)", as: ClientThreadView.self)
                 precondition(repeated.messages[0].html == html)
             }
@@ -111,20 +101,9 @@ struct RehearsalAPITests {
         precondition(rules.count == 1 && rules[0].id == created.rule_id)
         let muted = try await read("updates?band=standing", as: Page<AttentionUpdate>.self)
         precondition(!muted.items.contains { $0.id == 11 })
-        let actuallyMuted = await api.suppresses(messageID: 11, viaRuleID: created.rule_id)
-        precondition(actuallyMuted)
-        let (unrelatedData, _) = try await api.response(for: request("rules", method: "POST", body: ["match_pattern": "*@different.example", "want": "Mute this sender", "disposition": "squelch"]))
-        let unrelated = try JSONDecoder().decode(CreatedRule.self, from: unrelatedData)
-        let unrelatedMuted = await api.suppresses(messageID: 11, viaRuleID: unrelated.rule_id)
-        precondition(!unrelatedMuted, "A different saved pattern must not claim an existing rule's effect")
         let (allowData, _) = try await api.response(for: request("rules", method: "POST", body: ["match_pattern": "updates@brightly.example", "want": "Keep these visible", "disposition": "surface"]))
         let allow = try JSONDecoder().decode(CreatedRule.self, from: allowData)
-        let allowMuted = await api.suppresses(messageID: 11, viaRuleID: allow.rule_id)
-        let overriddenMute = await api.suppresses(messageID: 11, viaRuleID: created.rule_id)
-        precondition(!allowMuted && !overriddenMute, "An explicit allow and rule specificity must be respected")
         _ = try await api.response(for: request("rules/\(allow.rule_id)", method: "PUT", body: ["match_pattern": "updates@brightly.example", "want": "Only important terms changes", "disposition": "filtered"]))
-        let filteredMuted = await api.suppresses(messageID: 11, viaRuleID: allow.rule_id)
-        precondition(!filteredMuted, "Stored free-text filters must not pretend local fixtures evaluated AI instructions")
         _ = try await api.response(for: request("rules/\(allow.rule_id)", method: "DELETE"))
         _ = try await api.response(for: request("rules/\(created.rule_id)", method: "DELETE"))
         let unmuted = try await read("updates?band=standing", as: Page<AttentionUpdate>.self)
@@ -145,6 +124,6 @@ struct RehearsalAPITests {
         let resetSnapshot = await api.snapshot()
         precondition(reset.total == 18 && reset.bands.standing == 3 && resetRules.isEmpty && resetShipments.count == 3)
         precondition(resetSnapshot.messages.allSatisfy { !$0.isDone && !$0.isRead })
-        print("Rehearsal API tests passed")
+        print("Fixture API tests passed")
     }
 }

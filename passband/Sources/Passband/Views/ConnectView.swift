@@ -168,7 +168,7 @@ struct ConnectView: View {
     @State private var signInOutlook = false
     @State private var showingPairingDetails = false
     /// The gate was mounted because a saved connection could not be restored,
-    /// at launch or after the practice inbox. Fixed at mount: the retry it offers is about
+    /// at launch. Fixed at mount: the retry it offers is about
     /// the keychain, not about whatever error the form shows later, so it
     /// must outlive the form's own habit of clearing `store.connError`.
     @State private var savedConnectionFailed = false
@@ -246,20 +246,20 @@ struct ConnectView: View {
         }
     }
 
-    /// Somebody the intro is not for: they left the practice inbox this
-    /// session, or they have a saved account that failed to restore at launch.
-    /// `hasLeftPractice` alone is session-only, so without the second arm every
-    /// launch whose restore failed (a revoked token, a keychain panel denied
-    /// after an update, a daemon too old for this build) showed a long-time
-    /// user the first-run cold open and a welcome screen with no error on it.
+    /// Somebody the intro is not for: they walked away from a saved
+    /// connection's wait, or they have a saved account that failed to restore
+    /// at launch. Without the second arm every launch whose restore failed (a
+    /// revoked token, a keychain panel denied after an update, a daemon too old
+    /// for this build) showed a long-time user the first-run cold open and a
+    /// welcome screen with no error on it.
     /// A fresh install has no active account and loadSettings clears
     /// `connError` for it, so the intro stays theirs.
     private var isReturning: Bool {
-        store.tour.hasLeftPractice || store.leftSavedConnectionWait
+        store.leftSavedConnectionWait
             || (AccountManager.shared.active != nil && store.connError != nil)
     }
 
-    /// A practice exit or a failed restore may need credentials, but never the
+    /// A failed restore may need credentials, but never the
     /// intro again.
     private var effectiveGateStep: ConnectGateStep {
         if case .introduction = gateStep, isReturning {

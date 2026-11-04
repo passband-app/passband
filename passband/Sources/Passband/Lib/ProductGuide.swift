@@ -274,10 +274,12 @@ enum ProductGuide {
         - j / k or the arrows move. Enter opens the email.
         - e or d marks it done. r replies. h sets a reminder. v fixes a wrong triage call. t writes a rule for that sender.
         - c starts a new message, with or without a highlight.
+        - The first time on a Mac the user leaves a For your eyes email with Esc without marking it done, the board rings that row for a few seconds with "Stays here until you mark it done." It shows once.
 
         Flow mode:
         - Space, or the "flow mode" pill at the top of For your eyes, walks the list one email at a time, starting at the row picked with the arrow keys or the first one. Mail that reaches the list during the walk joins the end of it.
         - In the reader during the walk, e is done and next, and s saves the email for later: it stays on the board and the walk moves on. A small "FLOW MODE" card shows both keys. A key pressed while an email is still moving is kept and plays when the next one lands. A summary card shows at the end.
+        - The first walk on a Mac starts with a short card over the email saying what flow mode is and which keys it uses; after two seconds it shrinks into the "FLOW MODE" card. It shows once.
 
         Hover tricks:
         - Hover a package and press e to clear it until its next update. Right-click has "Clear this package".
@@ -288,7 +290,7 @@ enum ProductGuide {
         - "View full list" on that receipt opens a page listing every email that was cleared: its subject, its sender and why. The undo timer is paused while that page is open. On it, u undoes everything, and Return or Esc confirms and goes back with the timer carrying on from where it stopped.
 
         Other things on the page:
-        - Clicking the headline asks for a different one. The name in the greeting starts as the first name on the mailbox's Google profile (or the first part of the address when that is not available) and is changed in Settings > General > You.
+        - Clicking the headline asks for a different one. The name in the greeting starts as the first name on the mailbox's Google profile (with none, the greeting has no name) and is changed only in Settings > General > You.
         - With nothing in For your eyes the page says there is no important mail, shows the day's tally and links to all mail.
         - "ingesting" in the top bar means new mail is still being sorted and will land on the next refresh.
         - Unsubscribes Passband is carrying out show in a tray at the bottom right.
@@ -371,6 +373,7 @@ enum ProductGuide {
         - h: remind me later, then move on. See the reminders topic.
         - In flow mode (Space on the Sitrep) plain e is done and next, and plain s saves for later.
         - On a Reading sender's stack, tapping e moves to that sender's next email, and holding e fills a ring and marks the whole stack done. E does the same and carries on to the next sender's card.
+        - The very first email the user opens on a Mac shows "Press e to mark done, or esc to leave." over it for two seconds; then it sits in the reader's bottom right corner until the first time anything is marked done, and never comes back.
         - Done is Passband's own status. The email leaves the board and stays in the mailbox; nothing is archived or deleted in Gmail.
 
         Acting on the sender:
@@ -654,6 +657,7 @@ enum ProductGuide {
         - Rename an account by editing its name in Settings > Accounts. "remove", then confirm, takes it off this Mac. On the last account the button reads "disconnect".
         - The account badge and the switcher show the photo from the mailbox's Google profile when Passband has been allowed to read it, and the account's initial otherwise. An account connected before this existed shows its initial until it is reconnected.
         - Notifications arrive for every account, not only the one on screen.
+        - The first time a mailbox is connected on a Mac, while Passband is still working through its mail, a card over the Sitrep says so: how many emails of how many are in, roughly how long is left, and how many have been sorted, set aside as noise, or need the user's attention so far. The Sitrep fills in behind it. "Start now", Enter or Esc closes it early; it closes by itself when the mail is all in, and it is not shown again on that Mac. There is no guided tour.
         - If the account's server is not answering at launch, Passband keeps retrying on its own. After a couple of seconds the loading screen offers "Try again now", "Switch to" each other account, and "Connect a different server". The Accounts menu and ⌘1 to ⌘9 switch from there too. Nothing is removed: the Connect screen's "Try saved connection again" goes back to the saved account.
         - If the Google sign-in expires, a banner on the Sitrep says Passband cannot read the mail. On a hosted account it has a Reconnect button.
 
@@ -668,8 +672,8 @@ enum ProductGuide {
         - When one is ready, a card at the bottom of the window offers "Restart" to install it now. "Later" hides the card for an hour.
         - While a new version is waiting, a down-arrow icon sits near the bottom of the sidebar. Clicking it brings the card back.
         - The Passband menu has "Check for Updates…". The installed version is printed at the bottom right of Settings.
-        - Settings > General > Help has "What's new" for the release notes and "Practice inbox" to replay the tour.
-        - On the iPhone, "What's new" is in Settings (the person icon at the top left of the Sitrep, then Settings at the bottom), in General. It shows the iPhone's own release notes full screen: swipe left for the next page, right to go back, and the x at the top right closes it. The iPhone has no practice inbox.
+        - Settings > General > Help has "What's new" for the release notes.
+        - On the iPhone, "What's new" is in Settings (the person icon at the top left of the Sitrep, then Settings at the bottom), in General. It shows the iPhone's own release notes full screen: swipe left for the next page, right to go back, and the x at the top right closes it.
 
         Usage and audit:
         - Usage, at the bottom of the rail: mail in and out, signal against noise, triage spend and assistant usage, over 7, 30 or 90 days.

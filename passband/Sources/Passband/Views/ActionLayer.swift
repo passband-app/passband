@@ -13,10 +13,10 @@ struct ActionLayer: View {
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
-            // FIRST, so everything else in this layer stacks above it: the
-            // undo chip the tour teaches has to be visible over the tour's own
-            // scrim, and the rule editor it opens has to cover its card.
-            if store.tour.active { TourOverlay() }
+            // FIRST, so everything else in this layer stacks above it: a
+            // toast or a card raised while the first-load veil is up is in
+            // front of it, not lost behind its scrim.
+            if store.firstLoad.active { FirstLoadVeil() }
 
             // Toast stack, bottom-left above every fullscreen surface. The
             // Spacers + fixedSize are load-bearing: a GlassEffectContainer
@@ -227,7 +227,6 @@ struct ActionLayer: View {
                     .buttonStyle(.plain)
                     .toastGlass(tint: Palette.warn.opacity(0.18), interactive: true)
                     .transition(.move(edge: .leading).combined(with: .opacity))
-                    .tourTarget(.undoToast)
                 }
             }
         }

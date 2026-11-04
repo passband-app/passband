@@ -426,7 +426,7 @@ struct ReleaseNotesTests {
         }
     }
 
-    /// A Mac that just finished the tour is stamped just below the latest
+    /// A Mac whose first look just ended is stamped just below the latest
     /// release, so its first time on the Sitrep shows that release alone.
     static func theMacsNewcomer() {
         guard announced.count > 1 else { return }

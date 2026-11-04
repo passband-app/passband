@@ -517,57 +517,9 @@ struct ThreadViewer: View {
             FrameMeasurer.shared.cancel(token: threadId)
             hold.end()
         }
-        // The default changed in Settings while this thread is open. A thread
-        // that has been switched by hand keeps what it was told — that is the
-        // whole point of an override — so only the ones following the default
-        // follow it here, and they follow it through the guess: switching TO
-        // Automatic has to re-read the thread, not leave it on what the fixed
-        // setting last drew.
-        .onChange(of: prefs.threadStyle) { _, _ in
-            guard styles.style(threadId) == nil else { return }
-            style = resolvedStyle(messages)
-        }
-        // READING MAIL IS ALWAYS FULL WIDTH, and the zone that says a thread is
-        // Reading can arrive AFTER the thread did: a newsletter opened from
-        // search or a notification before the sitrep has loaded resolves its
-        // style with no zone to consult, and `adopt` never asks twice. This is
-        // the second ask.
-        .onChange(of: isReadingMail) { _, reading in
-            if reading { style = .classic }
-        }
-        // NEW MAIL IN THIS VERY THREAD, from the poll that heard about it.
-        // `onChange` rather than `.task(id:)`: a task keyed on the token would
-        // also fire on mount, refetching the thread `load()` is already
-        // fetching.
-        .onChange(of: store.openThreadRefreshToken) { _, _ in
-            Task { await refreshInPlace() }
-        }
-        // A HELD REPLY LANDED and the daemon already has the sent copy. The
-        // send outlives the composer (see `AppStore.sendWithUndo`), so this is
-        // how the reply shows up in the thread it answers.
-        .onChange(of: store.lastSendEcho) { _, echo in
-            guard echo?.threadId == threadId else { return }
-            Task { await reloadAfterSend() }
-        }
-        .onChange(of: store.focusedMessageView) { _, direct in
-            guard store.threadId == threadId, let direct, direct.thread_id == threadId else { return }
-            adopt(direct, opening: true)
-            error = nil
-            loading = false
-        }
-        .onChange(of: store.focusedMessageId) { _, target in
-            guard store.threadId == threadId, let target,
-                let selected = messages.firstIndex(where: { $0.id == target }) else { return }
-            index = selected
-            }
-        // Warm the NEXT queued thread while this one is being read, so e/d's
-        // done+advance opens it instantly.
-        .onAppear {
-            // A reader opening after a density flip it was not mounted for:
-            // the heights on file are the other density's (ReaderMetrics.sync).
-            ReaderMetrics.sync()
-            warmAhead()
-        }
+        // The rest of the chain is its own function: in one expression the
+        // whole body outran the iOS type checker's time limit.
+        .modifier(LiveFollowing(viewer: self))
     }
 
     // MARK: - the column
@@ -897,7 +849,6 @@ struct ThreadViewer: View {
             }
             .buttonStyle(.textAction)
             .help("write a rule for this sender — shows the ones already in effect")
-            .tourTarget(.readerRule)
 
             Button {
                 // A job waiting on the user finishes from here too; anything
@@ -944,7 +895,6 @@ struct ThreadViewer: View {
                 }
                 .buttonStyle(.textAction)
                 .help("mark done and close — d works too, and E moves to the next")
-                .tourTarget(.readerDone)
             #endif
         }
     }
@@ -1924,6 +1874,9 @@ struct ThreadViewer: View {
                 } else if store.sideView.isOpen {
                     store.closeSide()
                 } else {
+                    // Leaving For your eyes mail undone, the first time: the
+                    // board says where it went (StaysHint).
+                    StaysHint.shared.leaving(store)
                     store.closeThread()
                 }
             },
@@ -5019,5 +4972,73 @@ extension MinimapGeometry.Scale {
     /// compact chrome, so the ratio is the one that card actually grew by.
     @MainActor static var current: Self {
         Self(type: Typo.size(14) / 14, chrome: Space.scaled(132) / 132)
+    }
+}
+
+/// The tail of `ThreadViewer.body`: what keeps an open thread in step with
+/// Settings, the zone, new mail, held sends and the store's focus. Its own
+/// function only so the body type-checks in reasonable time on iOS.
+private struct LiveFollowing: ViewModifier {
+    let viewer: ThreadViewer
+
+    func body(content: Content) -> some View {
+        viewer.liveFollowing(content)
+    }
+}
+
+extension ThreadViewer {
+    fileprivate func liveFollowing<V: View>(_ content: V) -> some View {
+        content
+        // The default changed in Settings while this thread is open. A thread
+        // that has been switched by hand keeps what it was told — that is the
+        // whole point of an override — so only the ones following the default
+        // follow it here, and they follow it through the guess: switching TO
+        // Automatic has to re-read the thread, not leave it on what the fixed
+        // setting last drew.
+        .onChange(of: prefs.threadStyle) { _, _ in
+            guard styles.style(threadId) == nil else { return }
+            style = resolvedStyle(messages)
+        }
+        // READING MAIL IS ALWAYS FULL WIDTH, and the zone that says a thread is
+        // Reading can arrive AFTER the thread did: a newsletter opened from
+        // search or a notification before the sitrep has loaded resolves its
+        // style with no zone to consult, and `adopt` never asks twice. This is
+        // the second ask.
+        .onChange(of: isReadingMail) { _, reading in
+            if reading { style = .classic }
+        }
+        // NEW MAIL IN THIS VERY THREAD, from the poll that heard about it.
+        // `onChange` rather than `.task(id:)`: a task keyed on the token would
+        // also fire on mount, refetching the thread `load()` is already
+        // fetching.
+        .onChange(of: store.openThreadRefreshToken) { _, _ in
+            Task { await refreshInPlace() }
+        }
+        // A HELD REPLY LANDED and the daemon already has the sent copy. The
+        // send outlives the composer (see `AppStore.sendWithUndo`), so this is
+        // how the reply shows up in the thread it answers.
+        .onChange(of: store.lastSendEcho) { _, echo in
+            guard echo?.threadId == threadId else { return }
+            Task { await reloadAfterSend() }
+        }
+        .onChange(of: store.focusedMessageView) { _, direct in
+            guard store.threadId == threadId, let direct, direct.thread_id == threadId else { return }
+            adopt(direct, opening: true)
+            error = nil
+            loading = false
+        }
+        .onChange(of: store.focusedMessageId) { _, target in
+            guard store.threadId == threadId, let target,
+                let selected = messages.firstIndex(where: { $0.id == target }) else { return }
+            index = selected
+            }
+        // Warm the NEXT queued thread while this one is being read, so e/d's
+        // done+advance opens it instantly.
+        .onAppear {
+            // A reader opening after a density flip it was not mounted for:
+            // the heights on file are the other density's (ReaderMetrics.sync).
+            ReaderMetrics.sync()
+            warmAhead()
+        }
     }
 }

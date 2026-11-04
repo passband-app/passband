@@ -86,6 +86,19 @@ pub const ATTEMPTS_PER_DAY: u32 = 2;
 pub const RAN_AT_KEY: &str = "memory_profile_ran_at";
 pub const RAN_DAY_KEY: &str = "memory_profile_ran_day";
 pub const DAY_KEY: &str = "memory_profile_day";
+/// When the pass may next try after a CONFIGURATION failure (a rejected key,
+/// a model the gateway's allow-list does not carry, a schema the provider
+/// refuses). Such a failure is refunded, because it spent nothing, and that
+/// is exactly why it needs a cooldown of its own: refunded and unstamped, it
+/// would be retried every refine round all day, a request and a log line
+/// each time. Kept in `app_settings` rather than an engine atomic (the
+/// translate pass's `translate_retry_after`) so the pass owns all of its own
+/// gates and a restart does not reopen it.
+pub const RETRY_AFTER_KEY: &str = "memory_profile_retry_after";
+/// The cooldown after a configuration failure: long enough that a broken
+/// allow-list costs a handful of requests a day, short enough that a fix
+/// made in the afternoon still gets tonight's run.
+pub const CONFIG_COOLDOWN: Duration = Duration::hours(1);
 /// The owner-local hour the pass becomes due. After the ledger's own nightly
 /// work, and before the owner is up.
 pub const DUE_HOUR: u32 = 3;
@@ -415,6 +428,8 @@ pub enum PassOutcome {
     NotDue,
     /// The `understanding` feature is off.
     Off,
+    /// A configuration failure is cooling down ([`RETRY_AFTER_KEY`]).
+    CoolingDown,
     NotEnoughCoverage {
         days: f32,
     },
@@ -477,6 +492,9 @@ pub async fn run_pass<S: Store + ?Sized>(
     // 1. The feature. NOT stamped: a flag ticked at noon should run today.
     if !features.enabled(features::UNDERSTANDING) {
         return PassOutcome::Off;
+    }
+    if setting_instant(store, account, RETRY_AFTER_KEY).is_some_and(|until| now < until) {
+        return PassOutcome::CoolingDown;
     }
     let decided = |outcome: PassOutcome| {
         // Best-effort: a stamp that fails to write costs one re-check next
@@ -592,8 +610,15 @@ pub async fn run_pass<S: Store + ?Sized>(
         Err(kind) => {
             // A configuration failure spent nothing and is the same for every
             // try: give the attempt back, as every other cap here does.
+            // It also cools down, or the refund would make it retry every
+            // round (see RETRY_AFTER_KEY).
             if llm::is_config_failure(&kind) {
                 let _ = store.stage2_refund_budget(account, BUDGET_KEY, &local_day);
+                let _ = store.set_app_setting(
+                    account,
+                    RETRY_AFTER_KEY,
+                    &(now + CONFIG_COOLDOWN).to_rfc3339(),
+                );
             }
             return PassOutcome::Failed { kind };
         }

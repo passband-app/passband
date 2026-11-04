@@ -364,13 +364,39 @@ async fn failed_attempts_are_capped_per_day_and_config_failures_refunded() {
         .unwrap();
     assert_eq!(billed.calls as u32, ATTEMPTS_PER_DAY);
 
-    // A rejected key spends nothing and gives its attempt back.
+    // A rejected key spends nothing and gives its attempt back, and then
+    // cools down: no further call that round or for the next hour.
     let mailbox = self::mailbox();
     let model = Scripted::new(Answer::Fail("http_401"));
-    for _ in 0..ATTEMPTS_PER_DAY + 1 {
-        run(&mailbox, noon(), &model).await;
+    assert_eq!(
+        run(&mailbox, noon(), &model).await,
+        PassOutcome::Failed {
+            kind: "http_401".into()
+        }
+    );
+    for later in [Duration::zero(), Duration::seconds(30), Duration::minutes(59)] {
+        assert_eq!(
+            run(&mailbox, noon() + later, &model).await,
+            PassOutcome::CoolingDown
+        );
     }
-    assert_eq!(model.calls() as u32, ATTEMPTS_PER_DAY + 1);
+    assert_eq!(model.calls(), 1);
+    // An hour on it tries again, and because the first attempt was given
+    // back, the day's cap still has room after it.
+    for (i, later) in [Duration::minutes(61), Duration::minutes(122)]
+        .into_iter()
+        .enumerate()
+    {
+        run(&mailbox, noon() + later, &model).await;
+        assert_eq!(model.calls(), i + 2);
+    }
+    assert_eq!(
+        mailbox
+            .store
+            .stage2_budget_used(mailbox.acct, BUDGET_KEY, "2026-11-04")
+            .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]

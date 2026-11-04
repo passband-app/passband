@@ -297,7 +297,9 @@ struct ProductGuideTests {
     // MARK: - what's new
 
     static func whatsNewReadsTheReleaseTable() {
-        guard let newest = ReleaseNotes.all.first else {
+        // The newest ANNOUNCED release: the guide reads the table the way the
+        // card does, and a quiet release is invisible to both.
+        guard let newest = ReleaseNotes.all.first(where: { !$0.quiet }) else {
             expect(false, "the release table has a newest release")
             return
         }
@@ -314,7 +316,7 @@ struct ProductGuideTests {
         // THE IPHONE READS ITS OWN TABLE. Its versions are a different line:
         // asked as the phone, the Mac's notes for the same number must not
         // come back.
-        guard let phone = PhoneReleaseNotes.all.first, let feature = phone.features.first else {
+        guard let phone = PhoneReleaseNotes.all.first(where: { !$0.quiet }), let feature = phone.features.first else {
             expect(false, "the phone's table has a release with a feature")
             return
         }

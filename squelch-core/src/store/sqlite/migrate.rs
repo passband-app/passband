@@ -501,33 +501,44 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // reading these few rows and joining each to its message by key
     // (`relationships::SEALED_COUNT_SQL`), instead of probing all four tables
     // for every message the address ever sent. Sealed mail is a small
-    // minority, so the indexes are small. Each guarded by its table: the
-    // migration suite builds partial schemas.
-    for (table, sql) in [
+    // minority, so the indexes are small. Each guarded by the columns it
+    // names: the migration suite builds partial old schemas.
+    //
+    // THE DECISIONS PREDICATE IS GUARDED BY `json_valid`, in a CASE because
+    // only a CASE is sure not to evaluate the JSON functions first. A partial
+    // index's predicate runs on EVERY write to its table, so without the guard
+    // one malformed `decision_json` would make the write itself fail. A
+    // malformed decision is not sealed here; the macro's own read of it fails
+    // as it always has.
+    for (table, columns, sql) in [
         (
             "triage",
+            &["account_id", "message_id", "sensitivity"][..],
             "CREATE INDEX IF NOT EXISTS idx_triage_sealed
              ON triage(account_id, message_id) WHERE sensitivity != 'normal'",
         ),
         (
             "agent_message_decisions",
+            &["account_id", "message_id", "decision_json"][..],
             "CREATE INDEX IF NOT EXISTS idx_agent_decisions_sealed
              ON agent_message_decisions(account_id, message_id)
-             WHERE (json_array_length(decision_json,'$.auth.kinds')>0 OR COALESCE(json_extract(decision_json,'$.external_access.restricted'),0))",
+             WHERE (CASE WHEN json_valid(decision_json) THEN json_array_length(decision_json,'$.auth.kinds')>0 OR COALESCE(json_extract(decision_json,'$.external_access.restricted'),0) ELSE 0 END)",
         ),
         (
             "agent_message_state",
+            &["account_id", "message_id", "access"][..],
             "CREATE INDEX IF NOT EXISTS idx_agent_state_restricted
              ON agent_message_state(account_id, message_id) WHERE access = 'restricted'",
         ),
         (
             "agent_triage_corrections",
+            &["account_id", "message_id", "field", "value_json"][..],
             "CREATE INDEX IF NOT EXISTS idx_agent_corrections_sealed
              ON agent_triage_corrections(account_id, message_id)
              WHERE field = 'external_access' AND value_json = 'true'",
         ),
     ] {
-        if tables_exist(conn, &[table])? {
+        if tables_exist(conn, &[table])? && has_columns(conn, table, columns)? {
             conn.execute(sql, [])?;
         }
     }

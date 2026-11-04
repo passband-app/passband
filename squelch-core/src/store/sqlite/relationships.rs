@@ -183,7 +183,7 @@ pub(crate) const SEALED_COUNT_SQL: &str = "SELECT COUNT(*)
      FROM (SELECT message_id FROM triage INDEXED BY idx_triage_sealed
             WHERE account_id = ?1 AND sensitivity != 'normal'
            UNION SELECT message_id FROM agent_message_decisions INDEXED BY idx_agent_decisions_sealed
-            WHERE account_id = ?1 AND (json_array_length(decision_json,'$.auth.kinds')>0 OR COALESCE(json_extract(decision_json,'$.external_access.restricted'),0))
+            WHERE account_id = ?1 AND (CASE WHEN json_valid(decision_json) THEN json_array_length(decision_json,'$.auth.kinds')>0 OR COALESCE(json_extract(decision_json,'$.external_access.restricted'),0) ELSE 0 END)
            UNION SELECT message_id FROM agent_message_state INDEXED BY idx_agent_state_restricted
             WHERE account_id = ?1 AND access = 'restricted'
            UNION SELECT message_id FROM agent_triage_corrections

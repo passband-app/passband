@@ -331,12 +331,20 @@ enum UnderstandingText {
     }
 
     /// The fading tab's line: the fatigue module's own receipt when it gave
-    /// one ("opened_few" with its counts), else the ledger's opened tally.
+    /// one that is a count, in that order of strength (`rarely_opened`,
+    /// `cleared_unopened`, `never_clicked`), else the ledger's opened tally.
     static func fatigue(_ row: RelationshipRow) -> String {
-        for reason in row.fatigue_reasons {
-            if let opened = reason.counts["opened"], let of = reason.counts["of"], of > 0 {
-                return "opened \(UsageText.count(opened)) of \(UsageText.count(of))"
-            }
+        let byCode = Dictionary(row.fatigue_reasons.map { ($0.code, $0) }, uniquingKeysWith: { a, _ in a })
+        if let r = byCode["rarely_opened"], let opened = r.int("opened"), let received = r.int("received"),
+            received > 0
+        {
+            return "opened \(UsageText.count(opened)) of \(UsageText.count(received))"
+        }
+        if let n = byCode["cleared_unopened"]?.int("count"), n > 0 {
+            return "cleared \(UsageText.count(n)) without opening"
+        }
+        if let opened = byCode["never_clicked"]?.int("opened"), opened > 0 {
+            return "opened \(UsageText.count(opened)), never clicked a link"
         }
         if row.attention_rows > 0 {
             return "opened \(UsageText.count(row.opened_count)) of \(UsageText.count(row.attention_rows))"

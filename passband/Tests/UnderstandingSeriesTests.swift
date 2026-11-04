@@ -144,13 +144,21 @@ struct UnderstandingSeriesTests {
     static func fadingRanksByFatigueAndQuotesItsReceipt() {
         let s = series([
             row("a", attention: 38, opened: 2, fatigue: 0.86,
-                reasons: [FatigueReason(code: "opened_few", counts: ["opened": 2, "of": 38])]),
+                reasons: [FatigueReason(code: "high_volume", values: ["per_month": 31]),
+                          FatigueReason(code: "rarely_opened", values: ["opened": 2, "received": 38])]),
             row("b", attention: 23, opened: 1, fatigue: 0.92),
             row("c", fatigue: 0.4, received: 7),
+            row("d", fatigue: 0.3, reasons: [FatigueReason(code: "cleared_unopened", values: ["count": 17])]),
+            row("e", fatigue: 0.2, reasons: [FatigueReason(code: "never_clicked", values: ["opened": 12])]),
+            row("f", attention: 9, opened: 4, fatigue: 0.1,
+                reasons: [FatigueReason(code: "skimmed", values: ["median_read_fraction": 0.2])]),
             row("fine", fatigue: 0),
             row("unscored"),
         ])
-        expect(s.fading.map(\.id) == ["b", "a", "c"], "by fatigue, highest first, unscored and zero left out")
+        expect(s.fading.map(\.id) == ["b", "a", "c", "d", "e", "f"], "by fatigue, highest first, unscored and zero left out")
+        expect(s.fading[3].sentence == "cleared 17 without opening", "cleared_unopened is quoted")
+        expect(s.fading[4].sentence == "opened 12, never clicked a link", "never_clicked is quoted")
+        expect(s.fading[5].sentence == "opened 4 of 9", "a reason with no count falls back to the ledger")
         expect(s.fading[1].sentence == "opened 2 of 38", "the module's own receipt when it gave one")
         expect(s.fading[0].sentence == "opened 1 of 23", "else the ledger's opened tally")
         expect(s.fading[2].sentence == "7 received, none answered", "else what is left to say")
@@ -274,7 +282,8 @@ struct UnderstandingSeriesTests {
         // The fixture exercises every region, so the demo shows all four.
         expect(Set(fixture.points.map(\.region)) == Set(PeopleRegion.allCases), "the fixture fills every region")
         expect(fixture.answered.first?.row.display_name == "Sam Rivera", "the cofounder leads the answered list")
-        expect(fixture.answered.last?.row.display_name == "Alex Moreno", "the recruiter answered once trails it")
+        expect(!fixture.fading.contains { $0.row.display_name == "Alex Moreno" },
+            "the recruiter answered once is a known contact, scored 0, never fading")
         expect(fixture.fading.prefix(3).map { $0.row.display_name ?? "" }
             == ["The Growth Letter", "SaaS Weekly", "Product Pulse"], "the three unopened newsletters lead the fading list")
         expect(fixture.points.first { $0.row.corrections > 0 }?.sentence.contains("corrected") == true,

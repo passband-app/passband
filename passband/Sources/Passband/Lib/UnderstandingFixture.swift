@@ -7,7 +7,8 @@
 //
 // The people are shaped to exercise every branch the section has: a cofounder
 // answered within the hour, a teammate and a lawyer answered the same day, a
-// recruiter answered once, three newsletters never opened, an essay list read
+// recruiter answered once (a known contact, so never fading), three
+// newsletters never opened, an essay list read
 // to the end, a vendor whose sorting was corrected, a coffee shop's receipts
 // skimmed, and two senders too new to judge. Everything is relative to `now`,
 // so the fixture never ages into the "just arrived" strip emptying out.
@@ -57,7 +58,7 @@ enum UnderstandingFixture {
                 received_per_month: 2.5, received_first_at: ago(130), received_last_at: ago(9),
                 sent_count: 1, sent_last_at: ago(100), inbound_threads: 6, replied_threads: 1,
                 attention_rows: 8, opened_count: 3, median_read_fraction: 0.3,
-                fatigue_score: 0.41, fatigue_reasons: [FatigueReason(code: "opened_few", counts: ["opened": 3, "of": 8])]),
+                fatigue_score: 0, fatigue_reasons: [FatigueReason(code: "known_contact")]),
             RelationshipRow(
                 addr: "essays@longreadclub.example", display_name: "Long Read Club", received_count: 46,
                 received_per_month: 6, received_first_at: ago(240), received_last_at: ago(2),
@@ -68,27 +69,37 @@ enum UnderstandingFixture {
                 received_per_month: 15, received_first_at: ago(260), received_last_at: ago(1),
                 inbound_threads: 40, attention_rows: 30, opened_count: 14, median_read_fraction: 0.48,
                 link_clicks: 3, corrections: 4, fatigue_score: 0.33,
-                fatigue_reasons: [FatigueReason(code: "opened_some", counts: ["opened": 14, "of": 30])]),
+                fatigue_reasons: [
+                    FatigueReason(code: "skimmed", values: ["median_read_fraction": 0.48, "median_words": 310, "median_dwell_ms": 21_000])
+                ]),
             RelationshipRow(
                 addr: "receipts@bluebird-coffee.example", display_name: "Bluebird Coffee", received_count: 58,
                 received_per_month: 10, received_first_at: ago(200), received_last_at: ago(0.6),
                 inbound_threads: 58, attention_rows: 25, opened_count: 9, median_read_fraction: 0.2,
-                fatigue_score: 0.58, fatigue_reasons: [FatigueReason(code: "opened_few", counts: ["opened": 9, "of": 25])]),
+                fatigue_score: 0.58,
+                fatigue_reasons: [
+                    FatigueReason(code: "rarely_opened", values: ["opened": 9, "received": 25]),
+                    FatigueReason(code: "brief_looks", values: ["median_dwell_ms": 2_400]),
+                ]),
             RelationshipRow(
                 addr: "digest@productpulse.example", display_name: "Product Pulse", received_count: 190,
                 received_per_month: 31, received_first_at: ago(340), received_last_at: ago(0.2),
                 inbound_threads: 190, attention_rows: 38, opened_count: 2, median_read_fraction: 0.1,
-                fatigue_score: 0.86, fatigue_reasons: [FatigueReason(code: "opened_few", counts: ["opened": 2, "of": 38])]),
+                fatigue_score: 0.86,
+                fatigue_reasons: [
+                    FatigueReason(code: "rarely_opened", values: ["opened": 2, "received": 38]),
+                    FatigueReason(code: "high_volume", values: ["per_month": 31]),
+                ]),
             RelationshipRow(
                 addr: "news@saasweekly.example", display_name: "SaaS Weekly", received_count: 52,
                 received_per_month: 12, received_first_at: ago(260), received_last_at: ago(1.5),
                 inbound_threads: 52, attention_rows: 23, opened_count: 1,
-                fatigue_score: 0.92, fatigue_reasons: [FatigueReason(code: "opened_few", counts: ["opened": 1, "of": 23])]),
+                fatigue_score: 0.92, fatigue_reasons: [FatigueReason(code: "rarely_opened", values: ["opened": 1, "received": 23])]),
             RelationshipRow(
                 addr: "hello@growthletter.example", display_name: "The Growth Letter", received_count: 34,
                 received_per_month: 8, received_first_at: ago(200), received_last_at: ago(2.5),
                 inbound_threads: 34, attention_rows: 17, opened_count: 0,
-                fatigue_score: 0.95, fatigue_reasons: [FatigueReason(code: "never_opened", counts: ["opened": 0, "of": 17])]),
+                fatigue_score: 0.95, fatigue_reasons: [FatigueReason(code: "cleared_unopened", values: ["count": 17])]),
             RelationshipRow(
                 addr: "maya@studio-oak.example", display_name: "Maya Okafor", received_count: 2,
                 received_first_at: ago(3), received_last_at: ago(1), sent_count: 1, sent_last_at: ago(1),

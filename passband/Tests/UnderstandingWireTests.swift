@@ -71,7 +71,9 @@ struct UnderstandingWireTests {
             {"rows": [
               {"addr": "a@x.example", "received_count": null, "replied_threads": 2, "inbound_threads": 3,
                "display_name": "", "new_field_from_later": {"nested": true},
-               "fatigue_reasons": [{"code": "opened_few", "opened": 2, "of": 38, "note": "text"},
+               "fatigue_reasons": [{"code": "rarely_opened", "opened": 2, "received": 38, "note": "text"},
+                                   {"code": "skimmed", "median_read_fraction": 0.25, "median_words": 900, "median_dwell_ms": 4000},
+                                   {"code": "known_contact"},
                                    {"no_code": 1}]},
               {"display_name": "nobody, no addr"},
               "not even an object",
@@ -87,8 +89,12 @@ struct UnderstandingWireTests {
         let a = r.rows[0]
         expect(a.received_count == 0 && a.sent_count == 0 && a.attention_rows == 0, "null and missing counts are zero")
         expect(a.display_name == nil, "an empty name is no name")
-        expect(a.fatigue_reasons == [FatigueReason(code: "opened_few", counts: ["opened": 2, "of": 38])],
-            "a reason keeps its integers, drops its text, and a reason with no code is dropped")
+        expect(a.fatigue_reasons.map(\.code) == ["rarely_opened", "skimmed", "known_contact"],
+            "the daemon's tagged reasons decode, a reason with no code is dropped")
+        expect(a.fatigue_reasons[0].values == ["opened": 2, "received": 38], "numbers kept by name, text dropped")
+        expect(a.fatigue_reasons[1].values["median_read_fraction"] == 0.25, "an f32 field is kept as a Double")
+        expect(a.fatigue_reasons[2].values.isEmpty, "a variant with no fields has no values")
+        expect(UnderstandingText.fatigue(a) == "opened 2 of 38", "and rarely_opened is what the Fading tab says")
         expect(r.rows[1].median_reply_ms == nil && r.rows[1].fatigue_score == 0.4, "a mistyped field is nil, its neighbours kept")
         expect(decode(RelationshipsResponse.self, "{}")?.rows.isEmpty == true, "an empty object is an empty page")
     }

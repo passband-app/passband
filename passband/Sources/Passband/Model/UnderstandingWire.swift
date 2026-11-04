@@ -122,18 +122,32 @@ struct RelationshipRow: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
-/// One of `sender_fatigue`'s reasons: a code and the counts that make it a
-/// claim rather than a mood ("opened_few", opened 2 of 38). The counts are
-/// whatever integers the reason carries, kept by name; anything that is not
-/// an integer is ignored.
+/// One of `sender_fatigue`'s reasons, as the daemon serializes its `Reason`
+/// enum: `#[serde(tag = "code", rename_all = "snake_case")]`, so the code and
+/// the variant's own fields side by side. The variants this build knows:
+///
+///   * `rarely_opened { opened, received }`
+///   * `cleared_unopened { count }`
+///   * `never_clicked { opened }`
+///   * `skimmed { median_read_fraction, median_words, median_dwell_ms }`
+///   * `brief_looks { median_dwell_ms }`, `read_closely { median_read_fraction }`
+///   * `high_volume { per_month }`
+///   * `not_enough_history`, `known_contact`, `wanted_by_rule`, `kept_recently`
+///
+/// Every numeric field is kept, by name, as a Double (several are f32 on the
+/// daemon); anything else is ignored, and a code this build does not know is
+/// kept and simply never quoted.
 struct FatigueReason: Codable, Sendable, Equatable {
     var code: String
-    var counts: [String: Int]
+    var values: [String: Double]
 
-    init(code: String, counts: [String: Int] = [:]) {
+    init(code: String, values: [String: Double] = [:]) {
         self.code = code
-        self.counts = counts
+        self.values = values
     }
+
+    /// A field as a whole number, for a count.
+    func int(_ key: String) -> Int? { values[key].map { Int($0.rounded()) } }
 
     private struct Key: CodingKey {
         var stringValue: String
@@ -145,17 +159,17 @@ struct FatigueReason: Codable, Sendable, Equatable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Key.self)
         code = try c.decode(String.self, forKey: Key(stringValue: "code"))
-        var counts: [String: Int] = [:]
+        var values: [String: Double] = [:]
         for key in c.allKeys where key.stringValue != "code" {
-            if let n = try? c.decode(Int.self, forKey: key) { counts[key.stringValue] = n }
+            if let n = try? c.decode(Double.self, forKey: key) { values[key.stringValue] = n }
         }
-        self.counts = counts
+        self.values = values
     }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: Key.self)
         try c.encode(code, forKey: Key(stringValue: "code"))
-        for (k, v) in counts { try c.encode(v, forKey: Key(stringValue: k)) }
+        for (k, v) in values { try c.encode(v, forKey: Key(stringValue: k)) }
     }
 }
 

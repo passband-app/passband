@@ -19,6 +19,13 @@ struct MailFilterBar: View {
 
     private var reminders: Bool { store.reminderFilter }
 
+    #if os(macOS)
+        /// The pills' natural width and the room the bar gives them, each
+        /// reported only when it CHANGES (see `pillScroller`).
+        @State private var pillsWidth: CGFloat = 0
+        @State private var room: CGFloat = .infinity
+    #endif
+
     var body: some View {
         HStack(spacing: Space.s6) {
             pillScroller {
@@ -43,9 +50,6 @@ struct MailFilterBar: View {
                     }
                 }
             }
-            #if os(macOS)
-                Spacer(minLength: Space.s8)
-            #endif
             // The reminder lens is your own parked list, which the picker does
             // not narrow; a lit control there would claim it did.
             CategoryPicker()
@@ -79,17 +83,46 @@ struct MailFilterBar: View {
 /// scrolls. On the picker's side the last few points fade out, which is what
 /// says there are more lenses under there, and the inset on that side is the
 /// fade's width, so the last lens scrolls clear of it and stops.
-@MainActor @ViewBuilder private func pillScroller<C: View>(@ViewBuilder _ content: () -> C) -> some View {
-    #if os(macOS)
-        let pills = content()
-        ViewThatFits(in: .horizontal) {
-            pills
-            fadingScroller(pills)
-        }
-    #else
-        fadingScroller(content())
-            .contentMargins(.leading, Space.s16, for: .scrollContent)
-    #endif
+///
+/// NOT A `ViewThatFits`. It was one, and on the Mac it cost nearly half the
+/// main thread while the list below scrolled: every layout pass the list's
+/// scroll set off, it rebuilt every pill and sized a scroll view from
+/// scratch to ask the same question again (profiled 2026-11-04: 4,275 of
+/// 9,100 main-thread samples). The answer only changes with the width, so it
+/// is asked then: the pills' natural width and the bar's room are each
+/// reported on change, and a plain `if` picks the plain row or the scroller.
+extension MailFilterBar {
+    @MainActor @ViewBuilder fileprivate func pillScroller<C: View>(
+        @ViewBuilder _ content: () -> C
+    ) -> some View {
+        #if os(macOS)
+            let pills = content()
+            Group {
+                if pillsWidth <= room { pills } else { fadingScroller(pills) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { room = $0 }
+            // The natural width, measured off a copy nobody sees or reaches.
+            .background(alignment: .leading) {
+                pills
+                    .fixedSize()
+                    .hidden()
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
+                        pillsWidth = $0
+                    }
+            }
+            // The gap the Spacer that used to sit here kept at its least
+            // (8, plus the bar's spacing either side of it). A Spacer beside
+            // a frame that already fills would split the room with it, and
+            // the pills would scroll at half the width they have.
+            .padding(.trailing, Space.s8 + Space.s6)
+        #else
+            fadingScroller(content())
+                .contentMargins(.leading, Space.s16, for: .scrollContent)
+        #endif
+    }
 }
 
 @MainActor private func fadingScroller<C: View>(_ content: C) -> some View {

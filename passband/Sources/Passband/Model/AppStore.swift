@@ -948,6 +948,36 @@ final class AppStore {
         var reversed = false
     }
     var skipTurn: SkipTurn?
+    /// A FLOW MODE KEY PRESSED MID-FLIGHT, kept rather than dropped. An `e`
+    /// or `s` that lands while an email is still leaving or walking in used
+    /// to be thrown away, so a fast reader's second tap did nothing and the
+    /// walk read as stuck. One is kept (a held-down queue of ten would walk
+    /// past mail nobody saw) and the reader that lands next plays it. Every
+    /// way out of the reader, and every undo, drops it.
+    enum WalkStep: Equatable { case done, skip }
+    var queuedWalkStep: WalkStep?
+
+    /// Keep `step` for the reader that lands next. Only in flow mode, only one.
+    func queueWalkStep(_ step: WalkStep) {
+        guard walk != nil, queuedWalkStep == nil else { return }
+        queuedWalkStep = step
+    }
+
+    /// The upcoming emails of the open queue, nearest first, by the same rule
+    /// as `nextQueuedThread`: other threads only, nothing already resolved.
+    func upcomingQueuedThreads(_ n: Int) -> [AttentionUpdate] {
+        guard n > 0, let threadId,
+            let current = threadQueue.firstIndex(where: { $0.thread_id == threadId })
+        else { return [] }
+        var seen: Set<String> = [threadId]
+        var out: [AttentionUpdate] = []
+        for u in threadQueue.dropFirst(current + 1)
+        where !resolvedIds.contains(u.id) && seen.insert(u.thread_id).inserted {
+            out.append(u)
+            if out.count == n { break }
+        }
+        return out
+    }
     /// An undo asking the reader on `from` to play a walk step backwards.
     /// The reader drives the motion (see ThreadViewer.rewind), as it does
     /// every other one.
@@ -1311,6 +1341,30 @@ final class AppStore {
             board: readingOnBoard, notThread: threadId)
     }
 
+    /// A FLOW MODE WALK RUNS TO THE END OF THE BOARD, not the end of the board
+    /// as it stood when Space was pressed. The queue is a snapshot, and the
+    /// poll keeps filling the band behind it: a Space pressed before the first
+    /// full load, or mail that arrived mid-walk, left rows on the board that
+    /// the walk would never reach, so an `e` on the snapshot's last row closed
+    /// flow mode with mail still waiting. Rows the band holds that the queue
+    /// does not are appended at the end (the steps already taken keep their
+    /// order, so undo still finds them). Called by the reader's step verbs
+    /// just before they ask what comes next.
+    func topUpWalkQueue() {
+        guard walk != nil, !readingMail, threadId != nil else { return }
+        let have = Set(threadQueue.map(\.thread_id))
+        var seen = have
+        let fresh = sitrep.standing.filter { u in
+            guard !seen.contains(u.thread_id), !resolvedIds.contains(u.id),
+                authMeta(for: u) == nil
+            else { return false }
+            seen.insert(u.thread_id)
+            return true
+        }
+        guard !fresh.isEmpty else { return }
+        threadQueue += fresh
+    }
+
     /// Shared by the preview and advance action so resolved siblings never peek.
     var nextQueuedThread: AttentionUpdate? {
         guard let threadId,
@@ -1344,6 +1398,11 @@ final class AppStore {
         case departingTrailing
         /// Parked one window outside the frame, waiting to be walked in.
         case entering(ThreadEdge)
+
+        var isEntering: Bool {
+            if case .entering = self { return true }
+            return false
+        }
     }
 
     /// Which side a thread arrives from. The bottom is a new subject; the
@@ -3510,6 +3569,7 @@ final class AppStore {
         // and a walk carried into it would celebrate mail it never held.
         if walk != nil, queue.map(\.thread_id) != threadQueue.map(\.thread_id) {
             walk = nil
+            queuedWalkStep = nil
             dropSkipUndos()
         }
         self.threadQueue = queue
@@ -3563,6 +3623,7 @@ final class AppStore {
         // Every way out of the reader ends a Space walk; only `finishWalk`
         // turns one into a celebration, and it reads the walk before this.
         walk = nil
+        queuedWalkStep = nil
         dropSkipUndos()
         walkRewind = nil
         skipTurn = nil
@@ -7720,6 +7781,8 @@ final class AppStore {
     func fireUndo(_ id: UUID? = nil) async {
         // One at a time: `u u` on two walk steps has to walk back the first
         // before the second can find the reader where its step landed.
+        // `u` means stop: a step kept from a fast tap must not run after it.
+        queuedWalkStep = nil
         while undoBusy { try? await Task.sleep(for: .milliseconds(16)) }
         undoBusy = true
         defer { undoBusy = false }

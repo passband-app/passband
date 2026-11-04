@@ -432,7 +432,8 @@ struct MainShell: View {
                 // Visible again the moment the reader is in flight, so the
                 // board is there under a departing email.
                 .opacity(
-                    (store.threadId != nil && store.threadFlight == .settled)
+                    (store.threadId != nil
+                        && (store.threadFlight == .settled || store.threadFlight.isEntering))
                         || store.scheduledPreviewRow != nil ? 0 : 1)
                 // The composer's STRIP: a working surface in the layout, NOT an
                 // overlay — no scrim, no blur, the page beside it shrinks and
@@ -520,7 +521,13 @@ struct MainShell: View {
                             // it flashed through on every E and S. Only while
                             // the flight CONTINUES: an exit that closes the
                             // reader should reveal the sitrep as it goes.
-                            if store.skipTurn != nil || store.flightContinues {
+                            // ENTERING COUNTS: `openThread` clears
+                            // `flightContinues` as it mounts the next email
+                            // off screen, and that email's walk in is exactly
+                            // when the sitrep used to show through.
+                            if store.skipTurn != nil || store.flightContinues
+                                || store.threadFlight.isEntering
+                            {
                                 ReaderBackdrop()
                                     .ignoresSafeArea()
                             }

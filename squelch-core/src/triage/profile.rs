@@ -504,8 +504,14 @@ pub async fn run_pass<S: Store + ?Sized>(
     if !features.enabled(features::UNDERSTANDING) {
         return PassOutcome::Off;
     }
-    if setting_instant(store, account, RETRY_AFTER_KEY).is_some_and(|until| now < until) {
-        return PassOutcome::CoolingDown;
+    match setting_instant(store, account, RETRY_AFTER_KEY) {
+        Some(until) if now < until => return PassOutcome::CoolingDown,
+        // Elapsed: the run goes ahead, and the stamp goes with it, so a
+        // stale cooldown never sits in the settings looking current.
+        Some(_) => {
+            let _ = store.delete_app_setting(account, RETRY_AFTER_KEY);
+        }
+        None => {}
     }
     let decided = |outcome: PassOutcome| {
         // Best-effort: a stamp that fails to write costs one re-check next

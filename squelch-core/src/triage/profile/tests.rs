@@ -407,6 +407,26 @@ async fn failed_attempts_are_capped_per_day_and_config_failures_refunded() {
 }
 
 #[tokio::test]
+async fn an_elapsed_cooldown_is_cleared_when_the_run_proceeds() {
+    let mailbox = mailbox();
+    let model = Scripted::new(Answer::Fail("http_403"));
+    run(&mailbox, noon(), &model).await;
+    let stamp = || {
+        mailbox
+            .store
+            .get_app_setting(mailbox.acct, RETRY_AFTER_KEY)
+            .unwrap()
+    };
+    assert!(stamp().is_some());
+    *model.answer.lock().unwrap() = Answer::Ops(json!({"ops": []}));
+    assert!(matches!(
+        run(&mailbox, noon() + Duration::minutes(61), &model).await,
+        PassOutcome::Applied(_)
+    ));
+    assert_eq!(stamp(), None);
+}
+
+#[tokio::test]
 async fn nothing_is_spent_off_early_young_or_unchanged() {
     let mailbox = mailbox();
     let model = Scripted::new(Answer::Ops(json!({"ops": []})));

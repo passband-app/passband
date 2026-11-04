@@ -73,8 +73,8 @@ pub struct Relationship {
     /// The lowercased bare address.
     pub addr: String,
     pub display_name: Option<String>,
-    /// Inbound, not spam, not the archive tier, not the owner's own mail: a
-    /// bare index count, which includes sealed mail.
+    /// Inbound, not spam, not sealed, not the archive tier, not the owner's
+    /// own mail: what the listings count.
     pub received_count: i64,
     /// Off `messages.received_at`, NEVER `senders.first_seen`: the backfill
     /// walks newest first, so the directory dates a ten-year correspondent to

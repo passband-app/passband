@@ -15,8 +15,8 @@
 
 use super::super::reading_senders::SenderMeasurer;
 use super::super::relationships::{
-    CORRECTIONS_SQL, INBOUND_SQL, INITIATED_SQL, NAME_SQL, THREADS_SQL, WALK_SOURCES,
-    walk_addresses,
+    CORRECTIONS_SQL, INBOUND_SQL, INITIATED_SQL, NAME_SQL, SEALED_COUNT_SQL, THREADS_SQL,
+    WALK_SOURCES, walk_addresses,
 };
 use super::super::*;
 use super::support::*;
@@ -41,7 +41,10 @@ fn build(store: &SqliteStore, acct: AccountId) {
             )
             .unwrap();
         let mut tri = tx
-            .prepare("INSERT INTO triage(message_id, account_id, created_at) VALUES(?1, ?2, ?3)")
+            .prepare(
+                "INSERT INTO triage(message_id, account_id, created_at, sensitivity)
+                 VALUES(?1, ?2, ?3, ?4)",
+            )
             .unwrap();
         for n in 0..total {
             // Interleaved in time, so the firehose's rows are spread through
@@ -64,7 +67,12 @@ fn build(store: &SqliteStore, acct: AccountId) {
             ])
             .unwrap();
             let id = tx.last_insert_rowid();
-            tri.execute(params![id, acct, at.to_rfc3339()]).unwrap();
+            // One message in a hundred sealed, across every sender: the
+            // sealed set the count subtracts is a small minority, as in a
+            // real mailbox.
+            let sensitivity = if n % 100 == 0 { "sealed" } else { "normal" };
+            tri.execute(params![id, acct, at.to_rfc3339(), sensitivity])
+                .unwrap();
             if n % 50 == 0 {
                 let reply = at + chrono::Duration::minutes(30);
                 msg.execute(params![
@@ -143,6 +151,7 @@ fn firehose_recompute() {
     {
         let conn = store.lock().unwrap();
         for (name, sql) in [
+            ("SEALED_COUNT", SEALED_COUNT_SQL),
             ("CORRECTIONS", CORRECTIONS_SQL),
             ("INITIATED", INITIATED_SQL),
         ] {
@@ -162,7 +171,10 @@ fn firehose_recompute() {
         eprintln!("BENCH SenderMeasurer::measure (reading_senders, unchanged): {took:?}");
     }
     let cold = best(1, || store.recompute_relationship(acct, FIREHOSE).unwrap());
-    eprintln!("BENCH recompute (first, full): {cold:?}");
+    eprintln!("BENCH recompute (first ever, full, cold statements): {cold:?}");
+    // `recompute_relationship` always counts in full.
+    let full = best(5, || store.recompute_relationship(acct, FIREHOSE).unwrap());
+    eprintln!("BENCH recompute (full, best of 5): {full:?}");
     let again = best(5, || {
         store
             .lock()

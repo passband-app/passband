@@ -2649,10 +2649,12 @@ CREATE TABLE IF NOT EXISTS relationships (
     -- the list read needs no join. NOT `senders.display_name`, which takes a
     -- name from sealed mail too (see `people.rs`).
     display_name      TEXT,
-    -- INBOUND: not the owner's own mail, not provider spam, and NOT THE
-    -- ARCHIVE TIER, which is absent from every count. A bare index count
-    -- (`idx_messages_from_received`), so it includes sealed mail: excluding
-    -- it costs a probe per row of a sender's whole history.
+    -- INBOUND, the listings' rule: not the owner's own mail, not provider
+    -- spam, not known to be sealed, and NOT THE ARCHIVE TIER, which is absent
+    -- from every count. An index-only count (`idx_messages_from_received`)
+    -- less the address's sealed mail, counted from the partial indexes over
+    -- the sealed rows (`relationships::SEALED_COUNT_SQL`), so no probe per
+    -- message of a sender's history.
     received_count    INTEGER NOT NULL,
     -- Off `messages.received_at`, NEVER `senders.first_seen`. The directory's
     -- date is the first SIGHTING, and the backfill walks newest first, so it

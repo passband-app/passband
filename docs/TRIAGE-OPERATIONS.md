@@ -451,8 +451,12 @@ fatigue score are one `SenderMeasurer` result, the purge flow's own, so the
 two never disagree. It is not email text and it is not a floor.
 
 A recount is bounded. `received_count` and the arrival dates are one
-index-only walk of `idx_messages_from_received`, so the count includes sealed
-mail. Threads, replies, the name and the field corrections read only the
+index-only walk of `idx_messages_from_received`, less the address's sealed
+mail, which is counted from partial indexes over the account's sealed rows
+(`idx_triage_sealed`, `idx_agent_decisions_sealed`,
+`idx_agent_state_restricted`, `idx_agent_corrections_sealed`), so the count
+follows the listings' rule without a probe per message. The arrival range may
+end on a sealed message. Threads, replies, the name and the field corrections read only the
 address's newest 500 inbound messages. A recount whose received, sent and
 initiated counts have not changed skips those reads and refreshes only
 attention, fatigue and the monthly rate, unless its mark is full

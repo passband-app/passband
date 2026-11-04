@@ -495,6 +495,43 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         "INTEGER NOT NULL DEFAULT 0",
     )?;
 
+    // THE SEALED SET, one partial index per place a message is marked kept
+    // close (`known_sealed_mail_sql!`'s four arms), each holding only the
+    // sealed rows. The relationship ledger counts an address's sealed mail by
+    // reading these few rows and joining each to its message by key
+    // (`relationships::SEALED_COUNT_SQL`), instead of probing all four tables
+    // for every message the address ever sent. Sealed mail is a small
+    // minority, so the indexes are small. Each guarded by its table: the
+    // migration suite builds partial schemas.
+    for (table, sql) in [
+        (
+            "triage",
+            "CREATE INDEX IF NOT EXISTS idx_triage_sealed
+             ON triage(account_id, message_id) WHERE sensitivity != 'normal'",
+        ),
+        (
+            "agent_message_decisions",
+            "CREATE INDEX IF NOT EXISTS idx_agent_decisions_sealed
+             ON agent_message_decisions(account_id, message_id)
+             WHERE (json_array_length(decision_json,'$.auth.kinds')>0 OR COALESCE(json_extract(decision_json,'$.external_access.restricted'),0))",
+        ),
+        (
+            "agent_message_state",
+            "CREATE INDEX IF NOT EXISTS idx_agent_state_restricted
+             ON agent_message_state(account_id, message_id) WHERE access = 'restricted'",
+        ),
+        (
+            "agent_triage_corrections",
+            "CREATE INDEX IF NOT EXISTS idx_agent_corrections_sealed
+             ON agent_triage_corrections(account_id, message_id)
+             WHERE field = 'external_access' AND value_json = 'true'",
+        ),
+    ] {
+        if tables_exist(conn, &[table])? {
+            conn.execute(sql, [])?;
+        }
+    }
+
     // THE RELATIONSHIP LEDGER'S PER-SENDER INDEX (`relationships`): one
     // sender's mail in arrival order, COVERING the three flags its inbound
     // count filters on. `idx_messages_from_nocase` orders a sender's rows by

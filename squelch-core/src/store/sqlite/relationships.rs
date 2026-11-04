@@ -15,8 +15,9 @@
 //! `idx_messages_from_received` (account, address, arrival, and the three
 //! flags the count filters on):
 //!
-//! - `received_count` and the first and last arrival are ONE index-only walk:
-//!   no table row, no per-row probe.
+//! - `received_count` and the first and last arrival are ONE index-only walk,
+//!   less the address's sealed mail counted from the small sealed set: no
+//!   table row and no probe per message of the sender's history.
 //! - Everything that needs a row or a probe (threads and replies, the name,
 //!   corrections) reads only the address's newest [`RECENT_WINDOW`] inbound
 //!   messages, which are the index's own tail. The reply rate over the last
@@ -40,15 +41,16 @@
 //! - DATES COME OFF `messages.received_at`, never `senders.first_seen`. The
 //!   backfill walks newest first, so the directory's first sighting dates a
 //!   ten-year correspondent to last Tuesday.
-//! - INBOUND is not the owner's own mail, not provider spam, and not the
-//!   archive tier, which is absent from every count. `received_count` stops
-//!   there, so it is a bare index count and INCLUDES sealed mail: a count is
-//!   all that leaves here, and excluding sealed mail costs a probe per row.
-//!   The bounded window also leaves out mail KNOWN to be sealed
-//!   (`known_sealed_mail_sql!`: a shop's login codes are not its newsletter),
-//!   so threads, replies and the name never rest on one. "Not the owner's
-//!   own" is `is_sent = 0` here, and not `own_mail_sql!`: the account's own
-//!   address never has a row, and for any other address the two agree.
+//! - INBOUND follows the listings' rule: not the owner's own mail, not
+//!   provider spam, not the archive tier (absent from every count), and not
+//!   mail KNOWN to be sealed (`known_sealed_mail_sql!`: a shop's login codes
+//!   are not its newsletter). `received_count` is an index-only count less
+//!   the address's sealed mail, which is read from the sealed side
+//!   ([`SEALED_COUNT_SQL`]) rather than probed per message. The first and
+//!   last arrival come off the same index walk, so they may fall on a sealed
+//!   message. "Not the owner's own" is `is_sent = 0` here, and not
+//!   `own_mail_sql!`: the account's own address never has a row, and for any
+//!   other address the two agree.
 //! - PENDING MAIL COUNTS in the recent window, the one place this module
 //!   takes the looser of the two sealed macros, and the reason is the order
 //!   of a round: the refine lane drains the dirty set BEFORE its triage pass,
@@ -157,11 +159,39 @@ macro_rules! recent_sql {
     };
 }
 
-/// Count, first and last arrival: one index-only walk.
+/// Count, first and last arrival: one index-only walk. The count is BEFORE
+/// sealed mail is taken out ([`SEALED_COUNT_SQL`]).
 pub(crate) const INBOUND_SQL: &str = concat!(
     "SELECT COUNT(*), MIN(m.received_at), MAX(m.received_at)",
     inbound_sql!()
 );
+
+/// How many of the address's inbound messages are KNOWN to be sealed, by the
+/// four arms of `known_sealed_mail_sql!`, read from the other side: the
+/// account's sealed rows in each marker table (a partial index apiece, see
+/// `migrate`), deduplicated, each joined to its message by primary key and
+/// kept when it is this address's inbound mail. Linear in the account's
+/// SEALED mail, which is a small minority, never in the sender's history.
+/// `received_count` is [`INBOUND_SQL`]'s count less this, so it follows the
+/// listings' rule (the contact card never promises more mail than "their
+/// mail" finds, and a shop's login codes are not correspondence).
+///
+/// THE ARMS MUST STAY THE MACRO'S. A test checks this count against the
+/// macro's own over the same mail, so a fifth way to seal a message that
+/// lands in `known_sealed_mail_sql!` and not here fails it.
+pub(crate) const SEALED_COUNT_SQL: &str = "SELECT COUNT(*)
+     FROM (SELECT message_id FROM triage INDEXED BY idx_triage_sealed
+            WHERE account_id = ?1 AND sensitivity != 'normal'
+           UNION SELECT message_id FROM agent_message_decisions INDEXED BY idx_agent_decisions_sealed
+            WHERE account_id = ?1 AND (json_array_length(decision_json,'$.auth.kinds')>0 OR COALESCE(json_extract(decision_json,'$.external_access.restricted'),0))
+           UNION SELECT message_id FROM agent_message_state INDEXED BY idx_agent_state_restricted
+            WHERE account_id = ?1 AND access = 'restricted'
+           UNION SELECT message_id FROM agent_triage_corrections
+                   INDEXED BY idx_agent_corrections_sealed
+            WHERE account_id = ?1 AND field = 'external_access' AND value_json = 'true') s
+     CROSS JOIN messages m ON m.id = s.message_id
+     WHERE m.account_id = ?1 AND m.from_addr = ?2 COLLATE NOCASE
+       AND m.is_sent = 0 AND m.is_spam = 0 AND m.is_archive = 0";
 
 /// One row per thread in the recent window: when the address first wrote
 /// into it inside the window, and the owner's first SENT message in it after
@@ -488,11 +518,15 @@ impl<'c> Recomputer<'c> {
     fn count(&mut self, addr: &str, full: bool) -> Result<Option<Relationship>> {
         let conn = self.conn;
         let account = self.account_id;
-        let (received_count, first, last): (i64, Option<String>, Option<String>) = conn
+        let (all_inbound, first, last): (i64, Option<String>, Option<String>) = conn
             .prepare_cached(INBOUND_SQL)?
             .query_row(params![account, addr], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })?;
+        let sealed: i64 = conn
+            .prepare_cached(SEALED_COUNT_SQL)?
+            .query_row(params![account, addr], |r| r.get(0))?;
+        let received_count = (all_inbound - sealed).max(0);
         let (summed, contact_last, contact_name): (Option<i64>, Option<String>, Option<String>) =
             conn.prepare_cached(CONTACT_SQL)?
                 .query_row(params![account, addr], |r| {

@@ -5,7 +5,7 @@
 use super::super::reading_senders::SenderMeasurer;
 use super::super::relationships::{
     CONTACT_SQL, CORRECTIONS_SQL, INBOUND_SQL, INITIATED_SQL, NAME_SQL, RECENT_WINDOW,
-    RELATIONSHIPS_BACKFILL_KEY, RelationshipSort, THREADS_SQL, WALK_SOURCES,
+    RELATIONSHIPS_BACKFILL_KEY, RelationshipSort, SEALED_COUNT_SQL, THREADS_SQL, WALK_SOURCES,
 };
 use super::super::*;
 use super::support::*;
@@ -106,8 +106,7 @@ fn inbound_counts_the_listings_mail_and_dates_it_from_the_messages() {
             .received_at(days_ago(days))
             .seed(&store);
     }
-    // Spam and the archive tier are never counted. Sealed mail is in the
-    // bare count, and in nothing that reads rows (threads, replies, name).
+    // None of these is mail the listings would show, so none is counted.
     triaged(acct, "spam", "spam")
         .from(DAN)
         .is_spam(true)
@@ -133,15 +132,17 @@ fn inbound_counts_the_listings_mail_and_dates_it_from_the_messages() {
         .unwrap();
     let row = store.relationship(acct, DAN).unwrap().expect("a row");
     assert_eq!(row.addr, DAN, "keyed by the lowercased address");
-    assert_eq!(row.received_count, 4, "three ordinary, one sealed");
+    assert_eq!(row.received_count, 3, "the sealed message is not counted");
     let first = row.received_first_at.unwrap();
     assert!((first - days_ago(300)).num_minutes().abs() < 5, "{first}");
+    // The arrival range comes off the same index walk as the count, so it
+    // may end on the sealed message (4 days ago), never on spam or archive.
     let last = row.received_last_at.unwrap();
     assert!((last - days_ago(4)).num_minutes().abs() < 5, "{last}");
     assert_eq!(row.display_name.as_deref(), Some("Dan Smith"));
     assert_eq!(row.inbound_threads, 3, "the sealed thread is not one");
-    // Four mails over three hundred days.
-    assert_eq!(row.received_per_month, Some(0.4));
+    // Three mails over three hundred days.
+    assert_eq!(row.received_per_month, Some(0.3));
 }
 
 #[test]
@@ -631,6 +632,30 @@ fn every_per_address_statement_is_an_indexed_probe() {
             "{sql}\n{walk:#?}"
         );
     }
+    // The sealed count reads only the sealed rows, each by its partial index,
+    // and reaches messages by key: never a walk of the sender's mail.
+    let sealed = plan(SEALED_COUNT_SQL);
+    for index in [
+        "idx_triage_sealed",
+        "idx_agent_decisions_sealed",
+        "idx_agent_state_restricted",
+        "idx_agent_corrections_sealed",
+    ] {
+        assert!(
+            sealed.iter().any(|l| l.contains(index)),
+            "{index}\n{sealed:#?}"
+        );
+    }
+    assert!(
+        sealed
+            .iter()
+            .any(|l| l.starts_with("SEARCH m USING INTEGER PRIMARY KEY")),
+        "{sealed:#?}"
+    );
+    assert!(
+        !sealed.iter().any(|l| l.starts_with("SCAN m")),
+        "{sealed:#?}"
+    );
     let initiated = plan(INITIATED_SQL);
     assert!(
         initiated
@@ -759,14 +784,8 @@ fn a_decision_that_seals_mail_marks_its_sender_for_a_full_recount() {
     // Drained while the second is still pending: counted, as the module
     // header says it must be.
     store.drain_relationship_dirty(acct, 10).unwrap();
-    assert_eq!(
-        store
-            .relationship(acct, DAN)
-            .unwrap()
-            .unwrap()
-            .inbound_threads,
-        2
-    );
+    let before = store.relationship(acct, DAN).unwrap().unwrap();
+    assert_eq!((before.received_count, before.inbound_threads), (2, 2));
 
     into_reading_with(&store, acct, code, |d| d.external_access.restricted = true);
     let full: bool = store
@@ -783,14 +802,11 @@ fn a_decision_that_seals_mail_marks_its_sender_for_a_full_recount() {
         "the counts do not move, so the mark must refuse the shortcut"
     );
     store.drain_relationship_dirty(acct, 10).unwrap();
+    let after = store.relationship(acct, DAN).unwrap().unwrap();
     assert_eq!(
-        store
-            .relationship(acct, DAN)
-            .unwrap()
-            .unwrap()
-            .inbound_threads,
-        1,
-        "the sealed thread is gone within a round"
+        (after.received_count, after.inbound_threads),
+        (1, 1),
+        "the sealed message leaves the count and its thread within a round"
     );
 }
 
@@ -912,4 +928,83 @@ fn a_message_whose_date_will_not_parse_still_counts() {
     assert_eq!(row.inbound_threads, 2, "the undatable thread is still one");
     // MAX(received_at) is the unparseable text; the dated thread stands in.
     assert!(row.received_first_at.is_some() && row.received_last_at.is_some());
+}
+
+/// The sealed count is `known_sealed_mail_sql!` read from the other side:
+/// for mail sealed by each of the macro's four arms, the two must agree, so
+/// a new way to seal a message cannot reach the macro and miss the ledger.
+#[test]
+fn the_sealed_count_agrees_with_the_macro_arm_by_arm() {
+    let (store, acct) = store();
+    let ids: Vec<i64> = (0..5)
+        .map(|n| inbound(&store, acct, &format!("m{n}"), &format!("t{n}"), DAN, 1))
+        .collect();
+    let conn = store.lock().unwrap();
+    let now = Utc::now().to_rfc3339();
+    // Arm 1: the retired sensitivity column.
+    conn.execute(
+        "UPDATE triage SET sensitivity = 'sealed' WHERE message_id = ?1",
+        [ids[0]],
+    )
+    .unwrap();
+    // Arm 2: an auth decision, and a restricting one.
+    for (id, json) in [
+        (ids[1], r#"{"auth":{"kinds":["otp"]}}"#),
+        (ids[2], r#"{"external_access":{"restricted":true}}"#),
+    ] {
+        conn.execute(
+            "INSERT INTO agent_message_decisions(account_id, message_id, revision, decision_json, decided_at)
+             VALUES(?1, ?2, 1, ?3, ?4)",
+            params![acct, id, json, now],
+        )
+        .unwrap();
+    }
+    // Arm 3: the access check said restricted.
+    conn.execute(
+        "INSERT INTO agent_message_state(account_id, message_id, content_snapshot, access)
+         VALUES(?1, ?2, '', 'restricted')
+         ON CONFLICT(account_id, message_id) DO UPDATE SET access = 'restricted'",
+        params![acct, ids[3]],
+    )
+    .unwrap();
+    // Arm 4: the owner sealed it, and also counted twice by arm 1, which the
+    // UNION must not double.
+    conn.execute(
+        "INSERT INTO agent_triage_corrections(account_id, message_id, field, value_json,
+             source_revision, updated_at)
+         VALUES(?1, ?2, 'external_access', 'true', 1, ?3)",
+        params![acct, ids[4], now],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE triage SET sensitivity = 'sealed' WHERE message_id = ?1",
+        [ids[4]],
+    )
+    .unwrap();
+    let ours: i64 = conn
+        .query_row(SEALED_COUNT_SQL, params![acct, DAN], |r| r.get(0))
+        .unwrap();
+    let macros: i64 = conn
+        .query_row(
+            concat!(
+                "SELECT COUNT(*) FROM messages m LEFT JOIN triage t ON t.message_id = m.id
+                 WHERE m.account_id = ?1 AND m.from_addr = ?2 COLLATE NOCASE AND ",
+                known_sealed_mail_sql!()
+            ),
+            params![acct, DAN],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!((ours, macros), (5, 5));
+    drop(conn);
+    inbound(&store, acct, "open", "open", DAN, 1);
+    store.recompute_relationship(acct, DAN).unwrap();
+    assert_eq!(
+        store
+            .relationship(acct, DAN)
+            .unwrap()
+            .unwrap()
+            .received_count,
+        1
+    );
 }

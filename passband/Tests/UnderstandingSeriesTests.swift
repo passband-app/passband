@@ -239,6 +239,10 @@ struct UnderstandingSeriesTests {
             "13 days of ledger is still learning")
         expect(!MemoryGrouping.stillLearning(MemoryResponse(enabled: true, coverage_days: 14, entries: [])),
             "two weeks is enough")
+        expect(MemoryGrouping.stillLearning(MemoryResponse(enabled: false, coverage_days: 9, entries: [])),
+            "the daemon's enabled = false is still learning")
+        expect(MemoryGrouping.stillLearning(MemoryResponse(enabled: false, coverage_days: 30, entries: [])),
+            "and it wins over a coverage count that disagrees")
         expect(UnderstandingText.stillLearning(days: 1).contains("1 day old"), "singular day")
         expect(UnderstandingText.stillLearning(days: 9).contains("9 days old"), "plural days")
     }

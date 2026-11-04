@@ -63,7 +63,11 @@ struct UnderstandingSection: View {
                     } else {
                         SectionCard(label: "Understanding") { EmptyNote("reading the ledger…") }
                     }
-                    if let memory, memory.enabled, showsMemory {
+                    // The flag and a 200 are the whole gate. `enabled` is the
+                    // daemon saying its ledger is under two weeks old, and the
+                    // card shows that as a note over whatever the owner has
+                    // already stated, not by hiding the card.
+                    if let memory, showsMemory {
                         KnowsCard(memory: memory, onChange: { self.memory = $0 }).id("knows")
                     }
                 }
@@ -485,7 +489,8 @@ private struct KnowsCard: View {
                 EmptyNote(UnderstandingText.stillLearning(days: memory.coverage_days))
             } else if memory.entries.isEmpty {
                 EmptyNote("Nothing written down yet. The first entries appear after the nightly pass.")
-            } else {
+            }
+            if !memory.entries.isEmpty {
                 ForEach(MemoryGrouping.groups(memory.entries)) { group in
                     VStack(alignment: .leading, spacing: Space.s4) {
                         Text(group.title)
@@ -671,7 +676,9 @@ private struct Receipts: View {
     UnderstandingSection(
         relationships: RelationshipsResponse(
             coverage_days: 6, computed_at: nil, rows: Array(UnderstandingFixture.relationships().rows.prefix(5))),
-        memory: MemoryResponse(enabled: true, coverage_days: 6, entries: []))
+        memory: MemoryResponse(
+            enabled: false, coverage_days: 6,
+            entries: UnderstandingFixture.memory().entries.filter { $0.origin == .stated }))
         .padding(Space.page)
         .frame(width: 980)
         .environment(AppStore.shared)

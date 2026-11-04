@@ -255,9 +255,13 @@ enum MemoryGrouping {
         return a.id < b.id
     }
 
-    /// Whether the list should show its "still learning" note instead.
+    /// Whether the list leads with its "still learning" note. The daemon's
+    /// `enabled` is exactly this (`coverage_days >= 14`); the coverage check
+    /// stands in for a daemon that leaves it out. The note sits OVER the
+    /// entries, never instead of them: an owner's stated entry is theirs from
+    /// day one.
     static func stillLearning(_ response: MemoryResponse) -> Bool {
-        response.coverage_days < minimumCoverageDays
+        !response.enabled || response.coverage_days < minimumCoverageDays
     }
 }
 

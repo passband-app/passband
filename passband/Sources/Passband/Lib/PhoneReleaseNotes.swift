@@ -80,9 +80,11 @@ struct PhoneReleaseNote: VersionedNote, Identifiable, Sendable {
     /// The release's name, in the app's own voice. It rides every page.
     let headline: String
     /// The pages, in the order they are walked. Three to five: fewer is not a
-    /// walk, and more is the list again with pictures.
+    /// walk, and more is the list again with pictures. None on a quiet release.
     let features: [PhoneFeature]
     let also: [PhoneAside]
+    /// Never walked, only recorded; see `ReleaseNote.quiet`.
+    var quiet: Bool = false
 
     var id: String { version }
 

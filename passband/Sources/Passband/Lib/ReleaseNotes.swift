@@ -132,6 +132,13 @@ struct ReleaseNote: Identifiable, Sendable {
     /// The release in one line, in the app's own voice.
     let headline: String
     let items: [ReleaseItem]
+    /// A QUIET release is written down and never announced: it is in the
+    /// changelog and the GitHub release body, but the What's New card, the
+    /// Settings button and the assistant all read the table as if it were not
+    /// there (ReleaseLedger skips it). For a small fix release that should not
+    /// interrupt anybody. Quiet means no headliners, since nobody would see
+    /// their pages.
+    var quiet: Bool = false
 
     var id: String { version }
     var semver: ReleaseVersion? { ReleaseVersion(version) }
@@ -923,6 +930,8 @@ enum ReleaseNotes {
 /// A note keyed by the version of whatever shipped it.
 protocol VersionedNote {
     var version: String { get }
+    /// Never announced; see `ReleaseNote.quiet`.
+    var quiet: Bool { get }
 }
 
 extension ReleaseNote: VersionedNote {}
@@ -934,6 +943,12 @@ extension ReleaseNote: VersionedNote {}
 /// owed, what closing them stamps and what Settings shows again are the same
 /// questions with the same wrong answers, so both tables ask them here. What
 /// each rule is FOR is written on `ReleaseNotes`' wrapper of it.
+///
+/// QUIET NOTES DO NOT EXIST HERE. Every rule reads the table through
+/// `ordered`, which drops them, so a quiet release is never owed, never
+/// replayed, and never the "latest release" a newcomer is shown; that is the
+/// newest announced one instead. Somebody who skipped an announced release
+/// and lands on a quiet one is still shown the announced one.
 enum ReleaseLedger {
     static func unseen<Note: VersionedNote>(_ all: [Note], lastSeen: String?, running: String) -> [Note] {
         guard let ceiling = ReleaseVersion(running) else { return [] }
@@ -971,11 +986,12 @@ enum ReleaseLedger {
         return ordered(all).first { $0.version <= ceiling }?.note
     }
 
-    /// A table with unparseable rows dropped and the order enforced rather
-    /// than trusted. Both are authored newest first; this is what guarantees
-    /// it.
+    /// A table with quiet and unparseable rows dropped and the order enforced
+    /// rather than trusted. Both are authored newest first; this is what
+    /// guarantees it.
     private static func ordered<Note: VersionedNote>(_ all: [Note]) -> [(note: Note, version: ReleaseVersion)] {
-        all.compactMap { note in ReleaseVersion(note.version).map { (note: note, version: $0) } }
+        all.filter { !$0.quiet }
+            .compactMap { note in ReleaseVersion(note.version).map { (note: note, version: $0) } }
             .sorted { $0.version > $1.version }
     }
 }

@@ -214,7 +214,7 @@ final class WhatsNew {
     /// device is the one writing it.
     static var replayable: PhoneReleaseNote? {
         #if DEBUG
-            PhoneReleaseNotes.all.first
+            PhoneReleaseNotes.all.first { !$0.quiet }
         #else
             runningVersion.flatMap { PhoneReleaseNotes.newest(atOrBelow: $0) }
         #endif

@@ -1270,6 +1270,7 @@ pub fn ingest(
     // or external access. Legacy fields stay neutral until the new decision commits.
     TriagedMessage {
         foreground_triage: false,
+        first_load: false,
         message,
         recipients,
         recipient_addrs,

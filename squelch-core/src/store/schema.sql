@@ -377,6 +377,10 @@ CREATE TABLE IF NOT EXISTS triage (
     -- NOT BACKFILLED: every row that predates the column is NULL, which is the
     -- silent direction.
     notify_eligible_at TEXT,
+    -- BROUGHT IN BY THE FIRST-RUN BACKFILL, written on first insert only. A
+    -- thread whose live mail is all first-load shares a small FYE allowance
+    -- (`agent_thread_attention.first_load`). 0 on every pre-existing row.
+    first_load      INTEGER NOT NULL DEFAULT 0,
     status          TEXT NOT NULL DEFAULT 'new',
     surfaced_at     TEXT,
     resolved_at     TEXT,
@@ -1866,6 +1870,18 @@ CREATE TABLE IF NOT EXISTS agent_thread_attention (
     attention_json TEXT NOT NULL,
     relevant_activity TEXT NOT NULL,
     unresolved_since TEXT,
+    -- THE THREAD IS FIRST-LOAD MAIL: its attention was written by triage of
+    -- the first-run backfill and no live mail or human re-triage has touched
+    -- it since. Such threads share a small FYE allowance
+    -- (`FIRST_LOAD_FYE_CAP`), so a new account opens on a short board rather
+    -- than a month of backlog. 0 on every pre-existing row (migrate.rs).
+    first_load INTEGER NOT NULL DEFAULT 0,
+    -- HELD BACK BY THAT ALLOWANCE: the model picked FYE (so `show_in_fye` is
+    -- 0 only because of the cap) and the thread waits to be let in. A held
+    -- thread comes back when it turns time-sensitive (`time_sensitive`) or
+    -- when something asks for more of the backlog; closing other rows never
+    -- refills the board on its own. Always 0 when `first_load` is 0.
+    held INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(account_id,thread_id)
 );
 CREATE TABLE IF NOT EXISTS agent_decision_sources (

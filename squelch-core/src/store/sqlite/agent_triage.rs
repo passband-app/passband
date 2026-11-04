@@ -581,8 +581,9 @@ pub(super) fn correct_agent_triage_conn(
         // Visibility is a human preference, not new model evidence. Preserve the
         // representative, provenance, actions and activity even before the
         // representative has a classification or after it becomes spam.
+        // The owner's say also ends a first-load hold: the thread is theirs now.
         conn.execute(
-            "UPDATE agent_thread_attention SET show_in_fye=?3,
+            "UPDATE agent_thread_attention SET show_in_fye=?3,held=0,
              attention_json=json_set(attention_json,'$.show_in_fye',json(?4)),
              revision=revision+1 WHERE account_id=?1 AND thread_id=?2",
             params![account, thread, value.as_bool().unwrap(), json(value)?],
@@ -2375,12 +2376,25 @@ impl AgentTriageStore for SqliteStore {
                 tx.execute("INSERT OR IGNORE INTO agent_message_destinations(account_id,message_id,destination) VALUES(?1,?2,?3)",
         params![job.account_id,job.message_id,value])?;
             }
+            // What this job means for the first-load allowance: a person
+            // asking again (`manual:`), or the backlog's first sorting.
+            let here = FirstLoadJob {
+                asked: job.trigger.starts_with("manual:"),
+                sorting: current.previous_decision.is_none()
+                    && tx.query_row(
+                        "SELECT COALESCE((SELECT first_load FROM triage
+                          WHERE account_id=?1 AND message_id=?2),0)",
+                        params![job.account_id, job.message_id],
+                        |r| r.get::<_, bool>(0),
+                    )?,
+            };
             apply_attention(
                 &tx,
                 job.account_id,
                 &current.message.thread_id,
                 job.message_id,
                 &decision.attention,
+                here,
             )?;
             replace_attention_sources(&tx, job.account_id, &current.message.thread_id, sources)?;
             for update in &decision.related_updates {
@@ -2390,9 +2404,11 @@ impl AgentTriageStore for SqliteStore {
                     &update.thread_id,
                     job.message_id,
                     &update.attention,
+                    FirstLoadJob::default(),
                 )?;
                 replace_attention_sources(&tx, job.account_id, &update.thread_id, sources)?;
             }
+            cap_first_load_fye(&tx, job.account_id, here.sorting, Utc::now())?;
         }
         tx.execute(
             "DELETE FROM agent_decision_sources WHERE account_id=?1 AND message_id=?2",
@@ -3216,6 +3232,7 @@ fn apply_attention(
     thread: &str,
     fallback_message: i64,
     attention: &ThreadAttentionDecision,
+    job: FirstLoadJob,
 ) -> Result<()> {
     let existing:Option<String>=conn.query_row("SELECT attention_json FROM agent_thread_attention WHERE account_id=?1 AND thread_id=?2",
         params![account,thread],
@@ -3241,7 +3258,8 @@ fn apply_attention(
         }
     }
     let mut attention = attention.clone();
-    if let Some(show) = thread_fye_override(conn, account, thread)? {
+    let pinned = thread_fye_override(conn, account, thread)?;
+    if let Some(show) = pinned {
         attention.show_in_fye = show;
     }
     for action in &mut attention.actions {
@@ -3317,12 +3335,23 @@ fn apply_attention(
     } else {
         None
     };
+    let (first_load, held) = first_load_flags(
+        conn,
+        account,
+        thread,
+        id,
+        job,
+        pinned.is_some(),
+        &mut attention,
+    )?;
     conn.execute(
         "INSERT INTO agent_thread_attention(
              account_id,thread_id,message_id,show_in_fye,attention_json,
-             relevant_activity,unresolved_since,decision_message_id)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+             relevant_activity,unresolved_since,decision_message_id,first_load,held)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
          ON CONFLICT(account_id,thread_id) DO UPDATE SET
+             first_load=excluded.first_load,
+             held=excluded.held,
              message_id=excluded.message_id,
              decision_message_id=excluded.decision_message_id,
              revision=agent_thread_attention.revision+1,
@@ -3332,10 +3361,231 @@ fn apply_attention(
              unresolved_since=CASE WHEN excluded.unresolved_since IS NULL THEN NULL
                  ELSE COALESCE(agent_thread_attention.unresolved_since,excluded.unresolved_since) END",
         params![account,thread,id,attention.show_in_fye,json(&attention)?,
-            activity,unresolved_since,decision_message],
+            activity,unresolved_since,decision_message,first_load,held],
     )?;
     Ok(())
 }
+
+/// THE MOST FIRST-LOAD THREADS FYE SHOWS AT ONCE. A new account's first run
+/// triages a month of mail in one sitting, and every thread the model would
+/// have surfaced on the day it arrived lands on the board together: forty
+/// rows of backlog is not a sitrep, it is a chore list on day one. So the
+/// backfill's picks compete for this many places, by the board's own rank,
+/// and the rest stay in All mail. Mail that arrives after the first run is
+/// never counted against it.
+pub(super) const FIRST_LOAD_FYE_CAP: usize = 15;
+
+/// What the job writing a thread's attention says about the first-load
+/// allowance. The default is a write on behalf of another thread (a related
+/// update): neither asked about nor being sorted.
+#[derive(Debug, Clone, Copy, Default)]
+struct FirstLoadJob {
+    /// A person asked for this message again: its thread leaves the
+    /// allowance for good.
+    asked: bool,
+    /// The first decision on mail the first-run backfill brought in: the
+    /// backlog being sorted, the only picks that compete for a place.
+    sorting: bool,
+}
+
+/// Is every live message in the thread one the first-run backfill ingested
+/// (`triage.first_load`)? Live mail in either direction, the owner's own
+/// reply included, makes the thread current, and current threads are never
+/// capped. `''` is no thread: the message alone answers.
+fn thread_is_first_load(
+    conn: &Connection,
+    account: AccountId,
+    thread: &str,
+    message: i64,
+) -> Result<bool> {
+    let current: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages m
+             LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
+             WHERE m.account_id=?1 AND m.is_archive=0 AND m.is_spam=0
+               AND (CASE WHEN ?2='' THEN m.id=?3 ELSE m.thread_id=?2 END)
+               AND COALESCE(t.first_load,0)=0)",
+        params![account, thread, message],
+        |r| r.get(0),
+    )?;
+    Ok(!current)
+}
+
+/// The first-load flags a write to a thread's attention leaves, and the FYE
+/// pick it may keep (`attention.show_in_fye` is lowered in place when the
+/// pick is held, so the JSON copy the sitrep reads agrees with the column).
+///
+/// - `first_load` is the thread's mail, not the job: true while every live
+///   message in it came from the first-run backfill. Once false (live mail
+///   arrived, the owner replied, or they asked for a re-triage: `asked`) it
+///   stays false.
+/// - A pick the owner made (`pinned`) is theirs: never held.
+/// - A held thread stays held, and a thread showing keeps its place.
+/// - A pick on a thread not showing lands on the board only when it is
+///   `sorting` (the first decision on backfilled mail, which competes for a
+///   place: [`cap_first_load_fye`] holds the excess) or pressing. Any other
+///   pick is held: background re-runs never bring backlog back. Only
+///   [`time_sensitive`] lets a held thread in.
+fn first_load_flags(
+    conn: &Connection,
+    account: AccountId,
+    thread: &str,
+    message: i64,
+    job: FirstLoadJob,
+    pinned: bool,
+    attention: &mut ThreadAttentionDecision,
+) -> Result<(bool, bool)> {
+    let existing: Option<(bool, bool, bool)> = conn
+        .query_row(
+            "SELECT first_load,show_in_fye,held FROM agent_thread_attention
+             WHERE account_id=?1 AND thread_id=?2",
+            params![account, thread],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let first_load = !job.asked
+        && existing.is_none_or(|(was, _, _)| was)
+        && thread_is_first_load(conn, account, thread, message)?;
+    if !first_load || pinned || !attention.show_in_fye {
+        return Ok((first_load, false));
+    }
+    let held = match existing {
+        Some((_, _, true)) => true,
+        Some((_, true, false)) => false,
+        None | Some((_, false, false)) => !job.sorting && !time_sensitive(attention, Utc::now()),
+    };
+    if held {
+        attention.show_in_fye = false;
+    }
+    Ok((first_load, held))
+}
+
+/// How far ahead a first-load thread's stated date makes it too pressing to
+/// hold back: a bill due this week is on the board whatever the cap says.
+const FIRST_LOAD_DUE_WITHIN_DAYS: i64 = 7;
+
+/// The model's urgency at or above which a first-load thread is never held.
+/// The prompt asks for "high urgency" on fraud checks and security
+/// incidents; this is where that lands.
+const FIRST_LOAD_URGENT: f64 = 0.8;
+
+/// A first-load thread too pressing to hold: rated [`FIRST_LOAD_URGENT`],
+/// or its stated date (`attention_at`) falls within
+/// [`FIRST_LOAD_DUE_WITHIN_DAYS`], or has passed while the thread still
+/// needs the owner (an overdue bill; a meeting that already happened is
+/// informational and stays backlog). A date the parser cannot read is not a
+/// reason to show mail early. Dates are compared by UTC day: a day of slack
+/// on a week's window.
+fn time_sensitive(attention: &ThreadAttentionDecision, now: DateTime<Utc>) -> bool {
+    use crate::triage::decision::{AttentionState, StatedTime};
+    let factors = &attention.factors;
+    if factors.urgency.is_finite() && factors.urgency >= FIRST_LOAD_URGENT {
+        return true;
+    }
+    let day = match factors.attention_at.as_ref().and_then(|at| at.stated()) {
+        Some(StatedTime::Instant(at)) => at.date_naive(),
+        Some(StatedTime::Local(at)) => at.date(),
+        Some(StatedTime::Day(day)) => day,
+        None => return false,
+    };
+    let today = now.date_naive();
+    if day < today {
+        return attention.state == AttentionState::NeedsUser;
+    }
+    day <= (now + Duration::days(FIRST_LOAD_DUE_WITHIN_DAYS)).date_naive()
+}
+
+/// Hold first-load mail to [`FIRST_LOAD_FYE_CAP`] places in FYE. Runs in every
+/// placing triage commit, in two steps:
+///
+/// 1. LET IN what turned pressing: a held thread that is now
+///    [`time_sensitive`] gets its FYE pick back. The check rides on triage
+///    commits, so a held bill surfaces on the first commit after it comes
+///    within the window, not at a tick of its own.
+/// 2. HOLD BACK the excess, ONLY WHILE THE BACKLOG IS BEING SORTED (`sorting`:
+///    this commit is the first decision on backfilled mail): rank the board
+///    the way it is served, and every first-load thread past the cap that is
+///    not pressing is held. Any other commit holds nothing, so once the
+///    backlog is sorted a row the owner is looking at never vanishes on its
+///    own.
+///
+/// IT NEVER REFILLS. Closing rows ahead of a held thread does not let it in:
+/// a board that tops itself up after each Done never empties, and reaching
+/// the end of it is the point.
+///
+/// The cap counts only threads it can move and that are on the board: not a
+/// pinned or hidden thread (`agent_thread_preferences`), not done, snoozed or
+/// reminded mail, and not a pressing one.
+fn cap_first_load_fye(
+    conn: &Connection,
+    account: AccountId,
+    sorting: bool,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let candidates: Vec<(String, bool, String)> = conn
+        .prepare_cached(
+            "SELECT a.thread_id,a.held,a.attention_json FROM agent_thread_attention a
+             JOIN triage t ON t.account_id=a.account_id AND t.message_id=a.message_id
+             WHERE a.account_id=?1 AND a.first_load=1 AND (a.show_in_fye=1 OR a.held=1)
+               AND t.status!='done' AND t.reminded_at IS NULL
+               AND (t.remind_at IS NULL OR t.remind_at<=?2)
+               AND NOT EXISTS(SELECT 1 FROM agent_thread_preferences p
+                              WHERE p.account_id=a.account_id AND p.thread_id=a.thread_id)",
+        )?
+        .query_map(params![account, now.to_rfc3339()], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    // `movable`: on the board and not pressing, the only threads the cap counts.
+    let mut release = Vec::new();
+    let mut movable = std::collections::HashSet::new();
+    for (thread, held, attention) in candidates {
+        let attention: ThreadAttentionDecision = decode(&attention)?;
+        match (held, time_sensitive(&attention, now)) {
+            (true, true) => release.push(thread),
+            (false, false) => {
+                movable.insert(thread);
+            }
+            _ => {}
+        }
+    }
+    // Column and JSON together: the sitrep's tiering reads the JSON copy.
+    // No revision bump: this is not new evidence about the thread, and a
+    // bump would turn every in-flight job that read it stale for nothing.
+    let mut set = conn.prepare_cached(
+        "UPDATE agent_thread_attention SET show_in_fye=?3,held=NOT ?3,
+         attention_json=json_set(attention_json,'$.show_in_fye',json(CASE WHEN ?3 THEN 'true' ELSE 'false' END))
+         WHERE account_id=?1 AND thread_id=?2",
+    )?;
+    for thread in &release {
+        set.execute(params![account, thread, true])?;
+    }
+    let mut hold = Vec::new();
+    if sorting && movable.len() > FIRST_LOAD_FYE_CAP {
+        // The ranking config the board is served with lives in the daemon's
+        // config, not the store; the default is what it ships with.
+        let mut items = list_items(conn, account, "fye", now)?;
+        rank_items(&mut items, &RankingConfig::default(), now);
+        let mut seen = std::collections::HashSet::new();
+        hold = items
+            .into_iter()
+            .filter(|item| movable.contains(&item.thread_id) && seen.insert(item.thread_id.clone()))
+            .skip(FIRST_LOAD_FYE_CAP)
+            .map(|item| item.thread_id)
+            .collect();
+    }
+    for thread in &hold {
+        set.execute(params![account, thread, false])?;
+    }
+    if !hold.is_empty() || !release.is_empty() {
+        eprintln!(
+            "squelch: first-load FYE cap held {} thread(s), let in {}",
+            hold.len(),
+            release.len()
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn list_items(
     conn: &Connection,
     account: AccountId,
@@ -10329,5 +10579,422 @@ mod reading_board_tests {
         assert_eq!(list_time(starts[0]), "2026-11-02T08:00:00.000Z");
         // A week back crosses the end of daylight time (1 November).
         assert_eq!(list_time(starts[6]), "2026-10-27T07:00:00.000Z");
+    }
+}
+
+/// The first-load allowance (`FIRST_LOAD_FYE_CAP`): a new account's backfill
+/// fills at most that many FYE places, by rank; pressing mail skips it; the
+/// rest is held and never refills the board; live mail is never counted.
+#[cfg(test)]
+mod first_load_cap_tests {
+    use super::tests::decision;
+    use super::*;
+    use crate::triage::decision::{AttentionState, SupportedTime};
+
+    const BACKLOG: i64 = 20;
+
+    /// One account, `BACKLOG + 3` single-message threads `t1..`, all
+    /// received now and all brought in by the first-run backfill.
+    fn fixture() -> SqliteStore {
+        let store = SqliteStore::open_in_memory().unwrap();
+        {
+            let conn = store.lock().unwrap();
+            conn.execute(
+                "INSERT INTO accounts(id,email,created_at) VALUES(1,'a@test','2026-01-01')",
+                [],
+            )
+            .unwrap();
+            for id in 1..=BACKLOG + 3 {
+                conn.execute(
+                    "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body)
+                     VALUES(?1,1,?1,'t'||?1,'sender@test','subject',?2,'snippet','body')",
+                    params![id, Utc::now().to_rfc3339()],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO triage(account_id,message_id,created_at,first_load) VALUES(1,?1,?2,1)",
+                    params![id, Utc::now().to_rfc3339()],
+                )
+                .unwrap();
+            }
+        }
+        store
+    }
+
+    fn exec(store: &SqliteStore, sql: &str) {
+        store.lock().unwrap().execute(sql, []).unwrap();
+    }
+
+    /// Message `id` arrived live, not in the backfill.
+    fn live(store: &SqliteStore, id: i64) {
+        exec(
+            store,
+            &format!("UPDATE triage SET first_load=0 WHERE message_id={id}"),
+        );
+    }
+
+    struct Verdict {
+        urgency: f64,
+        due_in_days: Option<i64>,
+        state: AttentionState,
+        show: bool,
+    }
+
+    fn pick(urgency: f64) -> Verdict {
+        Verdict {
+            urgency,
+            due_in_days: None,
+            state: AttentionState::default(),
+            show: true,
+        }
+    }
+
+    /// Triage message `id` under `trigger` with `verdict`.
+    fn triage_with(store: &SqliteStore, id: i64, trigger: &str, verdict: Verdict) {
+        store.enqueue_agent_triage(1, id, trigger, false).unwrap();
+        let job = store
+            .claim_agent_job(1, "investigation", Utc::now(), 60)
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.message_id, id);
+        let context = store.load_agent_context(&job).unwrap();
+        let mut decided = decision(id);
+        decided.attention.show_in_fye = verdict.show;
+        decided.attention.state = verdict.state;
+        decided.attention.factors.urgency = verdict.urgency;
+        decided.attention.factors.attention_at = verdict.due_in_days.map(|days| SupportedTime {
+            value: (Utc::now() + Duration::days(days))
+                .date_naive()
+                .format("%Y-%m-%d")
+                .to_string(),
+            timezone: None,
+            source_message_id: id,
+            interpreted_relative: false,
+        });
+        assert_eq!(
+            store
+                .commit_agent_decision(&job, &context, &decided, &[])
+                .unwrap(),
+            AgentCommitOutcome::Applied
+        );
+    }
+
+    fn triage(store: &SqliteStore, id: i64, trigger: &str, urgency: f64) {
+        triage_with(store, id, trigger, pick(urgency));
+    }
+
+    fn board(store: &SqliteStore) -> Vec<String> {
+        let conn = store.lock().unwrap();
+        let mut items = list_items(&conn, 1, "fye", Utc::now()).unwrap();
+        rank_items(&mut items, &RankingConfig::default(), Utc::now());
+        items.into_iter().map(|item| item.thread_id).collect()
+    }
+
+    fn held(store: &SqliteStore) -> Vec<String> {
+        let conn = store.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT thread_id FROM agent_thread_attention WHERE held=1 ORDER BY thread_id")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    }
+
+    fn t(id: i64) -> String {
+        format!("t{id}")
+    }
+
+    fn backlog(store: &SqliteStore) {
+        // Urgency rises with the id, so the last FIRST_LOAD_FYE_CAP are the
+        // board's best and arrive last: the cap must evict, not just refuse.
+        // All of it stays under FIRST_LOAD_URGENT: none of it is pressing.
+        for id in 1..=BACKLOG {
+            triage(store, id, "backfill", 0.5 * id as f64 / BACKLOG as f64);
+        }
+    }
+
+    #[test]
+    fn the_backfill_keeps_only_its_best_ranked_threads() {
+        let store = fixture();
+        backlog(&store);
+        let shown = board(&store);
+        let best: Vec<String> = (BACKLOG - FIRST_LOAD_FYE_CAP as i64 + 1..=BACKLOG)
+            .rev()
+            .map(t)
+            .collect();
+        assert_eq!(shown, best);
+        // Both copies of the pick moved: the sitrep tiers off the JSON one.
+        let json_says_shown: i64 = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM agent_thread_attention
+                 WHERE json_extract(attention_json,'$.show_in_fye')=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(json_says_shown, FIRST_LOAD_FYE_CAP as i64);
+    }
+
+    /// The trigger a job runs under is not what makes mail first-load: the
+    /// SENT leg rewrites a queued backfill job's trigger to `thread_changed:`,
+    /// and that thread is still backlog.
+    #[test]
+    fn a_rewritten_trigger_does_not_escape_the_cap() {
+        let store = fixture();
+        backlog(&store);
+        // Backlog that competes like any other: the weak one is held...
+        triage(&store, BACKLOG + 1, "thread_changed:99:1", 0.0);
+        assert!(!board(&store).contains(&t(BACKLOG + 1)));
+        assert!(held(&store).contains(&t(BACKLOG + 1)));
+        // ...and a strong one wins a place from the weakest on the board.
+        let weakest = t(BACKLOG - FIRST_LOAD_FYE_CAP as i64 + 1);
+        assert!(board(&store).contains(&weakest));
+        triage(&store, BACKLOG + 2, "thread_changed:99:2", 0.79);
+        assert!(board(&store).contains(&t(BACKLOG + 2)));
+        assert!(!board(&store).contains(&weakest));
+        assert_eq!(board(&store).len(), FIRST_LOAD_FYE_CAP);
+    }
+
+    #[test]
+    fn live_mail_is_never_counted_against_the_cap() {
+        let store = fixture();
+        backlog(&store);
+        // A brand-new live thread, and a person asking about a held one.
+        live(&store, BACKLOG + 1);
+        triage(&store, BACKLOG + 1, "arrival", 0.0);
+        triage(&store, 1, "manual:requested", 0.0);
+        let shown = board(&store);
+        assert_eq!(shown.len(), FIRST_LOAD_FYE_CAP + 2);
+        assert!(shown.contains(&t(BACKLOG + 1)));
+        assert!(shown.contains(&t(1)));
+        // And a later backfill pick still competes only with the backlog.
+        triage(&store, BACKLOG + 2, "backfill", 0.0);
+        assert!(!board(&store).contains(&t(BACKLOG + 2)));
+    }
+
+    /// Live mail in a held thread, the owner's own reply included, makes it
+    /// current: out of the allowance for good.
+    #[test]
+    fn a_reply_in_a_held_thread_brings_it_back() {
+        let store = fixture();
+        backlog(&store);
+        assert!(held(&store).contains(&t(1)));
+        exec(
+            &store,
+            "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body,is_sent)
+             VALUES(100,1,'100','t1','a@test','re',datetime('now'),'s','b',1)",
+        );
+        exec(
+            &store,
+            "INSERT INTO triage(account_id,message_id,created_at) VALUES(1,100,datetime('now'))",
+        );
+        triage(&store, 1, "thread_changed:100:1", 0.1);
+        assert!(!held(&store).contains(&t(1)));
+        assert!(board(&store).contains(&t(1)));
+    }
+
+    /// A related update the live arrival carries does not make ANOTHER
+    /// thread current: that thread got no live mail.
+    #[test]
+    fn live_mail_does_not_release_threads_it_did_not_arrive_in() {
+        let store = fixture();
+        backlog(&store);
+        assert!(held(&store).contains(&t(1)));
+        live(&store, BACKLOG + 1);
+        store
+            .enqueue_agent_triage(1, BACKLOG + 1, "arrival", false)
+            .unwrap();
+        let job = store
+            .claim_agent_job(1, "investigation", Utc::now(), 60)
+            .unwrap()
+            .unwrap();
+        let context = store.load_agent_context(&job).unwrap();
+        let target = store.agent_thread_context(1, "t1").unwrap();
+        let mut attention = target.attention.unwrap();
+        attention.show_in_fye = true;
+        let mut decided = decision(BACKLOG + 1);
+        decided
+            .related_updates
+            .push(crate::triage::decision::RelatedAttentionUpdate {
+                thread_id: "t1".into(),
+                expected_revision: target.revision.attention_revision,
+                attention,
+                evidence: vec![],
+            });
+        let sources = store.snapshot_agent_sources(1, &[1, BACKLOG + 1]).unwrap();
+        let outcome = store
+            .commit_agent_decision(&job, &context, &decided, &sources)
+            .unwrap();
+        assert_eq!(outcome, AgentCommitOutcome::Applied);
+        assert!(held(&store).contains(&t(1)));
+        assert!(!board(&store).contains(&t(1)));
+    }
+
+    #[test]
+    fn a_pinned_thread_neither_counts_nor_moves() {
+        let store = fixture();
+        triage(&store, 1, "backfill", 0.0);
+        exec(
+            &store,
+            "INSERT INTO agent_thread_preferences(account_id,thread_id,show_in_fye,updated_at)
+             VALUES(1,'t1',1,datetime('now'))",
+        );
+        for id in 2..=BACKLOG {
+            triage(&store, id, "backfill", 0.5);
+        }
+        let shown = board(&store);
+        assert_eq!(shown.len(), FIRST_LOAD_FYE_CAP + 1);
+        assert!(shown.contains(&t(1)));
+    }
+
+    #[test]
+    fn pinning_a_held_thread_ends_the_hold() {
+        let store = fixture();
+        backlog(&store);
+        assert!(held(&store).contains(&t(1)));
+        store
+            .correct_agent_triage(1, 1, "show_in_fye", &serde_json::json!(true), Utc::now())
+            .unwrap();
+        assert!(!held(&store).contains(&t(1)));
+        assert!(board(&store).contains(&t(1)));
+    }
+
+    #[test]
+    fn pressing_mail_skips_the_cap() {
+        let store = fixture();
+        backlog(&store);
+        // Urgent, due in three days, and overdue while still needing the
+        // owner: all on the board, none costing the backlog a place.
+        triage(&store, BACKLOG + 1, "backfill", 0.9);
+        triage_with(
+            &store,
+            BACKLOG + 2,
+            "backfill",
+            Verdict {
+                due_in_days: Some(3),
+                ..pick(0.0)
+            },
+        );
+        triage_with(
+            &store,
+            BACKLOG + 3,
+            "backfill",
+            Verdict {
+                due_in_days: Some(-2),
+                state: AttentionState::NeedsUser,
+                ..pick(0.0)
+            },
+        );
+        let shown = board(&store);
+        assert_eq!(shown.len(), FIRST_LOAD_FYE_CAP + 3);
+        for id in [BACKLOG + 1, BACKLOG + 2, BACKLOG + 3] {
+            assert!(shown.contains(&t(id)), "t{id}");
+        }
+    }
+
+    /// Backlog is full of dates that have come and gone. Only what still
+    /// needs the owner is overdue; the rest, and anything a month out, is
+    /// just backlog.
+    #[test]
+    fn past_and_distant_dates_are_backlog() {
+        let store = fixture();
+        backlog(&store);
+        for (id, days) in [(BACKLOG + 1, -10), (BACKLOG + 2, 30)] {
+            triage_with(
+                &store,
+                id,
+                "backfill",
+                Verdict {
+                    due_in_days: Some(days),
+                    state: AttentionState::Informational,
+                    ..pick(0.0)
+                },
+            );
+            assert!(held(&store).contains(&t(id)), "t{id}");
+        }
+    }
+
+    #[test]
+    fn a_held_thread_comes_back_when_it_turns_pressing() {
+        let store = fixture();
+        backlog(&store);
+        assert!(held(&store).contains(&t(1)));
+        // Its due date arrives (stood in for by the urgency it now carries).
+        exec(
+            &store,
+            "UPDATE agent_thread_attention
+             SET attention_json=json_set(attention_json,'$.factors.urgency',0.95)
+             WHERE thread_id='t1'",
+        );
+        // The next commit, about anything, lets it in.
+        live(&store, BACKLOG + 1);
+        triage(&store, BACKLOG + 1, "arrival", 0.0);
+        assert!(board(&store).contains(&t(1)));
+        assert!(!held(&store).contains(&t(1)));
+    }
+
+    #[test]
+    fn closing_rows_never_refills_the_board() {
+        let store = fixture();
+        backlog(&store);
+        let before = held(&store);
+        assert_eq!(before.len(), BACKLOG as usize - FIRST_LOAD_FYE_CAP);
+        exec(
+            &store,
+            "UPDATE triage SET status='done' WHERE message_id IN (16,17,18,19,20)",
+        );
+        live(&store, BACKLOG + 1);
+        triage(&store, BACKLOG + 1, "arrival", 0.0);
+        assert_eq!(held(&store), before);
+        assert_eq!(board(&store).len(), FIRST_LOAD_FYE_CAP - 5 + 1);
+    }
+
+    /// Re-runs of sorted backlog never bring it back, even when the model
+    /// changes its mind both ways and there is room on the board.
+    #[test]
+    fn background_reruns_never_bring_backlog_back() {
+        let store = fixture();
+        backlog(&store);
+        assert!(held(&store).contains(&t(1)));
+        exec(
+            &store,
+            "UPDATE triage SET status='done' WHERE message_id IN (16,17,18,19,20)",
+        );
+        triage(&store, 1, "source_changed:2:1", 0.1);
+        assert!(held(&store).contains(&t(1)));
+        // Off and back on again.
+        triage_with(
+            &store,
+            1,
+            "source_changed:2:2",
+            Verdict {
+                show: false,
+                ..pick(0.1)
+            },
+        );
+        assert!(!held(&store).contains(&t(1)));
+        triage(&store, 1, "source_changed:2:3", 0.1);
+        assert!(held(&store).contains(&t(1)));
+        assert!(!board(&store).contains(&t(1)));
+        // Nor does a re-run of a row on the board cost another its place.
+        let before = board(&store);
+        triage(&store, 15, "source_changed:2:4", 0.49);
+        assert_eq!(board(&store).len(), before.len());
+        // A person asking again is not background: their answer stands.
+        triage(&store, 1, "manual:requested", 0.1);
+        assert!(board(&store).contains(&t(1)));
+    }
+
+    #[test]
+    fn an_existing_board_is_left_whole() {
+        let store = fixture();
+        for id in 1..=BACKLOG {
+            live(&store, id);
+            triage(&store, id, "arrival", 0.5);
+        }
+        assert_eq!(board(&store).len(), BACKLOG as usize);
     }
 }

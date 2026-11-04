@@ -470,6 +470,17 @@ impl SqliteStore {
 
     // ---- REVISITS ---------------------------------------------------------
 
+    /// `triage.first_load` for one message, for the sync engine's tests.
+    #[cfg(test)]
+    pub(crate) fn triage_first_load(&self, account_id: AccountId, message_id: i64) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.query_row(
+            "SELECT first_load FROM triage WHERE account_id=?1 AND message_id=?2",
+            params![account_id, message_id],
+            |r| r.get(0),
+        )?)
+    }
+
     pub(super) fn notify_eligible_at(
         &self,
         account_id: AccountId,

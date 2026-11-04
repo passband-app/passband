@@ -3502,6 +3502,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         triaged.foreground_triage = origin == IngestOrigin::Incremental
             && !triaged.message.is_sent
             && !triaged.message.is_spam;
+        triaged.first_load = origin == IngestOrigin::Backfill;
         // NO TRANSLATOR, NO QUEUE: a row queued here with nothing to work it
         // would read as "Translating..." in the reader for good. Detection is
         // free; the row is what promises a translation.
@@ -11561,6 +11562,38 @@ Q0/00yfa39rgtJLa0DnOoA==
     /// steady-state effort. Driven through the real ingest origins and
     /// `process_agent_job`, with the effort read off the request the mock
     /// model received for each.
+    /// Which path FIRST brought a message in is what makes it first-load
+    /// (`triage.first_load`, the FYE allowance's input): the backfill, and
+    /// only the backfill. A poll re-sighting the same mail does not move it.
+    #[tokio::test]
+    async fn only_the_backfill_stamps_mail_first_load() {
+        let (store, account) = store_at_cursor(Some(100));
+        let now = Utc::now();
+        let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+        let raw = |msgid: &str| {
+            fixture(
+                account,
+                msgid,
+                "From: alice@example.com\r\nSubject: A note\r\n\r\nHello",
+                false,
+            )
+        };
+        let ingest = |msgid: &str, origin| {
+            engine
+                .ingest_one(&raw(msgid), &[], now, origin)
+                .unwrap()
+                .expect("ingested")
+                .id
+        };
+        let first_load = |id: i64| store.triage_first_load(account, id).unwrap();
+        let backlog = ingest("backlog", IngestOrigin::Backfill);
+        let arrival = ingest("arrival", IngestOrigin::Incremental);
+        assert!(first_load(backlog));
+        assert!(!first_load(arrival));
+        ingest("backlog", IngestOrigin::Incremental);
+        assert!(first_load(backlog), "a re-sighting is the same mail");
+    }
+
     #[tokio::test]
     async fn only_the_jobs_somebody_waits_on_go_out_at_the_onboarding_effort() {
         use crate::store::agent_triage::AgentTriageStore;

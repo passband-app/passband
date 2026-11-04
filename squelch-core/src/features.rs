@@ -90,7 +90,6 @@ pub const KNOWN: &[Feature] = &[
 /// heard of the key. docs/TRIAGE-OPERATIONS.md, "Spend and revisit limits".
 pub const UNCAPPED_TRIAGE: &str = "uncapped_triage";
 
-
 /// Deep user understanding (docs/UNDERSTANDING.md §2.3, §5): the nightly
 /// profile pass (`triage::profile`), the entries triage reads from it
 /// (`triage::memory::StoreMemoryContext`), and the review page's routes

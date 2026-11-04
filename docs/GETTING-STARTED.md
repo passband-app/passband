@@ -219,7 +219,7 @@ brew install --cask passband-app/tap/passband
 ```
 
 Building from source is for working on the app rather than running it, and it is
-what the code-signing notes in the [root README](../README.md#passband-the-client)
+what the code-signing notes in the [root README](../README.md#build-from-source)
 are about:
 
 ```sh

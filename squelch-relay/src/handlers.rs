@@ -120,6 +120,11 @@ pub struct PushRequest {
     /// for an agent's draft awaiting review, `"calendar"` for a reminder
     /// before an event. A closed set, so a daemon can pick a line but never
     /// write one.
+    ///
+    /// `"clear"` is the one kind that is not an alert: the owner dealt with
+    /// that event on another device (copied its login code on the Mac), so the
+    /// phone should take its banner down. It goes out as a silent background
+    /// push with no alert at all.
     #[serde(default)]
     pub kind: Option<String>,
 }
@@ -256,6 +261,10 @@ struct Validated {
     collapse_id: Option<String>,
     base_url: String,
     environment: Environment,
+    /// `apns-push-type`: `alert` for every banner, `background` for a clear.
+    push_type: &'static str,
+    /// `apns-priority`: APNs refuses a background push sent at 10.
+    priority: &'static str,
 }
 
 pub async fn push(
@@ -404,24 +413,34 @@ fn validate(state: &RelayState, req: PushRequest) -> Result<Validated, RelayErro
         None => environment.base_url().to_string(),
     };
 
-    let body = match req.kind.as_deref() {
-        None => ALERT_BODY,
-        Some("draft") => DRAFT_ALERT_BODY,
-        Some("calendar") => CALENDAR_ALERT_BODY,
+    let alert_body = match req.kind.as_deref() {
+        None => Some(ALERT_BODY),
+        Some("draft") => Some(DRAFT_ALERT_BODY),
+        Some("calendar") => Some(CALENDAR_ALERT_BODY),
+        Some("clear") => None,
         Some(_) => {
             return Err(RelayError::bad_request(
-                "kind must be absent, `draft` or `calendar`",
+                "kind must be absent, `draft`, `calendar` or `clear`",
             ));
         }
     };
 
-    // Content-free by design: an opaque id plus a generic alert.
+    // Content-free by design: an opaque id plus a generic alert, or for a
+    // clear, an opaque id and nothing to show.
+    let (aps, push_type, priority) = match alert_body {
+        Some(body) => (
+            json!({
+                "alert": { "title": ALERT_TITLE, "body": body },
+                "mutable-content": 1,
+                "sound": "default",
+            }),
+            "alert",
+            "10",
+        ),
+        None => (json!({ "content-available": 1 }), "background", "5"),
+    };
     let payload = serde_json::to_vec(&json!({
-        "aps": {
-            "alert": { "title": ALERT_TITLE, "body": body },
-            "mutable-content": 1,
-            "sound": "default",
-        },
+        "aps": aps,
         "event_id": req.event_id,
     }))
     .map_err(|_| RelayError::new(StatusCode::INTERNAL_SERVER_ERROR, "payload encode failed"))?;
@@ -441,6 +460,8 @@ fn validate(state: &RelayState, req: PushRequest) -> Result<Validated, RelayErro
         collapse_id,
         base_url,
         environment,
+        push_type,
+        priority,
     })
 }
 
@@ -460,9 +481,11 @@ async fn send_one(state: &RelayState, v: &Validated, jwt: &str, token: String) -
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .header("apns-topic", &v.topic)
         // A visible alert, not `content-available`: background pushes get
-        // throttled, while a mutable alert runs the NSE reliably.
-        .header("apns-push-type", "alert")
-        .header("apns-priority", "10");
+        // throttled, while a mutable alert runs the NSE reliably. The one
+        // exception is a clear, which has nothing to show and must not
+        // buzz: it is a background push, and APNs requires priority 5 for it.
+        .header("apns-push-type", v.push_type)
+        .header("apns-priority", v.priority);
     if let Some(c) = &v.collapse_id {
         req = req.header("apns-collapse-id", c);
     }
@@ -608,12 +631,38 @@ mod tests {
     }
 
     #[test]
+    fn a_clear_push_is_silent_and_background() {
+        let mut req = base(json!([hex(64)]));
+        req["kind"] = json!("clear");
+        req["event_id"] = json!("acct:clear:41");
+        let v = parse(req).unwrap();
+        let p: serde_json::Value = serde_json::from_slice(&v.payload).unwrap();
+        assert_eq!(p["aps"]["content-available"], 1);
+        // Nothing to show and nothing to hear: no alert, no sound, and no
+        // mutable-content, which would wake the extension for no banner.
+        assert!(p["aps"].get("alert").is_none());
+        assert!(p["aps"].get("sound").is_none());
+        assert!(p["aps"].get("mutable-content").is_none());
+        assert_eq!(p["event_id"], "acct:clear:41");
+        assert_eq!(v.push_type, "background");
+        assert_eq!(v.priority, "5");
+    }
+
+    #[test]
+    fn an_alert_push_keeps_its_headers() {
+        let v = parse(base(json!([hex(64)]))).unwrap();
+        assert_eq!(v.push_type, "alert");
+        assert_eq!(v.priority, "10");
+    }
+
+    #[test]
     fn an_unknown_kind_is_refused_rather_than_written() {
         for bad in [
             json!("Your bank wants $5000"),
             json!(""),
             json!(1),
             json!("Calendar"),
+            json!("Clear"),
         ] {
             let mut req = base(json!([hex(64)]));
             req["kind"] = bad.clone();

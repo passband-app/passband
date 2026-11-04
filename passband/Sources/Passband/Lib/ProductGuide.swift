@@ -376,7 +376,7 @@ enum ProductGuide {
         Acting on the sender:
         - u: unsubscribe. Passband asks first, then usually does it in the background, and the reader closes. Progress shows at the bottom right of the Sitrep. If the sender's page needs a choice, a card there offers "Finish on their site". For spam or a sender Passband cannot verify, it opens the unsubscribe page in the browser instead. If the email has no unsubscribe link, the dialog offers "Block sender".
         - t: write a rule for this sender. v: fix a wrong triage call. See sender_rules and triage.
-        - Clicking a sender's name or avatar opens their contact card: how much mail has gone each way, any rule that applies, recent threads, and buttons to email them or see their mail.
+        - Clicking a sender's name or avatar (or a guest's name on a calendar event) opens their contact card: how much mail has gone each way, any rule that applies, recent threads, and buttons to email them or see their mail.
 
         How the thread looks:
         - b switches this thread between email cards and chat bubbles, and so does the two-icon switch at the top right. The choice sticks to that thread. The default is Settings > Mail > Threads. Reading mail is always cards.

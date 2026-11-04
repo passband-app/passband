@@ -1911,6 +1911,17 @@ would tell them. The venue lookup sends the card's place text alone to Apple
 never for a link or a call, and Apple's answer is used only when its name
 matches the place. No location permission, no key, no Google.
 
+The picture each card resolved is kept on disk (`EventVisualDisk`, in
+Application Support's Passband/EventVisualCache) so the card paints it on its
+first frame: an index of kind, source thread id, venue point and name, plus a
+PNG per photo or Look Around still. It is mail content at rest and is written
+the §6 way, through `PrivateFile` (excluded from backup, 0600 in 0700 on the
+Mac, complete protection on the phone). File names are sha256 of the account
+id plus the card's key, so no event id, thread id or place shows in them.
+Nothing is written for the practice inbox, an entry older than 30 days is
+dropped unpainted, a photo is not painted while "load remote images" is off,
+and an account's entries go when the account is removed.
+
 **The token is the union; the slot is the boundary.** Self-host
 `squelchd auth --calendar` stores its token in its own credential slot
 (`CredentialKind::Calendar`). Google unions grants per Cloud project and the consent

@@ -40,10 +40,28 @@ struct EventVisualView: View {
             }
             .buttonStyle(.plain)
             .pointingHand()
-        case .lookAround(let scene, _):
-            LookAroundPreview(
-                initialScene: scene, allowsNavigation: false, showsRoadLabels: false,
-                badgePosition: .bottomTrailing)
+        case .lookAround(let scene, let item, let still):
+            // Painted from disk, the last frame Apple's scene showed stands in
+            // (or the well, without one) until the scene itself arrives.
+            ZStack {
+                if let still {
+                    Image(platformImage: still)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
+                        .contentShape(Rectangle())
+                        .onTapGesture { item.openInMaps() }
+                        .pointingHand()
+                } else {
+                    Palette.hairline
+                }
+                if let scene {
+                    LookAroundPreview(
+                        initialScene: scene, allowsNavigation: false, showsRoadLabels: false,
+                        badgePosition: .bottomTrailing)
+                }
+            }
         case .map(let item):
             Map(initialPosition: .item(item), interactionModes: []) {
                 Marker(item: item)
@@ -61,7 +79,7 @@ struct EventVisualView: View {
         switch visual {
         case .photo:
             label("From the mail")
-        case .lookAround(_, let item), .map(let item):
+        case .lookAround(_, let item, _), .map(let item):
             Button {
                 item.openInMaps()
             } label: {

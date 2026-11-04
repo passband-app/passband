@@ -5,10 +5,16 @@ standing understanding of who they are, who matters to them, and what they
 ignore, and how triage and the clients use that understanding without ever
 mistaking it for an instruction.
 
-Status: design. Nothing here is built. The reserved seam it fills is
-`MemoryContextProvider` in `squelch-core/src/triage/context.rs`, shipped as
-`EmptyMemoryContext` by the triage rewrite (TRIAGE-CODE-DESIGN.md §4, "Future
-memory seam"). Issue #213 owns the explicit-feedback UX and lands as §4 below.
+Status: §2.3 (owner profile), its `understanding` flag (§5) and the
+`/client/memory` routes (§6) are built, behind the flag; the relationship
+ledger (§2.1), the graph (§2.2) and the triage question (§4) are not. Until
+the ledger lands, the profile pass reads `contacts`, `senders`, `send_groups`,
+calendar guests and the owner's replies through the `ProfileInputSource` seam
+(`triage/profile.rs`), and a `person` address is checked against `contacts`
+and `senders`. The seam it fills is `MemoryContextProvider` in
+`squelch-core/src/triage/context.rs` (TRIAGE-CODE-DESIGN.md §4, "Future
+memory seam"), now `triage::memory::StoreMemoryContext`. Issue #213 owns the
+explicit-feedback UX and lands as §4 below.
 
 ## 1. What exists and what triage sees
 

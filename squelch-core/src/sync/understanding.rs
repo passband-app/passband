@@ -14,6 +14,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// `thread_id`. Nothing while the `understanding` feature is off, and
     /// nothing on a store error: a run without its memory is an ordinary run,
     /// never a failed job.
+    ///
+    /// Accepted: the eval runner builds its input with `snapshot()` alone, so it gets no memory lines.
     pub(super) fn memory_for(&self, thread_id: &str, sender: &str) -> Vec<MemoryEntry> {
         let now = Utc::now();
         let zone = self.store.owner_zone(self.account_id).unwrap_or_default();

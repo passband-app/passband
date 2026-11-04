@@ -764,6 +764,7 @@ impl SqliteStore {
             line = cleaned;
         }
         if edited || edit.confirm {
+            // Accepted: no live cap here, so confirming retired entries can take the owner past 40.
             tx.execute(
                 "UPDATE memory_entries SET origin = 'stated', scope = ?3, body = ?4, line = ?5,
                      revision = revision + ?6, updated_at = ?7, affirmed_at = ?7,

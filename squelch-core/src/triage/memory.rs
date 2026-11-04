@@ -33,6 +33,7 @@ pub const MAX_LIVE_ENTRIES: usize = 40;
 /// The most lines one triage run is handed, and the bytes they may take
 /// together. Small on purpose: these are context, and the message is the job.
 pub const MAX_CONTEXT_LINES: usize = 20;
+// Accepted: the byte cap counts line text only, not the JSON around each line.
 pub const MAX_CONTEXT_BYTES: usize = 3_000;
 /// An inferred entry lapses this long after the pass last stood by it. The
 /// pass must re-affirm (keep or revise) or the entry stops being served:

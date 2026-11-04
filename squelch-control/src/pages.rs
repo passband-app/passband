@@ -1294,17 +1294,24 @@ pub fn admin_page(pending: &[UserRow], approved: &[UserRow], error: Option<&str>
             // as the rung below and the same no-button rule, for the same
             // reason: there is nothing left to mail somebody who is using the
             // product.
+            //
+            // THE ONE BUTTON THOSE RUNGS DO GET is Delete, and it is not an
+            // invite: it destroys the mailbox so the same person can be invited
+            // again from the top. It asks for the username typed before it does
+            // anything; see `crate::admin::delete`.
             let outcome = if let Some(at) = r.first_paired_at {
                 let label = tenant_code(r);
                 format!(
-                    r#"<span class="done">active</span><span class="muted">{}</span>{label}"#,
+                    r#"<span class="done">active</span><span class="muted">{}</span>{label}{}"#,
                     day(at),
+                    delete_form(r),
                 )
             } else if let Some(at) = r.signed_up_at {
                 let label = tenant_code(r);
                 format!(
-                    r#"<span class="done">signed up</span><span class="muted">{}</span>{label}"#,
+                    r#"<span class="done">signed up</span><span class="muted">{}</span>{label}{}"#,
                     day(at),
+                    delete_form(r),
                 )
             } else if let Some(at) = r.notified_at {
                 format!(
@@ -1821,6 +1828,42 @@ approved, minted, or mailed.</p>"#,
     )
 }
 
+/// The question before a mailbox is destroyed: type its username.
+///
+/// NOTHING HAS HAPPENED YET when this renders, as with [`admin_confirm`]. The
+/// typed label is the confirmation, so a stale form or a replayed POST that did
+/// not type it lands back here instead of deleting anything.
+pub fn admin_confirm_delete(id: i64, who: &str, label: &str, error: Option<&str>) -> Response {
+    console(
+        StatusCode::OK,
+        "Delete this mailbox?",
+        &format!(
+            r#"<h1>Delete this mailbox?</h1>
+{error_html}
+<p class="stop"><strong>This destroys <code>{label}</code> for good: its mail
+index, its Google credential, its key, and its row on this board.</strong></p>
+<p>{who}</p>
+<p class="hint">The username and the address come free, so the same person can
+be invited and sign up again from the start. Their paired devices stop working.
+There is no undo.</p>
+<form method="post" action="/admin/delete">
+<input type="hidden" name="id" value="{id}">
+<input type="hidden" name="{CONFIRM_FIELD}" value="yes">
+<label for="label">Type <code>{label}</code> to confirm</label>
+<input type="text" id="label" name="label" autocomplete="off" autocapitalize="off"
+  spellcheck="false" required>
+<button type="submit">Delete the mailbox</button>
+</form>
+<p class="hint"><a href="/admin">Cancel and go back.</a> Nothing has been
+deleted.</p>"#,
+            error_html = stop_note(error),
+            label = escape_html(label),
+            who = escape_html(who),
+            CONFIRM_FIELD = CONFIRM_FIELD,
+        ),
+    )
+}
+
 /// The hidden field that says the operator answered the question on
 /// [`admin_confirm`]. Lives here so the page that writes it and the handlers
 /// that read it cannot drift to two different spellings.
@@ -1902,6 +1945,15 @@ fn tenant_code(r: &UserRow) -> String {
         .as_deref()
         .map(|l| format!(" <code>{}</code>", escape_html(l)))
         .unwrap_or_default()
+}
+
+/// The Delete button for a row that became a mailbox, or nothing for one that
+/// did not.
+fn delete_form(r: &UserRow) -> String {
+    if r.tenant_label.is_none() {
+        return String::new();
+    }
+    action_form("/admin/delete", r.id, "Delete", true)
 }
 
 /// One row's button, as its own form. No JavaScript on this page, so a button

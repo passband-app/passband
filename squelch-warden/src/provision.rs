@@ -1824,8 +1824,7 @@ impl Warden {
     ///
     /// The PersistentVolumeClaim, the identity Secret and the credential Secret
     /// are all left in place. This is the "cancel my account" path, not the
-    /// "destroy my mail" path, and the second one is a later flag with a lot
-    /// more ceremony behind it. The LLM Secret is the exception — it holds a
+    /// "destroy my mail" path; that one is [`Warden::purge`], on its own route. The LLM Secret is the exception — it holds a
     /// gateway credential, not data, and goes with the workload; see below.
     ///
     /// Idempotent: an unknown label is success. The control plane calls this on
@@ -1891,6 +1890,59 @@ impl Warden {
             .await
             .map_err(|e| fail(name.as_str(), "share_token_delete_failed", &e))?;
         tracing::info!(tenant = %name, "tenant stopped; volume, identity and credential kept");
+        Ok(())
+    }
+
+    /// DESTROY a tenant: everything [`Warden::delete`] removes, and then the
+    /// three things it keeps. The mail volume, the sealed credential and the
+    /// identity Secret all go, so the label is free and a later signup under it
+    /// starts from nothing.
+    ///
+    /// This is the "destroy my mail" path that [`Warden::delete`] says is a
+    /// separate door, and it is one: its own route, never a flag on DELETE. A
+    /// warden that predates it answers the route with a 404 instead of quietly
+    /// doing the soft delete and reporting success.
+    ///
+    /// ORDER, and why each step waits for the last:
+    ///
+    /// 1. [`Warden::delete`] first, which writes the cancellation marker before
+    ///    touching anything. A purge that stops partway leaves a cancelled
+    ///    tenant, which nothing will bring back up on its own.
+    /// 2. Wait for the pod to exit. The volume is `ReadWriteOnce` behind one
+    ///    SQLite file; deleting the claim under a live daemon leaves it held by
+    ///    the protection finalizer until the pod goes, and a fast re-signup
+    ///    would then apply a fresh claim onto one that is being deleted.
+    /// 3. The volume, then the credential.
+    /// 4. The identity Secret LAST. It is the record that this label exists,
+    ///    so while anything else is still standing a retry can find it.
+    ///
+    /// Idempotent, like `delete`: an unknown label is success.
+    pub async fn purge(&self, raw_label: &str) -> Result<(), WardenError> {
+        let name = TenantName::parse(raw_label)?;
+        self.delete(name.as_str()).await?;
+        self.cluster
+            .pods_gone(&objects::pod_selector(&name), self.config.ready_timeout)
+            .await
+            .map_err(|e| fail(name.as_str(), "pods_not_gone", &e))?;
+        for (kind, object, reason) in [
+            (Kind::Pvc, name.data_pvc(), "volume_delete_failed"),
+            (
+                Kind::Secret,
+                name.credential_secret(),
+                "credential_delete_failed",
+            ),
+            (
+                Kind::Secret,
+                name.identity_secret(),
+                "identity_delete_failed",
+            ),
+        ] {
+            self.cluster
+                .delete(kind, &object)
+                .await
+                .map_err(|e| fail(name.as_str(), reason, &e))?;
+        }
+        tracing::warn!(tenant = %name, "tenant PURGED: volume, credential and identity deleted");
         Ok(())
     }
 
@@ -3856,6 +3908,102 @@ mod tests {
             h.warden.status("alice").await.unwrap(),
             TenantStatus::Stopped
         );
+    }
+
+    /// The other door: PURGE takes everything `delete` keeps, identity last,
+    /// and leaves the label free for a signup that starts from nothing.
+    #[tokio::test]
+    async fn purge_destroys_the_data_and_frees_the_label() {
+        let h = Harness::new();
+        let first = h
+            .warden
+            .create_tenant("alice", "alice@example.com")
+            .await
+            .unwrap();
+        h.warden
+            .set_credentials("alice", &armored("alice"))
+            .await
+            .unwrap();
+
+        h.warden.purge("alice").await.unwrap();
+
+        let deleted = h.cluster.deleted();
+        assert_eq!(
+            deleted[deleted.len() - 3..],
+            [
+                (Kind::Pvc, "alice-data".to_string()),
+                (Kind::Secret, "alice-credential".to_string()),
+                (Kind::Secret, "alice-identity".to_string()),
+            ]
+        );
+        assert!(h.cluster.secret("alice-identity").is_none());
+        assert!(h.cluster.secret("alice-credential").is_none());
+        assert!(!h.cluster.exists(Kind::Pvc, "alice-data"));
+        assert!(!h.cluster.exists(Kind::Deployment, "alice"));
+        assert!(matches!(
+            h.warden.status("alice").await,
+            Err(WardenError::NotFound)
+        ));
+
+        // A signup under the same label, even by a DIFFERENT mailbox, gets a
+        // brand new identity rather than the old one or a 409.
+        let second = h
+            .warden
+            .create_tenant("alice", "someone-else@example.com")
+            .await
+            .unwrap();
+        assert_ne!(first.recipient, second.recipient);
+        h.warden
+            .set_credentials("alice", &armored("alice"))
+            .await
+            .unwrap();
+        assert_eq!(
+            h.warden.status("alice").await.unwrap(),
+            TenantStatus::Active
+        );
+    }
+
+    /// A pod that will not leave stops the purge BEFORE the volume, and what is
+    /// left is a cancelled tenant a retry can finish.
+    #[tokio::test]
+    async fn purge_waits_for_the_pod_before_touching_the_volume() {
+        let h = Harness::new();
+        h.warden
+            .create_tenant("alice", "alice@example.com")
+            .await
+            .unwrap();
+        h.warden
+            .set_credentials("alice", &armored("alice"))
+            .await
+            .unwrap();
+        h.cluster.pods_linger();
+
+        assert!(h.warden.purge("alice").await.is_err());
+        assert!(h.cluster.exists(Kind::Pvc, "alice-data"));
+        assert!(h.cluster.secret("alice-identity").is_some());
+        assert_eq!(
+            h.warden.status("alice").await.unwrap(),
+            TenantStatus::Stopped
+        );
+
+        h.cluster.pods_release();
+        h.warden.purge("alice").await.unwrap();
+        assert!(!h.cluster.exists(Kind::Pvc, "alice-data"));
+        assert!(h.cluster.secret("alice-identity").is_none());
+    }
+
+    #[tokio::test]
+    async fn purge_is_idempotent_and_an_unknown_label_is_a_no_op() {
+        let h = Harness::new();
+        h.warden.purge("nobody").await.unwrap();
+        h.warden
+            .create_tenant("alice", "alice@example.com")
+            .await
+            .unwrap();
+        // Pending is purgeable too: a signup that never finished.
+        h.warden.purge("alice").await.unwrap();
+        h.warden.purge("alice").await.unwrap();
+        assert!(h.cluster.secret("alice-identity").is_none());
     }
 
     #[tokio::test]

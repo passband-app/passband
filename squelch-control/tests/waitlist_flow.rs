@@ -94,6 +94,26 @@ async fn spawn_resend(rec: Shared) -> String {
     spawn(app).await
 }
 
+/// Every label the mock warden was asked to purge.
+type PurgeLog = Arc<Mutex<Vec<String>>>;
+
+/// A mock warden with the one route the admin page's delete calls.
+async fn spawn_warden(log: PurgeLog, status: StatusCode) -> String {
+    let app = Router::new()
+        .route(
+            "/v1/tenants/{label}/purge",
+            post(
+                move |AxumState(log): AxumState<PurgeLog>,
+                      axum::extract::Path(label): axum::extract::Path<String>| async move {
+                    log.lock().unwrap().push(label);
+                    status
+                },
+            ),
+        )
+        .with_state(log);
+    spawn(app).await
+}
+
 fn auth_of(headers: &HeaderMap) -> String {
     headers
         .get(header::AUTHORIZATION)
@@ -139,7 +159,22 @@ impl Harness {
         Self::build(false).await
     }
 
+    /// The feature ON, with a mock warden behind it that answers the purge
+    /// route with `purge_status`.
+    async fn with_warden(purge_status: StatusCode) -> (Self, PurgeLog) {
+        let log: PurgeLog = Arc::new(Mutex::new(Vec::new()));
+        let url = spawn_warden(log.clone(), purge_status).await;
+        (Self::build_with(true, url).await, log)
+    }
+
     async fn build(waitlist: bool) -> Self {
+        // Nothing on these routes reaches the warden. Port 1 is where a request
+        // would land if one ever did, which is a connection refused rather than
+        // a silently mocked success.
+        Self::build_with(waitlist, "http://127.0.0.1:1".into()).await
+    }
+
+    async fn build_with(waitlist: bool, warden_url: String) -> Self {
         let rec: Shared = Arc::new(Mutex::new(Recorder::default()));
         let resend_url = spawn_resend(rec.clone()).await;
 
@@ -181,12 +216,7 @@ impl Harness {
 
         let (store, db_url) = common::fresh_store().await;
         let warden = Arc::new(
-            HttpWarden::new(
-                "http://127.0.0.1:1".into(),
-                "warden-bearer".into(),
-                Duration::from_secs(5),
-            )
-            .unwrap(),
+            HttpWarden::new(warden_url, "warden-bearer".into(), Duration::from_secs(5)).unwrap(),
         );
         let state = ControlState::new(config, store, warden).unwrap();
         Self {
@@ -1437,4 +1467,149 @@ async fn an_unanswered_confirmation_invites_nobody_directly() {
     );
     assert!(h.invite_ids().await.is_empty(), "and nothing was minted");
     assert!(h.sends().is_empty(), "and nothing was mailed");
+}
+
+/// Approve the one row, spend its code as a finished signup does, and record
+/// the mailbox it became. Returns the row id and the cookie.
+async fn signed_up(h: &Harness, label: &str) -> (i64, String) {
+    h.join(APPLICANT).await;
+    let id = h.only_row_id().await;
+    let cookie = h.sign_in().await;
+    h.post_form(
+        "/admin/approve",
+        format!("id={id}&confirmed=yes"),
+        Some(&cookie),
+    )
+    .await;
+    let code = code_in(&h.sends()[0].1);
+    let now = chrono::Utc::now();
+    let invite_id = h
+        .state
+        .store()
+        .reserve_invite(
+            &invites::hash(&code),
+            "holder",
+            now,
+            now + chrono::Duration::minutes(10),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    h.state
+        .store()
+        .consume_invite(invite_id, label, "holder")
+        .await
+        .unwrap();
+    h.state
+        .store()
+        .record_signup(invite_id, APPLICANT, label, now)
+        .await
+        .unwrap();
+    h.state
+        .store()
+        .insert_tenant(label, APPLICANT)
+        .await
+        .unwrap();
+    (id, cookie)
+}
+
+/// The whole reason the button exists: delete a signed-up mailbox and invite
+/// the same address again from the top.
+#[tokio::test]
+async fn a_deleted_mailbox_can_be_invited_again() {
+    let (h, purged) = Harness::with_warden(StatusCode::NO_CONTENT).await;
+    let (id, cookie) = signed_up(&h, "ada").await;
+
+    let (_, _, board) = h.get("/admin", Some(&cookie)).await;
+    assert!(board.contains(r#"action="/admin/delete""#), "{board}");
+
+    let (status, _, body) = h
+        .post_form(
+            "/admin/delete",
+            format!("id={id}&confirmed=yes&label=ada"),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+    assert_eq!(*purged.lock().unwrap(), vec!["ada".to_string()]);
+    assert!(!h.state.store().label_exists("ada").await.unwrap());
+    assert!(h.state.store().user_entry(id).await.unwrap().is_none());
+
+    // And the address is a stranger again: a direct invite mints and mails.
+    let (status, body) = invite_directly(&h, &cookie, APPLICANT).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+    assert_eq!(h.sends().len(), 2, "a second invite went out");
+    assert!(h.code_is_available(&code_in(&h.sends()[1].1)).await);
+}
+
+/// Nothing is destroyed until the username is typed, and typed right.
+#[tokio::test]
+async fn a_delete_waits_for_the_username() {
+    let (h, purged) = Harness::with_warden(StatusCode::NO_CONTENT).await;
+    let (id, cookie) = signed_up(&h, "ada").await;
+
+    // The board's button: no confirmation yet, so the question.
+    let (status, _, body) = h
+        .post_form("/admin/delete", format!("id={id}"), Some(&cookie))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Type <code>ada</code> to confirm"), "{body}");
+    assert!(!body.contains("does not match"), "{body}");
+
+    // Confirmed with the wrong name, or none: asked again, with a reason.
+    for typed in ["", "ad", "ada2", "ADA"] {
+        let (status, _, body) = h
+            .post_form(
+                "/admin/delete",
+                format!("id={id}&confirmed=yes&label={typed}"),
+                Some(&cookie),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("does not match"), "{typed:?}: {body}");
+    }
+
+    // No session, or another origin: refused before anything is read.
+    let (status, _, _) = h
+        .post_form(
+            "/admin/delete",
+            format!("id={id}&confirmed=yes&label=ada"),
+            None,
+        )
+        .await;
+    assert_ne!(status, StatusCode::SEE_OTHER);
+    let (status, _, _) = h
+        .post_from(
+            "/admin/delete",
+            format!("id={id}&confirmed=yes&label=ada"),
+            Some(&cookie),
+            Some("https://passband.test"),
+        )
+        .await;
+    assert_ne!(status, StatusCode::SEE_OTHER);
+
+    assert!(purged.lock().unwrap().is_empty());
+    assert!(h.state.store().label_exists("ada").await.unwrap());
+    assert!(h.state.store().user_entry(id).await.unwrap().is_some());
+}
+
+/// A warden without the purge route answers 404, and that must never read as
+/// "deleted": the mail would still be there under the label.
+#[tokio::test]
+async fn a_warden_without_purge_deletes_nothing() {
+    let (h, purged) = Harness::with_warden(StatusCode::NOT_FOUND).await;
+    let (id, cookie) = signed_up(&h, "ada").await;
+
+    let (status, _, body) = h
+        .post_form(
+            "/admin/delete",
+            format!("id={id}&confirmed=yes&label=ada"),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("does not support deleting"), "{body}");
+    assert_eq!(purged.lock().unwrap().len(), 1);
+    assert!(h.state.store().label_exists("ada").await.unwrap());
+    assert!(h.state.store().user_entry(id).await.unwrap().is_some());
 }

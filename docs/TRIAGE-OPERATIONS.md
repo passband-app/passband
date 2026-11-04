@@ -368,7 +368,7 @@ timestamp of a report is kept, and only the owner's own client can write them.
 
 Smart clear scores each sender with open mail in Reading (the 30-day
 inventory `/client/v2/feed?destination=reading&since=...` returns, not the
-shorter board the default feed shows: see "The Reading board" below), at most
+board the default feed shows: see "The Reading board" below), at most
 100 senders, from
 per-sender statistics read in `store/sqlite/reading_senders.rs`. Nothing about
 them is served to a client.
@@ -706,17 +706,30 @@ but no typed facts are queued once for re-triage (`records_cleanup`).
 ## The Reading board
 
 The default Reading feed (`/client/v2/feed?destination=reading` with no `since`
-and no `all_time=true`) is the BOARD the owner sees, not the whole inventory:
-the newest 49 Reading messages of the last 7 calendar days in the owner's zone,
-COUNTING MAIL ALREADY DONE, less the done ones. A heavy week shrinks the window
-from its old end; a quiet one shows the whole week. Because done mail keeps its
-place, clearing never refills the board with older mail, and the board moves
-only when mail arrives or a day starts. `READING_BOARD_DAYS` and
-`READING_BOARD_MAX` in `store/sqlite/agent_triage.rs`.
+and no `all_time=true`) is the BOARD the owner sees. It is the 30-day Reading
+inventory with one part cut down: the mail the first-run backfill brought in
+(`triage.first_load`, stamped at ingest for backfill-origin mail only). The two
+parts are merged newest first.
 
-Mail off the board is not hidden or changed in the store: it stays open in All
-mail and search. Smart clear works on the whole 30-day inventory, so it also
-marks done older mail that is no longer on the board (its stale-promotion rule
-only fires on mail a week old, which the board never shows), and its count can
-be larger than what leaves the board. A caller naming its own dates, and the
-agent door's `get_reading`, get the inventory.
+- **Mail that is not first-load** (everything that arrives after onboarding,
+  and all mail on an account onboarded before first-load stamping existed):
+  the plain 30-day inventory. No week window, no cap. Every new Reading email
+  shows up.
+- **First-load mail**: the newest 49 first-load Reading messages of the 7
+  calendar days, in the owner's zone, ending on the day of the NEWEST
+  first-load message (any destination), COUNTING MAIL ALREADY DONE, less the
+  done ones. That newest message is the leading edge of the first run, so the
+  onboarding board is "the week before you joined, at most 49". It is fixed:
+  it does not slide with `now`, live mail does not move it, and its mail then
+  ages off with the ordinary 30-day rule. Because done mail keeps its place,
+  clearing never refills it with older backlog. A heavy day is cut by message,
+  never as a whole day, so a flood cannot empty it.
+
+`READING_BOARD_DAYS` and `READING_BOARD_MAX` in `store/sqlite/agent_triage.rs`.
+
+First-load mail off the board is not hidden or changed in the store: it stays
+open in All mail and search. Smart clear and the per-sender purge work on the
+whole 30-day inventory, so they also see the first-load backlog the board
+leaves off, and smart clear's count can be larger than what leaves the board.
+A caller naming its own dates, and the agent door's `get_reading`, get the
+inventory.

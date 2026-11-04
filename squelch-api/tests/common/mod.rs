@@ -136,3 +136,35 @@ pub fn sent_msg(account_id: i64, gmail: &str, thread: &str, subject: &str, to: &
         ..msg(account_id, gmail, thread, subject, "what I wrote")
     }
 }
+
+/// Store `message` the way the FIRST-RUN BACKFILL does: message and triage row
+/// in one ingest, stamped `triage.first_load` (only the backfill origin sets
+/// it). Returns the id; the triage decision is the caller's.
+pub fn ingest_first_load(store: &SqliteStore, message: &NewMessage) -> i64 {
+    use squelch_core::config::Stage1Config;
+    use squelch_core::store::Store;
+    use squelch_core::sync::ingest::{RawFetched, ingest};
+    let fetched = RawFetched {
+        account_id: message.account_id,
+        gmail_msg_id: message.gmail_msg_id.clone(),
+        gmail_thread_id: Some(message.thread_id.clone()),
+        raw: format!(
+            "From: {}\r\nTo: me@example.com\r\nSubject: {}\r\n\r\n{}\r\n",
+            message.from_addr, message.subject, message.body
+        )
+        .into_bytes(),
+        internal_date: Some(message.received_at),
+        is_sent: false,
+        is_spam: false,
+        account_addr: "me@example.com".to_string(),
+    };
+    let mut triaged = ingest(
+        &fetched,
+        &Stage1Config::default(),
+        chrono::Utc::now(),
+        |_| false,
+    );
+    triaged.message = message.clone();
+    triaged.first_load = true;
+    store.ingest_message(&triaged).unwrap()
+}

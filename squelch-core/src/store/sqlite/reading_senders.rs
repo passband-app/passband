@@ -15,7 +15,7 @@
 //!
 //! - WHICH senders is the Reading inventory's own answer
 //!   (`agent_triage::reading_items`, the 30-day inventory smart clear works
-//!   on, not the shorter board the default feed shows), never a second
+//!   on, not the board the default feed shows), never a second
 //!   membership query that could drift from it.
 //! - At most [`MAX_SENDERS`] of them are measured.
 //! - Per sender, three seeks on `idx_messages_from_nocase` (pinned with

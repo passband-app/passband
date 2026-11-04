@@ -133,6 +133,7 @@ final class Prefs {
         static let firstLoadSeen = "passband.pref.tourCompleted"
         static let lastSeenReleaseNotes = "passband.pref.lastSeenReleaseNotes"
         static let lastSeenPhoneNotes = "passband.pref.lastSeenPhoneNotes"
+        static let readerHint = "passband.pref.readerHint"
         static let theme = "passband.pref.theme"
         static let zoom = "passband.pref.zoom"
         static let density = "passband.pref.density"
@@ -318,6 +319,14 @@ final class Prefs {
     /// a Mac stamp that silences several phone releases the day a backup, a
     /// shared suite or a careless read brings it across. Unregistered, for the
     /// reason the Mac's is: absence is a real state.
+    /// Where the reader's one-time hint stands (ReaderHintRule.Stored), or nil
+    /// before the reader has ever opened on this Mac. Not registered: absence
+    /// is the state that earns the centred beat.
+    var readerHint: ReaderHintRule.Stored? {
+        get { defaults.string(forKey: Key.readerHint).flatMap(ReaderHintRule.Stored.init) }
+        set { defaults.set(newValue?.rawValue, forKey: Key.readerHint) }
+    }
+
     private var _lastSeenPhoneNotes: String?
     var lastSeenPhoneNotes: String? {
         get { _lastSeenPhoneNotes }

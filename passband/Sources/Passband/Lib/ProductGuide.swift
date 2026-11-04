@@ -369,6 +369,7 @@ enum ProductGuide {
         - h: remind me later, then move on. See the reminders topic.
         - In flow mode (Space on the Sitrep) plain e is done and next, and plain s saves for later.
         - On a Reading sender's stack, tapping e moves to that sender's next email, and holding e fills a ring and marks the whole stack done. E does the same and carries on to the next sender's card.
+        - The very first email the user opens on a Mac shows "Press e to mark done, or esc to leave." over it for two seconds; then it sits in the reader's bottom right corner until the first time anything is marked done, and never comes back.
         - Done is Passband's own status. The email leaves the board and stays in the mailbox; nothing is archived or deleted in Gmail.
 
         Acting on the sender:

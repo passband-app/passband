@@ -494,6 +494,11 @@ struct MainShell: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
+                    // THE FIRST-OPEN HINT, outside the flight for the same reason
+                    // as the walk's below, and lifted above it when both are up.
+                    .overlay {
+                        ReaderHintLayer(cornerLift: store.walk != nil ? Space.scaled(84) : 0)
+                    }
                     // THE SPACE WALK'S HINT, outside the flight: the emails fly
                     // under it and it holds still, which is what lets it read
                     // as part of the window rather than part of each email.

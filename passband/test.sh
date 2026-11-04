@@ -778,6 +778,13 @@ run_suite rule-pattern-suggest \
 # The first-load veil's time estimate: no estimate until two polls a few
 # seconds apart saw the count move, a window that smooths one slow page, a
 # restarted walk that starts the samples over, and the rounded phrase.
+# The reader's one-time "press e" hint: who gets the centred beat, who gets
+# the corner chip, and that anyone who has ever pressed done gets neither.
+run_suite reader-hint-rule \
+  Sources/Passband/Lib/DiscoveryLedger.swift \
+  Sources/Passband/Lib/ReaderHintRule.swift \
+  Tests/ReaderHintRuleTests.swift
+
 run_suite catch-up-estimate \
   Sources/Passband/Lib/CatchUpEstimate.swift \
   Tests/CatchUpEstimateTests.swift

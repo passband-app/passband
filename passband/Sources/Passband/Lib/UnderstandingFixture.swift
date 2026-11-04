@@ -1,7 +1,7 @@
 // A mailbox's worth of understanding, made up: the ledger rows and memory
 // entries the Usage page's Understanding section draws, for SwiftUI previews,
 // for the fixture stage that demos the page with no daemon (`--fixture-usage`,
-// App/FixtureStage.swift), and for the suites. Also the plain mail and spend
+// FixtureMode.stagesUsage, served by FixtureAPI), and for the suites. Also the plain mail and spend
 // series the top of the Usage page needs on the same stage, so the page opens
 // whole rather than as a section under an error.
 //

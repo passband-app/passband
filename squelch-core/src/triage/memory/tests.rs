@@ -225,12 +225,34 @@ fn links_codes_and_credentials_are_rejected() {
         "Often visits www.example.com",
         "Was sent code 482913",
         "Keeps the password in mail",
+        "Was sent 123 456",
+        "Was sent 123-456",
+        "Was sent 12.34.56",
+        "Gets a security code daily",
+        "Gets one-time links",
+        "Stores the API token",
+        "Reads the OTP mail",
+        "Shares a PIN with Jo",
+        "Visits evil.example/reset often",
     ] {
         assert_eq!(
             World::new().rejects(&[new_op(role(what))]),
             Rejection::ForbiddenContent { field: "what" },
             "{what}"
         );
+    }
+}
+
+#[test]
+fn ordinary_prose_is_not_mistaken_for_a_secret() {
+    for what in [
+        "Runs a small studio with 3 to 5 people",
+        "Spinning up a new team in 2026",
+        "Answers within a day; prefers mornings",
+        "Works with acme.example and its partners",
+        "Splits time 50/50 between hiring and sales",
+    ] {
+        assert!(!forbidden_content(what), "{what}");
     }
 }
 

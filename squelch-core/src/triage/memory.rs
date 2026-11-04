@@ -271,20 +271,51 @@ pub fn clean_field(raw: &str) -> String {
 /// six or more digits, or a credential word. The prompt forbids all three; this
 /// is the floor under the prompt, because an email that talked the model into
 /// one would otherwise ride every future triage run.
+///
+/// - A LINK is a scheme (`://`), a `www.`, or a bare domain with a path
+///   (`evil.example/reset`): a word with a dot before its first slash and a
+///   letter after the last dot of that host.
+/// - A CODE is six digits counted across the separators a code is written
+///   with (`123 456`, `123-456`, `12.34.56`): a run breaks only on anything
+///   else.
+/// - A CREDENTIAL word is matched whole (`pin`, not `spinning`).
 pub fn forbidden_content(s: &str) -> bool {
     let lower = s.to_lowercase();
     if lower.contains("://") || lower.contains("www.") {
         return true;
     }
-    const WORDS: [&str; 6] = [
+    let bare_link = lower.split_whitespace().any(|word| {
+        let word = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '/');
+        let Some((host, path)) = word.split_once('/') else {
+            return false;
+        };
+        let tld = host.rsplit_once('.').map(|(_, tld)| tld).unwrap_or("");
+        host.contains('.')
+            && tld.len() >= 2
+            && tld.chars().all(|c| c.is_ascii_alphabetic())
+            && !path.is_empty()
+    });
+    if bare_link {
+        return true;
+    }
+    const PHRASES: [&str; 8] = [
         "password",
         "passcode",
         "passphrase",
         "api key",
         "login code",
         "verification code",
+        "security code",
+        "one-time",
     ];
-    if WORDS.iter().any(|w| lower.contains(w)) {
+    if PHRASES.iter().any(|w| lower.contains(w)) {
+        return true;
+    }
+    const WORDS: [&str; 4] = ["token", "otp", "pin", "2fa"];
+    if lower
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| WORDS.contains(&w) || w == "tokens" || w == "pins")
+    {
         return true;
     }
     let mut run = 0usize;
@@ -294,7 +325,7 @@ pub fn forbidden_content(s: &str) -> bool {
             if run >= 6 {
                 return true;
             }
-        } else {
+        } else if !matches!(c, ' ' | '-' | '.') {
             run = 0;
         }
     }

@@ -582,10 +582,16 @@ groups:
                 - evaluator: { type: gte, params: [0] }
 
       # The lanes under the total: access (sent, spam and archive rows an
-      # agent asked to read) and revisits, which answer to
-      # `[revisit].daily_cap` and export no run gauge, so they are read from
-      # the jobs they hold. One message a day per tenant per lane at most,
-      # since it resolves at the reset.
+      # agent asked to read, the archive check's own sub-cap included) and
+      # revisits (`[revisit].daily_cap`). One message a day per tenant per
+      # lane at most, since it resolves at the reset or the release.
+      #
+      # Read from the jobs a cap HOLDS, not from runs against the cap. Runs
+      # are charged to a lane even when nothing enforces it: a tenant with
+      # `uncapped_triage` on reads `access 900 of 500` by design
+      # (TRIAGE-OPERATIONS.md), and runs >= cap would have fired on it every
+      # day. Held jobs are the harm itself, and the flag releases them, so
+      # they also answer for the revisit lane, which exports no run gauge.
       #
       # The BACKGROUND lane is left out on purpose (2026-11-04). Its cap is
       # how an onboarding backlog drains (200 a day, so a new mailbox sits at
@@ -593,7 +599,7 @@ groups:
       # saying the design was working. Its share-of-cap panel is still on the
       # dashboard.
       - uid: tenant-triage-lane-cap
-        title: Tenant triage lane at its daily cap
+        title: Tenant triage jobs held by a lane cap
         condition: C
         for: 5m
         noDataState: OK
@@ -601,11 +607,13 @@ groups:
         labels:
           severity: info
         annotations:
-          summary: 'tenant {{ $labels.tenant }}: triage {{ $labels.scope }} lane at its daily cap'
+          summary: 'tenant {{ $labels.tenant }}: {{ $values.A.Value }} {{ $labels.scope }} jobs held until 00:00 UTC by a daily cap'
           description: >-
-            access: a heavy day of access checks waiting for tomorrow. revisit: autonomous revisits
-            parked by [revisit].daily_cap, which a grant does not raise. New mail is not held by
-            any of these; that is `tenant-triage-daily-cap`.
+            access: a heavy day of access checks waiting for tomorrow (a grant, or the
+            uncapped_triage feature on /admin/features, releases them; archive checks only as far
+            as their own sub-cap allows). revisit: autonomous revisits parked by
+            [revisit].daily_cap, which neither a grant nor uncapped_triage raises. New mail is not
+            held by either; that is `tenant-triage-daily-cap`.
         data:
           - refId: A
             datasourceUid: prometheus
@@ -613,13 +621,7 @@ groups:
             model:
               refId: A
               instant: true
-              expr: >-
-                (
-                  max by (cluster, tenant, scope) (last_over_time(squelchd_triage_daily_runs{scope="access"}[10m]))
-                    - max by (cluster, tenant, scope) (last_over_time(squelchd_triage_daily_run_cap{scope="access"}[10m]) > 0)
-                ) >= 0
-                  or
-                max by (cluster, tenant, scope) (last_over_time(squelchd_triage_jobs_held{scope="revisit"}[10m])) > 0
+              expr: max by (cluster, tenant, scope) (last_over_time(squelchd_triage_jobs_held{scope=~"access|revisit"}[10m]))
           - refId: C
             datasourceUid: __expr__
             model:
@@ -627,7 +629,7 @@ groups:
               type: threshold
               expression: A
               conditions:
-                - evaluator: { type: gte, params: [0] }
+                - evaluator: { type: gt, params: [0] }
 
       # The monthly budget (2026-10-05: ellie's $75 key was spent and triage
       # stalled for days before anyone looked). A spent budget is a 402 on

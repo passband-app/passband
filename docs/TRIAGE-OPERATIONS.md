@@ -706,12 +706,17 @@ but no typed facts are queued once for re-triage (`records_cleanup`).
 ## The Reading board
 
 The default Reading feed (`/client/v2/feed?destination=reading` with no `since`
-or `all_time`) is the BOARD the owner sees, not the whole inventory: the last
-7 calendar days in the owner's zone, dropping a whole day at a time from the old
-end while that is more than 49 messages, and the newest 49 if today alone is.
-`READING_BOARD_DAYS` and `READING_BOARD_MAX` in `store/sqlite/agent_triage.rs`.
-Nothing off the board is changed: it stays open in All mail and search, and
-smart clear still cleans it (its stale-promotion rule only fires on mail a week
-old, which the board never shows). A caller naming its own dates, and the agent
-door's `get_reading`, get the inventory.
+and no `all_time=true`) is the BOARD the owner sees, not the whole inventory:
+the newest 49 Reading messages of the last 7 calendar days in the owner's zone,
+COUNTING MAIL ALREADY DONE, less the done ones. A heavy week shrinks the window
+from its old end; a quiet one shows the whole week. Because done mail keeps its
+place, clearing never refills the board with older mail, and the board moves
+only when mail arrives or a day starts. `READING_BOARD_DAYS` and
+`READING_BOARD_MAX` in `store/sqlite/agent_triage.rs`.
 
+Mail off the board is not hidden or changed in the store: it stays open in All
+mail and search. Smart clear works on the whole 30-day inventory, so it also
+marks done older mail that is no longer on the board (its stale-promotion rule
+only fires on mail a week old, which the board never shows), and its count can
+be larger than what leaves the board. A caller naming its own dates, and the
+agent door's `get_reading`, get the inventory.

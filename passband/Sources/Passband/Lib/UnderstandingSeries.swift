@@ -431,6 +431,13 @@ enum UnderstandingText {
         return nil
     }
 
+    /// The memory card's header note: "1 thing, over 41 days".
+    static func knowsNote(holding: Int, days: Int) -> String {
+        let things = holding == 1 ? "1 thing" : "\(UsageText.count(holding)) things"
+        let span = days == 1 ? "1 day" : "\(UsageText.count(days)) days"
+        return "\(things), over \(span)"
+    }
+
     /// The crossed-out entry's lead. The pass withdrew a retired one; an
     /// expired guess or a finished project simply stopped holding.
     static func withdrawnLead(_ w: MemoryEntry.Withdrawal) -> String {

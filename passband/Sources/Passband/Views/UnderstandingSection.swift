@@ -244,12 +244,15 @@ private struct PeopleChartCard: View {
         .chartYScale(domain: Self.yDomain)
         .chartLegend(.hidden)
         .chartYAxis(.hidden)
+        .chartXAxisLabel(alignment: .trailing) {
+            Text("mail a month").font(Typo.micro).foregroundStyle(Palette.inkFaint)
+        }
         .chartXAxis {
             AxisMarks(values: Self.ticks.filter { $0 >= floor && $0 <= hi }) { value in
                 AxisGridLine().foregroundStyle(Palette.hairline)
                 AxisValueLabel {
                     if let v = value.as(Double.self) {
-                        Text(v == floor ? "1 a month" : UnderstandingText.perMonth(v))
+                        Text(UnderstandingText.perMonth(v))
                     }
                 }
                 .font(Typo.micro)
@@ -302,7 +305,10 @@ private struct PeopleChartCard: View {
         .annotation(position: .overlay, alignment: .topLeading, spacing: 0) {
             Text(r.title)
                 .font(Typo.micro)
-                .foregroundStyle(r.color.opacity(0.95))
+                // The ignore band's own colour is the de-emphasis gray, which
+                // is the point of the dots and too quiet for words: its label
+                // takes the ink the other two labels read at.
+                .foregroundStyle(r == .ignore ? Palette.inkDim : r.color.opacity(0.95))
                 .padding(.horizontal, Space.s8)
                 .padding(.vertical, Space.s6)
                 .lineLimit(r == .arrived ? 2 : 1)
@@ -481,7 +487,7 @@ private struct KnowsCard: View {
         VStack(alignment: .leading, spacing: Space.s14) {
             HStack(spacing: Space.s12) {
                 Text("What Passband knows").font(Typo.zoneTitle).foregroundStyle(Palette.ink)
-                Text("\(UsageText.count(MemoryGrouping.holding(memory.entries))) things, over \(UsageText.count(memory.coverage_days)) days")
+                Text(UnderstandingText.knowsNote(holding: MemoryGrouping.holding(memory.entries), days: memory.coverage_days))
                     .font(Typo.micro).foregroundStyle(Palette.inkFaintest)
                 Spacer(minLength: Space.s8)
             }
@@ -564,9 +570,10 @@ private struct MemoryRow: View {
         HStack(alignment: .firstTextBaseline, spacing: Space.s12) {
             VStack(alignment: .leading, spacing: Space.s4) {
                 if let withdrawn {
-                    (Text(UnderstandingText.withdrawnLead(withdrawn) + " ").foregroundStyle(Palette.inkFaint)
-                        + Text(entry.line).strikethrough(true, color: Palette.inkFaintest)
-                        .foregroundStyle(Palette.inkFaintest))
+                    let lead = Text(UnderstandingText.withdrawnLead(withdrawn)).foregroundStyle(Palette.inkFaint)
+                    let line = Text(entry.line).strikethrough(true, color: Palette.inkFaintest)
+                        .foregroundStyle(Palette.inkFaintest)
+                    Text("\(lead) \(line)")
                         .font(Typo.row)
                         .fixedSize(horizontal: false, vertical: true)
                 } else {

@@ -116,7 +116,7 @@ actor APIClient {
     /// whole life of the process. That is how a build of a branch is pointed
     /// at a scratch daemon of the same branch without adding an account to
     /// the keychain or touching the account the user actually reads mail
-    /// through. Same posture as `PASSBAND_FORCE_TOUR`: a launch environment
+    /// through. Same posture as `PASSBAND_FIRST_LOAD`: a launch environment
     /// only a developer sets, never a preference, never persisted. A user
     /// double-clicking the app has neither variable.
     ///

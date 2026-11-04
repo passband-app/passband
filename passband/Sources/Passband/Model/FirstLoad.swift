@@ -37,7 +37,12 @@ final class FirstLoad {
         init(done: Int, total: Int, stats: StoreStats?) {
             self.done = done
             self.total = total
-            sorted = stats?.total ?? 0
+            // SORTED, not received: the daemon's `total` counts mail still
+            // waiting on triage too, and triage is held for most of a walk,
+            // so it would count unsorted mail. Floored: the two are read off
+            // one answer but are not one atomic count.
+            let waiting = max(stats?.triage?.queued ?? 0, 0) + max(stats?.triage?.leased ?? 0, 0)
+            sorted = max(0, (stats?.total ?? 0) - waiting)
             noise = stats?.tier_counts["noise"] ?? 0
             attention = stats?.bands.standing ?? 0
         }
@@ -48,6 +53,9 @@ final class FirstLoad {
     /// The walk has ended and the bar is being shown full for a beat before
     /// the veil lifts.
     private(set) var finishing = false
+    /// The counts have met but the walk is still running (the daemon between
+    /// its inbox and its Sent; see FirstLoadRule): the bar full, not "ready".
+    private(set) var finishingUp = false
     private(set) var snapshot: Snapshot?
 
     /// How long a mailbox with no mail and no catch-up is waited on before
@@ -75,46 +83,77 @@ final class FirstLoad {
         guard !FixtureMode.isEnabled else { return }
         if let epoch, epoch != store.epoch, !Prefs.shared.firstLoadSeen {
             // A different mailbox: start its first look over, quietly.
-            settleTask?.cancel()
-            settleTask = nil
-            active = false
-            finishing = false
-            snapshot = nil
-            decided = false
-            waitingSince = nil
-            self.epoch = nil
+            reset()
+        }
+        let connected = store.connStatus == .connected
+        // Only a live poll in this epoch counts; the board painted from disk
+        // carries the stats the daemon gave LAST time.
+        let fresh = store.stats != nil && store.liveStatsEpoch == store.epoch
+        let walk = store.stats?.catch_up.flatMap { c in
+            c.total > 0 ? FirstLoadRule.Walk(done: c.done, total: c.total) : nil
         }
         if !decided {
-            guard !Prefs.shared.firstLoadSeen else {
+            let decision = FirstLoadRule.decide(
+                seen: Prefs.shared.firstLoadSeen, connected: connected, fresh: fresh, walk: walk,
+                hasMail: (store.stats?.total ?? 0) > 0,
+                waited: fresh && waited(now))
+            switch decision {
+            case .never:
                 decided = true
                 return
-            }
-            guard store.connStatus == .connected, let stats = store.stats else { return }
-            epoch = store.epoch
-            // A walk still under way, not one first seen already complete:
-            // that would blink the card for its settle and count a wait
-            // nobody had.
-            if let c = store.catchUp, c.done < c.total {
-                decided = true
-                active = true
-                Analytics.capture("first_load_shown")
-            } else if stats.total > 0 || store.catchUp != nil || waited(now) {
+            case .wait:
+                return
+            case .conclude:
                 decided = true
                 conclude(store)
                 return
-            } else {
-                return
+            case .show:
+                decided = true
+                epoch = store.epoch
+                active = true
+                Analytics.capture("first_load_shown")
             }
         }
         guard active, !finishing else { return }
-        if let progress = store.catchUp {
-            snapshot = Snapshot(done: progress.done, total: progress.total, stats: store.stats)
-            // The pace itself is the store's (`catchUpEstimate`), fed by the
-            // same polls, so the board's banner carries it on after Start now.
-            if progress.done < progress.total { return }
+        switch FirstLoadRule.progress(connected: connected, fresh: fresh, walk: walk) {
+        case .lost:
+            dropQuietly()
+        case .hold:
+            break
+        case .running(let met):
+            finishingUp = met
+            if let walk {
+                snapshot = Snapshot(done: min(walk.done, walk.total), total: walk.total, stats: store.stats)
+            }
+        case .finished:
+            finish(store)
         }
-        // Gone, or reporting itself complete: the walk is over.
-        if store.stats != nil { finish(store) }
+    }
+
+    /// The connection left `.connected` (RootView, which outlives the shell
+    /// this is otherwise driven from). A veil left up over the Connect gate
+    /// would hold account actions blocked with no way out but a relaunch.
+    func connectionChanged(_ store: AppStore) {
+        guard store.connStatus != .connected, active || !decided else { return }
+        if active { dropQuietly() }
+    }
+
+    /// Down without counting it as seen, so it decides again on the next real
+    /// connect.
+    private func dropQuietly() {
+        reset()
+    }
+
+    private func reset() {
+        settleTask?.cancel()
+        settleTask = nil
+        active = false
+        finishing = false
+        finishingUp = false
+        snapshot = nil
+        decided = false
+        waitingSince = nil
+        epoch = nil
     }
 
     /// "Start now", Enter, Esc, a click on the scrim.
@@ -134,6 +173,7 @@ final class FirstLoad {
     /// The bar to the end, a beat to see it there, then the board.
     private func finish(_ store: AppStore) {
         finishing = true
+        finishingUp = false
         if let shown = snapshot {
             snapshot = Snapshot(done: shown.total, total: shown.total, stats: store.stats)
         }
@@ -150,6 +190,7 @@ final class FirstLoad {
         settleTask = nil
         active = false
         finishing = false
+        finishingUp = false
         conclude(store)
     }
 

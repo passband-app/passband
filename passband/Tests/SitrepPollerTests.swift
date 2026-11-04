@@ -388,6 +388,7 @@ struct RefreshError { var message: String; var kind: ErrorKind }
 @MainActor final class AppStore {
     var stats: Stats?
     var statsEpoch: Int?
+    var liveStatsEpoch: Int?
     static let shared = AppStore()
     var connStatus = ConnectionStatus.connected
     var epoch = 0

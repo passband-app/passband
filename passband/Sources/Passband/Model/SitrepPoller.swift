@@ -424,6 +424,8 @@ final class SitrepPoller {
             // even when the body is identical, because identical stats can
             // still belong to a mailbox switched to since they were written.
             if store.statsEpoch != e { store.statsEpoch = e }
+            // A live answer, which a board painted from disk never is.
+            if store.liveStatsEpoch != e { store.liveStatsEpoch = e }
             noteCatchUp(st.catch_up)
             // THE BADGE IS REFRESHED EVEN WHEN NOTHING CHANGED, and this is the
             // second write point rather than an accident. `AppStore.sitrep`'s

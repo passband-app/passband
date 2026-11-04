@@ -108,6 +108,8 @@ struct RootView: View {
             if !blocked { Notifier.shared.drainPendingTap() }
         }
         .onChange(of: store.connStatus) { _, status in
+            // Here, not in the shell: the shell is what goes when this does.
+            store.firstLoad.connectionChanged(store)
             if status == .connected {
                 SitrepPoller.shared.start()
                 // EVERY account's ears, not just the live one's: the poller

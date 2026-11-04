@@ -96,6 +96,10 @@ struct CatchUpEstimateTests {
         for i in 0..<4 { e.record(done: 1000 + i * 120, at: t0.addingTimeInterval(Double(i) * 10)) }
         let line = e.line(done: 1360, total: 4200)
         expect(line.hasSuffix("emails · about 4 minutes left"), "12 a second over 2,840 left: \(line)")
+        // Counts that have met with the walk still reported: finishing up,
+        // never a pace and never "ready".
+        let met = e.line(done: 4200, total: 4200)
+        expect(met.hasSuffix("emails · finishing up…"), "met counts: \(met)")
     }
 
     static func expect(_ condition: Bool, _ message: String) {

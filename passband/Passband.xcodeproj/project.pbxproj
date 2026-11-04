@@ -299,6 +299,7 @@
 		7C8814F30F405C284EF16A86 /* AppStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D18C66DBE79E1F7D55CD6DD /* AppStore.swift */; };
 		7D06A833C919C4053C84351D /* AnthropicStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = E949BF41848E8F43B63C7AB7 /* AnthropicStream.swift */; };
 		7D46E9FB21A567E94CE3D748 /* MarkdownTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF2D98A36AEF64366DD338AB /* MarkdownTextView.swift */; };
+		7D6DD8976F73846BDE4DD30F /* FirstLoadRule.swift in Sources */ = {isa = PBXBuildFile; fileRef = C053D886041E42E579489A27 /* FirstLoadRule.swift */; };
 		7D858C1B0E9A02383E35EB56 /* AuthCode.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB5FEFF987265DA1E7F85007 /* AuthCode.swift */; };
 		7D89527CD3EF7C51C4EB8242 /* Loadable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A74374DEAEE21CDF9A5067D /* Loadable.swift */; };
 		7DC8CE09FEAF828333CCBF18 /* RecentSearchRing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 949E0180F1D5B2769F394945 /* RecentSearchRing.swift */; };
@@ -503,6 +504,7 @@
 		D10DE0642804F38B87D8466B /* FixtureMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 599BE43C72F83A1C7D5EED25 /* FixtureMode.swift */; };
 		D1722EF952905C3BCED61CD5 /* AuthCodeModal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A47FA6986F50A4E81628452 /* AuthCodeModal.swift */; };
 		D229AE3C967617AE228AC01A /* HostedServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B2016745A95BE31B7869ECF /* HostedServer.swift */; };
+		D32D6AE04A9DC58B927366C1 /* FirstLoadRule.swift in Sources */ = {isa = PBXBuildFile; fileRef = C053D886041E42E579489A27 /* FirstLoadRule.swift */; };
 		D46DE05A4B60111DB4FEA9D6 /* Mailto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C229EB225D28FC28ADBE84D /* Mailto.swift */; };
 		D4A4EA8324A57E2B01720266 /* ImageRepeats.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFF2F03B0D68F54C0DC28777 /* ImageRepeats.swift */; };
 		D4CB64316C37E4438ADF419D /* KeyDispatch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E2AB71004C775ABFABB73D9 /* KeyDispatch.swift */; };
@@ -911,6 +913,7 @@
 		BE85FBF58B14F2DC27FC16FB /* AttachmentThumbs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentThumbs.swift; sourceTree = "<group>"; };
 		BF2CABDFF5F2A1E68AC88738 /* PagePresence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PagePresence.swift; sourceTree = "<group>"; };
 		BF7F148E013D8BCCE2BAA598 /* Palette.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Palette.swift; sourceTree = "<group>"; };
+		C053D886041E42E579489A27 /* FirstLoadRule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstLoadRule.swift; sourceTree = "<group>"; };
 		C09F1065514BF2244F027952 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		C10C0C8780CCB9C6BAB2709C /* MailCSP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailCSP.swift; sourceTree = "<group>"; };
 		C465B24E00D0436CD5704294 /* SwipeRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwipeRow.swift; sourceTree = "<group>"; };
@@ -1157,6 +1160,7 @@
 				51EE4124F774336250749978 /* EventProposal.swift */,
 				BB1DA83A2F2F84ED79DFE34B /* EventVisualPick.swift */,
 				151C06F2A835787B0FDEDB24 /* FindInThread.swift */,
+				C053D886041E42E579489A27 /* FirstLoadRule.swift */,
 				599BE43C72F83A1C7D5EED25 /* FixtureMode.swift */,
 				09D9E297D8DF5D8EE4E37C92 /* FlowHintRule.swift */,
 				5883BA424612265657845246 /* Format.swift */,
@@ -1775,6 +1779,7 @@
 				10EC2ECDCCD06D1869F5DFF7 /* FindInThread.swift in Sources */,
 				E8A8E071D78E35630F24BCA8 /* FindVignette.swift in Sources */,
 				5EC66C522B19529DD48A95CF /* FirstLoad.swift in Sources */,
+				D32D6AE04A9DC58B927366C1 /* FirstLoadRule.swift in Sources */,
 				32DC601F398A9C7FB9DD9EF0 /* FirstLoadVeil.swift in Sources */,
 				70B64403CC16815B0C8676ED /* FixtureAPI.swift in Sources */,
 				0438C9721B79DAD1EA823083 /* FixtureMail.swift in Sources */,
@@ -2061,6 +2066,7 @@
 				DA0FBF25FA4A102FBC273EA3 /* FindBar.swift in Sources */,
 				E93B57DD5D448858473180D5 /* FindInThread.swift in Sources */,
 				DA1363271D5FE7D00EBD8D34 /* FirstLoad.swift in Sources */,
+				7D6DD8976F73846BDE4DD30F /* FirstLoadRule.swift in Sources */,
 				D799E81E93F6B491AE680667 /* FirstLoadVeil.swift in Sources */,
 				F96B7C3835B23E7EF2BBDE37 /* FixtureAPI.swift in Sources */,
 				40511B719F47440CF6A9825D /* FixtureMail.swift in Sources */,

@@ -797,6 +797,13 @@ run_suite stays-hint-rule \
   Sources/Passband/Lib/StaysHintRule.swift \
   Tests/StaysHintRuleTests.swift
 
+# The first-load veil's decision and progress: present means running even
+# with the counts met, absent is finished, disk stats never decide, and a
+# lost connection lifts it without stamping.
+run_suite first-load-rule \
+  Sources/Passband/Lib/FirstLoadRule.swift \
+  Tests/FirstLoadRuleTests.swift
+
 # The first-load veil's time estimate: no estimate until two polls a few
 # seconds apart saw the count move, a window that smooths one slow page, a
 # restarted walk that starts the samples over, and the rounded phrase.

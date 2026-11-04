@@ -65,7 +65,11 @@ struct CatchUpEstimate: Sendable, Equatable {
     /// The whole line under the bar, the same on the veil and on the board's
     /// banner: "1,510 of 4,200 emails · about 4 minutes left".
     func line(done: Int, total: Int) -> String {
-        "\(Self.count(done: done, total: total)) · \(Self.phrase(remaining(total: total)))"
+        // Counts that have met while the walk is still reported are the
+        // daemon between its inbox and its Sent (FirstLoadRule): no pace to
+        // give, and not done either.
+        if done >= total { return "\(Self.count(done: total, total: total)) · finishing up…" }
+        return "\(Self.count(done: done, total: total)) · \(Self.phrase(remaining(total: total)))"
     }
 
     /// The count half, "1,510 of 4,200 emails": the one place it is spelled,

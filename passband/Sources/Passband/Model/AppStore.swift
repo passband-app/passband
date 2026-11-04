@@ -737,6 +737,11 @@ final class AppStore {
     var statsEpoch: Int? {
         didSet { warmCalendarIfDue() }
     }
+    /// The epoch of the last stats a LIVE poll wrote. Unlike `statsEpoch`, a
+    /// board restored from disk never sets it, so "the daemon has answered
+    /// this session" can be told from "we painted what it said last time"
+    /// (the first-load veil decides only on the former).
+    @ObservationIgnored var liveStatsEpoch: Int?
     var lastRefresh: Date? {
         // `derive` reads only whether there has been one (`daemonDown`).
         didSet { if (oldValue == nil) != (lastRefresh == nil) { noteSyncStatus() } }
@@ -7427,8 +7432,10 @@ final class AppStore {
     private func noteSyncStatus() {
         let now = Date()
         // The pace: one sample per poll while a walk runs, reset when none is.
+        // Present means running, even with done == total: the daemon meets
+        // its inbox count before it extends the walk by Sent (FirstLoadRule).
         let walk = previewCatchUp ?? stats?.catch_up
-        if let c = walk, c.total > 0, c.done < c.total {
+        if let c = walk, c.total > 0 {
             catchUpEstimate.record(done: c.done, at: now)
         } else if !catchUpEstimate.samples.isEmpty {
             catchUpEstimate.reset()

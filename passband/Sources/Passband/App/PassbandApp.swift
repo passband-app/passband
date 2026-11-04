@@ -67,7 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // center without one drops it.
         Notifier.shared.install()
         // Look at the floating code panel without waiting for a login code:
-        // same posture as PASSBAND_FORCE_TOUR, a launch environment only.
+        // same posture as PASSBAND_FIRST_LOAD, a launch environment only.
         if let code = ProcessInfo.processInfo.environment["PASSBAND_PREVIEW_LOGIN_CODE"] {
             LoginCodePanel.shared.show(
                 .init(service: "GitHub", code: code), sender: "GitHub <noreply@github.com>",

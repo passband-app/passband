@@ -63,8 +63,19 @@ The experience starts with relief, then opens onto the person's own mail:
   the veil is up (the same block the fixture inbox uses), and should the store
   change mailbox under it anyway, the veil drops what it had and decides
   again for the new one.
-- **Already done is not a wait.** A catch-up first seen complete raises
-  nothing: the decision is on a walk still under way.
+- **Present means running.** The daemon meets its inbox count before it
+  extends the walk by Sent (`catchup_begin` then `catchup_begin_extend` in
+  `squelch-core/src/sync/mod.rs`), so `catch_up` with done equal to total is a
+  walk still going: the bar shows full with "finishing up…", and the veil
+  stays. Finished is `catch_up` absent. `Lib/FirstLoadRule.swift` holds this,
+  pinned by `Tests/FirstLoadRuleTests.swift`.
+- **Only on a live poll.** The board painted from disk never decides the
+  veil (`AppStore.liveStatsEpoch`): a walk that finished while the app was
+  closed would otherwise raise it on old numbers.
+- **Losing the connection** drops the veil without counting it as seen, so a
+  later connect decides again, and the Connect gate is never left blocked.
+- **"Emails sorted"** is the daemon's total less what is still waiting on
+  triage, which is most of a walk's mail.
 - **What comes after.** The first look ending is what stamps a newcomer for
   What's New (`WhatsNew.meetNewcomer`), so the latest release's notes follow
   on the board, never over the veil.

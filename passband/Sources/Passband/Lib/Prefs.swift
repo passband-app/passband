@@ -443,6 +443,10 @@ final class Prefs {
     /// The human's display name, for the Sitrep greeting only. Client-side:
     /// the human door has no such field. Set in Settings > You; seeded once
     /// below.
+    ///
+    /// `passband.name.chosen` may still sit in older installs' defaults, from
+    /// the greeting's name pencil. Nothing reads it any more; it is left in
+    /// place rather than given a one-off migration of its own.
     private var _userName: String
     var userName: String {
         get { _userName }

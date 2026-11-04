@@ -90,10 +90,13 @@ const WROTE: &[&str] = &[
     "skrev",
 ];
 
-/// The banners mail clients write over a quoted message, in the languages
-/// the header keys below know, and Thunderbird's spaced form.
-const QUOTE_BANNERS: &[&str] = &[
-    "-----Original Message-----",
+/// More banners mail clients write over a quoted message: German, French,
+/// and Thunderbird's spaced form. FOR [`own_text`] ONLY. Triage's
+/// `outlook_cut` keeps the English banner alone, because its quote cut is
+/// skipped only for a forward `forwarded()` recognises (English `FW:`), and a
+/// German or French Outlook FORWARD carries the same banner: cut there,
+/// triage would read "FYI" and lose the forwarded invoice.
+const OWN_QUOTE_BANNERS: &[&str] = &[
     "-----Ursprüngliche Nachricht-----",
     "-----Message d'origine-----",
     "-------- Original Message --------",
@@ -366,6 +369,7 @@ pub fn own_text(body: &str) -> Option<String> {
         quoted_block_cut(body),
         header_block_cut(body),
         wrote_line_cut(body),
+        OWN_QUOTE_BANNERS.iter().filter_map(|b| body.find(b)).min(),
     ]
     .into_iter()
     .flatten()
@@ -545,7 +549,7 @@ fn wrote_line_cut(body: &str) -> Option<usize> {
 /// underscores followed by a `From:` header block.
 fn outlook_cut(body: &str) -> Option<usize> {
     const RULE: &str = "________________";
-    let mut best = QUOTE_BANNERS.iter().filter_map(|b| body.find(b)).min();
+    let mut best = body.find("-----Original Message-----");
     let mut from = 0;
     while let Some(pos) = body[from..].find(RULE) {
         let at = from + pos;
@@ -608,6 +612,21 @@ mod tests {
     }
 
     const TRACKER: &str = "https://click.mailer.example.com/ls/click?upn=u001.AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz-2Fmore";
+
+    /// Triage's condensing is unchanged by `own_text`'s extra banners: a
+    /// German Outlook forward keeps the forwarded message.
+    #[test]
+    fn a_german_forward_still_reaches_triage() {
+        let body = "FYI\n\n-----Ursprüngliche Nachricht-----\nVon: Rechnungen <billing@acme.de>\nGesendet: Dienstag, 3. November 2026 09:00\nAn: Me\nBetreff: WG: Rechnung 4711\n\nBitte zahlen Sie 120 EUR bis Freitag.";
+        let condensed = condense_body(body);
+        assert!(
+            condensed.contains("Bitte zahlen Sie 120 EUR"),
+            "{condensed}"
+        );
+        assert!(!condensed.contains(QUOTE_MARKER), "{condensed}");
+        // The owner-words read, by contrast, stops at the banner.
+        assert_eq!(own_text(body).unwrap().trim(), "FYI");
+    }
 
     /// [`own_text`] must never hand an inbound body on, whatever shape the
     /// reply's quote takes.

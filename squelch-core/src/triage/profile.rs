@@ -99,6 +99,12 @@ pub const RETRY_AFTER_KEY: &str = "memory_profile_retry_after";
 /// allow-list costs a handful of requests a day, short enough that a fix
 /// made in the afternoon still gets tonight's run.
 pub const CONFIG_COOLDOWN: Duration = Duration::hours(1);
+/// The owner-local date a configuration failure was last REFUNDED. Only the
+/// first one of a local day gets its attempt back; every later one spends an
+/// attempt like any other failure. Refunded every time, an hourly cooldown
+/// alone would let a broken allow-list cost about twenty calls a day; this
+/// way a day costs at most `ATTEMPTS_PER_DAY + 1`.
+pub const CONFIG_REFUND_DAY_KEY: &str = "memory_profile_config_refund_day";
 /// The owner-local hour the pass becomes due. After the ledger's own nightly
 /// work, and before the owner is up.
 pub const DUE_HOUR: u32 = 3;
@@ -613,12 +619,28 @@ pub async fn run_pass<S: Store + ?Sized>(
     let ops = match call.result {
         Ok(ops) => ops,
         Err(kind) => {
-            // A configuration failure spent nothing and is the same for every
-            // try: give the attempt back, as every other cap here does.
-            // It also cools down, or the refund would make it retry every
-            // round (see RETRY_AFTER_KEY).
+            // A configuration failure spent nothing: the FIRST one of the
+            // owner's day gets its attempt back, as other caps here refund
+            // theirs, so a gateway fixed within the hour still gets tonight's
+            // two tries. Later ones keep the charge (CONFIG_REFUND_DAY_KEY).
+            // Every one cools down, or a refund would retry every round
+            // (RETRY_AFTER_KEY).
+            //
+            // This call returns `Failed`, not `CoolingDown`, on purpose: it is
+            // the one that made a request, and the engine logs its kind
+            // ("http_403", say) once, which is how an operator learns the
+            // allow-list is wrong. The rounds after it are the silent ones.
             if llm::is_config_failure(&kind) {
-                let _ = store.stage2_refund_budget(account, BUDGET_KEY, &local_day);
+                let refunded_today = store
+                    .get_app_setting(account, CONFIG_REFUND_DAY_KEY)
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    == Some(local_day.as_str());
+                if !refunded_today {
+                    let _ = store.stage2_refund_budget(account, BUDGET_KEY, &local_day);
+                    let _ = store.set_app_setting(account, CONFIG_REFUND_DAY_KEY, &local_day);
+                }
                 let _ = store.set_app_setting(
                     account,
                     RETRY_AFTER_KEY,

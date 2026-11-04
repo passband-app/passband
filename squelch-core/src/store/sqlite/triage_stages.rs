@@ -470,6 +470,26 @@ impl SqliteStore {
 
     // ---- REVISITS ---------------------------------------------------------
 
+    /// For the sync engine's tests: a message stored under provider id
+    /// `gmail`, as (`triage.first_load`, whether it was stamped to notify).
+    #[cfg(test)]
+    pub(crate) fn triage_by_provider_id(
+        &self,
+        account_id: AccountId,
+        gmail: &str,
+    ) -> Result<Option<(bool, bool)>> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT t.first_load, t.notify_eligible_at IS NOT NULL
+                 FROM messages m JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
+                 WHERE m.account_id=?1 AND m.gmail_msg_id=?2",
+                params![account_id, gmail],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
     /// `triage.first_load` for one message, for the sync engine's tests.
     #[cfg(test)]
     pub(crate) fn triage_first_load(&self, account_id: AccountId, message_id: i64) -> Result<bool> {

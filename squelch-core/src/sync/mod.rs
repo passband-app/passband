@@ -20,6 +20,7 @@ mod translate_pass;
 pub mod triage_worker;
 
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -145,6 +146,14 @@ enum IngestOrigin {
     /// queues no model work, wakes no lane and moves no catch-up gauge (see
     /// [`Store::ingest_archive_message`]).
     Archive,
+}
+
+/// What one change-feed walk found ([`SyncEngine::walk_changes`]).
+struct Walked {
+    /// The mailbox changed (or might have): the poll's idle ladder resets.
+    moved: bool,
+    /// Where the cursor may move, or `None` to hold it where it is.
+    advance: Option<SyncCursor>,
 }
 
 /// Persisted message and optional embedding input. `embed_text` is `Some`
@@ -1343,15 +1352,114 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// peak is the highest watermark this process ever reaches; leaving it in
     /// glibc's arenas because the last call errored would make a failed first
     /// run the most expensive thing a pod ever does. See [`crate::mem`].
-    async fn backfill(&self) -> Result<()> {
-        let out = self.backfill_inner().await;
+    async fn backfill(&self, ahead: &StdMutex<Option<SyncCursor>>) -> Result<SyncCursor> {
+        let out = self.backfill_inner(ahead).await;
         crate::mem::trim_off_runtime().await;
         out
     }
 
-    async fn backfill_inner(&self) -> Result<()> {
-        let since = self.backfill_since();
+    /// THE FIRST RUN: the backfill, and LIVE POLLING BESIDE IT.
+    ///
+    /// A backfill is minutes of fetches (Gmail's quota is about four bodies a
+    /// second), and mail that arrives while it runs is exactly the mail the
+    /// owner is watching for: the new account's first proof that the app
+    /// works. So when the source mints its cursor before the window
+    /// ([`MailSource::cursor_before_window`]), [`Self::poll_during_backfill`]
+    /// walks the change feed from it every poll interval while the download
+    /// goes on, and that mail arrives as live mail (it notifies, and it is
+    /// not first-load backlog).
+    ///
+    /// `tokio::join!`, NOT `select!`: neither half may cancel the other
+    /// mid-walk. The poller only ever moves the shared cursor forward and
+    /// finishes its walk before the join returns, and the cursor is stored
+    /// ONCE, here, after both: never inside the backfill, where a walk still
+    /// in flight could lose its advance. A walk that loses the race only
+    /// replays on the first ordinary poll, which the store collapses.
+    async fn first_run(&self, shutdown: &tokio::sync::watch::Receiver<bool>) -> Result<()> {
+        let ahead = StdMutex::new(None);
+        let finished = AtomicBool::new(false);
+        let done = tokio::sync::Notify::new();
+        let (backfilled, ()) = tokio::join!(
+            async {
+                let out = self.backfill(&ahead).await;
+                finished.store(true, Ordering::Release);
+                done.notify_one();
+                out
+            },
+            self.poll_during_backfill(&ahead, &finished, &done, shutdown),
+        );
+        let minted = backfilled?;
+        let cursor = ahead
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .unwrap_or(minted);
+        self.store_cursor(&cursor)?;
+        eprintln!(
+            "squelch: history cursor established (backfill window from {})",
+            self.backfill_since()
+        );
+        Ok(())
+    }
+
+    /// The live half of [`Self::first_run`]: every `sync.poll_secs`, until the
+    /// backfill finishes or shutdown, walk the change feed from the cursor the
+    /// backfill minted (`ahead`) and move it forward. Idle for a source that
+    /// mints no cursor before its window.
+    ///
+    /// NOTHING HERE FAILS THE RUN. A walk's error is logged and the next
+    /// interval tries again: the backfill is what decides whether the first
+    /// run worked, and a live-path refusal must not throw away minutes of
+    /// download. Nor does it stamp poll health (`polled_ok`, `note_poll_ok`):
+    /// that is the ordinary poll's to say once the first run is over.
+    async fn poll_during_backfill(
+        &self,
+        ahead: &StdMutex<Option<SyncCursor>>,
+        finished: &AtomicBool,
+        done: &tokio::sync::Notify,
+        shutdown: &tokio::sync::watch::Receiver<bool>,
+    ) {
+        let interval = Duration::from_secs(self.config.sync.poll_secs.max(1));
+        loop {
+            tokio::select! {
+                () = tokio::time::sleep(interval) => {}
+                () = done.notified() => {}
+            }
+            if finished.load(Ordering::Acquire) || *shutdown.borrow() {
+                return;
+            }
+            let start = ahead
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let Some(start) = start else { continue };
+            match self.walk_changes(&start).await {
+                Ok(walk) => {
+                    if let Some(next) = walk.advance {
+                        *ahead
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(next);
+                    }
+                }
+                // Error strings from this crate never carry secrets.
+                Err(e) => {
+                    eprintln!("squelch: live poll during the first backfill failed ({e}); retrying")
+                }
+            }
+        }
+    }
+
+    /// The backfill proper. Returns the cursor to store; [`Self::first_run`]
+    /// stores it, after the live walks beside it have had their say. A
+    /// source that mints its cursor before the window leaves it in `ahead`
+    /// before anything is listed, which is what those walks start from.
+    async fn backfill_inner(&self, ahead: &StdMutex<Option<SyncCursor>>) -> Result<SyncCursor> {
         let early_cursor = self.cursor_ahead_of_window().await?;
+        if let Some(cursor) = &early_cursor {
+            *ahead
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cursor.clone());
+        }
 
         // INBOX bodies.
         let inbox_ids = self
@@ -1402,14 +1510,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // NO SPAM LEG HERE, deliberately. See `sync_spam_window`: the spam
         // folder is fetched only when somebody opens the page that shows it.
 
-        // Establish the cursor from the mailbox as it stands now.
-        let cursor = match early_cursor {
-            Some(cursor) => cursor,
-            None => self.source()?.current_cursor().await?,
-        };
-        self.store_cursor(&cursor)?;
-        eprintln!("squelch: history cursor established (backfill window from {since})");
-        Ok(())
+        // The cursor to establish: minted before the window, or (for a
+        // source that snapshots its own position) asked for now.
+        match early_cursor {
+            Some(cursor) => Ok(cursor),
+            None => self.source()?.current_cursor().await,
+        }
     }
 
     /// THE STEADY STATE: two lanes, not one (docs/NOTIFY.md §11.2).
@@ -1471,7 +1577,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         tokio::select! {
             polled = async {
                 if backfill_first {
-                    self.backfill().await?;
+                    self.first_run(shutdown).await?;
                 }
                 self.poll_lane(shutdown).await
             } => polled,
@@ -2570,9 +2676,25 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// Propagates [`CoreError::NotFound`] on an expired historyId so the caller
     /// can fall back to a catch-up.
     async fn history_walk(&self, start: &SyncCursor) -> Result<bool> {
+        let walk = self.walk_changes(start).await?;
+        if let Some(cursor) = &walk.advance {
+            self.store_cursor(cursor)?;
+        }
+        Ok(walk.moved)
+    }
+
+    /// [`Self::history_walk`]'s walk, without storing the cursor: what it
+    /// found, and where the cursor may move (`None`: hold it where it is).
+    /// The first run's live poll keeps its own cursor until the backfill is
+    /// done ([`Self::first_run`]), so the store must not see it early.
+    async fn walk_changes(&self, start: &SyncCursor) -> Result<Walked> {
+        let hold = |moved| Walked {
+            moved,
+            advance: None,
+        };
         let inbox = self.changes(start, Folder::Inbox).await?;
         if inbox.ids.is_empty() && inbox.mailbox_unchanged {
-            return Ok(false);
+            return Ok(hold(false));
         }
         let (inbox_ids, inbox_cursor, inbox_saw) = (inbox.ids, inbox.cursor, inbox.saw_changes);
         let inbox_new = self.unstored_changes(&inbox_ids)?;
@@ -2609,7 +2731,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             Err(CoreError::NotFound) => return Err(CoreError::NotFound),
             Err(e) => {
                 eprintln!("squelch: sent history walk failed ({e}); holding the cursor");
-                return Ok(true);
+                return Ok(hold(true));
             }
         };
 
@@ -2637,7 +2759,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 Ok(n) => eprintln!("squelch: ingested {n} new SENT messages"),
                 Err(e) => {
                     eprintln!("squelch: sent ingest failed ({e}); holding the cursor");
-                    return Ok(true);
+                    return Ok(hold(true));
                 }
             }
         }
@@ -2649,12 +2771,13 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
 
         // Both walks started from `start`; the merge is the one commit
         // covering both.
-        self.store_cursor(
-            &self
-                .source()?
-                .merge_cursors(start, &inbox_cursor, &sent_cursor),
-        )?;
-        Ok(!idle)
+        Ok(Walked {
+            moved: !idle,
+            advance: Some(
+                self.source()?
+                    .merge_cursors(start, &inbox_cursor, &sent_cursor),
+            ),
+        })
     }
 
     /// Fresh catch-up: re-run the backfill-window INBOX fetch, then the SENT
@@ -3328,7 +3451,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             //
             // Not for the archive walk, which runs beside a catch-up's
             // aftermath and is no part of its denominator.
+            //
+            // Nor for a LIVE fetch (`Urgency::Live`): the first run polls
+            // beside its backfill (`Self::first_run`), and mail that walk
+            // brings in is no part of the window's count either.
             if origin != IngestOrigin::Archive
+                && retry == Urgency::Window
                 && let Some((_, total)) = self.metrics.catchup_progress()
             {
                 let done = self.metrics.catchup_step();
@@ -11064,6 +11192,84 @@ Q0/00yfa39rgtJLa0DnOoA==
             .unwrap()
             .unwrap();
         server.abort();
+    }
+
+    /// LIVE MAIL ARRIVES DURING THE FIRST LOAD. A new account's backfill is
+    /// minutes of downloads; mail that lands meanwhile is the owner's first
+    /// proof the app works. It used to wait for the whole window, and on Gmail
+    /// it was LOST: the historyId was asked for after the fetches, past it.
+    /// Now the cursor is minted before the listing and the change feed is
+    /// walked from it beside the download: the live message is ingested while
+    /// the window is still in flight, as live mail (stamped to notify, not
+    /// first-load backlog), the window's progress count is untouched by it,
+    /// and the stored cursor is where the live walk got to, not the minted one.
+    #[tokio::test]
+    async fn live_mail_arrives_while_the_first_backfill_downloads() {
+        let g = MockGmail::default();
+        g.listing(LABEL_INBOX, &["a", "b"]);
+        g.listing(LABEL_SENT, &[]);
+        g.body("a", alert_eml(Utc::now()));
+        g.body("b", alert_eml(Utc::now()));
+        g.slow_body("b", Duration::from_secs(8));
+        // Arrived after the listing: in the change feed, in no listing.
+        g.body("live", alert_eml(Utc::now()));
+        g.history(LABEL_INBOX, LabelHistory::added(5, &[(5, "live")]));
+        g.history(LABEL_SENT, LabelHistory::quiet(5));
+        g.profile(1);
+        let base = serve_mock(g.clone()).await;
+        let (store, acct) = store_at_cursor(None);
+
+        let mut config = Config::default();
+        config.sync.poll_secs = 1;
+        let metrics = SyncMetrics::new();
+        let e =
+            engine_with_config(store.clone(), acct, &base, config).with_metrics(metrics.clone());
+        let (stop, rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move { e.run(rx).await });
+
+        let seen = store.clone();
+        wait_for(6, "the live message during the backfill", || {
+            seen.triage_by_provider_id(acct, "live").unwrap().is_some()
+        })
+        .await;
+        assert_eq!(
+            cursor_of(&store, acct),
+            None,
+            "the backfill was still going"
+        );
+        assert_eq!(
+            metrics.catchup_progress(),
+            Some((1, 2)),
+            "the live message is no part of the window's count"
+        );
+        assert_eq!(
+            store.triage_by_provider_id(acct, "live").unwrap(),
+            Some((false, true)),
+            "live mail: not first-load, and stamped to notify"
+        );
+
+        let seen = store.clone();
+        wait_for(15, "the backfill to finish", || {
+            cursor_of(&seen, acct).is_some()
+        })
+        .await;
+        assert_eq!(
+            cursor_of(&store, acct),
+            Some(5),
+            "the cursor is where the live walk got to"
+        );
+        assert_eq!(
+            store.triage_by_provider_id(acct, "b").unwrap(),
+            Some((true, false)),
+            "the window itself is still silent first-load backlog"
+        );
+
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 
     /// Exercise parsing, the durable claim, real model transport, validation,

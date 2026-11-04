@@ -306,14 +306,16 @@ pub trait MailSource: Send + Sync {
         false
     }
 
-    /// Does [`Self::current_cursor`] describe a position by TIME rather than
-    /// by asking the server where its feed stands? Graph's mints the initial
-    /// delta round from a timestamp, with no request; minted after a
-    /// backfill that ran for an hour, it would start an hour late and the
-    /// mail in between would never sync. `true` makes the engine mint the
-    /// cursor BEFORE a backfill or catch-up lists its window and store it
-    /// after, so the first walk replays everything since the listing began
-    /// (stored ids are skipped). Gmail asks the server and keeps its order.
+    /// Must the cursor be minted BEFORE a backfill or catch-up lists its
+    /// window? `true` makes the engine mint it first and store it after, so
+    /// the first walk replays everything since the listing began, and lets
+    /// the engine poll from it while a first-run backfill is still going
+    /// (`SyncEngine::first_run`). Graph's mints its delta round from a
+    /// timestamp; Gmail's is the mailbox's historyId. Minted AFTER a window
+    /// that took minutes to download, either would start past the mail
+    /// that arrived meanwhile, which then is in neither the listing nor any
+    /// walk: LOST. The default (`false`) is for a source that snapshots its
+    /// own position before listing (IMAP's per-folder state).
     fn cursor_before_window(&self) -> bool {
         false
     }

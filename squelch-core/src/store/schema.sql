@@ -2643,8 +2643,9 @@ CREATE TABLE IF NOT EXISTS relationships (
     -- name from sealed mail too (see `people.rs`).
     display_name      TEXT,
     -- INBOUND, counted the way the listings count: inbound, not provider spam,
-    -- not sealed (`sealed_mail_sql!`, the strict answer), not the owner's own
-    -- mail, and NOT THE ARCHIVE TIER, which is absent from every count.
+    -- not known to be sealed (`known_sealed_mail_sql!`; why not the strict
+    -- macro is in `relationships`), not the owner's own mail, and NOT THE
+    -- ARCHIVE TIER, which is absent from every count.
     received_count    INTEGER NOT NULL,
     -- Off `messages.received_at`, NEVER `senders.first_seen`. The directory's
     -- date is the first SIGHTING, and the backfill walks newest first, so it

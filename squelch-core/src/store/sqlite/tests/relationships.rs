@@ -1,0 +1,565 @@
+//! The relationship ledger (`relationships`): what each column counts, the
+//! floors it counts under, how rows are kept current, and that every
+//! per-address statement is a seek and not a walk.
+
+use super::super::reading_senders::SenderMeasurer;
+use super::super::relationships::{
+    CORRECTIONS_SQL, INBOUND_SQL, INITIATED_SQL, RELATIONSHIPS_BACKFILL_KEY, RelationshipSort,
+    THREADS_SQL,
+};
+use super::super::*;
+use super::support::*;
+use crate::store::agent_triage::AgentTriageStore;
+use crate::store::{ContactEntry, SyncState};
+use crate::types::SealedKind;
+use chrono::Duration;
+
+const DAN: &str = "dan@example.com";
+
+fn days_ago(days: i64) -> DateTime<Utc> {
+    Utc::now() - Duration::days(days)
+}
+
+/// One inbound message from `from` in `thread`, with a triage row.
+fn inbound(
+    store: &SqliteStore,
+    acct: AccountId,
+    key: &str,
+    thread: &str,
+    from: &str,
+    days: i64,
+) -> i64 {
+    triaged(acct, key, thread)
+        .from(from)
+        .received_at(days_ago(days))
+        .seed(store)
+}
+
+/// One message the owner sent in `thread` to `to`, through the real ingest so
+/// `message_recipients` is written the way production writes it.
+fn sent(
+    store: &SqliteStore,
+    acct: AccountId,
+    key: &str,
+    thread: &str,
+    to: &str,
+    at: DateTime<Utc>,
+) -> i64 {
+    triaged(acct, key, thread)
+        .from("me@example.com")
+        .is_sent(true)
+        .to_addrs(to)
+        .received_at(at)
+        .ingest(store)
+}
+
+fn mark_backfilled(store: &SqliteStore, acct: AccountId) {
+    store
+        .set_sync_state(
+            acct,
+            RELATIONSHIPS_BACKFILL_KEY,
+            &SyncState {
+                uidvalidity: 0,
+                last_uid: 1,
+            },
+        )
+        .unwrap();
+}
+
+fn ledgers_since(store: &SqliteStore, acct: AccountId, open_days: i64, dwell_days: i64) {
+    store
+        .set_app_setting(
+            acct,
+            OPEN_LEDGER_SINCE_KEY,
+            &days_ago(open_days).to_rfc3339(),
+        )
+        .unwrap();
+    store
+        .set_app_setting(
+            acct,
+            DWELL_LEDGER_SINCE_KEY,
+            &days_ago(dwell_days).to_rfc3339(),
+        )
+        .unwrap();
+}
+
+fn dirty(store: &SqliteStore, acct: AccountId) -> Vec<String> {
+    let conn = store.lock().unwrap();
+    let mut stmt = conn
+        .prepare("SELECT addr FROM relationship_dirty WHERE account_id = ?1 ORDER BY addr")
+        .unwrap();
+    stmt.query_map([acct], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+}
+
+#[test]
+fn inbound_counts_the_listings_mail_and_dates_it_from_the_messages() {
+    let (store, acct) = store();
+    // Seeded NEWEST FIRST, the order the backfill walks: the directory's
+    // `first_seen` would say 20 days ago, the mail says 300.
+    for (key, days) in [("g3", 20), ("g2", 90), ("g1", 300)] {
+        triaged(acct, key, key)
+            .from("Dan@Example.com")
+            .from_name(Some("Dan Smith"))
+            .received_at(days_ago(days))
+            .seed(&store);
+    }
+    // None of these is mail the listings would show, so none is counted.
+    triaged(acct, "spam", "spam")
+        .from(DAN)
+        .is_spam(true)
+        .received_at(days_ago(5))
+        .seed(&store);
+    triaged(acct, "otp", "otp")
+        .from(DAN)
+        .sealed(SealedKind::Otp)
+        .received_at(days_ago(4))
+        .seed(&store);
+    let archived = inbound(&store, acct, "old", "old", DAN, 2_000);
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE messages SET is_archive = 1 WHERE id = ?1",
+            [archived],
+        )
+        .unwrap();
+
+    store
+        .recompute_relationship(acct, "DAN@example.com")
+        .unwrap();
+    let row = store.relationship(acct, DAN).unwrap().expect("a row");
+    assert_eq!(row.addr, DAN, "keyed by the lowercased address");
+    assert_eq!(row.received_count, 3);
+    let first = row.received_first_at.unwrap();
+    assert!((first - days_ago(300)).num_minutes().abs() < 5, "{first}");
+    let last = row.received_last_at.unwrap();
+    assert!((last - days_ago(20)).num_minutes().abs() < 5, "{last}");
+    assert_eq!(row.display_name.as_deref(), Some("Dan Smith"));
+    assert_eq!(row.inbound_threads, 3);
+    // Three mails over three hundred days.
+    assert_eq!(row.received_per_month, Some(0.3));
+}
+
+#[test]
+fn a_reply_is_a_later_owner_message_in_a_thread_they_wrote_into() {
+    let (store, acct) = store();
+    // t1: Dan writes, the owner answers 30 minutes later.
+    inbound(&store, acct, "a", "t1", DAN, 10);
+    sent(
+        &store,
+        acct,
+        "a-r",
+        "t1",
+        "Dan <dan@example.com>",
+        days_ago(10) + Duration::minutes(30),
+    );
+    // t2: the owner wrote first and Dan answered; nothing from the owner
+    // after Dan, so it is not a replied thread (it is an initiated one).
+    sent(&store, acct, "b-0", "t2", "dan@example.com", days_ago(9));
+    inbound(&store, acct, "b", "t2", DAN, 8);
+    // t3, t4: answered after an hour and after a day.
+    inbound(&store, acct, "c", "t3", DAN, 7);
+    sent(
+        &store,
+        acct,
+        "c-r",
+        "t3",
+        "dan@example.com",
+        days_ago(7) + Duration::hours(1),
+    );
+    inbound(&store, acct, "d", "t4", DAN, 6);
+    sent(&store, acct, "d-r", "t4", "dan@example.com", days_ago(5));
+    // t5: never answered.
+    inbound(&store, acct, "e", "t5", DAN, 4);
+
+    store.recompute_relationship(acct, DAN).unwrap();
+    let row = store.relationship(acct, DAN).unwrap().unwrap();
+    assert_eq!(row.inbound_threads, 5);
+    assert_eq!(row.replied_threads, 3);
+    // 30m, 1h, 1d; each fixture reads the clock, so allow its drift.
+    let median = row.median_reply_ms.expect("three replied threads");
+    assert!((median - 3_600_000).abs() < 1_000, "{median}");
+    assert_eq!(row.initiated_count, 1, "only t2 opened with the owner");
+}
+
+#[test]
+fn initiated_needs_the_first_message_of_the_thread_to_name_the_address() {
+    let (store, acct) = store();
+    // The owner starts a thread to Ann, and later copies Dan into it: Ann's
+    // initiation, not Dan's.
+    sent(&store, acct, "s1", "t1", "ann@fund.com", days_ago(10));
+    sent(
+        &store,
+        acct,
+        "s2",
+        "t1",
+        "ann@fund.com, dan@example.com",
+        days_ago(9),
+    );
+    // And starts one with both of them on it.
+    sent(
+        &store,
+        acct,
+        "s3",
+        "t2",
+        "Ann <ann@fund.com>, dan@example.com",
+        days_ago(8),
+    );
+    store.recompute_all_relationships(acct).unwrap();
+    let ann = store.relationship(acct, "ann@fund.com").unwrap().unwrap();
+    let dan = store.relationship(acct, DAN).unwrap().unwrap();
+    assert_eq!(ann.initiated_count, 2);
+    assert_eq!(dan.initiated_count, 1);
+    // Nobody wrote to the owner, so neither has an inbound thread.
+    assert_eq!((ann.inbound_threads, ann.received_count), (0, 0));
+}
+
+#[test]
+fn sent_is_the_contacts_row_the_known_contact_floor_reads() {
+    let (store, acct) = store();
+    store
+        .merge_harvested_contacts(
+            acct,
+            &[ContactEntry {
+                addr: "ann@fund.com".into(),
+                display_name: Some("Ann Lee".into()),
+                sent_count: 4,
+                last_sent_at: Some(days_ago(3)),
+            }],
+        )
+        .unwrap();
+    store.recompute_relationship(acct, "Ann@Fund.com").unwrap();
+    let row = store.relationship(acct, "ANN@fund.com").unwrap().unwrap();
+    assert_eq!(row.sent_count, 4);
+    assert!(row.sent_last_at.is_some());
+    assert_eq!(
+        row.display_name.as_deref(),
+        Some("Ann Lee"),
+        "from the contacts row"
+    );
+    // A known contact is never a purge suggestion, and the ledger stores the
+    // purge flow's own answer.
+    assert_eq!(row.fatigue_score, Some(0.0));
+}
+
+#[test]
+fn attention_counts_only_mail_at_or_after_the_ledger_floor() {
+    let (store, acct) = store();
+    // Opens recorded for a year, dwell for thirty days.
+    ledgers_since(&store, acct, 365, 30);
+    let before = inbound(&store, acct, "before", "before", DAN, 45);
+    let after = inbound(&store, acct, "after", "after", DAN, 10);
+    inbound(&store, acct, "unopened", "unopened", DAN, 5);
+    for id in [before, after] {
+        store
+            .acknowledge_agent_message(acct, id, Utc::now())
+            .unwrap();
+        store.record_message_attention(acct, id, 9_000, 1).unwrap();
+    }
+    store.recompute_relationship(acct, DAN).unwrap();
+    let row = store.relationship(acct, DAN).unwrap().unwrap();
+    assert_eq!(
+        row.received_count, 3,
+        "inbound counts do not wait for a ledger"
+    );
+    assert_eq!(row.attention_rows, 2, "the 45-day-old mail predates dwell");
+    assert_eq!(row.opened_count, 1);
+    assert_eq!(row.link_clicks, 1);
+
+    // The context reports the attention block's coverage, the ledger's age.
+    mark_backfilled(&store, acct);
+    let block = store.relationship_context(acct, DAN).unwrap().unwrap();
+    assert_eq!(block["coverage_days"], 30);
+    assert_eq!(block["attention"]["rows"], 2);
+}
+
+#[test]
+fn the_attention_block_is_left_out_of_the_context_on_a_young_ledger() {
+    let (store, acct) = store();
+    ledgers_since(&store, acct, 365, 3);
+    inbound(&store, acct, "a", "a", DAN, 1);
+    store.recompute_relationship(acct, DAN).unwrap();
+    mark_backfilled(&store, acct);
+    let block = store.relationship_context(acct, DAN).unwrap().unwrap();
+    assert_eq!(block["coverage_days"], 3);
+    assert!(block.get("attention").is_none(), "{block}");
+    assert_eq!(block["received"]["count"], 1);
+}
+
+#[test]
+fn the_fatigue_score_is_the_reading_purges_own() {
+    let (store, acct) = store();
+    ledgers_since(&store, acct, 365, 365);
+    for n in 0..10 {
+        inbound(
+            &store,
+            acct,
+            &format!("n{n}"),
+            &format!("n{n}"),
+            "news@letters.example",
+            n * 3 + 1,
+        );
+    }
+    store
+        .recompute_relationship(acct, "news@letters.example")
+        .unwrap();
+    let row = store
+        .relationship(acct, "news@letters.example")
+        .unwrap()
+        .unwrap();
+    let conn = store.lock().unwrap();
+    let measured = SenderMeasurer::new(&conn, acct, Utc::now())
+        .unwrap()
+        .measure("news@letters.example")
+        .unwrap();
+    assert!(
+        measured.score.is_some(),
+        "ten unopened mails over a year of ledger"
+    );
+    assert_eq!(
+        row.fatigue_score,
+        measured.score.map(|s| f32::from(s) / 100.0)
+    );
+    assert_eq!(row.fatigue_reasons, measured.reasons);
+    assert_eq!(row.replied_threads, 0, "bulk mail: the expected shape");
+}
+
+#[test]
+fn corrections_count_both_tables_on_the_address() {
+    let (store, acct) = store();
+    let a = inbound(&store, acct, "a", "a", DAN, 2);
+    let conn = store.lock().unwrap();
+    conn.execute(
+        "INSERT INTO triage_feedback(account_id, message_id, corrected_at, dimension,
+             to_value, original, sender, subject)
+         VALUES(?1, ?2, ?3, 'tier', 'signal', '{}', 'Dan@Example.com', 's')",
+        params![acct, a, Utc::now().to_rfc3339()],
+    )
+    .unwrap();
+    // Not `external_access`: an owner's seal takes the mail out of the
+    // ledger altogether, corrections and all.
+    for field in ["kinds", "fye"] {
+        conn.execute(
+            "INSERT INTO agent_triage_corrections(account_id, message_id, field, value_json,
+                 source_revision, updated_at)
+             VALUES(?1, ?2, ?3, 'true', 1, ?4)",
+            params![acct, a, field, Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    store.recompute_relationship(acct, DAN).unwrap();
+    assert_eq!(
+        store.relationship(acct, DAN).unwrap().unwrap().corrections,
+        3
+    );
+}
+
+#[test]
+fn the_owners_own_address_and_an_address_whose_mail_is_gone_have_no_row() {
+    let (store, acct) = store();
+    inbound(&store, acct, "self", "self", "me@example.com", 1);
+    let gone = inbound(&store, acct, "a", "a", DAN, 1);
+    store.recompute_all_relationships(acct).unwrap();
+    assert!(
+        store
+            .relationship(acct, "me@example.com")
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.relationship(acct, DAN).unwrap().is_some());
+
+    store
+        .lock()
+        .unwrap()
+        .execute("DELETE FROM messages WHERE id = ?1", [gone])
+        .unwrap();
+    store.recompute_all_relationships(acct).unwrap();
+    assert!(
+        store.relationship(acct, DAN).unwrap().is_none(),
+        "a row of zeros would read as known and ignored"
+    );
+}
+
+#[test]
+fn ingest_and_attention_mark_addresses_and_the_drain_clears_them() {
+    let (store, acct) = store();
+    // Inbound marks its sender; Sent marks each recipient; spam marks nobody.
+    let id = triaged(acct, "in", "t1")
+        .from("Dan@Example.com")
+        .received_at(days_ago(1))
+        .ingest(&store);
+    triaged(acct, "out", "t2")
+        .from("me@example.com")
+        .is_sent(true)
+        .to_addrs("Ann <ann@fund.com>, bo@co.example")
+        .received_at(days_ago(1))
+        .ingest(&store);
+    triaged(acct, "junk", "t3")
+        .from("junk@spam.example")
+        .is_spam(true)
+        .received_at(days_ago(1))
+        .ingest(&store);
+    assert_eq!(dirty(&store, acct), ["ann@fund.com", "bo@co.example", DAN]);
+
+    assert_eq!(store.drain_relationship_dirty(acct, 100).unwrap(), 3);
+    assert!(dirty(&store, acct).is_empty());
+    assert!(store.relationship(acct, "ann@fund.com").unwrap().is_some());
+
+    // The attention POST marks the message's sender again.
+    store.record_message_attention(acct, id, 4_000, 0).unwrap();
+    assert_eq!(dirty(&store, acct), [DAN]);
+}
+
+#[test]
+fn the_drain_is_bounded_per_call() {
+    let (store, acct) = store();
+    for n in 0..60 {
+        triaged(acct, &format!("m{n}"), &format!("t{n}"))
+            .from(&format!("s{n:02}@example.com"))
+            .received_at(days_ago(1))
+            .ingest(&store);
+    }
+    assert_eq!(store.drain_relationship_dirty(acct, 40).unwrap(), 40);
+    assert_eq!(dirty(&store, acct).len(), 20);
+    assert_eq!(store.drain_relationship_dirty(acct, 40).unwrap(), 20);
+    assert!(dirty(&store, acct).is_empty());
+}
+
+#[test]
+fn the_context_is_absent_until_the_backfill_has_run() {
+    let (store, acct) = store();
+    inbound(&store, acct, "a", "a", DAN, 1);
+    store.recompute_all_relationships(acct).unwrap();
+    assert!(
+        store.relationship_context(acct, DAN).unwrap().is_none(),
+        "a partly filled table would make every unfilled sender a stranger"
+    );
+    mark_backfilled(&store, acct);
+    assert!(store.relationship_context(acct, DAN).unwrap().is_some());
+    // No row is no key, not a block of zeros.
+    assert!(
+        store
+            .relationship_context(acct, "nobody@nowhere.example")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn the_full_recompute_walks_in_chunks_and_finds_every_address() {
+    let (store, acct) = store();
+    for n in 0..7 {
+        inbound(
+            &store,
+            acct,
+            &format!("m{n}"),
+            &format!("t{n}"),
+            &format!("s{n}@example.com"),
+            1,
+        );
+    }
+    let mut after: Option<String> = None;
+    let mut chunks = 0;
+    while let Some(last) = store
+        .recompute_relationship_chunk(acct, after.as_deref(), 3)
+        .unwrap()
+    {
+        after = Some(last);
+        chunks += 1;
+    }
+    assert_eq!(chunks, 2, "3 + 3, then a short chunk ends the walk");
+    let list = store
+        .list_relationships(acct, RelationshipSort::Volume, 50)
+        .unwrap();
+    assert_eq!(list.rows.len(), 7);
+    assert!(list.computed_at.is_some());
+}
+
+#[test]
+fn the_list_sorts_by_what_it_was_asked() {
+    let (store, acct) = store();
+    for n in 0..3 {
+        inbound(
+            &store,
+            acct,
+            &format!("v{n}"),
+            &format!("v{n}"),
+            "volume@example.com",
+            n + 3,
+        );
+    }
+    inbound(&store, acct, "r", "r", "replied@example.com", 2);
+    sent(&store, acct, "r-r", "r", "replied@example.com", days_ago(1));
+    store.recompute_all_relationships(acct).unwrap();
+    let first = |sort| {
+        store.list_relationships(acct, sort, 10).unwrap().rows[0]
+            .addr
+            .clone()
+    };
+    assert_eq!(first(RelationshipSort::Volume), "volume@example.com");
+    assert_eq!(first(RelationshipSort::Replies), "replied@example.com");
+    assert_eq!(first(RelationshipSort::Recent), "replied@example.com");
+    assert_eq!(
+        RelationshipSort::parse("fatigue"),
+        Some(RelationshipSort::Fatigue)
+    );
+    assert_eq!(RelationshipSort::parse("nope"), None);
+}
+
+/// Every per-address statement seeks one address; none walks the account.
+#[test]
+fn every_per_address_statement_is_an_indexed_probe() {
+    let (store, _acct) = store();
+    let conn = store.lock().unwrap();
+    let plan = |sql: &str| -> Vec<String> {
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let nulls = vec![rusqlite::types::Value::Null; stmt.parameter_count()];
+        stmt.query_map(rusqlite::params_from_iter(nulls), |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(|line| line.unwrap())
+            .collect()
+    };
+    for sql in [INBOUND_SQL, THREADS_SQL, CORRECTIONS_SQL] {
+        let plan = plan(sql);
+        assert!(
+            plan.iter().any(|l| l.starts_with("SEARCH m USING")
+                && l.contains("idx_messages_from_nocase (account_id=? AND from_addr=?)")),
+            "walked instead of seeking\n{sql}\n{plan:#?}"
+        );
+        assert!(
+            !plan.iter().any(|l| l.starts_with("SCAN m")),
+            "a scan of messages\n{sql}\n{plan:#?}"
+        );
+    }
+    let corrections = plan(CORRECTIONS_SQL);
+    assert!(
+        corrections
+            .iter()
+            .any(|l| l.starts_with("SEARCH c USING") && l.contains("message_id=?")),
+        "each correction is probed by its message\n{corrections:#?}"
+    );
+    let threads = plan(THREADS_SQL);
+    assert!(
+        threads
+            .iter()
+            .any(|l| l.contains("SEARCH s USING") && l.contains("idx_messages_thread")),
+        "each reply probe seeks its thread\n{threads:#?}"
+    );
+    let initiated = plan(INITIATED_SQL);
+    assert!(
+        initiated
+            .iter()
+            .any(|l| l.contains("SEARCH r USING") && l.contains("idx_message_recipients_addr")),
+        "{initiated:#?}"
+    );
+    assert!(
+        !initiated
+            .iter()
+            .any(|l| l.starts_with("SCAN m") || l.starts_with("SCAN r")),
+        "{initiated:#?}"
+    );
+}

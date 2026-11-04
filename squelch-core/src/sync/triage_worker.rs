@@ -1872,6 +1872,86 @@ mod budget_tests {
         assert!(!snapshot.initial.to_string().contains("unrelated"));
     }
 
+    fn fill_ledger(store: &SqliteStore, account: AccountId, ledger_days: i64) {
+        use crate::store::Store as _;
+        let since = (Utc::now() - chrono::Duration::days(ledger_days)).to_rfc3339();
+        for key in [
+            crate::store::sqlite::OPEN_LEDGER_SINCE_KEY,
+            crate::store::sqlite::DWELL_LEDGER_SINCE_KEY,
+        ] {
+            store.set_app_setting(account, key, &since).unwrap();
+        }
+        store.recompute_all_relationships(account).unwrap();
+        store
+            .set_sync_state(
+                account,
+                crate::store::sqlite::relationships::RELATIONSHIPS_BACKFILL_KEY,
+                &crate::store::SyncState {
+                    uidvalidity: 0,
+                    last_uid: 1,
+                },
+            )
+            .unwrap();
+    }
+
+    /// docs/UNDERSTANDING.md §2.1: the sender's ledger row rides beside
+    /// `sender_is_contact`, ABSENT until the first-run backfill has filled the
+    /// table, without attention on a young ledger, and in no fingerprint.
+    #[test]
+    fn the_context_carries_the_relationship_block_beside_the_contact_flag() {
+        let (store, account, ids) = evidence_fixture();
+        let job = read_job(account, ids[0]);
+        let unfilled = store.load_agent_context(&job).unwrap();
+        let initial = snapshot(&unfilled, &job, 8, &utc_clock()).initial;
+        assert!(initial.get("relationship").is_none(), "no backfill, no key");
+
+        fill_ledger(&store, account, 3);
+        let young = store.load_agent_context(&job).unwrap();
+        let initial = snapshot(&young, &job, 8, &utc_clock()).initial;
+        let block = &initial["relationship"];
+        assert_eq!(block["received"]["count"], 3);
+        assert_eq!(block["coverage_days"], 3);
+        assert!(block.get("attention").is_none(), "{block}");
+        assert_eq!(block["replies"]["median_reply"], serde_json::Value::Null);
+        assert_eq!(
+            young.revision, unfilled.revision,
+            "a recount must never make a run in flight stale"
+        );
+
+        fill_ledger(&store, account, 60);
+        let ripe = store.load_agent_context(&job).unwrap();
+        let initial = snapshot(&ripe, &job, 8, &utc_clock()).initial;
+        // Past the floor the block is there; what it counts is the Reading
+        // purge's own universe, pinned in `store::sqlite::tests::relationships`.
+        let attention = &initial["relationship"]["attention"];
+        assert!(attention.is_object(), "{initial}");
+        assert_eq!(attention["opened"], 0);
+    }
+
+    #[test]
+    fn read_sender_history_carries_the_relationship_at_the_top() {
+        let (store, account, _) = evidence_fixture();
+        fill_ledger(&store, account, 60);
+        let reader = StoreEvidence::new(&store, account, 2);
+        let result = reader
+            .read(&EvidenceRequest::ReadSenderHistory {
+                sender: "Sender@Example.com".into(),
+            })
+            .unwrap();
+        assert_eq!(result.data["relationship"]["received"]["count"], 3);
+        assert_eq!(result.data["messages"].as_array().unwrap().len(), 2);
+        let stranger = reader
+            .read(&EvidenceRequest::ReadSenderHistory {
+                sender: "nobody@nowhere.example".into(),
+            })
+            .unwrap();
+        assert!(
+            stranger.data.get("relationship").is_none(),
+            "{}",
+            stranger.data
+        );
+    }
+
     #[test]
     fn read_thread_initializes_only_exposed_source_assessments() {
         let (store, account, ids) = evidence_fixture();

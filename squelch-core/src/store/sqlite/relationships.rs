@@ -25,11 +25,19 @@
 //!   backfill walks newest first, so the directory's first sighting dates a
 //!   ten-year correspondent to last Tuesday.
 //! - INBOUND IS THE LISTINGS' UNIVERSE: not the owner's own mail (by
-//!   authorship, `own_mail_sql!`), not provider spam, not sealed by the
-//!   strict answer (`sealed_mail_sql!`: a shop's login codes are not its
-//!   newsletter), and not the archive tier, which is absent from every count.
-//!   Mail whose access check is still pending is left out until it settles:
-//!   the next mark of that sender, or the nightly recompute, counts it.
+//!   authorship, `own_mail_sql!`), not provider spam, not KNOWN to be sealed
+//!   (`known_sealed_mail_sql!`: a shop's login codes are not its newsletter),
+//!   and not the archive tier, which is absent from every count.
+//! - PENDING MAIL COUNTS, the one place this module takes the looser of the
+//!   two sealed macros, and the reason is the reply itself. Ingesting the
+//!   owner's reply re-queues the thread it lands in, so at the moment the
+//!   Sent mark asks for a recount every inbound message of the thread just
+//!   answered is pending again. The strict macro would drop exactly the
+//!   thread that made the owner a replier, and nothing would recount it until
+//!   the nightly pass. A count is all that leaves here; a pending message
+//!   that turns out to be a login code costs one inflated count until the
+//!   next recount of that sender. The ATTENTION columns stay strict: they are
+//!   the Reading purge's own statements, which sweep on what they find.
 //! - ATTENTION ONLY OVER THE LEDGER FLOOR. A zero dwell before the dwell
 //!   ledger started is not a measurement (`migrate::stamp_dwell_ledger_start`),
 //!   so the four attention columns count only mail received at or after the
@@ -79,7 +87,7 @@ macro_rules! inbound_sql {
             own_mail_sql!(),
             " AND m.is_spam = 0 AND m.is_archive = 0
                 AND NOT ",
-            sealed_mail_sql!(),
+            known_sealed_mail_sql!(),
             " "
         )
     };
@@ -117,9 +125,14 @@ const NAME_SQL: &str = concat!(
 /// Threads the owner started by writing to the address: a sent message that
 /// names them (`message_recipients`, lowercased, so its BINARY index serves
 /// `?2`) and is the FIRST message of its thread.
+///
+/// PINNED BOTH WAYS. Left to choose, the planner walked the whole account's
+/// messages by thread and probed each for a recipient row, because the
+/// first-message subquery looks like a reason to go thread by thread.
+/// `INDEXED BY` holds the recipients seek, and `CROSS JOIN` keeps it outer.
 pub(crate) const INITIATED_SQL: &str = "SELECT COUNT(DISTINCT m.thread_id)
-     FROM message_recipients r
-     JOIN messages m ON m.account_id = r.account_id AND m.id = r.message_id
+     FROM message_recipients r INDEXED BY idx_message_recipients_addr
+     CROSS JOIN messages m ON m.account_id = r.account_id AND m.id = r.message_id
      WHERE r.account_id = ?1 AND r.addr = ?2
        AND m.is_sent = 1 AND m.is_archive = 0
        AND m.id = (SELECT f.id FROM messages f
@@ -129,11 +142,14 @@ pub(crate) const INITIATED_SQL: &str = "SELECT COUNT(DISTINCT m.thread_id)
 /// The owner's corrections on the address: the feedback table by its NOCASE
 /// sender index, and field corrections by message, reached through the
 /// from-index walk so the corrections table is only ever probed by key.
+/// `CROSS JOIN` because SQLite keeps its left table outer for that join and
+/// no other: left to choose, the planner walked every correction of the
+/// account and probed each one's message.
 pub(crate) const CORRECTIONS_SQL: &str = "SELECT
        (SELECT COUNT(*) FROM triage_feedback
          WHERE account_id = ?1 AND sender = ?2 COLLATE NOCASE)
      + (SELECT COUNT(*) FROM messages m INDEXED BY idx_messages_from_nocase
-          JOIN agent_triage_corrections c
+          CROSS JOIN agent_triage_corrections c
             ON c.account_id = m.account_id AND c.message_id = m.id
          WHERE m.account_id = ?1 AND m.from_addr = ?2 COLLATE NOCASE)";
 
@@ -626,11 +642,12 @@ impl SqliteStore {
     /// `Some(last)` to resume from, `None` once the walk is done.
     ///
     /// THE UNIVERSE is every address with a sender-directory row, a contacts
-    /// row, or a ledger row already: the first two between them hold every
-    /// address with mail either way, and the third is how a row whose mail
-    /// has gone is found and removed. One `UNION` over three small
-    /// per-account tables per chunk, which is the full recompute's one walk
-    /// and its whole point; a single address is never found this way.
+    /// row, a Sent recipient row, or a ledger row already: the first three
+    /// between them hold every address with mail either way (contacts alone
+    /// would miss a recipient the contact seeding filtered out), and the last
+    /// is how a row whose mail has gone is found and removed. One `UNION`
+    /// over per-account tables per chunk, which is the full recompute's one
+    /// walk and its whole point; a single address is never found this way.
     pub fn recompute_relationship_chunk(
         &self,
         account_id: AccountId,
@@ -643,6 +660,7 @@ impl SqliteStore {
                 "SELECT a FROM (
                      SELECT lower(trim(addr)) AS a FROM senders WHERE account_id = ?1
                      UNION SELECT lower(trim(addr)) FROM contacts WHERE account_id = ?1
+                     UNION SELECT addr FROM message_recipients WHERE account_id = ?1
                      UNION SELECT addr FROM relationships WHERE account_id = ?1)
                  WHERE a > ?2 AND a != ''
                  ORDER BY a LIMIT ?3",

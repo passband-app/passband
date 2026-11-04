@@ -404,12 +404,7 @@ private struct GuestRows: View {
         VStack(alignment: .leading, spacing: Space.s4) {
             ForEach(list.rows) { row in
                 HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
-                    Text(verbatim: row.name)
-                        .font(Typo.rowSub)
-                        .foregroundStyle(Palette.ink)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
+                    name(row)
                     Text(row.organizer ? "organizer, \(row.response)" : row.response)
                         .font(Typo.micro)
                         // The answers given read a step stronger than
@@ -425,6 +420,22 @@ private struct GuestRows: View {
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
             }
+        }
+    }
+
+    /// A guest's name is the door to their contact card, as a sender's is in
+    /// the reader: click for the card, right-click to copy. "You" has no card.
+    @ViewBuilder
+    private func name(_ row: GuestRow) -> some View {
+        let text = Text(verbatim: row.name)
+            .font(Typo.rowSub)
+            .foregroundStyle(Palette.ink)
+            .lineLimit(1)
+            .truncationMode(.middle)
+        if let sender = row.sender {
+            text.contactCard(for: sender)
+        } else {
+            text.textSelection(.enabled)
         }
     }
 }

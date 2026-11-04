@@ -149,6 +149,9 @@ struct GuestRow: Hashable, Sendable, Identifiable {
     /// "accepted", "declined", "maybe", "no reply".
     let response: String
     let organizer: Bool
+    /// "Name <addr>" for the contact card, in the reader's sender shape. Nil
+    /// for the user themselves and for a guest with no address.
+    let sender: String?
 }
 
 enum EventGuests {
@@ -456,10 +459,15 @@ enum EventGuests {
         let all = event.guests ?? []
         let rows = all.prefix(limit).enumerated().map { i, g in
             let name = (g.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let email = g.email.trimmingCharacters(in: .whitespacesAndNewlines)
+            let sender: String? =
+                g.isSelf == true || !email.contains("@") ? nil
+                : name.isEmpty ? email : "\(name) <\(email)>"
             return GuestRow(
                 id: "\(i)|\(key(g.email))",
                 name: g.isSelf == true ? "You" : (name.isEmpty ? g.email : name),
-                response: responseWord(g.response), organizer: g.organizer == true)
+                response: responseWord(g.response), organizer: g.organizer == true,
+                sender: sender)
         }
         let hidden = all.count - rows.count
         let truncated = event.guests_truncated == true

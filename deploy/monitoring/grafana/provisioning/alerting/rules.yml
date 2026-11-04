@@ -518,3 +518,150 @@ groups:
               expression: A
               conditions:
                 - evaluator: { type: gte, params: [0.85] }
+
+  # A tenant out of triage budget. Nothing is broken and nothing crashes: mail
+  # keeps syncing and simply stops being judged, which is why no other rule
+  # here notices. Two kinds of budget, three rules:
+  #
+  # - The daemon's DAILY run caps (`[agent].daily_run_cap` and its lanes),
+  #   reset at 00:00 UTC. Read from squelchd_triage_daily_runs against
+  #   squelchd_triage_daily_run_cap, which already includes any one-day grant,
+  #   so a `squelchd triage grant` clears the alert on the next scrape.
+  # - The MONTHLY dollar budget on the tenant's Bifrost virtual key. The
+  #   daemon cannot tell it apart from the other config-shaped 4xx (it lands
+  #   in squelchd_llm_config_failures_total with a bad key or a rejected
+  #   model), so that rule says "budget first" and names the other two.
+  #
+  # Every rule is one series per tenant (`max by (cluster, tenant, ...)`, with
+  # `last_over_time` across the scrape gap a pod roll leaves), for the reason
+  # `tenant-sync-stale` gives: per pod, every daemon roll re-announced every
+  # tenant that was already out of budget. The daily gauges come from the
+  # tenant's database, so a new pod reports the same numbers as the old one.
+  - orgId: 1
+    name: triage-budget
+    folder: Passband
+    interval: 1m
+    rules:
+      # The one that matters most: the total cap is spent, so newly arrived
+      # mail is parked until midnight UTC instead of triaged. Fires once and
+      # resolves at the reset (or on a grant). `cap > 0` leaves out a daemon
+      # with the cap configured to nothing, which is not "out of budget".
+      - uid: tenant-triage-daily-cap
+        title: Tenant out of daily triage runs
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: 'tenant {{ $labels.tenant }} spent its daily triage cap: new mail goes untriaged until 00:00 UTC'
+          description: >-
+            Mail still syncs; it is just not judged until the reset. "Daily triage runs, share of
+            cap" and "Triage jobs held" on the dashboard show how fast it got there. A real mail
+            day: `kubectl -n tenants exec deploy/{{ $labels.tenant }} -- squelchd triage grant
+            <runs>` (a grant is spend against the monthly Bifrost budget). A loop or a rule
+            fan-out: find that first, a grant only feeds it.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                max by (cluster, tenant) (last_over_time(squelchd_triage_daily_runs{scope="total"}[10m]))
+                  - max by (cluster, tenant) (last_over_time(squelchd_triage_daily_run_cap{scope="total"}[10m]) > 0)
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gte, params: [0] }
+
+      # The lanes under the total: background (backfill and refreshes),
+      # access (sent, spam and archive rows an agent asked to read), and
+      # revisits, which answer to `[revisit].daily_cap` and export no run
+      # gauge, so they are read from the jobs they hold. Background at its cap
+      # is how an onboarding backlog drains (200 a day, so a new mailbox does
+      # this for a week or more): info, not warning, and one message a day
+      # per tenant per lane at most, since it resolves at the reset.
+      - uid: tenant-triage-lane-cap
+        title: Tenant triage lane at its daily cap
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: info
+        annotations:
+          summary: 'tenant {{ $labels.tenant }}: triage {{ $labels.scope }} lane at its daily cap'
+          description: >-
+            background: backlog (a new signup's backfill, a refresh) draining at the background
+            cap; expected for days after a signup, worth a look on an old tenant. access: a
+            heavy day of access checks waiting for tomorrow. revisit: autonomous revisits
+            parked by [revisit].daily_cap, which a grant does not raise. New mail is not held by
+            any of these; that is `tenant-triage-daily-cap`.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                (
+                  max by (cluster, tenant, scope) (last_over_time(squelchd_triage_daily_runs{scope=~"background|access"}[10m]))
+                    - max by (cluster, tenant, scope) (last_over_time(squelchd_triage_daily_run_cap{scope=~"background|access"}[10m]) > 0)
+                ) >= 0
+                  or
+                max by (cluster, tenant, scope) (last_over_time(squelchd_triage_jobs_held{scope="revisit"}[10m])) > 0
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gte, params: [0] }
+
+      # The monthly budget (2026-10-05: ellie's $75 key was spent and triage
+      # stalled for days before anyone looked). A spent budget is a 402 on
+      # EVERY call, so the counter climbs steadily; one stray 4xx does not
+      # hold for 15 minutes. Per tenant, so a fleet-wide key or model problem
+      # arrives as one message per tenant, and several at once is the hint
+      # that it is not a budget.
+      - uid: tenant-llm-config-failing
+        title: Tenant LLM calls refused (budget, key or model)
+        condition: C
+        for: 15m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: 'tenant {{ $labels.tenant }}: gateway refusing LLM calls, triage stalled'
+          description: >-
+            Usually the tenant's monthly Bifrost budget is spent: read it with a GET on
+            /api/governance/virtual-keys and top it up with `squelch-control llm topup
+            {{ $labels.tenant }}` (ECS Exec on control). Every tenant at once is not a budget:
+            a rejected model (the 2026-08-19 class: `squelch-control llm sync --check`) or a
+            bad key. Rows stay queued and drain after the fix.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 900, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: max by (cluster, tenant) (increase(squelchd_llm_config_failures_total[15m]))
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }

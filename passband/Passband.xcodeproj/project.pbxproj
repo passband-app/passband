@@ -135,6 +135,7 @@
 		396BF899A7D7540E0DBCBB5B /* Badge.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3B428F6536347775B3EA5DC /* Badge.swift */; };
 		39808BC8E64BACBC8B8DCB4F /* ReadReceipt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 759702EBD03C1CECFD041E57 /* ReadReceipt.swift */; };
 		39B48BCF60CA5737C7088687 /* RemindTimes.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDDAB6C380027F87A19022BF /* RemindTimes.swift */; };
+		3C204A6AD74A49F279C52A7E /* HandledSignal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D79E5DFC7FA1CC324A1388A /* HandledSignal.swift */; };
 		3C99647F94095C561B3EE4EC /* RehearsalMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA6DBA73DEBD1CB392DE3A5 /* RehearsalMode.swift */; };
 		3CCC79739F2A8447B7612842 /* DiscoveryLedger.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE22230F3A496CA31B65874 /* DiscoveryLedger.swift */; };
 		3CDDFF0122107A439FA384A2 /* CalendarConnectCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A98F14CACFFA523492B5C673 /* CalendarConnectCard.swift */; };
@@ -348,6 +349,7 @@
 		91774D41994F36BA146947E7 /* Badge.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3B428F6536347775B3EA5DC /* Badge.swift */; };
 		918EB3663E912FF4F36229C2 /* EmailWebCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BFBFFBE499370A5F88E2540 /* EmailWebCore.swift */; };
 		919AA24C1449A248D1A67FC1 /* FullPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4720F5550C00C23ABD01C011 /* FullPage.swift */; };
+		91A5B74AEB91691F124ACD1A /* HandledSignal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D79E5DFC7FA1CC324A1388A /* HandledSignal.swift */; };
 		91F318BC5570E8048D351984 /* StagedAttachment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CEB46442CC9ABC798040928 /* StagedAttachment.swift */; };
 		921ACE1D761AE0AD1F714980 /* MobileAuthView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E5E8356451742599F7D7A2A /* MobileAuthView.swift */; };
 		937272D25047533E99FAFE3A /* InlineReply.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5B001C6ABDDB051E2B57205 /* InlineReply.swift */; };
@@ -808,6 +810,7 @@
 		7C0E91220FC27E7EC297FB40 /* FrameMeasurer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameMeasurer.swift; sourceTree = "<group>"; };
 		7C2908ED50464990EEF0B9AA /* PhoneVignettes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneVignettes.swift; sourceTree = "<group>"; };
 		7D145BAAFBF1028A3566D55C /* QuestionChats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuestionChats.swift; sourceTree = "<group>"; };
+		7D79E5DFC7FA1CC324A1388A /* HandledSignal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HandledSignal.swift; sourceTree = "<group>"; };
 		7E2E0C3297C76B7C9B8AF0C9 /* TranslationRefresh.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationRefresh.swift; sourceTree = "<group>"; };
 		7F39A78CE5F9F2D59F7DA8A3 /* CalendarMonth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalendarMonth.swift; sourceTree = "<group>"; };
 		804C8223C341E4978DF39DC5 /* MapKitPlaces.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapKitPlaces.swift; sourceTree = "<group>"; };
@@ -1263,6 +1266,7 @@
 				87589710B34A706B58D7D586 /* EventVisuals.swift */,
 				7C0E91220FC27E7EC297FB40 /* FrameMeasurer.swift */,
 				4EE5AF3E60001C29040AFCF5 /* GroupToken.swift */,
+				7D79E5DFC7FA1CC324A1388A /* HandledSignal.swift */,
 				20CA62DECFED05021D0C9964 /* HeroCache.swift */,
 				05270E444AAA1678F50EC0F0 /* ImageSchemeHandler.swift */,
 				2569BA5D1461BBA2A95D77F3 /* ImageStore.swift */,
@@ -1760,6 +1764,7 @@
 				8E1F8DB308ED83F7376BE9B5 /* GroupsView.swift in Sources */,
 				510D517578B61737918C1CFF /* Gzip.swift in Sources */,
 				85A1CC563396C7890FB07C1F /* HTMLImg.swift in Sources */,
+				3C204A6AD74A49F279C52A7E /* HandledSignal.swift in Sources */,
 				F6CCF6C021CD68BA6BED3944 /* HeroCache.swift in Sources */,
 				D0797905A0AFC74B229FC0B3 /* HiddenFeatures.swift in Sources */,
 				D229AE3C967617AE228AC01A /* HostedServer.swift in Sources */,
@@ -2041,6 +2046,7 @@
 				97F181221C34FBD4421A3349 /* GroupsView.swift in Sources */,
 				943AE44F6C8EF058D8EBAD57 /* Gzip.swift in Sources */,
 				E796A08FD35B6AFC987CF6A6 /* HTMLImg.swift in Sources */,
+				91A5B74AEB91691F124ACD1A /* HandledSignal.swift in Sources */,
 				9F54901230BBCD7044B85B48 /* Haptics.swift in Sources */,
 				765C0A73FABBBF4F7A041A83 /* HeroCache.swift in Sources */,
 				F64AE33C01B3FA2CF15D8F5A /* HiddenFeatures.swift in Sources */,

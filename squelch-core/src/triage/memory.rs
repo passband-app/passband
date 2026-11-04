@@ -277,24 +277,34 @@ pub fn clean_field(raw: &str) -> String {
 ///   (`acme.example/reset`): a host with a dot, a top-level label of two or
 ///   more letters that is not a file extension prose names (`Node.js/React`,
 ///   `notes.md/drafts`), and a path that starts with a letter or digit.
-/// - A CODE is six digits counted across the separators a code is written
-///   with (`123 456`, `123-456`, `12.34.56`): a run breaks only on anything
-///   else. Dates and year ranges are not codes and are left out of the count
-///   (`2026-11-30`, `2026-11`, `2025-26`, `2025-2026`), but only when they
-///   start with a 19xx or 20xx year: `1234-5678` is still a code.
-/// - A CREDENTIAL word is matched whole. `pin` only counts with a digit
-///   within twenty characters ("my pin is 4821"), because "Pin this" is
-///   prose.
+///   Accepted: a tech name shaped like that (`ASP.NET/C#`) is refused too.
+/// - A CODE is six digits in one run. Digit GROUPS join across a single
+///   space, hyphen or dot only when both are three digits or more, so
+///   `123 456`, `123-456` and `1234-5678` are one run, while `9.30-17.30`
+///   (a time range) is four short groups. Dates and year ranges starting
+///   with a 19xx or 20xx year (`2026-11-30`, `2025-26`, `2025-2026`), a
+///   standalone year (`ISO 27001 2022`), and thousands written with a one- or
+///   two-digit lead (`1 000 000`, `1.000.000`) are left out of the count.
+/// - A CREDENTIAL word is matched whole. `pin`, `token`, `one-time` and
+///   `security code` count only with a digit within twenty characters ("my
+///   pin is 4821", "token 48213"), because "Pin this", "token economics" and
+///   "a one-time donor" are prose. The rest count anywhere.
 pub fn forbidden_content(s: &str) -> bool {
-    static DATES: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        // YEAR-SHAPED only, so a 4-4 code (`1234-5678`) is still a code.
-        regex::Regex::new(
-            r"\b(?:19|20)\d{2}-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12]\d|3[01]))?\b|\b(?:19|20)\d{2}-(?:(?:19|20)\d{2}|\d{2})\b",
-        )
-            .expect("static date pattern")
+    static NOT_CODES: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        // YEAR-SHAPED dates and ranges, standalone years, and thousands with a
+        // short lead. A 4-4 code (`1234-5678`) matches none of them.
+        regex::Regex::new(concat!(
+            r"\b(?:19|20)\d{2}-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12]\d|3[01]))?\b",
+            r"|\b(?:19|20)\d{2}-(?:(?:19|20)\d{2}|\d{2})\b",
+            r"|\b\d{1,2}(?:[ .]\d{3})+\b",
+            r"|\b(?:19|20)\d{2}\b",
+        ))
+        .expect("static date pattern")
     });
-    static PIN: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| regex::Regex::new(r"\bpins?\b").expect("static pin pattern"));
+    static GATED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\b(?:pins?|tokens?|one-time|security codes?)\b")
+            .expect("static credential pattern")
+    });
     const PROSE_EXTENSIONS: [&str; 6] = ["js", "ts", "py", "rs", "md", "txt"];
     let lower = s.to_lowercase();
     if lower.contains("://") || lower.contains("www.") {
@@ -315,47 +325,69 @@ pub fn forbidden_content(s: &str) -> bool {
     if bare_link {
         return true;
     }
-    const PHRASES: [&str; 8] = [
+    const PHRASES: [&str; 6] = [
         "password",
         "passcode",
         "passphrase",
         "api key",
         "login code",
         "verification code",
-        "security code",
-        "one-time",
     ];
     if PHRASES.iter().any(|w| lower.contains(w)) {
         return true;
     }
-    const WORDS: [&str; 3] = ["token", "otp", "2fa"];
+    const WORDS: [&str; 2] = ["otp", "2fa"];
     if lower
         .split(|c: char| !c.is_alphanumeric())
-        .any(|w| WORDS.contains(&w) || w == "tokens")
+        .any(|w| WORDS.contains(&w))
     {
         return true;
     }
-    let pin_with_digits = PIN.find_iter(&lower).any(|m| {
+    let gated_with_digits = GATED.find_iter(&lower).any(|m| {
         let from = lower.floor_char_boundary(m.start().saturating_sub(20));
         let to = lower.ceil_char_boundary((m.end() + 20).min(lower.len()));
         lower[from..to].chars().any(|c| c.is_ascii_digit())
     });
-    if pin_with_digits {
+    if gated_with_digits {
         return true;
     }
-    let undated = DATES.replace_all(s, "#");
+    longest_code_run(&NOT_CODES.replace_all(s, "#")) >= 6
+}
+
+/// The longest run of digits, joining two digit groups across ONE space,
+/// hyphen or dot only when both groups are three digits or longer.
+fn longest_code_run(s: &str) -> usize {
+    let chars: Vec<char> = s.chars().collect();
+    let mut best = 0usize;
     let mut run = 0usize;
-    for c in undated.chars() {
-        if c.is_ascii_digit() {
-            run += 1;
-            if run >= 6 {
-                return true;
-            }
-        } else if !matches!(c, ' ' | '-' | '.') {
+    let mut i = 0usize;
+    while i < chars.len() {
+        // A non-digit does not reset the run by itself: whether the next
+        // group joins it is decided below, from the one character between.
+        if !chars[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && chars[i].is_ascii_digit() {
+            i += 1;
+        }
+        let group = i - start;
+        // Did the previous group end just before one separator?
+        let joined = start >= 2
+            && matches!(chars[start - 1], ' ' | '-' | '.')
+            && chars[start - 2].is_ascii_digit()
+            && run >= 3
+            && group >= 3;
+        run = if joined { run + group } else { group };
+        // A group of one or two digits ends any run: nothing joins it.
+        let last_group_short = group < 3;
+        best = best.max(run);
+        if last_group_short {
             run = 0;
         }
     }
-    false
+    best
 }
 
 fn bounded(

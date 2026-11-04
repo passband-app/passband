@@ -409,7 +409,10 @@ impl MemoryBody {
                     Some(raw) => {
                         let date = NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d")
                             .map_err(|_| Rejection::BadDate)?;
-                        if date > today + Duration::days(MAX_UNTIL_DAYS) {
+                        // Not in the past (a finished project is not live,
+                        // so writing one is writing nothing) and not years
+                        // out. `today` is the owner-local date.
+                        if date < today || date > today + Duration::days(MAX_UNTIL_DAYS) {
                             return Err(Rejection::BadDate);
                         }
                         Some(date)
@@ -612,11 +615,26 @@ pub struct MemoryRecord {
 
 impl MemoryRecord {
     /// Served to triage and counted against [`MAX_LIVE_ENTRIES`]: not deleted,
-    /// not retired, not expired.
-    pub fn is_live(&self, now: DateTime<Utc>) -> bool {
+    /// not retired, not expired, and not a project whose `until` has passed.
+    /// `today` is the OWNER-LOCAL date: "through 30 November" means the
+    /// owner's 30 November, and for an American evening UTC is already the
+    /// 1st.
+    pub fn is_live(&self, now: DateTime<Utc>, today: NaiveDate) -> bool {
         self.deleted_at.is_none()
             && self.retired_at.is_none()
             && self.expires_at.is_none_or(|at| at > now)
+            && self.until().is_none_or(|until| until >= today)
+    }
+
+    /// A project's `until`, when it has one.
+    pub fn until(&self) -> Option<NaiveDate> {
+        if self.kind != MemoryKind::Project.as_str() {
+            return None;
+        }
+        self.body
+            .get("until")
+            .and_then(Value::as_str)
+            .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
     }
 }
 
@@ -720,6 +738,8 @@ pub struct Facts<'a> {
     /// sources the run observed): a model may cite only what it read.
     pub exposed_ids: &'a BTreeSet<i64>,
     pub now: DateTime<Utc>,
+    /// The owner-local date, for `until`.
+    pub today: NaiveDate,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -752,7 +772,7 @@ fn check_entry(
     facts: &Facts<'_>,
     allowed_ids: &dyn Fn(i64) -> bool,
 ) -> Result<ValidEntry, Rejection> {
-    let body = MemoryBody::from_fields(&raw.kind, &raw.fields(), facts.now.date_naive())?;
+    let body = MemoryBody::from_fields(&raw.kind, &raw.fields(), facts.today)?;
     let scope = Scope::parse(&raw.scope).ok_or(Rejection::BadScope)?;
     match &scope {
         Scope::Sender(addr) if !facts.known_addrs.contains(addr) => {
@@ -835,7 +855,7 @@ pub fn validate_ops(ops: &[RawOp], facts: &Facts<'_>) -> Validated {
             // Only what is live can be kept or revised: a retired tombstone
             // stays a tombstone, and an expired guess comes back as a `new`
             // with fresh receipts or not at all.
-            if !record.is_live(facts.now) {
+            if !record.is_live(facts.now, facts.today) {
                 return Err(Rejection::UnknownEntry);
             }
             Ok(record)
@@ -891,7 +911,7 @@ pub fn validate_ops(ops: &[RawOp], facts: &Facts<'_>) -> Validated {
     let mut live = facts
         .existing
         .iter()
-        .filter(|r| r.is_live(facts.now) && !retired.contains(&r.id))
+        .filter(|r| r.is_live(facts.now, facts.today) && !retired.contains(&r.id))
         .count();
     for (index, entry) in news {
         if live >= MAX_LIVE_ENTRIES {
@@ -944,7 +964,8 @@ pub type ServedRow = (MemoryRecord, Option<DateTime<Utc>>);
 /// Order, discount and cap what a run is handed. Pure, so the ordering rules
 /// are tested without a store.
 ///
-/// - Not deleted, retired or expired, and not a project whose `until` passed.
+/// - Live ([`MemoryRecord::is_live`]): not deleted, retired or expired, and
+///   not a project whose `until` passed.
 /// - INFERRED confidence is halved and the line says "(old)" when every
 ///   message it rests on is older than [`OLD_PROVENANCE_DAYS`]. A STATED entry
 ///   is the owner's word and is not aged: "I am a cofounder of X" does not get
@@ -952,20 +973,16 @@ pub type ServedRow = (MemoryRecord, Option<DateTime<Utc>>);
 /// - `stated` first, then by (discounted) confidence, then newest affirmation.
 /// - At most [`MAX_CONTEXT_LINES`] lines and [`MAX_CONTEXT_BYTES`] of text; a
 ///   line that would overflow the bytes is skipped, not cut.
-pub fn select_for_context(rows: Vec<ServedRow>, now: DateTime<Utc>) -> Vec<MemoryEntry> {
-    let today = now.date_naive();
+///
+/// `today` is the owner-local date ([`MemoryRecord::is_live`]).
+pub fn select_for_context(
+    rows: Vec<ServedRow>,
+    now: DateTime<Utc>,
+    today: NaiveDate,
+) -> Vec<MemoryEntry> {
     let mut candidates: Vec<(MemoryRecord, f64, bool)> = rows
         .into_iter()
-        .filter(|(record, _)| record.is_live(now))
-        .filter(|(record, _)| {
-            record.kind != "project"
-                || record
-                    .body
-                    .get("until")
-                    .and_then(Value::as_str)
-                    .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
-                    .is_none_or(|until| until >= today)
-        })
+        .filter(|(record, _)| record.is_live(now, today))
         .map(|(record, newest)| {
             let old = record.origin == Origin::Inferred
                 && !record.provenance.message_ids.is_empty()
@@ -1038,6 +1055,8 @@ pub struct StoreMemoryContext<'a, S: crate::store::memory::MemoryStore + ?Sized>
     pub store: &'a S,
     pub features: &'a Features,
     pub now: DateTime<Utc>,
+    /// The owner-local date (`OwnerClock::today`).
+    pub today: NaiveDate,
 }
 
 impl<S: crate::store::memory::MemoryStore + ?Sized> MemoryContextProvider
@@ -1051,7 +1070,7 @@ impl<S: crate::store::memory::MemoryStore + ?Sized> MemoryContextProvider
             .store
             .memory_context_rows(scope.account_id, &scopes_for(&scope.sender), self.now)
             .map_err(|e| e.to_string())?;
-        Ok(select_for_context(rows, self.now))
+        Ok(select_for_context(rows, self.now, self.today))
     }
 }
 

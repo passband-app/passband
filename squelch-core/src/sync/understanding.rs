@@ -15,10 +15,13 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// nothing on a store error: a run without its memory is an ordinary run,
     /// never a failed job.
     pub(super) fn memory_for(&self, thread_id: &str, sender: &str) -> Vec<MemoryEntry> {
+        let now = Utc::now();
+        let zone = self.store.owner_zone(self.account_id).unwrap_or_default();
         let provider = StoreMemoryContext {
             store: &*self.store,
             features: &self.features,
-            now: Utc::now(),
+            now,
+            today: now.with_timezone(&zone.zone).date_naive(),
         };
         provider
             .relevant_memory(&ContextScope {

@@ -541,7 +541,7 @@ pub async fn run_pass<S: Store + ?Sized>(
         }
     }
     // 4. Something changed.
-    match store.profile_changed_since(account, ran_at, now) {
+    match store.profile_changed_since(account, ran_at, now, local.date_naive()) {
         Ok(true) => {}
         Ok(false) => return decided(PassOutcome::Unchanged),
         Err(e) => {
@@ -574,7 +574,7 @@ pub async fn run_pass<S: Store + ?Sized>(
     input.coverage_days = coverage.floor() as u32;
     input.entries = entries
         .iter()
-        .filter(|r| r.is_live(now))
+        .filter(|r| r.is_live(now, local.date_naive()))
         .map(EntryView::of)
         .collect();
     let user = match input.fit(MAX_INPUT_BYTES) {
@@ -628,7 +628,7 @@ pub async fn run_pass<S: Store + ?Sized>(
             return PassOutcome::Failed { kind };
         }
     };
-    match store.apply_profile_ops(account, &ops.ops, &exposed, now) {
+    match store.apply_profile_ops(account, &ops.ops, &exposed, now, local.date_naive()) {
         Ok(report) => {
             let _ = store.set_app_setting(account, RAN_AT_KEY, &now.to_rfc3339());
             let _ = store.set_app_setting(account, RAN_DAY_KEY, &local_day);
@@ -642,9 +642,13 @@ pub async fn run_pass<S: Store + ?Sized>(
 
 /// The change gate's expiry arm, pure: a live inferred entry lapsing within
 /// [`memory::EXPIRY_WARNING_DAYS`].
-pub fn any_expiring(entries: &[MemoryRecord], now: DateTime<Utc>) -> bool {
+pub fn any_expiring(
+    entries: &[MemoryRecord],
+    now: DateTime<Utc>,
+    today: chrono::NaiveDate,
+) -> bool {
     entries.iter().any(|r| {
-        r.is_live(now)
+        r.is_live(now, today)
             && r.expires_at
                 .is_some_and(|at| at - now <= Duration::days(memory::EXPIRY_WARNING_DAYS))
     })

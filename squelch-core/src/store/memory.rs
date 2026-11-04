@@ -13,7 +13,7 @@ use crate::error::Result;
 use crate::triage::memory::{MemoryRecord, RawOp, ServedRow};
 use crate::triage::profile::{ApplyReport, ProfileInputSource};
 use crate::types::AccountId;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use std::collections::BTreeSet;
 
 pub trait MemoryStore: ProfileInputSource {
@@ -45,16 +45,19 @@ pub trait MemoryStore: ProfileInputSource {
         account_id: AccountId,
         since: Option<DateTime<Utc>>,
         now: DateTime<Utc>,
+        today: NaiveDate,
     ) -> Result<bool>;
 
     /// Validate `ops` against the store as it is INSIDE one transaction
     /// (ownership, the ledger, the live cap, stated entries) and apply what
-    /// passes. `exposed` is the message ids the run showed the model.
+    /// passes. `exposed` is the message ids the run showed the model; `today`
+    /// is the owner-local date, for a project's `until`.
     fn apply_profile_ops(
         &self,
         account_id: AccountId,
         ops: &[RawOp],
         exposed: &BTreeSet<i64>,
         now: DateTime<Utc>,
+        today: NaiveDate,
     ) -> Result<ApplyReport>;
 }

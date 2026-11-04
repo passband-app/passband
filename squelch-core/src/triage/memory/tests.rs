@@ -4,6 +4,10 @@ use super::*;
 use crate::store::SqliteStore;
 use crate::store::memory::MemoryStore as _;
 
+fn at_utc(s: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+}
+
 fn now() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-11-04T12:00:00Z")
         .unwrap()
@@ -91,6 +95,7 @@ impl World {
                 owned_ids: &self.owned,
                 exposed_ids: &self.exposed,
                 now: now(),
+                today: now().date_naive(),
             },
         )
     }
@@ -254,6 +259,77 @@ fn ordinary_prose_is_not_mistaken_for_a_secret() {
     ] {
         assert!(!forbidden_content(what), "{what}");
     }
+}
+
+fn project(until: &str) -> RawEntry {
+    RawEntry {
+        scope: "owner".into(),
+        kind: "project".into(),
+        name: Some("the launch".into()),
+        until: Some(until.into()),
+        confidence: 0.7,
+        message_ids: vec![7],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_project_cannot_end_before_the_owners_today() {
+    // `now()` is 12:00 UTC on 4 November.
+    assert_eq!(
+        World::new().rejects(&[new_op(project("2026-11-03"))]),
+        Rejection::BadDate
+    );
+    assert!(
+        World::new()
+            .validate(&[new_op(project("2026-11-04"))])
+            .rejected
+            .is_empty()
+    );
+    // The OWNER'S today: at 02:00 UTC on the 5th it is still the 4th in
+    // California, so a project through the 4th is accepted there.
+    let world = World::new();
+    let late = at_utc("2026-11-05T02:00:00Z");
+    let facts = |today| Facts {
+        existing: &world.existing,
+        known_addrs: &world.known,
+        owned_ids: &world.owned,
+        exposed_ids: &world.exposed,
+        now: late,
+        today,
+    };
+    let ops = [new_op(project("2026-11-04"))];
+    let pacific = late
+        .with_timezone(&chrono_tz::America::Los_Angeles)
+        .date_naive();
+    assert!(validate_ops(&ops, &facts(pacific)).rejected.is_empty());
+    assert_eq!(
+        validate_ops(&ops, &facts(late.date_naive())).rejected,
+        vec![(0, Rejection::BadDate)]
+    );
+}
+
+#[test]
+fn a_finished_project_is_not_live_and_frees_its_place_under_the_cap() {
+    let mut done = record("01P", Origin::Inferred, "project", "Working on x.", 0.5);
+    done.body = json!({"name": "x", "note": "", "until": "2026-11-03"});
+    assert!(!done.is_live(now(), now().date_naive()));
+    // Still live on the owner's 3 November.
+    assert!(done.is_live(now(), "2026-11-03".parse().unwrap()));
+
+    let mut world = World::new();
+    for i in 0..MAX_LIVE_ENTRIES - 1 {
+        world.existing.push(record(
+            &format!("01E{i:02}"),
+            Origin::Inferred,
+            "role",
+            "x.",
+            0.5,
+        ));
+    }
+    world.existing.push(done);
+    let out = world.validate(&[new_op(role("One more"))]);
+    assert!(out.rejected.is_empty(), "{:?}", out.rejected);
 }
 
 #[test]
@@ -485,7 +561,7 @@ fn stated_lines_come_first_then_by_confidence() {
         (record("01B", Origin::Inferred, "role", "High.", 0.9), None),
         (record("01C", Origin::Stated, "role", "Mine.", 0.2), None),
     ];
-    let served = select_for_context(rows, now());
+    let served = select_for_context(rows, now(), now().date_naive());
     let lines: Vec<&str> = served.iter().map(|e| e.text.as_str()).collect();
     assert_eq!(lines, ["Mine.", "High.", "Low."]);
     assert_eq!(served[0].origin, "stated");
@@ -509,6 +585,7 @@ fn retired_expired_deleted_and_finished_projects_are_not_served() {
             .map(|r| (r, None))
             .collect(),
         now(),
+        now().date_naive(),
     );
     assert_eq!(
         served.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(),
@@ -532,6 +609,7 @@ fn inferred_lines_on_old_mail_are_discounted_and_say_so() {
             (stated, long_ago),
         ],
         now(),
+        now().date_naive(),
     );
     let by_id = |id: &str| served.iter().find(|e| e.id == id).unwrap().clone();
     assert_eq!(by_id("01A").text, "Old guess. (old)");
@@ -559,7 +637,10 @@ fn a_run_gets_at_most_twenty_lines_and_the_byte_budget() {
             )
         })
         .collect();
-    assert_eq!(select_for_context(rows, now()).len(), MAX_CONTEXT_LINES);
+    assert_eq!(
+        select_for_context(rows, now(), now().date_naive()).len(),
+        MAX_CONTEXT_LINES
+    );
 
     let long = "x".repeat(MAX_CONTEXT_BYTES / 2 + 1);
     let rows = vec![
@@ -567,7 +648,7 @@ fn a_run_gets_at_most_twenty_lines_and_the_byte_budget() {
         (record("01L2", Origin::Inferred, "role", &long, 0.8), None),
         (record("01S", Origin::Inferred, "role", "Short.", 0.1), None),
     ];
-    let served = select_for_context(rows, now());
+    let served = select_for_context(rows, now(), now().date_naive());
     // The second long line would overflow, so it is skipped and the short
     // one still fits.
     assert_eq!(
@@ -627,6 +708,7 @@ fn the_store_provider_serves_nothing_while_the_feature_is_off() {
         store: &store,
         features: &off,
         now: now(),
+        today: now().date_naive(),
     };
     assert!(provider.relevant_memory(&scope).unwrap().is_empty());
 
@@ -635,6 +717,7 @@ fn the_store_provider_serves_nothing_while_the_feature_is_off() {
         store: &store,
         features: &on,
         now: now(),
+        today: now().date_naive(),
     };
     let served = provider.relevant_memory(&scope).unwrap();
     // The owner line and the `kind:` line; another sender's line is not this

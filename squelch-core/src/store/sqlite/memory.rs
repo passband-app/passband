@@ -243,6 +243,7 @@ impl MemoryStore for SqliteStore {
         account_id: AccountId,
         since: Option<DateTime<Utc>>,
         now: DateTime<Utc>,
+        today: chrono::NaiveDate,
     ) -> Result<bool> {
         let Some(since) = since else {
             return Ok(true);
@@ -282,6 +283,7 @@ impl MemoryStore for SqliteStore {
         Ok(profile::any_expiring(
             &entries_conn(&conn, account_id)?,
             now,
+            today,
         ))
     }
 
@@ -291,6 +293,7 @@ impl MemoryStore for SqliteStore {
         ops: &[RawOp],
         exposed: &BTreeSet<i64>,
         now: DateTime<Utc>,
+        today: chrono::NaiveDate,
     ) -> Result<ApplyReport> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
@@ -313,6 +316,7 @@ impl MemoryStore for SqliteStore {
                 owned_ids: &owned,
                 exposed_ids: exposed,
                 now,
+                today,
             },
         );
         let mut report = ApplyReport {
@@ -714,6 +718,16 @@ impl SqliteStore {
         edit: &MemoryEdit,
         now: DateTime<Utc>,
     ) -> Result<Option<MemoryRecord>> {
+        // The owner-local date, for a project's `until`; read before the lock,
+        // which the zone read takes too. An unreadable zone is UTC, as
+        // everywhere else.
+        let today = now
+            .with_timezone(
+                &crate::store::Store::owner_zone(self, account_id)
+                    .unwrap_or_default()
+                    .zone,
+            )
+            .date_naive();
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
         let Some(current) = entry_conn(&tx, account_id, id)? else {
@@ -725,8 +739,7 @@ impl SqliteStore {
         let mut line = current.line.clone();
         let edited = edit.body.is_some() || edit.line.is_some();
         if let Some(fields) = &edit.body {
-            let typed = MemoryBody::from_fields(&current.kind, fields, now.date_naive())
-                .map_err(invalid)?;
+            let typed = MemoryBody::from_fields(&current.kind, fields, today).map_err(invalid)?;
             if let MemoryBody::Person { addr, .. } = &typed {
                 // A person entry is scoped to its address, so moving the
                 // address moves the scope with it.

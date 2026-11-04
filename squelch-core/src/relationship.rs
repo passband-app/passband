@@ -91,10 +91,11 @@ pub struct Relationship {
     pub replied_threads: i64,
     /// See [`median_reply_ms`].
     pub median_reply_ms: Option<i64>,
-    /// How many rows the next three are over: inbound mail received at or
-    /// after the attention floor (the later of the dwell ledger, the open
-    /// ledger, and the Reading statistics' 90-day window). Before the dwell
-    /// ledger a zero dwell is not a measurement, so nothing earlier counts.
+    /// The Reading purge's own counts for this address (`SenderSignals`):
+    /// inbound mail received at or after the later of the 90-day window and
+    /// the open ledger floor, and of those the opened ones. The read fraction
+    /// and clicks are over the newest reported opens at or after the dwell
+    /// ledger floor, the same sample the fatigue score reads.
     pub attention_rows: i64,
     pub opened_count: i64,
     pub median_read_fraction: Option<f32>,

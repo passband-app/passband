@@ -446,8 +446,9 @@ them is served to a client.
 (docs/UNDERSTANDING.md §2.1): inbound count and dates (off `received_at`),
 the contacts row's sent count, threads the owner started, inbound threads and
 how many the owner later wrote into, the median reply time (3 replied threads
-or more), attention over the ledger floor, corrections, and the fatigue score
-computed by the same `SenderMeasurer` the purge flow uses. It is not email
+or more), attention, corrections, and the fatigue score. Attention and the
+fatigue score are one `SenderMeasurer` result, the purge flow's own, so the
+two never disagree. It is not email
 text and it is not a floor.
 
 Ingest, not-spam and the attention POST add the address to
@@ -462,7 +463,8 @@ The triage context carries the row as `relationship` beside
 `sender_is_contact`, and `read_sender_history` returns it as `relationship`
 at the top of its result. The key is absent before the backfill stamp and
 for an address with no row. `attention` is left out while `coverage_days`
-(days since the later of the open and dwell ledger floors, at most 90) is
+(days since the later of the open ledger floor and the 90-day window, the
+`SenderMeasurer`'s own coverage, so the same floor the fatigue score uses) is
 under 14. The block is in no revision fingerprint, so a recount never makes
 a run stale. Prompt `agent-triage-v19` reads it as evidence and restates the
 65-point personal-mail floor over "a person the owner replies to": replied

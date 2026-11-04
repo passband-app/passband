@@ -15,9 +15,9 @@
 //! `rules::SENDER_RULE_DIGEST_SQL` for why the planner cannot be left to
 //! choose), the thread probes ride `idx_messages_thread_received`, Sent
 //! ride `idx_message_recipients_addr`, and the fatigue score is the Reading
-//! purge's own `SenderMeasurer`, whose bounds that module documents. Bodies
+//! purge's own `SenderMeasurer`, whose bounds that module documents (bodies
 //! are read only to count words, by primary key, at most
-//! `reading_senders::DWELL_SAMPLE_CAP` per address.
+//! `reading_senders::DWELL_SAMPLE_CAP` per address).
 //!
 //! THE TRAPS, each a rule below:
 //!
@@ -38,20 +38,22 @@
 //!   that turns out to be a login code costs one inflated count until the
 //!   next recount of that sender. The ATTENTION columns stay strict: they are
 //!   the Reading purge's own statements, which sweep on what they find.
-//! - ATTENTION ONLY OVER THE LEDGER FLOOR. A zero dwell before the dwell
-//!   ledger started is not a measurement (`migrate::stamp_dwell_ledger_start`),
-//!   so the four attention columns count only mail received at or after the
-//!   later of both ledger floors and the Reading window.
+//! - ATTENTION IS THE PURGE'S OWN MEASUREMENT, the same `Measured` the
+//!   fatigue score comes from, so "opened 2 of 38" in the stored reasons and
+//!   the attention columns beside it agree by construction. `attention_rows`
+//!   and `opened_count` are over mail received at or after the later of the
+//!   Reading window and the open ledger floor; `median_read_fraction` and
+//!   `link_clicks` are over the newest `DWELL_SAMPLE_CAP` opens a client
+//!   reported on, OPENED at or after the dwell ledger floor, because a zero
+//!   dwell before that floor is not a measurement
+//!   (`migrate::stamp_dwell_ledger_start`).
 //! - THE ACCOUNT'S OWN ADDRESS HAS NO ROW. Its "inbound" is notes to self.
 
-use super::attention::{dwell_ledger_since, open_ledger_since};
-use super::reading_senders::{
-    DWELL_SAMPLE_CAP, SENDER_COUNTS_SQL, SENDER_OPENS_SQL, STATS_WINDOW_DAYS, SenderMeasurer,
-    sender_key,
-};
+use super::attention::open_ledger_since;
+use super::reading_senders::{STATS_WINDOW_DAYS, SenderMeasurer, sender_key};
 use super::*;
 use crate::relationship::{self, AttentionCounts, Counts, Relationship, ThreadReply};
-use crate::triage::sender_fatigue::{OpenSample, Reason, summarize_attention, word_count};
+use crate::triage::sender_fatigue::Reason;
 
 /// `sync_state.mailbox` of the one-time first-run backfill. Present means the
 /// table has been filled once for the account; until then the agent context
@@ -158,13 +160,6 @@ const CONTACT_SQL: &str = "SELECT sent_count, last_sent_at, display_name FROM co
      WHERE account_id = ?1 AND addr = ?2 COLLATE NOCASE
      ORDER BY sent_count DESC LIMIT 1";
 
-/// One message's flattened text, by primary key, for a word count.
-const BODY_SQL: &str = "SELECT body FROM messages WHERE account_id = ?1 AND id = ?2";
-
-/// How many reported opens the click sum reads. Far past any real sender's
-/// opens inside the 90-day window; it bounds a pathological one.
-const CLICK_ROWS_CAP: i64 = 2_000;
-
 /// Columns of a stored row, in [`row_from_sql`]'s order.
 const ROW_COLUMNS: &str = "addr, display_name, received_count, received_first_at,
      received_last_at, received_per_month, sent_count, sent_last_at, initiated_count,
@@ -250,22 +245,23 @@ pub(super) fn mark_message_sender_dirty_conn(
     Ok(())
 }
 
-/// The floor the attention columns count from: the later of both ledger
-/// floors and the Reading statistics' window.
+/// The floor `attention_rows` counts from: `SenderMeasurer::new`'s own, the
+/// later of the Reading window and the open ledger floor. Restated here only
+/// to report its age; the counts themselves come from the measurer.
 fn attention_floor(
     conn: &Connection,
     account_id: AccountId,
     now: DateTime<Utc>,
 ) -> Result<DateTime<Utc>> {
     let window = now - chrono::Duration::days(STATS_WINDOW_DAYS);
-    Ok(window
-        .max(open_ledger_since(conn, account_id)?)
-        .max(dwell_ledger_since(conn, account_id)?))
+    Ok(window.max(open_ledger_since(conn, account_id)?))
 }
 
-/// Whole days the attention columns cover right now: at most the Reading
-/// window, and under `sender_fatigue::MIN_COVERED_DAYS` on a young ledger,
-/// which is what tells the agent context to leave attention out.
+/// Whole days the attention columns cover right now: the measurer's
+/// `covered`, at most the Reading window, and under
+/// `sender_fatigue::MIN_COVERED_DAYS` on a young ledger, which is what tells
+/// the agent context to leave attention out (the fatigue score declines to
+/// score under the same floor).
 pub(super) fn coverage_days_conn(
     conn: &Connection,
     account_id: AccountId,
@@ -299,7 +295,6 @@ struct Recomputer<'c> {
     account_id: AccountId,
     now: DateTime<Utc>,
     self_addr: String,
-    floor_text: String,
     measurer: SenderMeasurer<'c>,
 }
 
@@ -318,7 +313,6 @@ impl<'c> Recomputer<'c> {
             account_id,
             now,
             self_addr,
-            floor_text: attention_floor(conn, account_id, now)?.to_rfc3339(),
             measurer: SenderMeasurer::new(conn, account_id, now)?,
         })
     }
@@ -402,10 +396,17 @@ impl<'c> Recomputer<'c> {
         counts.corrections = conn
             .prepare_cached(CORRECTIONS_SQL)?
             .query_row(params![account, addr], |r| r.get(0))?;
-        counts.attention = self.attention(addr)?;
         // THE PURGE FLOW'S OWN MEASUREMENT, never a second one: the score a
-        // sender is shown and swept for is the score the ledger stores.
+        // sender is shown and swept for is the score the ledger stores, and
+        // the attention columns are the counts that score was computed from.
         let measured = self.measurer.measure(addr)?;
+        let signals = measured.signals;
+        counts.attention = AttentionCounts {
+            rows: signals.received,
+            opened: signals.opened,
+            median_read_fraction: signals.median_read_fraction,
+            link_clicks: signals.clicks,
+        };
         counts.fatigue = (measured.score, measured.reasons);
 
         let sender_name: Option<String> = conn
@@ -418,55 +419,6 @@ impl<'c> Recomputer<'c> {
             .map(|n| n.trim().to_string())
             .find(|n| !n.is_empty());
         Ok(Some((name, counts)))
-    }
-
-    /// The attention columns over the ledger floor, through the Reading
-    /// purge's own statements (`SENDER_COUNTS_SQL`, `SENDER_OPENS_SQL`) with
-    /// the stricter floor bound in, so "opened" and "reported on" mean here
-    /// exactly what they mean there.
-    fn attention(&self, addr: &str) -> Result<AttentionCounts> {
-        let conn = self.conn;
-        let account = self.account_id;
-        let (rows, opened, _cleared): (u32, u32, u32) = conn
-            .prepare_cached(SENDER_COUNTS_SQL)?
-            .query_row(params![account, addr, self.floor_text], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })?;
-        let opens = conn
-            .prepare_cached(SENDER_OPENS_SQL)?
-            .query_map(
-                params![account, addr, self.floor_text, CLICK_ROWS_CAP],
-                |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, i64>(2)?,
-                        r.get::<_, i64>(3)?,
-                    ))
-                },
-            )?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let link_clicks = opens.iter().fold(0u32, |sum, o| {
-            sum.saturating_add(o.2.clamp(0, i64::from(u32::MAX)) as u32)
-        });
-        let mut body = conn.prepare_cached(BODY_SQL)?;
-        let mut samples = Vec::with_capacity(opens.len().min(DWELL_SAMPLE_CAP));
-        for (id, dwell_ms, clicks) in opens.into_iter().take(DWELL_SAMPLE_CAP) {
-            // Counted straight off the row, never copied out of SQLite.
-            let words = body.query_row(params![account, id], |r| {
-                Ok(word_count(r.get_ref(0)?.as_str().unwrap_or("")))
-            })?;
-            samples.push(OpenSample {
-                dwell_ms: dwell_ms.max(0) as u64,
-                link_clicks: clicks.clamp(0, i64::from(u32::MAX)) as u32,
-                words,
-            });
-        }
-        Ok(AttentionCounts {
-            rows,
-            opened,
-            median_read_fraction: summarize_attention(&samples).median_read_fraction,
-            link_clicks,
-        })
     }
 }
 

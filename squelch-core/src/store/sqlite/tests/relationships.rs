@@ -246,40 +246,72 @@ fn sent_is_the_contacts_row_the_known_contact_floor_reads() {
 }
 
 #[test]
-fn attention_counts_only_mail_at_or_after_the_ledger_floor() {
+fn attention_is_the_measurement_the_fatigue_score_reads() {
     let (store, acct) = store();
-    // Opens recorded for a year, dwell for thirty days.
-    ledgers_since(&store, acct, 365, 30);
-    let before = inbound(&store, acct, "before", "before", DAN, 45);
-    let after = inbound(&store, acct, "after", "after", DAN, 10);
+    // Opens recorded for 60 days, dwell for 30.
+    ledgers_since(&store, acct, 60, 30);
+    let early = inbound(&store, acct, "early", "early", DAN, 50);
+    let late = inbound(&store, acct, "late", "late", DAN, 10);
     inbound(&store, acct, "unopened", "unopened", DAN, 5);
-    for id in [before, after] {
+    // Older than the open ledger: in the inbound count, not in attention.
+    inbound(&store, acct, "ancient", "ancient", DAN, 80);
+    for id in [early, late] {
         store
             .acknowledge_agent_message(acct, id, Utc::now())
             .unwrap();
         store.record_message_attention(acct, id, 9_000, 1).unwrap();
     }
+    // `early` was opened BEFORE the dwell ledger: its open counts, its dwell
+    // and click do not.
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE triage SET opened_at = ?2 WHERE message_id = ?1",
+            params![early, days_ago(40).to_rfc3339()],
+        )
+        .unwrap();
     store.recompute_relationship(acct, DAN).unwrap();
     let row = store.relationship(acct, DAN).unwrap().unwrap();
     assert_eq!(
-        row.received_count, 3,
+        row.received_count, 4,
         "inbound counts do not wait for a ledger"
     );
-    assert_eq!(row.attention_rows, 2, "the 45-day-old mail predates dwell");
-    assert_eq!(row.opened_count, 1);
-    assert_eq!(row.link_clicks, 1);
+    assert_eq!(row.attention_rows, 3, "the 80-day-old mail predates opens");
+    assert_eq!(row.opened_count, 2);
+    assert_eq!(
+        row.link_clicks, 1,
+        "the pre-dwell open's click is not a measurement"
+    );
+
+    // The very same numbers the purge flow's score was computed from.
+    let conn = store.lock().unwrap();
+    let signals = SenderMeasurer::new(&conn, acct, Utc::now())
+        .unwrap()
+        .measure(DAN)
+        .unwrap()
+        .signals;
+    drop(conn);
+    assert_eq!(
+        (row.attention_rows, row.opened_count, row.link_clicks),
+        (
+            i64::from(signals.received),
+            i64::from(signals.opened),
+            i64::from(signals.clicks)
+        )
+    );
 
     // The context reports the attention block's coverage, the ledger's age.
     mark_backfilled(&store, acct);
     let block = store.relationship_context(acct, DAN).unwrap().unwrap();
-    assert_eq!(block["coverage_days"], 30);
-    assert_eq!(block["attention"]["rows"], 2);
+    assert_eq!(block["coverage_days"], 60);
+    assert_eq!(block["attention"]["rows"], 3);
 }
 
 #[test]
 fn the_attention_block_is_left_out_of_the_context_on_a_young_ledger() {
     let (store, acct) = store();
-    ledgers_since(&store, acct, 365, 3);
+    ledgers_since(&store, acct, 3, 3);
     inbound(&store, acct, "a", "a", DAN, 1);
     store.recompute_relationship(acct, DAN).unwrap();
     mark_backfilled(&store, acct);

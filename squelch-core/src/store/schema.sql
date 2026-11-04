@@ -2669,9 +2669,12 @@ CREATE TABLE IF NOT EXISTS relationships (
     -- From the address first writing into a thread to the owner's first
     -- message after it. NULL under 3 replied threads.
     median_reply_ms   INTEGER,
-    -- ATTENTION, over inbound mail received at or after the later of the
-    -- dwell ledger floor, the open ledger floor and the Reading statistics'
-    -- 90-day window. Before the dwell ledger a zero is not a measurement
+    -- ATTENTION, the Reading purge's own measurement of this address (the
+    -- `SenderMeasurer` the fatigue score below comes from, so the two agree
+    -- by construction). Rows and opens are over mail received at or after the
+    -- later of the 90-day window and the open ledger floor; read fraction and
+    -- clicks over the newest 25 reported opens at or after the dwell ledger
+    -- floor, before which a zero is not a measurement
     -- (`migrate::stamp_dwell_ledger_start`). It SEES ONLY PASSBAND: mail read
     -- in Gmail on a phone looks unopened here, so all four understate.
     attention_rows    INTEGER NOT NULL,       -- how many rows the next three are over

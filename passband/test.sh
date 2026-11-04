@@ -389,6 +389,7 @@ run_suite retriage-run \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/SyncStatus.swift \
+  Sources/Passband/Lib/CatchUpEstimate.swift \
   Sources/Passband/Lib/Format.swift \
   Sources/Passband/Lib/AsyncMemo.swift \
   Sources/Passband/Model/RetriageRun.swift \
@@ -530,6 +531,7 @@ run_suite sync-status \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Model/SyncStatus.swift \
+  Sources/Passband/Lib/CatchUpEstimate.swift \
   Sources/Passband/Lib/Format.swift \
   Sources/Passband/Lib/AsyncMemo.swift \
   Tests/SyncStatusTests.swift
@@ -775,9 +777,6 @@ run_suite rule-pattern-suggest \
   Sources/Passband/Lib/RulePatternSuggest.swift \
   Tests/RulePatternSuggestTests.swift
 
-# The first-load veil's time estimate: no estimate until two polls a few
-# seconds apart saw the count move, a window that smooths one slow page, a
-# restarted walk that starts the samples over, and the rounded phrase.
 # The reader's one-time "press e" hint: who gets the centred beat, who gets
 # the corner chip, and that anyone who has ever pressed done gets neither.
 run_suite reader-hint-rule \
@@ -785,6 +784,9 @@ run_suite reader-hint-rule \
   Sources/Passband/Lib/ReaderHintRule.swift \
   Tests/ReaderHintRuleTests.swift
 
+# The first-load veil's time estimate: no estimate until two polls a few
+# seconds apart saw the count move, a window that smooths one slow page, a
+# restarted walk that starts the samples over, and the rounded phrase.
 run_suite catch-up-estimate \
   Sources/Passband/Lib/CatchUpEstimate.swift \
   Tests/CatchUpEstimateTests.swift

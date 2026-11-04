@@ -1614,9 +1614,9 @@ final class AppStore {
 
     /// Also enforced by account mutation entry points, not only menu items.
     var accountActionsBlocked: Bool {
-        FixtureMode.isEnabled || fixtureTransitioning
+        FixtureMode.isEnabled || fixtureTransitioning || firstLoad.active
     }
-    private static let fixtureAccountError = "Accounts can't change while the fixture inbox is up."
+    private static let fixtureAccountError = "Accounts can't change while your inbox is loading. Press Start now, then try again."
 
     /// Whether `e` is still the live epoch — the post-await check every
     /// account-scoped writer outside this file makes.
@@ -7332,7 +7332,7 @@ final class AppStore {
     /// and anything waiting on a verdict is waiting on this — which is the one
     /// thing a stalled-looking progress bar needs to be able to say.
     var catchUp: (done: Int, total: Int)? {
-        guard let c = syntheticCatchUp ?? stats?.catch_up, c.total > 0 else { return nil }
+        guard let c = stats?.catch_up, c.total > 0 else { return nil }
         return (c.done, c.total)
     }
 
@@ -7413,28 +7413,28 @@ final class AppStore {
     /// reconnect, a long absence) is measured fresh.
     private(set) var catchUpEstimate = CatchUpEstimate()
 
-    /// A made-up walk, for `PASSBAND_FIRST_LOAD` only (FirstLoad's preview).
-    /// Wins over the stats while set, for the banner and the veil alike.
-    private(set) var syntheticCatchUp: CatchUpProgress?
+    /// `PASSBAND_FIRST_LOAD`'s made-up walk, and nothing else: the one hook
+    /// the preview needs, so the banner after Start now has a pace to show.
+    /// Read in exactly one place, `noteSyncStatus`.
+    @ObservationIgnored private var previewCatchUp: CatchUpProgress?
 
     func stageSyntheticCatchUp(_ progress: CatchUpProgress?) {
-        syntheticCatchUp = progress
+        guard FirstLoad.forced else { return }
+        previewCatchUp = progress
         noteSyncStatus()
-    }
-
-    private func noteCatchUpPace(_ now: Date) {
-        if let c = syntheticCatchUp ?? stats?.catch_up, c.total > 0, c.done < c.total {
-            catchUpEstimate.record(done: c.done, at: now)
-        } else if !catchUpEstimate.samples.isEmpty {
-            catchUpEstimate.reset()
-        }
     }
 
     private func noteSyncStatus() {
         let now = Date()
-        noteCatchUpPace(now)
+        // The pace: one sample per poll while a walk runs, reset when none is.
+        let walk = previewCatchUp ?? stats?.catch_up
+        if let c = walk, c.total > 0, c.done < c.total {
+            catchUpEstimate.record(done: c.done, at: now)
+        } else if !catchUpEstimate.samples.isEmpty {
+            catchUpEstimate.reset()
+        }
         var status = SyncStatus.derive(daemonDown: daemonDown, stats: stats, now: now, date: Fmt.date)
-        if let c = syntheticCatchUp, c.done < c.total { status = .catchingUp(done: c.done, total: c.total) }
+        if let c = previewCatchUp, c.done < c.total { status = .catchingUp(done: c.done, total: c.total) }
         if status != syncStatus { syncStatus = status }
         var expiry: Date?
         if case .coolingDown(let until?, _) = status, until > now { expiry = until }

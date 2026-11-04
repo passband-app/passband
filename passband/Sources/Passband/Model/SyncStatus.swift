@@ -151,7 +151,7 @@ enum SyncStatus: Equatable, Sendable {
             return kind == "network"
                 ? "Passband cannot reach Gmail right now"
                 : "Gmail is not answering for this mailbox"
-        case .catchingUp: return "Working through your inbox."
+        case .catchingUp: return "Working through your inbox"
         case .waitingForSync: return "Triage is waiting for Gmail"
         case .coolingDown: return "Triage is paused for a moment"
         case .budgetPaused: return "Today's triage budget is used up"
@@ -211,8 +211,9 @@ enum SyncStatus: Equatable, Sendable {
         case .catchingUp(let done, let total):
             // The banner draws its own line under a bar, with the pace
             // (`CatchUpEstimate.line`); this is the words without a pace, for
-            // the places that have no room for one.
-            return "\(done.formatted()) of \(total.formatted()) emails"
+            // the places that have no room for one, and they say why the
+            // board is still empty.
+            return CatchUpEstimate.count(done: done, total: total) + " fetched. Sorting starts when it finishes."
         case .waitingForSync(let waiting):
             return "\(Self.emails(waiting)) will be sorted once Gmail sync succeeds."
         case .coolingDown(let until, let waiting):

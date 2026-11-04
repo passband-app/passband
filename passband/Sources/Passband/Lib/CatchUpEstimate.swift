@@ -65,7 +65,13 @@ struct CatchUpEstimate: Sendable, Equatable {
     /// The whole line under the bar, the same on the veil and on the board's
     /// banner: "1,510 of 4,200 emails · about 4 minutes left".
     func line(done: Int, total: Int) -> String {
-        "\(done.formatted()) of \(total.formatted()) emails · \(Self.phrase(remaining(total: total)))"
+        "\(Self.count(done: done, total: total)) · \(Self.phrase(remaining(total: total)))"
+    }
+
+    /// The count half, "1,510 of 4,200 emails": the one place it is spelled,
+    /// for the line above, the veil's own captions and the sync status.
+    static func count(done: Int, total: Int) -> String {
+        "\(done.formatted()) of \(total.formatted()) emails"
     }
 
     /// The pace half of the line. Rounded to what a person plans around: the

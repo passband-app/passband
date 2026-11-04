@@ -31,6 +31,16 @@ final class FirstLoad {
         var sorted: Int
         var noise: Int
         var attention: Int
+
+        /// The one mapping from a walk and the stats to the card, for the
+        /// veil on every poll, its full bar at the end, and the preview.
+        init(done: Int, total: Int, stats: StoreStats?) {
+            self.done = done
+            self.total = total
+            sorted = stats?.total ?? 0
+            noise = stats?.tier_counts["noise"] ?? 0
+            attention = stats?.bands.standing ?? 0
+        }
     }
 
     /// The veil is up.
@@ -48,9 +58,12 @@ final class FirstLoad {
 
     @ObservationIgnored private var decided = false
     @ObservationIgnored private var waitingSince: Date?
+    /// The store epoch the decision was made under. An account change under
+    /// the veil (account actions are blocked while it is up, so this is a
+    /// backstop) must not finish one mailbox's walk with another's numbers.
+    @ObservationIgnored private var epoch: Int?
     @ObservationIgnored private var settleTask: Task<Void, Never>?
     @ObservationIgnored private var synthetic: Task<Void, Never>?
-
 
     /// Called on connect and on every poll (RootView's ShellWatchers). Cheap
     /// and idempotent: after the decision it only feeds a veil that is up.
@@ -60,17 +73,32 @@ final class FirstLoad {
             return
         }
         guard !FixtureMode.isEnabled else { return }
+        if let epoch, epoch != store.epoch, !Prefs.shared.firstLoadSeen {
+            // A different mailbox: start its first look over, quietly.
+            settleTask?.cancel()
+            settleTask = nil
+            active = false
+            finishing = false
+            snapshot = nil
+            decided = false
+            waitingSince = nil
+            self.epoch = nil
+        }
         if !decided {
             guard !Prefs.shared.firstLoadSeen else {
                 decided = true
                 return
             }
             guard store.connStatus == .connected, let stats = store.stats else { return }
-            if store.catchUp != nil {
+            epoch = store.epoch
+            // A walk still under way, not one first seen already complete:
+            // that would blink the card for its settle and count a wait
+            // nobody had.
+            if let c = store.catchUp, c.done < c.total {
                 decided = true
                 active = true
                 Analytics.capture("first_load_shown")
-            } else if stats.total > 0 || waited(now) {
+            } else if stats.total > 0 || store.catchUp != nil || waited(now) {
                 decided = true
                 conclude(store)
                 return
@@ -80,10 +108,7 @@ final class FirstLoad {
         }
         guard active, !finishing else { return }
         if let progress = store.catchUp {
-            snapshot = Snapshot(
-                done: progress.done, total: progress.total, sorted: store.stats?.total ?? 0,
-                noise: store.stats?.tier_counts["noise"] ?? 0,
-                attention: store.stats?.bands.standing ?? 0)
+            snapshot = Snapshot(done: progress.done, total: progress.total, stats: store.stats)
             // The pace itself is the store's (`catchUpEstimate`), fed by the
             // same polls, so the board's banner carries it on after Start now.
             if progress.done < progress.total { return }
@@ -109,12 +134,8 @@ final class FirstLoad {
     /// The bar to the end, a beat to see it there, then the board.
     private func finish(_ store: AppStore) {
         finishing = true
-        if var shown = snapshot {
-            shown.done = shown.total
-            shown.sorted = store.stats?.total ?? shown.sorted
-            shown.noise = store.stats?.tier_counts["noise"] ?? shown.noise
-            shown.attention = store.stats?.bands.standing ?? shown.attention
-            snapshot = shown
+        if let shown = snapshot {
+            snapshot = Snapshot(done: shown.total, total: shown.total, stats: store.stats)
         }
         settleTask = Task { @MainActor in
             try? await Task.sleep(for: Self.settle)
@@ -148,10 +169,14 @@ final class FirstLoad {
 
     /// Made-up numbers on a clock, so the card can be looked at with no
     /// daemon: a walk of 4,200 that started a while ago, moving about twelve
-    /// a second, staged on the store the way a poll would land it. It keeps
-    /// counting after Start now, so the board's banner can be looked at too,
-    /// and ends the way a real walk does.
-    /// Once per launch: a preview that was dismissed stays dismissed.
+    /// a second, over the connected board's real counts. It keeps counting
+    /// after Start now so the board's banner can be looked at too, and ends
+    /// the way a real walk does. Once per launch: a dismissed preview stays
+    /// dismissed.
+    ///
+    /// The one hook it needs in the store is `stageSyntheticCatchUp`: the
+    /// banner after Start now reads the store's sync status and pace, so the
+    /// made-up walk has to be what those see.
     private func startSynthetic(_ store: AppStore) {
         guard !decided else { return }
         decided = true
@@ -163,9 +188,7 @@ final class FirstLoad {
                 let done = min(4_200, 1_180 + Int(elapsed * 12))
                 store.stageSyntheticCatchUp(CatchUpProgress(done: done, total: 4_200))
                 if self.active, !self.finishing {
-                    self.snapshot = Snapshot(
-                        done: done, total: 4_200, sorted: done * 9 / 10,
-                        noise: done * 6 / 10, attention: max(1, done / 140))
+                    self.snapshot = Snapshot(done: done, total: 4_200, stats: store.stats)
                 }
                 if done >= 4_200 {
                     if self.active { self.finish(store) }

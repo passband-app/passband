@@ -39,7 +39,7 @@ struct FirstLoadVeil: View {
                         .animation(reduceMotion ? nil : .easeOut(duration: 0.35), value: shown)
                     }
                     if let trouble {
-                        Label(trouble, systemImage: store.daemonDown ? "wifi.exclamationmark" : "exclamationmark.circle")
+                        Label(trouble, systemImage: store.refreshError != nil ? "wifi.exclamationmark" : "exclamationmark.circle")
                             .font(Typo.ui(13))
                             .foregroundStyle(Palette.inkDim)
                             .fixedSize(horizontal: false, vertical: true)
@@ -75,18 +75,22 @@ struct FirstLoadVeil: View {
 
     private func caption(_ shown: FirstLoad.Snapshot?) -> String {
         guard let shown else { return "Getting started…" }
-        let count = "\(shown.done.formatted()) of \(shown.total.formatted()) emails"
+        let count = CatchUpEstimate.count(done: shown.done, total: shown.total)
         if firstLoad.finishing { return "\(count). All caught up." }
-        // A daemon that is not answering has no pace to report.
+        // A daemon that stopped answering has no pace to report.
         if trouble != nil { return count }
         // The store's estimate, the one the board's banner reads after Start now.
         return store.catchUpEstimate.line(done: shown.done, total: shown.total)
     }
 
     /// Why the bar may not move, when there is a reason. The old summary
-    /// card's two degraded states, in its words.
+    /// card's two degraded states, in its words. Keyed on the last poll
+    /// failing (`refreshError`), not `daemonDown`: the veil only goes up after
+    /// a poll landed, so `daemonDown` (failing with nothing ever loaded) can
+    /// never be true under it, and a daemon that dies mid-walk leaves stale
+    /// numbers here that need saying so.
     private var trouble: String? {
-        if store.daemonDown { return "Connection interrupted. Your inbox will update when we reconnect." }
+        if store.refreshError != nil { return "Connection interrupted. Your inbox will update when we reconnect." }
         if store.stats?.gmail?.connected == false {
             return "Your mail connection needs attention in Settings before new mail can arrive."
         }

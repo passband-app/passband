@@ -53,10 +53,18 @@ The experience starts with relief, then opens onto the person's own mail:
   does not start over. A later catch-up with no veil uses that banner too,
   measured fresh. When the catch-up ends the bar is shown full
   with "All caught up." for a second, then the veil lifts.
-- **Degraded states.** Daemon down: "Connection interrupted. Your inbox will
-  update when we reconnect." Gmail disconnected: "Your mail connection needs
+- **Degraded states.** The veil only goes up after a poll has landed, so the
+  daemon going away shows as the last poll failing: the numbers stay where
+  they were and the card says "Connection interrupted. Your inbox will update
+  when we reconnect." Gmail disconnected: "Your mail connection needs
   attention in Settings before new mail can arrive." The pace is not shown
   while either holds.
+- **One mailbox at a time.** Account switching and adding are refused while
+  the veil is up (the same block the fixture inbox uses), and should the store
+  change mailbox under it anyway, the veil drops what it had and decides
+  again for the new one.
+- **Already done is not a wait.** A catch-up first seen complete raises
+  nothing: the decision is on a walk still under way.
 - **What comes after.** The first look ending is what stamps a newcomer for
   What's New (`WhatsNew.meetNewcomer`), so the latest release's notes follow
   on the board, never over the veil.

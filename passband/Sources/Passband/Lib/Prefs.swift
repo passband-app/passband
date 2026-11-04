@@ -444,10 +444,13 @@ final class Prefs {
     /// Fires AT MOST ONCE per install. The guard is the stored key's absence,
     /// not emptiness, so a name cleared in Settings stays cleared and an
     /// account switch never re-guesses over a name you already have. The one
-    /// other state it writes over is OUR OWN earlier guess, the local part of
-    /// this same mailbox (what installs seeded before the given name existed),
-    /// so those stop greeting by their address too. A name cleared in
-    /// Settings is the empty string, not the local part, and stays cleared.
+    /// other state it writes over is a stored name exactly equal to this
+    /// mailbox's local part. That is what upgrades installs that seeded the
+    /// address before the given name existed, so they stop greeting by it.
+    /// It cannot tell that guess from the same text typed into Settings by
+    /// hand (the flag that could is gone with the greeting's pencil), so a
+    /// typed name that happens to equal the local part is replaced once too.
+    /// A name cleared in Settings is the empty string and stays cleared.
     func seedUserName(fromGivenName given: String?, email: String?) {
         guard let name = given?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty
         else { return }

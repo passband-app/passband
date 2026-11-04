@@ -848,11 +848,46 @@ pub fn ghost_matches(
     if !display_same_start(ghost_start, event_start) {
         return false;
     }
-    let ghost = normalize_title(ghost_title);
-    let event = normalize_title(event_title.unwrap_or_default());
-    !ghost.is_empty()
-        && !event.is_empty()
-        && (ghost == event || ghost.contains(&event) || event.contains(&ghost))
+    titles_match(
+        ghost_title,
+        event_title.unwrap_or_default(),
+        same_start(ghost_start, event_start),
+    )
+}
+
+/// Shortest title, in characters, that may match a longer one by being in
+/// it when the two starts are only the same DAY: "Polar Inertia" in RA's
+/// "Parameter & Endzeit Invite Polar Inertia", never a stray "Show".
+const DAY_MATCH_MIN_CHARS: usize = 8;
+
+/// Equal after [`normalize_title`], or one's words a run of the other's
+/// ("Dinner" in "Dinner with Sam", never "art" in "party"). When the starts
+/// are only the same day (`exact` false), a title held in another must be
+/// at least [`DAY_MATCH_MIN_CHARS`] long. An empty title matches nothing.
+fn titles_match(a: &str, b: &str, exact: bool) -> bool {
+    let (a, b) = (normalize_title(a), normalize_title(b));
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a == b {
+        return true;
+    }
+    let words = |t: &str| -> Vec<String> {
+        t.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    let (short, long) = if a.chars().count() <= b.chars().count() {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    if !exact && short.chars().count() < DAY_MATCH_MIN_CHARS {
+        return false;
+    }
+    let (short, long) = (words(&short), words(&long));
+    !short.is_empty() && long.windows(short.len()).any(|w| w == short.as_slice())
 }
 
 /// [`ghost_matches`] for a whole listing: for each ghost (its title and
@@ -971,27 +1006,32 @@ pub fn link_ghosts(
 }
 
 /// Where a ghost is SHOWN: for each ghost, the index of the ghost it folds
-/// into, or None when it stands for itself. Two live, undismissed ghosts
-/// fold when their starts match for display ([`display_same_start`]) and
-/// they share an event-page URL (`urls`, from `Store::ghost_url_refs`) or
-/// their titles match the way [`ghost_matches`] does.
+/// into, or None when it stands for itself. Display only: computed when
+/// listed and never stored, so it changes no ghost and cannot go stale.
 ///
-/// Ghosts from DIFFERENT senders are the case this is for: a ref is scoped
-/// to its sender, so the venue's listing and a friend forwarding its link
-/// make two ghosts that matching mail can never join (by design: a stranger
-/// quoting a URL must not move the owner's ghost). Folding joins them on
-/// screen only. It is computed when listed and never stored, so it changes
-/// no ghost and cannot go stale.
+/// Ghosts from DIFFERENT senders are the case this is for. A ref is scoped
+/// to its sender, so the venue's ticket mail and a friend's reply with the
+/// venue's link are two ghosts that matching mail never joins, by design: a
+/// stranger quoting a URL must not move the owner's ghost. Folding must not
+/// let a stranger do it on screen either, so a ghost folds into another
+/// only when their starts match for display ([`display_same_start`]) and:
 ///
-/// The one shown is, first to last: the ISSUER's (its sender is the shared
-/// URL's own site), so a stranger's copy never hides the venue's; then a
-/// committed one, one the user said they are going to, an authenticated one,
-/// one with a clock time, and the oldest.
+/// - from ANOTHER sender: they share an event-page URL (`urls`, from
+///   `Store::ghost_url_refs`) and the other's sender is that URL's own site
+///   (the ISSUER: `ra.co` for an `ra.co/events/...` page) and this one's is
+///   not. So the copy shown is always the venue's own, and a stranger can
+///   only ever fold their own copy away.
+/// - from the SAME sender (both authenticated): a shared URL or a title
+///   match ([`ghost_matches`]), into the timed copy over a date-only one,
+///   then the older.
+///
+/// One step at a time, never by chaining: a ghost folds only when everything
+/// it may fold into ends at ONE ghost shown, so a date-only "Hamilton" never
+/// joins the 2pm and the 8pm shows into one.
 pub fn fold_ghosts(
     ghosts: &[crate::types::GhostEvent],
     urls: &std::collections::HashMap<i64, Vec<String>>,
 ) -> Vec<Option<usize>> {
-    use crate::triage::decision::EventCommitment;
     use crate::types::{GhostMailState, GhostUserState};
     let day = |t: &EventTime| match t {
         EventTime::At(at) => at.date_naive(),
@@ -1002,71 +1042,86 @@ pub fn fold_ghosts(
     let foldable = |g: &crate::types::GhostEvent| {
         g.mail_state == GhostMailState::Live && g.user_state != Some(GhostUserState::Dismissed)
     };
-    let same = |a: usize, b: usize| {
-        let (x, y) = (&ghosts[a], &ghosts[b]);
-        display_same_start(&x.start, &y.start)
-            && (urls_of(a).iter().any(|u| urls_of(b).contains(u))
-                || ghost_matches(&x.title, &x.start, Some(&y.title), &y.start))
-    };
-    // A ghost whose own sender is the site of one of its URLs.
-    let issuer = |i: usize| {
-        let Some(scope) = ghosts[i].owner_scope.as_deref() else {
-            return false;
-        };
-        urls_of(i).iter().any(|u| {
+    // Is `i`'s sender the site of URL `u`?
+    let issues = |i: usize, u: &str| {
+        ghosts[i].owner_scope.as_deref().is_some_and(|scope| {
             let host = u.split('/').next().unwrap_or_default();
             host == scope || host.ends_with(&format!(".{scope}"))
         })
     };
-    let rank = |i: usize| {
-        let g = &ghosts[i];
-        (
-            !issuer(i),
-            g.commitment != EventCommitment::Committed,
-            g.user_state != Some(GhostUserState::Going),
-            !g.verified(),
-            !g.start.has_clock(),
-            g.id,
-        )
+    let same_sender = |a: usize, b: usize| {
+        ghosts[a].owner_scope.is_some() && ghosts[a].owner_scope == ghosts[b].owner_scope
+    };
+    // Same sender: the timed copy over a date-only one, then the older.
+    let above = |a: usize, b: usize| {
+        let key = |i: usize| (ghosts[i].start.has_clock(), std::cmp::Reverse(ghosts[i].id));
+        key(a) > key(b)
+    };
+    // May `g` fold into `h`, one step?
+    let into = |g: usize, h: usize| {
+        let (x, y) = (&ghosts[g], &ghosts[h]);
+        if !display_same_start(&x.start, &y.start) {
+            return false;
+        }
+        let shared = || urls_of(g).iter().filter(|u| urls_of(h).contains(u));
+        if same_sender(g, h) {
+            above(h, g)
+                && (shared().next().is_some()
+                    || ghost_matches(&x.title, &x.start, Some(&y.title), &y.start))
+        } else {
+            shared().any(|u| issues(h, u) && !issues(g, u))
+        }
     };
 
-    // Union-find over the ghosts of each day.
-    let mut parent: Vec<usize> = (0..ghosts.len()).collect();
-    fn root(parent: &mut [usize], mut i: usize) -> usize {
-        while parent[i] != i {
-            parent[i] = parent[parent[i]];
-            i = parent[i];
-        }
-        i
-    }
     let mut by_day: std::collections::HashMap<chrono::NaiveDate, Vec<usize>> = Default::default();
     for (i, g) in ghosts.iter().enumerate() {
         if foldable(g) {
             by_day.entry(day(&g.start)).or_default().push(i);
         }
     }
+    let mut out: Vec<Vec<usize>> = vec![Vec::new(); ghosts.len()];
     for members in by_day.values() {
-        for (n, &a) in members.iter().enumerate() {
-            for &b in &members[n + 1..] {
-                if same(a, b) {
-                    let (ra, rb) = (root(&mut parent, a), root(&mut parent, b));
-                    parent[ra] = rb;
-                }
-            }
+        for &g in members {
+            out[g] = members
+                .iter()
+                .copied()
+                .filter(|&h| h != g && into(g, h))
+                .collect();
         }
     }
-    let mut shown: std::collections::HashMap<usize, usize> = Default::default();
-    for i in 0..ghosts.len() {
-        let r = root(&mut parent, i);
-        let best = shown.entry(r).or_insert(i);
-        if rank(i) < rank(*best) {
-            *best = i;
+    // Where each ghost ends up: itself when it folds into nothing, or into
+    // more than one ghost shown, or round a cycle.
+    fn resolve(
+        g: usize,
+        out: &[Vec<usize>],
+        memo: &mut [Option<usize>],
+        visiting: &mut [bool],
+    ) -> usize {
+        if let Some(r) = memo[g] {
+            return r;
         }
+        if visiting[g] {
+            return g;
+        }
+        visiting[g] = true;
+        let ends: std::collections::BTreeSet<usize> = out[g]
+            .iter()
+            .map(|&h| resolve(h, out, memo, visiting))
+            .collect();
+        visiting[g] = false;
+        let r = match ends.iter().collect::<Vec<_>>().as_slice() {
+            [only] if **only != g => **only,
+            _ => g,
+        };
+        memo[g] = Some(r);
+        r
     }
+    let mut memo = vec![None; ghosts.len()];
+    let mut visiting = vec![false; ghosts.len()];
     (0..ghosts.len())
-        .map(|i| {
-            let best = shown[&root(&mut parent, i)];
-            (best != i).then_some(best)
+        .map(|g| {
+            let r = resolve(g, &out, &mut memo, &mut visiting);
+            (r != g).then_some(r)
         })
         .collect()
 }

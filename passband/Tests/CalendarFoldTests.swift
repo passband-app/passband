@@ -19,11 +19,11 @@ struct CalendarFoldTests {
     }
 
     static func row(
-        _ id: Int, _ title: String?, _ start: String?, received: String
+        _ id: Int, _ title: String?, _ start: String?, received: String, change: String? = nil
     ) -> CalendarUpdate {
         CalendarUpdate(
             id: id, message_id: id, thread_id: "t\(id)", kind: .event, event_title: title,
-            starts_at: start, organizer: nil, received_at: received)
+            starts_at: start, organizer: nil, received_at: received, change: change)
     }
 
     static let party = "Parameter & Endzeit Invite Polar Inertia"
@@ -34,6 +34,8 @@ struct CalendarFoldTests {
         anotherDayOrAnotherTitleStaysApart()
         aDatelessRowNeverBridgesTwoDays()
         orderAndUntitledRows()
+        newsKeepsItsOwnRow()
+        looseTitlesDoNotFold()
         print("calendar-fold: \(checks - failures)/\(checks) passed")
         exit(failures == 0 ? 0 : 1)
     }
@@ -88,5 +90,36 @@ struct CalendarFoldTests {
         let g = row(4, "Gym", nil, received: "2026-11-04T12:00:00Z")
         let p2 = row(5, party, "2026-11-06", received: "2026-11-04T01:00:00Z")
         check(CalendarUpdate.folded([p1, g, p2]).map(\.id) == [5, 4], "the party keeps first place")
+    }
+
+    static func newsKeepsItsOwnRow() {
+        let order = row(1, party, "2026-11-06T19:00:00-08:00", received: "2026-11-04T01:00:00Z")
+        // "Doors moved to 9pm": its own row, with the new time.
+        let moved = row(
+            2, party, "2026-11-06T21:00:00-08:00", received: "2026-11-05T01:00:00Z",
+            change: "updated")
+        check(CalendarUpdate.folded([order, moved]).map(\.id) == [1, 2], "a move keeps its row")
+        let off = row(3, party, "2026-11-06", received: "2026-11-05T02:00:00Z", change: "cancelled")
+        check(CalendarUpdate.folded([order, off]).map(\.id) == [1, 3], "a cancellation keeps its row")
+        // Even without the change mark, two different times are two rows.
+        let later = row(4, party, "2026-11-06T21:00:00-08:00", received: "2026-11-05T03:00:00Z")
+        check(CalendarUpdate.folded([order, later]).count == 2, "two times, two rows")
+        // A plain reminder still folds.
+        let reminder = row(5, party, nil, received: "2026-11-05T04:00:00Z", change: "created")
+        check(CalendarUpdate.folded([order, reminder]).map(\.id) == [1], "a reminder folds")
+    }
+
+    static func looseTitlesDoNotFold() {
+        let gym = row(1, "Gym", "2026-11-06", received: "2026-11-04T01:00:00Z")
+        let meet = row(2, "Gymnastics meet", "2026-11-06", received: "2026-11-04T02:00:00Z")
+        check(CalendarUpdate.folded([gym, meet]).count == 2, "not inside a word")
+        let art = row(3, "art", "2026-11-06", received: "2026-11-04T03:00:00Z")
+        let party = row(4, "party at mel's", "2026-11-06", received: "2026-11-04T04:00:00Z")
+        check(CalendarUpdate.folded([art, party]).count == 2, "not a short title")
+        // A short title cannot chain two lunches through itself.
+        let sam = row(5, "Lunch with Sam", "2026-11-06", received: "2026-11-04T05:00:00Z")
+        let lunch = row(6, "Lunch", "2026-11-06", received: "2026-11-04T06:00:00Z")
+        let ana = row(7, "Lunch with Ana", "2026-11-06", received: "2026-11-04T07:00:00Z")
+        check(CalendarUpdate.folded([sam, lunch, ana]).count == 3, "no chain through Lunch")
     }
 }

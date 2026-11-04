@@ -308,22 +308,23 @@ fn end_or_default(row: &EventRow) -> EventTime {
 }
 
 /// The adopted event's end: the one the mail states (or the user set) when
-/// it fits Gmail's start, else Gmail's. Gmail reads "Fri - Sun, 19:00 -
-/// 02:00" as one span to Sunday morning; the mail's own read is Friday's
-/// night, and the start is the same either way (adoption needs it).
+/// it SHORTENS Gmail's (after the start, before Gmail's end), else Gmail's.
+/// Gmail reads "Fri - Sun, 19:00 - 02:00" as one span to Sunday morning;
+/// the mail's own read is Friday's night, and the start is the same either
+/// way (adoption needs it). Never longer: an end from mail cannot stretch
+/// an event Passband writes to the user's calendar.
 fn adopted_end(ghost: &GhostEvent, gmail: &EventRow) -> EventTime {
-    let fits = |end: &EventTime| match (gmail.start, end) {
-        (EventTime::At(s), EventTime::At(e)) => *e > s,
-        (EventTime::Date(s), EventTime::Date(e)) => *e >= s,
+    let gmails = end_or_default(gmail);
+    let shortens = |end: &EventTime| match (gmail.start, end, gmails) {
+        (EventTime::At(s), EventTime::At(e), EventTime::At(g)) => *e > s && *e < g,
+        (EventTime::Date(s), EventTime::Date(e), EventTime::Date(g)) => *e >= s && *e < g,
         _ => false,
     };
-    ghost_end(ghost)
-        .filter(fits)
-        .unwrap_or_else(|| end_or_default(gmail))
+    ghost_end(ghost).filter(shortens).unwrap_or(gmails)
 }
 
 /// Passband's event in place of Gmail's `gmail`: its title, start, colour
-/// and free/busy, the end the mail states ([`adopted_end`]), the cleaned `place` as one line ([`Place::line`]: its name,
+/// and free/busy, the end the mail states when it is shorter ([`adopted_end`]), the cleaned `place` as one line ([`Place::line`]: its name,
 /// then its address) when the card has one, else Gmail's location (also when
 /// the model judged it names no place: Gmail's copy is about to be deleted,
 /// and a wrong judgment must not lose the address), and Passband's note.
@@ -1125,6 +1126,10 @@ mod tests {
         g.stated_end = Some(at(sat));
         g.user_end = Some(at("2026-11-07T01:00:00-08:00"));
         assert_eq!(end_of(&g), parse("2026-11-07T01:00:00-08:00"));
+        // Never longer than Gmail's: mail cannot stretch the event.
+        g.user_end = None;
+        g.stated_end = Some(at("2030-01-01T00:00:00-08:00"));
+        assert_eq!(end_of(&g), parse(sun));
     }
 
     /// `fold_ghosts` lives in `gcal`; its tests are here for the ghost builder.
@@ -1142,93 +1147,179 @@ mod tests {
             g
         }
 
+        fn urls(pairs: &[(i64, &str)]) -> HashMap<i64, Vec<String>> {
+            let mut out: HashMap<i64, Vec<String>> = HashMap::new();
+            for (id, u) in pairs {
+                out.entry(*id).or_default().push(u.to_string());
+            }
+            out
+        }
+
         #[test]
-        fn the_venues_listing_and_a_friends_link_show_as_one() {
-            // The order from RA and Endzeit's reply with the RA link, from a
-            // gmail address: two scopes, so mail never joins them.
-            let endzeit = from(1, "Polar Inertia", "2026-11-06", "endzeitsf@gmail.com");
-            let mut ra = from(
+        fn a_friends_copy_of_the_venues_link_folds_into_the_venues_ghost() {
+            // Endzeit's reply (gmail) with RA's link, and RA's own mail: two
+            // scopes, so mail never joins them. Titles need not match.
+            let endzeit = from(1, "Friday night", "2026-11-06", "endzeitsf@gmail.com");
+            let ra = from(
                 2,
                 "Parameter & Endzeit Invite Polar Inertia",
                 "2026-11-06T19:00:00-08:00",
                 "ra.co",
             );
-            ra.commitment = EventCommitment::Invited;
-            let urls = HashMap::from([(1, vec![RA.to_string()]), (2, vec![RA.to_string()])]);
-            // The issuer's wins even over an older, committed copy.
+            let both = urls(&[(1, RA), (2, RA)]);
             assert_eq!(
-                fold_ghosts(&[endzeit.clone(), ra.clone()], &urls),
+                fold_ghosts(&[endzeit.clone(), ra.clone()], &both),
                 [Some(1), None]
             );
-            // By title alone too, with no URL.
+            // Never the other way, even when the venue's copy is date-only.
+            let mut ra_day = ra.clone();
+            ra_day.start = at("2026-11-06");
+            let mut endzeit_timed = endzeit.clone();
+            endzeit_timed.start = at("2026-11-06T19:00:00-08:00");
             assert_eq!(
-                fold_ghosts(&[endzeit.clone(), ra.clone()], &HashMap::new()),
-                [None, Some(0)],
-                "no issuer: the committed one"
+                fold_ghosts(&[endzeit_timed, ra_day], &both),
+                [Some(1), None]
             );
+            // Another sender's copy never folds by title alone.
+            let titled = from(3, "Polar Inertia", "2026-11-06", "endzeitsf@gmail.com");
+            assert_eq!(fold_ghosts(&[titled, ra], &HashMap::new()), [None, None]);
         }
 
         #[test]
-        fn a_shared_url_folds_titles_that_do_not_match() {
-            let a = from(1, "Friday night", "2026-11-06", "endzeitsf@gmail.com");
-            let b = from(2, "Polar Inertia", "2026-11-06", "ra.co");
-            let urls = HashMap::from([(1, vec![RA.to_string()]), (2, vec![RA.to_string()])]);
-            assert_eq!(fold_ghosts(&[a.clone(), b.clone()], &urls), [Some(1), None]);
-            // No URL and no title match: two things.
-            assert_eq!(fold_ghosts(&[a, b], &HashMap::new()), [None, None]);
-        }
-
-        #[test]
-        fn near_misses_stay_apart() {
-            let urls = HashMap::from([(1, vec![RA.to_string()]), (2, vec![RA.to_string()])]);
-            // The same listing, another night.
-            let fri = from(1, "Polar Inertia", "2026-11-06", "ra.co");
-            let sat = from(2, "Polar Inertia", "2026-11-07", "ra.co");
-            assert_eq!(fold_ghosts(&[fri.clone(), sat], &urls), [None, None]);
-            // Two shows of one title the same day, at different times.
-            let early = from(1, "Phoebe Bridgers", "2026-11-06T14:00:00-08:00", "x.com");
-            let late = from(2, "Phoebe Bridgers", "2026-11-06T20:00:00-08:00", "x.com");
-            assert_eq!(fold_ghosts(&[early, late], &HashMap::new()), [None, None]);
-            // A dismissed or cancelled copy is never folded.
-            let mut gone = from(2, "Polar Inertia", "2026-11-06", "ra.co");
-            gone.user_state = Some(GhostUserState::Dismissed);
-            assert_eq!(
-                fold_ghosts(&[fri.clone(), gone.clone()], &urls),
-                [None, None]
-            );
-            gone.user_state = None;
-            gone.mail_state = GhostMailState::Cancelled;
-            assert_eq!(fold_ghosts(&[fri, gone], &urls), [None, None]);
-        }
-
-        #[test]
-        fn a_stranger_quoting_the_url_never_hides_the_issuers_ghost() {
-            let mine = from(5, "Polar Inertia", "2026-11-06", "ra.co");
-            let mut theirs = from(
+        fn a_stranger_cannot_take_the_owners_ghost_by_title_or_their_own_url() {
+            // The reviewer's attack: evil.com is the issuer of ITS OWN page,
+            // with a title that matches. No shared URL, no fold.
+            let real = from(5, "Polar Inertia", "2026-11-06", "ra.co");
+            let mut evil = from(
                 1,
                 "Polar Inertia",
                 "2026-11-06T23:00:00-08:00",
                 "evil.example",
             );
-            theirs.user_state = Some(GhostUserState::Going);
-            let urls = HashMap::from([(1, vec![RA.to_string()]), (5, vec![RA.to_string()])]);
-            assert_eq!(fold_ghosts(&[mine, theirs], &urls), [None, Some(0)]);
+            evil.user_state = Some(GhostUserState::Going);
+            let own_page = urls(&[(1, "evil.example/e/1"), (5, RA)]);
+            assert_eq!(
+                fold_ghosts(&[real.clone(), evil.clone()], &own_page),
+                [None, None]
+            );
+            // Quoting the venue's URL folds only the stranger's copy away.
+            let quoted = urls(&[(1, RA), (1, "evil.example/e/1"), (5, RA)]);
+            assert_eq!(
+                fold_ghosts(&[real.clone(), evil.clone()], &quoted),
+                [None, Some(0)]
+            );
+            // A host that only ends with the scope's letters is not its site.
+            let lookalike = from(6, "Polar Inertia", "2026-11-06", "evilra.co");
+            let near = urls(&[
+                (5, "evilra.co/events/2494673"),
+                (6, "evilra.co/events/2494673"),
+            ]);
+            assert_eq!(
+                fold_ghosts(&[real.clone(), lookalike], &near),
+                [Some(1), None]
+            );
         }
 
         #[test]
-        fn three_copies_fold_into_one() {
-            let a = from(1, "Polar Inertia", "2026-11-06", "a@gmail.com");
-            let b = from(2, "Polar Inertia tickets", "2026-11-06", "b@gmail.com");
-            let c = from(
-                3,
+        fn the_same_senders_copies_fold_into_the_timed_then_the_older() {
+            let day = from(1, "Polar Inertia", "2026-11-06", "ra.co");
+            let timed = from(
+                2,
                 "Parameter & Endzeit Invite Polar Inertia",
-                "2026-11-06",
+                "2026-11-06T19:00:00-08:00",
                 "ra.co",
             );
-            let urls = HashMap::from([(3, vec![RA.to_string()])]);
-            // a~b and a~c by title (b and c alone do not match): all three
-            // are one, and the issuer's shows.
-            assert_eq!(fold_ghosts(&[a, b, c], &urls), [Some(2), Some(2), None]);
+            assert_eq!(
+                fold_ghosts(&[day.clone(), timed], &HashMap::new()),
+                [Some(1), None]
+            );
+            let later = from(3, "Polar Inertia", "2026-11-06", "ra.co");
+            assert_eq!(fold_ghosts(&[later, day], &HashMap::new()), [Some(1), None]);
+        }
+
+        #[test]
+        fn a_date_only_copy_never_bridges_two_shows() {
+            // A date-only "Hamilton" matches both the 2pm and the 8pm: it
+            // folds into neither, and they stay two.
+            let note = from(1, "Hamilton tickets", "2026-11-06", "box.example");
+            let matinee = from(
+                2,
+                "Hamilton tickets",
+                "2026-11-06T14:00:00-08:00",
+                "box.example",
+            );
+            let evening = from(
+                3,
+                "Hamilton tickets",
+                "2026-11-06T20:00:00-08:00",
+                "box.example",
+            );
+            assert_eq!(
+                fold_ghosts(&[note, matinee, evening], &HashMap::new()),
+                [None, None, None]
+            );
+        }
+
+        #[test]
+        fn short_or_partial_word_titles_do_not_fold_across_the_day() {
+            let show = from(1, "Show", "2026-11-06", "x.example");
+            let gig = from(
+                2,
+                "Show at The Independent",
+                "2026-11-06T20:00:00-08:00",
+                "x.example",
+            );
+            assert_eq!(
+                fold_ghosts(&[show, gig.clone()], &HashMap::new()),
+                [None, None]
+            );
+            let art = from(3, "Art openings", "2026-11-06", "x.example");
+            let party = from(
+                4,
+                "Party openings tonight",
+                "2026-11-06T20:00:00-08:00",
+                "x.example",
+            );
+            assert_eq!(fold_ghosts(&[art, party], &HashMap::new()), [None, None]);
+        }
+
+        #[test]
+        fn near_misses_stay_apart() {
+            let both = urls(&[(1, RA), (2, RA)]);
+            // The same listing, another night.
+            let fri = from(1, "Polar Inertia", "2026-11-06", "ra.co");
+            let sat = from(2, "Polar Inertia", "2026-11-07", "ra.co");
+            assert_eq!(fold_ghosts(&[fri.clone(), sat], &both), [None, None]);
+            // A dismissed or cancelled copy is never folded.
+            let mut gone = from(2, "Polar Inertia", "2026-11-06", "ra.co");
+            gone.user_state = Some(GhostUserState::Dismissed);
+            assert_eq!(
+                fold_ghosts(&[fri.clone(), gone.clone()], &both),
+                [None, None]
+            );
+            gone.user_state = None;
+            gone.mail_state = GhostMailState::Cancelled;
+            assert_eq!(fold_ghosts(&[fri.clone(), gone], &both), [None, None]);
+            // Unauthenticated copies are no one's: no same-sender fold.
+            let mut a = fri.clone();
+            let mut b = from(3, "Polar Inertia", "2026-11-06", "ra.co");
+            a.owner_scope = None;
+            b.owner_scope = None;
+            assert_eq!(fold_ghosts(&[a, b], &HashMap::new()), [None, None]);
+        }
+
+        #[test]
+        fn copies_end_at_one_ghost_through_a_step() {
+            // A friend's copy folds into the venue's date-only copy, which
+            // folds into the venue's timed one: all show as the timed one.
+            let friend = from(1, "Friday night", "2026-11-06", "pal@gmail.com");
+            let ra_day = from(2, "Polar Inertia", "2026-11-06", "ra.co");
+            let ra_timed = from(3, "Polar Inertia", "2026-11-06T19:00:00-08:00", "ra.co");
+            let u = urls(&[(1, RA), (2, RA)]);
+            assert_eq!(
+                fold_ghosts(&[friend, ra_day, ra_timed], &u),
+                [Some(2), Some(2), None]
+            );
         }
     }
 }

@@ -849,9 +849,10 @@ list, Esc closes the place list, then the delete question, then the pane.
     (`own::same_event`: the same start, and the display match's titles or a
     distinctive word shared across title and place) is replaced. Passband
     creates its own event (Gmail's title, start, colour and free/busy; the
-    end the mail states, or the user set, when it falls after that start,
-    else Gmail's, since Gmail reads "Fri - Sun, 19:00 - 02:00" as one span
-    to Sunday morning where the mail and the tickets say Friday night; the
+    end the mail states, or the user set, when it SHORTENS Gmail's, else
+    Gmail's, since Gmail reads "Fri - Sun, 19:00 - 02:00" as one span to
+    Sunday morning where the mail and the tickets say Friday night, and an
+    end from mail must never stretch an event on the user's calendar; the
     card's cleaned place as one line, its name then its address, or Gmail's
     location when there is none; the note "Kept up to date by Passband from your
     mail."; a private extended property naming the ghost) under an id made
@@ -1606,16 +1607,25 @@ Read only (slice B). The only writes are the user's own, described under
   titles are equal after lowercasing and collapsing whitespace, or one contains
   the other. The day rule is display only: adoption (`own.rs`) still needs the
   same start.
-- **Copies from different senders fold** (`gcal::fold_ghosts`). A ref is
-  scoped to its sender, so the venue's ticket mail and a friend's reply with
-  the venue's link are two ghosts that mail can never join, by design: a
-  stranger quoting a URL must not move the owner's ghost. The timeline and
-  calendar search show them as one when their starts match for display and
-  they share an event-page URL (the sender scope dropped) or their titles
-  match. The one shown is the issuer's (its sender is the URL's own site),
-  else committed, going, authenticated, timed, oldest, and it carries every
-  copy's mail and tickets, and the event match of any copy. Display only:
-  nothing is merged or stored. Worked out when the timeline is listed, never stored: it hides a
+- **Copies fold on screen** (`gcal::fold_ghosts`). A ref is scoped to its
+  sender, so the venue's ticket mail and a friend's reply with the venue's
+  link are two ghosts that mail can never join, by design: a stranger
+  quoting a URL must not move the owner's ghost. The timeline and calendar
+  search show such copies as one, and a stranger must not be able to do on
+  screen what they cannot do in the store. So, with starts that match for
+  display: a copy from ANOTHER sender folds only into the copy of the
+  ISSUER of a URL they share (its sender is that URL's own site, `ra.co`
+  for an `ra.co/events/...` page), never by title; the SAME sender's copies
+  fold by a shared URL or a title match, into the timed one, then the older.
+  One step: a copy folds only when everything it may fold into ends at one
+  ghost, so a date-only copy never joins a matinee and an evening show. The
+  one shown carries every copy's mail; a copy's event match and tickets
+  carry over only from the same sender. Display only: nothing is merged or
+  stored.
+- **Titles for the day match.** "One title holds the other" means whole
+  words in a run ("Dinner" in "Dinner with Sam", never "art" in "party"). When
+  the starts match only by day (all-day against timed), a held title must be
+  at least 8 characters. Worked out when the timeline is listed, never stored: it hides a
   duplicate and changes no ghost.
 - **The card's place** (`gcal/place.rs`, 2026-10-28). A booking service
   often writes its marketing into the location ("Dingles Public House, Tock is

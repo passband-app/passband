@@ -2242,13 +2242,18 @@ pub async fn get_timeline(
     // stored, so it can never go stale and never changes a ghost. The
     // calendar reminders link mail to events by the same function.
     let mut matched = squelch_core::gcal::link_ghosts(&ghosts, &events, &owned);
-    // Copies of one event from different senders show as one ghost
-    // (`gcal::fold_ghosts`): the one shown carries every copy's mail, and is
-    // an event's when any copy is.
+    // Copies of one event show as one ghost (`gcal::fold_ghosts`). The one
+    // shown carries every copy's mail (each labelled by its own sender). A
+    // copy's event match and tickets carry over only from the SAME sender,
+    // and the match only when it fits the shown ghost's own start: another
+    // sender's copy must not hide the shown ghost behind an event, nor fill
+    // its tickets button.
     let folded = squelch_core::gcal::fold_ghosts(&ghosts, &urls);
     let mut ghosts = ghosts;
     for (i, into) in folded.iter().enumerate() {
         let Some(w) = *into else { continue };
+        let same_sender =
+            ghosts[w].owner_scope.is_some() && ghosts[w].owner_scope == ghosts[i].owner_scope;
         let sources = ghosts[i].sources.clone();
         for source in sources {
             if !ghosts[w]
@@ -2259,8 +2264,14 @@ pub async fn get_timeline(
                 ghosts[w].sources.push(source);
             }
         }
-        if matched[w].is_none() {
-            matched[w] = matched[i];
+        if !same_sender {
+            continue;
+        }
+        if matched[w].is_none()
+            && let Some(m) = matched[i]
+            && squelch_core::gcal::display_same_start(&ghosts[w].start, &events[m].row.start)
+        {
+            matched[w] = Some(m);
         }
         if let Some(t) = tickets.ghosts.get(&ghosts[i].id).cloned() {
             tickets.ghosts.entry(ghosts[w].id).or_insert(t);

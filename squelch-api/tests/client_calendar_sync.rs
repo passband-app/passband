@@ -859,7 +859,7 @@ async fn copies_of_one_event_from_two_senders_show_as_one_ghost() {
         EventCommitment::Committed,
         vec!["https://ra.co/events/2494673".into()],
     );
-    // A third sender's copy by title alone.
+    // A third sender's copy with the venue's link folds too.
     seed_ghost_from(
         &w.store,
         w.acct,
@@ -869,7 +869,18 @@ async fn copies_of_one_event_from_two_senders_show_as_one_ghost() {
         date.clone(),
         // Committed, so search serves it (it serves no mere invitation).
         EventCommitment::Committed,
-        Vec::new(),
+        vec!["ra.co/events/2494673".into()],
+    );
+    // A stranger matching only the title never folds, either way.
+    seed_ghost_from(
+        &w.store,
+        w.acct,
+        "stranger",
+        "tickets@evil.example",
+        "Polar Inertia",
+        date.clone(),
+        EventCommitment::Committed,
+        vec!["https://evil.example/e/1".into()],
     );
     // Another day's copy, from another sender, stays its own. (The venue's
     // own mail a day apart would be the same ghost, moved.)
@@ -891,22 +902,33 @@ async fn copies_of_one_event_from_two_senders_show_as_one_ghost() {
             (Utc::now() + Duration::days(30)).fixed_offset(),
         )
         .unwrap();
-    assert_eq!(stored.len(), 4, "never merged in the store");
+    assert_eq!(stored.len(), 5, "never merged in the store");
     let body = w.timeline().await;
     let ghosts = body["ghosts"].as_array().unwrap();
     let on_day: Vec<&Value> = ghosts
         .iter()
         .filter(|g| g["start"].as_str() == Some(date.as_str()))
         .collect();
-    assert_eq!(on_day.len(), 1, "{ghosts:#?}");
-    assert_eq!(on_day[0]["title"], "Polar Inertia", "the issuer's shows");
-    assert_eq!(on_day[0]["sources"].as_array().unwrap().len(), 3);
-    assert_eq!(ghosts.len(), 2);
+    assert_eq!(
+        on_day.len(),
+        2,
+        "the venue's, and the stranger's: {ghosts:#?}"
+    );
+    let venue = on_day
+        .iter()
+        .find(|g| g["sources"].as_array().unwrap().len() == 3)
+        .expect("the venue's ghost carries all three mails");
+    assert_eq!(venue["title"], "Polar Inertia", "the issuer's shows");
+    assert_eq!(ghosts.len(), 3);
     // Search shows the one too.
     let found = search(&w.app, "/client/calendar/search", "polar").await;
     assert_eq!(
         hit_titles(&found),
-        ["ghost:Polar Inertia", "ghost:Polar Inertia"],
+        [
+            "ghost:Polar Inertia",
+            "ghost:Polar Inertia",
+            "ghost:Polar Inertia"
+        ],
         "{found:#}"
     );
 }

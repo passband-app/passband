@@ -932,49 +932,74 @@ struct CalendarUpdate: Codable, Sendable, Identifiable, Hashable {
     var organizer: String?
     var received_at: String
     var start_timezone: String? = nil
+    /// What the mail does to the event (`created`, `updated`, `cancelled`,
+    /// `agreed`), from a feed record; nil from `/client/calendar`.
+    var change: String? = nil
 }
 
 extension CalendarUpdate {
     /// One row per event, not per email: a venue's ticket mail and its "get
     /// the app for your tickets" reminder both carry the event, and were two
-    /// rows. The daemon's ghost fold (`gcal::fold_ghosts`) by the same test.
+    /// rows. The daemon folds ghosts by a stricter test (`gcal::fold_ghosts`);
+    /// these rows are only what the card lists, and carry nothing over.
     ///
     /// Two rows are one event when their titles are equal (case and spacing
-    /// aside) or one holds the other, on the same day (a start's own date, so
-    /// 7pm Pacific stays that day). A row with no start joins only when
-    /// exactly one dated event matches its title, so it never bridges two
-    /// Fridays of a weekly thing. The row shown is the earliest received
-    /// with a start (the confirmation, which carries the tickets; reminders
-    /// come later), else the earliest. Order is the input's, at each event's
-    /// first row.
+    /// aside) or one's words are a run of the other's and it is at least 8
+    /// characters ("Polar Inertia", never "Gym" in "Gymnastics"), compared
+    /// with the event's first row; on the same day (a start's own date, so
+    /// 7pm Pacific stays that day), at the same start unless one is a date
+    /// only. A row with no start joins only when exactly one dated event
+    /// matches it. Mail that MOVES or CANCELS an event always keeps its own
+    /// row, so the card never hides the news under the old confirmation. The
+    /// row shown is the earliest received with a start (the confirmation,
+    /// which carries the tickets; reminders come later), else the earliest.
+    /// Order is the input's, at each event's first row.
     static func folded(_ rows: [CalendarUpdate]) -> [CalendarUpdate] {
-        func title(_ r: CalendarUpdate) -> String? {
-            let t = (r.event_title ?? "").lowercased()
-                .split(whereSeparator: \.isWhitespace).joined(separator: " ")
-            return t.isEmpty ? nil : t
+        func words(_ t: String) -> [Substring] {
+            t.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        }
+        func title(_ r: CalendarUpdate) -> [Substring]? {
+            let w = words(r.event_title ?? "")
+            return w.isEmpty ? nil : w
+        }
+        func matches(_ a: [Substring], _ b: [Substring]) -> Bool {
+            if a == b { return true }
+            let (short, long) = a.count <= b.count ? (a, b) : (b, a)
+            guard short.joined(separator: " ").count >= 8, long.count > short.count else {
+                return false
+            }
+            return (0...(long.count - short.count)).contains {
+                Array(long[$0..<($0 + short.count)]) == short
+            }
         }
         func day(_ r: CalendarUpdate) -> Substring? {
             guard let s = r.starts_at, s.count >= 10 else { return nil }
             return s.prefix(10)
         }
-        func matches(_ a: String, _ b: String) -> Bool {
-            a == b || a.contains(b) || b.contains(a)
+        // The same day, and the same start unless one is only a date.
+        func sameStart(_ a: CalendarUpdate, _ b: CalendarUpdate) -> Bool {
+            guard let x = a.starts_at, let y = b.starts_at, day(a) == day(b) else { return false }
+            return x == y || x.count == 10 || y.count == 10
         }
-        // Each group: the indices of its rows, first-seen order.
+        func news(_ r: CalendarUpdate) -> Bool {
+            r.change == "updated" || r.change == "cancelled"
+        }
+        // Each group: the indices of its rows, first-seen order. Its first
+        // row is the one others are compared with.
         var groups: [[Int]] = []
-        func titles(_ g: [Int]) -> [String] { g.compactMap { title(rows[$0]) } }
         var undated: [Int] = []
+        func joins(_ g: [Int], _ i: Int) -> Bool {
+            let first = rows[g[0]]
+            guard !news(first), let a = title(first), let b = title(rows[i]) else { return false }
+            return matches(a, b)
+        }
         for (i, row) in rows.enumerated() {
-            guard let t = title(row) else {
+            if title(row) == nil || news(row) {
                 groups.append([i])
-                continue
-            }
-            guard let d = day(row) else {
+            } else if day(row) == nil {
                 undated.append(i)
-                continue
-            }
-            if let g = groups.firstIndex(where: { g in
-                g.contains { day(rows[$0]) == d } && titles(g).contains { matches($0, t) }
+            } else if let g = groups.firstIndex(where: { g in
+                joins(g, i) && g.contains { sameStart(rows[$0], row) }
             }) {
                 groups[g].append(i)
             } else {
@@ -982,17 +1007,14 @@ extension CalendarUpdate {
             }
         }
         for i in undated {
-            let t = title(rows[i])!
             let dated = groups.indices.filter { g in
-                groups[g].contains { day(rows[$0]) != nil }
-                    && titles(groups[g]).contains { matches($0, t) }
+                day(rows[groups[g][0]]) != nil && joins(groups[g], i)
             }
             if dated.count == 1 {
                 groups[dated[0]].append(i)
             } else if dated.isEmpty,
                 let g = groups.firstIndex(where: { g in
-                    g.allSatisfy { day(rows[$0]) == nil }
-                        && titles(g).contains { matches($0, t) }
+                    day(rows[g[0]]) == nil && joins(g, i)
                 })
             {
                 groups[g].append(i)
@@ -3526,6 +3548,8 @@ struct AgentRecordProposal: Codable, Sendable {
     var description: String?
     var due: AgentSupportedTime?
     var autopay: Bool?
+    /// An event record's `change`: created, updated, cancelled or agreed.
+    var change: String?
 }
 
 extension AgentFeed {
@@ -3549,7 +3573,7 @@ extension AgentFeed {
                     message_id: item.message_id, thread_id: item.thread_id, kind: .event,
                     event_title: record.title, starts_at: record.start?.value,
                     organizer: nil, received_at: item.received_at,
-                    start_timezone: record.start?.timezone)
+                    start_timezone: record.start?.timezone, change: record.change)
             }
         })
     }

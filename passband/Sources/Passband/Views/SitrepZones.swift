@@ -999,6 +999,20 @@ struct AdaptiveGrid: Layout {
 
     func makeCache(subviews: Subviews) -> Cache { Cache() }
 
+    /// NO ALIGNMENT GUIDES OF ITS OWN. The default merges every card's guides,
+    /// asking each for its dimensions on every layout pass, and the board is
+    /// laid out even while it is kept hidden behind another page: scrolling
+    /// All mail spent a few per cent of the main thread here.
+    func explicitAlignment(
+        of guide: HorizontalAlignment, in bounds: CGRect, proposal: ProposedViewSize,
+        subviews: Subviews, cache: inout Cache
+    ) -> CGFloat? { nil }
+
+    func explicitAlignment(
+        of guide: VerticalAlignment, in bounds: CGRect, proposal: ProposedViewSize,
+        subviews: Subviews, cache: inout Cache
+    ) -> CGFloat? { nil }
+
     /// The subviews changed, so the heights we hold describe cards that are gone.
     /// `metrics` ALSO re-checks the count on every read: this is the documented
     /// invalidation hook, but a stale row height is a visibly broken grid, and

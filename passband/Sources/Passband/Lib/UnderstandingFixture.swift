@@ -99,7 +99,11 @@ enum UnderstandingFixture {
                 addr: "hello@growthletter.example", display_name: "The Growth Letter", received_count: 34,
                 received_per_month: 8, received_first_at: ago(200), received_last_at: ago(2.5),
                 inbound_threads: 34, attention_rows: 17, opened_count: 0,
-                fatigue_score: 0.95, fatigue_reasons: [FatigueReason(code: "cleared_unopened", values: ["count": 17])]),
+                fatigue_score: 0.95,
+                fatigue_reasons: [
+                    FatigueReason(code: "rarely_opened", values: ["opened": 0, "received": 17]),
+                    FatigueReason(code: "cleared_unopened", values: ["count": 17]),
+                ]),
             RelationshipRow(
                 addr: "maya@studio-oak.example", display_name: "Maya Okafor", received_count: 2,
                 received_first_at: ago(3), received_last_at: ago(1), sent_count: 1, sent_last_at: ago(1),

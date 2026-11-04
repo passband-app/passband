@@ -331,6 +331,8 @@ struct UnderstandingSeriesTests {
             "the recruiter answered once is a known contact, scored 0, never fading")
         expect(fixture.fading.prefix(3).map { $0.row.display_name ?? "" }
             == ["The Growth Letter", "SaaS Weekly", "Product Pulse"], "the three unopened newsletters lead the fading list")
+        expect(fixture.fading.first?.sentence == "opened 0 of 17",
+            "the Growth Letter quotes rarely_opened first, as the daemon's scorer emits it")
         expect(fixture.points.first { $0.row.corrections > 0 }?.sentence.contains("corrected") == true,
             "the vendor's corrections are said")
         expect(Set(MemoryGrouping.groups(memory.entries, now: now).map(\.kind)) == Set(MemoryKind.allCases),

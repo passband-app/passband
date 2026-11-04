@@ -487,7 +487,19 @@ predates the table is filled by the same walk on the first round, stamped
 8 chunks (200 addresses) per refine round and keeps its place in
 `app_settings` key `relationships_walk_cursor`, so triage interleaves with
 it and a restart resumes where it stopped. Each chunk finds its addresses by
-range seeks on the senders, contacts, recipients and ledger indexes.
+range seeks on the senders, contacts, recipients and ledger indexes. A
+completed walk stamps the ledger day it started on
+(`relationships_walk_day`), so a walk that runs past 03:00 does not use up
+the next day's.
+
+The first open after upgrading to a daemon with the ledger does work before
+the daemon serves. `migrate` builds `idx_messages_from_received` over every
+message, which takes seconds on a large store. It also builds
+`idx_agent_decisions_sealed`, which evaluates its JSON predicate once for
+every existing decision (about 35 µs each). The other sealed-set indexes are
+small. After that, the first-run backfill walk runs inside the refine lane at
+200 addresses per round, interleaved with triage. The agent context carries
+no `relationship` block until that walk completes.
 
 The triage context carries the row as `relationship` beside
 `sender_is_contact`, and `read_sender_history` returns it as `relationship`

@@ -10163,6 +10163,35 @@ async fn sender_domains_roll_up_by_host_for_the_rule_editor() {
 }
 
 #[tokio::test]
+async fn the_relationship_list_needs_the_clients_token() {
+    // Who the owner answers and whose mail they ignore: never without a
+    // bearer, and never with somebody else's.
+    let Harness { app, .. } = harness(|store, acct| {
+        store
+            .upsert_message(&msg(acct, "g1", "t1", "hello", "body"))
+            .unwrap();
+        store.recompute_all_relationships(acct).unwrap();
+    });
+    for bearer in [None, Some("Bearer nope")] {
+        let mut req = Request::builder().uri("/client/relationships");
+        if let Some(bearer) = bearer {
+            req = req.header(header::AUTHORIZATION, bearer);
+        }
+        let resp = app
+            .clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{bearer:?}");
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            !String::from_utf8_lossy(&body).contains("alice@example.com"),
+            "a refusal carries no row"
+        );
+    }
+}
+
+#[tokio::test]
 async fn the_relationship_ledger_reaches_the_card_and_its_own_list() {
     // WIRE CONTRACT (docs/UNDERSTANDING.md §2.1): GET /client/person carries
     // `relationship`, a row object or null; GET /client/relationships answers

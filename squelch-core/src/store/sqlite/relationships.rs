@@ -549,12 +549,11 @@ impl<'c> Recomputer<'c> {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?
             .into_iter()
-            // A stamp that will not parse is not a thread the ledger can date.
-            .filter_map(|(first, reply)| {
-                Some(ThreadReply {
-                    first_inbound_at: parse_at(Some(first))?,
-                    reply_at: parse_at(reply),
-                })
+            // A stamp that will not parse still counts as a thread; it just
+            // cannot be dated or timed.
+            .map(|(first, reply)| ThreadReply {
+                first_inbound_at: parse_at(Some(first)),
+                reply_at: parse_at(reply),
             })
             .collect();
         counts.corrections = conn

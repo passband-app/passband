@@ -4,8 +4,8 @@
 
 use super::super::reading_senders::SenderMeasurer;
 use super::super::relationships::{
-    CORRECTIONS_SQL, INBOUND_SQL, INITIATED_SQL, NAME_SQL, RECENT_WINDOW,
-    RELATIONSHIPS_BACKFILL_KEY, RelationshipSort, THREADS_SQL,
+    CONTACT_SQL, CORRECTIONS_SQL, INBOUND_SQL, INITIATED_SQL, NAME_SQL, RECENT_WINDOW,
+    RELATIONSHIPS_BACKFILL_KEY, RelationshipSort, THREADS_SQL, WALK_SOURCES,
 };
 use super::super::*;
 use super::support::*;
@@ -598,6 +598,39 @@ fn every_per_address_statement_is_an_indexed_probe() {
             .any(|l| l.contains("SEARCH s USING") && l.contains("idx_messages_thread")),
         "each reply probe seeks its thread\n{threads:#?}"
     );
+    // The contacts read seeks its NOCASE index, for the sum and the name.
+    let contact = plan(CONTACT_SQL);
+    assert!(
+        contact
+            .iter()
+            .filter(
+                |l| l.contains("USING COVERING INDEX idx_contacts_addr_nocase")
+                    || l.contains("USING INDEX idx_contacts_addr_nocase")
+            )
+            .count()
+            >= 2,
+        "{contact:#?}"
+    );
+    assert!(
+        !contact.iter().any(|l| l.starts_with("SCAN")),
+        "{contact:#?}"
+    );
+    // Each source of the full walk is a range seek from the cursor, never a
+    // scan or a sort of the whole table (the quadratic walk this replaced).
+    for sql in WALK_SOURCES {
+        let walk = plan(sql);
+        assert!(
+            walk.iter()
+                .any(|l| l.starts_with("SEARCH") && l.contains("addr>?")),
+            "{sql}\n{walk:#?}"
+        );
+        assert!(
+            !walk
+                .iter()
+                .any(|l| l.starts_with("SCAN") || l.contains("TEMP B-TREE")),
+            "{sql}\n{walk:#?}"
+        );
+    }
     let initiated = plan(INITIATED_SQL);
     assert!(
         initiated
@@ -858,4 +891,25 @@ fn sent_count_sums_every_spelling_of_the_address() {
     let last = row.sent_last_at.unwrap();
     assert!((last - days_ago(2)).num_minutes().abs() < 5, "{last}");
     assert_eq!(row.display_name.as_deref(), Some("Ann Lee"));
+}
+
+#[test]
+fn a_message_whose_date_will_not_parse_still_counts() {
+    let (store, acct) = store();
+    inbound(&store, acct, "good", "good", DAN, 3);
+    let bad = inbound(&store, acct, "bad", "bad", DAN, 1);
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE messages SET received_at = 'garbage' WHERE id = ?1",
+            [bad],
+        )
+        .unwrap();
+    store.recompute_relationship(acct, DAN).unwrap();
+    let row = store.relationship(acct, DAN).unwrap().unwrap();
+    assert_eq!(row.received_count, 2);
+    assert_eq!(row.inbound_threads, 2, "the undatable thread is still one");
+    // MAX(received_at) is the unparseable text; the dated thread stands in.
+    assert!(row.received_first_at.is_some() && row.received_last_at.is_some());
 }

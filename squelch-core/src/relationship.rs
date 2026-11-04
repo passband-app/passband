@@ -34,7 +34,9 @@ pub const MIN_REPLIED_FOR_MEDIAN: usize = 3;
 /// it, and when the owner first wrote into it AFTER that, if ever.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThreadReply {
-    pub first_inbound_at: DateTime<Utc>,
+    /// `None` when the stored stamp will not parse: the thread still counts,
+    /// it just cannot be dated or timed.
+    pub first_inbound_at: Option<DateTime<Utc>>,
     pub reply_at: Option<DateTime<Utc>>,
 }
 
@@ -144,8 +146,8 @@ pub fn median_reply_ms(threads: &[ThreadReply]) -> Option<i64> {
     let mut gaps: Vec<u64> = threads
         .iter()
         .filter_map(|t| {
-            t.reply_at
-                .map(|at| (at - t.first_inbound_at).num_milliseconds())
+            let (first, reply) = (t.first_inbound_at?, t.reply_at?);
+            Some((reply - first).num_milliseconds())
         })
         .filter_map(|ms| u64::try_from(ms).ok())
         .collect();
@@ -168,17 +170,24 @@ pub fn derive(
         .filter(|t| t.reply_at.is_some())
         .count();
     let (score, reasons) = counts.fatigue;
+    // A stamp that will not parse never leaves a row with mail and no dates:
+    // the threads' own dates stand in, then the other end of the range.
+    let thread_dates = || counts.threads.iter().filter_map(|t| t.first_inbound_at);
+    let first = counts
+        .received_first_at
+        .or_else(|| thread_dates().min())
+        .or(counts.received_last_at);
+    let last = counts
+        .received_last_at
+        .or_else(|| thread_dates().max())
+        .or(first);
     Relationship {
         addr: addr.to_string(),
         display_name,
         received_count: counts.received_count,
-        received_first_at: counts.received_first_at,
-        received_last_at: counts.received_last_at,
-        received_per_month: received_per_month(
-            counts.received_count,
-            counts.received_first_at,
-            now,
-        ),
+        received_first_at: first,
+        received_last_at: last,
+        received_per_month: received_per_month(counts.received_count, first, now),
         sent_count: counts.sent_count,
         sent_last_at: counts.sent_last_at,
         initiated_count: counts.initiated_count,
@@ -219,8 +228,8 @@ pub fn counts_unchanged(stored: &Relationship, counts: &Counts) -> bool {
 /// last send. Threads, replies, corrections and the name are kept as counted.
 pub fn refresh(mut stored: Relationship, counts: Counts, now: DateTime<Utc>) -> Relationship {
     let fresh = derive(&stored.addr, stored.display_name.clone(), counts, now);
-    stored.received_first_at = fresh.received_first_at;
-    stored.received_last_at = fresh.received_last_at;
+    stored.received_first_at = fresh.received_first_at.or(stored.received_first_at);
+    stored.received_last_at = fresh.received_last_at.or(stored.received_last_at);
     stored.received_per_month = fresh.received_per_month;
     stored.sent_last_at = fresh.sent_last_at;
     stored.attention_rows = fresh.attention_rows;
@@ -301,7 +310,7 @@ mod tests {
     fn thread(days_ago: i64, reply_after_mins: Option<i64>) -> ThreadReply {
         let first = now() - Duration::days(days_ago);
         ThreadReply {
-            first_inbound_at: first,
+            first_inbound_at: Some(first),
             reply_at: reply_after_mins.map(|m| first + Duration::minutes(m)),
         }
     }
@@ -466,5 +475,27 @@ mod tests {
         assert_eq!(young["received"]["count"], 212);
         let ripe = agent_json(&row(), MIN_COVERED_DAYS as i64);
         assert!(ripe.get("attention").is_some());
+    }
+
+    #[test]
+    fn an_undatable_thread_still_counts_and_the_dates_fall_back() {
+        let undated = ThreadReply {
+            first_inbound_at: None,
+            reply_at: Some(now()),
+        };
+        let counts = Counts {
+            received_count: 2,
+            // Neither end of the range parsed.
+            received_first_at: None,
+            received_last_at: None,
+            threads: vec![undated, thread(30, None)],
+            ..Default::default()
+        };
+        let row = derive("dan@example.com", None, counts, now());
+        assert_eq!((row.inbound_threads, row.replied_threads), (2, 1));
+        assert_eq!(row.median_reply_ms, None, "an undated thread has no gap");
+        let first = row.received_first_at.expect("a row with mail has a date");
+        assert_eq!(first, now() - Duration::days(30));
+        assert_eq!(row.received_last_at, Some(first));
     }
 }

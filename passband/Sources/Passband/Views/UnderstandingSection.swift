@@ -602,16 +602,16 @@ private struct MemoryRow: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            if withdrawn == nil {
-                HStack(spacing: Space.s10) {
-                    if entry.origin == .inferred {
-                        Button("Confirm", action: confirm).buttonStyle(.textAction).font(Typo.micro)
-                    }
-                    Button("Delete", action: remove).buttonStyle(.textAction).font(Typo.micro)
+            // Delete is the owner's right on every entry, withdrawn or not;
+            // only a guess that still holds can be confirmed.
+            HStack(spacing: Space.s10) {
+                if entry.origin == .inferred, withdrawn == nil {
+                    Button("Confirm", action: confirm).buttonStyle(.textAction).font(Typo.micro)
                 }
-                .disabled(busy)
-                .opacity(hovering || busy ? 1 : 0.55)
+                Button("Delete", action: remove).buttonStyle(.textAction).font(Typo.micro)
             }
+            .disabled(busy)
+            .opacity(hovering || busy ? 1 : 0.55)
         }
         .padding(.vertical, Space.s10)
         .onHover { hovering = $0 }

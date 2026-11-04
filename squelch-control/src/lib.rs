@@ -45,6 +45,7 @@ pub mod labels;
 pub mod oauth;
 pub mod pages;
 pub mod pg_tls;
+pub mod posthog;
 pub mod ratelimit;
 pub mod reconnect;
 pub mod resend;

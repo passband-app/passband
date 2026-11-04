@@ -131,6 +131,7 @@ use crate::invites;
 use crate::labels;
 use crate::oauth::{self, Flow, GoogleEndpoints, Identity, Provider};
 use crate::pages;
+use crate::posthog::HostedIdentity;
 use crate::seal;
 use crate::sessions::{self, InsertError, Purpose, SessionKind};
 use crate::share;
@@ -1901,6 +1902,18 @@ pub async fn oauth_callback(
             // is in scope on this line and does not go in it, and neither does
             // the analytics id, which must never be logged beside one.
             tracing::info!(user_id = record.user_id, label = %label, "signup recorded on the funnel");
+            // Name this person in PostHog, under the id the app adopts when it
+            // pairs. Detached: analytics never makes a signup wait.
+            if let Some(posthog) = state.posthog() {
+                posthog.identify_detached(
+                    record.user_id,
+                    HostedIdentity {
+                        analytics_id: record.analytics_id,
+                        email: record.account_email,
+                        name: record.name,
+                    },
+                );
+            }
         }
         Err(e) => {
             tracing::error!(

@@ -68,7 +68,7 @@
   <body>
     <nav><a href="/">&larr; Passband</a></nav>
     <h1>Privacy Policy</h1>
-    <p class="meta">Effective October 29, 2026</p>
+    <p class="meta">Effective November 3, 2026</p>
 
     <p>
       Passband is an email client for Mac and iOS. Behind it runs
@@ -423,8 +423,12 @@
       of roughly its length, and an email's body is one empty box. The layout
       does show which kinds of cards and icons were on screen, such as a bill
       or a package. This helps us see where the app is confusing.
-      Events are keyed to a random per-install identifier, or for hosted
-      accounts to an opaque account identifier that is not your email address.
+      For self-hosted installs, events are keyed to a random per-install
+      identifier and PostHog is never told who you are. For hosted accounts,
+      events are keyed to an account identifier, and we also give PostHog the
+      email address and name you signed up with, so we can tell which account
+      a session belongs to when we support you. Deleting a hosted account
+      deletes this record in PostHog too.
       You can reduce or disable telemetry in Settings under Privacy; any level
       below Full turns recording off.
     </p>

@@ -45,12 +45,13 @@
 //! rather than a hope. The statement above still holds as written: there is
 //! nothing at rest here that opens a mailbox.
 //!
-//! `analytics_id` IS OPAQUE, AND STAYS THAT WAY BY NOT BEING PUT NEXT TO AN
-//! ADDRESS. It is the distinct_id PostHog knows a person by, which is the whole
-//! reason PostHog is never told an address at all. Beside a row id or a label it
-//! is harmless; beside an address it is the join that undoes the separation, so
-//! no line in this crate may carry both, and it is deliberately NOT on
-//! [`UserRow`], which is the shape the page that renders addresses is handed.
+//! `analytics_id` is the distinct_id PostHog knows a person by. For HOSTED
+//! people, PostHog is also told their address and name, on purpose and in one
+//! place: [`crate::posthog`], fed by [`ControlStore::record_signup`] and
+//! [`ControlStore::hosted_identities`]. Everywhere else the id stays apart from
+//! the address: no LOG line may carry both (a log is not where the operator
+//! looks a person up, and it outlives a deletion), and it is NOT on
+//! [`UserRow`], the shape the page that renders addresses is handed.
 
 use std::collections::BTreeSet;
 
@@ -62,6 +63,7 @@ use tokio_postgres::{IsolationLevel, NoTls, Row, Transaction};
 
 use crate::invites::DEFAULT_TTL_DAYS;
 use crate::pg_tls::TlsChoice;
+use crate::posthog::HostedIdentity;
 
 /// Connections the pool will open. Four, because the reason it exists is
 /// surviving a dropped connection rather than serving load: the hosted tier is
@@ -296,8 +298,8 @@ CREATE TABLE IF NOT EXISTS users (
     -- ever once (see `mark_user_first_paired`).
     first_paired_at TEXT COLLATE \"C\",
     -- The id PostHog knows this person by. MINTED ONCE AND NEVER ROTATED: it is
-    -- what lets analytics join one person's sessions together without analytics
-    -- ever being told an address, and rotating it would split one person into
+    -- what lets analytics join one person's sessions together, and the key the
+    -- hosted identify names them under. Rotating it would split one person into
     -- two strangers with no way back. UNIQUE so a collision is an error rather
     -- than two people merging into one.
     analytics_id    TEXT NOT NULL UNIQUE
@@ -488,19 +490,34 @@ pub struct UserRow {
     pub first_paired_at: Option<DateTime<Utc>>,
 }
 
-/// What a recorded signup hands back: the row it landed on, and the id that row
-/// is known by outside this database.
+/// What a recorded signup hands back: the row it landed on, the id that row is
+/// known by in PostHog, and who that is, for the identify that names them
+/// there (see [`crate::posthog`]).
 ///
-/// `Debug` IS FINE HERE and is the difference between this and [`UserRow`]:
-/// neither field is an address. A row id and an analytics id together are two
-/// opaque handles, which is exactly the pair a log line may carry.
-#[derive(Debug, Clone)]
+/// `Debug` is hand-written: the row id and analytics id are opaque handles a
+/// log line may carry, and the address and name are not.
+#[derive(Clone)]
 pub struct SignupRecord {
     pub user_id: i64,
     /// The KEPT id, never a freshly minted one: a second signup on a row that
     /// already has an analytics id gets the one it already had, or the person
     /// splits into two strangers in PostHog.
     pub analytics_id: String,
+    /// The Google account that finished this signup, normalized.
+    pub account_email: String,
+    /// What they typed into the waitlist's name field, if anything.
+    pub name: Option<String>,
+}
+
+impl std::fmt::Debug for SignupRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignupRecord")
+            .field("user_id", &self.user_id)
+            .field("analytics_id", &self.analytics_id)
+            .field("account_email", &"<redacted>")
+            .field("name", &self.name.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 /// One tenant row.
@@ -1815,7 +1832,7 @@ impl ControlStore {
                     SET signed_up_at = $2, account_email = $3, tenant_label = $4,
                         status = $5, approved_at = COALESCE(approved_at, $2)
                   WHERE invite_id = $1
-                RETURNING id, analytics_id",
+                RETURNING id, analytics_id, account_email, name",
                 &[&invite_id, &at, &email, &tenant_label, &USER_APPROVED],
             )
             .await?;
@@ -1823,6 +1840,8 @@ impl ControlStore {
             return Ok(SignupRecord {
                 user_id: row.try_get(0)?,
                 analytics_id: row.try_get(1)?,
+                account_email: row.try_get(2)?,
+                name: row.try_get(3)?,
             });
         }
 
@@ -1836,7 +1855,7 @@ impl ControlStore {
                         signed_up_at = EXCLUDED.signed_up_at,
                         account_email = EXCLUDED.account_email,
                         tenant_label = EXCLUDED.tenant_label
-                 RETURNING id, analytics_id",
+                 RETURNING id, analytics_id, account_email, name",
                 &[
                     &email,
                     &at,
@@ -1849,7 +1868,39 @@ impl ControlStore {
         Ok(SignupRecord {
             user_id: row.try_get(0)?,
             analytics_id: row.try_get(1)?,
+            account_email: row.try_get(2)?,
+            name: row.try_get(3)?,
         })
+    }
+
+    /// Everyone who has signed up for hosted, as PostHog should name them: the
+    /// backfill behind `squelch-control analytics identify`. The address is the
+    /// Google account that signed up, falling back to the one they are known
+    /// by for a row written before `account_email` existed.
+    pub async fn hosted_identities(&self) -> Result<Vec<(i64, HostedIdentity)>> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT id, analytics_id, COALESCE(account_email, email), name
+                   FROM users
+                  WHERE signed_up_at IS NOT NULL
+                  ORDER BY id",
+                &[],
+            )
+            .await?;
+        rows.iter()
+            .map(|r| {
+                Ok((
+                    r.try_get(0)?,
+                    HostedIdentity {
+                        analytics_id: r.try_get(1)?,
+                        email: r.try_get(2)?,
+                        name: r.try_get(3)?,
+                    },
+                ))
+            })
+            .collect()
     }
 
     /// Stamp activation: the first time a device that is not the console paired

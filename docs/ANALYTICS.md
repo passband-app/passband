@@ -149,8 +149,14 @@ web recordings for billing.
 An install mints a random UUID once. A hosted pairing link carries `aid`, the
 control plane's opaque per-person id; the app adopts it as `distinct_id` after
 a successful claim and connect, with one `$create_alias` folding the anonymous
-history in. First aid wins per install. PostHog never sees an address; the
-control plane never sees an event. `Analytics.isHosted` is that adoption flag.
+history in. First aid wins per install. `Analytics.isHosted` is that adoption
+flag.
+
+Hosted people are named in PostHog by control, not by the app: signup sends one
+`$set` with `email`, `name` and `hosted: true` on the `aid`
+(`squelch-control/src/posthog.rs`), and `squelch-control analytics identify`
+backfills everyone who signed up. The apps never send an address, so a
+self-hosted install stays a bare UUID. The control plane never sees an event.
 
 ## Person properties
 

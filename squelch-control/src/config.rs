@@ -347,6 +347,12 @@ pub struct Config {
     /// how 2026-09-28 went unnoticed until the person signing up said so. A
     /// SECRET: the URL is the whole credential, so `Debug` redacts it.
     pub alert_webhook_url: Option<String>,
+    /// PostHog's ingest origin, where a hosted signup's email and name are set
+    /// on their analytics person (see [`crate::posthog`]). `from_env` always
+    /// pins [`crate::posthog::POSTHOG_URL`]; `None` sends nothing, which is
+    /// what tests that do not exercise it use. Not a secret: the key it is
+    /// paired with is PostHog's public ingest key.
+    pub posthog_url: Option<String>,
     /// WorkOS AuthKit, when this deployment lets agents connect to a tenant's
     /// `/mcp` through it. `None` means the feature is OFF and `GET /agent/auth`
     /// is NOT MOUNTED (a 404): a deployment that cannot complete an AuthKit
@@ -501,6 +507,7 @@ impl std::fmt::Debug for Config {
                 "alert_webhook_url",
                 &self.alert_webhook_url.as_ref().map(|_| "<redacted>"),
             )
+            .field("posthog_url", &self.posthog_url)
             // WorkosConfig's own Debug redacts the API key.
             .field("workos", &self.workos)
             .finish()
@@ -645,6 +652,7 @@ impl Config {
             bifrost,
             waitlist,
             alert_webhook_url: alert_webhook_from(var("SQUELCH_CONTROL_ALERT_WEBHOOK_URL"))?,
+            posthog_url: Some(crate::posthog::POSTHOG_URL.to_string()),
             workos: workos_from(var("SQUELCH_CONTROL_WORKOS_API_KEY"))?,
         })
     }
@@ -1134,6 +1142,7 @@ mod tests {
                 resend_url: RESEND_URL.into(),
             }),
             alert_webhook_url: Some("https://hooks.slack.com/services/T0/B0/WEBHOOK-SECRET".into()),
+            posthog_url: None,
             workos: Some(WorkosConfig {
                 api_key: "WORKOS-API-KEY-VALUE".into(),
                 api_url: WORKOS_API_URL.into(),

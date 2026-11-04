@@ -66,6 +66,51 @@ struct EmailCardList: View {
     }
 }
 
+/// The `show_page` card: a button to one page of the app. Title, glyph and
+/// line all come from `PageLink`, never the model. `onOpen` is the caller's,
+/// as on the email cards: the tray navigates and closes itself.
+struct PageLinkCard: View {
+    let page: PageLink
+    let onOpen: (PageLink) -> Void
+
+    var body: some View {
+        Button {
+            onOpen(page)
+        } label: {
+            HStack(spacing: Space.s10) {
+                Image(systemName: page.symbol)
+                    .font(Typo.ui(13, weight: .medium))
+                    .foregroundStyle(Palette.inkDim)
+                    .frame(width: Typo.size(20))
+                VStack(alignment: .leading, spacing: Space.scaled(2)) {
+                    Text(page.title)
+                        .font(Typo.ui(12, weight: .semibold))
+                        .foregroundStyle(Palette.ink)
+                        .lineLimit(1)
+                    Text(page.blurb)
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaintest)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                }
+                Spacer(minLength: Space.s6)
+                Image(systemName: "arrow.right")
+                    .font(Typo.ui(11, weight: .semibold))
+                    .foregroundStyle(Palette.inkFaint)
+            }
+            .padding(Space.s10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
+                .fill(Palette.hairline.opacity(0.35))
+        )
+        .help("Go to \(page.title)")
+    }
+}
+
 /// One tool-activity chip: what the agent is doing, in the smallest type the
 /// app has, with its outcome on the trailing edge.
 struct ToolChipRow: View {

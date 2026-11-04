@@ -20,6 +20,7 @@ enum ReplayIconNames {
         "arrow.right",
         "arrow.triangle.branch",
         "arrow.up",
+        "arrow.up.forward.square",
         "arrow.up.left",
         "arrow.up.left.and.arrow.down.right",
         "arrow.up.right",
@@ -130,6 +131,7 @@ enum ReplayIconNames {
         "wind",
         "wrench",
         "xmark",
+        "xmark.bin",
         "xmark.circle",
         "xmark.circle.fill",
     ]

@@ -663,7 +663,7 @@ fn replied_threads(
         out.push(RepliedThread {
             message_id: id,
             subject: crate::text::truncate_chars(
-                &memory::clean_field(&subject),
+                &profile::blank_sensitive(&memory::clean_field(&subject)),
                 profile::MAX_SUBJECT_CHARS,
             ),
             participants,

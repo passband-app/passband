@@ -269,26 +269,31 @@ pub trait ProfileInputSource {
 /// and there is no telling the owner's words from it.
 pub fn owner_words(body: &str) -> Option<String> {
     let own = super::condense::own_text(body)?;
-    let mut out = String::new();
-    for word in own.split_whitespace() {
-        let lower = word.to_ascii_lowercase();
-        let blanked = if lower.contains("://") || lower.starts_with("www.") {
-            "[link]"
-        } else if word.chars().filter(char::is_ascii_digit).count() >= 4 {
-            // A code, a phone number, an account number: none of it is
-            // anything a profile should be built from, and a code is exactly
-            // what the prompt says never to repeat.
-            "[number]"
-        } else {
-            word
-        };
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        out.push_str(blanked);
-    }
-    let out = crate::text::truncate_chars(&out, OWNER_REPLY_CHARS);
+    let out = crate::text::truncate_chars(&blank_sensitive(&own), OWNER_REPLY_CHARS);
     (!out.trim().is_empty()).then_some(out)
+}
+
+/// Every piece of mail text the pass is shown goes through this: the owner's
+/// reply AND the thread's subject (a subject is where a code, a tracking link
+/// or a case number sits most often). Whitespace folds to single spaces; a
+/// word that is a link becomes `[link]` and one carrying four or more digits
+/// becomes `[number]`. A code, a phone number, an account number: none of it
+/// is anything a profile should be built from, and a code is exactly what
+/// the prompt says never to repeat.
+pub fn blank_sensitive(text: &str) -> String {
+    text.split_whitespace()
+        .map(|word| {
+            let lower = word.to_ascii_lowercase();
+            if lower.contains("://") || lower.starts_with("www.") {
+                "[link]"
+            } else if word.chars().filter(char::is_ascii_digit).count() >= 4 {
+                "[number]"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The output schema: strict JSON, one flat entry shape for every kind (most

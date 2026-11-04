@@ -126,6 +126,7 @@ fn mailbox() -> Mailbox {
         .unwrap();
     let reply = store
         .upsert_message(&NewMessage {
+            subject: "Re: order 88231977 https://shop.example/track".into(),
             is_sent: true,
             from_addr: "me@example.com".into(),
             to_addrs: Some(SAM.into()),
@@ -266,6 +267,10 @@ async fn the_model_sees_the_owners_words_and_never_an_inbound_body_or_a_sealed_t
     );
     // A long number in the owner's own words is blanked too.
     assert!(!user.contains("4155551234"), "{user}");
+    // And so are the subject's: a number and a link.
+    assert!(!user.contains("88231977"), "{user}");
+    assert!(!user.contains("shop.example"), "{user}");
+    assert!(user.contains("Re: order [number] [link]"), "{user}");
     let input: Value = serde_json::from_str(&user).unwrap();
     assert_eq!(input["replied_threads"].as_array().unwrap().len(), 1);
     assert_eq!(input["replied_threads"][0]["message_id"], mailbox.reply);

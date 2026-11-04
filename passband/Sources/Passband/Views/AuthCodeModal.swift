@@ -46,11 +46,8 @@ struct AuthCodeModal: View {
                     actions
 
                     HStack(spacing: Space.s4) {
-                        Text("not stored · revealing it was audited")
-                            .font(Typo.micro)
-                            .foregroundStyle(Palette.inkFaintest)
                         if !paused && secondsLeft > 0 {
-                            Text("· \(secondsLeft)s")
+                            Text("\(secondsLeft)s")
                                 .font(Typo.num(10))
                                 .foregroundStyle(Palette.inkFaintest)
                                 .help("auto-dismisses; copying keeps it open")

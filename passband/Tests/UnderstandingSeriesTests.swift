@@ -67,6 +67,9 @@ struct UnderstandingSeriesTests {
         let s = series([
             row("answered", inbound: 10, replied: 9),
             row("once", inbound: 6, replied: 1),
+            row("bulk-answered-once", inbound: 190, replied: 1, attention: 38, opened: 2, read: 0.1),
+            row("bulk-answered-twice", inbound: 190, replied: 2, attention: 38, opened: 2, read: 0.1),
+            row("two-of-twelve", inbound: 12, replied: 2),
             row("reader", attention: 20, opened: 18, read: 0.9),
             row("skimmer", attention: 20, opened: 12, read: 0.3),
             row("ignored", attention: 38, opened: 2, read: 0.1),
@@ -74,7 +77,11 @@ struct UnderstandingSeriesTests {
             row("unmeasured"),
         ])
         expect(point(s, "answered")?.region == .answer, "a sender answered 9 of 10 is someone you answer")
-        expect(point(s, "once")?.region == .answer, "one reply is still a reply: the top half")
+        expect(point(s, "once")?.region == .ignore && point(s, "once")?.measure == PeopleMeasure.none,
+            "one reply is not a person you answer: placed by reads, of which it has none")
+        expect(point(s, "bulk-answered-once")?.region == .ignore, "a newsletter answered once in 190 sits with what you ignore")
+        expect(point(s, "bulk-answered-twice")?.region == .ignore, "two replies in 190 is under the 10% share")
+        expect(point(s, "two-of-twelve")?.region == .answer, "two replies on 12 threads (17%) is someone you answer")
         expect(point(s, "reader")?.region == .read, "read to the end, never answered: things you read")
         expect(point(s, "skimmer")?.region == .ignore, "a 30% read is under the 40% line")
         expect(point(s, "ignored")?.region == .ignore, "opened 2 of 38 is ignored")
@@ -82,9 +89,9 @@ struct UnderstandingSeriesTests {
         expect(point(s, "unmeasured")?.region == .ignore && point(s, "unmeasured")?.measure == PeopleMeasure.none,
             "nothing to stand on sits at the floor, marked as unmeasured")
 
-        let a = point(s, "answered")!, once = point(s, "once")!
+        let a = point(s, "answered")!, two = point(s, "two-of-twelve")!
         expect(abs(a.y - 0.95) < 1e-9, "the top half is 0.5 + share / 2 (9 of 10 is 0.95)")
-        expect(abs(once.y - (0.5 + 0.5 / 6)) < 1e-9, "1 of 6 sits just over the line")
+        expect(abs(two.y - (0.5 + 1.0 / 12)) < 1e-9, "2 of 12 sits just over the line")
         expect(a.measure == .replies(0.9), "a replied sender's height rests on replies")
         let reader = point(s, "reader")!
         expect(reader.measure == .reads(0.9) && reader.y < UnderstandingSeries.answerLine,

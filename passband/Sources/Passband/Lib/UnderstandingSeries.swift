@@ -149,9 +149,19 @@ struct UnderstandingSeries: Equatable {
         return first > cut
     }
 
+    /// What it takes to sit in the top band: answered on at least two threads,
+    /// and on at least a tenth of them. One reply, or a reply to one thread in
+    /// 190, is not a person you answer; that sender is placed by its reads.
+    static let answeredMinimum = 2
+    static let answeredMinimumShare = 0.1
+
+    static func isAnswered(_ row: RelationshipRow) -> Bool {
+        row.replied_threads >= answeredMinimum && replyShare(row) >= answeredMinimumShare
+    }
+
     /// The point's height and what it stands on.
     static func ladder(_ row: RelationshipRow) -> (PeopleMeasure, Double) {
-        if row.replied_threads > 0, row.inbound_threads > 0 {
+        if isAnswered(row) {
             let share = min(1, Double(row.replied_threads) / Double(row.inbound_threads))
             return (.replies(share), answerLine + share * (1 - answerLine))
         }
@@ -363,10 +373,15 @@ enum UnderstandingText {
                 ?? "new"
             s = "\(first), \(UsageText.count(row.received_count)) so far"
             if row.replied_threads > 0 { s += ", " + replies(row) }
-        } else if row.replied_threads > 0, row.inbound_threads > 0 {
+        } else if UnderstandingSeries.isAnswered(row) {
             s = replies(row)
         } else {
+            // Placed by its reads, so it leads with them; a stray reply is
+            // still said, after.
             s = reads(row)
+            if row.replied_threads > 0, row.inbound_threads > 0 {
+                s += ", replied to \(UsageText.count(row.replied_threads)) of \(UsageText.count(row.inbound_threads))"
+            }
         }
         if row.corrections > 0 {
             s += row.corrections == 1 ? ", sorting corrected once" : ", sorting corrected \(UsageText.count(row.corrections)) times"

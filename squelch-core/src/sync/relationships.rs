@@ -11,28 +11,37 @@
 //!   (`relationships::DIRTY_DRAIN_MAX`); a flood is carried by later rounds.
 //! - THE NIGHTLY FULL RECOMPUTE, once per owner-local day from 03:00
 //!   (`owner_clock`), because the monthly rate and the ledger floors move with
-//!   the clock when nothing arrives. The day it last ran is stamped in
+//!   the clock when nothing arrives. The day it last completed is stamped in
 //!   `sync_state`, so a restart does not run it twice; a daemon that was off
 //!   at 03:00 runs it on its first round after.
 //! - THE FIRST-RUN BACKFILL, the same walk, once per store: a daemon upgraded
 //!   onto an existing mailbox has mail and no rows. Until it completes the
 //!   agent context carries no `relationship` key at all. Stamped only AFTER
-//!   the whole walk, so a crash mid-walk walks again.
+//!   the whole walk.
+//!
+//! THE WALK IS SPREAD OVER ROUNDS. One round runs at most
+//! `relationships::WALK_CHUNKS_PER_ROUND` chunks and saves where it stopped
+//! (`relationships::RELATIONSHIPS_WALK_CURSOR_KEY`), so triage interleaves
+//! with a backfill of any size instead of waiting behind all of it, and a
+//! restart resumes from the cursor instead of from the first address. Each
+//! chunk is one lock acquisition, and the doors get the mutex back between
+//! them.
 //!
 //! COSTS NO MODEL CALL, so it runs whether or not a poll has succeeded or a
-//! model is configured. The full walk yields between chunks: each chunk is
-//! one lock acquisition (`relationships::RECOMPUTE_CHUNK` addresses), and the
-//! doors get the mutex back between them.
+//! model is configured.
 
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, NaiveDate, Utc};
 
 use super::SyncEngine;
 use crate::credentials::CredentialStore;
+use crate::error::Result;
 use crate::owner_clock::{OwnerClock, OwnerZone};
 use crate::store::sqlite::relationships::{
     DIRTY_DRAIN_MAX, RECOMPUTE_CHUNK, RELATIONSHIPS_BACKFILL_KEY, RELATIONSHIPS_DAILY_KEY,
+    RELATIONSHIPS_WALK_CURSOR_KEY, WALK_CHUNKS_PER_ROUND,
 };
 use crate::store::{Store, SyncState};
+use crate::types::AccountId;
 
 /// The owner-local hour the nightly recompute is due from.
 pub const FULL_RECOMPUTE_LOCAL_HOUR: u32 = 3;
@@ -55,76 +64,87 @@ pub fn full_recompute_due(backfilled: bool, last_day: Option<u64>, today: u64) -
     !backfilled || last_day != Some(today)
 }
 
+/// What one round did to the full walk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WalkProgress {
+    /// No walk was due or running.
+    Idle,
+    /// The walk ran this round's chunks and stopped after this address.
+    Paused(String),
+    /// The walk reached the end this round and stamped the day.
+    Completed,
+}
+
+/// One round of ledger work, synchronously: the walk's share for this round
+/// (`today` is the [`ledger_day`]), then the dirty set. Public within the
+/// crate so a test drives rounds without an engine.
+pub(crate) fn ledger_round<S: Store + ?Sized>(
+    store: &S,
+    account: AccountId,
+    today: u64,
+) -> Result<WalkProgress> {
+    let backfilled = store
+        .sync_state(account, RELATIONSHIPS_BACKFILL_KEY)?
+        .is_some();
+    let last_day = store
+        .sync_state(account, RELATIONSHIPS_DAILY_KEY)?
+        .map(|s| s.last_uid);
+    let cursor = store.get_app_setting(account, RELATIONSHIPS_WALK_CURSOR_KEY)?;
+    // A walk already running finishes whatever the day says; a new one starts
+    // only when one is owed.
+    let start = match cursor {
+        Some(cursor) => Some(cursor),
+        None if full_recompute_due(backfilled, last_day, today) => Some(String::new()),
+        None => None,
+    };
+    let progress = match start {
+        None => WalkProgress::Idle,
+        Some(mut after) => {
+            let mut done = false;
+            for _ in 0..WALK_CHUNKS_PER_ROUND {
+                match store.recompute_relationship_chunk(account, Some(&after), RECOMPUTE_CHUNK)? {
+                    Some(last) => after = last,
+                    None => {
+                        done = true;
+                        break;
+                    }
+                }
+            }
+            if done {
+                let stamp = |key: &str, last_uid: u64| {
+                    store.set_sync_state(
+                        account,
+                        key,
+                        &SyncState {
+                            uidvalidity: 0,
+                            last_uid,
+                        },
+                    )
+                };
+                stamp(RELATIONSHIPS_DAILY_KEY, today)?;
+                if !backfilled {
+                    stamp(RELATIONSHIPS_BACKFILL_KEY, 1)?;
+                }
+                store.delete_app_setting(account, RELATIONSHIPS_WALK_CURSOR_KEY)?;
+                WalkProgress::Completed
+            } else {
+                store.set_app_setting(account, RELATIONSHIPS_WALK_CURSOR_KEY, &after)?;
+                WalkProgress::Paused(after)
+            }
+        }
+    };
+    store.drain_relationship_dirty(account, DIRTY_DRAIN_MAX)?;
+    Ok(progress)
+}
+
 impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C> {
     /// One refine round's ledger work. Cannot fail the round: an error is
     /// logged and the next round tries again.
     pub(super) async fn relationship_round(&self) {
-        let account = self.account_id;
-        let backfilled = match self.store.sync_state(account, RELATIONSHIPS_BACKFILL_KEY) {
-            Ok(state) => state.is_some(),
-            Err(e) => {
-                eprintln!("squelch: relationship ledger state unreadable ({e}); skipping round");
-                return;
-            }
-        };
-        let last_day = self
-            .store
-            .sync_state(account, RELATIONSHIPS_DAILY_KEY)
-            .ok()
-            .flatten()
-            .map(|s| s.last_uid);
-        let zone = self.store.owner_zone(account).unwrap_or_default();
+        let zone = self.store.owner_zone(self.account_id).unwrap_or_default();
         let today = ledger_day(Utc::now(), zone);
-        if full_recompute_due(backfilled, last_day, today)
-            && self.recompute_all_relationships().await
-        {
-            let stamp = |key: &str, last_uid: u64| {
-                self.store.set_sync_state(
-                    account,
-                    key,
-                    &SyncState {
-                        uidvalidity: 0,
-                        last_uid,
-                    },
-                )
-            };
-            let stamped = stamp(RELATIONSHIPS_DAILY_KEY, today).and_then(|()| {
-                if backfilled {
-                    Ok(())
-                } else {
-                    stamp(RELATIONSHIPS_BACKFILL_KEY, 1)
-                }
-            });
-            if let Err(e) = stamped {
-                eprintln!("squelch: relationship ledger stamp failed ({e})");
-            }
-        }
-        if let Err(e) = self
-            .store
-            .drain_relationship_dirty(account, DIRTY_DRAIN_MAX)
-        {
-            eprintln!("squelch: relationship ledger drain failed ({e})");
-        }
-    }
-
-    /// The full walk, chunk by chunk, yielding between chunks. `true` when it
-    /// reached the end.
-    async fn recompute_all_relationships(&self) -> bool {
-        let mut after: Option<String> = None;
-        loop {
-            match self.store.recompute_relationship_chunk(
-                self.account_id,
-                after.as_deref(),
-                RECOMPUTE_CHUNK,
-            ) {
-                Ok(Some(last)) => after = Some(last),
-                Ok(None) => return true,
-                Err(e) => {
-                    eprintln!("squelch: relationship ledger recompute failed ({e})");
-                    return false;
-                }
-            }
-            tokio::task::yield_now().await;
+        if let Err(e) = ledger_round(&*self.store, self.account_id, today) {
+            eprintln!("squelch: relationship ledger round failed ({e})");
         }
     }
 }
@@ -165,5 +185,118 @@ mod tests {
             !full_recompute_due(true, Some(20261104), 20261104),
             "a restart the same day does not rerun it"
         );
+    }
+}
+
+#[cfg(test)]
+mod walk_tests {
+    use super::*;
+    use crate::store::SqliteStore;
+
+    /// `n` senders, one message each.
+    fn store_with_senders(n: usize) -> (SqliteStore, AccountId) {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let account = store.ensure_account("me@example.com").unwrap();
+        for i in 0..n {
+            store
+                .upsert_message(&crate::types::NewMessage {
+                    account_id: account,
+                    gmail_msg_id: format!("m{i}"),
+                    thread_id: format!("t{i}"),
+                    from_addr: format!("s{i:04}@example.com"),
+                    from_name: None,
+                    subject: "s".into(),
+                    received_at: Utc::now(),
+                    snippet: String::new(),
+                    body: String::new(),
+                    body_html: None,
+                    is_sent: false,
+                    is_spam: false,
+                    to_addrs: None,
+                    cc_addrs: None,
+                    bcc_addrs: None,
+                    list_unsubscribe: None,
+                    list_unsub_one_click: false,
+                    auth_pass: None,
+                    sender_signals: None,
+                })
+                .unwrap();
+        }
+        (store, account)
+    }
+
+    fn rows(store: &SqliteStore, account: AccountId) -> usize {
+        store
+            .list_relationships(
+                account,
+                crate::store::sqlite::relationships::RelationshipSort::Volume,
+                500,
+            )
+            .unwrap()
+            .rows
+            .len()
+    }
+
+    /// The walk is spread over rounds, resumes from its cursor (including
+    /// across a restart, which is a fresh round over the same store), and
+    /// stamps the backfill and the day only when it reaches the end.
+    #[test]
+    fn the_walk_runs_a_bounded_share_per_round_and_resumes_from_its_cursor() {
+        let per_round = WALK_CHUNKS_PER_ROUND * RECOMPUTE_CHUNK;
+        let (store, account) = store_with_senders(per_round + 10);
+        let first = ledger_round(&store, account, 20261104).unwrap();
+        let WalkProgress::Paused(cursor) = first else {
+            panic!("a backfill bigger than a round must pause: {first:?}");
+        };
+        // This round's share, in address order: the senders up to about the
+        // 200th (the universe may hold one more address that sorts first,
+        // the account's own, which is recounted and has no row).
+        assert!(
+            cursor == format!("s{:04}@example.com", per_round - 1)
+                || cursor == format!("s{:04}@example.com", per_round - 2),
+            "{cursor}"
+        );
+        assert_eq!(
+            store
+                .get_app_setting(account, RELATIONSHIPS_WALK_CURSOR_KEY)
+                .unwrap()
+                .as_deref(),
+            Some(cursor.as_str())
+        );
+        assert!(
+            store
+                .sync_state(account, RELATIONSHIPS_BACKFILL_KEY)
+                .unwrap()
+                .is_none(),
+            "a half-filled table is not backfilled"
+        );
+
+        assert_eq!(
+            ledger_round(&store, account, 20261104).unwrap(),
+            WalkProgress::Completed
+        );
+        assert_eq!(rows(&store, account), per_round + 10);
+        assert!(
+            store
+                .get_app_setting(account, RELATIONSHIPS_WALK_CURSOR_KEY)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .sync_state(account, RELATIONSHIPS_BACKFILL_KEY)
+                .unwrap()
+                .is_some()
+        );
+        // The same ledger day again: nothing owed.
+        assert_eq!(
+            ledger_round(&store, account, 20261104).unwrap(),
+            WalkProgress::Idle
+        );
+        // The next day walks again.
+        assert!(matches!(
+            ledger_round(&store, account, 20261105).unwrap(),
+            WalkProgress::Paused(_)
+        ));
     }
 }

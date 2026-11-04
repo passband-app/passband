@@ -91,6 +91,17 @@ pub const RELATIONSHIPS_DAILY_KEY: &str = "relationships_daily";
 /// chunk to a few milliseconds of the mutex both doors and sync wait on.
 pub const RECOMPUTE_CHUNK: usize = 25;
 
+/// `app_settings` key holding the full walk's cursor while a walk is in
+/// progress: the last address it recounted, `""` for a walk just started. No
+/// row means no walk is running. Persisted so a restart resumes rather than
+/// restarting a walk the size of the address book.
+pub const RELATIONSHIPS_WALK_CURSOR_KEY: &str = "relationships_walk_cursor";
+
+/// How many [`RECOMPUTE_CHUNK`]-address chunks of the full walk one refine
+/// round runs. The rest wait for later rounds, so triage interleaves with a
+/// backfill of any size instead of stalling behind it.
+pub const WALK_CHUNKS_PER_ROUND: usize = 8;
+
 /// The most dirty addresses one refine round drains. A burst past it (the
 /// first backfill's flood) is carried by the next round, and by the nightly
 /// recompute, rather than by one round that holds the lane for seconds.
@@ -197,14 +208,56 @@ const CONTACT_SQL: &str = "SELECT sent_count, last_sent_at, display_name FROM co
      WHERE account_id = ?1 AND addr = ?2 COLLATE NOCASE
      ORDER BY sent_count DESC LIMIT 1";
 
-/// The next `?3` addresses after `?2` in the full walk's universe.
-pub(crate) const CHUNK_SQL: &str = "SELECT a FROM (
-         SELECT lower(trim(addr)) AS a FROM senders WHERE account_id = ?1
-         UNION SELECT lower(trim(addr)) FROM contacts WHERE account_id = ?1
-         UNION SELECT addr FROM message_recipients WHERE account_id = ?1
-         UNION SELECT addr FROM relationships WHERE account_id = ?1)
-     WHERE a > ?2 AND a != ''
-     ORDER BY a LIMIT ?3";
+/// The full walk's universe, one statement per source, each the next `?3`
+/// addresses after the cursor `?2` by a SEEK on that table's NOCASE (or
+/// already-lowercased) index. Merged and deduplicated in Rust
+/// ([`walk_addresses`]), so a chunk costs four range seeks of at most `?3`
+/// rows each and the whole walk is linear in the address count. The cursor
+/// is always lowercased (`sender_key`), and for a lowercased string NOCASE
+/// and BINARY order agree, so one cursor serves all four.
+///
+/// THE TRAP this replaces: one `UNION` over `lower(trim(addr))`, which no
+/// index can serve, so every 25-address chunk re-read and re-sorted every
+/// sender and contact of the account. At 30,000 senders that was 9 ms a
+/// chunk and 1,200 chunks a night: quadratic, and 40 s of the store mutex.
+pub(crate) const WALK_SOURCES: [&str; 4] = [
+    "SELECT lower(trim(addr)) FROM senders INDEXED BY idx_senders_addr_nocase
+      WHERE account_id = ?1 AND addr > ?2 COLLATE NOCASE
+      ORDER BY addr COLLATE NOCASE LIMIT ?3",
+    "SELECT lower(trim(addr)) FROM contacts INDEXED BY idx_contacts_addr_nocase
+      WHERE account_id = ?1 AND addr > ?2 COLLATE NOCASE
+      ORDER BY addr COLLATE NOCASE LIMIT ?3",
+    "SELECT DISTINCT addr FROM message_recipients INDEXED BY idx_message_recipients_addr
+      WHERE account_id = ?1 AND addr > ?2
+      ORDER BY addr LIMIT ?3",
+    "SELECT addr FROM relationships
+      WHERE account_id = ?1 AND addr > ?2
+      ORDER BY addr LIMIT ?3",
+];
+
+/// The next `max` addresses after `after` across [`WALK_SOURCES`], in order
+/// and deduplicated. Fewer than `max` means the walk has reached the end.
+pub(crate) fn walk_addresses(
+    conn: &Connection,
+    account_id: AccountId,
+    after: &str,
+    max: usize,
+) -> Result<Vec<String>> {
+    let mut all = std::collections::BTreeSet::new();
+    for sql in WALK_SOURCES {
+        let rows = conn
+            .prepare_cached(sql)?
+            .query_map(params![account_id, after, max as i64], |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        all.extend(
+            rows.into_iter()
+                .filter(|a| !a.is_empty() && a.as_str() > after),
+        );
+    }
+    Ok(all.into_iter().take(max).collect())
+}
 
 /// Columns of a stored row, in [`row_from_sql`]'s order.
 const ROW_COLUMNS: &str = "addr, display_name, received_count, received_first_at,
@@ -652,9 +705,9 @@ impl SqliteStore {
     /// row, a Sent recipient row, or a ledger row already: the first three
     /// between them hold every address with mail either way (contacts alone
     /// would miss a recipient the contact seeding filtered out), and the last
-    /// is how a row whose mail has gone is found and removed. One `UNION`
-    /// over per-account tables per chunk, which is the full recompute's one
-    /// walk and its whole point; a single address is never found this way.
+    /// is how a row whose mail has gone is found and removed. Each chunk is a
+    /// range seek on each source ([`walk_addresses`]); a single address is
+    /// never found this way.
     pub fn recompute_relationship_chunk(
         &self,
         account_id: AccountId,
@@ -662,13 +715,7 @@ impl SqliteStore {
         max: usize,
     ) -> Result<Option<String>> {
         let conn = self.lock()?;
-        let addrs: Vec<String> = conn
-            .prepare_cached(CHUNK_SQL)?
-            .query_map(
-                params![account_id, after.unwrap_or(""), max.max(1) as i64],
-                |r| r.get(0),
-            )?
-            .collect::<std::result::Result<_, _>>()?;
+        let addrs = walk_addresses(&conn, account_id, after.unwrap_or(""), max.max(1))?;
         let mut recomputer = Recomputer::new(&conn, account_id, Utc::now())?;
         // The nightly walk always counts in full: it is what catches every
         // change no mark saw.

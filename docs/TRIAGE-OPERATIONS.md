@@ -464,10 +464,14 @@ purge flow's `SenderMeasurer`.
 Ingest, not-spam and the attention POST add the address to
 `relationship_dirty`. Every refine round, before the triage pass, recomputes
 up to 200 dirty addresses, 25 per store lock. Once per owner-local day from
-03:00 the whole table is recomputed in the same chunks; the day it last ran
-is `sync_state` mailbox `relationships_daily`. A store that predates the table
-is filled by the same walk on the first round, stamped
-`relationships_backfill` only when the walk completes.
+03:00 the whole table is recomputed in the same chunks; the day it last
+completed is `sync_state` mailbox `relationships_daily`. A store that
+predates the table is filled by the same walk on the first round, stamped
+`relationships_backfill` only when the walk completes. The walk runs at most
+8 chunks (200 addresses) per refine round and keeps its place in
+`app_settings` key `relationships_walk_cursor`, so triage interleaves with
+it and a restart resumes where it stopped. Each chunk finds its addresses by
+range seeks on the senders, contacts, recipients and ledger indexes.
 
 The triage context carries the row as `relationship` beside
 `sender_is_contact`, and `read_sender_history` returns it as `relationship`

@@ -202,6 +202,13 @@ CREATE TABLE IF NOT EXISTS senders (
     last_received_at TEXT NOT NULL,
     PRIMARY KEY(account_id, addr)
 );
+-- NOCASE twin of the key, for the relationship ledger's full walk
+-- (`relationships::WALK_SOURCES`), which seeks the directory in address order
+-- from a lowercased cursor. The BINARY key cannot serve `addr > ? COLLATE
+-- NOCASE`, and without a seek every chunk of the walk re-sorted the whole
+-- directory (see `idx_contacts_addr_nocase`).
+CREATE INDEX IF NOT EXISTS idx_senders_addr_nocase
+    ON senders(account_id, addr COLLATE NOCASE);
 
 CREATE TABLE IF NOT EXISTS sender_rules (
     id            INTEGER PRIMARY KEY,

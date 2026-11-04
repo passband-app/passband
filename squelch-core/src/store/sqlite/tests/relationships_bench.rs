@@ -15,7 +15,8 @@
 
 use super::super::reading_senders::SenderMeasurer;
 use super::super::relationships::{
-    CHUNK_SQL, CORRECTIONS_SQL, INBOUND_SQL, INITIATED_SQL, NAME_SQL, THREADS_SQL,
+    CORRECTIONS_SQL, INBOUND_SQL, INITIATED_SQL, NAME_SQL, THREADS_SQL, WALK_SOURCES,
+    walk_addresses,
 };
 use super::super::*;
 use super::support::*;
@@ -188,27 +189,21 @@ fn full_walk_chunks() {
     build(&store, acct);
     {
         let conn = store.lock().unwrap();
-        let mut plan = conn
-            .prepare(&format!("EXPLAIN QUERY PLAN {CHUNK_SQL}"))
-            .unwrap();
-        let lines: Vec<String> = plan
-            .query_map(params![acct, "person5000@example.com", 25], |r| {
-                r.get::<_, String>(3)
-            })
-            .unwrap()
-            .map(|l| l.unwrap())
-            .collect();
-        let mut stmt = conn.prepare(CHUNK_SQL).unwrap();
+        for sql in WALK_SOURCES {
+            let mut plan = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let lines: Vec<String> = plan
+                .query_map(params![acct, "person5000@example.com", 25], |r| {
+                    r.get::<_, String>(3)
+                })
+                .unwrap()
+                .map(|l| l.unwrap())
+                .collect();
+            eprintln!("BENCH walk source plan:\n  {}", lines.join("\n  "));
+        }
         let took = best(5, || {
-            let mut rows = stmt
-                .query(params![acct, "person5000@example.com", 25])
-                .unwrap();
-            while rows.next().unwrap().is_some() {}
+            walk_addresses(&conn, acct, "person5000@example.com", 25).unwrap();
         });
-        eprintln!(
-            "BENCH chunk address query: {took:?}\n  {}",
-            lines.join("\n  ")
-        );
+        eprintln!("BENCH chunk address query: {took:?}");
     }
     let start = Instant::now();
     store.recompute_all_relationships(acct).unwrap();

@@ -841,3 +841,41 @@ async fn a_new_accounts_backfilled_promotions_are_swept_as_stale() {
     assert_eq!(body["message_ids"], json!([old]));
     assert_eq!(open_in_reading(&h).await, [essay]);
 }
+
+/// Smart clear works on the 30-day inventory, not the Reading board. On a new
+/// account, a first-load promotion from before the onboarding week is off the
+/// board but is still swept as stale; the one on the board, a day old, is not.
+#[tokio::test]
+async fn smart_clear_sweeps_first_load_mail_the_board_does_not_show() {
+    let h = harness(|_, _| {});
+    let first_load = |key: &str, days_ago: i64, summary: &str| {
+        let message = NewMessage {
+            from_addr: ADDRESS.to_string(),
+            from_name: Some(NAME.to_string()),
+            received_at: Utc::now() - Duration::days(days_ago),
+            ..msg(h.acct, key, key, SUBJECT, BODY)
+        };
+        let id = ingest_first_load(&h.store, &message);
+        commit(&h.store, h.acct, id, summary, |_| {});
+        id
+    };
+    let fresh = first_load("fresh", 1, "New arrivals");
+    let old = first_load("old", 20, "Autumn sale");
+    // The ledger began with the account, a moment ago.
+    h.store
+        .set_app_setting(h.acct, "opened_ledger_since", &Utc::now().to_rfc3339())
+        .unwrap();
+    let board = body_json(
+        h.app
+            .clone()
+            .oneshot(authed("GET", "/client/v2/feed?destination=reading"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(board["items"].as_array().unwrap().len(), 1);
+    assert_eq!(board["items"][0]["message_id"], json!(fresh));
+    let body = press(&h).await;
+    assert_eq!(body["message_ids"], json!([old]));
+    assert_eq!(open_in_reading(&h).await, [fresh]);
+}

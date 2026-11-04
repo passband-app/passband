@@ -2761,8 +2761,9 @@ impl AgentTriageStore for SqliteStore {
 /// `agent_reading_with_query`, and smart clear and the per-sender purge read
 /// (`reading_senders`) call it under the lock they already hold. Two shapes of
 /// one answer: the 30-day inventory those cleaners work on, and, with
-/// `query.reading_board`, the shorter Reading BOARD the owner sees (the
-/// default feed), which is a newest-first prefix of it.
+/// `query.reading_board`, the Reading BOARD the owner sees (the default
+/// feed): the same inventory with only its FIRST-LOAD mail cut down to the
+/// onboarding week (see [`reading_board`]).
 pub(super) fn reading_items(
     conn: &Connection,
     account: AccountId,
@@ -2787,29 +2788,46 @@ fn sort_newest_first(items: &mut [AgentListItem]) {
     });
 }
 
-/// The most days of mail the Reading board reaches back.
+/// How many owner-zone calendar days of first-load Reading mail the board
+/// shows: the onboarding week.
 pub const READING_BOARD_DAYS: i64 = 7;
-/// The most messages the Reading board shows. Reading is the low-stakes
-/// pile (newsletters, announcements, promotions), and a month of it is a
-/// guilt list, not a reading list.
+/// The most FIRST-LOAD messages the Reading board shows. The first-run
+/// backfill fills Reading with a month of newsletters and promotions at once,
+/// and a new account opening on that reads as a guilt list, not a reading
+/// list. Mail that arrives after onboarding is never capped.
 pub const READING_BOARD_MAX: usize = 49;
 
-/// THE READING BOARD: the newest [`READING_BOARD_MAX`] Reading messages of the
-/// last [`READING_BOARD_DAYS`] days in the owner's zone, COUNTING MAIL ALREADY
-/// DONE, less the done ones. A heavy week shrinks the window from its old end
-/// by however much it takes; a quiet one shows the whole week.
+/// THE READING BOARD: what the owner's default Reading view shows. Two parts,
+/// merged newest first and cut to `limit`:
 ///
+/// - EVERY READING MESSAGE THAT IS NOT FIRST-LOAD (`triage.first_load = 0`):
+///   the plain inventory (`query.since`, the 30-day default), with no window
+///   and no cap. After onboarding, every new Reading email shows up.
+/// - FIRST-LOAD MAIL (what the first-run backfill brought in): the newest
+///   [`READING_BOARD_MAX`] first-load Reading messages of the
+///   [`READING_BOARD_DAYS`] owner-zone calendar days ending on the day of the
+///   NEWEST FIRST-LOAD MESSAGE, COUNTING MAIL ALREADY DONE, less the done ones.
+///
+/// ANCHORED TO ONBOARDING, NOT TO NOW. The newest message the backfill brought
+/// in (of any destination) is the leading edge of the first run: the moment
+/// the account joined, read off the mail itself, so no new column or setting
+/// is needed, and a signup time that predates the first sync (an account
+/// created days before it was connected) cannot misplace it. The first-load
+/// part is then "the week before you joined, at most 49", fixed: it does not
+/// slide day by day, live mail does not move it, and its mail ages off with
+/// the ordinary 30-day rule like any other. A window relative to `now` would
+/// instead drop every first-load email a week after signup, which is
+/// arbitrary.
+///
+/// Within the first-load part, the rules #701 settled hold:
 /// - DONE MAIL HOLDS ITS PLACE, so clearing never refills: closing three cards
-///   leaves three fewer, rather than letting older mail in behind them, and
-///   the board can run out. It moves only when mail arrives or a day starts.
+///   leaves three fewer, rather than letting older backlog in behind them.
 /// - NO WHOLE-DAY CUT. Dropping whole days from the old end emptied the board
-///   whenever one day alone was over the cap (the morning after a sale day:
-///   today nothing, yesterday eighty, so the board showed nothing).
-/// - CALENDAR DAYS, not 24 hours back from now, so the old end does not slide
-///   hour to hour.
+///   whenever one day alone was over the cap.
+/// - CALENDAR DAYS in the owner's zone, not 24 hours back from the anchor.
 ///
-/// Nothing is changed in the store: mail off the board stays open in All
-/// mail and search, and smart clear still cleans it.
+/// Nothing is changed in the store: first-load mail off the board stays open
+/// in All mail and search, and smart clear still cleans it.
 fn reading_board(
     conn: &Connection,
     account: AccountId,
@@ -2817,51 +2835,96 @@ fn reading_board(
     query: &AgentListQuery,
     now: DateTime<Utc>,
 ) -> Result<Vec<AgentListItem>> {
-    // An owner zone that cannot be read is not a reason to show no Reading.
-    let zone = super::device_tokens::owner_zone_conn(conn, account)
-        .map(|owner| owner.zone)
-        .unwrap_or(chrono_tz::Tz::UTC);
-    let since = Some(reading_board_since(now, zone));
-    let mut slots = list_items_with_query(
-        conn,
-        account,
-        "reading",
-        now,
-        &AgentListQuery {
-            since,
-            include_done: true,
-            reading_board: false,
-        },
-    )?;
-    sort_newest_first(&mut slots);
-    slots.truncate(READING_BOARD_MAX);
-    if !query.include_done {
-        let open: std::collections::HashSet<i64> = list_items_with_query(
+    let inventory = |include_done| {
+        list_items_with_query(
             conn,
             account,
             "reading",
             now,
             &AgentListQuery {
-                since,
-                include_done: false,
+                since: query.since,
+                include_done,
                 reading_board: false,
             },
-        )?
-        .into_iter()
-        .map(|item| item.message_id)
-        .collect();
-        slots.retain(|item| open.contains(&item.message_id));
+        )
+    };
+    let mut first_load_flag = conn.prepare_cached(
+        "SELECT COALESCE((SELECT first_load FROM triage WHERE account_id=?1 AND message_id=?2),0)",
+    )?;
+    let mut items = Vec::new();
+    let mut first_load = Vec::new();
+    for item in inventory(true)? {
+        let flag: i64 =
+            first_load_flag.query_row(params![account, item.message_id], |r| r.get(0))?;
+        if flag != 0 {
+            first_load.push(item);
+        } else {
+            items.push(item);
+        }
     }
-    slots.truncate(limit);
-    Ok(slots)
+    if !first_load.is_empty() {
+        // An owner zone that cannot be read is not a reason to show no Reading.
+        let zone = super::device_tokens::owner_zone_conn(conn, account)
+            .map(|owner| owner.zone)
+            .unwrap_or(chrono_tz::Tz::UTC);
+        // A first-load Reading item in the inventory means a first-load
+        // message exists inside `since`, so the anchor is found; `now` only
+        // covers a row that vanished between the two reads.
+        let anchor = first_load_anchor(conn, account, query.since, now)?.unwrap_or(now);
+        let start = reading_board_since(anchor, zone);
+        first_load.retain(|item| {
+            DateTime::parse_from_rfc3339(&item.received_at)
+                .map(|at| at.with_timezone(&Utc) >= start)
+                .unwrap_or(true)
+        });
+        sort_newest_first(&mut first_load);
+        first_load.truncate(READING_BOARD_MAX);
+        items.extend(first_load);
+    }
+    if !query.include_done {
+        let open: std::collections::HashSet<i64> = inventory(false)?
+            .into_iter()
+            .map(|item| item.message_id)
+            .collect();
+        items.retain(|item| open.contains(&item.message_id));
+    }
+    sort_newest_first(&mut items);
+    items.truncate(limit);
+    Ok(items)
 }
 
-/// Where the board's oldest day begins: midnight in the owner's zone,
-/// [`READING_BOARD_DAYS`] days back counting today. A midnight a clock change
-/// skips is the first instant after it.
-fn reading_board_since(now: DateTime<Utc>, zone: chrono_tz::Tz) -> DateTime<Utc> {
+/// The onboarding moment the board's first-load week ends on: the received
+/// time of the newest message the first-run backfill brought in, any
+/// destination, never later than `now`. Only mail received since `since` is
+/// looked at (first-load mail older than that is off the board anyway), which
+/// keeps the walk down `idx_messages_received` to the inventory's own month.
+fn first_load_anchor(
+    conn: &Connection,
+    account: AccountId,
+    since: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>> {
+    let newest: Option<String> = conn
+        .query_row(
+            "SELECT m.received_at FROM messages m INDEXED BY idx_messages_received
+             JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
+             WHERE m.account_id=?1 AND (?2 IS NULL OR m.received_at>=?2) AND t.first_load=1
+             ORDER BY m.received_at DESC LIMIT 1",
+            params![account, since.map(|at| at.to_rfc3339())],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(newest
+        .and_then(|at| DateTime::parse_from_rfc3339(&at).ok())
+        .map(|at| at.with_timezone(&Utc).min(now)))
+}
+
+/// Where the board's first-load week begins: midnight in the owner's zone,
+/// [`READING_BOARD_DAYS`] days back from `anchor`'s day, counting that day. A
+/// midnight a clock change skips is the first instant after it.
+fn reading_board_since(anchor: DateTime<Utc>, zone: chrono_tz::Tz) -> DateTime<Utc> {
     use chrono::TimeZone;
-    let day = now.with_timezone(&zone).date_naive() - Duration::days(READING_BOARD_DAYS - 1);
+    let day = anchor.with_timezone(&zone).date_naive() - Duration::days(READING_BOARD_DAYS - 1);
     let midnight = day.and_time(chrono::NaiveTime::MIN);
     zone.from_local_datetime(&midnight)
         .earliest()
@@ -10575,7 +10638,7 @@ mod auto_done_tests {
     }
 }
 
-/// The Reading board's window starts at the owner's midnight
+/// The Reading board's first-load week starts at the owner's midnight
 /// (`reading_board_since`); the rest of the board is pinned through the API
 /// (`squelch-api/tests/client_triage_v2.rs`).
 #[cfg(test)]

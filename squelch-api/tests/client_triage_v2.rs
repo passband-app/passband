@@ -892,25 +892,96 @@ async fn sealed_verdict_round_trips_and_moves_fye() {
     }
 }
 
-/// The Reading board is the last week, at most `READING_BOARD_MAX` messages;
-/// a caller naming its own dates gets those dates, uncapped.
+/// Store one Reading message received at `at`, as LIVE mail (not first-load);
+/// returns its id.
+fn reading_at(h: &Harness, key: &str, at: chrono::DateTime<Utc>) -> i64 {
+    let mut m = msg(h.acct, key, &format!("t-{key}"), "A sale", "An offer");
+    m.received_at = at;
+    let id = h.store.upsert_message(&m).unwrap();
+    // Ingest always writes the lifecycle row, which is what done marks.
+    h.store
+        .set_triage(
+            id,
+            h.acct,
+            0,
+            squelch_core::types::Tier::Noise,
+            squelch_core::types::Sensitivity::Normal,
+            None,
+            "",
+            "pending agent triage",
+            None,
+        )
+        .unwrap();
+    assess(&h.store, h.acct, id, false);
+    id
+}
+
+/// [`reading_at`] for mail the FIRST-RUN BACKFILL brought in
+/// (`triage.first_load`).
+fn first_load_reading_at(h: &Harness, key: &str, at: chrono::DateTime<Utc>) -> i64 {
+    let mut m = msg(h.acct, key, &format!("t-{key}"), "A sale", "An offer");
+    m.received_at = at;
+    let id = ingest_first_load(&h.store, &m);
+    assess(&h.store, h.acct, id, false);
+    id
+}
+
+async fn board(h: &Harness) -> (i64, Vec<i64>) {
+    let body = body_json(
+        h.app
+            .clone()
+            .oneshot(authed("GET", "/client/v2/feed?destination=reading"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    (
+        body["total_count"].as_i64().unwrap(),
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["message_id"].as_i64().unwrap())
+            .collect(),
+    )
+}
+
+async fn board_ids(h: &Harness) -> Vec<i64> {
+    board(h).await.1
+}
+
+/// A new account whose first run was `onboarded_days_ago` days back: three
+/// weeks of first-load Reading mail, ten a day, every ten minutes back from
+/// that moment. Returns the ids newest first.
+fn onboard(h: &Harness, onboarded_days_ago: i64) -> Vec<i64> {
+    let joined = Utc::now() - chrono::Duration::days(onboarded_days_ago);
+    let mut ids = Vec::new();
+    for day in 0..21i64 {
+        for slot in 0..10i64 {
+            ids.push(first_load_reading_at(
+                h,
+                &format!("fl-{day}-{slot}"),
+                joined - chrono::Duration::days(day) - chrono::Duration::minutes(10 * slot),
+            ));
+        }
+    }
+    ids
+}
+
+/// The onboarding board is capped; a caller naming its own dates gets those
+/// dates, uncapped.
 #[tokio::test]
 async fn the_reading_board_is_capped_and_named_dates_are_not() {
     use squelch_core::store::sqlite::READING_BOARD_MAX;
     let h = harness(|_, _| {});
     let total = READING_BOARD_MAX as i64 + 6;
+    let now = Utc::now();
     for i in 0..total {
-        let id = h
-            .store
-            .upsert_message(&msg(
-                h.acct,
-                &format!("offer-{i}"),
-                &format!("t{i}"),
-                "A sale",
-                "An offer",
-            ))
-            .unwrap();
-        assess(&h.store, h.acct, id, false);
+        first_load_reading_at(
+            &h,
+            &format!("offer-{i}"),
+            now - chrono::Duration::seconds(60 + i),
+        );
     }
     let count = |path: String| {
         let app = h.app.clone();
@@ -938,49 +1009,76 @@ async fn the_reading_board_is_capped_and_named_dates_are_not() {
     );
 }
 
-/// Store one Reading message received at `at`; returns its id.
-fn reading_at(h: &Harness, key: &str, at: chrono::DateTime<Utc>) -> i64 {
-    let mut m = msg(h.acct, key, &format!("t-{key}"), "A sale", "An offer");
-    m.received_at = at;
-    let id = h.store.upsert_message(&m).unwrap();
-    // Ingest always writes the lifecycle row, which is what done marks.
-    h.store
-        .set_triage(
-            id,
-            h.acct,
-            0,
-            squelch_core::types::Tier::Noise,
-            squelch_core::types::Sensitivity::Normal,
-            None,
-            "",
-            "pending agent triage",
-            None,
-        )
-        .unwrap();
-    assess(&h.store, h.acct, id, false);
-    id
+/// An ESTABLISHED account has no first-load mail, so its Reading is the plain
+/// 30-day inventory: mail 10 and 25 days old and eighty from today all show,
+/// none windowed, none capped.
+#[tokio::test]
+async fn an_established_accounts_reading_is_not_windowed_or_capped() {
+    let h = harness(|_, _| {});
+    let now = Utc::now();
+    let mut ids: Vec<i64> = (0..80i64)
+        .map(|i| {
+            reading_at(
+                &h,
+                &format!("today-{i}"),
+                now - chrono::Duration::seconds(60 + i),
+            )
+        })
+        .collect();
+    ids.push(reading_at(&h, "ten", now - chrono::Duration::days(10)));
+    ids.push(reading_at(
+        &h,
+        "twenty-five",
+        now - chrono::Duration::days(25),
+    ));
+    // Past the inventory's month: not on the board, as before #701.
+    reading_at(&h, "forty", now - chrono::Duration::days(40));
+    assert_eq!(board(&h).await, (82, ids));
 }
 
-async fn board_ids(h: &Harness) -> Vec<i64> {
-    let body = body_json(
-        h.app
-            .clone()
-            .oneshot(authed("GET", "/client/v2/feed?destination=reading"))
-            .await
-            .unwrap(),
-    )
-    .await;
-    body["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|i| i["message_id"].as_i64().unwrap())
-        .collect()
+/// A NEW account whose backfill brought three weeks of Reading mail (210
+/// messages) and whose first run was three days ago: the board is the newest
+/// 49 of the onboarding week, newest first, and stays that, rather than
+/// shrinking as the week slides past `now`.
+#[tokio::test]
+async fn a_new_accounts_board_is_its_onboarding_week_at_most_49() {
+    use squelch_core::store::sqlite::READING_BOARD_MAX;
+    let h = harness(|_, _| {});
+    let ids = onboard(&h, 3);
+    assert_eq!(
+        board(&h).await,
+        (READING_BOARD_MAX as i64, ids[..READING_BOARD_MAX].to_vec())
+    );
 }
 
-/// The morning after a flood: nothing yet today, eighty yesterday. The board
-/// is yesterday's newest 49, not empty (dropping whole days used to leave
-/// "today only", which was nothing).
+/// Days after onboarding, live Reading mail keeps arriving: all of it shows,
+/// on top, uncapped, and the first-load part under it is exactly what it was.
+#[tokio::test]
+async fn live_mail_after_onboarding_all_shows_over_an_unchanged_first_load_week() {
+    use squelch_core::store::sqlite::READING_BOARD_MAX;
+    let h = harness(|_, _| {});
+    let first_load = onboard(&h, 3);
+    let before = board_ids(&h).await;
+    assert_eq!(before, first_load[..READING_BOARD_MAX]);
+    let now = Utc::now();
+    let live: Vec<i64> = (0..60i64)
+        .map(|i| {
+            reading_at(
+                &h,
+                &format!("live-{i}"),
+                now - chrono::Duration::minutes(30 * i),
+            )
+        })
+        .collect();
+    let (total, after) = board(&h).await;
+    assert_eq!(total, 60 + READING_BOARD_MAX as i64);
+    assert_eq!(after[..60], live[..]);
+    assert_eq!(after[60..], before[..]);
+}
+
+/// The morning after a flood: nothing yet today, sixty yesterday, all of it
+/// first-load. The board is yesterday's newest 49, not empty (dropping whole
+/// days used to leave "today only", which was nothing).
 #[tokio::test]
 async fn a_flooded_yesterday_still_fills_the_board() {
     use squelch_core::store::sqlite::READING_BOARD_MAX;
@@ -991,7 +1089,7 @@ async fn a_flooded_yesterday_still_fills_the_board() {
         .and_utc();
     let mut ids = Vec::new();
     for i in 0..60i64 {
-        ids.push(reading_at(
+        ids.push(first_load_reading_at(
             &h,
             &format!("y{i}"),
             today - chrono::Duration::hours(12) + chrono::Duration::seconds(i),
@@ -1004,22 +1102,17 @@ async fn a_flooded_yesterday_still_fills_the_board() {
     assert_eq!(board, newest);
 }
 
-/// Clearing never refills: done mail keeps its place on the board, so closing
-/// three leaves three fewer instead of letting older mail in behind them.
+/// Clearing never refills: done first-load mail keeps its place, so closing
+/// three leaves three fewer instead of letting older backlog in behind them.
+/// The account was onboarded six days ago, hourly mail back from then.
 #[tokio::test]
 async fn clearing_the_board_does_not_refill_it() {
     use squelch_core::store::sqlite::READING_BOARD_MAX;
     use squelch_core::types::AttentionStatus;
     let h = harness(|_, _| {});
-    let now = Utc::now();
+    let joined = Utc::now() - chrono::Duration::days(6);
     let ids: Vec<i64> = (0..55i64)
-        .map(|i| {
-            reading_at(
-                &h,
-                &format!("c{i}"),
-                now - chrono::Duration::seconds(60 + i),
-            )
-        })
+        .map(|i| first_load_reading_at(&h, &format!("c{i}"), joined - chrono::Duration::hours(i)))
         .collect();
     // `ids` is newest first: the board is the first 49, the last 6 are off it.
     assert_eq!(board_ids(&h).await, ids[..READING_BOARD_MAX]);
@@ -1031,21 +1124,24 @@ async fn clearing_the_board_does_not_refill_it() {
     assert_eq!(board_ids(&h).await, ids[3..READING_BOARD_MAX]);
 }
 
-/// The week is seven of the owner's calendar days counting today: mail an
-/// hour after the oldest day's midnight is on the board, an hour before it is
-/// not (the harness owner is in UTC).
+/// The onboarding week is seven of the owner's calendar days counting the day
+/// of the newest first-load message, wherever `now` is: mail an hour after the
+/// oldest day's midnight is on the board, an hour before it is not (the
+/// harness owner is in UTC).
 #[tokio::test]
-async fn the_board_reaches_back_seven_calendar_days() {
+async fn the_board_reaches_back_seven_calendar_days_from_onboarding() {
     let h = harness(|_, _| {});
-    let oldest = Utc::now()
+    let joined_day = Utc::now()
         .date_naive()
         .and_time(chrono::NaiveTime::MIN)
         .and_utc()
-        - chrono::Duration::days(6);
-    let inside = reading_at(&h, "inside", oldest + chrono::Duration::hours(1));
-    let outside = reading_at(&h, "outside", oldest - chrono::Duration::hours(1));
+        - chrono::Duration::days(10);
+    let joined = first_load_reading_at(&h, "joined", joined_day + chrono::Duration::hours(12));
+    let oldest = joined_day - chrono::Duration::days(6);
+    let inside = first_load_reading_at(&h, "inside", oldest + chrono::Duration::hours(1));
+    let outside = first_load_reading_at(&h, "outside", oldest - chrono::Duration::hours(1));
     let board = board_ids(&h).await;
-    assert!(board.contains(&inside));
+    assert_eq!(board, [joined, inside]);
     assert!(!board.contains(&outside));
     let body = body_json(
         h.app
@@ -1057,5 +1153,5 @@ async fn the_board_reaches_back_seven_calendar_days() {
             .unwrap(),
     )
     .await;
-    assert_eq!(body["total_count"], 1, "all_time=false is the default view");
+    assert_eq!(body["total_count"], 2, "all_time=false is the default view");
 }

@@ -157,9 +157,11 @@ pub struct AgentListQuery {
     /// None explicitly requests all dates. Default is the preceding 30 days.
     pub since: Option<DateTime<Utc>>,
     pub include_done: bool,
-    /// Reading only: shape the answer as the owner's Reading BOARD (the
-    /// window shrinks to keep it short; see `READING_BOARD_MAX`), in place of
-    /// `since`. The human door's default Reading view sets it; smart clear
+    /// Reading only: shape the answer as the owner's Reading BOARD: the
+    /// `since` inventory, with its FIRST-LOAD mail (the first-run backfill's)
+    /// cut to the onboarding week, at most `READING_BOARD_MAX`. Mail that is
+    /// not first-load is never windowed or capped. The human door's default
+    /// Reading view sets it; smart clear
     /// (which cleans the whole month), a caller that names its own dates,
     /// and the agent door do not.
     pub reading_board: bool,

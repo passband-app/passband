@@ -13,6 +13,7 @@ pub mod html;
 pub mod ingest;
 pub mod notify_lane;
 mod profile;
+mod relationships;
 pub mod sender_signals;
 mod translate_pass;
 /// Public for `squelch-eval`, which replays triage through the production
@@ -2383,6 +2384,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // bounded wait (`TRIAGE_WAIT_SECS` in the store), so foreign mail
             // is normally triaged once, on the English.
             self.translate_wake.notify_one();
+            // THE RELATIONSHIP LEDGER, ahead of the triage pass so a new
+            // sender's row exists before its first job is claimed, and outside
+            // the gate below because it spends no model call
+            // (`relationships`).
+            self.relationship_round().await;
             if self.poll_healthy.load(Ordering::Relaxed) {
                 if self.agent_triage_pass().await {
                     idle_rounds = 0;

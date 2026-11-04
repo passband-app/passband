@@ -118,6 +118,15 @@ pub struct AgentContext {
     pub rules: Vec<serde_json::Value>,
     pub matched_rules: Vec<serde_json::Value>,
     pub sender_is_contact: bool,
+    /// The relationship ledger's block for the sender (docs/UNDERSTANDING.md
+    /// §2.1), ABSENT rather than empty when there is no row or the first-run
+    /// backfill has not filled the table. Deterministic counts, no email
+    /// text. NOT IN ANY REVISION FINGERPRINT, for the reason `triage.dwell_ms`
+    /// is not in `user_state`: the ledger is recounted while mail is being
+    /// read and triaged, and a recount changes nothing a run in flight
+    /// decided, so it must not turn that run's commit stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relationship: Option<serde_json::Value>,
     pub corrections: Vec<serde_json::Value>,
     pub revision: ContextRevision,
     /// Reserved read-only seam. No learned-memory editor ships in this rewrite.

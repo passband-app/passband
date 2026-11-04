@@ -2255,6 +2255,29 @@ pub trait Store:
     /// See [`SqliteStore::owner_zone`](sqlite::SqliteStore::owner_zone).
     fn owner_zone(&self, account_id: AccountId) -> Result<crate::owner_clock::OwnerZone>;
 
+    /// The relationship ledger's block for `addr` in the triage agent's
+    /// context (docs/UNDERSTANDING.md §2.1), `None` when the key must be
+    /// ABSENT: no row, or the first-run backfill has not filled the table.
+    /// See [`SqliteStore::relationship_context`].
+    fn relationship_context(
+        &self,
+        account_id: AccountId,
+        addr: &str,
+    ) -> Result<Option<serde_json::Value>>;
+
+    /// Recompute up to `max` addresses from the ledger's dirty set; how many
+    /// were drained. See [`SqliteStore::drain_relationship_dirty`].
+    fn drain_relationship_dirty(&self, account_id: AccountId, max: usize) -> Result<usize>;
+
+    /// One chunk of the ledger's full recompute, resuming after `after`;
+    /// `None` once done. See [`SqliteStore::recompute_relationship_chunk`].
+    fn recompute_relationship_chunk(
+        &self,
+        account_id: AccountId,
+        after: Option<&str>,
+        max: usize,
+    ) -> Result<Option<String>>;
+
     /// Overwrite this account's Gmail INBOX unread counts, stamping `fetched_at`
     /// now. Only ever called with numbers that came back from Gmail, so a failed
     /// fetch leaves the previous row in place.

@@ -607,6 +607,7 @@ mod notify;
 mod outbound;
 pub mod people;
 pub mod reading_senders;
+pub mod relationships;
 mod renotify;
 mod retention;
 mod rules;
@@ -1819,6 +1820,27 @@ impl Store for SqliteStore {
 
     fn owner_zone(&self, account_id: AccountId) -> Result<crate::owner_clock::OwnerZone> {
         self.owner_zone(account_id)
+    }
+
+    fn relationship_context(
+        &self,
+        account_id: AccountId,
+        addr: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        self.relationship_context(account_id, addr)
+    }
+
+    fn drain_relationship_dirty(&self, account_id: AccountId, max: usize) -> Result<usize> {
+        self.drain_relationship_dirty(account_id, max)
+    }
+
+    fn recompute_relationship_chunk(
+        &self,
+        account_id: AccountId,
+        after: Option<&str>,
+        max: usize,
+    ) -> Result<Option<String>> {
+        self.recompute_relationship_chunk(account_id, after, max)
     }
 
     fn account_created_at(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>> {

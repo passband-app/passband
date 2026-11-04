@@ -2602,3 +2602,106 @@ CREATE TABLE IF NOT EXISTS message_translations (
 -- The translate pass's claim: one account's rows by status.
 CREATE INDEX IF NOT EXISTS idx_message_translations_claim
     ON message_translations(account_id, status, updated_at);
+
+-- THE RELATIONSHIP LEDGER (docs/UNDERSTANDING.md §2.1): one row per address
+-- the owner has live mail with, either way, holding what the owner's own
+-- behaviour says about them. Deterministic, no model, and NOTHING IN IT IS
+-- EMAIL TEXT: every column is a count or a timestamp off `messages`,
+-- `contacts`, `message_recipients`, `triage` and the two correction tables,
+-- so the triage agent reads it as trusted context beside `sender_is_contact`.
+-- The arithmetic is `crate::relationship`; the counting is
+-- `store::sqlite::relationships`.
+--
+-- HUMAN DOOR AND TRIAGE ONLY, like `contacts`, `send_groups` and the contact
+-- card: who the owner answers and how fast is the correspondent graph the
+-- agent door (/mcp) was never handed. Triage is the human door's own backend
+-- and may read it; no /mcp tool response may carry a column of it, and an
+-- invariant test in squelch-mcp holds that.
+--
+-- MAINTAINED BY A PASS, NOT AT INGEST. Ingest, the not-spam action and the
+-- attention POST each add one row to `relationship_dirty` below and nothing
+-- else; the refine lane drains that set every round and recomputes only those
+-- addresses, each as indexed probes on ONE address, never a directory scan.
+-- A full recompute runs once per owner-local day at 03:00, chunked so no chunk
+-- holds the store mutex long, because the monthly rate and the ledger floors
+-- move with the clock even when no mail arrives. A daemon upgraded onto an
+-- existing store fills the table once on its first pass (`sync_state`
+-- mailbox 'relationships_backfill'); until then the agent context carries NO
+-- `relationship` key at all, which reads as "nothing known" and is true,
+-- where a table of zeros would read as "known, and ignored".
+--
+-- NO ROW IS NO HISTORY. An address with no live mail in either direction
+-- (only archive-tier mail, or mail since deleted) has its row removed, and
+-- the account's own address never has one.
+CREATE TABLE IF NOT EXISTS relationships (
+    account_id        INTEGER NOT NULL,
+    -- Lowercased bare address, the key `reading_senders::sender_key` spells.
+    addr              TEXT NOT NULL,
+    -- The newest name on this address's counted mail, else the name the
+    -- owner's Sent mail addressed them by (`contacts.display_name`). Stored so
+    -- the list read needs no join. NOT `senders.display_name`, which takes a
+    -- name from sealed mail too (see `people.rs`).
+    display_name      TEXT,
+    -- INBOUND, counted the way the listings count: inbound, not provider spam,
+    -- not sealed (`sealed_mail_sql!`, the strict answer), not the owner's own
+    -- mail, and NOT THE ARCHIVE TIER, which is absent from every count.
+    received_count    INTEGER NOT NULL,
+    -- Off `messages.received_at`, NEVER `senders.first_seen`. The directory's
+    -- date is the first SIGHTING, and the backfill walks newest first, so it
+    -- would date a ten-year correspondent to last Tuesday.
+    received_first_at TEXT,
+    received_last_at  TEXT,
+    -- Thirty-day rate since the address first wrote. NULL under
+    -- `sender_fatigue::MIN_COVERED_DAYS` of history with them.
+    received_per_month REAL,
+    -- OUTBOUND: the Sent-derived `contacts` row, which is also the
+    -- known-contact floor, so the ledger and triage agree on who that is.
+    sent_count        INTEGER NOT NULL,
+    sent_last_at      TEXT,
+    -- Threads whose FIRST message is the owner's and names this address as a
+    -- recipient (`message_recipients`): conversations the owner started.
+    initiated_count   INTEGER NOT NULL,
+    -- REPLIES: inbound threads from this address, and those of them that
+    -- carry a LATER owner-sent message.
+    inbound_threads   INTEGER NOT NULL,
+    replied_threads   INTEGER NOT NULL,
+    -- From the address first writing into a thread to the owner's first
+    -- message after it. NULL under 3 replied threads.
+    median_reply_ms   INTEGER,
+    -- ATTENTION, over inbound mail received at or after the later of the
+    -- dwell ledger floor, the open ledger floor and the Reading statistics'
+    -- 90-day window. Before the dwell ledger a zero is not a measurement
+    -- (`migrate::stamp_dwell_ledger_start`). It SEES ONLY PASSBAND: mail read
+    -- in Gmail on a phone looks unopened here, so all four understate.
+    attention_rows    INTEGER NOT NULL,       -- how many rows the next three are over
+    opened_count      INTEGER NOT NULL,
+    median_read_fraction REAL,                -- sender_fatigue's read fraction, NULL when none measurable
+    link_clicks       INTEGER NOT NULL,
+    -- `triage_feedback` plus `agent_triage_corrections` rows on this address.
+    corrections       INTEGER NOT NULL,
+    -- `sender_fatigue::score` as the Reading purge computes it for this
+    -- address (the same `SenderMeasurer`), scaled to 0..1, with its reasons as
+    -- the module's JSON `Reason` list, so the purge flow and the ledger can
+    -- never disagree. NULL score when the module declined to score.
+    fatigue_score     REAL,
+    fatigue_reasons   TEXT,
+    computed_at       TEXT NOT NULL,
+    PRIMARY KEY(account_id, addr)
+);
+-- Every writer stores `addr` lowercased, but readers are handed whatever a
+-- header spelled, so the probes compare under NOCASE, which the BINARY
+-- primary key cannot serve (see `idx_contacts_addr_nocase`).
+CREATE INDEX IF NOT EXISTS idx_relationships_addr_nocase
+    ON relationships(account_id, addr COLLATE NOCASE);
+
+-- THE LEDGER'S DIRTY SET: addresses whose row is owed a recompute. Written on
+-- the hot paths (ingest, not-spam, the attention POST) as one
+-- `INSERT OR IGNORE` of a lowercased address and nothing more; drained by the
+-- refine lane, which deletes each address under the same lock it recomputed
+-- it under, so a mark that lands mid-drain is never lost. A duplicate mark is
+-- free, which is why there is no timestamp: "dirty" is a set, not a log.
+CREATE TABLE IF NOT EXISTS relationship_dirty (
+    account_id INTEGER NOT NULL,
+    addr       TEXT NOT NULL,
+    PRIMARY KEY(account_id, addr)
+);

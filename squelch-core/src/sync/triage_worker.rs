@@ -66,6 +66,7 @@ impl<S: Store> EvidenceReader for StoreEvidence<'_, S> {
 impl<S: Store> StoreEvidence<'_, S> {
     fn read_inner(&self, request: &EvidenceRequest) -> Result<EvidenceResult> {
         let mut revisions = BTreeMap::new();
+        let mut relationship = None;
         let messages = match request {
             EvidenceRequest::ReadMessage { message_id, offset } => {
                 self.store
@@ -144,6 +145,10 @@ impl<S: Store> StoreEvidence<'_, S> {
                     .agent_search_mail(self.account, query, self.limit)?
             }
             EvidenceRequest::ReadSenderHistory { sender } => {
+                // The sender's relationship row rides at the top of the
+                // result, the same block the initial context carries for the
+                // message's own sender (docs/UNDERSTANDING.md §2.1).
+                relationship = self.store.relationship_context(self.account, sender)?;
                 self.store
                     .agent_sender_history(self.account, sender, self.limit)?
             }
@@ -224,8 +229,12 @@ impl<S: Store> StoreEvidence<'_, S> {
             .expect("evidence sources")
             .extend(messages.iter().map(|m| m.source.clone()));
         let sources = messages.iter().map(|m| m.id).collect();
+        let mut data = serde_json::json!({"messages": messages});
+        if let Some(relationship) = relationship {
+            data["relationship"] = relationship;
+        }
         Ok(EvidenceResult {
-            data: serde_json::json!({"messages": messages}),
+            data,
             source_message_ids: sources,
             thread_revisions: revisions,
         })
@@ -265,11 +274,7 @@ pub fn snapshot(
     sources.push(context.message.id);
     sources.sort_unstable();
     sources.dedup();
-    ContextSnapshot {
-        account_id: job.account_id,
-        message_id: job.message_id,
-        thread_id: context.message.thread_id.clone(),
-        initial: serde_json::json!({
+    let mut initial = serde_json::json!({
             "message": context.message,
             "thread": siblings,
             "previous_decision": fed_back(context.previous_decision.clone()),
@@ -287,7 +292,18 @@ pub fn snapshot(
             "message_received_local": chrono::DateTime::parse_from_rfc3339(&context.message.received_at)
                 .ok()
                 .map(|at| clock.local(at.with_timezone(&Utc))),
-        }),
+    });
+    // Beside `sender_is_contact`, and ABSENT, not null, when the ledger has
+    // nothing to say (no row, or no first-run backfill yet): an absent block
+    // is "nothing known", where a null one invites a guess at why.
+    if let Some(relationship) = &context.relationship {
+        initial["relationship"] = relationship.clone();
+    }
+    ContextSnapshot {
+        account_id: job.account_id,
+        message_id: job.message_id,
+        thread_id: context.message.thread_id.clone(),
+        initial,
         source_message_ids: sources,
         thread_revisions: [(
             context.message.thread_id.clone(),

@@ -635,6 +635,11 @@ pub fn context_as_of(
         context.sender_is_contact = false;
         report.contact_dropped = true;
     }
+    // THE RELATIONSHIP LEDGER HAS NO HISTORY: a row is today's recount, and
+    // replaying it at `t` would hand the model replies the owner had not yet
+    // written. Dropped whole, which is also what a context before the ledger
+    // existed carried.
+    context.relationship = None;
     context.corrections.retain(|correction| {
         let field = correction
             .get("field")

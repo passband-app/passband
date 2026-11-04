@@ -239,6 +239,15 @@ fn context(conn: &Connection, account: AccountId, id: i64) -> Result<AgentContex
         params![account, message.from_addr],
         |row| row.get(0),
     )?;
+    // Beside `sender_is_contact`, and like it read here under the context's
+    // own lock. Deliberately left out of every fingerprint below (see
+    // `AgentContext::relationship`).
+    let relationship = super::relationships::relationship_context_conn(
+        conn,
+        account,
+        &message.from_addr,
+        Utc::now(),
+    )?;
     let matched_rules: Vec<serde_json::Value> = rules
         .iter()
         .filter(|rule| {
@@ -277,6 +286,7 @@ fn context(conn: &Connection, account: AccountId, id: i64) -> Result<AgentContex
         rules,
         matched_rules,
         sender_is_contact,
+        relationship,
         corrections,
         revision,
         memory: vec![],
@@ -2558,6 +2568,9 @@ impl AgentTriageStore for SqliteStore {
                 message
             ],
         )?;
+        // The sender's relationship row now owes a recount of its attention
+        // columns. One `INSERT OR IGNORE`; the refine lane does the work.
+        super::relationships::mark_message_sender_dirty_conn(&conn, account, message)?;
         Ok(())
     }
     fn agent_access_allowed(&self, account: AccountId, message: i64) -> Result<bool> {

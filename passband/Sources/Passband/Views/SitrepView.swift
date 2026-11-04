@@ -152,12 +152,18 @@ struct SitrepView: View {
                 GmailDisconnectedBanner()
                     .padding(.horizontal, Space.page)
                     .padding(.top, Space.s14)
+                    // Room under it too, so the hero reads as its own block
+                    // rather than the banner's caption.
+                    .padding(.bottom, Space.s16)
             } else if case let status = store.syncStatus, status.showsBanner {
                 // Throttled, erroring, catching up, or triage held: the same
                 // slot, because it answers the same question.
                 SyncStatusBanner(status: status)
                     .padding(.horizontal, Space.page)
                     .padding(.top, Space.s14)
+                    // Room under it too, so the hero reads as its own block
+                    // rather than the banner's caption.
+                    .padding(.bottom, Space.s16)
             }
             // THE HERO STAYS PUT. It sits above BOTH columns, so it cannot scroll
             // with one of them and hold still for the other; and "one item needs

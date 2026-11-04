@@ -132,8 +132,11 @@ struct UnderstandingSeriesTests {
             row("lawyer", inbound: 9, replied: 8),
             row("never", attention: 5, opened: 5, read: 1),
         ])
-        expect(s.answered.map(\.id) == ["cofounder", "lawyer", "one-of-one"],
-            "31 of 33 outranks 8 of 9 outranks 1 of 1; a sender never answered is not listed")
+        expect(s.answered.map(\.id) == ["cofounder", "lawyer"],
+            "31 of 33 (94%) over 8 of 9 (89%); 1 of 1 is under the three-thread floor; never answered is not listed")
+        let fixture = UnderstandingSeries(UnderstandingFixture.relationships(now: now), now: now)
+        expect(zip(fixture.answered, fixture.answered.dropFirst()).allSatisfy { $0.value >= $1.value },
+            "the fixture's bars read in the order of their own percentages")
         expect(s.answered.first?.value == 31.0 / 33.0, "the bar is the real share")
         expect(s.answered.first?.sentence == "replied to 31 of 33, usually within the hour", "and says it")
 

@@ -173,23 +173,26 @@ struct UnderstandingSeries: Equatable {
 
     // MARK: - ranking
 
-    /// Reply strength: replied over inbound, shrunk toward zero by two phantom
-    /// unanswered threads so one reply to one email does not outrank 31 of 33.
-    static func replyStrength(_ row: RelationshipRow) -> Double {
-        Double(row.replied_threads) / Double(row.inbound_threads + 2)
+    /// Fewer inbound threads than this and a reply share is an anecdote: one
+    /// answer to one email is 100%, and it would lead the list.
+    static let answeredFloor = 3
+
+    /// The share the bar shows: replied over inbound.
+    static func replyShare(_ row: RelationshipRow) -> Double {
+        row.inbound_threads > 0 ? min(1, Double(row.replied_threads) / Double(row.inbound_threads)) : 0
     }
 
+    /// Ranked by the share the bar shows, so the list reads top-down in the
+    /// order of its own percentages; ties go to the sender answered more often.
     static func rankAnswered(_ rows: [RelationshipRow]) -> [PersonBar] {
-        rows.filter { $0.replied_threads > 0 && $0.inbound_threads > 0 }
+        rows.filter { $0.replied_threads > 0 && $0.inbound_threads >= answeredFloor }
             .sorted { a, b in
-                let sa = replyStrength(a), sb = replyStrength(b)
+                let sa = replyShare(a), sb = replyShare(b)
                 return sa != sb ? sa > sb : a.replied_threads > b.replied_threads
             }
             .prefix(barCount)
             .map { row in
-                PersonBar(
-                    row: row, value: min(1, Double(row.replied_threads) / Double(row.inbound_threads)),
-                    sentence: UnderstandingText.replies(row))
+                PersonBar(row: row, value: replyShare(row), sentence: UnderstandingText.replies(row))
             }
     }
 

@@ -286,6 +286,13 @@ struct AskBar: View {
             citations(item.citations)
         case .emails:
             emailCards(item.emails)
+        case .page:
+            if let page = item.page.flatMap(PageLink.init(rawValue:)) {
+                PageLinkCard(page: page) { page in
+                    store.open(page)
+                    onClose()
+                }
+            }
         }
     }
 

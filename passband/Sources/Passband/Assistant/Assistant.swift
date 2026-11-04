@@ -1006,6 +1006,10 @@ final class AssistantSession {
                 self.shownIds.formUnion(cards.map(\.threadId))
                 self.append(.emails, emails: cards)
             },
+            point: { [weak self] page in
+                guard let self, self.alive(gen) else { return }
+                self.append(.page, page: page.rawValue)
+            },
             live: { [weak self] in self?.alive(gen) ?? false })
         let answer = Wire.RequestBlock.toolResult(
             toolUseId: call.id, content: outcome.content, isError: outcome.isError)
@@ -1186,13 +1190,13 @@ final class AssistantSession {
     private func append(
         _ kind: ChatItem.Kind, text: String = "", tool: ToolActivity? = nil,
         action: PendingAction? = nil, citations: [ToolCitation] = [],
-        emails: [EmailCard] = []
+        emails: [EmailCard] = [], page: String? = nil
     ) -> Int {
         nextItemId += 1
         transcript.append(
             ChatItem(
                 id: nextItemId, kind: kind, text: text, tool: tool, action: action,
-                citations: citations, emails: emails))
+                citations: citations, emails: emails, page: page))
         return nextItemId
     }
 

@@ -135,6 +135,8 @@ enum ProductGuide {
           how to do something, which key does it, where a setting lives. You know
           nothing about this app's controls except what they return, so call one
           before answering any "how do I..." question, and never guess a key.
+          When the answer is a place in the app, add show_page so the user can
+          click straight there.
         """
 
     // MARK: - product_help

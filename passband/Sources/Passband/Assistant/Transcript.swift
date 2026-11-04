@@ -430,7 +430,7 @@ struct EmailCard: Identifiable, Sendable, Hashable, Codable {
 /// "flip this chip's state": both are one in-place field write here, where an
 /// enum would rebuild (and re-copy) the payload on every token.
 struct ChatItem: Identifiable, Sendable, Codable {
-    enum Kind: String, Sendable, Codable { case user, assistant, tool, action, error, citations, emails }
+    enum Kind: String, Sendable, Codable { case user, assistant, tool, action, error, citations, emails, page }
 
     /// Monotonic per session, so a row keeps its identity while its text grows.
     let id: Int
@@ -441,6 +441,10 @@ struct ChatItem: Identifiable, Sendable, Codable {
     var action: PendingAction? = nil
     var citations: [ToolCitation] = []
     var emails: [EmailCard] = []
+    /// `.page` only: a `PageLink` by its wire name. Kept as the name rather
+    /// than the enum so this file still compiles on its own under test; a name
+    /// a later build dropped simply draws nothing.
+    var page: String? = nil
 }
 
 /// A tool the model called, as the tray shows it.

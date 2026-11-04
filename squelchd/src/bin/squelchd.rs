@@ -2467,7 +2467,10 @@ fn run_daemon(config: Config) -> Result<(), squelch_core::CoreError> {
         // assessments are kept until it is decided what the triage eval and
         // cost work need from them (see `store/sqlite/retention.rs`).
 
-        let mut engine = SyncEngine::new(store, creds, account_id, email, config);
+        // No human door here, so no control plane: the operator's pinned
+        // keys (`SQUELCH_FEATURES`) are the whole feature set.
+        let mut engine = SyncEngine::new(store, creds, account_id, email, config)
+            .with_features(squelch_core::features::Features::from_env());
         if let Some(e) = embedder {
             e.spawn_upkeep(idle_unload_secs, shutdown_rx.clone());
             engine = engine.with_embedder(e.embedder());

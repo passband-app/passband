@@ -87,6 +87,9 @@ enum EventBanner {
     static func tapRoute(_ userInfo: [AnyHashable: Any]) -> TapRoute {
         let route = userInfo[routeKey] as? String
         if route == updateRoute { return .update }
+        // The daemon's release announcement: on the Mac it is this same
+        // update, and on the phone it opens the app, as an update tap does.
+        if releasePush(userInfo["event_id"] as? String) != nil { return .update }
         if route == testRoute { return .test }
         // BEFORE anything else reads the payload: a draft push carries no
         // message, thread or event, and must never fall through to them.
@@ -315,6 +318,29 @@ enum EventBanner {
             let account = UUID(uuidString: String(raw[..<colon])),
             let event = Int(raw[raw.index(after: colon)...]), event > 0 else { return nil }
         return UnresolvedPush(accountId: account, eventId: event)
+    }
+
+    /// The pusher's release announcement, `"<account>:release:macos:<version>"`
+    /// (squelch-core's `release_feed`): a new Mac version is out. Strict like
+    /// the others: the tag, two literals, and dotted digits. Never an event
+    /// push: `unresolvedPush` splits at the LAST colon, so this shape's account
+    /// half is never a UUID there.
+    struct ReleasePush: Equatable, Sendable {
+        var accountId: UUID
+        var version: String
+    }
+
+    static func releasePush(_ raw: String?) -> ReleasePush? {
+        guard let raw, raw.count <= 256 else { return nil }
+        let parts = raw.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 4, parts[1] == "release", parts[2] == "macos",
+            let account = UUID(uuidString: String(parts[0]))
+        else { return nil }
+        let version = parts[3].split(separator: ".", omittingEmptySubsequences: false)
+        guard (2...4).contains(version.count),
+            version.allSatisfy({ (1...5).contains($0.utf8.count) && $0.utf8.allSatisfy { (48...57).contains($0) } })
+        else { return nil }
+        return ReleasePush(accountId: account, version: String(parts[3]))
     }
 
     /// The pusher's draft ping, `"<account>:draft:<id>:<created>"`: the tag

@@ -55,6 +55,11 @@ const DRAFT_ALERT_BODY: &str = "A draft is waiting for your review";
 /// The fallback for a `kind: "calendar"` push: a reminder before an event on
 /// the owner's calendar. It names no event, no time and no place.
 const CALENDAR_ALERT_BODY: &str = "An event is coming up";
+/// The fallback for a `kind: "release"` push: a new version of the app is out.
+/// The Mac has no extension to rewrite it, so on a Mac this IS the banner; the
+/// phone's extension names the version from the event id. Public news, but
+/// still a fixed line: the daemon picks it and can never write it.
+const RELEASE_ALERT_BODY: &str = "A new version is out";
 
 /// Open-token bounds. The alphabet is URL-safe base64 without padding, so a
 /// token can neither reshape the path it arrives on nor smuggle anything into
@@ -118,8 +123,8 @@ pub struct PushRequest {
     pub environment: Option<String>,
     /// Which fixed fallback line the alert carries: absent for mail, `"draft"`
     /// for an agent's draft awaiting review, `"calendar"` for a reminder
-    /// before an event. A closed set, so a daemon can pick a line but never
-    /// write one.
+    /// before an event, `"release"` for a new version of the app. A closed
+    /// set, so a daemon can pick a line but never write one.
     ///
     /// `"clear"` is the one kind that is not an alert: the owner dealt with
     /// that event on another device (copied its login code on the Mac), so the
@@ -417,17 +422,29 @@ fn validate(state: &RelayState, req: PushRequest) -> Result<Validated, RelayErro
         None => Some(ALERT_BODY),
         Some("draft") => Some(DRAFT_ALERT_BODY),
         Some("calendar") => Some(CALENDAR_ALERT_BODY),
+        Some("release") => Some(RELEASE_ALERT_BODY),
         Some("clear") => None,
         Some(_) => {
             return Err(RelayError::bad_request(
-                "kind must be absent, `draft`, `calendar` or `clear`",
+                "kind must be absent, `draft`, `calendar`, `release` or `clear`",
             ));
         }
     };
+    // News, not mail: a release banner arrives silently and at APNs' low
+    // priority, which lets the device deliver it when it suits the battery.
+    let quiet = req.kind.as_deref() == Some("release");
 
     // Content-free by design: an opaque id plus a generic alert, or for a
     // clear, an opaque id and nothing to show.
     let (aps, push_type, priority) = match alert_body {
+        Some(body) if quiet => (
+            json!({
+                "alert": { "title": ALERT_TITLE, "body": body },
+                "mutable-content": 1,
+            }),
+            "alert",
+            "5",
+        ),
         Some(body) => (
             json!({
                 "alert": { "title": ALERT_TITLE, "body": body },
@@ -627,6 +644,24 @@ mod tests {
         assert_eq!(p["aps"]["alert"]["body"], "An event is coming up");
         assert_eq!(p["aps"]["mutable-content"], 1);
         assert_eq!(p["event_id"], "acct:cal:7:1793210000");
+        assert!(p.get("kind").is_none());
+    }
+
+    #[test]
+    fn a_release_push_falls_back_to_its_own_line_quietly() {
+        let mut req = base(json!([hex(64)]));
+        req["kind"] = json!("release");
+        req["event_id"] = json!("acct:release:macos:0.0.19");
+        let v = parse(req).unwrap();
+        let p: serde_json::Value = serde_json::from_slice(&v.payload).unwrap();
+        assert_eq!(p["aps"]["alert"]["title"], "Passband");
+        assert_eq!(p["aps"]["alert"]["body"], "A new version is out");
+        assert_eq!(p["aps"]["mutable-content"], 1);
+        // News, not mail: no sound, low priority.
+        assert!(p["aps"].get("sound").is_none());
+        assert_eq!(v.push_type, "alert");
+        assert_eq!(v.priority, "5");
+        assert_eq!(p["event_id"], "acct:release:macos:0.0.19");
         assert!(p.get("kind").is_none());
     }
 

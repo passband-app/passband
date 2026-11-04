@@ -16,7 +16,8 @@ use tokio::sync::{broadcast, watch};
 use crate::config::Config;
 use crate::error::{CoreError, Result};
 use crate::metrics::{ApnsPushOutcome, SyncMetrics};
-use crate::store::{Store, SyncState};
+use crate::release_feed::{self, Decision};
+use crate::store::{Device, Store, SyncState};
 use crate::types::{AccountId, Event};
 
 /// The pusher's cursor row in `sync_state`: `uidvalidity` unused, `last_uid`
@@ -49,6 +50,20 @@ const BACKOFF_CAP: Duration = Duration::from_secs(300);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(35);
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The Mac app's APNs topic, its bundle id. A Mac device row is pushed under
+/// this whatever `[pusher] topic` says: that setting names the PHONE app's
+/// topic, which a Mac token is not valid for.
+pub const MAC_TOPIC: &str = "app.passband.client";
+
+/// The `devices.platform` a Mac registers under.
+pub const MAC_PLATFORM: &str = "macos";
+
+/// How often the release feed is read ([`crate::release_feed`]). Hourly, as
+/// every Mac's Sparkle already reads it; the first read waits a few minutes
+/// so a daemon that restarts in a loop is not a loop of fetches.
+const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(3600);
+const RELEASE_FIRST_CHECK: Duration = Duration::from_secs(300);
+
 /// How the event id goes out. A bare int for an untagged device; otherwise
 /// `"<tag>:<id>"`, the tag being the opaque label the client registered with.
 ///
@@ -80,6 +95,23 @@ struct Route {
     tag: Option<String>,
     /// The device row's declared environment; `None` = the client never said.
     environment: Option<String>,
+    /// A Mac's token, pushed under [`MAC_TOPIC`]. Macs get release pings and
+    /// nothing else (see [`Route::of`]'s callers).
+    mac: bool,
+}
+
+impl Route {
+    fn of(d: Device) -> (Self, String) {
+        let mac = d.platform == MAC_PLATFORM;
+        (
+            Self {
+                tag: d.tag,
+                environment: d.environment,
+                mac,
+            },
+            d.token,
+        )
+    }
 }
 
 /// The complete wire body, and THE PRIVACY BOUNDARY: the content-bearing fields
@@ -189,6 +221,30 @@ impl ClearPing {
     /// the banner with a background push would not take it down.
     fn collapse_id(&self) -> String {
         format!("clear-{}", self.event_id)
+    }
+}
+
+/// A new version of the Mac app is out ([`crate::release_feed`]). Not
+/// durable either, but not fire-and-forget: the version is recorded as
+/// announced only once some device took it, so a relay outage means the next
+/// hourly check tries again.
+///
+/// On the wire it is `"<tag>:release:macos:<version>"`. The version is public
+/// news, not mail. The collapse id has no tag in it ON PURPOSE: a phone with
+/// two mailboxes hears from two daemons, and one shared collapse id is what
+/// makes those one banner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleasePing {
+    pub version: String,
+}
+
+impl ReleasePing {
+    fn event_id(&self, tag: Option<&str>) -> Option<PushEventId> {
+        tag.map(|tag| PushEventId::Tagged(format!("{tag}:release:macos:{}", self.version)))
+    }
+
+    fn collapse_id(&self) -> String {
+        format!("release-macos-{}", self.version)
     }
 }
 
@@ -397,6 +453,9 @@ pub struct Pusher {
     /// Banners to take down; see [`ClearPing`]. `None` until
     /// [`Pusher::with_clear_pings`].
     clear_pings: Option<broadcast::Receiver<ClearPing>>,
+    /// Where to read the release feed ([`crate::release_feed::FEED_URL`]).
+    /// `None` reads nothing: a test pusher, unless it asks for one.
+    release_feed: Option<String>,
 }
 
 impl Pusher {
@@ -433,6 +492,7 @@ impl Pusher {
             draft_pings: None,
             calendar_pings: None,
             clear_pings: None,
+            release_feed: Some(release_feed::FEED_URL.to_string()),
         }))
     }
 
@@ -454,6 +514,7 @@ impl Pusher {
             draft_pings: None,
             calendar_pings: None,
             clear_pings: None,
+            release_feed: None,
         }
     }
 
@@ -478,6 +539,13 @@ impl Pusher {
     /// Listen for banners to take down (see [`ClearPing`]).
     pub fn with_clear_pings(mut self, pings: broadcast::Receiver<ClearPing>) -> Self {
         self.clear_pings = Some(pings);
+        self
+    }
+
+    /// TEST HOOK: read the release feed from here (a mock server).
+    #[doc(hidden)]
+    pub fn with_release_feed(mut self, url: &str) -> Self {
+        self.release_feed = Some(url.to_string());
         self
     }
 
@@ -541,19 +609,15 @@ impl Pusher {
             // The TAG and the ENVIRONMENT ride with each token: they decide which
             // payload and which APNs host the token's push goes out on, so they
             // cannot be dropped here the way the rest of the row is.
+            // MACS ARE LEFT OUT: a running Mac has its own banners off the
+            // event stream, and the Mac has no extension to fill a mail push
+            // in, so all one could show is the fixed fallback line.
             let mut devices: Vec<(Route, String)> = self
                 .store
                 .list_devices(self.account_id)?
                 .into_iter()
-                .map(|d| {
-                    (
-                        Route {
-                            tag: d.tag,
-                            environment: d.environment,
-                        },
-                        d.token,
-                    )
-                })
+                .map(Route::of)
+                .filter(|(r, _)| !r.mac)
                 .collect();
 
             // Nothing registered: an event nobody can receive is history, not
@@ -693,19 +757,13 @@ impl Pusher {
         what: &str,
         id_for: impl Fn(Option<&str>) -> Option<PushEventId>,
     ) {
+        // Phones only, for the reason `drain` leaves Macs out.
         let devices: Vec<(Route, String)> = match self.store.list_devices(self.account_id) {
             Ok(rows) => rows
                 .into_iter()
                 .filter(|d| d.tag.is_some())
-                .map(|d| {
-                    (
-                        Route {
-                            tag: d.tag,
-                            environment: d.environment,
-                        },
-                        d.token,
-                    )
-                })
+                .map(Route::of)
+                .filter(|(r, _)| !r.mac)
                 .collect(),
             Err(e) => {
                 eprintln!("squelch: APNs pusher could not list devices for {what}: {e}");
@@ -746,11 +804,16 @@ impl Pusher {
             // and with neither the field is omitted for the relay's default.
             let environment = route.environment.as_deref().or(self.environment.as_deref());
             for chunk in tokens.chunks(MAX_TOKENS_PER_REQUEST) {
+                let topic = if route.mac {
+                    Some(MAC_TOPIC)
+                } else {
+                    self.topic.as_deref()
+                };
                 let body = PushRequest {
                     device_tokens: chunk,
                     event_id: event_id.clone(),
                     collapse_id: Some(collapse.clone()),
-                    topic: self.topic.as_deref(),
+                    topic,
                     environment,
                     kind,
                 };
@@ -821,6 +884,126 @@ impl Pusher {
         outcome
     }
 
+    /// Read the release feed and push the newest Mac release to whoever
+    /// [`release_feed::decide`] says should hear it, once. Every failure is
+    /// logged and left for the next hourly check.
+    pub async fn check_release(&self) {
+        let Some(url) = self.release_feed.as_deref() else {
+            return;
+        };
+        let Some(feed) = self.fetch_feed(url).await else {
+            return;
+        };
+        let Some(release) = release_feed::newest(&feed) else {
+            eprintln!("squelch: release feed listed no release; nothing to announce");
+            return;
+        };
+        let announced = match self
+            .store
+            .get_app_setting(self.account_id, release_feed::ANNOUNCED_KEY)
+        {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("squelch: release check could not read its record: {e}");
+                return;
+            }
+        };
+        let seen = match self.store.client_versions_seen(self.account_id) {
+            Ok(seen) => seen,
+            Err(e) => {
+                eprintln!("squelch: release check could not read client versions: {e}");
+                return;
+            }
+        };
+        let phones =
+            match release_feed::decide(&release, chrono::Utc::now(), &seen, announced.as_deref()) {
+                Decision::Wait => return,
+                Decision::AlreadyHave => return self.mark_announced(&release.version),
+                Decision::Announce { phones } => phones,
+            };
+        let devices: Vec<(Route, String)> = match self.store.list_devices(self.account_id) {
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|d| d.tag.is_some())
+                .map(Route::of)
+                .filter(|(r, _)| r.mac || phones)
+                .collect(),
+            Err(e) => {
+                eprintln!("squelch: release check could not list devices: {e}");
+                return;
+            }
+        };
+        if devices.is_empty() {
+            return self.mark_announced(&release.version);
+        }
+        let ping = ReleasePing {
+            version: release.version.clone(),
+        };
+        let outcome = self
+            .fan_out(&devices, ping.collapse_id(), Some("release"), |tag| {
+                ping.event_id(tag)
+            })
+            .await;
+        for token in &outcome.dead {
+            if let Err(e) = self.store.delete_device_by_token(self.account_id, token) {
+                eprintln!("squelch: APNs pusher could not drop a device: {e}");
+            }
+        }
+        if outcome.delivered == 0 && (outcome.relay_failed || outcome.failed > 0) {
+            eprintln!(
+                "squelch: release {} reached no device; trying again next check",
+                release.version
+            );
+            return;
+        }
+        eprintln!(
+            "squelch: announced release {} to {} device(s)",
+            release.version, outcome.delivered
+        );
+        self.mark_announced(&release.version);
+    }
+
+    fn mark_announced(&self, version: &str) {
+        if let Err(e) =
+            self.store
+                .set_app_setting(self.account_id, release_feed::ANNOUNCED_KEY, version)
+        {
+            eprintln!("squelch: release check could not record {version}: {e}");
+        }
+    }
+
+    /// GET the feed, bounded. No bearer rides this client's requests unless
+    /// one is added, and none is: the feed is public.
+    async fn fetch_feed(&self, url: &str) -> Option<String> {
+        let Ok(resp) = self.http.get(url).send().await else {
+            eprintln!("squelch: release feed unreachable");
+            return None;
+        };
+        if !resp.status().is_success() {
+            eprintln!(
+                "squelch: release feed answered HTTP {}",
+                resp.status().as_u16()
+            );
+            return None;
+        }
+        if resp
+            .content_length()
+            .is_some_and(|n| n as usize > release_feed::MAX_FEED_BYTES)
+        {
+            eprintln!("squelch: release feed is too large; ignored");
+            return None;
+        }
+        let Ok(bytes) = resp.bytes().await else {
+            eprintln!("squelch: release feed body unreadable");
+            return None;
+        };
+        if bytes.len() > release_feed::MAX_FEED_BYTES {
+            eprintln!("squelch: release feed is too large; ignored");
+            return None;
+        }
+        String::from_utf8(bytes.to_vec()).ok()
+    }
+
     /// Run until shutdown, waking on the events broadcast, a coarse
     /// [`IDLE_INTERVAL`] tick, or the shutdown watch. After a relay failure only
     /// shutdown may cut the backoff short — a wake must not turn a dead relay
@@ -834,9 +1017,17 @@ impl Pusher {
         let mut reminders = self.calendar_pings.take();
         let mut clears = self.clear_pings.take();
         let mut backoff: Option<Duration> = None;
+        let mut next_release_check = tokio::time::Instant::now() + RELEASE_FIRST_CHECK;
         loop {
             if *shutdown.borrow() {
                 return Ok(());
+            }
+            // Checked on the loop's own wakes (at least once a minute idle,
+            // once per backoff step otherwise), which is plenty for an hourly
+            // job and needs no arm of its own in either select.
+            if tokio::time::Instant::now() >= next_release_check {
+                next_release_check = tokio::time::Instant::now() + RELEASE_CHECK_INTERVAL;
+                self.check_release().await;
             }
             // Drain FIRST: a daemon that restarts with a stale cursor catches up
             // immediately instead of waiting out an idle interval.
@@ -1077,6 +1268,7 @@ mod tests {
         Route {
             tag: tag.map(str::to_string),
             environment: environment.map(str::to_string),
+            mac: false,
         }
     }
 

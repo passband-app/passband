@@ -18,6 +18,7 @@ pub mod mem;
 pub mod metrics;
 pub mod owner_clock;
 pub mod push;
+pub mod release_feed;
 pub mod renotify;
 pub mod store;
 pub mod sync;

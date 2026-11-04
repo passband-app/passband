@@ -2205,6 +2205,8 @@ final class AppStore {
             connError = nil
             #if os(iOS)
                 await PushRegistration.shared.registerAndSync()
+            #else
+                await MacPush.shared.accountAdded()
             #endif
             Analytics.capture("connect_succeeded")
             identifyPerson()
@@ -2364,6 +2366,8 @@ final class AppStore {
         }
         #if os(iOS)
             await PushRegistration.shared.registerAndSync()
+        #else
+            await MacPush.shared.accountAdded()
         #endif
         return (true, nil)
     }

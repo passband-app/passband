@@ -66,6 +66,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // was not running is delivered the moment a delegate exists, and a
         // center without one drops it.
         Notifier.shared.install()
+        // The release push token, for a build that carries the profile.
+        MacPush.shared.start()
         // Look at the floating code panel without waiting for a login code:
         // same posture as PASSBAND_FIRST_LOAD, a launch environment only.
         if let code = ProcessInfo.processInfo.environment["PASSBAND_PREVIEW_LOGIN_CODE"] {
@@ -93,7 +95,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidBecomeActive(_ notification: Notification) {
         AppStore.shared.identifyPerson()
         AppStore.shared.attentionResume()
+        MacPush.shared.start()
     }
+
+    func application(_ application: NSApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        Task { @MainActor in await MacPush.shared.received(deviceToken) }
+    }
+
+    /// Refused a token (no entitlement, no network): nothing to undo. The
+    /// next activation past the throttle asks again.
+    func application(_ application: NSApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {}
 
     /// Another app came forward. An email left open behind it is not being
     /// read, and the dwell clock must not go on counting it. The reader pauses

@@ -666,6 +666,10 @@ final class AccountManager {
             if let settings = await settings(for: id) {
                 await PushRegistration.shared.unregister(settings)
             }
+        #else
+            if let settings = await settings(for: id) {
+                await MacPush.shared.unregister(settings)
+            }
         #endif
         let cleared = await offMain { Result { try SettingsStore.clear(accountId: id) } }
         if case .failure = cleared { AccountIndex.parkOrphan(id) }

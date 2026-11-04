@@ -53,6 +53,7 @@ struct SealedEventTests {
         anAuthTapNeverRoutesToTheReader()
         aDraftPushParsesOnlyItsOwnShape()
         aClearPushParsesOnlyItsOwnShape()
+        aReleasePushParsesOnlyItsOwnShapeAndTapsToUpdate()
         aClearFindsTheBannerItNames()
         aDraftTapOpensTheDraftAndNothingElse()
         aDraftBannerSaysWhoAndWhat()
@@ -532,6 +533,26 @@ struct SealedEventTests {
         expect(K.unresolvedPush("\(a):clear:41") == nil, "a clear never resolves as an event")
         expect(K.draftPush("\(a):clear:41") == nil, "nor as a draft")
         expect(K.calendarPush("\(a):clear:41") == nil, "nor as a reminder")
+    }
+
+    static func aReleasePushParsesOnlyItsOwnShapeAndTapsToUpdate() {
+        typealias K = EventBanner
+        let account = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let a = account.uuidString
+        expect(
+            K.releasePush("\(a):release:macos:0.0.19") == K.ReleasePush(accountId: account, version: "0.0.19"),
+            "the pusher's shape parses")
+        for bad in [
+            "\(a):release:ios:0.0.19", "\(a):release:macos", "\(a):release:macos:0.0.19:1",
+            "\(a):release:macos:v0.0.19", "\(a):release:macos:1", "\(a):release:macos:0..19",
+            "not-a-uuid:release:macos:0.0.19", "release:macos:0.0.19", "\(a):releases:macos:0.0.19", "",
+        ] {
+            expect(K.releasePush(bad) == nil, "rejects \(bad)")
+        }
+        expect(K.unresolvedPush("\(a):release:macos:0.0.19") == nil, "a release never resolves as an event")
+        expect(K.draftPush("\(a):release:macos:0.0.19") == nil, "nor as a draft")
+        expect(K.calendarPush("\(a):release:macos:0.0.19") == nil, "nor as a reminder")
+        expect(K.tapRoute(["event_id": "\(a):release:macos:0.0.19"]) == .update, "a tap is an update tap")
     }
 
     static func aClearFindsTheBannerItNames() {

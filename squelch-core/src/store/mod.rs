@@ -2677,6 +2677,11 @@ pub trait Store:
     /// a push fan-out and its response array line up reproducibly.
     fn list_devices(&self, account_id: AccountId) -> Result<Vec<Device>>;
 
+    /// Each (platform, version) this account's apps have connected as, with
+    /// when. See [`SqliteStore::client_versions_seen`](sqlite::SqliteStore::client_versions_seen);
+    /// on the trait for the pusher's release check ([`crate::release_feed`]).
+    fn client_versions_seen(&self, account_id: AccountId) -> Result<Vec<ClientSeen>>;
+
     /// Drop one device by token, scoped to the account. Two callers: the human
     /// door's DELETE, and the pusher on APNs `410 Unregistered`.
     fn delete_device_by_token(&self, account_id: AccountId, token: &str) -> Result<bool>;

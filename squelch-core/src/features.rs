@@ -71,6 +71,12 @@ pub const KNOWN: &[Feature] = &[
                   are queued instead of waiting for tomorrow. The 10,000-run daily breaker and \
                   the monthly LLM budget still apply.",
     },
+    Feature {
+        key: UNDERSTANDING,
+        summary: "What Passband knows about you: a nightly model pass writes short entries about \
+                  the owner and the people they reply to, triage reads them, and Settings shows \
+                  every one.",
+    },
 ];
 
 /// The daemon's background and access lane caps (see
@@ -83,6 +89,18 @@ pub const KNOWN: &[Feature] = &[
 /// not touch. OFF IS THE CAPS AS CONFIGURED, which is every daemon that never
 /// heard of the key. docs/TRIAGE-OPERATIONS.md, "Spend and revisit limits".
 pub const UNCAPPED_TRIAGE: &str = "uncapped_triage";
+
+
+/// Deep user understanding (docs/UNDERSTANDING.md §2.3, §5): the nightly
+/// profile pass (`triage::profile`), the entries triage reads from it
+/// (`triage::memory::StoreMemoryContext`), and the review page's routes
+/// (`/client/memory`). OFF IS AS IF IT DID NOT EXIST: the pass does not run
+/// and spends nothing, triage is handed no memory lines, and the routes 404.
+/// It ships dark because it spends tokens and writes sentences about people,
+/// and the first weeks are for reading what the model writes about a handful
+/// of tenants before anyone else sees it. Entries already written stay in the
+/// store while it is off, unserved.
+pub const UNDERSTANDING: &str = "understanding";
 
 /// Smart re-notify (issue #625, docs/RENOTIFY.md): the daemon records the Mac
 /// app's connections and, at a moment the owner can act, sends a `renotify`

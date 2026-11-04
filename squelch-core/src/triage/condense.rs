@@ -277,6 +277,38 @@ fn quote_cut(body: &str) -> Option<usize> {
     })
 }
 
+/// The words a reply's AUTHOR wrote: everything before the first quoted
+/// earlier message (an attribution line, an Outlook header block, a `>`
+/// block), with any `>` line that survived that dropped. `None` for a
+/// forward, where the part after the banner IS somebody else's message and
+/// there is no telling the author's words from it.
+///
+/// Unlike [`quote_cut`] the cut is taken even when nothing precedes it: an
+/// empty reply is an empty answer here, never the whole quoted chain. The
+/// profile pass reads only this of the owner's sent mail
+/// (`triage::profile::owner_words`), so an inbound body never reaches it.
+pub fn own_text(body: &str) -> Option<String> {
+    if forwarded(body) {
+        return None;
+    }
+    let cut = [
+        attribution_cut(body),
+        outlook_cut(body),
+        quoted_block_cut(body),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .unwrap_or(body.len());
+    Some(
+        body[..cut]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('>'))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
 /// A condensed body cut to `chars` scalar values, for the older siblings of
 /// a thread whose gist matters but whose text rarely does. The flag says
 /// whether the cut removed anything. The quote marker is whole or absent

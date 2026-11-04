@@ -2602,3 +2602,46 @@ CREATE TABLE IF NOT EXISTS message_translations (
 -- The translate pass's claim: one account's rows by status.
 CREATE INDEX IF NOT EXISTS idx_message_translations_claim
     ON message_translations(account_id, status, updated_at);
+-- What Passband understands about the OWNER (docs/UNDERSTANDING.md §2.3): a
+-- small set of typed entries the nightly profile pass infers from the owner's
+-- own behaviour (`origin = 'inferred'`), or the owner states or confirms on the
+-- review page (`origin = 'stated'`). Triage reads them as lines in its context
+-- (`triage::memory::StoreMemoryContext`), never as numbers: nothing here
+-- reaches `ranking.rs`. HUMAN DOOR ONLY, like `contacts` and `send_groups`: a
+-- profile of the owner and the people around them never crosses to `/mcp`.
+--
+-- `kind` is closed (`role`, `project`, `person`, `ignores`, `prefers`) and
+-- `body` holds that kind's bounded fields as JSON; `line` is the one sentence
+-- the prompt sees, rendered from `body` by `triage::memory::MemoryBody::
+-- render_line` (or the owner's own words, once they edit it). `provenance` is
+-- `{"message_ids": [...], "addrs": [...]}`, every id checked for ownership when
+-- it was written. `id` is a ULID, so ids sort by creation and a client can
+-- hold one across edits.
+--
+-- THREE WAYS OUT, and they are not the same. `expires_at` (inferred only,
+-- `affirmed_at + 90d`) lapses an entry the pass stopped standing by; `retired_at`
+-- is the pass withdrawing one, kept as a tombstone so the review page can say
+-- "no longer thinks"; `deleted_at` is the owner removing one, never served to
+-- anything again and audited. No row is ever hard-deleted by the daemon.
+CREATE TABLE IF NOT EXISTS memory_entries (
+    account_id   INTEGER NOT NULL,
+    id           TEXT NOT NULL,
+    scope        TEXT NOT NULL,
+    origin       TEXT NOT NULL CHECK (origin IN ('stated','inferred')),
+    kind         TEXT NOT NULL,
+    body         TEXT NOT NULL,
+    line         TEXT NOT NULL,
+    provenance   TEXT NOT NULL,
+    confidence   REAL NOT NULL,
+    revision     INTEGER NOT NULL DEFAULT 1,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    affirmed_at  TEXT NOT NULL,
+    expires_at   TEXT,
+    retired_at   TEXT,
+    deleted_at   TEXT,
+    PRIMARY KEY(account_id, id)
+);
+-- The triage read: one account's entries for a handful of scopes, every job.
+CREATE INDEX IF NOT EXISTS idx_memory_entries_scope
+    ON memory_entries(account_id, scope);

@@ -244,11 +244,16 @@ async fn undo(h: &Harness, batch: &str) -> (StatusCode, Value) {
 }
 
 /// The ids currently open in Reading, as the feed reports them.
+/// Every Reading message still open, past the board's week too: smart clear
+/// cleans the whole month, so that is what it must leave or take.
 async fn open_in_reading(h: &Harness) -> Vec<i64> {
     let response = h
         .app
         .clone()
-        .oneshot(authed("GET", "/client/v2/feed?destination=reading"))
+        .oneshot(authed(
+            "GET",
+            "/client/v2/feed?destination=reading&all_time=true",
+        ))
         .await
         .unwrap();
     let mut ids: Vec<i64> = body_json(response).await["items"]

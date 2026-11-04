@@ -2756,11 +2756,13 @@ impl AgentTriageStore for SqliteStore {
     }
 }
 
-/// The Reading inventory, newest first: the ONE answer to "what is in Reading".
-/// `GET /client/v2/feed?destination=reading` reads it through
-/// `agent_reading_with_query`, and the per-sender purge read
-/// (`reading_senders`) calls it under the lock it already holds, so the two
-/// cannot disagree about which mail is open there.
+/// The Reading inventory, newest first: the ONE query for "what is in
+/// Reading". `GET /client/v2/feed?destination=reading` reads it through
+/// `agent_reading_with_query`, and smart clear and the per-sender purge read
+/// (`reading_senders`) call it under the lock they already hold. Two shapes of
+/// one answer: the 30-day inventory those cleaners work on, and, with
+/// `query.reading_board`, the shorter Reading BOARD the owner sees (the
+/// default feed), which is a newest-first prefix of it.
 pub(super) fn reading_items(
     conn: &Connection,
     account: AccountId,
@@ -2768,15 +2770,107 @@ pub(super) fn reading_items(
     query: &AgentListQuery,
     now: DateTime<Utc>,
 ) -> Result<Vec<AgentListItem>> {
+    if query.reading_board {
+        return reading_board(conn, account, limit, query, now);
+    }
     let mut items = list_items_with_query(conn, account, "reading", now, query)?;
+    sort_newest_first(&mut items);
+    items.truncate(limit);
+    Ok(items)
+}
 
+fn sort_newest_first(items: &mut [AgentListItem]) {
     items.sort_by(|a, b| {
         b.received_at
             .cmp(&a.received_at)
             .then_with(|| b.message_id.cmp(&a.message_id))
     });
-    items.truncate(limit);
-    Ok(items)
+}
+
+/// The most days of mail the Reading board reaches back.
+pub const READING_BOARD_DAYS: i64 = 7;
+/// The most messages the Reading board shows. Reading is the low-stakes
+/// pile (newsletters, announcements, promotions), and a month of it is a
+/// guilt list, not a reading list.
+pub const READING_BOARD_MAX: usize = 49;
+
+/// THE READING BOARD: the newest [`READING_BOARD_MAX`] Reading messages of the
+/// last [`READING_BOARD_DAYS`] days in the owner's zone, COUNTING MAIL ALREADY
+/// DONE, less the done ones. A heavy week shrinks the window from its old end
+/// by however much it takes; a quiet one shows the whole week.
+///
+/// - DONE MAIL HOLDS ITS PLACE, so clearing never refills: closing three cards
+///   leaves three fewer, rather than letting older mail in behind them, and
+///   the board can run out. It moves only when mail arrives or a day starts.
+/// - NO WHOLE-DAY CUT. Dropping whole days from the old end emptied the board
+///   whenever one day alone was over the cap (the morning after a sale day:
+///   today nothing, yesterday eighty, so the board showed nothing).
+/// - CALENDAR DAYS, not 24 hours back from now, so the old end does not slide
+///   hour to hour.
+///
+/// Nothing is changed in the store: mail off the board stays open in All
+/// mail and search, and smart clear still cleans it.
+fn reading_board(
+    conn: &Connection,
+    account: AccountId,
+    limit: usize,
+    query: &AgentListQuery,
+    now: DateTime<Utc>,
+) -> Result<Vec<AgentListItem>> {
+    // An owner zone that cannot be read is not a reason to show no Reading.
+    let zone = super::device_tokens::owner_zone_conn(conn, account)
+        .map(|owner| owner.zone)
+        .unwrap_or(chrono_tz::Tz::UTC);
+    let since = Some(reading_board_since(now, zone));
+    let mut slots = list_items_with_query(
+        conn,
+        account,
+        "reading",
+        now,
+        &AgentListQuery {
+            since,
+            include_done: true,
+            reading_board: false,
+        },
+    )?;
+    sort_newest_first(&mut slots);
+    slots.truncate(READING_BOARD_MAX);
+    if !query.include_done {
+        let open: std::collections::HashSet<i64> = list_items_with_query(
+            conn,
+            account,
+            "reading",
+            now,
+            &AgentListQuery {
+                since,
+                include_done: false,
+                reading_board: false,
+            },
+        )?
+        .into_iter()
+        .map(|item| item.message_id)
+        .collect();
+        slots.retain(|item| open.contains(&item.message_id));
+    }
+    slots.truncate(limit);
+    Ok(slots)
+}
+
+/// Where the board's oldest day begins: midnight in the owner's zone,
+/// [`READING_BOARD_DAYS`] days back counting today. A midnight a clock change
+/// skips is the first instant after it.
+fn reading_board_since(now: DateTime<Utc>, zone: chrono_tz::Tz) -> DateTime<Utc> {
+    use chrono::TimeZone;
+    let day = now.with_timezone(&zone).date_naive() - Duration::days(READING_BOARD_DAYS - 1);
+    let midnight = day.and_time(chrono::NaiveTime::MIN);
+    zone.from_local_datetime(&midnight)
+        .earliest()
+        .or_else(|| {
+            zone.from_local_datetime(&(midnight + Duration::hours(1)))
+                .earliest()
+        })
+        .map(|at| at.with_timezone(&Utc))
+        .unwrap_or_else(|| midnight.and_utc())
 }
 
 /// A blank display name is no display name.
@@ -8918,6 +9012,7 @@ mod dependency_tests {
         let all = AgentListQuery {
             since: None,
             include_done: true,
+            reading_board: false,
         };
         assert_eq!(
             store.agent_reading_with_query(1, 10, &all).unwrap().len(),
@@ -8934,7 +9029,8 @@ mod dependency_tests {
                     10,
                     &AgentListQuery {
                         since: None,
-                        include_done: false
+                        include_done: false,
+                        reading_board: false,
                     }
                 )
                 .unwrap()
@@ -8948,7 +9044,8 @@ mod dependency_tests {
                     10,
                     &AgentListQuery {
                         since: Some(Utc::now() - Duration::days(30)),
-                        include_done: true
+                        include_done: true,
+                        reading_board: false,
                     }
                 )
                 .unwrap()
@@ -10415,6 +10512,47 @@ mod auto_done_tests {
             )
             .unwrap();
         assert_eq!(theirs, "new");
+    }
+}
+
+/// The Reading board's window starts at the owner's midnight
+/// (`reading_board_since`); the rest of the board is pinned through the API
+/// (`squelch-api/tests/client_triage_v2.rs`).
+#[cfg(test)]
+mod reading_board_tests {
+    use super::*;
+
+    fn at(rfc3339: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    /// 05:00 UTC on the 3rd is the evening of the 2nd in Los Angeles, so the
+    /// week counts back from the 2nd: the 27th, across the end of daylight
+    /// time (1 November), so that midnight is 07:00 UTC, not 08:00.
+    #[test]
+    fn the_week_begins_at_the_owners_midnight() {
+        let now = at("2026-11-03T05:00:00Z");
+        assert_eq!(
+            reading_board_since(now, chrono_tz::America::Los_Angeles),
+            at("2026-10-27T07:00:00Z")
+        );
+        assert_eq!(
+            reading_board_since(now, chrono_tz::Tz::UTC),
+            at("2026-10-28T00:00:00Z")
+        );
+    }
+
+    /// Havana skips its midnight when clocks go forward (8 March 2026): that
+    /// day begins at the first instant there is, 01:00 local.
+    #[test]
+    fn a_skipped_midnight_starts_the_day_an_hour_late() {
+        let now = at("2026-03-14T17:00:00Z");
+        assert_eq!(
+            reading_board_since(now, chrono_tz::America::Havana),
+            at("2026-03-08T05:00:00Z")
+        );
     }
 }
 

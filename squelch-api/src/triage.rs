@@ -21,8 +21,8 @@ pub struct FeedQuery {
 }
 
 /// How many items a feed page holds: 200 unless asked, never more than 1000.
-/// Shared with [`smart_clear`], whose rows must be the items the Reading feed
-/// returns.
+/// Shared with [`smart_clear`], which scans the Reading inventory a 30-day
+/// feed would return (not the shorter Reading board).
 fn feed_limit(requested: Option<usize>) -> usize {
     requested.unwrap_or(200).clamp(1, 1000)
 }
@@ -51,6 +51,8 @@ pub async fn feed(
             Some(query.since.unwrap_or(default_feed_since(now)))
         },
         include_done: query.include_done.unwrap_or(false),
+        // Asked for no dates of its own: the Reading board, not 30 days.
+        reading_board: query.all_time != Some(true) && query.since.is_none(),
     };
     let mut items = store_call(&state, move |store, account| {
         match query.destination.as_str() {
@@ -408,9 +410,13 @@ pub async fn smart_clear(State(state): State<ApiState>) -> Result<impl IntoRespo
 
     let limit = feed_limit(None);
     let now = Utc::now();
+    // NOT the Reading board: smart clear cleans the whole month of open
+    // Reading mail, including what has aged off the board. Its stale-promo
+    // rule only fires on mail a week old, which the board never shows.
     let inventory = squelch_core::store::agent_triage::AgentListQuery {
         since: Some(default_feed_since(now)),
         include_done: false,
+        reading_board: false,
     };
     let day = now.format("%Y-%m-%d").to_string();
     let scan_inventory = inventory.clone();

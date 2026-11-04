@@ -633,50 +633,7 @@ impl SqliteStore {
     /// the owner is. Failing every app, the primary Google Calendar's zone;
     /// failing that, UTC.
     pub fn owner_zone(&self, account_id: AccountId) -> Result<OwnerZone> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT client_timezone, client_action_at, client_seen_at FROM device_tokens
-             WHERE account_id = ?1 AND revoked_at IS NULL
-               AND client_timezone IS NOT NULL AND client_seen_at IS NOT NULL",
-        )?;
-        let rows = stmt
-            .query_map(params![account_id], |r| {
-                Ok((r.get::<_, String>(0)?, dt_opt(r, 1)?, dt(r, 2)?))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        // Compared parsed, not as text, as in `client_versions_seen`.
-        let newest = rows
-            .into_iter()
-            .filter_map(|(zone, acted, seen)| {
-                Some((
-                    acted.unwrap_or(seen),
-                    crate::owner_clock::device_zone(&zone)?,
-                ))
-            })
-            .max_by_key(|(at, _)| *at);
-        if let Some((_, zone)) = newest {
-            return Ok(OwnerZone {
-                zone,
-                source: OwnerZoneSource::Client,
-            });
-        }
-        let calendar = conn
-            .query_row(
-                "SELECT time_zone FROM calendar_calendars
-                 WHERE account_id = ?1 AND is_primary = 1 AND time_zone IS NOT NULL
-                 LIMIT 1",
-                params![account_id],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?;
-        Ok(calendar
-            .as_deref()
-            .and_then(crate::owner_clock::device_zone)
-            .map(|zone| OwnerZone {
-                zone,
-                source: OwnerZoneSource::Calendar,
-            })
-            .unwrap_or_default())
+        owner_zone_conn(&*self.lock()?, account_id)
     }
 
     /// Record that the app holding `presented` just DID something: stamps
@@ -954,4 +911,51 @@ impl SqliteStore {
         }
         Ok(())
     }
+}
+
+/// [`SqliteStore::owner_zone`] on a connection the caller holds.
+pub(super) fn owner_zone_conn(conn: &Connection, account_id: AccountId) -> Result<OwnerZone> {
+    let mut stmt = conn.prepare(
+        "SELECT client_timezone, client_action_at, client_seen_at FROM device_tokens
+         WHERE account_id = ?1 AND revoked_at IS NULL
+           AND client_timezone IS NOT NULL AND client_seen_at IS NOT NULL",
+    )?;
+    let rows = stmt
+        .query_map(params![account_id], |r| {
+            Ok((r.get::<_, String>(0)?, dt_opt(r, 1)?, dt(r, 2)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    // Compared parsed, not as text, as in `client_versions_seen`.
+    let newest = rows
+        .into_iter()
+        .filter_map(|(zone, acted, seen)| {
+            Some((
+                acted.unwrap_or(seen),
+                crate::owner_clock::device_zone(&zone)?,
+            ))
+        })
+        .max_by_key(|(at, _)| *at);
+    if let Some((_, zone)) = newest {
+        return Ok(OwnerZone {
+            zone,
+            source: OwnerZoneSource::Client,
+        });
+    }
+    let calendar = conn
+        .query_row(
+            "SELECT time_zone FROM calendar_calendars
+             WHERE account_id = ?1 AND is_primary = 1 AND time_zone IS NOT NULL
+             LIMIT 1",
+            params![account_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(calendar
+        .as_deref()
+        .and_then(crate::owner_clock::device_zone)
+        .map(|zone| OwnerZone {
+            zone,
+            source: OwnerZoneSource::Calendar,
+        })
+        .unwrap_or_default())
 }

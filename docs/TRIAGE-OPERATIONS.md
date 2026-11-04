@@ -366,8 +366,10 @@ make an in-flight triage commit stale. Human door only.
 What is stored is two counts per message. No URL, link host, scroll position or
 timestamp of a report is kept, and only the owner's own client can write them.
 
-Smart clear scores each sender with open mail in Reading (the same inventory
-`/client/v2/feed?destination=reading` returns), at most 100 senders, from
+Smart clear scores each sender with open mail in Reading (the 30-day
+inventory `/client/v2/feed?destination=reading&since=...` returns, not the
+shorter board the default feed shows: see "The Reading board" below), at most
+100 senders, from
 per-sender statistics read in `store/sqlite/reading_senders.rs`. Nothing about
 them is served to a client.
 
@@ -700,3 +702,21 @@ remains available, but never includes a message solely because of a placement
 label. On upgrade, legacy Records placements and corrections are removed while
 preserving typed facts and other choices. Messages with a legacy Records label
 but no typed facts are queued once for re-triage (`records_cleanup`).
+
+## The Reading board
+
+The default Reading feed (`/client/v2/feed?destination=reading` with no `since`
+and no `all_time=true`) is the BOARD the owner sees, not the whole inventory:
+the newest 49 Reading messages of the last 7 calendar days in the owner's zone,
+COUNTING MAIL ALREADY DONE, less the done ones. A heavy week shrinks the window
+from its old end; a quiet one shows the whole week. Because done mail keeps its
+place, clearing never refills the board with older mail, and the board moves
+only when mail arrives or a day starts. `READING_BOARD_DAYS` and
+`READING_BOARD_MAX` in `store/sqlite/agent_triage.rs`.
+
+Mail off the board is not hidden or changed in the store: it stays open in All
+mail and search. Smart clear works on the whole 30-day inventory, so it also
+marks done older mail that is no longer on the board (its stale-promotion rule
+only fires on mail a week old, which the board never shows), and its count can
+be larger than what leaves the board. A caller naming its own dates, and the
+agent door's `get_reading`, get the inventory.

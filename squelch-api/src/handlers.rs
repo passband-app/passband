@@ -2159,7 +2159,7 @@ pub(crate) fn ghost_view(
 /// holds fewer events than Google has (its own cap, likewise nearest now).
 /// Each ghost
 /// carries `matched_event` (`{calendar_id, id}` or null): a real event at the
-/// same start whose title matches ([`squelch_core::gcal::ghost_matches`]),
+/// same start (or day, across all-day and timed) whose title matches ([`squelch_core::gcal::ghost_matches`]),
 /// computed here for display de-duplication and never stored. Each event
 /// carries `place` once the small model has cleaned its location
 /// ([`squelch_core::gcal::place`]): the text the detail card shows in place
@@ -2193,9 +2193,11 @@ pub async fn get_timeline(
     // Real events are served only while calendar is granted: a grant taken
     // back hides what was synced under it.
     let (granted, reminder_email) = crate::calendar_remind::calendar_reach(&state).await;
-    let (ghosts, events, calendars, status, places, owned, tickets) =
+    let (ghosts, urls, events, calendars, status, places, owned, mut tickets) =
         store_call(&state, move |store, account_id| {
             let ghosts = store.list_ghost_events(account_id, from, to)?;
+            let ids: Vec<i64> = ghosts.iter().map(|g| g.id).collect();
+            let urls = store.ghost_url_refs(account_id, &ids)?;
             // The tickets button (docs/CALENDAR.md, "Reminders and
             // tickets"): the reminder plan's pick, else the fallback from
             // the linked mail, built as the reminder worker builds it.
@@ -2211,6 +2213,7 @@ pub async fn get_timeline(
             if !granted {
                 return Ok((
                     ghosts,
+                    urls,
                     Vec::new(),
                     Vec::new(),
                     Default::default(),
@@ -2230,13 +2233,57 @@ pub async fn get_timeline(
                 .collect();
             let places = store.calendar_places(account_id)?;
             let owned = store.calendar_owned(account_id)?;
-            Ok((ghosts, events, calendars, status, places, owned, tickets))
+            Ok((
+                ghosts, urls, events, calendars, status, places, owned, tickets,
+            ))
         })
         .await?;
     // The display match (`gcal::link_ghosts`): computed here and never
     // stored, so it can never go stale and never changes a ghost. The
     // calendar reminders link mail to events by the same function.
-    let matched = squelch_core::gcal::link_ghosts(&ghosts, &events, &owned);
+    let mut matched = squelch_core::gcal::link_ghosts(&ghosts, &events, &owned);
+    // Copies of one event show as one ghost (`gcal::fold_ghosts`). The one
+    // shown carries every copy's mail (each labelled by its own sender). A
+    // copy's event match and tickets carry over only from the SAME sender,
+    // and the match only when it fits the shown ghost's own start: another
+    // sender's copy must not hide the shown ghost behind an event, nor fill
+    // its tickets button.
+    let folded = squelch_core::gcal::fold_ghosts(&ghosts, &urls);
+    let mut ghosts = ghosts;
+    for (i, into) in folded.iter().enumerate() {
+        let Some(w) = *into else { continue };
+        let same_sender =
+            ghosts[w].owner_scope.is_some() && ghosts[w].owner_scope == ghosts[i].owner_scope;
+        let sources = ghosts[i].sources.clone();
+        for source in sources {
+            if !ghosts[w]
+                .sources
+                .iter()
+                .any(|s| s.message_id == source.message_id)
+            {
+                ghosts[w].sources.push(source);
+            }
+        }
+        if !same_sender {
+            continue;
+        }
+        if matched[w].is_none()
+            && let Some(m) = matched[i]
+            && squelch_core::gcal::display_same_start(&ghosts[w].start, &events[m].row.start)
+        {
+            matched[w] = Some(m);
+        }
+        if let Some(t) = tickets.ghosts.get(&ghosts[i].id).cloned() {
+            tickets.ghosts.entry(ghosts[w].id).or_insert(t);
+        }
+    }
+    let (ghosts, matched): (Vec<_>, Vec<_>) = ghosts
+        .into_iter()
+        .zip(matched)
+        .zip(&folded)
+        .filter(|(_, into)| into.is_none())
+        .map(|(pair, _)| pair)
+        .unzip();
     use squelch_core::gcal::own::OwnState;
     let mine: std::collections::HashSet<(&str, &str)> = owned
         .iter()

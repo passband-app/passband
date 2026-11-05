@@ -308,7 +308,8 @@ pub fn build_cases(
             &clock,
         );
         let multi = context.thread.len() > 1;
-        let fidelity = if !report.multi_run_messages.is_empty() {
+        let understanding_note = understanding_gold(&run.metadata);
+        let fidelity = if !report.multi_run_messages.is_empty() || understanding_note.is_some() {
             Fidelity::Suspect
         } else if !multi
             && report.prior_attention_entries == 0
@@ -327,7 +328,11 @@ pub fn build_cases(
             as_of,
             trigger: run.trigger.clone(),
             fidelity,
-            fidelity_notes: report.notes(),
+            fidelity_notes: report
+                .notes()
+                .into_iter()
+                .chain(understanding_note)
+                .collect(),
             tags: tags(&gold.decision, min_importance, multi),
             context: input,
             gold: gold.decision.clone(),
@@ -619,7 +624,9 @@ fn manifest(
     json!({
         "source_db": options.db.display().to_string(),
         "exported_at": Utc::now().to_rfc3339(),
-        "daemon_prompt_version": squelch_core::triage::agent::PROMPT_VERSION,
+        // A replay runs the flag-off variant (no memory, no ledger), so this
+        // is the version a replay is measured on.
+        "daemon_prompt_version": squelch_core::triage::agent::prompt_version(false),
         "min_importance": min_importance,
         "cases": built.cases.len(),
         "counts": {
@@ -786,8 +793,30 @@ fn sample_entry(case: &Case) -> String {
     )
 }
 
+/// A gold run made under the `understanding` prompt variant
+/// (`run_metadata.understanding`). Export replays a case with no memory lines
+/// and no relationship evidence, on the flag-off prompt, so such a gold was
+/// decided on a context the replay cannot rebuild: SUSPECT, the existing
+/// "the reconstruction is off" grade, which `--fidelity reconstructed` and
+/// stricter runs already leave out. Kept rather than skipped, so the manifest
+/// still counts it.
+fn understanding_gold(metadata: &serde_json::Value) -> Option<String> {
+    (metadata["understanding"].as_bool() == Some(true)).then(|| {
+        "gold ran under the understanding prompt with memory or relationship evidence the replay does not rebuild".to_string()
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    /// A run under the understanding prompt is Suspect; one without the key
+    /// (every run before it existed) or with it false is not.
+    #[test]
+    fn a_gold_run_under_the_understanding_prompt_is_suspect() {
+        assert!(understanding_gold(&json!({"understanding": true})).is_some());
+        assert!(understanding_gold(&json!({"understanding": false})).is_none());
+        assert!(understanding_gold(&json!({"prompt_version": "agent-triage-v19"})).is_none());
+    }
+
     use super::*;
     use crate::fixture::{self, Fixture};
     use chrono::Duration;

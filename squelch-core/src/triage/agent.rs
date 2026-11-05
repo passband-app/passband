@@ -11,7 +11,24 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The version of the prompt with the `understanding` flag ON: the file plus
+/// [`UNDERSTANDING_SEGMENTS`]. A const because a const is what a stored string
+/// is compared against; what a run reports is [`prompt_version`].
 pub const PROMPT_VERSION: &str = "agent-triage-v20";
+/// The version of the prompt with the flag OFF: the prompt file alone, byte
+/// for byte main's (a test pins that), so it keeps main's version string.
+pub const PROMPT_VERSION_BASE: &str = "agent-triage-v19";
+
+/// The version a run reports, by the variant it ran: decisions and their
+/// diagnostics carry it, and an eval groups gold runs by it, so two different
+/// prompts must never share one string.
+pub fn prompt_version(understanding: bool) -> &'static str {
+    if understanding {
+        PROMPT_VERSION
+    } else {
+        PROMPT_VERSION_BASE
+    }
+}
 /// The prompt text, with one figure to fill in: the `read_message` page
 /// size, defined beside the request it answers
 /// ([`super::context::READ_MESSAGE_PAGE_CHARS`]) and shared with the
@@ -1845,9 +1862,10 @@ mod tests {
         assert_eq!(
             (
                 super::super::context::READ_MESSAGE_PAGE_CHARS,
+                PROMPT_VERSION_BASE,
                 PROMPT_VERSION
             ),
-            (2_000, "agent-triage-v20")
+            (2_000, "agent-triage-v19", "agent-triage-v20")
         );
     }
     /// OFF IS THE PROMPT AS IT WAS. With the `understanding` flag off, both
@@ -1880,6 +1898,10 @@ mod tests {
             }
             assert!(!on.contains('\u{2014}') && !on.contains('\u{2013}'));
         }
+        // Two prompts, two version strings.
+        assert_eq!(prompt_version(false), PROMPT_VERSION_BASE);
+        assert_eq!(prompt_version(true), PROMPT_VERSION);
+        assert_ne!(PROMPT_VERSION_BASE, PROMPT_VERSION);
         // Composed once: the same bytes every call.
         assert!(std::ptr::eq(
             system_prompt(true, true),

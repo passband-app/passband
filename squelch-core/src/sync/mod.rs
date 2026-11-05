@@ -11388,7 +11388,7 @@ Q0/00yfa39rgtJLa0DnOoA==
         assert!(
             diagnostics
                 .to_string()
-                .contains(crate::triage::agent::PROMPT_VERSION)
+                .contains(crate::triage::agent::prompt_version(false))
         );
         server.abort();
     }

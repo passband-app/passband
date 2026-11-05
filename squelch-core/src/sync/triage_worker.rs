@@ -593,9 +593,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 self.agent_answered_since_timeout
                     .store(true, Ordering::Relaxed);
                 context.run_metadata = serde_json::json!({
-                    "prompt_version": crate::triage::agent::PROMPT_VERSION,
-                    // Which prompt variant ran: one version string covers
-                    // both, and this says which (agent::system_prompt).
+                    // By the variant that ran: off is main's prompt and
+                    // main's version (agent::prompt_version).
+                    "prompt_version": crate::triage::agent::prompt_version(input_understanding),
                     "understanding": input_understanding,
                     "schema_version": 1,
                     "model": config.agent.model.as_deref().unwrap_or(&base_model),

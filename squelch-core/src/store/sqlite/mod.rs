@@ -645,15 +645,15 @@ use crate::metrics::{NotifyDecision, NotifyLane};
 use crate::store::SmartBlockMemo;
 use crate::store::{
     AccountIdentity, AccountPhoto, AgentDraftOutcome, AttachmentBytes, BankingApplied,
-    BlankBodyScan, ClientActed, ClientPlatform, ClientSeen, ClientTag, ContactEntry, Device,
-    DeviceToken, Draft, DraftFields, DraftKey, ExtractQueued, FtsQuery, HealScope, InboxUnread,
-    IssuedDeviceToken, LeggedHit, MailActivityDay, MarketingApplied, MarketingOffer,
-    MessageMissingRecipients, MessageOpen, MessageUnsub, MintedPairingCode, MissingVector,
-    NewAuditEntry, NewEvent, NewNotifyDecision, NotifyDecisionRow, PersonNamed, SPAM_SYNCED_AT_KEY,
-    SealedBody, SealedMessage, SearchDiagnostics, SearchFilter, SearchSort, SenderDigestRow,
-    SenderDomainEntry, SenderEntry, SentMessage, Stage1Applied, Stage2CapOverrides, Stage2Usage,
-    Stage2UsageDay, Store, SyncState, TermDf, TrackedMessage, TriageDebug, TriagedMessage,
-    UsageTokens,
+    BlankBodyScan, ClientActed, ClientActivity, ClientPlatform, ClientSeen, ClientTag,
+    ContactEntry, Device, DeviceToken, Draft, DraftFields, DraftKey, ExtractQueued, FtsQuery,
+    HealScope, InboxUnread, IssuedDeviceToken, LeggedHit, MailActivityDay, MarketingApplied,
+    MarketingOffer, MessageMissingRecipients, MessageOpen, MessageUnsub, MintedPairingCode,
+    MissingVector, NewAuditEntry, NewEvent, NewNotifyDecision, NotifyDecisionRow, PersonNamed,
+    PlatformActivity, SPAM_SYNCED_AT_KEY, SealedBody, SealedMessage, SearchDiagnostics,
+    SearchFilter, SearchSort, SenderDigestRow, SenderDomainEntry, SenderEntry, SentMessage,
+    Stage1Applied, Stage2CapOverrides, Stage2Usage, Stage2UsageDay, Store, SyncState, TermDf,
+    TrackedMessage, TriageDebug, TriagedMessage, UsageTokens,
 };
 use crate::triage::rule_suggest::SmartBlock;
 use crate::types::{

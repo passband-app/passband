@@ -1144,6 +1144,100 @@ fn client_actions_fold_to_the_newest_stamp_per_platform() {
     assert!(store.client_actions_seen(other).unwrap().is_empty());
 }
 
+/// `token activity`: first pairing overall (the activation answer, console
+/// excluded), and per platform the earliest pairing and the newest stamps.
+/// Revoked rows count for both, and a token whose app never named itself
+/// counts for activation and no platform.
+#[test]
+fn client_activity_reports_timestamps_per_platform() {
+    let (store, acct) = store();
+    let other = store.ensure_account("other@example.com").unwrap();
+    assert_eq!(
+        store.client_activity(acct).unwrap(),
+        ClientActivity::default()
+    );
+
+    let jan = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).single().unwrap();
+    let feb = Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).single().unwrap();
+    let mar = Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).single().unwrap();
+    let apr = Utc.with_ymd_and_hms(2026, 4, 1, 0, 0, 0).single().unwrap();
+    let may = Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).single().unwrap();
+
+    // A console session, older than everything and carrying stamps it could
+    // never really have: it must not count anywhere.
+    let console = store.issue_device_token(acct, CONSOLE_DEVICE_NAME).unwrap();
+    store
+        .verify_device_token_from(&console.token, Some(&tag("macos/0.0.19")))
+        .unwrap();
+    backdate_created(
+        &store,
+        console.id,
+        Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).single().unwrap(),
+    );
+    set_client_action(&store, console.id, Some(may + Duration::days(30)));
+
+    // An old app that never named itself: activation, no platform.
+    let anon = store.issue_device_token(acct, "old-mac").unwrap();
+    backdate_created(&store, anon.id, jan);
+
+    let mac = store.issue_device_token(acct, "laptop").unwrap();
+    let phone = store.issue_device_token(acct, "phone").unwrap();
+    let ipad = store.issue_device_token(acct, "ipad").unwrap();
+    for (token, client) in [
+        (&mac.token, "macos/0.0.19"),
+        (&phone.token, "ios/0.0.13"),
+        (&ipad.token, "ios/0.0.12"),
+    ] {
+        store
+            .verify_device_token_from(token, Some(&tag(client)))
+            .unwrap()
+            .unwrap();
+    }
+    backdate_created(&store, mac.id, feb);
+    set_client_seen(&store, mac.id, may);
+    set_client_action(&store, mac.id, Some(apr));
+    // The phone paired first and acted last, then was revoked: both count.
+    backdate_created(&store, phone.id, mar);
+    set_client_seen(&store, phone.id, apr);
+    set_client_action(&store, phone.id, Some(may));
+    assert!(store.revoke_device_token(acct, phone.id).unwrap());
+    // The iPad paired later and connected later, and never acted.
+    backdate_created(&store, ipad.id, apr);
+    set_client_seen(&store, ipad.id, may);
+    set_client_action(&store, ipad.id, None);
+
+    let activity = store.client_activity(acct).unwrap();
+    assert_eq!(activity.first_paired_at, Some(jan));
+    assert_eq!(
+        activity.first_paired_at,
+        store.first_client_pairing_at(acct).unwrap(),
+        "the two commands must agree about activation"
+    );
+    assert_eq!(activity.platforms.len(), 2);
+    assert_eq!(
+        activity.platforms[&ClientPlatform::Macos],
+        PlatformActivity {
+            first_paired_at: feb,
+            last_seen_at: Some(may),
+            last_action_at: Some(apr),
+        }
+    );
+    assert_eq!(
+        activity.platforms[&ClientPlatform::Ios],
+        PlatformActivity {
+            first_paired_at: mar,
+            last_seen_at: Some(may),
+            last_action_at: Some(may),
+        }
+    );
+
+    // Another account's devices are nobody else's activity.
+    assert_eq!(
+        store.client_activity(other).unwrap(),
+        ClientActivity::default()
+    );
+}
+
 // ---- the owner's zone (#526) ------------------------------------------
 
 fn zoned(header: &str, zone: &str) -> ClientTag {

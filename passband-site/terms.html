@@ -28,39 +28,41 @@
       media="(prefers-color-scheme: dark)"
     />
     <link rel="apple-touch-icon" href="/icon-180.png" />
-    <style>
-      body {
-        font-family: system-ui, sans-serif;
-        max-width: 42rem;
-        margin: 0 auto;
-        padding: 3rem 1.25rem 5rem;
-        line-height: 1.65;
-        color: #1a1a1a;
-      }
-      h1 { font-size: 1.8rem; margin-bottom: 0.25rem; }
-      h2 { font-size: 1.15rem; margin-top: 2.2rem; }
-      .meta { color: #777; font-size: 0.9rem; margin-top: 0; }
-      a { color: #3556c9; }
-      nav { margin-bottom: 2rem; font-size: 0.9rem; }
-      /* FOOTER: the site footer's layout (site.css .foot), in this page's light colors. */
-      .foot { margin-top: 4.5rem; padding-top: 2.5rem; border-top: 1px solid #e4e4e4; font-size: 0.9rem; }
-      .foot-grid { display: grid; grid-template-columns: auto repeat(3, minmax(0, 1fr)); gap: 2rem; }
-      .foot-mark { width: fit-content; align-self: start; opacity: 0.55; filter: grayscale(1); }
-      .foot-mark:hover { opacity: 0.8; }
-      .foot-mark img { display: block; width: 2.75rem; height: auto; }
-      .foot nav { display: flex; flex-direction: column; align-items: flex-start; gap: 0.6rem; margin: 0; font-size: inherit; }
-      .foot nav p { margin: 0 0 0.5rem; color: #888; }
-      .foot nav a { color: #1a1a1a; text-decoration: none; }
-      .foot nav a:hover { color: #3556c9; }
-      .foot-legal { margin: 3rem 0 0; color: #888; font-size: 0.85rem; }
-      @media (max-width: 560px) { .foot-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-    </style>
+    <link rel="preload" href="/newsreader-var.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/site.css" />
   </head>
   <body>
-    <nav><a href="/">← Passband</a></nav>
-    <h1>Terms of Service</h1>
-    <p class="meta">Effective August 25, 2026</p>
+    <header class="top">
+      <a class="brand" href="/"><img src="/mark.svg" alt="" width="42" height="23" /><span>passband</span></a>
+      <nav class="nav">
+        <a class="keep" href="/self-host">Self-host</a>
+        <a class="keep" href="/trust">Trust</a>
+      </nav>
+    </header>
 
+    <main>
+      <section class="hero">
+        <p class="eyebrow"><b>Legal</b></p>
+        <h1>Terms of Service</h1>
+        <p class="updated">Effective August 25, 2026</p>
+      </section>
+
+      <div class="doc">
+        <nav class="toc" aria-label="On this page">
+          <p>On this page</p>
+          <ol>
+          <li><a href="#the-software">The software</a></li>
+          <li><a href="#your-accounts">Your accounts</a></li>
+          <li><a href="#hosted-accounts">Hosted accounts</a></li>
+          <li><a href="#acceptable-use">Acceptable use</a></li>
+          <li><a href="#the-services">The Services</a></li>
+          <li><a href="#privacy">Privacy</a></li>
+          <li><a href="#disclaimers">Disclaimers</a></li>
+          <li><a href="#changes">Changes</a></li>
+          <li><a href="#contact">Contact</a></li>
+          </ol>
+        </nav>
+        <article class="prose">
     <p>
       These terms cover your use of the Passband apps, the squelchd daemon,
       and the services we operate: hosted Passband accounts, the push
@@ -69,7 +71,7 @@
       using them you agree to these terms.
     </p>
 
-    <h2>The software</h2>
+    <h2 id="the-software">The software</h2>
     <p>
       Passband and squelchd are open source software, licensed under the
       <a href="https://github.com/passband-app/passband/blob/main/LICENSE">MIT
@@ -78,7 +80,7 @@
       and are responsible for your own deployment, backups, and security.
     </p>
 
-    <h2>Your accounts</h2>
+    <h2 id="your-accounts">Your accounts</h2>
     <p>
       Passband connects to your Google account with your consent. You are
       responsible for complying with Google's terms, and for any API keys
@@ -87,7 +89,7 @@
       <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>.
     </p>
 
-    <h2>Hosted accounts</h2>
+    <h2 id="hosted-accounts">Hosted accounts</h2>
     <p>
       A hosted account means we run squelchd for you and store your synced mail
       and your Google refresh token on our infrastructure. What we hold and who
@@ -108,7 +110,7 @@
       <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>.
     </p>
 
-    <h2>Acceptable use</h2>
+    <h2 id="acceptable-use">Acceptable use</h2>
     <p>
       Do not use the Services to send spam or unlawful content, to interfere
       with the Services, or to attempt to access data that is not yours.
@@ -116,7 +118,7 @@
       you and your recipients.
     </p>
 
-    <h2>The Services</h2>
+    <h2 id="the-services">The Services</h2>
     <p>
       The Services are provided free of charge and on a best-effort basis. We
       may change, limit, or discontinue them at any time. The self-hosted
@@ -124,13 +126,13 @@
       receipts.
     </p>
 
-    <h2>Privacy</h2>
+    <h2 id="privacy">Privacy</h2>
     <p>
       How data is handled is described in the
       <a href="/privacy">Privacy Policy</a>.
     </p>
 
-    <h2>Disclaimers</h2>
+    <h2 id="disclaimers">Disclaimers</h2>
     <p>
       The software and Services are provided "as is", without warranty of
       any kind, express or implied. To the maximum extent permitted by law,
@@ -139,19 +141,22 @@
       the software or Services.
     </p>
 
-    <h2>Changes</h2>
+    <h2 id="changes">Changes</h2>
     <p>
       We may update these terms; changes will be posted on this page with an
       updated effective date. Continued use after a change means you accept
       the new terms.
     </p>
 
-    <h2>Contact</h2>
+    <h2 id="contact">Contact</h2>
     <p>
       Email <a href="mailto:braelyn@passband.app">braelyn@passband.app</a>
       or open an issue at
       <a href="https://github.com/passband-app/passband">github.com/passband-app/passband</a>.
     </p>
+        </article>
+      </div>
+    </main>
 
     <footer class="foot">
       <div class="foot-grid">

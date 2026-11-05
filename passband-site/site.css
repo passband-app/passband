@@ -122,3 +122,55 @@ th { text-align: left; font: 600 10px/1.3 var(--mono); letter-spacing: 0.1em; te
 td { padding: 0.85rem 1rem; border-top: 1px solid var(--hair); vertical-align: top; color: var(--dim); }
 td:first-child { color: var(--ink); font-weight: 600; white-space: nowrap; }
 td small { display: block; color: var(--faint); font-weight: 400; font-size: 0.8rem; }
+
+/* LEGAL AND REFERENCE PAGES (privacy, terms, security): a sticky contents list
+   beside one readable column. The column stays near 48rem on purpose: long
+   policy text set at full width is unreadable. */
+.doc { display: grid; grid-template-columns: 15rem minmax(0, 48rem); gap: clamp(2.5rem, 6vw, 6rem);
+  max-width: 84rem; margin: 0 auto; padding: clamp(1rem, 3vw, 2rem) var(--gutter) 0; box-sizing: border-box;
+  border-top: 1px solid var(--hair); }
+.toc { position: sticky; top: 2rem; align-self: start; max-height: calc(100vh - 4rem); overflow-y: auto;
+  padding-top: clamp(1.5rem, 3vw, 2.5rem); }
+.toc p { margin: 0 0 1rem; font: 500 11px/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--faintest); }
+.toc ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.15rem; }
+.toc a { display: block; padding: 0.3rem 0; color: var(--faint); font-size: 0.88rem; line-height: 1.4; }
+.toc a:hover { color: var(--ink); text-decoration: none; }
+.hero .updated { margin-top: 1.25rem; font-family: var(--mono); font-size: 0.8rem; letter-spacing: 0.02em; }
+
+.prose { padding-top: clamp(1.5rem, 3vw, 2.5rem); color: var(--dim); font-size: 1rem; line-height: 1.75; }
+.prose > :first-child { margin-top: 0; }
+.prose p, .prose ul, .prose ol, .prose blockquote, .prose pre, .prose .table-wrap { margin: 0 0 1.15rem; }
+.prose h2 { margin: 3.25rem 0 1rem; padding-top: 0.25rem; color: var(--ink); font-size: clamp(1.5rem, 2.4vw, 1.85rem);
+  line-height: 1.2; scroll-margin-top: 1.5rem; }
+.prose h3 { margin: 2rem 0 0.6rem; color: var(--ink); font-family: var(--sans); font-size: 1rem; font-weight: 600; }
+.prose strong { color: var(--ink); font-weight: 600; }
+.prose a { text-decoration: underline; text-decoration-color: rgba(130, 186, 245, 0.35); text-underline-offset: 3px; }
+.prose a:hover { text-decoration-color: currentColor; }
+.prose ul, .prose ol { padding-left: 1.25rem; }
+.prose li { margin: 0.4rem 0; }
+.prose li::marker { color: var(--faintest); }
+.prose code { padding: 0.1em 0.35em; border-radius: 5px; background: var(--card); color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--hair); overflow-wrap: anywhere; }
+.prose pre { padding: 1rem 1.2rem; border-radius: 12px; background: var(--canvas); overflow-x: auto;
+  box-shadow: inset 0 0 0 1px var(--hair-strong); line-height: 1.5; }
+.prose pre code { padding: 0; background: none; box-shadow: none; overflow-wrap: normal; }
+.prose blockquote { padding: 1rem 1.2rem; border-radius: 12px; background: var(--canvas); color: var(--faint);
+  box-shadow: inset 0 0 0 1px var(--hair); }
+.prose blockquote > :last-child { margin-bottom: 0; }
+.prose .tier { margin: 0 0 0.8rem; padding: 1.25rem 1.3rem; border-radius: 14px; background: var(--card);
+  box-shadow: inset 0 0 0 1px var(--hair-strong); }
+.prose .tier h3 { margin: 0 0 0.5rem; font-family: var(--serif); font-weight: 500; font-size: 1.35rem; }
+.prose .tier p { margin: 0; font-size: 0.95rem; }
+.prose .tier + :not(.tier) { margin-top: 2rem; }
+.prose table { min-width: 34rem; }
+.prose td { line-height: 1.55; }
+.prose td:first-child { white-space: normal; width: 34%; }
+.prose td code { overflow-wrap: break-word; }
+
+@media (max-width: 900px) {
+  .doc { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .toc { position: static; max-height: none; padding-bottom: 1.5rem; border-bottom: 1px solid var(--hair); }
+  .toc ol { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 1.5rem; }
+}
+@media (max-width: 480px) { .toc ol { grid-template-columns: minmax(0, 1fr); } }

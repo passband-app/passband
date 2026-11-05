@@ -28,70 +28,45 @@
       media="(prefers-color-scheme: dark)"
     />
     <link rel="apple-touch-icon" href="/icon-180.png" />
-    <style>
-      body {
-        font-family: system-ui, sans-serif;
-        max-width: 42rem;
-        margin: 0 auto;
-        padding: 3rem 1.25rem 5rem;
-        line-height: 1.65;
-        color: #1a1a1a;
-      }
-      h1 { font-size: 1.8rem; margin-bottom: 0.25rem; }
-      h2 { font-size: 1.15rem; margin-top: 2.2rem; }
-      h3 { font-size: 1rem; margin-top: 1.6rem; }
-      .meta { color: #777; font-size: 0.9rem; margin-top: 0; }
-      a { color: #3556c9; }
-      nav { margin-bottom: 2rem; font-size: 0.9rem; }
-      ul { padding-left: 1.3rem; }
-      li { margin: 0.3rem 0; }
-      table {
-        border-collapse: collapse;
-        width: 100%;
-        font-size: 0.9rem;
-        margin: 1rem 0;
-      }
-      th, td {
-        border: 1px solid #ddd;
-        padding: 0.45rem 0.6rem;
-        text-align: left;
-        vertical-align: top;
-      }
-      th { background: #f6f6f6; font-weight: 600; }
-      .tier {
-        border-left: 3px solid #3556c9;
-        padding-left: 1rem;
-        margin: 1.2rem 0;
-      }
-      code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88em; background: #f3f3f3; padding: 0.08em 0.3em; border-radius: 3px; }
-      pre { background: #f6f6f6; padding: 0.8rem 1rem; overflow-x: auto; border-radius: 6px; line-height: 1.45; }
-      pre code { background: none; padding: 0; font-size: 0.85em; }
-      .tbl { overflow-x: auto; }
-      blockquote { margin: 1rem 0; padding-left: 1rem; border-left: 3px solid #ddd; color: #555; }
-      /* FOOTER: the site footer's layout (site.css .foot), in this page's light colors. */
-      .foot { margin-top: 4.5rem; padding-top: 2.5rem; border-top: 1px solid #e4e4e4; font-size: 0.9rem; }
-      .foot-grid { display: grid; grid-template-columns: auto repeat(3, minmax(0, 1fr)); gap: 2rem; }
-      .foot-mark { width: fit-content; align-self: start; opacity: 0.55; filter: grayscale(1); }
-      .foot-mark:hover { opacity: 0.8; }
-      .foot-mark img { display: block; width: 2.75rem; height: auto; }
-      .foot nav { display: flex; flex-direction: column; align-items: flex-start; gap: 0.6rem; margin: 0; font-size: inherit; }
-      .foot nav p { margin: 0 0 0.5rem; color: #888; }
-      .foot nav a { color: #1a1a1a; text-decoration: none; }
-      .foot nav a:hover { color: #3556c9; }
-      .foot-legal { margin: 3rem 0 0; color: #888; font-size: 0.85rem; }
-      @media (max-width: 560px) { .foot-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-    </style>
+    <link rel="preload" href="/newsreader-var.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/site.css" />
   </head>
   <body>
-    <nav><a href="/">&larr; Passband</a> &middot; <a href="/privacy">Privacy Policy</a></nav>
-    <h1>Security Model</h1>
-    <p class="meta">How Passband and its daemon, squelchd, handle untrusted mail, secrets and access.</p>
+    <header class="top">
+      <a class="brand" href="/"><img src="/mark.svg" alt="" width="42" height="23" /><span>passband</span></a>
+      <nav class="nav">
+        <a class="keep" href="/self-host">Self-host</a>
+        <a class="keep" href="/trust">Trust</a>
+      </nav>
+    </header>
 
+    <main>
+      <section class="hero">
+        <p class="eyebrow"><b>Security</b></p>
+        <h1>Security Model</h1>
+        <p class="lede">How Passband and its daemon, squelchd, handle untrusted mail, secrets and access.</p>
+      </section>
+
+      <div class="doc">
+        <nav class="toc" aria-label="On this page">
+          <p>On this page</p>
+          <ol>
+          <li><a href="#1-html-sanitization-at-ingest">1. HTML sanitization at ingest</a></li>
+          <li><a href="#2-rendering-sandbox">2. Rendering sandbox</a></li>
+          <li><a href="#3-image-loading-and-trackers">3. Image loading and trackers</a></li>
+          <li><a href="#4-human-and-agent-access-after-the-triage-rewrite">4. Human and agent access after the triage rewrite</a></li>
+          <li><a href="#4b-provider-spam">4b. Provider spam</a></li>
+          <li><a href="#5-outbound-secret-guard">5. Outbound secret guard</a></li>
+          <li><a href="#6-the-embedded-assistant">6. The embedded assistant</a></li>
+          <li><a href="#reporting-a-vulnerability">Reporting a vulnerability</a></li>
+          </ol>
+        </nav>
+        <article class="prose">
 <p>One section per surface: the <strong>invariant</strong>, the <strong>enforcement point</strong> (<code>file:symbol</code>
 - the line that actually holds it), and <strong>what a maintainer must not break</strong>.
 Verified against the tree on 2026-07-30; §6 was written against it on 2026-08-18.
 Stale source comments are flagged, not trusted.</p>
-<h2>1. HTML sanitization at ingest</h2>
+<h2 id="1-html-sanitization-at-ingest">1. HTML sanitization at ingest</h2>
 <p><strong>Invariant.</strong> <code>messages.body_html</code> never contains active content: no <code>&lt;script&gt;</code>, no
 <code>on*</code> handlers, no <code>javascript:</code>/<code>data:</code> URLs, no forms, no nested browsing contexts,
 no <code>&lt;meta&gt;</code>/<code>&lt;link&gt;</code>/<code>&lt;base&gt;</code>.</p>
@@ -123,7 +98,7 @@ image passes (§3) depend on that for correctness and for linear runtime.</li>
 stored mail. Delete the <code>sync_state</code> <code>history</code> row and restart <code>squelchd</code> to
 re-ingest (triage is preserved).</li>
 </ul>
-<h2>2. Rendering sandbox</h2>
+<h2 id="2-rendering-sandbox">2. Rendering sandbox</h2>
 <p><strong>Invariant.</strong> A body renders with no script execution, no network except the image
 proxy, no navigation, no cookies, nothing on disk.</p>
 <p><strong>Enforcement.</strong> <code>passband/Sources/Passband/Views/EmailWebView.swift</code> -
@@ -163,7 +138,7 @@ leaves &quot;one sender&#39;s mail in another&#39;s frame&quot; to a hash collis
 <code>WebFramePool.discard</code> unwiring the relay too: the content controller retains it,
 so merely dropping the frame leaves a live callback target.</li>
 </ul>
-<h2>3. Image loading and trackers</h2>
+<h2 id="3-image-loading-and-trackers">3. Image loading and trackers</h2>
 <p><strong>Invariant.</strong> Remote images may load, but only through our own audited fetch path,
 never with cookies or a referrer, and never for a reference we did not mint.
 Tracking pixels are stripped from mail whose sender the user has never written to.</p>
@@ -292,7 +267,7 @@ an ingestion path Gmail never stamped.</li>
 <code>headers_raw()</code> DROPS non-UTF-8 headers, which would let an attacker hide the
 genuine verdict and promote one they wrote.</li>
 </ul>
-<h2>4. Human and agent access after the triage rewrite</h2>
+<h2 id="4-human-and-agent-access-after-the-triage-rewrite">4. Human and agent access after the triage rewrite</h2>
 <p><strong>Invariant.</strong> Humans and internal triage models can read all their mail, including
 pending assessments and actionable authentication. External user agents, including
 the embedded assistant, cannot read actionable authentication secrets or their
@@ -332,7 +307,7 @@ content-type whitelist, <code>nosniff</code>, and attachment disposition as inbo
 The outbound guard scans text and message parts at send time; binary files are
 not scanned. Restricting external-agent access does not delete human drafts or
 their attachments.</p>
-<h2>4b. Provider spam</h2>
+<h2 id="4b-provider-spam">4b. Provider spam</h2>
 <p><strong>Invariant.</strong> Mail the provider filed as spam is stored and readable on one
 human-door page, and is otherwise absent: it never reaches an LLM, never crosses
 the agent door, is never embedded, and never fires a notification.</p>
@@ -391,7 +366,7 @@ The sync suite asserts the &quot;not fetched routinely&quot; half against the mo
 LOG rather than against what landed: &quot;no spam rows appeared&quot; would also pass if
 the walk ran and the folder happened to be empty, and the thing being avoided is
 the request.</p>
-<h2>5. Outbound secret guard</h2>
+<h2 id="5-outbound-secret-guard">5. Outbound secret guard</h2>
 <p><strong>Invariant.</strong> A secret-looking outgoing body is blocked unless the caller
 explicitly overrides, and the matched text is never copied anywhere - not into a
 response, a log, or the audit row.</p>
@@ -460,7 +435,7 @@ files carry one <code>content_id</code>, so the body&#39;s reference would resol
 <code>failed:fetch_original</code> (the forwarded
 original could not be read back, so nothing was sent), <code>rejected:compose</code>,
 <code>failed:gmail</code>, <code>ok</code>, <code>ok:forward</code>):</p>
-<div class="tbl"><table>
+<div class="table-wrap"><table>
 <thead>
 <tr>
 <th><code>send.echo</code> detail</th>
@@ -500,7 +475,7 @@ pre-echo status quo. The read-back is also capped at <strong>5s</strong>
 already made two serial Gmail calls, so bookkeeping may not spend the rest of that
 budget. Keep the echo&#39;s failures audited and swallowed; keep it out of core&#39;s write
 surface (the fetch lives in <code>squelch-api/src/write/gmail.rs</code>, core takes bytes).</p>
-<h2>6. The embedded assistant</h2>
+<h2 id="6-the-embedded-assistant">6. The embedded assistant</h2>
 <blockquote>
 <p>The dedicated <code>/client/agent/</code> read routes and source checks in §4 supersede
 references below to using ordinary human endpoints or legacy sealing.</p>
@@ -551,11 +526,14 @@ read to a store call that bypasses the door.</li>
 failure the model feels invited to retry.</li>
 </ul>
 
-    <h2>Reporting a vulnerability</h2>
+    <h2 id="reporting-a-vulnerability">Reporting a vulnerability</h2>
     <p>
       Email <a href="mailto:braelyn@passband.app">braelyn@passband.app</a>. We
       will acknowledge within 72 hours.
     </p>
+        </article>
+      </div>
+    </main>
 
     <footer class="foot">
       <div class="foot-grid">

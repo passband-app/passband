@@ -52,8 +52,17 @@ Ordered by what stops the submission soonest.
       App name). The logo is uploaded too. A logo on an app in production
       requires verification; if Google refuses to publish over it, remove it
       and add it back with the verification submission.
-- [ ] **Verify `passband.app` in Google Search Console**, as an owner, from the
-      same Google account that owns the Cloud project. Brand verification checks
+- [x] **The Cloud project belongs to the passband.app organization** (migrated
+      2026-11-05; project id `squelch-501806` unchanged, so every OAuth client
+      id and every existing refresh token is unchanged). `braelyn@passband.app`
+      is an owner; `bboynton97@gmail.com` stays as a second owner until a
+      signup and a reconnect have been seen working end to end. Never switch
+      the consent screen's user type to Internal: being in an org now offers
+      it, and it would lock out every account outside passband.app.
+- [ ] **Verify `passband.app` in Google Search Console**, as an owner, from
+      `braelyn@passband.app` (an owner of the Cloud project). A Domain
+      property, proved by a TXT record at Namecheap, where `passband.app`'s DNS
+      is hosted (`deploy/hosted/PRODUCTION.md`, the registrar table). Brand verification checks
       the top private domain of every URL on the consent screen.
 - [ ] **Declare `https://passband.app/about` as the application home page** —
       not `https://passband.app` (which is what Branding → App domain says as

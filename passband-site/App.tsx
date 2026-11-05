@@ -230,6 +230,21 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-step p { margin: 0; color: var(--dim); font-size: 1rem; line-height: 1.6; max-width: 22rem; }
 .pb-step kbd { font: 600 0.78em/1 var(--mono); color: var(--accent-ink); padding: 0.18em 0.5em; border-radius: 99px;
   box-shadow: inset 0 0 0 1px rgba(78, 155, 234, 0.4); white-space: nowrap; }
+/* THE CLOUDS behind the tours (see Clouds). Wide screens only: a few large,
+   soft passband-coloured glows on a stage pinned while the section is on
+   screen, faded at the screen's top and bottom so a section's edge never cuts
+   one. Clipped sideways only. */
+.pb { overflow-x: clip; }
+.pb-clouded { position: relative; isolation: isolate; }
+.pb-clouds { display: none; }
+@media (min-width: 901px) {
+  .pb-clouds { display: block; position: absolute; z-index: -1; pointer-events: none;
+    top: 0; bottom: 0; left: calc(50% - 50vw); width: 100vw; overflow: clip; }
+  .pb-clouds-stage { position: sticky; top: 0; height: 100vh; height: 100svh; overflow: hidden;
+    -webkit-mask-image: linear-gradient(transparent, #000 18%, #000 82%, transparent);
+            mask-image: linear-gradient(transparent, #000 18%, #000 82%, transparent); }
+  .pb-cloud { position: absolute; will-change: transform; }
+}
 /* THE GATE between the two panels: a lit filament with the squelch sitting on
    it, the same passband blue the scope's filter curve draws in. The before is
    everything upstream of it and the after is what comes out, so the divider is
@@ -1804,6 +1819,81 @@ function useTourFocus() {
   return { stepsRef, focus };
 }
 
+// THE CLOUDS. Behind the two tours, on wide screens: three large, soft glows
+// in the passband's blues, each wandering on its own slow path as the page
+// scrolls. Atmosphere only, no shapes to read. Positions and sizes are in
+// viewport units; a, the glow's strength at its heart.
+type Cloud = { w: number; h: number; l: number; t: number; rgb: string; a: number;
+  ax: number; ay: number; px: number; py: number; ph: number };
+
+const CLOUDS: Record<"mail" | "events", Cloud[]> = {
+  mail: [
+    { w: 62, h: 44, l: -14, t: 4, rgb: "78, 155, 234", a: 0.16, ax: 16, ay: 14, px: 2600, py: 3400, ph: 0 },
+    { w: 50, h: 36, l: 34, t: 52, rgb: "104, 112, 232", a: 0.13, ax: 20, ay: 12, px: 3100, py: 2400, ph: 2.1 },
+    { w: 54, h: 38, l: 66, t: -4, rgb: "70, 172, 206", a: 0.1, ax: 14, ay: 16, px: 2200, py: 3800, ph: 4.2 },
+  ],
+  events: [
+    { w: 58, h: 40, l: -10, t: 46, rgb: "104, 112, 232", a: 0.14, ax: 18, ay: 12, px: 2900, py: 2600, ph: 1 },
+    { w: 56, h: 40, l: 28, t: -2, rgb: "78, 155, 234", a: 0.15, ax: 16, ay: 14, px: 2400, py: 3600, ph: 3 },
+    { w: 48, h: 34, l: 68, t: 50, rgb: "70, 172, 206", a: 0.1, ax: 14, ay: 16, px: 3300, py: 2300, ph: 5 },
+  ],
+};
+
+// Two overlapping falloffs make a softer, less perfectly round glow.
+const cloudFill = ({ rgb, a }: Cloud) =>
+  `radial-gradient(closest-side, rgba(${rgb}, ${a}), rgba(${rgb}, ${a * 0.4}) 55%, rgba(${rgb}, 0)), ` +
+  `radial-gradient(closest-side at 68% 62%, rgba(${rgb}, ${a * 0.7}), rgba(${rgb}, 0))`;
+
+function Clouds({ kind }: { kind: "mail" | "events" }) {
+  const clouds = CLOUDS[kind];
+  const layerRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const layer = layerRef.current;
+    const stage = stageRef.current;
+    const section = layer?.parentElement;
+    if (!layer || !stage || !section) return;
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const wide = matchMedia("(min-width: 901px)");
+    let raf = 0;
+    const move = () => {
+      raf = 0;
+      const p = -section.getBoundingClientRect().top;
+      const vw = innerWidth / 100;
+      const vh = innerHeight / 100;
+      clouds.forEach((c, i) => {
+        const x = c.ax * vw * Math.sin((p / c.px) * Math.PI * 2 + c.ph);
+        const y = c.ay * vh * Math.sin((p / c.py) * Math.PI * 2 + c.ph + 1.3);
+        (stage.children[i] as HTMLElement).style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0)`;
+      });
+    };
+    const queue = () => {
+      if (!raf && wide.matches) raf = requestAnimationFrame(move);
+    };
+    queue();
+    addEventListener("scroll", queue, { passive: true });
+    addEventListener("resize", queue);
+    return () => {
+      cancelAnimationFrame(raf);
+      removeEventListener("scroll", queue);
+      removeEventListener("resize", queue);
+    };
+  }, [clouds]);
+
+  return (
+    <div className="pb-clouds" ref={layerRef} aria-hidden="true">
+      <div className="pb-clouds-stage" ref={stageRef}>
+        {clouds.map((c, i) => (
+          <div key={i} className="pb-cloud" style={{
+            width: `${c.w}vw`, height: `${c.h}vw`, left: `${c.l}vw`, top: `${c.t}vh`, background: cloudFill(c),
+          }} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Showcase() {
   const { stepsRef, focus } = useTourFocus();
 
@@ -2444,7 +2534,8 @@ export function App() {
         </div>
       </section>
 
-      <section className="pb-section">
+      <section className="pb-section pb-clouded">
+        <Clouds kind="mail" />
         <h2 className="pb-h2">
           Same inbox. <em>Squelched.</em>
         </h2>
@@ -2455,7 +2546,8 @@ export function App() {
         <Showcase />
       </section>
 
-      <section className="pb-section">
+      <section className="pb-section pb-clouded">
+        <Clouds kind="events" />
         <h2 className="pb-h2">
           Plans arrive by email. <em>So does your calendar.</em>
         </h2>

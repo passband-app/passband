@@ -1124,6 +1124,72 @@ pub fn scopes_for(sender: &str) -> Vec<String> {
     scopes
 }
 
+/// Consecutive words a decision must share with a served memory line to count
+/// as repeating it ([`memory_taints`]).
+pub const TAINT_WORDS: usize = 6;
+
+/// Every piece of prose in a decision that leaves the daemon: what the owner
+/// reads, and what crosses to `/mcp` (summaries, reasons, action text,
+/// notification title and body).
+pub fn decision_prose(decision: &super::decision::MessageDecision) -> Vec<&str> {
+    let mut prose = vec![
+        decision.summary.as_str(),
+        decision.reason.as_str(),
+        decision.attention.summary.as_str(),
+        decision.external_access.reason.as_str(),
+        decision.notification.title.as_str(),
+        decision.notification.body.as_str(),
+        decision.notification.reason.as_str(),
+    ];
+    prose.extend(
+        decision
+            .attention
+            .actions
+            .iter()
+            .map(|a| a.description.as_str()),
+    );
+    prose.extend(decision.rule_exceptions.iter().map(|r| r.reason.as_str()));
+    prose.extend(decision.revisit.iter().map(|r| r.reason.as_str()));
+    prose.extend(decision.done.iter().map(|d| d.reason.as_str()));
+    prose
+}
+
+/// Lowercased words, punctuation stripped: "Sam's (cofounder)." is
+/// `["sam", "s", "cofounder"]`.
+fn words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Does any `prose` share a run of [`TAINT_WORDS`] consecutive words with any
+/// served memory line? VERBATIM REPETITION ONLY, case and punctuation aside:
+/// the commit-path guard behind the prompt's "never repeat a memory line",
+/// which catches a model that copies one into a summary. It does not try to
+/// catch paraphrase. Six common words in a row ("the owner replies to them
+/// within") count too, on purpose: a false taint costs one flag-off re-run,
+/// a missed one puts the owner's profile on the agent door.
+pub fn memory_taints(memory: &[MemoryEntry], prose: &[&str]) -> bool {
+    let grams: BTreeSet<Vec<String>> = memory
+        .iter()
+        .flat_map(|entry| {
+            let w = words(&entry.text);
+            w.windows(TAINT_WORDS)
+                .map(<[String]>::to_vec)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    if grams.is_empty() {
+        return false;
+    }
+    prose.iter().any(|text| {
+        words(text)
+            .windows(TAINT_WORDS)
+            .any(|window| grams.contains(window))
+    })
+}
+
 /// The learned-memory seam, filled: entries from `memory_entries` for this run.
 ///
 /// `enabled` is the `understanding` flag AS THE RUN READ IT, once: the same

@@ -110,6 +110,29 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     }
 }
 
+/// The input a tainted run is re-run on: the same snapshot with the
+/// understanding flag off for this job alone, so the flag-off prompt, and no
+/// memory lines.
+///
+/// A run is TAINTED when its decision repeats a served memory line verbatim
+/// (`triage::memory::memory_taints`, six words in a row): summaries, reasons
+/// and notification text all cross to /mcp, and the prompt sentence alone is
+/// what would otherwise keep the owner's profile off the agent door. It is
+/// re-run once on this and that result commits, whatever it says; there is
+/// no second re-run, and the job is never failed over it.
+///
+/// EVERYTHING THE FLAG ADDS TO A RUN'S INPUT IS STRIPPED HERE, in one place:
+/// a later block gated on the flag (the relationship evidence) owes a line
+/// in this function.
+pub(super) fn scrubbed(
+    input: &crate::triage::context::ContextSnapshot,
+) -> crate::triage::context::ContextSnapshot {
+    let mut scrubbed = input.clone();
+    scrubbed.understanding = false;
+    scrubbed.memory.clear();
+    scrubbed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

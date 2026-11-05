@@ -76,6 +76,15 @@ pub const MIN_COOKIE_KEY_BYTES: usize = 32;
 /// see [`RECONCILE_TIMEOUT`] for what happened the day it did not.
 pub const OUTBOUND_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Budget for `POST /v1/tenants/{label}/purge`, which the admin page waits
+/// on. The warden waits for the tenant's pod to exit before it deletes the
+/// volume (thirty seconds of termination grace at most, by default), and the
+/// load balancer in front of this service closes an idle request at sixty
+/// (`deploy/aws/tofu/main/alb.tf`), so this sits between the two. A purge that
+/// outlasts it is finished by pressing the button again: the route is
+/// idempotent.
+pub const PURGE_TIMEOUT: Duration = Duration::from_secs(55);
+
 /// Budget for `PUT /v1/tenants/{label}/credentials/replace`: a reconnect
 /// replaces a running pod and waits for its rollout and then its readiness,
 /// which is the same two `ready_timeout` waits a reconcile's recreate makes.

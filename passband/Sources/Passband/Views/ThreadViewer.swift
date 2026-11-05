@@ -449,9 +449,14 @@ struct ThreadViewer: View {
             // Only once the thread is HERE: the hand-off names a message, and
             // whether it is in this thread is not knowable until it has loaded.
             consumePendingReply()
+            // A reply left half-written in this thread comes back on screen,
+            // filled, without taking the caret. Beside the rest of the
+            // opening work rather than ahead of it: it is a drafts fetch.
+            async let reopened: Void = reopenSavedReply()
             await requestDeferredTranslations()
             await refreshOpens()
             if aged { await revalidate() }
+            await reopened
         }
         .task(id: newestSender) { await refreshUnsub() }
         // A TRANSLATION STILL BEING WRITTEN. The daemon translates on arrival
@@ -996,7 +1001,8 @@ struct ThreadViewer: View {
                         #if os(macOS)
                             .replyFoot(
                                 messages: messages, threadSubject: thread?.subject ?? "",
-                                tailSpace: tailSpace, proxy: proxy)
+                                tailSpace: tailSpace, proxy: proxy, threadId: threadId,
+                                style: style)
                         #endif
                         // THE WIDTH THE MAIL LAYS OUT AT, taken from the column
                         // rather than derived from the constants around it: it
@@ -1026,6 +1032,10 @@ struct ThreadViewer: View {
                         #if !os(macOS)
                             .modifier(
                                 ChainEnd(tail: tailSpace) {
+                                    OutgoingReplies(
+                                        threadId: threadId, messages: messages, style: style
+                                    )
+                                    .padding(.horizontal, Self.columnPadding)
                                     ChainFoot(
                                         messages: messages, threadSubject: thread?.subject ?? "",
                                         proxy: proxy, onReply: openReply, onReplyAll: openReplyAll
@@ -2202,6 +2212,11 @@ struct ThreadViewer: View {
     /// A hand-off from another surface: `r` on a list row navigates here and asks
     /// for the composer on the row's own message. One-shot — cleared whether or
     /// not it lands, so a stale request can never fire against a later thread.
+    private func reopenSavedReply() async {
+        guard thread != nil else { return }
+        await store.reopenSavedReply(threadId: threadId, messageIds: Set(messages.map(\.id)))
+    }
+
     private func consumePendingReply() {
         guard let wanted = store.pendingReplyMessageId else { return }
         store.pendingReplyMessageId = nil
@@ -3206,6 +3221,9 @@ struct ThreadViewer: View {
     private func adopt(_ view: ClientThreadView, opening: Bool = false) {
         thread = view
         adoptions &+= 1
+        // A reply drawn faded while it was sending is in the thread for real
+        // now: the ghost hands over to it.
+        if !store.outgoingReplies.isEmpty { store.noteEchoesShown(Set(view.messages.map(\.id))) }
         // THE STYLE FIRST: the rail below is drawn to its measure, so a mark
         // taken before the thread has chosen one is drawn for the wrong one.
         if opening {
@@ -3497,6 +3515,68 @@ extension View {
     }
 }
 
+/// SENT, NOT GONE: inline replies in their undo hold or on the wire, drawn
+/// where the sent copy will land, faded until it does. The card is the real
+/// `MessageCard`, so the hand-over to the echo (`AppStore.noteEchoesShown`)
+/// swaps a faded card for the same card at full strength rather than for
+/// something shaped differently.
+///
+/// ITS OWN VIEW, for the reason `ReplyFoot` is: the list it reads changes
+/// on every send, and only this row should hear about it.
+struct OutgoingReplies: View {
+    let threadId: String
+    let messages: [ClientMessage]
+    let style: ThreadStyle
+
+    @Environment(AppStore.self) private var store
+
+    /// What a pending send is drawn at. Present enough to read, faint enough
+    /// that nobody takes it for mail that already went.
+    static let opacity = 0.8
+
+    private var pending: [AppStore.OutgoingReply] {
+        let shown = Set(messages.map(\.id))
+        return store.outgoingReplies.filter {
+            $0.threadId == threadId && !($0.echoMessageId.map(shown.contains) ?? false)
+        }
+    }
+
+    var body: some View {
+        let pending = pending
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(pending.enumerated()), id: \.element.id) { i, reply in
+                MessageCard(
+                    message: Self.card(reply, index: i, me: store.accountEmail), style: style,
+                    position: messages.count + i, selected: false, ruled: true, opens: [],
+                    me: store.accountEmail, previousRecipients: nil, showingOriginal: false,
+                    translationStalled: false, onToggleOriginal: {}
+                ) {}
+                .equatable()
+                .opacity(Self.opacity)
+                .allowsHitTesting(false)
+                .transition(.opacity)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("sending: \(reply.body)")
+            }
+        }
+        .animation(Motion.disclose, value: pending.map(\.id))
+    }
+
+    /// The message the card draws. Negative ids, which no stored message has.
+    /// Addresses only when the composer stated them; a reply that left the
+    /// audience to the daemon draws no recipients line rather than an empty
+    /// one.
+    private static func card(
+        _ reply: AppStore.OutgoingReply, index: Int, me: String?
+    ) -> ClientMessage {
+        ClientMessage(
+            id: -1 - index, from_addr: me ?? "", from_name: nil,
+            received_at: reply.startedAt.ISO8601Format(), content: reply.body, html: nil,
+            to_addrs: reply.to.isEmpty ? nil : reply.to,
+            cc_addrs: reply.cc.isEmpty ? nil : reply.cc, attachments: [], is_sent: true)
+    }
+}
+
 #if os(macOS)
     /// THE FOOT OF THE CONVERSATION: the reply composer, then the tail space.
     ///
@@ -3527,14 +3607,21 @@ extension View {
         /// (`ThreadViewer.tailSpace`).
         let tailSpace: CGFloat
         let proxy: ScrollViewProxy
+        let threadId: String
+        let style: ThreadStyle
 
         @Environment(AppStore.self) private var store
         @State private var replyHeight: CGFloat = 0
+        @State private var ghostHeight: CGFloat = 0
 
         static let anchor = "reply"
 
         var body: some View {
             VStack(spacing: 0) {
+                OutgoingReplies(threadId: threadId, messages: messages, style: style)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                        ghostHeight = $0
+                    }
                 InlineReply(messages: messages, threadSubject: threadSubject)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
                         replyHeight = $0
@@ -3546,13 +3633,16 @@ extension View {
                 // some of it. Left whole, opening a reply would lengthen the
                 // page and let it scroll past its own end into nothing.
                 Color.clear.frame(
-                    height: max(0, tailSpace - (store.inlineReply == nil ? 0 : replyHeight)))
+                    height: max(
+                        0, tailSpace - ghostHeight - (store.inlineReply == nil ? 0 : replyHeight)))
             }
             // `initial`, because a reply can be open before this row first
             // renders: the hand-off from a list row sets it in the same turn
-            // the thread lands.
+            // the thread lands. Not for a quiet reopen: the reader is parked
+            // on the newest message, and a draft nobody asked for does not
+            // get to move it.
             .onChange(of: store.inlineReply?.id, initial: true) { _, open in
-                if open != nil { Self.reveal(proxy) }
+                if open != nil, store.inlineReply?.quietOpen != true { Self.reveal(proxy) }
             }
         }
 
@@ -3577,13 +3667,13 @@ extension View {
         /// The message stack with the reply composer and the tail under it.
         fileprivate func replyFoot(
             messages: [ClientMessage], threadSubject: String, tailSpace: CGFloat,
-            proxy: ScrollViewProxy
+            proxy: ScrollViewProxy, threadId: String, style: ThreadStyle
         ) -> some View {
             VStack(alignment: .leading, spacing: 0) {
                 self
                 ReplyFoot(
                     messages: messages, threadSubject: threadSubject, tailSpace: tailSpace,
-                    proxy: proxy)
+                    proxy: proxy, threadId: threadId, style: style)
             }
         }
     }

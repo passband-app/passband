@@ -2227,16 +2227,26 @@ chown root:root /etc/litestream/backup-age.key
 `age-keygen` prints the public key and also writes it into the file's header
 comment; `age-keygen -y /etc/litestream/backup-age.key` re-derives it any time.
 
-The split that makes this worth doing:
+Where each half lives:
 
 | | Where it lives | Who uses it |
 |---|---|---|
-| **recipient** (public) | `LITESTREAM_AGE_RECIPIENT` in `/etc/litestream/env` | the always-running replicator, to seal |
-| **identity** (private) | `/etc/litestream/backup-age.key`, root 0600, read by nothing automatically | a human, exported into one shell, for the minutes a restore takes |
+| **recipient** (public) | `LITESTREAM_AGE_RECIPIENT` in `/etc/litestream/env` | the replicator, to seal |
+| **identity** (private) | `/etc/litestream/backup-age.key`, root 0600 | the replicator (systemd `LoadCredential=`, at start), and a human restoring |
 
-The replicating daemon therefore **cannot decrypt a single backup it writes**.
-That is deliberate, and it is why the identity is not in `/etc/litestream/env`
-next to the R2 keys.
+**The replicator holds the identity, and has to.** This runbook used to keep it
+out, so that the always-running process could not open a backup. That broke
+backups four times (issue #696): litestream 0.3.13 recovers each replica's
+position after every start and every failed upload by reading back the last
+WAL segment it wrote, which is ciphertext, and without the identity it fails
+with `lz4: bad magic number` and that tenant stops backing up for good. The
+split did not protect anything either: the key file is on this same box, and
+the replicator runs as root with `CAP_DAC_OVERRIDE`, so it could always read
+it. It also reads every tenant's live database, which is all the key unlocks.
+
+What is kept: the identity is still **not in `/etc/litestream/env`** next to
+the R2 keys, so that file, and the generated `/etc/litestream.yml`, are still
+safe to read and paste. There is still exactly one copy of the key on disk.
 
 > ## ⚠ THE IDENTITY IS THE BACKUP. PUT IT IN THE PASSWORD MANAGER NOW.
 >
@@ -2293,10 +2303,14 @@ ${EDITOR:-vi} /etc/litestream/env        # four values from step 2, plus the
 # Litestream's own state, off the tenant volume on purpose (see below).
 install -d -m 0700 -o root -g root /var/lib/litestream
 
-# The generator, and the units.
-install -m 0755 -o root -g root litestream-sync-config.sh /usr/local/bin/
+# The scripts, and the units. litestream-replicate.sh is the replicator's
+# ExecStart (it loads the age identity); litestream-health.sh feeds the backup
+# alerts; litestream-reset.sh is the "start every tenant over" lever.
+install -m 0755 -o root -g root litestream-sync-config.sh litestream-replicate.sh \
+  litestream-health.sh litestream-reset.sh /usr/local/bin/
 install -m 0644 -o root -g root litestream.service litestream-config.service \
-  litestream-config.timer /etc/systemd/system/
+  litestream-config.timer litestream-health.service litestream-health.timer \
+  /etc/systemd/system/
 systemctl daemon-reload
 
 # Our unit outranks the .deb's -- confirm it, don't assume it.
@@ -2319,12 +2333,13 @@ DRY_RUN=1 VERBOSE=1 /usr/local/bin/litestream-sync-config.sh
 That prints the config it *would* write and changes nothing. You should see one
 `- path:` block per tenant that has synced at least once, each with a
 `meta-path` under `/var/lib/litestream/`, a `replicas:` **list** whose single
-entry has a path of `tenants/<label>/store.db`, and an `age: recipients:` block.
+entry has a path of `tenants/<label>/store.db`, and an `age:` block with
+`identities: [${LITESTREAM_AGE_IDENTITY}]` and `recipients:`.
 If you see zero blocks and you have tenants, the tenant root is wrong. If you
-see credentials or an `age1...` string in that output, stop and file a bug: the
-config is supposed to carry `${LITESTREAM_R2_*}` and
-`${LITESTREAM_AGE_RECIPIENT}` names only, which is the entire reason it is safe
-to read.
+see credentials, an `age1...` string or an `AGE-SECRET-KEY-` string in that
+output, stop and file a bug: the config is supposed to carry
+`${LITESTREAM_R2_*}` and `${LITESTREAM_AGE_*}` names only, which is the entire
+reason it is safe to read.
 
 The generator refuses, loudly and with the fix, if `/etc/litestream/env` is
 missing a value, is looser than 0600 root, or spells `LITESTREAM_R2_ENDPOINT`
@@ -2353,8 +2368,16 @@ Happy? Start it:
 systemctl enable --now litestream-config.timer
 systemctl start litestream-config          # don't wait 2 minutes for the first tick
 systemctl enable --now litestream
-systemctl status litestream litestream-config.timer
+systemctl enable --now litestream-health.timer
+systemctl status litestream litestream-config.timer litestream-health.timer
 ```
+
+The health timer writes `/var/lib/node-exporter/textfile/litestream.prom`
+every minute, and node-exporter (`80-monitoring.yaml`, with
+`--collector.textfile.directory`) carries it to the backup alerts in Grafana
+(group `backups`). `cat` that file once: every tenant should have a recent
+`last_upload` and, after the first few minutes, `last_error` either 0 or older
+than its upload.
 
 Order matters slightly: the timer renders the config, and litestream started
 against the .deb's placeholder simply logs "no databases specified in
@@ -2435,28 +2458,25 @@ journalctl -u litestream -f                       # replication, live
 Do this now, on the canary, while nothing is on fire. A backup you have never
 restored is a hypothesis.
 
-**A restore needs the age identity, and `/etc/litestream.yml` does not have it.**
-That is the design (step 3), so every restore starts with two extra lines: load
-the identity into this shell, and render a config that references it.
+**A restore needs the age identity in your shell.** `/etc/litestream.yml`
+already references it (`identities: [${LITESTREAM_AGE_IDENTITY}]`), so the live
+config is the restore config; what your shell lacks is the value. Two lines:
 
 ```sh
 set -a; . /etc/litestream/env; set +a
-export LITESTREAM_AGE_IDENTITY="$(grep -v '^#' /etc/litestream/backup-age.key | tr -d '[:space:]')"
-
-umask 077
-DRY_RUN=1 WITH_IDENTITY=1 /usr/local/bin/litestream-sync-config.sh > /root/restore.yml
+export LITESTREAM_AGE_IDENTITY="$(grep '^AGE-SECRET-KEY-1' /etc/litestream/backup-age.key | tr -d '\r\t ')"
 ```
 
-`/root/restore.yml` is the same tenants and the same replicas as the live config,
-plus an `identities:` line. It still contains no key material — only the
-`${LITESTREAM_AGE_IDENTITY}` name — so the secret exists in that shell's
-environment and nowhere on disk but the key file.
+The config still contains no key material, only the name, so the secret exists
+in that shell's environment and nowhere on disk but the key file. (Older
+runbooks rendered a separate `/root/restore.yml` with `WITH_IDENTITY=1`. That
+flag is retired; the generator says so and renders the normal config.)
 
 Restoring to a **scratch path** then touches no tenant and needs no downtime:
 
 ```sh
 DB=/mnt/tenant-data/pvc-<uid>_tenants_<label>-data/squelch.db
-litestream restore -config /root/restore.yml -o /root/restore-<label>.db "$DB"
+litestream restore -config /etc/litestream.yml -o /root/restore-<label>.db "$DB"
 
 sqlite3 /root/restore-<label>.db 'pragma integrity_check;'
 sqlite3 /root/restore-<label>.db 'select count(*) from messages;'
@@ -2467,7 +2487,7 @@ the config to find the replica; `-o` sends the output somewhere else.
 Point-in-time works the same way:
 
 ```sh
-litestream restore -config /root/restore.yml -timestamp 2026-08-10T09:00:00Z \
+litestream restore -config /etc/litestream.yml -timestamp 2026-08-10T09:00:00Z \
   -o /root/rewind.db "$DB"
 ```
 
@@ -2482,8 +2502,8 @@ use `litestream generations "$DB"` and `litestream snapshots "$DB"` from step 5.
 > ```
 >
 > That is litestream trying to decompress age ciphertext. It means "no identity",
-> not "corrupt backup". Check `[ -n "$LITESTREAM_AGE_IDENTITY" ]` and that you
-> passed `-config /root/restore.yml`.
+> not "corrupt backup". Check `[ -n "$LITESTREAM_AGE_IDENTITY" ]` in the shell
+> you are restoring from.
 
 To put a restored database **back** into a live tenant, stop **both** writers
 first. There are two, and forgetting the second is the mistake worth naming: the
@@ -2504,13 +2524,16 @@ systemctl stop litestream-config.timer litestream
 mkdir -p /root/old-<label>
 mv "$DB" "$DB"-wal "$DB"-shm /root/old-<label>/ 2>/dev/null || true
 
-# Same restore config as above -- the identity is what makes this possible.
-litestream restore -config /root/restore.yml -o "$DB" "$DB"
+# The live config, with the identity exported above.
+litestream restore -config /etc/litestream.yml -o "$DB" "$DB"
 chown --reference="$(dirname "$DB")" "$DB"      # see the note below
 
 # 4. Litestream's local state for this tenant describes the database you just
-#    replaced. Clear it and let it re-derive from the replica.
+#    replaced. Clear it and let it re-derive from the replica. (Safe for the
+#    OTHER tenants only because the replicator holds the identity: before
+#    issue #696 was fixed, the restart in step 5 broke every one of them.)
 rm -rf /var/lib/litestream/<label>
+install -d -m 0700 -o root -g root /var/lib/litestream/<label>
 
 # 5. Back up, replicator first so the daemon's first writes are covered.
 systemctl start litestream litestream-config.timer
@@ -2518,8 +2541,7 @@ kubectl -n tenants scale deploy/<label> --replicas=1
 litestream databases | grep <label>         # back in the config, with an s3 replica
 journalctl -u litestream --since -2min | grep <label>   # and actually syncing
 
-# 6. Done: drop the restore config and the identity out of this shell.
-rm -f /root/restore.yml
+# 6. Done: drop the identity out of this shell.
 unset LITESTREAM_AGE_IDENTITY
 ```
 
@@ -2637,6 +2659,15 @@ an `s3` replica per tenant), a replicate → restore round trip comes back with
 `age-encryption.org/v1`, and restoring without `identities:` fails with exactly
 `lz4: bad magic number`. The `.deb` asset names and layout above come from the
 v0.3.13 release, not from memory.
+
+**What that drill missed** (issue #696, found 2026-11-04 in the v0.3.13 source):
+it tested restore, never a *restart* of a replicator that had already uploaded
+WAL. `Replica.Sync` keeps the replica position in memory only, clears it on any
+sync error, and `calcPos` recovers it by reading the last WAL segment back,
+decrypting only if `identities:` is configured. With recipients only, every
+restart and every transient R2 error stopped a tenant's backups for good. The
+replicator now holds the identity (step 3) and the `backups` alerts watch for
+the failure shape.
 
 Not verified, and worth ten seconds on the box the first time you install:
 `systemd-analyze verify /etc/systemd/system/litestream*.{service,timer}`. The
@@ -2765,6 +2796,11 @@ problem, and one gap that is still open:
   `/etc/litestream/backup-age.key` and in the password manager, and **nowhere
   else** — losing it makes every backup permanently unreadable. That is the
   trade this bought, and it is why litestream is pinned to 0.3.13 (§11 step 1).
+- **It is alerted on.** 0.3.13 failed silently four times between 2026-09-26
+  and 2026-11-04 (issue #696) while the unit stayed active. `litestream-health`
+  now reads its journal every minute, and Grafana's `backups` group pages on a
+  stuck replica, a tenant with nothing uploaded in 26 hours, and the service
+  being down.
 - **What Litestream does NOT do.** It backs up **only SQLite**. The identity
   Secrets are in the k3s datastore, not on the volume, and the sealed
   `credentials.json` is on the volume but is not a database — so neither is in

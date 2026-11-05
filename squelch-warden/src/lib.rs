@@ -186,6 +186,7 @@ pub fn router(state: WardenState) -> Router {
             post(handlers::reconcile_tenant),
         )
         .route("/v1/tenants/{label}/pair", post(handlers::repair_tenant))
+        .route("/v1/tenants/{label}/purge", post(handlers::purge_tenant))
         .layer(DefaultBodyLimit::max(handlers::MAX_BODY))
         .layer(middleware::from_fn_with_state(
             state.clone(),

@@ -34,22 +34,30 @@ inherits that obligation. That tradeoff was made deliberately; this is the bill.
 
 Ordered by what stops the submission soonest.
 
-- [ ] **Check the publishing status is In production, not Testing.** Google
-      Auth Platform → Audience. In Testing, Google expires every refresh token
-      seven days after consent, so every hosted user's mailbox goes dark a week
-      after signup until they reconnect. That looks exactly like churn. In
-      production but unverified, tokens last, and the cost is the "Google
-      hasn't verified this app" interstitial at signup plus the 100-user cap.
-      Verification removes both.
-- [ ] **The consent screen still says "Squelch."** It must say **Passband** —
-      the name on the home page, in the app, and on the App Store listing.
-      A mismatch fails brand verification on the first automated pass.
-      (`docs/HOSTED.md`, "Naming", has owed this since 2026-08-03.)
+- [ ] **Publish the app: it is in Testing** (checked in Google Auth Platform
+      → Audience, 2026-11-05: Testing, External, 16 of 100 lifetime users, 15
+      of them listed test users). In Testing, Google expires every refresh
+      token seven days after consent, so every hosted user's mailbox goes dark
+      a week after signup until they reconnect, and nobody off the test-user
+      list can sign up at all. That looks exactly like churn. Press **Publish
+      app**. In production but unverified, tokens last; the cost is the
+      "Google hasn't verified this app" interstitial at consent (Advanced →
+      Go to Passband) and the 100-user lifetime cap, both of which
+      verification removes. Tokens minted while in Testing keep their
+      seven-day life, so every existing user must reconnect once after
+      publishing: the app's Gmail-disconnected banner sends them to
+      `signup.passband.app/reconnect` when theirs lapses, or send each of them
+      the link the day you publish so nobody sees the outage first.
+- [x] **The consent screen says "Passband"** (checked 2026-11-05, Branding →
+      App name). The logo is uploaded too. A logo on an app in production
+      requires verification; if Google refuses to publish over it, remove it
+      and add it back with the verification submission.
 - [ ] **Verify `passband.app` in Google Search Console**, as an owner, from the
       same Google account that owns the Cloud project. Brand verification checks
       the top private domain of every URL on the consent screen.
 - [ ] **Declare `https://passband.app/about` as the application home page** —
-      not `https://passband.app`. The React homepage serves a 1,328-byte empty
+      not `https://passband.app` (which is what Branding → App domain says as
+      of 2026-11-05). The React homepage serves a 1,328-byte empty
       `#root` with no functional description and no privacy link, which is
       exactly what the automated home page check looks for. `/about` is static
       HTML (added 2026-08-25) and carries the description, the scope table, and
@@ -63,9 +71,9 @@ Ordered by what stops the submission soonest.
       `deploy/aws/CUTOVER.md`). The setting lives in Bifrost's config store,
       not in the task definition, so before the assessment re-check it under
       Config → Logs and keep the evidence. The Railway volume the gateway ran
-      on before the move goes with the Railway project's deletion (CUTOVER.md
-      Phase 10); confirm that has happened. **Do this before the assessment,
-      not during.**
+      on before the move, which had grown a multi-gigabyte `logs.db`, went
+      with the Railway project (deleted 2026-11-05, operator-confirmed).
+      **Do this before the assessment, not during.**
 - [ ] **`/mcp` auth: confirm it is live.** Built (OAuth through WorkOS
       AuthKit, 2026-10-01), and the checked-in warden config sets
       `SQUELCH_WARDEN_MCP_OAUTH_ISSUER` (`deploy/hosted/15-warden-config.yaml`).

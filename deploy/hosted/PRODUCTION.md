@@ -1627,7 +1627,8 @@ Two mechanisms, split by which disk they cover:
 | How | **one** systemd service on `carrier` (`litestream.service`), not a sidecar per pod — see below |
 | Discovery | `litestream-config.timer` → `/usr/local/bin/litestream-sync-config.sh` re-renders `/etc/litestream.yml` from the PVC directories every 2 min |
 | Litestream state | `/var/lib/litestream/<label>` (`meta-path`) — off the tenant volume, so a tenant pod cannot touch its own backup bookkeeping |
-| Units | `/etc/systemd/system/{litestream,litestream-config}.service`, `litestream-config.timer`, from `deploy/hosted/litestream/` |
+| Units | `/etc/systemd/system/{litestream,litestream-config,litestream-health}.service`, `litestream-config.timer`, `litestream-health.timer`, from `deploy/hosted/litestream/` |
+| Alerts | Grafana group `backups`: stuck replica, tenant stale 26 h, service down, exporter missing. Fed by `litestream-health.sh` through node-exporter's textfile collector (issue #696) |
 | Version | litestream **v0.3.13**, upstream `.deb`, `apt-mark hold` |
 
 **Why 0.3.13 and not the current line.** 0.3.x is the last release series with
@@ -1653,14 +1654,17 @@ owns the disk.
 |---|---|---|
 | R2 token (Object Read & Write, scoped to `passband-tenant-backups`) | `/etc/litestream/env` on `carrier`, root:root 0600. Never in git, never in a Secret | mint a new one in the Cloudflare dashboard; nothing is lost |
 | **backup age recipient** (public) | `LITESTREAM_AGE_RECIPIENT` in `/etc/litestream/env` | re-derive with `age-keygen -y` from the identity |
-| **backup age identity** (private) | `/etc/litestream/backup-age.key` on `carrier`, root:root 0600, **and the password manager**. Read by nothing automatically; exported by hand for the minutes a restore takes | **unrecoverable, fleet-wide.** Every backup in R2 becomes permanently unreadable, and nothing tells you until you try to restore |
+| **backup age identity** (private) | `/etc/litestream/backup-age.key` on `carrier`, root:root 0600, **and the password manager**. Loaded by `litestream.service` (`LoadCredential=`), which needs it to recover replica positions (issue #696); exported by hand for a restore | **unrecoverable, fleet-wide.** Every backup in R2 becomes permanently unreadable, and nothing tells you until you try to restore |
 | tenant identity Secrets (`<label>-identity`, ns `tenants`) | k3s datastore, encrypted at rest. Covered by the Hetzner snapshot only | **unrecoverable.** Every affected tenant re-consents with Google. No escrow, by design |
 
 **Backups are age-encrypted client-side.** Every snapshot and WAL segment is
 sealed to the recipient before it leaves the box, so R2 objects begin
 `age-encryption.org/v1` and Cloudflare cannot read a tenant's mail index. The
-replicating daemon holds only the public half and therefore cannot open a single
-backup it writes; restores load the identity into one operator shell. A
+replicator holds the identity too, since 2026-11-04: 0.3.13 cannot recover a
+replica's position after a restart or a failed upload without it, and keeping
+it out stopped backups four times (issue #696). That costs no boundary: the key
+file was always on this box and readable by the same root process, which reads
+the live databases anyway. It is still not in `/etc/litestream/env`. A
 compromised bucket on its own discloses nothing. `SETUP.md` §11 step 3 has the
 generation procedure and the custody warning.
 

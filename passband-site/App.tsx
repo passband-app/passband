@@ -1844,6 +1844,9 @@ const CLOUDS: Record<"mail" | "events", Cloud[]> = {
 const CLOUD_STRENGTH = 0.22;
 // How far each wanders from its place, as a share of its own ax and ay.
 const CLOUD_WANDER = 0.45;
+// The fastest the clouds will follow the scroll, in page pixels a second.
+// A fast scroll outruns it, and the clouds keep drifting slowly after.
+const CLOUD_MAX_RATE = 420;
 
 // Two overlapping falloffs make a softer, less perfectly round glow.
 const cloudFill = ({ rgb, a: a0 }: Cloud) => {
@@ -1865,9 +1868,12 @@ function Clouds({ kind }: { kind: "mail" | "events" }) {
     if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     const wide = matchMedia("(min-width: 901px)");
     let raf = 0;
-    const move = () => {
-      raf = 0;
-      const p = -section.getBoundingClientRect().top;
+    // The clouds follow the scroll, but never faster than a slow drift: a
+    // hard flick of the wheel leaves them easing on behind it, gently, until
+    // they arrive. Off screen they simply jump to where they belong.
+    let shown: number | null = null;
+    let last = 0;
+    const draw = (p: number) => {
       const vw = innerWidth / 100;
       const vh = innerHeight / 100;
       clouds.forEach((c, i) => {
@@ -1875,6 +1881,25 @@ function Clouds({ kind }: { kind: "mail" | "events" }) {
         const y = c.ay * CLOUD_WANDER * vh * Math.sin((p / c.py) * Math.PI * 2 + c.ph + 1.3);
         (stage.children[i] as HTMLElement).style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0)`;
       });
+    };
+    const move = (now: number) => {
+      raf = 0;
+      const rect = section.getBoundingClientRect();
+      const target = -rect.top;
+      const dt = last ? Math.min(0.1, (now - last) / 1000) : 0;
+      last = now;
+      const offscreen = rect.bottom < 0 || rect.top > innerHeight;
+      if (shown === null || offscreen) {
+        shown = target;
+      } else {
+        // Ease toward the scroll, capped at CLOUD_MAX_RATE scroll-pixels a second.
+        const want = (target - shown) * (1 - Math.exp(-dt / 0.6));
+        const cap = CLOUD_MAX_RATE * dt;
+        shown += Math.max(-cap, Math.min(cap, want));
+      }
+      draw(shown);
+      if (!offscreen && Math.abs(target - shown) > 0.5) raf = requestAnimationFrame(move);
+      else last = 0;
     };
     const queue = () => {
       if (!raf && wide.matches) raf = requestAnimationFrame(move);

@@ -230,9 +230,9 @@ impl ClearPing {
 /// hourly check tries again.
 ///
 /// On the wire it is `"<tag>:release:macos:<version>"`. The version is public
-/// news, not mail. The collapse id has no tag in it ON PURPOSE: a phone with
-/// two mailboxes hears from two daemons, and one shared collapse id is what
-/// makes those one banner.
+/// news, not mail. The collapse id has no tag in it ON PURPOSE: a device with
+/// two mailboxes hears from two daemons, and one shared collapse id folds
+/// those into one Notification Center entry (each still arrives as a banner).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleasePing {
     pub version: String,
@@ -915,8 +915,21 @@ impl Pusher {
                 return;
             }
         };
+        let phones_at = match self
+            .store
+            .get_app_setting(self.account_id, release_feed::PHONE_KEY)
+        {
+            Ok(v) => v
+                .and_then(|v| chrono::DateTime::parse_from_rfc3339(&v).ok())
+                .map(|t| t.with_timezone(&chrono::Utc)),
+            Err(e) => {
+                eprintln!("squelch: release check could not read its record: {e}");
+                return;
+            }
+        };
+        let now = chrono::Utc::now();
         let phones =
-            match release_feed::decide(&release, chrono::Utc::now(), &seen, announced.as_deref()) {
+            match release_feed::decide(&release, now, &seen, announced.as_deref(), phones_at) {
                 Decision::Wait => return,
                 Decision::AlreadyHave => return self.mark_announced(&release.version),
                 Decision::Announce { phones } => phones,
@@ -939,17 +952,41 @@ impl Pusher {
         let ping = ReleasePing {
             version: release.version.clone(),
         };
-        let outcome = self
-            .fan_out(&devices, ping.collapse_id(), Some("release"), |tag| {
-                ping.event_id(tag)
-            })
-            .await;
-        for token in &outcome.dead {
-            if let Err(e) = self.store.delete_device_by_token(self.account_id, token) {
-                eprintln!("squelch: APNs pusher could not drop a device: {e}");
+        // Macs and phones go out as separate sends: `fan_out` stops at the
+        // first refused request, and a relay that does not know the Mac topic
+        // (a self-hosted one allowing only the phone's) must not cost the
+        // phones their banner.
+        let (macs, phone_rows): (Vec<_>, Vec<_>) = devices.into_iter().partition(|(r, _)| r.mac);
+        let mut delivered = 0;
+        let mut retry = false;
+        for (group, is_phone) in [(macs, false), (phone_rows, true)] {
+            if group.is_empty() {
+                continue;
+            }
+            let outcome = self
+                .fan_out(&group, ping.collapse_id(), Some("release"), |tag| {
+                    ping.event_id(tag)
+                })
+                .await;
+            for token in &outcome.dead {
+                if let Err(e) = self.store.delete_device_by_token(self.account_id, token) {
+                    eprintln!("squelch: APNs pusher could not drop a device: {e}");
+                }
+            }
+            delivered += outcome.delivered;
+            retry |= outcome.relay_failed || outcome.failed > 0;
+            if is_phone
+                && outcome.delivered > 0
+                && let Err(e) = self.store.set_app_setting(
+                    self.account_id,
+                    release_feed::PHONE_KEY,
+                    &now.to_rfc3339(),
+                )
+            {
+                eprintln!("squelch: release check could not record the phones: {e}");
             }
         }
-        if outcome.delivered == 0 && (outcome.relay_failed || outcome.failed > 0) {
+        if delivered == 0 && retry {
             eprintln!(
                 "squelch: release {} reached no device; trying again next check",
                 release.version
@@ -957,8 +994,8 @@ impl Pusher {
             return;
         }
         eprintln!(
-            "squelch: announced release {} to {} device(s)",
-            release.version, outcome.delivered
+            "squelch: announced release {} to {delivered} device(s)",
+            release.version
         );
         self.mark_announced(&release.version);
     }
@@ -975,7 +1012,14 @@ impl Pusher {
     /// GET the feed, bounded. No bearer rides this client's requests unless
     /// one is added, and none is: the feed is public.
     async fn fetch_feed(&self, url: &str) -> Option<String> {
-        let Ok(resp) = self.http.get(url).send().await else {
+        // Its own short timeout: this runs in the push loop, ahead of mail.
+        let Ok(resp) = self
+            .http
+            .get(url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+        else {
             eprintln!("squelch: release feed unreachable");
             return None;
         };

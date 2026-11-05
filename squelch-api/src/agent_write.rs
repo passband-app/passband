@@ -456,11 +456,12 @@ impl AgentMailer for ApiAgentMailer {
                     store.account_email(account_id)?,
                     draft.created_at.timestamp(),
                     // A phone the pusher can route a draft to: untagged rows
-                    // are skipped by it, so they do not count as a phone.
+                    // are skipped by it, and a Mac is never sent one, so
+                    // neither counts as a phone.
                     store
                         .list_devices(account_id)?
                         .iter()
-                        .any(|d| d.tag.is_some()),
+                        .any(|d| d.tag.is_some() && d.platform != squelch_core::push::MAC_PLATFORM),
                 ))),
                 _ => Ok(None),
             }

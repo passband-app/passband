@@ -1603,7 +1603,109 @@ fn release_pusher(base: &str, feed: &str) -> (Arc<SqliteStore>, i64, Pusher) {
     store
         .upsert_device(acct, MAC_DEV, "macos", Some(MAC_TAG), Some("production"))
         .unwrap();
+    // A daemon that has checked before: the first check ever only records.
+    store
+        .set_app_setting(acct, squelch_core::release_feed::ANNOUNCED_KEY, "0.0.98")
+        .unwrap();
     (store, acct, pusher)
+}
+
+fn announced(store: &SqliteStore, acct: i64) -> Option<String> {
+    store
+        .get_app_setting(acct, squelch_core::release_feed::ANNOUNCED_KEY)
+        .unwrap()
+}
+
+/// The first check a daemon ever makes records the current release and
+/// pushes nothing: rolling this out is not itself an announcement.
+#[tokio::test]
+async fn the_first_check_ever_announces_nothing() {
+    let (base, relay) = spawn_relay().await;
+    let feed = spawn_feed().await;
+    let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+    let acct = store.ensure_account("me@example.com").unwrap();
+    store
+        .upsert_device(acct, MAC_DEV, "macos", Some(MAC_TAG), Some("production"))
+        .unwrap();
+    let pusher =
+        Pusher::for_test(store.clone() as Arc<dyn Store>, acct, &base).with_release_feed(&feed);
+    pusher.check_release().await;
+    assert_eq!(relay.count(), 0);
+    assert_eq!(announced(&store, acct).as_deref(), Some("0.0.99"));
+}
+
+/// A lapsed Mac owner's phone hears about one release, then nothing more
+/// until a Mac shows up again. The Mac and the phone go out as two requests.
+#[tokio::test]
+async fn a_lapsed_phone_hears_once() {
+    let (base, relay) = spawn_relay().await;
+    let feed = spawn_feed().await;
+    let path = std::env::temp_dir().join(format!(
+        "squelch-release-{}-{}.db",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let store = Arc::new(SqliteStore::open(&path).unwrap());
+    let acct = store.ensure_account("me@example.com").unwrap();
+    store
+        .upsert_device(acct, DEV_A, "ios", Some(PHONE_TAG), Some("production"))
+        .unwrap();
+    store
+        .upsert_device(acct, MAC_DEV, "macos", Some(MAC_TAG), Some("production"))
+        .unwrap();
+    store
+        .set_app_setting(acct, squelch_core::release_feed::ANNOUNCED_KEY, "0.0.98")
+        .unwrap();
+    let issued = store.issue_device_token(acct, "laptop").unwrap();
+    store
+        .verify_device_token_from(
+            &issued.token,
+            Some(&squelch_core::store::ClientTag::parse("macos/0.0.90").unwrap()),
+        )
+        .unwrap()
+        .unwrap();
+    // The Mac was last seen a month ago.
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE device_tokens SET client_seen_at = ?1 WHERE client_platform IS NOT NULL",
+            [(chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339()],
+        )
+        .unwrap();
+    let pusher =
+        Pusher::for_test(store.clone() as Arc<dyn Store>, acct, &base).with_release_feed(&feed);
+
+    pusher.check_release().await;
+    let bodies = relay.bodies();
+    assert_eq!(
+        bodies.len(),
+        2,
+        "one request for the Mac, one for the phone"
+    );
+    assert!(bodies.iter().any(|b| b["device_tokens"] == json!([DEV_A])));
+    assert!(
+        bodies
+            .iter()
+            .any(|b| b["device_tokens"] == json!([MAC_DEV]))
+    );
+    assert!(
+        store
+            .get_app_setting(acct, squelch_core::release_feed::PHONE_KEY)
+            .unwrap()
+            .is_some()
+    );
+
+    // The next release: the Mac again, the phone not.
+    store
+        .set_app_setting(acct, squelch_core::release_feed::ANNOUNCED_KEY, "0.0.98")
+        .unwrap();
+    pusher.check_release().await;
+    let bodies = relay.bodies();
+    assert_eq!(bodies.len(), 3);
+    assert_eq!(bodies[2]["device_tokens"], json!([MAC_DEV]));
+    drop(pusher);
+    let _ = std::fs::remove_file(&path);
 }
 
 /// A release goes to the Mac under the Mac's own topic, once. The phone of an
@@ -1677,12 +1779,7 @@ async fn a_release_that_reached_nobody_is_tried_again() {
     let (store, acct, pusher) = release_pusher(&base, &feed);
     relay.fail.store(true, Ordering::SeqCst);
     pusher.check_release().await;
-    assert_eq!(
-        store
-            .get_app_setting(acct, squelch_core::release_feed::ANNOUNCED_KEY)
-            .unwrap(),
-        None
-    );
+    assert_eq!(announced(&store, acct).as_deref(), Some("0.0.98"));
     relay.fail.store(false, Ordering::SeqCst);
     pusher.check_release().await;
     assert_eq!(relay.count(), 2);

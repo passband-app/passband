@@ -20,6 +20,18 @@
 //!   connected from one for [`MAC_ACTIVE`]. Somebody using the Mac every day
 //!   does not need their phone to buzz about it; somebody who stopped is who
 //!   this is for. A phone-only account is not told about a Mac release.
+//!   ONCE PER LAPSE: after one phone announcement ([`PHONE_KEY`]), the phone
+//!   hears nothing more until a Mac connects again. Releases come every day
+//!   or two, and a nag per release is how the app gets deleted.
+//!
+//! FIRST SIGHT IS NOT NEWS. With no record at all (a daemon running this code
+//! for the first time), the current release is recorded and nobody is pushed:
+//! the first announcement is the first release that comes out AFTER this
+//! shipped, not a backlog the moment the daemon rolls.
+//!
+//! One banner per daemon: a Mac with mailboxes on two daemons hears it twice,
+//! since each daemon decides alone. The shared collapse id folds them into
+//! one Notification Center entry.
 //!
 //! ONCE PER VERSION: the newest version announced (or found already
 //! installed) is kept in `app_settings` under [`ANNOUNCED_KEY`], so a restart
@@ -37,6 +49,10 @@ pub const FEED_URL: &str = "https://passband.app/appcast.xml";
 /// `app_settings` key holding the newest Mac version this account was told
 /// about (or was found already running).
 pub const ANNOUNCED_KEY: &str = "push.release_announced.macos";
+
+/// `app_settings` key holding when the phones were last told about a Mac
+/// release (RFC 3339), for once-per-lapse.
+pub const PHONE_KEY: &str = "push.release_phones_at.macos";
 
 /// How long a release waits before anybody is pushed about it. Sparkle checks
 /// hourly; this leaves running Macs time to update and say so first.
@@ -61,7 +77,8 @@ pub struct Release {
 pub enum Decision {
     /// Nothing yet: already announced, or still inside [`GRACE`].
     Wait,
-    /// The account already runs it. Record it as announced; push nothing.
+    /// The account already runs it, or this is the first check ever. Record
+    /// it as announced; push nothing.
     AlreadyHave,
     /// Push it. Macs always; phones only when `phones`.
     Announce { phones: bool },
@@ -133,8 +150,12 @@ pub fn decide(
     now: DateTime<Utc>,
     seen: &[ClientSeen],
     announced: Option<&str>,
+    phones_at: Option<DateTime<Utc>>,
 ) -> Decision {
-    if announced.is_some_and(|a| at_least(a, &release.version)) {
+    let Some(announced) = announced else {
+        return Decision::AlreadyHave;
+    };
+    if at_least(announced, &release.version) {
         return Decision::Wait;
     }
     let macs = seen.iter().filter(|c| c.platform == ClientPlatform::Macos);
@@ -144,11 +165,11 @@ pub fn decide(
     if now - release.published < GRACE {
         return Decision::Wait;
     }
-    let mut macs = macs.peekable();
-    let had_mac = macs.peek().is_some();
-    let mac_active = macs.any(|c| now - c.seen_at < MAC_ACTIVE);
+    let last_mac = macs.map(|c| c.seen_at).max();
+    let lapsed = last_mac.is_some_and(|t| now - t >= MAC_ACTIVE);
+    let told_this_lapse = phones_at.is_some_and(|p| last_mac.is_some_and(|t| p > t));
     Decision::Announce {
-        phones: had_mac && !mac_active,
+        phones: lapsed && !told_this_lapse,
     }
 }
 
@@ -190,6 +211,8 @@ mod tests {
         }
     }
 
+    const OLD: Option<&str> = Some("0.0.9");
+
     fn release() -> Release {
         Release {
             version: "0.0.10".into(),
@@ -227,7 +250,35 @@ mod tests {
     #[test]
     fn nothing_inside_the_grace_period() {
         let now = release().published + Duration::hours(5);
-        assert_eq!(decide(&release(), now, &[], None), Decision::Wait);
+        assert_eq!(decide(&release(), now, &[], OLD, None), Decision::Wait);
+    }
+
+    #[test]
+    fn the_first_check_ever_records_and_pushes_nothing() {
+        let now = release().published + Duration::days(3);
+        let seen = [mac("0.0.9", "2026-10-01T00:00:00Z")];
+        assert_eq!(
+            decide(&release(), now, &seen, None, None),
+            Decision::AlreadyHave
+        );
+    }
+
+    #[test]
+    fn the_phone_hears_once_per_lapse() {
+        let now = release().published + Duration::hours(7);
+        let seen = [mac("0.0.9", "2026-10-01T00:00:00Z")];
+        // Told after the Mac went quiet: the Mac alone, from now on.
+        let told = Some(at("2026-10-20T00:00:00Z"));
+        assert_eq!(
+            decide(&release(), now, &seen, OLD, told),
+            Decision::Announce { phones: false }
+        );
+        // Told before the Mac's last visit: a new lapse, told again.
+        let earlier = Some(at("2026-09-01T00:00:00Z"));
+        assert_eq!(
+            decide(&release(), now, &seen, OLD, earlier),
+            Decision::Announce { phones: true }
+        );
     }
 
     #[test]
@@ -235,12 +286,12 @@ mod tests {
         let now = release().published + Duration::hours(7);
         let seen = [mac("0.0.9", "2026-10-01T00:00:00Z")];
         assert_eq!(
-            decide(&release(), now, &seen, None),
+            decide(&release(), now, &seen, OLD, None),
             Decision::Announce { phones: true }
         );
         // Phone only, never a Mac: a Mac release is not news for the phone.
         assert_eq!(
-            decide(&release(), now, &[], None),
+            decide(&release(), now, &[], OLD, None),
             Decision::Announce { phones: false }
         );
     }
@@ -250,7 +301,7 @@ mod tests {
         let now = release().published + Duration::hours(7);
         let seen = [mac("0.0.9", "2026-11-05T09:00:00Z")];
         assert_eq!(
-            decide(&release(), now, &seen, None),
+            decide(&release(), now, &seen, OLD, None),
             Decision::Announce { phones: false }
         );
     }
@@ -262,18 +313,30 @@ mod tests {
             mac("0.0.9", "2026-11-01T00:00:00Z"),
             mac("0.0.10", "2026-11-05T04:00:00Z"),
         ];
-        assert_eq!(decide(&release(), now, &seen, None), Decision::AlreadyHave);
+        assert_eq!(
+            decide(&release(), now, &seen, OLD, None),
+            Decision::AlreadyHave
+        );
         let newer = [mac("0.0.11", "2026-11-05T04:00:00Z")];
-        assert_eq!(decide(&release(), now, &newer, None), Decision::AlreadyHave);
+        assert_eq!(
+            decide(&release(), now, &newer, OLD, None),
+            Decision::AlreadyHave
+        );
     }
 
     #[test]
     fn once_per_version() {
         let now = release().published + Duration::days(3);
-        assert_eq!(decide(&release(), now, &[], Some("0.0.10")), Decision::Wait);
-        assert_eq!(decide(&release(), now, &[], Some("0.0.11")), Decision::Wait);
         assert_eq!(
-            decide(&release(), now, &[], Some("0.0.9")),
+            decide(&release(), now, &[], Some("0.0.10"), None),
+            Decision::Wait
+        );
+        assert_eq!(
+            decide(&release(), now, &[], Some("0.0.11"), None),
+            Decision::Wait
+        );
+        assert_eq!(
+            decide(&release(), now, &[], Some("0.0.9"), None),
             Decision::Announce { phones: false }
         );
     }

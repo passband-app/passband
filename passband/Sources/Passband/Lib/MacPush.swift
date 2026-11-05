@@ -32,6 +32,8 @@
         private var token: String?
         private var lastSync: Date?
         private var syncing = false
+        /// A sync was asked for while one ran (an account added mid-sync).
+        private var again = false
 
         /// How often an activation re-sends the token. Registration is
         /// idempotent and the daemon keeps the row; this only refreshes it.
@@ -93,12 +95,30 @@
         }
 
         private func syncAll() async {
-            guard let token, let environment = Self.environment, !syncing else { return }
+            guard let token, let environment = Self.environment else { return }
+            guard !syncing else {
+                again = true
+                return
+            }
             syncing = true
             defer { syncing = false }
+            repeat {
+                again = false
+                await syncOnce(token: token, environment: environment)
+            } while again
+        }
+
+        /// One pass over every account. The throttle starts only when every
+        /// daemon took the token: one that was down is asked again on the
+        /// next activation, not six hours later.
+        private func syncOnce(token: String, environment: String) async {
+            var allTook = true
             for account in AccountManager.shared.accounts {
-                guard let settings = await AccountManager.shared.settings(for: account.id) else { continue }
-                _ = await post(
+                guard let settings = await AccountManager.shared.settings(for: account.id) else {
+                    allTook = false
+                    continue
+                }
+                let took = await post(
                     "/client/devices",
                     body: [
                         "token": token,
@@ -106,8 +126,9 @@
                         "tag": account.id.uuidString,
                         "environment": environment,
                     ], with: settings)
+                allTook = allTook && took
             }
-            lastSync = Date()
+            lastSync = allTook ? Date() : nil
         }
 
         /// POST one authenticated JSON body to the human door. Neither the

@@ -425,7 +425,7 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
     /// phone only when its owner's Mac has gone quiet (squelch-core's
     /// `release_feed`), so it names the Mac and where to get it. One thread
     /// for every release, and the same collapse id from every mailbox's
-    /// daemon, so a phone with two accounts shows one banner.
+    /// daemon; the shared collapse id keeps one entry in Notification Center.
     private static func releaseContent(
         _ push: EventBanner.ReleasePush, fallback: UNNotificationContent
     ) -> UNNotificationContent {

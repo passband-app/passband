@@ -59,7 +59,7 @@ const CALENDAR_ALERT_BODY: &str = "An event is coming up";
 /// The Mac has no extension to rewrite it, so on a Mac this IS the banner; the
 /// phone's extension names the version from the event id. Public news, but
 /// still a fixed line: the daemon picks it and can never write it.
-const RELEASE_ALERT_BODY: &str = "A new version is out";
+const RELEASE_ALERT_BODY: &str = "A new version of Passband for Mac is out";
 
 /// Open-token bounds. The alphabet is URL-safe base64 without padding, so a
 /// token can neither reshape the path it arrives on nor smuggle anything into
@@ -655,7 +655,10 @@ mod tests {
         let v = parse(req).unwrap();
         let p: serde_json::Value = serde_json::from_slice(&v.payload).unwrap();
         assert_eq!(p["aps"]["alert"]["title"], "Passband");
-        assert_eq!(p["aps"]["alert"]["body"], "A new version is out");
+        assert_eq!(
+            p["aps"]["alert"]["body"],
+            "A new version of Passband for Mac is out"
+        );
         assert_eq!(p["aps"]["mutable-content"], 1);
         // News, not mail: no sound, low priority.
         assert!(p["aps"].get("sound").is_none());

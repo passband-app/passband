@@ -15,6 +15,11 @@
 
 set -euo pipefail
 
+# Resolved before the cd below, so a relative path means the caller's one.
+if [ -n "${MAC_PUSH_PROFILE:-}" ]; then
+  MAC_PUSH_PROFILE="$(cd "$(dirname "$MAC_PUSH_PROFILE")" && pwd)/$(basename "$MAC_PUSH_PROFILE")"
+fi
+
 cd "$(dirname "$0")"
 
 # shellcheck source=signing.sh
@@ -198,7 +203,9 @@ fi
 if [ -n "${MAC_PUSH_PROFILE:-}" ]; then
   PROFILE_PLIST="build/push-profile.plist"
   security cms -D -i "$MAC_PUSH_PROFILE" > "$PROFILE_PLIST"
-  pb() { /usr/libexec/PlistBuddy -c "Print :$1" "$2" 2>/dev/null; }
+  # `|| true`: a missing key is an empty answer for the checks below to
+  # name, not a silent `set -e` exit.
+  pb() { /usr/libexec/PlistBuddy -c "Print :$1" "$2" 2>/dev/null || true; }
   PUSH_TEAM=$(pb 'TeamIdentifier:0' "$PROFILE_PLIST")
   PUSH_APPID=$(pb 'Entitlements:com.apple.application-identifier' "$PROFILE_PLIST")
   PUSH_APS=$(pb 'Entitlements:com.apple.developer.aps-environment' "$PROFILE_PLIST")
@@ -210,7 +217,8 @@ if [ -n "${MAC_PUSH_PROFILE:-}" ]; then
     *) echo "error: MAC_PUSH_PROFILE grants no aps-environment (Push Notifications off on the App ID?)" >&2; exit 1 ;;
   esac
   case "$SIGN_ID" in
-    *"($PUSH_TEAM)"*|-) ;;
+    *"($PUSH_TEAM)"*) ;;
+    -) echo "error: MAC_PUSH_PROFILE needs a Developer ID signature; an ad-hoc build with it is killed at launch" >&2; exit 1 ;;
     *) echo "error: signing as '$SIGN_ID', but MAC_PUSH_PROFILE belongs to team $PUSH_TEAM" >&2; exit 1 ;;
   esac
   EXPIRES=$(pb ExpirationDate "$PROFILE_PLIST")

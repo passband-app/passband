@@ -59,6 +59,34 @@ correction promotes the row to live mail first.
 Only matching sender rules are supplied as preferences and may be overridden with an evidenced
 exception. Memory has a read-only context interface; no memory editor ships.
 
+Under the `understanding` flag a run is handed up to 20 learned-memory lines
+(`triage::memory::StoreMemoryContext`, docs/UNDERSTANDING.md §2.3), and the
+flag-on prompt tells the model to use them only to decide, never to repeat or
+paraphrase one in a summary, a reason or notification text, all of which
+`/mcp` serves. A commit-path guard backs that sentence for verbatim copies:
+before committing, the worker checks the decision's prose (summary, reason,
+attention summary and action text, access reason, notification title, body
+and reason, rule-exception, revisit and done reasons) for any run of six
+consecutive words, case and punctuation aside, shared with a served memory
+line (`memory::memory_taints`). A match throws that run away: its usage is
+billed, and the job is re-run ONCE with the flag off for that job alone
+(`sync::understanding::scrubbed`: the flag-off prompt, no memory, and nothing
+else the flag adds). That answer commits whatever it says, `run_metadata`
+records `memory_scrubbed: true` with the discarded run's `scrubbed_usage`, and
+the log names the message id and never the text. There is no second re-run,
+the job is never failed over it, and the re-run reserves no second budget
+charge.
+
+Known limits:
+
+- Verbatim repetition of a memory line is caught at commit; paraphrase is
+  not. Against a paraphrase the only guard is the flag-on prompt's
+  instruction. The two-door tests check that no tool serves the profile's
+  fields, not what a model writes in prose.
+- A memory line shorter than six words cannot match, so it is not guarded.
+- Six ordinary words in a row shared with a line ("the owner replies to them
+  within") also count, which costs a needless flag-off re-run.
+
 ## Client projections
 
 Process and the TUI use the server's FYE ordering. Reading and Records default to

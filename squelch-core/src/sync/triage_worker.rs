@@ -301,6 +301,8 @@ pub fn snapshot(
             .filter_map(|r| r.get("id").and_then(|id| id.as_i64()))
             .collect(),
         memory: Vec::new(),
+        // Set by the worker from the `understanding` flag; off is main's prompt.
+        understanding: false,
     }
 }
 
@@ -544,11 +546,19 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             Utc::now(),
             self.store.owner_zone(self.account_id).unwrap_or_default(),
         );
-        let input = snapshot(
+        let mut input = snapshot(
             &context,
             job,
             config.context.initial_thread_messages,
             &clock,
+        );
+        // ONE read of the flag per run: it picks the prompt variant and gates
+        // the memory lines, so the two can never disagree.
+        input.understanding = self.features.enabled(crate::features::UNDERSTANDING);
+        input.memory = self.memory_for(
+            &context.message.thread_id,
+            &context.message.from_addr,
+            input.understanding,
         );
         // A new account triages the jobs somebody is waiting on at the
         // onboarding effort for its first days (`Stage2Config::effort_for_job`):
@@ -564,7 +574,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             self.config
                 .stage2
                 .effort_for_job(job.foreground, || self.account_created_at(), now);
-        let connection = AgentConnection {
+        let connection = || AgentConnection {
             http: &self.http,
             url: &llm.url,
             api_key: &llm.api_key,
@@ -572,7 +582,44 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             model: &base_model,
             effort,
         };
-        match run_agent(connection, &config, input, &reader).await {
+        let mut input_understanding = input.understanding;
+        // The commit-path guard behind the prompt's "never repeat a memory
+        // line" (docs/TRIAGE-OPERATIONS.md, Known limits): see
+        // `understanding::scrubbed`. What the re-run would read, built before the
+        // first run consumes the input.
+        let served_memory = input.memory.clone();
+        let scrub = (!served_memory.is_empty()).then(|| super::understanding::scrubbed(&input));
+        let initial_sources = reader.sources.lock().expect("evidence sources").clone();
+        let mut outcome = run_agent(connection(), &config, input, &reader).await;
+        let mut memory_scrubbed = false;
+        let mut scrubbed_usage = Vec::new();
+        if let Some(scrub) = scrub
+            && let Ok(run) = &outcome
+            && crate::triage::memory::memory_taints(
+                &served_memory,
+                &crate::triage::memory::decision_prose(&run.decision),
+            )
+        {
+            // ONCE, flag-off, for this job only. The tainted run's usage is
+            // billed (it was paid for); its decision is never committed. The
+            // log names the message and never the text.
+            eprintln!(
+                "squelch: triage of message {} repeated a memory line; re-running it once \
+                 without understanding",
+                job.message_id
+            );
+            scrubbed_usage = run.usage.clone();
+            for usage in &scrubbed_usage {
+                let _ = self
+                    .store
+                    .stage2_bump_usage(self.account_id, day, (*usage).into());
+            }
+            *reader.sources.lock().expect("evidence sources") = initial_sources;
+            memory_scrubbed = true;
+            input_understanding = false;
+            outcome = run_agent(connection(), &config, scrub, &reader).await;
+        }
+        match outcome {
             Ok(run) => {
                 self.note_provider_success();
                 // An investigation answered: its ladder starts over, and the
@@ -582,7 +629,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 self.agent_answered_since_timeout
                     .store(true, Ordering::Relaxed);
                 context.run_metadata = serde_json::json!({
-                    "prompt_version": crate::triage::agent::PROMPT_VERSION,
+                    // By the variant that ran: off is main's prompt and
+                    // main's version (agent::prompt_version).
+                    "prompt_version": crate::triage::agent::prompt_version(input_understanding),
+                    "understanding": input_understanding,
+                    "memory_scrubbed": memory_scrubbed,
+                    "scrubbed_usage": scrubbed_usage,
                     "schema_version": 1,
                     "model": config.agent.model.as_deref().unwrap_or(&base_model),
                     "review_model": config.agent.review_model,

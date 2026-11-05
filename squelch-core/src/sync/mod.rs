@@ -18,6 +18,7 @@ mod translate_pass;
 /// Public for `squelch-eval`, which replays triage through the production
 /// evidence reader and snapshot builder rather than copies of them.
 pub mod triage_worker;
+mod understanding;
 
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -826,8 +827,9 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// tick. `None` until the first.
     last_cursor: std::sync::Mutex<Option<SyncCursor>>,
     /// The daemon's live hidden features, for the triage worker's
-    /// [`crate::features::UNCAPPED_TRIAGE`]. Nothing is on without
-    /// [`Self::with_features`].
+    /// [`crate::features::UNCAPPED_TRIAGE`] and the owner profile's
+    /// [`crate::features::UNDERSTANDING`] (`sync/understanding.rs`). Nothing
+    /// is on without [`Self::with_features`].
     features: crate::features::Features,
     /// Whether the last triage pass saw `uncapped_triage` on, so the jobs the
     /// caps parked are released once when it flips on, not every pass.
@@ -2389,6 +2391,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 } else {
                     idle_rounds = idle_rounds.saturating_add(1).min(5);
                 }
+                // The nightly owner profile (docs/UNDERSTANDING.md §2.3):
+                // a no-op every round but the first one after the owner's
+                // 03:00, and gated on its feature and its own daily cap.
+                self.profile_pass().await;
 
                 // Per-round, so an embedder attached after startup catches up on
                 // rows ingested before it was ready, no restart needed.
@@ -11382,7 +11388,132 @@ Q0/00yfa39rgtJLa0DnOoA==
         assert!(
             diagnostics
                 .to_string()
-                .contains(crate::triage::agent::PROMPT_VERSION)
+                .contains(crate::triage::agent::prompt_version(false))
+        );
+        server.abort();
+    }
+    /// THE MEMORY SCRUB, END TO END: with `understanding` on and a memory line
+    /// served, a model that copies the line into its summary has that run
+    /// thrown away and the job re-run ONCE on the flag-off prompt with no
+    /// memory; that answer commits, and the run's metadata says scrubbed.
+    #[tokio::test]
+    async fn a_decision_that_repeats_a_memory_line_is_rerun_without_memory() {
+        use crate::store::agent_triage::AgentTriageStore;
+        use crate::triage::decision::*;
+        use crate::triage::memory::{MemoryRecord, Origin, Provenance, new_ulid};
+        const LINE: &str = "Runs a small pottery studio with two partners in Leeds.";
+        let (store, account) = store_at_cursor(Some(100));
+        let raw = fixture(
+            account,
+            "agent-memory",
+            "From: shop@example.com\r\nSubject: A sale\r\n\r\nToday we offer a discount.",
+            false,
+        );
+        let parsed = ingest_with_rules(&raw, &Stage1Config::default(), Utc::now(), &[], |_| false);
+        let id = store.ingest_message(&parsed).unwrap();
+        let now = Utc::now();
+        store
+            .insert_memory_entry_unchecked(
+                account,
+                &MemoryRecord {
+                    id: new_ulid(now),
+                    scope: "owner".into(),
+                    origin: Origin::Stated,
+                    kind: "role".into(),
+                    body: json!({"what": LINE}),
+                    line: LINE.into(),
+                    provenance: Provenance::default(),
+                    confidence: 1.0,
+                    revision: 1,
+                    created_at: now,
+                    updated_at: now,
+                    affirmed_at: now,
+                    expires_at: None,
+                    retired_at: None,
+                    deleted_at: None,
+                },
+            )
+            .unwrap();
+        let evidence = vec![EvidenceRef {
+            message_id: id,
+            location: "body".into(),
+        }];
+        let decision = |summary: &str| MessageDecision {
+            kinds: vec![EmailKind::Promotional],
+            destinations: vec![MessageDestination::Reading],
+            summary: summary.into(),
+            reason: "Promotions belong in Reading by default".into(),
+            external_access: AccessAssessment {
+                restricted: false,
+                reason: "No access credentials".into(),
+                evidence: evidence.clone(),
+            },
+            attention: ThreadAttentionDecision {
+                relevant_message_ids: vec![id],
+                evidence: evidence.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let answer = |d: MessageDecision| {
+            json!({"choices":[{"message":{"content":json!({"result":{"step":"finish", "decision":d}}).to_string()},"finish_reason":"stop"}],
+                "usage":{"prompt_tokens":12,"completion_tokens":8}})
+        };
+        // Echoes the memory line whenever the request carries it; answers
+        // cleanly when it does not.
+        let echo = answer(decision(&format!("The owner {LINE}")));
+        let clean = answer(decision("An offer from the shop"));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = calls.clone();
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(move |body: String| {
+                seen.fetch_add(1, Ordering::SeqCst);
+                let response = if body.contains("pottery studio") {
+                    echo.clone()
+                } else {
+                    clean.clone()
+                };
+                async move { Json(response) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let engine = engine(store.clone(), account, "http://127.0.0.1:1").with_features(
+            crate::features::Features::pinned([crate::features::UNDERSTANDING]),
+        );
+        let job = store
+            .claim_agent_job(account, "triage", Utc::now(), 120)
+            .unwrap()
+            .unwrap();
+        engine
+            .process_agent_job(
+                job,
+                &ResolvedLlm {
+                    api_key: "test".into(),
+                    provider: Stage2Provider::OpenAI,
+                    url: format!("http://{address}/"),
+                },
+                &Utc::now().format("%Y-%m-%d").to_string(),
+            )
+            .await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "one run, one scrubbed re-run"
+        );
+        let reading = store.agent_reading(account, 20).unwrap();
+        assert_eq!(reading[0].message_id, id);
+        assert_eq!(reading[0].decision.summary, "An offer from the shop");
+        let diagnostics = store.agent_diagnostics(account, id).unwrap().to_string();
+        assert!(!diagnostics.contains("pottery"), "{diagnostics}");
+        let metadata = &store.agent_diagnostics(account, id).unwrap()["runs"][0]["metadata"];
+        assert_eq!(metadata["memory_scrubbed"], true);
+        assert_eq!(metadata["understanding"], false);
+        assert_eq!(
+            metadata["prompt_version"],
+            crate::triage::agent::prompt_version(false)
         );
         server.abort();
     }

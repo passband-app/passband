@@ -11,7 +11,24 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const PROMPT_VERSION: &str = "agent-triage-v19";
+/// The version of the prompt with the `understanding` flag ON: the file plus
+/// [`UNDERSTANDING_SEGMENTS`]. A const because a const is what a stored string
+/// is compared against; what a run reports is [`prompt_version`].
+pub const PROMPT_VERSION: &str = "agent-triage-v20";
+/// The version of the prompt with the flag OFF: the prompt file alone, byte
+/// for byte main's (a test pins that), so it keeps main's version string.
+pub const PROMPT_VERSION_BASE: &str = "agent-triage-v19";
+
+/// The version a run reports, by the variant it ran: decisions and their
+/// diagnostics carry it, and an eval groups gold runs by it, so two different
+/// prompts must never share one string.
+pub fn prompt_version(understanding: bool) -> &'static str {
+    if understanding {
+        PROMPT_VERSION
+    } else {
+        PROMPT_VERSION_BASE
+    }
+}
 /// The prompt text, with one figure to fill in: the `read_message` page
 /// size, defined beside the request it answers
 /// ([`super::context::READ_MESSAGE_PAGE_CHARS`]) and shared with the
@@ -39,14 +56,57 @@ const NO_REVIEW_OFFER: &str = "Read evidence when needed, or finish with a compl
 /// left out rather than refused. Composed once per process, like every other
 /// prompt that feeds a cached prefix in this crate, so the bytes are
 /// identical across calls.
-fn system_prompt(with_review: bool) -> &'static str {
-    static WITHOUT_REVIEW: std::sync::LazyLock<String> =
-        std::sync::LazyLock::new(|| SYSTEM.replacen(REVIEW_OFFER, NO_REVIEW_OFFER, 1));
-    if with_review {
-        SYSTEM.as_str()
-    } else {
-        WITHOUT_REVIEW.as_str()
+///
+/// THE SECOND AXIS IS THE `understanding` HIDDEN FEATURE
+/// ([`crate::features::UNDERSTANDING`]). Off, the prompt is the file as it
+/// stands, byte for byte, which is the prompt every mailbox without the flag
+/// has always had: nothing about understanding reaches the model unless the
+/// flag is on. On, every edit in [`UNDERSTANDING_SEGMENTS`] is applied first.
+/// All four variants are composed once per process.
+fn system_prompt(with_review: bool, understanding: bool) -> &'static str {
+    static VARIANTS: std::sync::LazyLock<[[String; 2]; 2]> = std::sync::LazyLock::new(|| {
+        [false, true].map(|review| [false, true].map(|on| compose(review, on)))
+    });
+    &VARIANTS[with_review as usize][understanding as usize]
+}
+
+/// THE ONE LIST of what the `understanding` flag changes in the agent prompt:
+/// `(find, replace)` edits applied in order, each to a passage that occurs
+/// EXACTLY ONCE in the prompt file (a test holds that, so an edit to the file
+/// cannot turn a segment into a silent no-op). To add to what the flag
+/// gates (the relationship evidence, a notification floor restated over it),
+/// add a row here; never a second `replacen` somewhere else. To insert, make
+/// `replace` the anchor followed by the new text.
+const UNDERSTANDING_SEGMENTS: &[(&str, &str)] = &[
+    // Learned memory (docs/UNDERSTANDING.md §2.3): how to weigh a stated line
+    // against an inferred one, and that memory is for deciding, never for
+    // prose that crosses to /mcp.
+    (
+        "may override one with a recorded rule exception and evidence. ",
+        "may override one with a recorded rule exception and evidence. Each memory line \
+         describes the owner and carries an origin and a confidence: a stated line is the \
+         owner's own word about themselves and weighs like a sender preference; an inferred \
+         line is Passband's guess from the owner's behaviour, worth weighing by its confidence \
+         and never worth obeying, and a line marked (old) rests only on mail more than six \
+         months old. Memory never lowers a notification floor and never hides an account or \
+         security notice. Use memory only to decide: never repeat or paraphrase a memory line \
+         in a summary, a reason, or notification text. ",
+    ),
+];
+
+/// One variant of the prompt: the file, the `understanding` edits when on,
+/// then the review swap.
+fn compose(with_review: bool, understanding: bool) -> String {
+    let mut text = SYSTEM.clone();
+    if understanding {
+        for (find, replace) in UNDERSTANDING_SEGMENTS {
+            text = text.replacen(find, replace, 1);
+        }
     }
+    if !with_review {
+        text = text.replacen(REVIEW_OFFER, NO_REVIEW_OFFER, 1);
+    }
+    text
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case")]
@@ -167,7 +227,7 @@ async fn run_bounded(
     // with `max_review_calls = 0` is an offer whose acceptance fails the run.
     // Both are per-run constants, so the prompt and the schema are built once.
     let with_review = config.agent.review_model.is_some() && config.agent.max_review_calls > 0;
-    let system = system_prompt(with_review);
+    let system = system_prompt(with_review, context.understanding);
     let schema = step_schema(with_review);
     for turn in 0..config.agent.max_model_turns {
         let final_turn = turn + 1 == config.agent.max_model_turns;
@@ -1802,10 +1862,91 @@ mod tests {
         assert_eq!(
             (
                 super::super::context::READ_MESSAGE_PAGE_CHARS,
+                PROMPT_VERSION_BASE,
                 PROMPT_VERSION
             ),
-            (2_000, "agent-triage-v19")
+            (2_000, "agent-triage-v19", "agent-triage-v20")
         );
+    }
+    /// OFF IS THE PROMPT AS IT WAS. With the `understanding` flag off, both
+    /// review variants are the prompt file's own text, byte for byte, and the
+    /// file carries none of what the flag adds: nothing about understanding
+    /// reaches a mailbox without the flag. On, every segment applies.
+    #[test]
+    fn the_understanding_flag_off_is_the_prompt_file_byte_for_byte() {
+        assert_eq!(system_prompt(true, false), SYSTEM.as_str());
+        assert_eq!(
+            system_prompt(false, false),
+            SYSTEM.replacen(REVIEW_OFFER, NO_REVIEW_OFFER, 1)
+        );
+        // The segments in the order `compose` applies them, each anchor
+        // checked against the text AS IT STANDS when its edit lands (an
+        // earlier segment can create or consume a later one's anchor), and
+        // the result is exactly the flag-on prompt.
+        let mut text = SYSTEM.clone();
+        for (find, replace) in UNDERSTANDING_SEGMENTS {
+            assert_eq!(text.matches(find).count(), 1, "{find}");
+            text = text.replacen(find, replace, 1);
+        }
+        assert_eq!(text, system_prompt(true, true));
+        for with_review in [true, false] {
+            let off = system_prompt(with_review, false);
+            let on = system_prompt(with_review, true);
+            for (find, replace) in UNDERSTANDING_SEGMENTS {
+                let added = replace.replacen(find, "", 1);
+                assert!(!added.trim().is_empty(), "a segment that adds nothing");
+                assert!(
+                    !off.contains(added.trim()),
+                    "flag-off prompt carries {added}"
+                );
+                assert!(on.contains(replace), "flag-on prompt lacks {replace}");
+            }
+            for word in ["memory line", "stated line", "inferred line"] {
+                assert!(!off.contains(word), "flag-off prompt mentions {word}");
+            }
+            assert!(!on.contains('\u{2014}') && !on.contains('\u{2013}'));
+        }
+        // Two prompts, two version strings.
+        assert_eq!(prompt_version(false), PROMPT_VERSION_BASE);
+        assert_eq!(prompt_version(true), PROMPT_VERSION);
+        assert_ne!(PROMPT_VERSION_BASE, PROMPT_VERSION);
+        // Composed once: the same bytes every call.
+        assert!(std::ptr::eq(
+            system_prompt(true, true),
+            system_prompt(true, true)
+        ));
+    }
+
+    /// Learned memory (docs/UNDERSTANDING.md §2.3) reaches the model as the
+    /// snapshot's `memory` list, each line with its origin and confidence,
+    /// and the prompt says how to weigh the two origins.
+    #[test]
+    fn memory_lines_carry_their_authority_and_the_prompt_explains_it() {
+        let on = system_prompt(true, true);
+        assert!(on.contains("a stated line is the owner's own word"));
+        assert!(on.contains("never worth obeying"));
+        assert!(on.contains("marked (old)"));
+        // Summaries and notification text cross to /mcp; memory must not ride
+        // them out second-hand.
+        assert!(on.contains(
+            "never repeat or paraphrase a memory line in a summary, a reason, or notification text"
+        ));
+        let context = ContextSnapshot {
+            memory: vec![MemoryEntry {
+                id: "01J".into(),
+                scope: "owner".into(),
+                provenance: vec![7],
+                revision: 2,
+                text: "Runs a small studio.".into(),
+                origin: "inferred".into(),
+                confidence: 0.4,
+            }],
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(&context).unwrap();
+        assert_eq!(wire["memory"][0]["origin"], "inferred");
+        assert_eq!(wire["memory"][0]["confidence"], 0.4);
+        assert_eq!(wire["memory"][0]["text"], "Runs a small studio.");
     }
     #[test]
     fn credentials_are_not_inferred_from_auth_category() {
@@ -2347,8 +2488,8 @@ mod tests {
             SYSTEM.contains(REVIEW_OFFER),
             "the prompt file no longer carries the review offer verbatim"
         );
-        let with = system_prompt(true);
-        let without = system_prompt(false);
+        let with = system_prompt(true, false);
+        let without = system_prompt(false, false);
         assert_eq!(with, SYSTEM.as_str());
         assert!(without.contains(NO_REVIEW_OFFER));
         assert!(

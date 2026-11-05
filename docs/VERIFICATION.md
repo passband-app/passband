@@ -56,11 +56,13 @@ Ordered by what stops the submission soonest.
       2026-11-05; project id `squelch-501806` unchanged, so every OAuth client
       id and every existing refresh token is unchanged). `braelyn@passband.app`
       is an owner; `bboynton97@gmail.com` stays as a second owner until a
-      signup and a reconnect have been seen working end to end. Never switch
+      signup has been seen working end to end (a reconnect was, the same day).
+      The `passband.app` TXT records include an older `google-site-verification`
+      token from the Workspace setup: keep it beside the Search Console one. Never switch
       the consent screen's user type to Internal: being in an org now offers
       it, and it would lock out every account outside passband.app.
-- [ ] **Verify `passband.app` in Google Search Console**, as an owner, from
-      `braelyn@passband.app` (an owner of the Cloud project). A Domain
+- [x] **Verify `passband.app` in Google Search Console** (done 2026-11-05),
+      as an owner, from `braelyn@passband.app` (an owner of the Cloud project). A Domain
       property, proved by a TXT record at Namecheap, where `passband.app`'s DNS
       is hosted (`deploy/hosted/PRODUCTION.md`, the registrar table). Brand verification checks
       the top private domain of every URL on the consent screen.

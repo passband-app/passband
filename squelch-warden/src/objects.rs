@@ -1792,6 +1792,22 @@ pub fn first_paired_argv() -> Vec<String> {
     ]
 }
 
+/// The argv `squelchd token activity` runs as inside a tenant pod: when client
+/// apps first paired, last connected and last acted, per platform, for the
+/// control plane's retention panel. Fixed strings only, like
+/// [`first_paired_argv`], and for the same reasons.
+///
+/// A daemon too old to have the subcommand refuses it through clap, which
+/// [`crate::provision::Warden::activity`] reads as "not known yet" rather than
+/// as a failure. See [`crate::devices::activity_unsupported`].
+pub fn activity_argv() -> Vec<String> {
+    vec![
+        "/usr/local/bin/squelchd".to_string(),
+        "token".to_string(),
+        "activity".to_string(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1229,10 +1229,11 @@ private struct ObligationRow: View {
     }
 }
 
-/// One row's hover, as a reference so the row's own body never reads it.
+/// One row's or card's hover, as a reference so its own body never reads it:
+/// only a `.background` leaf does (`ObligationWash`, `ReadingCardFill`).
 @MainActor
 @Observable
-private final class RowHover {
+final class RowHover {
     var on = false
 }
 

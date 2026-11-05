@@ -759,7 +759,7 @@ private struct ReadingCard: View {
     let cursor: SitrepCursor
 
     /// A reference the card's own body never reads; only `ReadingCardFill` does.
-    @State private var hover = CardHover()
+    @State private var hover = RowHover()
 
     private var summaryText: String {
         Fmt.truncate(Reading.cleanSummary(sender.summary), 90)
@@ -834,19 +834,18 @@ private struct ReadingCard: View {
             if hover.on != over { hover.on = over }
             // Nothing READS this during a render — only the `e` handler, at
             // key-press time — so this write is free even at scroll frequency.
-            cursor.reading = over ? sender.address : nil
+            // Clear only our own address: a late exit from the card a scroll
+            // just dragged away must not wipe the one the pointer is now on.
+            if over {
+                cursor.reading = sender.address
+            } else if cursor.reading == sender.address {
+                cursor.reading = nil
+            }
         }
     }
 
     private func open() { store.openReading(sender) }
 
-}
-
-/// One card's hover, as a reference so the card's own body never reads it.
-@MainActor
-@Observable
-private final class CardHover {
-    var on = false
 }
 
 /// The card's fill, hover-aware, as a LEAF placed in `.background`.
@@ -861,7 +860,7 @@ private final class CardHover {
 /// so repainting this is paint and nothing else.
 private struct ReadingCardFill: View {
     let isContent: Bool
-    let hover: CardHover
+    let hover: RowHover
 
     var body: some View {
         RoundedRectangle(cornerRadius: Radius.well, style: .continuous)

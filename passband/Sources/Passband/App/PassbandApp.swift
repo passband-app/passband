@@ -68,9 +68,20 @@ struct PassbandApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        LoginItem.shared.noteLaunchEvent()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
+        // A login launch stays out of the way: hidden, not in front. The Dock
+        // icon or a banner brings the window back.
+        let atLogin = LoginItem.shared.launchedAtLogin
+        if atLogin {
+            DispatchQueue.main.async { NSApp.hide(nil) }
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
         // Install before launch finishes: a notification tapped while Passband
         // was not running is delivered the moment a delegate exists, and a
         // center without one drops it.
@@ -93,8 +104,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Analytics.start()
         SessionReplay.shared.start()
         // The boot view never passes through route(to:), so its screen event
-        // is recorded here or not at all.
-        Analytics.screen(AppStore.shared.activeView.rawValue)
+        // is recorded here or not at all. Not for a hidden login launch:
+        // nobody is looking at it.
+        if !atLogin { Analytics.screen(AppStore.shared.activeView.rawValue) }
         AppStore.shared.identifyPerson()
     }
 
@@ -102,6 +114,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// a thread style changed in Settings or a second mailbox added last week
     /// should describe the install by the next session, not the next update.
     func applicationDidBecomeActive(_ notification: Notification) {
+        // Back from System Settings, where the login item may have changed.
+        LoginItem.shared.refresh()
         AppStore.shared.identifyPerson()
         AppStore.shared.attentionResume()
     }

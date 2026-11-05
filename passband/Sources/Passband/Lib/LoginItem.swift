@@ -13,9 +13,20 @@
 // build lives in a worktree that gets deleted; registering it would leave a
 // login item pointing at nothing, or worse, at a stale branch. Same posture as
 // the updater (`Updater.init`): PASSBAND_LOGIN_ITEM opts a dev build in on
-// purpose, for working on this file.
+// purpose, for working on this file, and stamps its own key so it cannot use
+// up the release build's one adoption on the same Mac.
+//
+// ONLY FROM APPLICATIONS. `SMAppService.mainApp` registers the bundle that is
+// running. A first launch straight off the DMG, or from Downloads (which macOS
+// runs from a translocated copy), would register a path that is gone by the
+// next login. Those launches neither register nor stamp, so the first launch
+// after the drag to Applications adopts it.
+//
+// QUIET AT LOGIN. A login launch starts hidden (`launchedAtLogin`): the point
+// is the banners, not a window in front of whatever the person opened first.
 
 #if os(macOS)
+    import AppKit
     import Foundation
     import Observation
     import ServiceManagement
@@ -25,7 +36,35 @@
     final class LoginItem {
         static let shared = LoginItem()
 
-        private nonisolated static let adoptedKey = "passband.loginItem.adopted"
+        private nonisolated static var adoptedKey: String {
+            #if PASSBAND_RELEASE
+                "passband.loginItem.adopted"
+            #else
+                "passband.loginItem.adopted.dev"
+            #endif
+        }
+
+        /// Whether this launch came from the login item, read from the launch
+        /// Apple event in `applicationWillFinishLaunching`.
+        private(set) var launchedAtLogin = false
+
+        /// Read the launch event's "launched as login item" flag. Must run
+        /// before launch finishes: the event is gone after that.
+        func noteLaunchEvent() {
+            let event = NSAppleEventManager.shared().currentAppleEvent
+            launchedAtLogin =
+                event?.eventID == AEEventID(kAEOpenApplication)
+                && event?.paramDescriptor(forKeyword: AEKeyword(keyAEPropData))?.enumCodeValue
+                    == OSType(keyAELaunchedAsLogInItem)
+        }
+
+        /// The bundle sits somewhere it will still be at the next login.
+        nonisolated static var installed: Bool {
+            let path = Bundle.main.bundleURL.resolvingSymlinksInPath().path
+            if path.contains("/AppTranslocation/") || path.hasPrefix("/Volumes/") { return false }
+            let home = FileManager.default.homeDirectoryForCurrentUser.path
+            return path.hasPrefix("/Applications/") || path.hasPrefix(home + "/Applications/")
+        }
 
         /// Whether this build may touch the registration at all.
         nonisolated static var available: Bool {
@@ -42,10 +81,11 @@
         /// Why the last switch flip failed, until the next one.
         private(set) var error: String?
 
-        /// On, as far as the switch should show it. `requiresApproval` counts:
-        /// the registration exists and only the human's OK in System Settings
-        /// is missing, which `needsApproval` says out loud.
-        var enabled: Bool { status == .enabled || status == .requiresApproval }
+        /// On, as far as the switch should show it. `requiresApproval` is OFF:
+        /// it is also what macOS reports after the person turns Passband off in
+        /// System Settings, and the switch must not contradict them.
+        /// `needsApproval` offers the way back on.
+        var enabled: Bool { status == .enabled }
         var needsApproval: Bool { status == .requiresApproval }
 
         private init() { refresh() }
@@ -56,7 +96,7 @@
 
         /// Launch-time default: register once, ever, per install.
         func adoptDefault() {
-            guard Self.available else { return }
+            guard Self.available, Self.installed else { return refresh() }
             let defaults = UserDefaults.standard
             guard !defaults.bool(forKey: Self.adoptedKey) else { return refresh() }
             // Stamped before trying, so a registration the system refuses is

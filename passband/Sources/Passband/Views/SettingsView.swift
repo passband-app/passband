@@ -916,7 +916,7 @@ struct NotificationsSection: View {
                         title: "Open at login",
                         detail: loginItem.error
                             ?? (loginItem.needsApproval
-                                ? "Waiting for your OK in System Settings, General, Login Items."
+                                ? "Off in System Settings, General, Login Items. Turn it on there."
                                 : "Passband starts when you log in, so banners arrive after a restart without opening it first.")
                     ) {
                         HStack(spacing: 8) {

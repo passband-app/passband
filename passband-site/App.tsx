@@ -243,7 +243,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
   .pb-clouds-stage { position: sticky; top: 0; height: 100vh; height: 100svh; overflow: hidden;
     -webkit-mask-image: linear-gradient(transparent, #000 18%, #000 82%, transparent);
             mask-image: linear-gradient(transparent, #000 18%, #000 82%, transparent); }
-  .pb-cloud { position: absolute; will-change: transform; }
+  .pb-cloud { position: absolute; will-change: transform; filter: blur(70px); }
 }
 /* THE GATE between the two panels: a lit filament with the squelch sitting on
    it, the same passband blue the scope's filter curve draws in. The before is
@@ -1841,7 +1841,9 @@ const CLOUDS: Record<"mail" | "events", Cloud[]> = {
 
 // How strong the clouds are overall. Kept barely there on purpose: felt more
 // than seen.
-const CLOUD_STRENGTH = 0.35;
+const CLOUD_STRENGTH = 0.22;
+// How far each wanders from its place, as a share of its own ax and ay.
+const CLOUD_WANDER = 0.45;
 
 // Two overlapping falloffs make a softer, less perfectly round glow.
 const cloudFill = ({ rgb, a: a0 }: Cloud) => {
@@ -1869,8 +1871,8 @@ function Clouds({ kind }: { kind: "mail" | "events" }) {
       const vw = innerWidth / 100;
       const vh = innerHeight / 100;
       clouds.forEach((c, i) => {
-        const x = c.ax * vw * Math.sin((p / c.px) * Math.PI * 2 + c.ph);
-        const y = c.ay * vh * Math.sin((p / c.py) * Math.PI * 2 + c.ph + 1.3);
+        const x = c.ax * CLOUD_WANDER * vw * Math.sin((p / c.px) * Math.PI * 2 + c.ph);
+        const y = c.ay * CLOUD_WANDER * vh * Math.sin((p / c.py) * Math.PI * 2 + c.ph + 1.3);
         (stage.children[i] as HTMLElement).style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0)`;
       });
     };

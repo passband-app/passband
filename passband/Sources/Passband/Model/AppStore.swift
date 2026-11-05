@@ -1514,9 +1514,14 @@ final class AppStore {
             if !askBarOpen {
                 askBarWatchesLane = false
                 askBarFullscreen = false
+                askBarFoldedSearch = false
             }
         }
     }
+    /// The search panel was EXPANDED when the full-screen bar opened and was
+    /// folded to its strip for it (see `foldSearchUnderAskBar`), so Esc can
+    /// put it back the way it was.
+    private var askBarFoldedSearch = false
     /// THE BAR TAKES THE WINDOW, for a conversation that came out of search
     /// (the deeper search band, ⌘↩, a question from search history). The
     /// answer there is the reason the reader asked for more room, so it gets
@@ -1528,6 +1533,27 @@ final class AppStore {
     func openAskBarFromSearch() {
         askBarFullscreen = true
         askBarOpen = true
+        foldSearchUnderAskBar()
+    }
+
+    /// AN EXPANDED SEARCH COVERS THE RAIL, and the full-screen bar leaves the
+    /// rail's column clear to show it, so the panel would show through there
+    /// instead. Fold it to its strip under the bar, as `openThread` does under
+    /// the reader, and remember to unfold it on the way back.
+    private func foldSearchUnderAskBar() {
+        guard askBarOpen, askBarFullscreen, search.expanded else { return }
+        search.expanded = false
+        askBarFoldedSearch = true
+    }
+
+    /// The bar's own close (Esc, the scrim, a card that opened a thread). Back
+    /// to search means back to the search AS IT WAS: an expanded panel folded
+    /// for the bar unfolds. Not over a thread a card just opened, which wants
+    /// the strip beside it, and not if search itself has gone.
+    func closeAskBar() {
+        let unfold = askBarFoldedSearch && threadId == nil && sideView == .search
+        askBarOpen = false
+        if unfold { search.expanded = true }
     }
     /// THE BAR IS SHOWING THE SEARCH LANE, LIVE. ⌘↩ over a lane that is still
     /// answering cannot hand the conversation over (a running loop owns its
@@ -3270,6 +3296,21 @@ final class AppStore {
         routeWasPointer = viaPointer
         activeView = view
         routeAsks &+= 1
+        leaveFullscreenAskBar()
+    }
+
+    /// A ROUTE CHANGES THE PAGE UNDER A FULL-SCREEN ASK BAR, which is opaque:
+    /// a rail click, ⌘[ / ⌘], a notification tap. Idle, it closes, the way a
+    /// rail click leaves the reader. Mid-answer it drops to the modal instead,
+    /// because the run may be the one routing (the calendar tool lands its
+    /// proposal on the calendar page, and expects the bar to stay over it).
+    private func leaveFullscreenAskBar() {
+        guard askBarOpen, askBarFullscreen else { return }
+        if askBarSession.running {
+            askBarFullscreen = false
+        } else {
+            askBarOpen = false
+        }
     }
 
     /// Bumped by every route. The phone's shell answers a route with a tab and
@@ -3285,9 +3326,6 @@ final class AppStore {
         // page underneath the overlay". Through closeThread() so the reader's
         // inline reply is torn down with it, wherever the exit was taken from.
         closeThread()
-        // The full-screen ask bar keeps the rail beside it for the same reason
-        // the reader does, and a click there means the same thing: leave.
-        if askBarFullscreen { askBarOpen = false }
         // No-op on the same view+selection, so a repeat press cannot spam
         // identical history entries.
         let cur = history.indices.contains(historyIndex) ? history[historyIndex] : nil
@@ -4704,14 +4742,19 @@ final class AppStore {
     /// either route would end with this replacing it mid-answer.
     func openSearchLaneInChat() {
         guard searchLaneHasConversation, canOpenSearchLaneInChat else { return }
-        // The Mac's way in from search is always full screen (see
-        // `askBarFullscreen`); the phone pushes its own chat and never gets here.
-        askBarFullscreen = true
         if searchLane.running && !chatHoldsSearchLane {
             askBarOpen = true
             askBarWatchesLane = true
         } else {
             expandSearchLaneToChat()
+        }
+        // The Mac's way in from search is always full screen (see
+        // `askBarFullscreen`); the phone pushes its own chat and never gets
+        // here. Only if it opened: `expandSearchLaneToChat` can decline, and a
+        // flag left behind would make the next plain ⌘K full screen.
+        if askBarOpen {
+            askBarFullscreen = true
+            foldSearchUnderAskBar()
         }
     }
 

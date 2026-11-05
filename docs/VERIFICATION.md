@@ -34,7 +34,8 @@ inherits that obligation. That tradeoff was made deliberately; this is the bill.
 
 Ordered by what stops the submission soonest.
 
-- [ ] **Publish the app: it is in Testing** (checked in Google Auth Platform
+- [x] **Published: In production since 2026-11-05.** It was in Testing
+      (checked in Google Auth Platform
       → Audience, 2026-11-05: Testing, External, 16 of 100 lifetime users, 15
       of them listed test users). In Testing, Google expires every refresh
       token seven days after consent, so every hosted user's mailbox goes dark
@@ -66,9 +67,9 @@ Ordered by what stops the submission soonest.
       property, proved by a TXT record at Namecheap, where `passband.app`'s DNS
       is hosted (`deploy/hosted/PRODUCTION.md`, the registrar table). Brand verification checks
       the top private domain of every URL on the consent screen.
-- [ ] **Declare `https://passband.app/about` as the application home page** —
-      not `https://passband.app` (which is what Branding → App domain says as
-      of 2026-11-05). The React homepage serves a 1,328-byte empty
+- [x] **`https://passband.app/about` is the application home page** (set
+      2026-11-05; it was `https://passband.app`). Developer contact is
+      `braelyn@passband.app`. The React homepage serves a 1,328-byte empty
       `#root` with no functional description and no privacy link, which is
       exactly what the automated home page check looks for. `/about` is static
       HTML (added 2026-08-25) and carries the description, the scope table, and

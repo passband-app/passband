@@ -120,8 +120,9 @@ use axum::{
 /// an admin URL rather than 403: there is no door to knock on, and no admin
 /// token for a stranger to spend their bucket guessing at.
 ///
-/// `/healthz` sits outside every layer so liveness answers while a client is
-/// throttled.
+/// `/healthz` sits outside every rate-limit and body layer so liveness answers
+/// while a client is throttled. Only the transport-header layer
+/// (`transport.rs`) wraps it, as it wraps every route.
 pub fn router(state: ControlState) -> Router {
     let secure = !state.config().is_insecure();
     routes(state).layer(middleware::from_fn_with_state(

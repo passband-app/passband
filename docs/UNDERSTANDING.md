@@ -278,9 +278,15 @@ strongly; a rule is applied. The two are not merged.
 
 ## 5. Flag and rollout
 
-- **The ledger ships on.** It is deterministic, costs no tokens, and makes
-  every triage run better from the first day a daemon with it starts. No
-  flag, no env var, no knob; the daemon release is the rollout.
+- **The ledger computes for everyone and serves only under `understanding`.**
+  It is deterministic and costs no tokens, so its marks, its drain, the
+  nightly walk and the first-run backfill run on every daemon from the
+  release on, and a mailbox switched on later has its ledger at once. What
+  it SHOWS and what it TELLS is gated on the flag: off, the triage context
+  and `read_sender_history` carry no `relationship` key, the prompt is
+  byte-for-byte the one without the ledger, `GET /client/relationships` is
+  the opaque 404, and the contact card carries no `relationship` key. No env
+  var, no knob.
 - **The pass and the review page ship behind `understanding`** in
   `features::KNOWN`. Off is as if it did not exist: the pass does not run,
   `StoreMemoryContext` returns nothing, the memory routes 404, the Mac hides

@@ -450,6 +450,15 @@ or more), attention, corrections, and the fatigue score. Attention and the
 fatigue score are one `SenderMeasurer` result, the purge flow's own, so the
 two never disagree. It is not email text and it is not a floor.
 
+THE LEDGER COMPUTES FOR EVERY MAILBOX AND SERVES ONLY UNDER THE
+`understanding` HIDDEN FEATURE. The marks, the drain, the nightly walk and the
+first-run backfill below run whatever the flag says, so a mailbox switched on
+has its rows at once. With the flag off, the triage context and
+`read_sender_history` carry no `relationship` key (the worker drops it,
+`triage_worker::gate_relationship`, and `StoreEvidence` serves it only when
+told to), `GET /client/relationships` answers 404, and `GET /client/person`
+carries no `relationship` key.
+
 A recount is bounded. `received_count` and the first arrival are one
 index-only walk of `idx_messages_from_received`, less the address's sealed
 mail, so the count follows the listings' rule. The sealed count is taken one
@@ -510,7 +519,7 @@ small. After that, the first-run backfill walk runs inside the refine lane at
 200 addresses per round, interleaved with triage. The agent context carries
 no `relationship` block until that walk completes.
 
-The triage context carries the row as `relationship` beside
+Under the flag, the triage context carries the row as `relationship` beside
 `sender_is_contact`, and `read_sender_history` returns it as `relationship`
 at the top of its result. The key is absent before the backfill stamp and
 for an address with no row. `attention` is left out while `coverage_days`

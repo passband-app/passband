@@ -282,6 +282,11 @@ fn client_router(state: ApiState) -> Router {
         // The reader's contact card: one address, everything known about it.
         // Human door only, for the reason contacts is.
         .route("/client/person", get(handlers::get_person))
+        // The relationship ledger, ranked: who the owner answers and whose
+        // mail they ignore. Human door only, for the reason the card is. A
+        // store read, so the Local ceiling and the Local latency class, like
+        // the card (neither table in `limits` / `http_metrics` names it).
+        .route("/client/relationships", get(handlers::get_relationships))
         .merge(groups::routes())
         // What Passband knows about the owner (docs/UNDERSTANDING.md §6):
         // HUMAN DOOR ONLY, behind the `understanding` feature; see `memory`.

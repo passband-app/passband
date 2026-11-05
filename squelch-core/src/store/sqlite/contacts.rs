@@ -422,6 +422,9 @@ impl SqliteStore {
                      display_name = COALESCE(excluded.display_name, display_name)",
                 params![account_id, c.addr, c.sent_count, last_sent, c.display_name],
             )?;
+            // The harvest moves `sent_count`, which the relationship ledger
+            // reads; a changed count takes the recount past its shortcut.
+            super::relationships::mark_dirty_conn(&tx, account_id, &c.addr)?;
         }
         tx.commit()?;
         Ok(())

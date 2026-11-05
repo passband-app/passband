@@ -202,6 +202,13 @@ CREATE TABLE IF NOT EXISTS senders (
     last_received_at TEXT NOT NULL,
     PRIMARY KEY(account_id, addr)
 );
+-- NOCASE twin of the key, for the relationship ledger's full walk
+-- (`relationships::WALK_SOURCES`), which seeks the directory in address order
+-- from a lowercased cursor. The BINARY key cannot serve `addr > ? COLLATE
+-- NOCASE`, and without a seek every chunk of the walk re-sorted the whole
+-- directory (see `idx_contacts_addr_nocase`).
+CREATE INDEX IF NOT EXISTS idx_senders_addr_nocase
+    ON senders(account_id, addr COLLATE NOCASE);
 
 CREATE TABLE IF NOT EXISTS sender_rules (
     id            INTEGER PRIMARY KEY,
@@ -2602,6 +2609,127 @@ CREATE TABLE IF NOT EXISTS message_translations (
 -- The translate pass's claim: one account's rows by status.
 CREATE INDEX IF NOT EXISTS idx_message_translations_claim
     ON message_translations(account_id, status, updated_at);
+
+-- THE RELATIONSHIP LEDGER (docs/UNDERSTANDING.md §2.1): one row per address
+-- the owner has live mail with, either way, holding what the owner's own
+-- behaviour says about them. Deterministic, no model, and NOTHING IN IT IS
+-- EMAIL TEXT: every column is a count or a timestamp off `messages`,
+-- `contacts`, `message_recipients`, `triage` and the two correction tables,
+-- so the triage agent reads it as trusted context beside `sender_is_contact`.
+-- The arithmetic is `crate::relationship`; the counting is
+-- `store::sqlite::relationships`.
+--
+-- HUMAN DOOR AND TRIAGE ONLY, like `contacts`, `send_groups` and the contact
+-- card: who the owner answers and how fast is the correspondent graph the
+-- agent door (/mcp) was never handed. Triage is the human door's own backend
+-- and may read it; no /mcp tool response may carry a column of it, and an
+-- invariant test in squelch-mcp holds that.
+--
+-- MAINTAINED BY A PASS, NOT AT INGEST. Ingest, the not-spam action, the
+-- Sent-history harvest, the attention POST and the triage commits that seal
+-- mail each add one row to `relationship_dirty` below and nothing else; the refine lane drains that set every round and recomputes only those
+-- addresses, each as indexed probes on ONE address, never a directory scan.
+-- A full recompute runs once per owner-local day at 03:00, chunked so no chunk
+-- holds the store mutex long, because the monthly rate and the ledger floors
+-- move with the clock even when no mail arrives. A daemon upgraded onto an
+-- existing store fills the table once on its first pass (`sync_state`
+-- mailbox 'relationships_backfill'); until then the agent context carries NO
+-- `relationship` key at all, which reads as "nothing known" and is true,
+-- where a table of zeros would read as "known, and ignored".
+--
+-- NO ROW IS NO HISTORY. An address with no live mail in either direction
+-- (only archive-tier mail, or mail since deleted) has its row removed, and
+-- the account's own address never has one.
+CREATE TABLE IF NOT EXISTS relationships (
+    account_id        INTEGER NOT NULL,
+    -- Lowercased bare address, the key `reading_senders::sender_key` spells.
+    addr              TEXT NOT NULL,
+    -- The newest name on this address's counted mail, else the name the
+    -- owner's Sent mail addressed them by (`contacts.display_name`). Stored so
+    -- the list read needs no join. NOT `senders.display_name`, which takes a
+    -- name from sealed mail too (see `people.rs`).
+    display_name      TEXT,
+    -- INBOUND, the listings' rule: not the owner's own mail, not provider
+    -- spam, not known to be sealed, and NOT THE ARCHIVE TIER, which is absent
+    -- from every count. An index-only count (`idx_messages_from_received`)
+    -- less the address's sealed mail, counted from the partial indexes over
+    -- the sealed rows (`relationships::SEALED_COUNT_SQL`), so no probe per
+    -- message of a sender's history.
+    received_count    INTEGER NOT NULL,
+    -- Off `messages.received_at`, NEVER `senders.first_seen`. The directory's
+    -- date is the first SIGHTING, and the backfill walks newest first, so it
+    -- would date a ten-year correspondent to last Tuesday.
+    received_first_at TEXT,
+    -- The newest mail the listings would show, so never a hidden login code.
+    received_last_at  TEXT,
+    -- Thirty-day rate since the address first wrote. NULL under
+    -- `sender_fatigue::MIN_COVERED_DAYS` of history with them.
+    received_per_month REAL,
+    -- OUTBOUND: the Sent-derived `contacts` row, which is also the
+    -- known-contact floor, so the ledger and triage agree on who that is.
+    sent_count        INTEGER NOT NULL,
+    sent_last_at      TEXT,
+    -- Threads whose FIRST message is the owner's and names this address as a
+    -- recipient (`message_recipients`): conversations the owner started.
+    initiated_count   INTEGER NOT NULL,
+    -- REPLIES, over the address's newest 500 inbound messages not known to
+    -- be sealed: the threads they are in, and those of them that carry a
+    -- LATER owner-sent message. Bounded because a firehose sender is recounted
+    -- every round it is marked; the recent rate is how the owner treats them
+    -- now.
+    inbound_threads   INTEGER NOT NULL,
+    replied_threads   INTEGER NOT NULL,
+    -- From the address first writing into a thread to the owner's first
+    -- message after it. NULL under 3 replied threads.
+    median_reply_ms   INTEGER,
+    -- ATTENTION, the Reading purge's own measurement of this address (the
+    -- `SenderMeasurer` the fatigue score below comes from, so the two agree
+    -- by construction). Rows and opens are over mail received at or after the
+    -- later of the 90-day window and the open ledger floor; read fraction and
+    -- clicks over the newest 25 reported opens at or after the dwell ledger
+    -- floor, before which a zero is not a measurement
+    -- (`migrate::stamp_dwell_ledger_start`). It SEES ONLY PASSBAND: mail read
+    -- in Gmail on a phone looks unopened here, so all four understate.
+    attention_rows    INTEGER NOT NULL,       -- how many rows the next three are over
+    opened_count      INTEGER NOT NULL,
+    median_read_fraction REAL,                -- sender_fatigue's read fraction, NULL when none measurable
+    link_clicks       INTEGER NOT NULL,
+    -- `triage_feedback` rows on this address plus `agent_triage_corrections`
+    -- rows on its newest 500 messages.
+    corrections       INTEGER NOT NULL,
+    -- `sender_fatigue::score` as the Reading purge computes it for this
+    -- address (the same `SenderMeasurer`), scaled to 0..1, with its reasons as
+    -- the module's JSON `Reason` list, so the purge flow and the ledger can
+    -- never disagree. NULL score when the module declined to score.
+    fatigue_score     REAL,
+    fatigue_reasons   TEXT,
+    computed_at       TEXT NOT NULL,
+    PRIMARY KEY(account_id, addr)
+);
+-- Every writer stores `addr` lowercased, but readers are handed whatever a
+-- header spelled, so the probes compare under NOCASE, which the BINARY
+-- primary key cannot serve (see `idx_contacts_addr_nocase`).
+CREATE INDEX IF NOT EXISTS idx_relationships_addr_nocase
+    ON relationships(account_id, addr COLLATE NOCASE);
+
+-- THE LEDGER'S DIRTY SET: addresses whose row is owed a recompute. Written on
+-- the hot paths (ingest, not-spam, the harvest, the attention POST, the
+-- triage commits) as one
+-- `INSERT OR IGNORE` of a lowercased address and nothing more; drained by the
+-- refine lane, which deletes each address under the same lock it recomputed
+-- it under, so a mark that lands mid-drain is never lost. A duplicate mark is
+-- free, which is why there is no timestamp: "dirty" is a set, not a log.
+CREATE TABLE IF NOT EXISTS relationship_dirty (
+    account_id INTEGER NOT NULL,
+    addr       TEXT NOT NULL,
+    -- 1 when the change behind the mark is one the counts cannot see (a
+    -- message sealed or corrected, mail deleted or moved to spam), so the
+    -- recount must walk the recent window rather than take the
+    -- unchanged-counts shortcut. Never lowered by a later plain mark.
+    full       INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(account_id, addr)
+);
+
 -- What Passband understands about the OWNER (docs/UNDERSTANDING.md §2.3): a
 -- small set of typed entries the nightly profile pass infers from the owner's
 -- own behaviour (`origin = 'inferred'`), or the owner states or confirms on the

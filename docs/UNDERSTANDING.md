@@ -5,11 +5,12 @@ standing understanding of who they are, who matters to them, and what they
 ignore, and how triage and the clients use that understanding without ever
 mistaking it for an instruction.
 
-Status: §2.3 (owner profile), its `understanding` flag (§5) and the
-`/client/memory` routes (§6) are built, behind the flag; the relationship
-ledger (§2.1), the graph (§2.2) and the triage question (§4) are not. Until
-the ledger lands, the profile pass reads `contacts`, `senders`, `send_groups`,
-calendar guests and the owner's replies through the `ProfileInputSource` seam
+Status: the relationship ledger (§2.1), §2.3 (owner profile), its
+`understanding` flag (§5) and the `/client/memory` routes (§6) are built,
+everything the owner sees or the agent is told behind the flag; the graph
+(§2.2) and the triage question (§4) are not. The profile pass does not read
+the ledger yet: it reads `contacts`, `senders`, `send_groups`, calendar guests
+and the owner's replies through the `ProfileInputSource` seam
 (`triage/profile.rs`), and a `person` address is checked against `contacts`
 and `senders`. The seam it fills is `MemoryContextProvider` in
 `squelch-core/src/triage/context.rs` (TRIAGE-CODE-DESIGN.md §4, "Future
@@ -291,8 +292,10 @@ strongly; a rule is applied. The two are not merged.
 - **Everything the owner sees and everything the agent is told sits behind
   `understanding`** in `features::KNOWN`. Off stops new use and new
   serving, from the next run: the pass does not run, `StoreMemoryContext`
-  returns nothing, the relationship block is not in the triage context, the
-  memory routes 404, the Mac hides the page and the Usage section, and the
+  returns nothing, the relationship block is not in the triage context or in
+  `read_sender_history` (the ledger is not even read), `GET
+  /client/relationships` 404s, the contact card carries no `relationship`
+  key, the memory routes 404, the Mac hides the page and the Usage section, and the
   agent prompt is byte for byte the prompt every other mailbox gets
   (`agent::system_prompt` composes a variant per flag state from the one list
   `agent::UNDERSTANDING_SEGMENTS`; a test pins the off variant to the prompt

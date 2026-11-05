@@ -486,6 +486,93 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // Whether a relationship mark asks for a full recount. 0 on any row an
+    // earlier build of the ledger wrote, which is the plain mark it was.
+    add_column_if_missing(
+        conn,
+        "relationship_dirty",
+        "full",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+
+    // THE SEALED SET, one partial index per place a message is marked kept
+    // close (`known_sealed_mail_sql!`'s four arms), each holding only the
+    // sealed rows. The relationship ledger counts an address's sealed mail by
+    // reading these few rows and joining each to its message by key
+    // (`relationships::SEALED_COUNT_SQL`), instead of probing all four tables
+    // for every message the address ever sent. Sealed mail is a small
+    // minority, so the indexes are small. Each guarded by the columns it
+    // names: the migration suite builds partial old schemas.
+    //
+    // THE DECISIONS PREDICATE IS GUARDED BY `json_valid`, in a CASE because
+    // only a CASE is sure not to evaluate the JSON functions first. A partial
+    // index's predicate runs on EVERY write to its table, so without the guard
+    // one malformed `decision_json` would make the write itself fail. A
+    // malformed decision is not sealed here; the macro's own read of it fails
+    // as it always has.
+    for (table, columns, sql) in [
+        (
+            "triage",
+            &["account_id", "message_id", "sensitivity"][..],
+            "CREATE INDEX IF NOT EXISTS idx_triage_sealed
+             ON triage(account_id, message_id) WHERE sensitivity != 'normal'",
+        ),
+        (
+            "agent_message_decisions",
+            &["account_id", "message_id", "decision_json"][..],
+            "CREATE INDEX IF NOT EXISTS idx_agent_decisions_sealed
+             ON agent_message_decisions(account_id, message_id)
+             WHERE (CASE WHEN json_valid(decision_json) THEN json_array_length(decision_json,'$.auth.kinds')>0 OR COALESCE(json_extract(decision_json,'$.external_access.restricted'),0) ELSE 0 END)",
+        ),
+        (
+            "agent_message_state",
+            &["account_id", "message_id", "access"][..],
+            "CREATE INDEX IF NOT EXISTS idx_agent_state_restricted
+             ON agent_message_state(account_id, message_id) WHERE access = 'restricted'",
+        ),
+        (
+            "agent_triage_corrections",
+            &["account_id", "message_id", "field", "value_json"][..],
+            "CREATE INDEX IF NOT EXISTS idx_agent_corrections_sealed
+             ON agent_triage_corrections(account_id, message_id)
+             WHERE field = 'external_access' AND value_json = 'true'",
+        ),
+    ] {
+        if tables_exist(conn, &[table])? && has_columns(conn, table, columns)? {
+            conn.execute(sql, [])?;
+        }
+    }
+
+    // THE RELATIONSHIP LEDGER'S PER-SENDER INDEX (`relationships`): one
+    // sender's mail in arrival order, COVERING the three flags its inbound
+    // count filters on. `idx_messages_from_nocase` orders a sender's rows by
+    // rowid, which the newest-first backfill makes OLDEST-first, so "the
+    // newest 500" off it was a sort of every row the sender ever sent, and
+    // the count a table lookup per row: on a 40,000-message notifications
+    // sender that was 70 ms a statement, every round it was marked. Here the
+    // count is an index-only walk and the newest 500 are the index's own
+    // tail. Here and not in schema.sql because it covers migrated columns
+    // (see `idx_triage_remind_at`). The first open after this ships builds it
+    // over the whole table, once.
+    if has_columns(
+        conn,
+        "messages",
+        &[
+            "from_addr",
+            "received_at",
+            "is_sent",
+            "is_spam",
+            "is_archive",
+        ],
+    )? {
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_from_received
+             ON messages(account_id, from_addr COLLATE NOCASE, received_at,
+                         is_sent, is_spam, is_archive)",
+            [],
+        )?;
+    }
+
     // stage2_usage grew `category` INSIDE ITS PRIMARY KEY. ALTER ADD COLUMN
     // cannot change a PK, and the bump upsert's ON CONFLICT(account_id, day,
     // category) needs that exact unique index, so an old table must be REBUILT —

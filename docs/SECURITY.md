@@ -458,6 +458,15 @@ from every count and list, and has no MCP counterpart. The contacts seed stays
 sent-only, so being copied in beside a stranger never earns them the
 known-contact floor.
 
+**The relationship ledger is human-door data too.** The `relationships` table
+(one row per correspondent: how much mail each way, how often and how fast the
+owner replies, what they open, the fatigue score) is served by
+`GET /client/person` and `GET /client/relationships`, and read by triage, which
+is the human door's own backend. It holds counts and timestamps only, never
+email text. No `/mcp` tool serves any of it, and
+`squelch-mcp/tests/agent_door_wire.rs` (`no_read_tool_serves_the_relationship_ledger`)
+fails if a read tool's response carries any ledger field.
+
 ## 4b. Provider spam
 
 **Invariant.** Mail the provider filed as spam is stored and readable on one

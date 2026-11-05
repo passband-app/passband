@@ -669,3 +669,169 @@ groups:
               expression: A
               conditions:
                 - evaluator: { type: gt, params: [0] }
+
+  # Tenant backups: litestream on carrier streaming every tenant's SQLite to
+  # R2 (deploy/hosted/litestream/). It failed silently four times between
+  # 2026-09-26 and 2026-11-04 (issue #696): one tenant's replica, or every
+  # tenant's after a restart, stuck in an error loop for days while the unit
+  # stayed "active". litestream 0.3.13 exports nothing that says so, so
+  # litestream-health.sh reads the journal every minute and writes these
+  # series through node-exporter's textfile collector.
+  - orgId: 1
+    name: backups
+    folder: Passband
+    interval: 1m
+    rules:
+      # The #696 shape, and any other error a replica cannot get out of: its
+      # last error is newer than its last upload, and it errored in the last
+      # five minutes, for ten minutes running. `last_over_time(...[10m])` on every
+      # series here, as on the tenant rules above, so a node-exporter roll or a
+      # remote-write gap does not empty the query and restart the `for` clock. A transient R2 500 clears on
+      # the next upload. An idle tenant does not sync, so it cannot error and
+      # cannot fire; once its database changes, it does.
+      - uid: litestream-replica-stuck
+        title: Tenant backup stuck
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: 'tenant {{ $labels.tenant }}: backup to R2 failing, nothing uploaded since'
+          description: >-
+            Read the error first: `journalctl -u litestream --since -10min | grep {{ $labels.tenant }}`.
+            `lz4: bad magic number` is issue #696: check litestream.service still has
+            LoadCredential=age-identity (`systemctl cat litestream | grep LoadCredential`).
+            If the replica will not recover, `sudo /usr/local/bin/litestream-reset.sh` starts
+            every tenant on a fresh generation (deploy/hosted/litestream/README.md).
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                max by (cluster, tenant) (
+                  (last_over_time(passband_litestream_last_error_timestamp_seconds[10m])
+                    > last_over_time(passband_litestream_last_upload_timestamp_seconds[10m]))
+                  and (time() - last_over_time(passband_litestream_last_error_timestamp_seconds[10m]) < 300)
+                )
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+
+      # The backstop for a replicator that is not erroring because it is not
+      # doing anything at all: hung, or not configured for the tenant.
+      # litestream 0.3.13 takes a snapshot whenever none is younger than its
+      # 24h retention (checked hourly), even for a tenant that never writes,
+      # so a healthy tenant uploads at least every ~25 hours. A brand-new
+      # tenant reads 0 until its first snapshot, minutes after signup; the 30m
+      # `for` covers that.
+      - uid: litestream-tenant-stale
+        title: Tenant backup stale
+        condition: C
+        for: 30m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: 'tenant {{ $labels.tenant }}: nothing uploaded to R2 in 26+ hours'
+          description: >-
+            Even an idle tenant gets a daily retention snapshot, so this is litestream not
+            working for this tenant. `litestream databases` should list it with an s3 replica;
+            `journalctl -u litestream | grep {{ $labels.tenant }}` for what it last did.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: time() - max by (cluster, tenant) (last_over_time(passband_litestream_last_upload_timestamp_seconds[10m]))
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [93600] }
+
+      # litestream.service not active: a restart loop (a missing age key fails
+      # the unit at start, on purpose), or stopped by hand and not started.
+      - uid: litestream-down
+        title: Backups down (litestream not running)
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: 'litestream.service on {{ $labels.cluster }} is not running: no tenant is backing up'
+          description: >-
+            `systemctl status litestream` and `journalctl -u litestream -n 50`. A
+            `litestream-replicate: FATAL` line means the age identity did not load: check
+            /etc/litestream/backup-age.key (root 0600) and LoadCredential= in the unit.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: max by (cluster) (last_over_time(passband_litestream_service_active[10m]))
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+
+      # The exporter itself: without it every rule above is silent. Fires when
+      # carrier's node metrics arrive but this series does not (exporter timer
+      # stopped, node-exporter lost its textfile flag), or it stopped updating.
+      # Carrier going dark entirely is `carrier-metrics-missing`'s.
+      - uid: litestream-health-missing
+        title: Backup health exporter not reporting
+        condition: C
+        for: 15m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: 'litestream-health on carrier is not reporting: backup alerts are blind'
+          description: >-
+            `systemctl status litestream-health.timer` and
+            `cat /var/lib/node-exporter/textfile/litestream.prom` on carrier; node-exporter must run
+            with --collector.textfile.directory (deploy/hosted/80-monitoring.yaml).
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                (time() - max(passband_litestream_health_run_timestamp_seconds))
+                  or on() (vector(1e9) and on() count(node_uname_info{cluster="carrier"})
+                    unless on() count(passband_litestream_health_run_timestamp_seconds))
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [600] }

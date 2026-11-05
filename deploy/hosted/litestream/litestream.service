@@ -45,18 +45,28 @@ Type=simple
 # to read. The actual R2 keys enter the process here and nowhere else.
 # root:root 0600 -- litestream-sync-config.sh refuses to run if it is anything
 # looser.
-#
-# What is NOT in that file, deliberately: the age IDENTITY. This process needs
-# only the public recipient to seal a backup, so the daemon that runs around the
-# clock cannot open one. Restores load the identity by hand, into one shell,
-# for minutes. See README.md -> "Encryption".
 EnvironmentFile=/etc/litestream/env
 
-# No -config flag: /etc/litestream.yml is litestream's default, which keeps
-# every ad-hoc `litestream databases` / `generations` / `snapshots` you type at
-# 3am pointed at the same file the daemon is using. (0.3.x has no `status` and
-# no `ltx`; those are 0.5 commands.)
-ExecStart=/usr/bin/litestream replicate
+# What is NOT in that file: the age IDENTITY. It lives only in
+# /etc/litestream/backup-age.key, and LoadCredential= below hands this unit a
+# private copy at start, in a directory nothing else can see. The replicator
+# NEEDS it, which an earlier version of this file denied: 0.3.13 recovers a
+# replica's position after every start and every failed sync by reading back
+# the last WAL segment it uploaded, which is ciphertext. Without the identity
+# that read fails with `lz4: bad magic number` and the tenant stops backing up
+# for good (issue #696). See README.md -> "Encryption".
+#
+# A missing key file fails the unit at start, loudly. That is the point: a
+# replicator without the identity is the #696 failure waiting for its trigger.
+LoadCredential=age-identity:/etc/litestream/backup-age.key
+
+# The wrapper reads the credential into LITESTREAM_AGE_IDENTITY, refuses to
+# start without one, and execs `litestream replicate`. No -config flag:
+# /etc/litestream.yml is litestream's default, which keeps every ad-hoc
+# `litestream databases` / `generations` / `snapshots` you type at 3am pointed
+# at the same file the daemon is using. (0.3.x has no `status` and no `ltx`;
+# those are 0.5 commands.)
+ExecStart=/usr/local/bin/litestream-replicate.sh
 
 Restart=always
 RestartSec=5

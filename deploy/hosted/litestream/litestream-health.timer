@@ -1,0 +1,20 @@
+# /etc/systemd/system/litestream-health.timer
+#
+# Every minute: the backup alerts (deploy/monitoring/grafana/provisioning/
+# alerting/rules.yml, group `backups`) read what this writes, and the stuck-
+# replica rule wants ten consecutive minutes of evidence.
+#
+#   systemctl enable --now litestream-health.timer
+
+[Unit]
+Description=Export litestream replica health every minute
+Documentation=file:///usr/local/bin/litestream-health.sh
+
+[Timer]
+Unit=litestream-health.service
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

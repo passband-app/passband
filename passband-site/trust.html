@@ -577,14 +577,29 @@
     </main>
 
     <footer class="foot">
-      <span>Passband</span>
-      <nav>
-        <a href="/about">About</a>
-        <a href="/self-host">Self-host</a>
-        <a href="/trust">Trust</a>
-        <a href="/privacy">Privacy</a>
-        <a href="/terms">Terms</a>
-      </nav>
+      <div class="foot-grid">
+        <a class="foot-mark" href="/" aria-label="Passband home"><img src="/mark.svg" alt="" width="42" height="23" /></a>
+        <nav aria-label="Legal">
+          <p>Legal</p>
+          <a href="/terms">Terms of Service</a>
+          <a href="/privacy">Privacy Policy</a>
+        </nav>
+        <nav aria-label="Security">
+          <p>Security</p>
+          <a href="/trust">Trust</a>
+          <a href="/security">Threat model</a>
+          <a href="mailto:braelyn@passband.app">Report a vulnerability</a>
+        </nav>
+        <nav aria-label="Connect">
+          <p>Connect</p>
+          <a href="/about">About</a>
+          <a href="/self-host">Self-host</a>
+          <a href="https://github.com/passband-app/passband/releases" target="_blank" rel="noopener noreferrer">Changelog</a>
+          <a href="https://github.com/passband-app/passband" target="_blank" rel="noopener noreferrer">GitHub</a>
+          <a href="mailto:braelyn@passband.app">Email</a>
+        </nav>
+      </div>
+      <p class="foot-legal">&copy; 2026 Passband. All rights reserved.</p>
     </footer>
   </body>
 </html>

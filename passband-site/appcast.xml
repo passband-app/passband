@@ -7,6 +7,15 @@
         <title>Passband</title>
         <link>https://passband.app/appcast.xml</link>
         <item>
+            <title>0.0.19</title>
+            <pubDate>Wed, 04 Nov 2026 22:58:51 +0000</pubDate>
+            <sparkle:version>2661</sparkle:version>
+            <sparkle:shortVersionString>0.0.19</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://passband.app/download/Passband-0.0.19.zip" length="9629696" type="application/octet-stream" sparkle:edSignature="WkR23Zbf+/uH+dezbN15LFYOtKShWGBGQt9OPkKC9N4j0YJjUbP+nikPiKvF2RDbUJQoTbhPL5F2IlKP5Op5CA=="/>
+        </item>
+        <item>
             <title>0.0.18</title>
             <pubDate>Wed, 04 Nov 2026 03:22:34 +0000</pubDate>
             <sparkle:version>2605</sparkle:version>
@@ -23,15 +32,6 @@
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <enclosure url="https://passband.app/download/Passband-0.0.17.zip" length="9986310" type="application/octet-stream" sparkle:edSignature="IZU4MG96FCRPLo7avqbot4c0Whh8/38Bq3QunI2sn8XinEg/as7QSzan3pHDLu4MKGSJDQUfcAFCNyuJty2SBQ=="/>
-        </item>
-        <item>
-            <title>0.0.16</title>
-            <pubDate>Fri, 30 Oct 2026 22:26:05 +0000</pubDate>
-            <sparkle:version>2515</sparkle:version>
-            <sparkle:shortVersionString>0.0.16</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://passband.app/download/Passband-0.0.16.zip" length="9982947" type="application/octet-stream" sparkle:edSignature="hCe2MZlPbcfYR48jvtiyx//yHX1DTUx8uhcs1JIMzGmfTVU6qCUuKENXn20j/yemcTGQIEeXV8fsC/aUWC0PAw=="/>
         </item>
     </channel>
 </rss>

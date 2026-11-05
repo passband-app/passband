@@ -548,6 +548,16 @@ pub trait Warden: Send + Sync {
     /// Used before consent to check that a label is free.
     async fn status(&self, label: &str) -> Result<Option<TenantStatus>, WardenError>;
 
+    /// DESTROY a tenant: workload, mail volume, credential and identity, so
+    /// the label is free for a signup that starts from nothing. The admin
+    /// board's delete button, and nothing else.
+    ///
+    /// Idempotent on the warden's side, so a timeout or a half-finished call is
+    /// answered by pressing it again. A warden too old to have the route
+    /// answers 404, which comes back as [`WardenError::NotFound`] rather than
+    /// success: an old warden must never be read as having deleted anything.
+    async fn purge(&self, label: &str) -> Result<(), WardenError>;
+
     /// Mint a FRESH pairing code for a tenant that already exists, by running
     /// `squelchd pair` inside its pod.
     ///
@@ -897,6 +907,31 @@ impl Warden for HttpWarden {
             // otherwise, which is drift worth its own variant rather than a
             // generic failure.
             404 => Err(WardenError::UnknownTenant),
+            422 => Err(WardenError::LabelRefused),
+            _ => Err(WardenError::Failed),
+        }
+    }
+
+    async fn purge(&self, label: &str) -> Result<(), WardenError> {
+        crate::labels::validate(label).map_err(|_| WardenError::LabelRefused)?;
+        // NO BODY. The warden waits for the pod to exit before it deletes the
+        // volume, which is a pod's termination grace on top of a round trip, so
+        // this gets its own budget: long enough for that, short enough to
+        // answer before the load balancer in front of the admin page gives up.
+        let resp = self
+            .http
+            .post(self.url(&format!("/v1/tenants/{label}/purge")))
+            .bearer_auth(&self.token)
+            .timeout(crate::config::PURGE_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| transport_error(e, label))?;
+
+        match resp.status().as_u16() {
+            204 | 200 => Ok(()),
+            401 | 403 => Err(WardenError::Unauthorized),
+            // The route itself is missing: this warden predates purge.
+            404 | 405 => Err(WardenError::NotFound),
             422 => Err(WardenError::LabelRefused),
             _ => Err(WardenError::Failed),
         }

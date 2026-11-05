@@ -453,7 +453,10 @@ two never disagree. It is not email text and it is not a floor.
 THE LEDGER COMPUTES FOR EVERY MAILBOX AND SERVES ONLY UNDER THE
 `understanding` HIDDEN FEATURE. The marks, the drain, the nightly walk and the
 first-run backfill below run whatever the flag says, so a mailbox switched on
-has its rows at once. With the flag off the ledger is not even read: loading a
+has its rows at once. Turning the flag off stops new use and new serving from
+the next run; past decisions stand (a decision made with the block in its
+context stays until something re-triages it, and a flip triggers no
+re-triage). With the flag off the ledger is not even read: loading a
 triage context and the contact card make exactly main's queries, the triage
 context and `read_sender_history` carry no `relationship` key,
 `GET /client/relationships` answers 404, and `GET /client/person` carries no
@@ -530,13 +533,14 @@ for an address with no row. `attention` is left out while `coverage_days`
 (days since the later of the open ledger floor and the 90-day window, the
 `SenderMeasurer`'s own coverage, so the same floor the fatigue score uses) is
 under 14. The block is in no revision fingerprint, so a recount never makes
-a run stale. Under the flag, prompt `agent-triage-v21` (rows of
+a run stale. Under the flag, the prompt reports `agent-triage-v21` (rows of
 `agent::UNDERSTANDING_SEGMENTS`) reads it as evidence and restates the
 65-point personal-mail floor over "a person the owner replies to": replied
 above zero, initiated above zero, sent count above zero, or
 `sender_is_contact`. The ledger can add a person to the floor and never
 removes anyone `sender_is_contact` granted it. With the flag off the prompt is
-the file's own text, main's "a known contact" floor included. Eval
+the file's own text, main's "a known contact" floor included, and reports
+main's `agent-triage-v19` (`agent::prompt_version`). Eval
 replays (`squelch-eval`) drop the block, because the ledger has no history
 to replay as of a past moment.
 

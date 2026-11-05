@@ -108,7 +108,7 @@ struct AskBar: View {
             // shadow: this is a chat that grows a transcript out of its own
             // bottom edge, with the field moving under it, not a filtered list
             // with a footer. Higher than the palettes' inset because the tray
-            // grows to 440.
+            // grows to the window's height.
             OverlayScrim(alignment: .top, topInset: 96, onDismiss: onClose) {
                 GlassEffectContainer(spacing: 10) {
                     VStack(alignment: .leading, spacing: 0) {
@@ -126,6 +126,7 @@ struct AskBar: View {
                         id: "askbar", in: askGlass)
                     .overlayShadow()
                 }
+                .padding(.bottom, Space.s32)
             }
         }
     }
@@ -163,13 +164,14 @@ struct AskBar: View {
 
     private var header: some View {
         HStack(spacing: Space.scaled(7)) {
-            Image(systemName: "sparkles")
-                .font(Typo.ui(11, weight: .semibold))
-                .foregroundStyle(Palette.accent)
-            Text("ask your inbox")
-                .font(Typo.sectionLabel)
-                .foregroundStyle(Palette.inkFaint)
-                .textCase(.uppercase)
+            // The panel title's face, as the deeper search band's header is:
+            // a header, not a badge.
+            Image(systemName: "bubble.left.and.bubble.right")
+                .font(Typo.ui(13, weight: .semibold))
+                .foregroundStyle(Palette.inkDim)
+            Text("Ask your inbox")
+                .font(Typo.ui(14, weight: .semibold))
+                .foregroundStyle(Palette.ink)
             // WHAT THE AGENT CAN SEE, said before the question is asked: the
             // bar is opened over the reader often enough that "this email"
             // should look like it means something. Shown only once the thread
@@ -277,7 +279,10 @@ struct AskBar: View {
                 .padding(.horizontal, PaletteMetrics.edge)
                 .padding(.vertical, Space.s12)
             }
-            .frame(maxHeight: fullscreen ? .infinity : 440)
+            // THE WINDOW'S HEIGHT, in both forms: a conversation is read top to
+            // bottom, and a 440pt tray made a long answer a keyhole. The modal
+            // is held off the window's bottom edge by the scrim's own margin.
+            .frame(maxHeight: .infinity)
             // MOUNT AT THE BOTTOM. Both follows below are onChange, and neither
             // fires on appear — so reopening ⌘K would otherwise restore the
             // conversation scrolled to its beginning, with the card that is

@@ -403,6 +403,9 @@ more terms and no strict keyword hit. A query carrying an operator (`from:`,
 `after:`, `before:`) is **never** deeper: operators are structured intent and
 the reader is already speaking the index's language. One or two plain words
 are never deeper either: "wifi" is a lookup, and its one hit is on screen.
+**One word is never deeper, whatever the word**: "when" or "my" alone is a
+reader pausing mid-sentence. A leading question word needs three words ("when
+is rent"); `?` and first person keep the two-word floor ("my landlord").
 
 The decision is made once per settled query (after the panel's 220 ms
 debounce and the fetch), so the rule never fires mid-keystroke, and it is

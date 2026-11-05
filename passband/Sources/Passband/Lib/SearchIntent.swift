@@ -85,6 +85,9 @@ enum SearchIntent {
     /// Enough words to be a sentence rather than a name. Four is a phrase
     /// somebody might file mail under; five is somebody talking.
     private static let sentenceLength = 5
+    /// The fewest words a query opening with a question word needs before it
+    /// counts as one: the word, a verb, and a thing.
+    private static let questionWordFloor = 3
 
     /// The fewest plain words that can carry the "no message has all of these"
     /// signal. Under three, a strict miss is usually a typo or a proper noun
@@ -150,9 +153,20 @@ enum SearchIntent {
     }
 
     private static func isQuestionShaped(words: [String], query: String) -> Bool {
+        // ONE WORD IS A LOOKUP, whatever the word. "when" alone (somebody who
+        // paused while typing "when is my flight") is not a question about
+        // anything, and the model can only answer it by asking one back.
+        guard words.count >= 2 else { return false }
         if words.count >= sentenceLength { return true }
         if query.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("?") { return true }
-        if let first = words.first, questionWords.contains(bare(first)) { return true }
+        // A QUESTION WORD NEEDS SOMETHING TO ASK ABOUT: "when is" is a pause
+        // mid-sentence, "when is rent" is a question. The other markers are
+        // stronger and keep the two-word floor: "my landlord", "wifi password?".
+        if words.count >= questionWordFloor, let first = words.first,
+            questionWords.contains(bare(first))
+        {
+            return true
+        }
         // WHOLE WORDS. "i" as a substring is in half the mail ever written, and
         // "my" is inside "myself"; a marker matched loosely would send every
         // second lookup to a model.

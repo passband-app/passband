@@ -553,6 +553,12 @@ Known limits:
   attention columns use the purge flow's strict statements.
 - `sent_count` and `sent_last_at` are the contacts row's, so a recipient the
   contacts seed filtered out has initiated threads but a zero sent count.
+- Nothing scrubs a relationship figure out of a decision's summary, reason or
+  notification text, all of which `/mcp` serves. The only guard is the
+  flag-on prompt's instruction never to state one there (pinned by
+  `the_understanding_flag_off_is_the_prompt_file_byte_for_byte`). The two-door
+  tests check that no tool serves the ledger's fields, not what a model
+  writes in prose.
 
 ### Kept senders
 

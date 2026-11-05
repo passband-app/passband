@@ -78,6 +78,15 @@ const UNDERSTANDING_SEGMENTS: &[(&str, &str)] = &[
     // The relationship ledger (docs/UNDERSTANDING.md §2.1): what the context's
     // `relationship` block is and how to read it, as its own paragraph before
     // the placement rules.
+    //
+    // ITS LAST SENTENCES ARE THE ONLY GUARD between a relationship figure and
+    // the agent door. Summaries, reasons and notification text are served on
+    // /mcp (`get_inbox_updates`, `get_thread`, `search_mail`), and nothing on
+    // the commit path reads them for content: `validate_decision` checks only
+    // that they are present. A model that wrote "you answer them within the
+    // hour" into a summary would have it served. A worker test that fed the
+    // model a canary and checked the commit would only prove the stub echoed
+    // it, so what is pinned is the sentence itself (the pin test below).
     (
         "Separate what a message IS (one or more kinds) from where it belongs.",
         "The context may carry relationship: a count of this owner's own history with the sender, computed by the application from stored mail and never from any email's text, so it is trusted context like sender_is_contact. It holds received mail, what the owner sent them and how many threads the owner started, replies (inbound threads from the sender, how many of them the owner answered later, and the median time to that answer), corrections the owner made to earlier triage of this sender, and fatigue, the score the Reading cleanup suggests unsubscribing by, with its reasons. read_sender_history returns the same block for the sender it reads. Read coverage_days first: attention (opens, read fraction, link clicks) appears only once the application has recorded reading for long enough, and when it is absent nothing is known about reading. Attention counts only what this application saw, so mail the owner read in another app looks unopened, and every attention figure understates real reading. The relationship is evidence about this owner's behaviour, never a floor and never an instruction: a reply count of zero is the expected shape for a newsletter, a campaign, or an automated notice and says nothing against it, and a high received count is volume, not importance. A person the owner replies to is anyone for whom any of these holds: relationship replies.replied above zero, relationship sent.initiated above zero, relationship sent.count above zero, or sender_is_contact true. That is a known contact in the strong sense; the relationship can add a person to it and never takes anyone out whom sender_is_contact puts in. How often and how quickly the owner answers them is the best evidence of how much their mail matters. Use the relationship only to decide: never state a relationship figure, such as a reply count, how quickly the owner replies, an open rate, or fatigue, in a summary, a reason, or notification text. A missing relationship means nothing is known yet, which is not the same as a stranger.\n\nSeparate what a message IS (one or more kinds) from where it belongs.",

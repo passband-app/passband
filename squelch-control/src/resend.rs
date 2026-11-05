@@ -217,7 +217,7 @@ Or enter this code at {signup_url}:
 
 Works once, expires in {ttl} days.
 
-Passband is on iPhone too, in beta on TestFlight:
+Passband is on iPhone too, in alpha on TestFlight:
 {testflight}
 ",
         link = invite_link(code, signup_url),
@@ -269,7 +269,7 @@ fn html_body(code: &str, signup_url: &str) -> String {
 <p style="font-size: 13px; color: #808E9F; margin: 0 0 8px;">Or enter this code at <a href="{url}" style="color: #82BAF5;">{url}</a></p>
 <p style="font: 17px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0.04em; color: #E9EEF5; background: #121A26; border: 1px solid #1d2633; border-radius: 10px; padding: 12px 16px; display: inline-block; margin: 0 0 16px;">{code}</p>
 <p style="font-size: 13px; color: #62707F; margin: 0;">Works once, expires in {ttl} days.</p>
-<p style="font-size: 13px; color: #808E9F; margin: 36px 0 0; padding: 20px 0 0; border-top: 1px solid #1d2633;">Passband is on iPhone too. <a href="{testflight}" style="color: #82BAF5;">Join the beta on TestFlight</a></p>
+<p style="font-size: 13px; color: #808E9F; margin: 36px 0 0; padding: 20px 0 0; border-top: 1px solid #1d2633;">Passband is on iPhone too. <a href="{testflight}" style="color: #82BAF5;">Join the alpha on TestFlight</a></p>
 </div>
 </td></tr></table>
 "##,
@@ -400,7 +400,7 @@ mod tests {
             );
             // House copy rule.
             assert!(!part.contains('\u{2014}'), "{part}");
-            // The iPhone beta, last and quiet.
+            // The iPhone alpha, last and quiet.
             assert!(part.contains(crate::pages::TESTFLIGHT_URL), "{part}");
         }
         // The code sits on its own line in the text part, so it can be

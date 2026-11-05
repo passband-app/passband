@@ -183,7 +183,7 @@ fn qr_svg(qr: &qrcodegen::QrCode) -> String {
     }
     let side = size + 2 * QUIET;
     format!(
-        r##"<svg class="qr" viewBox="0 0 {side} {side}" role="img" aria-label="QR code for the Passband iPhone beta on TestFlight" shape-rendering="crispEdges"><rect width="{side}" height="{side}" fill="#fff"/><path fill="#0B1220" d="{d}"/></svg>"##
+        r##"<svg class="qr" viewBox="0 0 {side} {side}" role="img" aria-label="QR code for the Passband iPhone alpha on TestFlight" shape-rendering="crispEdges"><rect width="{side}" height="{side}" fill="#fff"/><path fill="#0B1220" d="{d}"/></svg>"##
     )
 }
 
@@ -884,7 +884,7 @@ pub fn signup_form_with(
 /// code: a second connect path here was a step the app already does.
 ///
 /// THE IPHONE IS THE SECOND THING, NOT A SECOND BUTTON. Under the download sits
-/// a quiet block with a QR code for the TestFlight beta: this page is almost
+/// a quiet block with a QR code for the TestFlight alpha: this page is almost
 /// always open on the Mac, and a phone that has the app from day one is the
 /// phone that gets the pushes that bring people back. On a narrow screen (the
 /// page opened on the phone itself) the code is hidden and the link carries it.
@@ -902,8 +902,8 @@ pub fn success(tenant_url: &str) -> Response {
 <section class="phone" aria-labelledby="phone-label">
 {qr}<div>
 <span class="rig-label" id="phone-label">Also on iPhone</span>
-<p><span class="on-desk">Point your iPhone camera at the code to join the beta on TestFlight.</span><span class="on-phone">Passband for iPhone is in beta on TestFlight.</span> Your phone is where the notifications land.</p>
-<p class="phone-link"><a href="{testflight}">Join the iPhone beta</a></p>
+<p><span class="on-desk">Point your iPhone camera at the code to join the alpha on TestFlight.</span><span class="on-phone">Passband for iPhone is in alpha on TestFlight.</span> Your phone is where the notifications land.</p>
+<p class="phone-link"><a href="{testflight}">Join the iPhone alpha</a></p>
 </div>
 </section>"#,
             host = escape_html(host),
@@ -1613,11 +1613,11 @@ mod tests {
         assert!(!html.contains("<script"), "{html}");
     }
 
-    /// The iPhone beta rides the success page as a QR code and a link, and it
+    /// The iPhone alpha rides the success page as a QR code and a link, and it
     /// is NOT a second button: the download stays the one thing to press. The
     /// code is markup (the CSP admits no image) and encodes the TestFlight link.
     #[tokio::test]
-    async fn the_success_page_offers_the_iphone_beta_without_a_second_button() {
+    async fn the_success_page_offers_the_iphone_alpha_without_a_second_button() {
         let html = document_of(success("https://ada.passband.email")).await;
         assert!(
             html.contains(&format!(r#"href="{TESTFLIGHT_URL}""#)),

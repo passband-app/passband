@@ -61,7 +61,23 @@ struct PassbandApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
+        // A staged page is for looking at, launched behind whatever the
+        // person is typing into: taking focus would hand it their keys.
+        if !FixtureMode.stagesUsage { NSApp.activate(ignoringOtherApps: true) }
+        // A staged page at a given window width (`--fixture-usage-width=980`,
+        // or `min` for the narrowest the window allows), for checking how it
+        // wraps without anyone dragging a corner. The window's frame autosave
+        // is switched off first: every build shares one defaults domain, and
+        // the stage must never change the size the real app opens at.
+        if let width = FixtureMode.stageValue("width") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                guard let window = MainWindow.find() else { return }
+                window.setFrameAutosaveName("")
+                var frame = window.frame
+                frame.size.width = width == "min" ? window.minSize.width : (Double(width) ?? frame.width)
+                window.setFrame(frame, display: true)
+            }
+        }
         // Install before launch finishes: a notification tapped while Passband
         // was not running is delivered the moment a delegate exists, and a
         // center without one drops it.

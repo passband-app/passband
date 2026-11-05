@@ -626,6 +626,40 @@ actor APIClient {
         try await get("/client/mail-activity", query: ["days": days.map(String.init)])
     }
 
+    // MARK: - understanding (docs/UNDERSTANDING.md)
+
+    /// `GET /client/relationships`: the relationship ledger, one row per
+    /// correspondent. `sort` is `replies`, `volume`, `fatigue` or `recent`. A
+    /// daemon older than the ledger answers 404, and the Usage page's
+    /// Understanding section stays away.
+    func getRelationships(limit: Int = 50, sort: String = "replies") async throws -> RelationshipsResponse {
+        try await get("/client/relationships", query: ["limit": String(limit), "sort": sort])
+    }
+
+    /// `GET /client/memory`: what the daemon has written down about the
+    /// owner. Behind the `understanding` hidden feature, so a 404 is "off
+    /// here", not a failure.
+    func getMemory() async throws -> MemoryResponse {
+        try await get("/client/memory")
+    }
+
+    /// `PUT /client/memory/{id}`: confirm an inferred entry (it becomes the
+    /// owner's own, and stops expiring) or rewrite its line.
+    func putMemory(_ id: String, _ patch: MemoryPatch) async throws -> MemoryEntry {
+        try await put("/client/memory/\(Self.pathSegment(id))", body: patch)
+    }
+
+    /// `DELETE /client/memory/{id}`: a real delete, audited on the daemon.
+    func deleteMemory(_ id: String) async throws {
+        try await deleteNoContent("/client/memory/\(Self.pathSegment(id))")
+    }
+
+    /// An id as one path segment. Entry ids are ULIDs, but nothing here
+    /// should trust that a `/` will never arrive in one.
+    private static func pathSegment(_ s: String) -> String {
+        s.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? s
+    }
+
     func getTriageConfig() async throws -> TriageConfig { try await get("/client/triage-config") }
 
     func setTriageConfig(_ patch: TriageConfigPatch) async throws -> TriageConfig {

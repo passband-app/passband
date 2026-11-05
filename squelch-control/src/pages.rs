@@ -206,7 +206,9 @@ const MARK: &str = concat!(
     r#"<rect x="849.8" y="699.3" width="44.4" height="72.7" rx="22.2"/>"#,
     r#"</g><path fill="none" stroke="currentColor" stroke-width="12" "#,
     r#"stroke-linecap="round" stroke-linejoin="round" d="#,
-    r#"M-12 768L12 765L33 760L54 752L69 745L87 733L102 721L117 707L135 686"#,
+    // The quote that opens `d` is on THIS line: `d="#` above would end the
+    // raw string at that quote and leave the attribute unquoted.
+    r#""M-12 768L12 765L33 760L54 752L69 745L87 733L102 721L117 707L135 686"#,
     r#"L159 653L189 602L279 420L309 364L339 316L369 279L384 265L399 254"#,
     r#"L414 244L429 238L462 229L501 227L552 228L588 235L606 242L621 251"#,
     r#"L636 262L651 275L681 311L711 357L744 418L834 600L861 646L888 685"#,
@@ -1755,6 +1757,8 @@ mod tests {
                 "{html}"
             );
             assert!(html.contains("<svg"), "{html}");
+            // The passband curve's path is quoted, or the browser drops it.
+            assert!(html.contains(r#" d="M-12 768"#), "{html}");
             // Inline, not fetched: an `<img src>` or a `url()` in the masthead
             // would be a request `default-src 'none'` refuses, i.e. a broken
             // logo. The stylesheet's one `url()` is the same-origin font.

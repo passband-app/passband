@@ -75,8 +75,7 @@ Ordered by what stops the submission soonest.
       the policy links without executing a bundle.
 - [x] **Confirm what Bifrost retains.** Checked 2026-11-05 in the Bifrost UI
       (Config → Logs, over the tailnet): Disable Content Logging is ON;
-      screenshot kept as CASA evidence. Retention (7 days) still to capture in
-      the same screenshot. The gateway keeps its config and log
+      Log Retention Days is 7. Screenshots of both kept as CASA evidence. The gateway keeps its config and log
       stores as SQLite under `/app/data` on EFS (`bifrost_store = "efs"`,
       `deploy/aws/tofu/main/ecs.tf`). Bifrost's defaults log every request
       body, i.e. Gmail message content, to `/app/data/logs.db` for 365 days.

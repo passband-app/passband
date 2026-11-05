@@ -147,7 +147,45 @@ enum IngestOrigin {
     /// found and for nothing else. Silent like a backfill, and beyond that it
     /// queues no model work, wakes no lane and moves no catch-up gauge (see
     /// [`Store::ingest_archive_message`]).
+    ///
+    /// A window read (the first backfill, a catch-up) also files its OLD BULK
+    /// MAIL here, message by message: see [`files_as_old_bulk`]. That is not
+    /// an origin of its own, because nothing else about the batch changes.
     Archive,
+}
+
+/// WHETHER A WINDOW READ FILES THIS MESSAGE AS ARCHIVE instead of triaging it:
+/// list mail (a non-empty `List-Unsubscribe` header) dated before `floor`,
+/// which no sender rule matches. `floor` is `None` everywhere but an inbox
+/// window read (the first backfill or a catch-up), so live arrivals, the
+/// archive walk, sent mail and spam are never asked.
+///
+/// WHY: a new account's backfill used to queue a model call for every message
+/// in a month of inbox, and about three quarters of that is newsletters and
+/// promotions. One tenant (75 messages a day, 2,300 jobs at about 3 cents
+/// each) spent her month's model budget in her first two days, mostly on
+/// three-week-old list mail that the first load never shows: the first-load
+/// boards reach back a week. Mail from people, bookings, bills and receipts
+/// without the header is triaged at any age in the window, exactly as before.
+///
+/// AGE IS THE MESSAGE'S OWN DATE (`received_at`: the Date header, else the
+/// provider's internal date), so a `Date:` in the future never files anything.
+///
+/// A SENDER RULE OUTRANKS IT. A rule is the owner saying how a sender's mail is
+/// to be treated, and an archive row would quietly ignore it. There are no
+/// rules on a first run, so this only matters to a catch-up.
+fn files_as_old_bulk(triaged: &TriagedMessage, floor: Option<DateTime<Utc>>) -> bool {
+    let Some(floor) = floor else {
+        return false;
+    };
+    let m = &triaged.message;
+    !m.is_sent
+        && !m.is_spam
+        && triaged.matched_rule.is_none()
+        && m.list_unsubscribe
+            .as_deref()
+            .is_some_and(|h| !h.trim().is_empty())
+        && m.received_at < floor
 }
 
 /// What one change-feed walk found ([`SyncEngine::walk_changes`]).
@@ -169,6 +207,10 @@ struct Ingested {
     /// so the ingest transaction queued its `notification` job: the one case
     /// the notification lane is poked for.
     notify_eligible: bool,
+    /// The row was written as an ARCHIVE row (old bulk mail on a window read,
+    /// see [`files_as_old_bulk`]): it queued no work, so the refine lane is
+    /// not poked for it.
+    archived: bool,
 }
 
 /// The longest the refine lane sleeps between looks at an empty queue. Its
@@ -3550,7 +3592,19 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // network round trip. `ingest_with_rules` reads the same value; it
             // is a pure function of the message and the clock, so per-message is
             // simply the more truthful "now" for it too.
-            let ingested = match self.ingest_one(&fetched, &rules, now, origin) {
+            // OLD BULK MAIL ON A WINDOW READ is filed as archive, not triaged
+            // (see [`files_as_old_bulk`]). The inbox leg only: sent mail and
+            // spam queue no model work anyway, and the archive walk is
+            // archive already. Measured from the same per-message `now`.
+            let bulk_floor = (retry == Urgency::Window
+                && mailbox == Mailbox::Inbox
+                && origin != IngestOrigin::Archive)
+                .then(|| {
+                    now - ChronoDuration::days(i64::from(
+                        self.config.sync.backfill_bulk_triage_days,
+                    ))
+                });
+            let ingested = match self.ingest_fetched(&fetched, &rules, now, origin, bulk_floor) {
                 Ok(ingested) => ingested,
                 // A message the store will not take is the walk's to step
                 // over on the same terms as one Gmail will not serve.
@@ -3612,7 +3666,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             //
             // Nor for the archive, for the same reason at a larger scale: a
             // year of rows that queue nothing.
-            if !mailbox.is_spam() && origin != IngestOrigin::Archive {
+            //
+            // Nor for old bulk mail a window read filed as archive, which
+            // queued nothing either.
+            if !mailbox.is_spam() && origin != IngestOrigin::Archive && !ingested.archived {
                 self.refine_wake.notify_one();
             }
         }
@@ -3635,13 +3692,29 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         (id, fetched)
     }
 
-    /// Parse and atomically persist one message plus its durable model jobs.
+    /// Parse and atomically persist one message plus its durable model jobs,
+    /// with no window-read floor: what the tests drive one message through.
+    #[cfg(test)]
     fn ingest_one(
         &self,
         fetched: &RawFetched,
         rules: &[SenderRule],
         now: DateTime<Utc>,
         origin: IngestOrigin,
+    ) -> Result<Option<Ingested>> {
+        self.ingest_fetched(fetched, rules, now, origin, None)
+    }
+
+    /// [`Self::ingest_one`], with the window read's floor for old bulk mail:
+    /// list mail dated before `bulk_floor` is filed as archive (see
+    /// [`files_as_old_bulk`]). `None` files nothing.
+    fn ingest_fetched(
+        &self,
+        fetched: &RawFetched,
+        rules: &[SenderRule],
+        now: DateTime<Utc>,
+        origin: IngestOrigin,
+        bulk_floor: Option<DateTime<Utc>>,
     ) -> Result<Option<Ingested>> {
         let mut triaged = ingest_with_rules(fetched, &self.config.stage1, now, rules, |addr| {
             self.store
@@ -3671,7 +3744,24 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         if triaged.translate_lang.is_some() {
             triaged.translate_over_budget = self.translate_over_budget(now);
         }
-        let id = if origin == IngestOrigin::Archive {
+        // OLD BULK MAIL, FILED AS ARCHIVE on a window read, but only when the
+        // store does not hold it yet: the insert-only archive write refuses an
+        // id it already has, and such a message falls through to the ordinary
+        // ingest below, unchanged. A live row a catch-up re-reads therefore
+        // stays live and is refreshed as it always was (that re-read is how a
+        // sanitizer fix reaches `body_html`), and an archive row stays archive.
+        let old_bulk = origin != IngestOrigin::Archive && files_as_old_bulk(&triaged, bulk_floor);
+        let filed = if old_bulk {
+            // Never stamped: the store ignores the stamp on an archive row,
+            // and this one must not poke the notification lane either.
+            triaged.notify_eligible_at = None;
+            self.store.ingest_archive_message(&triaged)?
+        } else {
+            None
+        };
+        let id = if let Some(id) = filed {
+            id
+        } else if origin == IngestOrigin::Archive {
             // Insert-only: an id the store already holds is left as it is, and
             // there is nothing to embed for a row this call did not write.
             let Some(id) = self.store.ingest_archive_message(&triaged)? else {
@@ -3720,6 +3810,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             id,
             embed_text,
             notify_eligible: triaged.notify_eligible_at.is_some(),
+            archived: filed.is_some(),
         }))
     }
 
@@ -9093,6 +9184,258 @@ Q0/00yfa39rgtJLa0DnOoA==
             .unwrap()
             .is_none()
         );
+    }
+
+    // ---- old bulk mail on a window read -------------------------------------
+
+    /// List mail dated `at`: a newsletter, with the `List-Unsubscribe` header
+    /// that makes it bulk and nothing else that would set it apart.
+    fn list_eml(at: DateTime<Utc>) -> String {
+        format!(
+            "From: Shop News <news@shop.example>\r\n\
+             To: me@example.com\r\n\
+             Subject: This week's deals\r\n\
+             Date: {}\r\n\
+             List-Unsubscribe: <https://shop.example/unsubscribe?u=1>\r\n\
+             \r\n\
+             This week's deals, picked for you.\r\n",
+            at.to_rfc2822()
+        )
+    }
+
+    /// A person's mail dated `at`: no List-Unsubscribe, so never bulk.
+    fn person_eml(at: DateTime<Utc>) -> String {
+        format!(
+            "From: Dana Reyes <dana@example.org>\r\n\
+             To: me@example.com\r\n\
+             Subject: Dinner on Saturday?\r\n\
+             Date: {}\r\n\
+             \r\n\
+             Are you still free Saturday? Let me know.\r\n",
+            at.to_rfc2822()
+        )
+    }
+
+    /// THE FIRST BACKFILL TRIAGES A WEEK OF LIST MAIL AND FILES THE REST. A
+    /// new account's month of inbox is mostly newsletters, and a model call
+    /// each for the three-week-old ones bought a board nobody shows (one
+    /// tenant spent her month's budget in two days on it). Through the real
+    /// signup path: list mail older than `sync.backfill_bulk_triage_days`
+    /// lands as an archive row with no job behind it; list mail inside the
+    /// week, and a person's mail as old as the filed newsletter, are queued
+    /// exactly as before.
+    #[tokio::test]
+    async fn the_first_backfill_files_list_mail_older_than_a_week_and_triages_the_rest() {
+        let now = Utc::now();
+        let g = MockGmail::default();
+        g.listing(LABEL_INBOX, &["fresh-list", "old-list", "old-person"]);
+        g.listing(LABEL_SENT, &[]);
+        g.body("fresh-list", list_eml(now - ChronoDuration::days(2)));
+        g.body("old-list", list_eml(now - ChronoDuration::days(20)));
+        g.body("old-person", person_eml(now - ChronoDuration::days(20)));
+        g.profile(1);
+        let base = serve_mock(g.clone()).await;
+        let (store, acct) = store_at_cursor(None);
+        let eng = engine(store.clone(), acct, &base);
+
+        eng.backfill(&StdMutex::new(None)).await.unwrap();
+
+        let row = |id: &str| store.archive_and_jobs_by_provider_id(acct, id).unwrap();
+        assert_eq!(
+            row("old-list"),
+            Some((true, 0)),
+            "three-week-old list mail is stored as archive, with no model work"
+        );
+        let (archived, jobs) = row("fresh-list").unwrap();
+        assert!(
+            !archived && jobs > 0,
+            "list mail inside the week is triaged"
+        );
+        let (archived, jobs) = row("old-person").unwrap();
+        assert!(
+            !archived && jobs > 0,
+            "a person's mail is triaged at any age in the window"
+        );
+        assert_eq!(
+            store.triage_by_provider_id(acct, "fresh-list").unwrap(),
+            Some((true, false)),
+            "the triaged rows are first-load backlog, as they always were"
+        );
+    }
+
+    /// The filed row wakes no lane: it queued nothing. Paired with a row that
+    /// DOES wake it, so the silence is about the filing and not the harness.
+    #[tokio::test]
+    async fn old_list_mail_filed_on_a_window_read_wakes_no_lane() {
+        let now = Utc::now();
+        let g = MockGmail::default();
+        g.body("old-list", list_eml(now - ChronoDuration::days(20)));
+        g.body("fresh-list", list_eml(now - ChronoDuration::days(2)));
+        let base = serve_mock(g.clone()).await;
+        let (store, acct) = store_at_cursor(None);
+        let eng = engine(store.clone(), acct, &base);
+        let woken = || async {
+            tokio::time::timeout(Duration::ZERO, eng.refine_wake.notified())
+                .await
+                .is_ok()
+        };
+
+        eng.fetch_raw_and_ingest(
+            &["old-list".to_string()],
+            Mailbox::Inbox,
+            IngestOrigin::Backfill,
+            Urgency::Window,
+        )
+        .await
+        .unwrap();
+        assert!(!woken().await, "an archive row queues nothing to wake for");
+        eng.fetch_raw_and_ingest(
+            &["fresh-list".to_string()],
+            Mailbox::Inbox,
+            IngestOrigin::Backfill,
+            Urgency::Window,
+        )
+        .await
+        .unwrap();
+        assert!(woken().await, "a triaged row still wakes the lane");
+    }
+
+    /// A CATCH-UP FILES THE SAME WAY, and only what it has never stored. Old
+    /// list mail that arrived during an outage costs what it would have cost
+    /// on a first run: nothing. A row the store already holds as LIVE stays
+    /// live, re-read as every catch-up re-reads it, rather than being demoted.
+    /// And a LIVE walk (`Urgency::Live`, the history walk) never files: an
+    /// arrival with an old `Date:` is still an arrival.
+    #[tokio::test]
+    async fn a_catch_up_files_unseen_old_list_mail_but_a_live_walk_and_a_stored_row_do_not() {
+        let now = Utc::now();
+        let old = now - ChronoDuration::days(20);
+        let g = MockGmail::default();
+        g.body("stored", list_eml(old));
+        g.body("unseen", list_eml(old));
+        g.body("walked", list_eml(old));
+        let base = serve_mock(g.clone()).await;
+        let (store, acct) = store_at_cursor(Some(1));
+        let eng = engine(store.clone(), acct, &base);
+
+        // Stored live before this daemon filed anything (an older build's
+        // first run, say).
+        eng.ingest_one(
+            &fixture(acct, "stored", &list_eml(old), false),
+            &[],
+            now,
+            IngestOrigin::Backfill,
+        )
+        .unwrap();
+        let before = store
+            .archive_and_jobs_by_provider_id(acct, "stored")
+            .unwrap();
+        assert_eq!(before.map(|(a, _)| a), Some(false));
+
+        eng.fetch_raw_and_ingest(
+            &["stored".to_string(), "unseen".to_string()],
+            Mailbox::Inbox,
+            IngestOrigin::Incremental,
+            Urgency::Window,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            store
+                .archive_and_jobs_by_provider_id(acct, "unseen")
+                .unwrap(),
+            Some((true, 0)),
+            "unseen old list mail on a catch-up is filed"
+        );
+        assert_eq!(
+            store
+                .archive_and_jobs_by_provider_id(acct, "stored")
+                .unwrap(),
+            before,
+            "a live row the catch-up re-reads stays live, its jobs untouched"
+        );
+
+        eng.fetch_raw_and_ingest(
+            &["walked".to_string()],
+            Mailbox::Inbox,
+            IngestOrigin::Incremental,
+            Urgency::Live,
+        )
+        .await
+        .unwrap();
+        let (archived, jobs) = store
+            .archive_and_jobs_by_provider_id(acct, "walked")
+            .unwrap()
+            .unwrap();
+        assert!(
+            !archived && jobs > 0,
+            "a live walk triages whatever it finds"
+        );
+    }
+
+    /// THE KNOB: at `backfill_days` the whole window is triaged again, which
+    /// is the documented way back to the old behaviour.
+    #[tokio::test]
+    async fn backfill_bulk_triage_days_at_the_window_triages_all_of_it() {
+        let now = Utc::now();
+        let g = MockGmail::default();
+        g.body("old-list", list_eml(now - ChronoDuration::days(20)));
+        let base = serve_mock(g.clone()).await;
+        let (store, acct) = store_at_cursor(None);
+        let mut config = Config::default();
+        config.sync.backfill_bulk_triage_days = config.sync.backfill_days;
+        let eng = engine_with_config(store.clone(), acct, &base, config);
+        eng.fetch_raw_and_ingest(
+            &["old-list".to_string()],
+            Mailbox::Inbox,
+            IngestOrigin::Backfill,
+            Urgency::Window,
+        )
+        .await
+        .unwrap();
+        let (archived, jobs) = store
+            .archive_and_jobs_by_provider_id(acct, "old-list")
+            .unwrap()
+            .unwrap();
+        assert!(!archived && jobs > 0);
+    }
+
+    /// [`files_as_old_bulk`] condition by condition: only list mail, only
+    /// before the floor, only with a floor, never the owner's own mail or
+    /// spam, never what a sender rule matched, and a blank header is none.
+    #[test]
+    fn files_as_old_bulk_asks_for_every_condition() {
+        let now = Utc::now();
+        let floor = Some(now - ChronoDuration::days(7));
+        let parse = |eml: &str| {
+            ingest_with_rules(
+                &fixture(1, "m", eml, false),
+                &crate::config::Stage1Config::default(),
+                now,
+                &[],
+                |_| false,
+            )
+        };
+        let old = parse(&list_eml(now - ChronoDuration::days(8)));
+        assert!(files_as_old_bulk(&old, floor));
+        assert!(!files_as_old_bulk(&old, None), "no floor, no filing");
+        let recent = parse(&list_eml(now - ChronoDuration::days(6)));
+        assert!(!files_as_old_bulk(&recent, floor), "inside the week");
+        let person = parse(&person_eml(now - ChronoDuration::days(20)));
+        assert!(!files_as_old_bulk(&person, floor), "not list mail");
+
+        let mut ruled = old.clone();
+        ruled.matched_rule = Some(1);
+        assert!(!files_as_old_bulk(&ruled, floor), "a rule outranks it");
+        let mut sent = old.clone();
+        sent.message.is_sent = true;
+        assert!(!files_as_old_bulk(&sent, floor));
+        let mut spam = old.clone();
+        spam.message.is_spam = true;
+        assert!(!files_as_old_bulk(&spam, floor));
+        let mut blank = old;
+        blank.message.list_unsubscribe = Some("  ".into());
+        assert!(!files_as_old_bulk(&blank, floor), "a blank header is none");
     }
 
     // ---- the archive walk ---------------------------------------------------

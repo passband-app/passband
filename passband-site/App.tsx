@@ -1839,10 +1839,16 @@ const CLOUDS: Record<"mail" | "events", Cloud[]> = {
   ],
 };
 
+// How strong the clouds are overall. Kept barely there on purpose: felt more
+// than seen.
+const CLOUD_STRENGTH = 0.35;
+
 // Two overlapping falloffs make a softer, less perfectly round glow.
-const cloudFill = ({ rgb, a }: Cloud) =>
-  `radial-gradient(closest-side, rgba(${rgb}, ${a}), rgba(${rgb}, ${a * 0.4}) 55%, rgba(${rgb}, 0)), ` +
-  `radial-gradient(closest-side at 68% 62%, rgba(${rgb}, ${a * 0.7}), rgba(${rgb}, 0))`;
+const cloudFill = ({ rgb, a: a0 }: Cloud) => {
+  const a = +(a0 * CLOUD_STRENGTH).toFixed(3);
+  return `radial-gradient(closest-side, rgba(${rgb}, ${a}), rgba(${rgb}, ${(a * 0.4).toFixed(3)}) 55%, rgba(${rgb}, 0)), ` +
+    `radial-gradient(closest-side at 68% 62%, rgba(${rgb}, ${(a * 0.7).toFixed(3)}), rgba(${rgb}, 0))`;
+};
 
 function Clouds({ kind }: { kind: "mail" | "events" }) {
   const clouds = CLOUDS[kind];

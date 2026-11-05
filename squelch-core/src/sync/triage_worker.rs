@@ -18,6 +18,11 @@ pub struct StoreEvidence<'a, S: Store> {
     account: AccountId,
     limit: usize,
     sources: std::sync::Mutex<Vec<AgentSourceSnapshot>>,
+    /// Does `read_sender_history` carry the sender's relationship block?
+    /// Only under the `understanding` hidden feature
+    /// ([`crate::features::UNDERSTANDING`]); off by default, so a reader
+    /// nobody switched on serves exactly what it did before the ledger.
+    relationship: bool,
 }
 
 impl<'a, S: Store> StoreEvidence<'a, S> {
@@ -29,7 +34,15 @@ impl<'a, S: Store> StoreEvidence<'a, S> {
             account,
             limit,
             sources: std::sync::Mutex::new(Vec::new()),
+            relationship: false,
         }
+    }
+
+    /// Serve the relationship block in `read_sender_history`: the caller
+    /// passes whether the `understanding` feature is on.
+    pub fn with_relationship(mut self, on: bool) -> Self {
+        self.relationship = on;
+        self
     }
 
     /// Seed the sources the initial snapshot already exposed.
@@ -148,7 +161,9 @@ impl<S: Store> StoreEvidence<'_, S> {
                 // The sender's relationship row rides at the top of the
                 // result, the same block the initial context carries for the
                 // message's own sender (docs/UNDERSTANDING.md §2.1).
-                relationship = self.store.relationship_context(self.account, sender)?;
+                if self.relationship {
+                    relationship = self.store.relationship_context(self.account, sender)?;
+                }
                 self.store
                     .agent_sender_history(self.account, sender, self.limit)?
             }
@@ -252,6 +267,18 @@ fn fed_back(
         done: None,
         ..decision
     })
+}
+
+/// THE LEDGER COMPUTES FOR EVERYONE AND INFORMS ONLY UNDER THE FLAG. With the
+/// `understanding` hidden feature off, the relationship block is dropped from
+/// a loaded context, so the initial context carries no `relationship` key,
+/// exactly as before the first-run backfill. Marks, the drain, the nightly
+/// walk and the backfill run regardless, so a mailbox switched on has its
+/// ledger at once.
+pub(crate) fn gate_relationship(context: &mut AgentContext, understanding: bool) {
+    if !understanding {
+        context.relationship = None;
+    }
 }
 
 /// The agent's starting context. `clock` is this run's "now" in the owner's
@@ -455,6 +482,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 return;
             }
         };
+        // The relationship ledger computes for everyone; it reaches the agent
+        // only under the `understanding` feature (docs/UNDERSTANDING.md §5).
+        let understanding = self.features.enabled(crate::features::UNDERSTANDING);
+        gate_relationship(&mut context, understanding);
         let now = Utc::now();
         let retry_after = self.agent_retry_after.load(Ordering::Relaxed);
         let episode = self.agent_last_cooldown_end.load(Ordering::Relaxed);
@@ -534,6 +565,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     })
                     .collect(),
             ),
+            relationship: understanding,
         };
         let mut config = self.config.triage.clone();
         let base_model = config
@@ -1932,7 +1964,7 @@ mod budget_tests {
     fn read_sender_history_carries_the_relationship_at_the_top() {
         let (store, account, _) = evidence_fixture();
         fill_ledger(&store, account, 60);
-        let reader = StoreEvidence::new(&store, account, 2);
+        let reader = StoreEvidence::new(&store, account, 2).with_relationship(true);
         let result = reader
             .read(&EvidenceRequest::ReadSenderHistory {
                 sender: "Sender@Example.com".into(),
@@ -1950,6 +1982,40 @@ mod budget_tests {
             "{}",
             stranger.data
         );
+    }
+
+    /// `understanding` off: the ledger is filled and backfilled, and still
+    /// neither the initial context nor `read_sender_history` carries it.
+    #[test]
+    fn the_relationship_reaches_the_agent_only_under_the_understanding_flag() {
+        let (store, account, ids) = evidence_fixture();
+        fill_ledger(&store, account, 60);
+        let job = read_job(account, ids[0]);
+
+        let mut off = store.load_agent_context(&job).unwrap();
+        assert!(off.relationship.is_some(), "control: the ledger has a row");
+        gate_relationship(&mut off, false);
+        let initial = snapshot(&off, &job, 8, &utc_clock()).initial;
+        assert!(initial.get("relationship").is_none(), "{initial}");
+        let history = StoreEvidence::new(&store, account, 2)
+            .read(&EvidenceRequest::ReadSenderHistory {
+                sender: "sender@example.com".into(),
+            })
+            .unwrap();
+        assert!(history.data.get("relationship").is_none(), "off by default");
+        assert_eq!(history.data["messages"].as_array().unwrap().len(), 2);
+
+        let mut on = store.load_agent_context(&job).unwrap();
+        gate_relationship(&mut on, true);
+        let initial = snapshot(&on, &job, 8, &utc_clock()).initial;
+        assert_eq!(initial["relationship"]["received"]["count"], 3);
+        let history = StoreEvidence::new(&store, account, 2)
+            .with_relationship(true)
+            .read(&EvidenceRequest::ReadSenderHistory {
+                sender: "sender@example.com".into(),
+            })
+            .unwrap();
+        assert_eq!(history.data["relationship"]["received"]["count"], 3);
     }
 
     #[test]

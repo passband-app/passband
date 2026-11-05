@@ -34,6 +34,13 @@ inherits that obligation. That tradeoff was made deliberately; this is the bill.
 
 Ordered by what stops the submission soonest.
 
+- [ ] **Check the publishing status is In production, not Testing.** Google
+      Auth Platform → Audience. In Testing, Google expires every refresh token
+      seven days after consent, so every hosted user's mailbox goes dark a week
+      after signup until they reconnect. That looks exactly like churn. In
+      production but unverified, tokens last, and the cost is the "Google
+      hasn't verified this app" interstitial at signup plus the 100-user cap.
+      Verification removes both.
 - [ ] **The consent screen still says "Squelch."** It must say **Passband** —
       the name on the home page, in the app, and on the App Store listing.
       A mismatch fails brand verification on the first automated pass.
@@ -59,10 +66,14 @@ Ordered by what stops the submission soonest.
       on before the move goes with the Railway project's deletion (CUTOVER.md
       Phase 10); confirm that has happened. **Do this before the assessment,
       not during.**
-- [ ] **`/mcp` bearer auth** (`deploy/hosted/PRODUCTION.md`). An unauthenticated
-      agent door is not something to be explaining to an assessor. Tenant
-      Ingresses currently route around it; make that structural, or build the
-      auth.
+- [ ] **`/mcp` auth: confirm it is live.** Built (OAuth through WorkOS
+      AuthKit, 2026-10-01), and the checked-in warden config sets
+      `SQUELCH_WARDEN_MCP_OAUTH_ISSUER` (`deploy/hosted/15-warden-config.yaml`).
+      Before the assessment, prove carrier runs that config: an unauthenticated
+      `POST https://<label>.passband.email/mcp` answers `401` with a
+      `www-authenticate: Bearer resource_metadata=...` header (the check is in
+      `deploy/hosted/SETUP.md`, "Publishing the agent door"). Then tick this and
+      record the date in `deploy/hosted/PRODUCTION.md`.
 
 Cleared as of 2026-08-25:
 
@@ -73,6 +84,17 @@ Cleared as of 2026-08-25:
       hosted tenants routed through our own Anthropic account.
 - [x] Terms of service extended to hosted accounts.
 - [x] `/about` written and routed.
+
+Cleared as of 2026-11-05:
+
+- [x] HSTS (`max-age=31536000`) and `X-Content-Type-Options: nosniff` on every
+      response from control and from tenant daemons
+      (`squelch-control/src/transport.rs`, `squelch-api/src/transport.rs`).
+      Neither service sent HSTS before, and a missing one is the first thing a
+      DAST scan reports on each page. The daemon sends it only when Traefik
+      says the request arrived over https, so self-host on loopback is
+      unchanged. The marketing site already had it from CloudFront's
+      `Managed-SecurityHeadersPolicy`.
 
 ## What gets submitted
 
@@ -204,8 +226,9 @@ reviewer needs one continuous frame proving that client ID granted that consent.
 2. **Hosted consent (Web client).** Start at `signup.passband.app`, click
    through to Google. Hold on the consent screen for a slow five seconds with
    the address bar in frame and legible: the URL must show `client_id=...` and
-   the screen must show **Passband**. Scroll the consent screen so all three
-   Gmail permissions are visible. Approve.
+   the screen must show **Passband**. Scroll the consent screen so every
+   permission is visible: the one Gmail permission (`gmail.modify`) and the two
+   calendar ones. Approve.
 3. **Self-host consent (Desktop client).** Run `squelchd auth` in a terminal,
    let it open the browser, and hold the same shot: address bar with the second
    client's `client_id`, consent screen showing **Passband**. Approve. This is
@@ -241,6 +264,40 @@ Up to three. Use:
 Engage an App Defense Alliance authorized lab once scope verification is under
 way; the assessment and Google's review can overlap, and the LOA date starts the
 12-month clock, so do not start it early for nothing.
+
+### Which route
+
+Google's restricted-scope review emails a request for the assessment, naming
+the tier. When it arrives:
+
+- **Lab: TAC Security** (the lab Google points developers to, Tier 2 from
+  about $540 per app per year as of 2025; check the current price). The lab
+  runs the DAST scan itself, and you answer its questionnaire. This is the
+  default: one invoice, and an assessor to argue scope with.
+- **Self-scan** (`appdefensealliance.dev/casa`): run the CASA-configured scan
+  yourself, fix the CWEs it flags, submit the results and the questionnaire
+  in the CASA portal, and a lab validates them. Cheaper in money, dearer in
+  operator time. Only worth it if the lab quote is unexpectedly large.
+
+Either way the Letter of Validation goes to Google from the portal.
+
+### Pre-scan before engaging the lab
+
+Run the scan the lab will run, first, so its first report is clean. OWASP ZAP's
+baseline scan is passive (it spiders and reads responses, no attack traffic),
+so it is safe against production. From a laptop, not this repo's CI:
+
+```sh
+for t in https://signup.passband.app https://passband.app/about \
+         https://<label>.passband.email https://relay.squelch.sh; do
+  docker run --rm -t ghcr.io/zaproxy/zaproxy:stable zap-baseline.py -t "$t" -I
+done
+```
+
+`bifrost.passband.app` answers only our own egress and `carrier`, so scan it
+from carrier or note it to the assessor as not publicly reachable. Fix anything
+Medium or above before the lab's scan, and write down the reason for every Low
+that stays.
 
 **Assessment scope is everything that touches Gmail data**, which is more than
 the daemon:

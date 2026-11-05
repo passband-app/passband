@@ -56,6 +56,7 @@ pub mod share;
 pub mod state;
 pub mod store;
 pub mod tenant;
+mod transport;
 pub mod warden;
 pub mod workos;
 
@@ -122,6 +123,14 @@ use axum::{
 /// `/healthz` sits outside every layer so liveness answers while a client is
 /// throttled.
 pub fn router(state: ControlState) -> Router {
+    let secure = !state.config().is_insecure();
+    routes(state).layer(middleware::from_fn_with_state(
+        secure,
+        transport::transport_security,
+    ))
+}
+
+fn routes(state: ControlState) -> Router {
     let form = Router::new()
         .route("/", get(handlers::signup_form))
         .route("/reconnect/status", get(reconnect::status))

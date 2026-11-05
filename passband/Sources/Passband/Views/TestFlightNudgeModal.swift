@@ -18,9 +18,9 @@
 // card, the hero and the phone drawn in it are set sizes, and the headline is
 // cut to that width. Every font here is a literal or `fixed:` on purpose.
 //
-// THE SAME PARTS, ON DAY ONE. The first-load veil carries a quiet row of them
-// (`FirstLoadIPhoneRow`, below): the code, the phone, the words. When the veil
-// closes by itself this card takes over, so the code never vanishes from under
+// THE SAME CARD, ON DAY ONE. The first-load veil sets it beside its progress
+// card (`FirstLoadIPhoneAd`, below) in the modal's glass. When the veil closes
+// by itself this corner card takes over, so the code never vanishes from under
 // a camera; see TestFlightNudge's header for every rule.
 //
 // NOT MODAL. A corner card, closed by its ✕, that leaves the inbox usable
@@ -37,7 +37,7 @@ struct TestFlightNudgeModal: View {
 
     var body: some View {
         if nudge.showingNudge {
-            TestFlightAdCard { copied in
+            TestFlightAdCard(inVeil: false) { copied in
                 nudge.showingNudge = false
                 Analytics.capture("ios_nudge_closed", ["copied": copied, "source": nudge.source])
                 // What's New waits behind this card (WhatsNew.maybeShow); its turn.
@@ -49,6 +49,9 @@ struct TestFlightNudgeModal: View {
 }
 
 private struct TestFlightAdCard: View {
+    /// In the first-load veil rather than the corner: the modal's glass, a
+    /// hero that stretches to the pair's height, no ✕.
+    let inVeil: Bool
     let close: (_ copied: Bool) -> Void
 
     @Environment(\.controlActiveState) private var activeState
@@ -58,14 +61,31 @@ private struct TestFlightAdCard: View {
     @State private var copied = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            hero
-            words
-        }
-        .adCardChrome(arrived: arrived, leaving: leaving, label: "Get Passband for iPhone")
-        .onAppear {
-            withAnimation(reduceMotion ? .easeOut(duration: 0.2) : .spring(response: 0.55, dampingFraction: 0.82).delay(0.35)) {
+        if inVeil {
+            VStack(spacing: 0) {
+                hero
+                words
+            }
+            .frame(width: AdCard.width)
+            // ModalCard's material, so the pair matches.
+            .passbandGlass(.pane, cornerRadius: Radius.modal, tint: Palette.glassTint)
+            .overlayShadow()
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Get Passband for iPhone")
+            .onAppear {
+                TestFlightNudge.shared.veilAdDrawn = true
                 arrived = true
+            }
+        } else {
+            VStack(spacing: 0) {
+                hero
+                words
+            }
+            .adCardChrome(arrived: arrived, leaving: leaving, label: "Get Passband for iPhone")
+            .onAppear {
+                withAnimation(reduceMotion ? .easeOut(duration: 0.2) : .spring(response: 0.55, dampingFraction: 0.82).delay(0.35)) {
+                    arrived = true
+                }
             }
         }
     }
@@ -74,12 +94,31 @@ private struct TestFlightAdCard: View {
 
     /// The shared hero (`AdHero`), with the phone rising out of it.
     private var hero: some View {
-        AdHero(live: activeState == .key, pill: "NEW  ·  IPHONE ALPHA", close: dismiss) {
+        let pill: String? = inVeil ? nil : "NEW  ·  IPHONE ALPHA"
+        let close: (() -> Void)? = inVeil ? nil : { dismiss() }
+        return AdHero(live: activeState == .key, pill: pill, close: close, stretch: inVeil) {
             PhoneMock(reduceMotion: reduceMotion, live: activeState == .key)
                 .offset(y: arrived ? 66 : 220)
                 .animation(
                     reduceMotion ? nil : .spring(response: 0.75, dampingFraction: 0.78).delay(0.6),
                     value: arrived)
+        }
+        .overlay(alignment: .topLeading) { wordmark }
+    }
+
+    /// In the veil, the progress card's wordmark on the same top line, so the
+    /// pair reads as one. The board's ink, as on the Sitrep: the phosphor
+    /// follows the theme, so ink reads on it in both.
+    @ViewBuilder private var wordmark: some View {
+        if inVeil {
+            Text("passband")
+                .font(Typo.serif(19, weight: .medium))
+                .foregroundStyle(Palette.ink)
+                // The progress card's inset (ModalCard's words plus the
+                // veil's own), so both wordmarks sit on one line.
+                .padding(.top, Space.modal + Space.s14)
+                .padding(.leading, AdCard.wordsHorizontal)
+                .accessibilityHidden(true)
         }
     }
 
@@ -147,6 +186,7 @@ private struct TestFlightAdCard: View {
     /// the code.
     private func copyLink() {
         TestFlightQR.copyLink()
+        if inVeil { TestFlightNudge.shared.copiedInVeil = true }
         withAnimation(Motion.toast) { copied = true }
     }
 }
@@ -172,71 +212,16 @@ enum TestFlightQR {
     }()
 }
 
-// MARK: - the veil's row
+// MARK: - the veil's ad
 
-/// THE IPHONE ASK IN THE FIRST-LOAD VEIL. A band along the card's foot, under
-/// a hairline: the code, two lines, a copy link, and the small phone with its
-/// push landing. Nothing to click to move on: it is an offer on a waiting
-/// screen, and "Start now" above it stays the only way forward. If the phone
-/// connects while the veil is still up (they scanned, installed and signed
-/// in), the band says so instead.
-struct FirstLoadIPhoneRow: View {
-    let connected: Bool
-
-    @Environment(\.controlActiveState) private var activeState
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var copied = false
-
+/// THE IPHONE AD BESIDE THE FIRST-LOAD PROGRESS. The corner card's own
+/// composition (the phosphor hero, the phone with its push landing, the
+/// headline, the code) in the veil's material: the modal's glass, radius and
+/// shadow, so the two cards read as a pair. No ✕ and no button of its own:
+/// it goes with the veil, at Start now, Enter or Esc.
+struct FirstLoadIPhoneAd: View {
     var body: some View {
-        HStack(alignment: .center, spacing: Space.s20) {
-            if connected {
-                Label("Your iPhone is connected. Pushes will land there.", systemImage: "checkmark.circle")
-                    .font(Typo.ui(14, weight: .medium))
-                    .foregroundStyle(Palette.ink)
-                    .transition(.opacity)
-                Spacer(minLength: 0)
-            } else {
-                if let qr = TestFlightQR.image {
-                    Image(nsImage: qr)
-                        .interpolation(.none)
-                        .resizable()
-                        .frame(width: 76, height: 76)
-                        .padding(6)
-                        // White in both themes, as on the card: cameras read
-                        // dark on light.
-                        .background(.white, in: RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
-                        .accessibilityLabel("QR code for the TestFlight invite")
-                }
-                VStack(alignment: .leading, spacing: Space.s6) {
-                    Text("Get Passband on your iPhone.")
-                        .font(Typo.serif(20, weight: .medium))
-                        .foregroundStyle(Palette.ink)
-                    Text("Scan to join the alpha on TestFlight. Your phone buzzes for the mail that needs you and stays quiet for everything else.")
-                        .font(Typo.ui(13))
-                        .foregroundStyle(Palette.inkDim)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button(action: copyLink) {
-                        Label(copied ? "Link copied" : "Copy link", systemImage: copied ? "checkmark" : "link")
-                            .font(Typo.ui(12, weight: .semibold))
-                            .foregroundStyle(Palette.accent)
-                            .contentTransition(.symbolEffect(.replace))
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.top, Space.s2)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                PhoneMock(reduceMotion: reduceMotion, live: activeState == .key)
-                    .scaleEffect(0.6)
-                    .frame(width: 118 * 0.6, height: 236 * 0.6)
-            }
-        }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.3), value: connected)
-    }
-
-    private func copyLink() {
-        TestFlightQR.copyLink()
-        TestFlightNudge.shared.copiedInVeil = true
-        withAnimation(Motion.toast) { copied = true }
+        TestFlightAdCard(inVeil: true) { _ in }
     }
 }
 

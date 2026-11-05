@@ -224,7 +224,7 @@ enum Analytics {
         // The TestFlight ask closing, with one bool: whether the link was
         // copied, and `source`, which road put it up. A QR scan leaves no
         // trace, so this is a floor on uptake. first_load_ended carries two
-        // more bools for the veil's own iPhone row: `iphone` (shown) and
+        // more bools for the veil's own iPhone ad: `iphone` (drawn) and
         // `copied`.
         "ios_nudge_closed",
         // The agent-door ad closing, with one bool: whether its button was

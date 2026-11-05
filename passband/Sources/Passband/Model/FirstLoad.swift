@@ -13,7 +13,7 @@
 // for one to appear. Every outcome stamps `Prefs.firstLoadSeen`, so a later
 // account, a reconnect or a relaunch never sees it again.
 //
-// ON THE MAC IT ALSO OFFERS THE IPHONE APP: a QR row under the progress, since
+// ON THE MAC IT ALSO OFFERS THE IPHONE APP: a second card beside the progress, since
 // the person is waiting anyway. Whether, and what happens to it when the veil
 // comes down, is `TestFlightNudge`'s rule; this only says when the veil went
 // up, came down, or was never needed.
@@ -203,7 +203,7 @@ final class FirstLoad {
             if !Self.forced {
                 Analytics.capture(
                     "first_load_ended",
-                    ["early": early, "iphone": nudge.offeredInVeil, "copied": nudge.copiedInVeil])
+                    ["early": early, "iphone": nudge.veilAdDrawn, "copied": nudge.copiedInVeil])
             }
             // Before `conclude`, so a hand-off card is up before What's New
             // asks to show, and What's New waits its turn behind it.
@@ -228,7 +228,7 @@ final class FirstLoad {
             // Somebody new to the app is shown the latest release's notes on
             // their first time at the board, and nothing older.
             if firstTime { store.whatsNew.meetNewcomer() }
-            // No veil, so no iPhone row: the corner card, shortly, instead.
+            // No veil, so no iPhone ad: the corner card, shortly, instead.
             if firstTime, !veilWasShown { TestFlightNudge.shared.askAfterOnboarding(store) }
         #endif
     }

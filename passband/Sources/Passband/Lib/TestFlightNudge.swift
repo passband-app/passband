@@ -17,16 +17,19 @@
 // OR ON DAY ONE, IN ONBOARDING (Mac). The phone is where the pushes that bring
 // somebody back land, so the ask comes while they wait, not two days later:
 //
-//   * IN THE FIRST-LOAD VEIL, a QR row under the progress (`offersInVeil`).
+//   * IN THE FIRST-LOAD VEIL, a second card beside the progress, the corner
+//     card's own composition (`offersInVeil`).
 //     They are sitting there anyway, so it costs no step and no click. Shown
 //     on `iosConnected` nil as well as false: the veil only goes up on a
-//     fresh poll, so nil there is a daemon too old to say, and a quiet row on
+//     fresh poll, so nil there is a daemon too old to say, and a quiet card on
 //     a waiting screen is cheap to be wrong about. Showing it is the ask, and
 //     is stamped as one, so the two-day card never asks again.
 //   * HANDED OFF when the veil closes by itself (`handsOff`): the catch-up can
 //     end mid-scan, and the QR must not vanish from under a camera, so the
 //     corner card carries it on, once. Not after "Start now": they chose the
-//     board, and are not chased with a second card.
+//     board, and are not chased with a second card. Unless the window was
+//     too narrow for the pair and the ad was never drawn: then the corner
+//     card is its only showing, Start now or not.
 //   * THE CORNER CARD SHORTLY AFTER ONBOARDING when there was no veil to put
 //     it in (`earnedAfterOnboarding`): a mailbox already caught up skips the
 //     veil, and its owner is just as new.
@@ -71,11 +74,14 @@ final class TestFlightNudge {
     /// "onboarding" (no veil, shortly after the first look).
     var source = "nudge"
 
-    /// The veil is showing the iPhone row this session. Latched when the veil
-    /// goes up, so the row does not come and go under the person's camera.
+    /// The veil is showing the iPhone ad this session. Latched when the veil
+    /// goes up, so the ad does not come and go under the person's camera.
     var offeredInVeil = false
-    /// "Copy link" was pressed on the veil's row, for `first_load_ended`.
+    /// "Copy link" was pressed on the veil's ad, for `first_load_ended`.
     var copiedInVeil = false
+    /// The veil's ad was actually drawn: false when the window was too narrow
+    /// for the pair and the veil showed its progress alone.
+    var veilAdDrawn = false
 
     /// `PASSBAND_FORCE_TESTFLIGHT_NUDGE=1` puts the card up at launch without
     /// recording an ask, so it can be looked at without a two-day-old install
@@ -107,10 +113,14 @@ final class TestFlightNudge {
         iosConnected != true && !asked
     }
 
-    /// THE HAND-OFF. The veil showed the row and closed by itself (`early`
+    /// THE HAND-OFF. The veil showed the ad and closed by itself (`early`
     /// false), and the phone is still a definite no: the corner card, now.
-    nonisolated static func handsOff(offered: Bool, early: Bool, iosConnected: Bool?) -> Bool {
-        offered && !early && iosConnected == false
+    /// `drawn` false is a window too narrow for the pair: the ad was never
+    /// on screen, so the card carries it even after "Start now".
+    nonisolated static func handsOff(
+        offered: Bool, drawn: Bool, early: Bool, iosConnected: Bool?
+    ) -> Bool {
+        offered && iosConnected == false && (!early || !drawn)
     }
 
     /// THE FALLBACK. A first look that never raised the veil, by a mailbox no
@@ -148,14 +158,14 @@ final class TestFlightNudge {
     }
 
     /// The first-load veil went up. Decides, once, whether it carries the
-    /// iPhone row, and stamps the ask if it does. `forced` (the veil's preview)
+    /// iPhone ad, and stamps the ask if it does. `forced` (the veil's preview)
     /// shows it and stamps nothing.
     func veilShown(iosConnected: Bool?, forced: Bool) {
-        // A veil dropped by a lost connection and raised again keeps its row:
+        // A veil dropped by a lost connection and raised again keeps its ad:
         // the stamp from the first time must not take it away.
         guard !offeredInVeil else { return }
         if forced {
-            offeredInVeil = iosConnected != true
+            offeredInVeil = true
             return
         }
         guard Self.offersInVeil(iosConnected: iosConnected, asked: asked) else { return }
@@ -164,12 +174,14 @@ final class TestFlightNudge {
     }
 
     /// The veil came down. Hands off to the corner card when the rule says so;
-    /// either way the row is done for the session.
+    /// either way the ad is done for the session.
     func veilEnded(early: Bool, iosConnected: Bool?) {
-        let handOff = Self.handsOff(offered: offeredInVeil, early: early, iosConnected: iosConnected)
+        let handOff = Self.handsOff(
+            offered: offeredInVeil, drawn: veilAdDrawn, early: early, iosConnected: iosConnected)
         offeredInVeil = false
+        veilAdDrawn = false
         guard handOff, !showingNudge else { return }
-        // Already stamped when the row went up.
+        // Already stamped when the ad went up.
         source = "first_load"
         showingNudge = true
     }

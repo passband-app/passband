@@ -35,12 +35,12 @@ struct TestFlightNudgeTests {
         print("testflight-nudge: ok")
     }
 
-    /// Day one on the Mac: the veil's row, its hand-off, and the fallback
+    /// Day one on the Mac: the veil's ad, its hand-off, and the fallback
     /// card, and that the three together ask at most once.
     static func onboarding() {
         typealias N = TestFlightNudge
 
-        // THE VEIL'S ROW. No phone, or not known (a fresh poll's nil is a
+        // THE VEIL'S AD. No phone, or not known (a fresh poll's nil is a
         // daemon too old to say): shown. A phone connected: never.
         precondition(N.offersInVeil(iosConnected: false, asked: false))
         precondition(N.offersInVeil(iosConnected: nil, asked: false))
@@ -48,27 +48,33 @@ struct TestFlightNudgeTests {
         // An install already asked (the two-day card, an earlier veil): not again.
         precondition(!N.offersInVeil(iosConnected: false, asked: true))
 
-        // THE HAND-OFF. The row was up and the veil closed by itself, phone
+        // THE HAND-OFF. The ad was up and the veil closed by itself, phone
         // still a no: the corner card carries the code on.
-        precondition(N.handsOff(offered: true, early: false, iosConnected: false))
+        precondition(N.handsOff(offered: true, drawn: true, early: false, iosConnected: false))
         // "Start now" (or Esc, or the scrim): they chose the board; not chased.
-        precondition(!N.handsOff(offered: true, early: true, iosConnected: false))
+        precondition(!N.handsOff(offered: true, drawn: true, early: true, iosConnected: false))
+        // A window too narrow for the pair never drew the ad: the corner card
+        // is its only showing, closed by itself or by Start now.
+        precondition(N.handsOff(offered: true, drawn: false, early: false, iosConnected: false))
+        precondition(N.handsOff(offered: true, drawn: false, early: true, iosConnected: false))
         // The phone connected while the veil was up: nothing to hand off.
-        precondition(!N.handsOff(offered: true, early: false, iosConnected: true))
+        precondition(!N.handsOff(offered: true, drawn: true, early: false, iosConnected: true))
+        precondition(!N.handsOff(offered: true, drawn: false, early: true, iosConnected: true))
         // The corner card needs a definite no, as it always has.
-        precondition(!N.handsOff(offered: true, early: false, iosConnected: nil))
-        // No row, nothing to hand off.
-        precondition(!N.handsOff(offered: false, early: false, iosConnected: false))
+        precondition(!N.handsOff(offered: true, drawn: true, early: false, iosConnected: nil))
+        precondition(!N.handsOff(offered: true, drawn: false, early: true, iosConnected: nil))
+        // No ad offered, nothing to hand off.
+        precondition(!N.handsOff(offered: false, drawn: false, early: false, iosConnected: false))
 
         // THE FALLBACK. No veil, no phone, never asked: the card, shortly.
         precondition(N.earnedAfterOnboarding(veilShown: false, iosConnected: false, asked: false))
-        // The veil had the row, so the fallback never doubles it.
+        // The veil had the ad, so the fallback never doubles it.
         precondition(!N.earnedAfterOnboarding(veilShown: true, iosConnected: false, asked: false))
         precondition(!N.earnedAfterOnboarding(veilShown: false, iosConnected: true, asked: false))
         precondition(!N.earnedAfterOnboarding(veilShown: false, iosConnected: nil, asked: false))
         precondition(!N.earnedAfterOnboarding(veilShown: false, iosConnected: false, asked: true))
 
-        // NEVER TWICE. Showing the row stamps the ask (`veilShown`), and once
+        // NEVER TWICE. Showing the ad stamps the ask (`veilShown`), and once
         // stamped neither another veil, the fallback, nor the two-day card
         // asks again, however late.
         precondition(!N.offersInVeil(iosConnected: false, asked: true))

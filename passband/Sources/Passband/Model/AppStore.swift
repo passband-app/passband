@@ -3128,6 +3128,7 @@ final class AppStore {
         focusedMessageView = nil
         compose = nil
         inlineReply = nil
+        outgoingReplies = []
         sideView = .none
         // Overlays holding an account-scoped id. A rule editor left open
         // across a switch would save the old account's rule to the new
@@ -5900,18 +5901,66 @@ final class AppStore {
     /// ceremony, and the daemon does the widening. It is fixed here rather than
     /// toggled later, so what the header says is what the opening keystroke
     /// asked for.
-    func openInlineReply(replyTo messageId: Int, replyAll: Bool = false) {
-        guard inlineReply == nil else { return }
+    func openInlineReply(
+        replyTo messageId: Int, replyAll: Bool = false, quiet: Bool = false,
+        rows: [DraftView]? = nil
+    ) {
+        guard inlineReply == nil else {
+            // `r` on a reply that is already open, typically one the reader
+            // reopened quietly from its draft: hand it the caret.
+            if !quiet { inlineReplyFocus &+= 1 }
+            return
+        }
         // Same rule as the pane composer: a reply gets the whole reader, not
-        // the sliver left beside an open search strip.
-        if sideView.isOpen { closeSide() }
-        inlineReply = ComposeState(
+        // the sliver left beside an open search strip. Not for a quiet
+        // reopen: nobody asked for a composer, so nothing else moves.
+        if sideView.isOpen, !quiet { closeSide() }
+        var state = ComposeState(
             replyToMessageId: messageId, body: Prefs.shared.signatureSeed,
             includeTracker: trackingDefault, replyAll: replyAll)
+        state.quietOpen = quiet
+        inlineReply = state
         DraftSaver.shared.noteOpened(.inlineReply)
         // Both ways in (the reader's `r` and the list's hand-off) come through
         // here, so the restore is wired once.
-        Task { await restoreReply(messageId) }
+        Task { await restoreReply(messageId, rows: rows) }
+    }
+
+    /// Bumped by `r` over an inline reply that is already open; the editor
+    /// takes the caret when it moves (see `InlineReply`).
+    var inlineReplyFocus = 0
+
+    /// THE READER LANDED ON A THREAD THAT HOLDS A SAVED REPLY: open the inline
+    /// composer on it, filled, so the half-written answer is where it was left
+    /// instead of one `r` away and invisible. Quiet (see
+    /// `ComposeState.quietOpen`): it does not take the caret.
+    ///
+    /// Only when the open asked for nothing else (no `r` hand-off) and no
+    /// reply is open. The newest draft wins if somebody left two in one
+    /// thread; the other is still on the drafts page.
+    func reopenSavedReply(threadId: String, messageIds: Set<Int>) async {
+        guard inlineReply == nil, pendingReplyMessageId == nil else { return }
+        let e = epoch
+        // Settle first, as `restoreReply` does: the reply to this thread
+        // closed a moment ago flushed fire-and-forget.
+        await DraftSaver.shared.settle()
+        guard e == epoch, let rows = await fetchDrafts(), e == epoch else { return }
+        adoptDraftsRows(rows)
+        guard self.threadId == threadId, inlineReply == nil, pendingReplyMessageId == nil
+        else { return }
+        let saved = rows.filter { row in
+            guard row.forward_of_message_id == nil, let parent = row.reply_to_message_id else {
+                return false
+            }
+            return messageIds.contains(parent) && !isHeld(row) && !isDeleting(row.id)
+        }
+        guard
+            let draft = saved.max(by: {
+                (Fmt.date($0.updated_at) ?? .distantPast) < (Fmt.date($1.updated_at) ?? .distantPast)
+            }),
+            let parent = draft.reply_to_message_id
+        else { return }
+        openInlineReply(replyTo: parent, quiet: true, rows: rows)
     }
 
     /// Fill the just-opened inline composer from the draft keyed to this parent.
@@ -5920,19 +5969,25 @@ final class AppStore {
     /// `to` and its `Re: <subject>` from the parent, but a Bcc never derives
     /// from anything — so a saved one has to come back, or closing a reply to
     /// think about it would silently un-blind-copy somebody.
-    private func restoreReply(_ messageId: Int) async {
+    private func restoreReply(_ messageId: Int, rows given: [DraftView]? = nil) async {
         let e = epoch
         // Same rule as the new message: a reply to this message in the hold
         // owns this draft row until its send deletes it.
         guard !holdsDraft(replyTo: messageId) else { return }
         // SETTLE FIRST, as `refreshDrafts` does: an inline reply to this
         // message closed a moment ago flushed fire-and-forget, and the list
-        // must see that save, not the one before it.
-        await DraftSaver.shared.settle()
+        // must see that save, not the one before it. A caller that just did
+        // both (`reopenSavedReply`) hands its list in.
+        var rows = given
+        if rows == nil {
+            await DraftSaver.shared.settle()
+            guard e == epoch else { return }
+            rows = await fetchDrafts()
+        }
         // A row whose delete is in its undo window (or went out) is gone as
         // far as the reader knows; restoring it would undo the delete.
         guard e == epoch,
-            let rows = await fetchDrafts(),
+            let rows,
             let draft = rows.first(where: { $0.reply_to_message_id == messageId }),
             !holdsDraft(replyTo: messageId), !isDeleting(draft.id)
         else { return }
@@ -6331,6 +6386,7 @@ final class AppStore {
             undos.removeAll { $0.id == held.undoId }
             let state = withDetachedDraft(held.state)
             holding.remove(state.id)
+            dropOutgoing(state.id)
             if !save {
                 pushToast("\(verb): its account was removed", .error)
             } else if state.forwardOfMessageId != nil && !draftsV2Available {
@@ -6358,6 +6414,52 @@ final class AppStore {
         let id = UUID()
     }
     private(set) var lastSendEcho: SendEcho?
+
+    /// AN INLINE REPLY THAT HAS LEFT ITS COMPOSER BUT NOT THE BUILDING: in
+    /// its undo hold, or on the wire. The reader draws it where the sent copy
+    /// will land, faded, so pressing send does not make the words vanish for
+    /// five seconds. Gone on undo or failure (the composer comes back with
+    /// them), and on success once the reader holds the echo, so the ghost
+    /// hands over to the real message rather than blinking out first.
+    struct OutgoingReply: Identifiable, Equatable {
+        /// The composer's identity (`ComposeState.id`).
+        let id: UUID
+        let threadId: String
+        let body: String
+        let to: String
+        let cc: String
+        let startedAt: Date
+        /// The sent copy, once the send came back with one. The reader stops
+        /// drawing the ghost the moment its thread holds this id.
+        var echoMessageId: Int?
+    }
+    private(set) var outgoingReplies: [OutgoingReply] = []
+
+    private func dropOutgoing(_ composer: UUID) {
+        outgoingReplies.removeAll { $0.id == composer }
+    }
+
+    /// The send came back. Sent with an echo: keep the ghost until the reader
+    /// has the real copy (it filters by `echoMessageId`), with a bound in case
+    /// that reload never lands. Anything else: gone now.
+    private func noteOutgoingLanded(_ composer: UUID, outcome: SendOutcome, sameAccount: Bool) {
+        guard sameAccount, case .sent(let result) = outcome, let echo = result.echo_message_id,
+            let i = outgoingReplies.firstIndex(where: { $0.id == composer })
+        else {
+            dropOutgoing(composer)
+            return
+        }
+        outgoingReplies[i].echoMessageId = echo
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(15))
+            self?.dropOutgoing(composer)
+        }
+    }
+
+    /// The reader holds the sent copy of these ghosts: retire them.
+    func noteEchoesShown(_ messageIds: Set<Int>) {
+        outgoingReplies.removeAll { $0.echoMessageId.map(messageIds.contains) ?? false }
+    }
 
     /// THE SEND: close the composer now, send in `sendHold` seconds unless the
     /// toast's undo (or `u`) puts it back first.
@@ -6391,6 +6493,13 @@ final class AppStore {
         }
         heldSends[key] = held
         holding.insert(state.id)
+        // Only an inline reply: it is the one whose thread is known (the
+        // reader it was typed under), the same rule `lastSendEcho` keeps.
+        if slot == .inlineReply, state.replyToMessageId != nil, let thread = threadId {
+            outgoingReplies.append(OutgoingReply(
+                id: state.id, threadId: thread, body: state.body, to: state.to, cc: state.cc,
+                startedAt: Date()))
+        }
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(Self.sendHold))
             await self?.release(key)
@@ -6419,6 +6528,7 @@ final class AppStore {
         guard var held = heldSends.removeValue(forKey: key) else { return false }
         held.state = withDetachedDraft(held.state)
         holding.remove(held.state.id)
+        dropOutgoing(held.state.id)
         putBack(held, error: nil)
         return true
     }
@@ -6440,6 +6550,7 @@ final class AppStore {
         held.state = withDetachedDraft(held.state)
         holding.remove(held.state.id)
         guard held.epoch == epoch else {
+            dropOutgoing(held.state.id)
             // An account change that parked nothing (the gate teardown): the
             // daemon it was written for is not configured any more, so there
             // is nowhere to send it or save it. Say so, at least.
@@ -6471,6 +6582,7 @@ final class AppStore {
             }
         }
         let outcome = await ComposeSubmit.fire(held.state, override: held.override)
+        noteOutgoingLanded(held.state.id, outcome: outcome, sameAccount: held.epoch == epoch)
         // The account changed while it was on the wire: whatever came back
         // belongs to the OLD account, and its message ids mean nothing here.
         // Reopening it would point the retry at the new one, so the outcome

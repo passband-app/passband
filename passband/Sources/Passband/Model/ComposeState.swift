@@ -112,6 +112,12 @@ struct ComposeState: Sendable, Equatable {
     /// they have not read, to recipients an agent chose. A click cannot be
     /// typed ahead. Never set for a draft the owner opened themselves.
     var keyboardSendLocked = false
+    /// Opened by the reader landing on a thread that holds this reply's saved
+    /// draft, not by `r`. The editor does not take the caret on mount: the
+    /// person came to read, and the reader's single-letter verbs (`e`, `j`)
+    /// would otherwise be typed into their draft. `r` or a click takes it.
+    /// Display only; never saved and never sent.
+    var quietOpen = false
     /// Redacted guard kinds from a 422, set when a held send comes back
     /// blocked and the composer reopens on it. Empty means the guard passed (or
     /// hasn't been asked yet). Non-empty is the ONLY state that offers an

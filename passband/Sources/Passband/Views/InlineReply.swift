@@ -156,6 +156,12 @@ struct InlineReply: View {
                     refocusEditor &+= 1
                 }
             }
+            // `r` over a reply that is already open (a quiet reopen, usually):
+            // the caret goes in, and it is a composer from here on.
+            .onChange(of: store.inlineReplyFocus) { _, _ in
+                patch { $0.quietOpen = false }
+                refocusEditor &+= 1
+            }
         }
     }
 
@@ -358,7 +364,7 @@ struct InlineReply: View {
             // bar never left), so Esc out of review would otherwise drop the cursor
             // and hand every letter you typed next to the reader's verbs.
             MarkdownTextView(
-                text: bind(\.body), autofocus: true, refocus: refocusEditor,
+                text: bind(\.body), autofocus: !compose.quietOpen, refocus: refocusEditor,
                 disabled: compose.sending,
                 // Same two doors the pane's editor has, gated the same way.
                 onDropFiles: store.composeAttachmentsAvailable
@@ -578,7 +584,7 @@ struct InlineReply: View {
         /// well) and a height (see `MarkdownTextView.grows`).
         private func growingEditor(_ compose: ComposeState) -> some View {
             MarkdownTextView(
-                text: bind(\.body), autofocus: true, refocus: refocusEditor,
+                text: bind(\.body), autofocus: !compose.quietOpen, refocus: refocusEditor,
                 disabled: compose.sending, grows: true
             )
             .attaching(store.composeAttachmentsAvailable ? .inlineReply : nil)
@@ -658,8 +664,14 @@ struct InlineReply: View {
             // Escape closes the composer, and only the NEXT press reaches the
             // viewer's Escape and closes the email. Plain Enter is not bound
             // at all: in the body it is a newline.
-            KeyBinding("Escape", "dismiss reply", allowInInput: true) {
+            //
+            // EXCEPT a reply the reader reopened from its draft that nobody
+            // has touched (`quietOpen`): the person came to read, so Escape
+            // still leaves the email, and the draft stays saved as it was.
+            KeyBinding(declining: "Escape", "dismiss reply", allowInInput: true) {
+                guard store.inlineReply?.quietOpen != true else { return false }
                 store.closeInlineReply()
+                return true
             },
             KeyBinding("Enter", "send", meta: true, allowInInput: true) {
                 // A draft an agent put on screen is sent with the button,
@@ -703,6 +715,8 @@ struct InlineReply: View {
                 patch {
                     $0[keyPath: keyPath] = value
                     $0.guardKinds = []
+                    // Typed into: it is a composer now, not a draft on show.
+                    $0.quietOpen = false
                 }
                 DraftSaver.shared.noteChange(.inlineReply)
             })
@@ -720,6 +734,7 @@ struct InlineReply: View {
                 patch {
                     $0.stateRecipients(value)
                     $0.guardKinds = []
+                    $0.quietOpen = false
                 }
                 DraftSaver.shared.noteChange(.inlineReply)
             })

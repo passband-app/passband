@@ -457,6 +457,7 @@ enum ProductGuide {
         Sending:
         - ⌘Enter sends. Plain Enter is a new line.
         - Undo send: the mail is held for 5 seconds, with a chip at the bottom left. Clicking it brings the composer back with everything in it. u does the same, except inside an open email, where u means unsubscribe.
+        - A reply sent from inside an email shows in the thread right away, slightly faded, while it is held and sending. It turns solid when the sent copy arrives, and disappears if the send is undone or fails (the composer comes back instead).
         - If the outbound guard blocks a send because the body looks like it carries a secret, the composer reopens with a "send anyway" button (⌘⇧Enter). Any edit re-locks it.
 
         Send later:
@@ -467,7 +468,7 @@ enum ProductGuide {
         Drafts:
         - Everything autosaves about a second after typing stops. Esc closes a composer and keeps the draft.
         - The trash can in the side composer's top corner deletes the message instead of keeping it. It asks first (Enter deletes, Esc goes back), and it cannot be undone.
-        - A reply draft comes back when r is pressed on the same message.
+        - A reply draft comes back on its own when its email is opened again: the reply sits under the newest message, filled in, without taking the keyboard, so the email's keys still work. Pressing r or clicking in it starts typing. Until something is typed, Esc leaves the email and the draft stays as it was.
         - Other drafts are behind the "drafts" control beside the composer's title: up and down move, Enter opens, Backspace deletes.
 
         Attachments:

@@ -55,6 +55,12 @@ spec:
           args:
             - --path.rootfs=/host
             - --web.listen-address=:9100
+            # Host-side exporters drop .prom files here; today that is
+            # litestream-health.sh (deploy/hosted/litestream/), whose metrics
+            # the backup alerts read. Through the read-only / mount above, so
+            # no extra volume. A missing directory is a scrape-error gauge,
+            # not a failed pod.
+            - --collector.textfile.directory=/host/var/lib/node-exporter/textfile
           ports:
             - containerPort: 9100
               name: metrics

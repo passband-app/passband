@@ -496,6 +496,17 @@ pub async fn delete_tenant(
     }
 }
 
+/// `POST /v1/tenants/{label}/purge` - take the workload down AND destroy the
+/// data: volume, credential and identity. No body. Its own route rather than a
+/// flag on DELETE, so a warden that predates it answers 404 instead of doing
+/// the soft delete and calling it done. See [`crate::provision::Warden::purge`].
+pub async fn purge_tenant(State(state): State<WardenState>, Path(label): Path<String>) -> Response {
+    match state.warden().purge(&label).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
 /// `POST /v1/tenants/{label}/pair` - re-mint a pairing code for a later
 /// device. No body: the tenant is the whole request.
 pub async fn repair_tenant(
@@ -981,6 +992,34 @@ mod tests {
         assert_eq!(body["error"], "invalid_label");
     }
 
+    /// Purge on the wire: 204, then the tenant is gone (404), and a second
+    /// purge is still 204.
+    #[tokio::test]
+    async fn the_purge_route_destroys_and_is_idempotent() {
+        let h = Harness::new();
+        call(&h, authed("POST", "/v1/tenants", &create_body("alice"))).await;
+        call(
+            &h,
+            authed(
+                "PUT",
+                "/v1/tenants/alice/credentials",
+                &credential_body("alice"),
+            ),
+        )
+        .await;
+
+        let (status, _) = call(&h, authed("POST", "/v1/tenants/alice/purge", "")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = call(&h, authed("GET", "/v1/tenants/alice", "")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = call(&h, authed("POST", "/v1/tenants/alice/purge", "")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (status, body) = call(&h, authed("POST", "/v1/tenants/-nope-/purge", "")).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"], "invalid_label");
+    }
+
     /// The activation route on the wire, through every answer it has: a
     /// timestamp, a null, the 503 for a tenant with no pod, and the 500 for a
     /// daemon whose output could not be read.
@@ -1138,6 +1177,7 @@ mod tests {
             ("POST", "/v1/tenants/alice/reconcile"),
             ("DELETE", "/v1/tenants/alice"),
             ("POST", "/v1/tenants/alice/pair"),
+            ("POST", "/v1/tenants/alice/purge"),
         ];
         let bad_headers = [
             None,

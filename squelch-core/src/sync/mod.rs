@@ -11402,6 +11402,8 @@ Q0/00yfa39rgtJLa0DnOoA==
     /// served, a model that copies the line into its summary has that run
     /// thrown away and the job re-run ONCE on the flag-off prompt with no
     /// memory; that answer commits, and the run's metadata says scrubbed.
+    /// The sender has a relationship row too: the first request carries the
+    /// block, and the re-run carries neither it nor the memory line.
     #[tokio::test]
     async fn a_decision_that_repeats_a_memory_line_is_rerun_without_memory() {
         use crate::store::agent_triage::AgentTriageStore;
@@ -11417,6 +11419,18 @@ Q0/00yfa39rgtJLa0DnOoA==
         );
         let parsed = ingest_with_rules(&raw, &Stage1Config::default(), Utc::now(), &[], |_| false);
         let id = store.ingest_message(&parsed).unwrap();
+        // The sender's ledger row, backfilled, so the flag-on run is handed it.
+        store.recompute_all_relationships(account).unwrap();
+        store
+            .set_sync_state(
+                account,
+                crate::store::sqlite::relationships::RELATIONSHIPS_BACKFILL_KEY,
+                &SyncState {
+                    uidvalidity: 0,
+                    last_uid: 1,
+                },
+            )
+            .unwrap();
         let now = Utc::now();
         store
             .insert_memory_entry_unchecked(
@@ -11471,10 +11485,13 @@ Q0/00yfa39rgtJLa0DnOoA==
         let clean = answer(decision("An offer from the shop"));
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let seen = calls.clone();
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let kept = bodies.clone();
         let app = Router::new().route(
             "/",
             axum::routing::post(move |body: String| {
                 seen.fetch_add(1, Ordering::SeqCst);
+                kept.lock().unwrap().push(body.clone());
                 let response = if body.contains("pottery studio") {
                     echo.clone()
                 } else {
@@ -11509,6 +11526,19 @@ Q0/00yfa39rgtJLa0DnOoA==
             2,
             "one run, one scrubbed re-run"
         );
+        {
+            let bodies = bodies.lock().unwrap();
+            // The request body is JSON, so the context's key arrives escaped.
+            assert!(
+                bodies[0].contains(r#"\"relationship\""#),
+                "control: the flag-on run is handed the ledger"
+            );
+            assert!(
+                !bodies[1].contains(r#"\"relationship\""#),
+                "the re-run carries no relationship block"
+            );
+            assert!(!bodies[1].contains("pottery"), "nor the memory line");
+        }
         let reading = store.agent_reading(account, 20).unwrap();
         assert_eq!(reading[0].message_id, id);
         assert_eq!(reading[0].decision.summary, "An offer from the shop");

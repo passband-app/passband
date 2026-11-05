@@ -22,7 +22,9 @@ pub struct StoreEvidence<'a, S: Store> {
     /// Only under the `understanding` hidden feature
     /// ([`crate::features::UNDERSTANDING`]); off by default, so a reader
     /// nobody switched on serves exactly what it did before the ledger.
-    relationship: bool,
+    /// Atomic because the memory scrub's re-run turns it off on a reader the
+    /// first run already borrowed ([`Self::withhold_relationship`]).
+    relationship: std::sync::atomic::AtomicBool,
 }
 
 impl<'a, S: Store> StoreEvidence<'a, S> {
@@ -34,15 +36,23 @@ impl<'a, S: Store> StoreEvidence<'a, S> {
             account,
             limit,
             sources: std::sync::Mutex::new(Vec::new()),
-            relationship: false,
+            relationship: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     /// Serve the relationship block in `read_sender_history`: the caller
     /// passes whether the `understanding` feature is on.
-    pub fn with_relationship(mut self, on: bool) -> Self {
-        self.relationship = on;
+    pub fn with_relationship(self, on: bool) -> Self {
+        self.relationship
+            .store(on, std::sync::atomic::Ordering::Relaxed);
         self
+    }
+
+    /// Stop serving the relationship block, for the memory scrub's flag-off
+    /// re-run on this same reader (`understanding::scrubbed` strips the rest).
+    pub(crate) fn withhold_relationship(&self) {
+        self.relationship
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Seed the sources the initial snapshot already exposed.
@@ -164,7 +174,7 @@ impl<S: Store> StoreEvidence<'_, S> {
                 // A ledger that cannot answer leaves the block out of the
                 // result, as `attach_relationship` does for the context: it is
                 // evidence, and a fault in it must not fail the read.
-                if self.relationship {
+                if self.relationship.load(std::sync::atomic::Ordering::Relaxed) {
                     match self.store.relationship_context(self.account, sender) {
                         Ok(block) => relationship = block,
                         Err(e) => eprintln!(
@@ -592,7 +602,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     })
                     .collect(),
             ),
-            relationship: understanding,
+            relationship: std::sync::atomic::AtomicBool::new(understanding),
         };
         let mut config = self.config.triage.clone();
         let base_model = config
@@ -689,6 +699,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     .stage2_bump_usage(self.account_id, day, (*usage).into());
             }
             *reader.sources.lock().expect("evidence sources") = initial_sources;
+            // The flag is off for the re-run: its tool reads too.
+            reader.withhold_relationship();
             memory_scrubbed = true;
             input_understanding = false;
             outcome = run_agent(connection(), &config, scrub, &reader).await;

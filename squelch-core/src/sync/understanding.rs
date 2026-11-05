@@ -122,14 +122,21 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
 /// no second re-run, and the job is never failed over it.
 ///
 /// EVERYTHING THE FLAG ADDS TO A RUN'S INPUT IS STRIPPED HERE, in one place:
-/// a later block gated on the flag (the relationship evidence) owes a line
-/// in this function.
+/// a later block gated on the flag owes a line in this function. Today that
+/// is the memory lines and the relationship evidence's block in the initial
+/// context (`triage_worker::attach_relationship`). The flag's one other
+/// addition is not input but a tool: `read_sender_history`'s relationship
+/// block, which the re-run site switches off on the evidence reader
+/// (`StoreEvidence::withhold_relationship`) beside resetting its sources.
 pub(super) fn scrubbed(
     input: &crate::triage::context::ContextSnapshot,
 ) -> crate::triage::context::ContextSnapshot {
     let mut scrubbed = input.clone();
     scrubbed.understanding = false;
     scrubbed.memory.clear();
+    if let Some(initial) = scrubbed.initial.as_object_mut() {
+        initial.remove("relationship");
+    }
     scrubbed
 }
 

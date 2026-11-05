@@ -66,7 +66,7 @@ enum ProductGuide {
         var covers: String {
             switch self {
             case .gettingAround:
-                "the pages, the sidebar rail, the Discover page and its progress ring, navigation "
+                "the pages, the sidebar rail, navigation "
                     + "keys, undo, zoom, theme"
             case .sitrep:
                 "the home board: For your eyes, Reading, the calendar, shipments, billing and "
@@ -257,7 +257,6 @@ enum ProductGuide {
 
     private static let gettingAroundTail = """
         - Usage and Settings sit at the bottom of the rail and have no number key. ⌘, opens Settings.
-        - The ring just above them opens Discover: a list of the ways through mail (the basics, flow mode, reminders, search, teaching Passband, the reading stack, smart clear) with a short guide to each on the right. The ring fills clockwise as the user tries each one on their own mail, and a feature used on three separate days is marked a habit. Nothing ever empties it. Esc leaves the page.
 
         Moving:
         - ⌘[ goes back and ⌘] goes forward.

@@ -68,16 +68,19 @@ struct DeeperSearchBand: View {
             RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(Palette.hairline, lineWidth: 0.75)
         )
-        // THE WHOLE BOX IS THE WAY INTO THE CHAT, on a shell that hosts its
-        // own (the phone): a tap anywhere but on an email card, or on one of
-        // the box's own buttons, opens the conversation. Those are Buttons and
-        // take their own taps first; this hears only what lands between them.
-        // Only once there is a conversation the chat can take.
+        // THE WHOLE BOX IS THE WAY INTO THE CHAT: a click anywhere but on an
+        // email card, or on one of the box's own buttons, opens the
+        // conversation (full screen on the Mac, a push on the phone). Those
+        // are Buttons and take their own clicks first; this hears only what
+        // lands between them. Only once there is a conversation to open.
         .contentShape(RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
         .onTapGesture {
-            guard let openInChat, tapOpensChat else { return }
-            openInChat()
+            guard tapOpensChat else { return }
+            (openInChat ?? store.openSearchLaneInChat)()
         }
+        #if os(macOS)
+            .pointerStyle(tapOpensChat ? .link : nil)
+        #endif
         .padding(.horizontal, expanded ? 0 : Space.s14)
         .padding(.bottom, expanded ? 0 : Space.s8)
         // STRUCTURE ONLY, for AskBar's reason: rows arriving is a change worth
@@ -147,9 +150,12 @@ struct DeeperSearchBand: View {
     }
 
     /// The box's background tap goes to the chat: the same moment the expand
-    /// button is offered and enabled.
+    /// button is offered and enabled. The Mac's bar can watch a lane that is
+    /// still answering, so there that is any time the button is live.
     private var tapOpensChat: Bool {
-        search.laneStarted && !session.transcript.isEmpty && hostedChatOffered && hostedChatReady
+        guard search.laneStarted && !session.transcript.isEmpty else { return false }
+        if openInChat == nil { return store.canOpenSearchLaneInChat }
+        return hostedChatOffered && hostedChatReady
     }
 
     /// A caller-owned chat is offered once the lane has stopped talking: there
@@ -195,10 +201,16 @@ struct DeeperSearchBand: View {
                 }
             }
             if let line = answerLine, !line.isEmpty {
+                // Selectable on the phone, where a long press selects and a tap
+                // still opens the chat. On the Mac a click into selectable text
+                // is a selection, not the box's click, and the full answer is
+                // one click away in the chat, selectable there.
                 Text(line)
                     .font(Typo.row)
                     .foregroundStyle(Palette.ink)
-                    .textSelection(.enabled)
+                    #if os(iOS)
+                        .textSelection(.enabled)
+                    #endif
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }

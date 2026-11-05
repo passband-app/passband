@@ -1508,9 +1508,26 @@ final class AppStore {
     @ObservationIgnored var ruleDrafts: [String: RuleDraft] = [:]
     var groupEditor: GroupEditorRequest?
     var askBarOpen = false {
-        // Every way the bar closes ends the watch: it is a view of the lane
-        // for as long as this one opening lasts, never a mode ⌘K reopens into.
-        didSet { if !askBarOpen { askBarWatchesLane = false } }
+        // Every way the bar closes ends the watch and the full-screen layout:
+        // both belong to this one opening, never a mode ⌘K reopens into.
+        didSet {
+            if !askBarOpen {
+                askBarWatchesLane = false
+                askBarFullscreen = false
+            }
+        }
+    }
+    /// THE BAR TAKES THE WINDOW, for a conversation that came out of search
+    /// (the deeper search band, ⌘↩, a question from search history). The
+    /// answer there is the reason the reader asked for more room, so it gets
+    /// all of it; Esc closes it and the search panel is still underneath.
+    /// ⌘K on its own stays the modal. Set only on the ways in from search.
+    private(set) var askBarFullscreen = false
+
+    /// Open the bar full screen over the search it came from.
+    func openAskBarFromSearch() {
+        askBarFullscreen = true
+        askBarOpen = true
     }
     /// THE BAR IS SHOWING THE SEARCH LANE, LIVE. ⌘↩ over a lane that is still
     /// answering cannot hand the conversation over (a running loop owns its
@@ -3268,6 +3285,9 @@ final class AppStore {
         // page underneath the overlay". Through closeThread() so the reader's
         // inline reply is torn down with it, wherever the exit was taken from.
         closeThread()
+        // The full-screen ask bar keeps the rail beside it for the same reason
+        // the reader does, and a click there means the same thing: leave.
+        if askBarFullscreen { askBarOpen = false }
         // No-op on the same view+selection, so a repeat press cannot spam
         // identical history entries.
         let cur = history.indices.contains(historyIndex) ? history[historyIndex] : nil
@@ -4684,6 +4704,9 @@ final class AppStore {
     /// either route would end with this replacing it mid-answer.
     func openSearchLaneInChat() {
         guard searchLaneHasConversation, canOpenSearchLaneInChat else { return }
+        // The Mac's way in from search is always full screen (see
+        // `askBarFullscreen`); the phone pushes its own chat and never gets here.
+        askBarFullscreen = true
         if searchLane.running && !chatHoldsSearchLane {
             askBarOpen = true
             askBarWatchesLane = true

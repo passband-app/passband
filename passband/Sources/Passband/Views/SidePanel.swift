@@ -789,7 +789,7 @@ struct SearchView: View {
         // one, it is asked again.
         if entry.kind == .question {
             if store.openQuestionFromHistory(entry.text) {
-                store.askBarOpen = true
+                store.openAskBarFromSearch()
             } else {
                 focused = true
             }

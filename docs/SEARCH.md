@@ -489,6 +489,12 @@ pause glyph and the last state. Expanded (Enter in the bar), the band becomes
 the **right column** beside the results, which is the side-by-side the
 request asked for. Cards open the thread exactly as AskBar's do.
 
+On the Mac a click anywhere else on the band (or its expand arrow, the
+panel's "Open in chat", or ⌘↩) opens the conversation in AskBar's
+**full-screen** layout rather than the ⌘K modal: the answer gets the window,
+and Esc closes it back onto the search it came from, which never left. The
+phone already did the same with a push.
+
 The band names its trigger in small type ("no email has all four words") so a
 reader who did not want the lane can see why it ran and shorten the query.
 

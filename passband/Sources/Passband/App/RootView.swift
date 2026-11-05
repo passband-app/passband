@@ -608,7 +608,9 @@ struct MainShell: View {
                 .zIndex(5)
             }
             }
-            .blur(radius: store.modalOverlayOpen ? 9 : 0)
+            // Not under a full-screen ask bar: it is opaque, and a blur
+            // nobody can see is a whole-window filter every frame.
+            .blur(radius: store.modalOverlayOpen && !store.askBarFullscreen ? 9 : 0)
 
 
             // Global overlays: undo toasts, compose ceremony, palettes. OUTSIDE

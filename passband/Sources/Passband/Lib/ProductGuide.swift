@@ -588,7 +588,7 @@ enum ProductGuide {
         Deeper search:
         - When a search reads like a question ("where is the wifi password"), an agent reads the mail alongside the results and points at the answer with email cards and one line.
         - Settings > Assistant > Deeper search sets when it runs: Automatic, On request (a button to press) or Off. It has a model setting of its own.
-        - "Open in chat", or ⌘Enter, continues the same question in this assistant with room for follow-ups.
+        - Clicking anywhere on the deeper search box (except an email card, which opens that email), "Open in chat", or ⌘Enter opens the conversation full screen in this assistant, with room for follow-ups. Esc goes back to the search results.
         - On the iPhone it works the same way in the Search tab, above the results, with the same setting under Assistant on the Account page. The expand arrow on it opens the conversation in the agent chat once it has finished. The Ask the agent row above the results does what the Mac's Ask agent button does: it asks the agent, then opens the conversation in the chat once there is one. With Deeper search off it is turned off, as on the Mac.
         """
 

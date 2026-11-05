@@ -109,7 +109,9 @@ struct ActionLayer: View {
             if store.discardAsk != nil { DiscardConfirm() }
             // A mailto: link clicked over a composer with writing in it.
             if let ask = store.liveMailtoAsk { MailtoConfirm(ask: ask) }
-            if store.askBarOpen { AskBar { store.askBarOpen = false } }
+            if store.askBarOpen {
+                AskBar(fullscreen: store.askBarFullscreen) { store.askBarOpen = false }
+            }
             if store.shortcutsOpen {
                 ShortcutsOverlay(calendar: store.calendarPageAvailable) { store.shortcutsOpen = false }
             }

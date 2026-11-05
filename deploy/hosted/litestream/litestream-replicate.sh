@@ -38,7 +38,9 @@ cred="${CREDENTIALS_DIRECTORY:-}/age-identity"
 # age-keygen writes comment lines (created at, public key) and one
 # AGE-SECRET-KEY-1... line. Keep the key line only: the generated config splices
 # this value into a YAML flow sequence, where a newline or a '#' would break it.
-identity="$(grep '^AGE-SECRET-KEY-1' "$cred" || true)"
+# Strip CR, tabs and spaces (a key pasted back from a password manager can
+# carry them); newlines stay, so two keys are still counted as two.
+identity="$(grep '^AGE-SECRET-KEY-1' "$cred" | tr -d '\r\t ' || true)"
 [ -n "$identity" ] ||
   die "${cred} has no AGE-SECRET-KEY-1 line. Without the identity litestream cannot recover a replica position (issue #696), so it will not start"
 [ "$(printf '%s\n' "$identity" | wc -l)" -eq 1 ] ||

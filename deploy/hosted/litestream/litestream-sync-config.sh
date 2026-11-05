@@ -416,12 +416,22 @@ fi
 # installing the render, so the config stays unchanged and every tick retries
 # (and says so) until the unit is right; installing first would make the next
 # tick see "no change" and never restart.
-if ! systemctl cat "$SERVICE" 2>/dev/null | grep -q '^LoadCredential=age-identity:'; then
-  log "WARNING: NOT installing the new config or restarting ${SERVICE}: its unit has no LoadCredential=age-identity:."
+#
+# It asks systemd what it has LOADED, not what the file on disk says: a new
+# unit file without `systemctl daemon-reload` still restarts the old keyless
+# ExecStart. Loaded ExecStart = the wrapper is enough, because the wrapper
+# itself refuses to start without the key. (`systemctl show -p LoadCredential`
+# prints "[unprintable]" on systemd 259, so it cannot be the test.)
+loaded_exec="$(systemctl show -p ExecStart --value "$SERVICE" 2>/dev/null || true)"
+needs_reload="$(systemctl show -p NeedDaemonReload --value "$SERVICE" 2>/dev/null || true)"
+if [[ "$loaded_exec" != *"path=/usr/local/bin/litestream-replicate.sh "* || "$needs_reload" != "no" ]]; then
+  log "WARNING: NOT installing the new config or restarting ${SERVICE}: the loaded unit does not start"
+  log "  through litestream-replicate.sh (NeedDaemonReload=${needs_reload:-?})."
   log "  A restart without the identity breaks every tenant's backup (issue #696)."
-  log "  Install deploy/hosted/litestream/litestream.service, daemon-reload, then:"
-  log "  systemctl restart ${SERVICE}"
-  exit 0
+  log "  Install deploy/hosted/litestream/litestream.service, then:"
+  log "  systemctl daemon-reload && systemctl restart ${SERVICE}"
+  # Non-zero, so litestream-config.service shows failed rather than fine.
+  exit 1
 fi
 
 # Metadata directories, before litestream is told to look for them. 0700

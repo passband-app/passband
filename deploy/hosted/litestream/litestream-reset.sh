@@ -85,7 +85,8 @@ for label in "${labels[@]}"; do
 done
 log "moved ${#entries[@]} entr(y/ies) to ${aside}"
 
-since="$(date -u '+%Y-%m-%d %H:%M:%S')"
+# Epoch, not a formatted time: journalctl reads a bare --since in local time.
+since="@$(date +%s)"
 start_service
 trap - EXIT
 log "started ${SERVICE}; waiting up to ${WAIT_SECONDS}s for ${#labels[@]} snapshot(s)"

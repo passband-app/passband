@@ -174,7 +174,9 @@ The guards, so a keyless replicator cannot come back quietly:
   line, and `LoadCredential=` fails the unit outright if the key file is
   missing. Either one shows as the `litestream-down` alert.
 - `litestream-sync-config.sh` will not install a new config or restart the
-  service while the installed unit lacks `LoadCredential=age-identity:`.
+  service unless the unit systemd has **loaded** starts through
+  `litestream-replicate.sh` and no `daemon-reload` is pending. It exits
+  non-zero meanwhile, so `litestream-config.service` shows failed.
 - The `identities:` list is a YAML flow list on purpose: in a shell that has
   not exported the key it expands to `[]`, so the metadata-only CLI commands
   (`databases`, `generations`, `snapshots`, `wal`) work without the key, and
@@ -210,7 +212,7 @@ set -a; . /etc/litestream/env; set +a
 
 # The identity, for as long as this shell lives. /etc/litestream.yml already
 # references it by name; this gives the name a value.
-export LITESTREAM_AGE_IDENTITY="$(grep '^AGE-SECRET-KEY-1' /etc/litestream/backup-age.key)"
+export LITESTREAM_AGE_IDENTITY="$(grep '^AGE-SECRET-KEY-1' /etc/litestream/backup-age.key | tr -d '\r\t ')"
 
 # Look, without touching anything: restore a tenant to a scratch path.
 DB=/mnt/tenant-data/pvc-<uid>_tenants_alice-data/squelch.db

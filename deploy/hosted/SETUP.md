@@ -2464,7 +2464,7 @@ config is the restore config; what your shell lacks is the value. Two lines:
 
 ```sh
 set -a; . /etc/litestream/env; set +a
-export LITESTREAM_AGE_IDENTITY="$(grep '^AGE-SECRET-KEY-1' /etc/litestream/backup-age.key)"
+export LITESTREAM_AGE_IDENTITY="$(grep '^AGE-SECRET-KEY-1' /etc/litestream/backup-age.key | tr -d '\r\t ')"
 ```
 
 The config still contains no key material, only the name, so the secret exists

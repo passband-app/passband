@@ -684,7 +684,9 @@ groups:
     rules:
       # The #696 shape, and any other error a replica cannot get out of: its
       # last error is newer than its last upload, and it errored in the last
-      # five minutes, for ten minutes running. A transient R2 500 clears on
+      # five minutes, for ten minutes running. `last_over_time(...[10m])` on every
+      # series here, as on the tenant rules above, so a node-exporter roll or a
+      # remote-write gap does not empty the query and restart the `for` clock. A transient R2 500 clears on
       # the next upload. An idle tenant does not sync, so it cannot error and
       # cannot fire; once its database changes, it does.
       - uid: litestream-replica-stuck
@@ -712,9 +714,9 @@ groups:
               instant: true
               expr: >-
                 max by (cluster, tenant) (
-                  (passband_litestream_last_error_timestamp_seconds
-                    > passband_litestream_last_upload_timestamp_seconds)
-                  and (time() - passband_litestream_last_error_timestamp_seconds < 300)
+                  (last_over_time(passband_litestream_last_error_timestamp_seconds[10m])
+                    > last_over_time(passband_litestream_last_upload_timestamp_seconds[10m]))
+                  and (time() - last_over_time(passband_litestream_last_error_timestamp_seconds[10m]) < 300)
                 )
           - refId: C
             datasourceUid: __expr__
@@ -753,7 +755,7 @@ groups:
             model:
               refId: A
               instant: true
-              expr: time() - max by (cluster, tenant) (passband_litestream_last_upload_timestamp_seconds)
+              expr: time() - max by (cluster, tenant) (last_over_time(passband_litestream_last_upload_timestamp_seconds[10m]))
           - refId: C
             datasourceUid: __expr__
             model:
@@ -786,7 +788,7 @@ groups:
             model:
               refId: A
               instant: true
-              expr: max by (cluster) (passband_litestream_service_active)
+              expr: max by (cluster) (last_over_time(passband_litestream_service_active[10m]))
           - refId: C
             datasourceUid: __expr__
             model:

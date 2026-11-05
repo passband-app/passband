@@ -49,6 +49,7 @@ die() { printf 'litestream-health: FATAL: %s\n' "$*" >&2; exit 1; }
 
 state="${STATE_DIR}/tenants"
 cursor="${STATE_DIR}/cursor"
+next_cursor="${STATE_DIR}/cursor.next"
 [[ "$DRY_RUN" == "1" ]] || mkdir -p "$STATE_DIR" "$TEXTFILE_DIR"
 
 # Configured tenants. Metrics are written for exactly these, so an erased
@@ -66,13 +67,17 @@ read_journal() {
   elif [[ "$DRY_RUN" == "1" ]]; then
     journalctl -u "$SERVICE" --since -26h --no-pager -o short-unix -q
   elif [[ -s "$cursor" ]]; then
-    journalctl -u "$SERVICE" --cursor-file="$cursor" --no-pager -o short-unix -q
+    # journalctl advances the cursor file as it reads. Advance a copy, and
+    # promote it only after the state is saved, so a failed run re-reads its
+    # lines instead of losing them.
+    cp -f "$cursor" "$next_cursor"
+    journalctl -u "$SERVICE" --cursor-file="$next_cursor" --no-pager -o short-unix -q
   else
     # journalctl refuses --since together with --cursor-file ("Please specify
     # only one of ..."; seen on carrier, systemd 259), so the first run reads
     # the window with --show-cursor and saves the trailing cursor itself.
     journalctl -u "$SERVICE" --since -26h --no-pager -o short-unix -q --show-cursor |
-      awk -v c="$cursor" '/^-- cursor: /{ sub(/^-- cursor: /, ""); printf "%s", $0 > c; next } { print }'
+      awk -v c="$next_cursor" '/^-- cursor: /{ sub(/^-- cursor: /, ""); printf "%s", $0 > c; next } { print }'
   fi
 }
 
@@ -85,7 +90,9 @@ if [[ -z "$JOURNAL_FILE" ]] && systemctl is-active --quiet "$SERVICE"; then acti
 # only, sorted.
 new_state="$(
   {
-    [[ -f "$state" ]] && sed 's/^/S /' "$state"
+    # DRY_RUN reads the whole 26h window, so folding saved state in too
+    # would count the same error lines twice.
+    [[ -f "$state" && "$DRY_RUN" != "1" ]] && sed 's/^/S /' "$state"
     [[ -n "$configured" ]] && printf '%s\n' "$configured" | sed 's/^/C /'
     read_journal | sed 's/^/J /'
   } | awk '
@@ -112,17 +119,17 @@ render() {
   echo '# HELP passband_litestream_last_upload_timestamp_seconds Last WAL segment or snapshot litestream wrote for this tenant.'
   echo '# TYPE passband_litestream_last_upload_timestamp_seconds gauge'
   while read -r t up _err _n; do
-    [[ -n "$t" ]] && echo "passband_litestream_last_upload_timestamp_seconds{tenant=\"$t\"} $up"
+    [[ -n "$t" ]] || continue; echo "passband_litestream_last_upload_timestamp_seconds{tenant=\"$t\"} $up"
   done <<< "$new_state"
   echo '# HELP passband_litestream_last_error_timestamp_seconds Last replica error litestream logged for this tenant.'
   echo '# TYPE passband_litestream_last_error_timestamp_seconds gauge'
   while read -r t _up err _n; do
-    [[ -n "$t" ]] && echo "passband_litestream_last_error_timestamp_seconds{tenant=\"$t\"} $err"
+    [[ -n "$t" ]] || continue; echo "passband_litestream_last_error_timestamp_seconds{tenant=\"$t\"} $err"
   done <<< "$new_state"
   echo '# HELP passband_litestream_errors_total Replica errors litestream logged for this tenant.'
   echo '# TYPE passband_litestream_errors_total counter'
   while read -r t _up _err n; do
-    [[ -n "$t" ]] && echo "passband_litestream_errors_total{tenant=\"$t\"} $n"
+    [[ -n "$t" ]] || continue; echo "passband_litestream_errors_total{tenant=\"$t\"} $n"
   done <<< "$new_state"
   echo '# HELP passband_litestream_service_active 1 if litestream.service is active.'
   echo '# TYPE passband_litestream_service_active gauge'
@@ -139,9 +146,13 @@ fi
 
 # Write-then-rename, both files: node-exporter must never read half a file,
 # and a crash mid-run must not lose the state.
-printf '%s\n' "$new_state" > "${state}.tmp"
-mv -f "${state}.tmp" "$state"
+# Order: metrics, then state, then cursor. A run that fails anywhere before
+# the cursor moves re-reads its lines next time; one that fails before the
+# state moves has saved nothing, so nothing is counted twice.
 out="${TEXTFILE_DIR}/litestream.prom"
 render > "${out}.tmp"
 chmod 0644 "${out}.tmp"
 mv -f "${out}.tmp" "$out"
+printf '%s\n' "$new_state" > "${state}.tmp"
+mv -f "${state}.tmp" "$state"
+if [[ -f "$next_cursor" ]]; then mv -f "$next_cursor" "$cursor"; fi

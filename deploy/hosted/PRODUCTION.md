@@ -1779,8 +1779,8 @@ drill: run it against a throwaway tenant first if one is to hand.
 - **`/mcp` auth** is built (OAuth through WorkOS AuthKit, 2026-10-01) and
   live: verified 2026-11-05 on one tenant (`401` with the AuthKit
   `resource_metadata` challenge, issuer `https://secure-soul-15.authkit.app`).
-  The fleet-wide Ingress check (SETUP.md, "Publishing the agent door") is
-  still to record here. Tenant Ingresses publish `/client`,
+  The fleet-wide Ingress check (SETUP.md, "Publishing the agent door") the
+  same day: all 11 tenants route `/mcp` and the protected-resource metadata. Tenant Ingresses publish `/client`,
   `/console` and `/t` only until the issuer is set, and
   setting it has prerequisites: the daemon image that understands the new env
   rolled first, the control plane holding a WorkOS API key, and the pre-publish

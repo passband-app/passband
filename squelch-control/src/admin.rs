@@ -49,6 +49,7 @@ use crate::invites;
 use crate::pages;
 use crate::state::ControlState;
 use crate::store::{USER_APPROVED, USER_PENDING, UserRow};
+use crate::warden::WardenError;
 
 /// Ceiling on the presented admin token. Well above any token an operator
 /// would generate, because a value truncated on the way in fails the compare
@@ -84,6 +85,39 @@ const INVITE_SPENT: &str = "That invite has already been used, so nothing was se
      issue a code with the CLI.";
 
 const STORE_TROUBLE: &str = "The store did not answer. Nothing changed, so try again.";
+
+/// A delete pressed on a row that never became a mailbox.
+const NO_MAILBOX: &str = "That row has no mailbox to delete.";
+
+/// The warden has no purge route: it is older than this button. Said plainly,
+/// because the alternative reading ("nothing to delete") is false and would
+/// leave the operator re-signing up into the old mail.
+const WARDEN_TOO_OLD: &str = "The warden does not support deleting a mailbox yet. Roll the warden to a release \
+     that has the purge route, then try again. Nothing was deleted.";
+
+/// The purge outlasted its budget. The warden may well have finished, and the
+/// route is idempotent, so the answer is the same button.
+const PURGE_TIMED_OUT: &str = "The warden did not answer in time and may still be deleting. Press Delete again \
+     to finish: it is safe to repeat.";
+
+/// Any other warden failure. The warden stops at its first error and leaves a
+/// cancelled tenant, which nothing brings back up on its own, so a retry is
+/// the whole remedy.
+const PURGE_FAILED: &str = "The warden could not finish deleting that mailbox. It is stopped, and pressing \
+     Delete again picks up where it left off. Nothing in the control store was changed.";
+
+/// The warden destroyed the mailbox and the control store did not forget it.
+/// The label stays taken here until a retry lands.
+const PURGE_UNRECORDED: &str = "The mailbox was destroyed but the control store did not record it. Press \
+     Delete again to finish.";
+
+/// Destroyed and forgotten, and one of the LLM keys is still live in Bifrost.
+/// That matters for the very thing this button is for: the gateway enforces
+/// unique key names, so a re-signup under the same label cannot mint its own
+/// until the old one goes.
+const KEYS_NOT_REVOKED: &str = "The mailbox was deleted, but its LLM keys could not be revoked in Bifrost. \
+     A new signup under the same username will come up without keys until they are; the ids \
+     are in the control log.";
 
 /// A direct invite typed as something that is not an address. Says what is
 /// wrong, unlike the refusals above it: this one is the operator's own typo and
@@ -475,6 +509,121 @@ pub async fn send(State(state): State<ControlState>, headers: HeaderMap, body: B
         Some(problem) => dashboard(&state, Some(problem)).await,
         None => back_to_dashboard(),
     }
+}
+
+/// `POST /admin/delete` — destroy a mailbox, so the same person can be
+/// invited and sign up again from nothing.
+///
+/// THE QUESTION IS THE LABEL, TYPED. Every other button on this board can be
+/// undone by another one; this deletes somebody's mail. So the confirmation is
+/// not a second press of a button in the same place but the tenant's label typed
+/// into a box, and a mismatch asks again rather than acting.
+///
+/// ORDER, from the outside in: the warden first, because it holds the data and
+/// is the step that can half-fail; then the LLM keys, while the store still
+/// names them; then the store, which is what frees the label and the address
+/// here. Each step is idempotent, so every failure is answered by pressing the
+/// button again.
+pub async fn delete(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !is_admin(&state, &headers) {
+        return signed_out(&state);
+    }
+    if !same_origin(&state, &headers) {
+        return cross_origin(&state, &headers);
+    }
+    let Some(id) = row_id(&body) else {
+        return dashboard(&state, Some(NO_SUCH_ROW)).await;
+    };
+    let row = match state.store().user_entry(id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return dashboard(&state, Some(NO_SUCH_ROW)).await,
+        Err(e) => {
+            tracing::error!(id, error = %e, "reading a user row failed");
+            return dashboard(&state, Some(STORE_TROUBLE)).await;
+        }
+    };
+    let Some(label) = row.tenant_label.clone() else {
+        return dashboard(&state, Some(NO_MAILBOX)).await;
+    };
+
+    let typed = field_capped(&body, "label", crate::labels::MAX_LABEL_LEN + 1);
+    if !confirmed(&body) || typed.trim() != label {
+        // A typed label that is wrong says so; arriving from the board's button
+        // (nothing typed yet) does not.
+        let mismatch =
+            confirmed(&body).then_some("That does not match the username. Nothing was deleted.");
+        return pages::admin_confirm_delete(id, &row.email, &label, mismatch);
+    }
+
+    match state.warden().purge(&label).await {
+        Ok(()) => {}
+        Err(e) => {
+            tracing::error!(id, label = %label, error = %e, "purging the tenant failed");
+            let message = match e {
+                WardenError::NotFound => WARDEN_TOO_OLD,
+                WardenError::TimedOut { .. } => PURGE_TIMED_OUT,
+                _ => PURGE_FAILED,
+            };
+            return dashboard(&state, Some(message)).await;
+        }
+    }
+
+    let keys_ok = revoke_llm_keys(&state, &label).await;
+
+    match state.store().purge_tenant(&label, id).await {
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(id, label = %label, error = %e, "forgetting the purged tenant failed");
+            return dashboard(&state, Some(PURGE_UNRECORDED)).await;
+        }
+    }
+    tracing::warn!(id, label = %label, "admin deleted a mailbox");
+
+    if keys_ok {
+        back_to_dashboard()
+    } else {
+        dashboard(&state, Some(KEYS_NOT_REVOKED)).await
+    }
+}
+
+/// Revoke both of a tenant's Bifrost keys, by the ids the store holds.
+/// `false` when either one could not be revoked; the ids are logged so the
+/// operator can finish by hand. A deployment with no gateway has nothing to
+/// revoke and answers `true`.
+async fn revoke_llm_keys(state: &ControlState, label: &str) -> bool {
+    let Some((bifrost, _)) = state.bifrost() else {
+        return true;
+    };
+    let (triage, assistant) = match (
+        state.store().tenant_vk(label).await,
+        state.store().tenant_assistant_vk(label).await,
+    ) {
+        (Ok(t), Ok(a)) => (t, a),
+        (Err(e), _) | (_, Err(e)) => {
+            tracing::error!(label = %label, error = %e, "reading the tenant's LLM key ids failed");
+            return false;
+        }
+    };
+    let mut ok = true;
+    for (kind, id) in [("triage", triage), ("assistant", assistant)] {
+        if let Some(id) = id
+            && let Err(e) = bifrost.revoke_virtual_key(&id).await
+        {
+            tracing::error!(
+                label = %label,
+                kind,
+                vk_id = %id,
+                error = %e,
+                "LLM KEY NOT REVOKED for a deleted mailbox; revoke it by hand"
+            );
+            ok = false;
+        }
+    }
+    ok
 }
 
 /// Mint one invite for an approved row and mail it. `Some(message)` is a banner

@@ -189,8 +189,8 @@
     if (s.cc) draft.cc = s.cc;
     if (typeof s.body === "string") draft.body = s.body;
     render();
-    if (s.opened_on_mac === true) {
-      status("Opened on your Mac");
+    if (s.opened_on_mac === true || s.notified_phone === true) {
+      status(s.opened_on_mac ? "Opened on your Mac" : "Sent to your phone");
       $("open-label").textContent = "Open again";
     } else {
       status("Saved in Passband drafts");

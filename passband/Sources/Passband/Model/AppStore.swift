@@ -1529,6 +1529,25 @@ final class AppStore {
     /// ⌘K on its own stays the modal. Set only on the ways in from search.
     private(set) var askBarFullscreen = false
 
+    /// Whether the bar is showing a conversation that came out of search, which
+    /// is what its header names ("deeper search" rather than "ask your inbox").
+    var askBarShowsSearch: Bool {
+        askBarWatchesLane || chatHoldsSearchLane || chatQuestionKey != nil
+    }
+
+    /// ⌘K ON ITS OWN: talking to the agent, which is not search. It never
+    /// shows a conversation that came out of search (adopted from the deeper
+    /// search lane, or a question brought back from search history): that
+    /// one is saved under its question in search history, and ⌘K starts clean
+    /// instead. A ⌘K conversation of its own is kept as it always was.
+    func openAskBar() {
+        if !askBarOpen, chatHoldsSearchLane || chatQuestionKey != nil {
+            askBarWatchesLane = false
+            assistant.clear()
+        }
+        askBarOpen = true
+    }
+
     /// Open the bar full screen over the search it came from.
     func openAskBarFromSearch() {
         askBarFullscreen = true

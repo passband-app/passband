@@ -630,6 +630,7 @@ enum ProductGuide {
     private static let assistant = """
         This assistant:
         - ⌘K opens it from anywhere. Esc closes the bar, and the conversation stays until ⌘⇧K (new chat) or an account switch.
+        - ⌘K is its own chat, separate from search. A deeper search opened full screen is not what ⌘K shows next: ⌘K starts fresh, and that search's conversation comes back from search history.
         - If an email is open when the question is asked, an "in:" chip names it and "this email" means that one.
         - It can search and read mail, look up shipments, receipts, bills and calendar items, explain why an email was triaged the way it was, show emails as clickable cards, and answer questions about Passband itself.
         - It marks things done, writes sender rules and saves drafts without asking, because those stay inside Passband.

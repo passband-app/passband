@@ -660,7 +660,12 @@ final class AssistantSession {
         elidedAtRunStart = elidedResults
         turnContext[history.count] = questionContext(pin)
         append(.user, text: question)
-        history.append(.init(role: "user", content: .text(question)))
+        // THE LANE IS A SEARCH, NOT A CHAT: the model is told it is reading a
+        // search box ("User is searching for: …"), so a bare "rekordbox" reads
+        // as a thing to find rather than a message to answer. The transcript
+        // keeps the reader's own words.
+        let wire = lane == .search ? SearchLanePrompt.searchingFor(question) : question
+        history.append(.init(role: "user", content: .text(wire)))
         // A fresh answer cites its own sources.
         cites.removeAll()
         readIds.removeAll()

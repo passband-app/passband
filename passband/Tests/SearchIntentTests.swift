@@ -446,6 +446,10 @@ struct SearchIntentTests {
         expect(
             !refinement.contains("\u{2014}") && !refinement.contains("\u{2013}"),
             "nor in a refinement")
+        expect(
+            SearchLanePrompt.searchingFor("when did i download rekordbox")
+                == "User is searching for: when did i download rekordbox",
+            "a search starts as \"User is searching for: <query>\"")
     }
 
     static func promptFramesMailAsData() {

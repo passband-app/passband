@@ -715,7 +715,7 @@ struct MainShell: View {
             KeyBinding("]", "forward", meta: true, allowInInput: true) { store.goForward() })
         bindings.append(
             KeyBinding("k", "ask your inbox", meta: true, allowInInput: true) {
-                store.askBarOpen = true
+                store.openAskBar()
             })
         // ⌘⇧K starts over. Bound as the CAPITAL letter, which is how the
         // registry spells shift for a letter key, and matched by the exact pass

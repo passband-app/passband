@@ -269,7 +269,7 @@ struct ShortcutsOverlay: View {
     /// there had just hidden it.
     private func askAgent() {
         onClose()
-        store.askBarOpen = true
+        store.openAskBar()
     }
 
     var body: some View {

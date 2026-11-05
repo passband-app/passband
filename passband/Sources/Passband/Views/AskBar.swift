@@ -171,9 +171,10 @@ struct AskBar: View {
 
     private var header: some View {
         HStack(spacing: Space.scaled(7)) {
-            // The wordmark's face ("passband" in the mail bar), as the deeper
-            // search band's header is: the same feature, the same name.
-            Text("deeper search")
+            // The wordmark's face ("passband" in the mail bar). Named for what
+            // it holds: a search's conversation is deeper search, as the band
+            // it grew out of says; plain ⌘K is talking to the agent.
+            Text(store.askBarShowsSearch ? "deeper search" : "ask your inbox")
                 .font(Typo.serif(19, weight: .medium))
                 .foregroundStyle(Palette.ink)
             // WHAT THE AGENT CAN SEE, said before the question is asked: the

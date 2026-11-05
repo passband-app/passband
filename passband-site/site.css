@@ -42,8 +42,9 @@ code { font-family: var(--mono); font-size: 0.88em; }
 .brand img { width: 42px; height: auto; }
 .brand span { font-family: var(--serif); font-size: 1.5rem; font-weight: 500; }
 .nav { display: flex; gap: 1.4rem; font-size: 0.9rem; }
-.nav a, .foot a { color: var(--faint); }
-.nav a:hover, .foot a:hover { color: var(--ink); text-decoration: none; }
+.nav a { color: var(--faint); }
+.foot nav a { color: var(--dim); }
+.nav a:hover, .foot nav a:hover { color: var(--ink); text-decoration: none; }
 .nav [aria-current] { color: var(--ink); }
 
 /* THE HERO sits on the analyzer's graticule, faded at the edges, so the
@@ -96,9 +97,20 @@ h2 em { font-style: normal; color: var(--accent-ink); }
 .fine { margin-top: 1rem !important; font-size: 0.82rem; color: var(--faintest) !important; }
 
 .updated { margin: 0; font-size: 0.85rem; color: var(--faint); }
-.foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 1rem; margin-top: clamp(4rem, 9vw, 7rem);
-  padding: 1.75rem var(--gutter) 2.25rem; border-top: 1px solid var(--hair); font-size: 0.85rem; color: var(--faintest); }
-.foot nav { display: flex; flex-wrap: wrap; gap: 1.25rem; }
+/* FOOTER (mirrors App.tsx .pb-foot): a faded mark, then three link columns, then the copyright line. */
+.foot { margin-top: clamp(4rem, 9vw, 7rem); padding: clamp(3rem, 7vw, 4.5rem) var(--gutter) 2.25rem; border-top: 1px solid var(--hair); }
+/* The pages' sections are 84rem including their gutters; this matches their content edge. */
+.foot-grid, .foot-legal { max-width: calc(84rem - 2 * var(--gutter)); margin-inline: auto; }
+.foot-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 3rem; }
+.foot-mark { width: fit-content; align-self: start; opacity: 0.35; filter: grayscale(1); transition: opacity 0.2s; }
+.foot-mark:hover { opacity: 0.6; }
+.foot-mark img { display: block; width: 3.5rem; height: auto; }
+.foot nav { display: flex; flex-direction: column; align-items: flex-start; gap: 0.75rem; }
+.foot nav p { margin: 0 0 0.75rem; color: var(--faintest); font-size: 0.95rem; }
+.foot nav a { color: var(--dim); font-size: 0.95rem; }
+.foot-legal { margin-top: clamp(3rem, 7vw, 4.5rem); margin-bottom: 0; color: var(--faintest); font-size: 0.85rem; }
+@media (max-width: 820px) { .foot-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 420px) { .foot-grid { grid-template-columns: minmax(0, 1fr); gap: 2.25rem; } }
 
 @media (max-width: 820px) { .nav a:not(.keep) { display: none; } }
 

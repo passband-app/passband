@@ -574,9 +574,19 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-close .pb-h2 { margin: 0; }
 /* No meter behind this one, so no clearance for it under the label. */
 .pb-close .pb-cta { padding: 0.9rem 1.9rem; }
-.pb-foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 1rem;
-  padding: 1.75rem var(--gutter) 2.25rem; border-top: 1px solid var(--hair); font-size: 0.85rem; color: var(--faintest); }
-.pb-foot nav { display: flex; flex-wrap: wrap; gap: 1.25rem; }
+/* FOOTER: a faded mark, then three link columns, then the copyright line. */
+.pb-foot { padding: clamp(3rem, 7vw, 4.5rem) var(--gutter) 2.25rem; border-top: 1px solid var(--hair); }
+.pb-foot-grid, .pb-foot-legal { max-width: 84rem; margin-inline: auto; }
+.pb-foot-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 3rem; }
+.pb-foot-mark { width: fit-content; align-self: start; opacity: 0.35; filter: grayscale(1); transition: opacity 0.2s; }
+.pb-foot-mark:hover { opacity: 0.6; }
+.pb-foot-mark img { display: block; width: 3.5rem; height: auto; }
+.pb-foot nav { display: flex; flex-direction: column; align-items: flex-start; gap: 0.75rem; }
+.pb-foot nav p { margin: 0 0 0.75rem; color: var(--faintest); font-size: 0.95rem; }
+.pb-foot nav a { color: var(--dim); font-size: 0.95rem; }
+.pb-foot-legal { margin-top: clamp(3rem, 7vw, 4.5rem); margin-bottom: 0; color: var(--faintest); font-size: 0.85rem; }
+@media (max-width: 820px) { .pb-foot-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 420px) { .pb-foot-grid { grid-template-columns: minmax(0, 1fr); gap: 2.25rem; } }
 
 @media (prefers-reduced-motion: reduce) {
   .pb-cue { transition-duration: 0.01ms; }
@@ -2528,15 +2538,29 @@ export function App() {
       </section>
 
       <footer className="pb-foot">
-        <span>Passband</span>
-        <nav>
-          <a href="/about">About</a>
-          <a href="/self-host">Self-host</a>
-          <a href="/trust">Trust</a>
-          <a href="/privacy">Privacy</a>
-          <a href="/terms">Terms</a>
-          <a href="https://github.com/passband-app/passband">GitHub</a>
-        </nav>
+        <div className="pb-foot-grid">
+          <a className="pb-foot-mark" href="/" aria-label="Passband home"><img src="/mark.svg" alt="" width={42} height={23} /></a>
+          <nav aria-label="Legal">
+            <p>Legal</p>
+            <a href="/terms">Terms of Service</a>
+            <a href="/privacy">Privacy Policy</a>
+          </nav>
+          <nav aria-label="Security">
+            <p>Security</p>
+            <a href="/trust">Trust</a>
+            <a href="/security">Threat model</a>
+            <a href="mailto:braelyn@passband.app">Report a vulnerability</a>
+          </nav>
+          <nav aria-label="Connect">
+            <p>Connect</p>
+            <a href="/about">About</a>
+            <a href="/self-host">Self-host</a>
+            <a href="https://github.com/passband-app/passband/releases" target="_blank" rel="noopener noreferrer">Changelog</a>
+            <a href="https://github.com/passband-app/passband" target="_blank" rel="noopener noreferrer">GitHub</a>
+            <a href="mailto:braelyn@passband.app">Email</a>
+          </nav>
+        </div>
+        <p className="pb-foot-legal">&copy; 2026 Passband. All rights reserved.</p>
       </footer>
     </main>
   );

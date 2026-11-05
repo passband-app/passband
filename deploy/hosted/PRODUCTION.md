@@ -1776,11 +1776,11 @@ drill: run it against a throwaway tenant first if one is to hand.
   runtime does not drop when the connection goes; it changes the wire shape and
   wants its own design pass. Until then, nothing about the warden's job should
   depend on whether an operator's terminal is still listening, and it does.
-- **`/mcp` auth** is built (OAuth through WorkOS AuthKit, 2026-10-01), and
-  the checked-in `15-warden-config.yaml` now sets
-  `SQUELCH_WARDEN_MCP_OAUTH_ISSUER`. Whether carrier runs that config has not
-  been verified and recorded here (the CASA assessment needs it:
-  `docs/VERIFICATION.md`, Blockers). Tenant Ingresses publish `/client`,
+- **`/mcp` auth** is built (OAuth through WorkOS AuthKit, 2026-10-01) and
+  live: verified 2026-11-05 on one tenant (`401` with the AuthKit
+  `resource_metadata` challenge, issuer `https://secure-soul-15.authkit.app`).
+  The fleet-wide Ingress check (SETUP.md, "Publishing the agent door") is
+  still to record here. Tenant Ingresses publish `/client`,
   `/console` and `/t` only until the issuer is set, and
   setting it has prerequisites: the daemon image that understands the new env
   rolled first, the control plane holding a WorkOS API key, and the pre-publish

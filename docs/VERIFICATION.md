@@ -87,7 +87,12 @@ Ordered by what stops the submission soonest.
       on before the move, which had grown a multi-gigabyte `logs.db`, went
       with the Railway project (deleted 2026-11-05, operator-confirmed).
       **Do this before the assessment, not during.**
-- [ ] **`/mcp` auth: confirm it is live.** Built (OAuth through WorkOS
+- [x] **`/mcp` auth: confirm it is live.** Checked 2026-11-05 on
+      `braelyn.passband.email`: `/mcp` without a token answers `401` with the
+      `resource_metadata` challenge, and the metadata names
+      `https://secure-soul-15.authkit.app`. Still worth running the fleet-wide
+      Ingress check (every tenant lists `/mcp`) before the assessment.
+      Original note: Built (OAuth through WorkOS
       AuthKit, 2026-10-01), and the checked-in warden config sets
       `SQUELCH_WARDEN_MCP_OAUTH_ISSUER` (`deploy/hosted/15-warden-config.yaml`).
       Before the assessment, prove carrier runs that config: an unauthenticated

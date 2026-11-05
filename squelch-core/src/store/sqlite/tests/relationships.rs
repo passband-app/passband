@@ -1073,6 +1073,7 @@ fn the_sealed_count_agrees_with_the_macro_arm_by_arm() {
 #[test]
 fn a_broken_ledger_cannot_fail_a_context_or_a_card_without_the_flag() {
     use crate::sync::triage_worker::attach_relationship;
+    use crate::triage::context::EvidenceReader as _;
     let (store, acct) = store();
     let id = triaged(acct, "a", "t1")
         .from(DAN)
@@ -1102,6 +1103,19 @@ fn a_broken_ledger_cannot_fail_a_context_or_a_card_without_the_flag() {
     // On, the fault is logged and the run goes on without the block.
     attach_relationship(&store, acct, &mut context, true);
     assert!(context.relationship.is_none());
+
+    // And `read_sender_history` with the flag on: the history is served, the
+    // block left out.
+    let history = crate::sync::triage_worker::StoreEvidence::new(&store, acct, 5)
+        .with_relationship(true)
+        .read(&crate::triage::context::EvidenceRequest::ReadSenderHistory { sender: DAN.into() })
+        .expect("a broken ledger does not fail the read");
+    assert!(
+        history.data.get("relationship").is_none(),
+        "{}",
+        history.data
+    );
+    assert_eq!(history.data["messages"].as_array().unwrap().len(), 1);
 
     let card = store
         .person_record(acct, DAN)

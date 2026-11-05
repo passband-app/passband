@@ -10203,6 +10203,49 @@ fn ledger_app(understanding: bool) -> axum::Router {
 }
 
 #[tokio::test]
+async fn a_broken_ledger_leaves_the_card_answering_without_its_key() {
+    // FLAG ON, LEDGER UNREADABLE (its table dropped from a second connection,
+    // a stand-in for any fault in it): the card still answers, everything but
+    // `relationship` on it, and the key is absent rather than the call failing.
+    use squelch_core::features::{CALENDAR, Features, UNDERSTANDING};
+    let dir = std::env::temp_dir().join(format!("squelch-ledger-card-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("store.sqlite3");
+    let store = Arc::new(SqliteStore::open(&path).unwrap());
+    let acct = store.ensure_account("me@example.com").unwrap();
+    store
+        .upsert_message(&msg(acct, "g1", "t1", "lunch?", "body"))
+        .unwrap();
+    store.recompute_all_relationships(acct).unwrap();
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("DROP TABLE relationships;")
+        .unwrap();
+    assert!(
+        store.relationship(acct, "alice@example.com").is_err(),
+        "control: the ledger read fails"
+    );
+    let app = router(
+        ApiState::new(store.clone(), acct, TOKEN)
+            .with_features(Features::pinned([CALENDAR, UNDERSTANDING])),
+    );
+    let resp = app
+        .oneshot(authed("GET", "/client/person?addr=alice%40example.com"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let card = body_json(resp).await;
+    assert_eq!(card["received"]["count"], 1, "control: it is Alice's card");
+    assert!(
+        !card.as_object().unwrap().contains_key("relationship"),
+        "{card}"
+    );
+    drop(store);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn the_relationship_ledger_is_not_served_without_the_understanding_flag() {
     // OFF: the list route is the opaque 404, and the contact card carries no
     // `relationship` key at all (what an older daemon serves), though the

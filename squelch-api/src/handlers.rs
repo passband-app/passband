@@ -3538,8 +3538,17 @@ pub async fn get_person(
         .enabled(squelch_core::features::UNDERSTANDING);
     let (p, relationship) = store_call(&state, move |store, account_id| {
         let record = store.person_record(account_id, &addr)?;
+        // A ledger that cannot answer leaves the key off the card (as with
+        // the flag off) rather than failing the whole card. The log line
+        // carries no address: the card is one person's.
         let relationship = if understanding {
-            Some(store.relationship(account_id, &addr)?)
+            match store.relationship(account_id, &addr) {
+                Ok(row) => Some(row),
+                Err(e) => {
+                    eprintln!("squelch: relationship ledger unreadable ({e}); card without it");
+                    None
+                }
+            }
         } else {
             None
         };

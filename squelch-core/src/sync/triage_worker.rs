@@ -161,8 +161,16 @@ impl<S: Store> StoreEvidence<'_, S> {
                 // The sender's relationship row rides at the top of the
                 // result, the same block the initial context carries for the
                 // message's own sender (docs/UNDERSTANDING.md §2.1).
+                // A ledger that cannot answer leaves the block out of the
+                // result, as `attach_relationship` does for the context: it is
+                // evidence, and a fault in it must not fail the read.
                 if self.relationship {
-                    relationship = self.store.relationship_context(self.account, sender)?;
+                    match self.store.relationship_context(self.account, sender) {
+                        Ok(block) => relationship = block,
+                        Err(e) => eprintln!(
+                            "squelch: relationship ledger unreadable ({e}); sender history without it"
+                        ),
+                    }
                 }
                 self.store
                     .agent_sender_history(self.account, sender, self.limit)?

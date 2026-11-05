@@ -638,7 +638,9 @@ pub fn context_as_of(
     // THE RELATIONSHIP LEDGER HAS NO HISTORY: a row is today's recount, and
     // replaying it at `t` would hand the model replies the owner had not yet
     // written. Dropped whole, which is also what a context before the ledger
-    // existed carried.
+    // existed carried. A context load no longer fills it (only the worker
+    // attaches it, under the flag), but this stays for contexts that already
+    // carry one: an exported case deserialized with the field set.
     context.relationship = None;
     context.corrections.retain(|correction| {
         let field = correction

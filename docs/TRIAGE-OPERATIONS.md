@@ -463,8 +463,9 @@ context and `read_sender_history` carry no `relationship` key,
 `relationship` key. With it on, the worker reads and attaches the sender's
 block (`triage_worker::attach_relationship`), `StoreEvidence` serves it in
 `read_sender_history`, and the card handler reads the row beside the record.
-A ledger that cannot answer leaves the block out of a run rather than failing
-it.
+A ledger that cannot answer leaves the block out of a run, out of
+`read_sender_history`'s result and off the card, rather than failing any of
+them; the log line names no address.
 
 A recount is bounded. `received_count` and the first arrival are one
 index-only walk of `idx_messages_from_received`, less the address's sealed

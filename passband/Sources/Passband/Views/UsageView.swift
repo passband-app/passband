@@ -52,7 +52,7 @@ struct UsageView: View {
             // The staged page (`--fixture-usage`) is a demo of the section at
             // the bottom, so it opens there.
             .task(id: series != nil) {
-                guard FixtureMode.stagesUsage, series != nil else { return }
+                guard FixtureMode.stagesUsage, showsUnderstanding, series != nil else { return }
                 try? await Task.sleep(for: .milliseconds(900))
                 withAnimation(.smooth(duration: 0.3)) {
                     scroller.scrollTo(FixtureMode.stageValue("scroll") ?? UnderstandingSection.anchor, anchor: .top)
@@ -86,6 +86,10 @@ struct UsageView: View {
         assistant = AssistantUsageLedger.read()
     }
 
+    private var showsUnderstanding: Bool {
+        UnderstandingGate.showsSection(store.hiddenFeatures, staged: FixtureMode.stagesUsage)
+    }
+
     // MARK: - layout
 
     @ViewBuilder private var content: some View {
@@ -104,8 +108,11 @@ struct UsageView: View {
                     assistantCard.frame(width: Typo.measure(280))
                 }
                 // Not scoped by the window: who the mail says the owner is
-                // is the ledger's whole span, and the section says so.
-                UnderstandingSection().id(UnderstandingSection.anchor)
+                // is the ledger's whole span, and the section says so. Behind
+                // the `understanding` flag, whole: see UnderstandingGate.
+                if showsUnderstanding {
+                    UnderstandingSection().id(UnderstandingSection.anchor)
+                }
             }
             // A refetch keeps the frame: the last render dims rather than
             // dropping to a spinner, so nothing jumps when the window changes.

@@ -238,6 +238,19 @@ struct UnderstandingSeries: Equatable {
     }
 }
 
+// MARK: - the gate
+
+/// Whether the Understanding section is on the page at all. THE FLAG IS THE
+/// WHOLE GATE: without `understanding` the owner never learns the ledger
+/// exists, and the daemon answers 404 on the routes besides (the section's
+/// second line of defence, for a daemon older than that rule). The fixture
+/// stage shows everything, as a preview does.
+enum UnderstandingGate {
+    static func showsSection(_ features: HiddenFeatures, staged: Bool) -> Bool {
+        staged || features.has(.understanding)
+    }
+}
+
 // MARK: - memory
 
 /// The memory entries as the list draws them: one group per kind, in a fixed

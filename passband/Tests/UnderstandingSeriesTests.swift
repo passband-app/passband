@@ -30,6 +30,7 @@ struct UnderstandingSeriesTests {
         withdrawnEntriesAreRetiredExpiredOrOver()
         nearestPicksTheClosestWithinReach()
         noDashesInAnythingTheSectionSays()
+        theSectionIsBehindTheFlag()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -337,6 +338,20 @@ struct UnderstandingSeriesTests {
             "the vendor's corrections are said")
         expect(Set(MemoryGrouping.groups(memory.entries, now: now).map(\.kind)) == Set(MemoryKind.allCases),
             "the memory fixture fills every kind, the unknown one included")
+    }
+
+    static func theSectionIsBehindTheFlag() {
+        expect(!UnderstandingGate.showsSection(.none, staged: false), "no stats yet: no section")
+        expect(!UnderstandingGate.showsSection(HiddenFeatures(daemon: nil), staged: false), "an older daemon's silence: no section")
+        expect(!UnderstandingGate.showsSection(HiddenFeatures(daemon: ["renotify"]), staged: false),
+            "other flags on, understanding off: no section")
+        expect(!UnderstandingGate.showsSection(HiddenFeatures(daemon: ["Understanding"]), staged: false),
+            "the key is matched exactly")
+        expect(UnderstandingGate.showsSection(HiddenFeatures(daemon: ["understanding"]), staged: false),
+            "the flag on: the section")
+        expect(UnderstandingGate.showsSection(.none, staged: true), "the fixture stage shows it regardless")
+        expect(HiddenFeature.understanding.key == UnderstandingFlag.key,
+            "the app's flag and the fixture's claimed key are one string")
     }
 
     static func expect(_ cond: Bool, _ what: String) {

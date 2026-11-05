@@ -243,6 +243,7 @@ run_suite fixture-api \
   Sources/Passband/Model/FixtureMail.swift \
   Sources/Passband/Lib/UsageSeries.swift \
   Sources/Passband/Model/UnderstandingWire.swift \
+  Sources/Passband/Lib/HiddenFeatures.swift \
   Sources/Passband/Lib/UnderstandingSeries.swift \
   Sources/Passband/Lib/UnderstandingFixture.swift \
   Sources/Passband/Model/FixtureAPI.swift \
@@ -610,6 +611,7 @@ run_suite understanding-series \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Lib/UsageSeries.swift \
   Sources/Passband/Model/UnderstandingWire.swift \
+  Sources/Passband/Lib/HiddenFeatures.swift \
   Sources/Passband/Lib/UnderstandingSeries.swift \
   Sources/Passband/Lib/UnderstandingFixture.swift \
   Tests/UnderstandingSeriesTests.swift
@@ -622,6 +624,7 @@ run_suite understanding-wire \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Lib/UsageSeries.swift \
   Sources/Passband/Model/UnderstandingWire.swift \
+  Sources/Passband/Lib/HiddenFeatures.swift \
   Sources/Passband/Lib/UnderstandingSeries.swift \
   Sources/Passband/Lib/UnderstandingFixture.swift \
   Tests/UnderstandingWireTests.swift

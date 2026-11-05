@@ -171,6 +171,72 @@ actor FixtureAPI {
         #endif
     }
 
+    #if !PASSBAND_RELEASE
+        /// THE USAGE PAGE ON A STAGE (`--fixture-usage`, FixtureMode.stagesUsage):
+        /// the mail and spend series the page's charts read, the relationship
+        /// ledger, and the memory list, all from `UnderstandingFixture`, with
+        /// the `understanding` feature claimed on the stats so the memory list
+        /// shows. Nothing else stages this, and a shipped build cannot: the
+        /// block is compiled out of release.
+        private var stagedUnderstanding: (relationships: RelationshipsResponse, memory: MemoryResponse)?
+        func stageUnderstanding(now: Date = Date()) {
+            stagedUnderstanding = (
+                UnderstandingFixture.relationships(now: now), UnderstandingFixture.memory(now: now)
+            )
+        }
+
+        /// The staged answer for a route, or nil to fall through.
+        private func stagedUnderstandingResponse(
+            method: String, path: String, components: [String], query: [String: String],
+            body: [String: Any]
+        ) throws -> Data? {
+            guard var staged = stagedUnderstanding else { return nil }
+            let days = max(1, query["days"].flatMap(Int.init) ?? 30)
+            switch (method, path) {
+            case ("GET", "/client/usage"): return try encode(UnderstandingFixture.usage(days: days))
+            case ("GET", "/client/mail-activity"): return try encode(UnderstandingFixture.mailActivity(days: days))
+            case ("GET", "/client/relationships"): return try encode(staged.relationships)
+            case ("GET", "/client/memory"): return try encode(staged.memory)
+            default: break
+            }
+            guard components.count == 3, components[1] == "memory" else { return nil }
+            let id = components[2].removingPercentEncoding ?? components[2]
+            guard let at = staged.memory.entries.firstIndex(where: { $0.id == id }) else { throw missing() }
+            switch method {
+            case "PUT":
+                var entry = staged.memory.entries[at]
+                if let line = body["line"] as? String, !line.isEmpty { entry.line = line }
+                if body["confirm"] as? Bool == true {
+                    entry.origin = .stated
+                    entry.expires_at = nil
+                    entry.confidence = 1
+                }
+                entry.affirmed_at = stamp()
+                entry.updated_at = entry.affirmed_at
+                staged.memory.entries[at] = entry
+                stagedUnderstanding = staged
+                return try encode(entry)
+            case "DELETE":
+                staged.memory.entries.remove(at: at)
+                stagedUnderstanding = staged
+                return Data()
+            default:
+                throw unsupported()
+            }
+        }
+    #endif
+
+    private func withStagedUnderstanding(_ stats: StoreStats) -> StoreStats {
+        #if !PASSBAND_RELEASE
+            guard stagedUnderstanding != nil else { return stats }
+            var out = stats
+            out.features = (out.features ?? []) + [UnderstandingFlag.key]
+            return out
+        #else
+            return stats
+        #endif
+    }
+
     func response(for request: URLRequest) throws -> (Data, HTTPURLResponse) {
         guard let url = request.url else { throw APIError(.badRequest, 400, "Missing fixture request URL") }
         let path = url.path
@@ -198,6 +264,19 @@ actor FixtureAPI {
                     try json(["promoted": translateStaged(components[2])]),
                     HTTPURLResponse(
                         url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "application/json"])!
+                )
+            }
+        #endif
+
+        #if !PASSBAND_RELEASE
+            if let staged = try stagedUnderstandingResponse(
+                method: method, path: path, components: components, query: query, body: body)
+            {
+                return (
+                    staged,
+                    HTTPURLResponse(
+                        url: url, statusCode: staged.isEmpty ? 204 : 200, httpVersion: "HTTP/1.1",
                         headerFields: ["Content-Type": "application/json"])!
                 )
             }
@@ -249,7 +328,7 @@ actor FixtureAPI {
                 // is not stubbed here: every fixture save would fail
                 // silently under a "kept in drafts" toast.
                 drafts_v2: true)
-            data = try encode(withStagedCalendar(stats))
+            data = try encode(withStagedUnderstanding(withStagedCalendar(stats)))
         case ("GET", "/client/updates"):
             var rows = query["band"].map { bandRows($0) } ?? allUpdates()
             if let tier = query["tier"] { rows = rows.filter { $0.tier.rawValue == tier } }

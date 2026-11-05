@@ -1857,6 +1857,20 @@ final class AppStore {
         connStatus = .connected
     }
 
+    /// `--fixture-usage` (FixtureMode.stagesUsage): the fixture transport with
+    /// the Understanding fixture staged, and the Usage page on screen. Staged
+    /// BEFORE the fixtures are entered, so the first stats already claim the
+    /// feature. Unreachable in a shipped build, where the flag is always
+    /// false and the staging is compiled out.
+    func stageUsagePage() async {
+        guard FixtureMode.stagesUsage else { return }
+        #if !PASSBAND_RELEASE
+            await FixtureAPI.shared.stageUnderstanding()
+        #endif
+        await enterFixtures()
+        setView(.usage)
+    }
+
     /// Fill the fixture board before a scene is raised over it: bands, zones,
     /// the calendar bodies, and the inbox page. Starts the poller, which an
     /// entry from a connected state otherwise never would (`connStatus`

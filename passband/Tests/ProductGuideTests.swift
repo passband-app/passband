@@ -29,6 +29,7 @@ struct ProductGuideTests {
         shortcutsAreTheOverlaysTable()
         theGuideAgreesWithTheKeymapTable()
         theCalendarIsListedOnlyWhereItIsOffered()
+        understandingIsDescribedOnlyWhereItIsOn()
         withTheCalendarOffTheGuideIsMains()
         aPagesDigitIsTheSheets()
         settingsAreFoundByDescription()
@@ -73,11 +74,14 @@ struct ProductGuideTests {
     static func houseStyle() {
         var texts: [(String, String)] = []
         for calendar in [false, true] {
-            texts += ProductGuide.topics(calendar: calendar).map {
-                ($0.rawValue, ProductGuide.text($0, runningVersion: "0.0.12", calendar: calendar))
+            for understanding in [false, true] {
+                texts += ProductGuide.topics(calendar: calendar).map {
+                    ($0.rawValue, ProductGuide.text(
+                        $0, runningVersion: "0.0.12", calendar: calendar, understanding: understanding))
+                }
+                texts.append(("topic index", ProductGuide.topicIndex(calendar: calendar, understanding: understanding)))
             }
             texts.append(("shortcuts", ProductGuide.shortcuts(calendar: calendar)))
-            texts.append(("topic index", ProductGuide.topicIndex(calendar: calendar)))
         }
         texts.append(("settings", ProductGuide.settings(matching: nil)))
         texts.append(("prompt intro", ProductGuide.promptIntro))
@@ -334,6 +338,44 @@ struct ProductGuideTests {
     }
 
     // MARK: - helpers
+
+    /// The Usage page's Understanding section is behind a hidden feature, and
+    /// the owner is never shown that it exists without it: off, no topic and
+    /// no index line says a word about it; on, the app topic describes it.
+    static func understandingIsDescribedOnlyWhereItIsOn() {
+        let words = ["Understanding", "understanding", "What Passband knows", "Your people", "relationship ledger"]
+        for calendar in [false, true] {
+            for topic in ProductGuide.topics(calendar: calendar) {
+                let off = ProductGuide.text(topic, runningVersion: "0.0.12", calendar: calendar, understanding: false)
+                for w in words {
+                    expect(!off.contains(w), "off: \(topic.rawValue) never says \"\(w)\"")
+                }
+            }
+            let offIndex = ProductGuide.topicIndex(calendar: calendar, understanding: false)
+            expect(!words.contains { offIndex.contains($0) }, "off: the topic index says nothing of it")
+            expect(offIndex == ProductGuide.topicIndex(calendar: calendar), "off: the index is the default one")
+            let on = ProductGuide.text(.appAndAccounts, runningVersion: "0.0.12", calendar: calendar, understanding: true)
+            for w in ["two subpages", "Mail and Understanding", "- Mail: mail in and out", "What Passband knows",
+                "Your people", "People you answer"] {
+                expect(on.contains(w), "on: the app topic describes \"\(w)\"")
+            }
+            expect(!on.contains("not on for every mailbox"), "on: no flag caveat")
+            expect(!on.contains("- Usage, at the bottom of the rail: mail in and out"),
+                "on: the single page's line gives way to the two subpages")
+            let offApp = ProductGuide.text(.appAndAccounts, runningVersion: "0.0.12", calendar: calendar, understanding: false)
+            expect(offApp.contains("- Usage, at the bottom of the rail: mail in and out"), "off: the single Usage page")
+            expect(!offApp.contains("subpage"), "off: no subpages")
+            expect(
+                ProductGuide.topicIndex(calendar: calendar, understanding: true).contains("understanding (people you answer"),
+                "on: the index names it")
+            for topic in ProductGuide.topics(calendar: calendar) where topic != .appAndAccounts {
+                expect(
+                    ProductGuide.text(topic, runningVersion: "0.0.12", calendar: calendar, understanding: true)
+                        == ProductGuide.text(topic, runningVersion: "0.0.12", calendar: calendar, understanding: false),
+                    "on: \(topic.rawValue) is unchanged")
+            }
+        }
+    }
 
     static func expect(_ cond: Bool, _ what: String) {
         checks += 1

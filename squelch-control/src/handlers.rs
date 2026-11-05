@@ -1659,13 +1659,17 @@ pub async fn oauth_callback(
                 // `llm topup` is the operator's own call.
                 //
                 // Fail-soft like the mint: a key without the allowance is a
-                // tenant on the ordinary limit, which `llm topup` fixes later.
+                // tenant on the ordinary limit, which `llm topup --usd` fixes
+                // later. An error can also mean the write landed and only the
+                // read-back failed; a second top-up replaces, never stacks, so
+                // the operator's fix is safe either way.
                 if let Err(e) = bifrost.top_up_key(&vk.id, llm.budget_usd).await {
                     tracing::error!(
                         error = %e,
                         label = %label,
                         vk_id = %vk.id,
-                        "SIGNUP ALLOWANCE NOT GRANTED: this tenant's first month is on the ordinary limit; `squelch-control llm topup` adds it by hand"
+                        usd = llm.budget_usd,
+                        "SIGNUP ALLOWANCE NOT CONFIRMED: this tenant's first month may be on the ordinary limit; `squelch-control llm topup <label> --usd <usd>` grants it by hand"
                     );
                 }
                 vk_id = Some(vk.id);

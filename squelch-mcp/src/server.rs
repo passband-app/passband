@@ -1624,7 +1624,10 @@ impl SquelchServer {
                        `subject` for a new message. \
                        Write the body in the owner's voice, ready to send. After it \
                        succeeds, tell the human the draft is waiting in Passband; never \
-                       say it was sent. Fails if that message already has a draft reply.",
+                       say it was sent. Fails if that message already has a draft reply. \
+                       Clients that show apps render the saved draft as a card with a \
+                       button that opens it in Passband.",
+        meta = draft_card_tool_meta(),
         annotations(
             title = "Create draft",
             read_only_hint = false,
@@ -1640,6 +1643,8 @@ impl SquelchServer {
         let Some(mailer) = &self.mailer else {
             return Ok(CallToolResult::error(vec![ContentBlock::text(NO_MAILER)]));
         };
+        let cc = params.cc.clone().unwrap_or_default();
+        let body = params.body.clone();
         let compose = AgentCompose {
             reply_to_message_id: params.reply_to_message_id,
             to: params.to,
@@ -1656,6 +1661,9 @@ impl SquelchServer {
             "status": "draft_saved",
             "draft_id": created.draft_id,
             "link": created.link,
+            "to": created.to,
+            "cc": cc.trim(),
+            "subject": created.subject,
             "note": "Not sent. The draft is in Passband for the owner to review and send. \
                      `link` opens it in the Passband Mac app.",
         });
@@ -1670,7 +1678,13 @@ impl SquelchServer {
             result["notified_phone"] = on_phone.into();
             result["open_note"] = note.into();
         }
-        Self::ok_json(result)
+        // The card (see `draft_card_tool_meta`) reads the body from here, so
+        // the model's text copy stays as it was, without the body.
+        let mut card = result.clone();
+        card["body"] = body.into();
+        let mut out = Self::ok_json(result)?;
+        out.structured_content = Some(card);
+        Ok(out)
     }
 
     /// Ask the owner's Mac to bring one of the agent's drafts up in the
@@ -1801,8 +1815,13 @@ impl ServerHandler for SquelchServer {
             self.write_access(),
             self.mailer.is_some(),
         ));
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions(instructions)
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
+        )
+        .with_instructions(instructions)
     }
 
     /// The tool list, MINUS the mail-writing tools the owner has not allowed.
@@ -1821,6 +1840,75 @@ impl ServerHandler for SquelchServer {
             next_cursor: None,
         })
     }
+
+    /// The one resource: the draft card, listed while drafts are allowed.
+    async fn list_resources(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListResourcesResult, ErrorData> {
+        let mut resources = Vec::new();
+        if self.write_access().allows_drafts() {
+            resources.push(
+                rmcp::model::Resource::new(DRAFT_CARD_URI, "draft-card")
+                    .with_title("Passband draft")
+                    .with_description(
+                        "Shows a draft create_draft saved, with a button to open it in Passband.",
+                    )
+                    .with_mime_type(MCP_APP_MIME),
+            );
+        }
+        Ok(rmcp::model::ListResourcesResult {
+            resources,
+            ..Default::default()
+        })
+    }
+
+    /// The card's HTML. Static and data-free (the draft reaches it only
+    /// through the host, from the tool result), so it is served to anyone
+    /// who asks, whatever the setting.
+    async fn read_resource(
+        &self,
+        request: rmcp::model::ReadResourceRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ReadResourceResult, ErrorData> {
+        if request.uri != DRAFT_CARD_URI {
+            return Err(ErrorData::resource_not_found("not found", None));
+        }
+        Ok(rmcp::model::ReadResourceResult::new(vec![
+            rmcp::model::ResourceContents::text(DRAFT_CARD_HTML, DRAFT_CARD_URI)
+                .with_mime_type(MCP_APP_MIME)
+                .with_meta(draft_card_resource_meta()),
+        ]))
+    }
+}
+
+/// The draft card (MCP Apps, `io.modelcontextprotocol/ui`): what Claude and
+/// other app-capable clients show in place of create_draft's raw result. Its
+/// one action is asking the host to call open_draft; it cannot send.
+const DRAFT_CARD_URI: &str = "ui://passband/draft-card.html";
+const MCP_APP_MIME: &str = "text/html;profile=mcp-app";
+const DRAFT_CARD_HTML: &str = include_str!("draft_card.html");
+
+/// `create_draft`'s `_meta`: points app-capable clients at the card. The
+/// flat `ui/resourceUri` key is the older spelling some hosts still read.
+fn draft_card_tool_meta() -> rmcp::model::Meta {
+    meta(serde_json::json!({
+        "ui": { "resourceUri": DRAFT_CARD_URI },
+        "ui/resourceUri": DRAFT_CARD_URI,
+    }))
+}
+
+/// The card loads nothing from the network (an empty CSP allow-list) and
+/// draws its own border, so the host need not add one.
+fn draft_card_resource_meta() -> rmcp::model::Meta {
+    meta(serde_json::json!({
+        "ui": { "prefersBorder": false, "csp": { "connectDomains": [], "resourceDomains": [] } },
+    }))
+}
+
+fn meta(value: serde_json::Value) -> rmcp::model::Meta {
+    rmcp::model::Meta(value.as_object().cloned().unwrap_or_default())
 }
 
 impl SquelchServer {
@@ -1917,10 +2005,14 @@ mod tests {
             if let Some(e) = &self.refuse {
                 return Err(e.clone());
             }
+            let to = compose.to.clone().unwrap_or_default();
+            let subject = compose.subject.clone().unwrap_or_default();
             self.drafts.lock().unwrap().push(compose);
             Ok(AgentDraftCreated {
                 draft_id: 41,
                 link: "passband://draft/41?mailbox=me%40localhost".into(),
+                to,
+                subject,
             })
         }
 
@@ -2217,6 +2309,50 @@ mod tests {
         assert_eq!(sends.len(), 1);
         assert_eq!(sends[0].to.as_deref(), Some("bob@example.com"));
         assert_eq!(sends[0].body, "See you there.");
+    }
+
+    /// The draft card: create_draft points app-capable clients at it, the
+    /// card's HTML is the static file, and the result carries the body for
+    /// the card while the model's text copy does not repeat it.
+    #[tokio::test]
+    async fn create_draft_shows_the_draft_card() {
+        let (server, _) = writing_server(AgentWriteAccess::Drafts, RecordingMailer::default());
+        let tool = server
+            .offered_tools()
+            .into_iter()
+            .find(|t| t.name == "create_draft")
+            .unwrap();
+        let meta = serde_json::to_value(tool.meta.unwrap()).unwrap();
+        assert_eq!(meta["ui"]["resourceUri"], DRAFT_CARD_URI);
+        assert!(DRAFT_CARD_HTML.contains("open_draft"));
+        assert!(
+            !DRAFT_CARD_HTML.contains("send_email"),
+            "the card never sends"
+        );
+        assert!(
+            server.get_info().capabilities.resources.is_some(),
+            "hosts read the card as a resource"
+        );
+
+        let res = server
+            .create_draft(Parameters(CreateDraftParams {
+                body: "See you Tuesday.".into(),
+                to: Some("m@example.com".into()),
+                cc: Some(" c@example.com ".into()),
+                bcc: None,
+                subject: Some("Tuesday".into()),
+                reply_to_message_id: None,
+                open: None,
+            }))
+            .await
+            .unwrap();
+        let card = res.structured_content.clone().unwrap();
+        assert_eq!(card["draft_id"], 41);
+        assert_eq!(card["subject"], "Tuesday");
+        assert_eq!(card["to"], "m@example.com");
+        assert_eq!(card["cc"], "c@example.com");
+        assert_eq!(card["body"], "See you Tuesday.");
+        assert!(!result_text(&res).contains("See you Tuesday."));
     }
 
     #[tokio::test]

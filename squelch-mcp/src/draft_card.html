@@ -1,0 +1,320 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Passband draft</title>
+<style>
+  /* Host variables first (MCP Apps hostContext.styles), our own fallbacks
+     after, so the card looks native in Claude and sane anywhere else. */
+  :root {
+    color-scheme: light dark;
+    --pb-bg: var(--color-background-secondary, #f7f6f3);
+    --pb-head: var(--color-background-tertiary, #efede8);
+    --pb-text: var(--color-text-primary, #1f1e1c);
+    --pb-muted: var(--color-text-secondary, #6b6862);
+    --pb-line: var(--color-border-primary, rgba(0, 0, 0, 0.1));
+    --pb-button: var(--color-background-tertiary, #e9e7e1);
+    --pb-button-hover: var(--color-background-primary, #e1ded7);
+    --pb-radius: var(--border-radius-lg, 14px);
+    --pb-font: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  }
+  :root[data-theme="dark"] {
+    --pb-bg: var(--color-background-secondary, #262624);
+    --pb-head: var(--color-background-tertiary, #2d2d2a);
+    --pb-text: var(--color-text-primary, #ecebe7);
+    --pb-muted: var(--color-text-secondary, #a29f97);
+    --pb-line: var(--color-border-primary, rgba(255, 255, 255, 0.09));
+    --pb-button: var(--color-background-tertiary, #34342f);
+    --pb-button-hover: var(--color-background-primary, #3d3d38);
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; padding: 0; background: transparent; }
+  body { font: 15px/1.55 var(--pb-font); color: var(--pb-text); }
+  .card {
+    background: var(--pb-bg);
+    border: 1px solid var(--pb-line);
+    border-radius: var(--pb-radius);
+    overflow: hidden;
+  }
+  .rows { background: var(--pb-head); border-bottom: 1px solid var(--pb-line); }
+  .row {
+    display: flex; gap: 14px; align-items: baseline;
+    padding: 11px 20px;
+  }
+  .row + .row { border-top: 1px solid var(--pb-line); }
+  .label { color: var(--pb-muted); font-size: 13px; min-width: 56px; }
+  .value { overflow-wrap: anywhere; }
+  .subject { font-size: 16px; }
+  .body {
+    padding: 18px 20px 4px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 340px;
+    overflow-y: auto;
+  }
+  .body.empty { color: var(--pb-muted); font-style: italic; }
+  .foot {
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+    justify-content: flex-end;
+    padding: 14px 16px 16px;
+  }
+  .status { margin-right: auto; color: var(--pb-muted); font-size: 13px; }
+  button {
+    display: inline-flex; align-items: center; gap: 8px;
+    font: inherit; font-size: 14px; color: var(--pb-text);
+    background: var(--pb-button);
+    border: 1px solid var(--pb-line);
+    border-radius: 10px;
+    padding: 8px 14px;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: var(--pb-button-hover); }
+  button:disabled { opacity: 0.55; cursor: default; }
+  button svg { width: 18px; height: 18px; flex: none; }
+  .mark { width: 20px; height: 12px; }
+  @media (max-width: 420px) {
+    .row, .body { padding-left: 14px; padding-right: 14px; }
+    .status { flex-basis: 100%; }
+  }
+</style>
+</head>
+<body>
+<div class="card" id="card">
+  <div class="rows">
+    <div class="row"><span class="label">Subject:</span><span class="value subject" id="subject"></span></div>
+    <div class="row" id="to-row"><span class="label">To:</span><span class="value" id="to"></span></div>
+    <div class="row" id="cc-row" hidden><span class="label">Cc:</span><span class="value" id="cc"></span></div>
+  </div>
+  <div class="body empty" id="body">Writing the draft...</div>
+  <div class="foot">
+    <span class="status" id="status"></span>
+    <button id="copy" type="button" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2.5"/><path d="M16 8V6.5A2.5 2.5 0 0 0 13.5 4h-7A2.5 2.5 0 0 0 4 6.5v7A2.5 2.5 0 0 0 6.5 16H8"/></svg>
+      <span id="copy-label">Copy</span>
+    </button>
+    <button id="open" type="button" disabled>
+      <svg class="mark" viewBox="120 245 790 535" fill="currentColor"><rect x="129.8" y="697.3" width="44.4" height="74.7" rx="22.2"/><rect x="189.8" y="600.7" width="44.4" height="171.3" rx="22.2"/><rect x="249.8" y="550.1" width="44.4" height="221.9" rx="22.2"/><rect x="309.8" y="420.4" width="44.4" height="351.6" rx="22.2"/><rect x="369.8" y="297.4" width="44.4" height="474.6" rx="22.2"/><rect x="429.8" y="370.0" width="44.4" height="402.0" rx="22.2"/><rect x="489.8" y="253.1" width="44.4" height="518.9" rx="22.2"/><rect x="549.8" y="329.5" width="44.4" height="442.5" rx="22.2"/><rect x="609.8" y="356.3" width="44.4" height="415.7" rx="22.2"/><rect x="669.8" y="362.2" width="44.4" height="409.8" rx="22.2"/><rect x="729.8" y="555.9" width="44.4" height="216.1" rx="22.2"/><rect x="789.8" y="619.1" width="44.4" height="152.9" rx="22.2"/><rect x="849.8" y="699.3" width="44.4" height="72.7" rx="22.2"/></svg>
+      <span id="open-label">Open draft in Passband</span>
+    </button>
+  </div>
+</div>
+<script>
+(function () {
+  "use strict";
+  // MCP Apps (io.modelcontextprotocol/ui): JSON-RPC 2.0 over postMessage
+  // with the host. The card shows the draft create_draft saved, and its
+  // button asks the host to call open_draft, which is the only thing it
+  // can do: it never sends.
+  var PROTOCOL = "2026-01-26";
+  var nextId = 1;
+  var pending = {};
+  var draft = { id: null, link: null, subject: "", to: "", cc: "", body: "" };
+  var $ = function (id) { return document.getElementById(id); };
+
+  function post(msg) { window.parent.postMessage(msg, "*"); }
+  function request(method, params) {
+    var id = nextId++;
+    post({ jsonrpc: "2.0", id: id, method: method, params: params || {} });
+    return new Promise(function (resolve, reject) {
+      pending[id] = { resolve: resolve, reject: reject };
+    });
+  }
+  function notify(method, params) {
+    post({ jsonrpc: "2.0", method: method, params: params || {} });
+  }
+
+  function reportSize() {
+    var el = $("card");
+    notify("ui/notifications/size-changed", {
+      width: Math.ceil(el.scrollWidth),
+      height: Math.ceil(el.getBoundingClientRect().height) + 2
+    });
+  }
+  if (window.ResizeObserver) new ResizeObserver(reportSize).observe($("card"));
+
+  function applyContext(ctx) {
+    if (!ctx) return;
+    if (ctx.theme) document.documentElement.setAttribute("data-theme", ctx.theme);
+    var vars = ctx.styles && ctx.styles.variables;
+    if (vars) {
+      Object.keys(vars).forEach(function (k) {
+        if (vars[k] != null) document.documentElement.style.setProperty(k, vars[k]);
+      });
+    }
+  }
+
+  function render() {
+    $("subject").textContent = draft.subject || "(no subject)";
+    $("to").textContent = draft.to || "";
+    $("to-row").hidden = !draft.to;
+    $("cc").textContent = draft.cc || "";
+    $("cc-row").hidden = !draft.cc;
+    if (draft.body) {
+      $("body").textContent = draft.body;
+      $("body").classList.remove("empty");
+    }
+    $("copy").disabled = !draft.body;
+    $("open").disabled = draft.id == null;
+  }
+
+  function status(text) { $("status").textContent = text || ""; }
+
+  // The model's arguments arrive first (subject may be blank on a reply);
+  // the result then fills in what the daemon resolved.
+  function fromArgs(args) {
+    if (!args) return;
+    if (args.subject) draft.subject = args.subject;
+    if (args.to) draft.to = args.to;
+    if (args.cc) draft.cc = args.cc;
+    if (typeof args.body === "string") draft.body = args.body;
+    render();
+  }
+
+  function fromResult(result) {
+    if (!result) return;
+    if (result.isError) {
+      $("body").textContent = textOf(result) || "The draft was not saved.";
+      $("body").classList.add("empty");
+      status("Not saved");
+      $("open").disabled = true;
+      return;
+    }
+    var s = result.structuredContent || parse(textOf(result)) || {};
+    if (s.draft_id != null) draft.id = s.draft_id;
+    if (s.link) draft.link = s.link;
+    if (s.subject) draft.subject = s.subject;
+    if (s.to) draft.to = s.to;
+    if (s.cc) draft.cc = s.cc;
+    if (typeof s.body === "string") draft.body = s.body;
+    render();
+    if (s.opened_on_mac === true) {
+      status("Opened on your Mac");
+      $("open-label").textContent = "Open again";
+    } else {
+      status("Saved in Passband drafts");
+    }
+  }
+
+  function textOf(result) {
+    var c = (result && result.content) || [];
+    for (var i = 0; i < c.length; i++) if (c[i] && c[i].type === "text") return c[i].text;
+    return "";
+  }
+  function parse(text) { try { return JSON.parse(text); } catch (e) { return null; } }
+
+  window.addEventListener("message", function (event) {
+    if (event.source !== window.parent) return;
+    var msg = event.data;
+    if (!msg || msg.jsonrpc !== "2.0") return;
+    if (msg.id != null && pending[msg.id] && !msg.method) {
+      var p = pending[msg.id];
+      delete pending[msg.id];
+      if (msg.error) p.reject(msg.error); else p.resolve(msg.result);
+      return;
+    }
+    switch (msg.method) {
+      case "ui/notifications/tool-input":
+        fromArgs(msg.params && msg.params.arguments);
+        break;
+      case "ui/notifications/tool-input-partial":
+        fromArgs(msg.params && msg.params.arguments);
+        break;
+      case "ui/notifications/tool-result":
+        fromResult(msg.params);
+        break;
+      case "ui/notifications/tool-cancelled":
+        status("Cancelled");
+        break;
+      case "ui/notifications/host-context-changed":
+        applyContext(msg.params);
+        break;
+      case "ui/resource-teardown":
+        if (msg.id != null) post({ jsonrpc: "2.0", id: msg.id, result: {} });
+        break;
+      default:
+        // Answer any other request so the host never waits on us.
+        if (msg.id != null && msg.method) {
+          post({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "Method not found" } });
+        }
+    }
+  });
+
+  $("open").addEventListener("click", function () {
+    if (draft.id == null) return;
+    var btn = $("open");
+    btn.disabled = true;
+    status("Opening...");
+    request("tools/call", { name: "open_draft", arguments: { draft_id: draft.id } })
+      .then(function (result) {
+        var r = (result && result.structuredContent) || parse(textOf(result)) || {};
+        if (result && result.isError) {
+          status(textOf(result) || "Could not open it");
+        } else if (r.opened_on_mac && r.notified_phone) {
+          status("Opened on your Mac and sent to your phone");
+        } else if (r.opened_on_mac) {
+          status("Opened on your Mac");
+        } else if (r.notified_phone) {
+          status("Sent to your phone");
+        } else {
+          status("Passband isn't open on your Mac. Trying the link...");
+          openLink(r.link || draft.link);
+        }
+        $("open-label").textContent = "Open again";
+      })
+      .catch(function () {
+        status("Trying the link...");
+        openLink(draft.link);
+      })
+      .then(function () { btn.disabled = false; });
+  });
+
+  function openLink(link) {
+    if (!link) { status("Saved in Passband drafts"); return; }
+    request("ui/open-link", { url: link })
+      .then(function () { status("Opened the draft link"); })
+      .catch(function () { status("Saved in Passband drafts"); });
+  }
+
+  $("copy").addEventListener("click", function () {
+    var text = (draft.subject ? "Subject: " + draft.subject + "\n\n" : "") + draft.body;
+    var done = function () {
+      $("copy-label").textContent = "Copied";
+      setTimeout(function () { $("copy-label").textContent = "Copy"; }, 1500);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, function () { legacyCopy(text) && done(); });
+    } else if (legacyCopy(text)) {
+      done();
+    }
+  });
+  function legacyCopy(text) {
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) {}
+    document.body.removeChild(ta);
+    return ok;
+  }
+
+  request("ui/initialize", {
+    protocolVersion: PROTOCOL,
+    appInfo: { name: "passband-draft-card", version: "1" },
+    appCapabilities: {}
+  }).then(function (init) {
+    applyContext(init && init.hostContext);
+    notify("ui/notifications/initialized", {});
+    reportSize();
+  }, function () {
+    notify("ui/notifications/initialized", {});
+  });
+  render();
+})();
+</script>
+</body>
+</html>

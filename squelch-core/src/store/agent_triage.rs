@@ -120,8 +120,11 @@ pub struct AgentContext {
     pub sender_is_contact: bool,
     /// The relationship ledger's block for the sender (docs/UNDERSTANDING.md
     /// §2.1), ABSENT rather than empty when there is no row or the first-run
-    /// backfill has not filled the table. Deterministic counts, no email
-    /// text. NOT IN ANY REVISION FINGERPRINT, for the reason `triage.dwell_ms`
+    /// backfill has not filled the table. NEVER FILLED BY A CONTEXT LOAD: the
+    /// worker attaches it under the `understanding` flag
+    /// (`sync::triage_worker::attach_relationship`), so every other reader of
+    /// a context runs without touching the ledger. Deterministic counts, no
+    /// email text. NOT IN ANY REVISION FINGERPRINT, for the reason `triage.dwell_ms`
     /// is not in `user_state`: the ledger is recounted while mail is being
     /// read and triaged, and a recount changes nothing a run in flight
     /// decided, so it must not turn that run's commit stale.

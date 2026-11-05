@@ -453,11 +453,15 @@ two never disagree. It is not email text and it is not a floor.
 THE LEDGER COMPUTES FOR EVERY MAILBOX AND SERVES ONLY UNDER THE
 `understanding` HIDDEN FEATURE. The marks, the drain, the nightly walk and the
 first-run backfill below run whatever the flag says, so a mailbox switched on
-has its rows at once. With the flag off, the triage context and
-`read_sender_history` carry no `relationship` key (the worker drops it,
-`triage_worker::gate_relationship`, and `StoreEvidence` serves it only when
-told to), `GET /client/relationships` answers 404, and `GET /client/person`
-carries no `relationship` key.
+has its rows at once. With the flag off the ledger is not even read: loading a
+triage context and the contact card make exactly main's queries, the triage
+context and `read_sender_history` carry no `relationship` key,
+`GET /client/relationships` answers 404, and `GET /client/person` carries no
+`relationship` key. With it on, the worker reads and attaches the sender's
+block (`triage_worker::attach_relationship`), `StoreEvidence` serves it in
+`read_sender_history`, and the card handler reads the row beside the record.
+A ledger that cannot answer leaves the block out of a run rather than failing
+it.
 
 A recount is bounded. `received_count` and the first arrival are one
 index-only walk of `idx_messages_from_received`, less the address's sealed

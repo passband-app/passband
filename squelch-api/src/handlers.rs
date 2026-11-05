@@ -3529,17 +3529,25 @@ pub async fn get_person(
     if addr.is_empty() || !addr.contains('@') || addr.len() > 320 {
         return Err(ApiError::bad_request("addr must be an email address"));
     }
-    let p = store_call(&state, move |store, account_id| {
-        store.person_record(account_id, &addr)
+    // The ledger computes for everyone and is SHOWN only under the
+    // `understanding` feature (docs/UNDERSTANDING.md §5). Off, it is not even
+    // READ: the card runs exactly the queries it always did, so no fault in
+    // the ledger can cost a mailbox without the flag its contact card.
+    let understanding = state
+        .features()
+        .enabled(squelch_core::features::UNDERSTANDING);
+    let (p, relationship) = store_call(&state, move |store, account_id| {
+        let record = store.person_record(account_id, &addr)?;
+        let relationship = if understanding {
+            Some(store.relationship(account_id, &addr)?)
+        } else {
+            None
+        };
+        Ok((record, relationship))
     })
     .await?;
     let view = PersonView {
-        // The ledger computes for everyone and is SHOWN only under the
-        // `understanding` feature (docs/UNDERSTANDING.md §5).
-        relationship: state
-            .features()
-            .enabled(squelch_core::features::UNDERSTANDING)
-            .then(|| p.relationship.map(RelationshipView::from)),
+        relationship: relationship.map(|row| row.map(RelationshipView::from)),
         addr: p.addr,
         display_name: p.display_name,
         is_self: p.is_self,

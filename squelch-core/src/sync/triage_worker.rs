@@ -270,14 +270,26 @@ fn fed_back(
 }
 
 /// THE LEDGER COMPUTES FOR EVERYONE AND INFORMS ONLY UNDER THE FLAG. With the
-/// `understanding` hidden feature off, the relationship block is dropped from
-/// a loaded context, so the initial context carries no `relationship` key,
-/// exactly as before the first-run backfill. Marks, the drain, the nightly
-/// walk and the backfill run regardless, so a mailbox switched on has its
-/// ledger at once.
-pub(crate) fn gate_relationship(context: &mut AgentContext, understanding: bool) {
+/// `understanding` hidden feature off the ledger is not READ at all: the
+/// context keeps no `relationship` key, exactly as before the first-run
+/// backfill, and the run makes only main's queries. On, the sender's block is
+/// read and attached here. A ledger that cannot answer is logged and leaves
+/// the block out: it is evidence, and no fault in it may fail a triage run.
+/// Marks, the drain, the nightly walk and the backfill run regardless, so a
+/// mailbox switched on has its ledger at once.
+pub(crate) fn attach_relationship<S: Store + ?Sized>(
+    store: &S,
+    account: AccountId,
+    context: &mut AgentContext,
+    understanding: bool,
+) {
+    context.relationship = None;
     if !understanding {
-        context.relationship = None;
+        return;
+    }
+    match store.relationship_context(account, &context.message.from_addr) {
+        Ok(block) => context.relationship = block,
+        Err(e) => eprintln!("squelch: relationship ledger unreadable ({e}); triaging without it"),
     }
 }
 
@@ -487,7 +499,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // The relationship ledger computes for everyone; it reaches the agent
         // only under the `understanding` feature (docs/UNDERSTANDING.md §5).
         let understanding = self.features.enabled(crate::features::UNDERSTANDING);
-        gate_relationship(&mut context, understanding);
+        attach_relationship(
+            self.store.as_ref(),
+            self.account_id,
+            &mut context,
+            understanding,
+        );
         let now = Utc::now();
         let retry_after = self.agent_retry_after.load(Ordering::Relaxed);
         let episode = self.agent_last_cooldown_end.load(Ordering::Relaxed);
@@ -1943,12 +1960,14 @@ mod budget_tests {
     fn the_context_carries_the_relationship_block_beside_the_contact_flag() {
         let (store, account, ids) = evidence_fixture();
         let job = read_job(account, ids[0]);
-        let unfilled = store.load_agent_context(&job).unwrap();
+        let mut unfilled = store.load_agent_context(&job).unwrap();
+        attach_relationship(&store, account, &mut unfilled, true);
         let initial = snapshot(&unfilled, &job, 8, &utc_clock()).initial;
         assert!(initial.get("relationship").is_none(), "no backfill, no key");
 
         fill_ledger(&store, account, 3);
-        let young = store.load_agent_context(&job).unwrap();
+        let mut young = store.load_agent_context(&job).unwrap();
+        attach_relationship(&store, account, &mut young, true);
         let initial = snapshot(&young, &job, 8, &utc_clock()).initial;
         let block = &initial["relationship"];
         assert_eq!(block["received"]["count"], 3);
@@ -1961,7 +1980,8 @@ mod budget_tests {
         );
 
         fill_ledger(&store, account, 60);
-        let ripe = store.load_agent_context(&job).unwrap();
+        let mut ripe = store.load_agent_context(&job).unwrap();
+        attach_relationship(&store, account, &mut ripe, true);
         let initial = snapshot(&ripe, &job, 8, &utc_clock()).initial;
         // Past the floor the block is there; what it counts is the Reading
         // purge's own universe, pinned in `store::sqlite::tests::relationships`.
@@ -2003,8 +2023,9 @@ mod budget_tests {
         let job = read_job(account, ids[0]);
 
         let mut off = store.load_agent_context(&job).unwrap();
-        assert!(off.relationship.is_some(), "control: the ledger has a row");
-        gate_relationship(&mut off, false);
+        assert!(off.relationship.is_none(), "a load reads no ledger");
+        attach_relationship(&store, account, &mut off, false);
+        assert!(off.relationship.is_none());
         let initial = snapshot(&off, &job, 8, &utc_clock()).initial;
         assert!(initial.get("relationship").is_none(), "{initial}");
         let history = StoreEvidence::new(&store, account, 2)
@@ -2016,7 +2037,7 @@ mod budget_tests {
         assert_eq!(history.data["messages"].as_array().unwrap().len(), 2);
 
         let mut on = store.load_agent_context(&job).unwrap();
-        gate_relationship(&mut on, true);
+        attach_relationship(&store, account, &mut on, true);
         let initial = snapshot(&on, &job, 8, &utc_clock()).initial;
         assert_eq!(initial["relationship"]["received"]["count"], 3);
         let history = StoreEvidence::new(&store, account, 2)

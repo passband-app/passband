@@ -239,15 +239,6 @@ fn context(conn: &Connection, account: AccountId, id: i64) -> Result<AgentContex
         params![account, message.from_addr],
         |row| row.get(0),
     )?;
-    // Beside `sender_is_contact`, and like it read here under the context's
-    // own lock. Deliberately left out of every fingerprint below (see
-    // `AgentContext::relationship`).
-    let relationship = super::relationships::relationship_context_conn(
-        conn,
-        account,
-        &message.from_addr,
-        Utc::now(),
-    )?;
     let matched_rules: Vec<serde_json::Value> = rules
         .iter()
         .filter(|rule| {
@@ -286,7 +277,13 @@ fn context(conn: &Connection, account: AccountId, id: i64) -> Result<AgentContex
         rules,
         matched_rules,
         sender_is_contact,
-        relationship,
+        // NOT READ HERE. Every triage job, evidence read, notification and
+        // decision view loads a context, and the ledger is the `understanding`
+        // flag's: the worker attaches it only when the flag is on
+        // (`triage_worker::attach_relationship`), so a mailbox without the flag
+        // runs exactly the queries it always did and no fault in the ledger
+        // can fail its triage.
+        relationship: None,
         corrections,
         revision,
         memory: vec![],

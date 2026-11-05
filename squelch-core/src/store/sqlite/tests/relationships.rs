@@ -1063,3 +1063,48 @@ fn the_sealed_count_agrees_with_the_macro_arm_by_arm() {
         1
     );
 }
+
+/// FLAG OFF RUNS MAIN'S QUERIES. With the ledger's table gone (a stand-in
+/// for any fault in it: a missing migration, a bad row, a lock), loading a
+/// triage context and reading the contact card still succeed, because
+/// neither reads the ledger; only the `understanding` flag's own read does,
+/// and with the flag on a ledger that cannot answer is left out of the run,
+/// never a failed run.
+#[test]
+fn a_broken_ledger_cannot_fail_a_context_or_a_card_without_the_flag() {
+    use crate::sync::triage_worker::attach_relationship;
+    let (store, acct) = store();
+    let id = triaged(acct, "a", "t1")
+        .from(DAN)
+        .received_at(days_ago(1))
+        .ingest(&store);
+    store.recompute_all_relationships(acct).unwrap();
+    store
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TABLE relationships;")
+        .unwrap();
+    assert!(
+        store.relationship(acct, DAN).is_err(),
+        "control: the ledger read itself fails"
+    );
+
+    store.enqueue_agent_triage(acct, id, "test", false).unwrap();
+    let job = store
+        .claim_agent_job(acct, "triage", Utc::now(), 60)
+        .unwrap()
+        .expect("a job");
+    let mut context = store
+        .load_agent_context(&job)
+        .expect("a load reads no ledger");
+    attach_relationship(&store, acct, &mut context, false);
+    assert!(context.relationship.is_none());
+    // On, the fault is logged and the run goes on without the block.
+    attach_relationship(&store, acct, &mut context, true);
+    assert!(context.relationship.is_none());
+
+    let card = store
+        .person_record(acct, DAN)
+        .expect("the card reads no ledger");
+    assert_eq!(card.received.map(|r| r.count), Some(1));
+}

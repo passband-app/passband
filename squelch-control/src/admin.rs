@@ -1069,7 +1069,7 @@ async fn view(state: &ControlState, place: &Place, flash: Option<Banner<'_>>) ->
             Ok(None) => views::admin_no_person(counts.as_ref(), NO_SUCH_ROW),
             Err(e) => {
                 tracing::error!(id, error = %e, "reading a user row failed");
-                views::admin_overview(None, Some(Banner::Stop(STORE_TROUBLE)))
+                views::admin_overview(None, None, Some(Banner::Stop(STORE_TROUBLE)))
             }
         };
     }
@@ -1084,7 +1084,17 @@ async fn view(state: &ControlState, place: &Place, flash: Option<Banner<'_>>) ->
         // Nothing posts here with the features page as its `next`; it has its
         // own save. The overview is the honest landing for anything else.
         Place::Overview | Place::Features | Place::Person(_) => {
-            views::admin_overview(rows.as_deref(), flash)
+            // Its own read, uncapped by the listing (see
+            // `ControlStore::retention_facts`). A failure here costs the
+            // Retention panel only, which says so; the pipeline still draws.
+            let retention = match state.store().retention_facts().await {
+                Ok(facts) => Some(facts),
+                Err(e) => {
+                    tracing::error!(error = %e, "reading retention facts failed");
+                    None
+                }
+            };
+            views::admin_overview(rows.as_deref(), retention.as_deref(), flash)
         }
     }
 }

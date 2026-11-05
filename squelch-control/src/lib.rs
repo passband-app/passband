@@ -50,6 +50,7 @@ pub mod posthog;
 pub mod ratelimit;
 pub mod reconnect;
 pub mod resend;
+pub mod retention;
 pub mod seal;
 pub mod sessions;
 pub mod share;

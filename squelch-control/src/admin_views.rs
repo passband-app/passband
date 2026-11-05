@@ -22,11 +22,11 @@
 //! module builds carries one. A search term is the operator's own and does.
 
 use axum::{http::StatusCode, response::Response};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Utc};
 use squelch_core::features::Feature;
 
 use crate::pages::{console, console_app, escape_html, percent_encode};
-use crate::store::{FeatureBoard, USER_APPROVED_LIMIT, USER_PENDING, UserRow};
+use crate::store::{FeatureBoard, RetentionFacts, USER_APPROVED_LIMIT, USER_PENDING, UserRow};
 
 /// The hidden field that says where an action came from. See [`Place`].
 pub const NEXT_FIELD: &str = "next";
@@ -42,6 +42,13 @@ const MAX_QUERY: usize = 120;
 
 /// How many lines of recent activity the overview shows.
 const OVERVIEW_FEED: usize = 10;
+
+/// How many signup weeks the retention panel's cohort table shows, this one
+/// included.
+const RETENTION_WEEKS: i64 = 8;
+
+/// "Active" is an app action within this many days.
+const ACTIVE_DAYS: i64 = 7;
 
 // ---------------------------------------------------------------------------
 // The lifecycle.
@@ -631,7 +638,13 @@ fn stage_cell(r: &UserRow) -> String {
             .notified_at
             .map(|at| format!(r#" <span class="muted">{}</span>"#, day(at)))
             .unwrap_or_default(),
-        Stage::SignedUp | Stage::Active => tenant_code(r),
+        Stage::SignedUp | Stage::Active => {
+            let used = r
+                .last_action_at
+                .map(|at| format!(r#" <span class="muted">used {}</span>"#, day(at)))
+                .unwrap_or_default();
+            format!("{}{used}", tenant_code(r))
+        }
     };
     format!("{}{fact}", stage.pill())
 }
@@ -914,12 +927,16 @@ fn unavailable() -> String {
 /// converts, and what happened lately. Nothing here acts: it is the page you
 /// read, and Users is the page you work.
 ///
-/// Usage data, when control has some, belongs here too, as panels under the
-/// pipeline.
+/// Usage data lives here too, as panels under the pipeline: Retention, fed by
+/// `retention`, which is `None` when the store did not answer that read.
 ///
 /// ALWAYS 200, even with a banner: a banner over a real state is a finished
 /// page.
-pub fn admin_overview(rows: Option<&[UserRow]>, flash: Option<Banner>) -> Response {
+pub fn admin_overview(
+    rows: Option<&[UserRow]>,
+    retention: Option<&[RetentionFacts]>,
+    flash: Option<Banner>,
+) -> Response {
     let here = Place::Overview;
     let counts = rows.map(Counts::of);
     let review = format!(
@@ -938,10 +955,21 @@ pub fn admin_overview(rows: Option<&[UserRow]>, flash: Option<Banner>) -> Respon
 {needs}
 {conversion}
 </div>
+{retention}
 {feed}"#,
                 scope = scope(&c),
                 needs = panel("", "Needs you", None, "", &needs_you(rows, &c)),
                 conversion = panel("", "Conversion", None, "", &conversion(rows, &c)),
+                retention = panel(
+                    "live",
+                    "Retention",
+                    None,
+                    "",
+                    &match retention {
+                        Some(facts) => retention_panel(facts, Utc::now()),
+                        None => unavailable(),
+                    }
+                ),
                 feed = panel("", "Recent activity", None, "", &feed(rows)),
             )
         }
@@ -1046,6 +1074,157 @@ fn conversion(rows: &[UserRow], c: &Counts) -> String {
             to_device
         ),
     )
+}
+
+/// Whether people come back, and on which app: a headline and weekly signup
+/// cohorts, from the facts the retention poller stamped.
+///
+/// ACTIVE MEANS ACTED. An app's last ACTION (a successful write on the client
+/// door: clearing, replying, a rule) in the last [`ACTIVE_DAYS`] days, not its
+/// last connection. An open Mac polls, so "seen" moves for a laptop nobody is
+/// looking at, and a retention number that counts that would flatter itself.
+/// `last_seen_at` is stored too, so the line can be redrawn if action turns
+/// out too sparse to read.
+///
+/// NOT KNOWN IS NOT ZERO. A person whose daemon has not answered yet (it
+/// predates the command, or the poller has not reached them) is left out of
+/// every active and iPhone count, and the panel says how many it has heard
+/// from. Until it has heard from anybody it says that instead of drawing a
+/// row of zeros.
+fn retention_panel(facts: &[RetentionFacts], now: DateTime<Utc>) -> String {
+    let active_since = now - chrono::Duration::days(ACTIVE_DAYS);
+    let known = |f: &RetentionFacts| f.activity_read_at.is_some();
+    let activated = |f: &RetentionFacts| f.first_paired_at.is_some() || f.ios_paired_at.is_some();
+    let active = |f: &RetentionFacts| f.last_action_at.is_some_and(|at| at >= active_since);
+    let on_iphone = |f: &RetentionFacts| f.ios_paired_at.is_some();
+    let pct = |n: usize, of: usize| format!("{}%", (n as f64 / of as f64 * 100.0).round());
+
+    let heard = facts.iter().filter(|f| known(f)).count();
+    if facts.is_empty() {
+        return r#"<p class="muted empty">Nobody has signed up yet, so there is nobody to come back.</p>"#.to_string();
+    }
+
+    let mut out = String::new();
+    if heard == 0 {
+        out.push_str(
+            r#"<p class="muted empty">No usage data yet. It arrives once a daemon release that reports app activity rolls out to the fleet, and then within a few hours for each person. Until then, active and iPhone counts are not known rather than zero.</p>
+"#,
+        );
+    } else {
+        let activated_known: Vec<&RetentionFacts> = facts
+            .iter()
+            .filter(|f| known(f))
+            .filter(|f| activated(f))
+            .collect();
+        let weekly = facts.iter().filter(|f| active(f)).count();
+        let iphone = activated_known.iter().filter(|f| on_iphone(f)).count();
+        let readout = |colour: &str, label: &str, num: String, sub: String| {
+            format!(
+                r#"<div class="readout" style="--c:{colour}"><span class="lbl">{label}</span><span class="num">{num}</span><span class="sub">{sub}</span></div>"#
+            )
+        };
+        let of_activated = |n: usize| {
+            if activated_known.is_empty() {
+                "nobody activated yet".to_string()
+            } else {
+                format!(
+                    "{} of {} activated",
+                    pct(n, activated_known.len()),
+                    activated_known.len()
+                )
+            }
+        };
+        out.push_str(&format!(
+            r#"<div class="readouts">{}{}{}</div>
+"#,
+            readout(
+                "var(--positive)",
+                "weekly active",
+                weekly.to_string(),
+                of_activated(weekly),
+            ),
+            readout(
+                "var(--accent-ink)",
+                "on iphone",
+                if activated_known.is_empty() {
+                    "none".to_string()
+                } else {
+                    pct(iphone, activated_known.len())
+                },
+                format!("{iphone} of {} activated", activated_known.len()),
+            ),
+            readout(
+                "var(--accent)",
+                "usage known",
+                heard.to_string(),
+                format!("of {} signed up", facts.len()),
+            ),
+        ));
+    }
+
+    // Signup weeks start on Monday, UTC, newest first.
+    let this_week =
+        now.date_naive() - chrono::Duration::days(i64::from(now.weekday().num_days_from_monday()));
+    let mobile = |label: &str| format!(r#"<span class="m">{label} </span>"#);
+    let not_known = r#"<span class="muted">not known</span>"#;
+    let mut table = String::new();
+    for k in 0..RETENTION_WEEKS {
+        let start = this_week - chrono::Duration::weeks(k);
+        let end = start + chrono::Duration::weeks(1);
+        let cohort: Vec<&RetentionFacts> = facts
+            .iter()
+            .filter(|f| {
+                let d = f.signed_up_at.date_naive();
+                d >= start && d < end
+            })
+            .collect();
+        let week = escape_html(&start.format("%Y-%m-%d").to_string());
+        let n = cohort.len();
+        if n == 0 {
+            table.push_str(&format!(
+                r#"<tr><td class="who">{week}</td><td class="when">{}<span class="muted">nobody</span></td><td class="when"></td><td class="when"></td><td class="when"></td></tr>
+"#,
+                mobile("signed up"),
+            ));
+            continue;
+        }
+        let share = |count: usize, of: usize| {
+            format!(r#"{count} <span class="muted">{}</span>"#, pct(count, of))
+        };
+        let paired = cohort.iter().filter(|f| activated(f)).count();
+        let heard_here: Vec<&&RetentionFacts> = cohort.iter().filter(|f| known(f)).collect();
+        // Counted among the people heard from; when that is not everybody,
+        // the cell says so rather than passing a partial count off as whole.
+        let among_known = |count: usize| {
+            if heard_here.is_empty() {
+                not_known.to_string()
+            } else if heard_here.len() < n {
+                format!(
+                    r#"{count} <span class="muted">of {} known</span>"#,
+                    heard_here.len()
+                )
+            } else {
+                share(count, n)
+            }
+        };
+        table.push_str(&format!(
+            r#"<tr><td class="who">{week}</td><td class="when">{m1}{n}</td><td class="when">{m2}{paired}</td><td class="when">{m3}{active}</td><td class="when">{m4}{iphone}</td></tr>
+"#,
+            m1 = mobile("signed up"),
+            m2 = mobile("paired"),
+            m3 = mobile("active"),
+            m4 = mobile("on iPhone"),
+            paired = share(paired, n),
+            active = among_known(heard_here.iter().filter(|f| active(f)).count()),
+            iphone = among_known(heard_here.iter().filter(|f| on_iphone(f)).count()),
+        ));
+    }
+    out.push_str(&format!(
+        r#"<table class="conv cohorts"><tr><th>Signup week</th><th>Signed up</th><th>Paired</th><th>Active, {ACTIVE_DAYS} days</th><th>On iPhone</th></tr>
+{table}</table>
+<p class="muted foot">Active means one of their apps changed something, like clearing or replying to mail, in the last {ACTIVE_DAYS} days. Opening the app alone does not count. Weeks start Monday, UTC.</p>"#
+    ));
+    out
 }
 
 /// One thing that happened to one person, for the overview's feed.
@@ -1303,12 +1482,32 @@ pub fn admin_person(row: &UserRow, counts: Option<&Counts>, flash: Option<Banner
         Some(l) => format!("<code>{}</code>", escape_html(l)),
         None => none("none yet"),
     };
+    // Usage, for somebody with a mailbox. "Not known yet" until their daemon
+    // has answered the retention read, which is a different thing from
+    // "never".
+    let usage = if row.tenant_label.is_none() {
+        String::new()
+    } else {
+        let known = row.activity_read_at.is_some();
+        let when = |at: Option<DateTime<Utc>>, never: &str| match (at, known) {
+            (Some(at), _) => day(at),
+            (None, true) => none(never),
+            (None, false) => none("not known yet"),
+        };
+        format!(
+            "\n<dt>Last used</dt><dd>{}</dd>\n<dt>Last opened</dt><dd>{}</dd>\n<dt>Mac app</dt><dd>{}</dd>\n<dt>iPhone app</dt><dd>{}</dd>",
+            when(row.last_action_at, "never"),
+            when(row.last_seen_at, "never"),
+            when(row.mac_paired_at, "not paired"),
+            when(row.ios_paired_at, "not paired"),
+        )
+    };
     let facts = format!(
         r#"<dl class="facts">
 <dt>Address</dt><dd>{email}</dd>
 <dt>Name, as typed</dt><dd>{name}</dd>
 <dt>Signed up as</dt><dd>{account}</dd>
-<dt>Mailbox</dt><dd>{mailbox}</dd>
+<dt>Mailbox</dt><dd>{mailbox}</dd>{usage}
 <dt>Row</dt><dd><code>{id}</code></dd>
 </dl>"#,
         email = escape_html(&row.email),
@@ -1825,6 +2024,11 @@ pub(crate) mod tests {
             tenant_label: None,
             account_email: None,
             first_paired_at: None,
+            last_action_at: None,
+            last_seen_at: None,
+            mac_paired_at: None,
+            ios_paired_at: None,
+            activity_read_at: None,
         }
     }
 
@@ -1871,8 +2075,13 @@ pub(crate) mod tests {
         let mut pages = vec![
             body_of(admin_login(Some("no"))).await,
             body_of(admin_signed_out()).await,
-            body_of(admin_overview(Some(rows), Some(Banner::Stop("no")))).await,
-            body_of(admin_overview(None, Some(Banner::Stop("no")))).await,
+            body_of(admin_overview(
+                Some(rows),
+                Some(&[]),
+                Some(Banner::Stop("no")),
+            ))
+            .await,
+            body_of(admin_overview(None, Some(&[]), Some(Banner::Stop("no")))).await,
             body_of(admin_users(Some(rows), all(), "", None)).await,
             body_of(admin_users(Some(rows), Filter::Waiting, "ada", None)).await,
             body_of(admin_users(
@@ -1913,6 +2122,7 @@ pub(crate) mod tests {
         for html in [
             document_of(admin_overview(
                 Some(&rows),
+                Some(&[]),
                 Some(Banner::Stop("<b>nope</b>")),
             ))
             .await,
@@ -2065,7 +2275,7 @@ pub(crate) mod tests {
         ];
         let c = Counts::of(&rows);
         assert_eq!((c.waiting, c.approved, c.signed_up, c.active), (1, 3, 2, 1));
-        let html = document_of(admin_overview(Some(&rows), None)).await;
+        let html = document_of(admin_overview(Some(&rows), Some(&[]), None)).await;
         assert!(html.contains("67% of approved"), "{html}");
         assert!(html.contains("50% of signed up"), "{html}");
         // The readouts open the lists they count.
@@ -2169,6 +2379,7 @@ pub(crate) mod tests {
         for html in [
             document_of(admin_overview(
                 None,
+                Some(&[]),
                 Some(Banner::Stop("The store did not answer.")),
             ))
             .await,
@@ -2200,7 +2411,7 @@ pub(crate) mod tests {
             tenant_label: Some("c".into()),
             ..row(10, "c@example.com", true)
         });
-        let html = document_of(admin_overview(Some(&rows), None)).await;
+        let html = document_of(admin_overview(Some(&rows), Some(&[]), None)).await;
         assert!(!html.contains("<button type=\"submit\">Approve"), "{html}");
         assert!(!html.contains("Send invite"), "{html}");
         assert!(!html.contains("action=\"/admin/approve\""), "{html}");
@@ -2220,10 +2431,172 @@ pub(crate) mod tests {
             "{html}"
         );
 
-        let calm = document_of(admin_overview(Some(&[]), None)).await;
+        let calm = document_of(admin_overview(Some(&[]), Some(&[]), None)).await;
         assert!(calm.contains("Nothing needs you."), "{calm}");
         assert!(calm.contains("none yet"), "{calm}");
         assert!(calm.contains("Nothing has happened yet."), "{calm}");
+    }
+
+    fn utc(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    /// One signed-up person as the retention panel sees them.
+    fn fact(signed_up: &str) -> RetentionFacts {
+        RetentionFacts {
+            signed_up_at: utc(signed_up),
+            first_paired_at: None,
+            last_action_at: None,
+            last_seen_at: None,
+            ios_paired_at: None,
+            activity_read_at: None,
+        }
+    }
+
+    /// Retention with data: the headline counts the people heard from, the
+    /// cohorts are Monday weeks, and a cohort only partly heard from says so
+    /// instead of passing a partial count off as whole.
+    #[test]
+    fn retention_counts_actions_by_signup_week() {
+        // A Thursday; this week started Monday 2026-11-02.
+        let now = utc("2026-11-05T12:00:00Z");
+        let heard = Some(utc("2026-11-05T08:00:00Z"));
+        let facts = [
+            // This week: paired, acted yesterday, on iPhone.
+            RetentionFacts {
+                first_paired_at: Some(utc("2026-11-03T10:00:00Z")),
+                last_action_at: Some(utc("2026-11-04T09:00:00Z")),
+                last_seen_at: Some(utc("2026-11-05T07:00:00Z")),
+                ios_paired_at: Some(utc("2026-11-03T11:00:00Z")),
+                activity_read_at: heard,
+                ..fact("2026-11-03T09:00:00Z")
+            },
+            // This week: signed up, never paired, heard from.
+            RetentionFacts {
+                activity_read_at: heard,
+                ..fact("2026-11-04T09:00:00Z")
+            },
+            // Last week: paired, last acted over a week ago. Seen recently,
+            // which does NOT make them active.
+            RetentionFacts {
+                first_paired_at: Some(utc("2026-10-27T10:00:00Z")),
+                last_action_at: Some(utc("2026-10-28T09:00:00Z")),
+                last_seen_at: Some(utc("2026-11-05T07:00:00Z")),
+                activity_read_at: heard,
+                ..fact("2026-10-27T09:00:00Z")
+            },
+            // Last week: paired, daemon not heard from yet.
+            RetentionFacts {
+                first_paired_at: Some(utc("2026-10-29T10:00:00Z")),
+                ..fact("2026-10-28T09:00:00Z")
+            },
+            // Months ago: outside the table, still in the headline.
+            RetentionFacts {
+                first_paired_at: Some(utc("2026-06-02T10:00:00Z")),
+                last_action_at: Some(utc("2026-11-01T09:00:00Z")),
+                ios_paired_at: Some(utc("2026-06-10T11:00:00Z")),
+                activity_read_at: heard,
+                ..fact("2026-06-01T09:00:00Z")
+            },
+        ];
+        let html = retention_panel(&facts, now);
+        for want in [
+            // Two of the three activated people heard from acted this week,
+            // and two of them have the iPhone app.
+            r#"<span class="lbl">weekly active</span><span class="num">2</span><span class="sub">67% of 3 activated</span>"#,
+            r#"<span class="lbl">on iphone</span><span class="num">67%</span><span class="sub">2 of 3 activated</span>"#,
+            r#"<span class="lbl">usage known</span><span class="num">4</span><span class="sub">of 5 signed up</span>"#,
+            // This week: everybody heard from.
+            r#"<td class="who">2026-11-02</td><td class="when"><span class="m">signed up </span>2</td><td class="when"><span class="m">paired </span>1 <span class="muted">50%</span></td><td class="when"><span class="m">active </span>1 <span class="muted">50%</span></td><td class="when"><span class="m">on iPhone </span>1 <span class="muted">50%</span></td>"#,
+            // Last week: one of two heard from, and the cells say so.
+            r#"<td class="who">2026-10-26</td><td class="when"><span class="m">signed up </span>2</td><td class="when"><span class="m">paired </span>2 <span class="muted">100%</span></td><td class="when"><span class="m">active </span>0 <span class="muted">of 1 known</span></td>"#,
+            // An empty week is a row, not a gap.
+            r#"<td class="who">2026-10-19</td><td class="when"><span class="m">signed up </span><span class="muted">nobody</span></td>"#,
+            "Weeks start Monday, UTC.",
+        ] {
+            assert!(html.contains(want), "missing {want}\n{html}");
+        }
+        assert_eq!(
+            html.matches(r#"<td class="who">"#).count(),
+            RETENTION_WEEKS as usize
+        );
+        assert!(!html.contains("2026-06-01"), "outside the table");
+        assert!(!html.contains("No usage data yet"), "{html}");
+        assert!(!html.contains('\u{2014}'), "no em dashes in UI copy");
+    }
+
+    /// Before any daemon has answered: say so, and show no zeros where the
+    /// truth is "not known".
+    #[test]
+    fn retention_before_any_data_says_so_rather_than_zero() {
+        let now = utc("2026-11-05T12:00:00Z");
+        let facts = [RetentionFacts {
+            first_paired_at: Some(utc("2026-11-03T10:00:00Z")),
+            ..fact("2026-11-03T09:00:00Z")
+        }];
+        let html = retention_panel(&facts, now);
+        assert!(html.contains("No usage data yet."), "{html}");
+        assert!(!html.contains("weekly active"), "{html}");
+        assert!(
+            html.contains(r#"<span class="m">active </span><span class="muted">not known</span>"#),
+            "{html}"
+        );
+        assert!(!html.contains('\u{2014}'), "{html}");
+
+        let nobody = retention_panel(&[], now);
+        assert!(nobody.contains("Nobody has signed up yet"), "{nobody}");
+    }
+
+    /// The panel is on the overview, and a failed retention read costs that
+    /// panel alone.
+    #[tokio::test]
+    async fn the_overview_carries_the_retention_panel() {
+        let rows = [active_row(1, "ada@example.com", "ada")];
+        let html = document_of(admin_overview(Some(&rows), Some(&[]), None)).await;
+        assert!(html.contains("<h2>Retention</h2>"), "{html}");
+        let broken = document_of(admin_overview(Some(&rows), None, None)).await;
+        assert!(broken.contains("<h2>Retention</h2>"), "{broken}");
+        assert!(
+            broken.contains("Nothing to show until the store answers."),
+            "{broken}"
+        );
+        assert!(broken.contains("<h2>Conversion</h2>"), "{broken}");
+    }
+
+    /// Last used, per person: on the members list, and on their page with
+    /// "not known yet" until their daemon has answered.
+    #[tokio::test]
+    async fn a_member_shows_when_they_last_used_the_app() {
+        let unknown = active_row(1, "ada@example.com", "ada");
+        let html = document_of(admin_person(&unknown, None, None)).await;
+        assert!(
+            html.contains(r#"<dt>Last used</dt><dd><span class="muted">not known yet</span></dd>"#),
+            "{html}"
+        );
+        let known = UserRow {
+            last_action_at: Some(utc("2026-11-04T09:00:00Z")),
+            mac_paired_at: Some(utc("2026-10-01T09:00:00Z")),
+            activity_read_at: Some(utc("2026-11-05T09:00:00Z")),
+            ..active_row(2, "bea@example.com", "bea")
+        };
+        let html = document_of(admin_person(&known, None, None)).await;
+        for want in [
+            "<dt>Last used</dt><dd>2026-11-04</dd>",
+            r#"<dt>Last opened</dt><dd><span class="muted">never</span></dd>"#,
+            "<dt>Mac app</dt><dd>2026-10-01</dd>",
+            r#"<dt>iPhone app</dt><dd><span class="muted">not paired</span></dd>"#,
+        ] {
+            assert!(html.contains(want), "missing {want}\n{html}");
+        }
+        let list = people(&[unknown, known], Filter::Members).await;
+        assert!(
+            list.contains(r#"<span class="muted">used 2026-11-04</span>"#),
+            "{list}"
+        );
+        assert_eq!(list.matches("used 20").count(), 1, "{list}");
+        // A waiting row has no mailbox and no usage lines.
+        let html = document_of(admin_person(&waiting(3, "w@example.com"), None, None)).await;
+        assert!(!html.contains("Last used"), "{html}");
     }
 
     /// The person page: every fact, every rung, and "not yet" on the ones not
@@ -2403,7 +2776,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn every_app_page_carries_the_way_out() {
         for html in [
-            document_of(admin_overview(Some(&[]), None)).await,
+            document_of(admin_overview(Some(&[]), Some(&[]), None)).await,
             document_of(admin_users(Some(&[]), all(), "", None)).await,
             document_of(admin_features(&[], None, None, None, false, 6)).await,
             document_of(admin_person(&waiting(1, "a@example.com"), None, None)).await,
@@ -2452,7 +2825,7 @@ pub(crate) mod tests {
                 .to_string()
         };
         for app in [
-            csp(admin_overview(Some(&[]), None)),
+            csp(admin_overview(Some(&[]), Some(&[]), None)),
             csp(admin_users(Some(&[]), all(), "", None)),
             csp(admin_person(&waiting(1, "a@example.com"), None, None)),
             csp(admin_features(&[], None, None, None, false, 6)),
@@ -2549,7 +2922,7 @@ pub(crate) mod tests {
             assert_eq!(html.matches("url(").count(), 1, "{html}");
         }
         for r in [
-            admin_overview(Some(&rows), None),
+            admin_overview(Some(&rows), Some(&[]), None),
             admin_person(&rows[0], None, None),
             admin_login(None),
         ] {

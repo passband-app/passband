@@ -1714,6 +1714,7 @@ mod tests {
                     waiting(1, "ada@example.com"),
                     row(2, "bob@example.com", true),
                 ]),
+                Some(&[]),
                 None,
             ))
             .await,
@@ -1749,7 +1750,12 @@ mod tests {
             ))
             .await,
             body_of(admin_login(None)).await,
-            body_of(admin_overview(Some(&[waiting(1, "ada@example.com")]), None)).await,
+            body_of(admin_overview(
+                Some(&[waiting(1, "ada@example.com")]),
+                Some(&[]),
+                None,
+            ))
+            .await,
         ] {
             assert!(html.contains(r#"<header class="brand">"#), "{html}");
             assert!(
@@ -1823,7 +1829,7 @@ mod tests {
             problem(StatusCode::BAD_REQUEST, "Nope", "Try again."),
             console_problem(StatusCode::BAD_REQUEST, "Nope", "Try again."),
             admin_login(None),
-            admin_overview(Some(&[waiting(1, "ada@example.com")]), None),
+            admin_overview(Some(&[waiting(1, "ada@example.com")]), Some(&[]), None),
         ] {
             let h = r.headers().clone();
             assert_eq!(h[header::X_FRAME_OPTIONS], "DENY");

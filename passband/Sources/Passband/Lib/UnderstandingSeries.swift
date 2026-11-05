@@ -251,6 +251,63 @@ enum UnderstandingGate {
     }
 }
 
+// MARK: - the Usage page's subpages
+
+/// The Usage page's two subpages. Mail is the page as it always was: mail in
+/// and out, signal to noise, spend. Understanding is the section above,
+/// behind its flag.
+enum UsageSubpage: String, CaseIterable, Sendable {
+    case mail, understanding
+
+    var label: String {
+        switch self {
+        case .mail: "Mail"
+        case .understanding: "Understanding"
+        }
+    }
+}
+
+/// Which subpages the page offers and which one is on screen. One decision
+/// point, `UnderstandingGate.showsSection`: without the flag the page offers
+/// nothing to switch between, and draws no switcher at all, because a
+/// switcher with one entry is a tell that something is missing.
+enum UsagePages {
+    /// Where the choice is remembered, beside the app's other remembered
+    /// view choices (`passband.pref.settingsSection`).
+    static let defaultsKey = "passband.pref.usageSubpage"
+
+    /// The switcher's entries, in order; empty means no switcher.
+    static func offered(_ features: HiddenFeatures, staged: Bool) -> [UsageSubpage] {
+        UnderstandingGate.showsSection(features, staged: staged) ? UsageSubpage.allCases : []
+    }
+
+    /// What the page opens on: the fixture stage on Understanding (or on the
+    /// subpage it names, `--fixture-usage-page=mail`), otherwise the
+    /// remembered choice, and Mail when nothing (or nothing readable) is
+    /// remembered.
+    static func initial(remembered: String?, staged: Bool, stagedPage: String? = nil) -> UsageSubpage {
+        if staged { return stagedPage.flatMap(UsageSubpage.init(rawValue:)) ?? .understanding }
+        return remembered.flatMap(UsageSubpage.init(rawValue:)) ?? .mail
+    }
+
+    /// What is drawn: the selection when it is on offer, else Mail. A flag
+    /// turned off under an open Understanding subpage drops back to Mail.
+    static func shown(_ selected: UsageSubpage, offered: [UsageSubpage]) -> UsageSubpage {
+        offered.contains(selected) ? selected : .mail
+    }
+
+    static func remembered(in defaults: UserDefaults) -> String? {
+        defaults.string(forKey: defaultsKey)
+    }
+
+    /// Remembered across launches. Not from the fixture stage, which must
+    /// never write the real app's choices.
+    static func remember(_ page: UsageSubpage, in defaults: UserDefaults, staged: Bool) {
+        guard !staged else { return }
+        defaults.set(page.rawValue, forKey: defaultsKey)
+    }
+}
+
 // MARK: - memory
 
 /// The memory entries as the list draws them: one group per kind, in a fixed

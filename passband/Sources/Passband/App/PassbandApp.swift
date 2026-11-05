@@ -64,6 +64,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A staged page is for looking at, launched behind whatever the
         // person is typing into: taking focus would hand it their keys.
         if !FixtureMode.stagesUsage { NSApp.activate(ignoringOtherApps: true) }
+        // A staged page at a given window width (`--fixture-usage-width=980`,
+        // or `min` for the narrowest the window allows), for checking how it
+        // wraps without anyone dragging a corner. It saves the frame as a drag
+        // would, into the defaults every build shares, so a narrow shot is
+        // followed by one at the old width to put it back.
+        if let width = FixtureMode.stageValue("width") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                guard let window = MainWindow.find() else { return }
+                var frame = window.frame
+                frame.size.width = width == "min" ? window.minSize.width : (Double(width) ?? frame.width)
+                window.setFrame(frame, display: true)
+            }
+        }
         // Install before launch finishes: a notification tapped while Passband
         // was not running is delivered the moment a delegate exists, and a
         // center without one drops it.

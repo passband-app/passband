@@ -31,6 +31,7 @@ struct UnderstandingSeriesTests {
         nearestPicksTheClosestWithinReach()
         noDashesInAnythingTheSectionSays()
         theSectionIsBehindTheFlag()
+        theUsageSwitcherIsBehindTheFlagAndRemembers()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -352,6 +353,34 @@ struct UnderstandingSeriesTests {
         expect(UnderstandingGate.showsSection(.none, staged: true), "the fixture stage shows it regardless")
         expect(HiddenFeature.understanding.key == UnderstandingFlag.key,
             "the app's flag and the fixture's claimed key are one string")
+    }
+
+    static func theUsageSwitcherIsBehindTheFlagAndRemembers() {
+        let on = HiddenFeatures(daemon: ["understanding"])
+        expect(UsagePages.offered(.none, staged: false).isEmpty, "off: no switcher at all, not a one-entry one")
+        expect(UsagePages.offered(HiddenFeatures(daemon: ["renotify"]), staged: false).isEmpty, "other flags: none")
+        expect(UsagePages.offered(on, staged: false) == [.mail, .understanding], "on: Mail, then Understanding")
+        expect(UsagePages.offered(.none, staged: true) == [.mail, .understanding], "the stage: both")
+        expect(UsageSubpage.mail.label == "Mail" && UsageSubpage.understanding.label == "Understanding", "labels")
+
+        expect(UsagePages.initial(remembered: nil, staged: false) == .mail, "nothing remembered: Mail")
+        expect(UsagePages.initial(remembered: "understanding", staged: false) == .understanding, "the remembered choice")
+        expect(UsagePages.initial(remembered: "a later build's page", staged: false) == .mail, "an unreadable choice: Mail")
+        expect(UsagePages.initial(remembered: "mail", staged: true) == .understanding, "the stage lands on Understanding")
+        expect(UsagePages.initial(remembered: nil, staged: true, stagedPage: "mail") == .mail, "or on the page it names")
+        expect(UsagePages.shown(.understanding, offered: []) == .mail, "flag off under an open Understanding: Mail")
+        expect(UsagePages.shown(.understanding, offered: UsageSubpage.allCases) == .understanding, "on: as chosen")
+
+        let suite = "understanding-tests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        expect(UsagePages.remembered(in: defaults) == nil, "a fresh install remembers nothing")
+        UsagePages.remember(.understanding, in: defaults, staged: false)
+        expect(UsagePages.initial(remembered: UsagePages.remembered(in: defaults), staged: false) == .understanding,
+            "a choice survives to the next launch")
+        UsagePages.remember(.mail, in: defaults, staged: true)
+        expect(UsagePages.remembered(in: defaults) == "understanding", "the stage never writes the real choice")
+        expect(UsagePages.defaultsKey.hasPrefix("passband.pref."), "kept beside the other remembered choices")
     }
 
     static func expect(_ cond: Bool, _ what: String) {

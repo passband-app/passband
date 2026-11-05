@@ -28,19 +28,37 @@ struct UsageView: View {
     @State private var assistant = AssistantUsage()
     /// The shared crosshair: an instant inside the hovered day, or nothing.
     @State private var scrub: Date?
+    /// The chosen subpage, remembered across launches (UsagePages). What is
+    /// drawn is `shown`, which falls back to Mail when Understanding is not
+    /// on offer.
+    @State private var selected = UsagePages.initial(
+        remembered: UsagePages.remembered(in: .standard), staged: FixtureMode.stagesUsage,
+        stagedPage: FixtureMode.stageValue("page"))
 
     private static let windows: [(value: Int, label: String)] = [
         (7, "7 days"), (30, "30 days"), (90, "90 days"),
     ]
 
     var body: some View {
-        VStack(spacing: 0) {
-            RoutedHeader(title: "Usage") {
-                GlassSegmented(options: Self.windows, selection: $days)
+        let offered = UsagePages.offered(store.hiddenFeatures, staged: FixtureMode.stagesUsage)
+        let shown = UsagePages.shown(selected, offered: offered)
+        return VStack(spacing: 0) {
+            RoutedHeader(title: "Usage", accessory: switcher(offered)) {
+                // The window scopes Mail only: Understanding is the ledger's
+                // whole span, and says so.
+                if shown == .mail {
+                    GlassSegmented(options: Self.windows, selection: $days)
+                }
             }
             ScrollViewReader { scroller in
-            ScrollView {
-                content
+                ScrollView {
+                    Group {
+                        if shown == .understanding {
+                            UnderstandingSection()
+                        } else {
+                            content
+                        }
+                    }
                     .padding(.horizontal, Space.page)
                     .padding(.vertical, Space.scaled(18))
                     // Capped on the type's curve, like the settings panes: the
@@ -48,17 +66,18 @@ struct UsageView: View {
                     // measure and grows with the text in comfortable.
                     .frame(maxWidth: Typo.measure(980), alignment: .leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            // The staged page (`--fixture-usage`) is a demo of the section at
-            // the bottom, so it opens there.
-            .task(id: series != nil) {
-                guard FixtureMode.stagesUsage, showsUnderstanding, series != nil else { return }
-                try? await Task.sleep(for: .milliseconds(900))
-                withAnimation(.smooth(duration: 0.3)) {
-                    scroller.scrollTo(FixtureMode.stageValue("scroll") ?? UnderstandingSection.anchor, anchor: .top)
+                }
+                // A screenshot of the stage's lower cards (`--fixture-usage-
+                // scroll=knows`); the stage itself lands on the subpage.
+                .task(id: shown) {
+                    guard shown == .understanding, let target = FixtureMode.stageValue("scroll") else { return }
+                    try? await Task.sleep(for: .milliseconds(1500))
+                    withAnimation(.smooth(duration: 0.3)) { scroller.scrollTo(target, anchor: .top) }
                 }
             }
-            }
+        }
+        .onChange(of: selected) { _, page in
+            UsagePages.remember(page, in: .standard, staged: FixtureMode.stagesUsage)
         }
         // The window is the one filter, and it scopes everything below it.
         .task(id: days) { await load() }
@@ -86,8 +105,13 @@ struct UsageView: View {
         assistant = AssistantUsageLedger.read()
     }
 
-    private var showsUnderstanding: Bool {
-        UnderstandingGate.showsSection(store.hiddenFeatures, staged: FixtureMode.stagesUsage)
+    /// The subpage switcher, or nothing: with Understanding off there is
+    /// one page and no control (UsagePages.offered is empty).
+    private func switcher(_ offered: [UsageSubpage]) -> AnyView? {
+        guard offered.count > 1 else { return nil }
+        return AnyView(
+            GlassSegmented(options: offered.map { ($0, $0.label) }, selection: $selected)
+                .accessibilityLabel("Usage page"))
     }
 
     // MARK: - layout
@@ -106,12 +130,6 @@ struct UsageView: View {
                 HStack(alignment: .top, spacing: Space.s16) {
                     categoryCard(series)
                     assistantCard.frame(width: Typo.measure(280))
-                }
-                // Not scoped by the window: who the mail says the owner is
-                // is the ledger's whole span, and the section says so. Behind
-                // the `understanding` flag, whole: see UnderstandingGate.
-                if showsUnderstanding {
-                    UnderstandingSection().id(UnderstandingSection.anchor)
                 }
             }
             // A refetch keeps the frame: the last render dims rather than

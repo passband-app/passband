@@ -355,10 +355,16 @@ struct ProductGuideTests {
             expect(!words.contains { offIndex.contains($0) }, "off: the topic index says nothing of it")
             expect(offIndex == ProductGuide.topicIndex(calendar: calendar), "off: the index is the default one")
             let on = ProductGuide.text(.appAndAccounts, runningVersion: "0.0.12", calendar: calendar, understanding: true)
-            for w in ["Understanding, at the bottom of Usage", "What Passband knows", "Your people", "People you answer"] {
+            for w in ["two subpages", "Mail and Understanding", "- Mail: mail in and out", "What Passband knows",
+                "Your people", "People you answer"] {
                 expect(on.contains(w), "on: the app topic describes \"\(w)\"")
             }
             expect(!on.contains("not on for every mailbox"), "on: no flag caveat")
+            expect(!on.contains("- Usage, at the bottom of the rail: mail in and out"),
+                "on: the single page's line gives way to the two subpages")
+            let offApp = ProductGuide.text(.appAndAccounts, runningVersion: "0.0.12", calendar: calendar, understanding: false)
+            expect(offApp.contains("- Usage, at the bottom of the rail: mail in and out"), "off: the single Usage page")
+            expect(!offApp.contains("subpage"), "off: no subpages")
             expect(
                 ProductGuide.topicIndex(calendar: calendar, understanding: true).contains("understanding (people you answer"),
                 "on: the index names it")

@@ -825,11 +825,18 @@ struct RoutedHeader<Trailing: View>: View {
     /// the same pairing as `passband` + `SITREP`, so a routed page and the
     /// dashboard read as one app rather than as two typographic ideas.
     var subtitle: String?
+    /// A page's own switcher between its subpages, set right after the title
+    /// the way the Emails bar sets its mode control after the wordmark.
+    var accessory: AnyView?
     @ViewBuilder var trailing: Trailing
 
-    init(title: String, subtitle: String? = nil, @ViewBuilder trailing: () -> Trailing) {
+    init(
+        title: String, subtitle: String? = nil, accessory: AnyView? = nil,
+        @ViewBuilder trailing: () -> Trailing
+    ) {
         self.title = title
         self.subtitle = subtitle
+        self.accessory = accessory
         self.trailing = trailing()
     }
 
@@ -849,6 +856,9 @@ struct RoutedHeader<Trailing: View>: View {
                         .foregroundStyle(Palette.inkFaintest)
                         .textCase(.uppercase)
                 }
+            }
+            if let accessory {
+                accessory.padding(.leading, Space.s6)
             }
             Spacer(minLength: Space.s8)
             trailing

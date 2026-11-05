@@ -1,5 +1,5 @@
-// UNDERSTANDING, at the bottom of the Usage page: who the owner's mail says
-// they are (docs/UNDERSTANDING.md). Three cards under one heading:
+// UNDERSTANDING, the Usage page's second subpage: who the owner's mail says
+// they are (docs/UNDERSTANDING.md). Three cards under one masthead:
 //
 //   * People: every correspondent on one plot, mail per month across a log
 //     axis and the ladder up it (answered on top, read in the middle, ignored
@@ -10,11 +10,12 @@
 //   * What Passband knows: the memory entries, behind the `understanding`
 //     hidden feature, with confirm and delete.
 //
-// THE LEDGER IS NOT THE WINDOW. The page's picker scopes the charts above;
-// this section is the ledger's whole span, read once per visit, and its notes
-// say how many days that is. A daemon older than the ledger answers 404 and
-// the whole section stays away; with the feature off, memory 404s and only
-// its card does. The arithmetic and every sentence are UnderstandingSeries.
+// THE LEDGER IS NOT THE WINDOW. The Mail subpage's 7, 30, 90 picker is not
+// shown here; this is the ledger's whole span, read once per visit, and its
+// notes say how many days that is. The subpage exists only with the
+// `understanding` flag (UsagePages, UnderstandingGate); a daemon too old for
+// the ledger answers 404 and the subpage says so rather than drawing cards.
+// The arithmetic and every sentence are UnderstandingSeries.
 
 import Charts
 import SwiftUI
@@ -33,9 +34,6 @@ struct UnderstandingSection: View {
     /// Previews hand their data in and skip the fetch.
     private let staged: Bool
 
-    /// Where the page scrolls to put this section on screen.
-    static let anchor = "understanding"
-
     init() { staged = false }
 
     /// A section already loaded, for previews.
@@ -49,7 +47,12 @@ struct UnderstandingSection: View {
     var body: some View {
         Group {
             if absent {
-                EmptyView()
+                VStack(alignment: .leading, spacing: Space.s16) {
+                    heading
+                    SectionCard(label: "Understanding") {
+                        EmptyNote("This server does not keep the relationship ledger yet. Update it and this page fills in.")
+                    }
+                }
             } else {
                 VStack(alignment: .leading, spacing: Space.s16) {
                     heading
@@ -71,7 +74,6 @@ struct UnderstandingSection: View {
                         KnowsCard(memory: memory, onChange: { self.memory = $0 }).id("knows")
                     }
                 }
-                .padding(.top, Space.s16)
             }
         }
         .task { await loadLedger() }
@@ -84,12 +86,15 @@ struct UnderstandingSection: View {
     /// preview has no stats to ask.
     private var showsMemory: Bool { staged || store.hasFeature(.understanding) }
 
+    /// The subpage's masthead, set like the Mail subpage's "Fun charts": the
+    /// switcher in the bar already says "Understanding", so this says what
+    /// the page is about instead of repeating its name.
     private var heading: some View {
         VStack(alignment: .leading, spacing: Space.scaled(3)) {
-            Text("Understanding")
+            Text("Who your mail says you are")
                 .font(Typo.ui(20, weight: .semibold))
                 .foregroundStyle(Palette.ink)
-            Text("Who your mail says you are, from what you answer, read and skip.")
+            Text("From what you answer, read and skip, across everything Passband has counted.")
                 .font(Typo.rowSub)
                 .foregroundStyle(Palette.inkFaint)
         }

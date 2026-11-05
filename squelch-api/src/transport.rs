@@ -1,15 +1,13 @@
 //! Transport security headers over every door the daemon serves.
 //!
-//! Two headers, both ones a DAST scan (the CASA Tier 2 assessment runs one,
-//! docs/VERIFICATION.md) flags on every response that lacks them:
-//!
 //! - `Strict-Transport-Security`, ONLY when the request reached us over https.
 //!   On hosted that is Traefik terminating TLS and saying so in
 //!   `X-Forwarded-Proto`. Self-host on loopback http never sees the header, so
-//!   nothing changes there. A client spoofing the header over plain http gains
-//!   nothing: browsers ignore HSTS on an http response (RFC 6797 §8.1). No
-//!   `includeSubDomains`: a tenant vhost speaks for itself, not its siblings.
+//!   nothing changes there.
 //! - `X-Content-Type-Options: nosniff`, unless a handler already set it.
+//!
+//! Both are what a DAST scan (the CASA assessment runs one,
+//! docs/VERIFICATION.md) reports on every response that lacks them.
 
 use axum::{
     extract::Request,
@@ -17,20 +15,14 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-
-/// One year, the floor the HSTS preload list and most scanners expect.
-pub const HSTS: &str = "max-age=31536000";
+use squelch_httpauth::{HSTS, forwarded_https};
 
 pub async fn transport_security(request: Request, next: Next) -> Response {
     let https = request
         .headers()
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| {
-            v.split(',')
-                .next()
-                .is_some_and(|p| p.trim().eq_ignore_ascii_case("https"))
-        });
+        .is_some_and(forwarded_https);
     let mut response = next.run(request).await;
     let h = response.headers_mut();
     if https {
@@ -50,18 +42,14 @@ mod tests {
     use axum::{Router, body::Body, middleware, routing::get};
     use tower::ServiceExt;
 
-    fn app() -> Router {
-        Router::new()
-            .route("/", get(|| async { "ok" }))
-            .layer(middleware::from_fn(transport_security))
-    }
-
     async fn headers(proto: Option<&str>) -> axum::http::HeaderMap {
-        let mut req = Request::builder().uri("/");
+        let mut req = Request::builder().uri("/missing");
         if let Some(p) = proto {
             req = req.header("x-forwarded-proto", p);
         }
-        app()
+        Router::new()
+            .route("/", get(|| async { "ok" }))
+            .layer(middleware::from_fn(transport_security))
             .oneshot(req.body(Body::empty()).unwrap())
             .await
             .unwrap()
@@ -70,32 +58,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hsts_only_behind_https() {
-        assert_eq!(
-            headers(Some("https")).await[header::STRICT_TRANSPORT_SECURITY],
-            HSTS
-        );
-        assert_eq!(
-            headers(Some("HTTPS, http")).await[header::STRICT_TRANSPORT_SECURITY],
-            HSTS
-        );
-        assert!(
-            !headers(Some("http"))
-                .await
-                .contains_key(header::STRICT_TRANSPORT_SECURITY)
-        );
-        assert!(
-            !headers(None)
-                .await
-                .contains_key(header::STRICT_TRANSPORT_SECURITY)
-        );
-    }
-
-    #[tokio::test]
-    async fn nosniff_everywhere() {
-        assert_eq!(
-            headers(None).await[header::X_CONTENT_TYPE_OPTIONS],
-            "nosniff"
-        );
+    async fn hsts_only_behind_https_and_on_a_404_too() {
+        let h = headers(Some("https")).await;
+        assert_eq!(h[header::STRICT_TRANSPORT_SECURITY], HSTS);
+        assert_eq!(h[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        let h = headers(None).await;
+        assert!(!h.contains_key(header::STRICT_TRANSPORT_SECURITY));
+        assert_eq!(h[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
     }
 }

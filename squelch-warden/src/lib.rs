@@ -77,6 +77,7 @@ pub mod provision;
 pub mod ratelimit;
 #[cfg(test)]
 pub mod testing;
+mod transport;
 pub mod validate;
 
 pub use cluster::{Cluster, KubeCluster};
@@ -201,6 +202,8 @@ pub fn router(state: WardenState) -> Router {
     Router::new()
         .route("/healthz", get(handlers::healthz))
         .merge(v1)
+        // Outermost, so a refusal and a 404 carry it too.
+        .layer(middleware::from_fn(transport::transport_security))
 }
 
 #[cfg(test)]

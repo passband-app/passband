@@ -13,9 +13,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-
-/// One year, the floor the HSTS preload list and most scanners expect.
-pub(crate) const HSTS: &str = "max-age=31536000";
+use squelch_httpauth::HSTS;
 
 pub(crate) async fn transport_security(
     State(secure): State<bool>,

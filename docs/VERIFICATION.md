@@ -93,8 +93,22 @@ Cleared as of 2026-11-05:
       Neither service sent HSTS before, and a missing one is the first thing a
       DAST scan reports on each page. The daemon sends it only when Traefik
       says the request arrived over https, so self-host on loopback is
-      unchanged. The marketing site already had it from CloudFront's
-      `Managed-SecurityHeadersPolicy`.
+      unchanged. The push relay and the warden got the same layer, keyed on
+      the load balancer's or Traefik's `X-Forwarded-Proto` (the shared check
+      is `squelch_httpauth::forwarded_https`).
+- [x] A Content-Security-Policy on `passband.app` (CloudFront response headers
+      policy `passband-site-security`, `deploy/aws/tofu/main/site.tf`), which
+      the managed policy it replaces never set. Every page was loaded in
+      Chromium under the exact policy, waitlist submit included, with no
+      violations. **Needs a `tofu apply`** (the CI site deploy does not apply
+      tofu); until then the managed policy is still the live one.
+- [x] SAST pre-scan (Semgrep, the community Rust, TypeScript, Dockerfile,
+      Terraform, Kubernetes and secrets rules). Nothing to fix: every secret
+      hit is a test fixture or PostHog's public client key, the root-user hits
+      are images whose entrypoint drops privileges with `setpriv`, the
+      Kubernetes hits are node-exporter's documented host access, and every
+      SQL string built with `format!` interpolates only a literal table name,
+      an enum, or test code. `cargo deny` covers dependencies in CI.
 
 ## What gets submitted
 

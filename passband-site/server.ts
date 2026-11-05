@@ -54,10 +54,10 @@ const pages: Record<string, string> = {
   // because it serves an empty #root.
   "/about": "about.html",
   "/privacy": "privacy.html",
-  // The threat model, published from docs/SECURITY.md while the source repo is
-  // private: the privacy policy (which Google's OAuth verification reviews)
-  // and /about link here rather than to a GitHub page that now 404s.
-  // Regenerate it after editing the doc: `bun tools/security-page.ts`.
+  // The threat model, published from docs/SECURITY.md as a readable page with
+  // diagrams; the privacy policy (which Google's OAuth verification reviews)
+  // and /about link here. Regenerate it after editing the doc:
+  // `bun tools/security-page.ts`.
   "/security": "security.html",
   "/self-host": "selfhost.html",
   "/terms": "terms.html",

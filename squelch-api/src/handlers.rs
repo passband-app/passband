@@ -3482,12 +3482,15 @@ impl From<squelch_core::relationship::Relationship> for RelationshipView {
 
 /// The wire shape of the reader's contact card. The optional parts are ABSENT,
 /// never null, when there is nothing to say: no mail from them, never written
-/// to, no rule covers them. `relationship` is the one exception: always
-/// present, `null` when the ledger has no row, so a client can tell an older
-/// daemon (no key) from a person with no history (null).
+/// to, no rule covers them. `relationship` is the one exception: under the
+/// `understanding` hidden feature it is always present, `null` when the
+/// ledger has no row, so a client can tell an older daemon (no key) from a
+/// person with no history (null). With the feature OFF the key is absent,
+/// which is exactly what an older daemon serves.
 #[derive(Debug, Serialize)]
 pub struct PersonView {
-    relationship: Option<RelationshipView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relationship: Option<Option<RelationshipView>>,
     addr: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     display_name: Option<String>,
@@ -3531,7 +3534,12 @@ pub async fn get_person(
     })
     .await?;
     let view = PersonView {
-        relationship: p.relationship.map(RelationshipView::from),
+        // The ledger computes for everyone and is SHOWN only under the
+        // `understanding` feature (docs/UNDERSTANDING.md §5).
+        relationship: state
+            .features()
+            .enabled(squelch_core::features::UNDERSTANDING)
+            .then(|| p.relationship.map(RelationshipView::from)),
         addr: p.addr,
         display_name: p.display_name,
         is_self: p.is_self,
@@ -3609,11 +3617,21 @@ const RELATIONSHIPS_MAX: usize = 200;
 /// invariant test in squelch-mcp holds that). `no-store`, like the card.
 /// `sort` defaults to `replies`; an unknown one is a 400 rather than a quiet
 /// default, so a client typo is not mistaken for an empty ranking.
+///
+/// BEHIND THE `understanding` HIDDEN FEATURE: off, it answers the opaque 404
+/// the memory routes do, before reading anything. The ledger behind it keeps
+/// computing either way.
 pub async fn get_relationships(
     State(state): State<ApiState>,
     Query(params): Query<RelationshipsQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     use squelch_core::store::sqlite::relationships::RelationshipSort;
+    if !state
+        .features()
+        .enabled(squelch_core::features::UNDERSTANDING)
+    {
+        return Err(ApiError::not_found());
+    }
     let sort = match params.sort.as_deref().map(str::trim) {
         None | Some("") => RelationshipSort::Replies,
         Some(s) => RelationshipSort::parse(s).ok_or_else(|| {

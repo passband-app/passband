@@ -10162,6 +10162,72 @@ async fn sender_domains_roll_up_by_host_for_the_rule_editor() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// A mailbox whose relationship ledger is filled (Alice: two threads, one
+/// answered; bulk@: three mails), served with the `understanding` hidden
+/// feature on or off. The ledger computes either way; only serving is gated.
+fn ledger_app(understanding: bool) -> axum::Router {
+    use squelch_core::features::{CALENDAR, Features, UNDERSTANDING};
+    let (state, _store, _acct) = state_with(|store, acct| {
+        let earlier = chrono::Utc::now() - chrono::Duration::hours(2);
+        let mut first = msg(acct, "g1", "t1", "lunch?", "body");
+        first.received_at = earlier;
+        store.upsert_message(&first).unwrap();
+        let mut second = msg(acct, "g2", "t2", "the deck", "body");
+        second.received_at = earlier;
+        store.upsert_message(&second).unwrap();
+        let mut reply = sent_msg(acct, "s1", "t1", "re: lunch?", "alice@example.com");
+        reply.received_at = earlier + chrono::Duration::minutes(20);
+        store.upsert_message(&reply).unwrap();
+        let mut other = msg(acct, "g3", "t3", "hello", "body");
+        other.from_addr = "bulk@news.example".into();
+        for n in 0..3 {
+            other.gmail_msg_id = format!("b{n}");
+            other.thread_id = format!("b{n}");
+            store.upsert_message(&other).unwrap();
+        }
+        store.recompute_all_relationships(acct).unwrap();
+        assert!(
+            store
+                .relationship(acct, "alice@example.com")
+                .unwrap()
+                .is_some(),
+            "control: the ledger computed"
+        );
+    });
+    let features = if understanding {
+        Features::pinned([CALENDAR, UNDERSTANDING])
+    } else {
+        Features::none()
+    };
+    router(state.with_features(features))
+}
+
+#[tokio::test]
+async fn the_relationship_ledger_is_not_served_without_the_understanding_flag() {
+    // OFF: the list route is the opaque 404, and the contact card carries no
+    // `relationship` key at all (what an older daemon serves), though the
+    // ledger behind both is filled.
+    let app = ledger_app(false);
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/relationships"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/person?addr=alice%40example.com"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "the card itself stays");
+    let card = body_json(resp).await;
+    assert_eq!(card["received"]["count"], 2, "control: it is Alice's card");
+    assert!(
+        !card.as_object().unwrap().contains_key("relationship"),
+        "{card}"
+    );
+}
+
 #[tokio::test]
 async fn the_relationship_list_needs_the_clients_token() {
     // Who the owner answers and whose mail they ignore: never without a
@@ -10197,26 +10263,7 @@ async fn the_relationship_ledger_reaches_the_card_and_its_own_list() {
     // `relationship`, a row object or null; GET /client/relationships answers
     // {coverage_days, computed_at, rows}, every row key present, null where
     // unknown. Both no-store.
-    let Harness { app, .. } = harness(|store, acct| {
-        let earlier = chrono::Utc::now() - chrono::Duration::hours(2);
-        let mut first = msg(acct, "g1", "t1", "lunch?", "body");
-        first.received_at = earlier;
-        store.upsert_message(&first).unwrap();
-        let mut second = msg(acct, "g2", "t2", "the deck", "body");
-        second.received_at = earlier;
-        store.upsert_message(&second).unwrap();
-        let mut reply = sent_msg(acct, "s1", "t1", "re: lunch?", "alice@example.com");
-        reply.received_at = earlier + chrono::Duration::minutes(20);
-        store.upsert_message(&reply).unwrap();
-        let mut other = msg(acct, "g3", "t3", "hello", "body");
-        other.from_addr = "bulk@news.example".into();
-        for n in 0..3 {
-            other.gmail_msg_id = format!("b{n}");
-            other.thread_id = format!("b{n}");
-            store.upsert_message(&other).unwrap();
-        }
-        store.recompute_all_relationships(acct).unwrap();
-    });
+    let app = ledger_app(true);
 
     let resp = app
         .clone()

@@ -324,6 +324,10 @@ the daemon:
 | The push/read-receipt relay | Opaque tokens only, but it is our surface |
 | `carrier` (Hetzner) and the k3s cluster | Where the mail and the sealed tokens rest |
 
+Draft questionnaire answers, chapter by chapter with evidence, and the list of
+what to fix before the lab looks: `docs/CASA-SAQ.md`. The incident response
+plan it points to: `docs/INCIDENT-RESPONSE.md`.
+
 Have ready before the DAST scan, because the questionnaire asks for all of it:
 the threat model (`docs/SECURITY.md`), the tenant isolation story (namespace,
 NetworkPolicy, per-tenant age identity), secret custody
@@ -342,9 +346,14 @@ Answers we should have written down before we are asked, not after.
   `docs/BROKER.md` sets out why the alternatives are worse. Be ready to say so
   in one paragraph.
 - **Message content reaching Anthropic.** Disclosed in the privacy policy for
-  both tiers. The load-bearing facts: no training on the content,
-  security-sensitive mail is detected deterministically and never sent to a
-  model at all, and self-host requires the user's own key.
+  both tiers. The load-bearing facts: no training on the content; the triage
+  model is what recognizes security-sensitive mail, so it reads login codes
+  once like any other message (there is no rule-based detector ahead of it:
+  `docs/SECURITY.md` §4d), and once sealed that mail never reaches the
+  assistant or the agent door; self-host requires the user's own key. Do not
+  tell a reviewer the model never sees login codes. An earlier draft of this
+  line and of the privacy policy said so, and it stopped being true with the
+  triage rewrite.
 - **Why both a Desktop and a Web client.** A refresh token is bound to the
   client that minted it; routing self-host refreshes through our infra would put
   our uptime in the path of every hourly refresh and every token in our reach.

@@ -173,13 +173,22 @@ enum Wire {
         var system: [SystemBlock]
         var tools: [ToolDef]
         var messages: [MessageParam]
+        /// Set only on a run's LAST step: `{"type":"none"}` keeps the tools in
+        /// the request (so the cached prefix is unchanged) but lets the model
+        /// do nothing except answer.
+        var tool_choice: ToolChoice?
         /// ALWAYS true: `LLMProxy.stream` asks for `text/event-stream` and the
         /// accumulator can only read frames, so a body that forgot this would
         /// hand a whole JSON message to an SSE parser that drops it.
         var stream = true
 
         private enum CodingKeys: String, CodingKey {
-            case model, max_tokens, system, tools, messages, stream
+            case model, max_tokens, system, tools, tool_choice, messages, stream
+        }
+
+        struct ToolChoice: Encodable, Equatable {
+            var type: String
+            static let answerOnly = ToolChoice(type: "none")
         }
 
         func encode(to encoder: Encoder) throws {
@@ -188,6 +197,7 @@ enum Wire {
             try c.encode(max_tokens, forKey: .max_tokens)
             try c.encode(system, forKey: .system)
             try c.encode(tools, forKey: .tools)
+            try c.encodeIfPresent(tool_choice, forKey: .tool_choice)
             var list = c.nestedUnkeyedContainer(forKey: .messages)
             for (index, message) in messages.enumerated() {
                 if index == messages.count - 1 || index == messages.count - 3 {
@@ -363,6 +373,21 @@ enum Wire {
     /// question it belongs to, it is the same bytes in every later request.
     /// Held beside the history rather than in it, so a saved question keeps
     /// what it always kept.
+    /// The last step's nudge, added to the outgoing copy of the newest user
+    /// message only (never to the kept history): the run is out of steps, so
+    /// answer from what has been found rather than ending on nothing.
+    static let wrapUpNudge =
+        "You are out of tool calls for this question. Answer now from what you have found so far. If it is incomplete, say what you found and what is still unknown."
+
+    static func wrappingUp(_ messages: [MessageParam]) -> [MessageParam] {
+        guard var last = messages.last, last.role == "user" else { return messages }
+        switch last.content {
+        case .text(let question): last.content = .blocks([.text(question), .text(wrapUpNudge)])
+        case .blocks(let blocks): last.content = .blocks(blocks + [.text(wrapUpNudge)])
+        }
+        return messages.dropLast() + [last]
+    }
+
     static func withContext(_ messages: [MessageParam], _ context: [Int: String]) -> [MessageParam] {
         guard !context.isEmpty else { return messages }
         var out = messages

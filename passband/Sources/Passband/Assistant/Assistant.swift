@@ -272,7 +272,9 @@ final class AssistantSession {
 
     /// Safety valve on the tool loop. Eight is enough for search → read → act
     /// with room to correct itself, and short enough that a confused model
-    /// stops costing money.
+    /// stops costing money. The LAST of them runs with tools switched off and
+    /// a nudge to answer, so hitting the valve ends in an answer built from
+    /// what was found, never in an error the reader has to decode.
     private static let maxTurns = 8
     /// Room for a real send_email/save_draft body. Too low and a long draft is
     /// truncated mid-argument, which costs a whole turn to recover from.
@@ -695,7 +697,7 @@ final class AssistantSession {
             }
         }
 
-        for _ in 0..<Self.maxTurns {
+        for step in 0..<Self.maxTurns {
             guard alive(gen) else { return }
             // PAUSE BOUNDARY 1 OF 2: before the next provider request. Together
             // with the one before each tool call these are the ONLY two places
@@ -709,7 +711,7 @@ final class AssistantSession {
 
             let body: Data
             do {
-                body = try requestBody(model: model)
+                body = try requestBody(model: model, wrapUp: step == Self.maxTurns - 1)
             } catch {
                 fail(errorText(error))
                 return
@@ -853,7 +855,9 @@ final class AssistantSession {
             return
         }
 
-        fail("The assistant took too many steps without answering.")
+        // Only reachable if the provider ignored tool_choice on the wrap-up
+        // step. Said plainly, without the internals.
+        fail("Couldn't finish that one. Try asking it a narrower way.")
     }
 
     /// One turn's worth of stream state. Lives here rather than in the session
@@ -1253,7 +1257,7 @@ final class AssistantSession {
     /// pruned to its budget (never the current run's own results), each
     /// question with its context, a system prompt that does not change, and
     /// the keys sorted so the same request is the same bytes.
-    private func requestBody(model: AssistantModel) throws -> Data {
+    private func requestBody(model: AssistantModel, wrapUp: Bool = false) throws -> Data {
         elidedResults = Wire.elisions(
             for: history, already: elidedResults, protectedFrom: rollbackMark)
         let sent = Wire.pruned(history, eliding: elidedResults, protectedFrom: rollbackMark)
@@ -1261,7 +1265,10 @@ final class AssistantSession {
             Wire.Request(
                 model: model.rawValue, max_tokens: Self.maxTokens, system: system(),
                 tools: lane.definitions(calendar: AppStore.shared.calendarPageAvailable),
-                messages: Wire.withContext(sent, turnContext)))
+                messages: wrapUp
+                    ? Wire.wrappingUp(Wire.withContext(sent, turnContext))
+                    : Wire.withContext(sent, turnContext),
+                tool_choice: wrapUp ? .answerOnly : nil))
     }
 
     // MARK: - system prompt

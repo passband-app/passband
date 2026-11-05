@@ -115,7 +115,6 @@ enum ReplayIconNames {
         "sun.max.fill",
         "tag",
         "terminal",
-        "text.magnifyingglass",
         "ticket",
         "translate",
         "trash",

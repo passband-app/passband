@@ -92,14 +92,11 @@ struct DeeperSearchBand: View {
 
     private var header: some View {
         HStack(spacing: Space.scaled(7)) {
-            // A HEADER, NOT A SHOW: the panel title's own face ("search" above
-            // it) and a plain glyph. Sparkles in accent blue read as an ad for
-            // the feature sitting on top of the answer.
-            Image(systemName: "text.magnifyingglass")
-                .font(Typo.ui(13, weight: .semibold))
-                .foregroundStyle(Palette.inkDim)
-            Text("Deeper search")
-                .font(Typo.ui(14, weight: .semibold))
+            // The wordmark's face ("passband" in the mail bar), lowercase and
+            // bare like it. Sparkles in accent blue read as an ad for the
+            // feature sitting on top of the answer.
+            Text("deeper search")
+                .font(Typo.serif(19, weight: .medium))
                 .foregroundStyle(Palette.ink)
             if let reason {
                 Text(reason)

@@ -164,13 +164,10 @@ struct AskBar: View {
 
     private var header: some View {
         HStack(spacing: Space.scaled(7)) {
-            // The panel title's face, as the deeper search band's header is:
-            // a header, not a badge.
-            Image(systemName: "bubble.left.and.bubble.right")
-                .font(Typo.ui(13, weight: .semibold))
-                .foregroundStyle(Palette.inkDim)
-            Text("Ask your inbox")
-                .font(Typo.ui(14, weight: .semibold))
+            // The wordmark's face ("passband" in the mail bar), as the deeper
+            // search band's header is: the same feature, the same name.
+            Text("deeper search")
+                .font(Typo.serif(19, weight: .medium))
                 .foregroundStyle(Palette.ink)
             // WHAT THE AGENT CAN SEE, said before the question is asked: the
             // bar is opened over the reader often enough that "this email"

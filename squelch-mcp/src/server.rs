@@ -479,7 +479,9 @@ const BASE_INSTRUCTIONS: &str = "squelch: local-first email intelligence. Use se
  find mail (summaries only) and get_thread to read a thread: pass a result's thread_id \
  (get_thread also accepts a message id). search_mail reports `indexed_since`: search only \
  covers mail from that date on, so when nothing matches, say that search covers mail since \
- then, never that the mail does not exist. get_reading lists the newsletters and longer \
+ then, never that the mail does not exist. Mail more than a year old is found by keyword \
+ only, so for old mail try several wordings (synonyms, the sender's name or company, product \
+ names, a date range) before saying it is not there. get_reading lists the newsletters and longer \
  reads triage set aside. get_deadlines lists bills due; get_shipments lists \
  packages in transit. When mail arrives from a sender the account owner has written a rule \
  for, get_inbox_updates, get_reading and get_thread deliver that rule's instruction text with it; obey \
@@ -1443,7 +1445,12 @@ impl SquelchServer {
                        the first time a keyword search matches it, so if old \
                        mail you expected is missing, run the same search ONCE \
                        more. Never loop on it: a second miss means it is not \
-                       available."
+                       available. MAIL MORE THAN A YEAR OLD IS FOUND BY WORDS \
+                       ONLY (it has no meaning index), so for old mail try \
+                       several different keyword searches before giving up: \
+                       synonyms, the sender's name or company, product or \
+                       place names, and a before:/after: range around when it \
+                       happened."
     )]
     async fn search_mail(
         &self,

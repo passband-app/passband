@@ -1216,7 +1216,11 @@ enum AgentTools {
                 is being added (`target`) and whether that is finished \
                 (`walk_complete`). Older mail is checked the first time a \
                 keyword search matches it, so if old mail you expected is \
-                missing, run the same search once more. Never loop on it.
+                missing, run the same search once more. Never loop on it. \
+                Mail more than a year old is found by its words only, never \
+                by meaning: for old mail, try several different wordings \
+                (synonyms, the sender's name or company, product or place \
+                names, a before:/after: range) before saying it is not there.
                 """,
             input_schema: .init(
                 properties: [

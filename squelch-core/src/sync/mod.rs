@@ -3662,7 +3662,18 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         let id = if origin == IngestOrigin::Archive {
             // Insert-only: an id the store already holds is left as it is, and
             // there is nothing to embed for a row this call did not write.
-            let Some(id) = self.store.ingest_archive_message(&triaged)? else {
+            //
+            // MORE THAN A YEAR BACK IT IS STORED LITE: the text and the index,
+            // not the HTML, which is the bulk of a row and is fetched back from
+            // the provider if the owner ever opens it. Dropped here so the
+            // bytes are never written; the store drops it again regardless.
+            let stored = if archive_row_is_lite(triaged.message.received_at, self.archive_now()) {
+                triaged.message.body_html = None;
+                self.store.ingest_lite_archive_message(&triaged)?
+            } else {
+                self.store.ingest_archive_message(&triaged)?
+            };
+            let Some(id) = stored else {
                 return Ok(None);
             };
             id
@@ -4264,6 +4275,22 @@ impl Default for ArchivePace {
             forward_lag: ChronoDuration::hours(24),
         }
     }
+}
+
+/// THE LITE TIER'S EDGE, in days: archive mail received longer ago than this
+/// is stored without its HTML (`messages.html_lite`). A year, because that is
+/// how far the archive reached before it reached five, and it is where the
+/// reader stops being a place people browse and becomes a place search lands
+/// them: the text is what keyword search and the agent read, and the HTML is
+/// fetched back from the provider when the owner opens the thread. Not a
+/// setting: it trades disk for one provider fetch per old message opened, and
+/// that trade does not change per deployment.
+pub const ARCHIVE_LITE_AFTER_DAYS: i64 = 365;
+
+/// Whether an archive message received at `received_at` is stored lite,
+/// judged against the walk's clock `now`.
+fn archive_row_is_lite(received_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    received_at < now - ChronoDuration::days(ARCHIVE_LITE_AFTER_DAYS)
 }
 
 /// 2024-01-01T00:00:00Z. A clock reading earlier than this is wrong, and the
@@ -9360,6 +9387,153 @@ Q0/00yfa39rgtJLa0DnOoA==
             ArchiveStep::Walked
         );
         assert_eq!(g.calls("get:g-too-old"), 1);
+    }
+
+    /// A multipart/alternative message with a text half and an HTML half, both
+    /// saying `word`.
+    fn html_eml(at: DateTime<Utc>, word: &str) -> String {
+        format!(
+            "From: Harbour Office <office@harbour.example>\r\n\
+             To: me@example.com\r\n\
+             Subject: Mooring invoice\r\n\
+             Date: {}\r\n\
+             MIME-Version: 1.0\r\n\
+             Content-Type: multipart/alternative; boundary=\"b\"\r\n\
+             \r\n\
+             --b\r\n\
+             Content-Type: text/plain; charset=\"UTF-8\"\r\n\
+             \r\n\
+             The {word} mooring is paid.\r\n\
+             --b\r\n\
+             Content-Type: text/html; charset=\"UTF-8\"\r\n\
+             \r\n\
+             <table><tr><td>The <b>{word}</b> mooring is paid.</td></tr></table>\r\n\
+             --b--\r\n",
+            at.to_rfc2822()
+        )
+    }
+
+    /// FIVE YEARS. A walk that finished at the old one-year default is not
+    /// finished at the new one: its cursor stays where it stopped, the target
+    /// moves back four years, and the next chunk carries on from the cursor.
+    /// What it stores out there is LITE: text and index, no HTML. Inside the
+    /// year an archive row keeps its HTML as it always did.
+    #[tokio::test]
+    async fn a_walk_finished_at_one_year_extends_to_five_and_stores_old_mail_lite() {
+        let (store, acct) = store_at_cursor(Some(100));
+        // Where a 365-day walk stopped: a little past its target.
+        let finished = days_ago(365) - ChronoDuration::hours(1);
+        store.set_archive_walked_to(acct, finished).unwrap();
+        let at = finished - ChronoDuration::days(2);
+        let g = MockGmail::default();
+        g.old_mail("g-2024", at, html_eml(at, "kittiwake"));
+        let base = serve_mock(g.clone()).await;
+        let (_tx, mut rx) = never_shutdown();
+
+        let one_year = archive_engine(store.clone(), acct, &base, 365);
+        assert_eq!(
+            one_year.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Done,
+            "finished, at a year"
+        );
+        assert_eq!(g.calls("list-all"), 0);
+
+        let default_days = Config::default().sync.archive_days;
+        assert_eq!(default_days, 1825, "five years by default");
+        let five = archive_engine(store.clone(), acct, &base, default_days);
+        assert_eq!(
+            five.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked,
+            "not finished at five"
+        );
+        assert_eq!(
+            g.queries(""),
+            vec![archive_q(finished - ChronoDuration::days(7), finished)],
+            "resumed from the cursor the one-year walk left"
+        );
+        assert_eq!(g.calls("get:g-2024"), 1);
+        assert_eq!(
+            store.archive_walked_to(acct).unwrap(),
+            Some(finished - ChronoDuration::days(7))
+        );
+        assert_eq!(
+            five.metrics.archive_walk().map(|(_, done)| done),
+            Some(false)
+        );
+
+        let view = store.thread_view_with_html(acct, "g-2024").unwrap();
+        let m = &view.messages[0];
+        assert!(store.message_is_archive(acct, m.id).unwrap());
+        assert!(m.lite, "more than a year back: lite");
+        assert_eq!(m.html, None, "its HTML is not kept");
+        assert!(m.content.contains("kittiwake"), "its text is");
+        let hits = store.search(acct, "kittiwake", 10, 0).unwrap();
+        assert_eq!(hits.iter().map(|h| h.id).collect::<Vec<_>>(), [m.id]);
+
+        // INSIDE THE YEAR, the walk keeps the HTML as it always has.
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.old_mail("g-recent", at, html_eml(at, "fulmar"));
+        let base = serve_mock(g.clone()).await;
+        let eng = archive_engine(store.clone(), acct, &base, default_days);
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        let view = store.thread_view_with_html(acct, "g-recent").unwrap();
+        assert!(!view.messages[0].lite);
+        assert!(
+            view.messages[0]
+                .html
+                .as_deref()
+                .is_some_and(|h| h.contains("fulmar"))
+        );
+    }
+
+    /// THE GUARDS HOLD AT FIVE YEARS. The floor and the ceiling are asked per
+    /// batch whatever the target is, so a walk out in its third year stops
+    /// for a short disk or a full database exactly as the first year's did,
+    /// with nothing fetched and the cursor where it was.
+    #[tokio::test]
+    async fn the_five_year_walk_still_holds_at_the_disk_floor_and_its_ceiling() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(800);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.old_mail("g-old", at, html_eml(at, "gannet"));
+        let base = serve_mock(g.clone()).await;
+        let eng = archive_engine(store.clone(), acct, &base, 1825);
+        let (_tx, mut rx) = never_shutdown();
+
+        for full in [
+            // Under the 2 GiB floor.
+            (|| Some(disk_mb(2047, 0, 0))) as fn() -> Option<crate::store::ArchiveDisk>,
+            // A fifth of a 49 GiB tenant volume is the floor there: 5 GiB.
+            || Some(disk_mb(5 * 1024 - 1, 49 * 1024, 0)),
+            // At the 4 GiB database ceiling.
+            || Some(disk_mb(u64::MAX >> 20, 0, 4096)),
+            // Free space that cannot be read.
+            || None,
+        ] {
+            eng.archive.state().disk_probe = Some(full);
+            assert_eq!(
+                eng.archive_walk_chunk(&mut rx).await.unwrap(),
+                ArchiveStep::Held
+            );
+        }
+        assert_eq!(g.calls("get:g-old"), 0, "held means nothing fetched");
+        assert_eq!(store.archive_walked_to(acct).unwrap(), Some(cursor));
+
+        eng.archive.state().disk_probe = Some(|| Some(crate::store::ArchiveDisk::UNBOUNDED));
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(g.calls("get:g-old"), 1);
     }
 
     /// `archive_days = 0` IS OFF: no listing, no cursor row, no gauge.

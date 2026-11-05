@@ -142,6 +142,11 @@ impl TriagedBuilder {
         self.msg.body = body.to_string();
         self
     }
+    pub(super) fn body_html(mut self, html: &str) -> Self {
+        self.msg.body_html = Some(html.to_string());
+        self
+    }
+
     pub(super) fn snippet(mut self, snippet: &str) -> Self {
         self.msg.snippet = snippet.to_string();
         self

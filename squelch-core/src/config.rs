@@ -269,6 +269,12 @@ pub struct SyncConfig {
     /// and catch-up all keep reading `backfill_days`. Raising it resumes the
     /// walk; 0 turns the archive off. Set in the config file only: there is
     /// no environment override. Clamped to [`ARCHIVE_DAYS_MAX`] at load.
+    ///
+    /// FIVE YEARS BY DEFAULT (1825). Mail more than a year back is stored
+    /// LITE, its text without its HTML (`sync::ARCHIVE_LITE_AFTER_DAYS`), so
+    /// the four extra years cost a fraction of the first. A walk that finished
+    /// at the old default of 365 is not finished at this one, and resumes from
+    /// its cursor (the target is measured from now on every chunk).
     pub archive_days: u32,
     /// THE ARCHIVE WALK'S DISK FLOOR, in MiB: the walk stores nothing while
     /// the filesystem holding the database has less than this free, and holds
@@ -347,7 +353,7 @@ impl Default for SyncConfig {
         Self {
             gmail_quota_profile: GmailQuotaProfile::Standard,
             backfill_days: 30,
-            archive_days: 365,
+            archive_days: 1825,
             archive_min_free_mb: 2048,
             archive_max_db_mb: 4096,
             poll_secs: 5,
@@ -3259,7 +3265,7 @@ mod tests {
     fn sync_defaults_are_sane() {
         let c = Config::default();
         assert_eq!(c.sync.backfill_days, 30);
-        assert_eq!(c.sync.archive_days, 365);
+        assert_eq!(c.sync.archive_days, 1825);
         assert_eq!(c.sync.archive_min_free_mb, 2048);
         assert_eq!(c.sync.archive_max_db_mb, 4096);
         assert_eq!(c.sync.poll_secs, 5);
@@ -3761,7 +3767,7 @@ archive_days = 730
                 d.sync.archive_max_db_mb,
                 d.triage.agent.archive_access_daily_cap
             ),
-            (365, 2048, 4096, 50)
+            (1825, 2048, 4096, 50)
         );
     }
 

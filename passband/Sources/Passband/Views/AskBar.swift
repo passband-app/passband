@@ -161,7 +161,6 @@ struct AskBar: View {
             // A reading measure, not the window: a line of chat as wide as
             // a 27" display is unreadable.
             .frame(maxWidth: Typo.measure(760), maxHeight: .infinity, alignment: .top)
-            .padding(.top, TopBar.height)
             .padding(.horizontal, Space.s24)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -222,8 +221,12 @@ struct AskBar: View {
             }
         }
         .padding(.horizontal, PaletteMetrics.edge)
-        .padding(.top, Space.s14)
-        .padding(.bottom, Space.s8)
+        // FULL SCREEN, THE HEADER IS THE TOP BAR: it sits in the title-bar row
+        // beside the traffic lights, as every page's own bar does, rather than
+        // under a strip of empty window.
+        .padding(.top, fullscreen ? 0 : Space.s14)
+        .padding(.bottom, fullscreen ? 0 : Space.s8)
+        .frame(minHeight: fullscreen ? TopBar.height : nil)
     }
 
     private var canSubmit: Bool { !question.trimmed.isEmpty && !session.running }

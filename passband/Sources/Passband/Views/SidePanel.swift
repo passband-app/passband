@@ -237,14 +237,14 @@ struct SearchView: View {
                     .disabled(store.search.showsListing || eventsOnly)
                     .opacity(store.search.showsListing || eventsOnly ? 0.4 : 1)
                 Spacer(minLength: Space.s8)
-                if expanded { askAgentButton }
+                if expanded && store.searchLaneHasConversation { askAgentButton }
             }
             .padding(.horizontal, Space.panel)
             .padding(.bottom, Space.s10)
 
             // Events only runs no mail search, so there is nothing for the
             // mail agent to go deeper on (the phone hides its ask row too).
-            if !expanded && !eventsOnly {
+            if !expanded && !eventsOnly && store.searchLaneHasConversation {
                 HStack { Spacer(); askAgentButton }
                     .padding(.horizontal, Space.panel)
                     .padding(.bottom, Space.s10)
@@ -424,33 +424,24 @@ struct SearchView: View {
         DispatchQueue.main.async { focused = true }
     }
 
-    /// ONE BUTTON, TWO VERBS, the same two ⌘↩ has: with a conversation going
-    /// it opens that conversation in ⌘K (see `openSearchLaneInChat`), and
-    /// before one it asks.
+    /// "OPEN IN CHAT", once there is a conversation to open (see
+    /// `openSearchLaneInChat`). Before one there is no button: the band's own
+    /// ⌘↩ hint says how to ask, and a second way to say it was clutter.
     private var askAgentButton: some View {
-        let opens = store.searchLaneHasConversation
-        return Button { store.requestDeeperSearch() } label: {
+        Button { store.requestDeeperSearch() } label: {
             HStack(spacing: Space.scaled(5)) {
-                Image(systemName: opens ? "arrow.up.left.and.arrow.down.right" : "sparkles")
-                Text(opens ? "Open in chat"
-                    : (store.searchLane.running || store.preparingSearchEvidence) ? "Searching…" : "Ask agent")
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                Text("Open in chat")
                 if store.search.expanded { Kbd("⌘↩") }
             }
             .font(Typo.ui(12, weight: .medium))
         }
         .buttonStyle(.plain)
         .foregroundStyle(Palette.accentInk)
-        .disabled(opens
-            ? !store.canOpenSearchLaneInChat
-            : !DeeperSearchPolicy.canRequest(query: store.search.query,
-                choice: prefs.deeperSearch, running: store.searchLane.running || store.preparingSearchEvidence))
-        .help(opens
-            ? (!store.canOpenSearchLaneInChat
-                ? "The chat is busy answering something else."
-                : "Open this conversation in chat for the full answer and follow-ups. ⌘Return")
-            : prefs.deeperSearch == .off
-                ? "Enable deeper search in Settings to use the agent."
-                : "Ask the agent to search and read your mail. ⌘Return")
+        .disabled(!store.canOpenSearchLaneInChat)
+        .help(!store.canOpenSearchLaneInChat
+            ? "The chat is busy answering something else."
+            : "Open this conversation in chat for the full answer and follow-ups. ⌘Return")
     }
 
     /// The hits themselves, extracted so the strip (band above) and the

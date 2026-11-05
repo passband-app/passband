@@ -341,6 +341,7 @@ enum ProductGuide {
         - In the month the arrow keys move the day, [ and ] go to the previous and next month, and t goes to today. Enter opens the selected day: its hours in a column beside the month.
         - The week shows seven days side by side under one column of hours, with all-day events and trips in a strip across the top. The left and right arrows move the day, [ and ] go to the previous and next week, t goes to today, and j / k or the up and down arrows step through the selected day's events.
         - j / k move the selection. Enter opens the mail behind an event guessed from mail. y marks it going (again: not going), x dismisses it.
+        - Mail from someone else about the same event (a promoter, a friend) folds into the user's own card instead of making a second one, listed under "Mail behind it" as "same event". When that mail says something different, the card says so ("Endzeit says Sat Nov 7, 9pm", or "Endzeit says it's cancelled"), the row says "change offered", and nothing changes until the user answers: "accept" (⇧A) takes the change, "keep mine" (⇧K) leaves the card as it is. Mail that did not pass sender authentication is marked "unverified".
 
         Making and changing events (only on the user's own calendars):
         - n, or "New event", opens the event pane. It takes half the window, like the composer, and the month stays usable beside it: clicking a day sets the event's date.

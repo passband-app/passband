@@ -410,6 +410,35 @@ extension AppStore {
         }
     }
 
+    /// The user's answer to a change another sender's mail offers on their
+    /// card (`LinkedChange`): accept takes it, false keeps the card as it
+    /// is. Nothing is drawn ahead of the daemon (an accepted move changes
+    /// times the daemon resolves), so the page waits for the refresh; a
+    /// refusal, or a link already gone, is a toast.
+    func answerLinkedChange(_ change: LinkedChange, accept: Bool, viaKey: Bool) async {
+        // A write: whatever was asked for before it is stale.
+        retireCalendarLoads()
+        let ticket = calendarTicket
+        do {
+            _ = try await APIClient.shared.answerLinkedChange(
+                change.ghost_id, from: change.from, accept: accept)
+            guard calendarLands(ticket) else { return }
+            // Closed vocabulary: these four words and nothing from the mail.
+            Analytics.capture(
+                "calendar_linked_change",
+                [
+                    "answer": accept ? "accepted" : "kept",
+                    "kind": change.kind == .cancelled ? "cancelled" : "moved",
+                    "via": viaKey ? "key" : "click",
+                ])
+            await refreshCalendar()
+        } catch {
+            guard calendarLands(ticket) else { return }
+            pushToast(errText(error, "Could not update that plan"), .error)
+            await refreshCalendar()
+        }
+    }
+
     /// A write is newer than every answer already on its way: none of them
     /// may be applied over it (see `refreshCalendar`).
     func retireCalendarLoads() {

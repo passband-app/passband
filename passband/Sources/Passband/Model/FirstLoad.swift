@@ -13,6 +13,11 @@
 // for one to appear. Every outcome stamps `Prefs.firstLoadSeen`, so a later
 // account, a reconnect or a relaunch never sees it again.
 //
+// ON THE MAC IT ALSO OFFERS THE IPHONE APP: a QR row under the progress, since
+// the person is waiting anyway. Whether, and what happens to it when the veil
+// comes down, is `TestFlightNudge`'s rule; this only says when the veil went
+// up, came down, or was never needed.
+//
 // `PASSBAND_FIRST_LOAD=1` forces it with made-up numbers, past the stamp and
 // with no daemon needed, for looking at the card. It stamps nothing.
 
@@ -70,6 +75,9 @@ final class FirstLoad {
     /// the veil (account actions are blocked while it is up, so this is a
     /// backstop) must not finish one mailbox's walk with another's numbers.
     @ObservationIgnored private var epoch: Int?
+    /// The veil went up for this first look, so the iPhone ask had its place
+    /// in it; a first look without one owes the fallback card instead.
+    @ObservationIgnored private var veilWasShown = false
     @ObservationIgnored private var settleTask: Task<Void, Never>?
     @ObservationIgnored private var synthetic: Task<Void, Never>?
 
@@ -111,6 +119,10 @@ final class FirstLoad {
                 decided = true
                 epoch = store.epoch
                 active = true
+                veilWasShown = true
+                #if os(macOS)
+                    TestFlightNudge.shared.veilShown(iosConnected: store.iosConnected, forced: false)
+                #endif
                 Analytics.capture("first_load_shown")
             }
         }
@@ -154,6 +166,7 @@ final class FirstLoad {
         decided = false
         waitingSince = nil
         epoch = nil
+        veilWasShown = false
     }
 
     /// "Start now", Enter, Esc, a click on the scrim.
@@ -185,7 +198,19 @@ final class FirstLoad {
     }
 
     private func lift(_ store: AppStore, early: Bool) {
-        if !Self.forced { Analytics.capture("first_load_ended", ["early": early]) }
+        #if os(macOS)
+            let nudge = TestFlightNudge.shared
+            if !Self.forced {
+                Analytics.capture(
+                    "first_load_ended",
+                    ["early": early, "iphone": nudge.offeredInVeil, "copied": nudge.copiedInVeil])
+            }
+            // Before `conclude`, so a hand-off card is up before What's New
+            // asks to show, and What's New waits its turn behind it.
+            nudge.veilEnded(early: early, iosConnected: store.iosConnected)
+        #else
+            if !Self.forced { Analytics.capture("first_load_ended", ["early": early]) }
+        #endif
         settleTask?.cancel()
         settleTask = nil
         active = false
@@ -203,6 +228,8 @@ final class FirstLoad {
             // Somebody new to the app is shown the latest release's notes on
             // their first time at the board, and nothing older.
             if firstTime { store.whatsNew.meetNewcomer() }
+            // No veil, so no iPhone row: the corner card, shortly, instead.
+            if firstTime, !veilWasShown { TestFlightNudge.shared.askAfterOnboarding(store) }
         #endif
     }
 
@@ -222,6 +249,9 @@ final class FirstLoad {
         guard !decided else { return }
         decided = true
         active = true
+        #if os(macOS)
+            TestFlightNudge.shared.veilShown(iosConnected: store.iosConnected, forced: true)
+        #endif
         let started = Date()
         synthetic = Task { @MainActor in
             while !Task.isCancelled {

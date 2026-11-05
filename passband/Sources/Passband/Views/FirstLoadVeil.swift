@@ -4,7 +4,8 @@ import SwiftUI
 /// card over the real board while the daemon works through the mail. The board
 /// stays live and blurred underneath (`AppStore.modalOverlayOpen`), so what
 /// this card counts is filling in behind it. It goes by itself when the
-/// catch-up ends, or at "Start now", Enter or Esc.
+/// catch-up ends, or at "Start now", Enter or Esc. On the Mac its foot offers
+/// the iPhone app (`FirstLoadIPhoneRow`), a code to scan while they wait.
 struct FirstLoadVeil: View {
     @Environment(AppStore.self) private var store
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -49,6 +50,16 @@ struct FirstLoadVeil: View {
                             .buttonStyle(.borderedProminent)
                         KeyHint("enter", "start now")
                     }
+                    #if os(macOS)
+                        // The iPhone app, while they wait (TestFlightNudge).
+                        if TestFlightNudge.shared.offeredInVeil {
+                            Rectangle()
+                                .fill(Palette.hairline)
+                                .frame(height: 1)
+                                .padding(.top, Space.s4)
+                            FirstLoadIPhoneRow(connected: store.iosConnected == true)
+                        }
+                    #endif
                 }
                 .padding(Space.s14)
             }

@@ -18,6 +18,11 @@
 // card, the hero and the phone drawn in it are set sizes, and the headline is
 // cut to that width. Every font here is a literal or `fixed:` on purpose.
 //
+// THE SAME PARTS, ON DAY ONE. The first-load veil carries a quiet row of them
+// (`FirstLoadIPhoneRow`, below): the code, the phone, the words. When the veil
+// closes by itself this card takes over, so the code never vanishes from under
+// a camera; see TestFlightNudge's header for every rule.
+//
 // NOT MODAL. A corner card, closed by its ✕, that leaves the inbox usable
 // underneath. Bottom-RIGHT on the main window: the toast stack owns
 // bottom-left and the update card owns bottom-centre. NO `.defaultAction`
@@ -34,7 +39,9 @@ struct TestFlightNudgeModal: View {
         if nudge.showingNudge {
             TestFlightAdCard { copied in
                 nudge.showingNudge = false
-                Analytics.capture("ios_nudge_closed", ["copied": copied])
+                Analytics.capture("ios_nudge_closed", ["copied": copied, "source": nudge.source])
+                // What's New waits behind this card (WhatsNew.maybeShow); its turn.
+                AppStore.shared.whatsNew.maybeShow()
             }
             .adCardPlacement()
         }
@@ -91,7 +98,7 @@ private struct TestFlightAdCard: View {
             }
 
             HStack(spacing: AdCard.wordsGap) {
-                if let qr = Self.qrCode {
+                if let qr = TestFlightQR.image {
                     Image(nsImage: qr)
                         .interpolation(.none)
                         .resizable()
@@ -139,15 +146,22 @@ private struct TestFlightAdCard: View {
     /// Copy and say so; the card stays up, because the person may still want
     /// the code.
     private func copyLink() {
+        TestFlightQR.copyLink()
+        withAnimation(Motion.toast) { copied = true }
+    }
+}
+
+/// The invite as a QR code and on the pasteboard, for the card and the veil.
+enum TestFlightQR {
+    static func copyLink() {
         let board = NSPasteboard.general
         board.clearContents()
         board.setString(TestFlightNudge.joinURL.absoluteString, forType: .string)
-        withAnimation(Motion.toast) { copied = true }
     }
 
     /// Rendered once per process. Nil only if CoreImage cannot make a QR code
     /// of a 40-character URL, in which case the card is copy-only.
-    private static let qrCode: NSImage? = {
+    static let image: NSImage? = {
         let filter = CIFilter.qrCodeGenerator()
         filter.message = Data(TestFlightNudge.joinURL.absoluteString.utf8)
         filter.correctionLevel = "M"
@@ -156,6 +170,105 @@ private struct TestFlightAdCard: View {
         else { return nil }
         return NSImage(cgImage: cg, size: output.extent.size)
     }()
+}
+
+// MARK: - the veil's row
+
+/// THE IPHONE ASK IN THE FIRST-LOAD VEIL. A band along the card's foot, under
+/// a hairline: the code, two lines, a copy link, and the small phone with its
+/// push landing. Nothing to click to move on: it is an offer on a waiting
+/// screen, and "Start now" above it stays the only way forward. If the phone
+/// connects while the veil is still up (they scanned, installed and signed
+/// in), the band says so instead.
+struct FirstLoadIPhoneRow: View {
+    let connected: Bool
+
+    @Environment(\.controlActiveState) private var activeState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var copied = false
+
+    var body: some View {
+        HStack(alignment: .center, spacing: Space.s20) {
+            if connected {
+                Label("Your iPhone is connected. Pushes will land there.", systemImage: "checkmark.circle")
+                    .font(Typo.ui(14, weight: .medium))
+                    .foregroundStyle(Palette.ink)
+                    .transition(.opacity)
+                Spacer(minLength: 0)
+            } else {
+                if let qr = TestFlightQR.image {
+                    Image(nsImage: qr)
+                        .interpolation(.none)
+                        .resizable()
+                        .frame(width: 76, height: 76)
+                        .padding(6)
+                        // White in both themes, as on the card: cameras read
+                        // dark on light.
+                        .background(.white, in: RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
+                        .accessibilityLabel("QR code for the TestFlight invite")
+                }
+                VStack(alignment: .leading, spacing: Space.s6) {
+                    Text("Get Passband on your iPhone.")
+                        .font(Typo.serif(20, weight: .medium))
+                        .foregroundStyle(Palette.ink)
+                    Text("Scan to join the alpha on TestFlight. Your phone buzzes for the mail that needs you and stays quiet for everything else.")
+                        .font(Typo.ui(13))
+                        .foregroundStyle(Palette.inkDim)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button(action: copyLink) {
+                        Label(copied ? "Link copied" : "Copy link", systemImage: copied ? "checkmark" : "link")
+                            .font(Typo.ui(12, weight: .semibold))
+                            .foregroundStyle(Palette.accent)
+                            .contentTransition(.symbolEffect(.replace))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, Space.s2)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                PhoneMock(reduceMotion: reduceMotion, live: activeState == .key)
+                    .scaleEffect(0.6)
+                    .frame(width: 118 * 0.6, height: 236 * 0.6)
+            }
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.3), value: connected)
+    }
+
+    private func copyLink() {
+        TestFlightQR.copyLink()
+        TestFlightNudge.shared.copiedInVeil = true
+        withAnimation(Motion.toast) { copied = true }
+    }
+}
+
+// MARK: - the fallback, over the live app
+
+extension TestFlightNudge {
+    /// Every other one-time card that can be on screen. The iPhone card waits
+    /// for them rather than piling on.
+    static func othersShowing(_ store: AppStore) -> Bool {
+        ShareNudge.shared.showingNudge
+            || AgentNudge.shared.showingNudge
+            || store.firstLoad.active
+            || store.whatsNew.active
+            || Updater.shared.phase != .idle
+    }
+
+    /// A first look that never needed the veil has ended: the corner card a
+    /// short beat later, once nothing else is up (a newcomer's What's New
+    /// usually is), and only if the rule still holds then. Gives up after ten
+    /// minutes of other cards; the two-day rule is still there behind it.
+    func askAfterOnboarding(_ store: AppStore) {
+        Task { @MainActor in
+            try? await Task.sleep(for: Self.afterOnboardingDelay)
+            for _ in 0..<300 where Self.othersShowing(store) {
+                try? await Task.sleep(for: .seconds(2))
+            }
+            guard !Self.othersShowing(store), !showingNudge, store.connStatus == .connected,
+                Self.earnedAfterOnboarding(veilShown: false, iosConnected: store.iosConnected, asked: asked)
+            else { return }
+            ask(source: "onboarding")
+        }
+    }
 }
 
 // MARK: - the phone

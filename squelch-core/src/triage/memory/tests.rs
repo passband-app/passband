@@ -779,3 +779,64 @@ fn the_store_provider_serves_nothing_while_disabled() {
         2
     );
 }
+
+// ---- the commit-path guard -------------------------------------------------
+
+fn served(text: &str) -> MemoryEntry {
+    MemoryEntry {
+        id: "01J".into(),
+        scope: "owner".into(),
+        text: text.into(),
+        origin: "inferred".into(),
+        confidence: 0.6,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_verbatim_repeat_of_a_memory_line_taints() {
+    let memory = [served(
+        "sam@acme.example is a cofounder; answers within the hour.",
+    )];
+    assert!(memory_taints(
+        &memory,
+        &["Sam@acme.example is a Cofounder, answers within the hour!"]
+    ));
+    // Caught in any field the decision carries.
+    let decision = crate::triage::decision::MessageDecision {
+        notification: crate::triage::decision::NotificationAdvice {
+            body: "FYI: sam@acme.example is a cofounder; answers fast".into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    assert!(memory_taints(&memory, &decision_prose(&decision)));
+}
+
+#[test]
+fn six_common_words_in_a_row_count_and_five_do_not() {
+    let memory = [served("The owner replies to them within a day.")];
+    // Six ordinary words in a row: counts, on purpose.
+    assert!(memory_taints(
+        &memory,
+        &["Note that the owner replies to them within reason."]
+    ));
+    // Five: does not.
+    assert!(!memory_taints(
+        &memory,
+        &["Note that the owner replies to them quickly."]
+    ));
+}
+
+#[test]
+fn no_memory_never_taints() {
+    assert!(!memory_taints(
+        &[],
+        &["anything at all said here in six words"]
+    ));
+    // A line shorter than the window has no run to repeat.
+    assert!(!memory_taints(
+        &[served("Prefers mornings.")],
+        &["Prefers mornings."]
+    ));
+}

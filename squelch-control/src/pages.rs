@@ -902,7 +902,7 @@ pub fn success(tenant_url: &str) -> Response {
 <section class="phone" aria-labelledby="phone-label">
 {qr}<div>
 <span class="rig-label" id="phone-label">Also on iPhone</span>
-<p><span class="on-desk">Point your iPhone camera at the code to join the alpha on TestFlight.</span><span class="on-phone">Passband for iPhone is in alpha on TestFlight.</span> Your phone is where the notifications land.</p>
+<p><span class="on-desk">Scan to join the alpha on TestFlight.</span><span class="on-phone">Passband for iPhone is in alpha on TestFlight.</span> Your phone is where the notifications land.</p>
 <p class="phone-link"><a href="{testflight}">Join the iPhone alpha</a></p>
 </div>
 </section>"#,

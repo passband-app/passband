@@ -289,14 +289,22 @@ strongly; a rule is applied. The two are not merged.
   no flag, and is warm the day the flag is ticked. Computing is all it does
   without the flag.
 - **Everything the owner sees and everything the agent is told sits behind
-  `understanding`** in `features::KNOWN`. Off is as if it did not exist: the
-  pass does not run, `StoreMemoryContext` returns nothing, the relationship
-  block is not in the triage context, the memory routes 404, the Mac hides
-  the page and the Usage section, and the agent prompt is byte for byte the
-  prompt every other mailbox gets (`agent::system_prompt` composes a variant
-  per flag state from the one list `agent::UNDERSTANDING_SEGMENTS`; a test
-  pins the off variant to the prompt file). One `PROMPT_VERSION` covers both
-  variants, and each run's diagnostics record which one ran. It spends tokens
+  `understanding`** in `features::KNOWN`. Off stops new use and new
+  serving, from the next run: the pass does not run, `StoreMemoryContext`
+  returns nothing, the relationship block is not in the triage context, the
+  memory routes 404, the Mac hides the page and the Usage section, and the
+  agent prompt is byte for byte the prompt every other mailbox gets
+  (`agent::system_prompt` composes a variant per flag state from the one list
+  `agent::UNDERSTANDING_SEGMENTS`; a test pins the off variant to the prompt
+  file). Each variant reports its own version (`agent::prompt_version`): off
+  is the prompt file's, on is the next one, and each run's diagnostics also
+  record `understanding`.
+
+  Off does NOT undo the past, and nothing is built to: decisions made under
+  the on prompt stay and are served until something re-triages them (a flip
+  triggers no re-triage), their `run_metadata.understanding` stays true,
+  entries already written stay in the store unserved, and `/client/usage`
+  keeps the `profile` spend it booked inside its window. It spends tokens
   and writes sentences about people, and the first weeks are for reading what
   the model writes about a handful of tenants before anyone else sees it.
   Launch is deleting the entry.

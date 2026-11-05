@@ -96,15 +96,21 @@ pub const UNCAPPED_TRIAGE: &str = "uncapped_triage";
 /// (`triage::memory::StoreMemoryContext`), the review page's routes
 /// (`/client/memory`), the relationship evidence triage is shown, the
 /// Understanding section on the Usage page, and every sentence of the agent
-/// prompt about any of it (`triage::agent::UNDERSTANDING_SEGMENTS`). OFF IS AS
-/// IF IT DID NOT EXIST: the pass does not run and spends nothing, triage is
-/// handed no memory lines and the prompt is byte for byte the one every other
-/// mailbox gets, and the routes 404. The relationship ledger still COMPUTES
-/// for everyone (it is deterministic and free); only what it shows is gated.
-/// It ships dark because it spends tokens and writes sentences about people,
-/// and the first weeks are for reading what the model writes about a handful
-/// of tenants before anyone else sees it. Entries already written stay in the
-/// store while it is off, unserved.
+/// prompt about any of it (`triage::agent::UNDERSTANDING_SEGMENTS`).
+///
+/// OFF STOPS NEW USE AND NEW SERVING; IT DOES NOT UNDO THE PAST. From the next
+/// run on, the pass does not run and spends nothing, triage is handed no
+/// memory lines or relationship evidence and gets the prompt byte for byte as
+/// every other mailbox does, and the routes 404. What already happened
+/// stands: decisions made under the flag-on prompt stay and are served until
+/// something re-triages them (a flip triggers no re-triage), each such run's
+/// `run_metadata` still says `understanding: true`, entries already written
+/// stay in the store unserved, and `/client/usage` keeps the `profile` spend
+/// it already booked inside its window. The relationship ledger still
+/// COMPUTES for everyone (it is deterministic and free); only what it shows
+/// is gated. It ships dark because it spends tokens and writes sentences
+/// about people, and the first weeks are for reading what the model writes
+/// about a handful of tenants before anyone else sees it.
 pub const UNDERSTANDING: &str = "understanding";
 
 /// Smart re-notify (issue #625, docs/RENOTIFY.md): the daemon records the Mac

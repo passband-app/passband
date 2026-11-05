@@ -73,7 +73,10 @@ Ordered by what stops the submission soonest.
       exactly what the automated home page check looks for. `/about` is static
       HTML (added 2026-08-25) and carries the description, the scope table, and
       the policy links without executing a bundle.
-- [ ] **Confirm what Bifrost retains.** The gateway keeps its config and log
+- [x] **Confirm what Bifrost retains.** Checked 2026-11-05 in the Bifrost UI
+      (Config → Logs, over the tailnet): Disable Content Logging is ON;
+      screenshot kept as CASA evidence. Retention (7 days) still to capture in
+      the same screenshot. The gateway keeps its config and log
       stores as SQLite under `/app/data` on EFS (`bifrost_store = "efs"`,
       `deploy/aws/tofu/main/ecs.tf`). Bifrost's defaults log every request
       body, i.e. Gmail message content, to `/app/data/logs.db` for 365 days.

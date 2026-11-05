@@ -340,6 +340,8 @@ html.is-loading #results { opacity: 0.6; }
   border-top: 0; border-bottom: 1px solid var(--hair); }
 .console .rack .readout .num { font-size: clamp(1.5rem, 2.6vw, 1.9rem); }
 .console table.cohorts { margin-top: 0.25rem; }
+.console table.cohorts th { white-space: nowrap; }
+.console table.cohorts td.when { width: 8.5rem; white-space: nowrap; }
 .console .rack > .foot { margin: 0.6rem 0 0.9rem; }
 /* THE FEED and THE LADDER: a dot in the stage's colour, what happened, when. */
 .console .feed { list-style: none; margin: 0.5rem 0 0.4rem; padding: 0; }
@@ -434,6 +436,7 @@ html.is-loading #results { opacity: 0.6; }
   .console .rack .readout + .readout { border-top: 1px solid var(--hair); }
   .console table.conv .m { display: inline; color: var(--faint); }
   .console table.conv td.when { text-align: left; }
+  .console table.cohorts td.when { width: auto; }
   .console table.conv td.when .muted { margin-left: 0; }
   .console .matrix td.tick span { display: inline; }
   body.console:not(.app) main { padding: 1.6rem 1.25rem 1.4rem; }

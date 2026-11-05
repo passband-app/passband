@@ -33,6 +33,7 @@
 
 pub mod activation;
 pub mod admin;
+pub mod admin_views;
 pub mod alert;
 mod appearance;
 pub mod bifrost;
@@ -261,6 +262,9 @@ pub fn router(state: ControlState) -> Router {
 
     let admin = Router::new()
         .route("/admin", get(admin::page))
+        .route(pages::ADMIN_SCRIPT_PATH, get(admin::app_js))
+        .route("/admin/users", get(admin::users))
+        .route("/admin/users/{id}", get(admin::person))
         .route("/admin/invite", post(admin::invite))
         .route("/admin/approve", post(admin::approve))
         .route("/admin/send", post(admin::send))

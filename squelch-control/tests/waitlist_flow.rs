@@ -457,7 +457,7 @@ async fn a_name_arrives_with_the_address() {
     assert_eq!(rows[0].name.as_deref(), Some("Ada Lovelace"));
 
     let cookie = h.sign_in().await;
-    let (_, _, board) = h.get("/admin", Some(&cookie)).await;
+    let (_, _, board) = h.get("/admin/users", Some(&cookie)).await;
     assert!(board.contains("Ada Lovelace"), "{board}");
     assert!(board.contains(APPLICANT), "{board}");
 }
@@ -597,7 +597,7 @@ async fn the_admin_page_opens_only_to_the_token() {
     assert!(!headers.contains_key(header::SET_COOKIE), "no session");
 
     let cookie = h.sign_in().await;
-    let (status, _, body) = h.get("/admin", Some(&cookie)).await;
+    let (status, _, body) = h.get("/admin/users", Some(&cookie)).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains(APPLICANT), "{body}");
     assert!(body.contains(">Approve</button>"), "{body}");
@@ -634,7 +634,7 @@ async fn the_dashboard_escapes_what_a_stranger_typed() {
     assert_eq!(status, StatusCode::OK);
 
     let cookie = h.sign_in().await;
-    let (_, _, body) = h.get("/admin", Some(&cookie)).await;
+    let (_, _, body) = h.get("/admin/users", Some(&cookie)).await;
     assert!(!body.contains(hostile), "{body}");
     assert!(body.contains("a&amp;&#39;b@evil.test"), "{body}");
     // The escaped form, and NOT a whole-page `!contains("<script>")`: this page
@@ -660,7 +660,7 @@ async fn a_name_off_the_public_form_cannot_forge_the_google_line() {
     assert_eq!(status, StatusCode::OK);
 
     let cookie = h.sign_in().await;
-    let (_, _, board) = h.get("/admin", Some(&cookie)).await;
+    let (_, _, board) = h.get("/admin/users", Some(&cookie)).await;
     // Quoted, in the register that says somebody typed it...
     assert!(
         board.contains("<span class=\"given\">\u{201c}signed up as ada@example.com\u{201d}</span>"),
@@ -692,7 +692,12 @@ async fn approving_mails_a_code_that_redeems() {
         )
         .await;
     assert_eq!(status, StatusCode::SEE_OTHER);
-    assert_eq!(header_of(&headers, header::LOCATION), "/admin");
+    // Back to the page the button was on (no `next` here, so the overview),
+    // saying what happened.
+    assert_eq!(
+        header_of(&headers, header::LOCATION),
+        "/admin?done=approved"
+    );
 
     let (row_status, invite_id, notified) = h.row_state(id).await;
     assert_eq!(row_status, "approved");
@@ -733,10 +738,22 @@ async fn approving_mails_a_code_that_redeems() {
         );
     }
 
-    // The dashboard never shows the code back, because nothing kept it.
-    let (_, _, page) = h.get("/admin", Some(&cookie)).await;
+    // No page shows the code back, because nothing kept it.
+    let (_, _, page) = h.get("/admin?done=approved", Some(&cookie)).await;
     assert!(!page.contains(&code), "{page}");
-    assert!(page.contains("Invited"), "{page}");
+    assert!(
+        page.contains("Approved, and the invite is on its way."),
+        "{page}"
+    );
+    let (_, _, list) = h.get("/admin/users?stage=invited", Some(&cookie)).await;
+    assert!(!list.contains(&code), "{list}");
+    assert!(
+        list.contains(r#"<span class="pill sent">invited</span>"#),
+        "{list}"
+    );
+    let (_, _, person) = h.get(&format!("/admin/users/{id}"), Some(&cookie)).await;
+    assert!(!person.contains(&code), "{person}");
+    let page = format!("{page}{list}{person}");
 
     // APPROVAL IS NOT A NEW PERSON. Minting a code, pointing the row at it and
     // stamping the send are three writes to this row, and the id analytics has
@@ -795,21 +812,37 @@ async fn a_failed_send_leaves_a_row_the_operator_can_repair() {
     let cookie = h.sign_in().await;
 
     h.fail_sends(true);
-    h.post_form(
-        "/admin/approve",
-        format!("id={id}&confirmed=yes"),
-        Some(&cookie),
-    )
-    .await;
+    let (_, headers, _) = h
+        .post_form(
+            "/admin/approve",
+            format!("id={id}&confirmed=yes"),
+            Some(&cookie),
+        )
+        .await;
+    // The banner agrees with the row: minted, not mailed.
+    assert_eq!(header_of(&headers, header::LOCATION), "/admin?done=unsent");
 
     let (row_status, first_invite, notified) = h.row_state(id).await;
     assert_eq!(row_status, "approved", "the person is approved either way");
     assert!(!notified, "nothing was accepted, so nothing is stamped");
     let first_invite = first_invite.expect("the code was minted before the send");
 
+    // The overview says so and points at the list...
     let (_, _, page) = h.get("/admin", Some(&cookie)).await;
-    assert!(page.contains("email not sent"), "{page}");
-    assert!(page.contains("Send invite"), "{page}");
+    assert!(
+        page.contains("<strong>1</strong> approved, and the email did not go out"),
+        "{page}"
+    );
+    // ...where the row is pilled, with the loud button.
+    let (_, _, page) = h.get("/admin/users?stage=invited", Some(&cookie)).await;
+    assert!(
+        page.contains(r#"<span class="pill flag">email not sent</span>"#),
+        "{page}"
+    );
+    assert!(
+        page.contains(r#"<button type="submit">Send invite</button>"#),
+        "{page}"
+    );
 
     // The repair: the code nobody received is revoked, and a new one is minted
     // in its place. Two live invites for one approval would be one mailbox more
@@ -975,10 +1008,16 @@ async fn a_signup_cookie_is_not_an_admin_cookie() {
         format!("{ADMIN_COOKIE_NAME}={signup}"),
         format!("{COOKIE_NAME}={signup}"),
     ] {
-        let (status, _, body) = h.get("/admin", Some(&value)).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.contains(r#"type="password""#), "{body}");
-        assert!(!body.contains(APPLICANT), "{body}");
+        for page in [
+            "/admin".to_string(),
+            "/admin/users".to_string(),
+            format!("/admin/users/{id}"),
+        ] {
+            let (status, _, body) = h.get(&page, Some(&value)).await;
+            assert_eq!(status, StatusCode::OK, "{page}");
+            assert!(body.contains(r#"type="password""#), "{page}: {body}");
+            assert!(!body.contains(APPLICANT), "{page}: {body}");
+        }
 
         let (status, _, _) = h
             .post_form(
@@ -1221,10 +1260,10 @@ async fn an_address_that_never_joined_can_be_invited_directly() {
         vec![invite_id.expect("one was minted")]
     );
 
-    // And the row is on the page with the same button as everybody else.
-    let (_, _, page) = h.get("/admin", Some(&cookie)).await;
-    assert!(page.contains("grace@example.com"), "{page}");
-    assert!(page.contains("Re-send"), "{page}");
+    // And the row is on the list with the same button as everybody else.
+    let (_, _, page) = h.get("/admin/users?stage=invited", Some(&cookie)).await;
+    assert!(page.contains(">grace@example.com</a>"), "{page}");
+    assert!(page.contains(">Re-send</button>"), "{page}");
 }
 
 /// Typing an address that is already waiting APPROVES that row rather than
@@ -1469,6 +1508,142 @@ async fn an_unanswered_confirmation_invites_nobody_directly() {
     assert!(h.sends().is_empty(), "and nothing was mailed");
 }
 
+/// AN ACTION COMES BACK TO THE PAGE IT WAS PRESSED ON. The `next` field is read
+/// into one of the console's pages and the redirect is written fresh, so a
+/// person's page returns to that person, a refusal re-renders the page it came
+/// from, and a `next` that is not one of ours lands on the overview rather
+/// than anywhere it names.
+#[tokio::test]
+async fn an_action_returns_to_the_page_it_came_from() {
+    let h = Harness::new().await;
+    h.join(APPLICANT).await;
+    let id = h.only_row_id().await;
+    let cookie = h.sign_in().await;
+
+    // The confirmation carries the page on, and Cancel leads back to it.
+    let (_, _, ask) = h
+        .post_form(
+            "/admin/approve",
+            format!("id={id}&next=%2Fadmin%2Fusers%2F{id}"),
+            Some(&cookie),
+        )
+        .await;
+    assert!(
+        ask.contains(&format!(r#"name="next" value="/admin/users/{id}""#)),
+        "{ask}"
+    );
+    assert!(
+        ask.contains(&format!(r#"<a href="/admin/users/{id}">Cancel"#)),
+        "{ask}"
+    );
+
+    let (status, headers, _) = h
+        .post_form(
+            "/admin/approve",
+            format!("id={id}&confirmed=yes&next=%2Fadmin%2Fusers%2F{id}"),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let location = header_of(&headers, header::LOCATION);
+    assert_eq!(location, format!("/admin/users/{id}?done=approved"));
+    let (status, _, page) = h.get(&location, Some(&cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        page.contains("Approved, and the invite is on its way."),
+        "{page}"
+    );
+    assert!(page.contains(">Re-send</button>"), "{page}");
+
+    // A refusal re-renders the page it came from, with its reason.
+    let (status, _, page) = h
+        .post_form(
+            "/admin/approve",
+            format!("id={id}&confirmed=yes&next=%2Fadmin%2Fusers%3Fstage%3Dwaiting"),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("already approved"), "{page}");
+    assert!(page.contains("<h1>Users</h1>"), "{page}");
+    assert!(
+        page.contains(r#"<a href="/admin/users?stage=waiting" aria-current="page">Waiting"#),
+        "{page}"
+    );
+
+    // Somewhere that is not ours is the overview, never a redirect off-site.
+    h.join("bob@example.com").await;
+    let bob = h
+        .state
+        .store()
+        .list_users()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.email == "bob@example.com")
+        .unwrap()
+        .id;
+    let (_, headers, _) = h
+        .post_form(
+            "/admin/approve",
+            format!("id={bob}&confirmed=yes&next=https%3A%2F%2Fevil.test%2Fadmin"),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(
+        header_of(&headers, header::LOCATION),
+        "/admin?done=approved"
+    );
+
+    // A person who is not there is the console's own page, not the router's.
+    let (status, _, page) = h.get("/admin/users/999999", Some(&cookie)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        page.contains("There is no waitlist row with that id."),
+        "{page}"
+    );
+    let (status, _, page) = h.get("/admin/users/ada", Some(&cookie)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(page.contains(r#"<aside class="side">"#), "{page}");
+}
+
+/// The console's script is served as a script, revalidated on every load, and
+/// is the one URL the console's pages name in a script tag.
+#[tokio::test]
+async fn the_console_script_is_served_and_named() {
+    let h = Harness::new().await;
+    let (status, headers, body) = h.get("/admin/app.js", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        header_of(&headers, header::CONTENT_TYPE).starts_with("text/javascript"),
+        "{headers:?}"
+    );
+    assert_eq!(
+        header_of(&headers, header::X_CONTENT_TYPE_OPTIONS),
+        "nosniff"
+    );
+    assert_eq!(header_of(&headers, header::CACHE_CONTROL), "no-cache");
+    assert!(body.contains("DOMParser"), "{body}");
+
+    let cookie = h.sign_in().await;
+    let (_, headers, page) = h.get("/admin", Some(&cookie)).await;
+    assert!(
+        page.contains(r#"<script src="/admin/app.js" defer></script>"#),
+        "{page}"
+    );
+    assert!(
+        header_of(&headers, header::CONTENT_SECURITY_POLICY).contains("script-src 'self'"),
+        "{headers:?}"
+    );
+    // The door in front of it runs nothing.
+    let (_, headers, door) = h.get("/admin", None).await;
+    assert!(!door.contains("<script"), "{door}");
+    assert!(
+        !header_of(&headers, header::CONTENT_SECURITY_POLICY).contains("script-src"),
+        "{headers:?}"
+    );
+}
+
 /// Approve the one row, spend its code as a finished signup does, and record
 /// the mailbox it became. Returns the row id and the cookie.
 async fn signed_up(h: &Harness, label: &str) -> (i64, String) {
@@ -1520,17 +1695,25 @@ async fn a_deleted_mailbox_can_be_invited_again() {
     let (h, purged) = Harness::with_warden(StatusCode::NO_CONTENT).await;
     let (id, cookie) = signed_up(&h, "ada").await;
 
-    let (_, _, board) = h.get("/admin", Some(&cookie)).await;
-    assert!(board.contains(r#"action="/admin/delete""#), "{board}");
+    // The button lives on the person's page, and only there.
+    let (_, _, person) = h.get(&format!("/admin/users/{id}"), Some(&cookie)).await;
+    assert!(person.contains(r#"action="/admin/delete""#), "{person}");
+    let (_, _, list) = h.get("/admin/users", Some(&cookie)).await;
+    assert!(!list.contains(r#"action="/admin/delete""#), "{list}");
 
-    let (status, _, body) = h
+    let (status, headers, body) = h
         .post_form(
             "/admin/delete",
-            format!("id={id}&confirmed=yes&label=ada"),
+            format!("id={id}&confirmed=yes&label=ada&next=%2Fadmin%2Fusers%2F{id}"),
             Some(&cookie),
         )
         .await;
     assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+    // Not back to a page that no longer has anybody on it.
+    assert_eq!(
+        header_of(&headers, header::LOCATION),
+        "/admin/users?done=deleted"
+    );
     assert_eq!(*purged.lock().unwrap(), vec!["ada".to_string()]);
     assert!(!h.state.store().label_exists("ada").await.unwrap());
     assert!(h.state.store().user_entry(id).await.unwrap().is_none());

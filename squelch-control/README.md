@@ -21,7 +21,12 @@ browser  ── GET  /  ──────────► "No invite code? Join 
                                 linking to <WAITLIST_ORIGIN>/waitlist
 site     ── POST /waitlist ──► one users row per address (with the name it gave),
                                 same 200 for a duplicate
-operator ── GET  /admin ──────► token login, then the list
+operator ── GET  /admin ──────► token login, then the overview: the pipeline
+                                (funnel, what needs a hand, conversion, activity)
+         ── GET  /admin/users[?stage=&q=] ► users: the waitlist, everybody let
+                                in, search, and the direct-invite form
+         ── GET  /admin/users/{id} ───► one person: facts, timeline, next step
+         ── GET  /admin/features ─► who sees which hidden feature
          ── POST /admin/approve ──► mint an invite, email it through Resend
          ── POST /admin/invite ───► the same, for an address that never joined
          ── POST /admin/send ─────► revoke that code, mint and mail a fresh one

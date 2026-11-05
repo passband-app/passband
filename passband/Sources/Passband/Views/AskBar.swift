@@ -93,7 +93,9 @@ struct AskBar: View {
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
                     if !WindowState.shared.isFullscreen {
-                        ReaderBackdrop().frame(height: TopBar.height)
+                        ReaderBackdrop()
+                            .overlay(Palette.accentSoft.opacity(0.35))
+                            .frame(height: TopBar.height)
                     }
                     Color.clear
                 }
@@ -137,7 +139,12 @@ struct AskBar: View {
     /// looks like the window.
     private var chatPage: some View {
         ZStack(alignment: .top) {
+            // THE BAND'S OWN BLUE, washed over the opaque page: the band in
+            // search and this page are the same conversation, and going from
+            // one to the other should read as the box growing, not as a jump
+            // to a different surface. Same wash as DeeperSearchBand's fill.
             ReaderBackdrop()
+                .overlay(Palette.accentSoft.opacity(0.35))
                 .ignoresSafeArea()
                 .contentShape(Rectangle())
             VStack(alignment: .leading, spacing: 0) {

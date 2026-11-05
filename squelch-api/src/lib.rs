@@ -190,6 +190,14 @@ fn client_router(state: ApiState) -> Router {
             "/client/thread/{thread_id}/translate",
             post(handlers::translate_thread),
         )
+        // "Fetch back the HTML of what I am showing." A lite archive message
+        // (more than a year old) is stored as text; the GET serves it so, for
+        // the prefetch reason above, and the reader displaying the thread asks
+        // here. HUMAN DOOR ONLY.
+        .route(
+            "/client/thread/{thread_id}/hydrate",
+            post(handlers::hydrate_thread),
+        )
         // "Languages I read": mail in them is never translated.
         .route(
             "/client/translate-config",

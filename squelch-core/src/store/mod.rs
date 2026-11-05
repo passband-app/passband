@@ -2101,6 +2101,14 @@ pub trait Store:
     /// timezone observations are not touched.
     fn ingest_archive_message(&self, triaged: &TriagedMessage) -> Result<Option<i64>>;
 
+    /// [`Store::ingest_archive_message`] for archive mail more than a year
+    /// old: the same row, insert-only and marked `is_archive`, but LITE. Its
+    /// `body_html` is not kept (whatever the caller carried) and the row is
+    /// marked `html_lite`, so the reader knows the HTML can be fetched back
+    /// from the provider when the owner opens it. `body` and the full-text
+    /// index are kept: keyword search finds it like any other archive row.
+    fn ingest_lite_archive_message(&self, triaged: &TriagedMessage) -> Result<Option<i64>>;
+
     /// The archive walk's cursor: the oldest instant the walk has fully
     /// covered, or `None` before its first chunk.
     fn archive_walked_to(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>>;

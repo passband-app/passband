@@ -85,6 +85,10 @@ enum SearchLanePrompt {
         - Search more than once. Rephrase, and search SUBSETS of their words: the mail \
           that answers a search usually lacks one of the words in it, and the rarest \
           word is the one that finds it.
+        - Mail more than a year old is found by its words only, never by meaning. When \
+          what they want sounds old, search the words that email would actually use: \
+          synonyms, the sender's name or company, the product or place, and a \
+          before:/after: range, each as its own search, before you say it is not there.
         - Open the most promising threads with get_thread. A snippet is the head of a \
           message, and the sentence that answers the search is usually further in.
         - Answer with show_emails cards plus AT MOST one plain line saying what the \

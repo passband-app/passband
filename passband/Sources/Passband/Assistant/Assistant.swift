@@ -1345,6 +1345,10 @@ final class AssistantSession {
               search AGAIN, at least twice more and differently each time: rephrase it,
               drop a word, search only the rarest word, try the sender's name or company,
               and raise the limit to 20.
+            - Mail more than a year old is found by its words, never by meaning. When
+              the user is after something old, search the words the email itself would
+              use: synonyms, the sender's name and company, the product or place, and an
+              after:/before: range around when it happened, each as its own search.
             - search_mail takes operators alongside the words: from:<name or address
               fragment>, in:sent, after:YYYY-MM-DD, before:YYYY-MM-DD. "The invoice Dan
               sent in March" is "invoice from:dan after:\(year)-03-01

@@ -784,6 +784,107 @@ pub async fn translate_thread(
     Ok(Json(json!({ "promoted": promoted })))
 }
 
+// --- POST /client/thread/{thread_id}/hydrate --------------------------------
+
+/// The most lite messages one hydrate fetches, newest first. A thread longer
+/// than this shows its older messages as text; the newest are the ones a
+/// reader lands on.
+const HYDRATE_CAP: usize = 12;
+/// How many provider fetches one hydrate runs at once.
+const HYDRATE_PARALLEL: usize = 4;
+/// How long one provider fetch may take before that message stays text.
+const HYDRATE_FETCH_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// "I am showing this thread: fetch back the HTML its lite messages were
+/// stored without." A lite row (`messages.html_lite`) is archive mail more
+/// than a year old, kept as text and the full-text index only; this asks the
+/// provider for each one's raw message, extracts the HTML by the rule ingest
+/// uses (`sync::ingest::html_body_from_raw`), and caches it on the row, which
+/// stops being lite. The reader then refetches the thread and swaps the HTML
+/// in over the text it was already showing.
+///
+/// A ROUTE OF ITS OWN for the translate route's reason: the GET is how the
+/// client warms threads nobody has opened (search results, hovers, the
+/// sitrep), and a provider fetch per message on every warm would turn a
+/// search for an old invoice into dozens of fetches. Only the reader
+/// displaying the thread asks here, once per open. HUMAN DOOR ONLY: the agent
+/// door serves text and has no use for HTML.
+///
+/// CACHED FOR GOOD, not for a while. What a person opens is bounded by their
+/// attention, a few threads a week against a mailbox of tens of thousands, so
+/// the bytes it puts back are noise beside what lite saves; and a cache that
+/// expired would need a sweep and would refetch the same thread on every
+/// reopen. A hydrated row is exactly a year-old row.
+///
+/// A FAILED FETCH LEAVES THE ROW LITE and the reader keeps the text; the next
+/// open tries again. A message the provider no longer has (404) and one with
+/// no HTML part are cleared without HTML, so nothing asks for them again.
+/// `hydrated` counts rows that gained HTML, `failed` fetches that did not
+/// answer. A mailbox with no write credential cannot fetch: that is the same
+/// 403 every write answers, and the reader keeps the text.
+pub async fn hydrate_thread(
+    State(state): State<ApiState>,
+    Path(thread_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    use futures::StreamExt;
+    let lite = store_call(&state, move |store, account_id| {
+        store.lite_messages_in_thread(account_id, &thread_id, HYDRATE_CAP)
+    })
+    .await?;
+    if lite.is_empty() {
+        return Ok(Json(json!({ "hydrated": 0, "failed": 0 })));
+    }
+    let client = write_client(&state).await?;
+    let fetched: Vec<(i64, Result<Option<String>, ()>)> = futures::stream::iter(lite)
+        .map(|(id, provider_id)| {
+            let client = client.clone();
+            async move {
+                let got =
+                    tokio::time::timeout(HYDRATE_FETCH_TIMEOUT, client.fetch_raw(&provider_id))
+                        .await;
+                let html = match got {
+                    Ok(Ok(f)) => match decode_raw_b64url(&f.raw_b64) {
+                        Ok(raw) => Ok(squelch_core::sync::ingest::html_body_from_raw(&raw)),
+                        Err(_) => Err(()),
+                    },
+                    // Gone from the mailbox: there is nothing to come back for.
+                    Ok(Err(WriteError::Api {
+                        status: 404 | 410, ..
+                    })) => Ok(None),
+                    Ok(Err(e)) => {
+                        // Ids only, never content.
+                        eprintln!("squelch-api: hydrate of message {id} failed: {e}");
+                        Err(())
+                    }
+                    Err(_) => {
+                        eprintln!("squelch-api: hydrate of message {id} timed out");
+                        Err(())
+                    }
+                };
+                (id, html)
+            }
+        })
+        .buffer_unordered(HYDRATE_PARALLEL)
+        .collect()
+        .await;
+    let failed = fetched.iter().filter(|(_, r)| r.is_err()).count();
+    let answered: Vec<(i64, Option<String>)> = fetched
+        .into_iter()
+        .filter_map(|(id, r)| r.ok().map(|html| (id, html)))
+        .collect();
+    let hydrated = store_call(&state, move |store, account_id| {
+        let mut n = 0usize;
+        for (id, html) in &answered {
+            if store.store_hydrated_html(account_id, *id, html.as_deref())? && html.is_some() {
+                n += 1;
+            }
+        }
+        Ok(n)
+    })
+    .await?;
+    Ok(Json(json!({ "hydrated": hydrated, "failed": failed })))
+}
+
 // --- GET/POST /client/translate-config ---------------------------------------
 
 /// The "Languages I read" setting: the codes the owner reads, every code they

@@ -823,6 +823,26 @@ pub(crate) fn domains_aligned(signing: &str, from_domain: &str) -> bool {
             .is_some_and(|parent| parent.ends_with('.') && parent.len() > 1)
 }
 
+/// The RENDERED HTML body of a parsed message, sanitized for the human door,
+/// or `None` for plain-text-only mail. The one definition both the ingest and
+/// the lite tier's hydrate use ([`html_body_from_raw`]), so a hydrated body is
+/// exactly the one an ingest would have stored.
+fn rendered_html(m: &mail_parser::Message<'_>) -> Option<String> {
+    m.html_part(0)
+        .filter(|p| p.is_text_html())
+        .and_then(|_| m.body_html(0))
+        .map(|c| sanitize_email_html(&c))
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// HYDRATE A LITE ARCHIVE ROW: the sanitized HTML body of one raw RFC 822
+/// message fetched back from the provider, by the same rule ingest stores it
+/// with. `None` when the raw does not parse or the mail has no real HTML part.
+pub fn html_body_from_raw(raw: &[u8]) -> Option<String> {
+    let parsed = MessageParser::default().parse(raw)?;
+    rendered_html(&parsed)
+}
+
 /// Derive a stable thread key from headers when the Gmail thread id is absent:
 /// the root References id, else In-Reply-To, else this message's own Message-ID.
 pub fn fallback_thread_id(msg: &mail_parser::Message) -> Option<String> {
@@ -1124,12 +1144,7 @@ pub fn ingest(
             // plain-text-only email has to leave body_html NULL. So we check
             // the actual part type (`is_text_html`) and only capture a REAL
             // `text/html` MIME part.
-            let body_html = m
-                .html_part(0)
-                .filter(|p| p.is_text_html())
-                .and_then(|_| m.body_html(0))
-                .map(|c| sanitize_email_html(&c))
-                .filter(|s| !s.trim().is_empty());
+            let body_html = rendered_html(m);
             let thr = fetched
                 .gmail_thread_id
                 .clone()

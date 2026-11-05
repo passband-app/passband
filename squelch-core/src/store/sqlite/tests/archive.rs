@@ -3788,3 +3788,170 @@ fn the_external_vector_leg_ranks_by_the_knns_own_metric() {
         .collect();
     assert_eq!(exact, knn);
 }
+
+// ---- the lite tier (archive mail more than a year back) --------------------
+
+/// `(body_html, html_lite)` as stored.
+fn html_of(store: &SqliteStore, message: i64) -> (Option<String>, i64) {
+    store
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT body_html, html_lite FROM messages WHERE id=?1",
+            params![message],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+}
+
+/// A LITE ROW keeps its text and its place in the full-text index and drops
+/// its HTML, whatever the caller carried; the reader is told it is lite, so it
+/// knows the null is "not kept" rather than "plain-text mail". An archive row
+/// inside the year keeps its HTML and is not lite.
+#[test]
+fn a_lite_archive_row_has_no_html_and_is_still_found_by_keyword() {
+    let (store, acct) = store();
+    let lite = store
+        .ingest_lite_archive_message(
+            &triaged(acct, "g-lite", "t-lite")
+                .from("keeper@lighthouse.example")
+                .subject("lantern rota")
+                .body("the cormorant shift starts at dusk")
+                .body_html("<table><tr><td>cormorant</td></tr></table>")
+                .received_at(days_ago(3 * 365))
+                .build(),
+        )
+        .unwrap()
+        .unwrap();
+    let full = archive(
+        &store,
+        &triaged(acct, "g-full", "t-full")
+            .subject("lantern rota")
+            .body("the cormorant shift moved to dawn")
+            .body_html("<p>cormorant at dawn</p>")
+            .received_at(days_ago(200)),
+    );
+
+    assert_eq!(
+        html_of(&store, lite),
+        (None, 1),
+        "no HTML stored, marked lite"
+    );
+    assert_eq!(
+        html_of(&store, full),
+        (Some("<p>cormorant at dawn</p>".into()), 0),
+        "a row inside the year keeps everything"
+    );
+    assert_eq!(
+        count(&store, "SELECT is_archive FROM messages WHERE id=?1", lite),
+        1
+    );
+    // Spends nothing, like every archive row.
+    assert_eq!(jobs(&store, lite), 0);
+    assert_eq!(state(&store, lite), (1, "pending".to_string()));
+    // Write-once like every archive row: a second sighting stores nothing.
+    assert!(
+        store
+            .ingest_lite_archive_message(&triaged(acct, "g-lite", "t-lite").build())
+            .unwrap()
+            .is_none()
+    );
+
+    // FOUND BY KEYWORD, body and subject alike.
+    for word in ["cormorant", "dusk", "lantern"] {
+        let hits: Vec<i64> = store
+            .search(acct, word, 10, 0)
+            .unwrap()
+            .iter()
+            .map(|hit| hit.id)
+            .collect();
+        assert!(hits.contains(&lite), "{word} finds the lite row: {hits:?}");
+    }
+
+    // The reader is served the text and told why there is no HTML.
+    let view = store.thread_view_with_html(acct, "t-lite").unwrap();
+    assert!(view.messages[0].lite);
+    assert_eq!(view.messages[0].html, None);
+    assert_eq!(
+        view.messages[0].content,
+        "the cormorant shift starts at dusk"
+    );
+    let wire = serde_json::to_value(&view.messages[0]).unwrap();
+    assert_eq!(wire["lite"], true);
+    let full_view = store.thread_view_with_html(acct, "t-full").unwrap();
+    assert!(!full_view.messages[0].lite);
+    let wire = serde_json::to_value(&full_view.messages[0]).unwrap();
+    assert!(wire.get("lite").is_none(), "absent on everything not lite");
+}
+
+/// HYDRATE: the lite rows of a thread are listed for the fetch, newest first
+/// and capped; caching the HTML clears the mark once (a racing second write
+/// writes nothing) and touches nothing a model or a search reads.
+#[test]
+fn a_hydrated_lite_row_keeps_its_html_and_its_revision() {
+    let (store, acct) = store();
+    let mut ids = Vec::new();
+    for (key, age) in [("g-a", 1200), ("g-b", 1100), ("g-c", 1000)] {
+        let t = triaged(acct, key, "t-old")
+            .subject("harbour dues")
+            .body("puffin harbour dues")
+            .body_html("<p>dropped</p>")
+            .received_at(days_ago(age))
+            .build();
+        ids.push(store.ingest_lite_archive_message(&t).unwrap().unwrap());
+    }
+    let listed = store.lite_messages_in_thread(acct, "t-old", 2).unwrap();
+    assert_eq!(
+        listed,
+        vec![(ids[2], "g-c".to_string()), (ids[1], "g-b".to_string())],
+        "newest first, at most the cap"
+    );
+    assert!(
+        store
+            .lite_messages_in_thread(acct, "t-other", 9)
+            .unwrap()
+            .is_empty()
+    );
+
+    assert!(
+        store
+            .store_hydrated_html(acct, ids[2], Some("<p>puffins</p>"))
+            .unwrap()
+    );
+    assert!(
+        !store
+            .store_hydrated_html(acct, ids[2], Some("<p>again</p>"))
+            .unwrap(),
+        "no longer lite, so a second write is refused"
+    );
+    assert_eq!(html_of(&store, ids[2]), (Some("<p>puffins</p>".into()), 0));
+    // Gone at the provider, or no HTML part: cleared, nothing to come back for.
+    assert!(store.store_hydrated_html(acct, ids[1], None).unwrap());
+    assert_eq!(html_of(&store, ids[1]), (None, 0));
+    // Another account's call moves nothing.
+    assert!(
+        !store
+            .store_hydrated_html(acct + 1, ids[0], Some("<p>x</p>"))
+            .unwrap()
+    );
+    assert_eq!(html_of(&store, ids[0]), (None, 1));
+
+    // Nothing a model or a search reads moved: no revision, no job.
+    assert_eq!(state(&store, ids[2]), (1, "pending".to_string()));
+    assert_eq!(jobs(&store, ids[2]), 0);
+    assert!(
+        store
+            .search(acct, "puffin", 10, 0)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.id == ids[2])
+    );
+    let view = store.thread_view_with_html(acct, "t-old").unwrap();
+    let hydrated = view.messages.iter().find(|m| m.id == ids[2]).unwrap();
+    assert!(!hydrated.lite);
+    assert_eq!(hydrated.html.as_deref(), Some("<p>puffins</p>"));
+    assert_eq!(
+        store.lite_messages_in_thread(acct, "t-old", 9).unwrap(),
+        vec![(ids[0], "g-a".to_string())]
+    );
+}

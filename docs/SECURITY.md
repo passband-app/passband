@@ -403,6 +403,16 @@ row does not exist yet, which is a different thing from "pending" on live mail:
 - A reminder the owner sets on an archive message lists it at the human door
   like any reminded row. It does not surface at the agent door until the row
   is `allowed`.
+- LITE ROWS (archive mail more than a year back, `messages.html_lite = 1`,
+  docs/SEARCH.md §8) are archive rows in every respect above; they only lack
+  `body_html`. The HTML is fetched back from the provider by
+  `POST /client/thread/{id}/hydrate`, which is HUMAN DOOR ONLY (the agent
+  doors serve text and have no HTML to hydrate), runs the fetched mail
+  through the same sanitizer ingest does, and writes `body_html` and the
+  mark and nothing else: `body`, the full-text index and the content snapshot
+  are untouched, so hydration advances no revision, queues no job and changes
+  nothing an agent can read. Reading a thread (the GET the client prefetches
+  through) never hydrates.
 
 Do not widen the omission: it is exactly `is_archive = 1` AND access NULL or
 `pending` AND no owner seal (`archive_unassessed_sql!` in `store/sqlite/mod.rs`).

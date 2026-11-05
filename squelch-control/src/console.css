@@ -174,6 +174,8 @@ body.console main { position: relative; z-index: 1; max-width: 30rem; }
 .console :is(tr.flag td.act, .rack.flag .next) button:not(.quiet) { padding: 0.42rem 0.7rem; font-size: 0.8rem;
   border-color: rgba(255, 122, 104, 0.55); background: rgba(255, 122, 104, 0.08); }
 .console :is(tr.flag td.act, .rack.flag .next) button:not(.quiet):hover { border-color: rgba(255, 122, 104, 0.9); }
+.console .rack.flag .next button.quiet { color: var(--danger); border-color: rgba(255, 122, 104, 0.4); }
+.console .rack.flag .next button.quiet:hover { border-color: rgba(255, 122, 104, 0.85); background: rgba(255, 122, 104, 0.06); }
 .console :is(input[type=text], input[type=password], input[type=email], input[type=search]) {
   font: 0.95rem/1.2 var(--mono); color: var(--ink); padding: 0.8rem 0.95rem; border-radius: 9px;
   background: rgba(9, 13, 22, 0.7); border: 1px solid rgba(130, 186, 245, 0.18);

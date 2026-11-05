@@ -343,6 +343,8 @@ pub enum Done {
     Sent,
     /// The mint landed and the mail did not. The row says so too.
     Unsent,
+    /// A mailbox was destroyed and its row forgotten.
+    Deleted,
 }
 
 impl Done {
@@ -352,6 +354,7 @@ impl Done {
             Done::Invited => "invited",
             Done::Sent => "sent",
             Done::Unsent => "unsent",
+            Done::Deleted => "deleted",
         }
     }
 
@@ -364,6 +367,7 @@ impl Done {
                 "invited" => Some(Done::Invited),
                 "sent" => Some(Done::Sent),
                 "unsent" => Some(Done::Unsent),
+                "deleted" => Some(Done::Deleted),
                 _ => None,
             })
     }
@@ -375,6 +379,9 @@ impl Done {
             Done::Sent => "A fresh invite is on its way. The old code no longer works.",
             Done::Unsent => {
                 "The invite was minted, but the email did not go out. The row says so, and its button tries again."
+            }
+            Done::Deleted => {
+                "The mailbox was deleted. The address and the username are free, so they can be invited and sign up again."
             }
         }
     }
@@ -843,6 +850,51 @@ approved, minted, or mailed.</p>"#,
             action = escape_html(action),
             confirm_label = escape_html(confirm_label),
             cancel = escape_html(&next),
+        ),
+    )
+}
+
+/// The question before a mailbox is destroyed: type its username.
+///
+/// NOTHING HAS HAPPENED YET when this renders, as with [`admin_confirm`]. The
+/// typed label is the confirmation, so a stale form or a replayed POST that did
+/// not type it lands back here instead of deleting anything. `back` rides on
+/// as [`NEXT_FIELD`] and is where Cancel leads.
+pub fn admin_confirm_delete(
+    id: i64,
+    who: &str,
+    label: &str,
+    error: Option<&str>,
+    back: &Place,
+) -> Response {
+    let next = back.href();
+    console(
+        StatusCode::OK,
+        "Delete this mailbox?",
+        &format!(
+            r#"<h1>Delete this mailbox?</h1>
+{error_html}
+<p class="stop"><strong>This destroys <code>{label}</code> for good: its mail
+index, its Google credential, its key, and its row on this board.</strong></p>
+<p>{who}</p>
+<p class="hint">The username and the address come free, so the same person can
+be invited and sign up again from the start. Their paired devices stop working.
+There is no undo.</p>
+<form method="post" action="/admin/delete">
+<input type="hidden" name="id" value="{id}">
+<input type="hidden" name="{NEXT_FIELD}" value="{next}">
+<input type="hidden" name="{CONFIRM_FIELD}" value="yes">
+<label for="label">Type <code>{label}</code> to confirm</label>
+<input type="text" id="label" name="label" autocomplete="off" autocapitalize="off"
+  spellcheck="false" required>
+<button type="submit">Delete the mailbox</button>
+</form>
+<p class="hint"><a href="{next}">Cancel and go back.</a> Nothing has been
+deleted.</p>"#,
+            error_html = banner(Banner::stop(error)),
+            label = escape_html(label),
+            who = escape_html(who),
+            next = escape_html(&next),
         ),
     )
 }
@@ -1338,8 +1390,10 @@ pub fn admin_person(row: &UserRow, counts: Option<&Counts>, flash: Option<Banner
 {details}
 {timeline}
 </div>
-{next}"#,
+{next}
+{danger}"#,
         flash = banner(flash),
+        danger = danger_zone(row, &here),
         details = panel("", "Details", None, &stage.pill(), &facts),
         timeline = panel(
             "",
@@ -1357,6 +1411,27 @@ pub fn admin_person(row: &UserRow, counts: Option<&Counts>, flash: Option<Banner
         ),
     );
     console_app(StatusCode::OK, &row.email, &sidebar(&here, counts), &body)
+}
+
+/// The one destructive button, on its own panel at the foot of a person who
+/// became a mailbox, and nowhere else: a list row is one slip away from its
+/// neighbour. Pressing it asks for the username typed
+/// ([`admin_confirm_delete`]) before anything happens.
+fn danger_zone(row: &UserRow, here: &Place) -> String {
+    if row.tenant_label.is_none() {
+        return String::new();
+    }
+    panel(
+        "flag",
+        "Delete mailbox",
+        None,
+        "",
+        &format!(
+            r#"<div class="next"><p>Destroys{} and everything in it, so this address can be invited and sign up again from nothing. You will be asked to type the username first.</p>{}</div>"#,
+            tenant_code(row),
+            action_form("/admin/delete", row.id, "Delete mailbox", true, here),
+        ),
+    )
 }
 
 /// A person's page for an id that names nobody: the sidebar, the banner, and

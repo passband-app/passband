@@ -758,7 +758,8 @@ private struct ReadingCard: View {
     let sender: ReadingSender
     let cursor: SitrepCursor
 
-    @State private var hovering = false
+    /// A reference the card's own body never reads; only `ReadingCardFill` does.
+    @State private var hover = CardHover()
 
     private var summaryText: String {
         Fmt.truncate(Reading.cleanSummary(sender.summary), 90)
@@ -810,13 +811,8 @@ private struct ReadingCard: View {
             }
             .padding(Space.scaled(9))
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
-                    .fill(
-                        sender.isContent
-                            ? Palette.readingContent.opacity(hovering ? 1 : 0.8)
-                            : Palette.hairline.opacity(hovering ? 0.85 : 0.5))
-            )
+            // A LEAF, not a fill read here: see `ReadingCardFill`.
+            .background { ReadingCardFill(isContent: sender.isContent, hover: hover) }
             .overlay(
                 RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .strokeBorder(
@@ -835,7 +831,7 @@ private struct ReadingCard: View {
                 removal: .opacity.combined(with: .offset(x: 26)).combined(
                     with: .scale(scale: 0.94))))
         .onHover { over in
-            hovering = over
+            if hover.on != over { hover.on = over }
             // Nothing READS this during a render — only the `e` handler, at
             // key-press time — so this write is free even at scroll frequency.
             cursor.reading = over ? sender.address : nil
@@ -844,6 +840,36 @@ private struct ReadingCard: View {
 
     private func open() { store.openReading(sender) }
 
+}
+
+/// One card's hover, as a reference so the card's own body never reads it.
+@MainActor
+@Observable
+private final class CardHover {
+    var on = false
+}
+
+/// The card's fill, hover-aware, as a LEAF placed in `.background`.
+///
+/// WHY IT IS NOT PART OF THE CARD'S BODY. When the hover flag lived in the card,
+/// every card a scroll dragged under a resting pointer re-ran its body, and that
+/// re-laid out the whole window from the root: the grid's `updateCache` drops
+/// every card's height, then the zone, the column and the scroll content are
+/// all sized again. A `sample` of a scroll over Reading showed that root pass;
+/// the same scroll over For your eyes, whose rows already paint hover this way
+/// (`ObligationWash`), did not. A background is sized by its primary content,
+/// so repainting this is paint and nothing else.
+private struct ReadingCardFill: View {
+    let isContent: Bool
+    let hover: CardHover
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
+            .fill(
+                isContent
+                    ? Palette.readingContent.opacity(hover.on ? 1 : 0.8)
+                    : Palette.hairline.opacity(hover.on ? 0.85 : 0.5))
+    }
 }
 
 /// Hero thumbnail mined from the latest email's sanitized html via the shared

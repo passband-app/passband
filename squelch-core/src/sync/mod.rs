@@ -1850,12 +1850,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     }
 
     /// How long the lane waits after the error the last chunk returned: the
-    /// quota backoff when Gmail refused it, the flat [`ArchivePace::
-    /// error_backoff`] for anything else.
+    /// quota backoff when Gmail refused it, else the error backoff that error
+    /// earned ([`ArchivePace::error_backoff`], doubling per consecutive
+    /// failure up to [`ArchivePace::error_backoff_cap`]).
     fn archive_error_wait(&self) -> Duration {
-        self.archive
-            .state()
+        let state = self.archive.state();
+        state
             .quota_wait
+            .or(state.error_wait)
             .unwrap_or(self.archive_pace.error_backoff)
     }
 
@@ -1929,6 +1931,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 state.skips_counted.clear();
                 state.quota_wait = None;
                 state.quota_backoff = None;
+                state.error_wait = None;
+                state.error_backoff = None;
+            }
+            // A finished walk asked the provider and was answered (or had
+            // nothing to ask): the run of failures is over too.
+            Ok(ArchiveStep::Done) => {
+                state.error_wait = None;
+                state.error_backoff = None;
             }
             Err(_) if refused => {
                 let wait = state.quota_backoff.unwrap_or(pace.quota_backoff);
@@ -1946,7 +1956,19 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // Nothing is counted against the CHUNK. What may eventually be
             // stepped over is one message that has itself failed, pass after
             // pass, and that is booked where it fails ([`Self::archive_skip`]).
-            Err(_) => state.quota_wait = None,
+            //
+            // THE WAIT GROWS WITH THE RUN OF FAILURES. Most errors here are
+            // transient (a laptop waking with no network yet, one dropped
+            // connection) and are gone in seconds, so the first retry comes
+            // quickly; one that keeps failing is an outage, and the wait
+            // doubles toward the cap so the walk stops knocking every few
+            // seconds. Separate from the quota backoff, which is untouched.
+            Err(_) => {
+                state.quota_wait = None;
+                let wait = state.error_backoff.unwrap_or(pace.error_backoff);
+                state.error_backoff = Some((wait * 2).min(pace.error_backoff_cap));
+                state.error_wait = Some(wait);
+            }
             Ok(_) => {}
         }
         out
@@ -4214,9 +4236,13 @@ struct ArchivePace {
     /// it and the poll lane, the sweeps and the write door queue behind an
     /// archive request at most a third of the time.
     rest_factor: u32,
-    /// The wait after any error inside the walk before the same chunk is tried
-    /// again.
+    /// The FIRST wait after an error inside the walk (other than a quota
+    /// refusal) before the same chunk is tried again. Doubles per consecutive
+    /// failure up to `error_backoff_cap`; a walked chunk, or a walk found
+    /// finished, resets it.
     error_backoff: Duration,
+    /// The longest that wait gets.
+    error_backoff_cap: Duration,
     /// How often an idle walk looks again while it is held off (no poll has
     /// succeeded yet, or a window of mail is being fetched).
     held_recheck: Duration,
@@ -4262,7 +4288,15 @@ impl Default for ArchivePace {
             // three even bursts rather than one of 25 and a long wait.
             batch: 10,
             rest_factor: 2,
-            error_backoff: Duration::from_secs(5 * 60),
+            // 15s, 30s, 1m, 2m, 4m, then 5m for as long as it keeps failing.
+            // The first retry is soon because the usual cause (a laptop
+            // waking before its network, one dropped connection) is gone in
+            // seconds, and it used to cost a flat five minutes. The cap stays
+            // at the old flat wait: a failed request that is not a quota
+            // refusal costs the budget next to nothing, so waiting longer
+            // than five minutes only delays recovery from a real outage.
+            error_backoff: Duration::from_secs(15),
+            error_backoff_cap: Duration::from_secs(5 * 60),
             held_recheck: Duration::from_secs(30),
             done_recheck: Duration::from_secs(60 * 60),
             per_minute: 30,
@@ -4367,6 +4401,10 @@ struct ArchiveState {
     quota_backoff: Option<Duration>,
     /// The wait the LAST error earned, when it was a quota refusal.
     quota_wait: Option<Duration>,
+    /// The wait the next non-quota error earns; `None` is the starting one.
+    error_backoff: Option<Duration>,
+    /// The wait the LAST error earned, when it was not a quota refusal.
+    error_wait: Option<Duration>,
     quota_day: Option<chrono::NaiveDate>,
     quota_refusals_today: u32,
     /// The current minute of the absolute ceiling: when it began and how many
@@ -9118,6 +9156,7 @@ Q0/00yfa39rgtJLa0DnOoA==
         ArchivePace {
             rest_factor: 0,
             error_backoff: Duration::from_millis(10),
+            error_backoff_cap: Duration::from_millis(80),
             held_recheck: Duration::from_millis(5),
             ..ArchivePace::default()
         }
@@ -10287,8 +10326,8 @@ Q0/00yfa39rgtJLa0DnOoA==
             assert_eq!(booked(&eng, "g-ok"), 0);
             assert_eq!(
                 eng.archive_error_wait(),
-                eng.archive_pace.error_backoff,
-                "not a quota refusal, so the flat wait"
+                eng.archive_pace.error_backoff * 2u32.pow(pass - 1),
+                "not a quota refusal, so the error backoff, doubling per pass"
             );
             assert!(!eng.archive.in_flight.load(Ordering::Relaxed));
             assert_eq!(eng.metrics.archive_skipped(), 0);
@@ -10982,6 +11021,54 @@ Q0/00yfa39rgtJLa0DnOoA==
         assert_eq!(pace.per_minute, 30);
         assert_eq!(pace.per_minute_window, Duration::from_secs(60));
         assert!(pace.batch <= pace.per_minute);
+    }
+
+    /// THE ERROR BACKOFF: a failure that is not a quota refusal waits the
+    /// first step, each consecutive one twice the last, never past the cap;
+    /// a walked chunk starts the run over. By default 15s, 30s, 1m, 2m, 4m,
+    /// then 5m.
+    #[tokio::test]
+    async fn the_archive_error_backoff_doubles_caps_and_resets_on_success() {
+        let d = ArchivePace::default();
+        let mut wait = d.error_backoff;
+        let mut seen = vec![wait.as_secs()];
+        for _ in 0..6 {
+            wait = (wait * 2).min(d.error_backoff_cap);
+            seen.push(wait.as_secs());
+        }
+        assert_eq!(seen, [15, 30, 60, 120, 240, 300, 300]);
+
+        let (store, acct) = store_at_cursor(Some(100));
+        store.set_archive_walked_to(acct, days_ago(40)).unwrap();
+        let g = MockGmail::default();
+        let base = serve_mock(g.clone()).await;
+        let mut eng = archive_engine(store.clone(), acct, &base, 365);
+        eng.archive_pace.error_backoff = Duration::from_secs(10);
+        eng.archive_pace.error_backoff_cap = Duration::from_secs(40);
+        let (_tx, mut rx) = never_shutdown();
+
+        // Five failed listings in a row: 10, 20, 40, then held at the cap.
+        g.0.lock().unwrap().all_mail_failures = 5;
+        let mut waits = Vec::new();
+        for _ in 0..5 {
+            assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
+            waits.push(eng.archive_error_wait().as_secs());
+        }
+        assert_eq!(waits, [10, 20, 40, 40, 40], "grows, then the cap holds");
+
+        // A walked chunk ends the run: the next failure starts small again.
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(eng.archive_error_wait(), Duration::from_secs(10));
+        g.0.lock().unwrap().all_mail_failures = 1;
+        assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
+        assert_eq!(
+            eng.archive_error_wait(),
+            Duration::from_secs(10),
+            "reset by the success"
+        );
     }
 
     /// THE ABSOLUTE CEILING, on a virtual clock: 30 in a minute and the 31st

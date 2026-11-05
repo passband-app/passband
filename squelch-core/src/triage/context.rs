@@ -13,6 +13,13 @@ pub struct ContextSnapshot {
     pub thread_revisions: BTreeMap<String, i64>,
     pub rule_ids: Vec<i64>,
     pub memory: Vec<MemoryEntry>,
+    /// The `understanding` hidden feature was on when this run's context was
+    /// built: the agent then gets the prompt variant that explains memory
+    /// (`agent::UNDERSTANDING_SEGMENTS`). NOT SERIALIZED, so it is never part
+    /// of what the model reads; off (the default) is the prompt every
+    /// mailbox without the flag has always had.
+    #[serde(skip)]
+    pub understanding: bool,
 }
 /// One learned-memory line as the agent reads it (`context.memory`), served by
 /// [`super::memory::StoreMemoryContext`]. `text` is the entry's rendered line,

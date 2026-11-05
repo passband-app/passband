@@ -284,15 +284,22 @@ strongly; a rule is applied. The two are not merged.
 
 ## 5. Flag and rollout
 
-- **The ledger ships on.** It is deterministic, costs no tokens, and makes
-  every triage run better from the first day a daemon with it starts. No
-  flag, no env var, no knob; the daemon release is the rollout.
-- **The pass and the review page ship behind `understanding`** in
-  `features::KNOWN`. Off is as if it did not exist: the pass does not run,
-  `StoreMemoryContext` returns nothing, the memory routes 404, the Mac hides
-  the page. It spends tokens and writes sentences about people, and the
-  first weeks are for reading what the model writes about a handful of
-  tenants before anyone else sees it. Launch is deleting the entry.
+- **The ledger COMPUTES for everyone.** It is deterministic and costs no
+  tokens, so it runs on every daemon from the release that ships it, flag or
+  no flag, and is warm the day the flag is ticked. Computing is all it does
+  without the flag.
+- **Everything the owner sees and everything the agent is told sits behind
+  `understanding`** in `features::KNOWN`. Off is as if it did not exist: the
+  pass does not run, `StoreMemoryContext` returns nothing, the relationship
+  block is not in the triage context, the memory routes 404, the Mac hides
+  the page and the Usage section, and the agent prompt is byte for byte the
+  prompt every other mailbox gets (`agent::system_prompt` composes a variant
+  per flag state from the one list `agent::UNDERSTANDING_SEGMENTS`; a test
+  pins the off variant to the prompt file). One `PROMPT_VERSION` covers both
+  variants, and each run's diagnostics record which one ran. It spends tokens
+  and writes sentences about people, and the first weeks are for reading what
+  the model writes about a handful of tenants before anyone else sees it.
+  Launch is deleting the entry.
 - **Release order.** Daemon first (ledger, context, prompt bump, pass, routes),
   then Mac (contact card numbers, settings page), then iOS (settings page).
   Nothing in the clients breaks against an older daemon: the card renders

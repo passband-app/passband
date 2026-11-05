@@ -301,6 +301,8 @@ pub fn snapshot(
             .filter_map(|r| r.get("id").and_then(|id| id.as_i64()))
             .collect(),
         memory: Vec::new(),
+        // Set by the worker from the `understanding` flag; off is main's prompt.
+        understanding: false,
     }
 }
 
@@ -551,6 +553,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             &clock,
         );
         input.memory = self.memory_for(&context.message.thread_id, &context.message.from_addr);
+        input.understanding = self.features.enabled(crate::features::UNDERSTANDING);
         // A new account triages the jobs somebody is waiting on at the
         // onboarding effort for its first days (`Stage2Config::effort_for_job`):
         // the store's foreground lane, and nothing else. A person's
@@ -573,6 +576,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             model: &base_model,
             effort,
         };
+        let input_understanding = input.understanding;
         match run_agent(connection, &config, input, &reader).await {
             Ok(run) => {
                 self.note_provider_success();
@@ -584,6 +588,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     .store(true, Ordering::Relaxed);
                 context.run_metadata = serde_json::json!({
                     "prompt_version": crate::triage::agent::PROMPT_VERSION,
+                    // Which prompt variant ran: one version string covers
+                    // both, and this says which (agent::system_prompt).
+                    "understanding": input_understanding,
                     "schema_version": 1,
                     "model": config.agent.model.as_deref().unwrap_or(&base_model),
                     "review_model": config.agent.review_model,

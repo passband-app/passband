@@ -82,13 +82,8 @@ extension View {
 struct AdHero<Content: View>: View {
     /// Whether the window is key. The phosphor pauses otherwise.
     let live: Bool
-    /// Nil draws no pill (the veil's ad wears the wordmark there instead).
-    let pill: String?
-    /// Nil draws no ✕: the first-load veil's ad closes with the veil.
-    let close: (() -> Void)?
-    /// Grow past `heroHeight` to fill a taller card (the veil's pair, which
-    /// shares one height); the phone stays on the floor.
-    var stretch = false
+    let pill: String
+    let close: () -> Void
     @ViewBuilder var content: Content
 
     var body: some View {
@@ -107,15 +102,11 @@ struct AdHero<Content: View>: View {
 
             content
         }
-        .frame(minHeight: AdCard.heroHeight, maxHeight: stretch ? .infinity : AdCard.heroHeight)
+        .frame(height: AdCard.heroHeight)
         .clipShape(UnevenRoundedRectangle(
             topLeadingRadius: AdCard.cornerRadius, topTrailingRadius: AdCard.cornerRadius))
-        .overlay(alignment: .topTrailing) {
-            if let close { AdCloseButton(action: close) }
-        }
-        .overlay(alignment: .topLeading) {
-            if let pill { AdPill(text: pill) }
-        }
+        .overlay(alignment: .topTrailing) { AdCloseButton(action: close) }
+        .overlay(alignment: .topLeading) { AdPill(text: pill) }
     }
 }
 

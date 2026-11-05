@@ -5,7 +5,7 @@ import SwiftUI
 /// stays live and blurred underneath (`AppStore.modalOverlayOpen`), so what
 /// this card counts is filling in behind it. It goes by itself when the
 /// catch-up ends, or at "Start now", Enter or Esc. On the Mac a second card
-/// beside it offers the iPhone app (`FirstLoadIPhoneAd`) while they wait.
+/// beside it offers the iPhone app (`FirstLoadIPhoneCard`) while they wait.
 struct FirstLoadVeil: View {
     @Environment(AppStore.self) private var store
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -32,7 +32,7 @@ struct FirstLoadVeil: View {
     }
 
     /// ON THE MAC, A PAIR: the progress on the left and, beside it, the iPhone
-    /// ad (`FirstLoadIPhoneAd`, TestFlightNudge's rules), on one top edge and
+    /// card (`FirstLoadIPhoneCard`, TestFlightNudge's rules), on one top edge and
     /// one height. A window too narrow for both shows the progress alone, and
     /// the ad goes to the corner card instead (`TestFlightNudge.veilEnded`).
     /// A phone already connected: the progress alone, centred, as it always was.
@@ -45,7 +45,7 @@ struct FirstLoadVeil: View {
                     HStack(alignment: .top, spacing: Space.s24) {
                         progressCard
                             .frame(maxHeight: .infinity, alignment: .top)
-                        FirstLoadIPhoneAd()
+                        FirstLoadIPhoneCard()
                             .frame(maxHeight: .infinity)
                     }
                     // One height for both: each card fills the taller's.

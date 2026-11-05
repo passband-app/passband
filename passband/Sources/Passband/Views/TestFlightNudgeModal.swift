@@ -18,10 +18,11 @@
 // card, the hero and the phone drawn in it are set sizes, and the headline is
 // cut to that width. Every font here is a literal or `fixed:` on purpose.
 //
-// THE SAME CARD, ON DAY ONE. The first-load veil sets it beside its progress
-// card (`FirstLoadIPhoneAd`, below) in the modal's glass. When the veil closes
-// by itself this corner card takes over, so the code never vanishes from under
-// a camera; see TestFlightNudge's header for every rule.
+// ON DAY ONE, A PLAIN PANEL. The first-load veil sets its own iPhone card
+// beside the progress (`FirstLoadIPhoneCard`, below): the app's own type and
+// glass, no hero, sharing only the code and the link with this card. When the
+// veil closes by itself this corner card takes over, so the code never
+// vanishes from under a camera; see TestFlightNudge's header for every rule.
 //
 // NOT MODAL. A corner card, closed by its ✕, that leaves the inbox usable
 // underneath. Bottom-RIGHT on the main window: the toast stack owns
@@ -37,7 +38,7 @@ struct TestFlightNudgeModal: View {
 
     var body: some View {
         if nudge.showingNudge {
-            TestFlightAdCard(inVeil: false) { copied in
+            TestFlightAdCard { copied in
                 nudge.showingNudge = false
                 Analytics.capture("ios_nudge_closed", ["copied": copied, "source": nudge.source])
                 // What's New waits behind this card (WhatsNew.maybeShow); its turn.
@@ -49,9 +50,6 @@ struct TestFlightNudgeModal: View {
 }
 
 private struct TestFlightAdCard: View {
-    /// In the first-load veil rather than the corner: the modal's glass, a
-    /// hero that stretches to the pair's height, no ✕.
-    let inVeil: Bool
     let close: (_ copied: Bool) -> Void
 
     @Environment(\.controlActiveState) private var activeState
@@ -61,31 +59,14 @@ private struct TestFlightAdCard: View {
     @State private var copied = false
 
     var body: some View {
-        if inVeil {
-            VStack(spacing: 0) {
-                hero
-                words
-            }
-            .frame(width: AdCard.width)
-            // ModalCard's material, so the pair matches.
-            .passbandGlass(.pane, cornerRadius: Radius.modal, tint: Palette.glassTint)
-            .overlayShadow()
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel("Get Passband for iPhone")
-            .onAppear {
-                TestFlightNudge.shared.veilAdDrawn = true
+        VStack(spacing: 0) {
+            hero
+            words
+        }
+        .adCardChrome(arrived: arrived, leaving: leaving, label: "Get Passband for iPhone")
+        .onAppear {
+            withAnimation(reduceMotion ? .easeOut(duration: 0.2) : .spring(response: 0.55, dampingFraction: 0.82).delay(0.35)) {
                 arrived = true
-            }
-        } else {
-            VStack(spacing: 0) {
-                hero
-                words
-            }
-            .adCardChrome(arrived: arrived, leaving: leaving, label: "Get Passband for iPhone")
-            .onAppear {
-                withAnimation(reduceMotion ? .easeOut(duration: 0.2) : .spring(response: 0.55, dampingFraction: 0.82).delay(0.35)) {
-                    arrived = true
-                }
             }
         }
     }
@@ -94,31 +75,12 @@ private struct TestFlightAdCard: View {
 
     /// The shared hero (`AdHero`), with the phone rising out of it.
     private var hero: some View {
-        let pill: String? = inVeil ? nil : "NEW  ·  IPHONE ALPHA"
-        let close: (() -> Void)? = inVeil ? nil : { dismiss() }
-        return AdHero(live: activeState == .key, pill: pill, close: close, stretch: inVeil) {
+        AdHero(live: activeState == .key, pill: "NEW  ·  IPHONE ALPHA", close: dismiss) {
             PhoneMock(reduceMotion: reduceMotion, live: activeState == .key)
                 .offset(y: arrived ? 66 : 220)
                 .animation(
                     reduceMotion ? nil : .spring(response: 0.75, dampingFraction: 0.78).delay(0.6),
                     value: arrived)
-        }
-        .overlay(alignment: .topLeading) { wordmark }
-    }
-
-    /// In the veil, the progress card's wordmark on the same top line, so the
-    /// pair reads as one. The board's ink, as on the Sitrep: the phosphor
-    /// follows the theme, so ink reads on it in both.
-    @ViewBuilder private var wordmark: some View {
-        if inVeil {
-            Text("passband")
-                .font(Typo.serif(19, weight: .medium))
-                .foregroundStyle(Palette.ink)
-                // The progress card's inset (ModalCard's words plus the
-                // veil's own), so both wordmarks sit on one line.
-                .padding(.top, Space.modal + Space.s14)
-                .padding(.leading, AdCard.wordsHorizontal)
-                .accessibilityHidden(true)
         }
     }
 
@@ -130,7 +92,7 @@ private struct TestFlightAdCard: View {
                 Text("Passband, in your pocket.")
                     .font(Typo.hero(25, fixed: true))
                     .foregroundStyle(Palette.ink)
-                Text("Your phone buzzes for the mail that needs you and stays quiet for everything else.")
+                Text("Your phone tells you what matters and stays quiet for everything else.")
                     .font(Typo.ui(12, fixed: true))
                     .foregroundStyle(Palette.inkDim)
                     .fixedSize(horizontal: false, vertical: true)
@@ -149,10 +111,10 @@ private struct TestFlightAdCard: View {
                         .accessibilityLabel("QR code for the TestFlight invite")
                 }
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Scan with your iPhone")
+                    Text("Scan to join")
                         .font(Typo.ui(13, weight: .semibold, fixed: true))
                         .foregroundStyle(Palette.ink)
-                    Text("Join the alpha on TestFlight.")
+                    Text("the alpha on TestFlight")
                         .font(Typo.ui(10, weight: .medium, fixed: true))
                         .foregroundStyle(Palette.inkFaint)
                         .fixedSize(horizontal: false, vertical: true)
@@ -186,13 +148,18 @@ private struct TestFlightAdCard: View {
     /// the code.
     private func copyLink() {
         TestFlightQR.copyLink()
-        if inVeil { TestFlightNudge.shared.copiedInVeil = true }
         withAnimation(Motion.toast) { copied = true }
     }
 }
 
 /// The invite as a QR code and on the pasteboard, for the card and the veil.
 enum TestFlightQR {
+    /// What the phone's morning brief looks like, for the pictures of it on
+    /// both iPhone cards. Made up, and calm on purpose: what the day holds,
+    /// no counts, nothing "for your eyes", nothing that "needs you".
+    static let briefSample =
+        "PG&E bill due tomorrow. A package arrives today. First up: Dentist at 9:30 AM."
+
     static func copyLink() {
         let board = NSPasteboard.general
         board.clearContents()
@@ -212,16 +179,116 @@ enum TestFlightQR {
     }()
 }
 
-// MARK: - the veil's ad
+// MARK: - the veil's iPhone card
 
-/// THE IPHONE AD BESIDE THE FIRST-LOAD PROGRESS. The corner card's own
-/// composition (the phosphor hero, the phone with its push landing, the
-/// headline, the code) in the veil's material: the modal's glass, radius and
-/// shadow, so the two cards read as a pair. No ✕ and no button of its own:
-/// it goes with the veil, at Start now, Enter or Esc.
-struct FirstLoadIPhoneAd: View {
+/// THE IPHONE ASK BESIDE THE FIRST-LOAD PROGRESS, as a second panel of the
+/// same screen rather than an ad: the progress card's glass, padding,
+/// wordmark, headline and body type, and the code on a plain white tile. No
+/// hero, no phone, no glow. No ✕ and no button of its own: it goes with the
+/// veil, at Start now, Enter or Esc. It fills the height the veil gives it,
+/// with the code on the floor, level with Start now beside it.
+struct FirstLoadIPhoneCard: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var copied = false
+
     var body: some View {
-        TestFlightAdCard(inVeil: true) { _ in }
+        ModalCard(width: 380) {
+            VStack(alignment: .leading, spacing: Space.scaled(22)) {
+                Text("passband")
+                    .font(Typo.serif(19, weight: .medium))
+                    .foregroundStyle(Palette.ink)
+                VStack(alignment: .leading, spacing: Space.s10) {
+                    Text("Passband, in your pocket.")
+                        .font(Typo.serif(32, weight: .medium))
+                        .foregroundStyle(Palette.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("Your phone tells you what matters and stays quiet for everything else.")
+                        .font(Typo.ui(15))
+                        .foregroundStyle(Palette.inkDim)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                brief
+                VStack(alignment: .leading, spacing: 0) {
+                    Spacer(minLength: 0)
+                    code
+                }
+            }
+            .padding(Space.s14)
+            .frame(maxHeight: .infinity, alignment: .top)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Get Passband for iPhone")
+        .onAppear { TestFlightNudge.shared.veilAdDrawn = true }
+    }
+
+    /// What the phone gets, drawn flat in the app's own palette: one
+    /// notification, Passband's mark, no title, the day in a sentence.
+    private var brief: some View {
+        HStack(alignment: .top, spacing: Space.s10) {
+            Group {
+                // The light mark on dark glass, where the dark one vanishes.
+                if let mark = colorScheme == .dark ? (IntroBrand.lightMark ?? IntroBrand.mark) : IntroBrand.mark {
+                    mark.resizable().scaledToFit().padding(4)
+                } else {
+                    Image(systemName: "waveform").font(Typo.ui(12, weight: .bold))
+                }
+            }
+            .frame(width: 26, height: 26)
+            .background(Palette.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            Text(TestFlightQR.briefSample)
+                .font(Typo.ui(13))
+                .foregroundStyle(Palette.ink)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("now")
+                .font(Typo.ui(11))
+                .foregroundStyle(Palette.inkFaint)
+        }
+        .padding(Space.s12)
+        .background(Palette.ink.opacity(0.04), in: RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
+                .strokeBorder(Palette.hairline, lineWidth: 1))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("A Passband notification: \(TestFlightQR.briefSample)")
+    }
+
+    private var code: some View {
+        HStack(spacing: Space.s14) {
+            if let qr = TestFlightQR.image {
+                Image(nsImage: qr)
+                    .interpolation(.none)
+                    .resizable()
+                    .frame(width: 84, height: 84)
+                    .padding(6)
+                    // White in both themes: a phone camera reads dark on light.
+                    .background(.white, in: RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
+                    .accessibilityLabel("QR code for the TestFlight invite")
+            }
+            VStack(alignment: .leading, spacing: Space.s4) {
+                Text("Scan to join")
+                    .font(Typo.ui(15, weight: .semibold))
+                    .foregroundStyle(Palette.ink)
+                Text("the alpha on TestFlight")
+                    .font(Typo.ui(13))
+                    .foregroundStyle(Palette.inkDim)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(action: copyLink) {
+                    Label(copied ? "Link copied" : "Copy link", systemImage: copied ? "checkmark" : "link")
+                        .font(Typo.ui(13, weight: .semibold))
+                        .foregroundStyle(Palette.accent)
+                        .contentTransition(.symbolEffect(.replace))
+                }
+                .buttonStyle(.plain)
+                .padding(.top, Space.s2)
+            }
+        }
+    }
+
+    private func copyLink() {
+        TestFlightQR.copyLink()
+        TestFlightNudge.shared.copiedInVeil = true
+        withAnimation(Motion.toast) { copied = true }
     }
 }
 
@@ -270,7 +337,6 @@ private struct PhoneMock: View {
     private static let size = CGSize(width: 118, height: 236)
     private static let screenInk = Color(hex: 0xE9EEF5)
     private static let screenDim = Color(hex: 0x808E9F)
-    private static let accent = Color(hex: 0x4E9BEA)
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -303,66 +369,39 @@ private struct PhoneMock: View {
         .accessibilityHidden(true)
     }
 
+    /// A lock screen: the date and the clock, and the morning brief landing
+    /// under them. No counts on it anywhere: the brief itself dropped them
+    /// because a number of things "for your eyes" reads as pressure.
     private var screen: some View {
         ZStack(alignment: .top) {
             LinearGradient(
                 colors: [Color(hex: 0x111A27), Color(hex: 0x090D16)],
                 startPoint: .top, endPoint: .bottom)
 
-            VStack(alignment: .leading, spacing: 5) {
-                Text("GOOD MORNING")
-                    .font(.system(size: 5, weight: .semibold).width(.expanded))
-                    .foregroundStyle(Self.accent)
-                Text("2 items for\nyour eyes.")
-                    .font(Typo.hero(13, fixed: true))
+            VStack(spacing: 1) {
+                Text("Thursday, November 5")
+                    .font(.system(size: 6, weight: .semibold))
+                    .foregroundStyle(Self.screenInk.opacity(0.8))
+                Text("8:02")
+                    .font(.system(size: 30, weight: .semibold).width(.condensed))
                     .foregroundStyle(Self.screenInk)
-                    .lineSpacing(-2)
-                    .fixedSize(horizontal: false, vertical: true)
-                VStack(spacing: 4) {
-                    row(width: 0.9, money: true)
-                    row(width: 0.7, money: false)
-                    row(width: 0.8, money: false)
-                }
-                .padding(.top, 4)
             }
-            .padding(.horizontal, 10)
-            // Under the banner's lane, so the push lands in its own space
-            // rather than on the headline.
-            .padding(.top, 62)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 22)
+            .frame(maxWidth: .infinity)
 
             notification
                 .padding(.horizontal, 5)
-                .padding(.top, 24)
-                .offset(y: banner ? 0 : -44)
+                .padding(.top, 72)
+                .offset(y: banner ? 0 : -20)
                 .opacity(banner ? 1 : 0)
                 .scaleEffect(banner ? 1 : 0.94, anchor: .top)
         }
     }
 
-    private func row(width: CGFloat, money: Bool) -> some View {
-        HStack(spacing: 4) {
-            Circle().fill(Self.screenDim.opacity(0.5)).frame(width: 7, height: 7)
-            RoundedRectangle(cornerRadius: 1.5)
-                .fill(Self.screenDim.opacity(0.45))
-                .frame(height: 3.5)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .scaleEffect(x: width, anchor: .leading)
-            if money {
-                RoundedRectangle(cornerRadius: 1.5)
-                    .fill(Self.accent.opacity(0.85))
-                    .frame(width: 12, height: 3.5)
-            }
-        }
-        .padding(.horizontal, 5)
-        .padding(.vertical, 5)
-        .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
-    }
-
-    /// The push. Real sender, real shape: what the lock screen actually shows
-    /// when the For Your Eyes lane lets something through.
+    /// The push: the morning brief as the phone gets it, a Passband
+    /// notification with no title, a calm summary of the day.
     private var notification: some View {
-        HStack(spacing: 5) {
+        HStack(alignment: .top, spacing: 5) {
             Group {
                 if let mark = IntroBrand.lightMark ?? IntroBrand.mark {
                     mark.resizable().scaledToFit().padding(2)
@@ -373,21 +412,14 @@ private struct PhoneMock: View {
             .frame(width: 15, height: 15)
             .background(Color(hex: 0x14243A), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
 
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 0) {
-                    Text("Chase")
-                        .font(.system(size: 6.5, weight: .semibold))
-                    Spacer(minLength: 2)
-                    Text("now")
-                        .font(.system(size: 5.5))
-                        .foregroundStyle(Self.screenDim)
-                }
-                Text("Card payment of $482 due Friday")
-                    .font(.system(size: 5.5))
-                    .foregroundStyle(Self.screenInk.opacity(0.85))
-                    .lineLimit(1)
-            }
-            .foregroundStyle(Self.screenInk)
+            Text(TestFlightQR.briefSample)
+                .font(.system(size: 5.5))
+                .foregroundStyle(Self.screenInk.opacity(0.9))
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("now")
+                .font(.system(size: 5))
+                .foregroundStyle(Self.screenDim)
         }
         .padding(5)
         .background(Color(hex: 0x2A3442).opacity(0.92), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -396,14 +428,14 @@ private struct PhoneMock: View {
                 .strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
     }
 
-    /// Land, hold, leave, rest, forever, while the window is key. Reduce Motion
-    /// gets the banner held still instead.
+    /// Land, hold, leave, rest, forever, while the window is key. Reduce Motion,
+    /// and a window in the background, get the banner held still instead: a
+    /// phone at rest still shows what it is for.
     private func loop() async {
-        if reduceMotion {
+        if reduceMotion || !live {
             banner = true
             return
         }
-        guard live else { return }
         try? await Task.sleep(for: .milliseconds(1700))
         while !Task.isCancelled {
             withAnimation(.spring(response: 0.42, dampingFraction: 0.72)) { banner = true }

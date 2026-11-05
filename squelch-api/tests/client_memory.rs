@@ -102,6 +102,12 @@ async fn the_list_carries_retired_entries_and_never_deleted_ones() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .unwrap(),
+        "no-store"
+    );
     let body = body_json(resp).await;
     // A brand-new account: the ledger is young, so the pass is not running.
     assert_eq!(body["enabled"], false);
@@ -152,6 +158,12 @@ async fn confirm_makes_an_entry_stated_and_permanent() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .unwrap(),
+        "no-store"
+    );
     let body = body_json(resp).await;
     assert_eq!(body["origin"], "stated");
     assert_eq!(body["expires_at"], Value::Null);

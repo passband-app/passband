@@ -617,10 +617,15 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             config.context.initial_thread_messages,
             &clock,
         );
-        input.memory = self.memory_for(&context.message.thread_id, &context.message.from_addr);
-        // The flag as read once at the top of this run, so the prompt variant,
-        // the relationship block and the evidence reader always agree.
+        // ONE read of the flag per run, at the top of `run_agent_job`: it picks
+        // the prompt variant, gates the memory lines, attaches the relationship
+        // block and switches the evidence reader, so none of them can disagree.
         input.understanding = understanding;
+        input.memory = self.memory_for(
+            &context.message.thread_id,
+            &context.message.from_addr,
+            understanding,
+        );
         // A new account triages the jobs somebody is waiting on at the
         // onboarding effort for its first days (`Stage2Config::effort_for_job`):
         // the store's foreground lane, and nothing else. A person's
@@ -654,9 +659,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 self.agent_answered_since_timeout
                     .store(true, Ordering::Relaxed);
                 context.run_metadata = serde_json::json!({
-                    "prompt_version": crate::triage::agent::PROMPT_VERSION,
-                    // Which prompt variant ran: one version string covers
-                    // both, and this says which (agent::system_prompt).
+                    // By the variant that ran: off is main's prompt and
+                    // main's version (agent::prompt_version).
+                    "prompt_version": crate::triage::agent::prompt_version(input_understanding),
                     "understanding": input_understanding,
                     "schema_version": 1,
                     "model": config.agent.model.as_deref().unwrap_or(&base_model),

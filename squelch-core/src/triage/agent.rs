@@ -11,7 +11,24 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The version of the prompt with the `understanding` flag ON: the file plus
+/// [`UNDERSTANDING_SEGMENTS`]. A const because a const is what a stored string
+/// is compared against; what a run reports is [`prompt_version`].
 pub const PROMPT_VERSION: &str = "agent-triage-v21";
+/// The version of the prompt with the flag OFF: the prompt file alone, byte
+/// for byte main's (a test pins that), so it keeps main's version string.
+pub const PROMPT_VERSION_BASE: &str = "agent-triage-v19";
+
+/// The version a run reports, by the variant it ran: decisions and their
+/// diagnostics carry it, and an eval groups gold runs by it, so two different
+/// prompts must never share one string.
+pub fn prompt_version(understanding: bool) -> &'static str {
+    if understanding {
+        PROMPT_VERSION
+    } else {
+        PROMPT_VERSION_BASE
+    }
+}
 /// The prompt text, with one figure to fill in: the `read_message` page
 /// size, defined beside the request it answers
 /// ([`super::context::READ_MESSAGE_PAGE_CHARS`]) and shared with the
@@ -1873,9 +1890,10 @@ mod tests {
         assert_eq!(
             (
                 super::super::context::READ_MESSAGE_PAGE_CHARS,
+                PROMPT_VERSION_BASE,
                 PROMPT_VERSION
             ),
-            (2_000, "agent-triage-v21")
+            (2_000, "agent-triage-v19", "agent-triage-v21")
         );
     }
     /// OFF IS THE PROMPT AS IT WAS. With the `understanding` flag off, both
@@ -1889,12 +1907,20 @@ mod tests {
             system_prompt(false, false),
             SYSTEM.replacen(REVIEW_OFFER, NO_REVIEW_OFFER, 1)
         );
+        // The segments in the order `compose` applies them, each anchor
+        // checked against the text AS IT STANDS when its edit lands (an
+        // earlier segment can create or consume a later one's anchor), and
+        // the result is exactly the flag-on prompt.
+        let mut text = SYSTEM.clone();
+        for (find, replace) in UNDERSTANDING_SEGMENTS {
+            assert_eq!(text.matches(find).count(), 1, "{find}");
+            text = text.replacen(find, replace, 1);
+        }
+        assert_eq!(text, system_prompt(true, true));
         for with_review in [true, false] {
             let off = system_prompt(with_review, false);
             let on = system_prompt(with_review, true);
             for (find, replace) in UNDERSTANDING_SEGMENTS {
-                // Each anchor is in the file exactly once, so the edit lands.
-                assert_eq!(SYSTEM.matches(find).count(), 1, "{find}");
                 let added = replace.replacen(find, "", 1);
                 assert!(!added.trim().is_empty(), "a segment that adds nothing");
                 assert!(
@@ -1944,6 +1970,10 @@ mod tests {
                 );
             }
         }
+        // Two prompts, two version strings.
+        assert_eq!(prompt_version(false), PROMPT_VERSION_BASE);
+        assert_eq!(prompt_version(true), PROMPT_VERSION);
+        assert_ne!(PROMPT_VERSION_BASE, PROMPT_VERSION);
         // Composed once: the same bytes every call.
         assert!(std::ptr::eq(
             system_prompt(true, true),

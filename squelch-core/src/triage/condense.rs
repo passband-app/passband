@@ -71,6 +71,13 @@ const ATTRIBUTIONS: &[(&str, &str)] = &[
     ("Le ", "a écrit :"),
     ("Am ", "schrieb "),
     ("El ", "escribió:"),
+];
+
+/// Italian, Dutch and Portuguese attribution lines. FOR [`own_text`] ONLY,
+/// like [`OWN_QUOTE_BANNERS`] and for the same reason: [`ATTRIBUTIONS`] feeds
+/// triage's own quote cut ([`condense_body`], [`excerpt`]), and what triage
+/// reads of a thread must not change with this feature, flag or no flag.
+const OWN_ATTRIBUTIONS: &[(&str, &str)] = &[
     ("Il ", "ha scritto:"),
     ("Op ", "schreef"),
     ("Em ", "escreveu:"),
@@ -365,6 +372,7 @@ pub fn own_text(body: &str) -> Option<String> {
     }
     let cut = [
         attribution_cut(body),
+        attribution_cut_in(body, OWN_ATTRIBUTIONS),
         outlook_cut(body),
         quoted_block_cut(body),
         header_block_cut(body),
@@ -434,8 +442,13 @@ fn forwarded(body: &str) -> bool {
 /// bodies and on HTML flattened to one line alike, because it never needs a
 /// line start.
 fn attribution_cut(body: &str) -> Option<usize> {
+    attribution_cut_in(body, ATTRIBUTIONS)
+}
+
+/// [`attribution_cut`] over a given list of (lead, tail) pairs.
+fn attribution_cut_in(body: &str, attributions: &[(&str, &str)]) -> Option<usize> {
     let mut best: Option<usize> = None;
-    for (lead, tail) in ATTRIBUTIONS {
+    for (lead, tail) in attributions {
         let mut from = 0;
         while let Some(pos) = body[from..].find(tail) {
             let tail_at = from + pos;
@@ -612,6 +625,25 @@ mod tests {
     }
 
     const TRACKER: &str = "https://click.mailer.example.com/ls/click?upn=u001.AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz-2Fmore";
+
+    /// Triage's condensing of an Italian, Dutch or Portuguese reply is what it
+    /// is on main: none of those attributions is one triage cuts at, and with
+    /// no `>` block under them there is no quote for triage to drop. So the
+    /// body comes back whole from `condense_body`, and whole and unflagged
+    /// from `excerpt`. `own_text` still stops at the attribution.
+    #[test]
+    fn italian_dutch_and_portuguese_replies_reach_triage_as_on_main() {
+        for body in [
+            "Va bene.\n\nIl giorno mar 3 nov 2026 alle ore 09:00 Jo <jo@x.it> ha scritto:\nIl testo di Jo.",
+            "Prima.\n\nOp di 3 nov. 2026 om 09:00 schreef Jo <jo@x.nl>:\nDe tekst van Jo.",
+            "Combinado.\n\nEm ter., 3 de nov. de 2026 às 09:00, Jo <jo@x.pt> escreveu:\nO texto do Jo.",
+        ] {
+            assert_eq!(condense_body(body), body, "{body:?}");
+            assert_eq!(excerpt(body, 2_000), (body.to_string(), false), "{body:?}");
+            let own = own_text(body).unwrap();
+            assert!(!own.contains("Jo."), "{own:?}");
+        }
+    }
 
     /// Triage's condensing is unchanged by `own_text`'s extra banners: a
     /// German Outlook forward keeps the forwarded message.

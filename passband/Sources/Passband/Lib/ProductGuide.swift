@@ -96,8 +96,7 @@ enum ProductGuide {
             case .assistant:
                 "this ⌘K assistant, its key and model, connecting outside agents over MCP"
             case .appAndAccounts:
-                "accounts, notifications, updates, usage, understanding where it is turned on "
-                    + "(people you answer, what Passband knows about you), audit log, invites, privacy"
+                "accounts, notifications, updates, usage, audit log, invites, privacy"
             case .whatsNew:
                 "what the installed version brought"
             }
@@ -118,9 +117,23 @@ enum ProductGuide {
     /// covers, built from the enum so a topic added above is offered without
     /// a second edit. This IS sent with every request, which is why each line
     /// is short.
-    static func topicIndex(calendar: Bool) -> String {
+    ///
+    /// `understanding` is the `understanding` hidden feature: with it on,
+    /// the app topic names the Usage page's Understanding section. Off, the
+    /// index is main's, byte for byte, and nothing in the guide says the
+    /// section exists (the owner is never shown it without the flag).
+    static func topicIndex(calendar: Bool, understanding: Bool = false) -> String {
         "Which page of the guide to read. "
-            + topics(calendar: calendar).map { "\($0.rawValue): \($0.covers)." }.joined(separator: " ")
+            + topics(calendar: calendar).map { "\($0.rawValue): \(covers($0, understanding: understanding))." }
+            .joined(separator: " ")
+    }
+
+    /// A topic's covers line for this mailbox: the app topic gains the
+    /// Understanding section only while the feature is on.
+    static func covers(_ topic: Topic, understanding: Bool) -> String {
+        guard understanding, topic == .appAndAccounts else { return topic.covers }
+        return topic.covers.replacingOccurrences(
+            of: "usage, ", with: "usage, understanding (people you answer, what Passband knows about you), ")
     }
 
     // MARK: - the system prompt's share
@@ -154,8 +167,17 @@ enum ProductGuide {
     /// `calendar` is whether the Calendar page is on for this mailbox: it
     /// puts the page into the getting-around list. The calendar topic itself
     /// is asked for only while it is on (`topics(calendar:)`).
-    static func text(_ topic: Topic, runningVersion: String?, onPhone: Bool = false, calendar: Bool = false) -> String {
-        keyed(page(topic, runningVersion: runningVersion, onPhone: onPhone, calendar: calendar), calendar: calendar)
+    ///
+    /// `understanding` is the `understanding` hidden feature: it puts the
+    /// Usage page's Understanding section into the app topic. Off, the topic
+    /// is main's and says nothing of it.
+    static func text(
+        _ topic: Topic, runningVersion: String?, onPhone: Bool = false, calendar: Bool = false,
+        understanding: Bool = false
+    ) -> String {
+        keyed(
+            page(topic, runningVersion: runningVersion, onPhone: onPhone, calendar: calendar, understanding: understanding),
+            calendar: calendar)
     }
 
     /// THE DIGIT THAT OPENS A PAGE IS NEVER WRITTEN IN THE PROSE. A topic
@@ -179,7 +201,9 @@ enum ProductGuide {
         return out
     }
 
-    private static func page(_ topic: Topic, runningVersion: String?, onPhone: Bool, calendar: Bool) -> String {
+    private static func page(
+        _ topic: Topic, runningVersion: String?, onPhone: Bool, calendar: Bool, understanding: Bool
+    ) -> String {
         switch topic {
         case .gettingAround: gettingAround(calendar: calendar)
         case .sitrep: sitrep
@@ -193,7 +217,7 @@ enum ProductGuide {
         case .search: calendar ? search + "\n\n" + searchEvents : search
         case .loginCodes: loginCodes
         case .assistant: assistant
-        case .appAndAccounts: appAndAccounts
+        case .appAndAccounts: understanding ? withUnderstanding(appAndAccounts) : appAndAccounts
         case .whatsNew: onPhone ? whatsNewOnPhone(running: runningVersion) : whatsNew(running: runningVersion)
         }
     }
@@ -651,6 +675,23 @@ enum ProductGuide {
         - Hosted Passband does not offer this yet. A self-hosted daemon does.
         """
 
+    /// The Usage page's Understanding section, behind the `understanding`
+    /// hidden feature: spliced in under the Usage line only while it is on.
+    private static let understandingSection = """
+        - Understanding, at the bottom of Usage, shows who the user's mail says they are. It covers everything Passband has counted, not just the 7, 30 or 90 days picked at the top.
+        - People is a chart of the people and senders Passband has counted most: further right is more mail a month, higher is closer. Senders the user replies to sit in the top band ("People you answer"), senders they read but never answer in the middle ("Things you read"), and mostly unopened mail at the bottom ("Things you ignore"). Senders from the last two weeks sit in a strip on the left ("Just arrived"). Hovering a dot names the sender and says what the numbers are, such as "replied to 31 of 33, usually within the hour" or "opened 2 of 38". "table" swaps the chart for the same numbers as a list.
+        - Your people lists the eight senders the user answers most surely. "Fading" switches to the eight whose mail is read least. Clicking a name opens that person's contact card.
+        - What Passband knows lists what Passband has written down about the user: their work, what is live right now, the people who matter, and reading habits. Each line says whether the user said it ("you said") or Passband guessed it ("inferred"), how old it is, and what it rests on ("because of 12 messages"). Confirm makes a guess the user's own; Delete removes it for good. A line Passband withdrew stays crossed out as "No longer thinks"; a guess that expired, or a project whose date has passed, stays crossed out as "No longer holds". Neither can be confirmed, and either can be deleted. For the first two weeks of a mailbox the list says it is still learning, above anything the user has already stated.
+        """
+
+    /// The line the section follows, as the app topic writes it.
+    private static let usageLine =
+        "- Usage, at the bottom of the rail: mail in and out, signal against noise, triage spend and assistant usage, over 7, 30 or 90 days."
+
+    private static func withUnderstanding(_ text: String) -> String {
+        text.replacingOccurrences(of: usageLine, with: usageLine + "\n" + understandingSection)
+    }
+
     private static let appAndAccounts = """
         Accounts:
         - Add one from the Accounts menu ("Add Account…") or Settings > Accounts: sign in with Gmail or Outlook, or connect a self-hosted server with a pairing code or an API token.
@@ -678,10 +719,6 @@ enum ProductGuide {
 
         Usage and audit:
         - Usage, at the bottom of the rail: mail in and out, signal against noise, triage spend and assistant usage, over 7, 30 or 90 days.
-        - Understanding is not on for every mailbox. Where it has been turned on, the bottom of Usage shows who the user's mail says they are; where it has not, the section is absent, and the user should not be told it exists. It covers everything Passband has counted, not just the 7, 30 or 90 days picked at the top.
-        - People is a chart of the people and senders Passband has counted most: further right is more mail a month, higher is closer. Senders the user replies to sit in the top band ("People you answer"), senders they read but never answer in the middle ("Things you read"), and mostly unopened mail at the bottom ("Things you ignore"). Senders from the last two weeks sit in a strip on the left ("Just arrived"). Hovering a dot names the sender and says what the numbers are, such as "replied to 31 of 33, usually within the hour" or "opened 2 of 38". "table" swaps the chart for the same numbers as a list.
-        - Your people lists the eight senders the user answers most surely. "Fading" switches to the eight whose mail is read least. Clicking a name opens that person's contact card.
-        - What Passband knows lists what Passband has written down about the user: their work, what is live right now, the people who matter, and reading habits. Each line says whether the user said it ("you said") or Passband guessed it ("inferred"), how old it is, and what it rests on ("because of 12 messages"). Confirm makes a guess the user's own; Delete removes it for good. A line Passband withdrew stays crossed out as "No longer thinks"; a guess that expired, or a project whose date has passed, stays crossed out as "No longer holds". Neither can be confirmed, and either can be deleted. For the first two weeks of a mailbox the list says it is still learning, above anything the user has already stated.
         - Audit log (Settings > Audit, or A on the Emails page): every action taken on the mail by the user or by an agent, with undo for the reversible ones.
 
         Sharing:

@@ -1879,12 +1879,20 @@ mod tests {
             system_prompt(false, false),
             SYSTEM.replacen(REVIEW_OFFER, NO_REVIEW_OFFER, 1)
         );
+        // The segments in the order `compose` applies them, each anchor
+        // checked against the text AS IT STANDS when its edit lands (an
+        // earlier segment can create or consume a later one's anchor), and
+        // the result is exactly the flag-on prompt.
+        let mut text = SYSTEM.clone();
+        for (find, replace) in UNDERSTANDING_SEGMENTS {
+            assert_eq!(text.matches(find).count(), 1, "{find}");
+            text = text.replacen(find, replace, 1);
+        }
+        assert_eq!(text, system_prompt(true, true));
         for with_review in [true, false] {
             let off = system_prompt(with_review, false);
             let on = system_prompt(with_review, true);
             for (find, replace) in UNDERSTANDING_SEGMENTS {
-                // Each anchor is in the file exactly once, so the edit lands.
-                assert_eq!(SYSTEM.matches(find).count(), 1, "{find}");
                 let added = replace.replacen(find, "", 1);
                 assert!(!added.trim().is_empty(), "a segment that adds nothing");
                 assert!(

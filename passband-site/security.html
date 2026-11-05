@@ -30,6 +30,146 @@
     <link rel="apple-touch-icon" href="/icon-180.png" />
     <link rel="preload" href="/newsreader-var.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="/site.css" />
+    <style>
+      /* SECURITY MODEL: summaries, labeled blocks and the diagrams. Full outlines
+         only; never a one-sided edge stripe. */
+      .prose code { background: rgba(233, 238, 245, 0.05); box-shadow: none; color: #C9D3E0; }
+      .sec-num { margin: 4.5rem 0 0.6rem; font: 600 11px/1 var(--mono); letter-spacing: 0.1em; color: var(--accent-ink); }
+      .sec-num + h2 { margin-top: 0; }
+      .sec-lede { margin: 0 0 1.75rem !important; color: var(--ink); font-size: 1.15rem; line-height: 1.6; }
+      .lbl { margin: 1.75rem 0 0.6rem !important; font: 600 10.5px/1 var(--mono); letter-spacing: 0.12em;
+        text-transform: uppercase; color: var(--faintest); }
+      .inv { margin: 0 0 1.5rem; padding: 1.1rem 1.25rem 1.2rem; border-radius: 14px;
+        background: rgba(78, 155, 234, 0.07); box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.28); }
+      .inv .lbl { margin-top: 0 !important; color: var(--accent-ink); }
+      .inv p:last-child { margin: 0; color: var(--ink); }
+      .dnb { margin: 1.75rem 0; padding: 1.1rem 1.25rem 0.4rem; border-radius: 14px;
+        background: rgba(232, 172, 76, 0.06); box-shadow: inset 0 0 0 1px rgba(232, 172, 76, 0.28); }
+      .dnb .lbl { margin-top: 0 !important; color: var(--warn); }
+      .dnb li::marker { color: var(--warn); }
+      .prose details { margin: 0 0 1.15rem; border-radius: 12px; background: var(--canvas);
+        box-shadow: inset 0 0 0 1px var(--hair-strong); }
+      .prose summary { cursor: pointer; padding: 0.85rem 1.1rem; color: var(--ink); font-weight: 600; font-size: 0.95rem;
+        list-style: none; display: flex; justify-content: space-between; gap: 1rem; }
+      .prose summary::-webkit-details-marker { display: none; }
+      .prose summary::after { content: "Show"; font: 500 11px/1.9 var(--mono); letter-spacing: 0.08em;
+        text-transform: uppercase; color: var(--faint); }
+      .prose details[open] summary::after { content: "Hide"; }
+      .prose details > :not(summary) { margin-left: 1.1rem; margin-right: 1.1rem; }
+      .prose details > ul { padding-left: 1.25rem; }
+
+      /* DIAGRAMS */
+      .viz { margin: 0 0 1.75rem; padding: 1.25rem; border-radius: 16px; background: var(--canvas);
+        box-shadow: inset 0 0 0 1px var(--hair-strong); color: var(--dim); font-size: 0.88rem; line-height: 1.45; }
+      .viz-title { margin: 0 0 1rem !important; font: 600 10.5px/1.4 var(--mono); letter-spacing: 0.12em;
+        text-transform: uppercase; color: var(--faint); }
+      .viz figcaption { margin-top: 0.9rem; color: var(--faint); font-size: 0.82rem; }
+      .viz ul, .viz ol { margin: 0; padding: 0; list-style: none; }
+      .viz li { margin: 0; }
+      .viz a { color: var(--accent-ink); text-decoration: none; }
+      .viz a:hover { text-decoration: underline; }
+      .tag { display: block; margin-bottom: 0.45rem; font: 600 10px/1 var(--mono); letter-spacing: 0.1em;
+        text-transform: uppercase; color: var(--accent-ink); }
+      .mnode { padding: 0.85rem 0.95rem; border-radius: 12px; background: var(--card);
+        box-shadow: inset 0 0 0 1px var(--hair-strong); min-width: 0; }
+      .mnode b { display: block; color: var(--ink); font-size: 0.92rem; font-weight: 600; }
+      .mnode > span:not(.tag) { display: block; margin-top: 0.2rem; color: var(--faint); font-size: 0.8rem; }
+      .mnode ul { margin-top: 0.55rem; display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.82rem; }
+      .arr { flex: none; align-self: center; width: 1.1rem; height: 1px; background: var(--hair-strong); position: relative; }
+      .arr::after { content: ""; position: absolute; right: 0; top: -3px; border: 3.5px solid transparent;
+        border-left: 5px solid rgba(233, 238, 245, 0.35); border-right: 0; }
+      .chip { display: inline-block; padding: 0.4rem 0.7rem; border-radius: 99px; background: var(--card);
+        box-shadow: inset 0 0 0 1px var(--hair-strong); color: var(--dim); font-size: 0.82rem; }
+      .chip.hl { box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.45); }
+      .chip.warn { color: var(--warn); box-shadow: inset 0 0 0 1px rgba(232, 172, 76, 0.4); }
+
+      .map-in { display: flex; gap: 0.5rem; align-items: stretch; }
+      .map-in .mnode { flex: 1 1 0; }
+      .map-in .src { flex: 0.6 1 0; display: flex; flex-direction: column; justify-content: center; }
+      .map-split { display: flex; justify-content: flex-end; padding-right: calc(16.5% - 0.5px); }
+      .map-split i { width: 1px; height: 1.1rem; background: var(--hair-strong); }
+      .map-doors { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; padding-top: 0.6rem;
+        border-top: 1px solid var(--hair-strong); }
+      .door.agent .tag { color: var(--warn); }
+      .map-out { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-top: 1.1rem;
+        padding-top: 1rem; border-top: 1px dashed var(--hair-strong); }
+      .map-out .tag { margin: 0 0.4rem 0 0; }
+
+      .ly { padding: 0.7rem 0.7rem 0.7rem; border-radius: 14px; background: rgba(78, 155, 234, 0.035);
+        box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.2); }
+      .ly .ly { margin-top: 0.6rem; }
+      .ly > p { margin: 0 0.2rem !important; color: var(--ink); font-weight: 600; font-size: 0.86rem; }
+      .ly > p b { display: inline-grid; place-items: center; width: 1.35rem; height: 1.35rem; margin-right: 0.45rem;
+        border-radius: 99px; background: rgba(130, 186, 245, 0.16); color: var(--accent-ink); font: 600 11px/1 var(--mono); }
+      .ly > p span { display: block; margin: 0.2rem 0 0 1.8rem; color: var(--faint); font-weight: 400; font-size: 0.8rem; }
+      .core { margin-top: 0.7rem; padding: 0.9rem; border-radius: 10px; text-align: center; color: var(--ink);
+        background: var(--card); box-shadow: inset 0 0 0 1px var(--hair-strong); font-family: var(--serif); font-size: 1.05rem; }
+
+      .steps-row { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0.5rem; counter-reset: st; }
+      .steps-row li { counter-increment: st; padding: 0.75rem 0.8rem; border-radius: 12px; background: var(--card);
+        box-shadow: inset 0 0 0 1px var(--hair-strong); }
+      .steps-row li::before { content: "0" counter(st); display: block; margin-bottom: 0.45rem;
+        font: 600 10.5px/1 var(--mono); color: var(--accent-ink); letter-spacing: 0.1em; }
+      .steps-row li.hl { box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.5); }
+      .steps-row b { display: block; color: var(--ink); font-size: 0.86rem; }
+      .steps-row span { display: block; margin-top: 0.2rem; color: var(--faint); font-size: 0.78rem; }
+      .pipe-out { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-top: 0.8rem; }
+
+      .gate-grid { display: grid; grid-template-columns: 1.3fr repeat(3, minmax(0, 1fr)); gap: 0.4rem; }
+      .gh { padding: 0 0.3rem 0.3rem; color: var(--faint); font-size: 0.8rem; }
+      .gh b { color: var(--ink); font-weight: 600; }
+      .gh code { display: block; margin-top: 0.25rem; width: fit-content; font-size: 0.74rem; }
+      .rh { align-self: center; color: var(--ink); font-size: 0.84rem; font-weight: 600; }
+      .cell { padding: 0.75rem 0.6rem; border-radius: 10px; text-align: center; color: var(--faint);
+        background: var(--card); box-shadow: inset 0 0 0 1px var(--hair); font-size: 0.82rem; }
+      .cell.keep { color: var(--positive); background: rgba(79, 192, 138, 0.08);
+        box-shadow: inset 0 0 0 1px rgba(79, 192, 138, 0.4); font-weight: 600; }
+
+      .access .table-wrap { margin: 0; }
+      .access table { min-width: 34rem; }
+      .access td.y, .access td.m, .access td.n { font-weight: 600; white-space: nowrap; }
+      .access td.y { color: var(--positive); }
+      .access td.m { color: var(--warn); }
+      .access td.n { color: var(--danger); }
+
+      .dest { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.5rem; }
+      .dest li { padding: 0.75rem 0.85rem; border-radius: 12px; background: var(--card); box-shadow: inset 0 0 0 1px var(--hair); }
+      .dest b { display: block; color: var(--faint); font-size: 0.86rem; text-decoration: line-through;
+        text-decoration-color: rgba(255, 122, 104, 0.6); }
+      .dest span { display: block; margin-top: 0.2rem; color: var(--faintest); font-size: 0.78rem; }
+      .dest li.ok { background: rgba(79, 192, 138, 0.08); box-shadow: inset 0 0 0 1px rgba(79, 192, 138, 0.4); }
+      .dest li.ok b { color: var(--positive); text-decoration: none; }
+      .dest li.ok span { color: var(--dim); }
+
+      .g-flow { display: flex; gap: 0.6rem; align-items: center; }
+      .g-flow > .mnode { flex: 0 1 15rem; }
+      .g-branch { display: flex; flex-direction: column; gap: 0.6rem; flex: 1; min-width: 0; }
+      .g-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; }
+      .g-sub { padding-left: 1.5rem; position: relative; }
+      .g-sub::before { content: ""; position: absolute; left: 0.6rem; top: -0.6rem; width: 0.6rem; height: 1.25rem;
+        border-left: 1px solid var(--hair-strong); border-bottom: 1px solid var(--hair-strong); border-bottom-left-radius: 6px; }
+      .kinds { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-top: 1rem; }
+      .kinds span { margin-right: 0.3rem; font: 600 10px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--faintest); }
+
+      .t3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.5rem; }
+      .t { padding: 0.9rem 0.95rem; border-radius: 12px; background: var(--card); box-shadow: inset 0 0 0 1px var(--hair-strong); }
+      .t b { display: block; color: var(--ink); font-size: 0.92rem; }
+      .t > span:not(.tag) { display: block; margin-top: 0.25rem; color: var(--faint); font-size: 0.8rem; }
+      .t.stop { background: rgba(232, 172, 76, 0.06); box-shadow: inset 0 0 0 1px rgba(232, 172, 76, 0.4); }
+      .t.stop .tag { color: var(--warn); }
+
+      @media (max-width: 640px) {
+        .map-in, .g-flow { flex-direction: column; }
+        .map-in .arr, .g-flow > .arr { width: 1px; height: 0.9rem; }
+        .map-in .arr::after, .g-flow > .arr::after { display: none; }
+        .map-split { display: none; }
+        .map-doors { grid-template-columns: 1fr; border-top: 0; }
+        .g-flow > .mnode { flex: none; width: 100%; box-sizing: border-box; }
+        .steps-row { grid-template-columns: 1fr 1fr; }
+        .dest, .t3 { grid-template-columns: 1fr 1fr; }
+        .gate-grid { grid-template-columns: 1fr repeat(3, minmax(0, 1fr)); font-size: 0.8rem; }
+      }
+    </style>
   </head>
   <body>
     <header class="top">
@@ -66,18 +206,45 @@
 - the line that actually holds it), and <strong>what a maintainer must not break</strong>.
 Verified against the tree on 2026-07-30; §6 was written against it on 2026-08-18.
 Stale source comments are flagged, not trusted.</p>
-<h2 id="1-html-sanitization-at-ingest">1. HTML sanitization at ingest</h2>
-<p><strong>Invariant.</strong> <code>messages.body_html</code> never contains active content: no <code>&lt;script&gt;</code>, no
+<figure class="viz map" aria-label="How mail moves through Passband">
+<p class="viz-title">How mail moves, and where each rule sits</p>
+<div class="map-in">
+  <div class="mnode src"><b>Gmail</b><span>Mail arrives</span></div>
+  <i class="arr" aria-hidden="true"></i>
+  <div class="mnode"><span class="tag">Ingest</span><b>Checked once, on arrival</b>
+    <ul><li><a href="#1-html-sanitization-at-ingest">&sect;1 Scrub the HTML</a></li><li><a href="#3-image-loading-and-trackers">&sect;3 Record Gmail&#39;s auth verdict</a></li><li><a href="#4b-provider-spam">&sect;4b Hold spam back</a></li></ul></div>
+  <i class="arr" aria-hidden="true"></i>
+  <div class="mnode"><span class="tag">Store</span><b>squelchd</b><span>Stored already scrubbed</span></div>
+</div>
+<div class="map-split" aria-hidden="true"><i></i></div>
+<div class="map-doors">
+  <div class="mnode door"><span class="tag">Human door</span><b>You, in the Passband app</b>
+    <ul><li><a href="#2-rendering-sandbox">&sect;2 Locked-down viewer</a></li><li><a href="#3-image-loading-and-trackers">&sect;3 Images through our proxy</a></li></ul></div>
+  <div class="mnode door agent"><span class="tag">Agent door</span><b>The assistant and MCP agents</b>
+    <ul><li><a href="#4-human-and-agent-access-after-the-triage-rewrite">&sect;4 No codes, nothing unchecked</a></li><li><a href="#6-the-embedded-assistant">&sect;6 Gmail changes wait for your tap</a></li></ul></div>
+</div>
+<div class="map-out">
+  <span class="tag">Outgoing</span>
+  <span class="chip">Your reply or forward</span><i class="arr" aria-hidden="true"></i>
+  <span class="chip hl"><a href="#5-outbound-secret-guard">&sect;5 Secret guard</a></span><i class="arr" aria-hidden="true"></i>
+  <span class="chip">Gmail</span>
+</div>
+</figure>
+<p class="sec-num">&sect;1</p>
+<h2 id="1-html-sanitization-at-ingest">HTML sanitization at ingest</h2>
+<p class="sec-lede">Every incoming email is scrubbed once, the moment it arrives, so nothing that could run code is ever stored.</p>
+<div class="inv"><p class="lbl">Invariant</p><p><code>messages.body_html</code> never contains active content: no <code>&lt;script&gt;</code>, no
 <code>on*</code> handlers, no <code>javascript:</code>/<code>data:</code> URLs, no forms, no nested browsing contexts,
-no <code>&lt;meta&gt;</code>/<code>&lt;link&gt;</code>/<code>&lt;base&gt;</code>.</p>
-<p><strong>Enforcement.</strong> <code>squelch-core/src/sync/html.rs:sanitize_email_html</code> - a closed
+no <code>&lt;meta&gt;</code>/<code>&lt;link&gt;</code>/<code>&lt;base&gt;</code>.</p></div>
+<p class="lbl">Enforcement</p>
+<p><code>squelch-core/src/sync/html.rs:sanitize_email_html</code> - a closed
 <code>ammonia::Builder</code> allow-list, run once at ingest before storage; pure, no I/O,
 fixture-tested in the same file. Four deliberate deviations from ammonia&#39;s
 defaults: <code>url_schemes</code> narrowed to <code>{http, https, mailto, cid}</code>; <code>&lt;style&gt;</code> kept with
 CSS verbatim (<code>rm_clean_content_tags</code> then <code>add_tags</code> - that order, or ammonia
 panics); <code>style</code>/<code>class</code>/<code>id</code> added to the generic attribute set; <code>link_rel</code>
 pinned to <code>noopener noreferrer</code>.</p>
-<p><strong>Do not break.</strong></p>
+<div class="dnb"><p class="lbl">Do not break</p>
 <ul>
 <li>Never widen <code>url_schemes</code>; <code>data:</code> coming back re-admits inline
 <code>data:text/html</code> payloads and is the only reason <code>data:</code> image URIs drop today.
@@ -97,11 +264,24 @@ image passes (§3) depend on that for correctness and for linear runtime.</li>
 <li><code>body_html</code> is <strong>baked at ingest</strong> - a sanitizer change does not retroactively fix
 stored mail. Delete the <code>sync_state</code> <code>history</code> row and restart <code>squelchd</code> to
 re-ingest (triage is preserved).</li>
-</ul>
-<h2 id="2-rendering-sandbox">2. Rendering sandbox</h2>
-<p><strong>Invariant.</strong> A body renders with no script execution, no network except the image
-proxy, no navigation, no cookies, nothing on disk.</p>
-<p><strong>Enforcement.</strong> <code>passband/Sources/Passband/Views/EmailWebView.swift</code> -
+</ul></div>
+<p class="sec-num">&sect;2</p>
+<h2 id="2-rendering-sandbox">Rendering sandbox</h2>
+<p class="sec-lede">Even scrubbed mail opens inside a locked-down viewer. There are five separate locks, and any one of them would stop scripts, network calls and navigation on its own.</p>
+<div class="inv"><p class="lbl">Invariant</p><p>A body renders with no script execution, no network except the image
+proxy, no navigation, no cookies, nothing on disk.</p></div>
+<figure class="viz layers" aria-label="Five rendering layers">
+<p class="viz-title">Five locks around every email body, each enough on its own</p>
+<div class="ly l5"><p><b>5</b> Throwaway storage <span>No cookies, nothing on disk, an opaque origin</span></p>
+<div class="ly l4"><p><b>4</b> Navigation refused <span>Only loads we started; links open outside; no popups</span></p>
+<div class="ly l3"><p><b>3</b> Content Security Policy <span>No script source, no http or https; images only via the proxy</span></p>
+<div class="ly l2"><p><b>2</b> JavaScript off <span>Page script cannot run at all</span></p>
+<div class="ly l1"><p><b>1</b> Scrubbed at ingest <span>&sect;1: no scripts, handlers, forms or frames stored</span></p>
+<div class="core">The email body</div>
+</div></div></div></div></div>
+</figure>
+<p class="lbl">Enforcement</p>
+<p><code>passband/Sources/Passband/Views/EmailWebView.swift</code> -
 five independent layers, each sufficient alone. Layer 1 is §1 above; the rest,
 numbered as the source comments number them:</p>
 <ol start="2">
@@ -121,7 +301,7 @@ so two loads would otherwise race one permission) and cancels everything else; a
 <code>FrameRelay.webView(_:createWebViewWith:…)</code> returns nil - no popups.</li>
 <li>A shared <strong>non-persistent</strong> <code>WKWebsiteDataStore</code>; <code>baseURL: nil</code> for an opaque origin.</li>
 </ol>
-<p><strong>Do not break.</strong></p>
+<div class="dnb"><p class="lbl">Do not break</p>
 <ul>
 <li>The delegate signature
 <code>webView(_:decidePolicyFor:decisionHandler: @escaping @MainActor @Sendable …)</code>
@@ -137,11 +317,27 @@ leaves &quot;one sender&#39;s mail in another&#39;s frame&quot; to a hash collis
 <code>Coordinator.release</code> refuses it because <code>loadedPoolKey</code> is nil. Keep
 <code>WebFramePool.discard</code> unwiring the relay too: the content controller retains it,
 so merely dropping the frame leaves a live callback target.</li>
-</ul>
-<h2 id="3-image-loading-and-trackers">3. Image loading and trackers</h2>
-<p><strong>Invariant.</strong> Remote images may load, but only through our own audited fetch path,
+</ul></div>
+<p class="sec-num">&sect;3</p>
+<h2 id="3-image-loading-and-trackers">Image loading and trackers</h2>
+<p class="sec-lede">Images can load, but only through Passband&#39;s own fetcher: no cookies, no referrer. Tracking pixels are removed unless the sender is someone you write to and Gmail vouches for them.</p>
+<div class="inv"><p class="lbl">Invariant</p><p>Remote images may load, but only through our own audited fetch path,
 never with cookies or a referrer, and never for a reference we did not mint.
-Tracking pixels are stripped from mail whose sender the user has never written to.</p>
+Tracking pixels are stripped from mail whose sender the user has never written to.</p></div>
+<figure class="viz gate" aria-label="When tracking pixels survive">
+<p class="viz-title">When tracking pixels survive: both halves, or nothing</p>
+<div class="gate-grid" role="table">
+<div class="gh" role="columnheader"></div>
+<div class="gh" role="columnheader">Gmail auth <b>pass</b><code>Some(true)</code></div>
+<div class="gh" role="columnheader">Gmail auth <b>fail</b><code>Some(false)</code></div>
+<div class="gh" role="columnheader">Never checked<code>NULL</code></div>
+<div class="rh" role="rowheader">Sender you have written to</div>
+<div class="cell keep">Pixels kept</div><div class="cell">Stripped</div><div class="cell">Stripped</div>
+<div class="rh" role="rowheader">Anyone else</div>
+<div class="cell">Stripped</div><div class="cell">Stripped</div><div class="cell">Stripped</div>
+</div>
+<figcaption>Kept pixels still need remote images switched on, and still load only through the proxy.</figcaption>
+</figure>
 <p>Outbound read tracking is the mirror image of this section and is documented
 separately in TRACKING.md.</p>
 <p><strong>Current behavior - VERIFIED, and not what old comments claimed.</strong> Remote images
@@ -151,7 +347,7 @@ There is no per-message <code>i</code> keystroke gate - that was the retired des
 On <em>On demand</em> <code>img-src</code> collapses to <code>data:</code>, an opt-in bar appears, and <strong>no
 request is made</strong> (the proxy scheme is absent from the policy, so the document
 refuses it before the handler is reached).</p>
-<p><strong>Enforcement.</strong></p>
+<p class="lbl">Enforcement</p>
 <ul>
 <li><code>Lib/Trackers.swift:strip</code> drops <code>&lt;img&gt;</code> elements on strong signals only: both
 declared dimensions ≤ 2px, <code>display:none</code>/<code>visibility:hidden</code>, or a short
@@ -193,7 +389,7 @@ column existed. Absence of proof withholds a permissive feature.
 <strong>Nothing is backfilled.</strong> <code>store/sqlite/migrate.rs</code> adds the column to an
 existing <code>messages</code> table with every historical row left NULL; a re-sync refills
 it through the message upsert.
-<strong>Residual risks, accepted:</strong><ul>
+<details><summary>Residual risks, accepted</summary><ul>
 <li>The evidence is header SHAPE, not a signature - nothing in the bytes is
 cryptographically bound to Google. On an ingestion path where Gmail prepends
 nothing (POP with the marker somehow absent, or <code>users.messages.import</code>/
@@ -209,7 +405,7 @@ the suffix itself.</li>
 usually emits), which DELEGATES the binding to Gmail enforcing RFC 6376 §3.5:
 an <code>i=</code> domain must be <code>d=</code> or a subdomain of it. When both are present that
 relationship is checked here instead of assumed.</li>
-</ul>
+</ul></details>
 </li>
 <li><code>Lib/ImageProxy.swift:rewrite</code> rewrites every http(s) image reference - <code>&lt;img src&gt;</code>, <code>style=&quot;…&quot;</code> <code>url()</code>, <code>&lt;style&gt;</code> block CSS - to
 <code>passband-img://local/&lt;hmac&gt;?u=&lt;encoded&gt;</code>. Default-port <code>http://</code> targets are
@@ -242,7 +438,18 @@ attachment. Bytes come from the authenticated human door
 (<code>GET /client/attachments/{id}</code>), served by the same <code>ImageSchemeHandler</code> under
 the same live-set discipline, refused again over <code>inlineMaxBytes</code>.</li>
 </ul>
-<p><strong>Do not break.</strong></p>
+<figure class="viz pipe" aria-label="Image rewrite order">
+<p class="viz-title">What happens to an image, in this exact order</p>
+<ol class="steps-row">
+<li><b>Strip trackers</b><span>Tiny, hidden or known pixels</span></li>
+<li><b>Dedupe repeats</b><span>Same image, once</span></li>
+<li><b>Read links</b><span>Before anything is rewritten</span></li>
+<li><b>Resolve cid:</b><span>Only to this message&#39;s own parts</span></li>
+<li class="hl"><b>Rewrite to proxy</b><span>Always last; signed per launch</span></li>
+</ol>
+<div class="pipe-out"><span class="chip">passband-img: handler checks the signature</span><i class="arr" aria-hidden="true"></i><span class="chip">Fetch with no cookies, no referrer, image/* only</span></div>
+</figure>
+<div class="dnb"><p class="lbl">Do not break</p>
 <ul>
 <li>The order in <code>EmailWebView.Prepared.make</code>: <code>Trackers.strip</code> → <code>ImageRepeats</code>
 dedupe → the <code>hasNetworkImages</code>/<code>extractLinks</code> reads → <code>CidImages.rewrite</code> →
@@ -266,19 +473,32 @@ an ingestion path Gmail never stamped.</li>
 <code>Message::header_raw</code> resolves to the LAST occurrence - the forgeable one - and
 <code>headers_raw()</code> DROPS non-UTF-8 headers, which would let an attacker hide the
 genuine verdict and promote one they wrote.</li>
-</ul>
-<h2 id="4-human-and-agent-access-after-the-triage-rewrite">4. Human and agent access after the triage rewrite</h2>
-<p><strong>Invariant.</strong> Humans and internal triage models can read all their mail, including
+</ul></div>
+<p class="sec-num">&sect;4</p>
+<h2 id="4-human-and-agent-access-after-the-triage-rewrite">Human and agent access after the triage rewrite</h2>
+<p class="sec-lede">You can read all of your mail. AI agents, the built-in assistant included, cannot read login codes or reset links, and cannot read anything that has not been checked yet.</p>
+<div class="inv"><p class="lbl">Invariant</p><p>Humans and internal triage models can read all their mail, including
 pending assessments and actionable authentication. External user agents, including
 the embedded assistant, cannot read actionable authentication secrets or their
-derivatives. Informational login/security alerts are normally allowed.</p>
+derivatives. Informational login/security alerts are normally allowed.</p></div>
+<figure class="viz access" aria-label="Who can read what">
+<p class="viz-title">Who can read what</p>
+<div class="table-wrap"><table>
+<thead><tr><th></th><th>Everyday mail</th><th>Login and security alerts</th><th>Codes and reset links</th><th>Not checked yet</th></tr></thead>
+<tbody>
+<tr><td>You, in the app</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td></tr>
+<tr><td>Internal triage models</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td></tr>
+<tr><td>The assistant and MCP agents</td><td class="y">Yes</td><td class="m">Normally</td><td class="n">Never</td><td class="n">No, until checked</td></tr>
+</tbody></table></div>
+</figure>
 <p><strong>Assessment.</strong> The triage model decides whether actual access-granting material
 is present. There is no deterministic sealing detector in ingest. A missing or
 stale assessment denies external access until a current allowed decision exists.
 Model summaries, notification text, reasons, and evidence locations must not quote
 credentials. This is a model-output requirement; it is not a claim that arbitrary
 model output can be proven secret-free by a string filter.</p>
-<p><strong>Enforcement.</strong> <code>store/sqlite/messages.rs:external_messages_allowed_conn</code> checks the
+<p class="lbl">Enforcement</p>
+<p><code>store/sqlite/messages.rs:external_messages_allowed_conn</code> checks the
 current assessment and source provenance, of one message or of a set at once, under
 the store lock. External whole-thread
 reads require the thread&#39;s sources to be allowed. MCP and dedicated
@@ -290,14 +510,14 @@ It returns <code>Cache-Control: no-store</code>; <code>cache_allowed</code> cont
 eligibility. Human read, attachment, draft, and reply paths do not treat a legacy
 <code>sensitivity=sealed</code> value as a denial. The legacy sealed list/reveal API remains a
 compatibility surface, not the new access authority.</p>
-<p><strong>Do not break.</strong></p>
+<div class="dnb"><p class="lbl">Do not break</p>
 <ul>
 <li>Do not let the embedded assistant call unrestricted human read endpoints.</li>
 <li>Do not treat a missing assessment as allowed, or trust a client-only filter.</li>
 <li>Keep source provenance with derived summaries, attention, records, and drafts.</li>
 <li>Internal evidence readers stay account-scoped and never execute email instructions.</li>
 <li>Keep user message access independent from the speed or availability of triage.</li>
-</ul>
+</ul></div>
 <p>See TRIAGE-OPERATIONS.md for the current execution contract.</p>
 <p><strong>Staged outbound attachments.</strong> <code>outbound_attachments</code> holds composer files until
 a send consumes them or their owning draft is deleted. Unclaimed uploads are
@@ -307,17 +527,30 @@ content-type whitelist, <code>nosniff</code>, and attachment disposition as inbo
 The outbound guard scans text and message parts at send time; binary files are
 not scanned. Restricting external-agent access does not delete human drafts or
 their attachments.</p>
-<h2 id="4b-provider-spam">4b. Provider spam</h2>
-<p><strong>Invariant.</strong> Mail the provider filed as spam is stored and readable on one
+<p class="sec-num">&sect;4b</p>
+<h2 id="4b-provider-spam">Provider spam</h2>
+<p class="sec-lede">Spam is kept for you to look at, and away from everything else: no model reads it, no agent sees it, and it never notifies you.</p>
+<div class="inv"><p class="lbl">Invariant</p><p>Mail the provider filed as spam is stored and readable on one
 human-door page, and is otherwise absent: it never reaches an LLM, never crosses
-the agent door, is never embedded, and never fires a notification.</p>
+the agent door, is never embedded, and never fires a notification.</p></div>
+<figure class="viz spam" aria-label="Where spam can go">
+<p class="viz-title">Where provider spam can go</p>
+<ul class="dest">
+<li class="ok"><b>The spam page</b><span>Fetched only when you open it</span></li>
+<li><b>Triage models</b><span>Never scored</span></li>
+<li><b>Embeddings</b><span>Never embedded</span></li>
+<li><b>Agent door</b><span>Not found, by design</span></li>
+<li><b>Notifications</b><span>Never fires</span></li>
+<li><b>Lists, counts, search</b><span>Filtered out in SQL</span></li>
+</ul>
+</figure>
 <p><strong>Why it is a security rule and not only a cost one.</strong> Spam is attacker-authored
 text selected for its ability to talk a reader into things, and a Stage-1 prompt
 is a reader. It is also the bulk of what arrives, so &quot;score it like anything
 else&quot; would mean spending the most model calls on the least trustworthy corpus.
 The same reasoning is why the agent door gets <strong>no spam at all</strong> rather than
 spam it is told to distrust: everything the agent reads is text it may act on.</p>
-<p><strong>Enforcement, in order.</strong></p>
+<p class="lbl">Enforcement, in order</p>
 <ul>
 <li><strong>Fetched only when asked for.</strong> The poll loop does not walk the <code>SPAM</code> label
 at all - not on backfill, not on a history tick, not on a catch-up.
@@ -366,11 +599,28 @@ The sync suite asserts the &quot;not fetched routinely&quot; half against the mo
 LOG rather than against what landed: &quot;no spam rows appeared&quot; would also pass if
 the walk ran and the folder happened to be empty, and the thing being avoided is
 the request.</p>
-<h2 id="5-outbound-secret-guard">5. Outbound secret guard</h2>
-<p><strong>Invariant.</strong> A secret-looking outgoing body is blocked unless the caller
+<p class="sec-num">&sect;5</p>
+<h2 id="5-outbound-secret-guard">Outbound secret guard</h2>
+<p class="sec-lede">Before mail leaves, Passband looks for anything shaped like a secret. If it finds one it stops and asks, and it never copies the secret anywhere.</p>
+<div class="inv"><p class="lbl">Invariant</p><p>A secret-looking outgoing body is blocked unless the caller
 explicitly overrides, and the matched text is never copied anywhere - not into a
-response, a log, or the audit row.</p>
-<p><strong>Enforcement.</strong> <code>squelch-api/src/guard.rs:scan</code> / <code>scan_kinds</code>, called from
+response, a log, or the audit row.</p></div>
+<figure class="viz guard" aria-label="Outbound secret guard">
+<p class="viz-title">The outbound check</p>
+<div class="g-flow">
+<div class="mnode"><span class="tag">Scanned</span><b>Everything you are about to send</b><span>Your note, plus a forward&#39;s original and its text attachments</span></div>
+<i class="arr" aria-hidden="true"></i>
+<div class="g-branch">
+<div class="g-row"><span class="chip">Nothing found</span><i class="arr" aria-hidden="true"></i><span class="chip">Sent</span></div>
+<div class="g-row"><span class="chip warn">Looks like a secret</span><i class="arr" aria-hidden="true"></i><span class="chip">Stopped; told only the kind</span></div>
+<div class="g-row g-sub"><span class="chip">You choose to override</span><i class="arr" aria-hidden="true"></i><span class="chip">Sent, with an audit row</span></div>
+</div>
+</div>
+<div class="kinds"><span>Detects</span><code>pem_block</code><code>api_key</code><code>otp_code</code><code>long_hex</code><code>long_base64</code></div>
+<figcaption>The matched text itself never leaves the process: not in the response, a log, or the audit row.</figcaption>
+</figure>
+<p class="lbl">Enforcement</p>
+<p><code>squelch-api/src/guard.rs:scan</code> / <code>scan_kinds</code>, called from
 <code>handlers::action_send</code> before the message leaves the process. Detects <code>pem_block</code>,
 <code>api_key</code> (vendor prefixes), <code>otp_code</code> (6–8 digits near an auth word), <code>long_hex</code>
 (≥32), <code>long_base64</code> (≥40). A non-empty match set returns HTTP 422 listing only the
@@ -412,10 +662,11 @@ This is deliberate and matches every mainstream mail client: passband strips tra
 out of what it RENDERS to its user, not out of what its user chooses to pass on.
 Rewriting a stranger&#39;s markup on the way out would forward something other than what
 arrived, and the user&#39;s decision is to send <em>this message</em>.</p>
-<p><strong>Do not break.</strong> <code>GuardMatch::kind()</code> is the only thing that may leave the process -
+<div class="dnb"><p class="lbl">Do not break</p><p><code>GuardMatch::kind()</code> is the only thing that may leave the process -
 never return, log, or audit the matched substring. Keep the override audited; an
-un-audited bypass is not a bypass we can reason about.</p>
-<p><strong>Post-send echo (audit contract).</strong> After a successful send,
+un-audited bypass is not a bypass we can reason about.</p></div>
+<details><summary>Post-send echo (audit contract)</summary>
+<p>After a successful send,
 <code>handlers::echo_sent</code> fetches the sent message back (<code>format=raw</code>, write token) and
 ingests it locally so the thread shows the reply immediately. It is strictly
 best-effort - the mail has already left, so nothing here may fail the request - and
@@ -475,16 +726,27 @@ pre-echo status quo. The read-back is also capped at <strong>5s</strong>
 already made two serial Gmail calls, so bookkeeping may not spend the rest of that
 budget. Keep the echo&#39;s failures audited and swallowed; keep it out of core&#39;s write
 surface (the fetch lives in <code>squelch-api/src/write/gmail.rs</code>, core takes bytes).</p>
-<h2 id="6-the-embedded-assistant">6. The embedded assistant</h2>
+</details>
+<p class="sec-num">&sect;6</p>
+<h2 id="6-the-embedded-assistant">The embedded assistant</h2>
+<p class="sec-lede">The assistant sees only what the app is allowed to show it, and anything that would change your Gmail waits for your tap.</p>
 <blockquote>
 <p>The dedicated <code>/client/agent/</code> read routes and source checks in §4 supersede
 references below to using ordinary human endpoints or legacy sealing.</p>
 </blockquote>
-<p><strong>Invariant.</strong> The agent inside Passband reads only what the human door serves, so
+<div class="inv"><p class="lbl">Invariant</p><p>The agent inside Passband reads only what the human door serves, so
 sealed mail is absent from it for the same reason it is absent from the door; and it
 cannot touch the mailbox without a human tap that has already happened by the time
-the call goes out.</p>
-<p><strong>Enforcement.</strong></p>
+the call goes out.</p></div>
+<figure class="viz tiers3" aria-label="Assistant tool tiers">
+<p class="viz-title">The assistant&#39;s fourteen tools, in three tiers</p>
+<div class="t3">
+<div class="t"><span class="tag">Reads</span><b>Never gated</b><span>Through the same door the app uses</span></div>
+<div class="t"><span class="tag">Safe writes</span><b>This database only</b><span>Status, sender rules, drafts; reversible in the app</span></div>
+<div class="t stop"><span class="tag">Gmail writes</span><b>Wait for your tap</b><span>Archive, label, send, unsubscribe</span></div>
+</div>
+</figure>
+<p class="lbl">Enforcement</p>
 <ul>
 <li><strong>Reads inherit §4.</strong> Every tool call in
 <code>passband/Sources/Passband/Assistant/AgentTools.swift</code> goes through <code>APIClient</code>,
@@ -512,7 +774,7 @@ Hosted holds no key in the app at all: <code>POST /client/assistant/messages</co
 the bytes back, human door only, and 404s when no gateway is configured. The
 conversation body is treated like mail content and logged in neither direction.</li>
 </ul>
-<p><strong>What a maintainer must not break.</strong></p>
+<div class="dnb"><p class="lbl">Do not break</p>
 <ul>
 <li><strong>Prompt injection is the standing threat, and the gate is the answer to it.</strong>
 Mail bodies reach this model as data, so assume the text is adversarial and
@@ -524,7 +786,7 @@ read to a store call that bypasses the door.</li>
 <li>Do not log the relay body, in either direction, at any level.</li>
 <li>A decline is a legitimate answer with <code>is_error</code> false. Do not turn it into a
 failure the model feels invited to retry.</li>
-</ul>
+</ul></div>
 
     <h2 id="reporting-a-vulnerability">Reporting a vulnerability</h2>
     <p>

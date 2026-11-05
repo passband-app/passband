@@ -15,9 +15,10 @@ struct HiddenFeature: Hashable, Sendable {
 }
 
 extension HiddenFeature {
-    /// The owner profile (docs/UNDERSTANDING.md §5): the nightly pass, the
-    /// memory routes, and "What Passband knows" on the Usage page. The
-    /// relationship ledger under it ships on and is not behind this.
+    /// Deep user understanding (docs/UNDERSTANDING.md §5): the Usage page's
+    /// Understanding subpage, all of it, and the guide's words about it.
+    /// Without it the owner is never shown that the ledger exists, and the
+    /// daemon answers 404 on its routes besides.
     static let understanding = HiddenFeature(key: "understanding")
 }
 

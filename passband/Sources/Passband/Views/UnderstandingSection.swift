@@ -83,7 +83,8 @@ struct UnderstandingSection: View {
     }
 
     /// The flag is the gate, and a 404 under it is the same answer. A staged
-    /// preview has no stats to ask.
+    /// preview has no stats to ask. The page gate already checked the flag;
+    /// this repeats it on purpose, as a second line of defence, so keep it.
     private var showsMemory: Bool { staged || store.hasFeature(.understanding) }
 
     /// The subpage's masthead, set like the Mail subpage's "Fun charts": the

@@ -66,12 +66,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !FixtureMode.stagesUsage { NSApp.activate(ignoringOtherApps: true) }
         // A staged page at a given window width (`--fixture-usage-width=980`,
         // or `min` for the narrowest the window allows), for checking how it
-        // wraps without anyone dragging a corner. It saves the frame as a drag
-        // would, into the defaults every build shares, so a narrow shot is
-        // followed by one at the old width to put it back.
+        // wraps without anyone dragging a corner. The window's frame autosave
+        // is switched off first: every build shares one defaults domain, and
+        // the stage must never change the size the real app opens at.
         if let width = FixtureMode.stageValue("width") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                 guard let window = MainWindow.find() else { return }
+                window.setFrameAutosaveName("")
                 var frame = window.frame
                 frame.size.width = width == "min" ? window.minSize.width : (Double(width) ?? frame.width)
                 window.setFrame(frame, display: true)

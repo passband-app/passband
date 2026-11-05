@@ -371,6 +371,19 @@ struct UnderstandingSeriesTests {
         expect(UsagePages.shown(.understanding, offered: []) == .mail, "flag off under an open Understanding: Mail")
         expect(UsagePages.shown(.understanding, offered: UsageSubpage.allCases) == .understanding, "on: as chosen")
 
+        // Stats not loaded yet (launch, account switch): hold, do not flash Mail.
+        let unknown: HiddenFeatures? = nil
+        let held = UsagePages.offered(unknown, staged: false, selected: .understanding)
+        expect(UsagePages.shown(.understanding, offered: held) == .understanding,
+            "unknown flags: an owner on Understanding stays on it")
+        expect(UsagePages.offered(unknown, staged: false, selected: .mail).isEmpty,
+            "unknown flags on Mail: no switcher yet, and nothing moves when it arrives")
+        expect(UsagePages.offered(Optional(on), staged: false, selected: .mail) == [.mail, .understanding],
+            "known: the gate decides")
+        let off: HiddenFeatures? = HiddenFeatures(daemon: [])
+        expect(UsagePages.shown(.understanding, offered: UsagePages.offered(off, staged: false, selected: .understanding)) == .mail,
+            "known and off: back to Mail, held or not")
+
         let suite = "understanding-tests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }

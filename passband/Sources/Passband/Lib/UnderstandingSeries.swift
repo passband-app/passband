@@ -281,6 +281,16 @@ enum UsagePages {
         UnderstandingGate.showsSection(features, staged: staged) ? UsageSubpage.allCases : []
     }
 
+    /// The same, while the flags may not be known yet: `features` is nil
+    /// until the mailbox's stats land, at launch and on every account
+    /// switch. Until then the page holds the selection it has (an owner who
+    /// was on Understanding stays there) instead of dropping to Mail and
+    /// jumping back a moment later; once they land, the gate decides.
+    static func offered(_ features: HiddenFeatures?, staged: Bool, selected: UsageSubpage) -> [UsageSubpage] {
+        guard let features else { return staged || selected == .understanding ? UsageSubpage.allCases : [] }
+        return offered(features, staged: staged)
+    }
+
     /// What the page opens on: the fixture stage on Understanding (or on the
     /// subpage it names, `--fixture-usage-page=mail`), otherwise the
     /// remembered choice, and Mail when nothing (or nothing readable) is

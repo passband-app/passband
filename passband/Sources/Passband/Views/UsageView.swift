@@ -40,7 +40,11 @@ struct UsageView: View {
     ]
 
     var body: some View {
-        let offered = UsagePages.offered(store.hiddenFeatures, staged: FixtureMode.stagesUsage)
+        // nil features while stats are loading, at launch and on every
+        // account switch: the page holds what it showed rather than flashing
+        // Mail and the window picker until they land.
+        let offered = UsagePages.offered(
+            store.stats == nil ? nil : store.hiddenFeatures, staged: FixtureMode.stagesUsage, selected: selected)
         let shown = UsagePages.shown(selected, offered: offered)
         return VStack(spacing: 0) {
             RoutedHeader(title: "Usage", accessory: switcher(offered)) {
@@ -54,7 +58,9 @@ struct UsageView: View {
                 ScrollView {
                     Group {
                         if shown == .understanding {
-                            UnderstandingSection()
+                            // A new account is a new ledger: reloaded by
+                            // design, not by the switch tearing the page down.
+                            UnderstandingSection().id(AccountManager.shared.activeId)
                         } else {
                             content
                         }
@@ -79,7 +85,8 @@ struct UsageView: View {
         .onChange(of: selected) { _, page in
             UsagePages.remember(page, in: .standard, staged: FixtureMode.stagesUsage)
         }
-        // The window is the one filter, and it scopes everything below it.
+        // The window is the Mail subpage's one filter; Understanding is the
+        // ledger's whole span and does not read it.
         .task(id: days) { await load() }
         // Esc leaves — a full routed page needs an exit other than the rail.
         .keyContext(.modal)

@@ -92,12 +92,16 @@ struct DeeperSearchBand: View {
 
     private var header: some View {
         HStack(spacing: Space.scaled(7)) {
-            Image(systemName: "sparkles")
+            // A LABEL, NOT A SHOW: the house section-label face and a plain
+            // ink glyph, like every other header in the app. Sparkles in
+            // accent blue read as an ad for the feature sitting on the answer.
+            Image(systemName: "text.magnifyingglass")
                 .font(Typo.ui(11, weight: .semibold))
-                .foregroundStyle(Palette.accent)
-            Text("Deeper search")
-                .font(Typo.row)
                 .foregroundStyle(Palette.inkFaint)
+            Text("Deeper search")
+                .font(Typo.sectionLabel)
+                .foregroundStyle(Palette.inkFaint)
+                .textCase(.uppercase)
             if let reason {
                 Text(reason)
                     .font(Typo.micro)

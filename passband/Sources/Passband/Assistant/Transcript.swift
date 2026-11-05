@@ -447,6 +447,16 @@ struct ChatItem: Identifiable, Sendable, Codable {
     var page: String? = nil
 }
 
+extension Array where Element == ChatItem {
+    /// WHAT A CHAT DRAWS: the conversation, not the plumbing. A tool chip is
+    /// shown only while its tool runs, as the "working on it" line, and goes
+    /// once it settles: what it found is in the cards and the answer, and a
+    /// stack of finished chips between bubbles reads as a log, not a chat.
+    var chatRows: [ChatItem] {
+        filter { $0.kind != .tool || $0.tool?.state == .running }
+    }
+}
+
 /// A tool the model called, as the tray shows it.
 struct ToolActivity: Sendable, Codable {
     enum State: String, Sendable, Equatable, Codable { case running, ok, failed }

@@ -4893,6 +4893,38 @@ final class AppStore {
 
     private var searchEvidenceTask: Task<Void, Never>?
     var preparingSearchEvidence: Bool { searchEvidenceTask != nil }
+    /// A start or refinement waiting out `QueryReadiness`: the quiet, then the
+    /// small model's "done typing?" check. Replaced by every settled query.
+    @ObservationIgnored private var laneGate: Task<Void, Never>?
+
+    /// A SETTLED QUERY'S MOVE, executed: both shells' `judge` land here so the
+    /// gate is one rule. `stop` is immediate (stopping never costs money); a
+    /// start or refinement first waits for the reader to stop typing and for
+    /// the small model to agree the words read as finished. Any keystroke
+    /// lands a new settled query, which replaces the gate.
+    func settleDeeperSearch(_ move: DeeperSearchPolicy.Move, query: String) {
+        laneGate?.cancel()
+        laneGate = nil
+        switch move {
+        case .nothing:
+            return
+        case .stop:
+            resetSearchLane(keepingVerdict: true)
+        case .refine, .start:
+            laneGate = Task { [weak self] in
+                try? await Task.sleep(for: QueryReadiness.quiet)
+                guard !Task.isCancelled, let self, self.search.query.trimmed == query else { return }
+                guard await QueryReadiness.looksFinished(query) else { return }
+                guard !Task.isCancelled, self.search.query.trimmed == query else { return }
+                self.laneGate = nil
+                switch move {
+                case .start(let trigger): self.startDeeperSearch(trigger: trigger)
+                case .refine: self.refineDeeperSearch()
+                case .nothing, .stop: break
+                }
+            }
+        }
+    }
 
     /// A question from search history, asked again: its words go back in the
     /// field and to the agent. With deeper search off it is simply searched.
@@ -5045,6 +5077,8 @@ final class AppStore {
     /// (`f` asks "what else is from this person"), so its verdict goes too and
     /// the band unmounts until the new query has been judged.
     func resetSearchLane(keepingVerdict: Bool = false) {
+        laneGate?.cancel()
+        laneGate = nil
         searchEvidenceTask?.cancel()
         searchEvidenceTask = nil
         searchLane.clear()

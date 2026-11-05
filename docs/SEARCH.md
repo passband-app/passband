@@ -411,6 +411,15 @@ The decision is made once per settled query (after the panel's 220 ms
 debounce and the fetch), so the rule never fires mid-keystroke, and it is
 shown: the deeper band (§6.4) says which signal started it.
 
+**Deciding is not starting.** A settled query the rule calls deeper (or a
+refinement of a running lane) waits for one more second of quiet, then asks
+Haiku one question with no tools and four output tokens: does this read as
+finished, or cut off mid-thought ("when did i download the")? Only "finished"
+starts or refines the lane (`QueryReadiness`, `AppStore.settleDeeperSearch`).
+Any failure or a check slower than 2.5 s falls back to the rule's verdict, so
+the check can hold back a half-typed question but never blocks a whole one.
+Stopping is immediate, and the band's own button and ⌘Enter skip the check.
+
 ## 6. Wave 2: the agent lane
 
 ### 6.1 What it is

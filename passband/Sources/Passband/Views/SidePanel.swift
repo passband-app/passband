@@ -956,19 +956,11 @@ struct SearchView: View {
         // ShellWatchers) — and a rule spelled twice is a rule that will
         // disagree with itself. The moves are executed here; the deciding is
         // pure and asserted in test.sh.
-        switch DeeperSearchPolicy.settled(
-            verdict: verdict, choice: prefs.deeperSearch,
-            laneStarted: store.search.laneStarted)
-        {
-        case .nothing:
-            break
-        case .stop:
-            store.resetSearchLane(keepingVerdict: true)
-        case .refine:
-            store.refineDeeperSearch()
-        case .start(let trigger):
-            store.startDeeperSearch(trigger: trigger)
-        }
+        store.settleDeeperSearch(
+            DeeperSearchPolicy.settled(
+                verdict: verdict, choice: prefs.deeperSearch,
+                laneStarted: store.search.laneStarted),
+            query: term)
     }
 
     /// Append the page after the one on screen. Cursors are only meaningful

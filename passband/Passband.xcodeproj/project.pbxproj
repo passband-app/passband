@@ -392,6 +392,7 @@
 		A172DC7A574B508E1B91152E /* CalendarEventPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00E3B798133DA73485CAA03A /* CalendarEventPane.swift */; };
 		A18FDD06D661272DAEB42CFB /* SyncStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DAC2EA79665D763DD36958D /* SyncStatus.swift */; };
 		A19640E9DA24D6C6F85E215C /* RelayProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A07093A9D416AD79A642B3A3 /* RelayProxy.swift */; };
+		A21E0790A8E8FA326926F313 /* QueryReadiness.swift in Sources */ = {isa = PBXBuildFile; fileRef = C90868EEB9EFEFF47ECD0238 /* QueryReadiness.swift */; };
 		A231861B2011F229FFEC9E36 /* TitleParse.swift in Sources */ = {isa = PBXBuildFile; fileRef = D52B4DD0A5257141584D4F92 /* TitleParse.swift */; };
 		A252756AF0D9655F2C1477B7 /* Ranking.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7079893CCCC8806D2B5099D8 /* Ranking.swift */; };
 		A32CA97991D874737EE663DA /* CidImages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C9C77BCE41A573ED04E49AA /* CidImages.swift */; };
@@ -567,6 +568,7 @@
 		E833B10A5EA2EBF6AB96DD70 /* CompositionSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = E076DAB13B2768EAD01C88F3 /* CompositionSummary.swift */; };
 		E8A8E071D78E35630F24BCA8 /* FindVignette.swift in Sources */ = {isa = PBXBuildFile; fileRef = 373F91F896A889D300C6BD09 /* FindVignette.swift */; };
 		E93B57DD5D448858473180D5 /* FindInThread.swift in Sources */ = {isa = PBXBuildFile; fileRef = 151C06F2A835787B0FDEDB24 /* FindInThread.swift */; };
+		E94D4CBE60BEBAB63B4049C3 /* QueryReadiness.swift in Sources */ = {isa = PBXBuildFile; fileRef = C90868EEB9EFEFF47ECD0238 /* QueryReadiness.swift */; };
 		E96078DC56E87F722CEBEDE8 /* Accounts.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4806E9349EDC2C9EF8520C5 /* Accounts.swift */; };
 		EA0F7FADC742BF00778433BF /* SubjectText.swift in Sources */ = {isa = PBXBuildFile; fileRef = E645BA6EC9A8686D95460095 /* SubjectText.swift */; };
 		EA82308C99D5B6C590E73289 /* AgentTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E7DFB379AF677D44E393FF /* AgentTools.swift */; };
@@ -920,6 +922,7 @@
 		C10C0C8780CCB9C6BAB2709C /* MailCSP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailCSP.swift; sourceTree = "<group>"; };
 		C465B24E00D0436CD5704294 /* SwipeRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwipeRow.swift; sourceTree = "<group>"; };
 		C756C9A9A4570C1AFFE7003E /* GmailDisconnectedBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GmailDisconnectedBanner.swift; sourceTree = "<group>"; };
+		C90868EEB9EFEFF47ECD0238 /* QueryReadiness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueryReadiness.swift; sourceTree = "<group>"; };
 		C9494D30E6731BF975F3F056 /* CalendarDetail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalendarDetail.swift; sourceTree = "<group>"; };
 		C98AD3FDFC5C4EB6D72C43F5 /* FrameHeightFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameHeightFile.swift; sourceTree = "<group>"; };
 		C9CC93E238228B2BA4D4569A /* Passband.icon */ = {isa = PBXFileReference; lastKnownFileType = wrapper.icon; path = Passband.icon; sourceTree = "<group>"; };
@@ -1482,6 +1485,7 @@
 				A313A64CFA085C08A1AE044B /* ConversationSnapshot.swift */,
 				8860DE0FE5AA0366C7BE9922 /* JSONValue.swift */,
 				E11CEC2756BB328563427E22 /* PageLink.swift */,
+				C90868EEB9EFEFF47ECD0238 /* QueryReadiness.swift */,
 				A07093A9D416AD79A642B3A3 /* RelayProxy.swift */,
 				1E0780DC48411C969D9B6001 /* Transcript.swift */,
 			);
@@ -1859,6 +1863,7 @@
 				A5587D86D95C9A1C0695EFAE /* PrivateFile.swift in Sources */,
 				8DD946F7BC6990641C19ACC1 /* ProcessView.swift in Sources */,
 				BB2D4A838A4E7036B0B9C037 /* ProductGuide.swift in Sources */,
+				E94D4CBE60BEBAB63B4049C3 /* QueryReadiness.swift in Sources */,
 				2AB1B2A4BA4F5E6B3ED837BC /* QuestionChats.swift in Sources */,
 				4F1ACF4C4907587277817F3D /* QuickLookPanel.swift in Sources */,
 				4C489FDA815D1AA53534BA7B /* Quotes.swift in Sources */,
@@ -2157,6 +2162,7 @@
 				7362D6064FE828BD80A2AEDA /* ProcessView.swift in Sources */,
 				9C995D3465CAD68AD186021D /* ProductGuide.swift in Sources */,
 				13068136E70BA1E4AD4A9709 /* PushRegistration.swift in Sources */,
+				A21E0790A8E8FA326926F313 /* QueryReadiness.swift in Sources */,
 				1D58CC5455C98421FE4F4FF1 /* QuestionChats.swift in Sources */,
 				822AC7C019AE85919C9B4181 /* QuickLookPanel.swift in Sources */,
 				79BB8595545903AE279A319C /* Quotes.swift in Sources */,

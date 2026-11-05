@@ -1,0 +1,87 @@
+// IS THE READER DONE TYPING? The gate between a settled query the classifier
+// liked and an agent run that costs money (docs/SEARCH.md §5).
+//
+// The keyword search settles 220ms after the last keystroke, which is right for
+// hits and far too eager for an agent: "when did i download" settled, started a
+// lane, and every word after it arrived as a "refinement". So a start (or a
+// refinement) waits for a longer quiet, then asks a small model one question:
+// does this read as finished, or cut off mid-thought? Only "finished" spends.
+
+import Foundation
+
+enum QueryReadiness {
+    /// How long the field must stay unchanged, on top of the keyword debounce,
+    /// before the agent is even considered.
+    static let quiet = Duration.milliseconds(1000)
+
+    /// The judge's own deadline. Past it the rule's verdict stands: a slow
+    /// check must not be the reason a question never gets answered.
+    static let deadline = Duration.milliseconds(2500)
+
+    static let system = """
+        You judge whether someone has finished typing a search into their email app. \
+        Reply with one word. Reply done if it reads as a complete question or request \
+        they would want answered now. Reply typing if it is cut off mid-thought: it \
+        ends on a dangling word (the, a, from, to, my, about, did i), a partial word, \
+        or an unfinished clause.
+        """
+
+    /// The judge's one-word answer, read leniently. Anything but "typing" is
+    /// done, so a confused reply never blocks a question.
+    static func finished(reply: String) -> Bool {
+        !reply.lowercased().contains("typing")
+    }
+
+    /// The request body: Haiku, no tools, a handful of output tokens.
+    static func body(query: String) throws -> Data {
+        let object: [String: Any] = [
+            "model": AssistantModel.haiku.rawValue,
+            "max_tokens": 4,
+            "system": system,
+            "messages": [["role": "user", "content": "Search so far: \(query)"]],
+            "stream": true,
+        ]
+        return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+
+    /// True unless the model says the query is cut off. Any failure (no key,
+    /// no relay, timeout, provider error) answers true: the rule already said
+    /// start, and this check only exists to hold back the half-typed.
+    ///
+    /// Not on the Usage ledger: it is a few dozen Haiku tokens, and counting it
+    /// as an "ask" would double the search count for every question.
+    @MainActor
+    static func looksFinished(_ query: String) async -> Bool {
+        let relay = Prefs.shared.assistantTransport == .relay && AppStore.shared.relayAvailable
+        guard let body = try? body(query: query) else { return true }
+        return await withTaskGroup(of: Bool?.self) { group in
+            group.addTask {
+                var reply = ""
+                var accumulator = AnthropicStreamAccumulator()
+                do {
+                    let stream = relay ? RelayProxy.stream(body: body) : LLMProxy.stream(body: body)
+                    for try await payload in stream {
+                        for event in accumulator.feed(payload) {
+                            switch event {
+                            case .textDelta(_, let text): reply += text
+                            case .providerError: return true
+                            default: break
+                            }
+                        }
+                    }
+                } catch {
+                    return true
+                }
+                return finished(reply: reply)
+            }
+            group.addTask {
+                try? await Task.sleep(for: deadline)
+                return nil
+            }
+            // First to land wins; a deadline (nil) means "done".
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first ?? true
+        }
+    }
+}

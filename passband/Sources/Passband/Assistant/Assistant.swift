@@ -196,7 +196,6 @@ final class AssistantSession {
     /// session: an answer cites what it consulted, not what some earlier
     /// question did.
     private var cites: [String: ToolCitation] = [:]
-    private var citeOrder: [String] = []
     private var readIds: [String] = []
     /// Threads already SHOWN as cards this answer. Excluded from the citation
     /// row: a card the user can click is its own source line, and repeating it
@@ -494,7 +493,6 @@ final class AssistantSession {
         askedThreadIds.removeAll()
         rollbackMark = 0
         cites.removeAll()
-        citeOrder.removeAll()
         readIds.removeAll()
         shownIds.removeAll()
         // A fresh conversation has been narrowed zero times, and the words
@@ -665,7 +663,6 @@ final class AssistantSession {
         history.append(.init(role: "user", content: .text(question)))
         // A fresh answer cites its own sources.
         cites.removeAll()
-        citeOrder.removeAll()
         readIds.removeAll()
         shownIds.removeAll()
 
@@ -993,7 +990,6 @@ final class AssistantSession {
             name: call.name, input: call.input, gate: gate(),
             cite: { [weak self] citation in
                 guard let self, self.alive(gen) else { return }
-                if self.cites[citation.threadId] == nil { self.citeOrder.append(citation.threadId) }
                 // LATER READINGS WIN — a get_thread knows more about a thread
                 // than the search hit that found it — except where the newcomer
                 // knows LESS. explain_triage cites from a triage record, which
@@ -1177,14 +1173,13 @@ final class AssistantSession {
             outputTokens: outputTokens)
     }
 
-    /// Threads surfaced by search vs. actually opened: cite the opened ones
-    /// when the model drilled in, else the top hits it saw. Threads already
-    /// shown as cards are skipped either way — see `shownIds`.
+    /// ONLY THREADS THE MODEL OPENED. A search hit it merely saw is not a
+    /// source: falling back to the top hits listed five unrelated "download"
+    /// emails under "No mail about Rekordbox found". Threads already shown as
+    /// cards are skipped too, see `shownIds`.
     private func pickCitations() -> [ToolCitation] {
-        let opened = readIds.compactMap { cites[$0] }.filter { !shownIds.contains($0.threadId) }
-        if !opened.isEmpty { return Array(opened.prefix(5)) }
-        return Array(
-            citeOrder.compactMap { cites[$0] }
+        Array(
+            readIds.compactMap { cites[$0] }
                 .filter { !shownIds.contains($0.threadId) }.prefix(5))
     }
 

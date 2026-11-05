@@ -2278,12 +2278,12 @@ enum MorningBriefRoute {
     static let settings = "/client/brief/settings"
 }
 
-/// `GET /client/brief`: the owner's local day and the banner's words.
-/// `title` null and `lines` empty on a day with nothing to say.
+/// `GET /client/brief`: the owner's local day and the banner's body, a few
+/// short sentences ("PG&E bill due tomorrow. A package arrives today.").
+/// `body` null on a day with nothing to say. There is no title.
 struct MorningBrief: Codable, Sendable, Hashable {
     var day: String?
-    var title: String?
-    var lines: [String]?
+    var body: String?
 }
 
 /// `{"enabled": bool}` on `CalendarReminderRoute.settings`.

@@ -430,7 +430,8 @@ fn validate(state: &RelayState, req: PushRequest) -> Result<Validated, RelayErro
         }
     };
     // A summary of the day, not news that needs hearing: the brief arrives
-    // without a sound. Still an alert at full priority, so it lands near 8.
+    // without a sound, and without a title (the phone shows the app's name
+    // above the body). Still an alert at full priority, so it lands near 8.
     let silent = req.kind.as_deref() == Some("brief");
 
     // Content-free by design: an opaque id plus a generic alert, or for a
@@ -438,7 +439,7 @@ fn validate(state: &RelayState, req: PushRequest) -> Result<Validated, RelayErro
     let (aps, push_type, priority) = match alert_body {
         Some(body) if silent => (
             json!({
-                "alert": { "title": ALERT_TITLE, "body": body },
+                "alert": { "body": body },
                 "mutable-content": 1,
             }),
             "alert",
@@ -653,7 +654,8 @@ mod tests {
         req["event_id"] = json!("acct:brief:20261105");
         let v = parse(req).unwrap();
         let p: serde_json::Value = serde_json::from_slice(&v.payload).unwrap();
-        assert_eq!(p["aps"]["alert"]["title"], "Passband");
+        // No title: the phone already shows the app's name.
+        assert!(p["aps"]["alert"].get("title").is_none());
         assert_eq!(p["aps"]["alert"]["body"], "Your morning brief is ready");
         // The extension rewrites it from the daemon.
         assert_eq!(p["aps"]["mutable-content"], 1);

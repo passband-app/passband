@@ -1,7 +1,7 @@
 //! The morning brief: once a local day, around 08:00 in the owner's zone, a
 //! push to the owner's iPhone(s) saying what today holds, from their mail and
-//! calendar. "2 need you · PG&E bill due today", "First up: Dentist at
-//! 9:30 AM". A tap opens the app's board.
+//! calendar: "PG&E bill due tomorrow. A package arrives today. First up:
+//! Dentist at 9:30 AM." A tap opens the app's board.
 //!
 //! THE RELAY STAYS BLIND. The worker hands the APNs pusher a
 //! [`BriefPing`] (the owner's local day and nothing else); the relay pushes
@@ -19,9 +19,10 @@
 //! no idea where its owner is (no app has reported a zone and no calendar
 //! names one) sends nothing: 08:00 UTC is midnight in California.
 //!
-//! EMPTY DAYS ARE SKIPPED. Nothing needing the owner, no bill due today or
-//! tomorrow, no package arriving and nothing on the calendar: no push. A
-//! content-free daily buzz teaches people to swipe us away.
+//! EMPTY DAYS ARE SKIPPED. No bill due today or tomorrow, no package
+//! arriving and nothing on the calendar: no push. A content-free daily buzz
+//! teaches people to swipe us away. Mail waiting on the owner is NOT part of
+//! the brief on purpose: a morning count of it reads as a to-do list.
 //!
 //! OFF. One owner preference ([`ENABLED_KEY`], on unless turned off), per
 //! mailbox, behind `GET`/`PUT /client/brief/settings`. Only iPhones are
@@ -35,7 +36,7 @@ use std::time::Duration;
 use axum::{Json, extract::State, response::IntoResponse};
 use chrono::{DateTime, NaiveDate, NaiveTime, TimeZone, Timelike, Utc};
 use chrono_tz::Tz;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use squelch_core::owner_clock::{OwnerZone, OwnerZoneSource};
 use squelch_core::push::{BriefPing, IOS_PLATFORM};
 use squelch_core::store::agent_triage::{AgentListQuery, AgentTriageStore};
@@ -103,9 +104,6 @@ pub enum Due {
 /// What today holds, as read from the store. The input to [`compose`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Facts {
-    /// The For-your-eyes band, auth mail left out: a login code from last
-    /// night is not something that needs anybody this morning.
-    pub needs_you: usize,
     /// Bills due today or tomorrow, by who sent them (empty when unknown).
     pub bills: Vec<(String, Due)>,
     /// Packages out for delivery or due today.
@@ -114,26 +112,14 @@ pub struct Facts {
     pub first_event: Option<(String, NaiveTime)>,
 }
 
-/// The banner: a title and one or two short lines.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Brief {
-    pub title: String,
-    pub lines: Vec<String>,
-}
-
-/// THE COPY. None for an empty day. Short and calm: counts, at most one
-/// name per clause, no exclamation marks, no emoji, no dashes.
+/// THE COPY: the banner's body, a few short sentences about what today
+/// holds, or None for an empty day. No title (the phone shows the app's
+/// name above it), no date, no count of mail waiting: a calm summary, not a
+/// to-do tally. No exclamation marks, no emoji, no dashes.
 ///
-///   Thursday, Nov 5
-///   2 need you · PG&E bill due today · A package arrives today
-///   First up: Dentist at 9:30 AM
-pub fn compose(facts: &Facts, today: NaiveDate) -> Option<Brief> {
-    let mut mail: Vec<String> = Vec::new();
-    match facts.needs_you {
-        0 => {}
-        1 => mail.push("1 needs you".into()),
-        n => mail.push(format!("{n} need you")),
-    }
+///   PG&E bill due tomorrow. A package arrives today. First up: Dentist at 9:30 AM.
+pub fn compose(facts: &Facts) -> Option<String> {
+    let mut sentences: Vec<String> = Vec::new();
     match facts.bills.as_slice() {
         [] => {}
         [(name, due)] => {
@@ -142,46 +128,37 @@ pub fn compose(facts: &Facts, today: NaiveDate) -> Option<Brief> {
                 Due::Tomorrow => "tomorrow",
             };
             let name = clip(name);
-            mail.push(if name.is_empty() {
-                format!("A bill due {when}")
+            sentences.push(if name.is_empty() {
+                format!("A bill due {when}.")
             } else {
-                format!("{name} bill due {when}")
+                format!("{name} bill due {when}.")
             });
         }
         many => {
             let n = many.len();
-            mail.push(if many.iter().all(|(_, d)| *d == Due::Today) {
-                format!("{n} bills due today")
+            sentences.push(if many.iter().all(|(_, d)| *d == Due::Today) {
+                format!("{n} bills due today.")
             } else {
-                format!("{n} bills due by tomorrow")
+                format!("{n} bills due by tomorrow.")
             });
         }
     }
     match facts.packages {
         0 => {}
-        1 => mail.push("A package arrives today".into()),
-        n => mail.push(format!("{n} packages arrive today")),
-    }
-    let mut lines = Vec::new();
-    if !mail.is_empty() {
-        lines.push(mail.join(" · "));
+        1 => sentences.push("A package arrives today.".into()),
+        n => sentences.push(format!("{n} packages arrive today.")),
     }
     if let Some((title, at)) = &facts.first_event {
         let title = clip(title);
+        let title = title.trim_end_matches('.');
         let at = clock(*at);
-        lines.push(if title.is_empty() {
-            format!("First up: an event at {at}")
+        sentences.push(if title.is_empty() {
+            format!("First up: an event at {at}.")
         } else {
-            format!("First up: {title} at {at}")
+            format!("First up: {title} at {at}.")
         });
     }
-    if lines.is_empty() {
-        return None;
-    }
-    Some(Brief {
-        title: format!("{}, {}", today.format("%A"), today.format("%b %-d")),
-        lines,
-    })
+    (!sentences.is_empty()).then(|| sentences.join(" "))
 }
 
 /// `9:30 AM`, `2 PM`: the minutes only when there are some.
@@ -216,8 +193,7 @@ fn local_day(time: &squelch_core::triage::decision::SupportedTime, zone: Tz) -> 
 }
 
 /// Read what today holds. Every source reuses the query its board already
-/// runs: the FYE band ([`AgentTriageStore::agent_fye`]), the Records board's
-/// bills ([`AgentTriageStore::agent_records_with_query`], as the agent door's
+/// runs: the Records board's bills ([`AgentTriageStore::agent_records_with_query`], as the agent door's
 /// `get_deadlines` reads them), the shipments listing, and the calendar
 /// timeline's events (only while calendar is granted).
 #[allow(clippy::too_many_arguments)]
@@ -226,19 +202,12 @@ pub fn gather(
     account: AccountId,
     now: DateTime<Utc>,
     zone: Tz,
-    ranking: &squelch_core::triage::agent_config::RankingConfig,
     policy: squelch_core::config::ShipmentListPolicy,
     calendar: bool,
 ) -> squelch_core::Result<Facts> {
     let local_now = now.with_timezone(&zone);
     let today = local_now.date_naive();
     let tomorrow = today.succ_opt().unwrap_or(today);
-
-    let needs_you = store
-        .agent_fye(account, usize::MAX, ranking, now)?
-        .iter()
-        .filter(|item| !item.decision.auth.is_auth())
-        .count();
 
     let mut bills: Vec<(String, Due)> = Vec::new();
     let records = store.agent_records_with_query(
@@ -319,7 +288,6 @@ pub fn gather(
     };
 
     Ok(Facts {
-        needs_you,
         bills,
         packages,
         first_event,
@@ -330,16 +298,15 @@ pub fn gather(
 async fn assemble(
     state: &ApiState,
     now: DateTime<Utc>,
-) -> Result<(NaiveDate, Option<Brief>), ApiError> {
+) -> Result<(NaiveDate, Option<String>), ApiError> {
     let calendar = state.features().enabled(squelch_core::features::CALENDAR)
         && crate::calendar_remind::calendar_reach(state).await.0;
-    let ranking = state.triage_config.ranking.clone();
     let policy = state.shipment_policy;
     store_call(state, move |store, account| {
         let zone = store.owner_zone(account)?.zone;
         let today = now.with_timezone(&zone).date_naive();
-        let facts = gather(store, account, now, zone, &ranking, policy, calendar)?;
-        Ok((today, compose(&facts, today)))
+        let facts = gather(store, account, now, zone, policy, calendar)?;
+        Ok((today, compose(&facts)))
     })
     .await
 }
@@ -455,20 +422,15 @@ pub async fn morning_brief_worker(
 }
 
 /// `GET /client/brief`: today's brief as of now, for the phone's
-/// notification extension. `{day, title, lines}`; `title` null and `lines`
-/// empty on a day with nothing to say. HUMAN DOOR ONLY.
+/// notification extension. `{day, body}`; `body` null on a day with nothing
+/// to say. No title: the banner has none. HUMAN DOOR ONLY.
 pub async fn get_brief(State(state): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
-    let (day, brief) = assemble(&state, Utc::now()).await?;
-    let (title, lines) = match brief {
-        Some(b) => (Some(b.title), b.lines),
-        None => (None, Vec::new()),
-    };
+    let (day, body) = assemble(&state, Utc::now()).await?;
     Ok((
         no_store(),
         Json(serde_json::json!({
             "day": day.format("%Y-%m-%d").to_string(),
-            "title": title,
-            "lines": lines,
+            "body": body,
         })),
     ))
 }
@@ -574,77 +536,76 @@ mod tests {
 
     #[test]
     fn an_empty_day_says_nothing() {
-        assert_eq!(compose(&Facts::default(), day(2026, 11, 5)), None);
+        assert_eq!(compose(&Facts::default()), None);
+    }
+
+    fn nine_thirty() -> NaiveTime {
+        NaiveTime::from_hms_opt(9, 30, 0).unwrap()
     }
 
     #[test]
     fn the_full_shape() {
         let facts = Facts {
-            needs_you: 2,
-            bills: vec![("PG&E".into(), Due::Today)],
+            bills: vec![("PG&E".into(), Due::Tomorrow)],
             packages: 1,
-            first_event: Some(("Dentist".into(), NaiveTime::from_hms_opt(9, 30, 0).unwrap())),
+            first_event: Some(("Dentist".into(), nine_thirty())),
         };
-        let brief = compose(&facts, day(2026, 11, 5)).unwrap();
-        assert_eq!(brief.title, "Thursday, Nov 5");
         assert_eq!(
-            brief.lines,
-            vec![
-                "2 need you · PG&E bill due today · A package arrives today".to_string(),
-                "First up: Dentist at 9:30 AM".to_string(),
-            ]
+            compose(&facts).unwrap(),
+            "PG&E bill due tomorrow. A package arrives today. First up: Dentist at 9:30 AM."
         );
     }
 
     #[test]
-    fn counts_and_plurals() {
-        let one = Facts {
-            needs_you: 1,
+    fn one_thing_at_a_time() {
+        let package = Facts {
+            packages: 1,
             ..Default::default()
         };
-        assert_eq!(
-            compose(&one, day(2026, 11, 5)).unwrap().lines,
-            vec!["1 needs you"]
-        );
+        assert_eq!(compose(&package).unwrap(), "A package arrives today.");
+        let event = Facts {
+            first_event: Some(("Dentist".into(), nine_thirty())),
+            ..Default::default()
+        };
+        assert_eq!(compose(&event).unwrap(), "First up: Dentist at 9:30 AM.");
+    }
+
+    #[test]
+    fn counts_and_plurals() {
         let bills = Facts {
             bills: vec![("A".into(), Due::Today), ("B".into(), Due::Tomorrow)],
             packages: 3,
             ..Default::default()
         };
         assert_eq!(
-            compose(&bills, day(2026, 11, 5)).unwrap().lines,
-            vec!["2 bills due by tomorrow · 3 packages arrive today"]
+            compose(&bills).unwrap(),
+            "2 bills due by tomorrow. 3 packages arrive today."
         );
         let today = Facts {
             bills: vec![("A".into(), Due::Today), ("B".into(), Due::Today)],
             ..Default::default()
         };
-        assert_eq!(
-            compose(&today, day(2026, 11, 5)).unwrap().lines,
-            vec!["2 bills due today"]
-        );
+        assert_eq!(compose(&today).unwrap(), "2 bills due today.");
         let unnamed = Facts {
             bills: vec![(" ".into(), Due::Tomorrow)],
             ..Default::default()
         };
-        assert_eq!(
-            compose(&unnamed, day(2026, 11, 5)).unwrap().lines,
-            vec!["A bill due tomorrow"]
-        );
+        assert_eq!(compose(&unnamed).unwrap(), "A bill due tomorrow.");
     }
 
     #[test]
-    fn only_an_event_is_still_a_brief() {
+    fn event_titles_are_folded_and_end_one_sentence() {
         let facts = Facts {
             first_event: Some((
-                "  Standup\nwith   the team ".into(),
+                "  Standup\nwith   the team. ".into(),
                 NaiveTime::from_hms_opt(14, 0, 0).unwrap(),
             )),
             ..Default::default()
         };
-        let brief = compose(&facts, day(2026, 11, 6)).unwrap();
-        assert_eq!(brief.title, "Friday, Nov 6");
-        assert_eq!(brief.lines, vec!["First up: Standup with the team at 2 PM"]);
+        assert_eq!(
+            compose(&facts).unwrap(),
+            "First up: Standup with the team at 2 PM."
+        );
     }
 
     #[test]
@@ -656,11 +617,11 @@ mod tests {
             )),
             ..Default::default()
         };
-        let line = &compose(&facts, day(2026, 11, 5)).unwrap().lines[0];
+        let body = compose(&facts).unwrap();
         assert_eq!(
-            line,
-            "First up: Quarterly planning offsite with… at 9:05 AM"
+            body,
+            "First up: Quarterly planning offsite with… at 9:05 AM."
         );
-        assert!(!line.contains('—') && !line.contains('–'));
+        assert!(!body.contains('—') && !body.contains('–') && !body.contains('·'));
     }
 }

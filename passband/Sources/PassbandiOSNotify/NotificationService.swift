@@ -452,13 +452,14 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
         guard let (data, response) = try? await Self.session.data(for: request),
             (response as? HTTPURLResponse)?.statusCode == 200,
             let brief = try? JSONDecoder().decode(MorningBrief.self, from: data),
-            let copy = EventBanner.morningBriefCopy(brief)
+            let body = EventBanner.morningBriefBody(brief)
         else { return nil }
 
         let account = push.accountId.uuidString
         let content = UNMutableNotificationContent()
-        content.title = copy.title
-        content.body = copy.body
+        // No title: iOS shows the app's name above the body, and the body
+        // says what today holds. No date either; the brief is this morning's.
+        content.body = body
         content.threadIdentifier = "\(account).morning-brief"
         content.userInfo = EventBanner.morningBriefUserInfo(account: push.accountId)
         // A summary of the day, not news: no chime, as the relay sent it.

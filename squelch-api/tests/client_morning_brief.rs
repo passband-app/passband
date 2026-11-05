@@ -159,7 +159,7 @@ async fn fires_once_from_eight_and_never_twice() {
 async fn a_daemon_up_late_still_sends_until_eleven_and_not_after() {
     let (state, store, acct) = setup();
     phone_in(&store, acct, LA);
-    needs_you(&store, acct, "n1");
+    bill(&store, acct, "b1", "PG&E", "2026-11-06");
     let mut pings = state.subscribe_brief_pings();
 
     // Down through the morning, back at 11:00: the day is skipped.
@@ -185,7 +185,7 @@ async fn a_daemon_up_late_still_sends_until_eleven_and_not_after() {
 async fn off_sends_nothing() {
     let (state, store, acct) = setup();
     phone_in(&store, acct, LA);
-    needs_you(&store, acct, "n1");
+    bill(&store, acct, "b1", "PG&E", "2026-11-05");
     let app = router(state.clone());
     let resp = app
         .oneshot(authed_json(
@@ -210,9 +210,12 @@ async fn off_sends_nothing() {
 async fn an_empty_day_is_decided_and_silent() {
     let (state, store, acct) = setup();
     phone_in(&store, acct, LA);
-    // A bill three days out and a login code on the board: neither is
-    // something today holds.
+    // A bill three days out, mail waiting on the owner and a login code on
+    // the board: none of it is something the brief speaks of. Mail needing
+    // the owner is left out of the brief on purpose.
     bill(&store, acct, "b1", "PG&E", "2026-11-08");
+    needs_you(&store, acct, "n1");
+    needs_you(&store, acct, "n2");
     seed(&store, acct, "a1", |_, d| {
         d.kinds = vec![EmailKind::AuthenticationSecurity];
         d.auth.kinds = vec![AuthKind::Otp];
@@ -227,8 +230,8 @@ async fn an_empty_day_is_decided_and_silent() {
         BriefOutcome::Empty(day)
     );
     assert!(pings.try_recv().is_err());
-    // Decided: mail that lands at 9 does not turn into a 9:01 brief.
-    needs_you(&store, acct, "n1");
+    // Decided: a bill that lands at 9 does not turn into a 9:01 brief.
+    bill(&store, acct, "b2", "Comcast", "2026-11-05");
     assert_eq!(
         run_brief_pass(&state, at("2026-11-05T17:01:00Z"))
             .await
@@ -257,7 +260,7 @@ async fn no_iphone_no_brief_and_the_day_stays_open() {
     store
         .upsert_device(acct, PHONE, "macos", Some(TAG), None)
         .unwrap();
-    needs_you(&store, acct, "n1");
+    bill(&store, acct, "b1", "PG&E", "2026-11-05");
     assert_eq!(
         run_brief_pass(&state, at(EIGHT_FIFTEEN)).await.unwrap(),
         BriefOutcome::NoPhone
@@ -276,7 +279,7 @@ async fn no_known_zone_no_brief() {
     store
         .upsert_device(acct, PHONE, "ios", Some(TAG), None)
         .unwrap();
-    needs_you(&store, acct, "n1");
+    bill(&store, acct, "b1", "PG&E", "2026-11-05");
     assert_eq!(
         run_brief_pass(&state, at("2026-11-05T08:15:00Z"))
             .await
@@ -294,6 +297,7 @@ async fn the_route_serves_todays_words() {
     let local = Utc::now().with_timezone(&zone);
     let today = local.date_naive();
     let tomorrow = today + Duration::days(1);
+    // Mail waiting on the owner says nothing here.
     needs_you(&store, acct, "n1");
     needs_you(&store, acct, "n2");
     bill(
@@ -313,18 +317,8 @@ async fn the_route_serves_todays_words() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body: Value = body_json(resp).await;
     assert_eq!(body["day"], json!(today.format("%Y-%m-%d").to_string()));
-    assert_eq!(
-        body["title"],
-        json!(format!(
-            "{}, {}",
-            today.format("%A"),
-            today.format("%b %-d")
-        ))
-    );
-    assert_eq!(
-        body["lines"],
-        json!(["2 need you · PG&E bill due tomorrow"])
-    );
+    assert_eq!(body["body"], json!("PG&E bill due tomorrow."));
+    assert!(body.get("title").is_none(), "no title, no date");
 
     // Settings default on.
     let resp = app
@@ -344,6 +338,5 @@ async fn the_route_on_an_empty_day() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body: Value = body_json(resp).await;
-    assert_eq!(body["title"], Value::Null);
-    assert_eq!(body["lines"], json!([]));
+    assert_eq!(body["body"], Value::Null);
 }

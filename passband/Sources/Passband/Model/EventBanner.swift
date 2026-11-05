@@ -377,19 +377,18 @@ enum EventBanner {
         return BriefPush(accountId: account, day: day)
     }
 
-    /// The brief's banner, from what `GET /client/brief` served: the
-    /// daemon's title, and its one or two lines as the body. nil when there
-    /// is nothing to say (the day emptied between the push and the fetch),
-    /// which keeps the relay's "Your morning brief is ready". The words are
-    /// the daemon's; this only refuses to show an empty or runaway banner.
-    static func morningBriefCopy(_ brief: MorningBrief) -> (title: String, body: String)? {
-        let lines = (brief.lines ?? [])
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .prefix(2)
-        let title = (brief.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty, !lines.isEmpty else { return nil }
-        return (String(title.prefix(80)), lines.map { String($0.prefix(160)) }.joined(separator: "\n"))
+    /// The brief's banner body, from what `GET /client/brief` served: the
+    /// daemon's sentences, folded to one paragraph. There is no title: the
+    /// lock screen already names the app above it. nil when there is nothing
+    /// to say (the day emptied between the push and the fetch), which keeps
+    /// the relay's "Your morning brief is ready". The words are the daemon's;
+    /// this only refuses to show an empty or runaway banner.
+    static func morningBriefBody(_ brief: MorningBrief) -> String? {
+        let body = (brief.body ?? "")
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+        guard !body.isEmpty else { return nil }
+        return String(body.prefix(240))
     }
 
     /// What a dressed brief carries for its tap: the route and the account.

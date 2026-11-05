@@ -3,7 +3,7 @@
 // saying what today holds. The daemon holds the switch, per mailbox, on by
 // default; this reads and writes it for the Notifications card on both the
 // Mac and the phone. The banner's words are the daemon's, and the phone's
-// notification extension draws them (EventBanner.morningBriefCopy).
+// notification extension draws them (EventBanner.morningBriefBody).
 
 import Foundation
 

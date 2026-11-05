@@ -57,30 +57,34 @@ struct MorningBriefTests {
     static func theBanner() {
         guard
             let brief = decode(
-                #"{"day":"2026-11-05","title":"Thursday, Nov 5","lines":["2 need you · PG&E bill due today","First up: Dentist at 9:30 AM"]}"#
+                #"{"day":"2026-11-05","body":"PG&E bill due tomorrow. A package arrives today. First up: Dentist at 9:30 AM."}"#
             )
         else { return expect(false, "the route's body decodes") }
-        let copy = EventBanner.morningBriefCopy(brief)
-        expect(copy?.title == "Thursday, Nov 5", "the daemon's title")
         expect(
-            copy?.body == "2 need you · PG&E bill due today\nFirst up: Dentist at 9:30 AM",
-            "its lines, one per line")
-
+            EventBanner.morningBriefBody(brief)
+                == "PG&E bill due tomorrow. A package arrives today. First up: Dentist at 9:30 AM.",
+            "the daemon's sentences, as written")
+        // The first draft's shape (a dated title and a count) has no body:
+        // nothing of it reaches the banner, and the relay's line stays.
+        if let old = decode(#"{"day":"2026-11-05","title":"Thursday, Nov 5","lines":["2 need you"]}"#) {
+            expect(EventBanner.morningBriefBody(old) == nil, "no title or count reaches the banner")
+        }
         // Nothing to say (the day emptied after the push): keep the relay's.
-        if let empty = decode(#"{"day":"2026-11-05","title":null,"lines":[]}"#) {
-            expect(EventBanner.morningBriefCopy(empty) == nil, "an empty day keeps the fallback")
+        if let empty = decode(#"{"day":"2026-11-05","body":null}"#) {
+            expect(EventBanner.morningBriefBody(empty) == nil, "an empty day keeps the fallback")
         } else {
             expect(false, "the empty body decodes")
         }
+        expect(EventBanner.morningBriefBody(MorningBrief(day: nil, body: "  \n ")) == nil, "blank is empty")
         expect(
-            EventBanner.morningBriefCopy(MorningBrief(day: nil, title: "  ", lines: ["x"])) == nil,
-            "no title, no banner")
-        // A body that grew: two lines at most, blank ones dropped.
-        let long = MorningBrief(day: nil, title: "Friday, Nov 6", lines: ["a", " ", "b", "c"])
-        expect(EventBanner.morningBriefCopy(long)?.body == "a\nb", "two lines at most")
+            EventBanner.morningBriefBody(MorningBrief(day: nil, body: "A package\narrives  today."))
+                == "A package arrives today.", "one paragraph")
+        let long = String(repeating: "word ", count: 100)
+        expect(
+            (EventBanner.morningBriefBody(MorningBrief(day: nil, body: long))?.count ?? 0) <= 240, "capped")
         // An older daemon without the route: an unknown body decodes to nothing.
         if let other = decode(#"{"error":"not found"}"#) {
-            expect(EventBanner.morningBriefCopy(other) == nil, "a foreign body draws nothing")
+            expect(EventBanner.morningBriefBody(other) == nil, "a foreign body draws nothing")
         }
     }
 

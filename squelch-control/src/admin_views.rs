@@ -1879,7 +1879,6 @@ pub(crate) mod tests {
             ),
             "{html}"
         );
-        assert!(!html.contains("<script"), "{html}");
     }
 
     /// Every button carries the page it was pressed on, so the action comes
@@ -2305,6 +2304,49 @@ pub(crate) mod tests {
         );
     }
 
+    /// THE ONE EXCEPTION TO "NO SCRIPT", AND HOW NARROW IT IS. Behind the door
+    /// the console may run scripts and fetch from this origin, which is
+    /// `/admin/app.js` swapping pages in place; never inline and never anyone
+    /// else's. The doors themselves, where a stranger can arrive, run nothing.
+    #[test]
+    fn only_the_console_behind_the_door_may_run_a_script() {
+        let csp = |r: Response| {
+            r.headers()[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+        for app in [
+            csp(admin_overview(Some(&[]), None)),
+            csp(admin_people(Some(&[]), all(), "", None)),
+            csp(admin_person(&waiting(1, "a@example.com"), None, None)),
+            csp(admin_invite(None, None)),
+            csp(admin_features(&[], None, None, None, false, 6)),
+        ] {
+            assert!(app.contains("default-src 'none'"), "{app}");
+            assert!(app.contains("script-src 'self';"), "{app}");
+            assert!(app.contains("connect-src 'self';"), "{app}");
+            assert!(!app.contains("unsafe-eval"), "{app}");
+            assert!(!app.contains("script-src 'self' 'unsafe-inline'"), "{app}");
+            assert!(!app.contains("https:"), "{app}");
+        }
+        for door in [
+            csp(admin_login(None)),
+            csp(admin_signed_out()),
+            csp(admin_confirm(
+                "/admin/approve",
+                &[],
+                "a@example.com",
+                "Yes",
+                &Place::Overview,
+            )),
+            csp(admin_cross_origin("https://signup.passband.app", "x")),
+        ] {
+            assert!(!door.contains("script-src"), "{door}");
+            assert!(!door.contains("connect-src"), "{door}");
+        }
+    }
+
     /// The door names nothing that is behind it.
     #[tokio::test]
     async fn the_admin_door_says_nothing_and_refuses_with_a_status() {
@@ -2329,8 +2371,9 @@ pub(crate) mod tests {
         assert!(page.contains("input[type=search]"), "{page}");
     }
 
-    /// House rules, on every admin page: no script, no typographic dashes, the
-    /// security headers, and the mark.
+    /// House rules, on every admin page: no inline script, no typographic
+    /// dashes, the security headers, and the mark. The ONE script anywhere is
+    /// the console's own, by URL, and only behind the door.
     #[tokio::test]
     async fn every_admin_page_keeps_the_house_rules() {
         const BANNED: [char; 5] = ['\u{2012}', '\u{2013}', '\u{2014}', '\u{2015}', '\u{2212}'];
@@ -2345,7 +2388,19 @@ pub(crate) mod tests {
             for dash in BANNED {
                 assert!(!html.contains(dash), "U+{:04X} in {html}", u32::from(dash));
             }
-            assert!(!html.contains("<script"), "{html}");
+            let scripts = html.matches("<script").count();
+            if html.contains(r#"<aside class="side">"#) {
+                assert_eq!(scripts, 1, "{html}");
+                assert!(
+                    html.contains(&format!(
+                        r#"<script src="{}" defer></script>"#,
+                        crate::pages::ADMIN_SCRIPT_PATH
+                    )),
+                    "{html}"
+                );
+            } else {
+                assert_eq!(scripts, 0, "a door runs nothing: {html}");
+            }
             assert!(html.contains(r#"<header class="brand">"#), "{html}");
             assert_eq!(html.matches("url(").count(), 1, "{html}");
         }

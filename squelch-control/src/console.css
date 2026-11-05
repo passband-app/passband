@@ -266,6 +266,16 @@ body.console.app main { max-width: 70rem; width: 100%; box-sizing: border-box; m
 .console .ok { padding: 0.8rem 1rem; border-radius: 10px; color: var(--positive);
   background: rgba(79, 192, 138, 0.07); box-shadow: inset 0 0 0 1px rgba(79, 192, 138, 0.3); }
 
+/* A PAGE ON ITS WAY: `admin.js` sets `is-loading` on the root while it
+   fetches, and a thin passband-blue line runs along the top of the window.
+   The swap itself needs no styling; that is the point of it. */
+html.is-loading body.console.app::after { content: ""; position: fixed; top: 0; left: 0; z-index: 10;
+  height: 2px; width: 100%; background: linear-gradient(90deg, transparent, var(--accent-ink), transparent);
+  background-size: 40% 100%; background-repeat: no-repeat;
+  animation: loading 0.9s ease-in-out infinite; }
+@keyframes loading { from { background-position: -40% 0; } to { background-position: 140% 0; } }
+.app main:focus { outline: none; }
+
 /* PANELS SIDE BY SIDE where there is room for two. */
 .app .cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin: 0 0 1rem; }
 .app main > .rack, .app form > .rack { margin: 0 0 1rem; }

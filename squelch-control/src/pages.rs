@@ -55,6 +55,19 @@ pub(crate) const OUTLOOK_MARK: &str = r##"<span class="mark" aria-hidden="true">
 
 const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self' https://accounts.google.com https://login.microsoftonline.com https://login.live.com; frame-ancestors 'none'; base-uri 'none'";
 
+/// The policy on the admin console's pages behind the door, and only there.
+///
+/// [`CSP`] with ONE allowance: scripts and fetches from this origin, which is
+/// the console's own `/admin/app.js` (see `admin.js`) fetching the console's
+/// own pages. Still no inline script and no third party, so nothing an escaped
+/// string could become runs. The doors in front of it, the signup pages, and
+/// every other page keep [`CSP`]: somebody deciding whether to hand over their
+/// mail runs no code at all, and that is the rule this exception is not.
+const CSP_ADMIN_APP: &str = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+
+/// Where the console's script is served, and the one script tag that names it.
+pub const ADMIN_SCRIPT_PATH: &str = "/admin/app.js";
+
 /// Escape text for HTML.
 pub fn escape_html(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -298,7 +311,9 @@ fn render(status: StatusCode, title: &str, body: &str, shell: Shell) -> Response
             format!(
                 r#"{CONSOLE_CHROME}<div class="shell"><aside class="side">{masthead}{sidebar}</aside><main>"#
             ),
-            "</main></div>",
+            // `ADMIN_SCRIPT_PATH`, spelled out because this is a `&'static str`;
+            // a test holds the two together.
+            r#"</main></div><script src="/admin/app.js" defer></script>"#,
         ),
     };
     let console_css = match shell {
@@ -604,7 +619,13 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
             // through to Google must not carry this URL as a referer.
             (header::CACHE_CONTROL, "no-store, no-cache"),
             (header::REFERRER_POLICY, "no-referrer"),
-            (header::CONTENT_SECURITY_POLICY, CSP),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                match shell {
+                    Shell::App(_) => CSP_ADMIN_APP,
+                    Shell::Auth | Shell::Console => CSP,
+                },
+            ),
             (header::X_FRAME_OPTIONS, "DENY"),
         ],
         html,

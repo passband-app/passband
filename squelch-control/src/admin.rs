@@ -268,6 +268,28 @@ pub async fn invite_page(
     view(&state, &Place::Invite, done_banner(query.as_deref())).await
 }
 
+/// The console's script. See `admin.js` for what it does and
+/// [`crate::pages`] for the one policy that lets it run.
+const APP_JS: &str = include_str!("admin.js");
+
+/// `GET /admin/app.js` — the script that swaps pages in place.
+///
+/// NO ADMIN CHECK: it is the same bytes for everybody, carries no data, and
+/// does nothing on a page that is not the console. `no-cache` so a deploy's
+/// new script is the one the next page load runs, revalidated rather than
+/// refetched blind.
+pub async fn app_js() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        APP_JS,
+    )
+        .into_response()
+}
+
 /// `POST /admin/logout` — end this session deliberately.
 ///
 /// IT EXISTS BECAUSE THE SESSION GOT LONG. At twelve hours the browser signed

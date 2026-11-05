@@ -262,6 +262,7 @@ pub fn router(state: ControlState) -> Router {
 
     let admin = Router::new()
         .route("/admin", get(admin::page))
+        .route(pages::ADMIN_SCRIPT_PATH, get(admin::app_js))
         .route("/admin/people", get(admin::people))
         .route("/admin/people/{id}", get(admin::person))
         .route("/admin/invite", get(admin::invite_page).post(admin::invite))

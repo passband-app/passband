@@ -1569,3 +1569,40 @@ async fn an_action_returns_to_the_page_it_came_from() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(page.contains(r#"<aside class="side">"#), "{page}");
 }
+
+/// The console's script is served as a script, revalidated on every load, and
+/// is the one URL the console's pages name in a script tag.
+#[tokio::test]
+async fn the_console_script_is_served_and_named() {
+    let h = Harness::new().await;
+    let (status, headers, body) = h.get("/admin/app.js", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        header_of(&headers, header::CONTENT_TYPE).starts_with("text/javascript"),
+        "{headers:?}"
+    );
+    assert_eq!(
+        header_of(&headers, header::X_CONTENT_TYPE_OPTIONS),
+        "nosniff"
+    );
+    assert_eq!(header_of(&headers, header::CACHE_CONTROL), "no-cache");
+    assert!(body.contains("DOMParser"), "{body}");
+
+    let cookie = h.sign_in().await;
+    let (_, headers, page) = h.get("/admin", Some(&cookie)).await;
+    assert!(
+        page.contains(r#"<script src="/admin/app.js" defer></script>"#),
+        "{page}"
+    );
+    assert!(
+        header_of(&headers, header::CONTENT_SECURITY_POLICY).contains("script-src 'self'"),
+        "{headers:?}"
+    );
+    // The door in front of it runs nothing.
+    let (_, headers, door) = h.get("/admin", None).await;
+    assert!(!door.contains("<script"), "{door}");
+    assert!(
+        !header_of(&headers, header::CONTENT_SECURITY_POLICY).contains("script-src"),
+        "{headers:?}"
+    );
+}

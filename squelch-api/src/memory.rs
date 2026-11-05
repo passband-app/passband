@@ -33,7 +33,7 @@ use squelch_core::triage::memory::is_ulid;
 use squelch_core::triage::sender_fatigue::MIN_COVERED_DAYS;
 
 use crate::error::ApiError;
-use crate::handlers::{audit_action, store_call};
+use crate::handlers::{audit_action, no_store, store_call};
 use crate::state::ApiState;
 
 /// `GET /client/memory`: every entry not deleted, newest first, retired ones
@@ -51,11 +51,16 @@ pub async fn list_memory(State(state): State<ApiState>) -> Result<impl IntoRespo
         ))
     })
     .await?;
-    Ok(Json(json!({
-        "enabled": coverage >= MIN_COVERED_DAYS,
-        "coverage_days": coverage.floor() as i64,
-        "entries": entries,
-    })))
+    // NO-STORE on everything this door answers, like `/client/person`: a
+    // client cache must not keep showing the profile once the routes 404.
+    Ok((
+        no_store(),
+        Json(json!({
+            "enabled": coverage >= MIN_COVERED_DAYS,
+            "coverage_days": coverage.floor() as i64,
+            "entries": entries,
+        })),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,7 +108,7 @@ pub async fn update_memory(
             if detail != "unchanged" {
                 audit_action(&state, "memory.update", target, detail).await;
             }
-            Ok(Json(entry))
+            Ok((no_store(), Json(entry)))
         }
         Ok(None) => Err(ApiError::not_found()),
         Err(e) => {
@@ -132,7 +137,7 @@ pub async fn delete_memory(
         return Err(ApiError::not_found());
     }
     audit_action(&state, "memory.delete", Some(target), "deleted").await;
-    Ok(StatusCode::NO_CONTENT)
+    Ok((StatusCode::NO_CONTENT, no_store()))
 }
 
 /// The route table, mounted into the bearer-authed `/client` tree, every

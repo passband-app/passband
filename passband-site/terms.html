@@ -42,6 +42,18 @@
       .meta { color: #777; font-size: 0.9rem; margin-top: 0; }
       a { color: #3556c9; }
       nav { margin-bottom: 2rem; font-size: 0.9rem; }
+      /* FOOTER: the site footer's layout (site.css .foot), in this page's light colors. */
+      .foot { margin-top: 4.5rem; padding-top: 2.5rem; border-top: 1px solid #e4e4e4; font-size: 0.9rem; }
+      .foot-grid { display: grid; grid-template-columns: auto repeat(3, minmax(0, 1fr)); gap: 2rem; }
+      .foot-mark { width: fit-content; align-self: start; opacity: 0.55; filter: grayscale(1); }
+      .foot-mark:hover { opacity: 0.8; }
+      .foot-mark img { display: block; width: 2.75rem; height: auto; }
+      .foot nav { display: flex; flex-direction: column; align-items: flex-start; gap: 0.6rem; margin: 0; font-size: inherit; }
+      .foot nav p { margin: 0 0 0.5rem; color: #888; }
+      .foot nav a { color: #1a1a1a; text-decoration: none; }
+      .foot nav a:hover { color: #3556c9; }
+      .foot-legal { margin: 3rem 0 0; color: #888; font-size: 0.85rem; }
+      @media (max-width: 560px) { .foot-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     </style>
   </head>
   <body>
@@ -140,5 +152,31 @@
       or open an issue at
       <a href="https://github.com/passband-app/passband">github.com/passband-app/passband</a>.
     </p>
+
+    <footer class="foot">
+      <div class="foot-grid">
+        <a class="foot-mark" href="/" aria-label="Passband home"><img src="/mark.svg" alt="" width="42" height="23" /></a>
+        <nav aria-label="Legal">
+          <p>Legal</p>
+          <a href="/terms">Terms of Service</a>
+          <a href="/privacy">Privacy Policy</a>
+        </nav>
+        <nav aria-label="Security">
+          <p>Security</p>
+          <a href="/trust">Trust</a>
+          <a href="/security">Threat model</a>
+          <a href="mailto:braelyn@passband.app">Report a vulnerability</a>
+        </nav>
+        <nav aria-label="Connect">
+          <p>Connect</p>
+          <a href="/about">About</a>
+          <a href="/self-host">Self-host</a>
+          <a href="https://github.com/passband-app/passband/releases" target="_blank" rel="noopener noreferrer">Changelog</a>
+          <a href="https://github.com/passband-app/passband" target="_blank" rel="noopener noreferrer">GitHub</a>
+          <a href="mailto:braelyn@passband.app">Email</a>
+        </nav>
+      </div>
+      <p class="foot-legal">&copy; 2026 Passband. All rights reserved.</p>
+    </footer>
   </body>
 </html>

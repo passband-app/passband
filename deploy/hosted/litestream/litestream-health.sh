@@ -68,7 +68,11 @@ read_journal() {
   elif [[ -s "$cursor" ]]; then
     journalctl -u "$SERVICE" --cursor-file="$cursor" --no-pager -o short-unix -q
   else
-    journalctl -u "$SERVICE" --since -26h --cursor-file="$cursor" --no-pager -o short-unix -q
+    # journalctl refuses --since together with --cursor-file ("Please specify
+    # only one of ..."; seen on carrier, systemd 259), so the first run reads
+    # the window with --show-cursor and saves the trailing cursor itself.
+    journalctl -u "$SERVICE" --since -26h --no-pager -o short-unix -q --show-cursor |
+      awk -v c="$cursor" '/^-- cursor: /{ sub(/^-- cursor: /, ""); printf "%s", $0 > c; next } { print }'
   fi
 }
 

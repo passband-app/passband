@@ -30,6 +30,8 @@ actor FixtureAPI {
     /// add and remove answer the way a daemon's do. Nothing in the fixture inbox is
     /// translated by it; `reset` drops it.
     private var readLanguages: [String] = []
+    /// The fixture's morning brief switch, on as a daemon's is by default.
+    private var morningBrief = true
     private var statusOverrides: [Int: AttentionStatus] = [:]
     private var tierOverrides: [Int: Tier] = [:]
     private var importanceOverrides: [Int: Int] = [:]
@@ -47,7 +49,7 @@ actor FixtureAPI {
         self.accountEmail = accountEmail
         referenceDate = Date()
         rules = []; nextRuleID = 1; drafts = [:]; nextDraftID = 1; clearedShipments = []
-        groups = []; nextGroupID = 1; groupHistory = [:]; readLanguages = []
+        groups = []; nextGroupID = 1; groupHistory = [:]; readLanguages = []; morningBrief = true
         statusOverrides = [:]; tierOverrides = [:]; importanceOverrides = [:]; reminders = [:]
     }
     func snapshot() -> FixtureMail { mailbox }
@@ -363,6 +365,11 @@ actor FixtureAPI {
             data = try json(["triggered": false])
         case ("GET", "/client/invites"):
             data = try json(["can_share": false])
+        case ("GET", "/client/brief/settings"):
+            data = try json(["enabled": morningBrief])
+        case ("PUT", "/client/brief/settings"):
+            morningBrief = body["enabled"] as? Bool ?? morningBrief
+            data = try json(["enabled": morningBrief])
         case ("GET", "/client/tracking-config"):
             data = try json(["available": false, "default_enabled": false])
         case ("GET", "/client/translate-config"):

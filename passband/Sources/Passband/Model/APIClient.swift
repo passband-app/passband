@@ -1316,6 +1316,18 @@ actor APIClient {
         try await putNoContent(CalendarReminderRoute.settings, body: CalendarReminderSettings(enabled: enabled))
     }
 
+    // MARK: - the morning brief
+
+    /// The owner's switch. A daemon older than the brief answers 404, which
+    /// the card reads as "not offered here".
+    func getMorningBriefSettings() async throws -> CalendarReminderSettings {
+        try await get(MorningBriefRoute.settings)
+    }
+
+    func setMorningBriefSettings(enabled: Bool) async throws {
+        try await putNoContent(MorningBriefRoute.settings, body: CalendarReminderSettings(enabled: enabled))
+    }
+
     // MARK: - translation languages
 
     /// The languages left untranslated. A daemon older than the setting

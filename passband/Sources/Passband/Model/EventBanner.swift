@@ -77,6 +77,10 @@ enum EventBanner {
         /// could not dress: only the fire id survived, so the app asks the
         /// daemon what it was before it routes.
         case calendarReminderPush(CalendarPush)
+        /// The morning brief, dressed or not: the board, in the account it
+        /// came from. `accountId` nil only when a dressed banner lost its
+        /// account key, which the tap queue reads as "the active account".
+        case morningBrief(accountId: UUID?)
         case reveal(messageId: Int, threadId: String, sender: String)
         case authPage
         case message(Int)
@@ -113,6 +117,13 @@ enum EventBanner {
         }
         if let push = calendarPush(userInfo["event_id"] as? String) {
             return .calendarReminderPush(push)
+        }
+        // The brief names no mail either: it opens the board.
+        if route == morningBriefRoute {
+            return .morningBrief(accountId: (userInfo[accountKey] as? String).flatMap(UUID.init(uuidString:)))
+        }
+        if let push = briefPush(userInfo["event_id"] as? String) {
+            return .morningBrief(accountId: push.accountId)
         }
         if let renotify = renotifyTap(userInfo) { return .renotify(renotify) }
         let messageId =
@@ -339,6 +350,51 @@ enum EventBanner {
             let created = plainNumber(parts[3], maxDigits: 11)
         else { return nil }
         return DraftPush(accountId: account, draftId: id, created: created)
+    }
+
+    // MARK: - the morning brief
+
+    /// The tap route a dressed morning brief carries in `routeKey`.
+    static let morningBriefRoute = "morning_brief"
+
+    /// The pusher's morning brief, `"<account>:brief:<YYYYMMDD>"`: the tag,
+    /// the literal, and the owner's local day. Strict like `draftPush`, and
+    /// never mistaken for an event push (`unresolvedPush` splits at the LAST
+    /// colon, so this shape's account half is never a UUID there).
+    struct BriefPush: Equatable, Sendable {
+        var accountId: UUID
+        /// The day as the daemon wrote it, `20261105`.
+        var day: Int
+    }
+
+    static func briefPush(_ raw: String?) -> BriefPush? {
+        guard let raw, raw.count <= 256 else { return nil }
+        let parts = raw.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[1] == "brief", parts[2].count == 8,
+            let account = UUID(uuidString: String(parts[0])),
+            let day = plainNumber(parts[2], maxDigits: 8)
+        else { return nil }
+        return BriefPush(accountId: account, day: day)
+    }
+
+    /// The brief's banner, from what `GET /client/brief` served: the
+    /// daemon's title, and its one or two lines as the body. nil when there
+    /// is nothing to say (the day emptied between the push and the fetch),
+    /// which keeps the relay's "Your morning brief is ready". The words are
+    /// the daemon's; this only refuses to show an empty or runaway banner.
+    static func morningBriefCopy(_ brief: MorningBrief) -> (title: String, body: String)? {
+        let lines = (brief.lines ?? [])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .prefix(2)
+        let title = (brief.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, !lines.isEmpty else { return nil }
+        return (String(title.prefix(80)), lines.map { String($0.prefix(160)) }.joined(separator: "\n"))
+    }
+
+    /// What a dressed brief carries for its tap: the route and the account.
+    static func morningBriefUserInfo(account: UUID) -> [AnyHashable: Any] {
+        [routeKey: morningBriefRoute, accountKey: account.uuidString]
     }
 
     /// The pusher's banner clear, `"<account>:clear:<event id>"`, delivered

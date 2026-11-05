@@ -696,6 +696,24 @@ run_suite calendar-reminder \
   Sources/Passband/Model/CalendarReminder.swift \
   Tests/CalendarReminderTests.swift
 
+# The morning brief (squelch-api's morning_brief): the phone's
+# `<tag>:brief:<day>` push id, refused when tag-less or malformed and never
+# read as a mail event, the banner the extension draws from /client/brief,
+# and a tap that opens the board whether or not the banner was dressed.
+run_suite morning-brief \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Sources/Passband/Lib/SenderIdentity.swift \
+  Sources/Passband/Lib/AuthLabels.swift \
+  Sources/Passband/Lib/AgentDraftLink.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Model/EventBanner.swift \
+  Sources/Passband/Model/RenotifyBanner.swift \
+  Sources/Passband/Model/CalendarReminder.swift \
+  Tests/MorningBriefTests.swift
+
 # What auth mail asks of the owner (docs/AUTH-MAIL-HANDLING.md, "Clients"): the
 # sealed row from both daemon versions, which kinds open a question and for
 # how long, explained alerts, new-device bursts, critical changes, and the move

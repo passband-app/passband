@@ -123,6 +123,23 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
             return
         }
 
+        // The morning brief: one fetch for today's words, no badge (the
+        // badge is the mail's to keep), no sound.
+        if let brief = EventBanner.briefPush(request.content.userInfo[PushRoute.eventIdKey] as? String) {
+            nonisolated(unsafe) let fallback = request.content
+            let task = Task { [weak self] in
+                let content = await Self.briefContent(brief)
+                guard let self else { return }
+                self.deliver(content ?? fallback)
+            }
+            let spent = lock.withLock { () -> Bool in
+                work = task
+                return handler == nil
+            }
+            if spent { task.cancel() }
+            return
+        }
+
         guard let route = PushRoute(userInfo: request.content.userInfo) else {
             return deliver(request.content)
         }
@@ -411,6 +428,41 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
         if signal.ticket != nil { content.categoryIdentifier = EventBanner.calendarTicketCategory }
         // The system's chime: the app's choice lives in ITS defaults.
         content.sound = copy.sound ? .default : nil
+        return content
+    }
+
+    // MARK: - the morning brief
+
+    /// Today's brief as THIS account's daemon words it now, or nil to keep
+    /// the relay's "Your morning brief is ready" (no daemon, no time, or the
+    /// day emptied since the push). A tap on either opens the board
+    /// (`EventBanner.tapRoute`).
+    private static func briefContent(_ push: EventBanner.BriefPush) async -> UNNotificationContent? {
+        guard let settings = try? SettingsStore.load(accountId: push.accountId) else { return nil }
+
+        var base = settings.serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        while base.hasSuffix("/") { base.removeLast() }
+        guard let url = URL(string: base + MorningBriefRoute.brief) else { return nil }
+
+        var request = URLRequest(url: url, timeoutInterval: 10)
+        request.setValue("Bearer \(settings.apiToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        // Silent on every failure, for the reason `fetch` is.
+        guard let (data, response) = try? await Self.session.data(for: request),
+            (response as? HTTPURLResponse)?.statusCode == 200,
+            let brief = try? JSONDecoder().decode(MorningBrief.self, from: data),
+            let copy = EventBanner.morningBriefCopy(brief)
+        else { return nil }
+
+        let account = push.accountId.uuidString
+        let content = UNMutableNotificationContent()
+        content.title = copy.title
+        content.body = copy.body
+        content.threadIdentifier = "\(account).morning-brief"
+        content.userInfo = EventBanner.morningBriefUserInfo(account: push.accountId)
+        // A summary of the day, not news: no chime, as the relay sent it.
+        content.sound = nil
         return content
     }
 

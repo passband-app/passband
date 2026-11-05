@@ -2269,6 +2269,23 @@ enum CalendarReminderRoute {
     static let settings = "/client/calendar/reminders/settings"
 }
 
+/// THE MORNING BRIEF'S ROUTES, for the app (APIClient) and the phone's
+/// notification extension.
+enum MorningBriefRoute {
+    /// Today's banner, built by the daemon when asked (`MorningBrief`).
+    static let brief = "/client/brief"
+    /// The owner's switch: `{"enabled": bool}` both ways, on by default.
+    static let settings = "/client/brief/settings"
+}
+
+/// `GET /client/brief`: the owner's local day and the banner's words.
+/// `title` null and `lines` empty on a day with nothing to say.
+struct MorningBrief: Codable, Sendable, Hashable {
+    var day: String?
+    var title: String?
+    var lines: [String]?
+}
+
 /// `{"enabled": bool}` on `CalendarReminderRoute.settings`.
 struct CalendarReminderSettings: Codable, Sendable, Hashable {
     var enabled: Bool

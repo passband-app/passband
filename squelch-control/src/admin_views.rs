@@ -40,9 +40,6 @@ pub const CONFIRM_FIELD: &str = "confirmed";
 /// address or a name, and this bounds the work a long query buys.
 const MAX_QUERY: usize = 120;
 
-/// How many waiting rows the overview shows before it points at the full list.
-const OVERVIEW_WAITING: usize = 6;
-
 /// How many lines of recent activity the overview shows.
 const OVERVIEW_FEED: usize = 10;
 
@@ -163,7 +160,9 @@ impl Filter {
 
     fn lede(self) -> &'static str {
         match self {
-            Filter::All => "Everybody on the list, newest approvals after the queue.",
+            Filter::All => {
+                "Everybody: the waitlist queue first, then everybody let in, newest first."
+            }
             Filter::Waiting => {
                 "Oldest first. Approving mints one invite code and emails it to that address."
             }
@@ -254,20 +253,27 @@ impl Counts {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Place {
     Overview,
-    People { filter: Filter, q: String },
+    Users { filter: Filter, q: String },
     Person(i64),
-    Invite,
     Features,
 }
 
 impl Place {
+    /// A users list with no search.
+    pub fn users(filter: Filter) -> Place {
+        Place::Users {
+            filter,
+            q: String::new(),
+        }
+    }
+
     /// This page's URL, built from its parts. The search term is
     /// percent-encoded, so nothing in it can end the parameter it sits in.
     pub fn href(&self) -> String {
         match self {
             Place::Overview => "/admin".to_string(),
-            Place::People { filter, q } => {
-                let mut href = "/admin/people".to_string();
+            Place::Users { filter, q } => {
+                let mut href = "/admin/users".to_string();
                 let mut sep = '?';
                 if *filter != Filter::All {
                     href.push_str(&format!("{sep}stage={}", filter.key()));
@@ -278,8 +284,7 @@ impl Place {
                 }
                 href
             }
-            Place::Person(id) => format!("/admin/people/{id}"),
-            Place::Invite => "/admin/invite".to_string(),
+            Place::Person(id) => format!("/admin/users/{id}"),
             Place::Features => "/admin/features".to_string(),
         }
     }
@@ -297,14 +302,13 @@ impl Place {
         let (path, query) = next.split_once('?').unwrap_or((next, ""));
         match path {
             "/admin" => Some(Place::Overview),
-            "/admin/people" => {
-                let (filter, q) = people_query(query);
-                Some(Place::People { filter, q })
+            "/admin/users" => {
+                let (filter, q) = users_query(query);
+                Some(Place::Users { filter, q })
             }
-            "/admin/invite" => Some(Place::Invite),
             "/admin/features" => Some(Place::Features),
             _ => {
-                let id = path.strip_prefix("/admin/people/")?;
+                let id = path.strip_prefix("/admin/users/")?;
                 // Digits only: `+1` and ` 1` parse as an i64 and are not a
                 // path this page ever wrote.
                 if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
@@ -316,8 +320,8 @@ impl Place {
     }
 }
 
-/// The people list's filter and search term, out of a query string.
-pub fn people_query(query: &str) -> (Filter, String) {
+/// The users list's filter and search term, out of a query string.
+pub fn users_query(query: &str) -> (Filter, String) {
     let mut filter = Filter::All;
     let mut q = String::new();
     for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
@@ -424,28 +428,23 @@ fn icon(paths: &str) -> String {
 }
 
 const IC_OVERVIEW: &str = r#"<rect x="2" y="2" width="5" height="5" rx="1.2"/><rect x="9" y="2" width="5" height="5" rx="1.2"/><rect x="2" y="9" width="5" height="5" rx="1.2"/><rect x="9" y="9" width="5" height="5" rx="1.2"/>"#;
-const IC_WAITING: &str = r#"<circle cx="8" cy="8" r="6"/><path d="M8 4.75V8l2.25 1.5"/>"#;
-const IC_INVITED: &str = r#"<rect x="1.75" y="3.5" width="12.5" height="9" rx="1.5"/><path d="M2.5 4.5 8 8.75l5.5-4.25"/>"#;
-const IC_MEMBERS: &str = r#"<circle cx="8" cy="5.5" r="2.75"/><path d="M2.75 13.5c.6-2.6 2.75-4 5.25-4s4.65 1.4 5.25 4"/>"#;
-const IC_EVERYONE: &str = r#"<circle cx="6" cy="5.75" r="2.25"/><path d="M1.75 13c.5-2.2 2.2-3.4 4.25-3.4s3.75 1.2 4.25 3.4"/><path d="M10.5 3.6a2.25 2.25 0 0 1 0 4.3M12.1 9.9c1.15.5 1.95 1.6 2.2 3.1"/>"#;
+const IC_USERS: &str = r#"<circle cx="6" cy="5.75" r="2.25"/><path d="M1.75 13c.5-2.2 2.2-3.4 4.25-3.4s3.75 1.2 4.25 3.4"/><path d="M10.5 3.6a2.25 2.25 0 0 1 0 4.3M12.1 9.9c1.15.5 1.95 1.6 2.2 3.1"/>"#;
 const IC_INVITE: &str = r#"<circle cx="6.5" cy="5.5" r="2.5"/><path d="M1.75 13.25c.55-2.4 2.45-3.75 4.75-3.75 1.3 0 2.45.4 3.3 1.15"/><path d="M12.5 8.5v5M10 11h5"/>"#;
 const IC_FEATURES: &str =
     r#"<rect x="1.5" y="4.5" width="13" height="7" rx="3.5"/><circle cx="11" cy="8" r="2"/>"#;
 const IC_SIGNOUT: &str =
     r#"<path d="M6.5 2.5h-3a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h3"/><path d="M10 5l3 3-3 3M13 8H6"/>"#;
 
-/// The sidebar: every page, the counts beside the ones that have them, and the
-/// way out at the foot.
+/// The sidebar: the three pages, the counts that want attention, and the way
+/// out at the foot.
 ///
 /// `counts` is `None` when the store did not answer, and then there are no
 /// badges at all rather than zeroes: "0 waiting" is a claim.
 fn sidebar(here: &Place, counts: Option<&Counts>) -> String {
     let current = |p: &Place| -> bool {
         match (p, here) {
-            (Place::People { filter: a, .. }, Place::People { filter: b, .. }) => a == b,
-            // A person's page sits under "Everyone", the list that holds them
-            // whatever their stage.
-            (Place::People { filter, .. }, Place::Person(_)) => *filter == Filter::All,
+            // Every list and every person's page is the Users tab.
+            (Place::Users { .. }, Place::Users { .. } | Place::Person(_)) => true,
             (a, b) => a == b,
         }
     };
@@ -467,35 +466,25 @@ fn sidebar(here: &Place, counts: Option<&Counts>) -> String {
             title = escape_html(title)
         )
     };
-    let people = |filter: Filter| Place::People {
-        filter,
-        q: String::new(),
-    };
-    let (waiting, invited, members) = match counts {
-        None => (String::new(), String::new(), String::new()),
+    // Only what asks for a hand: the queue, and the invites that never went.
+    // Totals live on the overview.
+    let users_badges = match counts {
+        None => String::new(),
         Some(c) => {
-            let waiting = badge(
-                c.waiting,
-                if c.waiting > 0 { "wait" } else { "" },
-                "waiting",
-            );
-            let mut invited = badge(c.invited, "", "invited, not signed up");
-            if c.unsent > 0 {
-                invited.push_str(&badge(c.unsent, "flag", "email not sent"));
+            let mut b = String::new();
+            if c.waiting > 0 {
+                b.push_str(&badge(c.waiting, "wait", "waiting"));
             }
-            (waiting, invited, badge(c.signed_up, "", "signed up"))
+            if c.unsent > 0 {
+                b.push_str(&badge(c.unsent, "flag", "email not sent"));
+            }
+            b
         }
     };
     format!(
         r#"<nav class="side-nav" aria-label="Admin">
-<p class="nav-h">Funnel</p>
 {overview}
-{waiting}
-{invited}
-{members}
-{everyone}
-<p class="nav-h">Manage</p>
-{invite}
+{users}
 {features}
 </nav>
 <div class="side-foot">
@@ -503,11 +492,7 @@ fn sidebar(here: &Place, counts: Option<&Counts>) -> String {
 <p class="hint">This session lasts {days} days.</p>
 </div>"#,
         overview = link(Place::Overview, IC_OVERVIEW, "Overview", String::new()),
-        waiting = link(people(Filter::Waiting), IC_WAITING, "Waiting", waiting),
-        invited = link(people(Filter::Invited), IC_INVITED, "Invited", invited),
-        members = link(people(Filter::Members), IC_MEMBERS, "Members", members),
-        everyone = link(people(Filter::All), IC_EVERYONE, "Everyone", String::new()),
-        invite = link(Place::Invite, IC_INVITE, "Invite someone", String::new()),
+        users = link(Place::users(Filter::All), IC_USERS, "Users", users_badges),
         features = link(Place::Features, IC_FEATURES, "Features", String::new()),
         signout = icon(IC_SIGNOUT),
         days = crate::cookie::ADMIN_COOKIE_TTL_SECS / (24 * 60 * 60),
@@ -543,12 +528,26 @@ fn page_head(eyebrow: &str, title: &str, lede: Option<&str>, actions: &str, hero
     )
 }
 
-/// The primary way to invite, as a link styled like a button. It goes to a page
-/// rather than posting, so it carries no form.
-fn invite_button() -> String {
+/// Inviting somebody who never joined the list: a button on the users page
+/// that opens the form in place. A native `<details>`, so it opens with no
+/// script; the form carries the page it sits on as [`NEXT_FIELD`].
+fn invite_pop(here: &Place) -> String {
     format!(
-        r#"<a class="button" href="/admin/invite">{}Invite someone</a>"#,
-        icon(IC_INVITE)
+        r#"<details class="pop"><summary class="button">{icon}Invite someone</summary>
+<div class="pop-body">
+<form class="invite" method="post" action="/admin/invite">
+<input type="hidden" name="{NEXT_FIELD}" value="{next}">
+<label for="email">Email address</label>
+<input type="email" id="email" name="email" placeholder="them@example.com"
+  autocomplete="off" autocapitalize="off" spellcheck="false" required>
+<button type="submit">Mint and email an invite</button>
+</form>
+<p class="hint">They do not have to be on the waitlist. You will be asked about Google's test-user list before anything is minted, and the code works once for {ttl} days.</p>
+</div>
+</details>"#,
+        icon = icon(IC_INVITE),
+        next = escape_html(&here.href()),
+        ttl = crate::invites::DEFAULT_TTL_DAYS,
     )
 }
 
@@ -587,7 +586,7 @@ fn panel(tone: &str, title: &str, count: Option<usize>, extra: &str, body: &str)
 /// every row would train the eye to skip the line that matters.
 fn who_cell(r: &UserRow) -> String {
     let mut cell = format!(
-        r#"<a class="person" href="/admin/people/{id}">{email}</a>"#,
+        r#"<a class="person" href="/admin/users/{id}">{email}</a>"#,
         id = r.id,
         email = escape_html(&r.email),
     );
@@ -662,7 +661,7 @@ fn row_action(r: &UserRow, back: &Place) -> String {
 }
 
 /// A list of people, or a sentence saying there is nobody to list.
-fn people_table(rows: &[&UserRow], back: &Place, show_stage: bool, empty: &str) -> String {
+fn user_table(rows: &[&UserRow], back: &Place, show_stage: bool, empty: &str) -> String {
     if rows.is_empty() {
         return format!(r#"<p class="muted empty">{}</p>"#, escape_html(empty));
     }
@@ -858,72 +857,39 @@ fn unavailable() -> String {
     r#"<p class="muted empty">Nothing to show until the store answers.</p>"#.to_string()
 }
 
-/// The overview: the funnel as the scope draws it, the queue, anything broken,
-/// and what happened lately.
+/// The overview: the pipeline. The funnel as the scope draws it, what needs a
+/// hand (each a link into Users, where the buttons are), how the funnel
+/// converts, and what happened lately. Nothing here acts: it is the page you
+/// read, and Users is the page you work.
 ///
-/// ALWAYS 200, even with a banner. The lists under it are correct either way,
-/// and the banner says what a button did NOT do; that is a finished page
-/// describing a real state, not a failed request.
+/// Usage data, when control has some, belongs here too, as panels under the
+/// pipeline.
+///
+/// ALWAYS 200, even with a banner: a banner over a real state is a finished
+/// page.
 pub fn admin_overview(rows: Option<&[UserRow]>, flash: Option<Banner>) -> Response {
     let here = Place::Overview;
     let counts = rows.map(Counts::of);
-    let head = page_head("Waitlist", "Overview", None, &invite_button(), true);
+    let review = format!(
+        r#"<a class="button" href="{}">{}Review the waitlist</a>"#,
+        escape_html(&Place::users(Filter::Waiting).href()),
+        icon(IC_USERS),
+    );
+    let head = page_head("Pipeline", "Overview", None, &review, true);
     let content = match rows {
         None => unavailable(),
         Some(rows) => {
             let c = counts.unwrap_or_default();
-            let waiting: Vec<&UserRow> = rows
-                .iter()
-                .filter(|r| Stage::of(r) == Stage::Waiting)
-                .collect();
-            let unsent: Vec<&UserRow> = rows
-                .iter()
-                .filter(|r| Stage::of(r) == Stage::Unsent)
-                .collect();
-            let shown = &waiting[..waiting.len().min(OVERVIEW_WAITING)];
-            let more = if waiting.len() > shown.len() {
-                format!(
-                    r#"<p class="more"><a href="{}">See all {} waiting</a></p>"#,
-                    escape_html(
-                        &Place::People {
-                            filter: Filter::Waiting,
-                            q: String::new()
-                        }
-                        .href()
-                    ),
-                    waiting.len(),
-                )
-            } else {
-                String::new()
-            };
-            let queue = panel(
-                "wait",
-                "Waiting",
-                Some(waiting.len()),
-                &format!(
-                    r#"<p class="hint">Oldest first. Approving mints one invite code and emails it. The code works once and expires in {} days.</p>"#,
-                    crate::invites::DEFAULT_TTL_DAYS
-                ),
-                &format!(
-                    "{}{more}",
-                    people_table(shown, &here, false, "Nobody is waiting.")
-                ),
-            );
-            let broken = panel(
-                if unsent.is_empty() { "" } else { "flag" },
-                "Email not sent",
-                Some(unsent.len()),
-                r#"<p class="hint">Approved, and nobody was told.</p>"#,
-                &people_table(&unsent, &here, false, "Every approved invite went out."),
-            );
             format!(
                 r#"{scope}
 <div class="cols">
-{queue}
-{broken}
+{needs}
+{conversion}
 </div>
 {feed}"#,
                 scope = scope(&c),
+                needs = panel("", "Needs you", None, "", &needs_you(rows, &c)),
+                conversion = panel("", "Conversion", None, "", &conversion(rows, &c)),
                 feed = panel("", "Recent activity", None, "", &feed(rows)),
             )
         }
@@ -933,6 +899,100 @@ pub fn admin_overview(rows: Option<&[UserRow]>, flash: Option<Banner>) -> Respon
         "Overview",
         &sidebar(&here, counts.as_ref()),
         &format!("{head}\n{}\n{content}", banner(flash)),
+    )
+}
+
+/// What is waiting on the operator, each line a way into the list that holds
+/// it. Said plainly when there is nothing.
+fn needs_you(rows: &[UserRow], c: &Counts) -> String {
+    let line = |tone: &str, n: usize, what: &str, filter: Filter, when: String| {
+        format!(
+            r#"<li class="{tone}"><span class="dot"></span><span class="what"><a href="{href}"><strong>{n}</strong> {what}</a></span><time>{when}</time></li>
+"#,
+            href = escape_html(&Place::users(filter).href()),
+            what = escape_html(what),
+        )
+    };
+    let mut items = String::new();
+    if c.waiting > 0 {
+        // The queue is oldest first, so its first row has waited longest.
+        let oldest = rows
+            .iter()
+            .find(|r| Stage::of(r) == Stage::Waiting)
+            .map(|r| format!("oldest {}", day(r.created_at)))
+            .unwrap_or_default();
+        items.push_str(&line(
+            "wait",
+            c.waiting,
+            "waiting for approval",
+            Filter::Waiting,
+            oldest,
+        ));
+    }
+    if c.unsent > 0 {
+        items.push_str(&line(
+            "flag",
+            c.unsent,
+            "approved, and the email did not go out",
+            Filter::Invited,
+            String::new(),
+        ));
+    }
+    if items.is_empty() {
+        return r#"<p class="muted empty">Nothing needs you. The queue is empty and every invite went out.</p>"#.to_string();
+    }
+    format!(r#"<ol class="feed">{items}</ol>"#)
+}
+
+/// How the funnel converts past approval: how many of each rung reached the
+/// next, and the median time it took the ones that did.
+fn conversion(rows: &[UserRow], c: &Counts) -> String {
+    let median_days = |mut spans: Vec<i64>| -> Option<i64> {
+        if spans.is_empty() {
+            return None;
+        }
+        spans.sort_unstable();
+        Some(spans[spans.len() / 2])
+    };
+    let to_signup = median_days(
+        rows.iter()
+            .filter_map(|r| Some((r.signed_up_at? - r.notified_at.or(r.approved_at)?).num_days()))
+            .collect(),
+    );
+    let to_device = median_days(
+        rows.iter()
+            .filter_map(|r| Some((r.first_paired_at? - r.signed_up_at?).num_days()))
+            .collect(),
+    );
+    let step = |label: &str, n: usize, of: usize, median: Option<i64>| {
+        let rate = if of > 0 {
+            format!("{}%", (n as f64 / of as f64 * 100.0).round())
+        } else {
+            "none yet".to_string()
+        };
+        let median = median
+            .map(|d| match d {
+                0 => "same day".to_string(),
+                1 => "median 1 day".to_string(),
+                d => format!("median {d} days"),
+            })
+            .unwrap_or_default();
+        format!(
+            r#"<tr><td class="who">{label}</td><td class="when">{n} of {of}</td><td class="when">{rate}</td><td class="when">{median}</td></tr>
+"#,
+            label = escape_html(label),
+        )
+    };
+    format!(
+        r#"<table class="conv"><tr><th>Step</th><th>Reached</th><th>Rate</th><th>Took</th></tr>
+{}{}</table>"#,
+        step("Invited to signed up", c.signed_up, c.approved, to_signup),
+        step(
+            "Signed up to a paired device",
+            c.active,
+            c.signed_up,
+            to_device
+        ),
     )
 }
 
@@ -1007,7 +1067,7 @@ fn feed(rows: &[UserRow]) -> String {
         .take(OVERVIEW_FEED)
         .map(|e| {
             format!(
-                r#"<li class="{tone}"><span class="dot"></span><span class="what"><a href="/admin/people/{id}">{email}</a> {what}</span><time>{when}</time></li>
+                r#"<li class="{tone}"><span class="dot"></span><span class="what"><a href="/admin/users/{id}">{email}</a> {what}</span><time>{when}</time></li>
 "#,
                 tone = e.stage.tone(),
                 id = e.row.id,
@@ -1032,24 +1092,29 @@ impl Stage {
     }
 }
 
-/// The people list: one table, filtered by stage and by a search, with the
-/// counts on the filters.
-pub fn admin_people(
+/// Users: everybody, the waitlist workflow, and search. One table, filtered by
+/// stage and by a search, with the counts on the filters and the invite form a
+/// button away.
+///
+/// THE RESULTS ARE ONE ELEMENT (`#results`), so `admin.js` can search as you
+/// type by swapping just that and the filter tabs, leaving the search box (and
+/// the caret in it) alone.
+pub fn admin_users(
     rows: Option<&[UserRow]>,
     filter: Filter,
     q: &str,
     flash: Option<Banner>,
 ) -> Response {
-    let here = Place::People {
+    let here = Place::Users {
         filter,
         q: q.to_string(),
     };
     let counts = rows.map(Counts::of);
     let head = page_head(
-        "People",
-        filter.title(),
-        Some(filter.lede()),
-        &invite_button(),
+        "Waitlist and accounts",
+        "Users",
+        None,
+        &invite_pop(&here),
         false,
     );
     let content = match rows {
@@ -1067,14 +1132,22 @@ pub fn admin_people(
                     format!(
                         r#"<a href="{href}"{aria}>{title}<span class="n">{n}</span></a>"#,
                         href = escape_html(
-                            &Place::People {
+                            &Place::Users {
                                 filter: *f,
                                 q: q.to_string()
                             }
                             .href()
                         ),
                         title = f.title(),
-                        n = f.count(&c),
+                        // With a search, what each tab would show; without
+                        // one, the same number, from the funnel's own count.
+                        n = if q.is_empty() {
+                            f.count(&c)
+                        } else {
+                            rows.iter()
+                                .filter(|r| f.admits(Stage::of(r)) && matches(r, q))
+                                .count()
+                        },
                     )
                 })
                 .collect();
@@ -1091,24 +1164,16 @@ pub fn admin_people(
             } else {
                 format!(
                     r#"<a class="clear" href="{}">Clear</a>"#,
-                    escape_html(
-                        &Place::People {
-                            filter,
-                            q: String::new()
-                        }
-                        .href()
-                    )
+                    escape_html(&Place::users(filter).href())
                 )
             };
             let toolbar = format!(
-                r#"<div class="toolbar">
-<nav class="seg" aria-label="Filter by stage">{tabs}</nav>
-<form class="search" method="get" action="/admin/people" role="search">{stage_field}
-<label class="sr" for="q">Search</label>
-<input type="search" id="q" name="q" value="{q}" placeholder="Address, name, or mailbox" autocomplete="off" autocapitalize="off" spellcheck="false">
+                r#"<form class="search" method="get" action="/admin/users" role="search">{stage_field}
+<label class="sr" for="q">Search users</label>
+<input type="search" id="q" name="q" value="{q}" placeholder="Search by address, name, Google account, or mailbox" autocomplete="off" autocapitalize="off" spellcheck="false">
 <button type="submit" class="quiet">Search</button>{clear}
 </form>
-</div>"#,
+<nav class="seg" aria-label="Filter by stage">{tabs}</nav>"#,
                 q = escape_html(q),
             );
             let shown: Vec<&UserRow> = rows
@@ -1128,20 +1193,25 @@ pub fn admin_people(
                 String::new()
             };
             format!(
-                "{toolbar}\n{}{capped}",
+                "{toolbar}\n<div id=\"results\">{}{capped}</div>\n<p class=\"hint foot\">{}</p>",
                 panel(
-                    "",
+                    if filter == Filter::Waiting {
+                        "wait"
+                    } else {
+                        ""
+                    },
                     filter.title(),
                     Some(shown.len()),
                     "",
-                    &people_table(&shown, &here, true, &empty),
+                    &user_table(&shown, &here, true, &empty),
                 ),
+                escape_html(filter.lede()),
             )
         }
     };
     console_app(
         StatusCode::OK,
-        filter.title(),
+        "Users",
         &sidebar(&here, counts.as_ref()),
         &format!("{head}\n{}\n{content}", banner(flash)),
     )
@@ -1154,12 +1224,12 @@ pub fn admin_people(
 pub fn admin_person(row: &UserRow, counts: Option<&Counts>, flash: Option<Banner>) -> Response {
     let here = Place::Person(row.id);
     let stage = Stage::of(row);
-    let everyone = Place::People {
+    let everyone = Place::Users {
         filter: Filter::All,
         q: String::new(),
     };
     let crumbs = format!(
-        r#"<nav class="crumbs" aria-label="Breadcrumb"><a href="{}">People</a><span aria-hidden="true">/</span><span>{}</span></nav>"#,
+        r#"<nav class="crumbs" aria-label="Breadcrumb"><a href="{}">Users</a><span aria-hidden="true">/</span><span>{}</span></nav>"#,
         escape_html(&everyone.href()),
         escape_html(&row.email),
     );
@@ -1292,7 +1362,7 @@ pub fn admin_person(row: &UserRow, counts: Option<&Counts>, flash: Option<Banner
 /// A person's page for an id that names nobody: the sidebar, the banner, and
 /// the way back to the list.
 pub fn admin_no_person(counts: Option<&Counts>, error: &str) -> Response {
-    let everyone = Place::People {
+    let everyone = Place::Users {
         filter: Filter::All,
         q: String::new(),
     };
@@ -1303,48 +1373,10 @@ pub fn admin_no_person(counts: Option<&Counts>, error: &str) -> Response {
         &format!(
             r#"{head}
 {banner}
-<p><a href="{href}">Back to everyone</a></p>"#,
-            head = page_head("People", "Nobody here", None, "", false),
+<p><a href="{href}">Back to users</a></p>"#,
+            head = page_head("Users", "Nobody here", None, "", false),
             banner = banner(Some(Banner::Stop(error))),
             href = escape_html(&everyone.href()),
-        ),
-    )
-}
-
-/// Inviting somebody who never joined the list, as its own page.
-pub fn admin_invite(counts: Option<&Counts>, flash: Option<Banner>) -> Response {
-    let here = Place::Invite;
-    let head = page_head(
-        "Manage",
-        "Invite someone",
-        Some(
-            "They do not have to be on the waitlist first. The invite lands on the same ledger as an approved row, so it shows under Invited with the same buttons.",
-        ),
-        "",
-        false,
-    );
-    let form = format!(
-        r#"<form class="invite" method="post" action="/admin/invite">
-<input type="hidden" name="{NEXT_FIELD}" value="{next}">
-<label class="sr" for="email">Email address</label>
-<input type="email" id="email" name="email" placeholder="them@example.com"
-  autocomplete="off" autocapitalize="off" spellcheck="false" required>
-<button type="submit">Mint and email an invite</button>
-</form>
-<p class="hint">You will be asked one question before anything is minted. The code works once and expires in {ttl} days.</p>"#,
-        next = escape_html(&here.href()),
-        ttl = crate::invites::DEFAULT_TTL_DAYS,
-    );
-    let before = r#"<p>Until Passband's OAuth client is verified, Google only lets an account finish consent if it is on the project's test-user list. Add the address there first, or the invite sends them to a wall.</p>"#;
-    console_app(
-        StatusCode::OK,
-        "Invite someone",
-        &sidebar(&here, counts),
-        &format!(
-            "{head}\n{}\n{}\n{}",
-            banner(flash),
-            panel("send", "Address", None, "", &form),
-            panel("wait", "Before you send", None, "", before),
         ),
     )
 }
@@ -1658,7 +1690,7 @@ fn scope(c: &Counts) -> String {
             format!(
                 r#"<a class="readout" href="{href}" style="--c:{c}"><span class="lbl">{label}</span><span class="num">{count}</span>{sub}</a>"#,
                 href = escape_html(
-                    &Place::People {
+                    &Place::Users {
                         filter: r.filter,
                         q: String::new()
                     }
@@ -1755,7 +1787,7 @@ pub(crate) mod tests {
     }
 
     async fn people(rows: &[UserRow], filter: Filter) -> String {
-        document_of(admin_people(Some(rows), filter, "", None)).await
+        document_of(admin_users(Some(rows), filter, "", None)).await
     }
 
     /// Every page a rendered string reaches, for the assertions that must hold
@@ -1766,9 +1798,15 @@ pub(crate) mod tests {
             body_of(admin_signed_out()).await,
             body_of(admin_overview(Some(rows), Some(Banner::Stop("no")))).await,
             body_of(admin_overview(None, Some(Banner::Stop("no")))).await,
-            body_of(admin_people(Some(rows), all(), "", None)).await,
-            body_of(admin_people(Some(rows), Filter::Waiting, "ada", None)).await,
-            body_of(admin_invite(None, Some(Banner::Done(Done::Invited)))).await,
+            body_of(admin_users(Some(rows), all(), "", None)).await,
+            body_of(admin_users(Some(rows), Filter::Waiting, "ada", None)).await,
+            body_of(admin_users(
+                Some(rows),
+                Filter::All,
+                "",
+                Some(Banner::Done(Done::Invited)),
+            ))
+            .await,
             body_of(admin_features(&[], None, None, None, true, 6)).await,
             body_of(admin_confirm(
                 "/admin/approve",
@@ -1832,7 +1870,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_search_term_is_escaped_and_encoded_wherever_it_lands() {
         let q = r#""><script>x</script>&stage=members"#;
-        let html = document_of(admin_people(Some(&[]), Filter::Waiting, q, None)).await;
+        let html = document_of(admin_users(Some(&[]), Filter::Waiting, q, None)).await;
         assert!(!html.contains("<script>x"), "{html}");
         assert!(
             html.contains(r#"value="&quot;&gt;&lt;script&gt;"#),
@@ -1885,7 +1923,7 @@ pub(crate) mod tests {
     /// back to it rather than to the top of the board.
     #[tokio::test]
     async fn every_button_carries_its_page() {
-        let html = document_of(admin_people(
+        let html = document_of(admin_users(
             Some(&[waiting(1, "ada@example.com")]),
             Filter::Waiting,
             "ada",
@@ -1893,12 +1931,12 @@ pub(crate) mod tests {
         ))
         .await;
         assert!(
-            html.contains(r#"name="next" value="/admin/people?stage=waiting&amp;q=ada""#),
+            html.contains(r#"name="next" value="/admin/users?stage=waiting&amp;q=ada""#),
             "{html}"
         );
         let html = document_of(admin_person(&waiting(1, "ada@example.com"), None, None)).await;
         assert!(
-            html.contains(r#"name="next" value="/admin/people/1""#),
+            html.contains(r#"name="next" value="/admin/users/1""#),
             "{html}"
         );
         let html = document_of(admin_confirm(
@@ -1910,11 +1948,11 @@ pub(crate) mod tests {
         ))
         .await;
         assert!(
-            html.contains(r#"name="next" value="/admin/people/1""#),
+            html.contains(r#"name="next" value="/admin/users/1""#),
             "{html}"
         );
         assert!(
-            html.contains(r#"<a href="/admin/people/1">Cancel"#),
+            html.contains(r#"<a href="/admin/users/1">Cancel"#),
             "{html}"
         );
     }
@@ -1957,7 +1995,7 @@ pub(crate) mod tests {
         assert!(html.contains("50% of signed up"), "{html}");
         // The readouts open the lists they count.
         assert!(
-            html.contains(r#"<a class="readout" href="/admin/people?stage=waiting""#),
+            html.contains(r#"<a class="readout" href="/admin/users?stage=waiting""#),
             "{html}"
         );
     }
@@ -2019,7 +2057,7 @@ pub(crate) mod tests {
             },
         ];
         for (q, who) in [("LOVELACE", "ada"), ("navy", "hopper"), ("amaz", "hopper")] {
-            let html = document_of(admin_people(Some(&rows), all(), q, None)).await;
+            let html = document_of(admin_users(Some(&rows), all(), q, None)).await;
             assert!(
                 html.contains(&format!(">{who}@example.com</a>")),
                 "{q}: {html}"
@@ -2030,7 +2068,18 @@ pub(crate) mod tests {
                 "{q}: {html}"
             );
         }
-        let html = document_of(admin_people(Some(&rows), all(), "zzz", None)).await;
+        // The tabs count what the search found, so a tab with nothing in it
+        // says so before it is opened.
+        let html = document_of(admin_users(Some(&rows), all(), "navy", None)).await;
+        assert!(
+            html.contains(r#"Waiting<span class="n">0</span>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"Members<span class="n">1</span>"#),
+            "{html}"
+        );
+        let html = document_of(admin_users(Some(&rows), all(), "zzz", None)).await;
         assert!(
             html.contains("Nobody here matches \u{201c}zzz\u{201d}."),
             "{html}"
@@ -2048,7 +2097,7 @@ pub(crate) mod tests {
                 Some(Banner::Stop("The store did not answer.")),
             ))
             .await,
-            document_of(admin_people(
+            document_of(admin_users(
                 None,
                 Filter::Waiting,
                 "",
@@ -2063,35 +2112,42 @@ pub(crate) mod tests {
         }
     }
 
-    /// The overview names the queue and the broken invites, and points at the
-    /// rest of the queue rather than drawing all of it.
+    /// The overview is the pipeline and acts on nothing: what needs a hand is
+    /// a link into Users, where the buttons are.
     #[tokio::test]
-    async fn the_overview_shows_the_queue_and_what_is_broken() {
-        let mut rows: Vec<UserRow> = (1..=8)
+    async fn the_overview_reads_the_pipeline_and_presses_nothing() {
+        let mut rows: Vec<UserRow> = (1..=3)
             .map(|i| waiting(i, &format!("w{i}@example.com")))
             .collect();
         rows.push(row(9, "broken@example.com", false));
+        rows.push(UserRow {
+            signed_up_at: Some(at() + chrono::Duration::days(3)),
+            tenant_label: Some("c".into()),
+            ..row(10, "c@example.com", true)
+        });
         let html = document_of(admin_overview(Some(&rows), None)).await;
-        assert_eq!(
-            html.matches(">Approve</button>").count(),
-            OVERVIEW_WAITING,
-            "{html}"
-        );
-        assert!(html.contains("See all 8 waiting"), "{html}");
+        assert!(!html.contains("<button type=\"submit\">Approve"), "{html}");
+        assert!(!html.contains("Send invite"), "{html}");
+        assert!(!html.contains("action=\"/admin/approve\""), "{html}");
         assert!(
-            html.contains(r#"<button type="submit">Send invite</button>"#),
+            html.contains(r#"<a href="/admin/users?stage=waiting"><strong>3</strong> waiting for approval</a>"#),
             "{html}"
         );
-        // The feed, newest first: everything here happened on one day, and the
-        // approval outranks a join that landed with it.
+        assert!(html.contains("oldest 2026-01-01"), "{html}");
+        assert!(
+            html.contains(r#"<a href="/admin/users?stage=invited"><strong>1</strong> approved, and the email did not go out</a>"#),
+            "{html}"
+        );
+        // Conversion: one of two approved signed up, three days after the mail.
+        assert!(html.contains("<td class=\"when\">1 of 2</td><td class=\"when\">50%</td><td class=\"when\">median 3 days</td>"), "{html}");
         assert!(
             html.contains("was approved, and the email did not go out"),
             "{html}"
         );
 
         let calm = document_of(admin_overview(Some(&[]), None)).await;
-        assert!(calm.contains("Nobody is waiting."), "{calm}");
-        assert!(calm.contains("Every approved invite went out."), "{calm}");
+        assert!(calm.contains("Nothing needs you."), "{calm}");
+        assert!(calm.contains("none yet"), "{calm}");
         assert!(calm.contains("Nothing has happened yet."), "{calm}");
     }
 
@@ -2212,10 +2268,10 @@ pub(crate) mod tests {
     #[test]
     fn next_parses_only_into_pages_and_writes_them_fresh() {
         assert_eq!(Place::parse("/admin"), Some(Place::Overview));
-        assert_eq!(Place::parse("/admin/people/42"), Some(Place::Person(42)));
+        assert_eq!(Place::parse("/admin/users/42"), Some(Place::Person(42)));
         assert_eq!(
-            Place::parse("/admin/people?stage=invited&q=a%20b"),
-            Some(Place::People {
+            Place::parse("/admin/users?stage=invited&q=a%20b"),
+            Some(Place::Users {
                 filter: Filter::Invited,
                 q: "a b".into()
             })
@@ -2225,21 +2281,21 @@ pub(crate) mod tests {
             "https://evil.test/admin",
             "//evil.test",
             "/admin/../x",
-            "/admin/people/+1",
-            "/admin/people/1/x",
-            "/admin/people/",
+            "/admin/users/+1",
+            "/admin/users/1/x",
+            "/admin/users/",
             "/adminx",
-            "/admin/people/99999999999999999999999",
+            "/admin/users/99999999999999999999999",
         ] {
             assert_eq!(Place::parse(bad), None, "{bad:?}");
         }
-        let p = Place::People {
+        let p = Place::Users {
             filter: Filter::Waiting,
             q: "a&b\r\nSet-Cookie: x".into(),
         };
         assert_eq!(
             p.href(),
-            "/admin/people?stage=waiting&q=a%26b%0D%0ASet-Cookie%3A%20x"
+            "/admin/users?stage=waiting&q=a%26b%0D%0ASet-Cookie%3A%20x"
         );
         assert_eq!(
             p.href_done(Done::Approved),
@@ -2273,8 +2329,7 @@ pub(crate) mod tests {
     async fn every_app_page_carries_the_way_out() {
         for html in [
             document_of(admin_overview(Some(&[]), None)).await,
-            document_of(admin_people(Some(&[]), all(), "", None)).await,
-            document_of(admin_invite(None, None)).await,
+            document_of(admin_users(Some(&[]), all(), "", None)).await,
             document_of(admin_features(&[], None, None, None, false, 6)).await,
             document_of(admin_person(&waiting(1, "a@example.com"), None, None)).await,
         ] {
@@ -2287,9 +2342,9 @@ pub(crate) mod tests {
     /// The sidebar knows where it is.
     #[tokio::test]
     async fn the_sidebar_marks_the_page_it_is_on() {
-        let html = document_of(admin_people(Some(&[]), Filter::Members, "", None)).await;
+        let html = document_of(admin_users(Some(&[]), Filter::Members, "", None)).await;
         assert!(
-            html.contains(r#"<a href="/admin/people?stage=members" aria-current="page">"#),
+            html.contains(r#"<a href="/admin/users?stage=members" aria-current="page">"#),
             "{html}"
         );
         assert_eq!(
@@ -2297,11 +2352,16 @@ pub(crate) mod tests {
             2,
             "sidebar and tab: {html}"
         );
-        let html = document_of(admin_invite(None, None)).await;
+        // A person's page is still the Users tab.
+        let html = document_of(admin_person(&waiting(1, "a@example.com"), None, None)).await;
         assert!(
-            html.contains(r#"<a href="/admin/invite" aria-current="page">"#),
+            html.contains(r#"<a href="/admin/users" aria-current="page">"#),
             "{html}"
         );
+        // Three pages, no more.
+        let nav = html.split_once(r#"<nav class="side-nav""#).unwrap().1;
+        let nav = nav.split_once("</nav>").unwrap().0;
+        assert_eq!(nav.matches("<a href=").count(), 3, "{nav}");
     }
 
     /// THE ONE EXCEPTION TO "NO SCRIPT", AND HOW NARROW IT IS. Behind the door
@@ -2318,9 +2378,8 @@ pub(crate) mod tests {
         };
         for app in [
             csp(admin_overview(Some(&[]), None)),
-            csp(admin_people(Some(&[]), all(), "", None)),
+            csp(admin_users(Some(&[]), all(), "", None)),
             csp(admin_person(&waiting(1, "a@example.com"), None, None)),
-            csp(admin_invite(None, None)),
             csp(admin_features(&[], None, None, None, false, 6)),
         ] {
             assert!(app.contains("default-src 'none'"), "{app}");
@@ -2359,11 +2418,21 @@ pub(crate) mod tests {
         assert!(!html.contains("side-nav"), "{html}");
     }
 
-    /// The direct-invite form is styled: the stylesheet once named input types
-    /// by hand, and an `email` input rendered as a browser default.
+    /// The direct-invite form is on Users, behind a button that opens it in
+    /// place, and it is styled: the stylesheet once named input types by hand,
+    /// and an `email` input rendered as a browser default.
     #[tokio::test]
-    async fn the_invite_page_carries_a_styled_form() {
-        let page = body_of(admin_invite(None, None)).await;
+    async fn the_users_page_carries_a_styled_invite_form() {
+        let page = body_of(admin_users(Some(&[]), Filter::Waiting, "", None)).await;
+        assert!(
+            page.contains(r#"<details class="pop"><summary class="button">"#),
+            "{page}"
+        );
+        // It comes back to the list it was opened on.
+        assert!(
+            page.contains(r#"name="next" value="/admin/users?stage=waiting""#),
+            "{page}"
+        );
         assert!(page.contains(r#"action="/admin/invite""#), "{page}");
         assert!(page.contains(r#"name="email""#), "{page}");
         assert!(page.contains("Mint and email an invite"), "{page}");

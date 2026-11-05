@@ -214,8 +214,8 @@ pub async fn page(
     view(&state, &Place::Overview, done_banner(query.as_deref())).await
 }
 
-/// `GET /admin/people` — everybody, filtered by `stage` and searched by `q`.
-pub async fn people(
+/// `GET /admin/users` — everybody, filtered by `stage` and searched by `q`.
+pub async fn users(
     State(state): State<ControlState>,
     headers: HeaderMap,
     RawQuery(query): RawQuery,
@@ -224,16 +224,16 @@ pub async fn people(
         return views::admin_login(None);
     }
     let query = query.unwrap_or_default();
-    let (filter, q) = views::people_query(&query);
+    let (filter, q) = views::users_query(&query);
     view(
         &state,
-        &Place::People { filter, q },
+        &Place::Users { filter, q },
         done_banner(Some(&query)),
     )
     .await
 }
 
-/// `GET /admin/people/{id}` — one person.
+/// `GET /admin/users/{id}` — one person.
 ///
 /// The id is taken as text and read here, so a path that is not a row id gets
 /// this console's own "nobody here" page rather than the router's plain-text
@@ -247,25 +247,13 @@ pub async fn person(
     if !is_admin(&state, &headers) {
         return views::admin_login(None);
     }
-    match Place::parse(&format!("/admin/people/{id}")) {
+    match Place::parse(&format!("/admin/users/{id}")) {
         Some(place) => view(&state, &place, done_banner(query.as_deref())).await,
         None => {
             let counts = counts(&state).await;
             views::admin_no_person(counts.as_ref(), NO_SUCH_ROW)
         }
     }
-}
-
-/// `GET /admin/invite` — the page the direct-invite form lives on.
-pub async fn invite_page(
-    State(state): State<ControlState>,
-    headers: HeaderMap,
-    RawQuery(query): RawQuery,
-) -> Response {
-    if !is_admin(&state, &headers) {
-        return views::admin_login(None);
-    }
-    view(&state, &Place::Invite, done_banner(query.as_deref())).await
 }
 
 /// The console's script. See `admin.js` for what it does and
@@ -370,7 +358,7 @@ pub async fn invite(
     if !same_origin(&state, &headers) {
         return cross_origin(&state, &headers);
     }
-    let back = back(&body, Place::Invite);
+    let back = back(&body, Place::users(views::Filter::All));
 
     // Capped one over the limit so a value AT the limit is still whole and an
     // address longer than we accept is refused rather than truncated into a
@@ -936,8 +924,7 @@ async fn view(state: &ControlState, place: &Place, flash: Option<Banner<'_>>) ->
         flash
     };
     match place {
-        Place::People { filter, q } => views::admin_people(rows.as_deref(), *filter, q, flash),
-        Place::Invite => views::admin_invite(rows.as_deref().map(Counts::of).as_ref(), flash),
+        Place::Users { filter, q } => views::admin_users(rows.as_deref(), *filter, q, flash),
         // Nothing posts here with the features page as its `next`; it has its
         // own save. The overview is the honest landing for anything else.
         Place::Overview | Place::Features | Place::Person(_) => {

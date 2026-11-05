@@ -161,11 +161,11 @@ body.console main { position: relative; z-index: 1; max-width: 30rem; }
 
 /* CONTROLS: the landing page's call to action, a dark slab with a passband
    edge all the way round that brightens on hover. */
-.console button, .console a.button { font: 500 0.88rem/1 inherit; color: var(--ink);
+.console button, .console :is(a, summary).button { font: 500 0.88rem/1 inherit; color: var(--ink);
   padding: 0.75rem 1.15rem; border-radius: 9px; cursor: pointer;
   background: linear-gradient(180deg, #152032, #0e1622); border: 1px solid rgba(78, 155, 234, 0.4);
   transition: border-color 0.15s, background 0.15s; }
-.console button:hover, .console a.button:hover { border-color: rgba(130, 186, 245, 0.8); }
+.console button:hover, .console :is(a, summary).button:hover { border-color: rgba(130, 186, 245, 0.8); }
 .console button.quiet { background: transparent; color: var(--dim); padding: 0.42rem 0.7rem;
   font-size: 0.8rem; border-color: rgba(130, 186, 245, 0.2); }
 .console button.quiet:hover { color: var(--ink); border-color: rgba(130, 186, 245, 0.5); }
@@ -217,9 +217,6 @@ body.console.app { padding: 0; }
 .app .side .brand svg { height: 1.4rem; }
 .app .side .wordmark { font-size: 1.25rem; }
 .app .side-nav { display: flex; flex-direction: column; gap: 2px; }
-.app .nav-h { margin: 1rem 0.65rem 0.45rem; font: 600 10px/1 var(--mono); letter-spacing: 0.16em;
-  text-transform: uppercase; color: var(--faintest); }
-.app .nav-h:first-child { margin-top: 0; }
 .app .side-nav a { display: flex; align-items: center; gap: 0.65rem; padding: 0.55rem 0.65rem;
   border-radius: 9px; color: var(--dim); text-decoration: none; font-size: 0.92rem;
   transition: background 0.15s, color 0.15s; }
@@ -254,8 +251,9 @@ body.console.app main { max-width: 70rem; width: 100%; box-sizing: border-box; m
 .app .page-head.hero h1 { font-size: clamp(2.6rem, 5.5vw, 4rem); }
 .app .lede { margin: 0.7rem 0 0; max-width: 42rem; font-size: 0.95rem; }
 .app .head-actions { display: flex; gap: 0.6rem; }
-.console a.button { display: inline-flex; align-items: center; gap: 0.55rem; text-decoration: none; }
-.console a.button .ic { color: var(--accent-ink); }
+.console :is(a, summary).button { display: inline-flex; align-items: center; gap: 0.55rem; text-decoration: none;
+  cursor: pointer; user-select: none; }
+.console :is(a, summary).button .ic { color: var(--accent-ink); }
 .app .crumbs { display: flex; gap: 0.55rem; margin: 0 0 1.4rem; font: 500 0.8rem/1.4 var(--mono);
   color: var(--faintest); overflow-wrap: anywhere; }
 .app .crumbs a { color: var(--faint); text-decoration: none; }
@@ -295,10 +293,13 @@ html.is-loading body.console.app::after { content: ""; position: fixed; top: 0; 
 .console td.stage code { font-size: 0.78rem; }
 .console td.stage .muted { font: 500 0.78rem/1 var(--mono); color: var(--faint); font-variant-numeric: tabular-nums; }
 
-/* THE TOOLBAR over the people list: the stage filters as one segmented
-   control, and the search beside it. */
-.app .toolbar { display: flex; align-items: center; gap: 0.75rem 1rem; flex-wrap: wrap; margin: 0 0 1rem; }
-.app .seg { display: inline-flex; padding: 3px; border-radius: 11px; background: rgba(14, 20, 29, 0.72);
+/* THE USERS LIST: the search is the widest thing on the page, the stage
+   filters sit under it as one segmented control, and the results under
+   those. */
+.app .search { display: flex; align-items: center; gap: 0.5rem; margin: 0 0 0.9rem; }
+.app .search input { flex: 1; min-width: 0; margin: 0; padding: 0.85rem 1rem; font-size: 0.95rem; }
+.app .search .clear { font-size: 0.82rem; color: var(--faint); white-space: nowrap; }
+.app .seg { margin: 0 0 1rem; display: inline-flex; padding: 3px; border-radius: 11px; background: rgba(14, 20, 29, 0.72);
   box-shadow: inset 0 0 0 1px var(--hair); overflow-x: auto; max-width: 100%; }
 .app .seg a { display: inline-flex; align-items: center; gap: 0.45rem; padding: 0.5rem 0.8rem;
   border-radius: 8px; color: var(--faint); text-decoration: none; white-space: nowrap;
@@ -308,10 +309,28 @@ html.is-loading body.console.app::after { content: ""; position: fixed; top: 0; 
   box-shadow: inset 0 0 0 1px rgba(78, 155, 234, 0.28); }
 .app .seg .n { color: var(--faintest); font-variant-numeric: tabular-nums; }
 .app .seg a[aria-current] .n { color: var(--accent-ink); }
-.app .search { display: flex; align-items: center; gap: 0.5rem; margin: 0 0 0 auto; }
-.app .search input { width: 17rem; margin: 0; padding: 0.6rem 0.8rem; font-size: 0.85rem; }
-.app .search .clear { font-size: 0.82rem; color: var(--faint); }
+#results { transition: opacity 0.15s; }
+html.is-loading #results { opacity: 0.6; }
 
+/* INVITE, as a popover under its button: a native <details>, so it opens
+   with no script, and a panel of the same glass as everything else. */
+.app .head-actions { position: relative; }
+.app details.pop { margin: 0; padding: 0; border: 0; }
+.app .pop > summary { list-style: none; }
+.app .pop > summary::-webkit-details-marker { display: none; }
+.app .pop[open] > summary { border-color: rgba(130, 186, 245, 0.8); }
+.app .pop-body { position: absolute; right: 0; top: calc(100% + 0.6rem); z-index: 6; width: min(26rem, 85vw);
+  box-sizing: border-box; padding: 1.1rem 1.15rem 0.4rem; border-radius: 14px;
+  background: rgba(12, 18, 28, 0.97); box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.18), 0 30px 70px -20px rgba(0, 0, 0, 0.9);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); }
+.app .pop-body .invite { flex-direction: column; margin: 0 0 0.75rem; }
+.app .pop-body .invite label { margin: 0 0 0.1rem; }
+.app .pop-body .hint { font-size: 0.8rem; }
+
+/* CONVERSION: a small table of rates. */
+.console table.conv { margin: 0.4rem 0 0.4rem; }
+.console table.conv td.when { text-align: right; }
+.console table.conv th:not(:first-child) { text-align: right; }
 /* THE FEED and THE LADDER: a dot in the stage's colour, what happened, when. */
 .console .feed { list-style: none; margin: 0.5rem 0 0.4rem; padding: 0; }
 .console .feed li { --c: var(--faintest); display: grid; grid-template-columns: 0.5rem minmax(0, 1fr) auto;
@@ -371,14 +390,12 @@ html.is-loading body.console.app::after { content: ""; position: fixed; top: 0; 
   .app .side .brand { margin: 0; }
   .app .side-nav { order: 3; flex: 1 0 100%; flex-direction: row; overflow-x: auto; gap: 4px;
     padding-bottom: 0.25rem; }
-  .app .nav-h { display: none; }
   .app .side-nav a { flex: none; white-space: nowrap; padding: 0.5rem 0.7rem; }
   .app .side-foot { margin: 0 0 0 auto; padding: 0; display: flex; align-items: center; }
   .app .side-foot form { margin: 0; }
   .app .side-foot .hint { display: none; }
   body.console.app main { padding: 1.75rem 1rem 3rem; }
-  .app .search { margin: 0; flex: 1 1 100%; }
-  .app .search input { flex: 1; width: auto; }
+  .app .pop-body { right: auto; left: 0; }
 }
 
 /* PHONES: readouts two by two, and table rows become cards, because three

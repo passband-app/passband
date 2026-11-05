@@ -427,7 +427,7 @@ async fn a_name_arrives_with_the_address() {
     assert_eq!(rows[0].name.as_deref(), Some("Ada Lovelace"));
 
     let cookie = h.sign_in().await;
-    let (_, _, board) = h.get("/admin", Some(&cookie)).await;
+    let (_, _, board) = h.get("/admin/users", Some(&cookie)).await;
     assert!(board.contains("Ada Lovelace"), "{board}");
     assert!(board.contains(APPLICANT), "{board}");
 }
@@ -567,7 +567,7 @@ async fn the_admin_page_opens_only_to_the_token() {
     assert!(!headers.contains_key(header::SET_COOKIE), "no session");
 
     let cookie = h.sign_in().await;
-    let (status, _, body) = h.get("/admin", Some(&cookie)).await;
+    let (status, _, body) = h.get("/admin/users", Some(&cookie)).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains(APPLICANT), "{body}");
     assert!(body.contains(">Approve</button>"), "{body}");
@@ -604,7 +604,7 @@ async fn the_dashboard_escapes_what_a_stranger_typed() {
     assert_eq!(status, StatusCode::OK);
 
     let cookie = h.sign_in().await;
-    let (_, _, body) = h.get("/admin", Some(&cookie)).await;
+    let (_, _, body) = h.get("/admin/users", Some(&cookie)).await;
     assert!(!body.contains(hostile), "{body}");
     assert!(body.contains("a&amp;&#39;b@evil.test"), "{body}");
     // The escaped form, and NOT a whole-page `!contains("<script>")`: this page
@@ -630,7 +630,7 @@ async fn a_name_off_the_public_form_cannot_forge_the_google_line() {
     assert_eq!(status, StatusCode::OK);
 
     let cookie = h.sign_in().await;
-    let (_, _, board) = h.get("/admin", Some(&cookie)).await;
+    let (_, _, board) = h.get("/admin/users", Some(&cookie)).await;
     // Quoted, in the register that says somebody typed it...
     assert!(
         board.contains("<span class=\"given\">\u{201c}signed up as ada@example.com\u{201d}</span>"),
@@ -715,13 +715,13 @@ async fn approving_mails_a_code_that_redeems() {
         page.contains("Approved, and the invite is on its way."),
         "{page}"
     );
-    let (_, _, list) = h.get("/admin/people?stage=invited", Some(&cookie)).await;
+    let (_, _, list) = h.get("/admin/users?stage=invited", Some(&cookie)).await;
     assert!(!list.contains(&code), "{list}");
     assert!(
         list.contains(r#"<span class="pill sent">invited</span>"#),
         "{list}"
     );
-    let (_, _, person) = h.get(&format!("/admin/people/{id}"), Some(&cookie)).await;
+    let (_, _, person) = h.get(&format!("/admin/users/{id}"), Some(&cookie)).await;
     assert!(!person.contains(&code), "{person}");
     let page = format!("{page}{list}{person}");
 
@@ -797,16 +797,20 @@ async fn a_failed_send_leaves_a_row_the_operator_can_repair() {
     assert!(!notified, "nothing was accepted, so nothing is stamped");
     let first_invite = first_invite.expect("the code was minted before the send");
 
-    // On the overview's "Email not sent" panel, with the loud button...
+    // The overview says so and points at the list...
     let (_, _, page) = h.get("/admin", Some(&cookie)).await;
     assert!(
-        page.contains(r#"<button type="submit">Send invite</button>"#),
+        page.contains("<strong>1</strong> approved, and the email did not go out"),
         "{page}"
     );
-    // ...and on the list, pilled.
-    let (_, _, page) = h.get("/admin/people?stage=invited", Some(&cookie)).await;
+    // ...where the row is pilled, with the loud button.
+    let (_, _, page) = h.get("/admin/users?stage=invited", Some(&cookie)).await;
     assert!(
         page.contains(r#"<span class="pill flag">email not sent</span>"#),
+        "{page}"
+    );
+    assert!(
+        page.contains(r#"<button type="submit">Send invite</button>"#),
         "{page}"
     );
 
@@ -976,9 +980,8 @@ async fn a_signup_cookie_is_not_an_admin_cookie() {
     ] {
         for page in [
             "/admin".to_string(),
-            "/admin/people".to_string(),
-            format!("/admin/people/{id}"),
-            "/admin/invite".to_string(),
+            "/admin/users".to_string(),
+            format!("/admin/users/{id}"),
         ] {
             let (status, _, body) = h.get(&page, Some(&value)).await;
             assert_eq!(status, StatusCode::OK, "{page}");
@@ -1228,7 +1231,7 @@ async fn an_address_that_never_joined_can_be_invited_directly() {
     );
 
     // And the row is on the list with the same button as everybody else.
-    let (_, _, page) = h.get("/admin/people?stage=invited", Some(&cookie)).await;
+    let (_, _, page) = h.get("/admin/users?stage=invited", Some(&cookie)).await;
     assert!(page.contains(">grace@example.com</a>"), "{page}");
     assert!(page.contains(">Re-send</button>"), "{page}");
 }
@@ -1491,29 +1494,29 @@ async fn an_action_returns_to_the_page_it_came_from() {
     let (_, _, ask) = h
         .post_form(
             "/admin/approve",
-            format!("id={id}&next=%2Fadmin%2Fpeople%2F{id}"),
+            format!("id={id}&next=%2Fadmin%2Fusers%2F{id}"),
             Some(&cookie),
         )
         .await;
     assert!(
-        ask.contains(&format!(r#"name="next" value="/admin/people/{id}""#)),
+        ask.contains(&format!(r#"name="next" value="/admin/users/{id}""#)),
         "{ask}"
     );
     assert!(
-        ask.contains(&format!(r#"<a href="/admin/people/{id}">Cancel"#)),
+        ask.contains(&format!(r#"<a href="/admin/users/{id}">Cancel"#)),
         "{ask}"
     );
 
     let (status, headers, _) = h
         .post_form(
             "/admin/approve",
-            format!("id={id}&confirmed=yes&next=%2Fadmin%2Fpeople%2F{id}"),
+            format!("id={id}&confirmed=yes&next=%2Fadmin%2Fusers%2F{id}"),
             Some(&cookie),
         )
         .await;
     assert_eq!(status, StatusCode::SEE_OTHER);
     let location = header_of(&headers, header::LOCATION);
-    assert_eq!(location, format!("/admin/people/{id}?done=approved"));
+    assert_eq!(location, format!("/admin/users/{id}?done=approved"));
     let (status, _, page) = h.get(&location, Some(&cookie)).await;
     assert_eq!(status, StatusCode::OK);
     assert!(
@@ -1526,13 +1529,17 @@ async fn an_action_returns_to_the_page_it_came_from() {
     let (status, _, page) = h
         .post_form(
             "/admin/approve",
-            format!("id={id}&confirmed=yes&next=%2Fadmin%2Fpeople%3Fstage%3Dwaiting"),
+            format!("id={id}&confirmed=yes&next=%2Fadmin%2Fusers%3Fstage%3Dwaiting"),
             Some(&cookie),
         )
         .await;
     assert_eq!(status, StatusCode::OK);
     assert!(page.contains("already approved"), "{page}");
-    assert!(page.contains("<h1>Waiting</h1>"), "{page}");
+    assert!(page.contains("<h1>Users</h1>"), "{page}");
+    assert!(
+        page.contains(r#"<a href="/admin/users?stage=waiting" aria-current="page">Waiting"#),
+        "{page}"
+    );
 
     // Somewhere that is not ours is the overview, never a redirect off-site.
     h.join("bob@example.com").await;
@@ -1559,13 +1566,13 @@ async fn an_action_returns_to_the_page_it_came_from() {
     );
 
     // A person who is not there is the console's own page, not the router's.
-    let (status, _, page) = h.get("/admin/people/999999", Some(&cookie)).await;
+    let (status, _, page) = h.get("/admin/users/999999", Some(&cookie)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(
         page.contains("There is no waitlist row with that id."),
         "{page}"
     );
-    let (status, _, page) = h.get("/admin/people/ada", Some(&cookie)).await;
+    let (status, _, page) = h.get("/admin/users/ada", Some(&cookie)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(page.contains(r#"<aside class="side">"#), "{page}");
 }

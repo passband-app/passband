@@ -133,6 +133,47 @@
     if (!ok) HTMLFormElement.prototype.submit.call(form);
   });
 
+  // SEARCH AS YOU TYPE. A pause in typing fetches the list for what is in the
+  // box and swaps only the results and the filter tabs (whose links carry the
+  // search), never the box itself, so the caret stays where it was. The
+  // address bar follows without a history entry per keystroke. Enter still
+  // submits the form, which the handler above turns into the same fetch.
+  let typing = null;
+  let searching = null;
+  document.addEventListener("input", (e) => {
+    const box = e.target;
+    if (!(box instanceof HTMLInputElement) || box.type !== "search") return;
+    const form = box.form;
+    if (!form || !form.classList.contains("search")) return;
+    clearTimeout(typing);
+    typing = setTimeout(async () => {
+      const url = adminUrl(form.getAttribute("action"));
+      if (!url) return;
+      url.search = new URLSearchParams(new FormData(form)).toString();
+      if (searching) searching.abort();
+      const ctl = new AbortController();
+      searching = ctl;
+      busy(true);
+      try {
+        const resp = await fetch(url, { credentials: "same-origin", signal: ctl.signal });
+        const next = new DOMParser().parseFromString(await resp.text(), "text/html");
+        for (const sel of ["#results", ".seg"]) {
+          const now = document.querySelector(sel);
+          const then = next.querySelector(sel);
+          if (now && then) now.replaceWith(document.adoptNode(then));
+        }
+        history.replaceState({ admin: true }, "", url);
+      } catch (err) {
+        if (!err || err.name !== "AbortError") form.requestSubmit();
+      } finally {
+        if (searching === ctl) {
+          searching = null;
+          busy(false);
+        }
+      }
+    }, 220);
+  });
+
   window.addEventListener("popstate", async () => {
     const url = adminUrl(location.href);
     if (!url || !(await go(url, undefined, "none"))) location.reload();

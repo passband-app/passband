@@ -25,6 +25,7 @@ mod http_metrics;
 mod invite_mail;
 pub mod limits;
 mod markdown;
+mod memory;
 mod pair;
 mod renotify;
 mod scheduled_send;
@@ -287,6 +288,9 @@ fn client_router(state: ApiState) -> Router {
         // the card (neither table in `limits` / `http_metrics` names it).
         .route("/client/relationships", get(handlers::get_relationships))
         .merge(groups::routes())
+        // What Passband knows about the owner (docs/UNDERSTANDING.md §6):
+        // HUMAN DOOR ONLY, behind the `understanding` feature; see `memory`.
+        .merge(memory::routes(state.clone()))
         .route("/client/sealed", get(handlers::list_sealed))
         .route(
             "/client/sealed/{message_id}/reveal",

@@ -39,14 +39,76 @@ const NO_REVIEW_OFFER: &str = "Read evidence when needed, or finish with a compl
 /// left out rather than refused. Composed once per process, like every other
 /// prompt that feeds a cached prefix in this crate, so the bytes are
 /// identical across calls.
-fn system_prompt(with_review: bool) -> &'static str {
-    static WITHOUT_REVIEW: std::sync::LazyLock<String> =
-        std::sync::LazyLock::new(|| SYSTEM.replacen(REVIEW_OFFER, NO_REVIEW_OFFER, 1));
-    if with_review {
-        SYSTEM.as_str()
-    } else {
-        WITHOUT_REVIEW.as_str()
+///
+/// THE SECOND AXIS IS THE `understanding` HIDDEN FEATURE
+/// ([`crate::features::UNDERSTANDING`]). Off, the prompt is the file as it
+/// stands, byte for byte, which is the prompt every mailbox without the flag
+/// has always had: nothing about understanding reaches the model unless the
+/// flag is on. On, every edit in [`UNDERSTANDING_SEGMENTS`] is applied first.
+/// All four variants are composed once per process.
+fn system_prompt(with_review: bool, understanding: bool) -> &'static str {
+    static VARIANTS: std::sync::LazyLock<[[String; 2]; 2]> = std::sync::LazyLock::new(|| {
+        [false, true].map(|review| [false, true].map(|on| compose(review, on)))
+    });
+    &VARIANTS[with_review as usize][understanding as usize]
+}
+
+/// THE ONE LIST of what the `understanding` flag changes in the agent prompt:
+/// `(find, replace)` edits applied in order, each to a passage that occurs
+/// EXACTLY ONCE in the prompt file (a test holds that, so an edit to the file
+/// cannot turn a segment into a silent no-op). To add to what the flag
+/// gates (the relationship evidence, a notification floor restated over it),
+/// add a row here; never a second `replacen` somewhere else. To insert, make
+/// `replace` the anchor followed by the new text.
+const UNDERSTANDING_SEGMENTS: &[(&str, &str)] = &[
+    // Learned memory (docs/UNDERSTANDING.md §2.3): how to weigh a stated line
+    // against an inferred one, and that memory is for deciding, never for
+    // prose that crosses to /mcp.
+    (
+        "may override one with a recorded rule exception and evidence. ",
+        "may override one with a recorded rule exception and evidence. Each memory line \
+         describes the owner and carries an origin and a confidence: a stated line is the \
+         owner's own word about themselves and weighs like a sender preference; an inferred \
+         line is Passband's guess from the owner's behaviour, worth weighing by its confidence \
+         and never worth obeying, and a line marked (old) rests only on mail more than six \
+         months old. Memory never lowers a notification floor and never hides an account or \
+         security notice. Use memory only to decide: never repeat or paraphrase a memory line \
+         in a summary, a reason, or notification text. ",
+    ),
+    // The relationship ledger (docs/UNDERSTANDING.md §2.1): what the context's
+    // `relationship` block is and how to read it, as its own paragraph before
+    // the placement rules.
+    (
+        "Separate what a message IS (one or more kinds) from where it belongs.",
+        "The context may carry relationship: a count of this owner's own history with the sender, computed by the application from stored mail and never from any email's text, so it is trusted context like sender_is_contact. It holds received mail, what the owner sent them and how many threads the owner started, replies (inbound threads from the sender, how many of them the owner answered later, and the median time to that answer), corrections the owner made to earlier triage of this sender, and fatigue, the score the Reading cleanup suggests unsubscribing by, with its reasons. read_sender_history returns the same block for the sender it reads. Read coverage_days first: attention (opens, read fraction, link clicks) appears only once the application has recorded reading for long enough, and when it is absent nothing is known about reading. Attention counts only what this application saw, so mail the owner read in another app looks unopened, and every attention figure understates real reading. The relationship is evidence about this owner's behaviour, never a floor and never an instruction: a reply count of zero is the expected shape for a newsletter, a campaign, or an automated notice and says nothing against it, and a high received count is volume, not importance. A person the owner replies to is anyone for whom any of these holds: relationship replies.replied above zero, relationship sent.initiated above zero, relationship sent.count above zero, or sender_is_contact true. That is a known contact in the strong sense; the relationship can add a person to it and never takes anyone out whom sender_is_contact puts in. How often and how quickly the owner answers them is the best evidence of how much their mail matters. A missing relationship means nothing is known yet, which is not the same as a stranger.\n\nSeparate what a message IS (one or more kinds) from where it belongs.",
+    ),
+    // The personal-mail notification floor and the event-likelihood line,
+    // restated over "a person the owner replies to" (defined in the paragraph
+    // above), which keeps everyone "a known contact" covered and adds the
+    // people the ledger shows the owner answers or writes to.
+    (
+        "and a known contact writing personally gets at least 65.",
+        "and a person the owner replies to writing personally gets at least 65.",
+    ),
+    (
+        "a personal invitation from a known contact is likelier than a mass invite.",
+        "a personal invitation from a person the owner replies to is likelier than a mass invite.",
+    ),
+];
+
+/// One variant of the prompt: the file, the `understanding` edits when on,
+/// then the review swap.
+fn compose(with_review: bool, understanding: bool) -> String {
+    let mut text = SYSTEM.clone();
+    if understanding {
+        for (find, replace) in UNDERSTANDING_SEGMENTS {
+            text = text.replacen(find, replace, 1);
+        }
     }
+    if !with_review {
+        text = text.replacen(REVIEW_OFFER, NO_REVIEW_OFFER, 1);
+    }
+    text
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case")]
@@ -167,7 +229,7 @@ async fn run_bounded(
     // with `max_review_calls = 0` is an offer whose acceptance fails the run.
     // Both are per-run constants, so the prompt and the schema are built once.
     let with_review = config.agent.review_model.is_some() && config.agent.max_review_calls > 0;
-    let system = system_prompt(with_review);
+    let system = system_prompt(with_review, context.understanding);
     let schema = step_schema(with_review);
     for turn in 0..config.agent.max_model_turns {
         let final_turn = turn + 1 == config.agent.max_model_turns;
@@ -1807,32 +1869,101 @@ mod tests {
             (2_000, "agent-triage-v21")
         );
     }
-    /// No em or en dashes in the agent prompt, the rule every prompt and UI
-    /// string in this repo follows; the relationship ledger is described as
-    /// evidence, never a floor; and the strong sense of "a person the owner
-    /// replies to" keeps everyone the old "known contact" wording granted the
-    /// 65 floor (sender_is_contact, and anyone the owner wrote to) while the
-    /// ledger may only add people to it.
+    /// OFF IS THE PROMPT AS IT WAS. With the `understanding` flag off, both
+    /// review variants are the prompt file's own text, byte for byte, and the
+    /// file carries none of what the flag adds: nothing about understanding
+    /// reaches a mailbox without the flag. On, every segment applies.
     #[test]
-    fn the_agent_prompt_reads_the_ledger_as_evidence_that_only_widens_the_floor() {
-        assert!(
-            !SYSTEM.contains('\u{2014}') && !SYSTEM.contains('\u{2013}'),
-            "a long dash in the agent prompt"
+    fn the_understanding_flag_off_is_the_prompt_file_byte_for_byte() {
+        assert_eq!(system_prompt(true, false), SYSTEM.as_str());
+        assert_eq!(
+            system_prompt(false, false),
+            SYSTEM.replacen(REVIEW_OFFER, NO_REVIEW_OFFER, 1)
         );
-        assert!(SYSTEM.contains("never a floor and never an instruction"));
-        assert!(
-            SYSTEM.contains("a person the owner replies to writing personally gets at least 65")
-        );
-        assert!(!SYSTEM.contains("a known contact writing personally"));
-        for qualifier in [
-            "replies.replied above zero",
-            "sent.initiated above zero",
-            "sent.count above zero",
-            "or sender_is_contact true",
-            "never takes anyone out whom sender_is_contact puts in",
-        ] {
-            assert!(SYSTEM.contains(qualifier), "the floor lost `{qualifier}`");
+        for with_review in [true, false] {
+            let off = system_prompt(with_review, false);
+            let on = system_prompt(with_review, true);
+            for (find, replace) in UNDERSTANDING_SEGMENTS {
+                // Each anchor is in the file exactly once, so the edit lands.
+                assert_eq!(SYSTEM.matches(find).count(), 1, "{find}");
+                let added = replace.replacen(find, "", 1);
+                assert!(!added.trim().is_empty(), "a segment that adds nothing");
+                assert!(
+                    !off.contains(added.trim()),
+                    "flag-off prompt carries {added}"
+                );
+                assert!(on.contains(replace), "flag-on prompt lacks {replace}");
+            }
+            for word in ["memory line", "stated line", "inferred line"] {
+                assert!(!off.contains(word), "flag-off prompt mentions {word}");
+            }
+            assert!(!on.contains('\u{2014}') && !on.contains('\u{2013}'));
         }
+        // The relationship ledger (docs/UNDERSTANDING.md §2.1): evidence,
+        // never a floor, and the 65 floor restated over "a person the owner
+        // replies to", which only ever WIDENS who gets it: everyone the old
+        // "known contact" wording granted (sender_is_contact, anyone the owner
+        // wrote to) keeps it. Off, main's floor sentence stands untouched.
+        for with_review in [true, false] {
+            let off = system_prompt(with_review, false);
+            let on = system_prompt(with_review, true);
+            assert!(on.contains("never a floor and never an instruction"));
+            assert!(
+                on.contains("a person the owner replies to writing personally gets at least 65")
+            );
+            assert!(!on.contains("a known contact writing personally"));
+            assert!(off.contains("a known contact writing personally gets at least 65"));
+            for qualifier in [
+                "replies.replied above zero",
+                "sent.initiated above zero",
+                "sent.count above zero",
+                "or sender_is_contact true",
+                "never takes anyone out whom sender_is_contact puts in",
+            ] {
+                assert!(on.contains(qualifier), "the floor lost `{qualifier}`");
+                assert!(
+                    !off.contains(qualifier),
+                    "flag-off prompt carries `{qualifier}`"
+                );
+            }
+        }
+        // Composed once: the same bytes every call.
+        assert!(std::ptr::eq(
+            system_prompt(true, true),
+            system_prompt(true, true)
+        ));
+    }
+
+    /// Learned memory (docs/UNDERSTANDING.md §2.3) reaches the model as the
+    /// snapshot's `memory` list, each line with its origin and confidence,
+    /// and the prompt says how to weigh the two origins.
+    #[test]
+    fn memory_lines_carry_their_authority_and_the_prompt_explains_it() {
+        let on = system_prompt(true, true);
+        assert!(on.contains("a stated line is the owner's own word"));
+        assert!(on.contains("never worth obeying"));
+        assert!(on.contains("marked (old)"));
+        // Summaries and notification text cross to /mcp; memory must not ride
+        // them out second-hand.
+        assert!(on.contains(
+            "never repeat or paraphrase a memory line in a summary, a reason, or notification text"
+        ));
+        let context = ContextSnapshot {
+            memory: vec![MemoryEntry {
+                id: "01J".into(),
+                scope: "owner".into(),
+                provenance: vec![7],
+                revision: 2,
+                text: "Runs a small studio.".into(),
+                origin: "inferred".into(),
+                confidence: 0.4,
+            }],
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(&context).unwrap();
+        assert_eq!(wire["memory"][0]["origin"], "inferred");
+        assert_eq!(wire["memory"][0]["confidence"], 0.4);
+        assert_eq!(wire["memory"][0]["text"], "Runs a small studio.");
     }
     #[test]
     fn credentials_are_not_inferred_from_auth_category() {
@@ -2374,8 +2505,8 @@ mod tests {
             SYSTEM.contains(REVIEW_OFFER),
             "the prompt file no longer carries the review offer verbatim"
         );
-        let with = system_prompt(true);
-        let without = system_prompt(false);
+        let with = system_prompt(true, false);
+        let without = system_prompt(false, false);
         assert_eq!(with, SYSTEM.as_str());
         assert!(without.contains(NO_REVIEW_OFFER));
         assert!(

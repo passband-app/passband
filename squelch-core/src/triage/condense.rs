@@ -71,6 +71,69 @@ const ATTRIBUTIONS: &[(&str, &str)] = &[
     ("Le ", "a écrit :"),
     ("Am ", "schrieb "),
     ("El ", "escribió:"),
+    ("Il ", "ha scritto:"),
+    ("Op ", "schreef"),
+    ("Em ", "escreveu:"),
+];
+
+/// The verb of an attribution line in each language [`ATTRIBUTIONS`] knows,
+/// for [`own_text`]'s looser line test.
+const WROTE: &[&str] = &[
+    "wrote",
+    "a écrit",
+    "schrieb",
+    "escribió",
+    "ha scritto",
+    "schreef",
+    "escreveu",
+    // Swedish, Danish and Norwegian share it.
+    "skrev",
+];
+
+/// More banners mail clients write over a quoted message: German, French,
+/// and Thunderbird's spaced form. FOR [`own_text`] ONLY. Triage's
+/// `outlook_cut` keeps the English banner alone, because its quote cut is
+/// skipped only for a forward `forwarded()` recognises (English `FW:`), and a
+/// German or French Outlook FORWARD carries the same banner: cut there,
+/// triage would read "FYI" and lose the forwarded invoice.
+const OWN_QUOTE_BANNERS: &[&str] = &[
+    "-----Ursprüngliche Nachricht-----",
+    "-----Message d'origine-----",
+    "-------- Original Message --------",
+];
+
+/// Header keys of a quoted header block, by role, lowercased, in English,
+/// German, French, Spanish, Italian, Dutch and Portuguese. Matched as the
+/// whole text before a line's first colon (`De :` with French spacing too).
+const HEADER_FROM: &[&str] = &["from", "von", "de", "da", "van"];
+const HEADER_DATED: &[&str] = &[
+    "sent",
+    "date",
+    "gesendet",
+    "datum",
+    "envoyé",
+    "enviado",
+    "enviada",
+    "inviato",
+    "data",
+    "verzonden",
+    "fecha",
+];
+const HEADER_ADDRESSED: &[&str] = &[
+    "to",
+    "subject",
+    "cc",
+    "an",
+    "betreff",
+    "à",
+    "a",
+    "objet",
+    "para",
+    "asunto",
+    "oggetto",
+    "aan",
+    "onderwerp",
+    "assunto",
 ];
 /// Bytes of attribution allowed between lead and tail: a date, a time, a
 /// name and an address, possibly wrapped once.
@@ -277,6 +340,50 @@ fn quote_cut(body: &str) -> Option<usize> {
     })
 }
 
+/// The words a reply's AUTHOR wrote: everything before the first quoted
+/// earlier message (an attribution line, an Outlook header block, a `>`
+/// block), with any `>` line that survived that dropped. `None` for a
+/// forward, where the part after the banner IS somebody else's message and
+/// there is no telling the author's words from it.
+///
+/// Unlike [`quote_cut`] the cut is taken even when nothing precedes it: an
+/// empty reply is an empty answer here, never the whole quoted chain. The
+/// profile pass reads only this of the owner's sent mail
+/// (`triage::profile::owner_words`), so an inbound body never reaches it.
+///
+/// IT CUTS MORE EAGERLY THAN TRIAGE'S CONDENSING DOES, on purpose: cutting
+/// too early here loses a few of the owner's words, cutting too late hands an
+/// inbound body to the profile pass. So beside the shared cuts it also takes
+/// a bare Outlook header block (no rule above it: Outlook for Mac, OWA,
+/// mobile, HTML flattened with the `<hr>` dropped, [`header_block_cut`]) and
+/// any line ending in an attribution verb, with or without a date
+/// ([`wrote_line_cut`]). Triage's own cuts keep their stricter tests, where
+/// a false cut would hide the message being triaged.
+pub fn own_text(body: &str) -> Option<String> {
+    if forwarded(body) {
+        return None;
+    }
+    let cut = [
+        attribution_cut(body),
+        outlook_cut(body),
+        quoted_block_cut(body),
+        header_block_cut(body),
+        wrote_line_cut(body),
+        OWN_QUOTE_BANNERS.iter().filter_map(|b| body.find(b)).min(),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .unwrap_or(body.len());
+    Some(
+        body[..cut]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('>'))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
 /// A condensed body cut to `chars` scalar values, for the older siblings of
 /// a thread whose gist matters but whose text rarely does. The flag says
 /// whether the cut removed anything. The quote marker is whole or absent
@@ -361,6 +468,83 @@ fn attribution_cut(body: &str) -> Option<usize> {
     best
 }
 
+/// The byte offset of the first quoted HEADER BLOCK: a line-start from key
+/// (`From:`, `Von:`, `De :`, ...) with, within three lines on EITHER side, a
+/// dated key (`Sent:`, `Gesendet:`, `Envoyé :`, ...) AND an addressed one
+/// (`To:`, `Betreff:`, `Objet :`, ...). Outlook writes it below the reply,
+/// often with no rule over it; Thunderbird writes Subject and Date ABOVE
+/// From. The cut is at the block's first header line, so the subject and date
+/// of the quoted message go with it. For [`own_text`] only.
+fn header_block_cut(body: &str) -> Option<usize> {
+    let lines: Vec<(usize, &str)> = body
+        .split_inclusive('\n')
+        .scan(0usize, |at, line| {
+            let start = *at;
+            *at += line.len();
+            Some((start, line))
+        })
+        .collect();
+    // The text before a line's first colon, when it is short enough to be a
+    // header key at all.
+    let key = |line: &str| -> Option<String> {
+        let (head, _) = line.trim_start().split_once(':')?;
+        let head = head.trim_end();
+        (!head.is_empty() && head.chars().count() <= 12).then(|| head.to_lowercase())
+    };
+    let is = |line: &str, keys: &[&str]| key(line).is_some_and(|k| keys.contains(&k.as_str()));
+    let any_header =
+        |line: &str| is(line, HEADER_FROM) || is(line, HEADER_DATED) || is(line, HEADER_ADDRESSED);
+    lines.iter().enumerate().find_map(|(i, (_, line))| {
+        if !is(line, HEADER_FROM) {
+            return None;
+        }
+        let (mut dated, mut addressed) = (false, false);
+        for (j, (_, l)) in lines
+            .iter()
+            .enumerate()
+            .take((i + 4).min(lines.len()))
+            .skip(i.saturating_sub(3))
+        {
+            if j != i {
+                dated |= is(l, HEADER_DATED);
+                addressed |= is(l, HEADER_ADDRESSED);
+            }
+        }
+        if !(dated && addressed) {
+            return None;
+        }
+        // Back up over header lines directly above From (Thunderbird's
+        // Subject and Date), at most three.
+        let mut first = i;
+        while first > 0 && i - first < 3 && any_header(lines[first - 1].1) {
+            first -= 1;
+        }
+        let (at, line) = lines[first];
+        // Cut where the header's own text starts, not at the line's indent.
+        Some(at + (line.len() - line.trim_start().len()))
+    })
+}
+
+/// The byte offset of the first line that ENDS in an attribution verb and a
+/// colon ("On Tue, Jo wrote:", "Il giorno lun Jo ha scritto:", "Op ma schreef
+/// Jo <jo@x.nl>:"), with no date required. For [`own_text`] only: in prose a
+/// line can end that way too, and there cutting early costs the owner a few
+/// words, nothing more.
+fn wrote_line_cut(body: &str) -> Option<usize> {
+    let mut at = 0usize;
+    for line in body.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if let Some(head) = trimmed.strip_suffix(':') {
+            let head = head.to_lowercase();
+            if WROTE.iter().any(|w| head.contains(w)) {
+                return Some(at + (line.len() - line.trim_start().len()));
+            }
+        }
+        at += line.len();
+    }
+    None
+}
+
 /// Outlook's separators: the literal "Original Message" banner, or a rule of
 /// underscores followed by a `From:` header block.
 fn outlook_cut(body: &str) -> Option<usize> {
@@ -428,6 +612,84 @@ mod tests {
     }
 
     const TRACKER: &str = "https://click.mailer.example.com/ls/click?upn=u001.AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz-2Fmore";
+
+    /// Triage's condensing is unchanged by `own_text`'s extra banners: a
+    /// German Outlook forward keeps the forwarded message.
+    #[test]
+    fn a_german_forward_still_reaches_triage() {
+        let body = "FYI\n\n-----Ursprüngliche Nachricht-----\nVon: Rechnungen <billing@acme.de>\nGesendet: Dienstag, 3. November 2026 09:00\nAn: Me\nBetreff: WG: Rechnung 4711\n\nBitte zahlen Sie 120 EUR bis Freitag.";
+        let condensed = condense_body(body);
+        assert!(
+            condensed.contains("Bitte zahlen Sie 120 EUR"),
+            "{condensed}"
+        );
+        assert!(!condensed.contains(QUOTE_MARKER), "{condensed}");
+        // The owner-words read, by contrast, stops at the banner.
+        assert_eq!(own_text(body).unwrap().trim(), "FYI");
+    }
+
+    /// [`own_text`] must never hand an inbound body on, whatever shape the
+    /// reply's quote takes.
+    #[test]
+    fn own_text_stops_at_every_quote_shape() {
+        let inbound = "THEIR WORDS here";
+        for body in [
+            // Outlook for Mac, OWA, mobile: a header block with no rule.
+            format!(
+                "Sounds good.\n\nFrom: Jo <jo@x.com>\nSent: Tuesday, November 3, 2026 9:00 AM\nTo: Me\nSubject: RE: plan\n\n{inbound}"
+            ),
+            format!("Sounds good.\nFrom: Jo\nDate: Tue\nSubject: plan\n{inbound}"),
+            // Attributions without a date, and in other languages.
+            format!("Sounds good.\n\nOn Tue, Jo wrote:\n{inbound}"),
+            format!(
+                "Sounds good.\n\nIl giorno mar 3 nov 2026, Jo <jo@x.it> ha scritto:\n{inbound}"
+            ),
+            format!("Sounds good.\n\nOp di 3 nov. 2026 schreef Jo <jo@x.nl>:\n{inbound}"),
+            format!(
+                "Sounds good.\n\nEm ter., 3 de nov. de 2026, Jo <jo@x.pt> escreveu:\n{inbound}"
+            ),
+            format!("Sounds good.\n\nIl giorno mar, Jo ha scritto:\n{inbound}"),
+            format!("Sounds good.\n\nDen tis 3 nov. 2026 skrev Jo <jo@x.se>:\n{inbound}"),
+            // Localized Outlook header blocks, French spacing included.
+            format!(
+                "Sounds good.\n\nVon: Jo <jo@x.de>\nGesendet: Dienstag, 3. November 2026\nAn: Me\nBetreff: AW: Plan\n\n{inbound}"
+            ),
+            format!(
+                "Sounds good.\n\nDe : Jo <jo@x.fr>\nEnvoyé : mardi 3 novembre 2026\nÀ : Moi\nObjet : RE: plan\n\n{inbound}"
+            ),
+            format!(
+                "Sounds good.\n\nDe: Jo <jo@x.es>\nEnviado: martes, 3 de noviembre de 2026\nPara: Yo\nAsunto: RE: plan\n\n{inbound}"
+            ),
+            format!(
+                "Sounds good.\n\nDa: Jo <jo@x.it>\nInviato: martedì 3 novembre 2026\nA: Me\nOggetto: R: piano\n\n{inbound}"
+            ),
+            format!(
+                "Sounds good.\n\nVan: Jo <jo@x.nl>\nVerzonden: dinsdag 3 november 2026\nAan: Mij\nOnderwerp: RE: plan\n\n{inbound}"
+            ),
+            format!(
+                "Sounds good.\n\nDe: Jo <jo@x.pt>\nEnviada: terça-feira, 3 de novembro de 2026\nPara: Eu\nAssunto: RE: plano\n\n{inbound}"
+            ),
+            // Banners: German, French, and Thunderbird's spaced one.
+            format!("Sounds good.\n\n-----Ursprüngliche Nachricht-----\n{inbound}"),
+            format!("Sounds good.\n\n-----Message d'origine-----\n{inbound}"),
+            format!("Sounds good.\n\n-------- Original Message --------\n{inbound}"),
+            // Thunderbird's block: Subject and Date ABOVE From.
+            format!(
+                "Sounds good.\n\nSubject: Re: plan\nDate: Tue, 3 Nov 2026 09:00\nFrom: Jo <jo@x.com>\nTo: Me\n\n{inbound}"
+            ),
+        ] {
+            let own = own_text(&body).unwrap();
+            assert_eq!(own.trim(), "Sounds good.", "{body:?}");
+            assert!(!own.contains("THEIR"), "{body:?}");
+        }
+        // Prose that merely mentions a header word is kept.
+        for prose in [
+            "From: the team, thanks for everything.",
+            "De: nada.\nA: thanks again.",
+        ] {
+            assert_eq!(own_text(prose).as_deref(), Some(prose), "{prose:?}");
+        }
+    }
 
     #[test]
     fn gmail_plain_text_reply_keeps_the_new_text_and_marks_the_quote() {

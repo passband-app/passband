@@ -5,10 +5,17 @@ standing understanding of who they are, who matters to them, and what they
 ignore, and how triage and the clients use that understanding without ever
 mistaking it for an instruction.
 
-Status: design. Nothing here is built. The reserved seam it fills is
-`MemoryContextProvider` in `squelch-core/src/triage/context.rs`, shipped as
-`EmptyMemoryContext` by the triage rewrite (TRIAGE-CODE-DESIGN.md §4, "Future
-memory seam"). Issue #213 owns the explicit-feedback UX and lands as §4 below.
+Status: the relationship ledger (§2.1), §2.3 (owner profile), its
+`understanding` flag (§5) and the `/client/memory` routes (§6) are built,
+everything the owner sees or the agent is told behind the flag; the graph
+(§2.2) and the triage question (§4) are not. The profile pass does not read
+the ledger yet: it reads `contacts`, `senders`, `send_groups`, calendar guests
+and the owner's replies through the `ProfileInputSource` seam
+(`triage/profile.rs`), and a `person` address is checked against `contacts`
+and `senders`. The seam it fills is `MemoryContextProvider` in
+`squelch-core/src/triage/context.rs` (TRIAGE-CODE-DESIGN.md §4, "Future
+memory seam"), now `triage::memory::StoreMemoryContext`. Issue #213 owns the
+explicit-feedback UX and lands as §4 below.
 
 ## 1. What exists and what triage sees
 
@@ -278,21 +285,24 @@ strongly; a rule is applied. The two are not merged.
 
 ## 5. Flag and rollout
 
-- **The ledger computes for everyone and serves only under `understanding`.**
-  It is deterministic and costs no tokens, so its marks, its drain, the
-  nightly walk and the first-run backfill run on every daemon from the
-  release on, and a mailbox switched on later has its ledger at once. What
-  it SHOWS and what it TELLS is gated on the flag: off, the triage context
-  and `read_sender_history` carry no `relationship` key, the prompt is
-  byte-for-byte the one without the ledger, `GET /client/relationships` is
-  the opaque 404, and the contact card carries no `relationship` key. No env
-  var, no knob.
-- **The pass and the review page ship behind `understanding`** in
-  `features::KNOWN`. Off is as if it did not exist: the pass does not run,
-  `StoreMemoryContext` returns nothing, the memory routes 404, the Mac hides
-  the page. It spends tokens and writes sentences about people, and the
-  first weeks are for reading what the model writes about a handful of
-  tenants before anyone else sees it. Launch is deleting the entry.
+- **The ledger COMPUTES for everyone.** It is deterministic and costs no
+  tokens, so it runs on every daemon from the release that ships it, flag or
+  no flag, and is warm the day the flag is ticked. Computing is all it does
+  without the flag.
+- **Everything the owner sees and everything the agent is told sits behind
+  `understanding`** in `features::KNOWN`. Off is as if it did not exist: the
+  pass does not run, `StoreMemoryContext` returns nothing, the relationship
+  block is not in the triage context or in `read_sender_history`,
+  `GET /client/relationships` 404s, the contact card carries no
+  `relationship` key, the memory routes 404, the Mac hides
+  the page and the Usage section, and the agent prompt is byte for byte the
+  prompt every other mailbox gets (`agent::system_prompt` composes a variant
+  per flag state from the one list `agent::UNDERSTANDING_SEGMENTS`; a test
+  pins the off variant to the prompt file). One `PROMPT_VERSION` covers both
+  variants, and each run's diagnostics record which one ran. It spends tokens
+  and writes sentences about people, and the first weeks are for reading what
+  the model writes about a handful of tenants before anyone else sees it.
+  Launch is deleting the entry.
 - **Release order.** Daemon first (ledger, context, prompt bump, pass, routes),
   then Mac (contact card numbers, settings page), then iOS (settings page).
   Nothing in the clients breaks against an older daemon: the card renders

@@ -73,9 +73,10 @@ pub const KNOWN: &[Feature] = &[
     },
     Feature {
         key: UNDERSTANDING,
-        summary: "What Passband knows about you: a nightly model pass writes short entries about \
-                  the owner and the people they reply to, triage reads them, and Settings shows \
-                  every one.",
+        summary: "Deep understanding of the owner: the nightly profile pass and the memory \
+                  entries it writes (Settings shows every one), the relationship evidence and \
+                  memory lines triage is told about, and the Understanding section on the Usage \
+                  page. Off, the agent prompt is the prompt everyone else gets.",
     },
 ];
 
@@ -90,11 +91,16 @@ pub const KNOWN: &[Feature] = &[
 /// heard of the key. docs/TRIAGE-OPERATIONS.md, "Spend and revisit limits".
 pub const UNCAPPED_TRIAGE: &str = "uncapped_triage";
 
-/// Deep user understanding (docs/UNDERSTANDING.md §2.3, §5): the nightly
-/// profile pass (`triage::profile`), the entries triage reads from it
-/// (`triage::memory::StoreMemoryContext`), and the review page's routes
-/// (`/client/memory`). OFF IS AS IF IT DID NOT EXIST: the pass does not run
-/// and spends nothing, triage is handed no memory lines, and the routes 404.
+/// Deep user understanding (docs/UNDERSTANDING.md §5): the nightly profile
+/// pass (`triage::profile`), the entries triage reads from it
+/// (`triage::memory::StoreMemoryContext`), the review page's routes
+/// (`/client/memory`), the relationship evidence triage is shown, the
+/// Understanding section on the Usage page, and every sentence of the agent
+/// prompt about any of it (`triage::agent::UNDERSTANDING_SEGMENTS`). OFF IS AS
+/// IF IT DID NOT EXIST: the pass does not run and spends nothing, triage is
+/// handed no memory lines and the prompt is byte for byte the one every other
+/// mailbox gets, and the routes 404. The relationship ledger still COMPUTES
+/// for everyone (it is deterministic and free); only what it shows is gated.
 /// It ships dark because it spends tokens and writes sentences about people,
 /// and the first weeks are for reading what the model writes about a handful
 /// of tenants before anyone else sees it. Entries already written stay in the

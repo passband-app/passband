@@ -4638,7 +4638,8 @@ pub async fn get_usage(
         // ONE match, so the model label and the prices can never come from
         // different arms: a category priced as Stage-1 but labelled with the
         // notify model would read as a 25x cost regression in the app.
-        let (model, price_in, price_out) = if name == "stage2" {
+        let (model, price_in, price_out) = if squelch_core::metrics::runs_investigation_model(name)
+        {
             (
                 state.stage2_model.as_ref(),
                 state.stage2_price_in_per_mtok,

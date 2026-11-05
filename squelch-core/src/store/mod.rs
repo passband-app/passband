@@ -6,6 +6,7 @@
 
 pub mod agent_triage;
 pub mod archive_surface;
+pub mod memory;
 pub mod recency;
 pub mod search_query;
 pub mod sqlite;
@@ -1541,7 +1542,11 @@ impl ArchiveDisk {
 /// [`crate::mail::imap::MessageLocations`] is a supertrait so the engine can
 /// hand its store to an IMAP source as that source's lookup table.
 pub trait Store:
-    agent_triage::AgentTriageStore + crate::mail::imap::MessageLocations + Send + Sync
+    agent_triage::AgentTriageStore
+    + crate::mail::imap::MessageLocations
+    + memory::MemoryStore
+    + Send
+    + Sync
 {
     /// Insert or update a message (and its FTS body + derived contacts).
     /// Returns the local message id.

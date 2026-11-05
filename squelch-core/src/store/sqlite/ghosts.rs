@@ -7,9 +7,13 @@
 //! chosen once when its message is decided ([`reconcile`]) and remembered in
 //! `ghost_event_sources`. A rebuild reloads exactly the assigned records and
 //! nothing else, so a ghost is never found or reshaped by key intersection,
-//! and ghosts are NEVER merged: when a record could belong to several, it is
-//! assigned to one and the rest are left alone. A duplicate ghost is an
-//! acceptable outcome; losing or rewriting one is not.
+//! and ghosts never merge on their own: when a record could belong to
+//! several, it is assigned to one and the rest are left alone. A duplicate
+//! ghost is an acceptable outcome; losing or rewriting one is not. Rows come
+//! together in two ways only: the identity check names one of the sender's
+//! own ghosts (`triage::event_identity`), or the user accepts another
+//! sender's change ([`SqliteStore::resolve_linked_change`]). Another sender's
+//! ghost for the same event is LINKED (`linked_to`), never merged.
 //!
 //! A GHOST BELONGS TO ONE SENDER. The record that creates a ghost sets its
 //! `owner_scope` (`triage::ghost::sender_scope`: the authenticated sender's
@@ -47,8 +51,10 @@
 //! after the last rebuild cannot serve facts from it.
 use super::*;
 use crate::triage::decision::{
-    EventChange, EventCommitment, EventLikelihood, EventRecordKind, MessageDecision, RecordProposal,
+    EventChange, EventCommitment, EventIdentity, EventLikelihood, EventRecordKind, MessageDecision,
+    RecordProposal,
 };
+use crate::triage::event_identity;
 use crate::triage::ghost::{self, ESTIMATE_MINUTES, EventTime, GhostEstimate, GhostProposal};
 use crate::types::{GhostEvent, GhostMailState, GhostSource, GhostUserState};
 use chrono::FixedOffset;
@@ -363,6 +369,48 @@ fn dates_apart(record: &GhostProposal, c: &Candidate) -> bool {
     distance(record.start.as_ref(), c.start.as_ref()).is_some_and(|d| d > SAME_EVENT_SECONDS)
 }
 
+/// THE BACKSTOP for a new booking (`created`) when no identity verdict says
+/// otherwise: a start on another calendar day is another occurrence, however
+/// close (a second night of one festival bought as a second order). Only an
+/// `updated` record moves a ghost to another day.
+fn another_day(record: &GhostProposal, c: &Candidate) -> bool {
+    match (&record.start, &c.start) {
+        (Some(r), Some(g)) => local_date(r) != local_date(g),
+        _ => false,
+    }
+}
+
+/// THE BACKSTOP's other half: a new booking whose own references (an order or
+/// confirmation number, not an event page) share none with the ghost's is a
+/// separate purchase, though both name the same event page. Two orders for
+/// one night stay two ghosts this way; the identity check is what merges
+/// them.
+fn conflicting_refs(
+    conn: &Connection,
+    account: AccountId,
+    m: &Matching,
+    record: &GhostProposal,
+    id: i64,
+) -> Result<bool> {
+    let text = |key: &String| !key.contains('/');
+    let mine: BTreeSet<String> = ghost::identity_keys(record, m.scope)
+        .into_iter()
+        .filter(text)
+        .collect();
+    if mine.is_empty() {
+        return Ok(false);
+    }
+    let mut statement = conn
+        .prepare_cached("SELECT key FROM ghost_event_keys WHERE account_id=?1 AND ghost_id=?2")?;
+    let theirs: BTreeSet<String> = statement
+        .query_map(params![account, id], |r| r.get::<_, String>(0))?
+        .collect::<std::result::Result<BTreeSet<_>, _>>()?
+        .into_iter()
+        .filter(text)
+        .collect();
+    Ok(!theirs.is_empty() && mine.is_disjoint(&theirs))
+}
+
 /// A candidate's place in [`rank`]'s order: smaller first, the ghost id last.
 type Rank = (bool, u8, i64, i64);
 
@@ -419,6 +467,8 @@ fn match_by_ref(
         };
         if !c.owned_by(m.scope)
             || (record.change != EventChange::Updated && dates_apart(record, &c))
+            || (record.change == EventChange::Created
+                && (another_day(record, &c) || conflicting_refs(conn, account, m, record, id)?))
         {
             continue;
         }
@@ -599,7 +649,15 @@ pub(super) fn reconcile(
             .collect::<std::result::Result<_, _>>()?
     };
     let fed_before: BTreeSet<i64> = previous.values().copied().collect();
-    let records = ghost::launder_events(&current.records);
+    let laundered = ghost::laundered_records(&current.records);
+    let verdicts: Vec<Option<&EventIdentity>> = laundered
+        .iter()
+        .map(|(raw, _)| match raw {
+            RecordProposal::Event { identity, .. } => identity.as_ref(),
+            _ => None,
+        })
+        .collect();
+    let records: Vec<GhostProposal> = laundered.into_iter().map(|(_, p)| p).collect();
     if records.is_empty() && previous.is_empty() {
         return Ok(());
     }
@@ -632,14 +690,38 @@ pub(super) fn reconcile(
 
     let mut claimed: BTreeSet<i64> = BTreeSet::new();
     let mut assigned: Vec<(usize, i64, String)> = Vec::new();
+    // Ghosts to link once the rebuilds below have settled their facts:
+    // (this record's ghost, the other sender's ghost it is the same event as).
+    let mut links: Vec<(usize, i64)> = Vec::new();
     for (position, record) in records.iter().enumerate() {
+        // THE IDENTITY VERDICT (`triage::event_identity`), when one was
+        // asked for. Every offered ghost it did not pick is off limits to
+        // the rules below, so "a new event" is never undone by a shared
+        // event page. Its pick is honoured only from the ghost's OWN sender
+        // (authenticated), and then whatever the rules say (a rebooking
+        // under a new reference, a day moved); another sender's pick is a
+        // link and never an assignment.
+        let mut off_limits = claimed.clone();
         let mut target = None;
-        if m.scope.is_some() {
+        if let Some(verdict) = verdicts[position] {
+            let pick = verdict.pick().filter(|id| !claimed.contains(id));
+            off_limits.extend(verdict.offered.iter().copied());
+            if let Some(id) = pick
+                && let Some(c) = candidate(conn, account, id, &m)?
+            {
+                if m.scope.is_some() && c.owned_by(m.scope) {
+                    target = Some(id);
+                } else {
+                    links.push((position, id));
+                }
+            }
+        }
+        if target.is_none() && m.scope.is_some() {
             let keys = ghost::identity_keys(record, m.scope);
             target = if keys.is_empty() {
-                match_by_thread(conn, account, &m, record, &claimed)?
+                match_by_thread(conn, account, &m, record, &off_limits)?
             } else {
-                match_by_ref(conn, account, &m, record, &keys, &claimed)?
+                match_by_ref(conn, account, &m, record, &keys, &off_limits)?
             };
         }
         if target.is_none() {
@@ -651,7 +733,13 @@ pub(super) fn reconcile(
         }
         let id = match target {
             Some(id) => id,
-            None if record.change == EventChange::Cancelled => continue,
+            // There is no event to cancel, unless the record names another
+            // sender's: then it needs a ghost to show the cancellation on.
+            None if record.change == EventChange::Cancelled
+                && !links.iter().any(|(p, _)| *p == position) =>
+            {
+                continue;
+            }
             None => {
                 // A placeholder the rebuild below fills in. Its owner is
                 // set here, and changes only through `reown`.
@@ -701,12 +789,70 @@ pub(super) fn reconcile(
     for id in affected {
         rebuild(conn, account, id, &now)?;
     }
+    for (position, other) in links {
+        if let Some(&(_, id, _)) = assigned.iter().find(|(p, _, _)| *p == position) {
+            link(conn, account, id, other)?;
+        }
+    }
+    Ok(())
+}
+
+/// Link ghost `id` under `other`, another sender's ghost for the same event.
+/// Links are one level deep: `other` stands for its own root when it is
+/// linked itself, and whatever was linked under `id` moves under the root
+/// with it. The ghost the user is committed to stays the one shown: when
+/// `id` is committed and the root is not (the promoter's announcement came
+/// before the ticket), the two swap places. Nothing about either ghost's
+/// facts changes, and a link never crosses an account.
+fn link(conn: &Connection, account: AccountId, id: i64, other: i64) -> Result<()> {
+    // Its parent, commitment and owner.
+    type LinkRow = (Option<i64>, String, Option<String>);
+    let row = |g: i64| -> Result<Option<LinkRow>> {
+        Ok(conn
+            .query_row(
+                "SELECT linked_to,commitment,owner_scope FROM ghost_events WHERE account_id=?1 AND id=?2",
+                params![account, g],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?)
+    };
+    let Some((parent, ..)) = row(other)? else {
+        return Ok(());
+    };
+    let root = parent.unwrap_or(other);
+    let (Some((_, mine, my_owner)), Some((_, theirs, _))) = (row(id)?, row(root)?) else {
+        return Ok(());
+    };
+    if root == id {
+        return Ok(());
+    }
+    let committed = label(&EventCommitment::Committed);
+    let (shown, under) = if mine == committed && theirs != committed && my_owner.is_some() {
+        (id, root)
+    } else {
+        (root, id)
+    };
+    conn.execute(
+        "UPDATE ghost_events SET linked_to=?2 WHERE account_id=?1 AND linked_to IN (?3,?4) AND id<>?2",
+        params![account, shown, id, root],
+    )?;
+    conn.execute(
+        "UPDATE ghost_events SET linked_to=?3 WHERE account_id=?1 AND id=?2",
+        params![account, under, shown],
+    )?;
+    conn.execute(
+        "UPDATE ghost_events SET linked_to=NULL WHERE account_id=?1 AND id=?2",
+        params![account, shown],
+    )?;
     Ok(())
 }
 
 /// One assigned record that feeds a ghost now.
 struct Fed {
     message: i64,
+    /// The user accepted this other sender's change: it supplies facts
+    /// and never commitment.
+    accepted: bool,
     received: DateTime<Utc>,
     position: usize,
     proposal: GhostProposal,
@@ -767,11 +913,20 @@ pub(super) fn rebuild(conn: &Connection, account: AccountId, id: i64, now: &str)
     else {
         return Ok(());
     };
-    type SourceRow = (i64, i64, String, bool, Option<String>, String, Option<bool>);
+    type SourceRow = (
+        i64,
+        i64,
+        String,
+        bool,
+        Option<String>,
+        String,
+        Option<bool>,
+        bool,
+    );
     let rows: Vec<SourceRow> = {
         let mut statement = conn.prepare_cached(&format!(
             "SELECT s.message_id,s.position,m.received_at,{ELIGIBLE},d.decision_json,
-                    m.from_addr,m.auth_pass
+                    m.from_addr,m.auth_pass,s.accepted
              FROM ghost_event_sources s
              JOIN messages m ON m.account_id=s.account_id AND m.id=s.message_id
              {ELIGIBLE_JOINS}
@@ -788,6 +943,7 @@ pub(super) fn rebuild(conn: &Connection, account: AccountId, id: i64, now: &str)
                     r.get(4)?,
                     r.get(5)?,
                     r.get(6)?,
+                    r.get(7)?,
                 ))
             })?
             .collect::<std::result::Result<_, _>>()?
@@ -797,7 +953,7 @@ pub(super) fn rebuild(conn: &Connection, account: AccountId, id: i64, now: &str)
     let mut keyed: Vec<GhostProposal> = Vec::new();
     let mut stale: Vec<(i64, i64)> = Vec::new();
     let total = rows.len();
-    for (message, position, received, eligible, encoded, from_addr, auth_pass) in rows {
+    for (message, position, received, eligible, encoded, from_addr, auth_pass, accepted) in rows {
         let entry = stored.entry(message).or_insert_with(|| {
             let Some(encoded) = encoded else {
                 return Stored::Undecided { eligible };
@@ -831,13 +987,18 @@ pub(super) fn rebuild(conn: &Connection, account: AccountId, id: i64, now: &str)
             }
             continue;
         };
-        if !in_scope {
+        // An accepted row is another sender's: it supplies facts, and never
+        // keys (its refs are not the owner's to be found by).
+        if !in_scope && !accepted {
             continue;
         }
-        keyed.push(proposal.clone());
+        if in_scope {
+            keyed.push(proposal.clone());
+        }
         if eligible {
             feds.push(Fed {
                 message,
+                accepted: accepted && !in_scope,
                 received: DateTime::parse_from_rfc3339(&received)
                     .map(|d| d.with_timezone(&Utc))
                     .unwrap_or(DateTime::<Utc>::MIN_UTC),
@@ -902,13 +1063,17 @@ pub(super) fn rebuild(conn: &Connection, account: AccountId, id: i64, now: &str)
     let commitment = if owner.is_none() {
         // Unauthenticated mail's word is no evidence of anything.
         EventCommitment::Unknown
-    } else if feds.iter().any(|f| {
+    } else if feds.iter().filter(|f| !f.accepted).any(|f| {
         f.proposal.commitment == EventCommitment::Committed
             || f.proposal.change == EventChange::Agreed
     }) {
         EventCommitment::Committed
     } else {
-        newest.proposal.commitment
+        // The newest of the owner's own: another sender's word is no
+        // evidence of the user's standing.
+        feds.iter()
+            .find(|f| !f.accepted)
+            .map_or(EventCommitment::Unknown, |f| f.proposal.commitment)
     };
     let p = &supplier.proposal;
     // THE ONE PROJECTION WRITE TO A USER COLUMN: a start that changed
@@ -1022,6 +1187,204 @@ impl SqliteStore {
         self.ghost_events_containing(account, from, to, None)
     }
 
+    /// The identity check's prefilter (`triage::event_identity`): for each
+    /// of `message`'s laundered event records with a start, the live ghosts
+    /// it could be. A candidate is listed (its supplier eligible), unlinked
+    /// (a link's root stands for it), fed by some OTHER message (a ghost this
+    /// message alone feeds is its own, found again by the store's rules),
+    /// starts within [`event_identity::window_days`] of the record, and
+    /// shares something with it: a reference under this sender's scope, an
+    /// event page under any, a distinctive title word, or the venue. Nearest
+    /// first, at most [`event_identity::CANDIDATES_PER_RECORD`]. Records with
+    /// none are left out, so an empty answer means no call is needed.
+    pub(super) fn event_identity_candidates(
+        &self,
+        account: AccountId,
+        message: i64,
+        records: &[GhostProposal],
+    ) -> Result<event_identity::Questions> {
+        use crate::gcal::own::distinctive;
+        let conn = self.lock()?;
+        let Some((from_addr, auth_pass)) = conn
+            .query_row(
+                "SELECT from_addr,auth_pass FROM messages WHERE account_id=?1 AND id=?2",
+                params![account, message],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<bool>>(1)?)),
+            )
+            .optional()?
+        else {
+            return Ok(event_identity::Questions::default());
+        };
+        let scope = ghost::sender_scope(&from_addr, auth_pass);
+        let mut near = conn.prepare_cached(&format!(
+            "SELECT g.id,g.title,g.starts_at,g.location,g.venue_key,g.owner_scope,g.mail_state
+             FROM ghost_events g
+             WHERE g.account_id=?1 AND g.start_sort>=?2 AND g.start_sort<=?3
+               AND g.linked_to IS NULL AND g.starts_at IS NOT NULL
+               AND EXISTS(SELECT 1 FROM ghost_event_sources s
+                          WHERE s.account_id=g.account_id AND s.ghost_id=g.id AND s.message_id<>?4)
+               AND EXISTS(SELECT 1 FROM messages m {ELIGIBLE_JOINS}
+                          WHERE m.account_id=g.account_id AND m.id=g.supplier_message_id AND {ELIGIBLE})
+             ORDER BY g.start_sort,g.id
+             LIMIT 200"
+        ))?;
+        let mut keys_of = conn.prepare_cached(
+            "SELECT key FROM ghost_event_keys WHERE account_id=?1 AND ghost_id=?2",
+        )?;
+        let mut questions = Vec::new();
+        for (position, record) in records.iter().enumerate() {
+            let Some(start) = record.start else { continue };
+            let pad = chrono::Duration::days(event_identity::window_days(record.change));
+            // Coarse by the stored sort key (a date sorts at 00:00Z), exact below.
+            let low = sort_key(&EventTime::At(
+                (instant(&start) - pad - chrono::Duration::days(1)).fixed_offset(),
+            ));
+            let high = sort_key(&EventTime::At(
+                (instant(&start) + pad + chrono::Duration::days(1)).fixed_offset(),
+            ));
+            let mine: BTreeSet<String> = ghost::identity_keys(record, scope.as_deref())
+                .into_iter()
+                .collect();
+            let pages: BTreeSet<&str> = record
+                .identity_refs
+                .iter()
+                .filter(|r| r.contains('/'))
+                .map(String::as_str)
+                .collect();
+            let title_words = distinctive(&record.title);
+            let venue = record.location.as_deref().and_then(ghost::venue_key);
+            type Row = (
+                i64,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                String,
+            );
+            let rows: Vec<Row> = near
+                .query_map(params![account, low, high, message], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                })?
+                .collect::<std::result::Result<_, _>>()?;
+            let mut found: Vec<(i64, event_identity::IdentityCandidate)> = Vec::new();
+            for (id, title, starts_at, location, venue_key, owner, mail_state) in rows {
+                let Some(their_start) = EventTime::parse(&starts_at) else {
+                    continue;
+                };
+                let gap = (instant(&start) - instant(&their_start))
+                    .num_seconds()
+                    .abs();
+                if gap > pad.num_seconds() {
+                    continue;
+                }
+                let keys: Vec<String> = keys_of
+                    .query_map(params![account, id], |r| r.get::<_, String>(0))?
+                    .collect::<std::result::Result<_, _>>()?;
+                let shares_reference = keys.iter().any(|k| {
+                    mine.contains(k)
+                        || k.strip_prefix("ref:")
+                            .and_then(|rest| rest.split_once(':'))
+                            .is_some_and(|(_, r)| pages.contains(r))
+                });
+                let similar = shares_reference
+                    || !title_words.is_disjoint(&distinctive(&title))
+                    || (venue.is_some() && venue == venue_key);
+                if !similar {
+                    continue;
+                }
+                found.push((
+                    gap,
+                    event_identity::IdentityCandidate {
+                        id,
+                        title,
+                        start: their_start,
+                        location,
+                        same_sender: scope.is_some() && owner == scope,
+                        sender: owner,
+                        cancelled: mail_state == "cancelled",
+                        shares_reference,
+                    },
+                ));
+            }
+            found.sort_by_key(|(gap, c)| (*gap, c.id));
+            found.truncate(event_identity::CANDIDATES_PER_RECORD);
+            if !found.is_empty() {
+                questions.push(event_identity::RecordQuestion {
+                    position,
+                    record: record.clone(),
+                    candidates: found.into_iter().map(|(_, c)| c).collect(),
+                });
+            }
+        }
+        Ok(event_identity::Questions {
+            scope,
+            records: questions,
+        })
+    }
+
+    /// The user's answer to a linked ghost's change, shown on the ghost it is
+    /// linked under (`shown`). Accept: the linked ghost's mail joins `shown`
+    /// as rows the user vouched for (`accepted`), which supply facts (the
+    /// newest record wins, as always) and never keys or commitment, and the
+    /// emptied linked ghost goes. Keep: the linked ghost's current facts are
+    /// remembered, and its change is not offered again until they move on.
+    /// False when `from` is not linked under `shown` in this account. One
+    /// transaction.
+    pub(super) fn resolve_linked_change(
+        &self,
+        account: AccountId,
+        shown: i64,
+        from: i64,
+        accept: bool,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let Some((starts_at, mail_state)) = tx
+            .query_row(
+                "SELECT starts_at,mail_state FROM ghost_events
+                 WHERE account_id=?1 AND id=?2 AND linked_to=?3",
+                params![account, from, shown],
+                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?
+        else {
+            return Ok(false);
+        };
+        let now = at.to_rfc3339();
+        if accept {
+            tx.execute(
+                "UPDATE ghost_event_sources SET ghost_id=?3,accepted=1
+                 WHERE account_id=?1 AND ghost_id=?2",
+                params![account, from, shown],
+            )?;
+            tx.execute(
+                "UPDATE ghost_events SET linked_to=?3 WHERE account_id=?1 AND linked_to=?2",
+                params![account, from, shown],
+            )?;
+            rebuild(&tx, account, from, &now)?;
+            rebuild(&tx, account, shown, &now)?;
+        } else {
+            let start = starts_at.as_deref().and_then(EventTime::parse);
+            let ack = start.map(|s| event_identity::link_facts(&s, mail_state == "cancelled"));
+            tx.execute(
+                "UPDATE ghost_events SET link_ack=?3 WHERE account_id=?1 AND id=?2",
+                params![account, from, ack],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// The event-page URLs each ghost in `ids` is keyed by, WITHOUT the sender
     /// scope: `ra.co/events/2494673` for a key
     /// `ref:ra.co:ra.co/events/2494673`. Only URL refs (a text ref is
@@ -1102,7 +1465,7 @@ impl SqliteStore {
                     g.est_basis,g.location,g.commitment,g.mail_state,g.likelihood_band,
                     g.likelihood_reason,g.user_state,g.user_state_at,g.user_end_minutes,
                     g.user_end_days,p.minutes,g.supplier_message_id,g.last_message_id,
-                    g.created_at,g.updated_at,g.owner_scope
+                    g.created_at,g.updated_at,g.owner_scope,g.linked_to,g.link_ack
              FROM ghost_events g
              LEFT JOIN event_duration_priors p
                ON p.account_id=g.account_id AND p.venue_key=g.venue_key AND p.kind=g.kind
@@ -1164,6 +1527,8 @@ impl SqliteStore {
                         created_at: dt(r, 20)?,
                         updated_at: dt(r, 21)?,
                         owner_scope: r.get(22)?,
+                        linked_to: r.get(23)?,
+                        link_ack: r.get(24)?,
                         sources: Vec::new(),
                     },
                 ))
@@ -1173,7 +1538,7 @@ impl SqliteStore {
         // ghost cannot (no two records of a message share a ghost), but the
         // wire shape is per message and role either way.
         let mut sources = conn.prepare(&format!(
-            "SELECT DISTINCT s.message_id,m.thread_id,s.role,m.received_at FROM ghost_event_sources s
+            "SELECT DISTINCT s.message_id,m.thread_id,s.role,m.received_at,s.accepted,m.from_addr,m.auth_pass FROM ghost_event_sources s
              JOIN messages m ON m.account_id=s.account_id AND m.id=s.message_id
              {ELIGIBLE_JOINS}
              WHERE s.account_id=?1 AND s.ghost_id=?2 AND {ELIGIBLE}
@@ -1191,10 +1556,17 @@ impl SqliteStore {
             ghost.sources = sources
                 .query_map(params![account, ghost.id], |r| {
                     let role: String = r.get(2)?;
+                    let accepted: bool = r.get(4)?;
+                    let from: String = r.get(5)?;
+                    let auth: Option<bool> = r.get(6)?;
                     Ok(GhostSource {
                         message_id: r.get(0)?,
                         thread_id: r.get(1)?,
                         role: unlabel(&role),
+                        // A change the user accepted from another sender
+                        // is still that sender's mail.
+                        linked: accepted,
+                        verified: ghost::sender_scope(&from, auth).is_some(),
                     })
                 })?
                 .collect::<std::result::Result<_, _>>()?;
@@ -1969,6 +2341,7 @@ mod tests {
                     reason: "a friend asked".into(),
                 }),
                 evidence: vec![],
+                identity: None,
             }
         }
         fn decision(&self) -> MessageDecision {
@@ -6570,5 +6943,534 @@ mod tests {
         assert_eq!(count(&store, "event_revisit_asked"), 2);
         sql(&store, "DELETE FROM messages WHERE id=1");
         assert_eq!(count(&store, "event_revisit_asked"), 1);
+    }
+
+    /// The identity check's verdicts and the backstop behind them
+    /// (`triage::event_identity`), case by case as the design lists them.
+    mod identity {
+        use super::*;
+        use crate::triage::decision::EventIdentity;
+
+        const RA: &str = "tickets@ra.co";
+        const PROMOTER: &str = "hello@endzeit.example";
+        const STRANGER: &str = "someone@gmail.com";
+        const FRIDAY: &str = "2026-11-06T19:00:00+01:00";
+        const SATURDAY: &str = "2026-11-07T19:00:00+01:00";
+
+        fn party<'a>(start: &'a str, refs: &'a [&'a str]) -> Ev<'a> {
+            Ev {
+                title: "Parameter & Endzeit Invite Polar Inertia",
+                start: Some(start),
+                refs,
+                location: Some("Tresor, Kopenicker Str. 70"),
+                ..Default::default()
+            }
+        }
+
+        /// `ev`'s decision carrying an identity verdict.
+        fn judged(ev: &Ev, offered: &[i64], same_as: Option<i64>) -> MessageDecision {
+            let mut record = ev.record();
+            if let RecordProposal::Event { identity, .. } = &mut record {
+                *identity = Some(EventIdentity {
+                    offered: offered.to_vec(),
+                    same_as,
+                });
+            }
+            decided(vec![record])
+        }
+
+        fn row(store: &SqliteStore, id: i64) -> (Option<i64>, Option<String>) {
+            store
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT linked_to,link_ack FROM ghost_events WHERE account_id=1 AND id=?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        }
+
+        fn ghost_of(store: &SqliteStore, message: i64) -> i64 {
+            store
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT ghost_id FROM ghost_event_sources WHERE account_id=1 AND message_id=?1",
+                    [message],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        }
+
+        /// Case 4, no verdict: two orders, two nights. The shared event page
+        /// used to merge them (a day apart counted as the same event) and the
+        /// newer order moved the Friday ghost, and any Google event Passband
+        /// kept for it, to Saturday.
+        #[test]
+        fn a_second_order_for_the_next_night_is_its_own_ghost_without_a_verdict() {
+            let store = fixture();
+            mail_from(&store, 1, 1, "t1", 60, RA, Some(true));
+            mail_from(&store, 1, 2, "t2", 30, RA, Some(true));
+            let page = "https://ra.co/events/2494673";
+            decide(
+                &store,
+                1,
+                1,
+                &party(FRIDAY, &["RA7F3K9Q2", page]).decision(),
+            );
+            decide(
+                &store,
+                1,
+                2,
+                &party(SATURDAY, &["RA8M2X5T1", page]).decision(),
+            );
+            let ghosts = listed(&store, 1);
+            assert_eq!(ghosts.len(), 2);
+            assert_eq!(ghosts[0].start, at(FRIDAY));
+            assert_eq!(ghosts[1].start, at(SATURDAY));
+            // Another day with only the event page in common: still its own.
+            mail_from(&store, 1, 3, "t3", 10, RA, Some(true));
+            decide(
+                &store,
+                1,
+                3,
+                &party("2026-11-08T19:00:00+01:00", &[page]).decision(),
+            );
+            assert_eq!(listed(&store, 1).len(), 3);
+        }
+
+        /// The backstop's other half: a second order for the SAME night is a
+        /// separate purchase until the model says otherwise (a duplicate card
+        /// is the safe failure), and a resend carrying the same order is the
+        /// same ghost.
+        #[test]
+        fn another_order_the_same_night_is_two_ghosts_and_a_resend_is_one() {
+            let store = fixture();
+            for (id, ago) in [(1, 60), (2, 40), (3, 20)] {
+                mail_from(&store, 1, id, &format!("t{id}"), ago, RA, Some(true));
+            }
+            let page = "https://ra.co/events/2494673";
+            decide(
+                &store,
+                1,
+                1,
+                &party(FRIDAY, &["RA7F3K9Q2", page]).decision(),
+            );
+            decide(
+                &store,
+                1,
+                2,
+                &party(FRIDAY, &["RA7F3K9Q2", page]).decision(),
+            );
+            assert_eq!(listed(&store, 1).len(), 1, "a resend of the same order");
+            decide(
+                &store,
+                1,
+                3,
+                &party(FRIDAY, &["RA4C6V8B3", page]).decision(),
+            );
+            assert_eq!(listed(&store, 1).len(), 2);
+        }
+
+        /// Case 5: the model says the second order is the same night. One
+        /// ghost, both orders' mail on it.
+        #[test]
+        fn a_same_sender_pick_merges_what_the_rules_would_split() {
+            let store = fixture();
+            mail_from(&store, 1, 1, "t1", 60, RA, Some(true));
+            mail_from(&store, 1, 2, "t2", 30, RA, Some(true));
+            decide(&store, 1, 1, &party(FRIDAY, &["RA7F3K9Q2"]).decision());
+            let friday = ghost_of(&store, 1);
+            decide(
+                &store,
+                1,
+                2,
+                &judged(&party(FRIDAY, &["RA8M2X5T1"]), &[friday], Some(friday)),
+            );
+            let ghosts = listed(&store, 1);
+            assert_eq!(ghosts.len(), 1);
+            assert_eq!(roles(&ghosts[0]).len(), 2);
+        }
+
+        /// Case 4 with a verdict: "a new event" keeps the record off every
+        /// offered ghost, even one sharing its order number.
+        #[test]
+        fn a_new_event_verdict_beats_a_shared_reference() {
+            let store = fixture();
+            mail_from(&store, 1, 1, "t1", 60, RA, Some(true));
+            mail_from(&store, 1, 2, "t2", 30, RA, Some(true));
+            decide(&store, 1, 1, &party(FRIDAY, &["RA7F3K9Q2"]).decision());
+            let friday = ghost_of(&store, 1);
+            let mut second = party(FRIDAY, &["RA7F3K9Q2"]);
+            second.title = "Polar Inertia late show";
+            decide(&store, 1, 2, &judged(&second, &[friday], None));
+            assert_eq!(listed(&store, 1).len(), 2);
+            assert_eq!(
+                ghost_by(&store, friday).title,
+                "Parameter & Endzeit Invite Polar Inertia"
+            );
+        }
+
+        /// Case 6: an airline rebooking under a new booking reference shares
+        /// nothing with the old flight. The rules make a second flight; the
+        /// model's pick moves the one there is.
+        #[test]
+        fn a_rebooking_under_a_new_reference_moves_the_flight_it_picks() {
+            let store = fixture();
+            let airline = "noreply@united.example";
+            for (id, ago) in [(1, 90), (2, 60), (3, 30)] {
+                mail_from(&store, 1, id, &format!("t{id}"), ago, airline, Some(true));
+            }
+            let flight = |start, refs, change| Ev {
+                title: "Flight to Lisbon",
+                refs,
+                start: Some(start),
+                change,
+                kind: EventRecordKind::Travel,
+                location: None,
+                ..Default::default()
+            };
+            decide(
+                &store,
+                1,
+                1,
+                &flight(
+                    "2026-11-10T08:00:00-05:00",
+                    &["PNR7QX2"],
+                    EventChange::Created,
+                )
+                .decision(),
+            );
+            let booked = ghost_of(&store, 1);
+            // Without a verdict: a second flight (today's behaviour, kept as
+            // the backstop).
+            decide(
+                &store,
+                1,
+                2,
+                &flight(
+                    "2026-11-11T09:30:00-05:00",
+                    &["PNR9ZK4"],
+                    EventChange::Updated,
+                )
+                .decision(),
+            );
+            assert_eq!(listed(&store, 1).len(), 2);
+            // With one: the booked flight moves, and nothing new appears.
+            decide(
+                &store,
+                1,
+                3,
+                &judged(
+                    &flight(
+                        "2026-11-12T07:00:00-05:00",
+                        &["PNRAB12C"],
+                        EventChange::Updated,
+                    ),
+                    &[booked],
+                    Some(booked),
+                ),
+            );
+            assert_eq!(listed(&store, 1).len(), 2);
+            assert_eq!(
+                ghost_by(&store, booked).start,
+                at("2026-11-12T07:00:00-05:00")
+            );
+        }
+
+        /// An id the record was not offered is no verdict at all.
+        #[test]
+        fn a_pick_that_was_not_offered_is_ignored() {
+            let store = fixture();
+            mail_from(&store, 1, 1, "t1", 60, RA, Some(true));
+            mail_from(&store, 1, 2, "t2", 30, RA, Some(true));
+            decide(&store, 1, 1, &party(FRIDAY, &["RA7F3K9Q2"]).decision());
+            let friday = ghost_of(&store, 1);
+            decide(
+                &store,
+                1,
+                2,
+                &judged(&party(SATURDAY, &["RA8M2X5T1"]), &[], Some(friday)),
+            );
+            assert_eq!(listed(&store, 1).len(), 2);
+            assert_eq!(ghost_by(&store, friday).start, at(FRIDAY));
+        }
+
+        /// Cases 10 and 11: the promoter's mail about the user's RA ticket is
+        /// LINKED, never assigned. The RA ghost keeps its facts; the
+        /// promoter's ghost (with the new time) folds under it.
+        #[test]
+        fn another_senders_pick_links_and_changes_nothing() {
+            let store = fixture();
+            mail_from(&store, 1, 1, "t1", 60, RA, Some(true));
+            mail_from(&store, 1, 2, "t2", 30, PROMOTER, Some(true));
+            decide(&store, 1, 1, &party(FRIDAY, &["RA7F3K9Q2"]).decision());
+            let ticket = ghost_of(&store, 1);
+            let mut moved = party("2026-11-07T21:00:00+01:00", &[]);
+            moved.change = EventChange::Updated;
+            moved.commitment = EventCommitment::Unknown;
+            decide(&store, 1, 2, &judged(&moved, &[ticket], Some(ticket)));
+            let theirs = ghost_of(&store, 2);
+            assert_ne!(theirs, ticket);
+            assert_eq!(row(&store, theirs).0, Some(ticket));
+            assert_eq!(row(&store, ticket).0, None);
+            let shown = ghost_by(&store, ticket);
+            assert_eq!(shown.start, at(FRIDAY));
+            assert_eq!(roles(&shown), vec![(1, EventChange::Created)]);
+        }
+
+        /// Accepting the change: the promoter's mail now supplies the RA
+        /// ghost's facts (the newest record wins), the emptied ghost goes,
+        /// and the user's standing (commitment) stays the RA mail's.
+        #[test]
+        fn accepting_a_linked_change_moves_the_ghost_and_keeps_its_standing() {
+            let store = fixture();
+            mail_from(&store, 1, 1, "t1", 60, RA, Some(true));
+            mail_from(&store, 1, 2, "t2", 30, PROMOTER, Some(true));
+            decide(&store, 1, 1, &party(FRIDAY, &["RA7F3K9Q2"]).decision());
+            let ticket = ghost_of(&store, 1);
+            let mut moved = party("2026-11-07T21:00:00+01:00", &["EZ5K2M9P"]);
+            moved.change = EventChange::Updated;
+            moved.commitment = EventCommitment::Unknown;
+            decide(&store, 1, 2, &judged(&moved, &[ticket], Some(ticket)));
+            let theirs = ghost_of(&store, 2);
+            assert!(
+                !store
+                    .resolve_linked_change(1, theirs, ticket, true, Utc::now())
+                    .unwrap(),
+                "backwards"
+            );
+            assert!(
+                store
+                    .resolve_linked_change(1, ticket, theirs, true, Utc::now())
+                    .unwrap()
+            );
+            let shown = ghost_by(&store, ticket);
+            assert_eq!(shown.start, at("2026-11-07T21:00:00+01:00"));
+            assert_eq!(shown.commitment, EventCommitment::Committed);
+            assert_eq!(count(&store, "ghost_events"), 1);
+            let linked: Vec<(i64, bool)> = shown
+                .sources
+                .iter()
+                .map(|s| (s.message_id, s.linked))
+                .collect();
+            assert_eq!(linked, vec![(1, false), (2, true)]);
+            // The promoter's references never become the RA ghost's keys.
+            assert_eq!(
+                keys(&store, ticket),
+                vec!["ref:ra.co:ra7f3k9q2".to_string()]
+            );
+        }
+
+        /// Another sender's word is never the user's standing: accepting an
+        /// unverified "your tickets" (its ghost committed nothing, so it
+        /// linked under the user's) does not commit an invitation.
+        #[test]
+        fn an_accepted_change_never_commits_the_users_ghost() {
+            let store = fixture();
+            mail_from(&store, 1, 1, "t1", 60, RA, Some(true));
+            mail_from(&store, 1, 2, "t2", 30, STRANGER, Some(false));
+            let mut invited = party(FRIDAY, &["RA7F3K9Q2"]);
+            invited.commitment = EventCommitment::Invited;
+            decide(&store, 1, 1, &invited.decision());
+            let mine = ghost_of(&store, 1);
+            let mut theirs = party("2026-11-06T20:00:00+01:00", &["EZ5K2M9P"]);
+            theirs.change = EventChange::Updated;
+            decide(&store, 1, 2, &judged(&theirs, &[mine], Some(mine)));
+            let linked = ghost_of(&store, 2);
+            assert!(
+                store
+                    .resolve_linked_change(1, mine, linked, true, Utc::now())
+                    .unwrap()
+            );
+            let shown = ghost_by(&store, mine);
+            assert_eq!(shown.start, at("2026-11-06T20:00:00+01:00"));
+            assert_eq!(shown.commitment, EventCommitment::Invited);
+        }
+
+        /// Keeping mine: the same change is not offered again, and a further
+        /// change is.
+        #[test]
+        fn keeping_mine_remembers_the_change_it_turned_down() {
+            let store = fixture();
+            mail_from(&store, 1, 1, "t1", 60, RA, Some(true));
+            mail_from(&store, 1, 2, "t2", 30, PROMOTER, Some(true));
+            decide(&store, 1, 1, &party(FRIDAY, &["RA7F3K9Q2"]).decision());
+            let ticket = ghost_of(&store, 1);
+            let mut moved = party("2026-11-07T21:00:00+01:00", &[]);
+            moved.change = EventChange::Updated;
+            decide(&store, 1, 2, &judged(&moved, &[ticket], Some(ticket)));
+            let theirs = ghost_of(&store, 2);
+            let changes = |store: &SqliteStore| {
+                let ghosts = listed(store, 1);
+                let urls = store
+                    .ghost_url_refs(1, &ghosts.iter().map(|g| g.id).collect::<Vec<_>>())
+                    .unwrap();
+                let folded = crate::gcal::fold_ghosts(&ghosts, &urls);
+                crate::gcal::linked_changes(&ghosts, &folded)
+                    .into_iter()
+                    .flatten()
+                    .map(|(i, kind)| (ghosts[i].id, kind))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                changes(&store),
+                vec![(theirs, crate::gcal::LinkedChange::Moved)]
+            );
+            assert!(
+                store
+                    .resolve_linked_change(1, ticket, theirs, false, Utc::now())
+                    .unwrap()
+            );
+            assert!(row(&store, theirs).1.is_some());
+            assert_eq!(changes(&store), vec![]);
+            assert_eq!(ghost_by(&store, ticket).start, at(FRIDAY));
+            // The promoter cancels: a new change, offered.
+            mail_from(&store, 1, 3, "t2", 10, PROMOTER, Some(true));
+            let mut cancelled = party("2026-11-07T21:00:00+01:00", &[]);
+            cancelled.change = EventChange::Cancelled;
+            decide(&store, 1, 3, &cancelled.decision());
+            assert_eq!(
+                changes(&store),
+                vec![(theirs, crate::gcal::LinkedChange::Cancelled)]
+            );
+        }
+
+        /// Case 12: a promoter's cancellation that matches none of its own
+        /// ghosts still makes one, so the cancellation can sit on the user's
+        /// card. The user's ghost stays live.
+        #[test]
+        fn another_senders_cancellation_links_and_cancels_nothing() {
+            let store = fixture();
+            mail_from(&store, 1, 1, "t1", 60, RA, Some(true));
+            mail_from(&store, 1, 2, "t2", 30, PROMOTER, Some(true));
+            decide(&store, 1, 1, &party(FRIDAY, &["RA7F3K9Q2"]).decision());
+            let ticket = ghost_of(&store, 1);
+            let mut cancelled = party(FRIDAY, &[]);
+            cancelled.change = EventChange::Cancelled;
+            decide(&store, 1, 2, &judged(&cancelled, &[ticket], Some(ticket)));
+            let theirs = ghost_of(&store, 2);
+            assert_eq!(row(&store, theirs).0, Some(ticket));
+            assert_eq!(ghost_by(&store, ticket).mail_state, GhostMailState::Live);
+            assert_eq!(
+                ghost_by(&store, theirs).mail_state,
+                GhostMailState::Cancelled
+            );
+            // Without a verdict, nothing to cancel: nothing is made.
+            mail_from(&store, 1, 3, "t3", 10, "news@other.example", Some(true));
+            decide(&store, 1, 3, &cancelled.decision());
+            assert_eq!(count(&store, "ghost_events"), 2);
+        }
+
+        /// The promoter's announcement came first and the ticket second: the
+        /// ticket (committed) is shown and the announcement links under it.
+        #[test]
+        fn the_committed_ghost_is_the_one_shown_whichever_came_first() {
+            let store = fixture();
+            mail_from(&store, 1, 1, "t1", 60, PROMOTER, Some(true));
+            mail_from(&store, 1, 2, "t2", 30, RA, Some(true));
+            mail_from(&store, 1, 3, "t3", 20, "news@third.example", Some(true));
+            let mut announced = party(FRIDAY, &[]);
+            announced.commitment = EventCommitment::Invited;
+            decide(&store, 1, 1, &announced.decision());
+            let theirs = ghost_of(&store, 1);
+            decide(
+                &store,
+                1,
+                2,
+                &judged(&party(FRIDAY, &["RA7F3K9Q2"]), &[theirs], Some(theirs)),
+            );
+            let ticket = ghost_of(&store, 2);
+            assert_eq!(row(&store, ticket).0, None);
+            assert_eq!(row(&store, theirs).0, Some(ticket));
+            // A third sender picking the announcement links under the root.
+            decide(&store, 1, 3, &judged(&announced, &[theirs], Some(theirs)));
+            assert_eq!(row(&store, ghost_of(&store, 3)).0, Some(ticket));
+        }
+
+        /// Case 13: a stranger whose mail failed authentication may link
+        /// (the user's call), labelled unverified, and never merges, even
+        /// into another unauthenticated ghost.
+        #[test]
+        fn an_unverified_stranger_links_and_never_merges() {
+            let store = fixture();
+            mail_from(&store, 1, 1, "t1", 60, RA, Some(false));
+            mail_from(&store, 1, 2, "t2", 30, STRANGER, Some(false));
+            decide(&store, 1, 1, &party(FRIDAY, &["RA7F3K9Q2"]).decision());
+            let first = ghost_of(&store, 1);
+            decide(
+                &store,
+                1,
+                2,
+                &judged(&party(FRIDAY, &[]), &[first], Some(first)),
+            );
+            let theirs = ghost_of(&store, 2);
+            assert_ne!(theirs, first);
+            assert_eq!(row(&store, theirs).0, Some(first));
+            assert!(ghost_by(&store, theirs).sources.iter().all(|s| !s.verified));
+        }
+
+        /// The prefilter: near in time and alike, unlinked, fed by other
+        /// mail, nearest first; the record's own ghost is never offered back.
+        #[test]
+        fn candidates_are_near_alike_unlinked_and_not_this_messages_own() {
+            let store = fixture();
+            for (id, ago, from) in [
+                (1, 90, RA),
+                (2, 80, "hello@moon.example"),
+                (3, 70, PROMOTER),
+                (4, 60, PROMOTER),
+            ] {
+                mail_from(&store, 1, id, &format!("t{id}"), ago, from, Some(true));
+            }
+            decide(&store, 1, 1, &party(FRIDAY, &["RA7F3K9Q2"]).decision());
+            let ticket = ghost_of(&store, 1);
+            // Unrelated: another title and place the same night.
+            let other = Ev {
+                title: "Moon Bingo",
+                start: Some(FRIDAY),
+                location: Some("Moon Bar"),
+                refs: &[],
+                ..Default::default()
+            };
+            decide(&store, 1, 2, &other.decision());
+            // A far-off night of the same party.
+            decide(
+                &store,
+                1,
+                3,
+                &party("2026-11-20T19:00:00+01:00", &[]).decision(),
+            );
+            let record = ghost::launder(&party(SATURDAY, &[]).record()).unwrap();
+            let q = store
+                .event_identity_candidates(1, 4, std::slice::from_ref(&record))
+                .unwrap();
+            assert_eq!(q.scope.as_deref(), Some("endzeit.example"));
+            assert_eq!(q.records.len(), 1);
+            let ids: Vec<i64> = q.records[0].candidates.iter().map(|c| c.id).collect();
+            assert_eq!(ids, vec![ticket]);
+            assert!(!q.records[0].candidates[0].same_sender);
+            // Its own ghost (message 3 alone feeds it) is not offered to it.
+            let far = ghost::launder(&party("2026-11-20T19:00:00+01:00", &[]).record()).unwrap();
+            assert!(
+                store
+                    .event_identity_candidates(1, 3, &[far])
+                    .unwrap()
+                    .records
+                    .is_empty()
+            );
+            // A linked ghost is not offered: its root stands for it.
+            decide(
+                &store,
+                1,
+                4,
+                &judged(&party(SATURDAY, &[]), &[ticket], Some(ticket)),
+            );
+            mail_from(&store, 1, 5, "t5", 5, PROMOTER, Some(true));
+            let q = store.event_identity_candidates(1, 5, &[record]).unwrap();
+            let ids: Vec<i64> = q.records[0].candidates.iter().map(|c| c.id).collect();
+            assert_eq!(ids, vec![ticket]);
+        }
     }
 }

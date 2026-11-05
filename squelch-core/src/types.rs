@@ -785,6 +785,13 @@ pub struct GhostSource {
     pub message_id: i64,
     pub thread_id: String,
     pub role: crate::triage::decision::EventChange,
+    /// From another sender's ghost folded under this one on the timeline
+    /// (a link or a shared event page), not this ghost's own mail.
+    pub linked: bool,
+    /// The mail passed authentication for its sender. A linked source that
+    /// did not is labelled unverified, so a stranger's mail cannot borrow the
+    /// card's standing.
+    pub verified: bool,
 }
 
 /// A listed ghost: the stored columns, parsed, plus the duration prior for its
@@ -832,6 +839,14 @@ pub struct GhostEvent {
     /// alone feeds the ghost is re-decided under another scope. None for a
     /// ghost made from mail that did not pass authentication.
     pub owner_scope: Option<String>,
+    /// Another sender's ghost this one is the same event as
+    /// (`triage::event_identity`): it folds under that one on the timeline
+    /// and never reaches Google.
+    pub linked_to: Option<i64>,
+    /// This (linked) ghost's facts when the user last kept the other's over
+    /// them (`gcal::link_facts`); its change is offered again only once its
+    /// facts move on.
+    pub link_ack: Option<String>,
     /// Oldest first.
     pub sources: Vec<GhostSource>,
 }

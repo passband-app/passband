@@ -1034,6 +1034,17 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // Cross-sender links between ghosts and the user's accepted changes
+    // (`triage::event_identity`) came after the ghost tables.
+    add_column_if_missing(conn, "ghost_events", "linked_to", "INTEGER")?;
+    add_column_if_missing(conn, "ghost_events", "link_ack", "TEXT")?;
+    add_column_if_missing(
+        conn,
+        "ghost_event_sources",
+        "accepted",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+
     // Guarded on table existence — migration unit tests build partial schemas.
     if !tables_exist(conn, &["triage", "deadlines", "messages"])? {
         return Ok(());

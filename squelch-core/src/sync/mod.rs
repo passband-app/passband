@@ -8756,6 +8756,7 @@ Q0/00yfa39rgtJLa0DnOoA==
                 identity_refs: vec!["PNR1".into()],
                 likelihood: None,
                 evidence: vec![],
+                identity: None,
             }],
             ..Default::default()
         };
@@ -11783,6 +11784,7 @@ Q0/00yfa39rgtJLa0DnOoA==
                 identity_refs: vec!["SEAT12".into()],
                 likelihood: None,
                 evidence: evidence.clone(),
+                identity: None,
             }],
             done: Some(DoneRequest {
                 reason: "The show is over".into(),

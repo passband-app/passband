@@ -501,6 +501,10 @@ fn calendar_routes(state: ApiState) -> Router<ApiState> {
         // directions: the agent door has no timeline route.
         .route("/client/timeline", get(handlers::get_timeline))
         .route("/client/timeline/ghosts/{id}", patch(handlers::patch_ghost))
+        .route(
+            "/client/timeline/ghosts/{id}/change",
+            post(handlers::resolve_linked_change),
+        )
         // Calendar search (docs/CALENDAR.md §10.1): the search box's Events
         // block, and the in-app assistant's `search_calendar`, which gets the
         // agent view (no address of anyone). Agent MCP's `search_calendar`

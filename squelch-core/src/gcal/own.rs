@@ -262,7 +262,7 @@ const COMMON: [&str; 22] = [
     "people",
 ];
 
-fn distinctive(text: &str) -> HashSet<String> {
+pub(crate) fn distinctive(text: &str) -> HashSet<String> {
     normalize_title(text)
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| w.chars().count() >= 4 && !COMMON.contains(w))
@@ -495,8 +495,9 @@ pub fn plan(
         }
         let before: Facts = serde_json::from_str(&o.fingerprint).unwrap_or_default();
         let mut print = facts(ghost);
-        // Only authenticated mail moves a real event.
-        if !print.same_mail(&before) && ghost.verified() {
+        // Only authenticated mail moves a real event, and only the ghost's
+        // own: a ghost linked under another sender's never does.
+        if !print.same_mail(&before) && ghost.verified() && ghost.linked_to.is_none() {
             print.was_free = match (before.cancelled, print.cancelled) {
                 (false, true) => Some(mine.row.transparent),
                 (true, true) => before.was_free,
@@ -539,6 +540,7 @@ pub fn plan(
             .filter(|g| {
                 !bound.contains(&g.id)
                     && g.verified()
+                    && g.linked_to.is_none()
                     && g.mail_state == GhostMailState::Live
                     && g.user_state != Some(GhostUserState::Dismissed)
                     && same_event(g, &copy.row)
@@ -610,6 +612,8 @@ mod tests {
             created_at: "2026-10-20T10:00:00Z".parse().unwrap(),
             updated_at: "2026-10-20T10:00:00Z".parse().unwrap(),
             owner_scope: Some("dingles.example".into()),
+            linked_to: None,
+            link_ack: None,
             sources: Vec::new(),
         }
     }
@@ -1321,5 +1325,91 @@ mod tests {
                 [Some(2), Some(2), None]
             );
         }
+
+        /// A stored link folds whatever the days and states (a promoter's
+        /// "moved to Saturday", their cancellation), and the difference is
+        /// the change the card offers, unless the user kept theirs over it.
+        #[test]
+        fn a_linked_ghost_folds_across_days_and_offers_its_change() {
+            use crate::gcal::{LinkedChange, linked_changes};
+            let ticket = from(1, "Polar Inertia", "2026-11-06T19:00:00-08:00", "ra.co");
+            let mut moved = from(
+                2,
+                "Endzeit night",
+                "2026-11-07T21:00:00-08:00",
+                "endzeit.example",
+            );
+            moved.linked_to = Some(1);
+            let folded = fold_ghosts(&[ticket.clone(), moved.clone()], &HashMap::new());
+            assert_eq!(folded, [None, Some(0)]);
+            assert_eq!(
+                linked_changes(&[ticket.clone(), moved.clone()], &folded),
+                [Some((1, LinkedChange::Moved)), None]
+            );
+            // Kept over: not offered again.
+            moved.link_ack = Some(crate::triage::event_identity::link_facts(
+                &moved.start,
+                false,
+            ));
+            assert_eq!(
+                linked_changes(&[ticket.clone(), moved.clone()], &folded),
+                [None, None]
+            );
+            // Cancelled: offered again, as a cancellation.
+            moved.mail_state = GhostMailState::Cancelled;
+            let folded = fold_ghosts(&[ticket.clone(), moved.clone()], &HashMap::new());
+            assert_eq!(folded, [None, Some(0)]);
+            assert_eq!(
+                linked_changes(&[ticket.clone(), moved.clone()], &folded),
+                [Some((1, LinkedChange::Cancelled)), None]
+            );
+            // Agreeing with the shown ghost: nothing to offer.
+            let mut agrees = from(
+                3,
+                "Endzeit night",
+                "2026-11-06T19:00:00-08:00",
+                "endzeit.example",
+            );
+            agrees.linked_to = Some(1);
+            let folded = fold_ghosts(&[ticket.clone(), agrees.clone()], &HashMap::new());
+            assert_eq!(linked_changes(&[ticket, agrees], &folded), [None, None]);
+        }
+
+        /// A link wins over an opposite URL fold rather than making a cycle.
+        #[test]
+        fn a_link_overrides_a_url_fold_the_other_way() {
+            let friend = from(1, "Friday night", "2026-11-06", "pal@gmail.com");
+            let mut ra = from(2, "Polar Inertia", "2026-11-06T19:00:00-08:00", "ra.co");
+            ra.linked_to = Some(1);
+            let u = urls(&[(1, RA), (2, RA)]);
+            assert_eq!(
+                fold_ghosts(&[friend.clone(), ra.clone()], &u),
+                [None, Some(0)]
+            );
+            // Whatever order they are listed in.
+            assert_eq!(fold_ghosts(&[ra, friend], &u), [Some(1), None]);
+        }
+    }
+
+    /// A linked ghost is another sender's word: it never adopts Gmail's
+    /// event, and one already adopted never moves it.
+    #[test]
+    fn a_linked_ghost_never_adopts_or_moves_a_real_event() {
+        let mut g = ghost(7, "Dinner at Dingles", START);
+        g.linked_to = Some(3);
+        assert!(plan_of(std::slice::from_ref(&g), &[dingles()], &[]).is_empty());
+        let o = bound(&g, OwnState::Owned);
+        let mine = passbands(&g, START, END);
+        let mut later = g.clone();
+        later.start = at("2026-10-30T21:15:00-04:00");
+        let steps = plan_of(
+            std::slice::from_ref(&later),
+            std::slice::from_ref(&mine),
+            std::slice::from_ref(&o),
+        );
+        assert!(
+            !steps.iter().any(|s| matches!(s, Step::Update { .. })),
+            "{steps:?}"
+        );
     }
 }

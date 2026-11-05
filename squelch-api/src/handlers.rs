@@ -2132,12 +2132,69 @@ pub(crate) fn ghost_view(
             "band": l.band,
             "reason": (!l.reason.is_empty()).then_some(&l.reason),
         })),
+        // `linked`: another sender's mail about the same event, folded
+        // under this ghost; `verified` false labels mail that did not pass
+        // authentication, so it cannot borrow the card's standing.
         "sources": ghost.sources.iter().map(|s| json!({
             "message_id": s.message_id,
             "thread_id": s.thread_id,
             "role": s.role,
+            "linked": s.linked,
+            "verified": s.verified,
         })).collect::<Vec<_>>(),
     })
+}
+
+/// A linked ghost's change as the card offers it: what it says (a new start,
+/// or cancelled), from which ghost, and the mail that says it. `ghost_id`
+/// (the ghost it is offered on) is added by the caller.
+fn linked_change_view(
+    from: &squelch_core::types::GhostEvent,
+    kind: squelch_core::gcal::LinkedChange,
+) -> serde_json::Value {
+    use squelch_core::gcal::LinkedChange;
+    let source = from.sources.last();
+    json!({
+        "from": from.id,
+        "kind": match kind {
+            LinkedChange::Moved => "moved",
+            LinkedChange::Cancelled => "cancelled",
+        },
+        "start": from.start.to_string(),
+        "all_day": from.all_day(),
+        "end": from.effective_end().filter(|e| !e.estimated).map(|e| e.end.to_string()),
+        "verified": from.verified(),
+        "message_id": source.map(|s| s.message_id),
+        "thread_id": source.map(|s| s.thread_id.clone()),
+    })
+}
+
+/// `POST /client/timeline/ghosts/{id}/change` `{from, accept}`: the user's
+/// answer to the change linked ghost `from` offers on ghost `id`. `accept`
+/// true takes it (the other sender's mail then supplies this ghost's facts,
+/// so an event Passband keeps on Google moves with it); false keeps this
+/// ghost as it is, and the same change is not offered again. 404 when
+/// `from` is not linked under `id`.
+#[derive(Debug, Deserialize)]
+pub struct LinkedChangeBody {
+    from: i64,
+    accept: bool,
+}
+
+pub async fn resolve_linked_change(
+    State(state): State<ApiState>,
+    Path(ghost_id): Path<i64>,
+    Json(body): Json<LinkedChangeBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let at = Utc::now();
+    let found = store_call(&state, move |store, account_id| {
+        store.resolve_linked_change(account_id, ghost_id, body.from, body.accept, at)
+    })
+    .await?;
+    if !found {
+        return Err(ApiError::not_found());
+    }
+    Ok((no_store(), Json(json!({ "updated": true, "id": ghost_id }))))
 }
 
 /// `GET /client/timeline?from=&to=`: the calendar ghosts and the real Google
@@ -2249,18 +2306,28 @@ pub async fn get_timeline(
     // sender's copy must not hide the shown ghost behind an event, nor fill
     // its tickets button.
     let folded = squelch_core::gcal::fold_ghosts(&ghosts, &urls);
+    // A linked ghost's change, offered on the ghost it is shown under. Read
+    // before the copies are dropped below.
+    let changes: Vec<serde_json::Value> = squelch_core::gcal::linked_changes(&ghosts, &folded)
+        .into_iter()
+        .map(|change| match change {
+            Some((i, kind)) => linked_change_view(&ghosts[i], kind),
+            None => serde_json::Value::Null,
+        })
+        .collect();
     let mut ghosts = ghosts;
     for (i, into) in folded.iter().enumerate() {
         let Some(w) = *into else { continue };
         let same_sender =
             ghosts[w].owner_scope.is_some() && ghosts[w].owner_scope == ghosts[i].owner_scope;
         let sources = ghosts[i].sources.clone();
-        for source in sources {
+        for mut source in sources {
             if !ghosts[w]
                 .sources
                 .iter()
                 .any(|s| s.message_id == source.message_id)
             {
+                source.linked |= !same_sender;
                 ghosts[w].sources.push(source);
             }
         }
@@ -2277,13 +2344,22 @@ pub async fn get_timeline(
             tickets.ghosts.entry(ghosts[w].id).or_insert(t);
         }
     }
-    let (ghosts, matched): (Vec<_>, Vec<_>) = ghosts
+    let (ghosts, matched, changes): (Vec<_>, Vec<_>, Vec<_>) = ghosts
         .into_iter()
         .zip(matched)
+        .zip(changes)
         .zip(&folded)
         .filter(|(_, into)| into.is_none())
-        .map(|(pair, _)| pair)
-        .unzip();
+        .map(|(((g, m), c), _)| (g, m, c))
+        .fold(
+            (Vec::new(), Vec::new(), Vec::new()),
+            |(mut gs, mut ms, mut cs), (g, m, c)| {
+                gs.push(g);
+                ms.push(m);
+                cs.push(c);
+                (gs, ms, cs)
+            },
+        );
     use squelch_core::gcal::own::OwnState;
     let mine: std::collections::HashSet<(&str, &str)> = owned
         .iter()
@@ -2291,11 +2367,29 @@ pub async fn get_timeline(
         .map(|o| (o.calendar_id.as_str(), o.event_id.as_str()))
         .collect();
     let now = now.with_timezone(from.offset());
+    // A change on a ghost that is drawn as its real event rides on the
+    // event too, or hiding the ghost would hide the change.
+    let mut event_changes: std::collections::HashMap<usize, serde_json::Value> = Default::default();
+    for ((g, m), change) in ghosts.iter().zip(&matched).zip(&changes) {
+        if let (Some(i), false) = (m, change.is_null()) {
+            let mut change = change.clone();
+            change["ghost_id"] = json!(g.id);
+            event_changes.insert(*i, change);
+        }
+    }
     let ghosts: Vec<_> = ghosts
         .iter()
         .zip(matched)
-        .map(|(g, matched)| {
+        .zip(changes)
+        .map(|((g, matched), change)| {
             let mut view = ghost_view(g, now);
+            view["pending_change"] = if change.is_null() {
+                change
+            } else {
+                let mut change = change;
+                change["ghost_id"] = json!(g.id);
+                change
+            };
             // A ghost that is an event's shares its tickets.
             view["tickets"] = tickets
                 .ghosts
@@ -2317,8 +2411,14 @@ pub async fn get_timeline(
         .unwrap_or_default();
     let events: Vec<_> = events
         .iter()
-        .map(|e| {
+        .enumerate()
+        .map(|(i, e)| {
             let mut view = calendar_event_view(e, &account_email);
+            // Only when there is one: an event is otherwise served the same
+            // here as by the write that made or changed it.
+            if let Some(change) = event_changes.remove(&i) {
+                view["pending_change"] = change;
+            }
             view["tickets"] = tickets
                 .events
                 .get(&squelch_core::gcal::remind::event_key(

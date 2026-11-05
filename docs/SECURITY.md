@@ -607,6 +607,18 @@ none and offers neither tool. For each call the mailer:
 An agent's composition is deliberately narrower than the owner's: no
 attachments, no forward, no send group, no read tracking, no scheduling.
 
+**The draft card (MCP Apps).** `create_draft` names a `ui://` resource
+(`squelch-mcp/src/draft_card.html`) that app-capable clients such as Claude
+render in a sandboxed frame in place of the raw result. The HTML is static and
+holds no mail: the client hands it the tool's own arguments and result
+(subject, recipients, the body the agent wrote, the draft id), which the agent
+already had. It loads nothing from the network (empty CSP allow-list), writes
+everything with `textContent`, and its one action asks the client to call
+`open_draft` for that draft, over the same authenticated agent session; it
+never names `send_email`. `resources/read` serves it to any authenticated
+session whatever the write setting, because it is the same file for everyone;
+it is listed only while drafts are allowed.
+
 **Asking for a draft on screen (`open_draft`, and `open: true` on
 `create_draft`).** At `drafts` and above an agent may ask the owner's Mac to
 bring one of its drafts up in the composer. This is the first thing the agent

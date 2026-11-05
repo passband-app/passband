@@ -1568,3 +1568,249 @@ async fn a_clear_ping_goes_to_tagged_devices_once() {
 
     h.stop().await;
 }
+
+// ---- release announcements ---------------------------------------------------
+
+const MAC_DEV: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd4";
+const PHONE_TAG: &str = "3F2A9C1E-7B44-4D0A-9E21-8C5B6D0F1A32";
+const MAC_TAG: &str = "9B1D4E2F-0C3A-4F5B-8D6E-7A1B2C3D4E5F";
+
+/// A Sparkle feed with one release published long enough ago to be past the
+/// grace period.
+const FEED: &str = r#"<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0"><channel>
+<item><title>0.0.99</title><pubDate>Thu, 01 Jan 2026 00:00:00 +0000</pubDate>
+<sparkle:shortVersionString>0.0.99</sparkle:shortVersionString></item>
+</channel></rss>"#;
+
+async fn spawn_feed() -> String {
+    let app = Router::new().route("/appcast.xml", axum::routing::get(|| async { FEED }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}/appcast.xml")
+}
+
+fn release_pusher(base: &str, feed: &str) -> (Arc<SqliteStore>, i64, Pusher) {
+    let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+    let acct = store.ensure_account("me@example.com").unwrap();
+    let pusher =
+        Pusher::for_test(store.clone() as Arc<dyn Store>, acct, base).with_release_feed(feed);
+    store
+        .upsert_device(acct, DEV_A, "ios", Some(PHONE_TAG), Some("production"))
+        .unwrap();
+    store
+        .upsert_device(acct, MAC_DEV, "macos", Some(MAC_TAG), Some("production"))
+        .unwrap();
+    // A daemon that has checked before: the first check ever only records.
+    store
+        .set_app_setting(acct, squelch_core::release_feed::ANNOUNCED_KEY, "0.0.98")
+        .unwrap();
+    (store, acct, pusher)
+}
+
+fn announced(store: &SqliteStore, acct: i64) -> Option<String> {
+    store
+        .get_app_setting(acct, squelch_core::release_feed::ANNOUNCED_KEY)
+        .unwrap()
+}
+
+/// The first check a daemon ever makes records the current release and
+/// pushes nothing: rolling this out is not itself an announcement.
+#[tokio::test]
+async fn the_first_check_ever_announces_nothing() {
+    let (base, relay) = spawn_relay().await;
+    let feed = spawn_feed().await;
+    let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+    let acct = store.ensure_account("me@example.com").unwrap();
+    store
+        .upsert_device(acct, MAC_DEV, "macos", Some(MAC_TAG), Some("production"))
+        .unwrap();
+    let pusher =
+        Pusher::for_test(store.clone() as Arc<dyn Store>, acct, &base).with_release_feed(&feed);
+    pusher.check_release().await;
+    assert_eq!(relay.count(), 0);
+    assert_eq!(announced(&store, acct).as_deref(), Some("0.0.99"));
+}
+
+/// A lapsed Mac owner's phone hears about one release, then nothing more
+/// until a Mac shows up again. The Mac and the phone go out as two requests.
+#[tokio::test]
+async fn a_lapsed_phone_hears_once() {
+    let (base, relay) = spawn_relay().await;
+    let feed = spawn_feed().await;
+    let path = std::env::temp_dir().join(format!(
+        "squelch-release-{}-{}.db",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let store = Arc::new(SqliteStore::open(&path).unwrap());
+    let acct = store.ensure_account("me@example.com").unwrap();
+    store
+        .upsert_device(acct, DEV_A, "ios", Some(PHONE_TAG), Some("production"))
+        .unwrap();
+    store
+        .upsert_device(acct, MAC_DEV, "macos", Some(MAC_TAG), Some("production"))
+        .unwrap();
+    store
+        .set_app_setting(acct, squelch_core::release_feed::ANNOUNCED_KEY, "0.0.98")
+        .unwrap();
+    let issued = store.issue_device_token(acct, "laptop").unwrap();
+    store
+        .verify_device_token_from(
+            &issued.token,
+            Some(&squelch_core::store::ClientTag::parse("macos/0.0.90").unwrap()),
+        )
+        .unwrap()
+        .unwrap();
+    // The Mac was last seen a month ago.
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE device_tokens SET client_seen_at = ?1 WHERE client_platform IS NOT NULL",
+            [(chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339()],
+        )
+        .unwrap();
+    let pusher =
+        Pusher::for_test(store.clone() as Arc<dyn Store>, acct, &base).with_release_feed(&feed);
+
+    pusher.check_release().await;
+    let bodies = relay.bodies();
+    assert_eq!(
+        bodies.len(),
+        2,
+        "one request for the Mac, one for the phone"
+    );
+    assert!(bodies.iter().any(|b| b["device_tokens"] == json!([DEV_A])));
+    assert!(
+        bodies
+            .iter()
+            .any(|b| b["device_tokens"] == json!([MAC_DEV]))
+    );
+    assert!(
+        store
+            .get_app_setting(acct, squelch_core::release_feed::PHONE_KEY)
+            .unwrap()
+            .is_some()
+    );
+
+    // The next release: the Mac again, the phone not.
+    store
+        .set_app_setting(acct, squelch_core::release_feed::ANNOUNCED_KEY, "0.0.98")
+        .unwrap();
+    pusher.check_release().await;
+    let bodies = relay.bodies();
+    assert_eq!(bodies.len(), 3);
+    assert_eq!(bodies[2]["device_tokens"], json!([MAC_DEV]));
+    drop(pusher);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A release goes to the Mac under the Mac's own topic, once. The phone of an
+/// account that never had a Mac on record hears nothing about a Mac release.
+#[tokio::test]
+async fn a_release_goes_to_the_mac_once_under_its_own_topic() {
+    let (base, relay) = spawn_relay().await;
+    let feed = spawn_feed().await;
+    let (store, acct, pusher) = release_pusher(&base, &feed);
+
+    pusher.check_release().await;
+    assert_eq!(relay.count(), 1);
+    let body = relay.bodies().remove(0);
+    assert_eq!(body["device_tokens"], json!([MAC_DEV]));
+    assert_eq!(body["kind"], json!("release"));
+    assert_eq!(body["topic"], json!(squelch_core::push::MAC_TOPIC));
+    assert_eq!(
+        body["event_id"],
+        json!(format!("{MAC_TAG}:release:macos:0.0.99"))
+    );
+    assert_eq!(body["collapse_id"], json!("release-macos-0.0.99"));
+    assert_eq!(
+        store
+            .get_app_setting(acct, squelch_core::release_feed::ANNOUNCED_KEY)
+            .unwrap()
+            .as_deref(),
+        Some("0.0.99")
+    );
+
+    // Once per version.
+    pusher.check_release().await;
+    assert_eq!(
+        relay.count(),
+        1,
+        "the same release is never announced twice"
+    );
+}
+
+/// A Mac that already connected on the new version means nobody is told.
+#[tokio::test]
+async fn a_mac_already_on_the_release_hears_nothing() {
+    let (base, relay) = spawn_relay().await;
+    let feed = spawn_feed().await;
+    let (store, acct, pusher) = release_pusher(&base, &feed);
+    let issued = store.issue_device_token(acct, "laptop").unwrap();
+    store
+        .verify_device_token_from(
+            &issued.token,
+            Some(&squelch_core::store::ClientTag::parse("macos/0.0.99").unwrap()),
+        )
+        .unwrap()
+        .unwrap();
+
+    pusher.check_release().await;
+    assert_eq!(relay.count(), 0);
+    assert_eq!(
+        store
+            .get_app_setting(acct, squelch_core::release_feed::ANNOUNCED_KEY)
+            .unwrap()
+            .as_deref(),
+        Some("0.0.99"),
+        "recorded, so it is never sent later"
+    );
+}
+
+/// A relay outage leaves the release unannounced for the next check.
+#[tokio::test]
+async fn a_release_that_reached_nobody_is_tried_again() {
+    let (base, relay) = spawn_relay().await;
+    let feed = spawn_feed().await;
+    let (store, acct, pusher) = release_pusher(&base, &feed);
+    relay.fail.store(true, Ordering::SeqCst);
+    pusher.check_release().await;
+    assert_eq!(announced(&store, acct).as_deref(), Some("0.0.98"));
+    relay.fail.store(false, Ordering::SeqCst);
+    pusher.check_release().await;
+    assert_eq!(relay.count(), 2);
+    assert!(
+        store
+            .get_app_setting(acct, squelch_core::release_feed::ANNOUNCED_KEY)
+            .unwrap()
+            .is_some()
+    );
+}
+
+/// Mail never goes to a Mac: it has its own banners, and no extension to fill
+/// a push in.
+#[tokio::test]
+async fn mail_events_skip_mac_devices() {
+    let (base, relay) = spawn_relay().await;
+    let h = start(&base, |_, _| {});
+    h.register_tagged(DEV_A, PHONE_TAG);
+    h.store
+        .upsert_device(h.acct, MAC_DEV, "macos", Some(MAC_TAG), Some("production"))
+        .unwrap();
+    wait_for("the initial cursor", Duration::from_secs(2), || {
+        h.cursor().is_some()
+    })
+    .await;
+
+    h.emit(1);
+    wait_for("the push", Duration::from_secs(5), || relay.count() == 1).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(relay.count(), 1);
+    assert_eq!(relay.bodies()[0]["device_tokens"], json!([DEV_A]));
+
+    h.stop().await;
+}

@@ -103,3 +103,35 @@ the site 302s to the GitHub release asset, so the feed URL never depends on
 where the archives are stored. `releases/` is the generator's working set:
 keep it around so old entries survive regeneration; losing it only trims the
 feed to the versions you re-stage.
+
+## Release announcements (push)
+
+A Mac where Passband is quit never sees the update card or banner, so the
+daemons announce each release themselves (squelch-core/src/release_feed.rs).
+Every daemon with a relay reads `passband.app/appcast.xml` hourly. Six hours
+after a version appears there, it pushes it once to its account's Macs, and to
+the phones of accounts whose Mac has gone quiet for a week. An account whose
+Mac already connected on the new version hears nothing. There is nothing to do
+per release: publishing the appcast is the trigger.
+
+The Mac half needs the app to hold an APNs token, which needs a provisioning
+profile. One-time setup, at developer.apple.com:
+
+1. Identifiers > `app.passband.client` > tick **Push Notifications**, save.
+2. Profiles > + > **Developer ID** (under Distribution) > App ID
+   `app.passband.client` > the Developer ID Application certificate CI signs
+   with > download the `.provisionprofile`.
+3. `base64 -i Passband_Push.provisionprofile | gh secret set MAC_PUSH_PROFILE --env release-mac`
+   (or as a repo secret, wherever the other release secrets live).
+
+The relay already allow-lists `app.passband.client` as a topic, and its `.p8`
+key is team-wide, so nothing changes on the server. Without the secret the app
+ships exactly as before and never asks for a token. `build.sh` refuses to sign
+with a profile for another app id or team, one without push, or an expired one,
+because an app that claims push without a matching profile does not launch.
+Profiles last a while but not forever: when it expires, the release fails with
+a message saying so, and step 2 makes a new one.
+
+Verify once on a real install: `codesign -d --entitlements - /Applications/Passband.app`
+lists `com.apple.developer.aps-environment`, and after a launch the account's
+daemon has a `macos` row in `devices`.

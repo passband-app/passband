@@ -11,17 +11,23 @@ use crate::triage::profile::{self, LlmProfileModel, PassOutcome};
 
 impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C> {
     /// The learned-memory lines for one triage run over mail from `sender` in
-    /// `thread_id`. Nothing while the `understanding` feature is off, and
-    /// nothing on a store error: a run without its memory is an ordinary run,
-    /// never a failed job.
+    /// `thread_id`. `understanding` is the flag as the run read it, ONCE, for
+    /// the prompt variant too: nothing when it is false, whatever the live
+    /// flag says by now. Nothing on a store error either: a run without its
+    /// memory is an ordinary run, never a failed job.
     ///
     /// Accepted: the eval runner builds its input with `snapshot()` alone, so it gets no memory lines.
-    pub(super) fn memory_for(&self, thread_id: &str, sender: &str) -> Vec<MemoryEntry> {
+    pub(super) fn memory_for(
+        &self,
+        thread_id: &str,
+        sender: &str,
+        understanding: bool,
+    ) -> Vec<MemoryEntry> {
         let now = Utc::now();
         let zone = self.store.owner_zone(self.account_id).unwrap_or_default();
         let provider = StoreMemoryContext {
             store: &*self.store,
-            features: &self.features,
+            enabled: understanding,
             now,
             today: now.with_timezone(&zone.zone).date_naive(),
         };
@@ -101,5 +107,65 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::SqliteStore;
+    use crate::triage::memory::{MemoryRecord, Origin, Provenance, new_ulid};
+
+    struct NoToken;
+
+    #[async_trait::async_trait]
+    impl CredentialStore for NoToken {
+        async fn token(&self, _account: AccountId) -> Result<crate::credentials::OAuthToken> {
+            Err(crate::error::CoreError::NotFound)
+        }
+    }
+
+    /// The flag as the run read it decides, not the live set: with the live
+    /// flag ON and a stored line that would be served, a run that read the
+    /// flag as off gets no memory at all.
+    #[test]
+    fn a_run_that_read_the_flag_off_gets_no_memory() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let acct = store.ensure_account("me@example.com").unwrap();
+        let now = Utc::now();
+        store
+            .insert_memory_entry_unchecked(
+                acct,
+                &MemoryRecord {
+                    id: new_ulid(now),
+                    scope: "owner".into(),
+                    origin: Origin::Stated,
+                    kind: "role".into(),
+                    body: serde_json::json!({"what": "Runs a studio"}),
+                    line: "Runs a studio.".into(),
+                    provenance: Provenance::default(),
+                    confidence: 1.0,
+                    revision: 1,
+                    created_at: now,
+                    updated_at: now,
+                    affirmed_at: now,
+                    expires_at: None,
+                    retired_at: None,
+                    deleted_at: None,
+                },
+            )
+            .unwrap();
+        let engine = SyncEngine::new(
+            store,
+            Arc::new(NoToken),
+            acct,
+            "me@example.com".into(),
+            Config::default(),
+        )
+        .with_features(crate::features::Features::pinned([
+            crate::features::UNDERSTANDING,
+        ]));
+        assert_eq!(engine.memory_for("t", "sam@acme.example", true).len(), 1);
+        assert!(engine.memory_for("t", "sam@acme.example", false).is_empty());
     }
 }

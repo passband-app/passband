@@ -552,8 +552,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             config.context.initial_thread_messages,
             &clock,
         );
-        input.memory = self.memory_for(&context.message.thread_id, &context.message.from_addr);
+        // ONE read of the flag per run: it picks the prompt variant and gates
+        // the memory lines, so the two can never disagree.
         input.understanding = self.features.enabled(crate::features::UNDERSTANDING);
+        input.memory = self.memory_for(
+            &context.message.thread_id,
+            &context.message.from_addr,
+            input.understanding,
+        );
         // A new account triages the jobs somebody is waiting on at the
         // onboarding effort for its first days (`Stage2Config::effort_for_job`):
         // the store's foreground lane, and nothing else. A person's

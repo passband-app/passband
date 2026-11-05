@@ -713,7 +713,7 @@ fn the_scopes_of_a_run_are_owner_sender_and_domain() {
 }
 
 #[test]
-fn the_store_provider_serves_nothing_while_the_feature_is_off() {
+fn the_store_provider_serves_nothing_while_disabled() {
     let store = SqliteStore::open_in_memory().unwrap();
     let acct = store.ensure_account("me@example.com").unwrap();
     let mut owner = record(
@@ -749,19 +749,17 @@ fn the_store_provider_serves_nothing_while_the_feature_is_off() {
         sender: "sam@acme.example".into(),
     };
 
-    let off = Features::none();
     let provider = StoreMemoryContext {
         store: &store,
-        features: &off,
+        enabled: false,
         now: now(),
         today: now().date_naive(),
     };
     assert!(provider.relevant_memory(&scope).unwrap().is_empty());
 
-    let on = Features::pinned([features::UNDERSTANDING]);
     let provider = StoreMemoryContext {
         store: &store,
-        features: &on,
+        enabled: true,
         now: now(),
         today: now().date_naive(),
     };

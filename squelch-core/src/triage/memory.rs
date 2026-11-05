@@ -20,7 +20,6 @@
 //! `/mcp` never does (an invariant test in `squelch-mcp` pins it).
 
 use super::context::{ContextScope, MemoryContextProvider, MemoryEntry};
-use crate::features::{self, Features};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1127,12 +1126,15 @@ pub fn scopes_for(sender: &str) -> Vec<String> {
 
 /// The learned-memory seam, filled: entries from `memory_entries` for this run.
 ///
-/// OFF IS AS IF IT DID NOT EXIST. With the `understanding` feature off this
-/// returns nothing without reading the store, so a mailbox whose flag is
-/// switched off stops seeing its profile on the very next job.
+/// `enabled` is the `understanding` flag AS THE RUN READ IT, once: the same
+/// read picks the prompt variant (`ContextSnapshot::understanding`). The
+/// provider never asks the live feature set itself, because a flip between
+/// two reads would hand memory lines to the flag-off prompt, which lacks the
+/// instruction never to repeat them. Disabled, it returns nothing without
+/// reading the store.
 pub struct StoreMemoryContext<'a, S: crate::store::memory::MemoryStore + ?Sized> {
     pub store: &'a S,
-    pub features: &'a Features,
+    pub enabled: bool,
     pub now: DateTime<Utc>,
     /// The owner-local date (`OwnerClock::today`).
     pub today: NaiveDate,
@@ -1142,7 +1144,7 @@ impl<S: crate::store::memory::MemoryStore + ?Sized> MemoryContextProvider
     for StoreMemoryContext<'_, S>
 {
     fn relevant_memory(&self, scope: &ContextScope) -> Result<Vec<MemoryEntry>, String> {
-        if !self.features.enabled(features::UNDERSTANDING) {
+        if !self.enabled {
             return Ok(Vec::new());
         }
         let rows = self

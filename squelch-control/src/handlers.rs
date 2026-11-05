@@ -1648,6 +1648,26 @@ pub async fn oauth_callback(
         // name the keys a revoke or a re-mint must find.
         let triage_value = match bifrost.mint_virtual_key(&label, llm.budget_usd).await {
             Ok(vk) => {
+                // THE SIGNUP ALLOWANCE: one more month's limit on the first
+                // window only. The first-run backfill triages up to a month of
+                // mail in a new mailbox's first days, and at ~3 cents a message
+                // a busy inbox (75 a day, 2026-11-05) spends the whole monthly
+                // budget on it and then sits with triage dark until the window
+                // resets. That bill is onboarding, not the person's usage. It
+                // rides the gateway's one-cycle override, so it ends by itself
+                // at the first reset. Signup only: `llm mint` is a reset and
+                // `llm topup` is the operator's own call.
+                //
+                // Fail-soft like the mint: a key without the allowance is a
+                // tenant on the ordinary limit, which `llm topup` fixes later.
+                if let Err(e) = bifrost.top_up_key(&vk.id, llm.budget_usd).await {
+                    tracing::error!(
+                        error = %e,
+                        label = %label,
+                        vk_id = %vk.id,
+                        "SIGNUP ALLOWANCE NOT GRANTED: this tenant's first month is on the ordinary limit; `squelch-control llm topup` adds it by hand"
+                    );
+                }
                 vk_id = Some(vk.id);
                 Some(vk.value)
             }

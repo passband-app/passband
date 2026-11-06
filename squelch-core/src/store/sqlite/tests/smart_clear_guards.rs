@@ -697,6 +697,7 @@ fn gala(start: impl Into<String>, timezone: Option<&str>) -> RecordProposal {
         identity_refs: vec![],
         likelihood: None,
         evidence: vec![],
+        identity: None,
     }
 }
 

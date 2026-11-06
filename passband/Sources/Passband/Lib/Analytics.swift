@@ -169,6 +169,10 @@ enum Analytics {
         // guests, and never who.
         "calendar_opened", "calendar_connect_clicked", "calendar_connect_dismissed",
         "calendar_ghost_marked",
+        // The user's answer to a change another sender's mail offered on
+        // their card: `answer` accepted or kept, `kind` moved or cancelled,
+        // `via` key or click. Never the sender, the event or the time.
+        "calendar_linked_change",
         "calendar_event_created", "calendar_event_edited", "calendar_event_deleted",
         // Discovery: which feature sets get found and which get kept. `full`
         // only: this is the "which actions are used" layer, not whether the
@@ -260,6 +264,9 @@ enum Analytics {
             // "cleared" for the null that takes the mark off. "calendar" (the
             // page, and thread_opened's source from it) is a MainView.
             "going", "dismissed", "cleared",
+            // calendar_linked_change: the answer and the kind of change.
+            // "cancelled" is the kind's own word.
+            "accepted", "kept", "moved", "cancelled",
             // calendar_opened's `view`: which way the page was drawn when it
             // opened (CalendarViewMode's raw values).
             "agenda", "month", "week",

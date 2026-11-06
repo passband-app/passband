@@ -835,3 +835,78 @@ groups:
               expression: A
               conditions:
                 - evaluator: { type: gt, params: [600] }
+
+  # The public doors, from the outside. Until 2026-11-05 these probes fed the
+  # dashboard only, so an endpoint could be down, and the LLM canary red, with
+  # nobody told: the canary was red for four days once (prometheus.yml, "THE
+  # LLM CANARY"). The CASA assessment asks how an outage reaches a person;
+  # these are the answer.
+  - orgId: 1
+    name: probes
+    folder: Passband
+    interval: 1m
+    rules:
+      - uid: public-endpoint-down
+        title: Public endpoint down
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: '{{ $labels.instance }} is failing its probe from the monitor box'
+          description: >-
+            The blackbox probe on the AWS monitor box cannot get a 2xx from this URL.
+            signup and relay are ECS services (`aws ecs describe-services --cluster passband`);
+            warden is on carrier; passband.app is CloudFront.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: min by (instance) (probe_success{job="blackbox-http"})
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+
+      # Two probes in a row, not one: the canary runs every 15m, so a 35m
+      # window holds two results, and max over it is 0 only when both failed.
+      # Keep the window wider than twice the scrape interval if that changes.
+      - uid: llm-canary-failing
+        title: LLM canary failing
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: 'LLM calls through bifrost.passband.app are failing'
+          description: >-
+            Two canary calls in a row through the gateway every tenant uses have failed, so
+            hosted triage is failing too. Check the provider key's models and budget in the
+            Bifrost UI, and `aws logs tail /passband/bifrost`.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 2400, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: max(max_over_time(probe_success{job="blackbox-bifrost-llm"}[35m]))
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }

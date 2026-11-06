@@ -860,6 +860,10 @@ final class AppStore {
     /// an answer is applied only if nothing newer has started since it was
     /// asked for. Not observed: it is bookkeeping, never drawn.
     @ObservationIgnored var calendarLoadGeneration = 0
+    /// Linked ghosts (`LinkedChange.from`) whose change is being answered:
+    /// a second press before the first lands would find the link gone and
+    /// toast an error over a change that was applied.
+    @ObservationIgnored var answeringLinkedChanges: Set<Int> = []
     /// Bumped by `dropCalendarState` (an account switch, the gate closing):
     /// a write still out when it was bumped answers into nothing
     /// (`CalendarWriteTicket`). Bookkeeping, never drawn.
@@ -1508,9 +1512,73 @@ final class AppStore {
     @ObservationIgnored var ruleDrafts: [String: RuleDraft] = [:]
     var groupEditor: GroupEditorRequest?
     var askBarOpen = false {
-        // Every way the bar closes ends the watch: it is a view of the lane
-        // for as long as this one opening lasts, never a mode ⌘K reopens into.
-        didSet { if !askBarOpen { askBarWatchesLane = false } }
+        // Every way the bar closes ends the watch and the full-screen layout:
+        // both belong to this one opening, never a mode ⌘K reopens into.
+        didSet {
+            if !askBarOpen {
+                askBarWatchesLane = false
+                askBarFullscreen = false
+                askBarFoldedSearch = false
+            }
+        }
+    }
+    /// The search panel was EXPANDED when the full-screen bar opened and was
+    /// folded to its strip for it (see `foldSearchUnderAskBar`), so Esc can
+    /// put it back the way it was.
+    private var askBarFoldedSearch = false
+    /// THE BAR TAKES THE WINDOW, for a conversation that came out of search
+    /// (the deeper search band, ⌘↩, a question from search history). The
+    /// answer there is the reason the reader asked for more room, so it gets
+    /// all of it; Esc closes it and the search panel is still underneath.
+    /// ⌘K on its own stays the modal. Set only on the ways in from search.
+    private(set) var askBarFullscreen = false
+
+    /// Whether the bar is showing a conversation that came out of search, which
+    /// is what its header names ("deeper search" rather than "ask your inbox").
+    var askBarShowsSearch: Bool {
+        askBarWatchesLane || chatHoldsSearchLane || chatQuestionKey != nil
+    }
+
+    /// ⌘K ON ITS OWN: talking to the agent, which is not search. It never
+    /// shows a conversation that came out of search (adopted from the deeper
+    /// search lane, or a question brought back from search history): that
+    /// one is saved under its question in search history, and ⌘K starts clean
+    /// instead. A ⌘K conversation of its own is kept as it always was.
+    func openAskBar() {
+        // Not mid-answer: a follow-up still running after Esc would be
+        // cancelled and lost (it is saved to search history when it ends).
+        if !askBarOpen, !assistant.running, chatHoldsSearchLane || chatQuestionKey != nil {
+            askBarWatchesLane = false
+            assistant.clear()
+        }
+        askBarOpen = true
+    }
+
+    /// Open the bar full screen over the search it came from.
+    func openAskBarFromSearch() {
+        askBarFullscreen = true
+        askBarOpen = true
+        foldSearchUnderAskBar()
+    }
+
+    /// AN EXPANDED SEARCH COVERS THE RAIL, and the full-screen bar leaves the
+    /// rail's column clear to show it, so the panel would show through there
+    /// instead. Fold it to its strip under the bar, as `openThread` does under
+    /// the reader, and remember to unfold it on the way back.
+    private func foldSearchUnderAskBar() {
+        guard askBarOpen, askBarFullscreen, search.expanded else { return }
+        search.expanded = false
+        askBarFoldedSearch = true
+    }
+
+    /// The bar's own close (Esc, the scrim, a card that opened a thread). Back
+    /// to search means back to the search AS IT WAS: an expanded panel folded
+    /// for the bar unfolds. Not over a thread a card just opened, which wants
+    /// the strip beside it, and not if search itself has gone.
+    func closeAskBar() {
+        let unfold = askBarFoldedSearch && threadId == nil && sideView == .search
+        askBarOpen = false
+        if unfold { search.expanded = true }
     }
     /// THE BAR IS SHOWING THE SEARCH LANE, LIVE. ⌘↩ over a lane that is still
     /// answering cannot hand the conversation over (a running loop owns its
@@ -3267,6 +3335,21 @@ final class AppStore {
         routeWasPointer = viaPointer
         activeView = view
         routeAsks &+= 1
+        leaveFullscreenAskBar()
+    }
+
+    /// A ROUTE CHANGES THE PAGE UNDER A FULL-SCREEN ASK BAR, which is opaque:
+    /// a rail click, ⌘[ / ⌘], a notification tap. Idle, it closes, the way a
+    /// rail click leaves the reader. Mid-answer it drops to the modal instead,
+    /// because the run may be the one routing (the calendar tool lands its
+    /// proposal on the calendar page, and expects the bar to stay over it).
+    private func leaveFullscreenAskBar() {
+        guard askBarOpen, askBarFullscreen else { return }
+        if askBarSession.running {
+            askBarFullscreen = false
+        } else {
+            askBarOpen = false
+        }
     }
 
     /// Bumped by every route. The phone's shell answers a route with a tab and
@@ -4704,6 +4787,14 @@ final class AppStore {
         } else {
             expandSearchLaneToChat()
         }
+        // The Mac's way in from search is always full screen (see
+        // `askBarFullscreen`); the phone pushes its own chat and never gets
+        // here. Only if it opened: `expandSearchLaneToChat` can decline, and a
+        // flag left behind would make the next plain ⌘K full screen.
+        if askBarOpen {
+            askBarFullscreen = true
+            foldSearchUnderAskBar()
+        }
     }
 
     /// The watched lane has finished: the chat takes the conversation over.
@@ -4841,6 +4932,47 @@ final class AppStore {
 
     private var searchEvidenceTask: Task<Void, Never>?
     var preparingSearchEvidence: Bool { searchEvidenceTask != nil }
+    /// A start or refinement waiting out `QueryReadiness`: the quiet, then the
+    /// small model's "done typing?" check. Replaced by every settled query.
+    @ObservationIgnored private var laneGate: Task<Void, Never>?
+
+    /// A SETTLED QUERY'S MOVE, executed: both shells' `judge` land here so the
+    /// gate is one rule. `stop` is immediate (stopping never costs money); a
+    /// start or refinement first waits for the reader to stop typing and for
+    /// the small model to agree the words read as finished. Any keystroke
+    /// lands a new settled query, which replaces the gate.
+    func settleDeeperSearch(_ move: DeeperSearchPolicy.Move, query: String) {
+        laneGate?.cancel()
+        laneGate = nil
+        switch move {
+        case .nothing:
+            return
+        case .stop:
+            resetSearchLane(keepingVerdict: true)
+        case .refine, .start:
+            laneGate = Task { [weak self] in
+                // The judge runs DURING the quiet wait, not after it: the wait
+                // is max(quiet, judge) instead of their sum. A keystroke
+                // cancels this task, and the judge's answer with it.
+                async let finished = QueryReadiness.looksFinished(query)
+                try? await Task.sleep(for: QueryReadiness.quiet)
+                guard !Task.isCancelled, let self, self.search.query.trimmed == query else { return }
+                // "Still typing" is a reason to wait longer, never a reason not
+                // to answer: a judge that misreads a whole question only costs
+                // the grace, and a keystroke before then replaces this gate.
+                if await !finished {
+                    try? await Task.sleep(for: QueryReadiness.typingGrace)
+                }
+                guard !Task.isCancelled, self.search.query.trimmed == query else { return }
+                self.laneGate = nil
+                switch move {
+                case .start(let trigger): self.startDeeperSearch(trigger: trigger)
+                case .refine: self.refineDeeperSearch()
+                case .nothing, .stop: break
+                }
+            }
+        }
+    }
 
     /// A question from search history, asked again: its words go back in the
     /// field and to the agent. With deeper search off it is simply searched.
@@ -4863,9 +4995,10 @@ final class AppStore {
     }
 
     /// START THE DEEPER SEARCH on the query the panel has just answered, with
-    /// the hits it answered with. Called by the classifier's automatic path and
-    /// by the band's own button, so the two cannot disagree about what starting
-    /// means (docs/SEARCH.md §6.1, §6.5).
+    /// the hits it answered with. Called by the automatic path (through
+    /// `settleDeeperSearch`) and by an explicit ask (⌘↩, the panel's "Ask
+    /// agent", the phone band's button), so they cannot disagree about what
+    /// starting means (docs/SEARCH.md §6.1, §6.5).
     ///
     /// The event carries the trigger and the model tier and NOTHING ELSE: the
     /// query is the reader's own words about their own mail, and no part of it,
@@ -4993,6 +5126,8 @@ final class AppStore {
     /// (`f` asks "what else is from this person"), so its verdict goes too and
     /// the band unmounts until the new query has been judged.
     func resetSearchLane(keepingVerdict: Bool = false) {
+        laneGate?.cancel()
+        laneGate = nil
         searchEvidenceTask?.cancel()
         searchEvidenceTask = nil
         searchLane.clear()

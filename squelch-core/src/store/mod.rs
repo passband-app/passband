@@ -6,6 +6,7 @@
 
 pub mod agent_triage;
 pub mod archive_surface;
+pub mod memory;
 pub mod recency;
 pub mod search_query;
 pub mod sqlite;
@@ -1541,7 +1542,11 @@ impl ArchiveDisk {
 /// [`crate::mail::imap::MessageLocations`] is a supertrait so the engine can
 /// hand its store to an IMAP source as that source's lookup table.
 pub trait Store:
-    agent_triage::AgentTriageStore + crate::mail::imap::MessageLocations + Send + Sync
+    agent_triage::AgentTriageStore
+    + crate::mail::imap::MessageLocations
+    + memory::MemoryStore
+    + Send
+    + Sync
 {
     /// Insert or update a message (and its FTS body + derived contacts).
     /// Returns the local message id.
@@ -1688,6 +1693,38 @@ pub trait Store:
         from: DateTime<chrono::FixedOffset>,
         to: DateTime<chrono::FixedOffset>,
     ) -> Result<Vec<crate::types::GhostEvent>>;
+
+    /// [`Store::list_ghost_events`] plus each listed ghost's link partners
+    /// (`ghost_events.linked_to`, either way) wherever they start, for the
+    /// timeline, which folds a link into one card.
+    fn list_ghost_events_with_links(
+        &self,
+        account_id: AccountId,
+        from: DateTime<chrono::FixedOffset>,
+        to: DateTime<chrono::FixedOffset>,
+    ) -> Result<Vec<crate::types::GhostEvent>>;
+
+    /// The identity check's prefilter (`triage::event_identity`): for each
+    /// of `message_id`'s laundered event `records` (by position), the live
+    /// ghosts it could be. Records with no candidate are left out.
+    fn event_identity_candidates(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        records: &[crate::triage::ghost::GhostProposal],
+    ) -> Result<crate::triage::event_identity::Questions>;
+
+    /// The user's answer to the change a linked ghost (`from`, another
+    /// sender's) shows on `shown`: accept it, or keep `shown` as it is.
+    /// False when `from` is not linked under `shown` in this account.
+    fn resolve_linked_change(
+        &self,
+        account_id: AccountId,
+        shown: i64,
+        from: i64,
+        accept: bool,
+        at: DateTime<Utc>,
+    ) -> Result<bool>;
 
     /// The event-page URLs each of these ghosts is keyed by, without the
     /// sender scope, for display folding only (`gcal::fold_ghosts`). Ghosts
@@ -2254,6 +2291,29 @@ pub trait Store:
     /// else the primary calendar's, else UTC. Every agent reads "now" in it.
     /// See [`SqliteStore::owner_zone`](sqlite::SqliteStore::owner_zone).
     fn owner_zone(&self, account_id: AccountId) -> Result<crate::owner_clock::OwnerZone>;
+
+    /// The relationship ledger's block for `addr` in the triage agent's
+    /// context (docs/UNDERSTANDING.md §2.1), `None` when the key must be
+    /// ABSENT: no row, or the first-run backfill has not filled the table.
+    /// See [`SqliteStore::relationship_context`].
+    fn relationship_context(
+        &self,
+        account_id: AccountId,
+        addr: &str,
+    ) -> Result<Option<serde_json::Value>>;
+
+    /// Recompute up to `max` addresses from the ledger's dirty set; how many
+    /// were drained. See [`SqliteStore::drain_relationship_dirty`].
+    fn drain_relationship_dirty(&self, account_id: AccountId, max: usize) -> Result<usize>;
+
+    /// One chunk of the ledger's full recompute, resuming after `after`;
+    /// `None` once done. See [`SqliteStore::recompute_relationship_chunk`].
+    fn recompute_relationship_chunk(
+        &self,
+        account_id: AccountId,
+        after: Option<&str>,
+        max: usize,
+    ) -> Result<Option<String>>;
 
     /// Overwrite this account's Gmail INBOX unread counts, stamping `fetched_at`
     /// now. Only ever called with numbers that came back from Gmail, so a failed

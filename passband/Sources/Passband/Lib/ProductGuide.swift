@@ -66,7 +66,7 @@ enum ProductGuide {
         var covers: String {
             switch self {
             case .gettingAround:
-                "the pages, the sidebar rail, the Discover page and its progress ring, navigation "
+                "the pages, the sidebar rail, navigation "
                     + "keys, undo, zoom, theme"
             case .sitrep:
                 "the home board: For your eyes, Reading, the calendar, shipments, billing and "
@@ -257,7 +257,6 @@ enum ProductGuide {
 
     private static let gettingAroundTail = """
         - Usage and Settings sit at the bottom of the rail and have no number key. ⌘, opens Settings.
-        - The ring just above them opens Discover: a list of the ways through mail (the basics, flow mode, reminders, search, teaching Passband, the reading stack, smart clear) with a short guide to each on the right. The ring fills clockwise as the user tries each one on their own mail, and a feature used on three separate days is marked a habit. Nothing ever empties it. Esc leaves the page.
 
         Moving:
         - ⌘[ goes back and ⌘] goes forward.
@@ -341,6 +340,7 @@ enum ProductGuide {
         - In the month the arrow keys move the day, [ and ] go to the previous and next month, and t goes to today. Enter opens the selected day: its hours in a column beside the month.
         - The week shows seven days side by side under one column of hours, with all-day events and trips in a strip across the top. The left and right arrows move the day, [ and ] go to the previous and next week, t goes to today, and j / k or the up and down arrows step through the selected day's events.
         - j / k move the selection. Enter opens the mail behind an event guessed from mail. y marks it going (again: not going), x dismisses it.
+        - Mail from someone else about the same event (a promoter, a friend) folds into the user's own card instead of making a second one, listed under "Mail behind it" as "same event". When that mail says something different, the card says so ("Endzeit says Sat Nov 7, 9pm", or "Endzeit says it's cancelled"), the row says "change offered", and nothing changes until the user answers: "accept" (⇧A) takes the change, "keep mine" (⇧K) leaves the card as it is. Mail that did not pass sender authentication is marked "unverified".
 
         Making and changing events (only on the user's own calendars):
         - n, or "New event", opens the event pane. It takes half the window, like the composer, and the month stays usable beside it: clicking a day sets the event's date.
@@ -613,7 +613,7 @@ enum ProductGuide {
         Deeper search:
         - When a search reads like a question ("where is the wifi password"), an agent reads the mail alongside the results and points at the answer with email cards and one line.
         - Settings > Assistant > Deeper search sets when it runs: Automatic, On request (a button to press) or Off. It has a model setting of its own.
-        - "Open in chat", or ⌘Enter, continues the same question in this assistant with room for follow-ups.
+        - Clicking anywhere on the deeper search box (except an email card, which opens that email), "Open in chat", or ⌘Enter opens the conversation full screen in this assistant, with room for follow-ups. Esc goes back to the search results.
         - On the iPhone it works the same way in the Search tab, above the results, with the same setting under Assistant on the Account page. The expand arrow on it opens the conversation in the agent chat once it has finished. The Ask the agent row above the results does what the Mac's Ask agent button does: it asks the agent, then opens the conversation in the chat once there is one. With Deeper search off it is turned off, as on the Mac.
         """
 
@@ -655,6 +655,7 @@ enum ProductGuide {
     private static let assistant = """
         This assistant:
         - ⌘K opens it from anywhere. Esc closes the bar, and the conversation stays until ⌘⇧K (new chat) or an account switch.
+        - ⌘K is its own chat, separate from search. A deeper search opened full screen is not what ⌘K shows next: ⌘K starts fresh, and that search's conversation comes back from search history.
         - If an email is open when the question is asked, an "in:" chip names it and "this email" means that one.
         - It can search and read mail, look up shipments, receipts, bills and calendar items, explain why an email was triaged the way it was, show emails as clickable cards, and answer questions about Passband itself.
         - It marks things done, writes sender rules and saves drafts without asking, because those stay inside Passband.

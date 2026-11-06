@@ -742,6 +742,21 @@ actor APIClient {
         return try decode(GhostPatchResult.self, from: data)
     }
 
+    /// `POST /client/timeline/ghosts/{id}/change`: the user's answer to a
+    /// change another sender's mail offers on their card (`LinkedChange`).
+    /// `id` is the change's `ghost_id`, `from` its linked ghost; accept takes
+    /// the change, false keeps the card as it is. A 404 means the link is
+    /// gone, and throws like any refusal.
+    func answerLinkedChange(_ id: Int, from: Int, accept: Bool) async throws -> GhostPatchResult {
+        try await post(
+            "/client/timeline/ghosts/\(id)/change", body: LinkedChangeAnswer(from: from, accept: accept))
+    }
+
+    private struct LinkedChangeAnswer: Encodable {
+        let from: Int
+        let accept: Bool
+    }
+
     // MARK: - calendar events (wave 3: writes to the user's own calendars)
 
     /// `POST /client/calendar/events`: create at Google, answered 201 with the

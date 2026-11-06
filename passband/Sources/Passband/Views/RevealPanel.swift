@@ -110,7 +110,14 @@ struct RevealPanel: View {
         }
         .keyContext(.modal)
         .keyBindings(.modal, [
-            KeyBinding("Escape", "close reveal", allowInInput: true) { onClose() }
+            KeyBinding("Escape", "close reveal", allowInInput: true) { onClose() },
+            // Done from inside the reveal, the way the reader takes it. The
+            // panel is a modal, so without these the board's `e` never sees
+            // the key and a locked row could only be cleared by hovering it.
+            // A non-nil onRelease swallows autorepeats: a held `e` must not
+            // carry onto the board and clear whatever row is under the cursor.
+            KeyBinding("e", "done", onRelease: { _ in }) { markDone() },
+            KeyBinding("d", "done", onRelease: { _ in }) { markDone() },
         ])
         .task { await load() }
         // Clear the sensitive body when this view goes away — `.idle` drops the
@@ -127,6 +134,13 @@ struct RevealPanel: View {
             // The keycap is the Mac's exit. A phone taps the scrim, and a hint
             // naming a key it has no way to press is worse than no hint.
             #if os(macOS)
+                if boardRow != nil {
+                    HStack(spacing: Space.s4) {
+                        Kbd("e")
+                        Text("done").font(Typo.micro)
+                    }
+                    .padding(.trailing, Space.s8)
+                }
                 HStack(spacing: Space.s4) {
                     Kbd("esc")
                     Text("close").font(Typo.micro)
@@ -160,6 +174,19 @@ struct RevealPanel: View {
         var m = meta
         m.kind = kind
         return m
+    }
+
+    /// The For-your-eyes row this reveal stands for, while the board still
+    /// holds it. A reveal opened from the Auth page or a notification on mail
+    /// that is not on the board has none, and `e` does nothing there.
+    private var boardRow: AttentionUpdate? {
+        AppStore.shared.sitrep.standing.first { $0.id == meta.id }
+    }
+
+    private func markDone() {
+        guard let u = boardRow else { return }
+        onClose()
+        Task { await Actions.done(u, via: .key, on: .sitrep) }
     }
 
     private var fromLine: String {

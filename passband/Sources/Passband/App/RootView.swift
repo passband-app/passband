@@ -612,7 +612,9 @@ struct MainShell: View {
                 .zIndex(5)
             }
             }
-            .blur(radius: store.modalOverlayOpen ? 9 : 0)
+            // Not under a full-screen ask bar: it is opaque, and a blur
+            // nobody can see is a whole-window filter every frame.
+            .blur(radius: store.modalOverlayOpen && !store.askBarFullscreen ? 9 : 0)
 
 
             // Global overlays: undo toasts, compose ceremony, palettes. OUTSIDE
@@ -717,7 +719,7 @@ struct MainShell: View {
             KeyBinding("]", "forward", meta: true, allowInInput: true) { store.goForward() })
         bindings.append(
             KeyBinding("k", "ask your inbox", meta: true, allowInInput: true) {
-                store.askBarOpen = true
+                store.openAskBar()
             })
         // ⌘⇧K starts over. Bound as the CAPITAL letter, which is how the
         // registry spells shift for a letter key, and matched by the exact pass

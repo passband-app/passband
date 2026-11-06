@@ -127,8 +127,8 @@ Cleared as of 2026-11-05:
       policy `passband-site-security`, `deploy/aws/tofu/main/site.tf`), which
       the managed policy it replaces never set. Every page was loaded in
       Chromium under the exact policy, waitlist submit included, with no
-      violations. **Needs a `tofu apply`** (the CI site deploy does not apply
-      tofu); until then the managed policy is still the live one.
+      violations. Applied 2026-11-06 (`tofu apply`; the CI site deploy does
+      not apply tofu) and confirmed live with `curl -sI https://passband.app/`.
 - [x] SAST pre-scan (Semgrep, the community Rust, TypeScript, Dockerfile,
       Terraform, Kubernetes and secrets rules). Nothing to fix: every secret
       hit is a test fixture or PostHog's public client key, the root-user hits

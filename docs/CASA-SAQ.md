@@ -255,7 +255,8 @@ evidence to collect.
    two `openssl` checks in that file (V9).
 5. Screenshot Bifrost's logging settings (content logging off, 7 days).
 6. Confirm `/mcp` OAuth is live on carrier (`docs/VERIFICATION.md`).
-7. `tofu apply` so the `passband.app` CSP is live before the scan.
+7. ~~`tofu apply` so the `passband.app` CSP is live before the scan.~~ Done
+   2026-11-06.
 8. Turn on MFA everywhere the operator signs in (Google Cloud, GitHub, Hetzner,
    Cloudflare, WorkOS, Anthropic, Tailscale) and say so in the questionnaire.
    AWS already requires it.

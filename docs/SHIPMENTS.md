@@ -524,6 +524,42 @@ when the record named no merchant; the order number is printed, not linked, so
 it rides in on the model's `order_refs`. Backfill: `migrate::project_ebay_packages`,
 marker `ebay_packages_projected`.
 
+### Every other store: keyed by sender and order number
+
+A delivery record files under, in order: a carrier number (polled), a store
+package key (Amazon, eBay), and, when its mail has neither, its ORDER:
+`order:<scope>:<order key>` (`triage/order_fallback.rs`). That carries a
+purchase from "Order confirmed" to "Delivered" for any store that never prints
+a tracking number, with no code per store.
+
+- **Scope is decided by code**: the authenticated sender (`sender_scope`), or
+  the full address for a platform that sends every store's mail from one
+  domain (`shopifyemail.com`, where `store+<id>@` names the store). The model's
+  merchant names drift across one order's mail and are never part of the key.
+  Unauthenticated mail opens, advances and covers nothing.
+- **The order number is the model's, checked by code**: it must be printed in
+  the mail whole (its letter-and-digit runs as consecutive tokens, so
+  `PO/2024/001` matches `PO 2024/001` and `#5001` does not match `#50019`). Of a
+  record's numbers, the smallest printed one keys it.
+- **An order number in the tracking field is the order**: a record whose
+  "tracking number" is one of its own order numbers files under the order.
+- **The order card steps aside** once a tracked or boxed record from the same
+  scope names its order in mail that prints it, and comes back if that record
+  is retracted. Only a record that makes a card of its own covers: one dropped
+  for an unknown carrier or status would otherwise hide the order and leave
+  nothing. An Amazon box covers its order through its tracker link even when
+  its record carries a TBA number.
+- The row shows the carrier any of its mail named (else `unknown`), links
+  nowhere (mail links are untrusted), is sold by the model's merchant or the
+  sender's display name, and is never polled (its key holds a `:`).
+
+Known gaps, for the model identity check that will sit on top: a mail printing
+an invoice number below the order number keys a second card; a store that
+confirms from its own domain and ships through Shopify is two scopes; an order
+shipped in parts retires its card when the first box ships. Backfill:
+`migrate::project_order_fallbacks`, marker `order_fallbacks_projected`, after
+the Amazon and eBay passes. Only decisions that stored order numbers can key.
+
 ### Packages the owner sent are not shipments
 
 The rail is for boxes coming to the owner. A shipping store's drop-off receipt

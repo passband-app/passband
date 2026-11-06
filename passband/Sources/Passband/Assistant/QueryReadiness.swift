@@ -55,8 +55,15 @@ enum QueryReadiness {
     static func looksFinished(_ query: String) async -> Bool {
         let relay = Prefs.shared.assistantTransport == .relay && AppStore.shared.relayAvailable
         guard let body = try? body(query: query) else { return true }
-        return await withTaskGroup(of: Bool?.self) { group in
-            group.addTask {
+        // NOT A TASK GROUP. A group waits for every child before it returns,
+        // cancelled or not, so a relay stream that ignores cancellation held
+        // the "deadline" open forever and the lane never started. Whichever of
+        // the judge and the deadline lands first resumes this; the other is
+        // cancelled and nobody waits on it.
+        let verdict = Verdict()
+        return await withCheckedContinuation { continuation in
+            verdict.continuation = continuation
+            verdict.judge = Task { @MainActor in
                 var reply = ""
                 var accumulator = AnthropicStreamAccumulator()
                 do {
@@ -65,24 +72,36 @@ enum QueryReadiness {
                         for event in accumulator.feed(payload) {
                             switch event {
                             case .textDelta(_, let text): reply += text
-                            case .providerError: return true
+                            case .providerError: verdict.land(true); return
                             default: break
                             }
                         }
                     }
                 } catch {
-                    return true
+                    verdict.land(true); return
                 }
-                return finished(reply: reply)
+                verdict.land(finished(reply: reply))
             }
-            group.addTask {
+            verdict.clock = Task { @MainActor in
                 try? await Task.sleep(for: deadline)
-                return nil
+                verdict.land(true)
             }
-            // First to land wins; a deadline (nil) means "done".
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first ?? true
+        }
+    }
+
+    /// The first answer wins, once; the loser is cancelled and left behind.
+    @MainActor
+    private final class Verdict {
+        var continuation: CheckedContinuation<Bool, Never>?
+        var judge: Task<Void, Never>?
+        var clock: Task<Void, Never>?
+
+        func land(_ finished: Bool) {
+            guard let continuation else { return }
+            self.continuation = nil
+            judge?.cancel()
+            clock?.cancel()
+            continuation.resume(returning: finished)
         }
     }
 }

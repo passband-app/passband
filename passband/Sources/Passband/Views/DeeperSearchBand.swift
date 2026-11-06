@@ -230,29 +230,26 @@ struct DeeperSearchBand: View {
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaint)
             Spacer(minLength: Space.s4)
+            // No button on the Mac: the panel's own "Ask agent ⌘↩" in its
+            // bottom corner is the way in, and two ways to say it was clutter.
+            #if os(iOS)
             if let trigger = offeredTrigger {
-                #if os(macOS)
-                    Button("ask the agent") { store.startDeeperSearch(trigger: trigger) }
-                        .buttonStyle(.glass)
+                // PLAIN, with the glass painted by hand. On the phone the
+                // band is a List row, and a Button of any other style in a
+                // row can take a tap anywhere on the row: a stray tap would
+                // spend a model call the reader never asked for.
+                Button { store.startDeeperSearch(trigger: trigger) } label: {
+                    Text("ask the agent")
                         .font(Typo.chip)
-                        .help("Runs the assistant over these results. It costs a model call.")
-                #else
-                    // PLAIN, with the glass painted by hand. On the phone the
-                    // band is a List row, and a Button of any other style in a
-                    // row can take a tap anywhere on the row: a stray tap would
-                    // spend a model call the reader never asked for.
-                    Button { store.startDeeperSearch(trigger: trigger) } label: {
-                        Text("ask the agent")
-                            .font(Typo.chip)
-                            .foregroundStyle(Palette.ink)
-                            .padding(.horizontal, Space.s12)
-                            .padding(.vertical, Space.s6)
-                            .glassCapsule()
-                            .contentShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                #endif
+                        .foregroundStyle(Palette.ink)
+                        .padding(.horizontal, Space.s12)
+                        .padding(.vertical, Space.s6)
+                        .glassCapsule()
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
             }
+            #endif
         }
     }
 

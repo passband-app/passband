@@ -158,6 +158,9 @@ targets:
           # into two implementations would drift within a week.
           - "Views/AuthView.swift"
           - "Views/UsageView.swift"
+          # Usage's Understanding subpage: drawn only by UsageView, and built
+          # on its ChartCard and LegendKey.
+          - "Views/UnderstandingSection.swift"
       - path: Sources/PassbandiOS
       # The same fonts and chimes the Mac ships, but NOT as one `Resources`
       # folder reference the way the macOS target takes them. An iOS bundle is

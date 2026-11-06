@@ -954,8 +954,9 @@ struct SearchView: View {
         // this view's, because the rule about `off` also has to serve the
         // picker being flipped under a lane that is already running (see
         // ShellWatchers) — and a rule spelled twice is a rule that will
-        // disagree with itself. The moves are executed here; the deciding is
-        // pure and asserted in test.sh.
+        // disagree with itself. The moves are executed by
+        // `AppStore.settleDeeperSearch`; the deciding is pure and asserted in
+        // test.sh.
         store.settleDeeperSearch(
             DeeperSearchPolicy.settled(
                 verdict: verdict, choice: prefs.deeperSearch,

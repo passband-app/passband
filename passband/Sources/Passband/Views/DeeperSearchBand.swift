@@ -175,7 +175,9 @@ struct DeeperSearchBand: View {
     @ViewBuilder
     private var content: some View {
         if !search.laneStarted {
-            offer
+            // Automatic is about to start on its own (QueryReadiness is
+            // waiting the reader out), so there is nothing to offer.
+            if prefs.deeperSearch == .onRequest { offer }
         } else {
             // The status line, while there is work to say something about.
             if session.running, let tool = latestTool {
@@ -220,13 +222,21 @@ struct DeeperSearchBand: View {
         }
     }
 
+    /// On the Mac there is no button: ⌘↩ asks, as the panel's "Ask agent"
+    /// corner says too.
+    #if os(macOS)
+        private static let offerLine = "Press ⌘↩ to have the agent read the mail and answer this."
+    #else
+        private static let offerLine = "Read the mail itself and answer this?"
+    #endif
+
     /// The on-request posture: the band says what it could do and waits to be
     /// asked. Nothing has been spent at this point, and nothing will be until
-    /// this is pressed.
+    /// the reader asks.
     @ViewBuilder
     private var offer: some View {
         HStack(spacing: Space.s8) {
-            Text("Read the mail itself and answer this?")
+            Text(Self.offerLine)
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaint)
             Spacer(minLength: Space.s4)

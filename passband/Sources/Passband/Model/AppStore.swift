@@ -1545,7 +1545,9 @@ final class AppStore {
     /// one is saved under its question in search history, and ⌘K starts clean
     /// instead. A ⌘K conversation of its own is kept as it always was.
     func openAskBar() {
-        if !askBarOpen, chatHoldsSearchLane || chatQuestionKey != nil {
+        // Not mid-answer: a follow-up still running after Esc would be
+        // cancelled and lost (it is saved to search history when it ends).
+        if !askBarOpen, !assistant.running, chatHoldsSearchLane || chatQuestionKey != nil {
             askBarWatchesLane = false
             assistant.clear()
         }
@@ -4955,7 +4957,12 @@ final class AppStore {
                 async let finished = QueryReadiness.looksFinished(query)
                 try? await Task.sleep(for: QueryReadiness.quiet)
                 guard !Task.isCancelled, let self, self.search.query.trimmed == query else { return }
-                guard await finished else { return }
+                // "Still typing" is a reason to wait longer, never a reason not
+                // to answer: a judge that misreads a whole question only costs
+                // the grace, and a keystroke before then replaces this gate.
+                if await !finished {
+                    try? await Task.sleep(for: QueryReadiness.typingGrace)
+                }
                 guard !Task.isCancelled, self.search.query.trimmed == query else { return }
                 self.laneGate = nil
                 switch move {
@@ -4988,9 +4995,10 @@ final class AppStore {
     }
 
     /// START THE DEEPER SEARCH on the query the panel has just answered, with
-    /// the hits it answered with. Called by the classifier's automatic path and
-    /// by the band's own button, so the two cannot disagree about what starting
-    /// means (docs/SEARCH.md §6.1, §6.5).
+    /// the hits it answered with. Called by the automatic path (through
+    /// `settleDeeperSearch`) and by an explicit ask (⌘↩, the panel's "Ask
+    /// agent", the phone band's button), so they cannot disagree about what
+    /// starting means (docs/SEARCH.md §6.1, §6.5).
     ///
     /// The event carries the trigger and the model tier and NOTHING ELSE: the
     /// query is the reader's own words about their own mail, and no part of it,

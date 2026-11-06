@@ -19,6 +19,10 @@ enum QueryReadiness {
     /// check must not be the reason a question never gets answered.
     static let deadline = Duration.milliseconds(1200)
 
+    /// How much longer a query the judge called cut off waits before it is
+    /// answered anyway, if the reader has not typed on by then.
+    static let typingGrace = Duration.seconds(2)
+
     static let system = """
         You judge whether someone has finished typing a search into their email app. \
         Reply with one word. Reply done if it reads as a complete question or request \
@@ -61,7 +65,17 @@ enum QueryReadiness {
         // the judge and the deadline lands first resumes this; the other is
         // cancelled and nobody waits on it.
         let verdict = Verdict()
-        return await withCheckedContinuation { continuation in
+        return await withTaskCancellationHandler {
+            await ask(body: body, relay: relay, verdict: verdict)
+        } onCancel: {
+            // A superseded gate stops paying for its answer.
+            Task { @MainActor in verdict.land(true) }
+        }
+    }
+
+    @MainActor
+    private static func ask(body: Data, relay: Bool, verdict: Verdict) async -> Bool {
+        await withCheckedContinuation { continuation in
             verdict.continuation = continuation
             verdict.judge = Task { @MainActor in
                 var reply = ""

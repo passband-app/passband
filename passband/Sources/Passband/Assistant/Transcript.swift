@@ -174,8 +174,8 @@ enum Wire {
         var tools: [ToolDef]
         var messages: [MessageParam]
         /// Set only on a run's LAST step: `{"type":"none"}` keeps the tools in
-        /// the request (so the cached prefix is unchanged) but lets the model
-        /// do nothing except answer.
+        /// the request (so the tools and system stay cached; the messages are
+        /// re-cached once) but lets the model do nothing except answer.
         var tool_choice: ToolChoice?
         /// ALWAYS true: `LLMProxy.stream` asks for `text/event-stream` and the
         /// accumulator can only read frames, so a body that forgot this would
@@ -365,14 +365,6 @@ enum Wire {
         return count
     }
 
-    /// The history as it is SENT with each question's context in front of
-    /// it: `context[i]` is a text block put ahead of message i's own. What a
-    /// question was asked under (the time, the email open, the local hits)
-    /// changes from question to question, so it cannot sit in the system
-    /// prompt without re-writing the whole cached history behind it; on the
-    /// question it belongs to, it is the same bytes in every later request.
-    /// Held beside the history rather than in it, so a saved question keeps
-    /// what it always kept.
     /// The last step's nudge, added to the outgoing copy of the newest user
     /// message only (never to the kept history): the run is out of steps, so
     /// answer from what has been found rather than ending on nothing.
@@ -388,6 +380,14 @@ enum Wire {
         return messages.dropLast() + [last]
     }
 
+    /// The history as it is SENT with each question's context in front of
+    /// it: `context[i]` is a text block put ahead of message i's own. What a
+    /// question was asked under (the time, the email open, the local hits)
+    /// changes from question to question, so it cannot sit in the system
+    /// prompt without re-writing the whole cached history behind it; on the
+    /// question it belongs to, it is the same bytes in every later request.
+    /// Held beside the history rather than in it, so a saved question keeps
+    /// what it always kept.
     static func withContext(_ messages: [MessageParam], _ context: [Int: String]) -> [MessageParam] {
         guard !context.isEmpty else { return messages }
         var out = messages

@@ -414,11 +414,14 @@ shown: the deeper band (§6.4) says which signal started it.
 **Deciding is not starting.** A settled query the rule calls deeper (or a
 refinement of a running lane) waits for 600 ms more of quiet, and during that
 wait asks Haiku one question with no tools and four output tokens: does this read as
-finished, or cut off mid-thought ("when did i download the")? Only "finished"
-starts or refines the lane (`QueryReadiness`, `AppStore.settleDeeperSearch`).
-Any failure or a check slower than 1.2 s falls back to the rule's verdict, so
-the check can hold back a half-typed question but never blocks a whole one.
-Stopping is immediate, and the band's own button and ⌘Enter skip the check.
+finished, or cut off mid-thought ("when did i download the")? "Finished"
+starts or refines the lane at once (`QueryReadiness`,
+`AppStore.settleDeeperSearch`); "typing" waits 2 s more and then starts anyway
+unless the reader typed on, so a misread holds a whole question back briefly
+but never blocks it. Any failure or a check slower than 1.2 s counts as
+finished. Stopping is immediate, and an explicit ask (⌘Enter, the panel's
+"Ask agent", the phone band's button) skips the check. While the check runs
+in automatic mode the band shows no offer: it is about to start on its own.
 
 ## 6. Wave 2: the agent lane
 
@@ -515,7 +518,7 @@ reader who did not want the lane can see why it ran and shorten the query.
 On self-host the lane runs on the user's own key, on hosted on the relay's
 credential. Either way it is spend the reader did not tap for, so it is a
 setting, `Deeper search`: **automatic** (the classifier starts it), **on
-request** (the band offers a button, iOS-style), **off**. Default automatic.
+request** (the band offers it: a button on the phone, ⌘Enter on the Mac), **off**. Default automatic.
 Every lane start is one `search_deeper_started` event carrying the trigger
 kind and the model tier, added to `Analytics.allowedEvents` and its strings
 to `allowedStrings`, because both are closed sets and a stray string is a

@@ -44,7 +44,7 @@ tokio-stream = "0.1"
 # thread view with every message's HTML inline, search): gzip only, because
 # every client and proxy speaks it and `flate2` is already in the tree, where
 # brotli would be a new crate for ~15% more on JSON.
-tower-http = { version = "0.6", features = ["cors", "compression-gzip"] }
+tower-http = { version = "0.7", features = ["cors", "compression-gzip"] }
 tokio-util = "0.7"
 # Gmail write ops: HTTP client (rustls, no native-tls) mirroring the read
 # engine, base64url for send payloads, regex for the outbound secret guard.

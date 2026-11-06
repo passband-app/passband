@@ -818,6 +818,9 @@ final class AppStore {
     /// The owner's event reminder switch, as the daemon holds it. Fetched by
     /// the settings card (Model/CalendarReminders.swift).
     var calendarReminderPref: CalendarReminderPrefState = .unknown
+    /// The owner's morning brief switch, as the daemon holds it, in the same
+    /// four states. Fetched by the settings card (Model/MorningBriefPref.swift).
+    var morningBriefPref: CalendarReminderPrefState = .unknown
     /// The connect card, while it is up. Its own property, apart from the
     /// feed: `modalOverlayOpen` reads it, and the whole shell reads that.
     var calendarConnectAsk: CalendarConnectAsk?
@@ -3256,6 +3259,7 @@ final class AppStore {
         tracking = nil
         translateConfig = .unknown
         calendarReminderPref = .unknown
+        morningBriefPref = .unknown
         ticketPreview = nil
         // `route(to:)` first: it is what turns a closed calendar into the
         // sitrep, and the history has to name the page actually shown.

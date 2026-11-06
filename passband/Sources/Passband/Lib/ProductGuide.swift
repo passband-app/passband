@@ -714,6 +714,7 @@ enum ProductGuide {
         - Only urgent and deadline banners play a sound. It is chosen in Settings > General > Notifications, where "Test banner" posts one.
         - While Passband is the front window, banners go to Notification Center only. Clicking a banner opens that message.
         - Event reminders come a while before each event, with the tickets one click away when the mail holds them. They show even while Passband is the front window. "Event reminders" in Settings > General > Notifications turns them off for the mailbox.
+        - Morning brief: once a day, at 8am where the user is (or as soon after as the server is up, never past 11am), the iPhone gets one quiet notification with a short summary of what today holds: a bill due today or tomorrow, packages arriving today, and the first event left on today's calendar ("PG&E bill due tomorrow. A package arrives today. First up: Dentist at 9:30 AM."). It has no title and no date, and it never counts the mail waiting on the user. Days with nothing to say get no notification. Tapping it opens the board. It goes to the iPhone only, never the Mac. "Morning brief" in Settings > General > Notifications turns it off for the mailbox.
 
         Updates:
         - Passband checks for a new version every hour and downloads it in the background. It installs the next time Passband quits.

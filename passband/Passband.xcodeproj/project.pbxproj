@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		005CA6F76F2141173BD3D0AC /* MorningBriefPref.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A868E6185A52FDF86A0B3A3 /* MorningBriefPref.swift */; };
 		007DD445499A552534B3CD28 /* ImageRepeats.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFF2F03B0D68F54C0DC28777 /* ImageRepeats.swift */; };
 		00DDA0A5E2AA17A893BEA9EB /* SearchIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67C63ACC5CBA08B09ABA71B2 /* SearchIntent.swift */; };
 		00FD7E47CC0166CB40DA4915 /* PhoneVignettes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C2908ED50464990EEF0B9AA /* PhoneVignettes.swift */; };
@@ -130,6 +131,7 @@
 		371F0BF84F786E1C64657134 /* NeedToday.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F65DF255404CE32FC4AD8CF /* NeedToday.swift */; };
 		37323F67BEB78A71E32524ED /* Concurrency.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1C033DDA02DD344F437F943 /* Concurrency.swift */; };
 		373495FD5EC6F3AE966972D9 /* SmartClear.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CCA02E95A2B5E2F24255F12 /* SmartClear.swift */; };
+		37880B94FBB0E5B3B43E52ED /* MorningBriefPref.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A868E6185A52FDF86A0B3A3 /* MorningBriefPref.swift */; };
 		37BD268312E51B58C631C8AC /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 613B9741AD84024778FA8204 /* APIClient.swift */; };
 		384E653D1035B58E753C9114 /* CalendarReminder.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFFFBB98FD5E3552B6C093DF /* CalendarReminder.swift */; };
 		385910633CD4D2BBE0FDEED3 /* WeekGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A60B309E78995FC6874113D /* WeekGrid.swift */; };
@@ -746,6 +748,7 @@
 		389673F8FDDB51FC4830D9D2 /* PassbandApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PassbandApp.swift; sourceTree = "<group>"; };
 		394CFE99327CF989002CD318 /* VignetteStage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VignetteStage.swift; sourceTree = "<group>"; };
 		39D5C019641DC37B55D7D922 /* ImageProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageProxy.swift; sourceTree = "<group>"; };
+		3A868E6185A52FDF86A0B3A3 /* MorningBriefPref.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MorningBriefPref.swift; sourceTree = "<group>"; };
 		3AFB3100AB7A6A1BC1E6D8BA /* APNsEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APNsEnvironment.swift; sourceTree = "<group>"; };
 		3B2016745A95BE31B7869ECF /* HostedServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedServer.swift; sourceTree = "<group>"; };
 		3BE1E84810E523707C4E2CC5 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
@@ -1322,6 +1325,7 @@
 				2569BA5D1461BBA2A95D77F3 /* ImageStore.swift */,
 				582A0094F147273BA003C4B6 /* ImageWarmer.swift */,
 				1D19065EB7E9BFE9E846675B /* Keychain.swift */,
+				3A868E6185A52FDF86A0B3A3 /* MorningBriefPref.swift */,
 				88151BD4CF9D97EE43150B72 /* NotificationIcon.swift */,
 				B13A2C48EBA35F12689998E3 /* Notifier.swift */,
 				5512C13F456F49B6DF7B182B /* Pairing.swift */,
@@ -1858,6 +1862,7 @@
 				964F8540CFA9F8C93CBB2C41 /* MessageRecipients.swift in Sources */,
 				F203E4786137371093270AB6 /* MinimapGeometry.swift in Sources */,
 				C862EEB6DDE0BCCDDD93ABC2 /* MonthGrid.swift in Sources */,
+				005CA6F76F2141173BD3D0AC /* MorningBriefPref.swift in Sources */,
 				6FFB126258C28AC3F2E63D01 /* Motion.swift in Sources */,
 				371F0BF84F786E1C64657134 /* NeedToday.swift in Sources */,
 				7936BA935C085573F40A410E /* NotificationIcon.swift in Sources */,
@@ -2159,6 +2164,7 @@
 				02A2C5770523B244425499D5 /* MobileSitrepView.swift in Sources */,
 				4BF112500D334A129834AAEB /* MobileToastHost.swift in Sources */,
 				44937F50F736EE0C92EA9078 /* MonthGrid.swift in Sources */,
+				37880B94FBB0E5B3B43E52ED /* MorningBriefPref.swift in Sources */,
 				D6C1F985EFED5530B73C27B8 /* Motion.swift in Sources */,
 				462F8657C4CD7BAA224F5CDD /* NeedToday.swift in Sources */,
 				C0A7430CA6A5C39AB995DD4E /* NotificationIcon.swift in Sources */,

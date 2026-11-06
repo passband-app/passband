@@ -3251,7 +3251,8 @@ fn cmd_serve(
                     .with_metrics(sync_metrics.clone())
                     .with_draft_pings(api_state.subscribe_draft_pings())
                     .with_calendar_pings(api_state.subscribe_calendar_pings())
-                    .with_clear_pings(api_state.subscribe_clear_pings());
+                    .with_clear_pings(api_state.subscribe_clear_pings())
+                    .with_brief_pings(api_state.subscribe_brief_pings());
                 let shutdown_rx = shutdown_rx.clone();
                 Some(tokio::spawn(async move {
                     pusher.run(pusher_wake, shutdown_rx).await
@@ -3553,6 +3554,15 @@ fn cmd_serve(
             squelch_api::CalendarRemindTiming::daemon(),
         ));
 
+        // THE MORNING BRIEF: once a local day near 08:00, to the owner's
+        // iPhones. Always spawned; idle while the owner has it off, outside
+        // the morning window, or with no iPhone registered.
+        let morning_brief_handle = tokio::spawn(squelch_api::morning_brief_worker(
+            api_state.clone(),
+            shutdown_tx.subscribe(),
+            squelch_api::MorningBriefTiming::daemon(),
+        ));
+
         // Bind BEFORE building the embedder: its first-run model download must
         // not leave the doors unreachable.
         let app = build_serve_router(
@@ -3760,6 +3770,9 @@ fn cmd_serve(
         }
         if calendar_remind_handle.await.is_err() {
             eprintln!("squelchd: calendar reminder worker task join error");
+        }
+        if morning_brief_handle.await.is_err() {
+            eprintln!("squelchd: morning brief worker task join error");
         }
         if let Some(handle) = metrics_handle {
             match handle.await {

@@ -7,7 +7,8 @@
 //!   self-host, or requires OAuth bearer tokens when `SQUELCH_MCP_OAUTH_ISSUER`
 //!   and `SQUELCH_MCP_PUBLIC_URL` are set; see `squelch_mcp::auth`.
 //! - `token`: issue / list / revoke the human door's per-device tokens, plus
-//!   `first-paired`, the one machine-readable line the hosted warden reads.
+//!   `first-paired` and `activity`, the machine-readable lines the hosted
+//!   warden reads.
 //! - `pair`: mint a short code a new device trades for one of those tokens.
 
 use chrono::{Duration, SecondsFormat};
@@ -172,6 +173,21 @@ enum TokenCommand {
     /// the "a revoked device still paired" rule both live in the store, in one
     /// place, rather than being re-derived by whoever reads the output.
     FirstPaired,
+    /// Print when client apps were first paired, last connected and last
+    /// used, per platform, as ONE line of JSON. Timestamps only.
+    ///
+    /// MACHINE-READABLE, like `first-paired`, and for the same reader: the
+    /// hosted warden execs it to learn whether people come back (retention)
+    /// and whether they installed the iPhone app. Its own subcommand, so
+    /// `first-paired` keeps its one-line contract for every warden and control
+    /// plane that already reads it.
+    ///
+    /// The shape is `{"first_paired_at": <ts|null>, "platforms": {"<platform>":
+    /// {"first_paired_at": <ts>, "last_seen_at": <ts|null>, "last_action_at":
+    /// <ts|null>}}}`, every timestamp RFC3339 in UTC at seconds precision. A
+    /// platform that never connected is absent. No names, no ids, no counts:
+    /// there is nothing in the line to over-share.
+    Activity,
 }
 
 #[derive(Args)]
@@ -2246,7 +2262,39 @@ fn cmd_token(config: &Config, args: &TokenArgs) -> Result<(), squelch_core::Core
             );
             Ok(())
         }
+        TokenCommand::Activity => {
+            // ONE LINE ON STDOUT, the `first-paired` discipline: the warden
+            // parses it strictly, and a second line or a friendly note would
+            // be a parse failure on a route the tenant cannot see or fix.
+            println!("{}", activity_json(&store.client_activity(account_id)?));
+            Ok(())
+        }
     }
+}
+
+/// `token activity`'s one line. Seconds precision and a `Z` offset, the
+/// `first-paired` spelling, so one rendering of an instant crosses the wire.
+fn activity_json(activity: &squelch_core::store::ClientActivity) -> String {
+    let ts = |at: chrono::DateTime<chrono::Utc>| at.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let platforms: serde_json::Map<String, serde_json::Value> = activity
+        .platforms
+        .iter()
+        .map(|(platform, p)| {
+            (
+                platform.as_str().to_string(),
+                serde_json::json!({
+                    "first_paired_at": ts(p.first_paired_at),
+                    "last_seen_at": p.last_seen_at.map(ts),
+                    "last_action_at": p.last_action_at.map(ts),
+                }),
+            )
+        })
+        .collect();
+    serde_json::json!({
+        "first_paired_at": activity.first_paired_at.map(ts),
+        "platforms": platforms,
+    })
+    .to_string()
 }
 
 /// Percent-encode a value for a query string. Everything outside the unreserved
@@ -4648,6 +4696,49 @@ mod tests {
         }
     }
 
+    /// `token activity`'s one line, exactly. The warden's parse tests hold a
+    /// copy of this (`squelch_warden::testing::activity_stdout`); when this
+    /// changes, that fixture changes with it.
+    #[test]
+    fn token_activity_prints_one_line_of_timestamps() {
+        use squelch_core::store::{ClientActivity, ClientPlatform, PlatformActivity};
+        let at = |s: &str| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        assert_eq!(
+            activity_json(&ClientActivity::default()),
+            r#"{"first_paired_at":null,"platforms":{}}"#
+        );
+        let mut activity = ClientActivity {
+            first_paired_at: Some(at("2026-03-01T09:30:00.123456Z")),
+            ..Default::default()
+        };
+        activity.platforms.insert(
+            ClientPlatform::Macos,
+            PlatformActivity {
+                first_paired_at: at("2026-03-01T09:30:00Z"),
+                last_seen_at: Some(at("2026-03-09T08:00:00Z")),
+                last_action_at: Some(at("2026-03-08T07:00:00Z")),
+            },
+        );
+        activity.platforms.insert(
+            ClientPlatform::Ios,
+            PlatformActivity {
+                first_paired_at: at("2026-03-02T10:00:00Z"),
+                last_seen_at: Some(at("2026-03-09T09:00:00Z")),
+                last_action_at: None,
+            },
+        );
+        let line = activity_json(&activity);
+        assert!(!line.contains('\n'));
+        assert_eq!(
+            line,
+            r#"{"first_paired_at":"2026-03-01T09:30:00Z","platforms":{"ios":{"first_paired_at":"2026-03-02T10:00:00Z","last_action_at":null,"last_seen_at":"2026-03-09T09:00:00Z"},"macos":{"first_paired_at":"2026-03-01T09:30:00Z","last_action_at":"2026-03-08T07:00:00Z","last_seen_at":"2026-03-09T08:00:00Z"}}}"#
+        );
+    }
+
     /// The token subcommands parse the shapes the README documents.
     #[test]
     fn token_and_pair_subcommands_parse() {
@@ -4677,6 +4768,12 @@ mod tests {
             Cli::parse_from(["squelchd", "token", "first-paired"]).command,
             Command::Token(TokenArgs {
                 command: TokenCommand::FirstPaired
+            })
+        ));
+        assert!(matches!(
+            Cli::parse_from(["squelchd", "token", "activity"]).command,
+            Command::Token(TokenArgs {
+                command: TokenCommand::Activity
             })
         ));
         // A name is not optional: an unlabeled token is one nobody can pick out

@@ -613,7 +613,7 @@ enum ProductGuide {
         Deeper search:
         - When a search reads like a question ("where is the wifi password"), an agent reads the mail alongside the results and points at the answer with email cards and one line.
         - Settings > Assistant > Deeper search sets when it runs: Automatic, On request (a button to press) or Off. It has a model setting of its own.
-        - "Open in chat", or ⌘Enter, continues the same question in this assistant with room for follow-ups.
+        - Clicking anywhere on the deeper search box (except an email card, which opens that email), "Open in chat", or ⌘Enter opens the conversation full screen in this assistant, with room for follow-ups. Esc goes back to the search results.
         - On the iPhone it works the same way in the Search tab, above the results, with the same setting under Assistant on the Account page. The expand arrow on it opens the conversation in the agent chat once it has finished. The Ask the agent row above the results does what the Mac's Ask agent button does: it asks the agent, then opens the conversation in the chat once there is one. With Deeper search off it is turned off, as on the Mac.
         """
 
@@ -655,6 +655,7 @@ enum ProductGuide {
     private static let assistant = """
         This assistant:
         - ⌘K opens it from anywhere. Esc closes the bar, and the conversation stays until ⌘⇧K (new chat) or an account switch.
+        - ⌘K is its own chat, separate from search. A deeper search opened full screen is not what ⌘K shows next: ⌘K starts fresh, and that search's conversation comes back from search history.
         - If an email is open when the question is asked, an "in:" chip names it and "this email" means that one.
         - It can search and read mail, look up shipments, receipts, bills and calendar items, explain why an email was triaged the way it was, show emails as clickable cards, and answer questions about Passband itself.
         - It marks things done, writes sender rules and saves drafts without asking, because those stay inside Passband.

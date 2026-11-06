@@ -18,6 +18,15 @@ struct ActionLayer: View {
             // front of it, not lost behind its scrim.
             if store.firstLoad.active { FirstLoadVeil() }
 
+            // THE FULL-SCREEN ASK BAR IS A SURFACE, not a modal over one, so
+            // it goes under everything else in this layer the way the reader
+            // goes under it: toasts, undo chips and any card raised while it
+            // is up land in front of it, not lost behind an opaque page. The
+            // modal form keeps its own slot below.
+            if store.askBarOpen && store.askBarFullscreen {
+                AskBar(fullscreen: true) { store.closeAskBar() }
+            }
+
             // Toast stack, bottom-left above every fullscreen surface. The
             // Spacers + fixedSize are load-bearing: a GlassEffectContainer
             // expands to the size it is offered, so an unconstrained one here
@@ -107,7 +116,7 @@ struct ActionLayer: View {
             if store.discardAsk != nil { DiscardConfirm() }
             // A mailto: link clicked over a composer with writing in it.
             if let ask = store.liveMailtoAsk { MailtoConfirm(ask: ask) }
-            if store.askBarOpen { AskBar { store.askBarOpen = false } }
+            if store.askBarOpen && !store.askBarFullscreen { AskBar { store.askBarOpen = false } }
             if store.shortcutsOpen {
                 ShortcutsOverlay(calendar: store.calendarPageAvailable) { store.shortcutsOpen = false }
             }
@@ -258,7 +267,7 @@ struct ShortcutsOverlay: View {
     /// there had just hidden it.
     private func askAgent() {
         onClose()
-        store.askBarOpen = true
+        store.openAskBar()
     }
 
     var body: some View {

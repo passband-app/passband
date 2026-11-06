@@ -13,7 +13,17 @@ pub struct ContextSnapshot {
     pub thread_revisions: BTreeMap<String, i64>,
     pub rule_ids: Vec<i64>,
     pub memory: Vec<MemoryEntry>,
+    /// The `understanding` hidden feature was on when this run's context was
+    /// built: the agent then gets the prompt variant that explains memory
+    /// (`agent::UNDERSTANDING_SEGMENTS`). NOT SERIALIZED, so it is never part
+    /// of what the model reads; off (the default) is the prompt every
+    /// mailbox without the flag has always had.
+    #[serde(skip)]
+    pub understanding: bool,
 }
+/// One learned-memory line as the agent reads it (`context.memory`), served by
+/// [`super::memory::StoreMemoryContext`]. `text` is the entry's rendered line,
+/// with " (old)" appended when every message it rests on is old.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MemoryEntry {
     pub id: String,
@@ -21,6 +31,14 @@ pub struct MemoryEntry {
     pub provenance: Vec<i64>,
     pub revision: i64,
     pub text: String,
+    /// `stated` (the owner's own word, weighed like a sender preference) or
+    /// `inferred` (the daemon's guess about the owner, weighed and never
+    /// obeyed). The prompt reads the two differently, so it rides every line.
+    #[serde(default)]
+    pub origin: String,
+    /// 0.0..=1.0, already discounted for provenance age at read time.
+    #[serde(default)]
+    pub confidence: f64,
 }
 #[derive(Debug, Clone)]
 pub struct ContextScope {

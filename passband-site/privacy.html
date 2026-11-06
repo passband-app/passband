@@ -44,7 +44,7 @@
       <section class="hero">
         <p class="eyebrow"><b>Legal</b></p>
         <h1>Privacy Policy</h1>
-        <p class="updated">Effective November 3, 2026</p>
+        <p class="updated">Effective November 5, 2026</p>
       </section>
 
       <div class="doc">
@@ -293,10 +293,11 @@
     <p>
       Security-sensitive mail (verification codes, one-time passcodes, sign-in
       links, password resets, and similar) is sealed as soon as it is
-      recognized. Rules recognize the common forms before any model is
-      consulted; mail the rules miss may be read once by the triage model,
-      which seals it if it is one. Sealed mail is never exposed to the
-      assistant and never crosses the agent-facing interface.
+      recognized. Recognizing it is the triage model's job, so the triage
+      model reads each such message once, as it reads every other message,
+      under the same no-training terms as the rest of your mail. Sealed mail is
+      never exposed to the assistant and never crosses the agent-facing
+      interface.
     </p>
 
     <h2 id="services-we-operate">Services we operate</h2>
@@ -364,6 +365,7 @@
       <tr><td>PostHog</td><td>Product analytics (see below)</td><td>No</td></tr>
       <tr><td>Browserbase</td><td>A remote browser that finishes an unsubscribe on the sender's page, when you ask to unsubscribe and that page needs one</td><td>No message text. The sender's unsubscribe link, the page it opens, and your email address if the form asks for it. Not recorded</td></tr>
       <tr><td>Apple</td><td>Push notification delivery</td><td>No</td></tr>
+      <tr><td>WorkOS</td><td>Sign-in for AI agents you connect to your mailbox (AuthKit)</td><td>No. Your email address, and the grants you approve for each agent</td></tr>
     </table></div>
 
     <h2 id="third-parties-you-direct-us-to-on-either-tier">Third parties you direct us to, on either tier</h2>

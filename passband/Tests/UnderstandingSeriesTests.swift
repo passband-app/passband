@@ -1,0 +1,414 @@
+// The Understanding section's arithmetic, pinned. Every sentence the page says
+// about a person is a claim built from the ledger's counts, and every way it
+// can be wrong is invisible until somebody reads it about their own cofounder:
+// a recruiter answered once ranked over the person answered 31 times, a
+// newsletter nobody opens drawn among the people, a reply time that says
+// "within minutes" for a day. So the placements, the rankings, the grouping
+// and the words are asserted here, against the shipped fixture and against
+// rows built to sit on each line.
+
+import Foundation
+
+@main
+@MainActor
+struct UnderstandingSeriesTests {
+    static var failures = 0
+    static var checks = 0
+
+    static let now = Date(timeIntervalSince1970: 1_793_000_000)
+
+    static func main() {
+        regionsFollowTheLadder()
+        newSendersSitInTheStripWhateverTheyDo()
+        repliesOutrankReadsAndTheStripStaysLeft()
+        answeredRanksByStrengthNotByShare()
+        fadingRanksByFatigueAndQuotesItsReceipt()
+        replyTimeBucketsInWords()
+        sentencesComeFromTheNumbers()
+        memoryGroupsInOrderLiveFirst()
+        memoryWordsAndTheEmptyState()
+        withdrawnEntriesAreRetiredExpiredOrOver()
+        nearestPicksTheClosestWithinReach()
+        noDashesInAnythingTheSectionSays()
+        theSectionIsBehindTheFlag()
+        theUsageSwitcherIsBehindTheFlagAndRemembers()
+
+        if failures > 0 {
+            print("FAILED: \(failures) of \(checks) checks")
+            exit(1)
+        }
+        print("ok: \(checks) checks passed")
+    }
+
+    // MARK: - fixtures
+
+    static func ago(_ days: Double) -> String { UnderstandingText.rfc3339(now.addingTimeInterval(-days * 86_400)) }
+
+    static func row(
+        _ addr: String, perMonth: Double? = 10, firstDaysAgo: Double = 200, inbound: Int = 0, replied: Int = 0,
+        replyMs: Int? = nil, attention: Int = 0, opened: Int = 0, read: Double? = nil, corrections: Int = 0,
+        fatigue: Double? = nil, reasons: [FatigueReason] = [], received: Int = 10, name: String? = nil
+    ) -> RelationshipRow {
+        RelationshipRow(
+            addr: addr, display_name: name, received_count: received, received_per_month: perMonth,
+            received_first_at: ago(firstDaysAgo), inbound_threads: inbound, replied_threads: replied,
+            median_reply_ms: replyMs, attention_rows: attention, opened_count: opened, median_read_fraction: read,
+            corrections: corrections, fatigue_score: fatigue, fatigue_reasons: reasons)
+    }
+
+    static func series(_ rows: [RelationshipRow], coverage: Int = 41) -> UnderstandingSeries {
+        UnderstandingSeries(RelationshipsResponse(coverage_days: coverage, computed_at: nil, rows: rows), now: now)
+    }
+
+    static func point(_ s: UnderstandingSeries, _ addr: String) -> PeoplePoint? {
+        s.points.first { $0.id == addr }
+    }
+
+    // MARK: - placement
+
+    static func regionsFollowTheLadder() {
+        let s = series([
+            row("answered", inbound: 10, replied: 9),
+            row("once", inbound: 6, replied: 1),
+            row("bulk-answered-once", inbound: 190, replied: 1, attention: 38, opened: 2, read: 0.1),
+            row("bulk-answered-twice", inbound: 190, replied: 2, attention: 38, opened: 2, read: 0.1),
+            row("two-of-twelve", inbound: 12, replied: 2),
+            row("reader", attention: 20, opened: 18, read: 0.9),
+            row("skimmer", attention: 20, opened: 12, read: 0.3),
+            row("ignored", attention: 38, opened: 2, read: 0.1),
+            row("opened-only", attention: 10, opened: 6),
+            row("unmeasured"),
+        ])
+        expect(point(s, "answered")?.region == .answer, "a sender answered 9 of 10 is someone you answer")
+        expect(point(s, "once")?.region == .ignore && point(s, "once")?.measure == PeopleMeasure.none,
+            "one reply is not a person you answer: placed by reads, of which it has none")
+        expect(point(s, "bulk-answered-once")?.region == .ignore, "a newsletter answered once in 190 sits with what you ignore")
+        expect(point(s, "bulk-answered-twice")?.region == .ignore, "two replies in 190 is under the 10% share")
+        expect(point(s, "two-of-twelve")?.region == .answer, "two replies on 12 threads (17%) is someone you answer")
+        expect(point(s, "reader")?.region == .read, "read to the end, never answered: things you read")
+        expect(point(s, "skimmer")?.region == .ignore, "a 30% read is under the 40% line")
+        expect(point(s, "ignored")?.region == .ignore, "opened 2 of 38 is ignored")
+        expect(point(s, "opened-only")?.region == .read, "with no read fraction the opened share stands in (6 of 10)")
+        expect(point(s, "unmeasured")?.region == .ignore && point(s, "unmeasured")?.measure == PeopleMeasure.none,
+            "nothing to stand on sits at the floor, marked as unmeasured")
+
+        let a = point(s, "answered")!, two = point(s, "two-of-twelve")!
+        expect(abs(a.y - 0.95) < 1e-9, "the top half is 0.5 + share / 2 (9 of 10 is 0.95)")
+        expect(abs(two.y - (0.5 + 1.0 / 12)) < 1e-9, "2 of 12 sits just over the line")
+        expect(a.measure == .replies(0.9), "a replied sender's height rests on replies")
+        let reader = point(s, "reader")!
+        expect(reader.measure == .reads(0.9) && reader.y < UnderstandingSeries.answerLine,
+            "a reader never crosses into the answered half, however far they read")
+    }
+
+    static func newSendersSitInTheStripWhateverTheyDo() {
+        let s = series([
+            row("new-answered", perMonth: nil, firstDaysAgo: 3, inbound: 1, replied: 1, received: 2),
+            row("new-ignored", perMonth: nil, firstDaysAgo: 6, attention: 2, received: 3),
+            row("no-sighting", perMonth: nil, firstDaysAgo: 0).withFirst(nil),
+            row("old", perMonth: 4, firstDaysAgo: 30),
+            row("sent-only", perMonth: nil, firstDaysAgo: 0, received: 0).withFirst(nil),
+        ])
+        expect(point(s, "new-answered")?.region == .arrived, "first mail 3 days ago is just arrived, even answered")
+        expect(point(s, "new-ignored")?.region == .arrived, "first mail 6 days ago is just arrived")
+        expect(point(s, "no-sighting").map { $0.region != .arrived && $0.x == UnderstandingSeries.axisFloor } == true,
+            "no first sighting is not new: placed at the once-a-month floor")
+        expect(point(s, "sent-only") == nil, "someone the owner only wrote to is not on the chart")
+        expect(point(s, "old")?.region != .arrived, "30 days old is placed by what it does")
+        let strip = s.points.filter { $0.region == .arrived }.map(\.x)
+        expect(strip.allSatisfy { $0 > UnderstandingSeries.stripFloor && $0 < UnderstandingSeries.axisFloor },
+            "every strip point is inside the strip")
+        expect(Set(strip).count == strip.count, "two new senders never share an x")
+    }
+
+    static func repliesOutrankReadsAndTheStripStaysLeft() {
+        let s = series([
+            row("rare", perMonth: 0.2, inbound: 2, replied: 2),
+            row("busy", perMonth: 190, attention: 10, opened: 0),
+        ])
+        expect(point(s, "rare")?.x == UnderstandingSeries.axisFloor, "rarer than once a month is drawn at once a month")
+        expect(s.xDomain.lowerBound == UnderstandingSeries.stripFloor, "the domain starts at the strip")
+        expect(s.xDomain.upperBound >= 190 * 1.5, "the domain clears the busiest sender")
+        expect(s.points.first?.row.received_count ?? 0 >= s.points.last?.row.received_count ?? 0,
+            "biggest first, so small dots draw on top")
+    }
+
+    // MARK: - ranking
+
+    static func answeredRanksByStrengthNotByShare() {
+        let s = series([
+            row("one-of-one", inbound: 1, replied: 1),
+            row("cofounder", inbound: 33, replied: 31, replyMs: 22 * 60_000),
+            row("lawyer", inbound: 9, replied: 8),
+            row("never", attention: 5, opened: 5, read: 1),
+        ])
+        expect(s.answered.map(\.id) == ["cofounder", "lawyer"],
+            "31 of 33 (94%) over 8 of 9 (89%); 1 of 1 is under the three-thread floor; never answered is not listed")
+        let fixture = UnderstandingSeries(UnderstandingFixture.relationships(now: now), now: now)
+        expect(zip(fixture.answered, fixture.answered.dropFirst()).allSatisfy { $0.value >= $1.value },
+            "the fixture's bars read in the order of their own percentages")
+        let onChart = Set(fixture.points.filter { $0.region == .answer }.map(\.id))
+        expect(fixture.answered.allSatisfy { onChart.contains($0.id) },
+            "everyone on the Answered list sits in People you answer on the chart")
+        expect(!fixture.answered.contains { $0.row.display_name == "Alex Moreno" },
+            "one reply in six is placed by reads, and off the Answered list too")
+        expect(s.answered.first?.value == 31.0 / 33.0, "the bar is the real share")
+        expect(s.answered.first?.sentence == "replied to 31 of 33, usually within the hour", "and says it")
+
+        let many = series((0..<12).map { row("p\($0)", inbound: 10, replied: $0 % 10 + 1) })
+        expect(many.answered.count == UnderstandingSeries.barCount, "at most eight bars")
+    }
+
+    static func fadingRanksByFatigueAndQuotesItsReceipt() {
+        let s = series([
+            row("a", attention: 38, opened: 2, fatigue: 0.86,
+                reasons: [FatigueReason(code: "high_volume", values: ["per_month": 31]),
+                          FatigueReason(code: "rarely_opened", values: ["opened": 2, "received": 38])]),
+            row("b", attention: 23, opened: 1, fatigue: 0.92),
+            row("c", fatigue: 0.4, received: 7),
+            row("d", fatigue: 0.3, reasons: [FatigueReason(code: "cleared_unopened", values: ["count": 17])]),
+            row("e", fatigue: 0.2, reasons: [FatigueReason(code: "never_clicked", values: ["opened": 12])]),
+            row("f", attention: 9, opened: 4, fatigue: 0.1,
+                reasons: [FatigueReason(code: "skimmed", values: ["median_read_fraction": 0.2])]),
+            row("fine", fatigue: 0),
+            row("unscored"),
+        ])
+        expect(s.fading.map(\.id) == ["b", "a", "c", "d", "e", "f"], "by fatigue, highest first, unscored and zero left out")
+        expect(s.fading[3].sentence == "cleared 17 without opening", "cleared_unopened is quoted")
+        expect(s.fading[4].sentence == "opened 12, never clicked a link", "never_clicked is quoted")
+        expect(s.fading[5].sentence == "opened 4 of 9", "a reason with no count falls back to the ledger")
+        expect(s.fading[1].sentence == "opened 2 of 38", "the module's own receipt when it gave one")
+        expect(s.fading[0].sentence == "opened 1 of 23", "else the ledger's opened tally")
+        expect(s.fading[2].sentence == "7 received, none answered", "else what is left to say")
+    }
+
+    // MARK: - words
+
+    static func replyTimeBucketsInWords() {
+        let m = 60_000
+        let cases: [(Int?, String?)] = [
+            (nil, nil), (-1, nil), (5 * m, "within minutes"), (22 * m, "within the hour"),
+            (3 * 60 * m, "within a few hours"), (9 * 60 * m, "the same day"),
+            (30 * 60 * m, "within a day or two"), (5 * 24 * 60 * m, "within the week"),
+            (10 * 24 * 60 * m, "after a week or more"),
+        ]
+        for (ms, want) in cases {
+            expect(UnderstandingText.replyTime(ms) == want, "reply time \(String(describing: ms)) reads \(want ?? "nil")")
+        }
+        expect(UnderstandingText.replyTime(15 * m) == "within the hour", "15 minutes is the hour bucket's floor")
+    }
+
+    static func sentencesComeFromTheNumbers() {
+        let s = series([
+            row("vendor", attention: 30, opened: 14, read: 0.48, corrections: 4),
+            row("once", attention: 1, opened: 1, read: 1, corrections: 1),
+            row("new", perMonth: nil, firstDaysAgo: 3, inbound: 1, replied: 1, received: 2),
+            row("today", perMonth: nil, firstDaysAgo: 0.2, received: 1),
+            row("ignored", attention: 38, opened: 2, read: 0.1),
+            row("none", attention: 0),
+        ])
+        expect(point(s, "vendor")?.sentence == "opened 14 of 30, about half, sorting corrected 4 times", "a corrected vendor")
+        expect(point(s, "once")?.sentence == "opened 1 of 1, usually to the end, sorting corrected once", "one correction")
+        expect(point(s, "new")?.sentence == "first wrote 3 days ago, 2 so far, replied to 1 of 1", "a new sender")
+        expect(point(s, "today")?.sentence == "first wrote today, 1 so far", "today")
+        expect(point(s, "ignored")?.sentence == "opened 2 of 38, a glance", "a glance")
+        expect(point(s, "none")?.sentence == "no reads measured yet", "nothing measured says so")
+
+        let named = row("sam@x.example", name: "  Sam Rivera ")
+        expect(UnderstandingText.name(named) == "Sam Rivera", "the name, trimmed")
+        expect(UnderstandingText.senderString(named) == "Sam Rivera <sam@x.example>", "the contact card's string")
+        expect(UnderstandingText.name(row("bare@x.example", name: "")) == "bare@x.example", "no name, the address")
+        expect(UnderstandingText.senderString(row("bare@x.example")) == "bare@x.example", "and the bare string")
+        expect(UnderstandingText.perMonth(1) == "1" && UnderstandingText.perMonth(3) == "3"
+            && UnderstandingText.perMonth(0.5) == "0.5" && UnderstandingText.perMonth(100) == "100",
+            "axis labels")
+    }
+
+    // MARK: - memory
+
+    static func entry(
+        _ id: String, _ kind: MemoryKind, _ origin: MemoryOrigin = .inferred, confidence: Double = 0.5,
+        retired: Bool = false, messages: [Int] = [], addrs: [String] = [], affirmedDaysAgo: Double = 3
+    ) -> MemoryEntry {
+        MemoryEntry(
+            id: id, origin: origin, kind: kind, line: "line \(id)",
+            provenance: MemoryProvenance(message_ids: messages, addrs: addrs), confidence: confidence,
+            affirmed_at: ago(affirmedDaysAgo), retired_at: retired ? ago(1) : nil)
+    }
+
+    static func memoryGroupsInOrderLiveFirst() {
+        let groups = MemoryGrouping.groups([
+            entry("ign", .ignores),
+            entry("p-retired", .person, retired: true),
+            entry("p-low", .person, confidence: 0.3),
+            entry("p-stated", .person, .stated, confidence: 0.1),
+            entry("p-high", .person, confidence: 0.9),
+            entry("role", .role),
+            entry("odd", .other),
+        ])
+        expect(groups.map(\.kind) == [.role, .person, .ignores, .other], "fixed kind order, empty kinds left out")
+        expect(groups[1].entries.map(\.id) == ["p-stated", "p-high", "p-low", "p-retired"],
+            "stated first, then by confidence, the withdrawn last")
+        expect(groups[1].title == "People" && groups[3].title == "Also noticed", "kind titles")
+    }
+
+    static func withdrawnEntriesAreRetiredExpiredOrOver() {
+        func e(_ id: String, kind: MemoryKind = .role, expires: Double? = nil, until: String? = nil, retired: Bool = false) -> MemoryEntry {
+            MemoryEntry(
+                id: id, origin: .inferred, kind: kind, body: until.map { ["until": $0] } ?? [:], line: id,
+                affirmed_at: ago(3), expires_at: expires.map(ago), retired_at: retired ? ago(1) : nil)
+        }
+        expect(e("live").withdrawn(now: now) == nil, "an entry with no dates holds")
+        expect(e("r", retired: true).withdrawn(now: now) == .retired, "retired")
+        expect(e("x", expires: 1).withdrawn(now: now) == .expired, "an expires_at in the past is expired")
+        expect(e("y", expires: -10).withdrawn(now: now) == nil, "an expires_at ahead still holds")
+        let pastDay = String(ago(5).prefix(10)), nextWeek = String(ago(-7).prefix(10))
+        expect(e("p", kind: .project, until: pastDay).withdrawn(now: now) == .ended, "a project whose until has passed is over")
+        expect(e("q", kind: .project, until: nextWeek).withdrawn(now: now) == nil, "one still running holds")
+        expect(e("today", kind: .project, until: String(ago(0).prefix(10))).withdrawn(now: now) == nil,
+            "a date-only until lasts to the end of its day")
+        expect(e("n", kind: .role, until: pastDay).withdrawn(now: now) == nil, "until means nothing outside a project")
+        let order = MemoryGrouping.groups([e("x", expires: 1), e("live"), e("r", retired: true)], now: now)[0].entries.map(\.id)
+        expect(order.first == "live", "holding entries before withdrawn ones")
+        expect(MemoryGrouping.holding([e("x", expires: 1), e("live")], now: now) == 1, "the header counts only what holds")
+        expect(UnderstandingText.withdrawnLead(.retired) == "No longer thinks:"
+            && UnderstandingText.withdrawnLead(.expired) == "No longer holds:"
+            && UnderstandingText.withdrawnLead(.ended) == "No longer holds:", "leads")
+        let fixture = UnderstandingFixture.memory(now: now)
+        expect(fixture.entries.first { $0.id == "01JFIXHIRE" }?.withdrawn(now: now) == .ended, "the fixture shows a finished project")
+        expect(fixture.entries.first { $0.id == "01JFIXROUND" }?.withdrawn(now: now) == nil, "and a live one")
+    }
+
+    static func memoryWordsAndTheEmptyState() {
+        expect(UnderstandingText.because(entry("a", .role, messages: [1])) == "because of 1 message", "one message")
+        expect(UnderstandingText.because(entry("a", .role, messages: [1, 2, 3])) == "because of 3 messages", "messages")
+        expect(UnderstandingText.because(entry("a", .role, addrs: ["x", "y"])) == "because of 2 senders", "senders when no messages")
+        expect(UnderstandingText.because(entry("a", .role)) == nil, "no receipts, no affordance")
+        expect(UnderstandingText.origin(.stated) == "you said" && UnderstandingText.origin(.inferred) == "inferred", "origin badges")
+        expect(UnderstandingText.entryAge(entry("a", .role, affirmedDaysAgo: 0.2), now: now) == "today", "today")
+        expect(UnderstandingText.entryAge(entry("a", .role, affirmedDaysAgo: 1.5), now: now) == "yesterday", "yesterday")
+        expect(UnderstandingText.entryAge(entry("a", .role, affirmedDaysAgo: 5), now: now) == "5 days ago", "days")
+        expect(UnderstandingText.entryAge(entry("a", .role, affirmedDaysAgo: 21), now: now) == "3 weeks ago", "weeks")
+        expect(UnderstandingText.entryAge(entry("a", .role, affirmedDaysAgo: 95), now: now) == "3 months ago", "months")
+
+        expect(MemoryGrouping.stillLearning(MemoryResponse(enabled: true, coverage_days: 13, entries: [])),
+            "13 days of ledger is still learning")
+        expect(!MemoryGrouping.stillLearning(MemoryResponse(enabled: true, coverage_days: 14, entries: [])),
+            "two weeks is enough")
+        expect(MemoryGrouping.stillLearning(MemoryResponse(enabled: false, coverage_days: 9, entries: [])),
+            "the daemon's enabled = false is still learning")
+        expect(MemoryGrouping.stillLearning(MemoryResponse(enabled: false, coverage_days: 30, entries: [])),
+            "and it wins over a coverage count that disagrees")
+        expect(UnderstandingText.knowsNote(holding: 1, days: 41) == "1 thing, over 41 days", "one thing")
+        expect(UnderstandingText.knowsNote(holding: 8, days: 1) == "8 things, over 1 day", "things, one day")
+        expect(UnderstandingText.stillLearning(days: 1).contains("1 day old"), "singular day")
+        expect(UnderstandingText.stillLearning(days: 9).contains("9 days old"), "plural days")
+    }
+
+    static func nearestPicksTheClosestWithinReach() {
+        let s = series([row("a", inbound: 2, replied: 2), row("b", attention: 2, opened: 0)])
+        let at: (PeoplePoint) -> (x: Double, y: Double)? = { p in p.id == "a" ? (100, 100) : (130, 100) }
+        expect(UnderstandingSeries.nearest(s.points, to: (110, 100), radius: 24, position: at)?.id == "a", "closest wins")
+        expect(UnderstandingSeries.nearest(s.points, to: (124, 100), radius: 24, position: at)?.id == "b", "the other side")
+        expect(UnderstandingSeries.nearest(s.points, to: (300, 300), radius: 24, position: at) == nil, "out of reach is nothing")
+    }
+
+    static func noDashesInAnythingTheSectionSays() {
+        let fixture = UnderstandingSeries(UnderstandingFixture.relationships(now: now), now: now)
+        let memory = UnderstandingFixture.memory(now: now)
+        var said: [String] = fixture.points.map(\.sentence) + fixture.answered.map(\.sentence)
+            + fixture.fading.map(\.sentence) + PeopleRegion.allCases.map(\.title)
+            + memory.entries.map(\.line) + MemoryKind.allCases.map(UnderstandingText.kindTitle)
+            + [UnderstandingText.stillLearning(days: 3), UnderstandingText.coverageNote(days: 3),
+               UnderstandingText.coverageNote(days: 41)]
+        said += memory.entries.compactMap(UnderstandingText.because)
+        for s in said {
+            expect(!s.contains("\u{2014}") && !s.contains("\u{2013}"), "no em or en dash in \"\(s)\"")
+        }
+
+        // The fixture exercises every region, so the demo shows all four.
+        expect(Set(fixture.points.map(\.region)) == Set(PeopleRegion.allCases), "the fixture fills every region")
+        expect(fixture.answered.first?.row.display_name == "Sam Rivera", "the cofounder leads the answered list")
+        expect(!fixture.fading.contains { $0.row.display_name == "Alex Moreno" },
+            "the recruiter answered once is a known contact, scored 0, never fading")
+        expect(fixture.fading.prefix(3).map { $0.row.display_name ?? "" }
+            == ["The Growth Letter", "SaaS Weekly", "Product Pulse"], "the three unopened newsletters lead the fading list")
+        expect(fixture.fading.first?.sentence == "opened 0 of 17",
+            "the Growth Letter quotes rarely_opened first, as the daemon's scorer emits it")
+        expect(fixture.points.first { $0.row.corrections > 0 }?.sentence.contains("corrected") == true,
+            "the vendor's corrections are said")
+        expect(Set(MemoryGrouping.groups(memory.entries, now: now).map(\.kind)) == Set(MemoryKind.allCases),
+            "the memory fixture fills every kind, the unknown one included")
+    }
+
+    static func theSectionIsBehindTheFlag() {
+        expect(!UnderstandingGate.showsSection(.none, staged: false), "no stats yet: no section")
+        expect(!UnderstandingGate.showsSection(HiddenFeatures(daemon: nil), staged: false), "an older daemon's silence: no section")
+        expect(!UnderstandingGate.showsSection(HiddenFeatures(daemon: ["renotify"]), staged: false),
+            "other flags on, understanding off: no section")
+        expect(!UnderstandingGate.showsSection(HiddenFeatures(daemon: ["Understanding"]), staged: false),
+            "the key is matched exactly")
+        expect(UnderstandingGate.showsSection(HiddenFeatures(daemon: ["understanding"]), staged: false),
+            "the flag on: the section")
+        expect(UnderstandingGate.showsSection(.none, staged: true), "the fixture stage shows it regardless")
+        expect(HiddenFeature.understanding.key == UnderstandingFlag.key,
+            "the app's flag and the fixture's claimed key are one string")
+    }
+
+    static func theUsageSwitcherIsBehindTheFlagAndRemembers() {
+        let on = HiddenFeatures(daemon: ["understanding"])
+        expect(UsagePages.offered(.none, staged: false).isEmpty, "off: no switcher at all, not a one-entry one")
+        expect(UsagePages.offered(HiddenFeatures(daemon: ["renotify"]), staged: false).isEmpty, "other flags: none")
+        expect(UsagePages.offered(on, staged: false) == [.mail, .understanding], "on: Mail, then Understanding")
+        expect(UsagePages.offered(.none, staged: true) == [.mail, .understanding], "the stage: both")
+        expect(UsageSubpage.mail.label == "Mail" && UsageSubpage.understanding.label == "Understanding", "labels")
+
+        expect(UsagePages.initial(remembered: nil, staged: false) == .mail, "nothing remembered: Mail")
+        expect(UsagePages.initial(remembered: "understanding", staged: false) == .understanding, "the remembered choice")
+        expect(UsagePages.initial(remembered: "a later build's page", staged: false) == .mail, "an unreadable choice: Mail")
+        expect(UsagePages.initial(remembered: "mail", staged: true) == .understanding, "the stage lands on Understanding")
+        expect(UsagePages.initial(remembered: nil, staged: true, stagedPage: "mail") == .mail, "or on the page it names")
+        expect(UsagePages.shown(.understanding, offered: []) == .mail, "flag off under an open Understanding: Mail")
+        expect(UsagePages.shown(.understanding, offered: UsageSubpage.allCases) == .understanding, "on: as chosen")
+
+        // Stats not loaded yet (launch, account switch): hold, do not flash Mail.
+        let unknown: HiddenFeatures? = nil
+        let held = UsagePages.offered(unknown, staged: false, selected: .understanding)
+        expect(UsagePages.shown(.understanding, offered: held) == .understanding,
+            "unknown flags: an owner on Understanding stays on it")
+        expect(UsagePages.offered(unknown, staged: false, selected: .mail).isEmpty,
+            "unknown flags on Mail: no switcher yet, and nothing moves when it arrives")
+        expect(UsagePages.offered(Optional(on), staged: false, selected: .mail) == [.mail, .understanding],
+            "known: the gate decides")
+        let off: HiddenFeatures? = HiddenFeatures(daemon: [])
+        expect(UsagePages.shown(.understanding, offered: UsagePages.offered(off, staged: false, selected: .understanding)) == .mail,
+            "known and off: back to Mail, held or not")
+
+        let suite = "understanding-tests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        expect(UsagePages.remembered(in: defaults) == nil, "a fresh install remembers nothing")
+        UsagePages.remember(.understanding, in: defaults, staged: false)
+        expect(UsagePages.initial(remembered: UsagePages.remembered(in: defaults), staged: false) == .understanding,
+            "a choice survives to the next launch")
+        UsagePages.remember(.mail, in: defaults, staged: true)
+        expect(UsagePages.remembered(in: defaults) == "understanding", "the stage never writes the real choice")
+        expect(UsagePages.defaultsKey.hasPrefix("passband.pref."), "kept beside the other remembered choices")
+    }
+
+    static func expect(_ cond: Bool, _ what: String) {
+        checks += 1
+        if !cond {
+            failures += 1
+            print("  FAIL: \(what)")
+        }
+    }
+}
+
+extension RelationshipRow {
+    func withFirst(_ s: String?) -> RelationshipRow {
+        var r = self
+        r.received_first_at = s
+        return r
+    }
+}

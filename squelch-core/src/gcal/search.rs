@@ -384,7 +384,7 @@ pub fn search(
     let far = chrono::Duration::days(365 * 20);
     let from = (now - far).fixed_offset();
     let to = (now + far).fixed_offset();
-    let ghost_rows = store.ghost_events_containing(account, from, to, needles.as_deref())?;
+    let ghost_rows = store.ghost_events_containing(account, from, to, needles.as_deref(), false)?;
     // Only ghosts that can be kept go on to the costlier checks: every term,
     // or all but one.
     let mut candidates: Vec<(usize, GhostEvent)> = Vec::new();

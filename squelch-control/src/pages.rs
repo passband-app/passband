@@ -146,6 +146,47 @@ pub fn deep_link(tenant_url: &str, pair_code: &str, analytics_id: Option<&str>) 
 /// when a release does.
 const DOWNLOAD_URL: &str = "https://passband.app/download/latest";
 
+/// The public TestFlight invite for the iPhone app. The same link the Mac app's
+/// iPhone ask carries (`TestFlightNudge.joinURL` in the Swift client); change
+/// both together. Hardcoded for the reason [`DOWNLOAD_URL`] is.
+pub(crate) const TESTFLIGHT_URL: &str = "https://testflight.apple.com/join/nt7BD5H1";
+
+/// [`TESTFLIGHT_URL`] as a QR code, inline SVG. Rendered once per process.
+///
+/// SVG MARKUP, NOT AN IMAGE, because `img-src` is `'none'` here (see [`MARK`]
+/// for the same reasoning). One path, one unit per module, the standard
+/// four-module quiet zone inside the viewBox so the code scans on any ground.
+/// Dark modules on a white tile ALWAYS, in both palettes: phone cameras read a
+/// light-on-dark code badly, so the dark theme does not invert it.
+fn testflight_qr() -> &'static str {
+    static SVG: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        use qrcodegen::{QrCode, QrCodeEcc};
+        // A 42-byte URL always fits; an `Err` would be a bug in the constant.
+        let Ok(qr) = QrCode::encode_text(TESTFLIGHT_URL, QrCodeEcc::Medium) else {
+            return String::new();
+        };
+        qr_svg(&qr)
+    });
+    &SVG
+}
+
+fn qr_svg(qr: &qrcodegen::QrCode) -> String {
+    const QUIET: i32 = 4;
+    let size = qr.size();
+    let mut d = String::new();
+    for y in 0..size {
+        for x in 0..size {
+            if qr.get_module(x, y) {
+                d.push_str(&format!("M{} {}h1v1h-1z", x + QUIET, y + QUIET));
+            }
+        }
+    }
+    let side = size + 2 * QUIET;
+    format!(
+        r##"<svg class="qr" viewBox="0 0 {side} {side}" role="img" aria-label="QR code for the Passband iPhone alpha on TestFlight" shape-rendering="crispEdges"><rect width="{side}" height="{side}" fill="#fff"/><path fill="#0B1220" d="{d}"/></svg>"##
+    )
+}
+
 /// Where a finished console login sends the browser: the tenant's own console,
 /// carrying the pairing code it will claim.
 ///
@@ -589,8 +630,22 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
 .auth details li {{ margin: 0 0 0.25rem; }}
 .auth details p {{ color: var(--faint); margin: 0; }}
 .auth details strong {{ color: var(--ink); font-weight: 500; }}
+/* The iPhone block on the success page: secondary to the download, so no rig
+   and no button, a hairline above and the code on its own white tile. */
+.auth .phone {{ display: flex; align-items: center; gap: 1.4rem; margin: 2.5rem 0 0;
+  padding: 1.75rem 0 0; border-top: 1px solid var(--hair); }}
+.auth .phone .qr {{ display: block; flex: none; width: 7.5rem; height: 7.5rem;
+  border-radius: 0.6rem; box-shadow: 0 0 0 1px var(--hair), 0 10px 26px var(--rig-shadow); }}
+.auth .phone .rig-label {{ display: block; margin: 0 0 0.45rem; color: var(--faintest);
+  font-size: 0.68rem; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; }}
+.auth .phone p {{ margin: 0; font-size: 0.9rem; line-height: 1.55; }}
+.auth .phone .phone-link {{ margin-top: 0.6rem; font-size: 0.85rem; }}
 @media (max-width: 600px) {{
   .auth main {{ margin-top: 3rem; }}
+  .auth .phone .qr, .auth .phone .on-desk {{ display: none; }}
+}}
+@media (min-width: 601px) {{
+  .auth .phone .on-phone {{ display: none; }}
 }}
 @media (prefers-reduced-motion: reduce) {{
   .auth :is(.rig, a.button, button, .arrow) {{ transition-duration: 0.01ms; }}
@@ -827,6 +882,12 @@ pub fn signup_form_with(
 /// yet, and the app's own onboarding signs in with Gmail and pairs itself
 /// through [`app_signed_in`], so this page carries no deep link and no pairing
 /// code: a second connect path here was a step the app already does.
+///
+/// THE IPHONE IS THE SECOND THING, NOT A SECOND BUTTON. Under the download sits
+/// a quiet block with a QR code for the TestFlight alpha: this page is almost
+/// always open on the Mac, and a phone that has the app from day one is the
+/// phone that gets the pushes that bring people back. On a narrow screen (the
+/// page opened on the phone itself) the code is hidden and the link carries it.
 pub fn success(tenant_url: &str) -> Response {
     let host = tenant_url
         .trim_start_matches("https://")
@@ -837,9 +898,18 @@ pub fn success(tenant_url: &str) -> Response {
         &format!(
             r#"<h1>Your mailbox is ready</h1>
 <p class="lead">{host} is live. Get the app, then sign in to finish.</p>
-<a class="button" href="{download}">Download Passband for Mac <span class="arrow" aria-hidden="true">→</span></a>"#,
+<a class="button" href="{download}">Download Passband for Mac <span class="arrow" aria-hidden="true">→</span></a>
+<section class="phone" aria-labelledby="phone-label">
+{qr}<div>
+<span class="rig-label" id="phone-label">Also on iPhone</span>
+<p><span class="on-desk">Scan to join the alpha on TestFlight.</span><span class="on-phone">Passband for iPhone is in alpha on TestFlight.</span> Your phone is where the notifications land.</p>
+<p class="phone-link"><a href="{testflight}">Join the iPhone alpha</a></p>
+</div>
+</section>"#,
             host = escape_html(host),
             download = DOWNLOAD_URL,
+            qr = testflight_qr(),
+            testflight = TESTFLIGHT_URL,
         ),
     )
 }
@@ -1541,6 +1611,46 @@ mod tests {
         assert!(!html.contains("passband://"), "{html}");
         assert!(!html.contains("<details"), "{html}");
         assert!(!html.contains("<script"), "{html}");
+    }
+
+    /// The iPhone alpha rides the success page as a QR code and a link, and it
+    /// is NOT a second button: the download stays the one thing to press. The
+    /// code is markup (the CSP admits no image) and encodes the TestFlight link.
+    #[tokio::test]
+    async fn the_success_page_offers_the_iphone_alpha_without_a_second_button() {
+        let html = document_of(success("https://ada.passband.email")).await;
+        assert!(
+            html.contains(&format!(r#"href="{TESTFLIGHT_URL}""#)),
+            "{html}"
+        );
+        assert!(html.contains(r#"<svg class="qr""#), "{html}");
+        assert!(!html.contains("<img"), "{html}");
+        assert_eq!(html.matches(r#"class="button""#).count(), 1, "{html}");
+        assert!(!html.contains('\u{2014}'), "{html}");
+    }
+
+    /// The SVG draws exactly the code qrcodegen made: one square per dark
+    /// module, inside a viewBox that leaves the four-module quiet zone.
+    #[test]
+    fn the_testflight_qr_draws_every_dark_module_with_a_quiet_zone() {
+        let qr = qrcodegen::QrCode::encode_text(TESTFLIGHT_URL, qrcodegen::QrCodeEcc::Medium)
+            .expect("the link fits");
+        let size = qr.size();
+        let dark = (0..size)
+            .flat_map(|y| (0..size).map(move |x| (x, y)))
+            .filter(|&(x, y)| qr.get_module(x, y))
+            .count();
+        let svg = testflight_qr();
+        assert_eq!(svg, qr_svg(&qr));
+        assert_eq!(svg.matches("h1v1h-1z").count(), dark);
+        // The top-left finder's corner module sits 4 in from the edge, so the
+        // quiet zone is real on every side, not only counted into the viewBox.
+        assert!(svg.contains("M4 4h1v1h-1z"), "{svg}");
+        let side = size + 8;
+        assert!(
+            svg.contains(&format!(r#"viewBox="0 0 {side} {side}""#)),
+            "{svg}"
+        );
     }
 
     /// The app page's fallback is FOLDED AWAY BUT LABELLED WITH THE SYMPTOM.

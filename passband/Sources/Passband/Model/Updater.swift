@@ -262,8 +262,8 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver, SPUUpdaterDelega
         pending = version
         phase = .ready(version: version)
         // Same once-per-version banner as a found update: the card only speaks
-        // to someone looking at the window.
-        if Self.bannered != version {
+        // to someone looking at the window. None for a quiet release.
+        if Self.bannered != version, !Self.isQuiet(item) {
             Self.bannered = version
             Task { await Notifier.shared.postUpdate(version: version) }
         }
@@ -303,10 +303,19 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver, SPUUpdaterDelega
         // version: Later brings the card back on every later check, and a
         // banner each time would be nagging. A check the human asked for gets
         // none, because they are already watching the answer.
-        if !state.userInitiated, Self.bannered != version {
+        if !state.userInitiated, Self.bannered != version, !Self.isQuiet(appcastItem) {
             Self.bannered = version
             Task { await Notifier.shared.postUpdate(version: version) }
         }
+    }
+
+    /// A release tagged quiet (a hotfix): `<passband:quiet>` in its appcast
+    /// item (make-appcast.sh). It still installs as any other, and the card
+    /// still shows in the window; only the banner is skipped. The daemon reads
+    /// the same mark and does not push it (squelch-core's `release_feed`).
+    static func isQuiet(_ item: SUAppcastItem) -> Bool {
+        let props = item.propertiesDictionary
+        return props["passband:quiet"] != nil || props["quiet"] != nil
     }
 
     /// The last version a banner went out for. Persisted so a relaunch does

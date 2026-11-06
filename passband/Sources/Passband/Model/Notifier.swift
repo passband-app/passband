@@ -703,15 +703,11 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         let isAuth = notification.request.content.userInfo[EventBanner.authKey] as? Bool ?? false
         let isReminder = route == EventBanner.calendarRoute
         nonisolated(unsafe) let done = completionHandler
-        // A release announcement pushed while Passband is running. On the Mac
+        // A release announcement (Mac only) pushed while Passband is running:
         // the updater has already said it, with its own banner and card, so
-        // the push is shown as nothing. On the phone it waits in the list.
+        // the push is shown as nothing.
         if EventBanner.releasePush(notification.request.content.userInfo["event_id"] as? String) != nil {
-            #if os(macOS)
-                DispatchQueue.main.async { done([]) }
-            #else
-                DispatchQueue.main.async { done([.list]) }
-            #endif
+            DispatchQueue.main.async { done([]) }
             return
         }
         #if os(iOS)

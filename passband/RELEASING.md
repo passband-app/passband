@@ -10,6 +10,9 @@ Write the release notes, push a tag; CI does the rest:
 
 # 2. bump VERSION (and its project.yml mirror), commit, then:
 git tag "passband-mac-$(cat VERSION)" && git push origin "passband-mac-$(cat VERSION)"
+
+# a hotfix nobody should be pushed about: tag it quiet instead
+git tag -a "passband-mac-$(cat VERSION)" -m quiet && git push origin "passband-mac-$(cat VERSION)"
 ```
 
 ## The release notes
@@ -109,10 +112,17 @@ feed to the versions you re-stage.
 A Mac where Passband is quit never sees the update card or banner, so the
 daemons announce each release themselves (squelch-core/src/release_feed.rs).
 Every daemon with a relay reads `passband.app/appcast.xml` hourly. Six hours
-after a version appears there, it pushes it once to its account's Macs, and to
-the phones of accounts whose Mac has gone quiet for a week. An account whose
-Mac already connected on the new version hears nothing. There is nothing to do
-per release: publishing the appcast is the trigger.
+after a version appears there, it pushes it once to its account's Macs. Phones
+are never told about a Mac release. An account whose Mac already connected on
+the new version hears nothing. There is nothing to do per release: publishing
+the appcast is the trigger.
+
+A hotfix tagged `-m quiet` (above) is marked `<passband:quiet>` in the appcast
+by `make-appcast.sh`: no daemon pushes it and a running Mac skips its banner,
+but it installs like any other release. A quiet fix does not cancel a feature
+release still inside its six hours; that push still goes, naming the newest
+version. Decide at tag time: the mark comes from the tag message on every
+regeneration, and once the six hours pass the push may already be out.
 
 The Mac half needs the app to hold an APNs token, which needs a provisioning
 profile. One-time setup, at developer.apple.com:

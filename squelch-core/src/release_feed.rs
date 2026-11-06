@@ -1,28 +1,28 @@
-//! TELLING PEOPLE A NEW VERSION IS OUT, even when the app is not running.
+//! TELLING A MAC A NEW VERSION IS OUT, even when Passband is not running.
 //!
 //! The Mac app announces its own updates (Sparkle, then a local banner), but
-//! only while it runs. A Mac where Passband was quit, or a person who drifted
-//! off to the phone or away entirely, hears nothing. So each daemon reads the
-//! PUBLIC release feed (the Mac's Sparkle appcast, which is published the
-//! moment a release is downloadable) and, once per version, pushes a release
-//! banner to the devices it already holds tokens for. The relay stays blind:
-//! it has no device registry, so the daemon that owns the tokens is the only
-//! place a fan-out like this can start.
+//! only while it runs. A Mac where Passband was quit hears nothing. So each
+//! daemon reads the PUBLIC release feed (the Mac's Sparkle appcast, published
+//! the moment a release is downloadable) and, once per version, pushes a
+//! release banner to the Macs it holds tokens for. The relay stays blind: it
+//! has no device registry, so the daemon that owns the tokens is the only
+//! place a fan-out like this can start. Macs only: a phone is never told about
+//! a Mac release.
 //!
 //! WHO HEARS IT ([`decide`]):
-//! - Nobody, while the release is younger than [`GRACE`]: a running Mac picks
+//! - Nobody, while the news is younger than [`GRACE`]: a running Mac picks
 //!   the update up on its own within the hour, and its own banner says so.
 //! - Nobody, ever, once any of the account's Macs has connected running the
-//!   new version (or newer). They have it.
+//!   news (or newer). They have it.
 //! - Every registered Mac otherwise. A Mac that is running swallows the push
 //!   (its Sparkle banner covers it); a Mac where Passband is quit shows it.
-//! - The phones too, but only for an account that has had a Mac and has not
-//!   connected from one for [`MAC_ACTIVE`]. Somebody using the Mac every day
-//!   does not need their phone to buzz about it; somebody who stopped is who
-//!   this is for. A phone-only account is not told about a Mac release.
-//!   ONCE PER LAPSE: after one phone announcement ([`PHONE_KEY`]), the phone
-//!   hears nothing more until a Mac connects again. Releases come every day
-//!   or two, and a nag per release is how the app gets deleted.
+//!
+//! QUIET RELEASES. A release whose tag message is `quiet` (a hotfix) carries
+//! `<passband:quiet>` in the appcast (passband/make-appcast.sh). It is never
+//! news by itself, but it does not swallow news either: a feature release
+//! still inside its grace when a quiet fix lands is announced, naming the
+//! newest version, since that is what the Mac will install. A run of quiet
+//! releases with no news among them is recorded and nobody hears.
 //!
 //! FIRST SIGHT IS NOT NEWS. With no record at all (a daemon running this code
 //! for the first time), the current release is recorded and nobody is pushed:
@@ -34,8 +34,9 @@
 //! one Notification Center entry.
 //!
 //! ONCE PER VERSION: the newest version announced (or found already
-//! installed) is kept in `app_settings` under [`ANNOUNCED_KEY`], so a restart
-//! does not repeat it and a release that was skipped is never sent later.
+//! installed, or passed over as quiet) is kept in `app_settings` under
+//! [`ANNOUNCED_KEY`], so a restart does not repeat it and a release that was
+//! skipped is never sent later.
 
 use chrono::{DateTime, Duration, Utc};
 use regex::Regex;
@@ -50,17 +51,9 @@ pub const FEED_URL: &str = "https://passband.app/appcast.xml";
 /// about (or was found already running).
 pub const ANNOUNCED_KEY: &str = "push.release_announced.macos";
 
-/// `app_settings` key holding when the phones were last told about a Mac
-/// release (RFC 3339), for once-per-lapse.
-pub const PHONE_KEY: &str = "push.release_phones_at.macos";
-
 /// How long a release waits before anybody is pushed about it. Sparkle checks
 /// hourly; this leaves running Macs time to update and say so first.
 pub const GRACE: Duration = Duration::hours(6);
-
-/// A Mac seen this recently counts as in use, and its owner's phone is left
-/// alone.
-pub const MAC_ACTIVE: Duration = Duration::days(7);
 
 /// A feed bigger than this is not our appcast. It is a few KB today.
 pub const MAX_FEED_BYTES: usize = 1 << 20;
@@ -70,18 +63,20 @@ pub const MAX_FEED_BYTES: usize = 1 << 20;
 pub struct Release {
     pub version: String,
     pub published: DateTime<Utc>,
+    /// Tagged quiet: never news by itself.
+    pub quiet: bool,
 }
 
-/// What to do about the newest release.
+/// What to do about the feed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
-    /// Nothing yet: already announced, or still inside [`GRACE`].
+    /// Nothing yet: nothing new, or the news is still inside [`GRACE`].
     Wait,
-    /// The account already runs it, or this is the first check ever. Record
-    /// it as announced; push nothing.
-    AlreadyHave,
-    /// Push it. Macs always; phones only when `phones`.
-    Announce { phones: bool },
+    /// Record this version as announced and push nothing: the account already
+    /// runs the news, everything new was quiet, or this is the first check.
+    Record(String),
+    /// Push this version (the newest) to the Macs.
+    Announce(String),
 }
 
 /// Dotted digits, compared numerically: `0.0.10` is newer than `0.0.9`.
@@ -121,11 +116,13 @@ static VERSION: LazyLock<Regex> = LazyLock::new(|| {
 static PUB_DATE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"<pubDate>\s*([^<]{1,64}?)\s*</pubDate>").unwrap());
 
-/// The newest release in a Sparkle appcast, by version. An item missing its
-/// version or date, or carrying one that does not parse, is skipped: the feed
-/// is ours, but it still arrives over a network, and a half-written item must
-/// not become a push.
-pub fn newest(feed: &str) -> Option<Release> {
+static QUIET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<passband:quiet\b").unwrap());
+
+/// Every release in a Sparkle appcast. An item missing its version or date,
+/// or carrying one that does not parse, is skipped: the feed is ours, but it
+/// still arrives over a network, and a half-written item must not become a
+/// push.
+pub fn releases(feed: &str) -> Vec<Release> {
     ITEM.captures_iter(feed)
         .filter_map(|item| {
             let body = item.get(1)?.as_str();
@@ -133,44 +130,59 @@ pub fn newest(feed: &str) -> Option<Release> {
             parse_version(&version)?;
             let date = PUB_DATE.captures(body)?.get(1)?.as_str();
             let published = DateTime::parse_from_rfc2822(date).ok()?.with_timezone(&Utc);
-            Some(Release { version, published })
+            Some(Release {
+                version,
+                published,
+                quiet: QUIET.is_match(body),
+            })
         })
-        .reduce(|best, r| {
-            if at_least(&best.version, &r.version) {
-                best
-            } else {
-                r
-            }
-        })
+        .collect()
 }
 
-/// Who hears about `release`; see the module header.
+fn newest<'a>(rs: impl Iterator<Item = &'a Release>) -> Option<&'a Release> {
+    rs.reduce(|best, r| {
+        if at_least(&best.version, &r.version) {
+            best
+        } else {
+            r
+        }
+    })
+}
+
+/// Who hears about the feed's releases; see the module header.
 pub fn decide(
-    release: &Release,
+    releases: &[Release],
     now: DateTime<Utc>,
     seen: &[ClientSeen],
     announced: Option<&str>,
-    phones_at: Option<DateTime<Utc>>,
 ) -> Decision {
-    let Some(announced) = announced else {
-        return Decision::AlreadyHave;
+    let Some(latest) = newest(releases.iter()) else {
+        return Decision::Wait;
     };
-    if at_least(announced, &release.version) {
+    let Some(announced) = announced else {
+        return Decision::Record(latest.version.clone());
+    };
+    if at_least(announced, &latest.version) {
         return Decision::Wait;
     }
-    let macs = seen.iter().filter(|c| c.platform == ClientPlatform::Macos);
-    if macs.clone().any(|c| at_least(&c.version, &release.version)) {
-        return Decision::AlreadyHave;
+    let news = newest(
+        releases
+            .iter()
+            .filter(|r| !r.quiet && !at_least(announced, &r.version)),
+    );
+    let Some(news) = news else {
+        return Decision::Record(latest.version.clone());
+    };
+    let has_it = seen
+        .iter()
+        .any(|c| c.platform == ClientPlatform::Macos && at_least(&c.version, &news.version));
+    if has_it {
+        return Decision::Record(latest.version.clone());
     }
-    if now - release.published < GRACE {
+    if now - news.published < GRACE {
         return Decision::Wait;
     }
-    let last_mac = macs.map(|c| c.seen_at).max();
-    let lapsed = last_mac.is_some_and(|t| now - t >= MAC_ACTIVE);
-    let told_this_lapse = phones_at.is_some_and(|p| last_mac.is_some_and(|t| p > t));
-    Decision::Announce {
-        phones: lapsed && !told_this_lapse,
-    }
+    Decision::Announce(latest.version.clone())
 }
 
 #[cfg(test)]
@@ -178,7 +190,7 @@ mod tests {
     use super::*;
 
     const FEED: &str = r#"<?xml version="1.0"?>
-<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:passband="https://passband.app/xml-namespaces/appcast" version="2.0">
     <channel>
         <title>Passband</title>
         <item>
@@ -191,6 +203,7 @@ mod tests {
             <pubDate>Thu, 05 Nov 2026 03:22:34 +0000</pubDate>
             <sparkle:version>2605</sparkle:version>
             <sparkle:shortVersionString>0.0.10</sparkle:shortVersionString>
+            <passband:quiet>yes</passband:quiet>
         </item>
         <item>
             <title>broken</title>
@@ -211,14 +224,20 @@ mod tests {
         }
     }
 
-    const OLD: Option<&str> = Some("0.0.9");
-
-    fn release() -> Release {
+    fn rel(version: &str, published: &str, quiet: bool) -> Release {
         Release {
-            version: "0.0.10".into(),
-            published: at("2026-11-05T03:22:34Z"),
+            version: version.into(),
+            published: at(published),
+            quiet,
         }
     }
+
+    /// 0.0.10, a feature release.
+    fn loud() -> Release {
+        rel("0.0.10", "2026-11-05T03:22:34Z", false)
+    }
+
+    const OLD: Option<&str> = Some("0.0.9");
 
     #[test]
     fn versions_compare_as_numbers() {
@@ -233,111 +252,112 @@ mod tests {
     }
 
     #[test]
-    fn newest_is_by_version_and_skips_broken_items() {
+    fn the_feed_parses_with_its_quiet_marks_and_skips_broken_items() {
         // The undated 9.9.9 item is not a release.
-        assert_eq!(newest(FEED), Some(release()));
-        assert_eq!(newest("<rss><channel></channel></rss>"), None);
-        assert_eq!(newest("not xml at all"), None);
+        assert_eq!(
+            releases(FEED),
+            vec![
+                rel("0.0.9", "2026-11-04T03:22:34Z", false),
+                rel("0.0.10", "2026-11-05T03:22:34Z", true),
+            ]
+        );
+        assert!(releases("<rss><channel></channel></rss>").is_empty());
+        assert!(releases("not xml at all").is_empty());
     }
 
     #[test]
     fn the_real_appcast_parses() {
         let feed = include_str!("../../passband-site/appcast.xml");
-        let r = newest(feed).expect("the shipped appcast has a release");
-        assert!(parse_version(&r.version).is_some());
+        assert!(
+            !releases(feed).is_empty(),
+            "the shipped appcast has a release"
+        );
     }
 
     #[test]
     fn nothing_inside_the_grace_period() {
-        let now = release().published + Duration::hours(5);
-        assert_eq!(decide(&release(), now, &[], OLD, None), Decision::Wait);
+        let now = loud().published + Duration::hours(5);
+        assert_eq!(decide(&[loud()], now, &[], OLD), Decision::Wait);
+    }
+
+    #[test]
+    fn after_the_grace_every_mac_hears() {
+        let now = loud().published + Duration::hours(7);
+        let seen = [mac("0.0.9", "2026-10-01T00:00:00Z")];
+        assert_eq!(
+            decide(&[loud()], now, &seen, OLD),
+            Decision::Announce("0.0.10".into())
+        );
     }
 
     #[test]
     fn the_first_check_ever_records_and_pushes_nothing() {
-        let now = release().published + Duration::days(3);
-        let seen = [mac("0.0.9", "2026-10-01T00:00:00Z")];
+        let now = loud().published + Duration::days(3);
         assert_eq!(
-            decide(&release(), now, &seen, None, None),
-            Decision::AlreadyHave
-        );
-    }
-
-    #[test]
-    fn the_phone_hears_once_per_lapse() {
-        let now = release().published + Duration::hours(7);
-        let seen = [mac("0.0.9", "2026-10-01T00:00:00Z")];
-        // Told after the Mac went quiet: the Mac alone, from now on.
-        let told = Some(at("2026-10-20T00:00:00Z"));
-        assert_eq!(
-            decide(&release(), now, &seen, OLD, told),
-            Decision::Announce { phones: false }
-        );
-        // Told before the Mac's last visit: a new lapse, told again.
-        let earlier = Some(at("2026-09-01T00:00:00Z"));
-        assert_eq!(
-            decide(&release(), now, &seen, OLD, earlier),
-            Decision::Announce { phones: true }
-        );
-    }
-
-    #[test]
-    fn a_lapsed_account_hears_on_every_device() {
-        let now = release().published + Duration::hours(7);
-        let seen = [mac("0.0.9", "2026-10-01T00:00:00Z")];
-        assert_eq!(
-            decide(&release(), now, &seen, OLD, None),
-            Decision::Announce { phones: true }
-        );
-        // Phone only, never a Mac: a Mac release is not news for the phone.
-        assert_eq!(
-            decide(&release(), now, &[], OLD, None),
-            Decision::Announce { phones: false }
-        );
-    }
-
-    #[test]
-    fn an_active_mac_keeps_the_phone_quiet() {
-        let now = release().published + Duration::hours(7);
-        let seen = [mac("0.0.9", "2026-11-05T09:00:00Z")];
-        assert_eq!(
-            decide(&release(), now, &seen, OLD, None),
-            Decision::Announce { phones: false }
+            decide(&[loud()], now, &[], None),
+            Decision::Record("0.0.10".into())
         );
     }
 
     #[test]
     fn a_mac_already_on_it_ends_it_even_inside_the_grace() {
-        let now = release().published + Duration::hours(1);
+        let now = loud().published + Duration::hours(1);
         let seen = [
             mac("0.0.9", "2026-11-01T00:00:00Z"),
             mac("0.0.10", "2026-11-05T04:00:00Z"),
         ];
         assert_eq!(
-            decide(&release(), now, &seen, OLD, None),
-            Decision::AlreadyHave
+            decide(&[loud()], now, &seen, OLD),
+            Decision::Record("0.0.10".into())
         );
         let newer = [mac("0.0.11", "2026-11-05T04:00:00Z")];
         assert_eq!(
-            decide(&release(), now, &newer, OLD, None),
-            Decision::AlreadyHave
+            decide(&[loud()], now, &newer, OLD),
+            Decision::Record("0.0.10".into())
         );
     }
 
     #[test]
     fn once_per_version() {
-        let now = release().published + Duration::days(3);
+        let now = loud().published + Duration::days(3);
+        assert_eq!(decide(&[loud()], now, &[], Some("0.0.10")), Decision::Wait);
+        assert_eq!(decide(&[loud()], now, &[], Some("0.0.11")), Decision::Wait);
         assert_eq!(
-            decide(&release(), now, &[], Some("0.0.10"), None),
+            decide(&[loud()], now, &[], Some("0.0.9")),
+            Decision::Announce("0.0.10".into())
+        );
+    }
+
+    #[test]
+    fn a_quiet_release_alone_is_recorded_not_announced() {
+        let fix = rel("0.0.11", "2026-11-06T00:00:00Z", true);
+        let now = fix.published + Duration::days(1);
+        assert_eq!(
+            decide(&[loud(), fix], now, &[], Some("0.0.10")),
+            Decision::Record("0.0.11".into())
+        );
+    }
+
+    #[test]
+    fn a_quiet_fix_does_not_swallow_the_news_before_it() {
+        // 0.0.10 is news, still in its grace when quiet 0.0.11 lands.
+        let fix = rel("0.0.11", "2026-11-05T05:00:00Z", true);
+        let early = loud().published + Duration::hours(3);
+        assert_eq!(
+            decide(&[loud(), fix.clone()], early, &[], OLD),
             Decision::Wait
         );
+        // The grace runs from the NEWS, and the push names the newest build.
+        let later = loud().published + Duration::hours(7);
         assert_eq!(
-            decide(&release(), now, &[], Some("0.0.11"), None),
-            Decision::Wait
+            decide(&[loud(), fix.clone()], later, &[], OLD),
+            Decision::Announce("0.0.11".into())
         );
+        // A Mac that took the news (but not the fix yet) is done.
+        let seen = [mac("0.0.10", "2026-11-05T04:00:00Z")];
         assert_eq!(
-            decide(&release(), now, &[], Some("0.0.9"), None),
-            Decision::Announce { phones: false }
+            decide(&[loud(), fix], later, &seen, OLD),
+            Decision::Record("0.0.11".into())
         );
     }
 }

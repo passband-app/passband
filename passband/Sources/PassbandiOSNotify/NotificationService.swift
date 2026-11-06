@@ -89,11 +89,6 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
             original = request.content
         }
 
-        // A new Mac version is out: nothing to fetch, the push names it.
-        if let release = EventBanner.releasePush(request.content.userInfo[PushRoute.eventIdKey] as? String) {
-            return deliver(Self.releaseContent(release, fallback: request.content))
-        }
-
         // An agent's draft is not an event: a different fetch, a different
         // banner, and no badge (a draft changes nothing the badge counts).
         if let draft = EventBanner.draftPush(request.content.userInfo[PushRoute.eventIdKey] as? String) {
@@ -416,23 +411,6 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
         if signal.ticket != nil { content.categoryIdentifier = EventBanner.calendarTicketCategory }
         // The system's chime: the app's choice lives in ITS defaults.
         content.sound = copy.sound ? .default : nil
-        return content
-    }
-
-    // MARK: - a new Mac version
-
-    /// The phone's words for the daemon's release announcement. It goes to a
-    /// phone only when its owner's Mac has gone quiet (squelch-core's
-    /// `release_feed`), so it names the Mac and where to get it. One thread
-    /// for every release, and the same collapse id from every mailbox's
-    /// daemon; the shared collapse id keeps one entry in Notification Center.
-    private static func releaseContent(
-        _ push: EventBanner.ReleasePush, fallback: UNNotificationContent
-    ) -> UNNotificationContent {
-        guard let content = fallback.mutableCopy() as? UNMutableNotificationContent else { return fallback }
-        content.title = "Passband \(push.version) for Mac is out"
-        content.body = "Open Passband on your Mac to get it, or download it at passband.app."
-        content.threadIdentifier = "passband.release"
         return content
     }
 

@@ -1634,82 +1634,8 @@ async fn the_first_check_ever_announces_nothing() {
     assert_eq!(announced(&store, acct).as_deref(), Some("0.0.99"));
 }
 
-/// A lapsed Mac owner's phone hears about one release, then nothing more
-/// until a Mac shows up again. The Mac and the phone go out as two requests.
-#[tokio::test]
-async fn a_lapsed_phone_hears_once() {
-    let (base, relay) = spawn_relay().await;
-    let feed = spawn_feed().await;
-    let path = std::env::temp_dir().join(format!(
-        "squelch-release-{}-{}.db",
-        std::process::id(),
-        line!()
-    ));
-    let _ = std::fs::remove_file(&path);
-    let store = Arc::new(SqliteStore::open(&path).unwrap());
-    let acct = store.ensure_account("me@example.com").unwrap();
-    store
-        .upsert_device(acct, DEV_A, "ios", Some(PHONE_TAG), Some("production"))
-        .unwrap();
-    store
-        .upsert_device(acct, MAC_DEV, "macos", Some(MAC_TAG), Some("production"))
-        .unwrap();
-    store
-        .set_app_setting(acct, squelch_core::release_feed::ANNOUNCED_KEY, "0.0.98")
-        .unwrap();
-    let issued = store.issue_device_token(acct, "laptop").unwrap();
-    store
-        .verify_device_token_from(
-            &issued.token,
-            Some(&squelch_core::store::ClientTag::parse("macos/0.0.90").unwrap()),
-        )
-        .unwrap()
-        .unwrap();
-    // The Mac was last seen a month ago.
-    rusqlite::Connection::open(&path)
-        .unwrap()
-        .execute(
-            "UPDATE device_tokens SET client_seen_at = ?1 WHERE client_platform IS NOT NULL",
-            [(chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339()],
-        )
-        .unwrap();
-    let pusher =
-        Pusher::for_test(store.clone() as Arc<dyn Store>, acct, &base).with_release_feed(&feed);
-
-    pusher.check_release().await;
-    let bodies = relay.bodies();
-    assert_eq!(
-        bodies.len(),
-        2,
-        "one request for the Mac, one for the phone"
-    );
-    assert!(bodies.iter().any(|b| b["device_tokens"] == json!([DEV_A])));
-    assert!(
-        bodies
-            .iter()
-            .any(|b| b["device_tokens"] == json!([MAC_DEV]))
-    );
-    assert!(
-        store
-            .get_app_setting(acct, squelch_core::release_feed::PHONE_KEY)
-            .unwrap()
-            .is_some()
-    );
-
-    // The next release: the Mac again, the phone not.
-    store
-        .set_app_setting(acct, squelch_core::release_feed::ANNOUNCED_KEY, "0.0.98")
-        .unwrap();
-    pusher.check_release().await;
-    let bodies = relay.bodies();
-    assert_eq!(bodies.len(), 3);
-    assert_eq!(bodies[2]["device_tokens"], json!([MAC_DEV]));
-    drop(pusher);
-    let _ = std::fs::remove_file(&path);
-}
-
-/// A release goes to the Mac under the Mac's own topic, once. The phone of an
-/// account that never had a Mac on record hears nothing about a Mac release.
+/// A release goes to the Mac under the Mac's own topic, once. The phone hears
+/// nothing about a Mac release.
 #[tokio::test]
 async fn a_release_goes_to_the_mac_once_under_its_own_topic() {
     let (base, relay) = spawn_relay().await;
@@ -1789,6 +1715,29 @@ async fn a_release_that_reached_nobody_is_tried_again() {
             .unwrap()
             .is_some()
     );
+}
+
+/// A feed whose only release past 0.0.98 is a quiet hotfix.
+const QUIET_FEED: &str = r#"<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:passband="https://passband.app/xml-namespaces/appcast" version="2.0"><channel>
+<item><title>0.0.99</title><pubDate>Thu, 01 Jan 2026 00:00:00 +0000</pubDate>
+<sparkle:shortVersionString>0.0.99</sparkle:shortVersionString>
+<passband:quiet>yes</passband:quiet></item>
+</channel></rss>"#;
+
+/// A quiet release is recorded and nobody is pushed.
+#[tokio::test]
+async fn a_quiet_release_is_not_announced() {
+    let (base, relay) = spawn_relay().await;
+    let app = Router::new().route("/appcast.xml", axum::routing::get(|| async { QUIET_FEED }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let (store, acct, pusher) = release_pusher(&base, &format!("http://{addr}/appcast.xml"));
+    pusher.check_release().await;
+    assert_eq!(relay.count(), 0);
+    assert_eq!(announced(&store, acct).as_deref(), Some("0.0.99"));
 }
 
 /// Mail never goes to a Mac: it has its own banners, and no extension to fill

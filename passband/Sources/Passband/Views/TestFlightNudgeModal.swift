@@ -225,7 +225,7 @@ struct FirstLoadIPhoneCard: View {
     @State private var copied = false
 
     var body: some View {
-        ModalCard(width: 380) {
+        ModalCard(width: 320) {
             VStack(alignment: .leading, spacing: Space.scaled(22)) {
                 // No wordmark: the progress card beside it already wears one.
                 VStack(alignment: .leading, spacing: Space.s10) {

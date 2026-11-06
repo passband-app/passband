@@ -1019,6 +1019,8 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // See the function: Amazon's Shipped/Delivered decisions were always
     // stored, and only lacked a key to project on.
     project_amazon_boxes(conn);
+    // See the function: the same, for eBay purchases.
+    project_ebay_packages(conn);
     // See the function: a drop-off receipt's box is going away, not coming.
     drop_sent_packages(conn);
 
@@ -1929,6 +1931,33 @@ fn project_amazon_boxes_once(conn: &Connection) -> Result<usize> {
         AMAZON_BOXES_KEY,
         agent_deliveries::project_amazon_boxes,
     )
+}
+
+/// The `app_settings` key marking an account whose stored eBay decisions
+/// have been projected by [`project_ebay_packages`].
+pub(super) const EBAY_PACKAGES_KEY: &str = "ebay_packages_projected";
+
+/// ONE-TIME: put every eBay purchase the stored decisions already describe on
+/// the Shipments rail (`agent_deliveries::project_ebay_packages`). eBay's mail
+/// prints no tracking number, so before package keys its records projected
+/// nothing, from Order confirmed to PACKAGE DELIVERED.
+///
+/// Gated and failure-tolerant exactly as [`project_amazon_boxes`] is.
+fn project_ebay_packages(conn: &Connection) {
+    match once_per_account(
+        conn,
+        EBAY_PACKAGES_KEY,
+        agent_deliveries::project_ebay_packages,
+    ) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("squelch: migration projected {n} eBay package(s)"),
+        Err(error) => {
+            eprintln!("squelch: eBay package backfill failed ({error}); will retry next open");
+            if !conn.is_autocommit() {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+        }
+    }
 }
 
 /// The `app_settings` key marking an account whose stored drop-off receipts

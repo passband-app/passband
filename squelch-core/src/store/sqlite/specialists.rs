@@ -1191,7 +1191,9 @@ impl SqliteStore {
     ) -> Result<Vec<crate::types::Shipment>> {
         let conn = self.lock()?;
         // Amazon and "unknown" are excluded by the carrier list: neither has an
-        // API to poll. Ordered never-polled first, then least-recently-polled,
+        // API to poll. A store package key (`ebay:…`, `amazon:…`; the only
+        // tracking numbers with a `:`) is not a carrier's number even when the
+        // row shows the carrier the seller used, so it is never sent to one. Ordered never-polled first, then least-recently-polled,
         // so a caller taking a prefix spreads its budget evenly.
         //
         // NO `cleared_at` AND NO STALENESS PREDICATE HERE, ON PURPOSE. A row the
@@ -1204,6 +1206,7 @@ impl SqliteStore {
              WHERE s.account_id=?1
                AND s.status != 'delivered'
                AND s.carrier IN ('ups','usps','fedex','dhl')
+               AND instr(s.tracking_number,':')=0
                AND s.first_seen >= ?2
                AND s.poll_failures < ?3
              ORDER BY s.last_polled_at IS NOT NULL, s.last_polled_at, s.id"

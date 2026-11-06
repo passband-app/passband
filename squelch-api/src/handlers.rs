@@ -2252,7 +2252,9 @@ pub async fn get_timeline(
     let (granted, reminder_email) = crate::calendar_remind::calendar_reach(&state).await;
     let (ghosts, urls, events, calendars, status, places, owned, mut tickets) =
         store_call(&state, move |store, account_id| {
-            let ghosts = store.list_ghost_events(account_id, from, to)?;
+            // With link partners outside the window: a link folds into one
+            // card wherever its two ghosts start.
+            let ghosts = store.list_ghost_events_with_links(account_id, from, to)?;
             let ids: Vec<i64> = ghosts.iter().map(|g| g.id).collect();
             let urls = store.ghost_url_refs(account_id, &ids)?;
             // The tickets button (docs/CALENDAR.md, "Reminders and
@@ -2370,8 +2372,16 @@ pub async fn get_timeline(
     // A change on a ghost that is drawn as its real event rides on the
     // event too, or hiding the ghost would hide the change.
     let mut event_changes: std::collections::HashMap<usize, serde_json::Value> = Default::default();
+    // Only on an event Passband keeps: accepting moves that one with the
+    // ghost (`gcal::own`). The user's own event stays theirs to move, and
+    // offering there would split one card into two at accept.
     for ((g, m), change) in ghosts.iter().zip(&matched).zip(&changes) {
-        if let (Some(i), false) = (m, change.is_null()) {
+        if let (Some(i), false) = (m, change.is_null())
+            && mine.contains(&(
+                events[*i].calendar_id.as_str(),
+                events[*i].row.event_id.as_str(),
+            ))
+        {
             let mut change = change.clone();
             change["ghost_id"] = json!(g.id);
             event_changes.insert(*i, change);

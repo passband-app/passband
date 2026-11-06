@@ -1002,6 +1002,65 @@ async fn another_senders_change_is_offered_on_the_card_and_applies_only_when_acc
 /// The venue's mail and a friend's with the venue's link: refs are scoped to
 /// their sender, so they stay two ghosts, and the timeline shows them as one
 /// carrying both mails (`gcal::fold_ghosts`).
+/// The user's own event (one Passband does not keep) never carries the
+/// offer: accept could not move it, and would split the card in two.
+#[tokio::test]
+async fn a_change_is_not_offered_on_an_event_the_user_made_themselves() {
+    use squelch_core::triage::decision::EventIdentity;
+    let w = world("linked-own", GRANTED).await;
+    let start = minute(Utc::now() + Duration::days(4));
+    w.google().full.insert(
+        PRIMARY.into(),
+        vec![vec![timed("evt-show", "Polar Inertia", start, 120)]],
+    );
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    let ticket_msg = seed_ghost_from(
+        &w.store,
+        w.acct,
+        "venue",
+        "noreply@ra.co",
+        "Polar Inertia",
+        rfc(start),
+        EventCommitment::Committed,
+        vec!["RA7F3K9Q2".into()],
+    );
+    let ticket = w
+        .store
+        .list_ghost_events(
+            w.acct,
+            (Utc::now() - Duration::days(1)).fixed_offset(),
+            (Utc::now() + Duration::days(30)).fixed_offset(),
+        )
+        .unwrap()
+        .into_iter()
+        .find(|g| g.sources.iter().any(|s| s.message_id == ticket_msg))
+        .unwrap()
+        .id;
+    seed_judged(
+        &w.store,
+        w.acct,
+        "promoter",
+        "hello@endzeit.example",
+        "Polar Inertia",
+        rfc(start + Duration::days(1)),
+        EventCommitment::Unknown,
+        vec![],
+        EventChange::Updated,
+        Some(EventIdentity {
+            offered: vec![ticket],
+            same_as: Some(ticket),
+        }),
+    );
+    let body = w.timeline().await;
+    let card = &body["ghosts"][0];
+    assert_eq!(card["matched_event"]["id"], "evt-show", "{body:#}");
+    assert_eq!(card["pending_change"]["kind"], "moved", "{body:#}");
+    assert!(
+        body["events"][0].get("pending_change").is_none(),
+        "{body:#}"
+    );
+}
+
 #[tokio::test]
 async fn copies_of_one_event_from_two_senders_show_as_one_ghost() {
     let w = world("fold", GRANTED).await;

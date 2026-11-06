@@ -147,15 +147,27 @@ same sender feed the same row.
   own that folds under the user's on screen, never changes it and never
   reaches Google. The committed ghost is the one shown, whichever mail came
   first. When the call fails or finds no candidate, the backstop decides.
+  The verdict is the check's alone: one in the agent's own answer is
+  dropped (`normalize_decision`), since mail could put it there. A stored
+  pick is followed on replay only while its ghost still starts within the
+  window asked about, and a deleted ghost unlinks the ghosts under it
+  (trigger `ghost_event_links_follow_ghost`). A linked ghost still counts
+  when Gmail's event is matched for adoption (`gcal::own`): two ghosts of a
+  link both matching is "more than one", so neither adopts, whichever is
+  shown. A link is not undone by a later re-decision; that waits on knowing
+  which mail made it.
 - **A linked ghost's change is the user's to accept.** When a linked ghost
   starts at another time or is cancelled, the card it folds under offers it
   ("Endzeit says Sat 9pm"; `pending_change` on the ghost, and on its real
-  event when the ghost is drawn as one). Accept
+  event when the ghost is drawn as one Passband keeps; an event the user made
+  is theirs to move, so it carries no offer). The timeline lists a link's
+  partner wherever it starts, so a pair across the window's edge still folds
+  into one card. Accept
   (`POST /client/timeline/ghosts/{id}/change {from, accept: true}`) moves
   that mail onto the user's ghost as rows the user vouched for
   (`ghost_event_sources.accepted`): they supply facts (the newest record
   wins, so an event Passband keeps on Google moves with it) and never keys
-  or commitment. Keep (`accept: false`) remembers the linked ghost's facts
+  or commitment, and stay there when that mail is decided again. Keep (`accept: false`) remembers the linked ghost's facts
   (`link_ack`), and the same change is not offered again.
 - **Ghosts never merge on their own.** Each record is assigned to exactly one
   ghost and the assignment is remembered. A record that could match several

@@ -1694,6 +1694,16 @@ pub trait Store:
         to: DateTime<chrono::FixedOffset>,
     ) -> Result<Vec<crate::types::GhostEvent>>;
 
+    /// [`Store::list_ghost_events`] plus each listed ghost's link partners
+    /// (`ghost_events.linked_to`, either way) wherever they start, for the
+    /// timeline, which folds a link into one card.
+    fn list_ghost_events_with_links(
+        &self,
+        account_id: AccountId,
+        from: DateTime<chrono::FixedOffset>,
+        to: DateTime<chrono::FixedOffset>,
+    ) -> Result<Vec<crate::types::GhostEvent>>;
+
     /// The identity check's prefilter (`triage::event_identity`): for each
     /// of `message_id`'s laundered event `records` (by position), the live
     /// ghosts it could be. Records with no candidate are left out.

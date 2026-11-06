@@ -365,6 +365,13 @@ fn distance(a: Option<&EventTime>, b: Option<&EventTime>) -> Option<i64> {
 
 /// Whether a record's start and a ghost's are too far apart to be one event.
 /// A missing start is no evidence either way.
+/// A verdict's pick still starts within the window the check asked about
+/// ([`event_identity::window_days`], a day's slack for zones).
+fn within_asked_window(record: &GhostProposal, c: &Candidate) -> bool {
+    let window = (event_identity::window_days(record.change) + 1) * 86_400;
+    distance(record.start.as_ref(), c.start.as_ref()).is_some_and(|d| d <= window)
+}
+
 fn dates_apart(record: &GhostProposal, c: &Candidate) -> bool {
     distance(record.start.as_ref(), c.start.as_ref()).is_some_and(|d| d > SAME_EVENT_SECONDS)
 }
@@ -649,6 +656,20 @@ pub(super) fn reconcile(
             .collect::<std::result::Result<_, _>>()?
     };
     let fed_before: BTreeSet<i64> = previous.values().copied().collect();
+    // Records whose change the user accepted onto another ghost
+    // (`resolve_linked_change`): a re-decision keeps them there, or a
+    // retriage would quietly take the accepted change back.
+    let accepted_before: BTreeMap<usize, i64> = {
+        let mut statement = conn.prepare_cached(
+            "SELECT position,ghost_id FROM ghost_event_sources
+             WHERE account_id=?1 AND message_id=?2 AND accepted=1",
+        )?;
+        statement
+            .query_map(params![account, message], |r| {
+                Ok((r.get::<_, i64>(0)? as usize, r.get::<_, i64>(1)?))
+            })?
+            .collect::<std::result::Result<_, _>>()?
+    };
     let laundered = ghost::laundered_records(&current.records);
     let verdicts: Vec<Option<&EventIdentity>> = laundered
         .iter()
@@ -689,7 +710,8 @@ pub(super) fn reconcile(
     };
 
     let mut claimed: BTreeSet<i64> = BTreeSet::new();
-    let mut assigned: Vec<(usize, i64, String)> = Vec::new();
+    // (position, ghost, role, accepted)
+    let mut assigned: Vec<(usize, i64, String, bool)> = Vec::new();
     // Ghosts to link once the rebuilds below have settled their facts:
     // (this record's ghost, the other sender's ghost it is the same event as).
     let mut links: Vec<(usize, i64)> = Vec::new();
@@ -703,11 +725,23 @@ pub(super) fn reconcile(
         // link and never an assignment.
         let mut off_limits = claimed.clone();
         let mut target = None;
-        if let Some(verdict) = verdicts[position] {
+        let accepted = match accepted_before.get(&position) {
+            Some(&id) if !claimed.contains(&id) && candidate(conn, account, id, &m)?.is_some() => {
+                Some(id)
+            }
+            _ => None,
+        };
+        if accepted.is_some() {
+            target = accepted;
+        } else if let Some(verdict) = verdicts[position] {
             let pick = verdict.pick().filter(|id| !claimed.contains(id));
             off_limits.extend(verdict.offered.iter().copied());
+            // Still within the window it was asked about: a stored verdict
+            // replayed after its ghost was deleted names an id SQLite may
+            // since have given to another event.
             if let Some(id) = pick
                 && let Some(c) = candidate(conn, account, id, &m)?
+                && within_asked_window(record, &c)
             {
                 if m.scope.is_some() && c.owned_by(m.scope) {
                     target = Some(id);
@@ -752,14 +786,14 @@ pub(super) fn reconcile(
             }
         };
         claimed.insert(id);
-        assigned.push((position, id, label(&record.change)));
+        assigned.push((position, id, label(&record.change), accepted == Some(id)));
     }
 
     conn.execute(
         "DELETE FROM ghost_event_sources WHERE account_id=?1 AND message_id=?2",
         params![account, message],
     )?;
-    for (position, id, role) in &assigned {
+    for (position, id, role, accepted) in &assigned {
         let held: i64 = conn.query_row(
             "SELECT COUNT(*) FROM ghost_event_sources WHERE account_id=?1 AND ghost_id=?2",
             params![account, id],
@@ -776,21 +810,21 @@ pub(super) fn reconcile(
             )?;
         }
         conn.execute(
-            "INSERT INTO ghost_event_sources(account_id,ghost_id,message_id,position,role)
-             VALUES(?1,?2,?3,?4,?5)",
-            params![account, id, message, *position as i64, role],
+            "INSERT INTO ghost_event_sources(account_id,ghost_id,message_id,position,role,accepted)
+             VALUES(?1,?2,?3,?4,?5,?6)",
+            params![account, id, message, *position as i64, role, accepted],
         )?;
     }
     let affected: BTreeSet<i64> = fed_before
         .iter()
         .copied()
-        .chain(assigned.iter().map(|(_, id, _)| *id))
+        .chain(assigned.iter().map(|(_, id, ..)| *id))
         .collect();
     for id in affected {
         rebuild(conn, account, id, &now)?;
     }
     for (position, other) in links {
-        if let Some(&(_, id, _)) = assigned.iter().find(|(p, _, _)| *p == position) {
+        if let Some(&(_, id, ..)) = assigned.iter().find(|(p, ..)| *p == position) {
             link(conn, account, id, other)?;
         }
     }
@@ -1184,7 +1218,21 @@ impl SqliteStore {
         from: DateTime<FixedOffset>,
         to: DateTime<FixedOffset>,
     ) -> Result<Vec<GhostEvent>> {
-        self.ghost_events_containing(account, from, to, None)
+        self.ghost_events_containing(account, from, to, None, false)
+    }
+
+    /// [`Self::list_ghost_events`] plus each listed ghost's link partners
+    /// wherever they start: the ghost it is linked under, and the ghosts
+    /// linked under it. For the timeline, which folds a link into one card
+    /// and offers its change: a pair split across the window's edge would
+    /// otherwise show the linked ghost alone, or lose its offer.
+    pub(super) fn list_ghost_events_with_links(
+        &self,
+        account: AccountId,
+        from: DateTime<FixedOffset>,
+        to: DateTime<FixedOffset>,
+    ) -> Result<Vec<GhostEvent>> {
+        self.ghost_events_containing(account, from, to, None, true)
     }
 
     /// The identity check's prefilter (`triage::event_identity`): for each
@@ -1374,8 +1422,11 @@ impl SqliteStore {
             rebuild(&tx, account, from, &now)?;
             rebuild(&tx, account, shown, &now)?;
         } else {
-            let start = starts_at.as_deref().and_then(EventTime::parse);
-            let ack = start.map(|s| event_identity::link_facts(&s, mail_state == "cancelled"));
+            // No start, nothing offered: no change to keep.
+            let Some(start) = starts_at.as_deref().and_then(EventTime::parse) else {
+                return Ok(false);
+            };
+            let ack = event_identity::link_facts(&start, mail_state == "cancelled");
             tx.execute(
                 "UPDATE ghost_events SET link_ack=?3 WHERE account_id=?1 AND id=?2",
                 params![account, from, ack],
@@ -1430,6 +1481,7 @@ impl SqliteStore {
         from: DateTime<FixedOffset>,
         to: DateTime<FixedOffset>,
         needles: Option<&[String]>,
+        with_links: bool,
     ) -> Result<Vec<GhostEvent>> {
         use rusqlite::types::Value;
         if to <= from {
@@ -1460,6 +1512,14 @@ impl SqliteStore {
                 format!("AND ({})", any.join(" OR "))
             }
         };
+        let window = if with_links {
+            "((g.start_sort>=?2 AND g.start_sort<=?3)
+              OR EXISTS(SELECT 1 FROM ghost_events o
+                        WHERE o.account_id=g.account_id AND (o.id=g.linked_to OR o.linked_to=g.id)
+                          AND o.start_sort>=?2 AND o.start_sort<=?3))"
+        } else {
+            "g.start_sort>=?2 AND g.start_sort<=?3"
+        };
         let mut statement = conn.prepare(&format!(
             "SELECT g.id,g.kind,g.title,g.starts_at,g.start_timezone,g.ends_at,g.est_minutes,
                     g.est_basis,g.location,g.commitment,g.mail_state,g.likelihood_band,
@@ -1470,7 +1530,7 @@ impl SqliteStore {
              LEFT JOIN event_duration_priors p
                ON p.account_id=g.account_id AND p.venue_key=g.venue_key AND p.kind=g.kind
              WHERE g.account_id=?1 AND g.start_sort IS NOT NULL
-               AND g.start_sort>=?2 AND g.start_sort<=?3 {containing}
+               AND {window} {containing}
                AND EXISTS(SELECT 1 FROM messages m {ELIGIBLE_JOINS}
                    WHERE m.account_id=g.account_id AND m.id=g.supplier_message_id AND {ELIGIBLE})
              ORDER BY g.start_sort,g.id
@@ -1544,9 +1604,23 @@ impl SqliteStore {
              WHERE s.account_id=?1 AND s.ghost_id=?2 AND {ELIGIBLE}
              ORDER BY m.received_at,s.message_id,s.role"
         ))?;
+        // In the window exactly, and (with links) the partners of those.
+        let inside: BTreeSet<i64> = rows
+            .iter()
+            .filter(|(start, ..)| start.as_ref().is_some_and(|s| in_range(s, from, to)))
+            .map(|(_, _, g)| g.id)
+            .collect();
+        let parents: BTreeSet<i64> = rows
+            .iter()
+            .filter(|(_, _, g)| inside.contains(&g.id))
+            .filter_map(|(_, _, g)| g.linked_to)
+            .collect();
         let mut listed = Vec::new();
         for (start, (minutes, days), mut ghost) in rows {
-            let Some(start) = start.filter(|s| in_range(s, from, to)) else {
+            let partner = with_links
+                && (parents.contains(&ghost.id)
+                    || ghost.linked_to.is_some_and(|p| inside.contains(&p)));
+            let Some(start) = start.filter(|_| inside.contains(&ghost.id) || partner) else {
                 continue;
             };
             ghost.start = start;
@@ -7261,6 +7335,97 @@ mod tests {
                 keys(&store, ticket),
                 vec!["ref:ra.co:ra7f3k9q2".to_string()]
             );
+            // A retriage of the promoter's mail keeps the accepted change
+            // where the user put it, rather than a ghost of its own again.
+            decide(&store, 1, 2, &judged(&moved, &[ticket], Some(ticket)));
+            assert_eq!(count(&store, "ghost_events"), 1);
+            let shown = ghost_by(&store, ticket);
+            assert_eq!(shown.start, at("2026-11-07T21:00:00+01:00"));
+            assert!(shown.sources.iter().any(|s| s.message_id == 2 && s.linked));
+            assert_eq!(
+                keys(&store, ticket),
+                vec!["ref:ra.co:ra7f3k9q2".to_string()]
+            );
+        }
+
+        /// A ghost deleted with its mail takes its links with it: the ghost
+        /// linked under it stands alone again, rather than pointing at an
+        /// id SQLite may give the next new ghost.
+        #[test]
+        fn a_deleted_ghost_unlinks_the_ghosts_under_it() {
+            let store = fixture();
+            mail_from(&store, 1, 1, "t1", 60, RA, Some(true));
+            mail_from(&store, 1, 2, "t2", 30, PROMOTER, Some(true));
+            decide(&store, 1, 1, &party(FRIDAY, &["RA7F3K9Q2"]).decision());
+            let ticket = ghost_of(&store, 1);
+            let mut theirs = party(FRIDAY, &["EZ5K2M9P"]);
+            theirs.commitment = EventCommitment::Unknown;
+            decide(&store, 1, 2, &judged(&theirs, &[ticket], Some(ticket)));
+            let linked = ghost_of(&store, 2);
+            assert_eq!(row(&store, linked).0, Some(ticket));
+            sql(&store, "DELETE FROM messages WHERE id=1");
+            assert_eq!(row(&store, linked), (None, None));
+        }
+
+        /// The timeline lists a link's partner across the window's edge, so
+        /// the pair still folds into one card; other listings stay exact.
+        #[test]
+        fn the_timeline_lists_link_partners_outside_its_window() {
+            let store = fixture();
+            mail_from(&store, 1, 1, "t1", 60, RA, Some(true));
+            mail_from(&store, 1, 2, "t2", 30, PROMOTER, Some(true));
+            decide(&store, 1, 1, &party(FRIDAY, &["RA7F3K9Q2"]).decision());
+            let ticket = ghost_of(&store, 1);
+            let mut moved = party("2026-11-12T19:00:00+01:00", &["EZ5K2M9P"]);
+            moved.change = EventChange::Updated;
+            moved.commitment = EventCommitment::Unknown;
+            decide(&store, 1, 2, &judged(&moved, &[ticket], Some(ticket)));
+            let theirs = ghost_of(&store, 2);
+            assert_eq!(row(&store, theirs).0, Some(ticket));
+            let ids = |ghosts: Vec<GhostEvent>| -> Vec<i64> {
+                let mut ids: Vec<i64> = ghosts.iter().map(|g| g.id).collect();
+                ids.sort();
+                ids
+            };
+            let week = |day: &str| {
+                let from: DateTime<FixedOffset> =
+                    DateTime::parse_from_rfc3339(&format!("{day}T00:00:00+01:00")).unwrap();
+                (from, from + chrono::Duration::days(3))
+            };
+            for day in ["2026-11-05", "2026-11-11"] {
+                let (from, to) = week(day);
+                assert_eq!(
+                    ids(store.list_ghost_events_with_links(1, from, to).unwrap()),
+                    vec![ticket, theirs],
+                    "{day}"
+                );
+            }
+            let (from, to) = week("2026-11-11");
+            assert_eq!(
+                ids(store.list_ghost_events(1, from, to).unwrap()),
+                vec![theirs]
+            );
+        }
+
+        /// A stored pick whose ghost is now far from the record (deleted, its
+        /// id reused by another event) is not followed.
+        #[test]
+        fn a_pick_far_outside_the_asked_window_is_ignored() {
+            let store = fixture();
+            mail_from(&store, 1, 1, "t1", 60, RA, Some(true));
+            mail_from(&store, 1, 2, "t2", 30, PROMOTER, Some(true));
+            decide(
+                &store,
+                1,
+                1,
+                &party("2026-12-20T19:00:00+01:00", &["RA7F3K9Q2"]).decision(),
+            );
+            let far = ghost_of(&store, 1);
+            let mut theirs = party(FRIDAY, &["EZ5K2M9P"]);
+            theirs.commitment = EventCommitment::Unknown;
+            decide(&store, 1, 2, &judged(&theirs, &[far], Some(far)));
+            assert_eq!(row(&store, ghost_of(&store, 2)).0, None);
+            assert_eq!(row(&store, far).0, None);
         }
 
         /// Another sender's word is never the user's standing: accepting an

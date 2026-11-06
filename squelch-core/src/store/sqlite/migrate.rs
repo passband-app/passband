@@ -1044,6 +1044,18 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         "accepted",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+    // A deleted ghost takes its links with it: a ghost left pointing at a
+    // gone id would stay out of Google and out of the identity check for
+    // good, and fold under whatever new ghost reuses that id.
+    if tables_exist(conn, &["ghost_events"])? {
+        conn.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS ghost_event_links_follow_ghost
+         AFTER DELETE ON ghost_events BEGIN
+             UPDATE ghost_events SET linked_to = NULL, link_ack = NULL
+             WHERE account_id = OLD.account_id AND linked_to = OLD.id;
+         END;",
+        )?;
+    }
 
     // Guarded on table existence — migration unit tests build partial schemas.
     if !tables_exist(conn, &["triage", "deadlines", "messages"])? {

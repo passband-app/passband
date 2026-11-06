@@ -540,15 +540,22 @@ pub fn plan(
             .filter(|g| {
                 !bound.contains(&g.id)
                     && g.verified()
-                    && g.linked_to.is_none()
                     && g.mail_state == GhostMailState::Live
                     && g.user_state != Some(GhostUserState::Dismissed)
                     && same_event(g, &copy.row)
             })
             .collect();
+        // A linked ghost still counts toward "more than one": each linked
+        // ghost is another sender's word for the same event, and nothing
+        // says which sender is the user's. Two matches is no adoption, as
+        // before links, whichever of them is shown; a linked ghost never
+        // adopts even alone.
         let [ghost] = candidates.as_slice() else {
             continue;
         };
+        if ghost.linked_to.is_some() {
+            continue;
+        }
         let place = copy
             .row
             .location
@@ -1411,5 +1418,21 @@ mod tests {
             !steps.iter().any(|s| matches!(s, Step::Update { .. })),
             "{steps:?}"
         );
+    }
+
+    /// A shown ghost does not win Gmail's event over the ghost linked under
+    /// it: either could be the stranger's, so two matches stay two, as they
+    /// were before links.
+    #[test]
+    fn a_shown_ghost_does_not_adopt_over_its_linked_ghost() {
+        let shown = ghost(3, "Dinner at Dingles", START);
+        let mut under = ghost(7, "Dinner at Dingles", START);
+        under.linked_to = Some(3);
+        assert!(
+            plan_of(std::slice::from_ref(&shown), &[dingles()], &[])
+                .iter()
+                .any(|s| matches!(s, Step::Adopt { .. }))
+        );
+        assert!(plan_of(&[shown, under], &[dingles()], &[]).is_empty());
     }
 }

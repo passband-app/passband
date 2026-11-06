@@ -416,6 +416,8 @@ extension AppStore {
     /// times the daemon resolves), so the page waits for the refresh; a
     /// refusal, or a link already gone, is a toast.
     func answerLinkedChange(_ change: LinkedChange, accept: Bool, viaKey: Bool) async {
+        guard answeringLinkedChanges.insert(change.from).inserted else { return }
+        defer { answeringLinkedChanges.remove(change.from) }
         // A write: whatever was asked for before it is stale.
         retireCalendarLoads()
         let ticket = calendarTicket

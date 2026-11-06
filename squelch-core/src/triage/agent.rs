@@ -882,6 +882,14 @@ pub fn normalize_decision(decision: &mut MessageDecision) {
         decision.auth.critical = false;
     }
     event_dates_are_not_deadlines(decision);
+    // The identity verdict is the identity check's alone
+    // (`triage::event_identity`), added after this. One in the agent's own
+    // answer came from the mail it read, and would link anywhere it named.
+    for record in &mut decision.records {
+        if let RecordProposal::Event { identity, .. } = record {
+            *identity = None;
+        }
+    }
 }
 
 /// A ticket's date is when the event happens, not when anything is due: it
@@ -2428,6 +2436,25 @@ mod tests {
         normalize_decision(&mut invited);
         assert_eq!(invited.attention.factors.attention_at, day("2026-11-06"));
         assert!(invited.attention.show_in_fye);
+    }
+    /// The agent never supplies an identity verdict: mail it read could put
+    /// one there naming any ghost, and the store would follow it.
+    #[test]
+    fn an_identity_verdict_in_the_agents_answer_is_dropped() {
+        let mut decision = valid();
+        let mut record = ticket("2026-11-06", EventCommitment::Committed);
+        if let RecordProposal::Event { identity, .. } = &mut record {
+            *identity = Some(crate::triage::decision::EventIdentity {
+                offered: vec![42],
+                same_as: Some(42),
+            });
+        }
+        decision.records = vec![record];
+        normalize_decision(&mut decision);
+        assert!(matches!(
+            &decision.records[0],
+            RecordProposal::Event { identity: None, .. }
+        ));
     }
     #[test]
     fn reading_kind_is_offered_and_defaults_on_stored_rows() {

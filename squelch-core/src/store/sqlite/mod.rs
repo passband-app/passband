@@ -1463,6 +1463,15 @@ impl Store for SqliteStore {
         self.list_ghost_events(account_id, from, to)
     }
 
+    fn list_ghost_events_with_links(
+        &self,
+        account_id: AccountId,
+        from: DateTime<chrono::FixedOffset>,
+        to: DateTime<chrono::FixedOffset>,
+    ) -> Result<Vec<crate::types::GhostEvent>> {
+        self.list_ghost_events_with_links(account_id, from, to)
+    }
+
     fn ghost_url_refs(
         &self,
         account_id: AccountId,

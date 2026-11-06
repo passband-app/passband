@@ -860,6 +860,10 @@ final class AppStore {
     /// an answer is applied only if nothing newer has started since it was
     /// asked for. Not observed: it is bookkeeping, never drawn.
     @ObservationIgnored var calendarLoadGeneration = 0
+    /// Linked ghosts (`LinkedChange.from`) whose change is being answered:
+    /// a second press before the first lands would find the link gone and
+    /// toast an error over a change that was applied.
+    @ObservationIgnored var answeringLinkedChanges: Set<Int> = []
     /// Bumped by `dropCalendarState` (an account switch, the gate closing):
     /// a write still out when it was bumped answers into nothing
     /// (`CalendarWriteTicket`). Bookkeeping, never drawn.

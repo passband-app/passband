@@ -31,7 +31,7 @@ rmcp = { version = "3.8.0", features = [
 ] }
 schemars = "1"
 # HTTP listener for the Streamable HTTP transport. rmcp gives us a tower Service;
-# axum hosts it and provides graceful shutdown. Versions track rmcp 2.1.0.
+# axum hosts it and provides graceful shutdown. Versions track rmcp 3.8.0.
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 tokio-util = "0.7"
 # Agent-door OAuth (src/auth.rs). The daemon is a resource server: it verifies

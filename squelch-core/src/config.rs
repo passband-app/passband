@@ -264,18 +264,20 @@ pub struct SyncConfig {
     pub backfill_days: u32,
     /// HOW OLD BULK MAIL MAY BE AND STILL BE TRIAGED ON A WINDOW READ, in
     /// days. The first backfill and a catch-up read `backfill_days` of inbox;
-    /// a message in it that carries a `List-Unsubscribe` header and is older
-    /// than this is stored as an archive row instead (findable by search,
-    /// openable in the reader, no model call unless something surfaces it).
-    /// Mail without the header is triaged at any age in the window, and so is
-    /// bulk mail a sender rule matches. Live arrivals are never affected.
+    /// a message in it that carries a `List-Unsubscribe` header and that the
+    /// provider received longer ago than this is stored as an archive row
+    /// instead (findable by search, openable in the reader, no model call
+    /// unless something surfaces it). Mail without the header is triaged at
+    /// any age in the window, and so is list mail that a Surface or Filtered
+    /// sender rule matches or that reads as a bill, a calendar invitation, a
+    /// receipt or a shipment. Live arrivals are never affected.
     ///
     /// 7 because nothing a first load shows reaches further back than a week
     /// (the Reading board) and three quarters of a typical month of inbox is
-    /// list mail: a new tenant spent her month's model budget in two days
-    /// triaging three-week-old newsletters (2026-11-05). Set it to
-    /// `backfill_days` or more to triage the whole window again. Config file
-    /// only: there is no environment override.
+    /// list mail: a new tenant spent a whole month's model budget in two days
+    /// triaging three-week-old newsletters. Set it to `backfill_days` or more
+    /// to triage the whole window again. Config file only: there is no
+    /// environment override.
     pub backfill_bulk_triage_days: u32,
     /// HOW FAR BACK THE ARCHIVE REACHES, in days: mail this old is fetched once
     /// by a slow background walk and stored findable by search and openable in

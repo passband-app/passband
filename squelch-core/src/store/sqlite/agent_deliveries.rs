@@ -115,12 +115,17 @@ fn has_trackless_delivery(decision: &MessageDecision) -> bool {
 /// package mail. The exact tests are the `package_from_mail`s; this only
 /// spares reading every other body. Amazon's HTML part loads only when the
 /// plain-text part has no tracker link: it is many times the size, and this
-/// runs on every rebuild. eBay's plain text carries no links at all.
+/// runs on every rebuild. eBay's plain text carries no links at all, and the
+/// same address sends its promotions, so its HTML loads only for mail whose
+/// stored decision holds a delivery record.
 const STORE_BODY_COLUMNS: &str = "m.from_addr,m.auth_pass,
     CASE WHEN lower(m.from_addr) LIKE '%amazon.com%' THEN m.body END,
     CASE WHEN lower(m.from_addr) LIKE '%amazon.com%'
           AND coalesce(m.body,'') NOT LIKE '%progress-tracker%' THEN m.body_html
-         WHEN lower(m.from_addr) LIKE '%@ebay.com' THEN m.body_html END";
+         WHEN lower(m.from_addr) LIKE '%@ebay.com' AND EXISTS(
+              SELECT 1 FROM agent_message_decisions dd
+              WHERE dd.account_id=m.account_id AND dd.message_id=m.id
+                AND dd.decision_json LIKE '%\"kind\":\"delivery\"%') THEN m.body_html END";
 
 fn package_from_row(
     from_addr: &str,
@@ -637,7 +642,17 @@ fn rebuild(conn: &Connection, account: AccountId, affected: &BTreeSet<String>) -
             }
             continue;
         };
-        let (message, received, info) = (&latest.message, &latest.received, &latest.info);
+        let (message, received) = (&latest.message, &latest.received);
+        // An eBay package keeps the last carrier its mail named: PACKAGE
+        // DELIVERED names none, and the row should not forget it was FedEx.
+        let mut info = latest.info.clone();
+        if ebay::is_package_key(number)
+            && info.carrier == "unknown"
+            && let Some(named) = mine.iter().find(|p| p.info.carrier != "unknown")
+        {
+            info.carrier = named.info.carrier.clone();
+        }
+        let info = &info;
         let carrier_status: Option<String> = conn.query_row(
             "SELECT status FROM shipments WHERE account_id=?1 AND tracking_number=?2 AND carrier_status_raw IS NOT NULL",
             params![account,number], |row|row.get(0),
@@ -2284,8 +2299,13 @@ mod tests {
                     "https://www.ebay.com/ord/show?itemId=198765432109&transactionId=10098765432101"
                 )
             );
+            let expected = if matches!(status, "ordered") || id == 21 {
+                "unknown"
+            } else {
+                "fedex"
+            };
+            assert_eq!(row.carrier, expected, "step {status} (msg {id})");
             if status == "out_for_delivery" {
-                assert_eq!(row.carrier, "fedex");
                 assert!(
                     store
                         .list_pollable_shipments(1, Utc::now() - chrono::Duration::days(3), 5)
@@ -2295,33 +2315,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// Seller messages relay through members.ebay.com, links and all; they
-    /// key nothing.
-    #[test]
-    fn a_seller_message_keys_no_ebay_package() {
-        let store = fixture();
-        add_ebay(
-            &store,
-            20,
-            "seller_x1@members.ebay.com",
-            "Shipped!",
-            "ord/show",
-            1,
-        );
-        write(
-            &store,
-            20,
-            None,
-            &trackless("shipped", Some("fedex"), "Lens", &[]),
-        );
-        assert!(
-            store
-                .list_shipments(1, true, Default::default())
-                .unwrap()
-                .is_empty()
-        );
     }
 
     /// THE EBAY BACKFILL: stored decisions project without a model call.

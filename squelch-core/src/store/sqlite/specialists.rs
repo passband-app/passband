@@ -1193,8 +1193,9 @@ impl SqliteStore {
         // Amazon and "unknown" are excluded by the carrier list: neither has an
         // API to poll. A store package key (`ebay:…`, `amazon:…`; the only
         // tracking numbers with a `:`) is not a carrier's number even when the
-        // row shows the carrier the seller used, so it is never sent to one. Ordered never-polled first, then least-recently-polled,
-        // so a caller taking a prefix spreads its budget evenly.
+        // row shows the carrier the seller used, so it is never sent to one.
+        // Ordered never-polled first, then least-recently-polled, so a caller
+        // taking a prefix spreads its budget evenly.
         //
         // NO `cleared_at` AND NO STALENESS PREDICATE HERE, ON PURPOSE. A row the
         // user cleared, and a row the listing hides as stale, are both still

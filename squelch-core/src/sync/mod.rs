@@ -155,37 +155,87 @@ enum IngestOrigin {
 }
 
 /// WHETHER A WINDOW READ FILES THIS MESSAGE AS ARCHIVE instead of triaging it:
-/// list mail (a non-empty `List-Unsubscribe` header) dated before `floor`,
-/// which no sender rule matches. `floor` is `None` everywhere but an inbox
-/// window read (the first backfill or a catch-up), so live arrivals, the
-/// archive walk, sent mail and spam are never asked.
+/// list mail (a non-empty `List-Unsubscribe` header) that ARRIVED before
+/// `floor`, that no Surface or Filtered sender rule matches, and that none of
+/// the deterministic record detectors recognises. `floor` is `None` everywhere
+/// but an inbox window read (the first backfill or a catch-up), so live
+/// arrivals, the archive walk, sent mail and spam are never asked.
 ///
 /// WHY: a new account's backfill used to queue a model call for every message
 /// in a month of inbox, and about three quarters of that is newsletters and
-/// promotions. One tenant (75 messages a day, 2,300 jobs at about 3 cents
-/// each) spent her month's model budget in her first two days, mostly on
-/// three-week-old list mail that the first load never shows: the first-load
-/// boards reach back a week. Mail from people, bookings, bills and receipts
-/// without the header is triaged at any age in the window, exactly as before.
+/// promotions. A new tenant with an ordinary mailbox (75 messages a day,
+/// 2,300 jobs at about 3 cents each) spent the month's model budget in two
+/// days, mostly on three-week-old list mail that the first load never shows:
+/// the first-load boards reach back a week. Mail from people, and anything
+/// without the header, is triaged at any age in the window, exactly as before.
 ///
-/// AGE IS THE MESSAGE'S OWN DATE (`received_at`: the Date header, else the
-/// provider's internal date), so a `Date:` in the future never files anything.
+/// AGE IS WHEN THE PROVIDER RECEIVED IT (`arrived_at`: Gmail's `internalDate`,
+/// Graph's `receivedDateTime`, IMAP's `INTERNALDATE`), falling back to the
+/// stored `received_at` only for a source that reports none. Not the Date
+/// header: a sender's misconfigured or stale `Date:` would file a newsletter
+/// that arrived yesterday.
 ///
-/// A SENDER RULE OUTRANKS IT. A rule is the owner saying how a sender's mail is
-/// to be treated, and an archive row would quietly ignore it. There are no
-/// rules on a first run, so this only matters to a catch-up.
-fn files_as_old_bulk(triaged: &TriagedMessage, floor: Option<DateTime<Utc>>) -> bool {
+/// A SURFACE OR FILTERED RULE OUTRANKS IT. Either is the owner asking for this
+/// sender's mail to be read (always shown, or shown when it matches what they
+/// want), and an archive row would quietly ignore that. A Squelch rule asks
+/// for the opposite, so its mail is filed like any other. Matched with the
+/// one matcher the rest of the daemon uses ([`match_sender_rule`]). A first
+/// run has no rules, so this only matters to a catch-up.
+///
+/// A RECORD OUTRANKS IT TOO. Tickets, bookings, bills, order confirmations
+/// and shipping notices are often sent through the same bulk mailers that
+/// send newsletters, header included, and a three-week-old booking for a
+/// flight next month is exactly what the first load must show. Ingest no
+/// longer extracts records itself (the triage agent does), so the four
+/// deterministic detectors are asked here, as a yes or no and nothing more:
+/// a hit is triaged like any other mail and what they found is dropped. They
+/// are pure pattern matches over the message's own text, with no model and
+/// no store, and they run only on mail that is already old list mail.
+///
+/// [`match_sender_rule`]: crate::triage::rules::match_sender_rule
+fn files_as_old_bulk(
+    triaged: &TriagedMessage,
+    arrived_at: DateTime<Utc>,
+    floor: Option<DateTime<Utc>>,
+    rules: &[SenderRule],
+) -> bool {
     let Some(floor) = floor else {
         return false;
     };
     let m = &triaged.message;
-    !m.is_sent
+    let old_list_mail = !m.is_sent
         && !m.is_spam
-        && triaged.matched_rule.is_none()
         && m.list_unsubscribe
             .as_deref()
             .is_some_and(|h| !h.trim().is_empty())
-        && m.received_at < floor
+        && arrived_at < floor;
+    old_list_mail && !owner_reads_sender(&m.from_addr, rules) && !looks_like_a_record(m)
+}
+
+/// Whether a Surface or Filtered rule matches `from_addr` (see
+/// [`files_as_old_bulk`]).
+fn owner_reads_sender(from_addr: &str, rules: &[SenderRule]) -> bool {
+    crate::triage::rules::match_sender_rule(from_addr, rules)
+        .is_some_and(|r| r.disposition != crate::types::Disposition::Squelch)
+}
+
+/// Whether any deterministic record detector fires on the message: a bill, a
+/// calendar update, a receipt or a shipment (see [`files_as_old_bulk`]).
+/// Dated from the message's own `received_at`, which is what the detectors
+/// anchor year-less dates to.
+fn looks_like_a_record(m: &crate::types::NewMessage) -> bool {
+    use crate::triage::{calendar, deadline, receipt, shipment};
+    deadline::detect_bill(&m.subject, &m.body, m.received_at).is_some()
+        || calendar::detect_calendar(
+            &m.from_addr,
+            m.from_name.as_deref(),
+            &m.subject,
+            &m.body,
+            m.received_at,
+        )
+        .is_some()
+        || receipt::detect_receipt(&m.from_addr, &m.subject, &m.body).is_some()
+        || shipment::detect_shipment(&m.from_addr, &m.subject, &m.body).is_some()
 }
 
 /// What one change-feed walk found ([`SyncEngine::walk_changes`]).
@@ -3750,7 +3800,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // ingest below, unchanged. A live row a catch-up re-reads therefore
         // stays live and is refreshed as it always was (that re-read is how a
         // sanitizer fix reaches `body_html`), and an archive row stays archive.
-        let old_bulk = origin != IngestOrigin::Archive && files_as_old_bulk(&triaged, bulk_floor);
+        let arrived_at = fetched.internal_date.unwrap_or(triaged.message.received_at);
+        let old_bulk = origin != IngestOrigin::Archive
+            && files_as_old_bulk(&triaged, arrived_at, bulk_floor, rules);
         let filed = if old_bulk {
             // Never stamped: the store ignores the stamp on an archive row,
             // and this one must not poke the notification lane either.
@@ -5423,6 +5475,9 @@ mod tests {
         /// two timestamps the engine wrote, which is the only deterministic way
         /// to tell a per-message clock from a per-batch one.
         slow: HashMap<String, Duration>,
+        /// gmail message id -> the `internalDate` `messages.get` reports for
+        /// it, in unix milliseconds. Absent is "now", as it always was.
+        internal_dates: HashMap<String, i64>,
         /// ALL MAIL, for a `messages.list` with no `labelIds` (the archive
         /// walk): `(internalDate in unix seconds, id)`, served by the `after:`
         /// and `before:` bounds of the request's `q`.
@@ -5459,6 +5514,16 @@ mod tests {
                 id.to_string(),
                 labels.iter().map(|s| s.to_string()).collect(),
             );
+            self
+        }
+        /// A body the provider says it RECEIVED at `at` (its `internalDate`),
+        /// whatever the message's own `Date:` header claims.
+        fn received(&self, id: &str, at: DateTime<Utc>, eml: String) -> &Self {
+            let mut st = self.0.lock().unwrap();
+            st.internal_dates
+                .insert(id.to_string(), at.timestamp_millis());
+            st.bodies.insert(id.to_string(), eml);
+            drop(st);
             self
         }
         /// One message that is in no listing by label, only in all mail,
@@ -5644,7 +5709,12 @@ mod tests {
                     "id": id,
                     "raw": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(eml),
                     "payload": { "headers": mock_headers(eml) },
-                    "internalDate": Utc::now().timestamp_millis().to_string(),
+                    "internalDate": st
+                        .internal_dates
+                        .get(&id)
+                        .copied()
+                        .unwrap_or_else(|| Utc::now().timestamp_millis())
+                        .to_string(),
                 });
                 if let Some(labels) = st.message_labels.get(&id) {
                     body["labelIds"] = json!(labels);
@@ -9191,14 +9261,24 @@ Q0/00yfa39rgtJLa0DnOoA==
     /// List mail dated `at`: a newsletter, with the `List-Unsubscribe` header
     /// that makes it bulk and nothing else that would set it apart.
     fn list_eml(at: DateTime<Utc>) -> String {
+        list_eml_with(
+            at,
+            "This week's deals",
+            "This week's deals, picked for you.",
+        )
+    }
+
+    /// List mail dated `at` with its own subject and body: a bill, a booking or
+    /// a newsletter, all sent through the same bulk mailer.
+    fn list_eml_with(at: DateTime<Utc>, subject: &str, body: &str) -> String {
         format!(
             "From: Shop News <news@shop.example>\r\n\
              To: me@example.com\r\n\
-             Subject: This week's deals\r\n\
+             Subject: {subject}\r\n\
              Date: {}\r\n\
              List-Unsubscribe: <https://shop.example/unsubscribe?u=1>\r\n\
              \r\n\
-             This week's deals, picked for you.\r\n",
+             {body}\r\n",
             at.to_rfc2822()
         )
     }
@@ -9218,21 +9298,23 @@ Q0/00yfa39rgtJLa0DnOoA==
 
     /// THE FIRST BACKFILL TRIAGES A WEEK OF LIST MAIL AND FILES THE REST. A
     /// new account's month of inbox is mostly newsletters, and a model call
-    /// each for the three-week-old ones bought a board nobody shows (one
-    /// tenant spent her month's budget in two days on it). Through the real
-    /// signup path: list mail older than `sync.backfill_bulk_triage_days`
-    /// lands as an archive row with no job behind it; list mail inside the
-    /// week, and a person's mail as old as the filed newsletter, are queued
-    /// exactly as before.
+    /// each for the three-week-old ones bought a board nobody shows (a new
+    /// tenant spent a month's budget in two days on it). Through the real
+    /// signup path: list mail that arrived more than
+    /// `sync.backfill_bulk_triage_days` ago lands as an archive row with no
+    /// job behind it; list mail inside the week, and a person's mail as old
+    /// as the filed newsletter, are queued exactly as before.
     #[tokio::test]
     async fn the_first_backfill_files_list_mail_older_than_a_week_and_triages_the_rest() {
         let now = Utc::now();
+        let old = now - ChronoDuration::days(20);
+        let recent = now - ChronoDuration::days(2);
         let g = MockGmail::default();
         g.listing(LABEL_INBOX, &["fresh-list", "old-list", "old-person"]);
         g.listing(LABEL_SENT, &[]);
-        g.body("fresh-list", list_eml(now - ChronoDuration::days(2)));
-        g.body("old-list", list_eml(now - ChronoDuration::days(20)));
-        g.body("old-person", person_eml(now - ChronoDuration::days(20)));
+        g.received("fresh-list", recent, list_eml(recent));
+        g.received("old-list", old, list_eml(old));
+        g.received("old-person", old, person_eml(old));
         g.profile(1);
         let base = serve_mock(g.clone()).await;
         let (store, acct) = store_at_cursor(None);
@@ -9263,14 +9345,96 @@ Q0/00yfa39rgtJLa0DnOoA==
         );
     }
 
+    /// BILLS AND BOOKINGS SENT THROUGH A BULK MAILER ARE NOT FILED. A
+    /// three-week-old bill due next week and an invitation to something next
+    /// month carry the same header as the newsletter beside them, and both are
+    /// exactly what the first load must show. Ingest extracts no records
+    /// itself, so a filed one would be on no board at all. Beside them, a
+    /// plain newsletter of the same age IS filed, so the exemption is about
+    /// what they say and not the harness.
+    #[tokio::test]
+    async fn old_list_mail_that_is_a_bill_or_a_booking_is_still_triaged() {
+        let now = Utc::now();
+        let old = now - ChronoDuration::days(20);
+        let due = (now + ChronoDuration::days(7)).format("%B %-d, %Y");
+        let when = (now + ChronoDuration::days(30)).format("%a %b %-d, %Y");
+        let g = MockGmail::default();
+        g.listing(LABEL_INBOX, &["bill", "invite", "news"]);
+        g.listing(LABEL_SENT, &[]);
+        g.received(
+            "bill",
+            old,
+            list_eml_with(
+                old,
+                "Your bill is ready",
+                &format!("Your bill\r\nAmount due\r\n$67.29\r\nPay by {due}"),
+            ),
+        );
+        g.received(
+            "invite",
+            old,
+            list_eml_with(
+                old,
+                &format!("Invitation: Concert night @ {when} 7pm - 10pm (PDT)"),
+                "You have been invited.",
+            ),
+        );
+        g.received("news", old, list_eml(old));
+        g.profile(1);
+        let base = serve_mock(g.clone()).await;
+        let (store, acct) = store_at_cursor(None);
+        let eng = engine(store.clone(), acct, &base);
+
+        eng.backfill(&StdMutex::new(None)).await.unwrap();
+
+        let row = |id: &str| store.archive_and_jobs_by_provider_id(acct, id).unwrap();
+        for id in ["bill", "invite"] {
+            let (archived, jobs) = row(id).unwrap();
+            assert!(!archived && jobs > 0, "{id} is triaged, not filed");
+        }
+        assert_eq!(row("news"), Some((true, 0)), "the newsletter is filed");
+    }
+
+    /// AGE IS WHEN THE PROVIDER RECEIVED IT, not what the sender's `Date:`
+    /// claims. A newsletter whose mailer stamps a stale Date header but that
+    /// arrived two days ago is inside the week, and is triaged.
+    #[tokio::test]
+    async fn a_stale_date_header_on_recent_list_mail_does_not_file_it() {
+        let now = Utc::now();
+        let g = MockGmail::default();
+        g.received(
+            "stale",
+            now - ChronoDuration::days(2),
+            list_eml(now - ChronoDuration::days(20)),
+        );
+        let base = serve_mock(g.clone()).await;
+        let (store, acct) = store_at_cursor(None);
+        let eng = engine(store.clone(), acct, &base);
+        eng.fetch_raw_and_ingest(
+            &["stale".to_string()],
+            Mailbox::Inbox,
+            IngestOrigin::Backfill,
+            Urgency::Window,
+        )
+        .await
+        .unwrap();
+        let (archived, jobs) = store
+            .archive_and_jobs_by_provider_id(acct, "stale")
+            .unwrap()
+            .unwrap();
+        assert!(!archived && jobs > 0, "arrived two days ago: triaged");
+    }
+
     /// The filed row wakes no lane: it queued nothing. Paired with a row that
     /// DOES wake it, so the silence is about the filing and not the harness.
     #[tokio::test]
     async fn old_list_mail_filed_on_a_window_read_wakes_no_lane() {
         let now = Utc::now();
+        let old = now - ChronoDuration::days(20);
+        let recent = now - ChronoDuration::days(2);
         let g = MockGmail::default();
-        g.body("old-list", list_eml(now - ChronoDuration::days(20)));
-        g.body("fresh-list", list_eml(now - ChronoDuration::days(2)));
+        g.received("old-list", old, list_eml(old));
+        g.received("fresh-list", recent, list_eml(recent));
         let base = serve_mock(g.clone()).await;
         let (store, acct) = store_at_cursor(None);
         let eng = engine(store.clone(), acct, &base);
@@ -9311,9 +9475,9 @@ Q0/00yfa39rgtJLa0DnOoA==
         let now = Utc::now();
         let old = now - ChronoDuration::days(20);
         let g = MockGmail::default();
-        g.body("stored", list_eml(old));
-        g.body("unseen", list_eml(old));
-        g.body("walked", list_eml(old));
+        g.received("stored", old, list_eml(old));
+        g.received("unseen", old, list_eml(old));
+        g.received("walked", old, list_eml(old));
         let base = serve_mock(g.clone()).await;
         let (store, acct) = store_at_cursor(Some(1));
         let eng = engine(store.clone(), acct, &base);
@@ -9373,13 +9537,58 @@ Q0/00yfa39rgtJLa0DnOoA==
         );
     }
 
+    /// THE OWNER'S RULES, through the store and the engine's own rule load. A
+    /// Surface rule on the newsletter's sender keeps its old mail triaged on
+    /// a catch-up; a Squelch rule on another sender files it like any list
+    /// mail, because squelching is the opposite of asking to read it.
+    #[tokio::test]
+    async fn a_surface_rule_keeps_old_list_mail_triaged_and_a_squelch_rule_does_not() {
+        let now = Utc::now();
+        let old = now - ChronoDuration::days(20);
+        let squelched = list_eml(old).replace("news@shop.example", "deals@other.example");
+        let g = MockGmail::default();
+        g.received("surfaced", old, list_eml(old));
+        g.received("squelched", old, squelched);
+        let base = serve_mock(g.clone()).await;
+        let (store, acct) = store_at_cursor(Some(1));
+        store
+            .set_sender_rule(acct, "news@shop.example", "", Disposition::Surface)
+            .unwrap();
+        store
+            .set_sender_rule(acct, "*@other.example", "", Disposition::Squelch)
+            .unwrap();
+        let eng = engine(store.clone(), acct, &base);
+
+        eng.fetch_raw_and_ingest(
+            &["surfaced".to_string(), "squelched".to_string()],
+            Mailbox::Inbox,
+            IngestOrigin::Incremental,
+            Urgency::Window,
+        )
+        .await
+        .unwrap();
+        let (archived, jobs) = store
+            .archive_and_jobs_by_provider_id(acct, "surfaced")
+            .unwrap()
+            .unwrap();
+        assert!(!archived && jobs > 0, "the owner asked to see this sender");
+        assert_eq!(
+            store
+                .archive_and_jobs_by_provider_id(acct, "squelched")
+                .unwrap(),
+            Some((true, 0)),
+            "a squelched sender's old list mail is filed"
+        );
+    }
+
     /// THE KNOB: at `backfill_days` the whole window is triaged again, which
     /// is the documented way back to the old behaviour.
     #[tokio::test]
     async fn backfill_bulk_triage_days_at_the_window_triages_all_of_it() {
         let now = Utc::now();
+        let old = now - ChronoDuration::days(20);
         let g = MockGmail::default();
-        g.body("old-list", list_eml(now - ChronoDuration::days(20)));
+        g.received("old-list", old, list_eml(old));
         let base = serve_mock(g.clone()).await;
         let (store, acct) = store_at_cursor(None);
         let mut config = Config::default();
@@ -9401,12 +9610,15 @@ Q0/00yfa39rgtJLa0DnOoA==
     }
 
     /// [`files_as_old_bulk`] condition by condition: only list mail, only
-    /// before the floor, only with a floor, never the owner's own mail or
-    /// spam, never what a sender rule matched, and a blank header is none.
+    /// arrived before the floor, only with a floor, never the owner's own
+    /// mail or spam, a blank header is none, and each of the four record
+    /// detectors (a receipt and a shipment here; the bill and the booking
+    /// go through the engine above) keeps it out.
     #[test]
     fn files_as_old_bulk_asks_for_every_condition() {
         let now = Utc::now();
         let floor = Some(now - ChronoDuration::days(7));
+        let old = now - ChronoDuration::days(8);
         let parse = |eml: &str| {
             ingest_with_rules(
                 &fixture(1, "m", eml, false),
@@ -9416,26 +9628,41 @@ Q0/00yfa39rgtJLa0DnOoA==
                 |_| false,
             )
         };
-        let old = parse(&list_eml(now - ChronoDuration::days(8)));
-        assert!(files_as_old_bulk(&old, floor));
-        assert!(!files_as_old_bulk(&old, None), "no floor, no filing");
-        let recent = parse(&list_eml(now - ChronoDuration::days(6)));
-        assert!(!files_as_old_bulk(&recent, floor), "inside the week");
-        let person = parse(&person_eml(now - ChronoDuration::days(20)));
-        assert!(!files_as_old_bulk(&person, floor), "not list mail");
+        let news = parse(&list_eml(old));
+        assert!(files_as_old_bulk(&news, old, floor, &[]));
+        assert!(!files_as_old_bulk(&news, old, None, &[]), "no floor");
+        assert!(
+            !files_as_old_bulk(&news, now - ChronoDuration::days(6), floor, &[]),
+            "arrived inside the week"
+        );
+        let person = parse(&person_eml(old));
+        assert!(
+            !files_as_old_bulk(&person, old, floor, &[]),
+            "not list mail"
+        );
 
-        let mut ruled = old.clone();
-        ruled.matched_rule = Some(1);
-        assert!(!files_as_old_bulk(&ruled, floor), "a rule outranks it");
-        let mut sent = old.clone();
+        let mut sent = news.clone();
         sent.message.is_sent = true;
-        assert!(!files_as_old_bulk(&sent, floor));
-        let mut spam = old.clone();
+        assert!(!files_as_old_bulk(&sent, old, floor, &[]));
+        let mut spam = news.clone();
         spam.message.is_spam = true;
-        assert!(!files_as_old_bulk(&spam, floor));
-        let mut blank = old;
+        assert!(!files_as_old_bulk(&spam, old, floor, &[]));
+        let mut blank = news.clone();
         blank.message.list_unsubscribe = Some("  ".into());
-        assert!(!files_as_old_bulk(&blank, floor), "a blank header is none");
+        assert!(!files_as_old_bulk(&blank, old, floor, &[]), "blank header");
+
+        let receipt = parse(&list_eml_with(
+            old,
+            "Your Bay Wheels ride receipt",
+            "Thanks for riding! Receipt for your ride. Total: $3.49. Ride time 12 min.",
+        ));
+        assert!(!files_as_old_bulk(&receipt, old, floor, &[]), "a receipt");
+        let shipment = parse(&list_eml_with(
+            old,
+            "Your UPS package has shipped",
+            "Tracking number: 1Z999AA10123456784. Track your package.",
+        ));
+        assert!(!files_as_old_bulk(&shipment, old, floor, &[]), "a shipment");
     }
 
     // ---- the archive walk ---------------------------------------------------

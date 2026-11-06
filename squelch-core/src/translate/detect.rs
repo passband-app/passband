@@ -160,7 +160,7 @@ fn header_lang(raw: &str) -> Option<Lang> {
     Lang::from_code(primary)
 }
 
-/// ISO 639-1 for every language whatlang knows. All 69 have one.
+/// ISO 639-1 for every language whatlang knows. All 70 have one.
 fn iso_639_1(lang: whatlang::Lang) -> &'static str {
     use whatlang::Lang::*;
     match lang {
@@ -233,6 +233,7 @@ fn iso_639_1(lang: whatlang::Lang) -> &'static str {
         Cat => "ca",
         Tgl => "tl",
         Hye => "hy",
+        Cym => "cy",
     }
 }
 

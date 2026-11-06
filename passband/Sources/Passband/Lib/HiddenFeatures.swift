@@ -14,6 +14,14 @@ struct HiddenFeature: Hashable, Sendable {
     let key: String
 }
 
+extension HiddenFeature {
+    /// Deep user understanding (docs/UNDERSTANDING.md §5): the Usage page's
+    /// Understanding subpage, all of it, and the guide's words about it.
+    /// Without it the owner is never shown that the ledger exists, and the
+    /// daemon answers 404 on its routes besides.
+    static let understanding = HiddenFeature(key: "understanding")
+}
+
 /// The hidden features that are on for this mailbox, as the daemon reported
 /// them on `/client/stats`.
 ///

@@ -19,7 +19,6 @@ enum PageLink: String, CaseIterable, Sendable {
     case spam
     case auth
     case usage
-    case discover
     case settingsGeneral = "settings_general"
     case settingsMail = "settings_mail"
     case settingsRules = "settings_rules"
@@ -57,7 +56,6 @@ enum PageLink: String, CaseIterable, Sendable {
         case .spam: return "Emails › Spam"
         case .auth: return MainView.auth.label
         case .usage: return MainView.usage.label
-        case .discover: return "Discover"
         default: return rawValue
         }
     }
@@ -72,7 +70,6 @@ enum PageLink: String, CaseIterable, Sendable {
         case .spam: return "xmark.bin"
         case .auth: return MainView.auth.symbol
         case .usage: return MainView.usage.symbol
-        case .discover: return "sparkles"
         default: return "arrow.right"
         }
     }
@@ -88,7 +85,6 @@ enum PageLink: String, CaseIterable, Sendable {
         case .spam: "Gmail's spam folder, to rescue anything real."
         case .auth: "Login codes, password resets and security alerts."
         case .usage: "Mail in and out, signal against noise, triage and assistant spend."
-        case .discover: "The ways through your mail, and which ones you have tried."
         case .settingsGeneral: "You, appearance, notifications and help."
         case .settingsMail: "Images, threads, search, translation, signature, read tracking."
         case .settingsRules: "Sender rules: how mail from someone is handled."
@@ -132,7 +128,6 @@ extension AppStore {
         case .spam: openMail(.spam)
         case .auth: setView(.auth)
         case .usage: setView(.usage)
-        case .discover: setView(.discovery)
         default: break
         }
     }

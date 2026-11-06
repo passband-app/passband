@@ -97,6 +97,20 @@ struct SearchIntentTests {
             SearchIntent.classify(query: "stripe invoice", diagnostics: diagnostics(strict: 0))
                 == .lookup,
             "two words under the co-occurrence floor stay a lookup")
+        // A lone word is a lookup even when it is a question word or marker:
+        // "when" is somebody pausing mid-sentence, not a question.
+        for word in ["when", "where?", "my", "What", "who"] {
+            expect(
+                SearchIntent.classify(query: word, diagnostics: diagnostics(strict: 0, any: 0)) == .lookup,
+                "one word (\(word)) is a lookup")
+        }
+        expect(
+            SearchIntent.classify(query: "when is", diagnostics: diagnostics(strict: 0, any: 0)) == .lookup,
+            "a question word with nothing to ask about is a lookup")
+        expect(
+            SearchIntent.classify(query: "when is rent", diagnostics: diagnostics(strict: 2))
+                == .deeper(trigger: .questionShaped),
+            "a question word and a thing is a question")
         expect(
             SearchIntent.classify(query: "   ", diagnostics: nil) == .lookup,
             "whitespace is not a search")
@@ -244,8 +258,8 @@ struct SearchIntentTests {
             "and three wordless tokens do not reach the co-occurrence rule either")
         expect(
             SearchIntent.classify(query: "wifi?", diagnostics: diagnostics(strict: 1))
-                == .deeper(trigger: .questionShaped),
-            "one real word with a question mark still is a question")
+                == .lookup,
+            "one real word is a lookup even with a question mark: its hits are on screen")
     }
 
     // MARK: - what the setting lets a verdict do
@@ -432,6 +446,10 @@ struct SearchIntentTests {
         expect(
             !refinement.contains("\u{2014}") && !refinement.contains("\u{2013}"),
             "nor in a refinement")
+        expect(
+            SearchLanePrompt.searchingFor("when did i download rekordbox")
+                == "User is searching for: when did i download rekordbox",
+            "a search starts as \"User is searching for: <query>\"")
     }
 
     static func promptFramesMailAsData() {

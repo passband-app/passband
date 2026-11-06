@@ -32,6 +32,7 @@ struct AssistantRequestTests {
         pruningIsStickyAndStaysUnderBudget()
         theCurrentRunIsNeverPruned()
         aThreadBodyIsCapped()
+        theLastStepAnswersInsteadOfFailing()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -46,6 +47,34 @@ struct AssistantRequestTests {
             failures += 1
             print("FAIL: \(what)")
         }
+    }
+
+    /// The step valve ends in an answer: the last request switches tools off
+    /// without dropping them (the cached prefix stays the same bytes) and asks
+    /// for an answer on the outgoing copy only.
+    static func theLastStepAnswersInsteadOfFailing() {
+        let history = conversation(turns: 2)
+        let normal = json(request(history)) as! [String: Any]
+        check(normal["tool_choice"] == nil, "an ordinary step sends no tool_choice")
+
+        var last = request(Wire.wrappingUp(history))
+        last.tool_choice = .answerOnly
+        let body = json(last) as! [String: Any]
+        check((body["tool_choice"] as? [String: Any])?["type"] as? String == "none",
+              "the last step sends tool_choice none")
+        check((body["tools"] as? [Any])?.count == tools().count, "the last step keeps the tools")
+
+        let sent = Wire.wrappingUp(history)
+        check(sent.count == history.count, "wrapping up adds no message")
+        if case .blocks(let blocks) = sent.last!.content, case .text(let nudge) = blocks.last! {
+            check(nudge == Wire.wrapUpNudge, "the nudge rides last on the newest user message")
+        } else {
+            check(false, "the nudge rides last on the newest user message")
+        }
+        if case .blocks(let blocks) = history.last!.content {
+            check(blocks.count == 1, "the kept history never carries the nudge")
+        }
+        check(!Wire.wrapUpNudge.contains("\u{2014}"), "no em dash in the nudge")
     }
 
     // MARK: - fixtures

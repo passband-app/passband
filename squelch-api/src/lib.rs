@@ -25,6 +25,7 @@ mod http_metrics;
 mod invite_mail;
 pub mod limits;
 mod markdown;
+mod memory;
 mod morning_brief;
 mod pair;
 mod renotify;
@@ -34,6 +35,7 @@ mod serve;
 mod sharing;
 mod state;
 pub mod tracking;
+mod transport;
 mod triage;
 mod unsub_browser;
 mod unsub_cdp;
@@ -78,6 +80,8 @@ pub use serve::{HEADER_READ_TIMEOUT, serve, serve_with_header_timeout};
 /// hand and for the integration suite, which points it at a mock control plane.
 pub use sharing::{FEATURE_REFRESH, FeatureRefresher, Sharing};
 pub use state::{AgentDoorStatus, ApiState, StateError, attach_event_channel};
+/// HSTS behind https and `nosniff` everywhere, over both doors.
+pub use transport::transport_security;
 
 use axum::{
     Router, middleware,
@@ -284,7 +288,15 @@ fn client_router(state: ApiState) -> Router {
         // The reader's contact card: one address, everything known about it.
         // Human door only, for the reason contacts is.
         .route("/client/person", get(handlers::get_person))
+        // The relationship ledger, ranked: who the owner answers and whose
+        // mail they ignore. Human door only, for the reason the card is. A
+        // store read, so the Local ceiling and the Local latency class, like
+        // the card (neither table in `limits` / `http_metrics` names it).
+        .route("/client/relationships", get(handlers::get_relationships))
         .merge(groups::routes())
+        // What Passband knows about the owner (docs/UNDERSTANDING.md §6):
+        // HUMAN DOOR ONLY, behind the `understanding` feature; see `memory`.
+        .merge(memory::routes(state.clone()))
         .route("/client/sealed", get(handlers::list_sealed))
         .route(
             "/client/sealed/{message_id}/reveal",
@@ -502,6 +514,10 @@ fn calendar_routes(state: ApiState) -> Router<ApiState> {
         // directions: the agent door has no timeline route.
         .route("/client/timeline", get(handlers::get_timeline))
         .route("/client/timeline/ghosts/{id}", patch(handlers::patch_ghost))
+        .route(
+            "/client/timeline/ghosts/{id}/change",
+            post(handlers::resolve_linked_change),
+        )
         // Calendar search (docs/CALENDAR.md §10.1): the search box's Events
         // block, and the in-app assistant's `search_calendar`, which gets the
         // agent view (no address of anyone). Agent MCP's `search_calendar`

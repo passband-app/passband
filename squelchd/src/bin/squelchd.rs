@@ -2931,9 +2931,15 @@ fn build_serve_router(
     // records is everything the daemon did for the request including auth. It
     // is a `Router::layer`, which runs after routing: that is what gives it the
     // route template rather than the path.
-    let app = squelch_api::router(api_state).merge(agent_router).layer(
-        axum::middleware::from_fn_with_state(metrics, squelch_api::record_http_metrics),
-    );
+    let app = squelch_api::router(api_state)
+        .merge(agent_router)
+        .layer(axum::middleware::from_fn_with_state(
+            metrics,
+            squelch_api::record_http_metrics,
+        ))
+        // Outermost of all, so every answer carries it, including an auth
+        // refusal or a 404 the routes never saw.
+        .layer(axum::middleware::from_fn(squelch_api::transport_security));
     Ok(app)
 }
 
@@ -3307,7 +3313,8 @@ fn cmd_serve(
             let sync_metrics = sync_metrics.clone();
             let sync_budget = gmail_budget.clone();
             let vectors_dirty = vectors_dirty.clone();
-            // The human door's live feature set, for `uncapped_triage`.
+            // The human door's live feature set, for `uncapped_triage` and
+            // `understanding` (the profile pass and triage's memory lines).
             let features = api_state.features().clone();
             // Taken before the spawn and dropped by the task, so readiness
             // tracks the engine and not the intention to start one.

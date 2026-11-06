@@ -1922,6 +1922,93 @@ struct GhostSource: Codable, Sendable, Hashable {
     var message_id: Int
     var thread_id: String
     var role: GhostSourceRole
+    /// Event identity: this mail is ANOTHER sender's (a promoter, a friend)
+    /// about the same event, folded under the user's own card rather than
+    /// drawn as a second one. Nil from an older daemon: not linked.
+    var linked: Bool? = nil
+    /// False when this message failed sender authentication. Nil from an
+    /// older daemon draws no mark.
+    var verified: Bool? = nil
+}
+
+extension GhostSource {
+    /// The two event-identity keys cost only themselves: a value of the
+    /// wrong shape is nil, never the source (and so the ghost) lost. In an
+    /// extension so the memberwise init stays.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        message_id = try c.decode(Int.self, forKey: .message_id)
+        thread_id = try c.decode(String.self, forKey: .thread_id)
+        role = try c.decode(GhostSourceRole.self, forKey: .role)
+        linked = try? c.decodeIfPresent(Bool.self, forKey: .linked)
+        verified = try? c.decodeIfPresent(Bool.self, forKey: .verified)
+    }
+}
+
+/// What a linked mail says differently from the user's own card.
+enum LinkedChangeKind: String, LenientRawEnum {
+    case moved, cancelled
+    /// A kind this client does not know. Never kept: `LinkedChange` refuses
+    /// to decode with it, so the card offers nothing rather than a change it
+    /// cannot describe.
+    case unknown
+    static var unknownFallback: LinkedChangeKind { .unknown }
+}
+
+/// `pending_change` on a ghost or a real event: another sender's mail about
+/// the same event says something different (a new time, or that it is off),
+/// offered on the user's card to accept or turn down. Nothing changes until
+/// the user answers, through `POST /client/timeline/ghosts/{ghost_id}/change`.
+struct LinkedChange: Codable, Sendable, Hashable {
+    /// The ghost the change is offered on, and the one to post to. On a real
+    /// event, the ghost drawn as that event.
+    var ghost_id: Int
+    /// The linked ghost the change comes from.
+    var from: Int
+    var kind: LinkedChangeKind
+    /// `YYYY-MM-DD` when `all_day`, else RFC3339 with an offset.
+    var start: String
+    var all_day: Bool
+    var end: String? = nil
+    /// False when the linked mail failed sender authentication.
+    var verified: Bool = true
+    var message_id: Int? = nil
+    var thread_id: String? = nil
+
+    init(
+        ghost_id: Int, from: Int, kind: LinkedChangeKind, start: String, all_day: Bool,
+        end: String? = nil, verified: Bool = true, message_id: Int? = nil, thread_id: String? = nil
+    ) {
+        self.ghost_id = ghost_id
+        self.from = from
+        self.kind = kind
+        self.start = start
+        self.all_day = all_day
+        self.end = end
+        self.verified = verified
+        self.message_id = message_id
+        self.thread_id = thread_id
+    }
+
+    /// The ids and the kind are required (without them there is nothing to
+    /// answer); everything else is lenient. An unknown kind throws, which
+    /// the `@LenientDecoded` holding this turns into no offer at all.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ghost_id = try c.decode(Int.self, forKey: .ghost_id)
+        from = try c.decode(Int.self, forKey: .from)
+        kind = try c.decode(LinkedChangeKind.self, forKey: .kind)
+        guard kind != .unknown else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .kind, in: c, debugDescription: "a change kind this client does not know")
+        }
+        start = (try? c.decodeIfPresent(String.self, forKey: .start)) ?? ""
+        all_day = (try? c.decodeIfPresent(Bool.self, forKey: .all_day)) ?? false
+        end = try? c.decodeIfPresent(String.self, forKey: .end)
+        verified = (try? c.decodeIfPresent(Bool.self, forKey: .verified)) ?? true
+        message_id = try? c.decodeIfPresent(Int.self, forKey: .message_id)
+        thread_id = try? c.decodeIfPresent(String.self, forKey: .thread_id)
+    }
 }
 
 /// The real event a ghost duplicates, by the daemon's display match. Display
@@ -1960,6 +2047,10 @@ struct TimelineGhost: Codable, Sendable, Hashable, Identifiable {
     /// button"). LENIENT: absent on an older daemon, and a value of the wrong
     /// shape is nil rather than the ghost dropped from the page.
     @LenientDecoded var tickets: CalendarTickets? = nil
+    /// Another sender's mail about this event says something different
+    /// (`LinkedChange`). LENIENT: absent on an older daemon, and a malformed
+    /// value or an unknown kind is nil rather than the ghost dropped.
+    @LenientDecoded var pending_change: LinkedChange? = nil
 }
 
 enum TimelineEventStatus: String, LenientRawEnum {
@@ -2030,6 +2121,11 @@ struct TimelineEvent: Codable, Sendable, Hashable, Identifiable {
     /// with the tickets, boarding pass or booking in it. Nil from an older
     /// daemon and on an event with none.
     var tickets: CalendarTickets? = nil
+    /// A change another sender's mail offers on the ghost drawn as this
+    /// event (the page hides a ghost with a `matched_event`, so the offer
+    /// rides here). Its `ghost_id` is the ghost to answer. Nil from an older
+    /// daemon, on an event with none, and for a malformed value.
+    var pending_change: LinkedChange? = nil
 }
 
 /// How a guest answered, in the daemon's four words.
@@ -2165,6 +2261,7 @@ extension TimelineEvent {
         from_gmail = try? c.decodeIfPresent(Bool.self, forKey: .from_gmail)
         passband_owned = try? c.decodeIfPresent(Bool.self, forKey: .passband_owned)
         tickets = try? c.decodeIfPresent(CalendarTickets.self, forKey: .tickets)
+        pending_change = try? c.decodeIfPresent(LinkedChange.self, forKey: .pending_change)
     }
 
     private struct OneGuest: Decodable {

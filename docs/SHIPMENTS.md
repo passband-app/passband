@@ -499,6 +499,31 @@ Decisions stored before box keys existed project once, on the open that
 introduces them (`migrate::project_amazon_boxes`, gated per account by the
 `amazon_boxes_projected` marker in `app_settings`). Every other open does one indexed read.
 
+### eBay purchases: keyed by eBay's item and transaction ids
+
+eBay's order mail has the same hole: Order confirmed, Order update, "Your
+package is now with its carrier!", OUT FOR DELIVERY and PACKAGE DELIVERED all
+name the carrier and none prints its number, so an eBay order never reached
+the rail at any step. Every one of them links eBay's order page with `itemId`
+and `transactionId` (`ebay.com/vod/FetchOrderDetails?…` before delivery,
+`ebay.com/ord/show?…` on it). The pair is one purchase line, so
+`triage/ebay.rs` reads it and `reconcile` keys the record on
+`ebay:<itemId>:<transactionId>`, under the same rules as an Amazon box: code
+reads it, the From domain must authenticate as `ebay.com`, and two purchases
+in one mail is no guess. Two differences:
+
+- only eBay's own address counts, not `members.ebay.com`, which relays what
+  sellers write;
+- the row shows the carrier the model read (`fedex`, `ups`, `usps`, `dhl`,
+  else `unknown`), because an eBay seller ships with a real carrier. The key is
+  not that carrier's number, so `list_pollable_shipments` skips any tracking
+  number holding a `:` (every package key does; no sanitized number can).
+
+The row links eBay's order page, built from the ids, and is sold by `eBay`
+when the record named no merchant; the order number is printed, not linked, so
+it rides in on the model's `order_refs`. Backfill: `migrate::project_ebay_packages`,
+marker `ebay_packages_projected`.
+
 ### Packages the owner sent are not shipments
 
 The rail is for boxes coming to the owner. A shipping store's drop-off receipt

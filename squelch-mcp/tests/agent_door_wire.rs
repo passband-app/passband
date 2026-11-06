@@ -253,3 +253,163 @@ async fn no_read_tool_serves_hidden_mail_over_the_wire() {
         assert_no_canary(name, &text);
     }
 }
+
+/// Every field the relationship ledger has (docs/UNDERSTANDING.md §2.1), and
+/// the key the triage context carries it under. None of these words appears
+/// anywhere in the agent door's code today, so any of them in a response is
+/// the ledger leaking.
+const LEDGER_FIELDS: [&str; 15] = [
+    "relationship",
+    "received_per_month",
+    "initiated_count",
+    "inbound_threads",
+    "replied_threads",
+    "median_reply",
+    "attention_rows",
+    "opened_count",
+    "median_read_fraction",
+    "link_clicks",
+    "fatigue",
+    "coverage_days",
+    "\"replied\"",
+    "\"initiated\"",
+    "computed_at",
+];
+
+/// HUMAN DOOR ONLY (docs/UNDERSTANDING.md §2.2): who the owner answers and
+/// how fast is a graph the agent door was never handed. Triage, the human
+/// door's own backend, reads the ledger; no `/mcp` tool response may carry
+/// a ledger field, for the sender the agent can see most plainly.
+#[tokio::test]
+async fn no_read_tool_serves_the_relationship_ledger() {
+    let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let account = store.ensure_account(ACCOUNT).expect("account");
+    ingest(&store, account, VISIBLE, false);
+    // The owner answered, so the ledger has replies to leak.
+    let now: DateTime<Utc> = Utc::now() + chrono::Duration::minutes(5);
+    let reply = RawFetched {
+        account_id: account,
+        gmail_msg_id: "m-reply".into(),
+        gmail_thread_id: Some(format!("t-{VISIBLE}")),
+        raw: format!(
+            "From: {ACCOUNT}\r\nTo: Alerts <alerts@example.com>\r\nSubject: Re: Update {VISIBLE}\r\nDate: {}\r\n\r\nThanks.",
+            now.to_rfc2822()
+        )
+        .into_bytes(),
+        internal_date: Some(now),
+        is_sent: true,
+        is_spam: false,
+        account_addr: ACCOUNT.into(),
+    };
+    store
+        .ingest_message(&ingest_with_rules(
+            &reply,
+            &Default::default(),
+            now,
+            &[],
+            |_| false,
+        ))
+        .expect("reply");
+    // After the reply, which re-queues the thread it lands in.
+    assess_all(&store, account, &[], None);
+    store
+        .recompute_all_relationships(account)
+        .expect("recompute");
+    store
+        .set_sync_state(
+            account,
+            squelch_core::store::sqlite::relationships::RELATIONSHIPS_BACKFILL_KEY,
+            &squelch_core::store::SyncState {
+                uidvalidity: 0,
+                last_uid: 1,
+            },
+        )
+        .expect("backfilled");
+    // Control: the ledger has a row for this sender, and triage is handed it.
+    let row = store
+        .relationship(account, "alerts@example.com")
+        .expect("read")
+        .expect("a ledger row");
+    assert_eq!(row.replied_threads, 1, "control: {row:?}");
+    assert!(
+        store
+            .relationship_context(account, "alerts@example.com")
+            .expect("context")
+            .is_some()
+    );
+
+    // The calendar door on, so `search_calendar` is offered and walked too.
+    let door = agent_door_router(
+        store,
+        ACCOUNT,
+        Default::default(),
+        Default::default(),
+        CancellationToken::new(),
+        &AgentDoorAuth::Open,
+        None,
+        Default::default(),
+        squelch_mcp::CalendarDoor {
+            features: squelch_core::features::Features::pinned([squelch_core::features::CALENDAR]),
+            credentials: None,
+        },
+    )
+    .expect("router");
+    let mut session = Session::open(door, HOST, None).await;
+    let since = "2000-01-01T00:00:00Z";
+
+    // CONTROL, asserted on its own call rather than OR'd across them: a door
+    // that errors on every tool would otherwise pass. `get_thread` must
+    // succeed and carry the sender's mail.
+    let (thread, reply) = session
+        .tool("get_thread", json!({"id": format!("t-{VISIBLE}")}))
+        .await;
+    assert!(
+        !refused(&reply),
+        "control: get_thread was refused: {thread}"
+    );
+    assert!(
+        thread.contains(VISIBLE),
+        "control: the door must serve the mail itself:\n{thread}"
+    );
+    assert!(
+        session
+            .tool_names()
+            .await
+            .iter()
+            .any(|n| n == "search_calendar"),
+        "control: the calendar tool is offered, so it is walked"
+    );
+
+    let calls = [
+        ("get_inbox_updates", json!({"since": since})),
+        ("get_reading", json!({"since": since})),
+        ("get_thread", json!({"id": format!("t-{VISIBLE}")})),
+        (
+            "search_mail",
+            json!({"query": "from:alerts@example.com", "k": 50}),
+        ),
+        ("search_mail", json!({"query": VISIBLE, "k": 50})),
+        ("get_deadlines", json!({})),
+        ("get_shipments", json!({"include_delivered": true})),
+        ("list_sender_rules", json!({})),
+        ("search_calendar", json!({"query": "alerts"})),
+    ];
+    for (name, args) in calls {
+        // Each call must answer: a refusal carries no fields and would pass
+        // the check below vacuously.
+        let (text, reply) = session.tool(name, args).await;
+        assert!(!refused(&reply), "{name} was refused: {text}");
+        for field in LEDGER_FIELDS {
+            assert!(
+                !text.contains(field),
+                "{name} served the ledger's `{field}` to the agent door:\n{text}"
+            );
+        }
+    }
+    for field in LEDGER_FIELDS {
+        assert!(
+            !thread.contains(field),
+            "get_thread served `{field}`:\n{thread}"
+        );
+    }
+}

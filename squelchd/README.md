@@ -5,7 +5,7 @@ The daemon. One process that hosts everything: the Gmail sync loop and a single 
 ## Subcommands
 
 ```sh
-squelchd auth              # one-time OAuth consent (requests gmail.readonly); token -> macOS keyring / 0600 file on Linux
+squelchd auth              # one-time OAuth consent (requests gmail.modify); token -> macOS keyring / 0600 file on Linux
 squelchd auth --write      # BOTH credentials: write (gmail.modify + gmail.send), then read
 squelchd auth --headless   # headless box: prints consent URL, binds loopback :8847
 squelchd auth --export     # consent here, print a one-line blob to move elsewhere (--out FILE for 0600; --write for both slots)

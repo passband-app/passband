@@ -34,6 +34,7 @@ mod serve;
 mod sharing;
 mod state;
 pub mod tracking;
+mod transport;
 mod triage;
 mod unsub_browser;
 mod unsub_cdp;
@@ -76,6 +77,8 @@ pub use serve::{HEADER_READ_TIMEOUT, serve, serve_with_header_timeout};
 /// hand and for the integration suite, which points it at a mock control plane.
 pub use sharing::{FEATURE_REFRESH, FeatureRefresher, Sharing};
 pub use state::{AgentDoorStatus, ApiState, StateError, attach_event_channel};
+/// HSTS behind https and `nosniff` everywhere, over both doors.
+pub use transport::transport_security;
 
 use axum::{
     Router, middleware,

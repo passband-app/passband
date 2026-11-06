@@ -2104,6 +2104,7 @@ impl ControlStore {
                     last_action_at = GREATEST(last_action_at, $3),
                     mac_paired_at = LEAST(mac_paired_at, $4),
                     ios_paired_at = LEAST(ios_paired_at, $5),
+                    first_paired_at = LEAST(first_paired_at, $7),
                     activity_read_at = $6,
                     activity_tried_at = $6
                   WHERE tenant_label = $1",
@@ -2114,6 +2115,11 @@ impl ControlStore {
                     &opt(activity.mac.map(|p| p.first_paired_at)),
                     &opt(activity.ios.map(|p| p.first_paired_at)),
                     &stamp(now),
+                    // The activation poller only reaches the 25 oldest
+                    // unpaired signups, so a newer one can act for weeks with
+                    // no first pairing on file. The daemon's own answer fills
+                    // it, and the panel's "of N activated" counts them.
+                    &opt(activity.first_paired_at),
                 ],
             )
             .await?;
@@ -2151,7 +2157,7 @@ impl ControlStore {
                         u.ios_paired_at, u.activity_read_at
                    FROM users u LEFT JOIN invite_codes i ON i.id = u.invite_id
                   WHERE COALESCE(u.signed_up_at, i.used_at) IS NOT NULL
-                  ORDER BY signed_up ASC
+                  ORDER BY signed_up DESC
                   LIMIT $1",
                 &[&RETENTION_FACTS_LIMIT],
             )
@@ -4572,6 +4578,11 @@ SQUELCH_TEST_PG_URL is not set, and these tests run against a real Postgres.
         assert_eq!(r.mac_paired_at, Some(t(29)));
         assert_eq!(r.ios_paired_at, Some(t(20)));
         assert_eq!(r.activity_read_at, Some(n));
+        assert_eq!(
+            r.first_paired_at,
+            Some(t(29)),
+            "the daemon's first pairing fills it"
+        );
 
         // A later answer that knows less (the phone gone, older stamps) takes
         // nothing back; a newer action moves forward.

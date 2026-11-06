@@ -1094,7 +1094,11 @@ fn conversion(rows: &[UserRow], c: &Counts) -> String {
 fn retention_panel(facts: &[RetentionFacts], now: DateTime<Utc>) -> String {
     let active_since = now - chrono::Duration::days(ACTIVE_DAYS);
     let known = |f: &RetentionFacts| f.activity_read_at.is_some();
-    let activated = |f: &RetentionFacts| f.first_paired_at.is_some() || f.ios_paired_at.is_some();
+    // An app that acted was paired, whatever the activation stamp says, so
+    // "weekly active" can never read above 100% of activated.
+    let activated = |f: &RetentionFacts| {
+        f.first_paired_at.is_some() || f.ios_paired_at.is_some() || f.last_action_at.is_some()
+    };
     let active = |f: &RetentionFacts| f.last_action_at.is_some_and(|at| at >= active_since);
     let on_iphone = |f: &RetentionFacts| f.ios_paired_at.is_some();
     let pct = |n: usize, of: usize| format!("{}%", (n as f64 / of as f64 * 100.0).round());
@@ -2523,6 +2527,20 @@ pub(crate) mod tests {
         assert!(!html.contains("2026-06-01"), "outside the table");
         assert!(!html.contains("No usage data yet"), "{html}");
         assert!(!html.contains('\u{2014}'), "no em dashes in UI copy");
+    }
+
+    /// A Mac-only person with no first pairing stamped yet still counts as
+    /// activated when their app acted, so the share stays at or under 100%.
+    #[test]
+    fn an_acting_mac_with_no_activation_stamp_counts_as_activated() {
+        let now = utc("2026-11-05T12:00:00Z");
+        let facts = [RetentionFacts {
+            last_action_at: Some(utc("2026-11-04T12:00:00Z")),
+            activity_read_at: Some(utc("2026-11-05T11:00:00Z")),
+            ..fact("2026-11-01T09:00:00Z")
+        }];
+        let html = retention_panel(&facts, now);
+        assert!(html.contains("100% of 1 activated"), "{html}");
     }
 
     /// Before any daemon has answered: say so, and show no zeros where the

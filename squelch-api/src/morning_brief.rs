@@ -40,7 +40,7 @@ use serde::Deserialize;
 use squelch_core::owner_clock::{OwnerZone, OwnerZoneSource};
 use squelch_core::push::{BriefPing, IOS_PLATFORM};
 use squelch_core::store::agent_triage::{AgentListQuery, AgentTriageStore};
-use squelch_core::store::{SqliteStore, Store};
+use squelch_core::store::{ClientPlatform, SqliteStore, Store};
 use squelch_core::triage::decision::{RecordProposal, StatedTime};
 use squelch_core::types::AccountId;
 use tokio::sync::watch;
@@ -320,6 +320,19 @@ fn enabled(store: &SqliteStore, account: AccountId) -> squelch_core::Result<bool
         != Some("0"))
 }
 
+/// The first iPhone app that fetches and shows the brief (and has its
+/// switch). 0.0.14 is the last release without it. The daemon rolls before
+/// the phone ships, so until this mailbox has seen an iPhone at least this
+/// new, there is no brief at all rather than a daily empty banner.
+pub const MIN_IOS_VERSION: [u32; 3] = [0, 0, 15];
+
+/// Whether an iPhone app at `version` (dotted digits, as `ClientTag` keeps
+/// it) shows the brief. Compared as numbers: "0.0.9" is older than "0.0.15".
+fn dresses_brief(version: &str) -> bool {
+    let parts: Option<Vec<u32>> = version.split('.').map(|p| p.parse().ok()).collect();
+    parts.is_some_and(|v| v.as_slice() >= MIN_IOS_VERSION.as_slice())
+}
+
 /// What a pass did, for the log and for tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BriefOutcome {
@@ -330,6 +343,11 @@ pub enum BriefOutcome {
     /// No iPhone registered for this mailbox: nothing decided, so a phone
     /// that registers at 9 still hears today's.
     NoPhone,
+    /// An iPhone is registered, but no iPhone app new enough to dress the
+    /// brief has ever connected ([`MIN_IOS_VERSION`]): an older app would
+    /// show the relay's bare "Your morning brief is ready" every day and has
+    /// no switch to stop it. Nothing decided, as with [`Self::NoPhone`].
+    OldPhone,
     /// Nothing worth saying today; decided, and nothing sent.
     Empty(NaiveDate),
     /// Stamped and handed to the pusher.
@@ -358,6 +376,13 @@ pub async fn run_brief_pass(
             .any(|d| d.tag.is_some() && d.platform == IOS_PLATFORM);
         if !phone {
             return Ok(Err(BriefOutcome::NoPhone));
+        }
+        let dressed = store
+            .client_versions_seen(account)?
+            .iter()
+            .any(|c| c.platform == ClientPlatform::Ios && dresses_brief(&c.version));
+        if !dressed {
+            return Ok(Err(BriefOutcome::OldPhone));
         }
         Ok(Ok(day))
     })
@@ -623,5 +648,15 @@ mod tests {
             "First up: Quarterly planning offsite with… at 9:05 AM."
         );
         assert!(!body.contains('—') && !body.contains('–') && !body.contains('·'));
+    }
+
+    #[test]
+    fn only_an_iphone_from_0_0_15_on_dresses_the_brief() {
+        for old in ["0.0.14", "0.0.9", "0.0.14.9", "garbage"] {
+            assert!(!dresses_brief(old), "{old}");
+        }
+        for new in ["0.0.15", "0.0.15.1", "0.0.100", "0.1", "1.0.0"] {
+            assert!(dresses_brief(new), "{new}");
+        }
     }
 }

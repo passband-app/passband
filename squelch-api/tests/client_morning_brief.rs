@@ -26,15 +26,16 @@ fn at(s: &str) -> DateTime<Utc> {
 /// The owner's phone has connected from `zone` (which is how the daemon
 /// learns the owner's zone) and registered for pushes.
 fn phone_in(store: &SqliteStore, acct: i64, zone: &str) {
+    phone_on(store, acct, zone, "ios/0.0.15");
+}
+
+/// [`phone_in`], with the app reporting `client` (`ios/<version>`).
+fn phone_on(store: &SqliteStore, acct: i64, zone: &str, client: &str) {
     let token = store.issue_device_token(acct, "phone").unwrap();
     store
         .verify_device_token_from(
             &token.token,
-            Some(
-                &ClientTag::parse("ios/0.0.14")
-                    .unwrap()
-                    .with_zone(Some(zone)),
-            ),
+            Some(&ClientTag::parse(client).unwrap().with_zone(Some(zone))),
         )
         .unwrap()
         .unwrap();
@@ -339,4 +340,25 @@ async fn the_route_on_an_empty_day() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body: Value = body_json(resp).await;
     assert_eq!(body["body"], Value::Null);
+}
+
+#[tokio::test]
+async fn an_iphone_too_old_to_show_it_gets_no_brief_and_the_day_stays_open() {
+    let (state, store, acct) = setup();
+    phone_on(&store, acct, LA, "ios/0.0.14");
+    bill(&store, acct, "b1", "PG&E", "2026-11-05");
+    assert_eq!(
+        run_brief_pass(&state, at(EIGHT_FIFTEEN)).await.unwrap(),
+        BriefOutcome::OldPhone
+    );
+    assert_eq!(
+        store.get_app_setting(acct, "morning_brief_day").unwrap(),
+        None
+    );
+    // The phone updates that morning: today's brief goes out after all.
+    phone_on(&store, acct, LA, "ios/0.0.15");
+    assert!(matches!(
+        run_brief_pass(&state, at(EIGHT_FIFTEEN)).await.unwrap(),
+        BriefOutcome::Sent(_)
+    ));
 }

@@ -69,7 +69,18 @@ Ordered by what stops the submission soonest.
       the top private domain of every URL on the consent screen.
 - [x] **`https://passband.app/about` is the application home page** (set
       2026-11-05; it was `https://passband.app`). Developer contact is
-      `braelyn@passband.app`. The React homepage serves a 1,328-byte empty
+      `braelyn@passband.app`.
+- [x] **Authorized domains: `passband.app` only** (2026-11-06). `passband.email`
+      was listed and unverified; it was removed rather than verified, because
+      no Google redirect or origin uses it (hosted consent returns to
+      `signup.passband.app`, self-host to loopback) and agents reach
+      `<label>.passband.email/mcp` through WorkOS, which never reads this list.
+      If a future Google flow lands on a tenant host, add it back and verify it
+      in Search Console (its DNS is Cloudflare).
+- Deferred, not blockers: the user support email is still
+  `bboynton97@gmail.com` (it shows on the unverified-app screen until
+  verification; a `support@passband.app` group is the fix), and billing is
+  still on the personal billing account. The React homepage serves a 1,328-byte empty
       `#root` with no functional description and no privacy link, which is
       exactly what the automated home page check looks for. `/about` is static
       HTML (added 2026-08-25) and carries the description, the scope table, and

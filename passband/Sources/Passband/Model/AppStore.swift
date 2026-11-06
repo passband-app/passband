@@ -4931,9 +4931,13 @@ final class AppStore {
             resetSearchLane(keepingVerdict: true)
         case .refine, .start:
             laneGate = Task { [weak self] in
+                // The judge runs DURING the quiet wait, not after it: the wait
+                // is max(quiet, judge) instead of their sum. A keystroke
+                // cancels this task, and the judge's answer with it.
+                async let finished = QueryReadiness.looksFinished(query)
                 try? await Task.sleep(for: QueryReadiness.quiet)
                 guard !Task.isCancelled, let self, self.search.query.trimmed == query else { return }
-                guard await QueryReadiness.looksFinished(query) else { return }
+                guard await finished else { return }
                 guard !Task.isCancelled, self.search.query.trimmed == query else { return }
                 self.laneGate = nil
                 switch move {

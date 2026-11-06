@@ -147,23 +147,30 @@ struct AskBar: View {
                 .overlay(Palette.accentSoft.opacity(0.35))
                 .ignoresSafeArea()
                 .contentShape(Rectangle())
+            // The rules run the page's full width; the words between them
+            // keep a reading measure, since a line of chat as wide as a 27"
+            // display is unreadable.
             VStack(alignment: .leading, spacing: 0) {
-                header
+                measured(header)
                 Divider().overlay(Palette.hairline)
                 if session.transcript.isEmpty {
                     Spacer(minLength: 0)
                 } else {
-                    tray
+                    measured(tray)
                 }
                 Divider().overlay(Palette.hairline)
-                inputRow
+                measured(inputRow)
             }
-            // A reading measure, not the window: a line of chat as wide as
-            // a 27" display is unreadable.
-            .frame(maxWidth: Typo.measure(760), maxHeight: .infinity, alignment: .top)
-            .padding(.horizontal, Space.s24)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
+    }
+
+    /// One band of the full-screen page at the reading measure, centered.
+    private func measured(_ content: some View) -> some View {
+        content
+            .frame(maxWidth: Typo.measure(760))
+            .padding(.horizontal, Space.s24)
+            .frame(maxWidth: .infinity)
     }
 
     // MARK: - chrome

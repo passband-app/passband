@@ -83,6 +83,10 @@ enum SearchLanePrompt {
         sentence to reply to.
 
         How to work:
+        - Work silently. Write nothing until you have the answer: no "I'll search \
+          for", no "no results, let me try", no note about which dates or terms came \
+          back empty. A miss is a reason to make the next call, not something to \
+          report. The only words the reader sees are your final answer.
         - Search more than once. Rephrase, and search SUBSETS of their words: the mail \
           that answers a search usually lacks one of the words in it, and the rarest \
           word is the one that finds it.

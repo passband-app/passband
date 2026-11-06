@@ -4,19 +4,20 @@
 // The keyword search settles 220ms after the last keystroke, which is right for
 // hits and far too eager for an agent: "when did i download" settled, started a
 // lane, and every word after it arrived as a "refinement". So a start (or a
-// refinement) waits for a longer quiet, then asks a small model one question:
-// does this read as finished, or cut off mid-thought? Only "finished" spends.
+// refinement) waits for a longer quiet while a small model answers one question
+// alongside it: does this read as finished, or cut off mid-thought? Only
+// "finished" spends.
 
 import Foundation
 
 enum QueryReadiness {
     /// How long the field must stay unchanged, on top of the keyword debounce,
-    /// before the agent is even considered.
-    static let quiet = Duration.milliseconds(1000)
+    /// before the agent starts. The judge runs during this wait, not after it.
+    static let quiet = Duration.milliseconds(600)
 
     /// The judge's own deadline. Past it the rule's verdict stands: a slow
     /// check must not be the reason a question never gets answered.
-    static let deadline = Duration.milliseconds(2500)
+    static let deadline = Duration.milliseconds(1200)
 
     static let system = """
         You judge whether someone has finished typing a search into their email app. \

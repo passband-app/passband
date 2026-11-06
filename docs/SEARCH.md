@@ -412,11 +412,11 @@ debounce and the fetch), so the rule never fires mid-keystroke, and it is
 shown: the deeper band (§6.4) says which signal started it.
 
 **Deciding is not starting.** A settled query the rule calls deeper (or a
-refinement of a running lane) waits for one more second of quiet, then asks
-Haiku one question with no tools and four output tokens: does this read as
+refinement of a running lane) waits for 600 ms more of quiet, and during that
+wait asks Haiku one question with no tools and four output tokens: does this read as
 finished, or cut off mid-thought ("when did i download the")? Only "finished"
 starts or refines the lane (`QueryReadiness`, `AppStore.settleDeeperSearch`).
-Any failure or a check slower than 2.5 s falls back to the rule's verdict, so
+Any failure or a check slower than 1.2 s falls back to the rule's verdict, so
 the check can hold back a half-typed question but never blocks a whole one.
 Stopping is immediate, and the band's own button and ⌘Enter skip the check.
 

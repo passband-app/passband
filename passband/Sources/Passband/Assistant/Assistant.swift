@@ -130,9 +130,13 @@ enum Lane: String, Sendable {
     ///
     /// `calendar` is `AppStore.calendarPageAvailable`: whether the guide's
     /// topic list may name the Calendar page (`AgentTools.definitions`).
-    func definitions(calendar: Bool) -> [Wire.ToolDef] {
+    ///
+    /// `understanding` is the `understanding` hidden feature: whether the
+    /// guide's topic index may name the Usage page's Understanding section.
+    func definitions(calendar: Bool, understanding: Bool = false) -> [Wire.ToolDef] {
         let allowed = toolNames
-        return AgentTools.definitions(calendar: calendar).filter { allowed.contains($0.name) }
+        return AgentTools.definitions(calendar: calendar, understanding: understanding)
+            .filter { allowed.contains($0.name) }
     }
 
     /// The lane's own model preference. The search lane runs on every deeper
@@ -1264,7 +1268,9 @@ final class AssistantSession {
         return try Wire.Request.encoder().encode(
             Wire.Request(
                 model: model.rawValue, max_tokens: Self.maxTokens, system: system(),
-                tools: lane.definitions(calendar: AppStore.shared.calendarPageAvailable),
+                tools: lane.definitions(
+                    calendar: AppStore.shared.calendarPageAvailable,
+                    understanding: AppStore.shared.hasFeature(.understanding)),
                 messages: wrapUp
                     ? Wire.wrappingUp(Wire.withContext(sent, turnContext))
                     : Wire.withContext(sent, turnContext),

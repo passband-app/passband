@@ -755,6 +755,35 @@ fn seed_ghost_from(
     commitment: EventCommitment,
     identity_refs: Vec<String>,
 ) -> i64 {
+    seed_judged(
+        store,
+        account,
+        gmail,
+        from_addr,
+        title,
+        start,
+        commitment,
+        identity_refs,
+        EventChange::Created,
+        None,
+    )
+}
+
+/// [`seed_ghost_from`] with the record's `change` and the identity check's
+/// verdict, as the triage worker writes it before the commit.
+#[allow(clippy::too_many_arguments)]
+fn seed_judged(
+    store: &SqliteStore,
+    account: i64,
+    gmail: &str,
+    from_addr: &str,
+    title: &str,
+    start: String,
+    commitment: EventCommitment,
+    identity_refs: Vec<String>,
+    change: EventChange,
+    identity: Option<squelch_core::triage::decision::EventIdentity>,
+) -> i64 {
     let id = store
         .upsert_message(&NewMessage {
             received_at: Utc::now() - Duration::minutes(5),
@@ -794,10 +823,11 @@ fn seed_ghost_from(
         duration_estimate: None,
         event_kind: EventRecordKind::Reservation,
         commitment,
-        change: EventChange::Created,
+        change,
         identity_refs,
         likelihood: None,
         evidence: evidence.clone(),
+        identity,
     };
     let decision = MessageDecision {
         kinds: vec![EmailKind::EventReservation],
@@ -831,9 +861,206 @@ fn seed_ghost_from(
     id
 }
 
+/// The promoter's mail about the user's RA ticket, judged the same event by
+/// the identity check: linked, not merged. The timeline shows one card
+/// carrying both mails (the promoter's labelled linked), offering the
+/// promoter's new time. Keeping mine stops the offer; accepting (after a
+/// fresh change) moves the user's ghost.
+#[tokio::test]
+async fn another_senders_change_is_offered_on_the_card_and_applies_only_when_accepted() {
+    use squelch_core::triage::decision::EventIdentity;
+    let w = world("linked", GRANTED).await;
+    let day = (Utc::now() + Duration::days(4)).date_naive();
+    let at = |d: chrono::NaiveDate, hm: &str| format!("{}T{hm}:00-05:00", d.format("%Y-%m-%d"));
+    let ticket_msg = seed_ghost_from(
+        &w.store,
+        w.acct,
+        "venue",
+        "noreply@ra.co",
+        "Parameter & Endzeit Invite Polar Inertia",
+        at(day, "19:00"),
+        EventCommitment::Committed,
+        vec!["RA7F3K9Q2".into()],
+    );
+    let ghost_of = |message: i64| -> i64 {
+        w.store
+            .list_ghost_events(
+                w.acct,
+                (Utc::now() - Duration::days(1)).fixed_offset(),
+                (Utc::now() + Duration::days(30)).fixed_offset(),
+            )
+            .unwrap()
+            .into_iter()
+            .find(|g| g.sources.iter().any(|s| s.message_id == message))
+            .map(|g| g.id)
+            .unwrap()
+    };
+    let ticket = ghost_of(ticket_msg);
+    let moved_to = at(day + Duration::days(1), "21:00");
+    let promoter_msg = seed_judged(
+        &w.store,
+        w.acct,
+        "promoter",
+        "hello@endzeit.example",
+        "Polar Inertia",
+        moved_to.clone(),
+        EventCommitment::Unknown,
+        vec![],
+        EventChange::Updated,
+        Some(EventIdentity {
+            offered: vec![ticket],
+            same_as: Some(ticket),
+        }),
+    );
+    let theirs = ghost_of(promoter_msg);
+    assert_ne!(theirs, ticket, "linked, never merged");
+
+    let body = w.timeline().await;
+    let ghosts = body["ghosts"].as_array().unwrap();
+    assert_eq!(ghosts.len(), 1, "one card: {ghosts:#?}");
+    let card = &ghosts[0];
+    assert_eq!(card["id"], ticket);
+    assert_eq!(card["start"], at(day, "19:00"), "the user's time stands");
+    let change = &card["pending_change"];
+    assert_eq!(change["ghost_id"], ticket);
+    assert_eq!(change["from"], theirs);
+    assert_eq!(change["kind"], "moved");
+    assert_eq!(change["start"], moved_to);
+    assert_eq!(change["verified"], true);
+    assert_eq!(change["message_id"], promoter_msg);
+    let linked: Vec<(i64, bool)> = card["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s["message_id"].as_i64().unwrap(),
+                s["linked"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(linked, vec![(ticket_msg, false), (promoter_msg, true)]);
+
+    let answer = |accept: bool, shown: i64, from: i64| {
+        let app = w.app.clone();
+        async move {
+            app.oneshot(authed_json(
+                "POST",
+                &format!("/client/timeline/ghosts/{shown}/change"),
+                json!({ "from": from, "accept": accept }),
+            ))
+            .await
+            .unwrap()
+            .status()
+        }
+    };
+    // Backwards (the user's ghost is not linked under the promoter's): 404.
+    assert_eq!(answer(true, theirs, ticket).await, StatusCode::NOT_FOUND);
+    // Keep mine: the offer goes, nothing moves.
+    assert_eq!(answer(false, ticket, theirs).await, StatusCode::OK);
+    let body = w.timeline().await;
+    assert!(body["ghosts"][0]["pending_change"].is_null(), "{body:#}");
+    assert_eq!(body["ghosts"][0]["start"], at(day, "19:00"));
+
+    // The promoter moves it again; this time the user accepts.
+    let again = at(day + Duration::days(1), "22:00");
+    let second = seed_judged(
+        &w.store,
+        w.acct,
+        "promoter2",
+        "hello@endzeit.example",
+        "Polar Inertia",
+        again.clone(),
+        EventCommitment::Unknown,
+        vec![],
+        EventChange::Updated,
+        Some(EventIdentity {
+            offered: vec![ticket],
+            same_as: Some(ticket),
+        }),
+    );
+    let body = w.timeline().await;
+    let change = body["ghosts"][0]["pending_change"].clone();
+    assert_eq!(change["start"], again, "{body:#}");
+    let from = change["from"].as_i64().unwrap();
+    assert_eq!(answer(true, ticket, from).await, StatusCode::OK);
+    let body = w.timeline().await;
+    let ghosts = body["ghosts"].as_array().unwrap();
+    let card = ghosts.iter().find(|g| g["id"] == ticket).unwrap();
+    assert_eq!(card["start"], again);
+    assert_eq!(card["commitment"], "committed", "the user's standing stays");
+    assert!(card["pending_change"].is_null());
+    assert!(
+        card["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["message_id"] == second && s["linked"] == true)
+    );
+}
+
 /// The venue's mail and a friend's with the venue's link: refs are scoped to
 /// their sender, so they stay two ghosts, and the timeline shows them as one
 /// carrying both mails (`gcal::fold_ghosts`).
+/// The user's own event (one Passband does not keep) never carries the
+/// offer: accept could not move it, and would split the card in two.
+#[tokio::test]
+async fn a_change_is_not_offered_on_an_event_the_user_made_themselves() {
+    use squelch_core::triage::decision::EventIdentity;
+    let w = world("linked-own", GRANTED).await;
+    let start = minute(Utc::now() + Duration::days(4));
+    w.google().full.insert(
+        PRIMARY.into(),
+        vec![vec![timed("evt-show", "Polar Inertia", start, 120)]],
+    );
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    let ticket_msg = seed_ghost_from(
+        &w.store,
+        w.acct,
+        "venue",
+        "noreply@ra.co",
+        "Polar Inertia",
+        rfc(start),
+        EventCommitment::Committed,
+        vec!["RA7F3K9Q2".into()],
+    );
+    let ticket = w
+        .store
+        .list_ghost_events(
+            w.acct,
+            (Utc::now() - Duration::days(1)).fixed_offset(),
+            (Utc::now() + Duration::days(30)).fixed_offset(),
+        )
+        .unwrap()
+        .into_iter()
+        .find(|g| g.sources.iter().any(|s| s.message_id == ticket_msg))
+        .unwrap()
+        .id;
+    seed_judged(
+        &w.store,
+        w.acct,
+        "promoter",
+        "hello@endzeit.example",
+        "Polar Inertia",
+        rfc(start + Duration::days(1)),
+        EventCommitment::Unknown,
+        vec![],
+        EventChange::Updated,
+        Some(EventIdentity {
+            offered: vec![ticket],
+            same_as: Some(ticket),
+        }),
+    );
+    let body = w.timeline().await;
+    let card = &body["ghosts"][0];
+    assert_eq!(card["matched_event"]["id"], "evt-show", "{body:#}");
+    assert_eq!(card["pending_change"]["kind"], "moved", "{body:#}");
+    assert!(
+        body["events"][0].get("pending_change").is_none(),
+        "{body:#}"
+    );
+}
+
 #[tokio::test]
 async fn copies_of_one_event_from_two_senders_show_as_one_ghost() {
     let w = world("fold", GRANTED).await;
@@ -2104,6 +2331,7 @@ async fn a_ghost_names_the_real_event_it_duplicates_and_near_misses_name_none() 
             "location",
             "mail_state",
             "matched_event",
+            "pending_change",
             "sources",
             "start",
             "start_timezone",

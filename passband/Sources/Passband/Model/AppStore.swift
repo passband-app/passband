@@ -860,6 +860,10 @@ final class AppStore {
     /// an answer is applied only if nothing newer has started since it was
     /// asked for. Not observed: it is bookkeeping, never drawn.
     @ObservationIgnored var calendarLoadGeneration = 0
+    /// Linked ghosts (`LinkedChange.from`) whose change is being answered:
+    /// a second press before the first lands would find the link gone and
+    /// toast an error over a change that was applied.
+    @ObservationIgnored var answeringLinkedChanges: Set<Int> = []
     /// Bumped by `dropCalendarState` (an account switch, the gate closing):
     /// a write still out when it was bumped answers into nothing
     /// (`CalendarWriteTicket`). Bookkeeping, never drawn.
@@ -1917,6 +1921,20 @@ final class AppStore {
         settings = ConnectionSettings(serverURL: "https://fixtures.invalid", apiToken: "fixtures")
         connError = nil
         connStatus = .connected
+    }
+
+    /// `--fixture-usage` (FixtureMode.stagesUsage): the fixture transport with
+    /// the Understanding fixture staged, and the Usage page on screen. Staged
+    /// BEFORE the fixtures are entered, so the first stats already claim the
+    /// feature. Unreachable in a shipped build, where the flag is always
+    /// false and the staging is compiled out.
+    func stageUsagePage() async {
+        guard FixtureMode.stagesUsage else { return }
+        #if !PASSBAND_RELEASE
+            await FixtureAPI.shared.stageUnderstanding()
+        #endif
+        await enterFixtures()
+        setView(.usage)
     }
 
     /// Fill the fixture board before a scene is raised over it: bands, zones,

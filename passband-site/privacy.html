@@ -28,48 +28,47 @@
       media="(prefers-color-scheme: dark)"
     />
     <link rel="apple-touch-icon" href="/icon-180.png" />
-    <style>
-      body {
-        font-family: system-ui, sans-serif;
-        max-width: 42rem;
-        margin: 0 auto;
-        padding: 3rem 1.25rem 5rem;
-        line-height: 1.65;
-        color: #1a1a1a;
-      }
-      h1 { font-size: 1.8rem; margin-bottom: 0.25rem; }
-      h2 { font-size: 1.15rem; margin-top: 2.2rem; }
-      h3 { font-size: 1rem; margin-top: 1.6rem; }
-      .meta { color: #777; font-size: 0.9rem; margin-top: 0; }
-      a { color: #3556c9; }
-      nav { margin-bottom: 2rem; font-size: 0.9rem; }
-      ul { padding-left: 1.3rem; }
-      li { margin: 0.3rem 0; }
-      table {
-        border-collapse: collapse;
-        width: 100%;
-        font-size: 0.9rem;
-        margin: 1rem 0;
-      }
-      th, td {
-        border: 1px solid #ddd;
-        padding: 0.45rem 0.6rem;
-        text-align: left;
-        vertical-align: top;
-      }
-      th { background: #f6f6f6; font-weight: 600; }
-      .tier {
-        border-left: 3px solid #3556c9;
-        padding-left: 1rem;
-        margin: 1.2rem 0;
-      }
-    </style>
+    <link rel="preload" href="/newsreader-var.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/site.css" />
   </head>
   <body>
-    <nav><a href="/">&larr; Passband</a></nav>
-    <h1>Privacy Policy</h1>
-    <p class="meta">Effective November 3, 2026</p>
+    <header class="top">
+      <a class="brand" href="/"><img src="/mark.svg" alt="" width="42" height="23" /><span>passband</span></a>
+      <nav class="nav">
+        <a class="keep" href="/self-host">Self-host</a>
+        <a class="keep" href="/trust">Trust</a>
+      </nav>
+    </header>
 
+    <main>
+      <section class="hero">
+        <p class="eyebrow"><b>Legal</b></p>
+        <h1>Privacy Policy</h1>
+        <p class="updated">Effective November 5, 2026</p>
+      </section>
+
+      <div class="doc">
+        <nav class="toc" aria-label="On this page">
+          <p>On this page</p>
+          <ol>
+          <li><a href="#two-tiers-two-very-different-answers">Two tiers, two very different answers</a></li>
+          <li><a href="#google-user-data">Google user data</a></li>
+          <li><a href="#limited-use-disclosure">Limited Use disclosure</a></li>
+          <li><a href="#where-your-data-is-stored">Where your data is stored</a></li>
+          <li><a href="#automated-processing-by-language-models">Automated processing by language models</a></li>
+          <li><a href="#services-we-operate">Services we operate</a></li>
+          <li><a href="#subprocessors">Subprocessors</a></li>
+          <li><a href="#third-parties-you-direct-us-to-on-either-tier">Third parties you direct us to, on either tier</a></li>
+          <li><a href="#what-the-apps-fetch-directly">What the apps fetch directly</a></li>
+          <li><a href="#app-telemetry">App telemetry</a></li>
+          <li><a href="#retention-and-deletion">Retention and deletion</a></li>
+          <li><a href="#security">Security</a></li>
+          <li><a href="#children">Children</a></li>
+          <li><a href="#changes">Changes</a></li>
+          <li><a href="#contact">Contact</a></li>
+          </ol>
+        </nav>
+        <article class="prose">
     <p>
       Passband is an email client for Mac and iOS. Behind it runs
       <strong>squelchd</strong>, a daemon that syncs your Gmail mailbox, triages
@@ -78,7 +77,7 @@
       operate.
     </p>
 
-    <h2>Two tiers, two very different answers</h2>
+    <h2 id="two-tiers-two-very-different-answers">Two tiers, two very different answers</h2>
     <p>
       Passband is offered in two forms, and the honest answer to "where does my
       mail live" is completely different in each. Read the one you use.
@@ -108,13 +107,13 @@
       </p>
     </div>
 
-    <h2>Google user data</h2>
+    <h2 id="google-user-data">Google user data</h2>
     <p>
       Passband accesses Gmail, and optionally Google Calendar, through Google
       APIs with your consent, using OAuth. It requests exactly these scopes and
       nothing else:
     </p>
-    <table>
+    <div class="table-wrap"><table>
       <tr><th>Scope</th><th>What it is used for</th></tr>
       <tr>
         <td><code>gmail.modify</code></td>
@@ -165,7 +164,7 @@
           not match the configured account.
         </td>
       </tr>
-    </table>
+    </table></div>
     <p>
       Passband asks Google for one Gmail permission, granted in a single
       consent at signup (or at <code>squelchd auth</code> on self-host); a
@@ -177,7 +176,7 @@
       configured, and is recorded in an audit log on your own daemon.
     </p>
 
-    <h2>Limited Use disclosure</h2>
+    <h2 id="limited-use-disclosure">Limited Use disclosure</h2>
     <p>
       Passband's use and transfer to any other app of information received from
       Google APIs will adhere to the
@@ -210,7 +209,7 @@
       </li>
     </ul>
 
-    <h2>Where your data is stored</h2>
+    <h2 id="where-your-data-is-stored">Where your data is stored</h2>
 
     <h3>Self-host</h3>
     <p>
@@ -261,7 +260,7 @@
       for you and is free.
     </p>
 
-    <h2>Automated processing by language models</h2>
+    <h2 id="automated-processing-by-language-models">Automated processing by language models</h2>
     <p>
       Passband uses large language models to score importance, summarize
       threads, extract deadlines and shipment details, and power the built-in
@@ -294,14 +293,15 @@
     <p>
       Security-sensitive mail (verification codes, one-time passcodes, sign-in
       links, password resets, and similar) is sealed as soon as it is
-      recognized. Rules recognize the common forms before any model is
-      consulted; mail the rules miss may be read once by the triage model,
-      which seals it if it is one. Sealed mail is never exposed to the
-      assistant and never crosses the agent-facing interface.
+      recognized. Recognizing it is the triage model's job, so the triage
+      model reads each such message once, as it reads every other message,
+      under the same no-training terms as the rest of your mail. Sealed mail is
+      never exposed to the assistant and never crosses the agent-facing
+      interface.
     </p>
 
-    <h2>Services we operate</h2>
-    <table>
+    <h2 id="services-we-operate">Services we operate</h2>
+    <div class="table-wrap"><table>
       <tr><th>Service</th><th>What it sees</th></tr>
       <tr>
         <td><strong>Push relay</strong></td>
@@ -342,20 +342,20 @@
           into it.
         </td>
       </tr>
-    </table>
+    </table></div>
     <p>
       Relay logs contain request timing and status codes only. Device tokens,
       open tokens, and payloads are never logged.
     </p>
 
-    <h2>Subprocessors</h2>
+    <h2 id="subprocessors">Subprocessors</h2>
     <p>
       These third parties process data on our behalf for the hosted tier. Only
       Anthropic and our own hosting providers ever handle the content of your
       mail. Browserbase receives one thing taken from a message, the sender's
       unsubscribe link, and only when you ask to unsubscribe from that sender.
     </p>
-    <table>
+    <div class="table-wrap"><table>
       <tr><th>Provider</th><th>Purpose</th><th>Handles mail content</th></tr>
       <tr><td>Hetzner Cloud</td><td>Servers running hosted daemons</td><td>Yes (at rest and in memory)</td></tr>
       <tr><td>Cloudflare</td><td>Encrypted database backups (R2), DNS</td><td>Encrypted only</td></tr>
@@ -365,9 +365,10 @@
       <tr><td>PostHog</td><td>Product analytics (see below)</td><td>No</td></tr>
       <tr><td>Browserbase</td><td>A remote browser that finishes an unsubscribe on the sender's page, when you ask to unsubscribe and that page needs one</td><td>No message text. The sender's unsubscribe link, the page it opens, and your email address if the form asks for it. Not recorded</td></tr>
       <tr><td>Apple</td><td>Push notification delivery</td><td>No</td></tr>
-    </table>
+      <tr><td>WorkOS</td><td>Sign-in for AI agents you connect to your mailbox (AuthKit)</td><td>No. Your email address, and the grants you approve for each agent</td></tr>
+    </table></div>
 
-    <h2>Third parties you direct us to, on either tier</h2>
+    <h2 id="third-parties-you-direct-us-to-on-either-tier">Third parties you direct us to, on either tier</h2>
     <ul>
       <li>
         <strong>Shipment carriers.</strong> If you configure your own carrier
@@ -388,7 +389,7 @@
       </li>
     </ul>
 
-    <h2>What the apps fetch directly</h2>
+    <h2 id="what-the-apps-fetch-directly">What the apps fetch directly</h2>
     <p>
       Two kinds of request go from the Passband apps straight to a third party,
       not through us, on either tier:
@@ -409,7 +410,7 @@
       </li>
     </ul>
 
-    <h2>App telemetry</h2>
+    <h2 id="app-telemetry">App telemetry</h2>
     <p>
       The Passband apps report anonymous usage events (for example, "an email
       was archived") to PostHog to help us understand which features are used.
@@ -433,7 +434,7 @@
       below Full turns recording off.
     </p>
 
-    <h2>Retention and deletion</h2>
+    <h2 id="retention-and-deletion">Retention and deletion</h2>
     <p>
       <strong>Self-host:</strong> your data is retained on your machine for as
       long as you keep it. To delete everything, delete the local database and
@@ -454,7 +455,7 @@
       effective whether or not you have asked us to delete anything.
     </p>
 
-    <h2>Security</h2>
+    <h2 id="security">Security</h2>
     <p>
       Passband's one Gmail permission can read and write, so the separation is
       kept in Passband's own code: the sync pipeline loads its own credential
@@ -473,23 +474,52 @@
       within 72 hours.
     </p>
 
-    <h2>Children</h2>
+    <h2 id="children">Children</h2>
     <p>
       Passband is not directed to children under 13 and we do not knowingly
       collect data from them.
     </p>
 
-    <h2>Changes</h2>
+    <h2 id="changes">Changes</h2>
     <p>
       Changes to this policy will be posted on this page with an updated
       effective date. Material changes to what we collect or who receives it
       will also be announced to hosted account holders by email.
     </p>
 
-    <h2>Contact</h2>
+    <h2 id="contact">Contact</h2>
     <p>
       Questions about privacy, deletion requests, and vulnerability reports:
       <a href="mailto:braelyn@passband.app">braelyn@passband.app</a>.
     </p>
+        </article>
+      </div>
+    </main>
+
+    <footer class="foot">
+      <div class="foot-grid">
+        <a class="foot-mark" href="/" aria-label="Passband home"><img src="/mark.svg" alt="" width="42" height="23" /></a>
+        <nav aria-label="Legal">
+          <p>Legal</p>
+          <a href="/terms">Terms of Service</a>
+          <a href="/privacy">Privacy Policy</a>
+        </nav>
+        <nav aria-label="Security">
+          <p>Security</p>
+          <a href="/trust">Trust</a>
+          <a href="/security">Threat model</a>
+          <a href="mailto:braelyn@passband.app">Report a vulnerability</a>
+        </nav>
+        <nav aria-label="Connect">
+          <p>Connect</p>
+          <a href="/about">About</a>
+          <a href="/self-host">Self-host</a>
+          <a href="https://github.com/passband-app/passband/releases" target="_blank" rel="noopener noreferrer">Changelog</a>
+          <a href="https://github.com/passband-app/passband" target="_blank" rel="noopener noreferrer">GitHub</a>
+          <a href="mailto:braelyn@passband.app">Email</a>
+        </nav>
+      </div>
+      <p class="foot-legal">&copy; 2026 Passband. All rights reserved.</p>
+    </footer>
   </body>
 </html>

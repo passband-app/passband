@@ -230,6 +230,21 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-step p { margin: 0; color: var(--dim); font-size: 1rem; line-height: 1.6; max-width: 22rem; }
 .pb-step kbd { font: 600 0.78em/1 var(--mono); color: var(--accent-ink); padding: 0.18em 0.5em; border-radius: 99px;
   box-shadow: inset 0 0 0 1px rgba(78, 155, 234, 0.4); white-space: nowrap; }
+/* THE CLOUDS behind the tours (see Clouds). Wide screens only: a few large,
+   soft passband-coloured glows on a stage pinned while the section is on
+   screen, faded at the screen's top and bottom so a section's edge never cuts
+   one. Clipped sideways only. */
+.pb { overflow-x: clip; }
+.pb-clouded { position: relative; isolation: isolate; }
+.pb-clouds { display: none; }
+@media (min-width: 901px) {
+  .pb-clouds { display: block; position: absolute; z-index: -1; pointer-events: none;
+    top: 0; bottom: 0; left: calc(50% - 50vw); width: 100vw; overflow: clip; }
+  .pb-clouds-stage { position: sticky; top: 0; height: 100vh; height: 100svh; overflow: hidden;
+    -webkit-mask-image: linear-gradient(transparent, #000 18%, #000 82%, transparent);
+            mask-image: linear-gradient(transparent, #000 18%, #000 82%, transparent); }
+  .pb-cloud { position: absolute; will-change: transform; filter: blur(70px); }
+}
 /* THE GATE between the two panels: a lit filament with the squelch sitting on
    it, the same passband blue the scope's filter curve draws in. The before is
    everything upstream of it and the after is what comes out, so the divider is
@@ -574,9 +589,19 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-close .pb-h2 { margin: 0; }
 /* No meter behind this one, so no clearance for it under the label. */
 .pb-close .pb-cta { padding: 0.9rem 1.9rem; }
-.pb-foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 1rem;
-  padding: 1.75rem var(--gutter) 2.25rem; border-top: 1px solid var(--hair); font-size: 0.85rem; color: var(--faintest); }
-.pb-foot nav { display: flex; flex-wrap: wrap; gap: 1.25rem; }
+/* FOOTER: a faded mark, then three link columns, then the copyright line. */
+.pb-foot { padding: clamp(3rem, 7vw, 4.5rem) var(--gutter) 2.25rem; border-top: 1px solid var(--hair); }
+.pb-foot-grid, .pb-foot-legal { max-width: 84rem; margin-inline: auto; }
+.pb-foot-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 3rem; }
+.pb-foot-mark { width: fit-content; align-self: start; opacity: 0.35; filter: grayscale(1); transition: opacity 0.2s; }
+.pb-foot-mark:hover { opacity: 0.6; }
+.pb-foot-mark img { display: block; width: 3.5rem; height: auto; }
+.pb-foot nav { display: flex; flex-direction: column; align-items: flex-start; gap: 0.75rem; }
+.pb-foot nav p { margin: 0 0 0.75rem; color: var(--faintest); font-size: 0.95rem; }
+.pb-foot nav a { color: var(--dim); font-size: 0.95rem; }
+.pb-foot-legal { margin-top: clamp(3rem, 7vw, 4.5rem); margin-bottom: 0; color: var(--faintest); font-size: 0.85rem; }
+@media (max-width: 820px) { .pb-foot-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 420px) { .pb-foot-grid { grid-template-columns: minmax(0, 1fr); gap: 2.25rem; } }
 
 @media (prefers-reduced-motion: reduce) {
   .pb-cue { transition-duration: 0.01ms; }
@@ -1794,6 +1819,114 @@ function useTourFocus() {
   return { stepsRef, focus };
 }
 
+// THE CLOUDS. Behind the two tours, on wide screens: three large, soft glows
+// in the passband's blues, each wandering on its own slow path as the page
+// scrolls. Atmosphere only, no shapes to read. Positions and sizes are in
+// viewport units; a, the glow's strength at its heart.
+type Cloud = { w: number; h: number; l: number; t: number; rgb: string; a: number;
+  ax: number; ay: number; px: number; py: number; ph: number };
+
+const CLOUDS: Record<"mail" | "events", Cloud[]> = {
+  mail: [
+    { w: 62, h: 44, l: -14, t: 4, rgb: "78, 155, 234", a: 0.16, ax: 16, ay: 14, px: 2600, py: 3400, ph: 0 },
+    { w: 50, h: 36, l: 34, t: 52, rgb: "104, 112, 232", a: 0.13, ax: 20, ay: 12, px: 3100, py: 2400, ph: 2.1 },
+    { w: 54, h: 38, l: 66, t: -4, rgb: "70, 172, 206", a: 0.1, ax: 14, ay: 16, px: 2200, py: 3800, ph: 4.2 },
+  ],
+  events: [
+    { w: 58, h: 40, l: -10, t: 46, rgb: "104, 112, 232", a: 0.14, ax: 18, ay: 12, px: 2900, py: 2600, ph: 1 },
+    { w: 56, h: 40, l: 28, t: -2, rgb: "78, 155, 234", a: 0.15, ax: 16, ay: 14, px: 2400, py: 3600, ph: 3 },
+    { w: 48, h: 34, l: 68, t: 50, rgb: "70, 172, 206", a: 0.1, ax: 14, ay: 16, px: 3300, py: 2300, ph: 5 },
+  ],
+};
+
+// How strong the clouds are overall. Kept barely there on purpose: felt more
+// than seen.
+const CLOUD_STRENGTH = 0.22;
+// How far each wanders from its place, as a share of its own ax and ay.
+const CLOUD_WANDER = 0.45;
+// The fastest the clouds will follow the scroll, in page pixels a second.
+// A fast scroll outruns it, and the clouds keep drifting slowly after.
+const CLOUD_MAX_RATE = 420;
+
+// Two overlapping falloffs make a softer, less perfectly round glow.
+const cloudFill = ({ rgb, a: a0 }: Cloud) => {
+  const a = +(a0 * CLOUD_STRENGTH).toFixed(3);
+  return `radial-gradient(closest-side, rgba(${rgb}, ${a}), rgba(${rgb}, ${(a * 0.4).toFixed(3)}) 55%, rgba(${rgb}, 0)), ` +
+    `radial-gradient(closest-side at 68% 62%, rgba(${rgb}, ${(a * 0.7).toFixed(3)}), rgba(${rgb}, 0))`;
+};
+
+function Clouds({ kind }: { kind: "mail" | "events" }) {
+  const clouds = CLOUDS[kind];
+  const layerRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const layer = layerRef.current;
+    const stage = stageRef.current;
+    const section = layer?.parentElement;
+    if (!layer || !stage || !section) return;
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const wide = matchMedia("(min-width: 901px)");
+    let raf = 0;
+    // The clouds follow the scroll, but never faster than a slow drift: a
+    // hard flick of the wheel leaves them easing on behind it, gently, until
+    // they arrive. Off screen they simply jump to where they belong.
+    let shown: number | null = null;
+    let last = 0;
+    const draw = (p: number) => {
+      const vw = innerWidth / 100;
+      const vh = innerHeight / 100;
+      clouds.forEach((c, i) => {
+        const x = c.ax * CLOUD_WANDER * vw * Math.sin((p / c.px) * Math.PI * 2 + c.ph);
+        const y = c.ay * CLOUD_WANDER * vh * Math.sin((p / c.py) * Math.PI * 2 + c.ph + 1.3);
+        (stage.children[i] as HTMLElement).style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0)`;
+      });
+    };
+    const move = (now: number) => {
+      raf = 0;
+      const rect = section.getBoundingClientRect();
+      const target = -rect.top;
+      const dt = last ? Math.min(0.1, (now - last) / 1000) : 0;
+      last = now;
+      const offscreen = rect.bottom < 0 || rect.top > innerHeight;
+      if (shown === null || offscreen) {
+        shown = target;
+      } else {
+        // Ease toward the scroll, capped at CLOUD_MAX_RATE scroll-pixels a second.
+        const want = (target - shown) * (1 - Math.exp(-dt / 0.6));
+        const cap = CLOUD_MAX_RATE * dt;
+        shown += Math.max(-cap, Math.min(cap, want));
+      }
+      draw(shown);
+      if (!offscreen && Math.abs(target - shown) > 0.5) raf = requestAnimationFrame(move);
+      else last = 0;
+    };
+    const queue = () => {
+      if (!raf && wide.matches) raf = requestAnimationFrame(move);
+    };
+    queue();
+    addEventListener("scroll", queue, { passive: true });
+    addEventListener("resize", queue);
+    return () => {
+      cancelAnimationFrame(raf);
+      removeEventListener("scroll", queue);
+      removeEventListener("resize", queue);
+    };
+  }, [clouds]);
+
+  return (
+    <div className="pb-clouds" ref={layerRef} aria-hidden="true">
+      <div className="pb-clouds-stage" ref={stageRef}>
+        {clouds.map((c, i) => (
+          <div key={i} className="pb-cloud" style={{
+            width: `${c.w}vw`, height: `${c.h}vw`, left: `${c.l}vw`, top: `${c.t}vh`, background: cloudFill(c),
+          }} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Showcase() {
   const { stepsRef, focus } = useTourFocus();
 
@@ -2434,7 +2567,8 @@ export function App() {
         </div>
       </section>
 
-      <section className="pb-section">
+      <section className="pb-section pb-clouded">
+        <Clouds kind="mail" />
         <h2 className="pb-h2">
           Same inbox. <em>Squelched.</em>
         </h2>
@@ -2445,7 +2579,8 @@ export function App() {
         <Showcase />
       </section>
 
-      <section className="pb-section">
+      <section className="pb-section pb-clouded">
+        <Clouds kind="events" />
         <h2 className="pb-h2">
           Plans arrive by email. <em>So does your calendar.</em>
         </h2>
@@ -2528,15 +2663,29 @@ export function App() {
       </section>
 
       <footer className="pb-foot">
-        <span>Passband</span>
-        <nav>
-          <a href="/about">About</a>
-          <a href="/self-host">Self-host</a>
-          <a href="/trust">Trust</a>
-          <a href="/privacy">Privacy</a>
-          <a href="/terms">Terms</a>
-          <a href="https://github.com/passband-app/passband">GitHub</a>
-        </nav>
+        <div className="pb-foot-grid">
+          <a className="pb-foot-mark" href="/" aria-label="Passband home"><img src="/mark.svg" alt="" width={42} height={23} /></a>
+          <nav aria-label="Legal">
+            <p>Legal</p>
+            <a href="/terms">Terms of Service</a>
+            <a href="/privacy">Privacy Policy</a>
+          </nav>
+          <nav aria-label="Security">
+            <p>Security</p>
+            <a href="/trust">Trust</a>
+            <a href="/security">Threat model</a>
+            <a href="mailto:braelyn@passband.app">Report a vulnerability</a>
+          </nav>
+          <nav aria-label="Connect">
+            <p>Connect</p>
+            <a href="/about">About</a>
+            <a href="/self-host">Self-host</a>
+            <a href="https://github.com/passband-app/passband/releases" target="_blank" rel="noopener noreferrer">Changelog</a>
+            <a href="https://github.com/passband-app/passband" target="_blank" rel="noopener noreferrer">GitHub</a>
+            <a href="mailto:braelyn@passband.app">Email</a>
+          </nav>
+        </div>
+        <p className="pb-foot-legal">&copy; 2026 Passband. All rights reserved.</p>
       </footer>
     </main>
   );

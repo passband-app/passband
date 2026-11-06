@@ -120,18 +120,8 @@ struct SidebarRail: View {
 
                 Spacer(minLength: Space.s8)
 
-                // WAYS THROUGH YOUR MAIL: the discovery ring, alone between the
-                // spacer and the divider. It is about how you use the five
-                // destinations above, not about your account like the group
-                // below, so it sits on the line between them. A RailButton
-                // like any other, so the selector parks on it when its page
-                // is up; the divider's own vertical padding is the gap under
-                // it, the same gap the bottom group gets above.
-                RailButton(
-                    view: .discovery, keyHint: nil, active: store.activeView == .discovery,
-                    showRings: false, onSlot: { slots[.discovery] = $0 }
-                ) { _ in DiscoveryRailGlyph() }
-                .accessibilityValue(DiscoveryRailGlyph.spokenValue)
+                // The discovery ring used to sit here. Discover is retired
+                // (2026-11-05): its code stays in Views/Discovery, unmounted.
 
                 Rectangle()
                     .fill(Palette.hairline)

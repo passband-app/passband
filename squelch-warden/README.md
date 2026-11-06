@@ -69,6 +69,7 @@ it costs a compare.
 | `POST /v1/tenants/{label}/reconcile` | `200 { deployment, status }`: `converged` / `recreated` / `created` | `404`, `409 not_reconcilable`, `409 cancelled`, `500` machine reason |
 | `POST /v1/tenants/{label}/pair` | `200 { pair_code, pair_url, deep_link }` | `404`, `409 cancelled`, `500 no_ready_pod` |
 | `DELETE /v1/tenants/{label}` | `204` (workload gone, **data kept**) | - |
+| `POST /v1/tenants/{label}/purge` | `204` (workload gone, **data destroyed**, label free) | `500` machine reason |
 | `GET /healthz` | `200 ok` (no token: it is a probe and says nothing) | - |
 
 ```json
@@ -111,6 +112,15 @@ running tenant's credential is `DELETE` (which keeps the mail) and then `PUT`.
 
 `DELETE` is idempotent: an unknown label is `204`, because the control plane
 calls it on its own unwind paths and should not have to special-case a 404.
+
+`purge` is the destructive one, and it is a separate route rather than a flag
+on `DELETE` so a warden that predates it answers `404` instead of quietly
+keeping the data. It does everything `DELETE` does, waits for the pod to exit,
+then deletes the volume, the credential, and the identity Secret last. A
+failure partway leaves a cancelled tenant, and running it again finishes the
+job; an unknown label is `204`. Its only caller is the Delete button on the
+control plane's admin board, which is how a test mailbox (`passband-qa`) gets
+wiped so the same person can sign up again from nothing.
 
 A `500` body is a machine reason and nothing else (`not_ready`, `pair_failed`,
 `pair_output_unparsed`, `workload_failed`, `cluster_unavailable`, ...). No

@@ -234,7 +234,7 @@
 
     <main>
       <section class="hero">
-        <p class="eyebrow"><b>Trust</b> &middot; updated October 29, 2026</p>
+        <p class="eyebrow"><b>Trust</b> &middot; updated November 5, 2026</p>
         <h1>Where your mail goes. All of it.</h1>
         <p class="lede">
           Passband reads your mail so it can decide what needs you. This page is
@@ -244,7 +244,7 @@
         <dl class="spec">
           <div><dt>Training on your mail</dt><dd>Never<small>not by us, not by our model provider</small></dd></div>
           <div><dt>Isolation</dt><dd>One per account<small>own daemon, own database, own key</small></dd></div>
-          <div><dt>Subprocessors</dt><dd>8<small>all listed below</small></dd></div>
+          <div><dt>Subprocessors</dt><dd>9<small>all listed below</small></dd></div>
           <div><dt>Login codes to agents</dt><dd>Never<small>sealed away from the assistant and AI tools</small></dd></div>
         </dl>
       </section>
@@ -313,7 +313,7 @@
             </div>
             <div class="ch content" data-hosted>
               <span class="wire"></span>
-              <div class="what"><b>Triage and the assistant</b>The parts of a message a model needs to score it, summarize it, or answer a question you asked. Codes our rules recognize are held back before this point.</div>
+              <div class="what"><b>Triage and the assistant</b>The parts of a message a model needs to score it, summarize it, or answer a question you asked. Triage is also what recognizes login codes, so it reads them once; after that they are sealed away from the assistant.</div>
               <div class="who"><b>Anthropic</b>through our gateway on AWS, which meters spend and keeps no bodies<br /><span class="pill">mail content</span><span class="off">off</span></div>
             </div>
             <div class="ch sealed" data-hosted>
@@ -411,6 +411,12 @@
               <td>Apple<small>apple.com</small></td>
               <td>Push notification delivery</td>
               <td>Device token, event id, thread id<br /><span class="dot meta">no mail content</span></td>
+              <td>United States</td>
+            </tr>
+            <tr>
+              <td>WorkOS<small>workos.com</small></td>
+              <td>Sign-in for AI agents you connect to your mailbox (AuthKit)</td>
+              <td>Your email address and the grants you approve for each agent. It issues the tokens those agents present, so it is trusted to vouch for who may read your non-sealed mail<br /><span class="dot meta">no mail content</span></td>
               <td>United States</td>
             </tr>
             <tr>
@@ -577,14 +583,29 @@
     </main>
 
     <footer class="foot">
-      <span>Passband</span>
-      <nav>
-        <a href="/about">About</a>
-        <a href="/self-host">Self-host</a>
-        <a href="/trust">Trust</a>
-        <a href="/privacy">Privacy</a>
-        <a href="/terms">Terms</a>
-      </nav>
+      <div class="foot-grid">
+        <a class="foot-mark" href="/" aria-label="Passband home"><img src="/mark.svg" alt="" width="42" height="23" /></a>
+        <nav aria-label="Legal">
+          <p>Legal</p>
+          <a href="/terms">Terms of Service</a>
+          <a href="/privacy">Privacy Policy</a>
+        </nav>
+        <nav aria-label="Security">
+          <p>Security</p>
+          <a href="/trust">Trust</a>
+          <a href="/security">Threat model</a>
+          <a href="mailto:braelyn@passband.app">Report a vulnerability</a>
+        </nav>
+        <nav aria-label="Connect">
+          <p>Connect</p>
+          <a href="/about">About</a>
+          <a href="/self-host">Self-host</a>
+          <a href="https://github.com/passband-app/passband/releases" target="_blank" rel="noopener noreferrer">Changelog</a>
+          <a href="https://github.com/passband-app/passband" target="_blank" rel="noopener noreferrer">GitHub</a>
+          <a href="mailto:braelyn@passband.app">Email</a>
+        </nav>
+      </div>
+      <p class="foot-legal">&copy; 2026 Passband. All rights reserved.</p>
     </footer>
   </body>
 </html>

@@ -922,6 +922,36 @@ impl ControlStore {
             .is_some())
     }
 
+    /// Forget a tenant entirely, after the warden has PURGED it: the tenant row
+    /// (its feature grants go with it by cascade), every funnel row that names
+    /// it or is `user_id`, and its reconnect jobs. One transaction, so the board
+    /// never shows half of it.
+    ///
+    /// The funnel rows go too, on purpose: this is the operator wiping a
+    /// mailbox so the same person can be invited and sign up again from the
+    /// top, and a kept row would read "signed up" for somebody with no mailbox
+    /// and block a direct invite to the address. Spent invite codes are left
+    /// alone: they are history, and `invited_by` already copes with a tenant id
+    /// that names nothing.
+    ///
+    /// Returns how many tenant rows went, 0 or 1. Idempotent.
+    pub async fn purge_tenant(&self, label: &str, user_id: i64) -> Result<u64> {
+        let mut client = self.client().await?;
+        let tx = client.transaction().await?;
+        let tenants = tx
+            .execute("DELETE FROM tenants WHERE label = $1", &[&label])
+            .await?;
+        tx.execute(
+            "DELETE FROM users WHERE id = $1 OR tenant_label = $2",
+            &[&user_id, &label],
+        )
+        .await?;
+        tx.execute("DELETE FROM reconnect_jobs WHERE label = $1", &[&label])
+            .await?;
+        tx.commit().await?;
+        Ok(tenants)
+    }
+
     /// The label of the ACTIVE tenant for this mailbox, if any. One mailbox,
     /// one daemon: a second signup from the same Google account is refused
     /// politely rather than provisioned into a second, competing sync loop.

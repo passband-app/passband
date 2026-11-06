@@ -277,6 +277,13 @@ fn context(conn: &Connection, account: AccountId, id: i64) -> Result<AgentContex
         rules,
         matched_rules,
         sender_is_contact,
+        // NOT READ HERE. Every triage job, evidence read, notification and
+        // decision view loads a context, and the ledger is the `understanding`
+        // flag's: the worker attaches it only when the flag is on
+        // (`triage_worker::attach_relationship`), so a mailbox without the flag
+        // runs exactly the queries it always did and no fault in the ledger
+        // can fail its triage.
+        relationship: None,
         corrections,
         revision,
         memory: vec![],
@@ -543,6 +550,10 @@ pub(super) fn correct_agent_triage_conn(
     if field == "kinds" && candidate.kinds.is_empty() {
         return Err(CoreError::InvalidInput("kinds cannot be empty".into()));
     }
+    // Every correction moves the sender's relationship row (its
+    // `corrections`, and for a seal what the row counts), and none of them
+    // moves a count, so the mark is full.
+    super::relationships::mark_message_sender_dirty_conn(conn, account, message, true)?;
     // A correction to how an ARCHIVE message is filed is the owner asking for
     // it to be treated as live mail: promote it, then queue the same triage
     // any corrected row gets. Sealing or unsealing one (`external_access`) is
@@ -2167,6 +2178,8 @@ impl AgentTriageStore for SqliteStore {
         if current.source.content != original.source.content {
             return Ok(AgentCommitOutcome::Stale);
         }
+        let was_sealed =
+            super::relationships::message_known_sealed_conn(&tx, job.account_id, job.message_id)?;
         let restricted = explicit_access_override(&tx, job.account_id, job.message_id)?
             .unwrap_or(decision.restricted);
         tx.execute(
@@ -2176,6 +2189,14 @@ impl AgentTriageStore for SqliteStore {
                 job.message_id,
                 if restricted { "restricted" } else { "allowed" }
             ],
+        )?;
+        // Sealed or unsealed by the access check: the sender's relationship
+        // row follows within a round, as at the decision commit.
+        super::relationships::mark_if_sealing_changed_conn(
+            &tx,
+            job.account_id,
+            job.message_id,
+            was_sealed,
         )?;
         // Access changed outside the triage commit: the message's stored
         // decision is projected again now (matched afresh), not at its next
@@ -2337,6 +2358,10 @@ impl AgentTriageStore for SqliteStore {
             ));
         }
         let decision = &decision;
+        // Read BEFORE the decision and the access state are written, so the
+        // relationship mark below sees which way sealing moved.
+        let was_sealed =
+            super::relationships::message_known_sealed_conn(&tx, job.account_id, job.message_id)?;
         let revision: i64 = tx.query_row(
             "SELECT revision FROM agent_message_state WHERE account_id=?1 AND message_id=?2",
             params![job.account_id, job.message_id],
@@ -2369,6 +2394,15 @@ impl AgentTriageStore for SqliteStore {
         // A decision that SEALS the message deletes its vectors here, at the
         // event, like its translation above (`vector_forbidden_sql!`).
         super::search::purge_forbidden_vectors_conn(&tx, Some(job.message_id))?;
+        // And moves it into or out of its sender's relationship row within a
+        // round: the ledger counted it while it was pending (`relationships`),
+        // and a re-triage that drops its auth kinds puts it back.
+        super::relationships::mark_if_sealing_changed_conn(
+            &tx,
+            job.account_id,
+            job.message_id,
+            was_sealed,
+        )?;
         let done = apply_done(&tx, job, decision, Utc::now())?;
         // A RE-CHECK MOVES MAIL ONLY BY ITS DONE. For the owner, done and
         // leaving FYE are one act: a re-check writes no placement at all (no
@@ -2558,6 +2592,9 @@ impl AgentTriageStore for SqliteStore {
                 message
             ],
         )?;
+        // The sender's relationship row now owes a recount of its attention
+        // columns. One `INSERT OR IGNORE`; the refine lane does the work.
+        super::relationships::mark_message_sender_dirty_conn(&conn, account, message, false)?;
         Ok(())
     }
     fn agent_access_allowed(&self, account: AccountId, message: i64) -> Result<bool> {

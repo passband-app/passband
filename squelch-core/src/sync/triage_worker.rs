@@ -18,6 +18,13 @@ pub struct StoreEvidence<'a, S: Store> {
     account: AccountId,
     limit: usize,
     sources: std::sync::Mutex<Vec<AgentSourceSnapshot>>,
+    /// Does `read_sender_history` carry the sender's relationship block?
+    /// Only under the `understanding` hidden feature
+    /// ([`crate::features::UNDERSTANDING`]); off by default, so a reader
+    /// nobody switched on serves exactly what it did before the ledger.
+    /// Atomic because the memory scrub's re-run turns it off on a reader the
+    /// first run already borrowed ([`Self::withhold_relationship`]).
+    relationship: std::sync::atomic::AtomicBool,
 }
 
 impl<'a, S: Store> StoreEvidence<'a, S> {
@@ -29,7 +36,23 @@ impl<'a, S: Store> StoreEvidence<'a, S> {
             account,
             limit,
             sources: std::sync::Mutex::new(Vec::new()),
+            relationship: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Serve the relationship block in `read_sender_history`: the caller
+    /// passes whether the `understanding` feature is on.
+    pub fn with_relationship(self, on: bool) -> Self {
+        self.relationship
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+        self
+    }
+
+    /// Stop serving the relationship block, for the memory scrub's flag-off
+    /// re-run on this same reader (`understanding::scrubbed` strips the rest).
+    pub(crate) fn withhold_relationship(&self) {
+        self.relationship
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Seed the sources the initial snapshot already exposed.
@@ -66,6 +89,7 @@ impl<S: Store> EvidenceReader for StoreEvidence<'_, S> {
 impl<S: Store> StoreEvidence<'_, S> {
     fn read_inner(&self, request: &EvidenceRequest) -> Result<EvidenceResult> {
         let mut revisions = BTreeMap::new();
+        let mut relationship = None;
         let messages = match request {
             EvidenceRequest::ReadMessage { message_id, offset } => {
                 self.store
@@ -144,6 +168,20 @@ impl<S: Store> StoreEvidence<'_, S> {
                     .agent_search_mail(self.account, query, self.limit)?
             }
             EvidenceRequest::ReadSenderHistory { sender } => {
+                // The sender's relationship row rides at the top of the
+                // result, the same block the initial context carries for the
+                // message's own sender (docs/UNDERSTANDING.md §2.1).
+                // A ledger that cannot answer leaves the block out of the
+                // result, as `attach_relationship` does for the context: it is
+                // evidence, and a fault in it must not fail the read.
+                if self.relationship.load(std::sync::atomic::Ordering::Relaxed) {
+                    match self.store.relationship_context(self.account, sender) {
+                        Ok(block) => relationship = block,
+                        Err(e) => eprintln!(
+                            "squelch: relationship ledger unreadable ({e}); sender history without it"
+                        ),
+                    }
+                }
                 self.store
                     .agent_sender_history(self.account, sender, self.limit)?
             }
@@ -224,8 +262,12 @@ impl<S: Store> StoreEvidence<'_, S> {
             .expect("evidence sources")
             .extend(messages.iter().map(|m| m.source.clone()));
         let sources = messages.iter().map(|m| m.id).collect();
+        let mut data = serde_json::json!({"messages": messages});
+        if let Some(relationship) = relationship {
+            data["relationship"] = relationship;
+        }
         Ok(EvidenceResult {
-            data: serde_json::json!({"messages": messages}),
+            data,
             source_message_ids: sources,
             thread_revisions: revisions,
         })
@@ -243,6 +285,30 @@ fn fed_back(
         done: None,
         ..decision
     })
+}
+
+/// THE LEDGER COMPUTES FOR EVERYONE AND INFORMS ONLY UNDER THE FLAG. With the
+/// `understanding` hidden feature off the ledger is not READ at all: the
+/// context keeps no `relationship` key, exactly as before the first-run
+/// backfill, and the run makes only main's queries. On, the sender's block is
+/// read and attached here. A ledger that cannot answer is logged and leaves
+/// the block out: it is evidence, and no fault in it may fail a triage run.
+/// Marks, the drain, the nightly walk and the backfill run regardless, so a
+/// mailbox switched on has its ledger at once.
+pub(crate) fn attach_relationship<S: Store + ?Sized>(
+    store: &S,
+    account: AccountId,
+    context: &mut AgentContext,
+    understanding: bool,
+) {
+    context.relationship = None;
+    if !understanding {
+        return;
+    }
+    match store.relationship_context(account, &context.message.from_addr) {
+        Ok(block) => context.relationship = block,
+        Err(e) => eprintln!("squelch: relationship ledger unreadable ({e}); triaging without it"),
+    }
 }
 
 /// The agent's starting context. `clock` is this run's "now" in the owner's
@@ -265,11 +331,7 @@ pub fn snapshot(
     sources.push(context.message.id);
     sources.sort_unstable();
     sources.dedup();
-    ContextSnapshot {
-        account_id: job.account_id,
-        message_id: job.message_id,
-        thread_id: context.message.thread_id.clone(),
-        initial: serde_json::json!({
+    let mut initial = serde_json::json!({
             "message": context.message,
             "thread": siblings,
             "previous_decision": fed_back(context.previous_decision.clone()),
@@ -287,7 +349,18 @@ pub fn snapshot(
             "message_received_local": chrono::DateTime::parse_from_rfc3339(&context.message.received_at)
                 .ok()
                 .map(|at| clock.local(at.with_timezone(&Utc))),
-        }),
+    });
+    // Beside `sender_is_contact`, and ABSENT, not null, when the ledger has
+    // nothing to say (no row, or no first-run backfill yet): an absent block
+    // is "nothing known", where a null one invites a guess at why.
+    if let Some(relationship) = &context.relationship {
+        initial["relationship"] = relationship.clone();
+    }
+    ContextSnapshot {
+        account_id: job.account_id,
+        message_id: job.message_id,
+        thread_id: context.message.thread_id.clone(),
+        initial,
         source_message_ids: sources,
         thread_revisions: [(
             context.message.thread_id.clone(),
@@ -301,6 +374,8 @@ pub fn snapshot(
             .filter_map(|r| r.get("id").and_then(|id| id.as_i64()))
             .collect(),
         memory: Vec::new(),
+        // Set by the worker from the `understanding` flag; off is main's prompt.
+        understanding: false,
     }
 }
 
@@ -439,6 +514,15 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 return;
             }
         };
+        // The relationship ledger computes for everyone; it reaches the agent
+        // only under the `understanding` feature (docs/UNDERSTANDING.md §5).
+        let understanding = self.features.enabled(crate::features::UNDERSTANDING);
+        attach_relationship(
+            self.store.as_ref(),
+            self.account_id,
+            &mut context,
+            understanding,
+        );
         let now = Utc::now();
         let retry_after = self.agent_retry_after.load(Ordering::Relaxed);
         let episode = self.agent_last_cooldown_end.load(Ordering::Relaxed);
@@ -518,6 +602,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     })
                     .collect(),
             ),
+            relationship: std::sync::atomic::AtomicBool::new(understanding),
         };
         let mut config = self.config.triage.clone();
         let base_model = config
@@ -544,11 +629,20 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             Utc::now(),
             self.store.owner_zone(self.account_id).unwrap_or_default(),
         );
-        let input = snapshot(
+        let mut input = snapshot(
             &context,
             job,
             config.context.initial_thread_messages,
             &clock,
+        );
+        // ONE read of the flag per run, at the top of `run_agent_job`: it picks
+        // the prompt variant, gates the memory lines, attaches the relationship
+        // block and switches the evidence reader, so none of them can disagree.
+        input.understanding = understanding;
+        input.memory = self.memory_for(
+            &context.message.thread_id,
+            &context.message.from_addr,
+            understanding,
         );
         // A new account triages the jobs somebody is waiting on at the
         // onboarding effort for its first days (`Stage2Config::effort_for_job`):
@@ -564,7 +658,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             self.config
                 .stage2
                 .effort_for_job(job.foreground, || self.account_created_at(), now);
-        let connection = AgentConnection {
+        let connection = || AgentConnection {
             http: &self.http,
             url: &llm.url,
             api_key: &llm.api_key,
@@ -572,8 +666,47 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             model: &base_model,
             effort,
         };
-        match run_agent(connection, &config, input, &reader).await {
-            Ok(run) => {
+        let mut input_understanding = input.understanding;
+        // The commit-path guard behind the prompt's "never repeat a memory
+        // line" (docs/TRIAGE-OPERATIONS.md, Known limits): see
+        // `understanding::scrubbed`. What the re-run would read, built before the
+        // first run consumes the input.
+        let served_memory = input.memory.clone();
+        let scrub = (!served_memory.is_empty()).then(|| super::understanding::scrubbed(&input));
+        let initial_sources = reader.sources.lock().expect("evidence sources").clone();
+        let mut outcome = run_agent(connection(), &config, input, &reader).await;
+        let mut memory_scrubbed = false;
+        let mut scrubbed_usage = Vec::new();
+        if let Some(scrub) = scrub
+            && let Ok(run) = &outcome
+            && crate::triage::memory::memory_taints(
+                &served_memory,
+                &crate::triage::memory::decision_prose(&run.decision),
+            )
+        {
+            // ONCE, flag-off, for this job only. The tainted run's usage is
+            // billed (it was paid for); its decision is never committed. The
+            // log names the message and never the text.
+            eprintln!(
+                "squelch: triage of message {} repeated a memory line; re-running it once \
+                 without understanding",
+                job.message_id
+            );
+            scrubbed_usage = run.usage.clone();
+            for usage in &scrubbed_usage {
+                let _ = self
+                    .store
+                    .stage2_bump_usage(self.account_id, day, (*usage).into());
+            }
+            *reader.sources.lock().expect("evidence sources") = initial_sources;
+            // The flag is off for the re-run: its tool reads too.
+            reader.withhold_relationship();
+            memory_scrubbed = true;
+            input_understanding = false;
+            outcome = run_agent(connection(), &config, scrub, &reader).await;
+        }
+        match outcome {
+            Ok(mut run) => {
                 self.note_provider_success();
                 // An investigation answered: its ladder starts over, and the
                 // two-timeouts rule may fail the next job that times out
@@ -582,7 +715,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 self.agent_answered_since_timeout
                     .store(true, Ordering::Relaxed);
                 context.run_metadata = serde_json::json!({
-                    "prompt_version": crate::triage::agent::PROMPT_VERSION,
+                    // By the variant that ran: off is main's prompt and
+                    // main's version (agent::prompt_version).
+                    "prompt_version": crate::triage::agent::prompt_version(input_understanding),
+                    "understanding": input_understanding,
+                    "memory_scrubbed": memory_scrubbed,
+                    "scrubbed_usage": scrubbed_usage,
                     "schema_version": 1,
                     "model": config.agent.model.as_deref().unwrap_or(&base_model),
                     "review_model": config.agent.review_model,
@@ -594,6 +732,18 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     "usage": run.usage,
                 });
                 for usage in run.usage {
+                    let _ = self
+                        .store
+                        .stage2_bump_usage(self.account_id, day, usage.into());
+                }
+                // Is each event one the user already has? One small call,
+                // only when the store has a candidate; a failure leaves the
+                // store's own rules to decide (`triage::event_identity`).
+                let model = config.agent.model.as_deref().unwrap_or(&base_model);
+                if let Some(usage) = self
+                    .check_event_identity(job.message_id, &mut run.decision, llm, model)
+                    .await
+                {
                     let _ = self
                         .store
                         .stage2_bump_usage(self.account_id, day, usage.into());
@@ -636,6 +786,66 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     at: now,
                 };
                 self.handle_agent_failure(job, error, day, &limits, false, start)
+            }
+        }
+    }
+
+    /// The identity check for one decision's event records
+    /// (`triage::event_identity`): asks the store for candidates, and only
+    /// when there are some, asks the model once and writes its verdicts onto
+    /// the records. Returns the call's usage to bill. A store or model
+    /// failure is logged by kind and leaves the decision as it was.
+    async fn check_event_identity(
+        &self,
+        message_id: i64,
+        decision: &mut crate::triage::decision::MessageDecision,
+        llm: &crate::config::ResolvedLlm,
+        model: &str,
+    ) -> Option<crate::triage::llm::Usage> {
+        use crate::triage::event_identity;
+        use crate::triage::llm::LlmOutcome;
+        let records = crate::triage::ghost::launder_events(&decision.records);
+        if records.is_empty() {
+            return None;
+        }
+        let questions =
+            match self
+                .store
+                .event_identity_candidates(self.account_id, message_id, &records)
+            {
+                Ok(q) if !q.records.is_empty() => q,
+                Ok(_) => return None,
+                Err(_) => {
+                    eprintln!("squelch: event identity candidates failed for message {message_id}");
+                    return None;
+                }
+            };
+        match event_identity::ask(
+            &self.http,
+            &llm.url,
+            &llm.api_key,
+            llm.provider,
+            model,
+            questions.scope.as_deref(),
+            &questions.records,
+        )
+        .await
+        {
+            Ok(LlmOutcome::Ok(answers, usage)) => {
+                event_identity::apply(decision, &questions.records, &answers);
+                usage
+            }
+            Ok(LlmOutcome::Refused(usage)) => usage,
+            Ok(LlmOutcome::Failed(kind, usage)) => {
+                eprintln!("squelch: event identity check failed for message {message_id} ({kind})");
+                usage
+            }
+            Err(e) => {
+                eprintln!(
+                    "squelch: event identity check failed for message {message_id} ({})",
+                    e.kind
+                );
+                None
             }
         }
     }
@@ -1854,6 +2064,124 @@ mod budget_tests {
         assert_eq!(snapshot.initial["sender_is_contact"], true);
         assert_eq!(snapshot.rule_ids, vec![7]);
         assert!(!snapshot.initial.to_string().contains("unrelated"));
+    }
+
+    fn fill_ledger(store: &SqliteStore, account: AccountId, ledger_days: i64) {
+        use crate::store::Store as _;
+        let since = (Utc::now() - chrono::Duration::days(ledger_days)).to_rfc3339();
+        for key in [
+            crate::store::sqlite::OPEN_LEDGER_SINCE_KEY,
+            crate::store::sqlite::DWELL_LEDGER_SINCE_KEY,
+        ] {
+            store.set_app_setting(account, key, &since).unwrap();
+        }
+        store.recompute_all_relationships(account).unwrap();
+        store
+            .set_sync_state(
+                account,
+                crate::store::sqlite::relationships::RELATIONSHIPS_BACKFILL_KEY,
+                &crate::store::SyncState {
+                    uidvalidity: 0,
+                    last_uid: 1,
+                },
+            )
+            .unwrap();
+    }
+
+    /// docs/UNDERSTANDING.md §2.1: the sender's ledger row rides beside
+    /// `sender_is_contact`, ABSENT until the first-run backfill has filled the
+    /// table, without attention on a young ledger, and in no fingerprint.
+    #[test]
+    fn the_context_carries_the_relationship_block_beside_the_contact_flag() {
+        let (store, account, ids) = evidence_fixture();
+        let job = read_job(account, ids[0]);
+        let mut unfilled = store.load_agent_context(&job).unwrap();
+        attach_relationship(&store, account, &mut unfilled, true);
+        let initial = snapshot(&unfilled, &job, 8, &utc_clock()).initial;
+        assert!(initial.get("relationship").is_none(), "no backfill, no key");
+
+        fill_ledger(&store, account, 3);
+        let mut young = store.load_agent_context(&job).unwrap();
+        attach_relationship(&store, account, &mut young, true);
+        let initial = snapshot(&young, &job, 8, &utc_clock()).initial;
+        let block = &initial["relationship"];
+        assert_eq!(block["received"]["count"], 3);
+        assert_eq!(block["coverage_days"], 3);
+        assert!(block.get("attention").is_none(), "{block}");
+        assert_eq!(block["replies"]["median_reply"], serde_json::Value::Null);
+        assert_eq!(
+            young.revision, unfilled.revision,
+            "a recount must never make a run in flight stale"
+        );
+
+        fill_ledger(&store, account, 60);
+        let mut ripe = store.load_agent_context(&job).unwrap();
+        attach_relationship(&store, account, &mut ripe, true);
+        let initial = snapshot(&ripe, &job, 8, &utc_clock()).initial;
+        // Past the floor the block is there; what it counts is the Reading
+        // purge's own universe, pinned in `store::sqlite::tests::relationships`.
+        let attention = &initial["relationship"]["attention"];
+        assert!(attention.is_object(), "{initial}");
+        assert_eq!(attention["opened"], 0);
+    }
+
+    #[test]
+    fn read_sender_history_carries_the_relationship_at_the_top() {
+        let (store, account, _) = evidence_fixture();
+        fill_ledger(&store, account, 60);
+        let reader = StoreEvidence::new(&store, account, 2).with_relationship(true);
+        let result = reader
+            .read(&EvidenceRequest::ReadSenderHistory {
+                sender: "Sender@Example.com".into(),
+            })
+            .unwrap();
+        assert_eq!(result.data["relationship"]["received"]["count"], 3);
+        assert_eq!(result.data["messages"].as_array().unwrap().len(), 2);
+        let stranger = reader
+            .read(&EvidenceRequest::ReadSenderHistory {
+                sender: "nobody@nowhere.example".into(),
+            })
+            .unwrap();
+        assert!(
+            stranger.data.get("relationship").is_none(),
+            "{}",
+            stranger.data
+        );
+    }
+
+    /// `understanding` off: the ledger is filled and backfilled, and still
+    /// neither the initial context nor `read_sender_history` carries it.
+    #[test]
+    fn the_relationship_reaches_the_agent_only_under_the_understanding_flag() {
+        let (store, account, ids) = evidence_fixture();
+        fill_ledger(&store, account, 60);
+        let job = read_job(account, ids[0]);
+
+        let mut off = store.load_agent_context(&job).unwrap();
+        assert!(off.relationship.is_none(), "a load reads no ledger");
+        attach_relationship(&store, account, &mut off, false);
+        assert!(off.relationship.is_none());
+        let initial = snapshot(&off, &job, 8, &utc_clock()).initial;
+        assert!(initial.get("relationship").is_none(), "{initial}");
+        let history = StoreEvidence::new(&store, account, 2)
+            .read(&EvidenceRequest::ReadSenderHistory {
+                sender: "sender@example.com".into(),
+            })
+            .unwrap();
+        assert!(history.data.get("relationship").is_none(), "off by default");
+        assert_eq!(history.data["messages"].as_array().unwrap().len(), 2);
+
+        let mut on = store.load_agent_context(&job).unwrap();
+        attach_relationship(&store, account, &mut on, true);
+        let initial = snapshot(&on, &job, 8, &utc_clock()).initial;
+        assert_eq!(initial["relationship"]["received"]["count"], 3);
+        let history = StoreEvidence::new(&store, account, 2)
+            .with_relationship(true)
+            .read(&EvidenceRequest::ReadSenderHistory {
+                sender: "sender@example.com".into(),
+            })
+            .unwrap();
+        assert_eq!(history.data["relationship"]["received"]["count"], 3);
     }
 
     #[test]

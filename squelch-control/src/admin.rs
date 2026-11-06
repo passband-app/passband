@@ -1,6 +1,14 @@
-//! The operator's door: the waitlist dashboard and the two buttons on it, and
-//! the features page beside it ([`features_page`]), which decides which tenants
-//! see what this build still hides.
+//! The operator's door and the console behind it: the overview, the people
+//! list and each person's page, the direct-invite page, the buttons on all of
+//! them, and the features page ([`features_page`]), which decides which tenants
+//! see what this build still hides. What they look like is
+//! [`crate::admin_views`].
+//!
+//! EVERY ACTION COMES BACK TO THE PAGE IT WAS PRESSED ON. The forms carry a
+//! [`views::NEXT_FIELD`], read here into a [`Place`] and never used as a URL:
+//! a refusal re-renders that page with its banner, and a success redirects to
+//! it with a `done` code (POST, redirect, GET), so a refresh re-reads the page
+//! instead of pressing the button again.
 //!
 //! ONE CREDENTIAL, AND IT IS NOT MOUNTED WITHOUT ONE. These routes exist only
 //! when the waitlist trio is configured (see [`crate::config::WaitlistConfig`]),
@@ -32,23 +40,24 @@
 //! link is built ([`crate::resend`]) and where it is read
 //! ([`crate::handlers::signup_form`]) rather than only here.
 //!
-//! PRIVACY: a waitlist address is shown on the dashboard and nowhere else. Every
+//! PRIVACY: a waitlist address is shown in the console and nowhere else. Every
 //! log line here names the ROW ID.
 
 use axum::{
     body::Bytes,
-    extract::{RawQuery, State},
+    extract::{Path, RawQuery, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use chrono::Utc;
 
+use crate::admin_views::{self as views, Banner, Counts, Done, Place};
 use crate::cookie::{self, AdminClaim};
 use crate::handlers::{field, field_capped};
 use crate::invites;
-use crate::pages;
 use crate::state::ControlState;
-use crate::store::{USER_APPROVED, USER_PENDING, UserRow};
+use crate::store::{USER_APPROVED, UserRow};
+use crate::warden::WardenError;
 
 /// Ceiling on the presented admin token. Well above any token an operator
 /// would generate, because a value truncated on the way in fails the compare
@@ -84,6 +93,39 @@ const INVITE_SPENT: &str = "That invite has already been used, so nothing was se
      issue a code with the CLI.";
 
 const STORE_TROUBLE: &str = "The store did not answer. Nothing changed, so try again.";
+
+/// A delete pressed on a row that never became a mailbox.
+const NO_MAILBOX: &str = "That row has no mailbox to delete.";
+
+/// The warden has no purge route: it is older than this button. Said plainly,
+/// because the alternative reading ("nothing to delete") is false and would
+/// leave the operator re-signing up into the old mail.
+const WARDEN_TOO_OLD: &str = "The warden does not support deleting a mailbox yet. Roll the warden to a release \
+     that has the purge route, then try again. Nothing was deleted.";
+
+/// The purge outlasted its budget. The warden may well have finished, and the
+/// route is idempotent, so the answer is the same button.
+const PURGE_TIMED_OUT: &str = "The warden did not answer in time and may still be deleting. Press Delete again \
+     to finish: it is safe to repeat.";
+
+/// Any other warden failure. The warden stops at its first error and leaves a
+/// cancelled tenant, which nothing brings back up on its own, so a retry is
+/// the whole remedy.
+const PURGE_FAILED: &str = "The warden could not finish deleting that mailbox. It is stopped, and pressing \
+     Delete again picks up where it left off. Nothing in the control store was changed.";
+
+/// The warden destroyed the mailbox and the control store did not forget it.
+/// The label stays taken here until a retry lands.
+const PURGE_UNRECORDED: &str = "The mailbox was destroyed but the control store did not record it. Press \
+     Delete again to finish.";
+
+/// Destroyed and forgotten, and one of the LLM keys is still live in Bifrost.
+/// That matters for the very thing this button is for: the gateway enforces
+/// unique key names, so a re-signup under the same label cannot mint its own
+/// until the old one goes.
+const KEYS_NOT_REVOKED: &str = "The mailbox was deleted, but its LLM keys could not be revoked in Bifrost. \
+     A new signup under the same username will come up without keys until they are; the ids \
+     are in the control log.";
 
 /// A direct invite typed as something that is not an address. Says what is
 /// wrong, unlike the refusals above it: this one is the operator's own typo and
@@ -192,14 +234,82 @@ fn origin_report(headers: &HeaderMap) -> String {
     )
 }
 
-/// `GET /admin` — the dashboard, or the door.
-pub async fn page(State(state): State<ControlState>, headers: HeaderMap) -> Response {
+/// `GET /admin` — the overview, or the door.
+pub async fn page(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Response {
     if !is_admin(&state, &headers) {
         // No message: this is the front door, not a refusal. A stranger who
         // asked for `/admin` learns only that the form exists.
-        return pages::admin_login(None);
+        return views::admin_login(None);
     }
-    dashboard(&state, None).await
+    view(&state, &Place::Overview, done_banner(query.as_deref())).await
+}
+
+/// `GET /admin/users` — everybody, filtered by `stage` and searched by `q`.
+pub async fn users(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Response {
+    if !is_admin(&state, &headers) {
+        return views::admin_login(None);
+    }
+    let query = query.unwrap_or_default();
+    let (filter, q) = views::users_query(&query);
+    view(
+        &state,
+        &Place::Users { filter, q },
+        done_banner(Some(&query)),
+    )
+    .await
+}
+
+/// `GET /admin/users/{id}` — one person.
+///
+/// The id is taken as text and read here, so a path that is not a row id gets
+/// this console's own "nobody here" page rather than the router's plain-text
+/// rejection.
+pub async fn person(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    RawQuery(query): RawQuery,
+) -> Response {
+    if !is_admin(&state, &headers) {
+        return views::admin_login(None);
+    }
+    match Place::parse(&format!("/admin/users/{id}")) {
+        Some(place) => view(&state, &place, done_banner(query.as_deref())).await,
+        None => {
+            let counts = counts(&state).await;
+            views::admin_no_person(counts.as_ref(), NO_SUCH_ROW)
+        }
+    }
+}
+
+/// The console's script. See `admin.js` for what it does and
+/// [`crate::pages`] for the one policy that lets it run.
+const APP_JS: &str = include_str!("admin.js");
+
+/// `GET /admin/app.js` — the script that swaps pages in place.
+///
+/// NO ADMIN CHECK: it is the same bytes for everybody, carries no data, and
+/// does nothing on a page that is not the console. `no-cache` so a deploy's
+/// new script is the one the next page load runs, revalidated rather than
+/// refetched blind.
+pub async fn app_js() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        APP_JS,
+    )
+        .into_response()
 }
 
 /// `POST /admin/logout` — end this session deliberately.
@@ -225,7 +335,7 @@ pub async fn logout(State(state): State<ControlState>, headers: HeaderMap) -> Re
     if !same_origin(&state, &headers) {
         return cross_origin(&state, &headers);
     }
-    clearing(&state, pages::admin_signed_out())
+    clearing(&state, views::admin_signed_out())
 }
 
 /// `POST /admin/login` — present the token, open a session.
@@ -243,7 +353,7 @@ pub async fn login(State(state): State<ControlState>, headers: HeaderMap, body: 
         // PRIVACY: that a login was refused. Never what was presented, and
         // never how close it was.
         tracing::warn!("admin login refused");
-        return pages::admin_login(Some(LOGIN_REFUSED));
+        return views::admin_login(Some(LOGIN_REFUSED));
     }
 
     let value = cookie::sign_admin(
@@ -282,13 +392,14 @@ pub async fn invite(
     if !same_origin(&state, &headers) {
         return cross_origin(&state, &headers);
     }
+    let back = back(&body, Place::users(views::Filter::All));
 
     // Capped one over the limit so a value AT the limit is still whole and an
     // address longer than we accept is refused rather than truncated into a
     // different, deliverable one.
     let email = field_capped(&body, "email", crate::handlers::MAX_EMAIL + 1);
     if !crate::handlers::is_email(&email) {
-        return dashboard(&state, Some(INVALID_ADDRESS)).await;
+        return refuse(&state, &back, INVALID_ADDRESS).await;
     }
 
     // After the address is known to be one, so the confirmation page never
@@ -297,11 +408,12 @@ pub async fn invite(
     // approve. The address rides the form rather than a row id because at this
     // point there is no row to name.
     if !confirmed(&body) {
-        return pages::admin_confirm(
+        return views::admin_confirm(
             "/admin/invite",
             &[("email", &email)],
             &email,
             "Yes, mint and email the invite",
+            &back,
         );
     }
 
@@ -310,10 +422,10 @@ pub async fn invite(
         // Already on the approved half. Not an error worth a red banner, but
         // not silence either: the row is on the page with its own button, and
         // saying so is what stops the operator from typing it again.
-        Ok(None) => return dashboard(&state, Some(ALREADY_INVITED)).await,
+        Ok(None) => return refuse(&state, &back, ALREADY_INVITED).await,
         Err(e) => {
             tracing::error!(error = %e, "recording a direct invite failed");
-            return dashboard(&state, Some(STORE_TROUBLE)).await;
+            return refuse(&state, &back, STORE_TROUBLE).await;
         }
     };
 
@@ -322,10 +434,13 @@ pub async fn invite(
     tracing::info!(id, "invited an address directly");
     // A row that was just created or just promoted names no invite yet, which
     // is the NULL this mint expects to replace.
-    match mint_and_send(&state, id, None).await {
-        Some(problem) => dashboard(&state, Some(problem)).await,
-        None => back_to_dashboard(),
-    }
+    finish(
+        &state,
+        &back,
+        mint_and_send(&state, id, None).await,
+        Done::Invited,
+    )
+    .await
 }
 
 /// `POST /admin/approve` — let one person in.
@@ -346,8 +461,9 @@ pub async fn approve(
     if !same_origin(&state, &headers) {
         return cross_origin(&state, &headers);
     }
+    let back = back(&body, Place::Overview);
     let Some(id) = row_id(&body) else {
-        return dashboard(&state, Some(NO_SUCH_ROW)).await;
+        return refuse(&state, &back, NO_SUCH_ROW).await;
     };
 
     // THE ASK COMES BEFORE THE APPROVAL, not between it and the mail. A row that
@@ -358,35 +474,39 @@ pub async fn approve(
     if !confirmed(&body) {
         let id_field = id.to_string();
         return match state.store().user_entry(id).await {
-            Ok(Some(row)) => pages::admin_confirm(
+            Ok(Some(row)) => views::admin_confirm(
                 "/admin/approve",
                 &[("id", &id_field)],
                 &row.email,
                 "Yes, approve and email the invite",
+                &back,
             ),
-            Ok(None) => dashboard(&state, Some(NO_SUCH_ROW)).await,
+            Ok(None) => refuse(&state, &back, NO_SUCH_ROW).await,
             Err(e) => {
                 tracing::error!(id, error = %e, "reading a user row failed");
-                dashboard(&state, Some(STORE_TROUBLE)).await
+                refuse(&state, &back, STORE_TROUBLE).await
             }
         };
     }
 
     match state.store().approve_user(id, Utc::now()).await {
         Ok(true) => {}
-        Ok(false) => return dashboard(&state, Some(ALREADY_APPROVED)).await,
+        Ok(false) => return refuse(&state, &back, ALREADY_APPROVED).await,
         Err(e) => {
             tracing::error!(id, error = %e, "approving a user row failed");
-            return dashboard(&state, Some(STORE_TROUBLE)).await;
+            return refuse(&state, &back, STORE_TROUBLE).await;
         }
     }
 
     // A row that just left `pending` names no invite yet, so that NULL is what
     // this call expects to replace.
-    match mint_and_send(&state, id, None).await {
-        Some(problem) => dashboard(&state, Some(problem)).await,
-        None => back_to_dashboard(),
-    }
+    finish(
+        &state,
+        &back,
+        mint_and_send(&state, id, None).await,
+        Done::Approved,
+    )
+    .await
 }
 
 /// `POST /admin/send` — replace an approved row's invite with a fresh one.
@@ -401,20 +521,21 @@ pub async fn send(State(state): State<ControlState>, headers: HeaderMap, body: B
     if !same_origin(&state, &headers) {
         return cross_origin(&state, &headers);
     }
+    let back = back(&body, Place::Overview);
     let Some(id) = row_id(&body) else {
-        return dashboard(&state, Some(NO_SUCH_ROW)).await;
+        return refuse(&state, &back, NO_SUCH_ROW).await;
     };
 
     let row = match state.store().user_entry(id).await {
         Ok(Some(row)) => row,
-        Ok(None) => return dashboard(&state, Some(NO_SUCH_ROW)).await,
+        Ok(None) => return refuse(&state, &back, NO_SUCH_ROW).await,
         Err(e) => {
             tracing::error!(id, error = %e, "reading a user row failed");
-            return dashboard(&state, Some(STORE_TROUBLE)).await;
+            return refuse(&state, &back, STORE_TROUBLE).await;
         }
     };
     if row.status != USER_APPROVED {
-        return dashboard(&state, Some(NOT_APPROVED)).await;
+        return refuse(&state, &back, NOT_APPROVED).await;
     }
 
     // Asked here too, and for the same reason it is asked on approval: the
@@ -425,11 +546,12 @@ pub async fn send(State(state): State<ControlState>, headers: HeaderMap, body: B
     // row holding nothing.
     if !confirmed(&body) {
         let id_field = id.to_string();
-        return pages::admin_confirm(
+        return views::admin_confirm(
             "/admin/send",
             &[("id", &id_field)],
             &row.email,
             "Yes, send the invite",
+            &back,
         );
     }
 
@@ -453,12 +575,12 @@ pub async fn send(State(state): State<ControlState>, headers: HeaderMap, body: B
                     .await
                     .unwrap_or(true)
                 {
-                    return dashboard(&state, Some(INVITE_HELD)).await;
+                    return refuse(&state, &back, INVITE_HELD).await;
                 }
                 // SPENT is a refusal: somebody set a mailbox up with that code,
                 // and minting a second is a tenant nobody approved.
                 if invite_is_spent(&state, old).await {
-                    return dashboard(&state, Some(INVITE_SPENT)).await;
+                    return refuse(&state, &back, INVITE_SPENT).await;
                 }
                 // GONE is not. An operator who revoked the code from the CLI
                 // leaves a row pointing at nothing, and refusing that too would
@@ -466,19 +588,145 @@ pub async fn send(State(state): State<ControlState>, headers: HeaderMap, body: B
             }
             Err(e) => {
                 tracing::error!(id, error = %e, "revoking the replaced invite failed");
-                return dashboard(&state, Some(STORE_TROUBLE)).await;
+                return refuse(&state, &back, STORE_TROUBLE).await;
             }
         }
     }
 
-    match mint_and_send(&state, id, row.invite_id).await {
-        Some(problem) => dashboard(&state, Some(problem)).await,
-        None => back_to_dashboard(),
+    finish(
+        &state,
+        &back,
+        mint_and_send(&state, id, row.invite_id).await,
+        Done::Sent,
+    )
+    .await
+}
+
+/// `POST /admin/delete` — destroy a mailbox, so the same person can be
+/// invited and sign up again from nothing.
+///
+/// THE QUESTION IS THE LABEL, TYPED. Every other button on this board can be
+/// undone by another one; this deletes somebody's mail. So the confirmation is
+/// not a second press of a button in the same place but the tenant's label typed
+/// into a box, and a mismatch asks again rather than acting.
+///
+/// ORDER, from the outside in: the warden first, because it holds the data and
+/// is the step that can half-fail; then the LLM keys, while the store still
+/// names them; then the store, which is what frees the label and the address
+/// here. Each step is idempotent, so every failure is answered by pressing the
+/// button again.
+pub async fn delete(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !is_admin(&state, &headers) {
+        return signed_out(&state);
+    }
+    if !same_origin(&state, &headers) {
+        return cross_origin(&state, &headers);
+    }
+    let back = back(&body, Place::users(views::Filter::All));
+    // Where a finished delete lands: the page it was pressed on, unless that
+    // page was the person who no longer exists.
+    let gone_to = match back {
+        Place::Person(_) => Place::users(views::Filter::All),
+        ref other => other.clone(),
+    };
+    let Some(id) = row_id(&body) else {
+        return refuse(&state, &back, NO_SUCH_ROW).await;
+    };
+    let row = match state.store().user_entry(id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return refuse(&state, &gone_to, NO_SUCH_ROW).await,
+        Err(e) => {
+            tracing::error!(id, error = %e, "reading a user row failed");
+            return refuse(&state, &back, STORE_TROUBLE).await;
+        }
+    };
+    let Some(label) = row.tenant_label.clone() else {
+        return refuse(&state, &back, NO_MAILBOX).await;
+    };
+
+    let typed = field_capped(&body, "label", crate::labels::MAX_LABEL_LEN + 1);
+    if !confirmed(&body) || typed.trim() != label {
+        // A typed label that is wrong says so; arriving from the board's button
+        // (nothing typed yet) does not.
+        let mismatch =
+            confirmed(&body).then_some("That does not match the username. Nothing was deleted.");
+        return views::admin_confirm_delete(id, &row.email, &label, mismatch, &back);
+    }
+
+    match state.warden().purge(&label).await {
+        Ok(()) => {}
+        Err(e) => {
+            tracing::error!(id, label = %label, error = %e, "purging the tenant failed");
+            let message = match e {
+                WardenError::NotFound => WARDEN_TOO_OLD,
+                WardenError::TimedOut { .. } => PURGE_TIMED_OUT,
+                _ => PURGE_FAILED,
+            };
+            return refuse(&state, &back, message).await;
+        }
+    }
+
+    let keys_ok = revoke_llm_keys(&state, &label).await;
+
+    match state.store().purge_tenant(&label, id).await {
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(id, label = %label, error = %e, "forgetting the purged tenant failed");
+            return refuse(&state, &back, PURGE_UNRECORDED).await;
+        }
+    }
+    tracing::warn!(id, label = %label, "admin deleted a mailbox");
+
+    if keys_ok {
+        redirect(gone_to.href_done(Done::Deleted))
+    } else {
+        refuse(&state, &gone_to, KEYS_NOT_REVOKED).await
     }
 }
 
-/// Mint one invite for an approved row and mail it. `Some(message)` is a banner
-/// the caller must render; `None` means the row itself now tells the story.
+/// Revoke both of a tenant's Bifrost keys, by the ids the store holds.
+/// `false` when either one could not be revoked; the ids are logged so the
+/// operator can finish by hand. A deployment with no gateway has nothing to
+/// revoke and answers `true`.
+async fn revoke_llm_keys(state: &ControlState, label: &str) -> bool {
+    let Some((bifrost, _)) = state.bifrost() else {
+        return true;
+    };
+    let (triage, assistant) = match (
+        state.store().tenant_vk(label).await,
+        state.store().tenant_assistant_vk(label).await,
+    ) {
+        (Ok(t), Ok(a)) => (t, a),
+        (Err(e), _) | (_, Err(e)) => {
+            tracing::error!(label = %label, error = %e, "reading the tenant's LLM key ids failed");
+            return false;
+        }
+    };
+    let mut ok = true;
+    for (kind, id) in [("triage", triage), ("assistant", assistant)] {
+        if let Some(id) = id
+            && let Err(e) = bifrost.revoke_virtual_key(&id).await
+        {
+            tracing::error!(
+                label = %label,
+                kind,
+                vk_id = %id,
+                error = %e,
+                "LLM KEY NOT REVOKED for a deleted mailbox; revoke it by hand"
+            );
+            ok = false;
+        }
+    }
+    ok
+}
+
+/// Mint one invite for an approved row and mail it. `Err(message)` is a banner
+/// the caller must render; `Ok(delivered)` means the row itself now tells the
+/// story, and says whether the mail went, for the banner the redirect carries.
 ///
 /// THE POINTER WRITE IS THE GATE ON THE SEND. Two presses of one button both
 /// mint, and [`crate::store::ControlStore::set_user_invite`] compares the
@@ -488,9 +736,9 @@ pub async fn send(State(state): State<ControlState>, headers: HeaderMap, body: B
 /// names is one no button can ever take back.
 ///
 /// A send that reaches nobody leaves `notified_at` NULL, which is exactly the
-/// "email not sent" badge the operator is looking at, so that failure is a log
-/// line and a redirect rather than a banner: the row keeps saying it after a
-/// refresh, which a banner does not.
+/// "email not sent" pill the operator is looking at, so that failure is
+/// `Ok(false)` and a redirect rather than a refusal: the row keeps saying it
+/// after a refresh, which a banner does not.
 ///
 /// PRIVACY: the id and the error's `Display`. The address is in the row that is
 /// in scope here and the code is in a local one, and neither may be formatted
@@ -499,17 +747,20 @@ async fn mint_and_send(
     state: &ControlState,
     id: i64,
     expected_prior: Option<i64>,
-) -> Option<&'static str> {
-    let (resend, _) = state.waitlist()?;
+) -> Result<bool, &'static str> {
+    // Unreachable: these routes are mounted only with the waitlist configured.
+    let Some((resend, _)) = state.waitlist() else {
+        return Err(STORE_TROUBLE);
+    };
     let row = match state.store().user_entry(id).await {
         Ok(Some(row)) => row,
         Ok(None) => {
             tracing::warn!(id, "the user row went away before its invite was minted");
-            return Some(NO_SUCH_ROW);
+            return Err(NO_SUCH_ROW);
         }
         Err(e) => {
             tracing::error!(id, error = %e, "reading the user row failed");
-            return Some(STORE_TROUBLE);
+            return Err(STORE_TROUBLE);
         }
     };
 
@@ -517,7 +768,7 @@ async fn mint_and_send(
         Ok(m) => m,
         Err(e) => {
             tracing::error!(id, error = %e, "the system random source failed");
-            return Some(STORE_TROUBLE);
+            return Err(STORE_TROUBLE);
         }
     };
     let expires_at = Utc::now() + chrono::Duration::days(invites::DEFAULT_TTL_DAYS);
@@ -529,7 +780,7 @@ async fn mint_and_send(
         Ok(invite_id) => invite_id,
         Err(e) => {
             tracing::error!(id, error = %e, "recording the minted invite failed");
-            return Some(STORE_TROUBLE);
+            return Err(STORE_TROUBLE);
         }
     };
     match state
@@ -540,12 +791,12 @@ async fn mint_and_send(
         Ok(true) => {}
         Ok(false) => {
             discard(state, id, invite_id).await;
-            return Some(ALREADY_HANDLED);
+            return Err(ALREADY_HANDLED);
         }
         Err(e) => {
             tracing::error!(id, invite_id, error = %e, "pointing the user row at its invite failed");
             discard(state, id, invite_id).await;
-            return Some(STORE_TROUBLE);
+            return Err(STORE_TROUBLE);
         }
     }
 
@@ -564,20 +815,29 @@ async fn mint_and_send(
                 // is waiting on. The newer send stamps its own.
                 Ok(false) => {
                     tracing::info!(id, "an invite was delivered after its row moved on");
-                    return None;
+                    Ok(true)
                 }
-                Ok(true) => tracing::info!(id, "invite sent"),
+                Ok(true) => {
+                    tracing::info!(id, "invite sent");
+                    Ok(true)
+                }
+                // Delivered and not stamped, so the row says "not sent". The
+                // banner agrees with the row rather than with the provider:
+                // two answers on one page is worse than one slightly wrong one,
+                // and the button on the row fixes both.
                 Err(e) => {
                     tracing::error!(id, error = %e, "stamping the user row as notified failed");
-                    return None;
+                    Ok(false)
                 }
             }
         }
-        // The row stays approved with no stamp, which is the badge and the
+        // The row stays approved with no stamp, which is the pill and the
         // button. The provider's own words are not in this error type.
-        Err(e) => tracing::warn!(id, error = %e, "sending the invite failed"),
+        Err(e) => {
+            tracing::warn!(id, error = %e, "sending the invite failed");
+            Ok(false)
+        }
     }
-    None
 }
 
 /// Take back a code this call minted and then lost the row for. Best effort: a
@@ -631,7 +891,7 @@ pub async fn features_page(
     RawQuery(query): RawQuery,
 ) -> Response {
     if !is_admin(&state, &headers) {
-        return pages::admin_login(None);
+        return views::admin_login(None);
     }
     // The acknowledgement a save redirects to. It names nothing and changes
     // nothing, so it is read off the URL rather than kept in a session.
@@ -668,20 +928,20 @@ pub async fn features_save(
     let mut everyone: Vec<String> = Vec::new();
     for (name, value) in url::form_urlencoded::parse(&body) {
         match name.as_ref() {
-            pages::FEATURE_KEY_FIELD => posted_keys.push(value.into_owned()),
-            pages::FEATURE_TENANT_FIELD => {
+            views::FEATURE_KEY_FIELD => posted_keys.push(value.into_owned()),
+            views::FEATURE_TENANT_FIELD => {
                 if let Ok(id) = value.parse() {
                     tenants.push(id);
                 }
             }
-            pages::FEATURE_GRANT_FIELD => {
+            views::FEATURE_GRANT_FIELD => {
                 if let Some((id, key)) = value.split_once('.')
                     && let Ok(id) = id.parse()
                 {
                     grants.push((id, key.to_string()));
                 }
             }
-            pages::FEATURE_EVERYONE_FIELD => everyone.push(value.into_owned()),
+            views::FEATURE_EVERYONE_FIELD => everyone.push(value.into_owned()),
             _ => {}
         }
     }
@@ -726,23 +986,26 @@ pub async fn features_save(
 }
 
 /// The features page, read fresh. A store that does not answer gets the banner
-/// and NO form; see [`pages::admin_features`] for why that matters here more
-/// than on the dashboard.
+/// and NO form; see [`views::admin_features`] for why that matters here more
+/// than on the overview.
 async fn features_board(state: &ControlState, error: Option<&str>, saved: bool) -> Response {
     let registry = state.feature_registry();
+    let counts = counts(state).await;
     match state.store().feature_board().await {
-        Ok(board) => pages::admin_features(
+        Ok(board) => views::admin_features(
             registry,
             Some(&board),
+            counts.as_ref(),
             error,
             saved,
             FEATURE_REFRESH_MINUTES,
         ),
         Err(e) => {
             tracing::error!(error = %e, "reading the features board failed");
-            pages::admin_features(
+            views::admin_features(
                 registry,
                 None,
+                counts.as_ref(),
                 Some(STORE_TROUBLE),
                 false,
                 FEATURE_REFRESH_MINUTES,
@@ -776,28 +1039,91 @@ fn is_admin(state: &ControlState, headers: &HeaderMap) -> bool {
         .is_some()
 }
 
-/// The dashboard, listed fresh. `error` is a banner over a correct list, never
-/// a page in place of one.
-async fn dashboard(state: &ControlState, error: Option<&str>) -> Response {
-    let rows = match state.store().list_users().await {
-        Ok(rows) => rows,
+/// The funnel, listed fresh, or `None` when the store did not answer.
+async fn rows(state: &ControlState) -> Option<Vec<UserRow>> {
+    match state.store().list_users().await {
+        Ok(rows) => Some(rows),
         Err(e) => {
-            // An empty page under a banner that says the store did not answer.
-            // Rendering "nobody is waiting" with no explanation would be the
-            // one wrong thing to show an operator.
             tracing::error!(error = %e, "listing the funnel failed");
-            return pages::admin_page(&[], &[], Some(STORE_TROUBLE));
+            None
         }
+    }
+}
+
+/// The sidebar's counts alone, for the pages that list nothing themselves.
+async fn counts(state: &ControlState) -> Option<Counts> {
+    rows(state).await.map(|rows| Counts::of(&rows))
+}
+
+/// One page of the console, read fresh, with `flash` over it. A banner is over
+/// a correct list, never a page in place of one.
+///
+/// A STORE THAT DID NOT ANSWER WINS THE BANNER. Its page draws no list (see
+/// [`views::admin_overview`]), and a banner about some other refusal over a page
+/// with nothing on it would explain the wrong absence.
+async fn view(state: &ControlState, place: &Place, flash: Option<Banner<'_>>) -> Response {
+    if let Place::Person(id) = place {
+        let counts = counts(state).await;
+        return match state.store().user_entry(*id).await {
+            Ok(Some(row)) => views::admin_person(&row, counts.as_ref(), flash),
+            Ok(None) => views::admin_no_person(counts.as_ref(), NO_SUCH_ROW),
+            Err(e) => {
+                tracing::error!(id, error = %e, "reading a user row failed");
+                views::admin_overview(None, Some(Banner::Stop(STORE_TROUBLE)))
+            }
+        };
+    }
+    let rows = rows(state).await;
+    let flash = if rows.is_none() {
+        Some(Banner::Stop(STORE_TROUBLE))
+    } else {
+        flash
     };
-    let (pending, approved): (Vec<UserRow>, Vec<UserRow>) =
-        rows.into_iter().partition(|r| r.status == USER_PENDING);
-    pages::admin_page(&pending, &approved, error)
+    match place {
+        Place::Users { filter, q } => views::admin_users(rows.as_deref(), *filter, q, flash),
+        // Nothing posts here with the features page as its `next`; it has its
+        // own save. The overview is the honest landing for anything else.
+        Place::Overview | Place::Features | Place::Person(_) => {
+            views::admin_overview(rows.as_deref(), flash)
+        }
+    }
+}
+
+/// Where a POST's page is, out of its [`views::NEXT_FIELD`], or `default` when it
+/// names none of the console's pages.
+fn back(body: &Bytes, default: Place) -> Place {
+    Place::parse(&field(body, views::NEXT_FIELD)).unwrap_or(default)
+}
+
+/// A refusal: the page the button was on, re-rendered with the reason.
+async fn refuse(state: &ControlState, back: &Place, message: &str) -> Response {
+    view(state, back, Some(Banner::Stop(message))).await
+}
+
+/// The end of every action that minted: a refusal re-renders, and anything
+/// else redirects back with what happened.
+async fn finish(
+    state: &ControlState,
+    back: &Place,
+    outcome: Result<bool, &'static str>,
+    done: Done,
+) -> Response {
+    match outcome {
+        Err(problem) => refuse(state, back, problem).await,
+        Ok(true) => redirect(back.href_done(done)),
+        Ok(false) => redirect(back.href_done(Done::Unsent)),
+    }
+}
+
+/// The `done` banner a page was redirected to, if its query names one.
+fn done_banner(query: Option<&str>) -> Option<Banner<'static>> {
+    query.and_then(Done::from_query).map(Banner::Done)
 }
 
 /// What an action with no live session gets: the door, a 401, and the stale
 /// cookie cleared so the browser stops presenting it.
 fn signed_out(state: &ControlState) -> Response {
-    clearing(state, pages::admin_login(Some(SIGNED_OUT)))
+    clearing(state, views::admin_login(Some(SIGNED_OUT)))
 }
 
 /// The same cookie clear on a page that is NOT a refusal. Both doors have to
@@ -822,13 +1148,14 @@ fn clearing(state: &ControlState, mut resp: Response) -> Response {
 fn cross_origin(state: &ControlState, headers: &HeaderMap) -> Response {
     let report = origin_report(headers);
     tracing::warn!(%report, "admin action refused: cross-origin");
-    pages::admin_cross_origin(&state.config().public_url, &report)
+    views::admin_cross_origin(&state.config().public_url, &report)
 }
 
 /// Every action that did something ends here rather than rendering, so a
-/// refresh re-reads the list instead of pressing the button again.
-fn back_to_dashboard() -> Response {
-    (StatusCode::SEE_OTHER, [(header::LOCATION, "/admin")]).into_response()
+/// refresh re-reads the page instead of pressing the button again. `location`
+/// is always one [`Place::href`] wrote, so it is a path this service built.
+fn redirect(location: String) -> Response {
+    (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response()
 }
 
 /// The row a button was on. An integer or nothing: an id that is not an id is a
@@ -837,7 +1164,7 @@ fn row_id(body: &Bytes) -> Option<i64> {
     field(body, "id").parse().ok()
 }
 
-/// Whether this POST is the one that comes back from [`pages::admin_confirm`]
+/// Whether this POST is the one that comes back from [`views::admin_confirm`]
 /// with the test-user question answered.
 ///
 /// A MISSING FIELD IS AN UNANSWERED QUESTION, which is the direction that costs
@@ -845,7 +1172,7 @@ fn row_id(body: &Bytes) -> Option<i64> {
 /// presses one more button, and a stale bookmark or a replayed form that never
 /// saw the page gets asked instead of acted on.
 fn confirmed(body: &Bytes) -> bool {
-    field(body, pages::CONFIRM_FIELD) == "yes"
+    field(body, views::CONFIRM_FIELD) == "yes"
 }
 
 #[cfg(test)]

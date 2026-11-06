@@ -22,6 +22,10 @@
 //!   first, else what ingest inferred. It is learned from header metadata
 //!   (a `Date` offset, an invitation's start zone) rather than content, and
 //!   the account's own address never has one.
+//! - The RELATIONSHIP (the ledger row) is NOT read here: it is the
+//!   `understanding` flag's, and the `/client/person` handler reads it beside
+//!   this record only when the flag is on, so a card without the flag runs
+//!   exactly the queries it always did.
 
 use super::*;
 use crate::triage::rules::match_sender_rule;

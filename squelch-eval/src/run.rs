@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use squelch_core::config::Stage2Provider;
 use squelch_core::store::SqliteStore;
 use squelch_core::triage::agent::{
-    AgentConnection, PROMPT_VERSION, prepare_initial_context, run_agent,
+    AgentConnection, prepare_initial_context, prompt_version, run_agent,
 };
 use squelch_core::triage::agent_config::AgentTriageConfig;
 use squelch_core::triage::decision::MessageDecision;
@@ -808,7 +808,9 @@ pub async fn run(options: &RunOptions) -> Result<RunSummary> {
             (None, None) => Value::Null,
         },
         "batch": batch,
-        "prompt_version": PROMPT_VERSION,
+        // A replay always runs the flag-off prompt: `ContextSnapshot.understanding`
+        // is never serialized, so every case reads back false.
+        "prompt_version": prompt_version(false),
         "harness_git_sha": git_sha(),
         "started_at": started,
         "finished_at": Value::Null,
@@ -1021,7 +1023,7 @@ async fn run_pair(shared: &Shared<'_>, case: &Case, weight: f64, rep: u32) -> Pa
             format!("{}_rep{rep}_attempt{attempt}.json", case.id)
         };
         let mut trace = json!({
-            "prompt_version": PROMPT_VERSION,
+            "prompt_version": prompt_version(false),
             "case_id": case.id,
             "rep": rep,
             "attempt": attempt,
@@ -1220,7 +1222,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(trace["prompt_version"], PROMPT_VERSION);
+        assert_eq!(trace["prompt_version"], prompt_version(false));
         assert_eq!(trace["tools"].as_array().unwrap().len(), 1);
         let seen = &trace["tools"][0]["source_message_ids"];
         assert!(

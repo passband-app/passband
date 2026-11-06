@@ -28,18 +28,43 @@ struct UsageView: View {
     @State private var assistant = AssistantUsage()
     /// The shared crosshair: an instant inside the hovered day, or nothing.
     @State private var scrub: Date?
+    /// The chosen subpage, remembered across launches (UsagePages). What is
+    /// drawn is `shown`, which falls back to Mail when Understanding is not
+    /// on offer.
+    @State private var selected = UsagePages.initial(
+        remembered: UsagePages.remembered(in: .standard), staged: FixtureMode.stagesUsage,
+        stagedPage: FixtureMode.stageValue("page"))
 
     private static let windows: [(value: Int, label: String)] = [
         (7, "7 days"), (30, "30 days"), (90, "90 days"),
     ]
 
     var body: some View {
-        VStack(spacing: 0) {
-            RoutedHeader(title: "Usage") {
-                GlassSegmented(options: Self.windows, selection: $days)
+        // nil features while stats are loading, at launch and on every
+        // account switch: the page holds what it showed rather than flashing
+        // Mail and the window picker until they land.
+        let offered = UsagePages.offered(
+            store.stats == nil ? nil : store.hiddenFeatures, staged: FixtureMode.stagesUsage, selected: selected)
+        let shown = UsagePages.shown(selected, offered: offered)
+        return VStack(spacing: 0) {
+            RoutedHeader(title: "Usage", accessory: switcher(offered)) {
+                // The window scopes Mail only: Understanding is the ledger's
+                // whole span, and says so.
+                if shown == .mail {
+                    GlassSegmented(options: Self.windows, selection: $days)
+                }
             }
-            ScrollView {
-                content
+            ScrollViewReader { scroller in
+                ScrollView {
+                    Group {
+                        if shown == .understanding {
+                            // A new account is a new ledger: reloaded by
+                            // design, not by the switch tearing the page down.
+                            UnderstandingSection().id(AccountManager.shared.activeId)
+                        } else {
+                            content
+                        }
+                    }
                     .padding(.horizontal, Space.page)
                     .padding(.vertical, Space.scaled(18))
                     // Capped on the type's curve, like the settings panes: the
@@ -47,9 +72,21 @@ struct UsageView: View {
                     // measure and grows with the text in comfortable.
                     .frame(maxWidth: Typo.measure(980), alignment: .leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                // A screenshot of the stage's lower cards (`--fixture-usage-
+                // scroll=knows`); the stage itself lands on the subpage.
+                .task(id: shown) {
+                    guard shown == .understanding, let target = FixtureMode.stageValue("scroll") else { return }
+                    try? await Task.sleep(for: .milliseconds(1500))
+                    withAnimation(.smooth(duration: 0.3)) { scroller.scrollTo(target, anchor: .top) }
+                }
             }
         }
-        // The window is the one filter, and it scopes everything below it.
+        .onChange(of: selected) { _, page in
+            UsagePages.remember(page, in: .standard, staged: FixtureMode.stagesUsage)
+        }
+        // The window is the Mail subpage's one filter; Understanding is the
+        // ledger's whole span and does not read it.
         .task(id: days) { await load() }
         // Esc leaves — a full routed page needs an exit other than the rail.
         .keyContext(.modal)
@@ -73,6 +110,15 @@ struct UsageView: View {
         // Local ledger, read after the server halves land so every section
         // appears in the same frame.
         assistant = AssistantUsageLedger.read()
+    }
+
+    /// The subpage switcher, or nothing: with Understanding off there is
+    /// one page and no control (UsagePages.offered is empty).
+    private func switcher(_ offered: [UsageSubpage]) -> AnyView? {
+        guard offered.count > 1 else { return nil }
+        return AnyView(
+            GlassSegmented(options: offered.map { ($0, $0.label) }, selection: $selected)
+                .accessibilityLabel("Usage page"))
     }
 
     // MARK: - layout
@@ -547,16 +593,32 @@ private struct DayAxis: ViewModifier {
     }
 }
 
-private struct LegendKey: Identifiable {
+/// One key in a chart card's inline legend. Shared with the Understanding
+/// section below the page's charts, which reads as part of the same page.
+struct LegendKey: Identifiable {
     let label: String
     let color: Color
     var line = false
+    /// Drawn as a point of this shape instead of a swatch.
+    var symbol: LegendSymbol?
     var id: String { label }
+}
+
+/// A legend key's point shape, matching the symbol the chart draws.
+enum LegendSymbol {
+    case circle, diamond
+
+    var shape: AnyShape {
+        switch self {
+        case .circle: AnyShape(Circle())
+        case .diamond: AnyShape(Rectangle().rotation(.degrees(45)).scale(0.78))
+        }
+    }
 }
 
 /// One chart on its own pane: title, an inline legend, and a table twin behind
 /// the "table" action so every number the plot shows is also readable exactly.
-private struct ChartCard<Plot: View, Table: View>: View {
+struct ChartCard<Plot: View, Table: View>: View {
     let title: String
     var note: String?
     var legend: [LegendKey] = []
@@ -576,6 +638,8 @@ private struct ChartCard<Plot: View, Table: View>: View {
                     HStack(spacing: Space.scaled(5)) {
                         if key.line {
                             Capsule().fill(key.color).frame(width: 10, height: 2)
+                        } else if let symbol = key.symbol {
+                            symbol.shape.fill(key.color).frame(width: 8, height: 8)
                         } else {
                             RoundedRectangle(cornerRadius: 2, style: .continuous)
                                 .fill(key.color).frame(width: 8, height: 8)
@@ -597,7 +661,7 @@ private struct ChartCard<Plot: View, Table: View>: View {
 
 /// The hover readout: the day, then every series at it — value first, in ink,
 /// keyed by a short stroke of the series colour.
-private struct ChartReadout: View {
+struct ChartReadout: View {
     struct Row {
         let value: String
         let label: String
@@ -726,10 +790,13 @@ private struct Sparkline: View {
 
 /// A chart's exact twin: one row per day, newest first, at the plot's height
 /// so switching between the two moves nothing on the page.
-private struct DayTable: View {
+struct DayTable: View {
     let columns: [String]
     let rows: [[String]]
     let height: CGFloat
+    /// The first column in mono, for day keys; a column of names reads in
+    /// the row face instead.
+    var monoFirst = true
 
     var body: some View {
         ScrollView {
@@ -746,7 +813,7 @@ private struct DayTable: View {
                     GridRow {
                         ForEach(rows[r].indices, id: \.self) { c in
                             Text(rows[r][c])
-                                .font(c == 0 ? Typo.mono(10) : Typo.num(11))
+                                .font(c == 0 ? (monoFirst ? Typo.mono(10) : Typo.rowSub) : Typo.num(11))
                                 .foregroundStyle(c == 0 ? Palette.inkDim : Palette.inkFaint)
                         }
                     }

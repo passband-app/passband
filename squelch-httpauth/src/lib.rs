@@ -33,6 +33,23 @@ pub fn parse_bearer(value: &str) -> Option<&str> {
     (!token.is_empty()).then_some(token)
 }
 
+/// The `Strict-Transport-Security` value every door sends over https. One
+/// year, the floor the HSTS preload list and most scanners expect (the CASA
+/// assessment's DAST scan among them: docs/VERIFICATION.md). No
+/// `includeSubDomains`: each host speaks for itself, not for its siblings.
+pub const HSTS: &str = "max-age=31536000";
+
+/// Whether an `X-Forwarded-Proto` value says the client spoke https to the
+/// proxy in front of us. Only the first hop counts. Believing a spoofed value
+/// is harmless for the one thing it decides, HSTS, because browsers ignore
+/// HSTS on a plain-http response (RFC 6797 §8.1).
+pub fn forwarded_https(value: &str) -> bool {
+    value
+        .split(',')
+        .next()
+        .is_some_and(|proto| proto.trim().eq_ignore_ascii_case("https"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,5 +72,15 @@ mod tests {
         assert!(!ct_eq(b"secret", b"secre"));
         assert!(!ct_eq(b"", b"x"));
         assert!(ct_eq(b"", b""));
+    }
+
+    #[test]
+    fn forwarded_https_reads_the_first_hop_only() {
+        assert!(forwarded_https("https"));
+        assert!(forwarded_https("HTTPS, http"));
+        assert!(forwarded_https(" https "));
+        assert!(!forwarded_https("http"));
+        assert!(!forwarded_https("http, https"));
+        assert!(!forwarded_https(""));
     }
 }

@@ -331,6 +331,7 @@ impl AgentMailer for ApiAgentMailer {
         };
 
         let reply_to = compose.reply_to_message_id;
+        let (saved_to, saved_subject) = (to.trim().to_string(), subject.trim().to_string());
         let entry = NewAuditEntry {
             actor: AGENT_ACTOR.to_string(),
             action: AUDIT_DRAFT.to_string(),
@@ -371,6 +372,8 @@ impl AgentMailer for ApiAgentMailer {
                 Ok(AgentDraftCreated {
                     draft_id,
                     link: draft_link(&mailbox, draft_id, now.timestamp()),
+                    to: saved_to,
+                    subject: saved_subject,
                 })
             }
             AgentDraftOutcome::ReplyDraftExists => Err(self

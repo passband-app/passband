@@ -1,0 +1,34 @@
+# The TLS floor for everything Traefik terminates on carrier: every tenant
+# vhost (*.passband.email) and warden.passband.app.
+#
+# Without this Traefik uses its built-in defaults, which is what the CASA
+# assessment's scan would find (docs/CASA-SAQ.md, V9). TLS 1.2 is the floor
+# the AWS side already holds (the ALB's ELBSecurityPolicy-TLS13-1-2-Res-2021-06,
+# CloudFront's TLSv1.2_2021), so every public door now says the same thing.
+# The 1.2 suites are the ECDHE + AEAD set; TLS 1.3 suites are not configurable
+# and are all fine. Every client Passband ships (macOS, iOS, any current
+# browser) negotiates TLS 1.3 anyway.
+#
+# A TLSOption named `default` is Traefik's global default, read from any
+# namespace. There must be exactly one in the cluster: a second one makes
+# Traefik log a conflict and fall back. `kubectl apply -f` is enough; Traefik
+# watches the CRD and picks it up without a restart.
+#
+# VERIFY after applying, from a laptop:
+#   openssl s_client -connect warden.passband.app:443 -tls1_1 </dev/null   # handshake failure
+#   openssl s_client -connect warden.passband.app:443 -tls1_2 </dev/null   # connects
+apiVersion: traefik.io/v1alpha1
+kind: TLSOption
+metadata:
+  name: default
+  namespace: kube-system
+spec:
+  minVersion: VersionTLS12
+  cipherSuites:
+    - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+    - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+    - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+    - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+    - TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+    - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+  sniStrict: false

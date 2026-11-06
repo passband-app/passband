@@ -37,12 +37,16 @@ fn ghost(id: i64, kind: EventRecordKind, title: &str, start: &str, sources: &[i6
         created_at: "2026-10-20T10:00:00Z".parse().unwrap(),
         updated_at: "2026-10-20T10:00:00Z".parse().unwrap(),
         owner_scope: Some("ticketmaster.example".into()),
+        linked_to: None,
+        link_ack: None,
         sources: sources
             .iter()
             .map(|id| GhostSource {
                 message_id: *id,
                 thread_id: format!("t{id}"),
                 role: EventChange::Created,
+                linked: false,
+                verified: true,
             })
             .collect(),
     }
@@ -1237,6 +1241,8 @@ fn a_candidates_eligible_mail_is_in_the_version() {
         message_id: 51,
         thread_id: "t51".into(),
         role: EventChange::Updated,
+        linked: false,
+        verified: true,
     });
     assert_ne!(w.built().events[0].version, v);
 }

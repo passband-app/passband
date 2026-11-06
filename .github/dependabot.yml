@@ -8,9 +8,9 @@
 # - security updates are not limited by schedule or group (GitHub opens them as
 #   soon as an advisory lands, when Dependabot security updates are enabled).
 #
-# Not covered: passband-site. Its lockfile is the binary bun.lockb, which
-# Dependabot's bun support does not read; moving it to the text bun.lock
-# (`bun install --save-text-lockfile`) would let a "bun" entry here cover it.
+# passband-site uses the text bun.lock, written by the Bun the site deploy pins
+# (1.3.14 in deploy-aws.yml): a newer Bun writes a lockfile version 1.3.14
+# refuses under --frozen-lockfile, so regenerate it with that version.
 version: 2
 
 updates:
@@ -43,4 +43,13 @@ updates:
       day: monday
     groups:
       docker-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: bun
+    directory: /passband-site
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      site-minor-patch:
         update-types: [minor, patch]

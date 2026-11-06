@@ -933,6 +933,9 @@ struct NotificationsSection: View {
                             .labelsHidden()
                             .toggleStyle(.switch)
                             .controlSize(.small)
+                            // Waiting on System Settings: the switch cannot
+                            // change it, the Open button can.
+                            .disabled(loginItem.needsApproval)
                         }
                     }
                     RowDivider()

@@ -68,16 +68,22 @@ struct PassbandApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    func applicationWillFinishLaunching(_ notification: Notification) {
-        LoginItem.shared.noteLaunchEvent()
-    }
+    /// A hidden login launch owes the boot screen event to whenever the
+    /// person first brings Passband forward.
+    private var screenOwed = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // FIRST, before anything can run the event loop: the launch event is
+        // only readable here (nil in willFinishLaunching, gone one hop later).
+        LoginItem.shared.noteLaunchEvent()
         NSApp.setActivationPolicy(.regular)
         // A login launch stays out of the way: hidden, not in front. The Dock
-        // icon or a banner brings the window back.
+        // icon, a banner tap or ⌘Tab brings the window back. Hidden now and
+        // again after the first pass of the run loop, in case the SwiftUI
+        // window is ordered in after this.
         let atLogin = LoginItem.shared.launchedAtLogin
         if atLogin {
+            NSApp.hide(nil)
             DispatchQueue.main.async { NSApp.hide(nil) }
         } else {
             NSApp.activate(ignoringOtherApps: true)
@@ -104,9 +110,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Analytics.start()
         SessionReplay.shared.start()
         // The boot view never passes through route(to:), so its screen event
-        // is recorded here or not at all. Not for a hidden login launch:
-        // nobody is looking at it.
-        if !atLogin { Analytics.screen(AppStore.shared.activeView.rawValue) }
+        // is recorded here, or for a hidden login launch, on the first
+        // activation (nobody is looking at it until then).
+        if atLogin {
+            screenOwed = true
+        } else {
+            Analytics.screen(AppStore.shared.activeView.rawValue)
+        }
         AppStore.shared.identifyPerson()
     }
 
@@ -116,6 +126,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidBecomeActive(_ notification: Notification) {
         // Back from System Settings, where the login item may have changed.
         LoginItem.shared.refresh()
+        if screenOwed {
+            screenOwed = false
+            Analytics.screen(AppStore.shared.activeView.rawValue)
+        }
         AppStore.shared.identifyPerson()
         AppStore.shared.attentionResume()
     }

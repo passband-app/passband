@@ -48,8 +48,9 @@
         /// Apple event in `applicationWillFinishLaunching`.
         private(set) var launchedAtLogin = false
 
-        /// Read the launch event's "launched as login item" flag. Must run
-        /// before launch finishes: the event is gone after that.
+        /// Read the launch event's "launched as login item" flag. Must run at
+        /// the top of `applicationDidFinishLaunching`: the event is nil in
+        /// `applicationWillFinishLaunching` and gone one run-loop hop later.
         func noteLaunchEvent() {
             let event = NSAppleEventManager.shared().currentAppleEvent
             launchedAtLogin =
@@ -82,7 +83,7 @@
         private(set) var error: String?
 
         /// On, as far as the switch should show it. `requiresApproval` is OFF:
-        /// it is also what macOS reports after the person turns Passband off in
+        /// it may be what macOS reports after the person turns Passband off in
         /// System Settings, and the switch must not contradict them.
         /// `needsApproval` offers the way back on.
         var enabled: Bool { status == .enabled }
@@ -112,6 +113,12 @@
         func set(_ on: Bool) {
             guard Self.available else { return }
             error = nil
+            // Same rule as adoption: a copy off the DMG or out of Downloads
+            // would register a path that is gone by the next login.
+            if on, !Self.installed {
+                error = "Move Passband to Applications first."
+                return refresh()
+            }
             do {
                 if on {
                     try SMAppService.mainApp.register()

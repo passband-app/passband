@@ -66,10 +66,8 @@ struct ActionLayer: View {
                 .animation(.smooth(duration: 0.26), value: showsUnsubscribeTray)
             }
 
-            // THE DISCOVERY RING'S FOUND MOMENT. Above the toasts and the
-            // tray, under every palette and modal below: the moment only ever
-            // arrives when none of them is up, and one raised over it covers it.
-            DiscoveryLayer()
+            // DiscoveryLayer (the found moment) mounted here. Discover is
+            // retired (2026-11-05); the layer stays in Views/Discovery, unmounted.
 
             if let request = store.ruleEditor {
                 // Keyed by the request: a click on an in-effect rule swaps the

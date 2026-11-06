@@ -85,7 +85,8 @@ The load-bearing subtlety: a refresh token is bound to the OAuth client that min
 If self-hosted daemons got tokens via a confidential broker client, they would need the
 broker for **every hourly access-token refresh** — our uptime becomes their dependency
 and tokens transit our infra forever. So the two tiers use two different OAuth clients
-under **one GCP project and one consent screen** ("Squelch"):
+under **one GCP project and one consent screen** ("Passband"; it said "Squelch" until
+2026-11):
 
 - **Self-host: Desktop-type client, credentials embedded in the docker image.**
   Google treats installed-app client secrets as non-confidential by design; this is

@@ -490,6 +490,28 @@ impl SqliteStore {
             .optional()?)
     }
 
+    /// For the sync engine's tests: a message stored under provider id
+    /// `gmail`, as (`messages.is_archive`, how many agent jobs it has ever
+    /// had queued, of any kind or state).
+    #[cfg(test)]
+    pub(crate) fn archive_and_jobs_by_provider_id(
+        &self,
+        account_id: AccountId,
+        gmail: &str,
+    ) -> Result<Option<(bool, i64)>> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT m.is_archive,
+                        (SELECT COUNT(*) FROM agent_triage_jobs j
+                          WHERE j.account_id=m.account_id AND j.message_id=m.id)
+                 FROM messages m WHERE m.account_id=?1 AND m.gmail_msg_id=?2",
+                params![account_id, gmail],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
     /// `triage.first_load` for one message, for the sync engine's tests.
     #[cfg(test)]
     pub(crate) fn triage_first_load(&self, account_id: AccountId, message_id: i64) -> Result<bool> {

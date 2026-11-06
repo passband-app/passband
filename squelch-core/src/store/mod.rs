@@ -1694,6 +1694,38 @@ pub trait Store:
         to: DateTime<chrono::FixedOffset>,
     ) -> Result<Vec<crate::types::GhostEvent>>;
 
+    /// [`Store::list_ghost_events`] plus each listed ghost's link partners
+    /// (`ghost_events.linked_to`, either way) wherever they start, for the
+    /// timeline, which folds a link into one card.
+    fn list_ghost_events_with_links(
+        &self,
+        account_id: AccountId,
+        from: DateTime<chrono::FixedOffset>,
+        to: DateTime<chrono::FixedOffset>,
+    ) -> Result<Vec<crate::types::GhostEvent>>;
+
+    /// The identity check's prefilter (`triage::event_identity`): for each
+    /// of `message_id`'s laundered event `records` (by position), the live
+    /// ghosts it could be. Records with no candidate are left out.
+    fn event_identity_candidates(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        records: &[crate::triage::ghost::GhostProposal],
+    ) -> Result<crate::triage::event_identity::Questions>;
+
+    /// The user's answer to the change a linked ghost (`from`, another
+    /// sender's) shows on `shown`: accept it, or keep `shown` as it is.
+    /// False when `from` is not linked under `shown` in this account.
+    fn resolve_linked_change(
+        &self,
+        account_id: AccountId,
+        shown: i64,
+        from: i64,
+        accept: bool,
+        at: DateTime<Utc>,
+    ) -> Result<bool>;
+
     /// The event-page URLs each of these ghosts is keyed by, without the
     /// sender scope, for display folding only (`gcal::fold_ghosts`). Ghosts
     /// with none are absent.

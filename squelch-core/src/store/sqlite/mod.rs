@@ -1463,12 +1463,41 @@ impl Store for SqliteStore {
         self.list_ghost_events(account_id, from, to)
     }
 
+    fn list_ghost_events_with_links(
+        &self,
+        account_id: AccountId,
+        from: DateTime<chrono::FixedOffset>,
+        to: DateTime<chrono::FixedOffset>,
+    ) -> Result<Vec<crate::types::GhostEvent>> {
+        self.list_ghost_events_with_links(account_id, from, to)
+    }
+
     fn ghost_url_refs(
         &self,
         account_id: AccountId,
         ids: &[i64],
     ) -> Result<std::collections::HashMap<i64, Vec<String>>> {
         self.ghost_url_refs(account_id, ids)
+    }
+
+    fn event_identity_candidates(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        records: &[crate::triage::ghost::GhostProposal],
+    ) -> Result<crate::triage::event_identity::Questions> {
+        self.event_identity_candidates(account_id, message_id, records)
+    }
+
+    fn resolve_linked_change(
+        &self,
+        account_id: AccountId,
+        shown: i64,
+        from: i64,
+        accept: bool,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.resolve_linked_change(account_id, shown, from, accept, at)
     }
 
     fn patch_ghost_user(

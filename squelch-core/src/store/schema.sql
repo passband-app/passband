@@ -1981,6 +1981,15 @@ CREATE TABLE IF NOT EXISTS agent_delivery_projections (
 -- rebuild CLEARS the span at the other precision (the one projection write to
 -- a user column), so a correction cannot come back after a second change.
 --
+-- `linked_to` is a LINK, not a merge: another sender's ghost for the same
+-- event (the promoter's mail beside RA's ticket), as the identity check
+-- judged it (`triage::event_identity`). The linked ghost keeps its own facts
+-- and folds under the one it names on the timeline, where a difference
+-- between them shows as a change the user may accept. It never changes the
+-- other ghost and never reaches Google. `link_ack` is the linked ghost's
+-- facts (start and mail state) when the user last said "keep mine", so the
+-- same change is not offered again.
+--
 -- No CHECK on kind, commitment or user_state: those vocabularies are expected
 -- to grow (held, materialized), and SQLite cannot alter a CHECK.
 CREATE TABLE IF NOT EXISTS ghost_events (
@@ -2009,7 +2018,9 @@ CREATE TABLE IF NOT EXISTS ghost_events (
     user_state          TEXT,
     user_state_at       TEXT,
     user_end_minutes    INTEGER,
-    user_end_days       INTEGER
+    user_end_days       INTEGER,
+    linked_to           INTEGER,
+    link_ack            TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_ghost_events_start ON ghost_events(account_id, start_sort);
 -- How later mail finds a ghost: `ref:<sender scope>:<ref>` for every identity
@@ -2031,13 +2042,16 @@ CREATE INDEX IF NOT EXISTS idx_ghost_event_keys_ghost ON ghost_event_keys(accoun
 -- of `message_id`. A record belongs to exactly one ghost; ghosts are never
 -- merged. `role` is the record's `change`. Every record had the ghost's
 -- `owner_scope` when it was assigned; a rebuild re-reads its message's scope
--- and a record whose message no longer has it contributes nothing.
+-- and a record whose message no longer has it contributes nothing, unless
+-- `accepted`: the user accepted another sender's change to this ghost, and
+-- that row then supplies facts (never keys or commitment).
 CREATE TABLE IF NOT EXISTS ghost_event_sources (
     account_id INTEGER NOT NULL,
     ghost_id   INTEGER NOT NULL,
     message_id INTEGER NOT NULL,
     position   INTEGER NOT NULL,
     role       TEXT NOT NULL,
+    accepted   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(account_id, message_id, position)
 );
 CREATE INDEX IF NOT EXISTS idx_ghost_event_sources_ghost ON ghost_event_sources(account_id, ghost_id);

@@ -86,6 +86,7 @@ fn seed(
             identity_refs: vec![format!("REF{gmail}12345")],
             likelihood: None,
             evidence: evidence.clone(),
+            identity: None,
         }],
         external_access: AccessAssessment {
             restricted: false,

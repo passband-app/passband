@@ -14,6 +14,7 @@ pub mod condense;
 pub mod context;
 pub mod deadline;
 pub mod decision;
+pub mod event_identity;
 pub mod events;
 pub mod extract;
 pub mod fye_headline;

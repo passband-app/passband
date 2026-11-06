@@ -1860,6 +1860,7 @@ mod tests {
                 identity_refs: vec![],
                 likelihood: None,
                 evidence: evidence(),
+                identity: None,
             },
             RecordProposal::FinancialUpdate {
                 institution: "First Bank".into(),

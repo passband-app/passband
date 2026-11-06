@@ -56,9 +56,9 @@ const DRAFT_ALERT_BODY: &str = "A draft is waiting for your review";
 /// the owner's calendar. It names no event, no time and no place.
 const CALENDAR_ALERT_BODY: &str = "An event is coming up";
 /// The fallback for a `kind: "release"` push: a new version of the app is out.
-/// The Mac has no extension to rewrite it, so on a Mac this IS the banner; the
-/// phone's extension names the version from the event id. Public news, but
-/// still a fixed line: the daemon picks it and can never write it.
+/// It goes to Macs only, which have no extension to rewrite it, so this IS the
+/// banner. Public news, but still a fixed line: the daemon picks it and can
+/// never write it.
 const RELEASE_ALERT_BODY: &str = "A new version of Passband for Mac is out";
 
 /// Open-token bounds. The alphabet is URL-safe base64 without padding, so a
@@ -432,15 +432,15 @@ fn validate(state: &RelayState, req: PushRequest) -> Result<Validated, RelayErro
     };
     // News, not mail: a release banner arrives silently and at APNs' low
     // priority, which lets the device deliver it when it suits the battery.
-    let quiet = req.kind.as_deref() == Some("release");
+    let low_priority = req.kind.as_deref() == Some("release");
 
     // Content-free by design: an opaque id plus a generic alert, or for a
     // clear, an opaque id and nothing to show.
     let (aps, push_type, priority) = match alert_body {
-        Some(body) if quiet => (
+        // No mutable-content: a Mac has no extension to wake.
+        Some(body) if low_priority => (
             json!({
                 "alert": { "title": ALERT_TITLE, "body": body },
-                "mutable-content": 1,
             }),
             "alert",
             "5",
@@ -659,7 +659,7 @@ mod tests {
             p["aps"]["alert"]["body"],
             "A new version of Passband for Mac is out"
         );
-        assert_eq!(p["aps"]["mutable-content"], 1);
+        assert!(p["aps"].get("mutable-content").is_none());
         // News, not mail: no sound, low priority.
         assert!(p["aps"].get("sound").is_none());
         assert_eq!(v.push_type, "alert");

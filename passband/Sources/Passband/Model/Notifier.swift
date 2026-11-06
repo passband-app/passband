@@ -703,11 +703,18 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         let isAuth = notification.request.content.userInfo[EventBanner.authKey] as? Bool ?? false
         let isReminder = route == EventBanner.calendarRoute
         nonisolated(unsafe) let done = completionHandler
-        // A release announcement (Mac only) pushed while Passband is running:
-        // the updater has already said it, with its own banner and card, so
-        // the push is shown as nothing.
-        if EventBanner.releasePush(notification.request.content.userInfo["event_id"] as? String) != nil {
-            DispatchQueue.main.async { done([]) }
+        // A release announcement (Mac only) pushed while Passband is running.
+        // Shown as nothing when the updater already bannered that version.
+        // Shown when it did not: a quiet hotfix right after a feature release
+        // gets no updater banner, and the push is then the only word of the
+        // feature release.
+        if let release = EventBanner.releasePush(notification.request.content.userInfo["event_id"] as? String) {
+            #if os(macOS)
+                let said = Updater.bannered == release.version
+            #else
+                let said = false
+            #endif
+            DispatchQueue.main.async { done(said ? [] : [.banner, .list]) }
             return
         }
         #if os(iOS)

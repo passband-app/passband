@@ -320,7 +320,7 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver, SPUUpdaterDelega
 
     /// The last version a banner went out for. Persisted so a relaunch does
     /// not announce the same release twice.
-    private static var bannered: String? {
+    nonisolated static var bannered: String? {
         get { UserDefaults.standard.string(forKey: "passband.update.bannered") }
         set { UserDefaults.standard.set(newValue, forKey: "passband.update.bannered") }
     }

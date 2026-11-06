@@ -87,8 +87,7 @@ enum EventBanner {
     static func tapRoute(_ userInfo: [AnyHashable: Any]) -> TapRoute {
         let route = userInfo[routeKey] as? String
         if route == updateRoute { return .update }
-        // The daemon's release announcement: on the Mac it is this same
-        // update, and on the phone it opens the app, as an update tap does.
+        // The daemon's release announcement (Macs only): this same update.
         if releasePush(userInfo["event_id"] as? String) != nil { return .update }
         if route == testRoute { return .test }
         // BEFORE anything else reads the payload: a draft push carries no

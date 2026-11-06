@@ -37,8 +37,13 @@ NS='xmlns:passband="https://passband.app/xml-namespaces/appcast"'
 # is a hotfix nobody is told about: its item gets <passband:quiet>, which the
 # daemon reads to skip its release push (squelch-core/src/release_feed.rs) and
 # the Mac reads to skip its "ready to install" banner (Updater.isQuiet). It
-# installs exactly like any other release. Only an ANNOTATED tag whose whole
-# message is `quiet` counts; a lightweight tag reads its commit's subject.
+# installs exactly like any other release. Only an ANNOTATED tag whose message
+# subject (first line) is `quiet` counts; a lightweight tag reads its commit's
+# subject, so it never does.
+#
+# This edits the feed AFTER generate_appcast. Safe because the feed itself is
+# not signed. If SURequireSignedFeed is ever turned on, the marks must move
+# before signing, or every update fails verification.
 #
 # The marks come off before generate_appcast runs and go back on after, from
 # the tags every time, so the generator only ever sees its own format and a

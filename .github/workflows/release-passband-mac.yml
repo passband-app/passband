@@ -167,7 +167,10 @@ jobs:
           # Re-fetch the release tags as they are: checkout on a tag push
           # can leave the pushed tag lightweight, and make-appcast.sh reads
           # an annotated tag's message for `quiet`.
-          git fetch --force --quiet origin 'refs/tags/passband-mac-*:refs/tags/passband-mac-*'
+          # With the job's token: checkout does not persist credentials,
+          # and this must not depend on the repo being public.
+          git -c http.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')" \
+            fetch --force --quiet origin 'refs/tags/passband-mac-*:refs/tags/passband-mac-*'
           cd passband
           mkdir -p releases
           gh release list --limit 100 --json tagName \

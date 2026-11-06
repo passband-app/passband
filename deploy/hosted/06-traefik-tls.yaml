@@ -14,9 +14,13 @@
 # Traefik log a conflict and fall back. `kubectl apply -f` is enough; Traefik
 # watches the CRD and picks it up without a restart.
 #
-# VERIFY after applying, from a laptop:
-#   openssl s_client -connect warden.passband.app:443 -tls1_1 </dev/null   # handshake failure
-#   openssl s_client -connect warden.passband.app:443 -tls1_2 </dev/null   # connects
+# VERIFY after applying, from carrier (applied and verified 2026-11-06). The
+# SECLEVEL=0 matters: a current OpenSSL or LibreSSL refuses TLS 1.1 on its own,
+# and a client-side refusal ("no protocols available") proves nothing. The
+# server's refusal is "tlsv1 alert protocol version" with `Cipher is (NONE)`.
+#   H=braelyn.passband.email
+#   openssl s_client -connect $H:443 -servername $H -tls1_1 -cipher 'DEFAULT@SECLEVEL=0' </dev/null
+#   openssl s_client -connect $H:443 -servername $H -tls1_2 </dev/null   # ECDHE + GCM/CHACHA20
 apiVersion: traefik.io/v1alpha1
 kind: TLSOption
 metadata:

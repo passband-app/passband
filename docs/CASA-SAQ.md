@@ -202,7 +202,9 @@ auth returns a bare 401 with no detail.
 are plain http on private networks (the embedder never receives sealed mail:
 `docs/SECURITY.md` §4d). Carrier's Traefik gets a TLS 1.2 floor and an
 ECDHE + AEAD suite list from `deploy/hosted/06-traefik-tls.yaml`, matching the
-AWS side, once it is applied.
+AWS side. Applied 2026-11-06 and checked from carrier: a TLS 1.1 handshake to a
+tenant host gets the server's `protocol version` alert, TLS 1.2 negotiates
+`ECDHE-RSA-AES128-GCM-SHA256`.
 
 ## V10 Malicious code and V14 configuration
 
@@ -251,8 +253,8 @@ evidence to collect.
    the operator's address, or be ready to explain the single-operator setup.
 2. **Revoke the Google grant on purge** (V8).
 3. **Console idle timeout** (V3).
-4. `kubectl apply -f deploy/hosted/06-traefik-tls.yaml` on carrier, then the
-   two `openssl` checks in that file (V9).
+4. ~~`kubectl apply -f deploy/hosted/06-traefik-tls.yaml` on carrier, then the
+   two `openssl` checks in that file (V9).~~ Done 2026-11-06.
 5. Screenshot Bifrost's logging settings (content logging off, 7 days).
 6. Confirm `/mcp` OAuth is live on carrier (`docs/VERIFICATION.md`).
 7. ~~`tofu apply` so the `passband.app` CSP is live before the scan.~~ Done

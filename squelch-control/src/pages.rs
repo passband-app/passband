@@ -161,7 +161,7 @@ pub(crate) const TESTFLIGHT_URL: &str = "https://testflight.apple.com/join/nt7BD
 fn testflight_qr() -> &'static str {
     static SVG: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         use qrcodegen::{QrCode, QrCodeEcc};
-        // A 43-byte URL always fits; `None` would be a bug in the constant.
+        // A 42-byte URL always fits; an `Err` would be a bug in the constant.
         let Ok(qr) = QrCode::encode_text(TESTFLIGHT_URL, QrCodeEcc::Medium) else {
             return String::new();
         };
@@ -1643,6 +1643,9 @@ mod tests {
         let svg = testflight_qr();
         assert_eq!(svg, qr_svg(&qr));
         assert_eq!(svg.matches("h1v1h-1z").count(), dark);
+        // The top-left finder's corner module sits 4 in from the edge, so the
+        // quiet zone is real on every side, not only counted into the viewBox.
+        assert!(svg.contains("M4 4h1v1h-1z"), "{svg}");
         let side = size + 8;
         assert!(
             svg.contains(&format!(r#"viewBox="0 0 {side} {side}""#)),

@@ -25,6 +25,7 @@ pub mod login_code;
 pub mod memory;
 pub mod money;
 pub mod notify_llm;
+pub mod order_fallback;
 pub mod order_link;
 pub mod profile;
 pub mod ranking;

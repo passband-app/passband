@@ -216,6 +216,6 @@ mod tests {
             "https://www.ebay.com/ord/show?itemId=123456789012&transactionId=10012345678901"
         );
         assert!(is_package_key(&trst().key()));
-        assert!(!is_package_key("amazon:113-1810790-1724205:N4RLGpMz1"));
+        assert!(!is_package_key("amazon:113-0000000-0000001:N0FAKE001"));
     }
 }

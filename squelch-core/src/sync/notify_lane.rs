@@ -1467,13 +1467,13 @@ mod tests {
         assert!(preferences.contains("matching preference"));
         assert!(!preferences.contains("unrelated rule"));
         assert!(candidate.general_rules.is_none());
-        context.general_rules = vec![serde_json::json!({"id":1,"text":"never SBA loan mail"})];
+        context.general_rules = vec![serde_json::json!({"id":1,"text":"never grant mail"})];
         let candidate = candidate_from_context(&context, &cfg()).unwrap();
         assert!(
             candidate
                 .general_rules
                 .unwrap()
-                .contains("never SBA loan mail")
+                .contains("never grant mail")
         );
         context.matched_rules.clear();
         assert!(

@@ -73,7 +73,7 @@ struct TeachTests {
     static func saveIsShutOnEmptyOrTooLong() {
         expect(!Teach.canSave(""), "empty")
         expect(!Teach.canSave(" \n "), "whitespace")
-        expect(Teach.canSave("never show me SBA funding mail"), "a sentence")
+        expect(Teach.canSave("never show me grant funding mail"), "a sentence")
         expect(Teach.canSave(String(repeating: "a", count: 1000)), "exactly at the cap")
         expect(!Teach.canSave(String(repeating: "a", count: 1001)), "over the cap")
         expect(Teach.canSave("  " + String(repeating: "a", count: 1000) + "  "), "trimmed before counting")
@@ -88,7 +88,7 @@ struct TeachTests {
 
     static func theWireDecodes() {
         let sender = #"{"kind":"sender","id":3,"text":"mute them","match_pattern":"*@a.com","disposition":"squelch"}"#
-        let general = #"{"kind":"general","id":9,"text":"never SBA mail"}"#
+        let general = #"{"kind":"general","id":9,"text":"never grant mail"}"#
         let list = #"[{"id":1,"text":"t","created_at":"2026-11-05T00:00:00Z","updated_at":"2026-11-05T00:00:00Z"}]"#
         let d = JSONDecoder()
         let s = try? d.decode(TeachResult.self, from: Data(sender.utf8))

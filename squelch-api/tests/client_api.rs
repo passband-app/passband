@@ -15847,14 +15847,14 @@ async fn teach_with_no_model_saves_a_general_rule_and_crud_works() {
         .oneshot(authed_json(
             "PUT",
             &format!("/client/general-rules/{id}"),
-            serde_json::json!({ "text": "never show me SBA loan mail" }),
+            serde_json::json!({ "text": "never show me grant mail" }),
         ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
         store.list_general_rules(acct).unwrap()[0].text,
-        "never show me SBA loan mail"
+        "never show me grant mail"
     );
 
     let resp = app

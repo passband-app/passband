@@ -1837,11 +1837,11 @@ mod budget_tests {
         context.sender_is_contact = true;
         context.rules = vec![serde_json::json!({"id":99,"want_text":"unrelated"})];
         context.matched_rules = vec![serde_json::json!({"id":7,"want_text":"relevant"})];
-        context.general_rules = vec![serde_json::json!({"id":1,"text":"never SBA loan mail"})];
+        context.general_rules = vec![serde_json::json!({"id":1,"text":"never grant mail"})];
         let snapshot = snapshot(&context, &job, 8, &utc_clock());
         assert_eq!(
             snapshot.initial["general_rules"][0]["text"],
-            "never SBA loan mail"
+            "never grant mail"
         );
         assert!(
             snapshot.initial["message"]["body"]

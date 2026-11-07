@@ -2706,6 +2706,11 @@ fn may_resolve_sender_mail(resolved: &ResolvedDisposition, sweep: bool) -> bool 
 #[derive(Debug, Deserialize)]
 pub struct SuggestRuleQuery {
     sender: String,
+    /// The email the teach card is open on. With it, the suggestion is read
+    /// from that email and is always "dont show me <kind> from <sender>";
+    /// without it, it is read from the sender's history as before.
+    #[serde(default)]
+    message_id: Option<i64>,
 }
 
 /// GET /client/rules/suggest?sender=addr: the sentence the owner might write
@@ -2728,6 +2733,31 @@ pub async fn suggest_rule(
     let Some(client) = state.rule_suggest.clone() else {
         return Ok(none());
     };
+    if let Some(message_id) = params.message_id {
+        let example = store_call(&state, move |store, account_id| {
+            if rule_suggest_capped(store, account_id)? {
+                return Ok(None);
+            }
+            store.teach_example(account_id, message_id)
+        })
+        .await?;
+        // Spam, sealed mail and a missing message offer nothing.
+        let Some(example) = example else {
+            return Ok(none());
+        };
+        let (suggestion, usage) = rule_suggest::suggest_from_email(&client, &example).await;
+        if let Some(u) = usage {
+            let _ = store_call(&state, move |store, account_id| {
+                bill_rule_suggest(store, account_id, u);
+                Ok(())
+            })
+            .await;
+        }
+        return Ok((
+            no_store(),
+            Json(serde_json::json!({ "suggestion": suggestion })),
+        ));
+    }
     let addr = sender.clone();
     let digest = store_call(&state, move |store, account_id| {
         // The runaway guard: past the day's cap the route answers null

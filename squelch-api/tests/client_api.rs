@@ -12199,7 +12199,7 @@ fn seed_suggest_msg(
     from: &str,
     subject: &str,
     sensitivity: Sensitivity,
-) {
+) -> i64 {
     let mut m = msg(acct, gmail, gmail, subject, "body");
     m.from_addr = from.to_string();
     let id = store.upsert_message(&m).unwrap();
@@ -12207,6 +12207,7 @@ fn seed_suggest_msg(
     store
         .set_triage(id, acct, 10, Tier::Noise, sensitivity, kind, "", "", None)
         .unwrap();
+    id
 }
 
 /// A state whose rule suggester points at a mock answering `suggestion`.
@@ -12272,6 +12273,59 @@ async fn rule_suggestion_is_cleaned_and_billed_to_its_own_category() {
         usage_categories(&store, acct),
         vec!["rule_suggest".to_string()]
     );
+}
+
+#[tokio::test]
+async fn a_suggestion_for_one_email_is_always_dont_show_me_from() {
+    let answer =
+        serde_json::json!({ "kind": "Terms of Service updates.", "sender": "Notion" }).to_string();
+    let body = serde_json::json!({
+        "content": [{ "type": "text", "text": answer }],
+        "stop_reason": "end_turn",
+        "usage": { "input_tokens": 60, "output_tokens": 8 }
+    })
+    .to_string();
+    // One message only: too little history for the sender path, so an answer
+    // here can only have come from the email.
+    let mut id = 0;
+    let Harness { app, store, acct } = app_with_suggest_body(body, |store, acct| {
+        id = seed_suggest_msg(
+            store,
+            acct,
+            "g1",
+            "legal@notion.so",
+            "We're updating our terms",
+            Sensitivity::Normal,
+        );
+    })
+    .await;
+
+    let resp = app
+        .clone()
+        .oneshot(authed(
+            "GET",
+            &format!("/client/rules/suggest?sender=legal@notion.so&message_id={id}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(
+        json["suggestion"],
+        "dont show me terms of service updates from Notion"
+    );
+    assert_eq!(suggest_calls(&store, acct), 1);
+
+    // A message that is not there offers nothing and spends nothing.
+    let resp = app
+        .oneshot(authed(
+            "GET",
+            "/client/rules/suggest?sender=legal@notion.so&message_id=999999",
+        ))
+        .await
+        .unwrap();
+    assert!(body_json(resp).await["suggestion"].is_null());
+    assert_eq!(suggest_calls(&store, acct), 1);
 }
 
 /// The suggester answering a smart-block call with these three fields.

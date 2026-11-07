@@ -13,7 +13,7 @@ enum Teach {
 
     /// The placeholder when there is no sender to suggest from.
     static let example =
-        "e.g. emails to Alex about grant funding for Northwind Bakery: never show me those"
+        "e.g. never show me TOS updates from this sender"
 
     /// The undo chip after a save, naming who the rule ended up about.
     static func savedLabel(_ result: TeachResult) -> String {

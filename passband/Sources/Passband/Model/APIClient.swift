@@ -858,10 +858,13 @@ actor APIClient {
 
     /// A small model's guess at the rule the owner might write about `sender`,
     /// or nil. Only ever shown as a placeholder: the owner takes it with tab.
-    /// A daemon too old for the route 404s, which the caller reads as none.
-    func suggestRule(sender: String) async throws -> String? {
+    /// With `messageId` it is read from that email and is always "dont show me
+    /// <kind> from <sender>". A daemon too old for the route 404s, which the
+    /// caller reads as none.
+    func suggestRule(sender: String, messageId: Int? = nil) async throws -> String? {
         let answer: RuleSuggestion = try await get(
-            "/client/rules/suggest", query: ["sender": sender])
+            "/client/rules/suggest",
+            query: ["sender": sender, "message_id": messageId.map(String.init)])
         return answer.suggestion
     }
 

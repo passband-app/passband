@@ -177,7 +177,7 @@ struct TeachCard: View {
     private func loadSuggestion() async {
         guard !editing, let sender = request.sender, text.isEmpty else { return }
         guard let answer = try? await APIClient.shared.suggestRule(
-            sender: SenderID.address(sender))
+            sender: SenderID.address(sender), messageId: request.sourceMessageId)
         else { return }
         withAnimation(Motion.disclose) { suggestion = answer }
         if text.isEmpty { suggestionShown = true }

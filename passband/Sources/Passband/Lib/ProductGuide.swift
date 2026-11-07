@@ -519,7 +519,7 @@ enum ProductGuide {
         works out whether it is about one sender or about all their mail.
 
         Teaching Passband (t):
-        - Press t in the reader, or on a highlighted row on the Sitrep or in the Emails list. The "teach Passband" card opens with one field: "what should Passband know?". The email's sender shows on the card as context, and Passband may suggest a sentence about them; Tab takes the suggestion.
+        - Press t in the reader, or on a highlighted row on the Sitrep or in the Emails list. The "teach Passband" card opens with one field: "what should Passband know?". The email's sender shows on the card as context, and Passband may suggest a sentence read from that email, always in the form "dont show me <kind of email> from <sender>" (for example "dont show me terms of service updates from Notion"); Tab takes the suggestion.
         - Write anything: "always show me mail from my accountant", or "emails to Alex about grant funding for Northwind Bakery: never show me those". Passband decides whether it is about the sender of that email (it becomes a sender rule) or about all mail (it becomes a rule about all mail). A sentence that names an address or a domain can become a rule for that sender.
         - Enter saves, Option+Enter adds a line, Esc cancels and keeps what was typed. Saving can take a few seconds while Passband reads the sentence.
         - Afterwards the chip at the bottom left says what it became ("Applies to mail from ..." or "Applies to all your mail"). Press u, or click it, within 5 seconds to undo.

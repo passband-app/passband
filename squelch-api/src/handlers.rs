@@ -26,6 +26,7 @@ use squelch_core::sync::{decode_raw_b64url, parse_internal_date};
 use squelch_core::triage::llm::Usage;
 use squelch_core::triage::rule_infer;
 use squelch_core::triage::rule_suggest;
+use squelch_core::triage::teach;
 use squelch_core::types::{
     AccountId, AttentionStatus, Disposition, GroupMode, SenderRule, ShredStats, Tier, TriageAxis,
 };
@@ -3022,6 +3023,249 @@ pub async fn delete_rule(
     } else {
         Err(ApiError::not_found())
     }
+}
+
+// --- POST /client/teach, /client/general-rules -----------------------------
+//
+// `t` in the app: the owner says what they want in their own words and the
+// daemon decides what rule that is (`triage::teach`). General rules are the
+// ones about no particular sender; the triage model reads them on every email.
+// Like every rule write, nothing here re-triages stored mail.
+
+#[derive(Debug, Deserialize)]
+pub struct TeachBody {
+    text: String,
+    /// The email the owner was on when they pressed `t`. Its sender is looked
+    /// up here, never taken from the client, and only matters when the owner's
+    /// words are about that sender.
+    #[serde(default)]
+    source_message_id: Option<i64>,
+}
+
+fn teach_text(raw: &str) -> Result<String, ApiError> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return Err(ApiError::bad_request("say what you want in a few words"));
+    }
+    if text.chars().count() > squelch_core::store::sqlite::MAX_GENERAL_RULE_CHARS {
+        return Err(ApiError::bad_request(format!(
+            "keep it under {} characters",
+            squelch_core::store::sqlite::MAX_GENERAL_RULE_CHARS
+        )));
+    }
+    Ok(text.to_string())
+}
+
+pub async fn teach(
+    State(state): State<ApiState>,
+    Json(body): Json<TeachBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let text = teach_text(&body.text)?;
+    // The sender (for "them") and, separately, the email as the describer may
+    // read it (for "like this"). Missing or sealed reads as no email.
+    let (source_sender, example) = match body.source_message_id {
+        Some(id) => {
+            store_call(&state, move |store, account_id| {
+                let sender = store
+                    .message_unsub_fields(account_id, id)?
+                    .map(|f| f.from_addr.trim().to_ascii_lowercase())
+                    .filter(|a| !a.is_empty());
+                Ok((sender, store.teach_example(account_id, id)?))
+            })
+            .await?
+        }
+        None => (None, None),
+    };
+    let llm = state.rule_infer();
+    // Two calls, side by side: the router never sees the email, the describer
+    // never decides what the rule does.
+    let ((plan, plan_usage), (description, describe_usage)) =
+        tokio::join!(teach::plan(&text, source_sender.as_deref(), llm), async {
+            match &example {
+                Some(example) => teach::describe(&text, example, llm).await,
+                None => (None, None),
+            }
+        });
+    let max = squelch_core::store::sqlite::MAX_GENERAL_RULE_CHARS;
+    let described = teach::with_description(&text, description.as_deref(), max);
+
+    // Full? Merge overlapping general rules first. Only for a general rule,
+    // and only when the list is actually at the cap.
+    let mut merge_plan = None;
+    let mut merge_usage = None;
+    if plan == teach::TeachPlan::General {
+        let rules = store_call(&state, |store, account_id| {
+            store.list_general_rules(account_id)
+        })
+        .await?;
+        let cap = squelch_core::store::sqlite::MAX_GENERAL_RULES;
+        if rules.len() >= cap {
+            let listed: Vec<(i64, String)> = rules.into_iter().map(|r| (r.id, r.text)).collect();
+            let free = listed.len() + 1 - cap;
+            let (merges, usage) = teach::consolidate(&listed, free, max, llm).await;
+            merge_usage = usage;
+            match merges {
+                Some(m) => merge_plan = Some(m),
+                None => {
+                    store_call(&state, move |store, account_id| {
+                        bill_rule_inference(store, account_id, plan_usage);
+                        bill_rule_inference(store, account_id, describe_usage);
+                        bill_rule_inference(store, account_id, merge_usage);
+                        Ok(())
+                    })
+                    .await?;
+                    return Err(ApiError::bad_request(format!(
+                        "you have {cap} rules for all mail and none overlap enough to merge; \
+                         delete one first"
+                    )));
+                }
+            }
+        }
+    }
+
+    let saved = store_call(&state, move |store, account_id| {
+        bill_rule_inference(store, account_id, plan_usage);
+        bill_rule_inference(store, account_id, describe_usage);
+        bill_rule_inference(store, account_id, merge_usage);
+        match plan {
+            teach::TeachPlan::General => {
+                let merged = match &merge_plan {
+                    Some(m) => {
+                        let ids = store.merge_general_rules(account_id, m)?;
+                        m.iter()
+                            .zip(ids)
+                            .map(|((sources, text), id)| {
+                                json!({ "id": id, "text": text, "replaced_ids": sources })
+                            })
+                            .collect::<Vec<_>>()
+                    }
+                    None => Vec::new(),
+                };
+                let id = store.create_general_rule(account_id, &described)?;
+                Ok(json!({
+                    "kind": "general",
+                    "id": id,
+                    "text": described,
+                    "merged": merged,
+                }))
+            }
+            teach::TeachPlan::Sender {
+                pattern,
+                disposition,
+            } => {
+                // The description only matters to a filtered rule, the one
+                // whose words are read against each email.
+                let want = if disposition == Disposition::Filtered {
+                    described
+                } else {
+                    text
+                };
+                // The pattern is unique per account, so this may overwrite a
+                // rule the owner already had. Hand the old one back so undo
+                // can put it back instead of deleting it.
+                let replaced = store
+                    .list_sender_rules(account_id)?
+                    .into_iter()
+                    .find(|r| r.match_pattern.eq_ignore_ascii_case(&pattern))
+                    .map(|r| {
+                        json!({
+                            "want_text": r.want_text,
+                            "disposition": r.disposition.as_str(),
+                        })
+                    });
+                let id = store.set_sender_rule(account_id, &pattern, &want, disposition)?;
+                Ok(json!({
+                    "kind": "sender",
+                    "id": id,
+                    "text": want,
+                    "match_pattern": pattern,
+                    "disposition": disposition.as_str(),
+                    "replaced": replaced,
+                }))
+            }
+        }
+    })
+    .await?;
+    let detail = format!("{} {}", saved["kind"].as_str().unwrap_or(""), saved["id"]);
+    audit_action(
+        &state,
+        "rule.teach",
+        saved["match_pattern"].as_str().map(str::to_string),
+        &detail,
+    )
+    .await;
+    Ok((StatusCode::CREATED, Json(saved)))
+}
+
+pub async fn list_general_rules(
+    State(state): State<ApiState>,
+) -> Result<impl IntoResponse, ApiError> {
+    query(&state, |store, account_id| {
+        Ok(store
+            .list_general_rules(account_id)?
+            .into_iter()
+            .map(|r| {
+                json!({
+                    "id": r.id,
+                    "text": r.text,
+                    "created_at": r.created_at.to_rfc3339(),
+                    "updated_at": r.updated_at.to_rfc3339(),
+                })
+            })
+            .collect::<Vec<_>>())
+    })
+    .await
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GeneralRuleBody {
+    text: String,
+}
+
+/// A verbatim save, no model: the Rules page's undo of a delete.
+pub async fn create_general_rule(
+    State(state): State<ApiState>,
+    Json(body): Json<GeneralRuleBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let text = teach_text(&body.text)?;
+    let id = store_call(&state, move |store, account_id| {
+        store.create_general_rule(account_id, &text)
+    })
+    .await?;
+    audit_action(&state, "rule.general.create", None, &id.to_string()).await;
+    Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
+}
+
+pub async fn update_general_rule(
+    State(state): State<ApiState>,
+    Path(id): Path<i64>,
+    Json(body): Json<GeneralRuleBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let text = teach_text(&body.text)?;
+    let updated = store_call(&state, move |store, account_id| {
+        store.update_general_rule(account_id, id, &text)
+    })
+    .await?;
+    if !updated {
+        return Err(ApiError::not_found());
+    }
+    audit_action(&state, "rule.general.update", Some(id.to_string()), "ok").await;
+    Ok(Json(json!({ "id": id })))
+}
+
+pub async fn delete_general_rule(
+    State(state): State<ApiState>,
+    Path(id): Path<i64>,
+) -> Result<impl IntoResponse, ApiError> {
+    let deleted = store_call(&state, move |store, account_id| {
+        store.delete_general_rule(account_id, id)
+    })
+    .await?;
+    if !deleted {
+        return Err(ApiError::not_found());
+    }
+    audit_action(&state, "rule.general.delete", Some(id.to_string()), "ok").await;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // --- GET/POST/PUT/DELETE /client/drafts -------------------------------------

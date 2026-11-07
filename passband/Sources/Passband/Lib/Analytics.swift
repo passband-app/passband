@@ -253,6 +253,7 @@ enum Analytics {
             // trips the debug assert.
             "archive", "done", "label", "ruleDelete", "groupDelete", "remind", "send",
             "draftDelete", "schedule", "scheduledCancel", "ghostDismiss", "skip",
+            // (and "teach", listed once below with the discovery skills)
             // calendar_ghost_marked states: the PATCH's own words, plus
             // "cleared" for the null that takes the mark off. "calendar" (the
             // page, and thread_opened's source from it) is a MainView.

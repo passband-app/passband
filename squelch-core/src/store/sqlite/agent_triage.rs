@@ -229,10 +229,19 @@ fn rules(conn: &Connection, account: AccountId) -> Result<Vec<serde_json::Value>
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(rows)
 }
+/// General rules as the model reads them: the owner's words and an id, nothing
+/// else. Timestamps would only churn the preference fingerprint's meaning.
+fn general_rules(conn: &Connection, account: AccountId) -> Result<Vec<serde_json::Value>> {
+    Ok(super::rules::list_general_rules_conn(conn, account)?
+        .into_iter()
+        .map(|r| serde_json::json!({ "id": r.id, "text": r.text }))
+        .collect())
+}
 fn context(conn: &Connection, account: AccountId, id: i64) -> Result<AgentContext> {
     let message = read_message(conn, account, id)?;
     let thread = read_thread(conn, account, &message.thread_id, 1000)?;
     let rules = rules(conn, account)?;
+    let general_rules = general_rules(conn, account)?;
     let corrections = corrections(conn, account, id)?;
     let sender_is_contact = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM contacts WHERE account_id=?1 AND addr=?2 COLLATE NOCASE)",
@@ -265,7 +274,12 @@ fn context(conn: &Connection, account: AccountId, id: i64) -> Result<AgentContex
         .collect();
     let revision = ContextRevision {
         content: fingerprint(&content)?,
-        preferences: fingerprint(&(&matched_rules, sender_is_contact, &corrections))?,
+        preferences: fingerprint(&(
+            &matched_rules,
+            &general_rules,
+            sender_is_contact,
+            &corrections,
+        ))?,
         user_state: fingerprint(&state)?,
         attention_revision: attention.as_ref().map(|a| a.1).unwrap_or(0),
     };
@@ -276,6 +290,7 @@ fn context(conn: &Connection, account: AccountId, id: i64) -> Result<AgentContex
         attention: attention.as_ref().map(|a| decode(&a.0)).transpose()?,
         rules,
         matched_rules,
+        general_rules,
         sender_is_contact,
         corrections,
         revision,
@@ -7715,6 +7730,33 @@ mod tests {
         assert_eq!(context.rules.len(), 2);
         assert_eq!(context.matched_rules.len(), 1);
         assert_eq!(context.matched_rules[0]["id"], 1);
+    }
+    #[test]
+    fn context_carries_every_general_rule_whatever_the_sender() {
+        let store = fixture();
+        let (_, before) = claim(&store, 1);
+        assert!(before.general_rules.is_empty());
+        let id = store
+            .create_general_rule(1, "emails about grant funding for Northwind Bakery: never")
+            .unwrap();
+        store
+            .create_general_rule(2, "another account's rule")
+            .unwrap();
+        let context = store
+            .lock()
+            .map(|conn| super::context(&conn, 1, 1).unwrap())
+            .unwrap();
+        assert_eq!(
+            context.general_rules,
+            vec![serde_json::json!({
+                "id": id,
+                "text": "emails about grant funding for Northwind Bakery: never"
+            })]
+        );
+        assert_ne!(
+            context.revision.preferences, before.revision.preferences,
+            "a new general rule makes in-flight work stale"
+        );
     }
     #[test]
     fn ingest_duplicates_are_idempotent_and_account_scoped() {

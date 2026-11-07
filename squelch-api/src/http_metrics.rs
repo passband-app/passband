@@ -28,6 +28,7 @@ pub const ROUTE_CLASSES: &[(&str, &str, RouteClass)] = &[
     ("GET", "/client/rules/suggest", RouteClass::Llm),
     ("POST", "/client/rules", RouteClass::Llm),
     ("PUT", "/client/rules/{id}", RouteClass::Llm),
+    ("POST", "/client/teach", RouteClass::Llm),
     // A relay: the response head is the gateway's, so the clock stops on the
     // provider's time to first byte.
     ("POST", "/client/assistant/messages", RouteClass::Llm),

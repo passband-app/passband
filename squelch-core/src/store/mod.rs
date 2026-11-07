@@ -28,9 +28,9 @@ use crate::triage::rule_suggest::SmartBlock;
 use crate::triage::{CalendarInfo, CarrierTrack, DeadlineHit, ReceiptInfo, ShipmentInfo};
 use crate::types::{
     AccountId, AttachmentInfo, AttentionStatus, AuditEntry, Banking, CalendarUpdate, Deadline,
-    Disposition, Event, EventKind, FieldReasons, NewMessage, OpenRate, Receipt, RetriageProgress,
-    SealedKind, SearchHit, SenderRule, Sensitivity, ShredCandidate, StoreStats, ThreadView, Tier,
-    TriageAxis, TriageFeedback, UnsubscribeRecord,
+    Disposition, Event, EventKind, FieldReasons, GeneralRule, NewMessage, OpenRate, Receipt,
+    RetriageProgress, SealedKind, SearchHit, SenderRule, Sensitivity, ShredCandidate, StoreStats,
+    ThreadView, Tier, TriageAxis, TriageFeedback, UnsubscribeRecord,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -2022,6 +2022,35 @@ pub trait Store:
     ) -> Result<i64>;
 
     fn list_sender_rules(&self, account_id: AccountId) -> Result<Vec<SenderRule>>;
+
+    /// The owner's general rules (not about one sender), oldest first.
+    fn list_general_rules(&self, account_id: AccountId) -> Result<Vec<GeneralRule>>;
+
+    /// Save a general rule verbatim (trimmed). `InvalidInput` when empty, too
+    /// long, or past the per-account cap. Re-triages nothing.
+    fn create_general_rule(&self, account_id: AccountId, text: &str) -> Result<i64>;
+
+    /// Rewrite a general rule. `false` => unknown id.
+    fn update_general_rule(&self, account_id: AccountId, id: i64, text: &str) -> Result<bool>;
+
+    /// Delete a general rule. `false` => unknown id.
+    fn delete_general_rule(&self, account_id: AccountId, id: i64) -> Result<bool>;
+
+    /// Replace groups of general rules with one merged rule each, atomically.
+    /// Each entry is (source ids, merged text). Fails whole if any source is
+    /// gone or any text is invalid.
+    fn merge_general_rules(
+        &self,
+        account_id: AccountId,
+        merges: &[(Vec<i64>, String)],
+    ) -> Result<Vec<i64>>;
+
+    /// The non-sealed, non-spam email a teach was written on, for the describer.
+    fn teach_example(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+    ) -> Result<Option<crate::triage::teach::TeachExample>>;
 
     /// The newest `limit` messages from `from_addr` with what became of each,
     /// for suggesting a rule about that sender. SEALED ROWS ARE EXCLUDED IN

@@ -117,6 +117,10 @@ pub struct AgentContext {
     pub attention: Option<ThreadAttentionDecision>,
     pub rules: Vec<serde_json::Value>,
     pub matched_rules: Vec<serde_json::Value>,
+    /// The owner's general rules (not about one sender). Every one goes to the
+    /// model on every email; the model decides which apply.
+    #[serde(default)]
+    pub general_rules: Vec<serde_json::Value>,
     pub sender_is_contact: bool,
     pub corrections: Vec<serde_json::Value>,
     pub revision: ContextRevision,

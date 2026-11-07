@@ -896,6 +896,36 @@ actor APIClient {
 
     func deleteRule(_ id: Int) async throws { try await deleteNoContent("/client/rules/\(id)") }
 
+    // MARK: - teaching
+
+    /// One sentence, read by a small model that decides whether it is about a
+    /// sender or about all mail. The model can take ~12s, so this waits longer
+    /// than the usual 15s idle. A daemon too old for the route answers 404.
+    func teach(_ body: TeachBody) async throws -> TeachResult {
+        try await post("/client/teach", body: body, timeout: 45)
+    }
+
+    /// A daemon too old for the route answers 404; the Rules page reads that
+    /// as "no general section".
+    func listGeneralRules() async throws -> [GeneralRule] {
+        try await get("/client/general-rules")
+    }
+
+    /// Saved verbatim, no model. The undo of a delete uses it.
+    @discardableResult
+    func createGeneralRule(text: String) async throws -> GeneralRuleSaved {
+        try await post("/client/general-rules", body: GeneralRuleBody(text: text))
+    }
+
+    @discardableResult
+    func updateGeneralRule(_ id: Int, text: String) async throws -> GeneralRuleSaved {
+        try await put("/client/general-rules/\(id)", body: GeneralRuleBody(text: text))
+    }
+
+    func deleteGeneralRule(_ id: Int) async throws {
+        try await deleteNoContent("/client/general-rules/\(id)")
+    }
+
     // MARK: - unsubscribe
 
     struct UnsubBody: Codable, Sendable {

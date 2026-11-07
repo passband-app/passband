@@ -88,6 +88,7 @@
 		231B88B449E171FE30F25D07 /* AuthCode.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB5FEFF987265DA1E7F85007 /* AuthCode.swift */; };
 		2340DCA0B3EC78CC786121E6 /* CalendarDisk.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1CF509A231CD32CD9465772 /* CalendarDisk.swift */; };
 		240B5441D4F292BDC77DDD62 /* CalendarMarks.swift in Sources */ = {isa = PBXBuildFile; fileRef = B60D343AD05DE659303B195E /* CalendarMarks.swift */; };
+		245ABD75EA10D1C50F2D36B7 /* Teach.swift in Sources */ = {isa = PBXBuildFile; fileRef = 897066D663BEFE228A268248 /* Teach.swift */; };
 		24AF68BF417C51D26EB40ED6 /* SyncStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DAC2EA79665D763DD36958D /* SyncStatus.swift */; };
 		24B9C76ED25930D29752DBC9 /* ReleaseVignettes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20784C558DBC1E921E560D2E /* ReleaseVignettes.swift */; };
 		2530ADC217749D5FEEFFA4D9 /* DraftSaver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06A50E65F84872DFA0504B96 /* DraftSaver.swift */; };
@@ -237,6 +238,7 @@
 		6277F73C5576C9955C6B0656 /* RecipientField.swift in Sources */ = {isa = PBXBuildFile; fileRef = 327BC236C39F192198AFEF7D /* RecipientField.swift */; };
 		633AB45EAC4D0C3EF482C7D3 /* EventDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06294128BE6F9EC8B5692553 /* EventDraft.swift */; };
 		63B1D314BBBFDE43A8860992 /* Reading.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AC75F572A768A3A2EEB001F /* Reading.swift */; };
+		6426F82C07CC2A9A813625D4 /* TeachCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E2619979E60C184243E98F3 /* TeachCard.swift */; };
 		647DD68EDE188660654C0D27 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDDBA0B71BDDC46E844D2856 /* RootView.swift */; };
 		64BC88FBDA98D7C9C4F3AAF3 /* GroupEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8FF235DC1DB2B57F7C06220 /* GroupEditor.swift */; };
 		64D506A4A0385471D36ABFE0 /* PhoneReleaseNotes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3778503DAD54463B024DBB06 /* PhoneReleaseNotes.swift */; };
@@ -310,6 +312,7 @@
 		7FA865BD3FC444EA52349F10 /* EventVisualPick.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB1DA83A2F2F84ED79DFE34B /* EventVisualPick.swift */; };
 		7FE470A247D27B7BDD2059A8 /* AttachmentTray.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD9028BBB8ECDE62A486B41B /* AttachmentTray.swift */; };
 		80CB8B4BE8201FDEA109E8A1 /* FixtureMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 599BE43C72F83A1C7D5EED25 /* FixtureMode.swift */; };
+		80EC9F9054BD60F080B9C1F9 /* TeachCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E2619979E60C184243E98F3 /* TeachCard.swift */; };
 		811AE61DFEA4A6D99E9AFE40 /* SitrepPoller.swift in Sources */ = {isa = PBXBuildFile; fileRef = A31EE886D87910F0348A94AB /* SitrepPoller.swift */; };
 		815B9C4E2BA52237B41F1556 /* SearchFetch.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA1F37AFE6C968BF66760A5B /* SearchFetch.swift */; };
 		8187BD8126DD9C305C879FBC /* SmartClear.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CCA02E95A2B5E2F24255F12 /* SmartClear.swift */; };
@@ -595,6 +598,7 @@
 		F3892526DCB5A77DCE1C4A2F /* ShareNudgeModal.swift in Sources */ = {isa = PBXBuildFile; fileRef = F35D517CCBF21D1292E154AB /* ShareNudgeModal.swift */; };
 		F38B78086DC5EBF798FFE3A1 /* Assistant.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EC7EBBF801C0364D402F94D /* Assistant.swift */; };
 		F407EADA69EC6BA6001EBD5B /* AgentNudge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77F7A4B36E2DEA7F8B1AC50B /* AgentNudge.swift */; };
+		F4580531BBD700BBA3784F10 /* Teach.swift in Sources */ = {isa = PBXBuildFile; fileRef = 897066D663BEFE228A268248 /* Teach.swift */; };
 		F4D434105490FF1F19B89986 /* AttachmentKinds.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DAF25E856CCAD8284AAA131 /* AttachmentKinds.swift */; };
 		F5D10BF828260AC92C5464E4 /* ReaderHintRule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05D548D1367E1CE6E01F5C6F /* ReaderHintRule.swift */; };
 		F6478DB23F517992C1B1F5FF /* AccountDoor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6956B39387CC9395FCCBECD2 /* AccountDoor.swift */; };
@@ -844,6 +848,7 @@
 		88151BD4CF9D97EE43150B72 /* NotificationIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationIcon.swift; sourceTree = "<group>"; };
 		8860DE0FE5AA0366C7BE9922 /* JSONValue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONValue.swift; sourceTree = "<group>"; };
 		88C38163197CC12C0A08950C /* RulePatternSuggest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RulePatternSuggest.swift; sourceTree = "<group>"; };
+		897066D663BEFE228A268248 /* Teach.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Teach.swift; sourceTree = "<group>"; };
 		89A44DCD12D99794B8DF43B0 /* AuthView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthView.swift; sourceTree = "<group>"; };
 		89D7AEFD2BA6E628127F2999 /* RenotifyBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RenotifyBanner.swift; sourceTree = "<group>"; };
 		8A5B932C525F604FE718F360 /* DiscoveryCopy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiscoveryCopy.swift; sourceTree = "<group>"; };
@@ -868,6 +873,7 @@
 		9C9C77BCE41A573ED04E49AA /* CidImages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CidImages.swift; sourceTree = "<group>"; };
 		9CC257E1C6D252919F11B337 /* GroupsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroupsView.swift; sourceTree = "<group>"; };
 		9D952F37AD4DF7C050902B19 /* EventBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventBanner.swift; sourceTree = "<group>"; };
+		9E2619979E60C184243E98F3 /* TeachCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TeachCard.swift; sourceTree = "<group>"; };
 		9E5E8356451742599F7D7A2A /* MobileAuthView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAuthView.swift; sourceTree = "<group>"; };
 		9ED32B3054A31D7933998E59 /* ComposeAttachments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposeAttachments.swift; sourceTree = "<group>"; };
 		9FC443D7A43C9C271CEEBAAE /* DiscoveryLayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiscoveryLayer.swift; sourceTree = "<group>"; };
@@ -1113,6 +1119,7 @@
 				A97E96827F6F661BD0999CFE /* SmartClearReceipt.swift */,
 				848BEC54D1FCD1F0FC5BE1A5 /* SpamNotice.swift */,
 				E30603BDC03A9EAB6868D105 /* StaysHintMark.swift */,
+				9E2619979E60C184243E98F3 /* TeachCard.swift */,
 				D078052FD335EF42C0AF9E8F /* TestFlightNudgeModal.swift */,
 				06AB2FB92191FC4913C38FFF /* ThreadMinimap.swift */,
 				F2BD37CBEFEA8CEB215E3247 /* ThreadViewer.swift */,
@@ -1227,6 +1234,7 @@
 				4CCA02E95A2B5E2F24255F12 /* SmartClear.swift */,
 				2CEB46442CC9ABC798040928 /* StagedAttachment.swift */,
 				2ED14756C423C17AAC02F8B6 /* StaysHintRule.swift */,
+				897066D663BEFE228A268248 /* Teach.swift */,
 				8DE74D8B3ADCEED239B127A1 /* TestFlightNudge.swift */,
 				CB8DC0D632309B6B97130426 /* ThreadArrivals.swift */,
 				A5B25E3187C89277DBE8DEF3 /* ThreadStyle.swift */,
@@ -1933,6 +1941,8 @@
 				EA0F7FADC742BF00778433BF /* SubjectText.swift in Sources */,
 				4470EFED5BDA9F1857FD2D45 /* SweepVignette.swift in Sources */,
 				24AF68BF417C51D26EB40ED6 /* SyncStatus.swift in Sources */,
+				245ABD75EA10D1C50F2D36B7 /* Teach.swift in Sources */,
+				80EC9F9054BD60F080B9C1F9 /* TeachCard.swift in Sources */,
 				EE79A77D361F587540EF9A34 /* TeachVignette.swift in Sources */,
 				B755BE657EE21A33D4ED557B /* TestFlightNudge.swift in Sources */,
 				C9A5397B0E0FB0E0C891684D /* TestFlightNudgeModal.swift in Sources */,
@@ -2230,6 +2240,8 @@
 				C47E10D8934D830B5018DC8B /* SubjectText.swift in Sources */,
 				C8FCFA76D21B9E6DC3093D18 /* SwipeRow.swift in Sources */,
 				A18FDD06D661272DAEB42CFB /* SyncStatus.swift in Sources */,
+				F4580531BBD700BBA3784F10 /* Teach.swift in Sources */,
+				6426F82C07CC2A9A813625D4 /* TeachCard.swift in Sources */,
 				D83B0B34F1E5C4F5C2BF2741 /* TestFlightNudge.swift in Sources */,
 				1CE21E966B1C0068BBAE7178 /* ThreadArrivals.swift in Sources */,
 				9B3E18E0184901FAE39CB499 /* ThreadMinimap.swift in Sources */,

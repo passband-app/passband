@@ -534,3 +534,166 @@ impl SqliteStore {
         Ok(n > 0)
     }
 }
+
+// ---- General rules ---------------------------------------------------------
+
+/// Longest general rule, in chars. Every general rule rides in every triage
+/// prompt, so length is paid on every email; a sentence or two is the shape.
+pub const MAX_GENERAL_RULE_CHARS: usize = 1000;
+/// Most general rules one account may hold, for the same reason.
+pub const MAX_GENERAL_RULES: usize = 40;
+
+fn validate_general_rule(text: &str) -> Result<&str> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(CoreError::InvalidInput("a rule needs some words".into()));
+    }
+    if text.chars().count() > MAX_GENERAL_RULE_CHARS {
+        return Err(CoreError::InvalidInput(format!(
+            "a rule can be at most {MAX_GENERAL_RULE_CHARS} characters"
+        )));
+    }
+    Ok(text)
+}
+
+/// [`SqliteStore::list_general_rules`] for a caller already holding the
+/// connection. Oldest first, so the prompt reads them in the order written.
+pub(super) fn list_general_rules_conn(
+    conn: &Connection,
+    account_id: AccountId,
+) -> Result<Vec<GeneralRule>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, account_id, text, created_at, updated_at
+             FROM general_rules WHERE account_id=?1 ORDER BY id",
+    )?;
+    let out = stmt
+        .query_map(params![account_id], |r| {
+            Ok(GeneralRule {
+                id: r.get(0)?,
+                account_id: r.get(1)?,
+                text: r.get(2)?,
+                created_at: dt(r, 3)?,
+                updated_at: dt(r, 4)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(out)
+}
+
+/// The email the owner pressed `t` on, as the teach describer may read it.
+/// NOT SEALED (strict form, so unassessed access stays out) and NOT SPAM: both
+/// are mail no model reads.
+const TEACH_EXAMPLE_SQL: &str = concat!(
+    "SELECT m.from_addr, m.subject, m.body, m.list_unsubscribe IS NOT NULL
+     FROM messages m LEFT JOIN triage t ON t.message_id = m.id
+     WHERE m.account_id = ?1 AND m.id = ?2 AND m.is_spam = 0 AND NOT ",
+    sealed_mail_sql!()
+);
+
+impl SqliteStore {
+    pub(super) fn teach_example(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+    ) -> Result<Option<crate::triage::teach::TeachExample>> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(TEACH_EXAMPLE_SQL, params![account_id, message_id], |r| {
+                Ok(crate::triage::teach::TeachExample {
+                    from_addr: r.get(0)?,
+                    subject: r.get(1)?,
+                    body: r.get(2)?,
+                    is_bulk: r.get(3)?,
+                })
+            })
+            .optional()?)
+    }
+
+    pub(super) fn list_general_rules(&self, account_id: AccountId) -> Result<Vec<GeneralRule>> {
+        let conn = self.lock()?;
+        list_general_rules_conn(&conn, account_id)
+    }
+
+    pub(super) fn create_general_rule(&self, account_id: AccountId, text: &str) -> Result<i64> {
+        let text = validate_general_rule(text)?;
+        let conn = self.lock()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM general_rules WHERE account_id=?1",
+            params![account_id],
+            |r| r.get(0),
+        )?;
+        if count as usize >= MAX_GENERAL_RULES {
+            return Err(CoreError::InvalidInput(format!(
+                "you can keep at most {MAX_GENERAL_RULES} general rules; delete one first"
+            )));
+        }
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO general_rules(account_id, text, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?3)",
+            params![account_id, text, now],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub(super) fn update_general_rule(
+        &self,
+        account_id: AccountId,
+        id: i64,
+        text: &str,
+    ) -> Result<bool> {
+        let text = validate_general_rule(text)?;
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "UPDATE general_rules SET text=?3, updated_at=?4 WHERE account_id=?1 AND id=?2",
+            params![account_id, id, text, Utc::now().to_rfc3339()],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Apply merges in ONE transaction: each merge deletes its sources and
+    /// inserts its text. Every source must still exist (a rule deleted while
+    /// the model was thinking fails the whole thing, nothing written). Returns
+    /// the new ids in merge order.
+    pub(super) fn merge_general_rules(
+        &self,
+        account_id: AccountId,
+        merges: &[(Vec<i64>, String)],
+    ) -> Result<Vec<i64>> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let now = Utc::now().to_rfc3339();
+        let mut ids = Vec::with_capacity(merges.len());
+        for (sources, text) in merges {
+            let text = validate_general_rule(text)?;
+            for id in sources {
+                let n = tx.execute(
+                    "DELETE FROM general_rules WHERE account_id=?1 AND id=?2",
+                    params![account_id, id],
+                )?;
+                if n == 0 {
+                    return Err(CoreError::InvalidInput(
+                        "a rule changed while merging; try again".into(),
+                    ));
+                }
+            }
+            tx.execute(
+                "INSERT INTO general_rules(account_id, text, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?3)",
+                params![account_id, text, now],
+            )?;
+            ids.push(tx.last_insert_rowid());
+        }
+        tx.commit()?;
+        Ok(ids)
+    }
+
+    pub(super) fn delete_general_rule(&self, account_id: AccountId, id: i64) -> Result<bool> {
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "DELETE FROM general_rules WHERE account_id=?1 AND id=?2",
+            params![account_id, id],
+        )?;
+        Ok(n > 0)
+    }
+}

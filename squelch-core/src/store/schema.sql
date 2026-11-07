@@ -213,6 +213,20 @@ CREATE TABLE IF NOT EXISTS sender_rules (
     UNIQUE(account_id, match_pattern)
 );
 
+-- GENERAL RULES: the owner's standing instructions that are not about one
+-- sender ("emails to Alex about grant funding for Northwind Bakery are never
+-- for me"). No pattern and no disposition: the triage model reads every one on
+-- every email and decides whether it applies. Forward-only like sender rules,
+-- so a write here re-triages nothing.
+CREATE TABLE IF NOT EXISTS general_rules (
+    id          INTEGER PRIMARY KEY,
+    account_id  INTEGER NOT NULL,
+    text        TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_general_rules_account ON general_rules(account_id, id);
+
 -- ATTENTION LIFECYCLE (sitrep seen-ledger):
 --   status       'new' | 'open' | 'done'. A row starts 'new'; the first time it
 --                flows OUT through ANY read door it is promoted to 'open' and

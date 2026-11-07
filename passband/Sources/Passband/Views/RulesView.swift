@@ -12,7 +12,11 @@
 // because the nesting is invisible on a mailbox whose rules name a different
 // domain each — the shape has to be assertable without a window.
 //
-// Keys: j/k select · n new · Enter/e edit · x delete, undo-first — the 5s toast
+// GENERAL RULES (about all mail, not one sender) sit above the sender sections,
+// from GET /client/general-rules. A daemon too old for the route 404s and the
+// section simply is not drawn.
+//
+// Keys: j/k select · n teach · Enter/e edit · x delete, undo-first — the 5s toast
 // recreates the deleted rule. j/k walk DRAWN order, not fetch order. A click
 // opens the rule: selecting a row has nothing to do on its own that the editor
 // does not, so the pointer goes straight there (#308).
@@ -28,6 +32,8 @@ struct RulesView: View {
     @Environment(AppStore.self) private var store
 
     @State private var rulesState: Loadable<[SenderRule]> = .loading
+    /// nil until loaded, and stays nil on a daemon without the route.
+    @State private var general: [GeneralRule]?
     @State private var index = 0
 
     /// The loaded rules, which a reload deliberately keeps on screen while the
@@ -42,11 +48,36 @@ struct RulesView: View {
     /// the one the reader can see.
     private var ordered: [SenderRule] { RuleGrouping.ordered(sections) }
 
-    /// rule id -> its position in `ordered`, so a row can tell whether it is the
+    /// General rules, oldest first, as drawn.
+    private var generalRules: [GeneralRule] { general ?? [] }
+
+    /// Everything the cursor walks, in drawn order: general rules first, then
+    /// the sender rules.
+    private enum Item {
+        case general(GeneralRule)
+        case sender(SenderRule)
+
+        var scrollID: String {
+            switch self {
+            case .general(let g): "g\(g.id)"
+            case .sender(let r): "s\(r.id)"
+            }
+        }
+    }
+
+    private var items: [Item] {
+        generalRules.map(Item.general) + ordered.map(Item.sender)
+    }
+
+    /// rule id -> its position in `items`, so a row can tell whether it is the
     /// selected one without searching the tree on every rebuild.
     private var ordinals: [Int: Int] {
-        Dictionary(uniqueKeysWithValues: ordered.enumerated().map { ($0.element.id, $0.offset) })
+        let offset = generalRules.count
+        return Dictionary(
+            uniqueKeysWithValues: ordered.enumerated().map { ($0.element.id, $0.offset + offset) })
     }
+
+    private var nothingYet: Bool { rules.isEmpty && generalRules.isEmpty }
 
     /// How many currently-loaded updates each rule matched, counted client-side
     /// from the store rather than through a new endpoint.
@@ -83,12 +114,12 @@ struct RulesView: View {
                 BandNote("loading rules…").padding(.horizontal, DeskRow.listInset)
             } else if let error = rulesState.error {
                 BandNote(error).padding(.horizontal, DeskRow.listInset)
-            } else if rules.isEmpty {
+            } else if nothingYet {
                 VStack(alignment: .leading, spacing: Space.s6) {
                     HStack(spacing: Space.s4) {
                         Text("no rules yet. press").font(Typo.rowSub)
                         Kbd("n")
-                        Text("to create one, or").font(Typo.rowSub)
+                        Text("to teach Passband something, or").font(Typo.rowSub)
                         Kbd("t")
                         Text("on any message.").font(Typo.rowSub)
                     }
@@ -102,6 +133,18 @@ struct RulesView: View {
                     ScrollView {
                         let ordinals = ordinals
                         LazyVStack(spacing: 1) {
+                            if !generalRules.isEmpty {
+                                GeneralSectionHeader(count: generalRules.count)
+                                ForEach(Array(generalRules.enumerated()), id: \.element.id) { i, rule in
+                                    GeneralRuleRow(
+                                        rule: rule, selected: i == index,
+                                        onOpen: {
+                                            index = i
+                                            editGeneral(rule)
+                                        })
+                                    .id(Item.general(rule).scrollID)
+                                }
+                            }
                             ForEach(sections) { section in
                                 RuleSectionHeader(
                                     disposition: section.disposition, count: section.ruleCount)
@@ -118,7 +161,7 @@ struct RulesView: View {
                                                 index = i
                                                 edit(row.rule)
                                             })
-                                        .id(row.rule.id)
+                                        .id(Item.sender(row.rule).scrollID)
                                     }
                                 }
                             }
@@ -127,9 +170,9 @@ struct RulesView: View {
                         .padding(.bottom, Space.s10)
                     }
                     .onChange(of: index) { _, i in
-                        guard let rule = ordered[safe: i] else { return }
+                        guard let item = items[safe: i] else { return }
                         withAnimation(Motion.scrollFollow) {
-                            proxy.scrollTo(rule.id, anchor: .center)
+                            proxy.scrollTo(item.scrollID, anchor: .center)
                         }
                     }
                 }
@@ -143,7 +186,7 @@ struct RulesView: View {
             await load()
         }
         .onDisappear { RulesReload.shared.handler = nil }
-        .onChange(of: rules.count) { _, count in
+        .onChange(of: items.count) { _, count in
             index = max(0, min(index, max(0, count - 1)))
         }
     }
@@ -151,7 +194,7 @@ struct RulesView: View {
     private var footer: some View {
         KeyHintBar(hints: [
             KeyHint(["j", "k"], "select"),
-            KeyHint("n", "new"),
+            KeyHint("n", "teach"),
             KeyHint(["e", "↵"], "edit"),
             KeyHint("x", "delete"),
         ])
@@ -163,11 +206,15 @@ struct RulesView: View {
             KeyBinding("k", "prev") { step(-1) },
             KeyBinding("ArrowDown", "next") { step(+1) },
             KeyBinding("ArrowUp", "prev") { step(-1) },
-            KeyBinding("n", "new rule") { create() },
-            KeyBinding("e", "edit rule") { if let r = ordered[safe: index] { edit(r) } },
-            KeyBinding("Enter", "edit rule") { if let r = ordered[safe: index] { edit(r) } },
+            KeyBinding("n", "teach Passband") { create() },
+            KeyBinding("e", "edit rule") { open(items[safe: index]) },
+            KeyBinding("Enter", "edit rule") { open(items[safe: index]) },
             KeyBinding("x", "delete rule") {
-                if let r = ordered[safe: index] { Task { await delete(r) } }
+                switch items[safe: index] {
+                case .general(let g): Task { await deleteGeneral(g) }
+                case .sender(let r): Task { await delete(r) }
+                case nil: break
+                }
             },
         ]
     }
@@ -175,12 +222,47 @@ struct RulesView: View {
     /// Clamped to the drawn rules, and never below 0: an empty list used to
     /// park the cursor at -1.
     private func step(_ delta: Int) {
-        index = max(0, min(ordered.count - 1, index + delta))
+        index = max(0, min(items.count - 1, index + delta))
     }
 
+    private func open(_ item: Item?) {
+        switch item {
+        case .general(let g): editGeneral(g)
+        case .sender(let r): edit(r)
+        case nil: break
+        }
+    }
+
+    /// `n` is the teach card with no sender: the daemon decides whether the
+    /// sentence is about one sender or all mail.
     private func create() {
         store.openRuleEditor(
-            RuleEditorRequest(rule: nil, onSaved: { Task { await load() } }))
+            RuleEditorRequest(teach: true, onSaved: { Task { await load() } }))
+    }
+
+    private func editGeneral(_ rule: GeneralRule) {
+        store.openRuleEditor(
+            RuleEditorRequest(general: rule, onSaved: { Task { await load() } }))
+    }
+
+    /// Same undo-first shape as a sender rule's delete. The undo saves the
+    /// text again verbatim (a new id; nothing points at the old one).
+    private func deleteGeneral(_ rule: GeneralRule) async {
+        do {
+            try await APIClient.shared.deleteGeneralRule(rule.id)
+            Analytics.capture("rule_deleted", ["general": true])
+            general?.removeAll { $0.id == rule.id }
+            let text = rule.text
+            store.pushUndo(
+                kind: .ruleDelete, messageId: rule.id,
+                label: "deleted rule \"\(Teach.shortLabel(text))\""
+            ) {
+                try await APIClient.shared.createGeneralRule(text: text)
+                await RulesReload.shared.reload()
+            }
+        } catch {
+            store.pushToast(errText(error, "delete failed"), .error)
+        }
     }
 
     private func edit(_ rule: SenderRule) {
@@ -216,9 +298,13 @@ struct RulesView: View {
     }
 
     private func load() async {
+        async let generalFetch = try? APIClient.shared.listGeneralRules()
         await $rulesState.load("rules failed") {
             try await APIClient.shared.listRules()
         }
+        // Any failure (a 404 from an old daemon above all) leaves the section
+        // out rather than putting an error over the sender rules.
+        general = await generalFetch?.sorted { $0.id < $1.id }
     }
 }
 
@@ -250,14 +336,18 @@ struct RulesView: View {
                     BandNote("loading rules…").plainRow()
                 } else if let error = rulesState.error {
                     BandNote(error).plainRow()
-                } else if rules.isEmpty {
+                } else if nothingYet {
                     phoneEmpty.plainRow()
                 } else {
                     let counts = matchCounts
+                    if !generalRules.isEmpty {
+                        PhoneGeneralSectionHeader(count: generalRules.count).plainRow()
+                        ForEach(generalRules) { rule in phoneGeneralRow(rule) }
+                    }
                     ForEach(sections) { section in
                         PhoneRuleSectionHeader(
                             disposition: section.disposition, count: section.ruleCount,
-                            first: section.id == sections.first?.id
+                            first: section.id == sections.first?.id && generalRules.isEmpty
                         )
                         .plainRow()
                         ForEach(section.groups) { group in
@@ -286,7 +376,7 @@ struct RulesView: View {
                     Button(action: create) {
                         Image(systemName: "plus").foregroundStyle(Palette.accent)
                     }
-                    .accessibilityLabel("New rule")
+                    .accessibilityLabel("Teach Passband")
                 }
                 .sharedBackgroundVisibility(.hidden)
             }
@@ -328,6 +418,29 @@ struct RulesView: View {
                 }
         }
 
+        /// A general rule: tap edits, swipe or hold deletes, as a sender rule's.
+        private func phoneGeneralRow(_ rule: GeneralRule) -> some View {
+            PhoneGeneralRuleRow(rule: rule) { editGeneral(rule) }
+                .plainRow()
+                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                    Button {
+                        Haptics.commit()
+                        Task { await deleteGeneral(rule) }
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                    .tint(Palette.danger)
+                }
+                .contextMenu {
+                    Button { editGeneral(rule) } label: { Label("Edit", systemImage: "pencil") }
+                    Button(role: .destructive) {
+                        Task { await deleteGeneral(rule) }
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                }
+        }
+
         /// Nothing written yet. Says what a rule is, since this is the first
         /// place most people meet the word, and names both ways to make one:
         /// here, and from the mail the rule would be about.
@@ -337,18 +450,72 @@ struct RulesView: View {
                     .font(Typo.row)
                     .foregroundStyle(Palette.inkDim)
                 Text(
-                    "a rule is one line, in your own words, saying what you want from a sender: always show them, mute them, or only let some of it through. write one here, or swipe any message and tap Tune."
+                    "a rule is one line, in your own words, saying what you want from your mail: always show a sender, mute them, or never show a kind of email at all. teach Passband one here, or swipe any message and tap Teach."
                 )
                 .font(Typo.rowSub)
                 .foregroundStyle(Palette.inkFaintest)
                 .fixedSize(horizontal: false, vertical: true)
-                Button("new rule", action: create)
+                Button("teach Passband", action: create)
                     .buttonStyle(.glass)
                     .padding(.top, Space.s2)
             }
             .padding(.horizontal, Space.scaled(11))
             .padding(.vertical, Space.s24)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// The general band, in the disposition bands' shape, hint printed under.
+    private struct PhoneGeneralSectionHeader: View {
+        let count: Int
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: Space.s4) {
+                HStack(spacing: Space.s8) {
+                    Text("ALL MAIL")
+                        .font(Typo.ui(10, weight: .semibold))
+                        .tracking(0.9)
+                        .foregroundStyle(Palette.accent)
+                    Text("\(count)")
+                        .font(Typo.num(10))
+                        .foregroundStyle(Palette.inkFaintest)
+                    Rectangle()
+                        .fill(Palette.hairline)
+                        .frame(height: 1)
+                }
+                Text("Passband reads these on every email")
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaintest)
+            }
+            .padding(.horizontal, Space.scaled(11))
+            .padding(.top, Space.s8)
+            .padding(.bottom, Space.s6)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+        }
+    }
+
+    /// A general rule at phone width: the sentence, up to four lines.
+    private struct PhoneGeneralRuleRow: View {
+        let rule: GeneralRule
+        let onOpen: () -> Void
+
+        var body: some View {
+            ListRow(
+                selected: false, cornerRadius: Radius.well, hPadding: Space.scaled(11), vPadding: Space.s10,
+                hoverFill: false, action: onOpen
+            ) { _, _ in
+                HStack(alignment: .firstTextBaseline, spacing: Space.s10) {
+                    Text(rule.text)
+                        .font(Typo.rowSub)
+                        .foregroundStyle(Palette.ink)
+                        .lineLimit(4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text(Fmt.relAge(rule.updated_at))
+                        .font(Typo.num(10))
+                        .foregroundStyle(Palette.inkFaintest)
+                }
+            }
         }
     }
 
@@ -517,6 +684,57 @@ private struct RuleSectionHeader: View {
     }
 }
 
+/// The band over the general rules, in the shape of the disposition bands.
+private struct GeneralSectionHeader: View {
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: Space.s8) {
+            Text("ALL MAIL")
+                .font(Typo.ui(10, weight: .semibold))
+                .tracking(0.9)
+                .foregroundStyle(Palette.accent)
+            Text("\(count)")
+                .font(Typo.num(10))
+                .foregroundStyle(Palette.inkFaintest)
+            Rectangle()
+                .fill(Palette.hairline)
+                .frame(height: 1)
+        }
+        .padding(.horizontal, DeskRow.hPadding)
+        .padding(.top, Space.scaled(18))
+        .padding(.bottom, Space.s6)
+        .help("all mail: Passband reads these on every email")
+    }
+}
+
+/// A general rule: the owner's sentence, which is the whole rule.
+private struct GeneralRuleRow: View {
+    let rule: GeneralRule
+    let selected: Bool
+    let onOpen: () -> Void
+
+    var body: some View {
+        ListRow(
+            selected: selected, cornerRadius: Radius.row, hPadding: DeskRow.hPadding,
+            vPadding: Space.scaled(7), action: onOpen
+        ) { selected, _ in
+            HStack(alignment: .firstTextBaseline, spacing: Space.scaled(9)) {
+                Text(rule.text)
+                    .font(Typo.rowSub)
+                    .foregroundStyle(Palette.ink)
+                    .lineLimit(selected ? nil : 2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .help(rule.text)
+                Text(Fmt.relAge(rule.updated_at).isEmpty ? "·" : Fmt.relAge(rule.updated_at))
+                    .font(Typo.num(10))
+                    .foregroundStyle(Palette.inkFaintest)
+                    .frame(width: Space.scaled(34), alignment: .trailing)
+            }
+        }
+    }
+}
+
 /// A domain carrying MORE THAN ONE rule: the icon and the domain sit here once,
 /// and the rules underneath say only what distinguishes them. A domain with a
 /// single rule never draws this — a header over one child is just an indent
@@ -630,7 +848,10 @@ private struct RuleRow: View {
 
 // MARK: - rule editor
 
-/// The `t` tune-sender modal, and the rules view's create/edit.
+/// The sender-rule editor: editing an existing sender rule from the Rules page
+/// (and from the in-effect strip). `t` and `n` open `TeachCard` instead; the
+/// tune and create modes below stay for any caller that opens a rule on a
+/// sender or pattern directly.
 ///
 /// NL-FIRST: the plain-English want text IS the rule, and it is stored VERBATIM
 /// — nothing rewrites it on the way out, because the daemon hands it to Stage 2

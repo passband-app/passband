@@ -28,6 +28,7 @@ struct ProductGuideTests {
         thePromptIsAPointer()
         shortcutsAreTheOverlaysTable()
         theGuideAgreesWithTheKeymapTable()
+        tTeachesPassband()
         theCalendarIsListedOnlyWhereItIsOffered()
         withTheCalendarOffTheGuideIsMains()
         aPagesDigitIsTheSheets()
@@ -128,6 +129,30 @@ struct ProductGuideTests {
         expect(writing.contains("press r"), "the guide says r replies")
         expect(writing.contains("press Enter"), "the guide says Enter replies to all")
         expect(writing.contains("press f"), "the guide says f forwards")
+    }
+
+    /// `t` is "teach Passband" in the table, and the guide says the same: one
+    /// field, the model decides who it is about, and n on the Rules page is
+    /// the same card.
+    static func tTeachesPassband() {
+        let inbox = ShortcutCatalog.groups.first { $0.title == "Sitrep & inbox" }
+        expect(
+            inbox?.items.first { $0.desc == "teach Passband" }?.keys == ["t"],
+            "the table says t teaches Passband")
+        let rules = ProductGuide.text(.senderRules, runningVersion: nil, calendar: false)
+        expect(rules.contains("Teaching Passband (t):"), "the guide teaches t")
+        expect(rules.contains("\"what should Passband know?\""), "and quotes the card's question")
+        expect(
+            rules.contains("Passband decides whether it is about the sender of that email"),
+            "and says the model decides who it is about")
+        expect(
+            rules.contains("- From Settings > Rules (key 4, or T on the Emails page): n. The same card"),
+            "n on the Rules page is the same card")
+        expect(rules.contains("under \"All mail\""), "and names the general section")
+        expect(rules.contains("choosing Teach"), "and the phone's swipe verb")
+        expect(!rules.contains("Tune"), "the old name is gone")
+        let triage = ProductGuide.text(.triage, runningVersion: nil, calendar: false)
+        expect(triage.contains("teach Passband: press t"), "triage points at t")
     }
 
     /// The calendar's keys follow the page: absent from the overlay while it

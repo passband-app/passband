@@ -1279,6 +1279,61 @@ struct CreatedRule: Codable, Sendable {
     var disposition: Disposition?
 }
 
+/// `POST /client/teach`: one sentence the owner wrote, and the email it was
+/// written from when there is one. The daemon decides what it becomes.
+struct TeachBody: Codable, Sendable {
+    var text: String
+    var source_message_id: Int? = nil
+}
+
+/// What the sentence became. `kind` is "sender" (an ordinary sender rule,
+/// `id` is its rule id) or "general" (a rule triage reads on every email).
+/// Kept as a string so an unexpected kind still decodes; anything that is
+/// not "sender" is treated as general.
+struct TeachResult: Codable, Sendable, Equatable {
+    var kind: String
+    var id: Int
+    var text: String
+    var match_pattern: String?
+    var disposition: Disposition?
+    /// Sender patterns are unique, so a teach can overwrite the rule already
+    /// on that pattern. This is what it said before; nil when nothing was
+    /// replaced. The undo puts it back instead of deleting the rule.
+    var replaced: ReplacedRule? = nil
+    /// General rules the daemon merged to make room when the list was full.
+    /// Absent from older daemons and when nothing was merged.
+    var merged: [MergedRule]? = nil
+
+    var isSender: Bool { kind == "sender" }
+}
+
+struct MergedRule: Codable, Sendable, Equatable {
+    var id: Int
+    var text: String
+    var replaced_ids: [Int]
+}
+
+struct ReplacedRule: Codable, Sendable, Equatable {
+    var want_text: String
+    var disposition: Disposition
+}
+
+/// A rule about all mail, not one sender. `GET /client/general-rules`.
+struct GeneralRule: Codable, Sendable, Identifiable, Hashable {
+    var id: Int
+    var text: String
+    var created_at: String
+    var updated_at: String
+}
+
+struct GeneralRuleBody: Codable, Sendable {
+    var text: String
+}
+
+struct GeneralRuleSaved: Codable, Sendable {
+    var id: Int
+}
+
 // MARK: - unsubscribe
 
 enum UnsubscribeMethod: String, LenientRawEnum {

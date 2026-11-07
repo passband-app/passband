@@ -617,6 +617,17 @@ run_suite rule-grouping \
   Sources/Passband/Lib/RuleGrouping.swift \
   Tests/RuleGroupingTests.swift
 
+# `t`, teach Passband: the undo chip's copy for what a sentence became, and
+# the fallback when the daemon is too old for /client/teach.
+run_suite teach \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Sources/Passband/Lib/SenderIdentity.swift \
+  Sources/Passband/Lib/Teach.swift \
+  Tests/TeachTests.swift
+
 run_suite sender-identity \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Model/WireTypes.swift \

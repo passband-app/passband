@@ -7,7 +7,7 @@ use crate::triage::llm::{self, ClassifyError, LlmOutcome, LlmRequest};
 use crate::triage::text::{Untrusted, neutralize, truncate_flagged};
 use serde::{Deserialize, Serialize};
 
-pub const PROMPT_VERSION: &str = "notification-v6";
+pub const PROMPT_VERSION: &str = "notification-v7";
 
 const ONE_LINE_RULES: &str =
     "ONE_LINE: one clear sentence, at most 120 characters. No leading label, em dash, or en dash.";
@@ -54,7 +54,9 @@ const PROMPT_TAIL: &str = "\
 The full triage agent may notify later after gathering more context. Do not decide \
 placement, tier, or access restrictions. Known-contact history is evidence, not a score \
 floor for mass mail they send. Sender preferences are strong user guidance; override only for a clear \
-consequence and explain why in reason. A sales promotion sent in bulk is normally reading, \
+consequence and explain why in reason. general_rules are the owner's own standing \
+instructions about any email, not one sender: apply each one this email clearly fits, \
+as strongly as a sender preference, and ignore the rest. A sales promotion sent in bulk is normally reading, \
 but its actual relevance can vary. Do not mistake promotional urgency language for a real \
 consequence. Write a short safe one_line for the phone's lock screen. NEVER include \
 codes, passwords, credential-bearing URLs, reset tokens, or other authentication secrets \
@@ -109,6 +111,9 @@ pub struct NotifyInput<'a> {
     /// personal its wording.
     pub is_bulk: bool,
     pub sender_preferences: Option<&'a str>,
+    /// The owner's general rules, JSON. Each says in their words what they do
+    /// or do not want, about any email; apply only the ones this email fits.
+    pub general_rules: Option<&'a str>,
 }
 
 pub async fn classify_at(
@@ -146,12 +151,14 @@ fn build_user_message(input: &NotifyInput<'_>, max_body_chars: usize) -> String 
     let (body, truncated) = truncate_flagged(input.body, max_body_chars);
     let preferences =
         serde_json::to_string(&input.sender_preferences).expect("string serialization");
+    let general = serde_json::to_string(&input.general_rules).expect("string serialization");
     let mut user = format!(
-        "=== TRUSTED CONTEXT ===\nis_known_contact: {}\nis_bulk: {}\nsender_preferences: {}\n\n\
+        "=== TRUSTED CONTEXT ===\nis_known_contact: {}\nis_bulk: {}\nsender_preferences: {}\n         general_rules: {}\n\n\
          -----BEGIN UNTRUSTED EMAIL-----\nfrom: {}\nsubject: {}\nbody:\n{}",
         if input.is_known_contact { "yes" } else { "no" },
         if input.is_bulk { "yes" } else { "no" },
         preferences,
+        general,
         neutralize(input.from_addr, Untrusted::Line),
         neutralize(input.subject, Untrusted::Line),
         neutralize(&body, Untrusted::Block),
@@ -182,6 +189,7 @@ mod tests {
             is_known_contact: true,
             is_bulk: false,
             sender_preferences: None,
+            general_rules: None,
         }
     }
 
@@ -347,6 +355,7 @@ mod tests {
             is_known_contact: false,
             is_bulk: false,
             sender_preferences: None,
+            general_rules: None,
         };
         classify_at(
             &http,

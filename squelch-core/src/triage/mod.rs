@@ -32,6 +32,7 @@ pub mod rules;
 pub mod sender_fatigue;
 pub mod shipment;
 pub mod smart_clear;
+pub mod teach;
 pub(crate) mod text;
 pub mod unsub_agent;
 pub mod unsub_page;

@@ -20,6 +20,9 @@
 //!
 //! One record keys one row: of its order numbers the mail prints, the one with
 //! the smallest key, so the same set of numbers always picks the same order.
+use crate::triage::text::rx;
+use regex::Regex;
+use std::sync::OnceLock;
 
 /// The prefix every order key carries in `shipments.tracking_number`. Like the
 /// store package keys it holds a `:`, which no sanitized carrier number can,
@@ -65,9 +68,14 @@ fn chunks(text: &str) -> impl Iterator<Item = String> + '_ {
         .map(|t| t.chars().flat_map(char::to_uppercase).collect())
 }
 
-/// The mail's tokens, for [`mail_prints`].
-pub fn mail_tokens(text: &str) -> Vec<String> {
-    chunks(text).collect()
+/// The mail's tokens, for [`mail_prints`]: its text, and its HTML with the
+/// markup taken out, so `width="1000"` is not a printed order #1000.
+pub fn mail_tokens(text: &str, html: &str) -> Vec<String> {
+    static TAG: OnceLock<Regex> = OnceLock::new();
+    let visible = TAG
+        .get_or_init(|| rx(r"(?s)<[^>]*>"))
+        .replace_all(html, " ");
+    chunks(text).chain(chunks(&visible)).collect()
 }
 
 /// Does the mail print this order number whole? Its letter-and-digit runs
@@ -124,14 +132,17 @@ mod tests {
 
     #[test]
     fn the_order_must_be_printed_whole() {
-        let tokens =
-            mail_tokens("Order #50019 confirmed. Order&nbsp;#01-23456-78901, $16.81. PO 2024/001");
+        let tokens = mail_tokens(
+            "Order #50019 confirmed.",
+            "<p>Order&nbsp;#01-23456-78901, $16.81.</p><td width=\"99999\">PO 2024/001</td>",
+        );
         assert!(mail_prints(&tokens, "#50019"));
         assert!(mail_prints(&tokens, "01-23456-78901"));
         assert!(mail_prints(&tokens, "PO/2024/001"), "separators may differ");
         assert!(!mail_prints(&tokens, "5001"), "a prefix is not the order");
         assert!(!mail_prints(&tokens, "15386-01"), "nor a piece of one");
-        assert!(!mail_prints(&tokens, "99999"), "an invented order");
+        assert!(!mail_prints(&tokens, "99999"), "markup is not printed");
+        assert!(!mail_prints(&tokens, "77777"), "an invented order");
         assert!(!mail_prints(&tokens, "#"), "nothing to find");
     }
 }

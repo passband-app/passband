@@ -542,7 +542,10 @@ a tracking number, with no code per store.
   `PO/2024/001` matches `PO 2024/001` and `#5001` does not match `#50019`). Of a
   record's numbers, the smallest printed one keys it.
 - **An order number in the tracking field is the order**: a record whose
-  "tracking number" is one of its own order numbers files under the order.
+  "tracking number" is one of its own order numbers, and has no carrier's
+  shape (`1Z…`, `TBA…`, `9[234]…`), files under the order (or its store box).
+  A row an older build keyed on that number is retired. Markup is not mail
+  text: the printed check reads the HTML with its tags taken out.
 - **The order card steps aside** once a tracked or boxed record from the same
   scope names its order in mail that prints it, and comes back if that record
   is retracted. Only a record that makes a card of its own covers: one dropped

@@ -108,6 +108,10 @@ struct RecordKeys {
     /// order's own card steps aside for the tracked one. A TRACKLESS record
     /// files under the first one its mail prints ([`order_fallback`]).
     orders: Vec<(String, String)>,
+    /// A "tracking number" that was only this record's order number. It keys
+    /// nothing now, but a row an older build keyed on it must be rebuilt (and
+    /// so retired), or the order would show twice.
+    dropped: Option<String>,
 }
 
 fn record_keys(
@@ -126,12 +130,19 @@ fn record_keys(
     let mut tracked = delivery_key(tracking_number, ctx.package.as_ref());
     // The model copying the order number into `tracking_number` is not a
     // tracked package: there is nothing to poll, and as a "tracked" record it
-    // would cover, and hide, its own order. It is the order.
-    if tracked
-        .as_deref()
-        .is_some_and(|n| !n.contains(':') && refs.iter().any(|r| order_key(r) == n))
+    // would cover, and hide, its own order. It is the order, or the box its
+    // mail is about. Only a number no carrier's shape vouches for is demoted
+    // (a real `1Z…` listed among the refs stays tracked), and only when a key
+    // takes its place: the record never ends up keyed by nothing.
+    let mut dropped = None;
+    if let Some(number) = tracked.as_deref()
+        && !number.contains(':')
+        && crate::triage::shipment::is_ambiguous_tracking_shape(number)
+        && refs.iter().any(|r| order_key(r) == number)
+        && (ctx.package.is_some() || ctx.scope.is_some())
     {
-        tracked = None;
+        dropped = tracked.take();
+        tracked = ctx.package.as_ref().map(StorePackage::key);
     }
     let mut orders: Vec<(String, String)> = match &ctx.scope {
         Some(scope) => refs
@@ -145,33 +156,46 @@ fn record_keys(
     };
     orders.sort();
     orders.dedup_by(|a, b| a.0 == b.0);
-    RecordKeys { tracked, orders }
+    RecordKeys {
+        tracked,
+        orders,
+        dropped,
+    }
 }
 
-/// Every key `decision` touches: each record's tracked key and all its order
-/// keys (a trackless record's candidates as well as a tracked one's covers),
-/// so a rebuild sees whichever one the mail turns out to print.
-fn tracking_numbers<'a>(
+/// [`record_keys`] for each delivery record of `decision`.
+fn decision_keys<'a>(
     decision: &'a MessageDecision,
     ctx: &'a MailContext,
-) -> impl Iterator<Item = String> + 'a {
+) -> impl Iterator<Item = RecordKeys> + 'a {
     decision
         .records
         .iter()
-        .flat_map(move |record| match record {
+        .filter_map(move |record| match record {
             RecordProposal::Delivery {
                 tracking_number,
                 order_refs,
                 ..
-            } => {
-                let keys = record_keys(tracking_number.as_deref(), order_refs, ctx);
-                keys.tracked
-                    .into_iter()
-                    .chain(keys.orders.into_iter().map(|(key, _)| key))
-                    .collect::<Vec<_>>()
-            }
-            _ => Vec::new(),
+            } => Some(record_keys(tracking_number.as_deref(), order_refs, ctx)),
+            _ => None,
         })
+}
+
+/// Every key `decision` touches: each record's tracked key, all its order
+/// keys (a trackless record's candidates as well as a tracked one's covers, so
+/// a rebuild sees whichever one the mail turns out to print), and a demoted
+/// number's old row.
+fn tracking_numbers<'a>(
+    decision: &'a MessageDecision,
+    ctx: &'a MailContext,
+) -> impl Iterator<Item = String> + 'a {
+    decision_keys(decision, ctx).flat_map(|keys| {
+        keys.tracked
+            .into_iter()
+            .chain(keys.orders.into_iter().map(|(key, _)| key))
+            .chain(keys.dropped)
+            .collect::<Vec<_>>()
+    })
 }
 
 fn has_delivery(decision: &MessageDecision) -> bool {
@@ -264,16 +288,16 @@ fn message_tokens<'c>(
     cache: &'c mut HashMap<i64, Vec<String>>,
 ) -> Result<&'c [String]> {
     if let std::collections::hash_map::Entry::Vacant(slot) = cache.entry(message) {
-        let text: String = conn
+        let (text, html): (String, String) = conn
             .query_row(
-                "SELECT coalesce(subject,'')||' '||coalesce(body,'')||' '||coalesce(body_html,'')
+                "SELECT coalesce(subject,'')||' '||coalesce(body,''),coalesce(body_html,'')
                  FROM messages WHERE account_id=?1 AND id=?2",
                 params![account, message],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?
             .unwrap_or_default();
-        slot.insert(order_fallback::mail_tokens(&text));
+        slot.insert(order_fallback::mail_tokens(&text, &html));
     }
     Ok(&cache[&message])
 }
@@ -571,13 +595,23 @@ pub(super) fn reconcile(
 /// always wrote these records; they only lacked a key, so no model call is
 /// needed. Returns how many boxes were rebuilt.
 pub(super) fn project_amazon_boxes(conn: &Connection, account: AccountId) -> Result<usize> {
-    project_keys(conn, account, "%amazon.com%", amazon::is_package_key)
+    project_keys(conn, account, "%amazon.com%", |keys| {
+        keys.tracked
+            .filter(|k| amazon::is_package_key(k))
+            .into_iter()
+            .collect()
+    })
 }
 
 /// ONE-TIME BACKFILL (see `migrate::project_ebay_packages`): the same, for
 /// eBay purchases.
 pub(super) fn project_ebay_packages(conn: &Connection, account: AccountId) -> Result<usize> {
-    project_keys(conn, account, "%@ebay.com", ebay::is_package_key)
+    project_keys(conn, account, "%@ebay.com", |keys| {
+        keys.tracked
+            .filter(|k| ebay::is_package_key(k))
+            .into_iter()
+            .collect()
+    })
 }
 
 /// ONE-TIME BACKFILL (see `migrate::project_order_fallbacks`): the same, for
@@ -585,7 +619,14 @@ pub(super) fn project_ebay_packages(conn: &Connection, account: AccountId) -> Re
 /// Only records that stored their order numbers can key one; the many decided
 /// before the agent recorded them stay off the rail.
 pub(super) fn project_order_fallbacks(conn: &Connection, account: AccountId) -> Result<usize> {
-    project_keys(conn, account, "%", order_fallback::is_key)
+    project_keys(conn, account, "%", |keys| {
+        // A demoted number's old row is rebuilt too, which retires it.
+        keys.orders
+            .into_iter()
+            .map(|(key, _)| key)
+            .chain(keys.dropped)
+            .collect()
+    })
 }
 
 /// Rebuild every key of kind `wanted` that the stored decisions of mail from
@@ -594,7 +635,7 @@ fn project_keys(
     conn: &Connection,
     account: AccountId,
     from_like: &str,
-    wanted: fn(&str) -> bool,
+    wanted: fn(RecordKeys) -> Vec<String>,
 ) -> Result<usize> {
     let mut statement = conn.prepare(&format!(
         "SELECT d.decision_json,{STORE_BODY_COLUMNS}
@@ -620,7 +661,7 @@ fn project_keys(
             continue;
         };
         let ctx = mail_context(&decision, &from, auth, body, html);
-        boxes.extend(tracking_numbers(&decision, &ctx).filter(|k| wanted(k)));
+        boxes.extend(decision_keys(&decision, &ctx).flat_map(wanted));
     }
     rebuild(conn, account, &boxes)?;
     Ok(boxes.len())
@@ -2120,8 +2161,9 @@ mod tests {
         }
     }
 
-    const ORDER: &str = "113-1810790-1724205";
-    const KEY: &str = "amazon:113-1810790-1724205:N4RLGpMz1";
+    const ORDER: &str = "113-0000000-0000001";
+    const KEY: &str = "amazon:113-0000000-0000001:N0FAKE001";
+    const SHIPMENT: &str = "N0FAKE001";
 
     /// THE BUG. Shipped, then Delivered, for one box, neither printing a
     /// tracking number: one Amazon row that ends delivered, named, sold by
@@ -2129,7 +2171,7 @@ mod tests {
     #[test]
     fn an_amazon_box_is_one_row_from_shipped_to_delivered() {
         let store = fixture();
-        let body = tracker(ORDER, "N4RLGpMz1");
+        let body = tracker(ORDER, "N0FAKE001");
         add_amazon(
             &store,
             10,
@@ -2175,7 +2217,7 @@ mod tests {
         assert_eq!(
             row.tracking_url.as_deref(),
             Some(
-                "https://www.amazon.com/progress-tracker/package?orderId=113-1810790-1724205&shipmentId=N4RLGpMz1"
+                "https://www.amazon.com/progress-tracker/package?orderId=113-0000000-0000001&shipmentId=N0FAKE001"
             )
         );
         assert!(
@@ -2201,7 +2243,7 @@ mod tests {
             "shipment-tracking@amazon.com",
             Some(true),
             "Shipped: Charmin",
-            &tracker(order, "Nh06jx4Hr"),
+            &tracker(order, "N0FAKE002"),
             chrono::Duration::hours(5),
         );
         add_amazon(
@@ -2245,7 +2287,7 @@ mod tests {
     #[test]
     fn unauthenticated_amazon_lookalikes_mint_no_box() {
         let store = fixture();
-        let body = tracker(ORDER, "N4RLGpMz1");
+        let body = tracker(ORDER, "N0FAKE001");
         add_amazon(
             &store,
             10,
@@ -2295,7 +2337,7 @@ mod tests {
             "shipment-tracking@amazon.com",
             Some(true),
             "Shipped",
-            &tracker(ORDER, "N4RLGpMz1"),
+            &tracker(ORDER, "N0FAKE001"),
             chrono::Duration::hours(1),
         );
         let decision = trackless("shipped", None, "Wire Brushes", &[]);
@@ -2330,7 +2372,7 @@ mod tests {
             .execute(
                 "UPDATE messages SET body_html=?1 WHERE id=10",
                 [format!(
-                    "<a href=\"https://www.amazon.com/progress-tracker/package?orderId={ORDER}&amp;shipmentId=N4RLGpMz1\">Track</a>"
+                    "<a href=\"https://www.amazon.com/progress-tracker/package?orderId={ORDER}&amp;shipmentId=N0FAKE001\">Track</a>"
                 )],
             )
             .unwrap();
@@ -2357,7 +2399,7 @@ mod tests {
             "order-update@amazon.com",
             Some(true),
             "Delivered",
-            &tracker(ORDER, "N4RLGpMz1"),
+            &tracker(ORDER, "N0FAKE001"),
             chrono::Duration::hours(1),
         );
         let decision = trackless("delivered", Some("amazon"), "Wire Brushes", &[]);
@@ -2781,7 +2823,7 @@ mod tests {
             "shipment-tracking@amazon.com",
             Some(true),
             "Shipped",
-            &tracker(ORDER, "N4RLGpMz1"),
+            &tracker(ORDER, "N0FAKE001"),
             chrono::Duration::hours(1),
         );
         write(
@@ -2920,7 +2962,7 @@ mod tests {
             "shipment-tracking@amazon.com",
             Some(true),
             "Shipped",
-            &tracker(ORDER, "N4RLGpMz1"),
+            &tracker(ORDER, "N0FAKE001"),
             chrono::Duration::hours(1),
         );
         let mut tba = named(
@@ -2939,6 +2981,141 @@ mod tests {
             .map(|r| r.tracking_number)
             .collect();
         assert_eq!(numbers, ["TBA303392911000"]);
+    }
+
+    /// A real carrier number the model also listed among the order numbers
+    /// stays a tracked, polled package, from any sender.
+    #[test]
+    fn a_carrier_number_among_the_refs_stays_tracked() {
+        let store = fixture();
+        let echoed = named(
+            "1Z999AA10123456784",
+            "shipped",
+            None,
+            None,
+            &["1Z999AA10123456784"],
+        );
+        // An unauthenticated sender, which no order key could replace.
+        write(&store, 1, None, &echoed);
+        // A store whose mail prints it, whose order key could.
+        add_store_mail(
+            &store,
+            20,
+            SHOP,
+            "Pillow Shop",
+            "Order 1Z999AA10123456784 shipped",
+            1,
+        );
+        write(&store, 20, None, &echoed);
+        let rows = rail(&store);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tracking_number, "1Z999AA10123456784");
+        let pollable = store
+            .list_pollable_shipments(1, Utc::now() - chrono::Duration::days(3), 5)
+            .unwrap();
+        assert_eq!(pollable.len(), 1, "still a polled UPS package");
+    }
+
+    /// A row an older build keyed on an order number in the tracking field is
+    /// retired by the backfill, leaving the order's own card.
+    #[test]
+    fn the_backfill_retires_a_row_keyed_on_an_order_number() {
+        let store = fixture();
+        add_store_mail(
+            &store,
+            20,
+            SHOP,
+            "Pillow Shop",
+            "Order #4600000017 is on its way",
+            1,
+        );
+        let decision = named(
+            "4600000017",
+            "shipped",
+            Some("Pillow"),
+            None,
+            &["4600000017"],
+        );
+        {
+            let conn = store.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agent_message_decisions(account_id,message_id,revision,decision_json,decided_at)
+                 VALUES(1,20,1,?1,?2)",
+                params![serde_json::to_string(&decision).unwrap(), Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+            // What an older build projected: the order number as a UPS row.
+            let info = crate::triage::ShipmentInfo {
+                carrier: "ups".into(),
+                tracking_number: "4600000017".into(),
+                status: crate::triage::ShipmentStatus::Shipped,
+                item_name: "Pillow".into(),
+                tracking_url: None,
+            };
+            let id =
+                super::super::specialists::upsert_shipment_conn(&conn, 1, 20, &info, Utc::now())
+                    .unwrap();
+            conn.execute(
+                "INSERT INTO agent_delivery_projections(account_id,shipment_id) VALUES(1,?1)",
+                [id],
+            )
+            .unwrap();
+        }
+        assert_eq!(rail(&store).len(), 1);
+        project_order_fallbacks(&store.lock().unwrap(), 1).unwrap();
+        let numbers: Vec<String> = rail(&store)
+            .into_iter()
+            .map(|r| r.tracking_number)
+            .collect();
+        assert_eq!(numbers, [SHOP_KEY]);
+    }
+
+    /// An Amazon box mail whose record carries the ORDER id as its tracking
+    /// number is still its box.
+    #[test]
+    fn an_amazon_order_id_in_the_tracking_field_is_its_box() {
+        let store = fixture();
+        add_amazon(
+            &store,
+            11,
+            "shipment-tracking@amazon.com",
+            Some(true),
+            "Shipped",
+            &tracker(ORDER, SHIPMENT),
+            chrono::Duration::hours(1),
+        );
+        let mut record = named(ORDER, "shipped", Some("Wire Brushes"), None, &[ORDER]);
+        if let RecordProposal::Delivery { carrier, .. } = &mut record.records[0] {
+            *carrier = None;
+        }
+        write(&store, 11, None, &record);
+        let numbers: Vec<String> = rail(&store)
+            .into_iter()
+            .map(|r| r.tracking_number)
+            .collect();
+        assert_eq!(numbers, [KEY]);
+    }
+
+    /// Markup is not mail text: an attribute value is not a printed order.
+    #[test]
+    fn an_order_number_only_in_markup_is_not_printed() {
+        let store = fixture();
+        add_store_mail(&store, 20, SHOP, "Pillow Shop", "Your order shipped", 1);
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE messages SET body_html='<img width=\"10001\" src=\"x\">Your order shipped' WHERE id=20",
+                [],
+            )
+            .unwrap();
+        write(
+            &store,
+            20,
+            None,
+            &trackless("shipped", None, "Pillow", &["10001"]),
+        );
+        assert!(rail(&store).is_empty());
     }
 
     /// THE ORDER BACKFILL: stored trackless decisions project once, and a
@@ -3056,7 +3233,7 @@ mod tests {
             "shipment-tracking@amazon.com",
             Some(true),
             "Shipped",
-            &tracker(ORDER, "N4RLGpMz1"),
+            &tracker(ORDER, "N0FAKE001"),
             chrono::Duration::hours(1),
         );
         write(&store, 10, None, &delivery("1Z999AA10123456784", "shipped"));

@@ -1021,6 +1021,8 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     project_amazon_boxes(conn);
     // See the function: the same, for eBay purchases.
     project_ebay_packages(conn);
+    // See the function: and for every other store, by order number.
+    project_order_fallbacks(conn);
     // See the function: a drop-off receipt's box is going away, not coming.
     drop_sent_packages(conn);
 
@@ -1953,6 +1955,33 @@ fn project_ebay_packages(conn: &Connection) {
         Ok(n) => eprintln!("squelch: migration projected {n} eBay package(s)"),
         Err(error) => {
             eprintln!("squelch: eBay package backfill failed ({error}); will retry next open");
+            if !conn.is_autocommit() {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+        }
+    }
+}
+
+/// The `app_settings` key marking an account whose stored trackless
+/// decisions have been projected by order ([`project_order_fallbacks`]).
+pub(super) const ORDER_FALLBACKS_KEY: &str = "order_fallbacks_projected";
+
+/// ONE-TIME: put every order the stored decisions describe without a carrier
+/// number or a store package id on the Shipments rail, keyed by sender and
+/// order number (`agent_deliveries::project_order_fallbacks`). Runs after the
+/// Amazon and eBay passes, so their packages exist to cover their orders.
+///
+/// Gated and failure-tolerant exactly as [`project_amazon_boxes`] is.
+fn project_order_fallbacks(conn: &Connection) {
+    match once_per_account(
+        conn,
+        ORDER_FALLBACKS_KEY,
+        agent_deliveries::project_order_fallbacks,
+    ) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("squelch: migration projected {n} order(s) without tracking"),
+        Err(error) => {
+            eprintln!("squelch: order backfill failed ({error}); will retry next open");
             if !conn.is_autocommit() {
                 let _ = conn.execute_batch("ROLLBACK");
             }

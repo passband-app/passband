@@ -453,7 +453,6 @@
 		B6F86A1B7C9CECBF25C347FA /* SitrepZones.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22B6CF4EF83BEF15EB372184 /* SitrepZones.swift */; };
 		B755BE657EE21A33D4ED557B /* TestFlightNudge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DE74D8B3ADCEED239B127A1 /* TestFlightNudge.swift */; };
 		B91230E83D52E90A46495F77 /* WireTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C9F46E8DA615783DD2BEAF6 /* WireTypes.swift */; };
-		B920DC924AFF91F3CD75D751 /* UnderstandingSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 758EF47FB31CEB5B56E54AA3 /* UnderstandingSection.swift */; };
 		B9E881C34398423A0DFF0A05 /* EventProposal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51EE4124F774336250749978 /* EventProposal.swift */; };
 		B9F41CA6FD59EAEC144FBD60 /* Transcript.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E0780DC48411C969D9B6001 /* Transcript.swift */; };
 		BA771F4795BCDCE964379257 /* FindBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 928C5A0026BC63E062B7676F /* FindBar.swift */; };
@@ -2281,7 +2280,6 @@
 				0D35FE1914DBB68CAB817177 /* TriageTargets.swift in Sources */,
 				BF2AD4F3EB9857AB051753D0 /* Typography.swift in Sources */,
 				570F685433F095595202D40F /* UnderstandingFixture.swift in Sources */,
-				B920DC924AFF91F3CD75D751 /* UnderstandingSection.swift in Sources */,
 				952899DD63D458332A40E14A /* UnderstandingSeries.swift in Sources */,
 				022A97A07974D1ABD8478E32 /* UnderstandingWire.swift in Sources */,
 				9DA60570A748B7066E7C4125 /* UnsubscribeJobs.swift in Sources */,

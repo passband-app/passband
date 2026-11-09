@@ -1112,6 +1112,7 @@ mod tests {
             identity_refs: vec![],
             likelihood: None,
             evidence: vec![],
+            identity: None,
         }
     }
 

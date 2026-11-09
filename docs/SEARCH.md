@@ -403,10 +403,25 @@ more terms and no strict keyword hit. A query carrying an operator (`from:`,
 `after:`, `before:`) is **never** deeper: operators are structured intent and
 the reader is already speaking the index's language. One or two plain words
 are never deeper either: "wifi" is a lookup, and its one hit is on screen.
+**One word is never deeper, whatever the word**: "when" or "my" alone is a
+reader pausing mid-sentence. A leading question word needs three words ("when
+is rent"); `?` and first person keep the two-word floor ("my landlord").
 
 The decision is made once per settled query (after the panel's 220 ms
 debounce and the fetch), so the rule never fires mid-keystroke, and it is
 shown: the deeper band (§6.4) says which signal started it.
+
+**Deciding is not starting.** A settled query the rule calls deeper (or a
+refinement of a running lane) waits for 600 ms more of quiet, and during that
+wait asks Haiku one question with no tools and four output tokens: does this read as
+finished, or cut off mid-thought ("when did i download the")? "Finished"
+starts or refines the lane at once (`QueryReadiness`,
+`AppStore.settleDeeperSearch`); "typing" waits 2 s more and then starts anyway
+unless the reader typed on, so a misread holds a whole question back briefly
+but never blocks it. Any failure or a check slower than 1.2 s counts as
+finished. Stopping is immediate, and an explicit ask (⌘Enter, the panel's
+"Ask agent", the phone band's button) skips the check. While the check runs
+in automatic mode the band shows no offer: it is about to start on its own.
 
 ## 6. Wave 2: the agent lane
 
@@ -489,6 +504,12 @@ pause glyph and the last state. Expanded (Enter in the bar), the band becomes
 the **right column** beside the results, which is the side-by-side the
 request asked for. Cards open the thread exactly as AskBar's do.
 
+On the Mac a click anywhere else on the band (or its expand arrow, the
+panel's "Open in chat", or ⌘↩) opens the conversation in AskBar's
+**full-screen** layout rather than the ⌘K modal: the answer gets the window,
+and Esc closes it back onto the search it came from, which never left. The
+phone already did the same with a push.
+
 The band names its trigger in small type ("no email has all four words") so a
 reader who did not want the lane can see why it ran and shorten the query.
 
@@ -497,7 +518,7 @@ reader who did not want the lane can see why it ran and shorten the query.
 On self-host the lane runs on the user's own key, on hosted on the relay's
 credential. Either way it is spend the reader did not tap for, so it is a
 setting, `Deeper search`: **automatic** (the classifier starts it), **on
-request** (the band offers a button, iOS-style), **off**. Default automatic.
+request** (the band offers it: a button on the phone, ⌘Enter on the Mac), **off**. Default automatic.
 Every lane start is one `search_deeper_started` event carrying the trigger
 kind and the model tier, added to `Analytics.allowedEvents` and its strings
 to `allowedStrings`, because both are closed sets and a stray string is a

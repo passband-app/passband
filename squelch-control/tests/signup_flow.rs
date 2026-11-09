@@ -47,7 +47,7 @@ use squelch_control::config::{
     WaitlistConfig,
 };
 use squelch_control::warden::HttpWarden;
-use squelch_control::{ControlState, activation, invites, router, seal};
+use squelch_control::{ControlState, activation, invites, retention, router, seal};
 use tower::ServiceExt as _;
 
 /// The throwaway Postgres schema every harness in this file is built on.
@@ -132,6 +132,13 @@ struct Recorder {
     /// Key NAMES the mock Bifrost should refuse to mint, so one of a signup's
     /// two mints can fail while the other lands.
     bifrost_fail_names: Vec<String>,
+    /// Keys the mock Bifrost minted, `(id, top-up)`, which its listing
+    /// reports with one budget each (`b-<id>`) and any top-up applied.
+    bifrost_minted: Vec<(String, f64)>,
+    /// Budget-override PUTs the mock Bifrost saw: `(vk id, budget id, body)`.
+    bifrost_overrides: Vec<(String, String, Value)>,
+    /// When true, the override route answers 500.
+    bifrost_fail_override: bool,
     /// Bearer values the warden saw, on every route.
     warden_bearers: Vec<String>,
     /// Labels asked about via `GET /v1/tenants/{label}`.
@@ -164,6 +171,12 @@ struct Recorder {
     /// tenant the poller must leave for the next pass.
     devices_paired: BTreeMap<String, Option<String>>,
     devices_unavailable: Vec<String>,
+    /// What `GET /v1/tenants/{label}/activity` answers, by label: a present
+    /// entry is a 200 with this as the body's `activity` (Null = a daemon too
+    /// old to have the command), an absent one is a 404. Every ask is
+    /// counted in `activity_asks`.
+    activity: BTreeMap<String, Value>,
+    activity_asks: Vec<String>,
     /// The `text` of every post to the operator's webhook, which this mock
     /// serves at `/hook` so every harness has alerts wired the way production
     /// does.
@@ -575,6 +588,22 @@ async fn spawn_warden(rec: Shared) -> String {
             ),
         )
         .route(
+            "/v1/tenants/{label}/activity",
+            get(
+                |AxumState(rec): AxumState<Shared>,
+                 axum::extract::Path(label): axum::extract::Path<String>,
+                 headers: HeaderMap| async move {
+                    let mut r = rec.lock().unwrap();
+                    r.warden_bearers.push(bearer_of(&headers));
+                    r.activity_asks.push(label.clone());
+                    match r.activity.get(&label) {
+                        Some(a) => Json(json!({ "activity": a })).into_response(),
+                        None => json_status(StatusCode::NOT_FOUND, "not_found"),
+                    }
+                },
+            ),
+        )
+        .route(
             "/v1/tenants/{label}/devices",
             get(
                 |AxumState(rec): AxumState<Shared>,
@@ -654,6 +683,7 @@ async fn spawn_bifrost(rec: Shared) -> String {
                     if r.bifrost_fail_names.contains(&name) {
                         return json_status(StatusCode::INTERNAL_SERVER_ERROR, "mint_failed");
                     }
+                    r.bifrost_minted.push((vk_id_for(&name), 0.0));
                     (
                         StatusCode::OK,
                         Json(json!({
@@ -667,6 +697,51 @@ async fn spawn_bifrost(rec: Shared) -> String {
                         })),
                     )
                         .into_response()
+                },
+            )
+            .get(
+                |AxumState(rec): AxumState<Shared>, headers: HeaderMap| async move {
+                    let mut r = rec.lock().unwrap();
+                    r.bifrost_auths.push(bearer_of(&headers));
+                    let keys: Vec<Value> = r
+                        .bifrost_minted
+                        .iter()
+                        .map(|(id, top_up)| {
+                            json!({
+                                "id": id,
+                                "name": id,
+                                "budgets": [{
+                                    "id": format!("b-{id}"),
+                                    "max_limit": DEFAULT_LLM_BUDGET_USD,
+                                    "current_usage": 0,
+                                    "override_amount": top_up,
+                                }],
+                            })
+                        })
+                        .collect();
+                    Json(json!({ "virtual_keys": keys })).into_response()
+                },
+            ),
+        )
+        .route(
+            "/api/governance/virtual-keys/{id}/budgets/{budget}/override",
+            axum::routing::put(
+                |AxumState(rec): AxumState<Shared>,
+                 axum::extract::Path((id, budget)): axum::extract::Path<(String, String)>,
+                 headers: HeaderMap,
+                 body: String| async move {
+                    let mut r = rec.lock().unwrap();
+                    r.bifrost_auths.push(bearer_of(&headers));
+                    let body: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                    r.bifrost_overrides.push((id.clone(), budget, body.clone()));
+                    if r.bifrost_fail_override {
+                        return StatusCode::INTERNAL_SERVER_ERROR;
+                    }
+                    let amount = body["amount"].as_f64().unwrap_or(0.0);
+                    for key in r.bifrost_minted.iter_mut().filter(|(k, _)| *k == id) {
+                        key.1 = amount;
+                    }
+                    StatusCode::OK
                 },
             ),
         )
@@ -2226,9 +2301,22 @@ async fn signup_mints_and_installs_a_tenant_llm_key() {
 
     {
         let rec = h.rec.lock().unwrap();
-        // FOUR governance requests — a provider-key listing then a mint, twice —
-        // all carrying HTTP Basic with the admin `username:password`.
-        assert_eq!(rec.bifrost_auths, vec![bifrost_basic_auth(); 4]);
+        // SEVEN governance requests — a provider-key listing then a mint,
+        // twice, plus the triage key's signup allowance (listing, override,
+        // read-back) — all carrying HTTP Basic with the admin
+        // `username:password`.
+        assert_eq!(rec.bifrost_auths, vec![bifrost_basic_auth(); 7]);
+        // THE SIGNUP ALLOWANCE: one more month's limit, one cycle, on the
+        // TRIAGE key's budget only. The assistant key is the person's own
+        // on-demand spend and gets nothing extra.
+        assert_eq!(
+            rec.bifrost_overrides,
+            vec![(
+                vk_id_for("tenant-ada"),
+                format!("b-{}", vk_id_for("tenant-ada")),
+                json!({ "amount": DEFAULT_LLM_BUDGET_USD, "mode": "cycles", "cycles": 1 }),
+            )]
+        );
         assert_eq!(rec.bifrost_mint_bodies.len(), 2);
         let mint = &rec.bifrost_mint_bodies[0];
         assert_eq!(mint["name"], "tenant-ada");
@@ -2282,6 +2370,40 @@ async fn signup_mints_and_installs_a_tenant_llm_key() {
     assert_eq!(
         h.state.store().tenant_assistant_vk("ada").await.unwrap(),
         Some(vk_id_for("tenant-ada-assistant"))
+    );
+}
+
+/// A gateway that refuses the signup allowance costs the tenant the allowance
+/// and nothing else: both keys are still installed and recorded, and the
+/// signup completes. `llm topup` adds the allowance by hand.
+#[tokio::test]
+async fn a_refused_signup_allowance_still_installs_both_keys() {
+    let h = Harness::with_bifrost(Bifrost::Mock).await;
+    h.rec.lock().unwrap().bifrost_fail_override = true;
+
+    let invite = h.invite_code.clone();
+    let (status, body) = h.run_signup("ada", &invite).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Your mailbox is ready"), "{body}");
+
+    {
+        let rec = h.rec.lock().unwrap();
+        assert_eq!(
+            rec.bifrost_overrides.len(),
+            1,
+            "the allowance was asked for"
+        );
+        assert_eq!(rec.llm_key_puts.len(), 1);
+        let (_, put) = &rec.llm_key_puts[0];
+        assert_eq!(put["api_key"], vk_value_for("tenant-ada"));
+        assert_eq!(
+            put["assistant_api_key"],
+            vk_value_for("tenant-ada-assistant")
+        );
+    }
+    assert_eq!(
+        h.state.store().tenant_vk("ada").await.unwrap(),
+        Some(vk_id_for("tenant-ada"))
     );
 }
 
@@ -2554,6 +2676,86 @@ async fn the_activation_poller_stamps_once_and_quiesces() {
     let after_third = read().await;
     assert_eq!(after_third[0].1.as_deref(), Some(ada_stamp.as_str()));
     assert!(after_third[1].1.is_some());
+}
+
+/// The retention poller end to end against the mock warden: a daemon that
+/// answers is recorded with its own dates, one too old to have the command is
+/// left NOT KNOWN, and both are left alone until the refresh interval passes.
+#[tokio::test]
+async fn the_retention_poller_records_activity_and_waits_out_the_interval() {
+    let h = Harness::new().await;
+    let now = chrono::Utc::now();
+    for (i, label) in ["ada", "bea"].iter().enumerate() {
+        let email = format!("{label}@example.com");
+        h.state.store().insert_tenant(label, &email).await.unwrap();
+        h.state
+            .store()
+            .record_signup(9100 + i as i64, &email, label, now)
+            .await
+            .unwrap();
+    }
+    {
+        let mut r = h.rec.lock().unwrap();
+        r.activity.insert(
+            "ada".into(),
+            json!({
+                "first_paired_at": "2026-08-20T09:30:00Z",
+                "platforms": {
+                    "ios": {"first_paired_at": "2026-08-21T10:00:00Z",
+                            "last_seen_at": "2026-08-25T09:00:00Z",
+                            "last_action_at": "2026-08-24T08:00:00Z"},
+                    "macos": {"first_paired_at": "2026-08-20T09:30:00Z",
+                              "last_seen_at": "2026-08-25T10:00:00Z",
+                              "last_action_at": null}
+                }
+            }),
+        );
+        r.activity.insert("bea".into(), Value::Null);
+    }
+    assert_eq!(retention::poll_activity(&h.state).await, 1);
+
+    let read = || async {
+        common::raw_client(&h.db_url)
+            .await
+            .query(
+                "SELECT tenant_label, last_seen_at, last_action_at, mac_paired_at,
+                        ios_paired_at, activity_read_at, activity_tried_at
+                   FROM users ORDER BY id",
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (0..7)
+                    .map(|i| r.get::<_, Option<String>>(i))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let same = |a: &Option<String>, b: &str| {
+        chrono::DateTime::parse_from_rfc3339(a.as_deref().expect("stamped")).unwrap()
+            == chrono::DateTime::parse_from_rfc3339(b).unwrap()
+    };
+    let rows = read().await;
+    let ada = &rows[0];
+    // The DAEMON's dates: newest seen and action across apps, each app's
+    // first pairing.
+    assert!(same(&ada[1], "2026-08-25T10:00:00Z"));
+    assert!(same(&ada[2], "2026-08-24T08:00:00Z"));
+    assert!(same(&ada[3], "2026-08-20T09:30:00Z"));
+    assert!(same(&ada[4], "2026-08-21T10:00:00Z"));
+    assert!(ada[5].is_some() && ada[6].is_some());
+    // bea's daemon predates the command: asked, and nothing known.
+    let bea = &rows[1];
+    assert_eq!(&bea[1..6], &[None, None, None, None, None]);
+    assert!(bea[6].is_some(), "the attempt is stamped");
+
+    // Next pass, inside the interval: nobody is asked again.
+    let asks = h.rec.lock().unwrap().activity_asks.len();
+    assert_eq!(retention::poll_activity(&h.state).await, 0);
+    assert_eq!(h.rec.lock().unwrap().activity_asks.len(), asks);
+    assert_eq!(read().await, rows);
 }
 
 // --- reconnect ---------------------------------------------------------------

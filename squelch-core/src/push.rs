@@ -98,8 +98,9 @@ pub struct PushRequest<'a> {
     pub environment: Option<&'a str>,
     /// Which of the relay's FIXED fallback lines the alert carries: absent for
     /// mail, `"draft"` for a [`DraftPing`], `"calendar"` for a
-    /// [`CalendarPing`], `"clear"` for a [`ClearPing`] (no line at all: a
-    /// silent push). A closed set the relay enforces;
+    /// [`CalendarPing`], `"brief"` for a [`BriefPing`], `"clear"` for a
+    /// [`ClearPing`] (no line at all: a silent push). A closed set the relay
+    /// enforces;
     /// it picks a line and can never carry one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<&'static str>,
@@ -191,6 +192,47 @@ impl ClearPing {
         format!("clear-{}", self.event_id)
     }
 }
+
+/// The owner's morning brief is ready (squelch-api's `morning_brief`): once a
+/// local day, around 08:00 in the owner's zone. Not durable, like
+/// [`DraftPing`]: a brief that cannot go out at 8 is not worth a buzz at noon,
+/// and the daemon's own day stamp, not this ping, is what stops a second one.
+///
+/// On the wire it is `"<tag>:brief:<YYYYMMDD>"`, the owner's local day. The
+/// relay sees no count, no bill and no event: the phone's extension fetches
+/// `GET /client/brief` from its own daemon. Untagged devices are skipped, and
+/// so is every device that is not an iPhone: the brief is the phone's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BriefPing {
+    pub day: chrono::NaiveDate,
+}
+
+impl BriefPing {
+    fn stamp(&self) -> String {
+        self.day.format("%Y%m%d").to_string()
+    }
+
+    fn event_id(&self, tag: Option<&str>) -> Option<PushEventId> {
+        tag.map(|tag| PushEventId::Tagged(format!("{tag}:brief:{}", self.stamp())))
+    }
+
+    /// The day AND the tag: two mailboxes on one phone each send a brief,
+    /// and with the day alone APNs would let the second silently replace the
+    /// first. Clamped to APNs' 64 bytes on a char boundary (a tag is a short
+    /// client-minted label, so this never bites in practice).
+    fn collapse_id(&self, tag: &str) -> String {
+        let id = format!("brief-{}-{tag}", self.stamp());
+        let mut end = id.len().min(MAX_COLLAPSE_ID);
+        while end > 0 && !id.is_char_boundary(end) {
+            end -= 1;
+        }
+        id[..end].to_string()
+    }
+}
+
+/// The platform an iPhone registers under (`devices.platform`). The morning
+/// brief goes to these rows only.
+pub const IOS_PLATFORM: &str = "ios";
 
 /// One token's outcome, as the relay reports it. `status` is the APNs HTTP
 /// status VERBATIM; `410` is data (delete the row), not an error. `reason` is
@@ -397,6 +439,9 @@ pub struct Pusher {
     /// Banners to take down; see [`ClearPing`]. `None` until
     /// [`Pusher::with_clear_pings`].
     clear_pings: Option<broadcast::Receiver<ClearPing>>,
+    /// The morning brief; see [`BriefPing`]. `None` until
+    /// [`Pusher::with_brief_pings`].
+    brief_pings: Option<broadcast::Receiver<BriefPing>>,
 }
 
 impl Pusher {
@@ -433,6 +478,7 @@ impl Pusher {
             draft_pings: None,
             calendar_pings: None,
             clear_pings: None,
+            brief_pings: None,
         }))
     }
 
@@ -454,6 +500,7 @@ impl Pusher {
             draft_pings: None,
             calendar_pings: None,
             clear_pings: None,
+            brief_pings: None,
         }
     }
 
@@ -478,6 +525,12 @@ impl Pusher {
     /// Listen for banners to take down (see [`ClearPing`]).
     pub fn with_clear_pings(mut self, pings: broadcast::Receiver<ClearPing>) -> Self {
         self.clear_pings = Some(pings);
+        self
+    }
+
+    /// Listen for the morning brief (see [`BriefPing`]).
+    pub fn with_brief_pings(mut self, pings: broadcast::Receiver<BriefPing>) -> Self {
+        self.brief_pings = Some(pings);
         self
     }
 
@@ -684,6 +737,59 @@ impl Pusher {
         .await;
     }
 
+    /// Push one [`BriefPing`] to every tagged IPHONE, ONCE, best effort as
+    /// [`Self::push_draft`] is. One send per tag, so each mailbox's banner
+    /// has a collapse id of its own ([`BriefPing::collapse_id`]).
+    async fn push_brief(&self, ping: BriefPing) {
+        let devices: Vec<(Route, String)> = match self.store.list_devices(self.account_id) {
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|d| d.tag.is_some() && d.platform == IOS_PLATFORM)
+                .map(|d| {
+                    (
+                        Route {
+                            tag: d.tag,
+                            environment: d.environment,
+                        },
+                        d.token,
+                    )
+                })
+                .collect(),
+            Err(e) => {
+                eprintln!("squelch: APNs pusher could not list devices for the morning brief: {e}");
+                return;
+            }
+        };
+        let mut tags: Vec<String> = Vec::new();
+        for (route, _) in &devices {
+            if let Some(tag) = &route.tag
+                && !tags.contains(tag)
+            {
+                tags.push(tag.clone());
+            }
+        }
+        for tag in tags {
+            let group: Vec<(Route, String)> = devices
+                .iter()
+                .filter(|(r, _)| r.tag.as_deref() == Some(tag.as_str()))
+                .cloned()
+                .collect();
+            let outcome = self
+                .fan_out(&group, ping.collapse_id(&tag), Some("brief"), |tag| {
+                    ping.event_id(tag)
+                })
+                .await;
+            for token in &outcome.dead {
+                if let Err(e) = self.store.delete_device_by_token(self.account_id, token) {
+                    eprintln!("squelch: APNs pusher could not drop a device: {e}");
+                }
+            }
+            if outcome.relay_failed || outcome.nothing_landed() {
+                eprintln!("squelch: the morning brief reached no device; not retried");
+            }
+        }
+    }
+
     /// The non-durable push every ping makes: every TAGGED device, once, the
     /// relay's `kind` line, a failure logged and dropped.
     async fn push_once(
@@ -833,6 +939,7 @@ impl Pusher {
         let mut pings = self.draft_pings.take();
         let mut reminders = self.calendar_pings.take();
         let mut clears = self.clear_pings.take();
+        let mut briefs = self.brief_pings.take();
         let mut backoff: Option<Duration> = None;
         loop {
             if *shutdown.borrow() {
@@ -870,6 +977,9 @@ impl Pusher {
                             Some(ping) = next_ping(&mut clears) => {
                                 if let Some(ping) = ping { self.push_clear(ping).await; }
                             }
+                            Some(ping) = next_ping(&mut briefs) => {
+                                if let Some(ping) = ping { self.push_brief(ping).await; }
+                            }
                             _ = shutdown.changed() => {
                                 if *shutdown.borrow() { return Ok(()); }
                             }
@@ -895,6 +1005,9 @@ impl Pusher {
                         Some(ping) = next_ping(&mut clears) => {
                             if let Some(ping) = ping { self.push_clear(ping).await; }
                         }
+                        Some(ping) = next_ping(&mut briefs) => {
+                            if let Some(ping) = ping { self.push_brief(ping).await; }
+                        }
                         _ = shutdown.changed() => {
                             if *shutdown.borrow() { return Ok(()); }
                         }
@@ -905,7 +1018,7 @@ impl Pusher {
     }
 }
 
-/// The next ping (a draft, a calendar reminder or a clear): `Some(Some(p))` for a
+/// The next ping (a draft, a calendar reminder, a clear or a brief): `Some(Some(p))` for a
 /// ping, `Some(None)` when some were missed (lagged: dropped, they are not
 /// durable), and pending forever once there is no channel, so a `select!` arm
 /// on it simply never fires.

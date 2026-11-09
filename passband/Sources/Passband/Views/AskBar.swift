@@ -18,6 +18,11 @@
 import SwiftUI
 
 struct AskBar: View {
+    /// THE WINDOW RATHER THAN A TRAY: a conversation that came out of search
+    /// (see `AppStore.askBarFullscreen`). Same view, same session, same keys;
+    /// only the room changes, so the bar can never be one thing in the modal
+    /// and another full screen.
+    var fullscreen = false
     let onClose: () -> Void
 
     @Environment(AppStore.self) private var store
@@ -60,28 +65,7 @@ struct AskBar: View {
     private static let bottomAnchor = "askbar.bottom"
 
     var body: some View {
-        // NOT ON `PaletteShell`, though it shares its edge, glass and shadow:
-        // this is a chat that grows a transcript out of its own bottom edge,
-        // with the field moving under it, not a filtered list with a footer.
-        // Higher than the palettes' inset because the tray grows to 440.
-        OverlayScrim(alignment: .top, topInset: 96, onDismiss: onClose) {
-            GlassEffectContainer(spacing: 10) {
-                VStack(alignment: .leading, spacing: 0) {
-                    header
-                    if !session.transcript.isEmpty {
-                        Divider().overlay(Palette.hairline)
-                        tray
-                        Divider().overlay(Palette.hairline)
-                    }
-                    inputRow
-                }
-                .frame(width: Typo.measure(620))
-                .passbandGlass(
-                    .pane, cornerRadius: Radius.modal, tint: Palette.glassTintStrong,
-                    id: "askbar", in: askGlass)
-                .overlayShadow()
-            }
-        }
+        surface
         .keyContext(.modal)
         // Enter submits from the field itself, not the keymap, so it can never
         // collide with list keys.
@@ -100,17 +84,105 @@ struct AskBar: View {
         .animation(.smooth(duration: 0.25), value: session.transcript.count)
     }
 
+    @ViewBuilder
+    private var surface: some View {
+        if fullscreen {
+            // THE RAIL STAYS, as it does beside the reader, and a click on it
+            // leaves (`setView` closes this). Only its title strip takes this
+            // surface's ground, so the top bar reads as one bar.
+            HStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    if !WindowState.shared.isFullscreen {
+                        ReaderBackdrop()
+                            .overlay(Palette.accentSoft.opacity(0.35))
+                            .frame(height: TopBar.height)
+                    }
+                    Color.clear
+                }
+                .frame(width: SidebarRail.railWidth)
+                .allowsHitTesting(false)
+                chatPage
+            }
+            .ignoresSafeArea()
+            .transition(.opacity)
+        } else {
+            // NOT ON `PaletteShell`, though it shares its edge, glass and
+            // shadow: this is a chat that grows a transcript out of its own
+            // bottom edge, with the field moving under it, not a filtered list
+            // with a footer. Higher than the palettes' inset because the tray
+            // grows to the window's height.
+            OverlayScrim(alignment: .top, topInset: 96, onDismiss: onClose) {
+                GlassEffectContainer(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        header
+                        if !session.transcript.isEmpty {
+                            Divider().overlay(Palette.hairline)
+                            tray
+                            Divider().overlay(Palette.hairline)
+                        }
+                        inputRow
+                    }
+                    .frame(width: Typo.measure(620))
+                    .passbandGlass(
+                        .pane, cornerRadius: Radius.modal, tint: Palette.glassTintStrong,
+                        id: "askbar", in: askGlass)
+                    .overlayShadow()
+                }
+                .padding(.bottom, Space.s32)
+            }
+        }
+    }
+
+    /// The full-screen page beside the rail. OPAQUE, the reader's own ground,
+    /// and it takes every click: the page underneath is still mounted (Esc
+    /// comes back to it) and must not be clickable through a surface that
+    /// looks like the window.
+    private var chatPage: some View {
+        ZStack(alignment: .top) {
+            // THE BAND'S OWN BLUE, washed over the opaque page: the band in
+            // search and this page are the same conversation, and going from
+            // one to the other should read as the box growing, not as a jump
+            // to a different surface. Same wash as DeeperSearchBand's fill.
+            ReaderBackdrop()
+                .overlay(Palette.accentSoft.opacity(0.35))
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+            // The rules run the page's full width; the words between them
+            // keep a reading measure, since a line of chat as wide as a 27"
+            // display is unreadable.
+            VStack(alignment: .leading, spacing: 0) {
+                measured(header)
+                Divider().overlay(Palette.hairline)
+                if session.transcript.isEmpty {
+                    Spacer(minLength: 0)
+                } else {
+                    measured(tray)
+                }
+                Divider().overlay(Palette.hairline)
+                measured(inputRow)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+    }
+
+    /// One band of the full-screen page at the reading measure, centered.
+    private func measured(_ content: some View) -> some View {
+        content
+            .frame(maxWidth: Typo.measure(760))
+            .padding(.horizontal, Space.s24)
+            .frame(maxWidth: .infinity)
+    }
+
     // MARK: - chrome
 
     private var header: some View {
         HStack(spacing: Space.scaled(7)) {
-            Image(systemName: "sparkles")
-                .font(Typo.ui(11, weight: .semibold))
-                .foregroundStyle(Palette.accent)
-            Text("ask your inbox")
-                .font(Typo.sectionLabel)
-                .foregroundStyle(Palette.inkFaint)
-                .textCase(.uppercase)
+            // The wordmark's face ("passband" in the mail bar). Named for what
+            // it holds: a search's conversation is deeper search, as the band
+            // it grew out of says; plain ⌘K is talking to the agent.
+            Text(store.askBarShowsSearch ? "deeper search" : "ask your inbox")
+                .font(Typo.serif(19, weight: .medium))
+                .foregroundStyle(Palette.ink)
             // WHAT THE AGENT CAN SEE, said before the question is asked: the
             // bar is opened over the reader often enough that "this email"
             // should look like it means something. Shown only once the thread
@@ -144,11 +216,24 @@ struct AskBar: View {
                 .buttonStyle(.textAction)
                 .help("Start over with an empty conversation")
             }
-            Kbd("esc")
+            HStack(spacing: Space.s4) {
+                // Full screen came from search, and Esc is the way back to it:
+                // say so, since nothing else on screen shows the search exists.
+                if fullscreen && store.sideView == .search {
+                    Text("back to search")
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaint)
+                }
+                Kbd("esc")
+            }
         }
         .padding(.horizontal, PaletteMetrics.edge)
-        .padding(.top, Space.s14)
-        .padding(.bottom, Space.s8)
+        // FULL SCREEN, THE HEADER IS THE TOP BAR: it sits in the title-bar row
+        // beside the traffic lights, as every page's own bar does, rather than
+        // under a strip of empty window.
+        .padding(.top, fullscreen ? 0 : Space.s14)
+        .padding(.bottom, fullscreen ? 0 : Space.s8)
+        .frame(minHeight: fullscreen ? TopBar.height : nil)
     }
 
     private var canSubmit: Bool { !question.trimmed.isEmpty && !session.running }
@@ -196,7 +281,7 @@ struct AskBar: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: Space.s10) {
-                    ForEach(session.transcript) { item in
+                    ForEach(session.transcript.chatRows) { item in
                         row(item).frame(maxWidth: .infinity, alignment: .leading)
                     }
                     if session.awaitingOutput {
@@ -209,7 +294,10 @@ struct AskBar: View {
                 .padding(.horizontal, PaletteMetrics.edge)
                 .padding(.vertical, Space.s12)
             }
-            .frame(maxHeight: 440)
+            // THE WINDOW'S HEIGHT, in both forms: a conversation is read top to
+            // bottom, and a 440pt tray made a long answer a keyhole. The modal
+            // is held off the window's bottom edge by the scrim's own margin.
+            .frame(maxHeight: .infinity)
             // MOUNT AT THE BOTTOM. Both follows below are onChange, and neither
             // fires on appear — so reopening ⌘K would otherwise restore the
             // conversation scrolled to its beginning, with the card that is

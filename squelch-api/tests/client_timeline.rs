@@ -74,6 +74,7 @@ impl Ev<'_> {
                 message_id,
                 location: "body".into(),
             }],
+            identity: None,
         }
     }
 }
@@ -324,6 +325,7 @@ async fn timeline_serves_every_field_with_the_right_end_tier() {
             "mail_state",
             // Null here: no calendar is granted, so no real event to match.
             "matched_event",
+            "pending_change",
             "sources",
             "start",
             "start_timezone",
@@ -364,7 +366,7 @@ async fn timeline_serves_every_field_with_the_right_end_tier() {
     assert_eq!(s["likelihood"], Value::Null, "committed ghosts are certain");
     assert_eq!(
         s["sources"],
-        json!([{ "message_id": stated, "thread_id": "t1", "role": "created" }])
+        json!([{ "message_id": stated, "thread_id": "t1", "role": "created", "linked": false, "verified": true }])
     );
 
     let m = by_title(ghosts, "Modelled");
@@ -579,7 +581,7 @@ async fn timeline_state_comes_from_the_user_then_the_mail_then_the_clock() {
         dinner["sources"]
             .as_array()
             .unwrap()
-            .contains(&json!({ "message_id": cancel, "thread_id": "t2", "role": "cancelled" }))
+            .contains(&json!({ "message_id": cancel, "thread_id": "t2", "role": "cancelled", "linked": false, "verified": true }))
     );
     let party = by_title(&ghosts, "Party");
     assert_eq!(party["state"], "ghost");

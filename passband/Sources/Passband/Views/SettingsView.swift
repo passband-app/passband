@@ -892,6 +892,9 @@ struct NotificationsSection: View {
     /// An event reminder switch write in flight, and why the last one failed.
     @State private var remindersBusy = false
     @State private var remindersError: String?
+    /// The same, for the morning brief's switch.
+    @State private var briefBusy = false
+    @State private var briefError: String?
     /// Held for the duration of playback: the sound stops when deallocated.
     @State private var player: PlatformSound?
     /// What the last test banner did, shown until the next one. nil before the
@@ -941,6 +944,7 @@ struct NotificationsSection: View {
                 }
             #endif
             eventReminders
+            morningBrief
             RowDivider()
             // Three states, because two of them look identical from the outside:
             // a banner that never came because the grant is off, and one that
@@ -958,6 +962,7 @@ struct NotificationsSection: View {
         // Keyed on the account, so a switch with the pane open reads the new
         // daemon's answer.
         .task(id: store.epoch) { await store.refreshCalendarReminderPref() }
+        .task(id: store.epoch) { await store.refreshMorningBriefPref() }
         #if os(macOS)
             // Turning it on is the moment to ask: a switch that reads on while
             // the system refuses to say whether a Focus is up would be a lie.
@@ -1007,6 +1012,58 @@ struct NotificationsSection: View {
             }
         case .unknown, .notOffered:
             EmptyView()
+        }
+    }
+
+    /// The daemon's switch for the morning brief, per mailbox: one push to
+    /// the iPhone near 8am about what today holds. Drawn on the Mac too,
+    /// since it is the same mailbox's switch. Hidden on a daemon too old to
+    /// send one, and before the first answer, as `eventReminders` is.
+    @ViewBuilder
+    private var morningBrief: some View {
+        switch store.morningBriefPref {
+        case .loaded(let enabled):
+            RowDivider()
+            SettingsRow(
+                title: "Morning brief",
+                detail: briefError
+                    ?? "At 8 each morning, a short note on your iPhone about what today holds. Days with nothing to say are skipped."
+            ) {
+                Toggle(
+                    "Morning brief",
+                    isOn: Binding(get: { enabled }, set: { saveBrief($0) })
+                )
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .disabled(briefBusy)
+            }
+        case .unreadable:
+            RowDivider()
+            SettingsRow(
+                title: "Morning brief",
+                detail: "Could not read this setting from the server."
+            ) {
+                Button("Try again") { Task { await store.refreshMorningBriefPref() } }
+                    .buttonStyle(.glass)
+                    .controlSize(.small)
+            }
+        case .unknown, .notOffered:
+            EmptyView()
+        }
+    }
+
+    private func saveBrief(_ enabled: Bool) {
+        guard !briefBusy else { return }
+        briefBusy = true
+        briefError = nil
+        Task {
+            do {
+                try await store.setMorningBrief(enabled)
+            } catch {
+                briefError = errText(error, "Could not save. Try again.")
+            }
+            briefBusy = false
         }
     }
 

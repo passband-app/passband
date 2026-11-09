@@ -1176,8 +1176,9 @@ async fn serve_async(config: Config) -> anyhow::Result<()> {
         }
     });
 
-    // The activation poller (issue #89): its own ticker on its own cadence —
-    // see ACTIVATION_POLL_EVERY — because an exec-per-tenant probe does not
+    // The activation and retention pollers (issue #89): their own ticker on
+    // their own cadence (see ACTIVATION_POLL_EVERY) because an exec-per-tenant
+    // probe does not
     // belong on the session sweep's tight loop. All logging lives inside the
     // pass; a quiet pass is the normal one.
     let poller = state.clone();
@@ -1186,6 +1187,10 @@ async fn serve_async(config: Config) -> anyhow::Result<()> {
         loop {
             ticker.tick().await;
             squelch_control::activation::poll_first_paired(&poller).await;
+            // Retention rides the same ticker, after activation: the same
+            // kind of exec-per-tenant read, serial and batched, with its own
+            // per-person refresh interval on top of this cadence.
+            squelch_control::retention::poll_activity(&poller).await;
         }
     });
 

@@ -468,6 +468,15 @@ from every count and list, and has no MCP counterpart. The contacts seed stays
 sent-only, so being copied in beside a stranger never earns them the
 known-contact floor.
 
+**The relationship ledger is human-door data too.** The `relationships` table
+(one row per correspondent: how much mail each way, how often and how fast the
+owner replies, what they open, the fatigue score) is served by
+`GET /client/person` and `GET /client/relationships`, and read by triage, which
+is the human door's own backend. It holds counts and timestamps only, never
+email text. No `/mcp` tool serves any of it, and
+`squelch-mcp/tests/agent_door_wire.rs` (`no_read_tool_serves_the_relationship_ledger`)
+fails if a read tool's response carries any ledger field.
+
 ## 4b. Provider spam
 
 **Invariant.** Mail the provider filed as spam is stored and readable on one
@@ -607,6 +616,18 @@ none and offers neither tool. For each call the mailer:
 
 An agent's composition is deliberately narrower than the owner's: no
 attachments, no forward, no send group, no read tracking, no scheduling.
+
+**The draft card (MCP Apps).** `create_draft` names a `ui://` resource
+(`squelch-mcp/src/draft_card.html`) that app-capable clients such as Claude
+render in a sandboxed frame in place of the raw result. The HTML is static and
+holds no mail: the client hands it the tool's own arguments and result
+(subject, recipients, the body the agent wrote, the draft id), which the agent
+already had. It loads nothing from the network (empty CSP allow-list), writes
+everything with `textContent`, and its one action asks the client to call
+`open_draft` for that draft, over the same authenticated agent session; it
+never names `send_email`. `resources/read` serves it to any authenticated
+session whatever the write setting, because it is the same file for everyone;
+it is listed only while drafts are allowed.
 
 **Asking for a draft on screen (`open_draft`, and `open: true` on
 `create_draft`).** At `drafts` and above an agent may ask the owner's Mac to

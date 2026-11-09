@@ -763,6 +763,14 @@ reader&#39;s contact card) answers for one address at a time, excludes sealed ma
 from every count and list, and has no MCP counterpart. The contacts seed stays
 sent-only, so being copied in beside a stranger never earns them the
 known-contact floor.</p>
+<p><strong>The relationship ledger is human-door data too.</strong> The <code>relationships</code> table
+(one row per correspondent: how much mail each way, how often and how fast the
+owner replies, what they open, the fatigue score) is served by
+<code>GET /client/person</code> and <code>GET /client/relationships</code>, and read by triage, which
+is the human door&#39;s own backend. It holds counts and timestamps only, never
+email text. No <code>/mcp</code> tool serves any of it, and
+<code>squelch-mcp/tests/agent_door_wire.rs</code> (<code>no_read_tool_serves_the_relationship_ledger</code>)
+fails if a read tool&#39;s response carries any ledger field.</p>
 <p class="sec-num">&sect;4b</p>
 <h2 id="s4b">Provider spam</h2>
 <p class="sec-lede">Spam is kept for you to look at, and away from everything else: no model reads it, no agent sees it, and it never notifies you.</p>
@@ -922,6 +930,17 @@ success row is best-effort once the mail has left.</li>
 </ul>
 <p>An agent&#39;s composition is deliberately narrower than the owner&#39;s: no
 attachments, no forward, no send group, no read tracking, no scheduling.</p>
+<p><strong>The draft card (MCP Apps).</strong> <code>create_draft</code> names a <code>ui://</code> resource
+(<code>squelch-mcp/src/draft_card.html</code>) that app-capable clients such as Claude
+render in a sandboxed frame in place of the raw result. The HTML is static and
+holds no mail: the client hands it the tool&#39;s own arguments and result
+(subject, recipients, the body the agent wrote, the draft id), which the agent
+already had. It loads nothing from the network (empty CSP allow-list), writes
+everything with <code>textContent</code>, and its one action asks the client to call
+<code>open_draft</code> for that draft, over the same authenticated agent session; it
+never names <code>send_email</code>. <code>resources/read</code> serves it to any authenticated
+session whatever the write setting, because it is the same file for everyone;
+it is listed only while drafts are allowed.</p>
 <p><strong>Asking for a draft on screen (<code>open_draft</code>, and <code>open: true</code> on
 <code>create_draft</code>).</strong> At <code>drafts</code> and above an agent may ask the owner&#39;s Mac to
 bring one of its drafts up in the composer. This is the first thing the agent

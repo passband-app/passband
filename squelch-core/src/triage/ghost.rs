@@ -1245,6 +1245,7 @@ mod tests {
             identity_refs: refs.iter().map(|r| r.to_string()).collect(),
             likelihood: None,
             evidence: vec![],
+            identity: None,
         }
     }
     fn at(raw: &str) -> EventTime {

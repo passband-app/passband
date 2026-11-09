@@ -137,6 +137,9 @@ enum AgentTools {
         // calendar's search with it. Off, the tool's name is answered as any
         // invented name is.
         let calendar = AppStore.shared.calendarPageAvailable
+        // Whether the guide may speak of the Usage page's Understanding
+        // section: only with the hidden feature on (ProductGuide.text).
+        let understanding = AppStore.shared.hasFeature(.understanding)
         guard let tool = Tool(rawValue: name), tool.isAvailable, EventProposals.mayRun(name, calendar: calendar),
             tool != .searchCalendar || calendar
         else {
@@ -160,7 +163,7 @@ enum AgentTools {
             case .unsubscribeSender: return await unsubscribeSender(input, gate)
             case .createCalendarEvent: return await createCalendarEvent(input, live: live)
             case .searchCalendar: return try await searchCalendar(input)
-            case .productHelp: return productHelp(input, calendar: calendar)
+            case .productHelp: return productHelp(input, calendar: calendar, understanding: understanding)
             case .listShortcuts: return listShortcuts(calendar: calendar)
             case .findSetting: return findSetting(input)
             case .showPage: return showPage(input, calendar: calendar, point: point)
@@ -543,7 +546,7 @@ enum AgentTools {
     // is mail-derived either: the app wrote every word, so the Trust rules have
     // nothing to guard here.
 
-    private static func productHelp(_ input: [String: JSONValue], calendar: Bool) -> ToolOutcome {
+    private static func productHelp(_ input: [String: JSONValue], calendar: Bool, understanding: Bool) -> ToolOutcome {
         // Only a topic on offer: the calendar's is not one while the page is
         // off, whatever the model remembers from another turn.
         let offered = ProductGuide.topics(calendar: calendar)
@@ -563,7 +566,8 @@ enum AgentTools {
             let onPhone = false
         #endif
         return ToolOutcome(
-            content: ProductGuide.text(topic, runningVersion: version, onPhone: onPhone, calendar: calendar),
+            content: ProductGuide.text(
+                topic, runningVersion: version, onPhone: onPhone, calendar: calendar, understanding: understanding),
             isError: false,
             summary: "read the guide: \(topic.title)")
     }
@@ -1061,11 +1065,20 @@ enum AgentTools {
     /// the last of the acting tools (`EventProposals.inventory` is the
     /// order, and the suite holds it: off, no such name), and
     /// `search_calendar`, beside `search_mail`.
-    static func definitions(calendar: Bool) -> [Wire.ToolDef] {
-        guard calendar else { return definitions }
+    ///
+    /// With `understanding` on (the hidden feature), product_help's topic
+    /// index names the Usage page's Understanding section; off, it does not.
+    static func definitions(calendar: Bool, understanding: Bool = false) -> [Wire.ToolDef] {
+        guard calendar else {
+            guard understanding else { return definitions }
+            return definitions.map {
+                $0.name == Tool.productHelp.rawValue
+                    ? productHelpDefinition(calendar: false, understanding: true) : $0
+            }
+        }
         var byName: [String: Wire.ToolDef] = [:]
         for def in definitions { byName[def.name] = def }
-        byName[Tool.productHelp.rawValue] = productHelpDefinition(calendar: true)
+        byName[Tool.productHelp.rawValue] = productHelpDefinition(calendar: true, understanding: understanding)
         byName[Tool.showPage.rawValue] = showPageDefinition(calendar: true)
         byName[EventProposals.toolName] = calendarEventDefinition
         byName[Tool.searchCalendar.rawValue] = calendarSearchDefinition
@@ -1151,7 +1164,7 @@ enum AgentTools {
             ],
             required: ["title", "start"]))
 
-    private static func productHelpDefinition(calendar: Bool) -> Wire.ToolDef {
+    private static func productHelpDefinition(calendar: Bool, understanding: Bool = false) -> Wire.ToolDef {
         Wire.ToolDef(
             name: Tool.productHelp.rawValue,
             description: """
@@ -1165,7 +1178,8 @@ enum AgentTools {
             input_schema: .init(
                 properties: [
                     "topic": .init(
-                        type: "string", description: ProductGuide.topicIndex(calendar: calendar),
+                        type: "string",
+                        description: ProductGuide.topicIndex(calendar: calendar, understanding: understanding),
                         values: ProductGuide.topics(calendar: calendar).map(\.rawValue))
                 ],
                 required: ["topic"]))

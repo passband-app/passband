@@ -15,6 +15,7 @@ pub mod jwt;
 pub mod opens;
 pub mod ratelimit;
 mod state;
+mod transport;
 
 pub use config::{Cidr, Config, ConfigError, Environment};
 pub use jwt::{JwtError, JwtSigner};
@@ -102,4 +103,6 @@ pub fn router(state: RelayState) -> Router {
         .route("/healthz", get(handlers::healthz))
         .merge(daemon)
         .merge(pixel)
+        // Outermost, so a refusal and a 404 carry it too.
+        .layer(middleware::from_fn(transport::transport_security))
 }

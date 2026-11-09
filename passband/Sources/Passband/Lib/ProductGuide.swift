@@ -66,7 +66,7 @@ enum ProductGuide {
         var covers: String {
             switch self {
             case .gettingAround:
-                "the pages, the sidebar rail, the Discover page and its progress ring, navigation "
+                "the pages, the sidebar rail, navigation "
                     + "keys, undo, zoom, theme"
             case .sitrep:
                 "the home board: For your eyes, Reading, the calendar, shipments, billing and "
@@ -117,9 +117,23 @@ enum ProductGuide {
     /// covers, built from the enum so a topic added above is offered without
     /// a second edit. This IS sent with every request, which is why each line
     /// is short.
-    static func topicIndex(calendar: Bool) -> String {
+    ///
+    /// `understanding` is the `understanding` hidden feature: with it on,
+    /// the app topic names the Usage page's Understanding section. Off, the
+    /// index is main's, byte for byte, and nothing in the guide says the
+    /// section exists (the owner is never shown it without the flag).
+    static func topicIndex(calendar: Bool, understanding: Bool = false) -> String {
         "Which page of the guide to read. "
-            + topics(calendar: calendar).map { "\($0.rawValue): \($0.covers)." }.joined(separator: " ")
+            + topics(calendar: calendar).map { "\($0.rawValue): \(covers($0, understanding: understanding))." }
+            .joined(separator: " ")
+    }
+
+    /// A topic's covers line for this mailbox: the app topic gains the
+    /// Understanding section only while the feature is on.
+    static func covers(_ topic: Topic, understanding: Bool) -> String {
+        guard understanding, topic == .appAndAccounts else { return topic.covers }
+        return topic.covers.replacingOccurrences(
+            of: "usage, ", with: "usage, understanding (people you answer, what Passband knows about you), ")
     }
 
     // MARK: - the system prompt's share
@@ -153,8 +167,17 @@ enum ProductGuide {
     /// `calendar` is whether the Calendar page is on for this mailbox: it
     /// puts the page into the getting-around list. The calendar topic itself
     /// is asked for only while it is on (`topics(calendar:)`).
-    static func text(_ topic: Topic, runningVersion: String?, onPhone: Bool = false, calendar: Bool = false) -> String {
-        keyed(page(topic, runningVersion: runningVersion, onPhone: onPhone, calendar: calendar), calendar: calendar)
+    ///
+    /// `understanding` is the `understanding` hidden feature: it puts the
+    /// Usage page's Understanding section into the app topic. Off, the topic
+    /// is main's and says nothing of it.
+    static func text(
+        _ topic: Topic, runningVersion: String?, onPhone: Bool = false, calendar: Bool = false,
+        understanding: Bool = false
+    ) -> String {
+        keyed(
+            page(topic, runningVersion: runningVersion, onPhone: onPhone, calendar: calendar, understanding: understanding),
+            calendar: calendar)
     }
 
     /// THE DIGIT THAT OPENS A PAGE IS NEVER WRITTEN IN THE PROSE. A topic
@@ -178,7 +201,9 @@ enum ProductGuide {
         return out
     }
 
-    private static func page(_ topic: Topic, runningVersion: String?, onPhone: Bool, calendar: Bool) -> String {
+    private static func page(
+        _ topic: Topic, runningVersion: String?, onPhone: Bool, calendar: Bool, understanding: Bool
+    ) -> String {
         switch topic {
         case .gettingAround: gettingAround(calendar: calendar)
         case .sitrep: sitrep
@@ -192,7 +217,7 @@ enum ProductGuide {
         case .search: calendar ? search + "\n\n" + searchEvents : search
         case .loginCodes: loginCodes
         case .assistant: assistant
-        case .appAndAccounts: appAndAccounts
+        case .appAndAccounts: understanding ? withUnderstanding(appAndAccounts) : appAndAccounts
         case .whatsNew: onPhone ? whatsNewOnPhone(running: runningVersion) : whatsNew(running: runningVersion)
         }
     }
@@ -232,7 +257,6 @@ enum ProductGuide {
 
     private static let gettingAroundTail = """
         - Usage and Settings sit at the bottom of the rail and have no number key. ⌘, opens Settings.
-        - The ring just above them opens Discover: a list of the ways through mail (the basics, flow mode, reminders, search, teaching Passband, the reading stack, smart clear) with a short guide to each on the right. The ring fills clockwise as the user tries each one on their own mail, and a feature used on three separate days is marked a habit. Nothing ever empties it. Esc leaves the page.
 
         Moving:
         - ⌘[ goes back and ⌘] goes forward.
@@ -316,6 +340,7 @@ enum ProductGuide {
         - In the month the arrow keys move the day, [ and ] go to the previous and next month, and t goes to today. Enter opens the selected day: its hours in a column beside the month.
         - The week shows seven days side by side under one column of hours, with all-day events and trips in a strip across the top. The left and right arrows move the day, [ and ] go to the previous and next week, t goes to today, and j / k or the up and down arrows step through the selected day's events.
         - j / k move the selection. Enter opens the mail behind an event guessed from mail. y marks it going (again: not going), x dismisses it.
+        - Mail from someone else about the same event (a promoter, a friend) folds into the user's own card instead of making a second one, listed under "Mail behind it" as "same event". When that mail says something different, the card says so ("Endzeit says Sat Nov 7, 9pm", or "Endzeit says it's cancelled"), the row says "change offered", and nothing changes until the user answers: "accept" (⇧A) takes the change, "keep mine" (⇧K) leaves the card as it is. Mail that did not pass sender authentication is marked "unverified".
 
         Making and changing events (only on the user's own calendars):
         - n, or "New event", opens the event pane. It takes half the window, like the composer, and the month stays usable beside it: clicking a day sets the event's date.
@@ -589,7 +614,7 @@ enum ProductGuide {
         Deeper search:
         - When a search reads like a question ("where is the wifi password"), an agent reads the mail alongside the results and points at the answer with email cards and one line.
         - Settings > Assistant > Deeper search sets when it runs: Automatic, On request (a button to press) or Off. It has a model setting of its own.
-        - "Open in chat", or ⌘Enter, continues the same question in this assistant with room for follow-ups.
+        - Clicking anywhere on the deeper search box (except an email card, which opens that email), "Open in chat", or ⌘Enter opens the conversation full screen in this assistant, with room for follow-ups. Esc goes back to the search results.
         - On the iPhone it works the same way in the Search tab, above the results, with the same setting under Assistant on the Account page. The expand arrow on it opens the conversation in the agent chat once it has finished. The Ask the agent row above the results does what the Mac's Ask agent button does: it asks the agent, then opens the conversation in the chat once there is one. With Deeper search off it is turned off, as on the Mac.
         """
 
@@ -631,6 +656,7 @@ enum ProductGuide {
     private static let assistant = """
         This assistant:
         - ⌘K opens it from anywhere. Esc closes the bar, and the conversation stays until ⌘⇧K (new chat) or an account switch.
+        - ⌘K is its own chat, separate from search. A deeper search opened full screen is not what ⌘K shows next: ⌘K starts fresh, and that search's conversation comes back from search history.
         - If an email is open when the question is asked, an "in:" chip names it and "this email" means that one.
         - It can search and read mail, look up shipments, receipts, bills and calendar items, explain why an email was triaged the way it was, show emails as clickable cards, and answer questions about Passband itself.
         - It marks things done, writes sender rules and saves drafts without asking, because those stay inside Passband.
@@ -652,6 +678,26 @@ enum ProductGuide {
         - Hosted Passband does not offer this yet. A self-hosted daemon does.
         """
 
+    /// The Usage page's two subpages, behind the `understanding` hidden
+    /// feature: with it on, this replaces the Usage line (which describes the
+    /// single page). Off, the guide says what main says.
+    private static let usageSubpages = """
+        - Usage, at the bottom of the rail, has two subpages, switched by the control beside the page's title: Mail and Understanding. It opens on whichever was used last, and on Mail the first time.
+        - Mail: mail in and out, signal against noise, triage spend and assistant usage, over 7, 30 or 90 days, picked at the top right.
+        - Understanding shows who the user's mail says they are. It covers everything Passband has counted, so it has no 7, 30 or 90 day picker.
+        - People is a chart of the people and senders Passband has counted most: further right is more mail a month, higher is closer. Senders the user replies to sit in the top band ("People you answer"), senders they read but never answer in the middle ("Things you read"), and mostly unopened mail at the bottom ("Things you ignore"). Senders from the last two weeks sit in a strip on the left ("Just arrived"). Hovering a dot names the sender and says what the numbers are, such as "replied to 31 of 33, usually within the hour" or "opened 2 of 38". "table" swaps the chart for the same numbers as a list.
+        - Your people lists the eight senders the user answers most surely. "Fading" switches to the eight whose mail is read least. Clicking a name opens that person's contact card.
+        - What Passband knows lists what Passband has written down about the user: their work, what is live right now, the people who matter, and reading habits. Each line says whether the user said it ("you said") or Passband guessed it ("inferred"), how old it is, and what it rests on ("because of 12 messages"). Confirm makes a guess the user's own; Delete removes it for good. A line Passband withdrew stays crossed out as "No longer thinks"; a guess that expired, or a project whose date has passed, stays crossed out as "No longer holds". Neither can be confirmed, and either can be deleted. For the first two weeks of a mailbox the list says it is still learning, above anything the user has already stated.
+        """
+
+    /// The single page's line, as the app topic writes it with the flag off.
+    private static let usageLine =
+        "- Usage, at the bottom of the rail: mail in and out, signal against noise, triage spend and assistant usage, over 7, 30 or 90 days."
+
+    private static func withUnderstanding(_ text: String) -> String {
+        text.replacingOccurrences(of: usageLine, with: usageSubpages)
+    }
+
     private static let appAndAccounts = """
         Accounts:
         - Add one from the Accounts menu ("Add Account…") or Settings > Accounts: sign in with Gmail or Outlook, or connect a self-hosted server with a pairing code or an API token.
@@ -660,6 +706,7 @@ enum ProductGuide {
         - The account badge and the switcher show the photo from the mailbox's Google profile when Passband has been allowed to read it, and the account's initial otherwise. An account connected before this existed shows its initial until it is reconnected.
         - Notifications arrive for every account, not only the one on screen.
         - The first time a mailbox is connected on a Mac, while Passband is still working through its mail, a card over the Sitrep says so: how many emails of how many are in, roughly how long is left, and how many have been sorted, set aside as noise, or need the user's attention so far. The Sitrep fills in behind it. "Start now", Enter or Esc closes it early; it closes by itself when the mail is all in, and it is not shown again on that Mac. There is no guided tour.
+        - Beside that card, a second card offers the iPhone app, unless a phone is already connected to the mailbox: a QR code to scan with the iPhone's camera, which opens the TestFlight invite to the iPhone alpha, and "Copy link". "Start now", Enter or Esc closes both. If the cards close by themselves, a card at the bottom right of the window carries the same code on; after "Start now" nothing follows. On a window too narrow for two cards side by side, only the progress card shows and the bottom-right card offers the iPhone app when it closes. A mailbox that needs no catch-up card gets that bottom-right card a little after it is connected instead. Either way the iPhone app is offered once; the link is always in Settings > Accounts.
         - If the account's server is not answering at launch, Passband keeps retrying on its own. After a couple of seconds the loading screen offers "Try again now", "Switch to" each other account, and "Connect a different server". The Accounts menu and ⌘1 to ⌘9 switch from there too. Nothing is removed: the Connect screen's "Try saved connection again" goes back to the saved account.
         - If the Google sign-in expires, a banner on the Sitrep says Passband cannot read the mail. On a hosted account it has a Reconnect button.
 
@@ -668,6 +715,7 @@ enum ProductGuide {
         - Only urgent and deadline banners play a sound. It is chosen in Settings > General > Notifications, where "Test banner" posts one.
         - While Passband is the front window, banners go to Notification Center only. Clicking a banner opens that message.
         - Event reminders come a while before each event, with the tickets one click away when the mail holds them. They show even while Passband is the front window. "Event reminders" in Settings > General > Notifications turns them off for the mailbox.
+        - Morning brief: once a day, at 8am where the user is (or as soon after as the server is up, never past 11am), the iPhone gets one quiet notification with a short summary of what today holds: a bill due today or tomorrow, packages arriving today, and the first event left on today's calendar ("PG&E bill due tomorrow. A package arrives today. First up: Dentist at 9:30 AM."). It has no title and no date, and it never counts the mail waiting on the user. Days with nothing to say get no notification. Tapping it opens the board. It goes to the iPhone only, never the Mac. "Morning brief" in Settings > General > Notifications turns it off for the mailbox.
 
         Updates:
         - Passband checks for a new version every hour and downloads it in the background. It installs the next time Passband quits.

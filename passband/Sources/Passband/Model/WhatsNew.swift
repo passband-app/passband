@@ -94,6 +94,9 @@ final class WhatsNew {
         let store = AppStore.shared
         guard !active, !dismissedThisSession else { return }
         guard Prefs.shared.firstLoadSeen, !store.firstLoad.active else { return }
+        // The iPhone card (often the veil's hand-off) goes first; closing it
+        // asks again (TestFlightNudgeModal). Two cards at once is a pile.
+        guard !TestFlightNudge.shared.showingNudge else { return }
         guard store.activeView == .sitrep, !store.daemonDown else { return }
         guard let running = runningVersion else { return }
 

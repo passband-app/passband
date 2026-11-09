@@ -358,6 +358,7 @@ waiting_saturation_days = 7
 
 [sync]
 backfill_days = 30
+backfill_bulk_triage_days = 7
 archive_days = 1825
 ```
 

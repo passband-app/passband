@@ -104,7 +104,10 @@ macro_rules! known_sealed_mail_sql {
 /// swept until triage has said what it is. That costs nothing lasting: it
 /// corrects itself the moment the decision commits.
 ///
-/// THE ONE CALLER THAT USES THE LOOSER MACRO INSTEAD is the attention WRITE
+/// TWO CALLERS USE THE LOOSER MACRO INSTEAD, each on purpose. The relationship
+/// ledger's recent window (`relationships`) counts pending mail because its
+/// marks drain before the triage pass, and recounts the sender the moment a
+/// decision seals one. The other is the attention WRITE
 /// (`record_message_attention`), and the asymmetry is deliberate. A report
 /// refused is lost for good, and mail opened in its first moments, before
 /// triage has reached it, is exactly when dwell is real. A report accepted
@@ -601,12 +604,14 @@ mod feedback;
 mod ghosts;
 pub mod groups;
 mod imap_locations;
+pub mod memory;
 mod messages;
 mod migrate;
 mod notify;
 mod outbound;
 pub mod people;
 pub mod reading_senders;
+pub mod relationships;
 mod renotify;
 mod retention;
 mod rules;
@@ -645,15 +650,15 @@ use crate::metrics::{NotifyDecision, NotifyLane};
 use crate::store::SmartBlockMemo;
 use crate::store::{
     AccountIdentity, AccountPhoto, AgentDraftOutcome, AttachmentBytes, BankingApplied,
-    BlankBodyScan, ClientActed, ClientPlatform, ClientSeen, ClientTag, ContactEntry, Device,
-    DeviceToken, Draft, DraftFields, DraftKey, ExtractQueued, FtsQuery, HealScope, InboxUnread,
-    IssuedDeviceToken, LeggedHit, MailActivityDay, MarketingApplied, MarketingOffer,
-    MessageMissingRecipients, MessageOpen, MessageUnsub, MintedPairingCode, MissingVector,
-    NewAuditEntry, NewEvent, NewNotifyDecision, NotifyDecisionRow, PersonNamed, SPAM_SYNCED_AT_KEY,
-    SealedBody, SealedMessage, SearchDiagnostics, SearchFilter, SearchSort, SenderDigestRow,
-    SenderDomainEntry, SenderEntry, SentMessage, Stage1Applied, Stage2CapOverrides, Stage2Usage,
-    Stage2UsageDay, Store, SyncState, TermDf, TrackedMessage, TriageDebug, TriagedMessage,
-    UsageTokens,
+    BlankBodyScan, ClientActed, ClientActivity, ClientPlatform, ClientSeen, ClientTag,
+    ContactEntry, Device, DeviceToken, Draft, DraftFields, DraftKey, ExtractQueued, FtsQuery,
+    HealScope, InboxUnread, IssuedDeviceToken, LeggedHit, MailActivityDay, MarketingApplied,
+    MarketingOffer, MessageMissingRecipients, MessageOpen, MessageUnsub, MintedPairingCode,
+    MissingVector, NewAuditEntry, NewEvent, NewNotifyDecision, NotifyDecisionRow, PersonNamed,
+    PlatformActivity, SPAM_SYNCED_AT_KEY, SealedBody, SealedMessage, SearchDiagnostics,
+    SearchFilter, SearchSort, SenderDigestRow, SenderDomainEntry, SenderEntry, SentMessage,
+    Stage1Applied, Stage2CapOverrides, Stage2Usage, Stage2UsageDay, Store, SyncState, TermDf,
+    TrackedMessage, TriageDebug, TriagedMessage, UsageTokens,
 };
 use crate::triage::rule_suggest::SmartBlock;
 use crate::types::{
@@ -1458,12 +1463,41 @@ impl Store for SqliteStore {
         self.list_ghost_events(account_id, from, to)
     }
 
+    fn list_ghost_events_with_links(
+        &self,
+        account_id: AccountId,
+        from: DateTime<chrono::FixedOffset>,
+        to: DateTime<chrono::FixedOffset>,
+    ) -> Result<Vec<crate::types::GhostEvent>> {
+        self.list_ghost_events_with_links(account_id, from, to)
+    }
+
     fn ghost_url_refs(
         &self,
         account_id: AccountId,
         ids: &[i64],
     ) -> Result<std::collections::HashMap<i64, Vec<String>>> {
         self.ghost_url_refs(account_id, ids)
+    }
+
+    fn event_identity_candidates(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        records: &[crate::triage::ghost::GhostProposal],
+    ) -> Result<crate::triage::event_identity::Questions> {
+        self.event_identity_candidates(account_id, message_id, records)
+    }
+
+    fn resolve_linked_change(
+        &self,
+        account_id: AccountId,
+        shown: i64,
+        from: i64,
+        accept: bool,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.resolve_linked_change(account_id, shown, from, accept, at)
     }
 
     fn patch_ghost_user(
@@ -1823,6 +1857,27 @@ impl Store for SqliteStore {
 
     fn owner_zone(&self, account_id: AccountId) -> Result<crate::owner_clock::OwnerZone> {
         self.owner_zone(account_id)
+    }
+
+    fn relationship_context(
+        &self,
+        account_id: AccountId,
+        addr: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        self.relationship_context(account_id, addr)
+    }
+
+    fn drain_relationship_dirty(&self, account_id: AccountId, max: usize) -> Result<usize> {
+        self.drain_relationship_dirty(account_id, max)
+    }
+
+    fn recompute_relationship_chunk(
+        &self,
+        account_id: AccountId,
+        after: Option<&str>,
+        max: usize,
+    ) -> Result<Option<String>> {
+        self.recompute_relationship_chunk(account_id, after, max)
     }
 
     fn account_created_at(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>> {

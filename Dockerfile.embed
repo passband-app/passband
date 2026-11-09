@@ -98,7 +98,7 @@ RUN set -eux; . /cross-env; triple="$(cat /rust-triple)"; \
     rm -rf target
 
 # Native, whatever the target: the bytes are the same on every arch.
-FROM --platform=$BUILDPLATFORM debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS weights
+FROM --platform=$BUILDPLATFORM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS weights
 # protocol::MODEL_CODE, at the revision the fleet runs (header).
 ARG HF_REPO=Xenova/bge-small-en-v1.5
 ARG HF_REVISION=ea104dacec62c0de699686887e3f920caeb4f3e3
@@ -128,7 +128,7 @@ RUN set -eux; \
     done; \
     chmod -R a+rX,go-w /models
 
-FROM debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 COPY --from=builder /squelch-embed /usr/local/bin/squelch-embed
 # Root-owned and world-readable: the service reads them as an unprivileged uid
 # and could not change them if it tried.

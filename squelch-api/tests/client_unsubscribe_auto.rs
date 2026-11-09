@@ -47,6 +47,10 @@ const PREFS: &str = "<html><body><h1>Email preferences</h1>\
     <input type=checkbox name=topic value=deals checked> Deals\
     <button>Save</button></form></body></html>";
 
+/// Holds `/held` until a test releases it, so a job that fetched it cannot
+/// finish (and give back its claim) before the test is ready.
+static HELD: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(0);
+
 /// The sender's site. Paths are the scenarios.
 async fn sender_site() -> (String, Hits) {
     let hits: Hits = Arc::new(Mutex::new(Vec::new()));
@@ -73,6 +77,14 @@ async fn sender_site() -> (String, Hits) {
             "/done",
             get(|State(h): State<Hits>| async move {
                 record(&h, "GET", "/done", "").await;
+                Html(DONE)
+            }),
+        )
+        .route(
+            "/held",
+            get(|State(h): State<Hits>| async move {
+                record(&h, "GET", "/held", "").await;
+                let _ = HELD.acquire().await;
                 Html(DONE)
             }),
         )
@@ -547,13 +559,17 @@ async fn opened_endpoint_moves_needs_you_to_opened_once() {
 #[tokio::test]
 async fn a_second_press_while_running_does_not_start_a_second_job() {
     let (site, h) = sender_site().await;
-    let run = mount(&Setup::page(format!("{site}/done")), None);
+    // The page is held until both presses have answered: on a loaded runner
+    // the first job could otherwise finish and release its claim before the
+    // second press got to it, and a second job would then be correct.
+    let run = mount(&Setup::page(format!("{site}/held")), None);
     let (a, b) = tokio::join!(ask(&run, true), ask(&run, true));
     assert_eq!(a["status"], "running");
     assert_eq!(b["status"], "running");
+    HELD.add_permits(tokio::sync::Semaphore::MAX_PERMITS / 2);
     settled(&run).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(hits(&h), vec!["GET /done "], "one job, one fetch");
+    assert_eq!(hits(&h), vec!["GET /held "], "one job, one fetch");
 }
 
 /// SECURITY.md §7: the audit log records the sender and the verdict, never

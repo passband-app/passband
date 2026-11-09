@@ -2369,7 +2369,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (identity_path, _identity) = identity_file("token-call-cost");
         // SAFETY: guarded by ENV_LOCK, and unset again below on every exit.
         unsafe { std::env::set_var(CRED_AGE_IDENTITY_ENV, &identity_path) };
@@ -2435,7 +2435,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         rt.block_on(file_store_serves_the_cached_token_scenario());
     }
 
@@ -2483,37 +2483,52 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// INSIDE THE REFRESH SKEW THE CACHE STEPS ASIDE: a token it served a
-    /// moment ago is not served once it is due a refresh, and the refresh
-    /// path runs exactly as it would have with no cache (here, to the error
-    /// a token without a refresh token earns).
+    /// INSIDE THE REFRESH SKEW THE CACHE STEPS ASIDE: a token it would serve
+    /// is not served once it is due a refresh, and the store goes back to the
+    /// backend exactly as it would have with no cache. The cached copy is aged
+    /// in place rather than by sleeping: a token written one second outside the
+    /// skew raced the first read on a loaded CI runner.
     #[test]
     fn file_store_does_not_serve_a_cached_token_once_it_is_due_a_refresh() {
-        // `ENV_LOCK`, for the reason above: a write and a read a second apart.
+        // `ENV_LOCK`, for the reason above: a write and a read of the file.
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         rt.block_on(file_store_refresh_skew_scenario());
     }
 
     async fn file_store_refresh_skew_scenario() {
         let path = tmp_path("cache-skew");
         let tok = StoredToken {
-            access_token: "soon".into(),
+            access_token: "on-disk".into(),
             refresh_token: None,
-            expires_at: Some(Utc::now() + ChronoDuration::seconds(REFRESH_SKEW_SECS + 1)),
+            expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
             scopes: None,
         };
         store_token_file(&path, "you@x.com", CredentialKind::Read, &tok).unwrap();
         let store = FileCredentialStore::new(1_i64, "you@x.com".into(), path.clone(), client());
-        assert_eq!(store.token(1).await.unwrap().access_token, "soon");
-        tokio::time::sleep(Duration::from_millis(1200)).await;
-        let err = store.token(1).await.unwrap_err().to_string();
-        assert!(
-            err.contains("no refresh token"),
-            "the refresh path ran, not the cache: {err}"
+        assert_eq!(store.token(1).await.unwrap().access_token, "on-disk");
+
+        // Mark the cached copy so a served-from-cache answer is visible.
+        let age_cached = |expires_at| {
+            let mut guard = store.cache.0.lock().unwrap();
+            let cached = guard.as_mut().expect("the first read filled the cache");
+            cached.stored.access_token = "cached".into();
+            cached.stored.expires_at = Some(expires_at);
+        };
+
+        // Outside the skew the cache answers (so the next check is not vacuous).
+        age_cached(Utc::now() + ChronoDuration::hours(1));
+        assert_eq!(store.token(1).await.unwrap().access_token, "cached");
+
+        // Inside it, the same file stamp no longer earns the cached copy.
+        age_cached(Utc::now() + ChronoDuration::seconds(REFRESH_SKEW_SECS - 1));
+        assert_eq!(
+            store.token(1).await.unwrap().access_token,
+            "on-disk",
+            "a cached token due a refresh was served"
         );
         let _ = std::fs::remove_file(&path);
     }
@@ -2528,7 +2543,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         rt.block_on(calendar_resolver_cache_scenario());
     }
 
@@ -3177,7 +3192,7 @@ mod tests {
     /// env, so it holds `ENV_LOCK` against the tests that set it.
     #[test]
     fn an_imap_password_round_trips_through_the_file_backend() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = tmp_path("imap-password-plain");
         store_imap_slot_backend(CredentialBackend::File, &path, "you@x.com", "app-pw-9").unwrap();
         assert_eq!(
@@ -3525,7 +3540,7 @@ mod tests {
     /// writes the exact plaintext JSON it always wrote, byte for byte.
     #[test]
     fn without_an_identity_the_bytes_are_the_plaintext_json_they_always_were() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: guarded by ENV_LOCK — the only other test that WRITES this
         // var takes the same lock.
         unsafe {
@@ -3791,7 +3806,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (key, _) = identity_file("wiring");
         let path = tmp_path("wiring-creds");
         let tok = sealed_token("wired-access", "wired-refresh");
@@ -4016,7 +4031,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         rt.block_on(calendar_resolver_scenario());
     }
 
@@ -4029,7 +4044,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         rt.block_on(async {
             let path = tmp_path("granted-cache");
             let resolver = CalendarCredentials::new(
@@ -4079,7 +4094,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         rt.block_on(async {
             let path = tmp_path("granted-forget");
             let resolver = CalendarCredentials::new(

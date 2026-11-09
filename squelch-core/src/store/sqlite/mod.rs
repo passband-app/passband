@@ -636,6 +636,7 @@ pub use self::agent_triage::{
 pub use self::calendar::EventMatch;
 use self::migrate::migrate;
 pub use self::retention::{HISTORY_RETENTION_DAYS, HistoryPruned};
+pub use self::rules::{MAX_GENERAL_RULE_CHARS, MAX_GENERAL_RULES};
 pub use self::search::{EXTERNAL_RECALL_MAX, ExternalSearchMode};
 
 use std::path::Path;
@@ -664,9 +665,9 @@ use crate::triage::rule_suggest::SmartBlock;
 use crate::types::{
     AccountId, AttachmentInfo, AttentionStatus, AuditEntry, BandCounts, Banking, CalendarUpdate,
     ClientAttachment, ClientMessage, ClientThreadView, Deadline, Disposition, Event, EventKind,
-    GroupHistoryEntry, GroupMember, GroupMode, NewMessage, OpenRate, Receipt, RetriageProgress,
-    SanitizedMessage, SealedKind, SearchHit, SendGroup, SenderRule, Sensitivity, ShredCandidate,
-    StoreStats, ThreadView, Tier, TriageAxis, TriageFeedback, UnsubscribeRecord,
+    GeneralRule, GroupHistoryEntry, GroupMember, GroupMode, NewMessage, OpenRate, Receipt,
+    RetriageProgress, SanitizedMessage, SealedKind, SearchHit, SendGroup, SenderRule, Sensitivity,
+    ShredCandidate, StoreStats, ThreadView, Tier, TriageAxis, TriageFeedback, UnsubscribeRecord,
 };
 
 /// `app_settings` key recording when this account's open ledger started, so the
@@ -1703,6 +1704,39 @@ impl Store for SqliteStore {
 
     fn list_sender_rules(&self, account_id: AccountId) -> Result<Vec<SenderRule>> {
         self.list_sender_rules(account_id)
+    }
+
+    fn list_general_rules(&self, account_id: AccountId) -> Result<Vec<GeneralRule>> {
+        self.list_general_rules(account_id)
+    }
+
+    fn create_general_rule(&self, account_id: AccountId, text: &str) -> Result<i64> {
+        self.create_general_rule(account_id, text)
+    }
+
+    fn update_general_rule(&self, account_id: AccountId, id: i64, text: &str) -> Result<bool> {
+        self.update_general_rule(account_id, id, text)
+    }
+
+    fn delete_general_rule(&self, account_id: AccountId, id: i64) -> Result<bool> {
+        self.delete_general_rule(account_id, id)
+    }
+
+    fn merge_and_create_general_rule(
+        &self,
+        account_id: AccountId,
+        merges: &[(Vec<i64>, String)],
+        new_text: &str,
+    ) -> Result<crate::types::MergedGeneralRules> {
+        self.merge_and_create_general_rule(account_id, merges, new_text)
+    }
+
+    fn teach_example(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+    ) -> Result<Option<crate::triage::teach::TeachExample>> {
+        self.teach_example(account_id, message_id)
     }
 
     fn sender_rule_digest(

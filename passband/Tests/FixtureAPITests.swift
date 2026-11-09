@@ -57,6 +57,30 @@ struct FixtureAPITests {
         precondition(savedView.read_languages == ["fr", "es"])
         let reread = try await read("translate-config", as: TranslateConfig.self)
         precondition(reread.read_languages == ["fr", "es"])
+        // Teach: from an email it becomes a rule on that sender's domain, and a
+        // second teach on the same sender overwrites it and says what it replaced.
+        // From nowhere it becomes a general rule, which edits and deletes.
+        func send(_ path: String, _ method: String, _ body: [String: Any]) async throws -> Data {
+            var r = request(path, method: method)
+            r.httpBody = try JSONSerialization.data(withJSONObject: body)
+            return try await api.response(for: r).0
+        }
+        let taught = try JSONDecoder().decode(
+            TeachResult.self, from: try await send("teach", "POST", ["text": "only receipts", "source_message_id": 5]))
+        precondition(taught.isSender && taught.match_pattern == "*@exfed.example" && taught.replaced == nil)
+        let again = try JSONDecoder().decode(
+            TeachResult.self, from: try await send("teach", "POST", ["text": "always show", "source_message_id": 5]))
+        precondition(again.id == taught.id && again.replaced?.want_text == "only receipts")
+        let generalTaught = try JSONDecoder().decode(
+            TeachResult.self, from: try await send("teach", "POST", ["text": "never grant mail"]))
+        precondition(!generalTaught.isSender)
+        _ = try await send("general-rules/\(generalTaught.id)", "PUT", ["text": "never grant funding mail"])
+        let generals = try await read("general-rules", as: [GeneralRule].self)
+        precondition(generals.map(\.text) == ["never grant funding mail"])
+        _ = try await send("general-rules/\(generalTaught.id)", "DELETE", [:])
+        let afterDelete = try await read("general-rules", as: [GeneralRule].self)
+        precondition(afterDelete.isEmpty)
+        _ = try await api.response(for: request("rules/\(taught.id)", method: "DELETE"))
         let receipts = try await read("receipts", as: [Receipt].self)
         let shipments = try await read("shipments", as: [Shipment].self)
         let banking = try await read("banking", as: [BankingRecord].self)

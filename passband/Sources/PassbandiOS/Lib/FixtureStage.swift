@@ -194,7 +194,7 @@
             case "sent", "sent-plain":
                 Task { await stageSent(outbox: scene == "sent", store) }
             case "tune":
-                if let first { Actions.tune(sender: first.sender) }
+                if let first { Actions.teach(sender: first.sender, messageId: first.id) }
             case "disconnected":
                 // Lasts until the poller's next pull, which is long enough.
                 SitrepPoller.shared.stop()
@@ -516,7 +516,7 @@
     ///   account        the Account index
     ///   rules          the Rules page, with rules across all three outcomes
     ///   rules-empty    the same page on a mailbox with none
-    ///   rule-new       the + button: the editor on a blank rule
+    ///   rule-new       the + button: the teach card with no sender
     ///   rule-edit      a row tapped: the editor on that rule
     ///   groups         the Groups page, three groups
     ///   groups-empty   the same page with none
@@ -577,7 +577,7 @@
             try? await Task.sleep(for: .milliseconds(700))
             switch scene {
             case "rule-new":
-                store.openRuleEditor(RuleEditorRequest(rule: nil))
+                store.openRuleEditor(RuleEditorRequest(teach: true))
             case "rule-edit":
                 store.openRuleEditor(RuleEditorRequest(rule: Self.rules[3]))
             case "group-new":

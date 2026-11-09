@@ -279,9 +279,72 @@ enum Actions {
         store.openThread(u.thread_id, queue: queue, replyTo: u.id, from: .reply)
     }
 
-    /// Tune a sender: open the rule editor prefilled with *@domain.
-    static func tune(sender: String) {
-        store.openRuleEditor(RuleEditorRequest(sender: sender))
+    /// `t`: open the teach card. From an email, `sender` is shown as context
+    /// and `messageId` goes to the daemon; the model decides whether the
+    /// sentence is about that sender or about all mail.
+    static func teach(sender: String? = nil, messageId: Int? = nil) {
+        store.openRuleEditor(
+            RuleEditorRequest(sender: sender, teach: true, sourceMessageId: messageId))
+    }
+
+    /// Send one taught sentence. A daemon from before `/client/teach` answers
+    /// 404: with a sender, save the old sender rule instead; without one,
+    /// say the server needs an update.
+    static func sendTeach(text: String, sender: String?, sourceMessageId: Int?) async throws
+        -> TeachResult
+    {
+        do {
+            return try await APIClient.shared.teach(
+                TeachBody(text: text, source_message_id: sourceMessageId))
+        } catch let error as APIError where error.kind == .notFound {
+            switch Teach.fallback(sender: sender) {
+            case .needsUpdate:
+                throw APIError(.notFound, 404, Teach.needsUpdateMessage)
+            case .senderRule(let pattern):
+                // The create is an upsert: note what it is about to replace so
+                // the undo can put it back, as the new route reports itself.
+                let before = try? await APIClient.shared.listRules()
+                let existing = before?.first { $0.match_pattern == pattern }
+                let created = try await APIClient.shared.createRule(
+                    CreateRuleBody(match_pattern: pattern, want: text, disposition: nil))
+                return TeachResult(
+                    kind: "sender", id: created.rule_id, text: text, match_pattern: pattern,
+                    disposition: created.disposition,
+                    replaced: existing.map {
+                        ReplacedRule(want_text: $0.want_text, disposition: $0.disposition)
+                    })
+            }
+        }
+    }
+
+    /// The undo of a teach. A general rule is deleted. A sender rule is
+    /// deleted too, unless the sentence overwrote a rule already on that
+    /// pattern (`replaced`): then the old rule is put back as it was,
+    /// disposition explicit, because deleting it would lose what the owner
+    /// wrote before.
+    static func undoTeach(_ result: TeachResult) async throws {
+        if !result.isSender {
+            try await APIClient.shared.deleteGeneralRule(result.id)
+            // A teach at the cap merged rules to make room: take the merged
+            // rule back out and restore the owner's originals word for word.
+            // Deletes first, so the list never goes past the cap on the way.
+            for merge in result.merged ?? [] {
+                guard let sources = merge.replaced, !sources.isEmpty else { continue }
+                try await APIClient.shared.deleteGeneralRule(merge.id)
+                for source in sources {
+                    _ = try await APIClient.shared.createGeneralRule(text: source.text)
+                }
+            }
+        } else if let replaced = result.replaced, let pattern = result.match_pattern {
+            try await APIClient.shared.updateRule(
+                result.id,
+                CreateRuleBody(
+                    match_pattern: pattern, want: replaced.want_text,
+                    disposition: replaced.disposition))
+        } else {
+            try await APIClient.shared.deleteRule(result.id)
+        }
+        await RulesReload.shared.reload()
     }
 
     /// Create a squelch rule matching `sender` EXACTLY (not *@domain) — this one

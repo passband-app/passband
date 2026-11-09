@@ -79,6 +79,7 @@ enum ReplayIconNames {
         "keyboard",
         "laptopcomputer",
         "laptopcomputer.and.iphone",
+        "lightbulb",
         "link",
         "list.bullet.below.rectangle",
         "lock.fill",

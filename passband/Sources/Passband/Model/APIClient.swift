@@ -907,10 +907,13 @@ actor APIClient {
 
     /// A small model's guess at the rule the owner might write about `sender`,
     /// or nil. Only ever shown as a placeholder: the owner takes it with tab.
-    /// A daemon too old for the route 404s, which the caller reads as none.
-    func suggestRule(sender: String) async throws -> String? {
+    /// With `messageId` it is read from that email and is always "dont show me
+    /// <kind> from <sender>". A daemon too old for the route 404s, which the
+    /// caller reads as none.
+    func suggestRule(sender: String, messageId: Int? = nil) async throws -> String? {
         let answer: RuleSuggestion = try await get(
-            "/client/rules/suggest", query: ["sender": sender])
+            "/client/rules/suggest",
+            query: ["sender": sender, "message_id": messageId.map(String.init)])
         return answer.suggestion
     }
 
@@ -944,6 +947,36 @@ actor APIClient {
     }
 
     func deleteRule(_ id: Int) async throws { try await deleteNoContent("/client/rules/\(id)") }
+
+    // MARK: - teaching
+
+    /// One sentence, read by a small model that decides whether it is about a
+    /// sender or about all mail. The model can take ~12s, so this waits longer
+    /// than the usual 15s idle. A daemon too old for the route answers 404.
+    func teach(_ body: TeachBody) async throws -> TeachResult {
+        try await post("/client/teach", body: body, timeout: 45)
+    }
+
+    /// A daemon too old for the route answers 404; the Rules page reads that
+    /// as "no general section".
+    func listGeneralRules() async throws -> [GeneralRule] {
+        try await get("/client/general-rules")
+    }
+
+    /// Saved verbatim, no model. The undo of a delete uses it.
+    @discardableResult
+    func createGeneralRule(text: String) async throws -> GeneralRuleSaved {
+        try await post("/client/general-rules", body: GeneralRuleBody(text: text))
+    }
+
+    @discardableResult
+    func updateGeneralRule(_ id: Int, text: String) async throws -> GeneralRuleSaved {
+        try await put("/client/general-rules/\(id)", body: GeneralRuleBody(text: text))
+    }
+
+    func deleteGeneralRule(_ id: Int) async throws {
+        try await deleteNoContent("/client/general-rules/\(id)")
+    }
 
     // MARK: - unsubscribe
 

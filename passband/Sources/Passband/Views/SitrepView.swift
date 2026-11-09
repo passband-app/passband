@@ -618,15 +618,15 @@ struct SitrepView: View {
                     TriageFixTarget(
                         messageId: u.id, sender: u.sender, subject: u.one_line))
             },
-            // `t` = tune this sender's rule, the verb the reader has on the
-            // same key. Bound HERE because the sitrep is its own key context:
-            // the list's `t` is never consulted from this page.
-            KeyBinding("t", "tune sender") {
+            // `t` = teach Passband, from this row's email, the verb the reader
+            // has on the same key. Bound HERE because the sitrep is its own key
+            // context: the list's `t` is never consulted from this page.
+            KeyBinding("t", "teach Passband") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
                 // Inert on an auth row: it opens only in the reveal and leaves
                 // only by an answer or Done (remind would park it).
                 guard store.authMeta(for: u) == nil else { return }
-                Actions.tune(sender: u.sender)
+                Actions.teach(sender: u.sender, messageId: u.id)
             },
             KeyBinding("h", "remind me later") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }

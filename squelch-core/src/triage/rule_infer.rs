@@ -234,6 +234,18 @@ impl RuleInferClient {
     pub fn model(&self) -> &str {
         &self.model
     }
+
+    /// Everything a sibling one-sentence call (`triage::teach`) needs to reuse
+    /// this client. Crate-only, so the key never leaves the crate.
+    pub(crate) fn parts(&self) -> (&reqwest::Client, &str, &str, Stage2Provider, &str) {
+        (
+            &self.http,
+            &self.url,
+            &self.api_key,
+            self.provider,
+            &self.model,
+        )
+    }
 }
 
 /// Classify one `want_text` against an explicit endpoint. The raw form: it

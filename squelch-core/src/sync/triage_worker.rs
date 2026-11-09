@@ -337,6 +337,7 @@ pub fn snapshot(
             "previous_decision": fed_back(context.previous_decision.clone()),
             "attention": context.attention,
             "sender_preferences": context.matched_rules,
+            "general_rules": context.general_rules,
             "sender_is_contact": context.sender_is_contact,
             "user_corrections": context.corrections,
             "trigger": job.trigger,
@@ -2046,7 +2047,12 @@ mod budget_tests {
         context.sender_is_contact = true;
         context.rules = vec![serde_json::json!({"id":99,"want_text":"unrelated"})];
         context.matched_rules = vec![serde_json::json!({"id":7,"want_text":"relevant"})];
+        context.general_rules = vec![serde_json::json!({"id":1,"text":"never grant mail"})];
         let snapshot = snapshot(&context, &job, 8, &utc_clock());
+        assert_eq!(
+            snapshot.initial["general_rules"][0]["text"],
+            "never grant mail"
+        );
         assert!(
             snapshot.initial["message"]["body"]
                 .as_str()

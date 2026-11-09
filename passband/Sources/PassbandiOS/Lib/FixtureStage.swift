@@ -2,8 +2,8 @@
 //
 // The simulator has no tap tool and a fresh one has no account, so a change to
 // this shell could be compiled and never looked at. Launched with
-// `--fixture-inbox` the app boots straight onto the practice inbox's fixture
-// mail (the same `RehearsalAPI` the Mac's lesson uses), and two more arguments
+// `--fixture-inbox` the app boots straight onto the fixture inbox
+// (`FixtureMail` behind `FixtureAPI`), and two more arguments
 // put a screen up for a screenshot:
 //
 //   xcrun simctl launch <sim> app.passband.client.ios --fixture-inbox \
@@ -30,12 +30,12 @@
         static var tab: String? { value("--fixture-tab") }
         /// Stages a week of plans on the calendar (FixtureCalendar) and a
         /// granted Google Calendar. Without it the calendar tab is the
-        /// practice inbox's: empty, and offering nothing.
+        /// fixture inbox's: empty, and offering nothing.
         static let calendar = args.contains("--fixture-calendar")
         /// The calendar's mode for a screenshot: `--fixture-calendar-mode
         /// month|week|day`. Scene `calendar-detail` pushes the likely ghost;
         /// `calendar-connect` raises the Google Calendar connect card, which
-        /// practice never offers on its own.
+        /// the fixture inbox never offers on its own.
         static var calendarMode: String? { value("--fixture-calendar-mode") }
         /// The day the calendar opens on, in days from today:
         /// `--fixture-calendar-day 3` (the day with only an evening dinner).
@@ -80,9 +80,9 @@
 
         /// Boot onto the fixture mailbox, then raise the scene asked for.
         static func boot(_ store: AppStore) async {
-            if calendar { await RehearsalAPI.shared.stage(timeline: FixtureCalendar.feed()) }
-            await store.enterPractice()
-            await store.warmPractice()
+            if calendar { await FixtureAPI.shared.stage(timeline: FixtureCalendar.feed()) }
+            await store.enterFixtures()
+            await store.warmFixtures()
             guard let scene else { return }
             // The shell mounts on the connect; its stacks have to exist before
             // anything is pushed onto one.
@@ -106,7 +106,7 @@
                     store.openThread(first.thread_id, queue: store.sitrep.standing, from: .sitrep)
                     Task { await openReply(on: first.id, store) }
                 }
-            // MAIL IN FRENCH, which the practice inbox does not have: the
+            // MAIL IN FRENCH, which the fixture inbox does not have: the
             // reader's translation strip. `translated` is an HTML message
             // shown in English, `translated-incomplete` one whose fact check
             // failed, `translated-pending` one still being written (it stays
@@ -116,7 +116,7 @@
             // `translated-all` the three in one thread, where the pending one
             // lands on the reader's third refetch.
             case let scene where scene.hasPrefix("translated"):
-                let kind: RehearsalAPI.TranslationFixture.Scene =
+                let kind: FixtureAPI.TranslationFixture.Scene =
                     switch scene {
                     case "translated-incomplete": .incomplete
                     case "translated-pending": .pending
@@ -128,7 +128,7 @@
             case let chain where chain.hasPrefix("chain"):
                 if let first { Task { await stageChain(first, scene: chain, store) } }
             // THE READER ON A READING STACK, and the checkmark's hold on it.
-            // The practice inbox has one email per newsletter, so the stack is
+            // The fixture inbox has one email per newsletter, so the stack is
             // the whole Reading zone handed over as one sender's pile: three
             // emails, which is all the reader asks of a stack.
             //   stack         the reader, first of three
@@ -161,8 +161,8 @@
             // THE DEEPER-SEARCH BAND on the phone's search tab (launch with
             // `--fixture-tab search`). "thursday?" is question-shaped by its
             // "?" and is also a literal substring of Alex's "Dinner on
-            // Thursday?", which is all the practice search matches on, so the
-            // band sits over one real hit. The practice API sends no
+            // Thursday?", which is all the fixture search matches on, so the
+            // band sits over one real hit. The fixture API sends no
             // diagnostics, so the no-strict-hits trigger cannot be staged here.
             // SEARCH HISTORY with a question in it: wants `--fixture-tab search`.
             // `recents-restore` also keeps a chat behind the question and taps
@@ -187,8 +187,8 @@
                 store.search.query = "in:calendar sam"
             case "accounts":
                 AccountDoor.shared.pane = .picker
-            // THE SENT PAGE, which the practice mailbox leaves empty: nothing
-            // in a rehearsal sends. `sent` is the list with an outbox pinned
+            // THE SENT PAGE, which the fixture mailbox leaves empty: nothing
+            // in the fixture inbox sends. `sent` is the list with an outbox pinned
             // above it (one mail waiting, one that failed); `sent-plain` is
             // the same list with nothing scheduled. Wants `--fixture-tab mail`.
             case "sent", "sent-plain":
@@ -222,7 +222,7 @@
                             keeps: "receipts", drops: "promotions")))
             // SMART CLEAR'S RECEIPT over the sitrep, and its full list as the
             // sheet the receipt's link raises. Staged straight onto the store:
-            // the press itself refuses the practice inbox. The clock is an
+            // the press itself refuses the fixture inbox. The clock is an
             // hour long so a screenshot never races it.
             case "smart-clear", "smart-clear-list":
                 store.smartClearReceipt = FixtureSmartClear.receipt()
@@ -285,7 +285,7 @@
                     },
                     created_at: at(-2), updated_at: at(-2))
             }
-            await RehearsalAPI.shared.stage(
+            await FixtureAPI.shared.stage(
                 sent: [
                     sent(
                         1, "Maya Chen <maya@studio.example>", "Re: Thursday, and the deck",
@@ -429,21 +429,21 @@
             }
         }
 
-        /// A thread in French under a real practice thread's id, staged in the
+        /// A thread in French under a real fixture thread's id, staged in the
         /// fixture daemon (so the reader's refetches see it too) and in the
         /// prefetch cache, in the same order `stageChain` explains.
         private static func stageTranslated(
-            _ first: AttentionUpdate, _ kind: RehearsalAPI.TranslationFixture.Scene,
+            _ first: AttentionUpdate, _ kind: FixtureAPI.TranslationFixture.Scene,
             _ store: AppStore
         ) async {
-            let versions = RehearsalAPI.TranslationFixture.versions(kind, threadId: first.thread_id)
+            let versions = FixtureAPI.TranslationFixture.versions(kind, threadId: first.thread_id)
             guard let opening = versions.first else { return }
-            await RehearsalAPI.shared.stage(thread: versions)
+            await FixtureAPI.shared.stage(thread: versions)
             store.openThread(first.thread_id, queue: store.sitrep.standing, from: .sitrep)
             ThreadPrefetch.shared.note(first.thread_id, opening)
         }
 
-        /// A CONVERSATION, which the practice mailbox does not have: every
+        /// A CONVERSATION, which the fixture mailbox does not have: every
         /// fixture thread is one message. Built from the real one and two
         /// invented replies, and left in the prefetch cache where the reader's
         /// load looks first. Nothing is written to the fixture daemon.
@@ -485,7 +485,7 @@
             // OPENED FIRST, CACHED SECOND, in one turn of the run loop: the
             // store seeds a reader from the cache at the moment it opens, and
             // a seeded reader is a different (and rarer) path than the load
-            // every practice thread takes. This way the reader mounts empty,
+            // every fixture thread takes. This way the reader mounts empty,
             // and its own load finds the conversation waiting.
             // `chain-long`: THIRTY MESSAGES, the long thread a phone has to
             // land on and hold while every card above it measures. Every
@@ -559,7 +559,7 @@
 
         func stage(_ scene: String, _ store: AppStore) async {
             if !scene.hasSuffix("-empty"), scene != "general", scene != "agents" {
-                await RehearsalAPI.shared.stage(
+                await FixtureAPI.shared.stage(
                     rules: Self.rules, groups: Self.groups, history: Self.history)
                 // The match counts on the Rules page read the board, and the
                 // board was pulled before these rules existed.
@@ -625,7 +625,7 @@
                 disposition: disposition, updated_at: ago(days))
         }
 
-        /// Written against the practice inbox's own senders, so some of them
+        /// Written against the fixture inbox's own senders, so some of them
         /// match mail that is on the board. One domain carries two rules (the
         /// nested header), one rule has no sentence, and one sentence is long
         /// enough to wrap.
@@ -821,7 +821,7 @@
                 event("e7", "Dinner with the Denver team", at(3, 19), at(3, 21), place: "Tavernetta"),
                 event("e8", "Dentist", at(9, 8, 30), at(9, 9, 30), calendar: "Personal", color: home),
             ]
-            let ghosts = [
+            var ghosts = [
                 ghost(1, .reservation, "Dinner at Nopa", at(0, 19, 30), end: at(0, 21, 30), estimated: true,
                       place: "Nopa, 560 Divisadero", commitment: .committed, message: 4),
                 ghost(2, .invite, "Climbing at Mission Cliffs", at(1, 18), place: "Mission Cliffs",
@@ -842,6 +842,15 @@
                           message_id: 7, thread_id: "practice-7", kind: .ticket,
                           attachment: .init(id: 71, filename: "Japanese Breakfast tickets.pdf", mime: "application/pdf"))),
             ]
+            // The venue's own mail about the same show says doors moved an
+            // hour: folded under the ticket's card, offered, not applied.
+            if let i = ghosts.firstIndex(where: { $0.id == 8 }) {
+                ghosts[i].sources.append(
+                    GhostSource(message_id: 8, thread_id: "practice-8", role: .updated, linked: true, verified: true))
+                ghosts[i].pending_change = LinkedChange(
+                    ghost_id: 8, from: 9, kind: .moved, start: at(6, 21), all_day: false, end: nil,
+                    verified: true, message_id: 8, thread_id: "practice-8")
+            }
             return TimelineFeed(
                 ghosts: ghosts, events: events,
                 calendar: TimelineCalendarStatus(granted: true, synced_at: iso.string(from: now)),

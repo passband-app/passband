@@ -56,7 +56,7 @@ spec:
           # is the renderer, and a roller on an older one renders older tenants.
           # An image is a pod-spec field, so it is the one value the ConfigMap
           # cannot hold for both of them.
-          image: ghcr.io/passband-app/squelch-warden:daemon-0.0.17
+          image: ghcr.io/passband-app/squelch-warden:daemon-0.0.18
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

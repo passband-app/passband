@@ -45,8 +45,9 @@
 //! - [`drift`] - reading a live tenant back: who else owns part of it, and what
 //!   an apply of today's render would change.
 //! - [`pair`] - reading `squelchd pair`'s output back.
-//! - [`devices`] - reading `squelchd token first-paired`'s output back: one
-//!   timestamp, which is the whole of the activation signal.
+//! - [`devices`] - reading `squelchd token first-paired`'s output back (one
+//!   timestamp, the whole of the activation signal) and `squelchd token
+//!   activity`'s (per-platform timestamps, the retention signal).
 //! - [`auth`] / [`ratelimit`] / [`handlers`] - the wire.
 //!
 //! The static infrastructure that installs the warden itself, and the runbook
@@ -77,6 +78,7 @@ pub mod provision;
 pub mod ratelimit;
 #[cfg(test)]
 pub mod testing;
+mod transport;
 pub mod validate;
 
 pub use cluster::{Cluster, KubeCluster};
@@ -181,11 +183,13 @@ pub fn router(state: WardenState) -> Router {
         )
         .route("/v1/tenants/{label}/drift", get(handlers::get_drift))
         .route("/v1/tenants/{label}/devices", get(handlers::get_devices))
+        .route("/v1/tenants/{label}/activity", get(handlers::get_activity))
         .route(
             "/v1/tenants/{label}/reconcile",
             post(handlers::reconcile_tenant),
         )
         .route("/v1/tenants/{label}/pair", post(handlers::repair_tenant))
+        .route("/v1/tenants/{label}/purge", post(handlers::purge_tenant))
         .layer(DefaultBodyLimit::max(handlers::MAX_BODY))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -200,6 +204,8 @@ pub fn router(state: WardenState) -> Router {
     Router::new()
         .route("/healthz", get(handlers::healthz))
         .merge(v1)
+        // Outermost, so a refusal and a 404 carry it too.
+        .layer(middleware::from_fn(transport::transport_security))
 }
 
 #[cfg(test)]

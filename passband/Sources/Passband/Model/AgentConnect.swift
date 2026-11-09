@@ -22,7 +22,7 @@ import Observation
 
 /// What a probe of `<server>/mcp` found.
 enum AgentDoorStatus: Equatable, Sendable {
-    /// Not asked yet, or not askable (no server, the practice inbox).
+    /// Not asked yet, or not askable (no server, the fixture inbox).
     case unknown
     case checking
     /// Answered an MCP `initialize`. An agent that can reach this address can
@@ -520,7 +520,7 @@ final class AgentConnect {
     func check(serverURL: String?) async {
         generation &+= 1
         let mine = generation
-        guard !RehearsalMode.isEnabled, let endpoint = Self.endpoint(serverURL: serverURL) else {
+        guard !FixtureMode.isEnabled, let endpoint = Self.endpoint(serverURL: serverURL) else {
             status = .unknown
             statusFor = nil
             return

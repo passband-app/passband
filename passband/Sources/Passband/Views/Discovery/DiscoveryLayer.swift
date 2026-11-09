@@ -17,8 +17,8 @@ final class DiscoveryPresenter {
     static let shared = DiscoveryPresenter()
 
     /// `PASSBAND_DISCOVERY_OPEN=1` opens the page at launch, the same posture
-    /// as `PASSBAND_FORCE_TOUR`: a launch environment nobody sets by accident.
-    /// It still waits for the shell (no practice inbox, no tour).
+    /// as `PASSBAND_FIRST_LOAD`: a launch environment nobody sets by accident.
+    /// It still waits for the shell (no first-load veil up).
     var openAtLaunch = ProcessInfo.processInfo.environment["PASSBAND_DISCOVERY_OPEN"] == "1"
     /// The found moment on screen, if any.
     var moment: FeatureSet?
@@ -26,11 +26,10 @@ final class DiscoveryPresenter {
 
 // MARK: - the ring on the rail
 
-/// The ring as the rail's icon for `.discovery`. The tile, the selector pane,
-/// the hover wash and the practice refusal are all `RailButton`'s; this is
-/// only the glyph.
+/// The ring as the rail's icon for `.discovery`. The tile, the selector pane
+/// and the hover wash are all `RailButton`'s; this is only the glyph.
 ///
-/// ALWAYS THERE, practice inbox included, and it never retires: all kept is a
+/// ALWAYS THERE, and it never retires: all kept is a
 /// resting state, not a farewell.
 struct DiscoveryRailGlyph: View {
     @Environment(\.controlActiveState) private var activeState
@@ -149,8 +148,8 @@ struct DiscoveryLayer: View {
             discovery.celebrationShown()
         }
         // `PASSBAND_DISCOVERY_OPEN`, once the shell is the real one.
-        .task(id: store.tour.active) {
-            guard presenter.openAtLaunch, !RehearsalMode.isEnabled, !store.tour.active else { return }
+        .task(id: store.firstLoad.active) {
+            guard presenter.openAtLaunch, !FixtureMode.isEnabled, !store.firstLoad.active else { return }
             presenter.openAtLaunch = false
             store.setView(.discovery)
         }
@@ -161,7 +160,7 @@ struct DiscoveryLayer: View {
     /// and its undo is still part of that action.
     private var atRest: Bool {
         store.activeView == .sitrep && store.threadId == nil && store.scheduledPreviewRow == nil
-            && !store.composeOpen && !store.modalOverlayOpen && !store.tour.active
+            && !store.composeOpen && !store.modalOverlayOpen && !store.firstLoad.active
             && !store.sideView.isOpen && !store.shareSheetOpen && !store.addAccountSheetOpen
             && store.undos.isEmpty && presenter.moment == nil
             // A finished walk has its own moment on the sitrep, and it is very
@@ -173,7 +172,7 @@ struct DiscoveryLayer: View {
             // The corner belongs to one card at a time, and an ad or an
             // update that got there first keeps it.
             && !AgentNudge.othersShowing(store) && !AgentNudge.shared.showingNudge
-            && !RehearsalMode.isEnabled && activeState == .key
+            && !FixtureMode.isEnabled && activeState == .key
     }
 
     private struct RestKey: Equatable {

@@ -66,10 +66,10 @@ final class AccountPhotos {
     }
 
     /// `sync` for whichever account is live, which is the one a stats answer
-    /// describes. NOT IN REHEARSAL: the practice mailbox has no owner, and its
+    /// describes. NOT FOR FIXTURES: the fixture mailbox has no owner, and its
     /// stats saying "no photo" must not take the real account's picture away.
     func noteActive(tag: String?) {
-        guard !RehearsalMode.isEnabled, let active = AccountManager.shared.activeId else { return }
+        guard !FixtureMode.isEnabled, let active = AccountManager.shared.activeId else { return }
         sync(tag: tag, for: active)
     }
 

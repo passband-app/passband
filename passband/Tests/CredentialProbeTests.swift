@@ -7,19 +7,19 @@ import os
 struct CredentialProbeTests {
     static func main() async {
         let client = APIClient()
-        RehearsalMode.setEnabled(true)
+        FixtureMode.setEnabled(true)
         await expectFailure(client, kind: .badRequest)
         expect(ProbeProtocol.requests.withLock { $0 } == 0,
-               "practice credential checks must fail before network access")
-        let fixtureRequests = await RehearsalAPI.shared.requests
+               "fixture-mode credential checks must fail before network access")
+        let fixtureRequests = await FixtureAPI.shared.requests
         expect(fixtureRequests == 0, "credential checks must not accept fictional stats")
 
-        RehearsalMode.setEnabled(false)
+        FixtureMode.setEnabled(false)
         await expectFailure(client, kind: .network)
         expect(ProbeProtocol.requests.withLock { $0 } == 4,
                "live credential checks must use the candidate transport")
-        let remainingFixtureRequests = await RehearsalAPI.shared.requests
-        expect(remainingFixtureRequests == 0, "live failures must not fall back to practice")
+        let remainingFixtureRequests = await FixtureAPI.shared.requests
+        expect(remainingFixtureRequests == 0, "live failures must not fall back to fixtures")
         print("Credential probe tests passed")
     }
 
@@ -61,8 +61,8 @@ enum Sessions {
     }
 }
 
-actor RehearsalAPI {
-    static let shared = RehearsalAPI()
+actor FixtureAPI {
+    static let shared = FixtureAPI()
     private(set) var requests = 0
     func response(for request: URLRequest) throws -> (Data, HTTPURLResponse) {
         requests += 1

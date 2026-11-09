@@ -128,9 +128,14 @@ final class Prefs {
         static let loadRemoteImages = "passband.pref.loadRemoteImages"
         static let settingsSection = "passband.pref.settingsSection"
         static let developerMode = "passband.pref.developerMode"
-        static let tourCompleted = "passband.pref.tourCompleted"
+        /// Still the tour's old key, on purpose: an install that finished the
+        /// tour has already had its first look and is owed no first-load veil.
+        static let firstLoadSeen = "passband.pref.tourCompleted"
         static let lastSeenReleaseNotes = "passband.pref.lastSeenReleaseNotes"
         static let lastSeenPhoneNotes = "passband.pref.lastSeenPhoneNotes"
+        static let readerHint = "passband.pref.readerHint"
+        static let flowHintSeen = "passband.pref.flowHintSeen"
+        static let staysHintSeen = "passband.pref.staysHintSeen"
         static let theme = "passband.pref.theme"
         static let zoom = "passband.pref.zoom"
         static let density = "passband.pref.density"
@@ -141,7 +146,6 @@ final class Prefs {
         static let floatLoginCodes = "passband.pref.floatLoginCodes"
         static let loginCodesRespectFocus = "passband.pref.loginCodesRespectFocus"
         static let userName = "passband.name"
-        static let nameChosen = "passband.name.chosen"
         static let signature = "passband.pref.signature"
         static let assistantModel = "passband.assistant.model"
         static let assistantTransport = "passband.assistant.transport"
@@ -156,7 +160,7 @@ final class Prefs {
             Key.loadRemoteImages: true,
             Key.settingsSection: SettingsSection.general.rawValue,
             Key.developerMode: false,
-            Key.tourCompleted: false,
+            Key.firstLoadSeen: false,
             // Dark by default: the app (and its onboarding scene) is designed
             // night-first. A stored choice, including an explicit Auto, wins.
             Key.theme: ThemeChoice.dark.rawValue,
@@ -176,7 +180,7 @@ final class Prefs {
             SettingsSection(rawValue: defaults.string(forKey: Key.settingsSection) ?? "")
             ?? .general
         _developerMode = defaults.bool(forKey: Key.developerMode)
-        _tourCompleted = defaults.bool(forKey: Key.tourCompleted)
+        _firstLoadSeen = defaults.bool(forKey: Key.firstLoadSeen)
         _lastSeenReleaseNotes = defaults.string(forKey: Key.lastSeenReleaseNotes)
         _lastSeenPhoneNotes = defaults.string(forKey: Key.lastSeenPhoneNotes)
         _theme = ThemeChoice(rawValue: defaults.string(forKey: Key.theme) ?? "") ?? .dark
@@ -196,13 +200,7 @@ final class Prefs {
         _loginCodesRespectFocus = defaults.bool(forKey: Key.loginCodesRespectFocus)
         _telemetry =
             TelemetryLevel(rawValue: defaults.string(forKey: Key.telemetry) ?? "") ?? .full
-        let storedName = defaults.string(forKey: Key.userName) ?? ""
-        _userName = storedName
-        // A NAME TYPED BEFORE THE FLAG EXISTED is a chosen name. Deliberately
-        // NOT in `register(defaults:)` above: a registered default reads exactly
-        // like a stored one, and this needs to see absence — the same reason
-        // `tourCompleted` is written the way it is.
-        _nameChosen = defaults.object(forKey: Key.nameChosen) as? Bool ?? !storedName.isEmpty
+        _userName = defaults.string(forKey: Key.userName) ?? ""
         // ABSENT, NOT EMPTY, is what earns the default. The Settings editor
         // stores on every keystroke, so a signature somebody cleared is a
         // stored "" and stays none; only an install that never touched the
@@ -222,14 +220,6 @@ final class Prefs {
             ?? .automatic
         _mailHiddenZones = Set(defaults.stringArray(forKey: Key.mailHiddenZones) ?? [])
 
-        // LAST, because it writes: the verdict above has to be PINNED on the
-        // launch that reaches it, not re-derived on the next one. A seed lands
-        // in the name key with no flag beside it, so a re-derivation would read
-        // the app's own guess as the human's answer and quietly retire the
-        // pencil that exists to correct it. Runs once per install.
-        if defaults.object(forKey: Key.nameChosen) == nil {
-            defaults.set(_nameChosen, forKey: Key.nameChosen)
-        }
     }
 
     /// Load remote (network) images in email HTML automatically. When false,
@@ -283,15 +273,15 @@ final class Prefs {
         }
     }
 
-    /// Whether the first-run tour has been seen. Set by finishing OR skipping
-    /// it: both are answers, and re-asking somebody who said no is worse than
-    /// never asking. Settings' replay ignores it.
-    private var _tourCompleted: Bool
-    var tourCompleted: Bool {
-        get { _tourCompleted }
+    /// Whether this Mac has had its first look at a mailbox: the first-load
+    /// veil was seen through, dismissed early, or never needed (the mailbox
+    /// had nothing to catch up on). Either way it is never shown again here.
+    private var _firstLoadSeen: Bool
+    var firstLoadSeen: Bool {
+        get { _firstLoadSeen }
         set {
-            _tourCompleted = newValue
-            defaults.set(newValue, forKey: Key.tourCompleted)
+            _firstLoadSeen = newValue
+            defaults.set(newValue, forKey: Key.firstLoadSeen)
         }
     }
 
@@ -316,6 +306,28 @@ final class Prefs {
     /// a Mac stamp that silences several phone releases the day a backup, a
     /// shared suite or a careless read brings it across. Unregistered, for the
     /// reason the Mac's is: absence is a real state.
+    /// Where the reader's one-time hint stands (ReaderHintRule.Stored), or nil
+    /// before the reader has ever opened on this Mac. Not registered: absence
+    /// is the state that earns the centred beat.
+    var readerHint: ReaderHintRule.Stored? {
+        get { defaults.string(forKey: Key.readerHint).flatMap(ReaderHintRule.Stored.init) }
+        set { defaults.set(newValue?.rawValue, forKey: Key.readerHint) }
+    }
+
+    /// Whether flow mode's one-time explanation has been shown on this Mac
+    /// (FlowHintRule). Never registered: false until it has.
+    var flowHintSeen: Bool {
+        get { defaults.bool(forKey: Key.flowHintSeen) }
+        set { defaults.set(newValue, forKey: Key.flowHintSeen) }
+    }
+
+    /// Whether the one-time "stays here until you mark it done" note has
+    /// been shown on this Mac (StaysHintRule). False until it has.
+    var staysHintSeen: Bool {
+        get { defaults.bool(forKey: Key.staysHintSeen) }
+        set { defaults.set(newValue, forKey: Key.staysHintSeen) }
+    }
+
     private var _lastSeenPhoneNotes: String?
     var lastSeenPhoneNotes: String? {
         get { _lastSeenPhoneNotes }
@@ -428,94 +440,53 @@ final class Prefs {
         }
     }
 
-    /// The human's display name, for the Sitrep greeting only. Client-side —
-    /// the human door has no such field.
+    /// The human's display name, for the Sitrep greeting only. Client-side:
+    /// the human door has no such field. Set in Settings > You; seeded once
+    /// below.
     ///
-    /// SETTING THIS TO A NAME IS A CHOICE, and the setter records it as one:
-    /// whoever assigns here is a human at a text field (the Settings row, or
-    /// the greeting's own inline editor), which is what retires the pencil
-    /// beside the greeting for good. The seed below writes the stored value
-    /// directly, precisely so a guess the app made about you never counts as
-    /// your answer.
-    ///
-    /// EMPTY IS NOT A CHOICE, and that is not pedantry: the Settings row binds
-    /// straight to this pref, so it lands here on every keystroke — including
-    /// the empty string in the middle of select-all-and-retype. Counting that
-    /// as an answer would strand anyone who got distracted mid-edit with a bare
-    /// greeting AND no pencil, the one state with no way back but Settings.
+    /// `passband.name.chosen` may still sit in older installs' defaults, from
+    /// the greeting's name pencil. Nothing reads it any more; it is left in
+    /// place rather than given a one-off migration of its own.
     private var _userName: String
     var userName: String {
         get { _userName }
         set {
             _userName = newValue.trimmingCharacters(in: .whitespaces)
             defaults.set(_userName, forKey: Key.userName)
-            if !_nameChosen, !_userName.isEmpty {
-                _nameChosen = true
-                defaults.set(true, forKey: Key.nameChosen)
-            }
         }
     }
 
-    /// Whether the human has ever named themselves. False means the greeting is
-    /// running on a seeded guess (or on nothing), which is the one state that
-    /// offers an edit affordance — a permanent pencil on a greeting is chrome,
-    /// and the name lives in Settings like every other pref.
-    private var _nameChosen: Bool
-    var nameChosen: Bool { _nameChosen }
-
-    /// First-run display name: the mailbox's local part, the first time a
-    /// daemon tells us which mailbox this is.
+    /// First-run display name: the given name on the mailbox's Google profile,
+    /// the first time the daemon has one. Greets "Ada", never "alovelace97":
+    /// there is no address fallback, because nothing on the greeting can
+    /// correct a bad guess in place any more. No given name, no name.
     ///
     /// Fires AT MOST ONCE per install. The guard is the stored key's absence,
-    /// not emptiness, so clearing the name in Settings stays cleared and an
-    /// account switch never re-guesses over a name you already have. A nil
-    /// address (daemon too old to say) and anything that is not address-shaped
-    /// both mean the same thing here: seed nothing, greet the way we always did.
-    ///
-    /// SPLIT WOULD BE WRONG. `split(separator:)` omits empty subsequences, so
-    /// "@gmail.com" hands back the DOMAIN and a bare "nobody" hands back
-    /// itself — and self-host never checks the shape of `account_email` (the
-    /// config only requires it non-empty), so both are reachable. The guess is
-    /// one-shot and keyed on the key's absence, so a wrong one is permanent:
-    /// this takes the text before the first "@" and insists there was one.
-    func seedUserName(fromEmail email: String?) {
-        guard !_nameChosen, defaults.object(forKey: Key.userName) == nil else { return }
-        guard let local = Self.localPart(of: email) else { return }
-        _userName = local
-        defaults.set(local, forKey: Key.userName)
-    }
-
-    /// Text before the first "@", or nil when the string is not address-shaped
-    /// or has nothing there. See `seedUserName(fromEmail:)` for why not `split`.
-    private static func localPart(of email: String?) -> String? {
-        guard let email, let at = email.firstIndex(of: "@") else { return nil }
-        let local = String(email[..<at])
-        return local.isEmpty ? nil : local
-    }
-
-    /// The better seed: the given name on the mailbox's Google profile, when
-    /// the daemon has imported one. Greets "Ada" where the address could only
-    /// offer "alovelace97".
-    ///
-    /// STILL A SEED, so it writes the stored value directly and leaves
-    /// `nameChosen` alone: the pencil stays, and a name the human typed is
-    /// never touched. It fires in exactly two states:
-    ///
-    /// - nothing has ever been stored (a first run against a daemon that
-    ///   already knows the name), and
-    /// - what is stored is OUR OWN earlier guess, the local part of this same
-    ///   mailbox. That is the upgrade for every install that seeded before the
-    ///   daemon could say a name, and matching the guess exactly is what keeps
-    ///   it from overwriting anything else: a name cleared in Settings is the
-    ///   empty string, not the local part, and stays cleared.
+    /// not emptiness, so a name cleared in Settings stays cleared and an
+    /// account switch never re-guesses over a name you already have. The one
+    /// other state it writes over is a stored name exactly equal to this
+    /// mailbox's local part. That is what upgrades installs that seeded the
+    /// address before the given name existed, so they stop greeting by it.
+    /// It cannot tell that guess from the same text typed into Settings by
+    /// hand (the flag that could is gone with the greeting's pencil), so a
+    /// typed name that happens to equal the local part is replaced once too.
+    /// A name cleared in Settings is the empty string and stays cleared.
     func seedUserName(fromGivenName given: String?, email: String?) {
-        guard !_nameChosen else { return }
         guard let name = given?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty
         else { return }
         let stored = defaults.object(forKey: Key.userName) as? String
         guard stored == nil || (stored == Self.localPart(of: email) && stored != name) else { return }
         _userName = name
         defaults.set(name, forKey: Key.userName)
+    }
+
+    /// Text before the first "@", or nil when the string is not address-shaped
+    /// or has nothing there. Not `split`: it omits empty subsequences, so
+    /// "@gmail.com" would hand back the domain.
+    private static func localPart(of email: String?) -> String? {
+        guard let email, let at = email.firstIndex(of: "@") else { return nil }
+        let local = String(email[..<at])
+        return local.isEmpty ? nil : local
     }
 
     /// What every install signs with until its human says otherwise. Markdown,

@@ -33,6 +33,7 @@
 
 pub mod activation;
 pub mod admin;
+pub mod admin_views;
 pub mod alert;
 mod appearance;
 pub mod bifrost;
@@ -49,12 +50,14 @@ pub mod posthog;
 pub mod ratelimit;
 pub mod reconnect;
 pub mod resend;
+pub mod retention;
 pub mod seal;
 pub mod sessions;
 pub mod share;
 pub mod state;
 pub mod store;
 pub mod tenant;
+mod transport;
 pub mod warden;
 pub mod workos;
 
@@ -118,9 +121,18 @@ use axum::{
 /// an admin URL rather than 403: there is no door to knock on, and no admin
 /// token for a stranger to spend their bucket guessing at.
 ///
-/// `/healthz` sits outside every layer so liveness answers while a client is
-/// throttled.
+/// `/healthz` sits outside every rate-limit and body layer so liveness answers
+/// while a client is throttled. Only the transport-header layer
+/// (`transport.rs`) wraps it, as it wraps every route.
 pub fn router(state: ControlState) -> Router {
+    let secure = !state.config().is_insecure();
+    routes(state).layer(middleware::from_fn_with_state(
+        secure,
+        transport::transport_security,
+    ))
+}
+
+fn routes(state: ControlState) -> Router {
     let form = Router::new()
         .route("/", get(handlers::signup_form))
         .route("/reconnect/status", get(reconnect::status))
@@ -261,9 +273,13 @@ pub fn router(state: ControlState) -> Router {
 
     let admin = Router::new()
         .route("/admin", get(admin::page))
+        .route(pages::ADMIN_SCRIPT_PATH, get(admin::app_js))
+        .route("/admin/users", get(admin::users))
+        .route("/admin/users/{id}", get(admin::person))
         .route("/admin/invite", post(admin::invite))
         .route("/admin/approve", post(admin::approve))
         .route("/admin/send", post(admin::send))
+        .route("/admin/delete", post(admin::delete))
         .route("/admin/logout", post(admin::logout))
         .layer(DefaultBodyLimit::max(handlers::MAX_BODY))
         .layer(middleware::from_fn_with_state(

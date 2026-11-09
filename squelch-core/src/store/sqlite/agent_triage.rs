@@ -277,6 +277,13 @@ fn context(conn: &Connection, account: AccountId, id: i64) -> Result<AgentContex
         rules,
         matched_rules,
         sender_is_contact,
+        // NOT READ HERE. Every triage job, evidence read, notification and
+        // decision view loads a context, and the ledger is the `understanding`
+        // flag's: the worker attaches it only when the flag is on
+        // (`triage_worker::attach_relationship`), so a mailbox without the flag
+        // runs exactly the queries it always did and no fault in the ledger
+        // can fail its triage.
+        relationship: None,
         corrections,
         revision,
         memory: vec![],
@@ -543,6 +550,10 @@ pub(super) fn correct_agent_triage_conn(
     if field == "kinds" && candidate.kinds.is_empty() {
         return Err(CoreError::InvalidInput("kinds cannot be empty".into()));
     }
+    // Every correction moves the sender's relationship row (its
+    // `corrections`, and for a seal what the row counts), and none of them
+    // moves a count, so the mark is full.
+    super::relationships::mark_message_sender_dirty_conn(conn, account, message, true)?;
     // A correction to how an ARCHIVE message is filed is the owner asking for
     // it to be treated as live mail: promote it, then queue the same triage
     // any corrected row gets. Sealing or unsealing one (`external_access`) is
@@ -1699,11 +1710,14 @@ pub(crate) const NEXT_JOBS_DUE_SQL: &str = "SELECT j.kind,
        AND j.kind IN (SELECT value FROM json_each(?2))
      GROUP BY j.kind";
 
-/// [`SqliteStore::triage_budget_parked`], pinned for the same reason.
+/// [`SqliteStore::triage_budget_parked`], pinned for the same reason. A
+/// revisit is left out: its mail is already sorted, so "N emails will be
+/// sorted tomorrow" would be untrue of it, and its own cap is one
+/// `uncapped_triage` deliberately keeps.
 pub(crate) const TRIAGE_BUDGET_PARKED_SQL: &str = "SELECT COUNT(*), MIN(available_at)
      FROM agent_triage_jobs INDEXED BY idx_agent_jobs_account_ready
      WHERE account_id=?1 AND state='queued' AND kind IN ('triage','access')
-       AND trigger!='archive_access'
+       AND trigger!='archive_access' AND trigger NOT LIKE 'revisit:%'
        AND last_error='daily_budget_exhausted' AND available_at>?2";
 
 impl SqliteStore {
@@ -1780,6 +1794,14 @@ impl AgentTriageStore for SqliteStore {
         limits: &[(String, u32)],
     ) -> Result<bool> {
         super::agent_budget::reserve(self, account, day, limits)
+    }
+    fn release_budget_held_jobs(
+        &self,
+        account: AccountId,
+        config: &crate::triage::agent_config::AgentConfig,
+        now: DateTime<Utc>,
+    ) -> Result<usize> {
+        super::agent_budget::release_all_held(self, account, config, now)
     }
     fn refund_agent_budget(
         &self,
@@ -2156,6 +2178,8 @@ impl AgentTriageStore for SqliteStore {
         if current.source.content != original.source.content {
             return Ok(AgentCommitOutcome::Stale);
         }
+        let was_sealed =
+            super::relationships::message_known_sealed_conn(&tx, job.account_id, job.message_id)?;
         let restricted = explicit_access_override(&tx, job.account_id, job.message_id)?
             .unwrap_or(decision.restricted);
         tx.execute(
@@ -2165,6 +2189,14 @@ impl AgentTriageStore for SqliteStore {
                 job.message_id,
                 if restricted { "restricted" } else { "allowed" }
             ],
+        )?;
+        // Sealed or unsealed by the access check: the sender's relationship
+        // row follows within a round, as at the decision commit.
+        super::relationships::mark_if_sealing_changed_conn(
+            &tx,
+            job.account_id,
+            job.message_id,
+            was_sealed,
         )?;
         // Access changed outside the triage commit: the message's stored
         // decision is projected again now (matched afresh), not at its next
@@ -2312,6 +2344,11 @@ impl AgentTriageStore for SqliteStore {
         }
         let mut decision = decision.clone();
         apply_corrections(&tx, job.account_id, job.message_id, &mut decision)?;
+        super::agent_deliveries::drop_sent_packages(
+            &mut decision,
+            &current.message.subject,
+            &current.message.body,
+        );
         let has_kind_correction: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM agent_triage_corrections WHERE account_id=?1 AND message_id=?2 AND field='kinds')",
             params![job.account_id,job.message_id], |row|row.get(0))?;
@@ -2321,6 +2358,10 @@ impl AgentTriageStore for SqliteStore {
             ));
         }
         let decision = &decision;
+        // Read BEFORE the decision and the access state are written, so the
+        // relationship mark below sees which way sealing moved.
+        let was_sealed =
+            super::relationships::message_known_sealed_conn(&tx, job.account_id, job.message_id)?;
         let revision: i64 = tx.query_row(
             "SELECT revision FROM agent_message_state WHERE account_id=?1 AND message_id=?2",
             params![job.account_id, job.message_id],
@@ -2353,6 +2394,15 @@ impl AgentTriageStore for SqliteStore {
         // A decision that SEALS the message deletes its vectors here, at the
         // event, like its translation above (`vector_forbidden_sql!`).
         super::search::purge_forbidden_vectors_conn(&tx, Some(job.message_id))?;
+        // And moves it into or out of its sender's relationship row within a
+        // round: the ledger counted it while it was pending (`relationships`),
+        // and a re-triage that drops its auth kinds puts it back.
+        super::relationships::mark_if_sealing_changed_conn(
+            &tx,
+            job.account_id,
+            job.message_id,
+            was_sealed,
+        )?;
         let done = apply_done(&tx, job, decision, Utc::now())?;
         // A RE-CHECK MOVES MAIL ONLY BY ITS DONE. For the owner, done and
         // leaving FYE are one act: a re-check writes no placement at all (no
@@ -2542,6 +2592,9 @@ impl AgentTriageStore for SqliteStore {
                 message
             ],
         )?;
+        // The sender's relationship row now owes a recount of its attention
+        // columns. One `INSERT OR IGNORE`; the refine lane does the work.
+        super::relationships::mark_message_sender_dirty_conn(&conn, account, message, false)?;
         Ok(())
     }
     fn agent_access_allowed(&self, account: AccountId, message: i64) -> Result<bool> {
@@ -4967,6 +5020,15 @@ mod tests {
                 )
                 .unwrap();
             }
+            // A revisit held by its own cap: already sorted, not counted.
+            conn.execute(
+                "INSERT INTO agent_triage_jobs
+                (account_id,message_id,kind,trigger,input_revision,state,available_at,last_error)
+                VALUES(1,7,'triage','revisit:due',1,'queued','2098-01-01T00:00:00Z',
+                       'daily_budget_exhausted')",
+                [],
+            )
+            .unwrap();
         }
         let (parked, resumes) = store.triage_budget_parked(1).unwrap();
         assert_eq!(parked, 2);

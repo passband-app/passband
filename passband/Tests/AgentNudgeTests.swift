@@ -14,14 +14,14 @@ struct AgentNudgeTests {
         firstUse: Date? = ago(days: 10),
         asked: Bool = false,
         paneSeen: Bool = false,
-        practice: Bool = false,
+        fixtures: Bool = false,
         othersShowing: Bool = false,
         iPhoneAdAskedAt: Date? = nil,
         door: AgentDoorStatus = .open,
         agentSeen: Bool? = false
     ) -> Bool {
         AgentNudge.earned(
-            firstUse: firstUse, asked: asked, paneSeen: paneSeen, practice: practice,
+            firstUse: firstUse, asked: asked, paneSeen: paneSeen, fixtures: fixtures,
             othersShowing: othersShowing, iPhoneAdAskedAt: iPhoneAdAskedAt,
             door: door, agentSeen: agentSeen, now: now)
     }
@@ -30,12 +30,12 @@ struct AgentNudgeTests {
         firstUse: Date? = ago(days: 10),
         asked: Bool = false,
         paneSeen: Bool = false,
-        practice: Bool = false,
+        fixtures: Bool = false,
         othersShowing: Bool = false,
         iPhoneAdAskedAt: Date? = nil
     ) -> Bool {
         AgentNudge.prerequisites(
-            firstUse: firstUse, asked: asked, paneSeen: paneSeen, practice: practice,
+            firstUse: firstUse, asked: asked, paneSeen: paneSeen, fixtures: fixtures,
             othersShowing: othersShowing, iPhoneAdAskedAt: iPhoneAdAskedAt, now: now)
     }
 
@@ -56,8 +56,8 @@ struct AgentNudgeTests {
         precondition(!earned(asked: true))
         // Somebody who has opened Settings > Agents knows.
         precondition(!earned(paneSeen: true))
-        // Never over the practice inbox.
-        precondition(!earned(practice: true))
+        // Never over the fixture inbox.
+        precondition(!earned(fixtures: true))
         // Never on top of another one-time card.
         precondition(!earned(othersShowing: true))
 
@@ -85,7 +85,7 @@ struct AgentNudgeTests {
         precondition(!free(firstUse: nil))
         precondition(!free(asked: true))
         precondition(!free(paneSeen: true))
-        precondition(!free(practice: true))
+        precondition(!free(fixtures: true))
         precondition(!free(othersShowing: true))
         precondition(!free(iPhoneAdAskedAt: ago(days: 1)))
 

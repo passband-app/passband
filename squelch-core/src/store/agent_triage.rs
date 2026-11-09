@@ -118,6 +118,18 @@ pub struct AgentContext {
     pub rules: Vec<serde_json::Value>,
     pub matched_rules: Vec<serde_json::Value>,
     pub sender_is_contact: bool,
+    /// The relationship ledger's block for the sender (docs/UNDERSTANDING.md
+    /// §2.1), ABSENT rather than empty when there is no row or the first-run
+    /// backfill has not filled the table. NEVER FILLED BY A CONTEXT LOAD: the
+    /// worker attaches it under the `understanding` flag
+    /// (`sync::triage_worker::attach_relationship`), so every other reader of
+    /// a context runs without touching the ledger. Deterministic counts, no
+    /// email text. NOT IN ANY REVISION FINGERPRINT, for the reason `triage.dwell_ms`
+    /// is not in `user_state`: the ledger is recounted while mail is being
+    /// read and triaged, and a recount changes nothing a run in flight
+    /// decided, so it must not turn that run's commit stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relationship: Option<serde_json::Value>,
     pub corrections: Vec<serde_json::Value>,
     pub revision: ContextRevision,
     /// Reserved read-only seam. No learned-memory editor ships in this rewrite.
@@ -376,6 +388,16 @@ pub trait AgentTriageStore: Send + Sync {
         retry_at: DateTime<Utc>,
         error_code: &str,
     ) -> Result<bool>;
+    /// Make every job the daily caps parked due now, for a mailbox whose lane
+    /// caps were just lifted: all but revisits, which answer to a cap of their
+    /// own, and archive search checks past what their own sub-cap still has
+    /// room for. Returns how many were released.
+    fn release_budget_held_jobs(
+        &self,
+        account: AccountId,
+        config: &crate::triage::agent_config::AgentConfig,
+        now: DateTime<Utc>,
+    ) -> Result<usize>;
     /// Requeue work that could not start, refunding only this lease's attempt.
     fn defer_agent_job(
         &self,

@@ -13,7 +13,7 @@
 // The remote-images pref is an ABSOLUTE gate — a prefetch is exactly the request
 // that pref exists to prevent, and doing it invisibly into a cache would be
 // worse, not better; reconciliation still runs, being network-free. Fires once
-// per store epoch (a launch, an account switch, a practice entry), once BOTH the
+// per store epoch (a launch, an account switch, a fixture entry), once BOTH the
 // bands and the zones have landed under it (either alone warms half the list
 // and never returns for the rest).
 
@@ -75,7 +75,7 @@ final class ImageWarmer {
 
     /// The store epoch each half last landed under, and the one the last warm
     /// was for. A warm stops at an epoch bump, so both halves landing under a
-    /// new epoch start another, the bump a switch's or not (a practice entry
+    /// new epoch start another, the bump a switch's or not (a fixture entry
     /// cancelled while its drafts settled bumps the epoch and keeps the board).
     private var sitrepEpoch: Int?
     private var zonesEpoch: Int?

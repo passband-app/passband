@@ -230,15 +230,15 @@ struct MobileCalendarView: View {
                     try? await Task.sleep(for: .seconds(1.5))
                     fixtureDetail = FixtureStage.calendarDetail
                     // The connect card, staged straight onto the store: the
-                    // practice inbox never offers it (`calendarOffer` is
-                    // `.none` in practice), and a screenshot needs the ask.
+                    // fixture inbox never offers it (`calendarOffer` is
+                    // `.none` there), and a screenshot needs the ask.
                     if FixtureStage.scene == "calendar-connect" {
                         store.calendarConnectAsk = CalendarConnectAsk(
                             route: .link("https://example.invalid/reconnect?calendar=1"),
                             email: "you@example.com", epoch: store.epoch)
                     }
                     // The sheet, staged straight onto the store: the
-                    // practice inbox never offers "+" (nothing can be saved).
+                    // fixture inbox never offers "+" (nothing can be saved).
                     if FixtureStage.scene == "calendar-new" {
                         let draft = EventForm.retitled(
                             EventForm.newDraft(
@@ -748,7 +748,7 @@ private struct MobileAgendaRow: View {
 
     private var hasSubline: Bool {
         item.location != nil || item.cancelled || end != nil || (item.band != nil && !item.cancelled)
-            || response != nil || item.unverified
+            || response != nil || item.unverified || item.pendingChange != nil
     }
 
     private var response: String? {
@@ -781,6 +781,9 @@ private struct MobileAgendaRow: View {
             }
             if item.unverified {
                 UnverifiedMark()
+            }
+            if item.pendingChange != nil {
+                ChangeOfferedMark()
             }
             if let place = item.location {
                 Text(place)
@@ -1051,7 +1054,7 @@ private struct MobileDayTimeline: View {
     let step: (_ forward: Bool) -> Void
     /// A tap on an empty stretch of the hours: a new event there, an hour
     /// long, starting on the half hour above the finger. Nil where nothing
-    /// can be created (no writable calendar, the practice inbox).
+    /// can be created (no writable calendar, the fixture inbox).
     var create: ((_ startMinutes: Int) -> Void)?
     /// Brings `firstEventAnchor` to the top of the list. Called by the mark
     /// itself as it appears, so it runs once the day's hours are laid out,

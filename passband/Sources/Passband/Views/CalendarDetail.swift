@@ -62,6 +62,14 @@ struct CalendarDetail: View {
             if !item.sources.isEmpty {
                 MailBehind(sources: item.sources)
             }
+            // Another sender's mail about this event says something
+            // different: offered, never applied until the user answers.
+            if let change = item.pendingChange {
+                LinkedChangeNotice(
+                    change: change, sources: item.sources,
+                    zone: item.ghost?.start_timezone ?? item.event?.start_timezone,
+                    calendar: calendar)
+            }
             actions
         }
         .padding(Space.s16)
@@ -369,7 +377,7 @@ struct CalendarDetail: View {
             }
         } else if let event = item.event {
             let link = event.html_link.flatMap { Opener.isHTTP($0) ? $0 : nil }
-            let editable = CalendarWrite.canEdit(event) && !RehearsalMode.isEnabled
+            let editable = CalendarWrite.canEdit(event) && !FixtureMode.isEnabled
             if link != nil || editable {
                 HStack(spacing: Space.s14) {
                     if editable {
@@ -563,6 +571,76 @@ private struct TicketsRow: View {
     }
 }
 
+/// A change another sender's mail offers on this card (`LinkedChange`):
+/// "Endzeit says Sat Nov 7, 9pm" or "Endzeit says it's cancelled", and the
+/// two answers. Quiet and roomy, in the same well as the mail behind it; no
+/// colour, because nothing has changed yet. The sender is named from the
+/// linked mail itself, through the same prefetch cache `SourceRow` reads.
+private struct LinkedChangeNotice: View {
+    @Environment(AppStore.self) private var store
+    let change: LinkedChange
+    let sources: [GhostSource]
+    let zone: String?
+    let calendar: Calendar
+    @State private var sender: String?
+    @State private var answering = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Space.s10) {
+            HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
+                // The sender's name is mail-derived: plain Text, never markup.
+                Text(verbatim: Agenda.changeLine(change, sender: sender, zone: zone, calendar: calendar))
+                    .font(Typo.rowSub)
+                    .foregroundStyle(Palette.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                Spacer(minLength: Space.s8)
+                if !change.verified {
+                    UnverifiedMark()
+                }
+            }
+            HStack(spacing: Space.s14) {
+                HintButton(key: "⇧A", label: "accept") { answer(true) }
+                HintButton(key: "⇧K", label: "keep mine") { answer(false) }
+                Spacer(minLength: 0)
+            }
+            .disabled(answering)
+        }
+        .padding(Space.s12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
+                .fill(Palette.hairline.opacity(0.45))
+        )
+        .task(id: change) { await resolveSender() }
+    }
+
+    /// The linked mail's thread: the change's own, else the linked source
+    /// with its message.
+    private var thread: String? {
+        change.thread_id
+            ?? change.message_id.flatMap { id in sources.first { $0.message_id == id }?.thread_id }
+    }
+
+    private func answer(_ accept: Bool) {
+        guard !answering else { return }
+        answering = true
+        Task {
+            await store.answerLinkedChange(change, accept: accept, viaKey: false)
+            answering = false
+        }
+    }
+
+    private func resolveSender() async {
+        guard let thread,
+            let view = try? await ThreadPrefetch.shared.fetch(thread, fresh: ThreadPrefetch.warmFresh)
+        else { return }
+        let m = view.messages.first { $0.id == change.message_id } ?? view.messages.last
+        guard let m else { return }
+        sender = SenderCache.resolved(m.senderString).displayName
+    }
+}
+
 /// "Mail behind it": every message that made, changed, cancelled or
 /// confirmed the ghost, oldest first, each opening its thread in the
 /// reader the way a sitrep record does.
@@ -614,9 +692,15 @@ private struct SourceRow: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: Space.s8)
+                if source.verified == false {
+                    UnverifiedMark()
+                }
                 Text(roleWord)
                     .font(Typo.micro)
                     .foregroundStyle(source.role == .cancelled ? Palette.danger : Palette.inkFaintest)
+                    .help(
+                        source.linked == true
+                            ? "Another sender's mail about the same event, folded into this card." : "")
             }
             .padding(.horizontal, Space.s6)
             .padding(.vertical, Space.s4)
@@ -642,8 +726,11 @@ private struct SourceRow: View {
         return when.isEmpty ? who : "\(who), \(when)"
     }
 
+    /// What the message did. Another sender's mail (`linked`) says so in
+    /// place of its role, except a cancellation, which is worth its word.
     private var roleWord: String {
-        switch source.role {
+        if source.linked == true, source.role != .cancelled { return "same event" }
+        return switch source.role {
         case .created: "first"
         case .updated: "update"
         case .cancelled: "cancellation"

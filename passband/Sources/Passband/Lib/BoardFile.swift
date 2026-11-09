@@ -422,7 +422,7 @@ enum BoardFile {
 /// board" under Points of Interest, the client measurement
 /// docs/PERFORMANCE.md §4 asks for. Begun when the store is made and ended
 /// once, by whichever comes first: the board painted from disk, the first
-/// pull to land, or a launch that is not a sample (a gate, the practice
+/// pull to land, or a launch that is not a sample (a gate, the fixture
 /// inbox). Its end message says which, so one build measures both kinds of
 /// launch (one with no board kept is the network's). The disk end is the
 /// paint's assignment, before the shell's first layout; the network end lands
@@ -448,7 +448,7 @@ enum LaunchSignpost {
         switch outcome {
         case .disk: signposter.endInterval("first board", state, "from disk")
         case .network: signposter.endInterval("first board", state, "from the network")
-        case .skipped: signposter.endInterval("first board", state, "not a sample: a gate or practice")
+        case .skipped: signposter.endInterval("first board", state, "not a sample: a gate or fixtures")
         }
     }
 }

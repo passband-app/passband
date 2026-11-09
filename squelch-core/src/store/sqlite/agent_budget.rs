@@ -247,6 +247,53 @@ impl SqliteStore {
     }
 }
 
+/// Every job the caps parked made due now, but revisits, whose own cap
+/// nothing lifts, and archive search checks past their own sub-cap's room
+/// (released the way [`SqliteStore::grant_daily_runs`] releases them). See
+/// [`AgentTriageStore::release_budget_held_jobs`](crate::store::agent_triage::AgentTriageStore::release_budget_held_jobs).
+pub(super) fn release_all_held(
+    store: &SqliteStore,
+    account: AccountId,
+    config: &AgentConfig,
+    now: DateTime<Utc>,
+) -> Result<usize> {
+    let day = now.format("%Y-%m-%d").to_string();
+    let mut connection = store.lock()?;
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let release = |lane: &str, limit: i64| -> Result<usize> {
+        Ok(transaction.execute(
+            &format!(
+                "UPDATE agent_triage_jobs SET available_at=?3 WHERE id IN (
+                     SELECT j.id FROM agent_triage_jobs j
+                     LEFT JOIN agent_job_lanes l ON l.job_id=j.id
+                     WHERE {HELD} AND {lane} ORDER BY j.id LIMIT ?4)"
+            ),
+            params![account, HELD_BY_BUDGET, now.to_rfc3339(), limit],
+        )?)
+    };
+    // SQLite reads a negative LIMIT as none.
+    let rest = release(&format!("NOT ({REVISIT}) AND NOT ({ARCHIVE})"), -1)?;
+    let archive_key = super::agent_triage::ARCHIVE_ACCESS_BUDGET_KEY;
+    let due_archive: u32 = transaction.query_row(
+        &format!("SELECT COUNT(*) FROM agent_triage_jobs j WHERE {DUE} AND {ACCESS} AND {ARCHIVE}"),
+        params![account, HELD_BY_BUDGET, now.to_rfc3339()],
+        |row| row.get(0),
+    )?;
+    let archive_room = cap(
+        &transaction,
+        account,
+        archive_key,
+        config.archive_access_daily_cap,
+        &day,
+    )?
+    .saturating_sub(runs(&transaction, account, archive_key, &day)?)
+    .saturating_sub(due_archive);
+    let archive = release(&format!("{ACCESS} AND {ARCHIVE}"), i64::from(archive_room))?;
+    transaction.commit()?;
+    Ok(rest + archive)
+}
+
 pub(super) fn reserve(
     store: &SqliteStore,
     account: AccountId,
@@ -500,6 +547,58 @@ mod tests {
         assert_eq!(held(1), (0, 1, 1, 1));
         // The other account's job was not touched.
         assert_eq!(held(2), (1, 0, 0, 0));
+    }
+
+    /// Lifting the caps releases every parked job of the account but
+    /// revisits, and archive checks only within their sub-cap's room, and
+    /// touches nothing else.
+    #[test]
+    fn release_all_held_frees_parked_mail_but_not_revisits() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        assert_eq!(store.ensure_account("lift@example.com").unwrap(), 1);
+        assert_eq!(store.ensure_account("other@example.com").unwrap(), 2);
+        let now = Utc::now();
+        let later = (now + chrono::Duration::hours(6)).to_rfc3339();
+        {
+            let conn = store.lock().unwrap();
+            for (id, account, kind, trigger, error) in [
+                (1, 1, "triage", "arrival", HELD_BY_BUDGET),
+                (2, 1, "triage", "migration", HELD_BY_BUDGET),
+                (3, 1, "access", "source_access", HELD_BY_BUDGET),
+                (4, 1, "triage", "revisit:due", HELD_BY_BUDGET),
+                (5, 1, "access", "archive_access", HELD_BY_BUDGET),
+                (8, 1, "access", "archive_access", HELD_BY_BUDGET),
+                (6, 1, "triage", "arrival", "provider_cooldown"),
+                (7, 2, "triage", "arrival", HELD_BY_BUDGET),
+            ] {
+                conn.execute(
+                    "INSERT INTO agent_triage_jobs
+                     (id,account_id,message_id,kind,trigger,input_revision,state,available_at,last_error)
+                     VALUES(?1,?2,?3,?4,?5,1,'queued',?6,?7)",
+                    params![id, account, id, kind, trigger, later, error],
+                )
+                .unwrap();
+            }
+        }
+        // Archive checks get their sub-cap's room: one of the two here.
+        let config = AgentConfig {
+            archive_access_daily_cap: 1,
+            ..AgentConfig::default()
+        };
+        assert_eq!(store.release_budget_held_jobs(1, &config, now).unwrap(), 4);
+        let due: Vec<i64> = {
+            let conn = store.lock().unwrap();
+            let mut stmt = conn
+                .prepare("SELECT id FROM agent_triage_jobs WHERE available_at<=?1 ORDER BY id")
+                .unwrap();
+            stmt.query_map(params![now.to_rfc3339()], |row| row.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert_eq!(due, [1, 2, 3, 5]);
+        // Nothing left to release, the archive room now spoken for.
+        assert_eq!(store.release_budget_held_jobs(1, &config, now).unwrap(), 0);
     }
 
     /// The store's lane SQL and the worker's charge are two statements of

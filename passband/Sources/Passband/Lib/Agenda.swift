@@ -127,10 +127,10 @@ enum CalendarGate {
 
     /// The card is raised UNPROMPTED once per account and never again: any
     /// way out of it (Not now, Escape, the scrim, or Connect itself) counts
-    /// as seen. After that the banner is the door. Practice mode offers
+    /// as seen. After that the banner is the door. The fixture inbox offers
     /// nothing: its daemon is a fixture.
-    static func offer(route: ConnectRoute?, cardSeen: Bool, practice: Bool) -> Offer {
-        guard route != nil, !practice else { return .none }
+    static func offer(route: ConnectRoute?, cardSeen: Bool, fixtures: Bool) -> Offer {
+        guard route != nil, !fixtures else { return .none }
         return cardSeen ? .banner : .card
     }
 
@@ -263,6 +263,10 @@ struct AgendaItem: Identifiable, Sendable, Hashable {
 
     /// What the card's Tickets button opens, ghost or event.
     var tickets: CalendarTickets? { ghost?.tickets ?? event?.tickets }
+
+    /// A change another sender's mail offers on this card, ghost or event
+    /// (`LinkedChange`): drawn as a notice to accept or turn down.
+    var pendingChange: LinkedChange? { ghost?.pending_change ?? event?.pending_change }
 
     var ghost: TimelineGhost? {
         if case .ghost(let g) = origin { return g }
@@ -635,6 +639,29 @@ enum Agenda {
         let sameDay = calendar.isDate(end, inSameDayAs: item.start)
         let tail = sameDay ? clock(end, calendar) : "\(format(end, "EEE", calendar)) \(clock(end, calendar))"
         return (lead, tail)
+    }
+
+    /// What a linked change says, after "<sender> says": "Sat Nov 7, 9pm",
+    /// "Sat Nov 7" for an all-day one, or "it's cancelled". A start that will
+    /// not read says only that the time changed, never a made-up one.
+    static func changeWords(_ change: LinkedChange, zone: String?, calendar: Calendar) -> String {
+        if change.kind == .cancelled { return "it's cancelled" }
+        guard let parsed = AgendaTime.parse(change.start, zone: zone, calendar: calendar) else {
+            return "the time changed"
+        }
+        let date = format(parsed.date, "EEE MMM d", calendar)
+        if change.all_day || parsed.dateOnly { return date }
+        return "\(date), \(clock(parsed.date, calendar))"
+    }
+
+    /// The notice's line: "Endzeit says Sat Nov 7, 9pm", "Endzeit says it's
+    /// cancelled". `sender` nil (the mail not read yet, or gone) is "Another
+    /// sender".
+    static func changeLine(
+        _ change: LinkedChange, sender: String?, zone: String?, calendar: Calendar
+    ) -> String {
+        let who = tidy(sender) ?? "Another sender"
+        return "\(who) says \(changeWords(change, zone: zone, calendar: calendar))"
     }
 
     /// When the calendar last synced, for the "could not refresh" line: "at

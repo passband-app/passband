@@ -152,12 +152,18 @@ struct SitrepView: View {
                 GmailDisconnectedBanner()
                     .padding(.horizontal, Space.page)
                     .padding(.top, Space.s14)
+                    // Room under it too, so the hero reads as its own block
+                    // rather than the banner's caption.
+                    .padding(.bottom, Space.s16)
             } else if case let status = store.syncStatus, status.showsBanner {
                 // Throttled, erroring, catching up, or triage held: the same
                 // slot, because it answers the same question.
                 SyncStatusBanner(status: status)
                     .padding(.horizontal, Space.page)
                     .padding(.top, Space.s14)
+                    // Room under it too, so the hero reads as its own block
+                    // rather than the banner's caption.
+                    .padding(.bottom, Space.s16)
             }
             // THE HERO STAYS PUT. It sits above BOTH columns, so it cannot scroll
             // with one of them and hold still for the other; and "one item needs
@@ -193,10 +199,8 @@ struct SitrepView: View {
                 ScrollView(.vertical) {
                     VStack(spacing: Space.s16) {
                         leftZones(visible: visible, overflow: overflow)
-                        // Same key as the pinned rail below: whichever layout is
-                        // on screen is the one the tour's ring finds.
                         if !recordsEmpty {
-                            railCards.tourTarget(.records)
+                            railCards
                         }
                     }
                     .padding(.top, Space.s14)
@@ -240,9 +244,6 @@ struct SitrepView: View {
                     .scrollIndicators(.hidden)
                     .scrollShadowRoom(topFade: Space.s14)
                     .frame(width: Self.railWidth)
-                    // The COLUMN, not its content: a rail taller than the window
-                    // would put the ring's bottom edge off screen.
-                    .tourTarget(.records)
                     }
                 }
                 .padding(.horizontal, Space.page)
@@ -378,7 +379,6 @@ struct SitrepView: View {
     private func leftZones(visible: [AttentionUpdate], overflow: Int) -> some View {
         if !store.sitrep.standing.isEmpty {
             forYourEyes(visible: visible, overflow: overflow)
-                .tourTarget(.eyes)
         } else if isClear {
             ClearNote()
                 .transition(.opacity)
@@ -389,17 +389,16 @@ struct SitrepView: View {
         let senders = readingSenders
         if !(senders.isEmpty && store.sitrep.standing.isEmpty) {
             ReadingZone(senders: senders, cursor: cursor)
-                .tourTarget(.reading)
         }
     }
 
     /// The records zones as the pinned rail shows them: full-width rows.
     @ViewBuilder
     private var railZones: some View {
-        CalendarZone().tourTarget(.calendar)
-        ShipmentsZone(cursor: cursor).tourTarget(.shipments)
-        BankingZone().tourTarget(.banking)
-        ReceiptsZone().tourTarget(.receipts)
+        CalendarZone()
+        ShipmentsZone(cursor: cursor)
+        BankingZone()
+        ReceiptsZone()
     }
 
     /// The records as HALF-WIDTH cards for the stacked layout. Two top-aligned
@@ -409,13 +408,13 @@ struct SitrepView: View {
     private var railCards: some View {
         HStack(alignment: .top, spacing: Space.s16) {
             VStack(spacing: Space.s16) {
-                CalendarZone().tourTarget(.calendar)
-                BankingZone().tourTarget(.banking)
+                CalendarZone()
+                BankingZone()
             }
             .frame(maxWidth: .infinity)
             VStack(spacing: Space.s16) {
-                ShipmentsZone(cursor: cursor).tourTarget(.shipments)
-                ReceiptsZone().tourTarget(.receipts)
+                ShipmentsZone(cursor: cursor)
+                ReceiptsZone()
             }
             .frame(maxWidth: .infinity)
         }
@@ -459,19 +458,10 @@ struct SitrepView: View {
             }
             Spacer(minLength: Space.s12)
             IngestIndicator()
-            // Only the practice board gets the rehearsal appearance control.
-            // The launch flag stays true after returning to the real inbox.
-            if RehearsalMode.launchedStandalone && RehearsalMode.isEnabled {
-                DemoAppearancePicker()
-            }
             RetriageButton()
             #if os(macOS)
-                // The practice board has no `/` (the global set is cut down to
-                // undo + theme there), so an icon for it would be a button
-                // that does nothing. The phone has its own sitrep.
-                if !RehearsalMode.isEnabled {
-                    MastheadShortcuts()
-                }
+                // The phone has its own sitrep.
+                MastheadShortcuts()
             #endif
         }
         .padding(.horizontal, Space.page)
@@ -491,6 +481,8 @@ struct SitrepView: View {
     private func forYourEyes(visible: [AttentionUpdate], overflow: Int) -> some View {
         ZoneCard(
             symbol: "eye", title: "For your eyes", count: store.sitrep.standing.count,
+            // What the zone is, in the Reading zone's register.
+            subtitle: "waiting on a reply or a decision from you",
             trailing: store.sitrep.standing.isEmpty
                 ? nil
                 : AnyView(
@@ -509,14 +501,9 @@ struct SitrepView: View {
                     // SwiftUI could not skip a single one when the parent redrew.
                     if let meta = store.authMeta(for: u) {
                         AuthEyesRow(update: u, meta: meta, index: i, cursor: cursor)
-                    } else if RehearsalMode.isEnabled && u.id == 1 {
-                        ObligationRow(update: u, index: i, cursor: cursor)
-                            .tourTarget(.maya)
-                    } else if RehearsalMode.isEnabled && u.id == 11 {
-                        ObligationRow(update: u, index: i, cursor: cursor)
-                            .tourTarget(.brightly)
                     } else {
                         ObligationRow(update: u, index: i, cursor: cursor)
+                            .staysHint(threadId: u.thread_id)
                     }
                 }
                 if overflow > 0 { expander(overflow) }
@@ -729,147 +716,24 @@ private struct IngestIndicator: View {
 
 // MARK: - GREETING
 
-/// "GOOD MORNING, BRAELYN" — the one line on either client that says the human's
-/// own name, and the one place they can set it without going to Settings.
+/// "GOOD MORNING, BRAELYN": the one line on either client that says the
+/// human's own name.
 ///
-/// THE NAME IS A GUESS UNTIL IT ISN'T. A fresh install has no name at all, and
-/// nobody opens Settings to introduce themselves, so the greeting used to read
-/// as an anonymous "GOOD MORNING" forever. It is now seeded from the mailbox's
-/// local part the first time the daemon names the account
-/// (`Prefs.seedUserName`), and a seed is a claim about someone that they never
-/// made — so it comes with a pencil, and the pencil edits IN PLACE rather than
-/// routing to Settings, because the thing being corrected is right there.
+/// The name is seeded once from the given name on the mailbox's Google
+/// profile when the daemon has one (`Prefs.seedUserName`), and changed only in
+/// Settings > You. With no name the greeting simply has none: it never falls
+/// back to the address, so it can never say "Good evening, bboynton97".
 ///
-/// The affordance is deliberately SINGLE-USE: it shows only while
-/// `prefs.nameChosen` is false, and the first answer — typed here or into the
-/// Settings row — retires it for good. A permanent edit button on a greeting is
-/// chrome; this is a question the app owes the human exactly once.
-///
-/// Shared by both clients (the Mac's `DashHero`, the phone's hero), so the
-/// nudge cannot ship on one surface and rot on the other.
+/// Shared by both clients (the Mac's `DashHero`, the phone's hero).
 struct GreetingLine: View {
     @Environment(Prefs.self) private var prefs
 
-    /// The edit buffer. Never bound straight to the pref: a live binding would
-    /// mark the name CHOSEN on the first keystroke, which is precisely the
-    /// state this view exists to end deliberately.
-    @State private var draft = ""
-    @State private var editing = false
-    @FocusState private var focused: Bool
-
     var body: some View {
-        HStack(spacing: Space.s6) {
-            if editing {
-                label(Self.greeting() + ",")
-                field
-            } else {
-                label(
-                    Self.greeting() + (prefs.userName.isEmpty ? "" : ", \(prefs.userName)"))
-                if !prefs.nameChosen { pencil }
-            }
-        }
-        #if os(macOS)
-            // Esc closes this, like everything else. It has to be a BINDING and
-            // not `.onExitCommand`: the app's key monitor sees the event first
-            // and Escape is the one key it never suppresses for a focused text
-            // field, so a surface that wants its own Escape must claim it.
-            // Registered in `.sitrep` (which outranks `.global` in dispatch
-            // order) and only while the editor is up.
-            .keyBindings(
-                .sitrep,
-                editing ? [KeyBinding("Escape", "cancel", allowInInput: true) { close() }] : []
-            )
-        #endif
-        // The board is kept mounted behind other pages: an editor left open
-        // there would keep the keyboard on a field nobody can see.
-        .onPageHidden { if editing { close() } }
-    }
-
-    private func label(_ text: String) -> some View {
-        Text(text)
+        Text(Self.greeting() + (prefs.userName.isEmpty ? "" : ", \(prefs.userName)"))
             .font(Typo.micro)
             .foregroundStyle(Palette.accent)
             .textCase(.uppercase)
             .tracking(0.6)
-    }
-
-    private var field: some View {
-        TextField("your name", text: $draft)
-            .textFieldStyle(.plain)
-            .autocorrectionDisabled()
-            .focused($focused)
-            .font(Typo.micro)
-            .foregroundStyle(Palette.accent)
-            .tracking(0.6)
-            .frame(maxWidth: Typo.measure(160))
-            // AN OVERLAY, not a border: it has to say "this is a field" without
-            // costing a single point of height, or the serif headline under it
-            // would hop down and back every time the editor opens and closes.
-            .overlay(alignment: .bottom) {
-                Rectangle()
-                    .fill(Palette.accent.opacity(0.4))
-                    .frame(height: 1)
-                    .offset(y: 3)
-            }
-            .onSubmit(commit)
-            // BLUR CANCELS, which is the opposite of the Settings rows' "click
-            // away saves" — and for the opposite reason. Saving on blur would
-            // commit a half-typed name AND retire the pencil that is the only
-            // way to see the mistake, so clicking away costs a retyped word
-            // rather than a wrong name you have to hunt through Settings to fix.
-            .onChange(of: focused) { _, nowFocused in
-                if !nowFocused { editing = false }
-            }
-            .submitLabel(.done)
-            .onAppear { focused = true }
-    }
-
-    private var pencil: some View {
-        Button {
-            draft = prefs.userName
-            editing = true
-        } label: {
-            Image(systemName: "pencil")
-                .font(Typo.ui(10, weight: .semibold))
-                .foregroundStyle(Palette.accent.opacity(0.8))
-                // Clickable past the glyph, but NOT past the line: a target
-                // taller than the label it sits beside would push the serif
-                // headline down by the height of a pencil nobody can see.
-                .padding(Space.scaled(3))
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("edit your name")
-        #if os(macOS)
-            // Honest either way. With nothing seeded — a daemon too old to name
-            // its mailbox — there is no guess to correct, only something to say.
-            .help(
-                prefs.userName.isEmpty
-                    ? "say what this greeting should call you"
-                    : "this is a guess from your email address; click to say what to call you"
-            )
-        #endif
-    }
-
-    /// Enter saves. An EMPTY box is a cancel, not an erasure: a name cleared
-    /// from here would take the pencil with it and leave Settings as the only
-    /// way back, which is a lot to charge for a stray Enter.
-    private func commit() {
-        let typed = draft.trimmed
-        close()
-        guard !typed.isEmpty else { return }
-        // The setter is what records the name as CHOSEN — see Prefs.userName.
-        prefs.userName = typed
-    }
-
-    /// Both exits go through here. Dropping `focused` EXPLICITLY rather than
-    /// leaning on SwiftUI to reset it when the field unmounts: cancel is the
-    /// one exit that leaves the pencil on screen, so it is the one exit with a
-    /// second open behind it, and a `focused` still stuck true would make that
-    /// open's `.onAppear` a no-op — a field you click into and cannot type in.
-    private func close() {
-        focused = false
-        editing = false
     }
 
     static func greeting(now: Date = Date()) -> String {
@@ -1229,10 +1093,11 @@ private struct ObligationRow: View {
     }
 }
 
-/// One row's hover, as a reference so the row's own body never reads it.
+/// One row's or card's hover, as a reference so its own body never reads it:
+/// only a `.background` leaf does (`ObligationWash`, `ReadingCardFill`).
 @MainActor
 @Observable
-private final class RowHover {
+final class RowHover {
     var on = false
 }
 

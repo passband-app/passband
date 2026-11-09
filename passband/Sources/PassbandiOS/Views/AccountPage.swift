@@ -228,10 +228,8 @@ struct AccountPage: View {
                     NotificationsSection()
                     // HelpSection is here for its What's new row, which the
                     // shell can now answer (WhatsNewWalk, mounted in
-                    // MobileShell). Its Practice inbox row stays on the Mac:
-                    // the tour is a lesson over the Mac's shell and the phone
-                    // has none. The section leaves both out by itself, and
-                    // draws nothing when there is no note to show.
+                    // MobileShell). It draws nothing when there is no note
+                    // to show.
                     HelpSection()
                     DeveloperSection()
                 case .mail:

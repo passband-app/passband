@@ -1236,8 +1236,6 @@ struct RuleEditor: View {
         guard !saving, canSave else { return }
         let body = CreateRuleBody(
             match_pattern: pattern.trimmed, want: want.trimmed, disposition: disposition)
-        // Practice uses this same save path with the local fixture transport;
-        // analytics tags the resulting event as a practice action.
         saving = true
         error = nil
         do {

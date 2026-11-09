@@ -153,6 +153,29 @@ pub fn first_paired_none_stdout() -> String {
     "none\n".to_string()
 }
 
+/// Exactly what `squelchd token activity` prints for a mailbox with a Mac and
+/// an iPhone: ONE line of JSON. A copy of the line
+/// `squelchd/src/bin/squelchd.rs`'s `token_activity_prints_one_line_of_timestamps`
+/// asserts, and the parser is held to it.
+pub fn activity_stdout() -> String {
+    concat!(
+        r#"{"first_paired_at":"2026-03-01T09:30:00Z","platforms":{"ios":{"first_paired_at":"2026-03-02T10:00:00Z","last_action_at":null,"last_seen_at":"2026-03-09T09:00:00Z"},"macos":{"first_paired_at":"2026-03-01T09:30:00Z","last_action_at":"2026-03-08T07:00:00Z","last_seen_at":"2026-03-09T08:00:00Z"}}}"#,
+        "\n"
+    )
+    .to_string()
+}
+
+/// The same command for a mailbox nobody has paired with.
+pub fn activity_none_stdout() -> String {
+    "{\"first_paired_at\":null,\"platforms\":{}}\n".to_string()
+}
+
+/// What a daemon too old to have `token activity` writes to stderr: clap's
+/// refusal, as clap 4 renders it.
+pub fn activity_unsupported_stderr() -> String {
+    "error: unrecognized subcommand 'activity'\n\nUsage: squelchd token <COMMAND>\n\nFor more information, try '--help'.\n".to_string()
+}
+
 #[derive(Default)]
 struct MockInner {
     /// Everything that currently exists, keyed the way the API server keys it.
@@ -163,6 +186,7 @@ struct MockInner {
     deleted: Vec<(Kind, String)>,
     execs: Vec<(String, Vec<String>)>,
     exec_stdout: String,
+    exec_stderr: String,
     exec_ok: bool,
     /// Whether an applied Deployment comes up.
     ready: bool,
@@ -382,12 +406,24 @@ impl MockCluster {
     pub fn exec_prints(&self, stdout: &str) {
         let mut inner = self.lock();
         inner.exec_stdout = stdout.to_string();
+        inner.exec_stderr = String::new();
         inner.exec_ok = true;
     }
 
     /// The next exec exits non-zero.
     pub fn exec_fails(&self) {
-        self.lock().exec_ok = false;
+        let mut inner = self.lock();
+        inner.exec_stderr = String::new();
+        inner.exec_ok = false;
+    }
+
+    /// The next exec exits non-zero with `stderr`, the way clap refuses a
+    /// subcommand an older daemon does not have.
+    pub fn exec_fails_with(&self, stderr: &str) {
+        let mut inner = self.lock();
+        inner.exec_stdout = String::new();
+        inner.exec_stderr = stderr.to_string();
+        inner.exec_ok = false;
     }
 
     /// Every apply and create, in order, as `(kind, name)`.
@@ -705,7 +741,7 @@ impl Cluster for MockCluster {
         inner.execs.push((pod.to_string(), argv.to_vec()));
         Ok(ExecOutput {
             stdout: inner.exec_stdout.clone(),
-            stderr: String::new(),
+            stderr: inner.exec_stderr.clone(),
             ok: inner.exec_ok,
         })
     }

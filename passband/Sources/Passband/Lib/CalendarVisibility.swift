@@ -7,10 +7,10 @@ final class CalendarVisibility {
     static let lifetime: TimeInterval = 24 * 3600
     private let defaults: UserDefaults
 
-    /// The scope the practice inbox stamps under. Its item ids are fixed
+    /// The scope the fixture inbox stamps under. Its item ids are fixed
     /// fixtures, so without `forget` a stamp from one session would hide the
     /// same events from every session that starts more than a day later.
-    static let practiceAccount = "practice"
+    static let fixtureAccount = "fixtures"
 
     init(defaults: UserDefaults = .standard) { self.defaults = defaults }
 
@@ -26,8 +26,8 @@ final class CalendarVisibility {
     }
 
     /// Drop every first-viewing stamp under one account, so its items start
-    /// their timer again the next time they are shown. The practice inbox
-    /// calls this on entry: every session is a fresh mailbox.
+    /// their timer again the next time they are shown. The fixture inbox
+    /// calls this on entry: every launch is a fresh mailbox.
     func forget(account: String) {
         let scope = "\(Self.prefix)\(account)."
         for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(scope) {

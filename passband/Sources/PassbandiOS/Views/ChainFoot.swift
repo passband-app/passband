@@ -58,10 +58,12 @@ struct ChainFoot: View {
         // A REPLY OPENED, from anywhere: these buttons, a card's rail, a list
         // row's Reply that arrived with the thread. The composer is the last
         // thing in the chain and the reader may be anywhere in it.
+        // Not a quiet reopen of a saved draft: nobody asked for the
+        // composer, so the reader stays where it landed.
         .onChange(of: store.inlineReply?.id) { _, now in
-            if now != nil, replying { Self.reveal(proxy) }
+            if now != nil, replying, store.inlineReply?.quietOpen != true { Self.reveal(proxy) }
         }
-        .onAppear { if replying { Self.reveal(proxy) } }
+        .onAppear { if replying, store.inlineReply?.quietOpen != true { Self.reveal(proxy) } }
         // AND AGAIN ONCE THE KEYBOARD IS UP. It takes half the window a beat
         // after the composer opens, from the bottom, which is exactly where
         // the composer was just put.

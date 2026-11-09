@@ -164,6 +164,7 @@ struct ReconnectAccountPrompt: View {
 /// rides in the hover text always, and on screen only in developer mode.
 struct SyncStatusBanner: View {
     @Environment(Prefs.self) private var prefs
+    @Environment(AppStore.self) private var store
     let status: SyncStatus
 
     var body: some View {
@@ -181,6 +182,18 @@ struct SyncStatusBanner: View {
                 // "Trying again now", a midnight on the way there), however
                 // slowly the poll runs, and by every other re-render with the
                 // time it is then.
+                // A CATCH-UP IS THE VEIL'S PROGRESS ROW, carried onto the
+                // board: the same bar, the same line, the same estimate
+                // (`AppStore.catchUpEstimate`), so Start now does not start
+                // the pace over.
+                if case .catchingUp(let done, let total) = status {
+                    CatchUpProgressRow(
+                        done: done, total: total,
+                        line: store.catchUpEstimate.line(done: done, total: total),
+                        lineFont: Typo.rowSub)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, Space.s6)
+                } else {
                 TimelineView(.explicit(status.redrawTimes(after: Date()))) { context in
                     // The entry's own date when the timeline fired it (SwiftUI
                     // may render a hair early), the clock's on any other render.
@@ -188,6 +201,7 @@ struct SyncStatusBanner: View {
                         .font(Typo.rowSub)
                         .foregroundStyle(Palette.inkDim)
                         .fixedSize(horizontal: false, vertical: true)
+                }
                 }
                 if prefs.developerMode, let raw = status.rawReason {
                     Text(verbatim: raw)

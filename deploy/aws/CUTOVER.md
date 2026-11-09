@@ -1,8 +1,9 @@
 # Railway → AWS cutover runbook
 
 > **Historical record.** Phases 0 to 9 ran 2026-10-23 to 2026-10-26 and
-> production has served from AWS since. Phase 10 (deleting the Railway
-> project, its tokens and the GitHub App) is the only part left. For how
+> production has served from AWS since. Phase 10: the Railway project was
+> deleted by 2026-11-05 (operator-confirmed); its tokens, the Railway GitHub
+> App and the other steps of Phase 10 below are not recorded as done. For how
 > production works today, read `DESIGN.md` and the root `CLAUDE.md`, not this
 > file; the commands below assume a Railway that is going away.
 

@@ -14,7 +14,7 @@
 // launch sweep, which also deletes the feed of every account no longer on the
 // install. The file goes when the account is removed, when the calendar gate
 // closes, when the same daemon is connected again or re-validated, and when
-// the daemon refuses the saved credentials. Never written for the practice
+// the daemon refuses the saved credentials. Never written for the fixture
 // inbox. A file that will not decode is deleted and read as nothing.
 
 import CryptoKit

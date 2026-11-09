@@ -7,12 +7,12 @@ enum IntroMetrics {
     static func gutter(wide: Bool) -> CGFloat { wide ? Space.scaled(44) : Space.s24 }
 }
 
-/// A user-paced introduction, shared by first connection and the isolated
-/// rehearsal. The illustrated messages are examples, never account data.
+/// A user-paced introduction ahead of the first connection. The illustrated
+/// messages are examples, never account data.
 struct OnboardingIntroView: View {
     let onContinue: () -> Void
-    var continueTitle = "Bring your inbox"
-    var continueHint = "Continue to account connection"
+    private let continueTitle = "Bring your inbox"
+    private let continueHint = "Continue to account connection"
     /// When the caller draws the scene itself (ConnectView, so the login
     /// steps after this stand on the SAME live layer), the intro leaves its
     /// own backdrop out and reports whether the squelch has closed.
@@ -156,10 +156,6 @@ struct OnboardingIntroView: View {
         HStack {
             IntroWordmark()
             Spacer()
-            if RehearsalMode.launchedStandalone {
-                DemoAppearancePicker()
-                    .padding(.trailing, 12)
-            }
         }
     }
 

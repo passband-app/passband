@@ -47,13 +47,8 @@ run_one() {
   {
     echo "==> $name"
     xcrun swiftc -swift-version 6 -parse-as-library -Onone \
-      -o "$BUILD/$name" Sources/Passband/Lib/RehearsalMode.swift "$@" \
-      && "$BUILD/$name" \
-      && case "$name" in
-        # Full connection rehearsal must work even when normal onboarding was
-        # completed.
-        tour-controller) "$BUILD/$name" --onboarding-rehearsal --rehearse-connection ;;
-      esac
+      -o "$BUILD/$name" Sources/Passband/Lib/FixtureMode.swift "$@" \
+      && "$BUILD/$name"
   } > "$log" 2>&1 || status=$?
   cat "$log"
   return $status
@@ -89,6 +84,15 @@ run_suite calendar-fold \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Model/WireTypes.swift \
   Tests/CalendarFoldTests.swift
+
+# Event identity on the wire: another sender's mail linked under the user's
+# card, and the change it offers. Every new key optional and lenient: an
+# unknown kind or a malformed offer costs the offer, never the card.
+run_suite linked-change \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Tests/LinkedChangeWireTests.swift
 
 # The search panel's Events block: which query goes to which search
 # (`in:calendar`, the mail-only operators), the wire it reads, three rows
@@ -237,17 +241,22 @@ run_suite image-warmer \
   Sources/Passband/Model/ImageWarmer.swift \
   Tests/ImageWarmerTests.swift
 
-run_suite onboarding-rehearsal \
-  Sources/Passband/Model/OnboardingRehearsal.swift \
-  Tests/OnboardingRehearsalTests.swift
+run_suite fixture-mail \
+  Sources/Passband/Model/FixtureMail.swift \
+  Tests/FixtureMailTests.swift
 
-run_suite rehearsal-api \
+run_suite fixture-api \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/APIError.swift \
-  Sources/Passband/Model/OnboardingRehearsal.swift \
-  Sources/Passband/Model/RehearsalAPI.swift \
-  Tests/RehearsalAPITests.swift
+  Sources/Passband/Model/FixtureMail.swift \
+  Sources/Passband/Lib/UsageSeries.swift \
+  Sources/Passband/Model/UnderstandingWire.swift \
+  Sources/Passband/Lib/HiddenFeatures.swift \
+  Sources/Passband/Lib/UnderstandingSeries.swift \
+  Sources/Passband/Lib/UnderstandingFixture.swift \
+  Sources/Passband/Model/FixtureAPI.swift \
+  Tests/FixtureAPITests.swift
 
 # The shipment row with and without the order-linking fields, and the card's
 # title and order line built from it.
@@ -293,6 +302,7 @@ run_suite credential-probe \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/APIError.swift \
   Sources/Passband/Lib/CalendarWrite.swift \
+  Sources/Passband/Model/UnderstandingWire.swift \
   Sources/Passband/Model/APIClient.swift \
   Sources/Passband/Lib/ClientIdentity.swift \
   Sources/Passband/Lib/TriageTargets.swift \
@@ -402,6 +412,7 @@ run_suite retriage-run \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/SyncStatus.swift \
+  Sources/Passband/Lib/CatchUpEstimate.swift \
   Sources/Passband/Lib/Format.swift \
   Sources/Passband/Lib/AsyncMemo.swift \
   Sources/Passband/Model/RetriageRun.swift \
@@ -543,6 +554,7 @@ run_suite sync-status \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Model/SyncStatus.swift \
+  Sources/Passband/Lib/CatchUpEstimate.swift \
   Sources/Passband/Lib/Format.swift \
   Sources/Passband/Lib/AsyncMemo.swift \
   Tests/SyncStatusTests.swift
@@ -598,6 +610,33 @@ run_suite usage-series \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Lib/UsageSeries.swift \
   Tests/UsageSeriesTests.swift
+
+# The Understanding section under it: the ledger placed on the People chart's
+# ladder (answered, read, ignored, just arrived), the two ranked lists, the
+# reply-time words, every sentence said about a person, and the memory
+# entries grouped by kind. Foundation only, like the series above.
+run_suite understanding-series \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/UsageSeries.swift \
+  Sources/Passband/Model/UnderstandingWire.swift \
+  Sources/Passband/Lib/HiddenFeatures.swift \
+  Sources/Passband/Lib/UnderstandingSeries.swift \
+  Sources/Passband/Lib/UnderstandingFixture.swift \
+  Tests/UnderstandingSeriesTests.swift
+
+# The two wire shapes it reads, as a daemon built beside this client sends
+# them: missing fields, nulls, unknown kinds and origins, one bad row among
+# good ones. Each costs only itself.
+run_suite understanding-wire \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/UsageSeries.swift \
+  Sources/Passband/Model/UnderstandingWire.swift \
+  Sources/Passband/Lib/HiddenFeatures.swift \
+  Sources/Passband/Lib/UnderstandingSeries.swift \
+  Sources/Passband/Lib/UnderstandingFixture.swift \
+  Tests/UnderstandingWireTests.swift
 
 # The clear board: the streak of clear days and the tally under the carrier.
 run_suite clear-board \
@@ -699,6 +738,24 @@ run_suite calendar-reminder \
   Sources/Passband/Model/CalendarReminder.swift \
   Tests/CalendarReminderTests.swift
 
+# The morning brief (squelch-api's morning_brief): the phone's
+# `<tag>:brief:<day>` push id, refused when tag-less or malformed and never
+# read as a mail event, the banner the extension draws from /client/brief,
+# and a tap that opens the board whether or not the banner was dressed.
+run_suite morning-brief \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Sources/Passband/Lib/SenderIdentity.swift \
+  Sources/Passband/Lib/AuthLabels.swift \
+  Sources/Passband/Lib/AgentDraftLink.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Model/EventBanner.swift \
+  Sources/Passband/Model/RenotifyBanner.swift \
+  Sources/Passband/Model/CalendarReminder.swift \
+  Tests/MorningBriefTests.swift
+
 # What auth mail asks of the owner (docs/AUTH-MAIL-HANDLING.md, "Clients"): the
 # sealed row from both daemon versions, which kinds open a question and for
 # how long, explained alerts, new-device bursts, critical changes, and the move
@@ -788,13 +845,39 @@ run_suite rule-pattern-suggest \
   Sources/Passband/Lib/RulePatternSuggest.swift \
   Tests/RulePatternSuggestTests.swift
 
-# The actual onboarding controller with in-memory collaborators: the store
-# stub flips the real RehearsalMode flag the way the real one does.
-run_suite tour-controller \
+# The reader's one-time "press e" hint: who gets the centred beat, who gets
+# the corner chip, and that anyone who has ever pressed done gets neither.
+run_suite reader-hint-rule \
   Sources/Passband/Lib/DiscoveryLedger.swift \
-  Sources/Passband/Model/PracticeTourStep.swift \
-  Sources/Passband/Model/TourController.swift \
-  Tests/TourControllerTests.swift
+  Sources/Passband/Lib/ReaderHintRule.swift \
+  Tests/ReaderHintRuleTests.swift
+
+# Flow mode's one-time explanation: a first walk on a Mac that has never
+# walked gets it, and nobody who has walked or has seen it ever does.
+run_suite flow-hint-rule \
+  Sources/Passband/Lib/DiscoveryLedger.swift \
+  Sources/Passband/Lib/FlowHintRule.swift \
+  Tests/FlowHintRuleTests.swift
+
+# The one-time "stays here" note: a first esc out of For your eyes, by
+# somebody who has never pressed done, on a row that is in view.
+run_suite stays-hint-rule \
+  Sources/Passband/Lib/StaysHintRule.swift \
+  Tests/StaysHintRuleTests.swift
+
+# The first-load veil's decision and progress: present means running even
+# with the counts met, absent is finished, disk stats never decide, and a
+# lost connection lifts it without stamping.
+run_suite first-load-rule \
+  Sources/Passband/Lib/FirstLoadRule.swift \
+  Tests/FirstLoadRuleTests.swift
+
+# The first-load veil's time estimate: no estimate until two polls a few
+# seconds apart saw the count move, a window that smooths one slow page, a
+# restarted walk that starts the samples over, and the rounded phrase.
+run_suite catch-up-estimate \
+  Sources/Passband/Lib/CatchUpEstimate.swift \
+  Tests/CatchUpEstimateTests.swift
 
 # The ring behind the search panel's empty state: what a submitted query does to
 # the remembered ones. Pure Foundation, one file — the fold is kept out of the

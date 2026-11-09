@@ -108,7 +108,7 @@ extension AppStore {
         calendarWarmedFor = id
         let e = epoch
         Task {
-            if calendarFeed == nil, !RehearsalMode.isEnabled,
+            if calendarFeed == nil, !FixtureMode.isEnabled,
                let saved = await CalendarDisk.shared.feed(for: id),
                isCurrent(e), AccountManager.shared.activeId == id, calendarFeed == nil {
                 calendarFeed = saved
@@ -177,7 +177,7 @@ extension AppStore {
     var calendarOffer: CalendarGate.Offer {
         CalendarGate.offer(
             route: calendarConnectRoute, cardSeen: calendarCardSeen,
-            practice: RehearsalMode.isEnabled)
+            fixtures: FixtureMode.isEnabled)
     }
 
     /// The connect card is up, for the account on screen.
@@ -201,8 +201,8 @@ extension AppStore {
     /// the calendar zone keys its own first-viewing stamps. A second mailbox
     /// gets its own first visit, because it is its own calendar to connect.
     private var calendarScope: String {
-        RehearsalMode.isEnabled
-            ? CalendarVisibility.practiceAccount
+        FixtureMode.isEnabled
+            ? CalendarVisibility.fixtureAccount
             : AccountManager.shared.activeId?.uuidString ?? "disconnected"
     }
 
@@ -257,10 +257,10 @@ extension AppStore {
             if feed != calendarFeed {
                 calendarFeed = feed
                 // What the page paints first next launch or switch back.
-                // Never a practice feed: it would land under the real account.
+                // Never a fixture feed: it would land under the real account.
                 // Nor anything after the credentials were re-validated, until
                 // the next account change (SECURITY.md §6, as the board).
-                if !RehearsalMode.isEnabled, boardWritesRefusedEpoch != epoch,
+                if !FixtureMode.isEnabled, boardWritesRefusedEpoch != epoch,
                    let id = AccountManager.shared.activeId {
                     Task.detached(priority: .utility) { await CalendarDisk.shared.save(feed, for: id) }
                 }
@@ -410,6 +410,37 @@ extension AppStore {
         }
     }
 
+    /// The user's answer to a change another sender's mail offers on their
+    /// card (`LinkedChange`): accept takes it, false keeps the card as it
+    /// is. Nothing is drawn ahead of the daemon (an accepted move changes
+    /// times the daemon resolves), so the page waits for the refresh; a
+    /// refusal, or a link already gone, is a toast.
+    func answerLinkedChange(_ change: LinkedChange, accept: Bool, viaKey: Bool) async {
+        guard answeringLinkedChanges.insert(change.from).inserted else { return }
+        defer { answeringLinkedChanges.remove(change.from) }
+        // A write: whatever was asked for before it is stale.
+        retireCalendarLoads()
+        let ticket = calendarTicket
+        do {
+            _ = try await APIClient.shared.answerLinkedChange(
+                change.ghost_id, from: change.from, accept: accept)
+            guard calendarLands(ticket) else { return }
+            // Closed vocabulary: these four words and nothing from the mail.
+            Analytics.capture(
+                "calendar_linked_change",
+                [
+                    "answer": accept ? "accepted" : "kept",
+                    "kind": change.kind == .cancelled ? "cancelled" : "moved",
+                    "via": viaKey ? "key" : "click",
+                ])
+            await refreshCalendar()
+        } catch {
+            guard calendarLands(ticket) else { return }
+            pushToast(errText(error, "Could not update that plan"), .error)
+            await refreshCalendar()
+        }
+    }
+
     /// A write is newer than every answer already on its way: none of them
     /// may be applied over it (see `refreshCalendar`).
     func retireCalendarLoads() {
@@ -430,10 +461,10 @@ extension AppStore {
     /// daemon too old to list them.
     var calendarWritable: [TimelineCalendar] { CalendarWrite.writable(calendarFeed) }
 
-    /// Whether "New event" and `n` exist at all. Practice mode's daemon is a
+    /// Whether "New event" and `n` exist at all. The fixture inbox.s daemon is a
     /// fixture, so it never offers one.
     var calendarCanCreate: Bool {
-        !RehearsalMode.isEnabled && CalendarWrite.canCreate(calendarFeed)
+        !FixtureMode.isEnabled && CalendarWrite.canCreate(calendarFeed)
     }
 
     /// The event pane is open, for the account on screen, and not parked
@@ -471,7 +502,7 @@ extension AppStore {
     /// `e` and the detail's Edit: the same pane, filled in. Only for an event
     /// the daemon called editable.
     func openEventEditor(editing event: TimelineEvent, now: Date = Date()) {
-        guard !RehearsalMode.isEnabled, CalendarWrite.canEdit(event), calendarEditor == nil,
+        guard !FixtureMode.isEnabled, CalendarWrite.canEdit(event), calendarEditor == nil,
             calendarDeleteAsk == nil
         else { return }
         let draft = EventForm.draft(editing: event, today: now, calendar: .current)
@@ -893,7 +924,7 @@ extension AppStore {
 
     /// The detail's Delete and ⌫: ask once, on the app's own card.
     func askDeleteEvent(_ event: TimelineEvent) {
-        guard !RehearsalMode.isEnabled, CalendarWrite.canEdit(event), calendarEditor == nil else { return }
+        guard !FixtureMode.isEnabled, CalendarWrite.canEdit(event), calendarEditor == nil else { return }
         calendarDeleteAsk = CalendarDeleteAsk(event: event, epoch: epoch)
     }
 

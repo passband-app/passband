@@ -1,0 +1,48 @@
+# /etc/systemd/system/litestream-health.service
+#
+# Turn litestream's journal into per-tenant metrics for node-exporter's
+# textfile collector. Driven by litestream-health.timer; harmless to run by
+# hand. See litestream-health.sh for what it writes and why (issue #696).
+#
+#   systemctl start litestream-health.service
+#   cat /var/lib/node-exporter/textfile/litestream.prom
+
+[Unit]
+Description=Export litestream replica health from the journal
+Documentation=file:///usr/local/bin/litestream-health.sh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/litestream-health.sh
+
+# The journal cursor and per-tenant state, and the textfile directory that
+# node-exporter reads (as /host/var/lib/node-exporter/textfile, through its
+# read-only hostPath mount of /). 0755 because node-exporter runs as nobody;
+# nothing in either directory is secret (timestamps and counts).
+StateDirectory=litestream-health node-exporter/textfile
+StateDirectoryMode=0755
+
+# --- Hardening -------------------------------------------------------------
+# Root only for the journal (it reads litestream.service's entries) and
+# `systemctl is-active`. It writes nothing outside the two StateDirectory
+# paths and needs no capabilities and no network.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectHome=yes
+ProtectProc=invisible
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+ProtectSystem=strict
+CapabilityBoundingSet=
+UMask=0022

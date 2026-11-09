@@ -116,7 +116,7 @@ actor APIClient {
     /// whole life of the process. That is how a build of a branch is pointed
     /// at a scratch daemon of the same branch without adding an account to
     /// the keychain or touching the account the user actually reads mail
-    /// through. Same posture as `PASSBAND_FORCE_TOUR`: a launch environment
+    /// through. Same posture as `PASSBAND_FIRST_LOAD`: a launch environment
     /// only a developer sets, never a preference, never persisted. A user
     /// double-clicking the app has neither variable.
     ///
@@ -149,7 +149,7 @@ actor APIClient {
     }
 
     private func requireConfig() throws -> Config {
-        if RehearsalMode.isEnabled { return Config(baseURL: "https://rehearsal.invalid", token: "practice") }
+        if FixtureMode.isEnabled { return Config(baseURL: "https://fixtures.invalid", token: "fixtures") }
         guard let config else { throw APIError(.network, 0, "client not configured") }
         return config
     }
@@ -201,12 +201,12 @@ actor APIClient {
 
     /// Perform a request and return the raw body. Non-2xx throws an APIError
     /// whose message comes from the server's `{"error": …}` body when present.
-    private func perform(_ req: URLRequest, allowPractice: Bool = true) async throws -> (Data, HTTPURLResponse) {
-        if RehearsalMode.isEnabled {
-            guard allowPractice else {
-                throw APIError(.badRequest, 400, "Finish the practice inbox before changing accounts.")
+    private func perform(_ req: URLRequest, allowFixtures: Bool = true) async throws -> (Data, HTTPURLResponse) {
+        if FixtureMode.isEnabled {
+            guard allowFixtures else {
+                throw APIError(.badRequest, 400, "Accounts can't change while the fixture inbox is up.")
             }
-            return try await RehearsalAPI.shared.response(for: req)
+            return try await FixtureAPI.shared.response(for: req)
         }
         let data: Data
         let response: URLResponse
@@ -356,11 +356,11 @@ actor APIClient {
     /// the request was out must not have the old daemon's 404 silence the new
     /// one.
     ///
-    /// Nothing is sent for the practice inbox. Its mail is fixtures and its
+    /// Nothing is sent for the fixture inbox. Its mail is fixtures and its
     /// message ids are made up; the fixture transport would only refuse the
     /// route, but refusing HERE means the request is never built at all.
     func reportAttention(messageId: Int, dwellMs: UInt64, linkClicks: UInt32) async {
-        guard !RehearsalMode.isEnabled, !attentionUnsupported, let asked = config?.baseURL else { return }
+        guard !FixtureMode.isEnabled, !attentionUnsupported, let asked = config?.baseURL else { return }
         do {
             try await postNoContent(
                 "/client/v2/messages/\(messageId)/attention",
@@ -570,8 +570,8 @@ actor APIClient {
     /// `retrying: false` asks exactly once, for a caller with a person waiting
     /// on the answer who can simply ask again.
     func probe(baseURL: String, token: String, retrying: Bool = true) async throws {
-        guard !RehearsalMode.isEnabled else {
-            throw APIError(.badRequest, 400, "Finish the practice inbox before changing accounts.")
+        guard !FixtureMode.isEnabled else {
+            throw APIError(.badRequest, 400, "Accounts can't change while the fixture inbox is up.")
         }
         var retry = CapabilityProbeRetry()
         while true {
@@ -598,8 +598,8 @@ actor APIClient {
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.identifyClient()
         do {
-            let (data, _) = try await perform(req, allowPractice: false)
-            guard !RehearsalMode.isEnabled else {
+            let (data, _) = try await perform(req, allowFixtures: false)
+            guard !FixtureMode.isEnabled else {
                 throw APIError(.badRequest, 400, "The mailbox changed during the credential check. Try again.")
             }
             guard let capabilities = try? decode(TriageCapabilities.self, from: data),
@@ -626,6 +626,40 @@ actor APIClient {
         try await get("/client/mail-activity", query: ["days": days.map(String.init)])
     }
 
+    // MARK: - understanding (docs/UNDERSTANDING.md)
+
+    /// `GET /client/relationships`: the relationship ledger, one row per
+    /// correspondent. `sort` is `replies`, `volume`, `fatigue` or `recent`. A
+    /// daemon older than the ledger answers 404, and the Usage page's
+    /// Understanding section stays away.
+    func getRelationships(limit: Int = 50, sort: String = "replies") async throws -> RelationshipsResponse {
+        try await get("/client/relationships", query: ["limit": String(limit), "sort": sort])
+    }
+
+    /// `GET /client/memory`: what the daemon has written down about the
+    /// owner. Behind the `understanding` hidden feature, so a 404 is "off
+    /// here", not a failure.
+    func getMemory() async throws -> MemoryResponse {
+        try await get("/client/memory")
+    }
+
+    /// `PUT /client/memory/{id}`: confirm an inferred entry (it becomes the
+    /// owner's own, and stops expiring) or rewrite its line.
+    func putMemory(_ id: String, _ patch: MemoryPatch) async throws -> MemoryEntry {
+        try await put("/client/memory/\(Self.pathSegment(id))", body: patch)
+    }
+
+    /// `DELETE /client/memory/{id}`: a real delete, audited on the daemon.
+    func deleteMemory(_ id: String) async throws {
+        try await deleteNoContent("/client/memory/\(Self.pathSegment(id))")
+    }
+
+    /// An id as one path segment. Entry ids are ULIDs, but nothing here
+    /// should trust that a `/` will never arrive in one.
+    private static func pathSegment(_ s: String) -> String {
+        s.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? s
+    }
+
     func getTriageConfig() async throws -> TriageConfig { try await get("/client/triage-config") }
 
     func setTriageConfig(_ patch: TriageConfigPatch) async throws -> TriageConfig {
@@ -642,12 +676,12 @@ actor APIClient {
     }
 
     func getReceipts(days: Int? = nil) async throws -> [Receipt] {
-        if RehearsalMode.isEnabled { return try await get("/client/receipts") }
+        if FixtureMode.isEnabled { return try await get("/client/receipts") }
         return try await getFeed(destination: "records", limit: 1000).receipts
     }
 
     func getCalendar(hours: Int? = nil) async throws -> [CalendarUpdate] {
-        if RehearsalMode.isEnabled { return try await get("/client/calendar") }
+        if FixtureMode.isEnabled { return try await get("/client/calendar") }
         return try await getFeed(destination: "records", limit: 1000).calendar
     }
 
@@ -708,6 +742,21 @@ actor APIClient {
         return try decode(GhostPatchResult.self, from: data)
     }
 
+    /// `POST /client/timeline/ghosts/{id}/change`: the user's answer to a
+    /// change another sender's mail offers on their card (`LinkedChange`).
+    /// `id` is the change's `ghost_id`, `from` its linked ghost; accept takes
+    /// the change, false keeps the card as it is. A 404 means the link is
+    /// gone, and throws like any refusal.
+    func answerLinkedChange(_ id: Int, from: Int, accept: Bool) async throws -> GhostPatchResult {
+        try await post(
+            "/client/timeline/ghosts/\(id)/change", body: LinkedChangeAnswer(from: from, accept: accept))
+    }
+
+    private struct LinkedChangeAnswer: Encodable {
+        let from: Int
+        let accept: Bool
+    }
+
     // MARK: - calendar events (wave 3: writes to the user's own calendars)
 
     /// `POST /client/calendar/events`: create at Google, answered 201 with the
@@ -759,7 +808,7 @@ actor APIClient {
     }
 
     func getBanking() async throws -> [BankingRecord] {
-        if RehearsalMode.isEnabled { return try await get("/client/banking") }
+        if FixtureMode.isEnabled { return try await get("/client/banking") }
         return try await getFeed(destination: "records", limit: 1000).banking
     }
 
@@ -956,9 +1005,9 @@ actor APIClient {
     /// Ask the daemon to mark expired and plainly unwanted Reading mail done.
     /// nil when this daemon predates the route.
     ///
-    /// Never asked of the practice inbox: its mail is fixtures.
+    /// Never asked of the fixture inbox: its mail is fixtures.
     func smartClear() async throws -> SmartClearResult? {
-        guard !RehearsalMode.isEnabled else { return nil }
+        guard !FixtureMode.isEnabled else { return nil }
         do {
             return try await post(
                 "/client/v2/reading/smart_clear", body: EmptyBody(),
@@ -1314,6 +1363,18 @@ actor APIClient {
     /// or nothing at all) a 2xx means it now holds `enabled`.
     func setCalendarReminderSettings(enabled: Bool) async throws {
         try await putNoContent(CalendarReminderRoute.settings, body: CalendarReminderSettings(enabled: enabled))
+    }
+
+    // MARK: - the morning brief
+
+    /// The owner's switch. A daemon older than the brief answers 404, which
+    /// the card reads as "not offered here".
+    func getMorningBriefSettings() async throws -> CalendarReminderSettings {
+        try await get(MorningBriefRoute.settings)
+    }
+
+    func setMorningBriefSettings(enabled: Bool) async throws {
+        try await putNoContent(MorningBriefRoute.settings, body: CalendarReminderSettings(enabled: enabled))
     }
 
     // MARK: - translation languages

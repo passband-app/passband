@@ -37,7 +37,6 @@ enum ReplayIconNames {
         "calendar",
         "calendar.badge.plus",
         "cancel",
-        "cat.fill",
         "checkmark",
         "checkmark.circle",
         "checkmark.circle.fill",

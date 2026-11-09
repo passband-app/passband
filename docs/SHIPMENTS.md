@@ -499,6 +499,87 @@ Decisions stored before box keys existed project once, on the open that
 introduces them (`migrate::project_amazon_boxes`, gated per account by the
 `amazon_boxes_projected` marker in `app_settings`). Every other open does one indexed read.
 
+### eBay purchases: keyed by eBay's item and transaction ids
+
+eBay's order mail has the same hole: Order confirmed, Order update, "Your
+package is now with its carrier!", OUT FOR DELIVERY and PACKAGE DELIVERED all
+name the carrier and none prints its number, so an eBay order never reached
+the rail at any step. Every one of them links eBay's order page with `itemId`
+and `transactionId` (`ebay.com/vod/FetchOrderDetails?…` before delivery,
+`ebay.com/ord/show?…` on it). The pair is one purchase line, so
+`triage/ebay.rs` reads it and `reconcile` keys the record on
+`ebay:<itemId>:<transactionId>`, under the same rules as an Amazon box: code
+reads it, the From domain must authenticate as `ebay.com`, and two purchases
+in one mail is no guess. Two differences:
+
+- only eBay's own address counts, not `members.ebay.com`, which relays what
+  sellers write;
+- the row shows the carrier the model read (`fedex`, `ups`, `usps`, `dhl`,
+  else `unknown`), because an eBay seller ships with a real carrier. The key is
+  not that carrier's number, so `list_pollable_shipments` skips any tracking
+  number holding a `:` (every package key does; no sanitized number can).
+
+The row links eBay's order page, built from the ids, and is sold by `eBay`
+when the record named no merchant; the order number is printed, not linked, so
+it rides in on the model's `order_refs`. Backfill: `migrate::project_ebay_packages`,
+marker `ebay_packages_projected`.
+
+### Every other store: keyed by sender and order number
+
+A delivery record files under, in order: a carrier number (polled), a store
+package key (Amazon, eBay), and, when its mail has neither, its ORDER:
+`order:<scope>:<order key>` (`triage/order_fallback.rs`). That carries a
+purchase from "Order confirmed" to "Delivered" for any store that never prints
+a tracking number, with no code per store.
+
+- **Scope is decided by code**: the authenticated sender (`sender_scope`), or
+  the full address for a platform that sends every store's mail from one
+  domain (`shopifyemail.com`, where `store+<id>@` names the store). The model's
+  merchant names drift across one order's mail and are never part of the key.
+  Unauthenticated mail opens, advances and covers nothing.
+- **The order number is the model's, checked by code**: it must be printed in
+  the mail whole (its letter-and-digit runs as consecutive tokens, so
+  `PO/2024/001` matches `PO 2024/001` and `#5001` does not match `#50019`). Of a
+  record's numbers, the smallest printed one keys it.
+- **An order number in the tracking field is the order**: a record whose
+  "tracking number" is one of its own order numbers, and has no carrier's
+  shape (`1Z…`, `TBA…`, `9[234]…`), files under the order (or its store box).
+  A row an older build keyed on that number is retired. Markup is not mail
+  text: the printed check reads the HTML with its tags taken out.
+- **The order card steps aside** once a tracked or boxed record from the same
+  scope names its order in mail that prints it, and comes back if that record
+  is retracted. Only a record that makes a card of its own covers: one dropped
+  for an unknown carrier or status would otherwise hide the order and leave
+  nothing. An Amazon box covers its order through its tracker link even when
+  its record carries a TBA number.
+- The row shows the carrier any of its mail named (else `unknown`), links
+  nowhere (mail links are untrusted), is sold by the model's merchant or the
+  sender's display name, and is never polled (its key holds a `:`).
+
+Known gaps, for the model identity check that will sit on top: a mail printing
+an invoice number below the order number keys a second card; a store that
+confirms from its own domain and ships through Shopify is two scopes; an order
+shipped in parts retires its card when the first box ships. Backfill:
+`migrate::project_order_fallbacks`, marker `order_fallbacks_projected`, after
+the Amazon and eBay passes. Only decisions that stored order numbers can key.
+
+### Packages the owner sent are not shipments
+
+The rail is for boxes coming to the owner. A shipping store's drop-off receipt
+(The UPS Store's "Drop-Off Package Receipt") prints a real UPS number, and the
+agent used to file it as a package on its way. It is the last mail that box
+will ever get, so it sat on the rail as "shipped" until it went silent.
+
+The prompt says a package the owner sent gets no delivery record, and a rail
+in code backs it: `commit_agent_decision` strips every delivery record from a
+decision about a drop-off receipt (`shipment::is_drop_off_receipt`) before the
+decision is stored, so neither door shows the box. The match keys only on the
+receipt's own headings ("drop-off receipt", "drop-off time", "thanks for
+dropping off"), not on the regex detector's wider return battery, whose
+`refund` and bare `drop off` also hit inbound mail ("we'll drop off
+your order"). Receipts already stored are cleaned once
+(`migrate::drop_sent_packages`, marker `sent_packages_dropped`).
+
 ## Identity: which package is this?
 
 ### Tracking number first, order reference second

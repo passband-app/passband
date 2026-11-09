@@ -396,9 +396,9 @@ struct SettingsCardView: View {
         case .appearance: AppearanceSection()
         case .notifications: NotificationsSection()
         case .help:
-            // Mac-only, for the reason AccountPage.swift gives: the tour and the
-            // what's-new card are hosted by the desktop's ActionLayer, and the
-            // phone has nothing that could show one. `SettingsCard.isAvailable`
+            // Mac-only, for the reason AccountPage.swift gives: the what's-new
+            // card is hosted by the desktop's ActionLayer, and the phone has
+            // its own walk instead. `SettingsCard.isAvailable`
             // keeps it out of the results there; this is the compile-time half
             // of the same fact.
             #if os(macOS)
@@ -724,8 +724,7 @@ struct RowDivider: View {
 
 // MARK: - general
 
-/// The name the sitrep greets you by. On the Mac the greeting's own pencil
-/// edits it too; the phone's sitrep has no greeting, so this is its only door.
+/// The name the sitrep greets you by, and the one place to change it.
 struct YouSection: View {
     @Environment(Prefs.self) private var prefs
 
@@ -893,6 +892,9 @@ struct NotificationsSection: View {
     /// An event reminder switch write in flight, and why the last one failed.
     @State private var remindersBusy = false
     @State private var remindersError: String?
+    /// The same, for the morning brief's switch.
+    @State private var briefBusy = false
+    @State private var briefError: String?
     /// Held for the duration of playback: the sound stops when deallocated.
     @State private var player: PlatformSound?
     /// What the last test banner did, shown until the next one. nil before the
@@ -979,6 +981,7 @@ struct NotificationsSection: View {
                 }
             #endif
             eventReminders
+            morningBrief
             RowDivider()
             // Three states, because two of them look identical from the outside:
             // a banner that never came because the grant is off, and one that
@@ -996,6 +999,7 @@ struct NotificationsSection: View {
         // Keyed on the account, so a switch with the pane open reads the new
         // daemon's answer.
         .task(id: store.epoch) { await store.refreshCalendarReminderPref() }
+        .task(id: store.epoch) { await store.refreshMorningBriefPref() }
         #if os(macOS)
             // System Settings can flip it while the pane is closed.
             .onAppear { LoginItem.shared.refresh() }
@@ -1050,6 +1054,58 @@ struct NotificationsSection: View {
         }
     }
 
+    /// The daemon's switch for the morning brief, per mailbox: one push to
+    /// the iPhone near 8am about what today holds. Drawn on the Mac too,
+    /// since it is the same mailbox's switch. Hidden on a daemon too old to
+    /// send one, and before the first answer, as `eventReminders` is.
+    @ViewBuilder
+    private var morningBrief: some View {
+        switch store.morningBriefPref {
+        case .loaded(let enabled):
+            RowDivider()
+            SettingsRow(
+                title: "Morning brief",
+                detail: briefError
+                    ?? "At 8 each morning, a short note on your iPhone about what today holds. Days with nothing to say are skipped."
+            ) {
+                Toggle(
+                    "Morning brief",
+                    isOn: Binding(get: { enabled }, set: { saveBrief($0) })
+                )
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .disabled(briefBusy)
+            }
+        case .unreadable:
+            RowDivider()
+            SettingsRow(
+                title: "Morning brief",
+                detail: "Could not read this setting from the server."
+            ) {
+                Button("Try again") { Task { await store.refreshMorningBriefPref() } }
+                    .buttonStyle(.glass)
+                    .controlSize(.small)
+            }
+        case .unknown, .notOffered:
+            EmptyView()
+        }
+    }
+
+    private func saveBrief(_ enabled: Bool) {
+        guard !briefBusy else { return }
+        briefBusy = true
+        briefError = nil
+        Task {
+            do {
+                try await store.setMorningBrief(enabled)
+            } catch {
+                briefError = errText(error, "Could not save. Try again.")
+            }
+            briefBusy = false
+        }
+    }
+
     /// Fire and wait, like read tracking's: the switch shows what the daemon
     /// holds, so a failed write leaves it where it was.
     private func saveReminders(_ enabled: Bool) {
@@ -1089,14 +1145,13 @@ struct NotificationsSection: View {
     }
 }
 
-/// The two things you can ask the app to show you again: the practice inbox,
-/// and the release notes. The what's-new card is shown once per version and
-/// then never again, which is the right behaviour and also means the one place
-/// somebody can go looking for it afterwards has to exist.
+/// What you can ask the app to show you again: the release notes. The
+/// what's-new card is shown once per version and then never again, which is
+/// the right behaviour and also means the one place somebody can go looking
+/// for it afterwards has to exist.
 ///
-/// ON THE IPHONE IT IS ONE ROW. The practice inbox is a lesson over the Mac's
-/// shell and the phone has no tour, so only the release notes are here, and
-/// they are the phone's own (Lib/PhoneReleaseNotes.swift), shown full screen.
+/// ON THE IPHONE the notes are the phone's own (Lib/PhoneReleaseNotes.swift),
+/// shown full screen.
 /// With no note to show the section is not drawn at all: a build older than
 /// the first phone note has nothing behind the button.
 struct HelpSection: View {
@@ -1105,15 +1160,6 @@ struct HelpSection: View {
     var body: some View {
         #if os(macOS)
             SectionCard(label: "Help") {
-                SettingsRow(
-                    title: "Practice inbox",
-                    detail: "Try the categories and a sender rule on example mail, then come back."
-                ) {
-                    Button("Open") { store.tour.replay(store: store) }
-                        .buttonStyle(.glass)
-                        .controlSize(.small)
-                }
-                RowDivider()
                 SettingsRow(
                     title: "What's new",
                     detail: "What this version brought, in the app and in the daemon behind it."

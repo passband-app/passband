@@ -72,7 +72,6 @@ struct SettingsSearchTests {
         first("translate", is: .translation)
         first("french", is: .translation)
         first("foreign language", is: .translation)
-        first("walkthrough", is: .help)
         first("changelog", is: .help)
         first("refer a friend", is: .account)
         first("mailbox", is: .account)
@@ -124,8 +123,9 @@ struct SettingsSearchTests {
         first("what is my name", is: .you)
         first("where do i put my api key", is: .assistant)
         // All filler and nothing else: the words are given back rather than
-        // thrown away, so this is still the practice inbox's question.
-        first("how", is: .help)
+        // thrown away, so a lone "how" still finds the card about how
+        // Passband sorts mail.
+        first("how", is: .rules)
     }
 
     /// The server URL, the API token and the account list share one card. A

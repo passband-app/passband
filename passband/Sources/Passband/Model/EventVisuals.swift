@@ -186,7 +186,7 @@ final class EventVisuals {
 /// Mail content at rest (a photo from the user's mail, a venue they are going
 /// to): written through `PrivateFile`, filed under sha256 of the account and
 /// the card's key so no event id, thread id or place is in a file name, never
-/// written for the practice inbox, never painted past `maxAge`, and the
+/// written for the fixture inbox, never painted past `maxAge`, and the
 /// account's entries go when the account is removed. A photo is not painted
 /// while "load remote images" is off, as it would not be fetched.
 @MainActor
@@ -240,9 +240,9 @@ final class EventVisualDisk {
     private static func hash(_ s: String) -> String { SHA256.hash(data: Data(s.utf8)).hex }
 
     /// The file key for a card in the active account; nil with no account,
-    /// or in the practice inbox, whose cards are never kept.
+    /// or in the fixture inbox, whose cards are never kept.
     private func fileKey(_ key: String) -> (file: String, account: String)? {
-        guard !RehearsalMode.isEnabled, let id = AccountManager.shared.activeId else { return nil }
+        guard !FixtureMode.isEnabled, let id = AccountManager.shared.activeId else { return nil }
         return (Self.hash(id.uuidString + "\u{1F}" + key), Self.hash(id.uuidString))
     }
 

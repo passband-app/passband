@@ -59,6 +59,34 @@ correction promotes the row to live mail first.
 Only matching sender rules are supplied as preferences and may be overridden with an evidenced
 exception. Memory has a read-only context interface; no memory editor ships.
 
+Under the `understanding` flag a run is handed up to 20 learned-memory lines
+(`triage::memory::StoreMemoryContext`, docs/UNDERSTANDING.md §2.3), and the
+flag-on prompt tells the model to use them only to decide, never to repeat or
+paraphrase one in a summary, a reason or notification text, all of which
+`/mcp` serves. A commit-path guard backs that sentence for verbatim copies:
+before committing, the worker checks the decision's prose (summary, reason,
+attention summary and action text, access reason, notification title, body
+and reason, rule-exception, revisit and done reasons) for any run of six
+consecutive words, case and punctuation aside, shared with a served memory
+line (`memory::memory_taints`). A match throws that run away: its usage is
+billed, and the job is re-run ONCE with the flag off for that job alone
+(`sync::understanding::scrubbed`: the flag-off prompt, no memory, and nothing
+else the flag adds). That answer commits whatever it says, `run_metadata`
+records `memory_scrubbed: true` with the discarded run's `scrubbed_usage`, and
+the log names the message id and never the text. There is no second re-run,
+the job is never failed over it, and the re-run reserves no second budget
+charge.
+
+Known limits:
+
+- Verbatim repetition of a memory line is caught at commit; paraphrase is
+  not. Against a paraphrase the only guard is the flag-on prompt's
+  instruction. The two-door tests check that no tool serves the profile's
+  fields, not what a model writes in prose.
+- A memory line shorter than six words cannot match, so it is not guarded.
+- Six ordinary words in a row shared with a line ("the owner replies to them
+  within") also count, which costs a needless flag-off re-run.
+
 ## Client projections
 
 Process and the TUI use the server's FYE ordering. Reading and Records default to
@@ -439,6 +467,137 @@ them is served to a client.
   acts on the score: a sender at 75 or more has their unopened open Reading
   mail marked done. That is why 75 needs a second signal on top of "never
   opened", and why the sweep is undoable.
+
+### Relationship ledger
+
+`relationships` holds one row per address the owner has live mail with
+(docs/UNDERSTANDING.md §2.1): inbound count and dates (off `received_at`),
+the contacts row's sent count, threads the owner started, inbound threads and
+how many the owner later wrote into, the median reply time (3 replied threads
+or more), attention, corrections, and the fatigue score. Attention and the
+fatigue score are one `SenderMeasurer` result, the purge flow's own, so the
+two never disagree. It is not email text and it is not a floor.
+
+THE LEDGER COMPUTES FOR EVERY MAILBOX AND SERVES ONLY UNDER THE
+`understanding` HIDDEN FEATURE. The marks, the drain, the nightly walk and the
+first-run backfill below run whatever the flag says, so a mailbox switched on
+has its rows at once. Turning the flag off stops new use and new serving from
+the next run; past decisions stand (a decision made with the block in its
+context stays until something re-triages it, and a flip triggers no
+re-triage). With the flag off the ledger is not even read: loading a
+triage context and the contact card make exactly main's queries, the triage
+context and `read_sender_history` carry no `relationship` key,
+`GET /client/relationships` answers 404, and `GET /client/person` carries no
+`relationship` key. With it on, the worker reads and attaches the sender's
+block (`triage_worker::attach_relationship`), `StoreEvidence` serves it in
+`read_sender_history`, and the card handler reads the row beside the record.
+A ledger that cannot answer leaves the block out of a run, out of
+`read_sender_history`'s result and off the card, rather than failing any of
+them; the log line names no address.
+
+A recount is bounded. `received_count` and the first arrival are one
+index-only walk of `idx_messages_from_received`, less the address's sealed
+mail, so the count follows the listings' rule. The sealed count is taken one
+of two ways by the sender's size:
+
+- Under 2,000 inbound messages, each of the sender's messages is probed with
+  `known_sealed_mail_sql!`.
+- At or over 2,000, it reads partial indexes over the account's sealed rows
+  (`idx_triage_sealed`, `idx_agent_decisions_sealed`,
+  `idx_agent_state_restricted`, `idx_agent_corrections_sealed`), so a large
+  sender pays for the account's sealed mail rather than a probe per message.
+
+The last arrival is the newest mail the listings would show; the first may be
+a sealed message. Threads, replies, the name and the field corrections read
+only the address's newest 500 inbound messages. A recount whose received, sent and
+initiated counts have not changed skips those reads and refreshes only
+attention, fatigue and the monthly rate, unless its mark is full
+(`relationship_dirty.full`) or the nightly walk is running. On a synthetic
+240,000-message store with one 40,000-message sender, a full recount takes
+about 36 ms and an unchanged one about 33 ms, of which about 28 ms is the
+purge flow's `SenderMeasurer`.
+
+These add an address to `relationship_dirty`:
+
+- ingest (the sender, or each recipient of Sent mail);
+- Sent ingest also marks the senders of the thread's inbound mail, so a reply
+  to a Reply-To address credits the From;
+- not-spam;
+- the Sent-history contacts harvest;
+- the attention POST;
+- a decision or access check that seals or unseals a message (the commit
+  compares known-sealed before and after it writes), and any owner
+  correction.
+
+Marks of the last kind, and the thread-sender marks, are full: the recount
+skips its unchanged-counts shortcut. The daemon has no mark-as-spam or
+local-delete path, so neither marks anything; the nightly walk catches
+anything no mark saw. Every refine round, before the triage pass, recomputes
+up to 200 dirty addresses, 25 per store lock. Once per owner-local day from
+03:00 the whole table is recomputed in the same chunks; the day it last
+completed is `sync_state` mailbox `relationships_daily`. A store that
+predates the table is filled by the same walk on the first round, stamped
+`relationships_backfill` only when the walk completes. The walk runs at most
+8 chunks (200 addresses) per refine round and keeps its place in
+`app_settings` key `relationships_walk_cursor`, so triage interleaves with
+it and a restart resumes where it stopped. Each chunk finds its addresses by
+range seeks on the senders, contacts, recipients and ledger indexes. A
+completed walk stamps the ledger day it started on
+(`relationships_walk_day`), so a walk that runs past 03:00 does not use up
+the next day's.
+
+The first open after upgrading to a daemon with the ledger does work before
+the daemon serves. `migrate` builds `idx_messages_from_received` over every
+message, which takes seconds on a large store. It also builds
+`idx_agent_decisions_sealed`, which evaluates its JSON predicate once for
+every existing decision (about 35 µs each). The other sealed-set indexes are
+small. After that, the first-run backfill walk runs inside the refine lane at
+200 addresses per round, interleaved with triage. The agent context carries
+no `relationship` block until that walk completes.
+
+Under the flag, the triage context carries the row as `relationship` beside
+`sender_is_contact`, and `read_sender_history` returns it as `relationship`
+at the top of its result. The key is absent before the backfill stamp and
+for an address with no row. `attention` is left out while `coverage_days`
+(days since the later of the open ledger floor and the 90-day window, the
+`SenderMeasurer`'s own coverage, so the same floor the fatigue score uses) is
+under 14. The block is in no revision fingerprint, so a recount never makes
+a run stale. Under the flag, the prompt reports `agent-triage-v25` (rows of
+`agent::UNDERSTANDING_SEGMENTS`) reads it as evidence and restates the
+65-point personal-mail floor over "a person the owner replies to": replied
+above zero, initiated above zero, sent count above zero, or
+`sender_is_contact`. The ledger can add a person to the floor and never
+removes anyone `sender_is_contact` granted it. With the flag off the prompt is
+the file's own text, main's "a known contact" floor included, and reports
+main's `agent-triage-v24` (`agent::prompt_version`). Eval
+replays (`squelch-eval`) drop the block, because the ledger has no history
+to replay as of a past moment.
+
+Known limits:
+
+- Archive-tier mail is not counted, so a correspondent whose history is all
+  older than the backfill window starts with only the window's counts.
+- The recent window uses `known_sealed_mail_sql!`, so mail whose access check
+  is pending counts. The dirty set drains before the triage pass, so a fresh
+  arrival is always pending when its mark drains. A decision or access check
+  that seals or unseals a message, and any owner correction, marks the sender
+  for a full recount, so the message leaves or rejoins the count and threads
+  within a round. The
+  attention columns use the purge flow's strict statements.
+- `sent_count` and `sent_last_at` are the contacts row's, so a recipient the
+  contacts seed filtered out has initiated threads but a zero sent count.
+- Relationship figures get NO commit-path scrub; memory lines get the verbatim
+  one (Execution, the paragraph after "Memory has a read-only context
+  interface"). Nothing checks a decision's summary, reason or notification
+  text, all of which `/mcp` serves, for a reply count, reply speed, open rate
+  or fatigue. The only guard there is the flag-on prompt's instruction never
+  to state one (pinned by
+  `the_understanding_flag_off_is_the_prompt_file_byte_for_byte`). A figure is
+  a number, not six words in a row, so the memory scrub's test would not catch
+  one. When a run IS re-run for a memory line, the re-run has no relationship
+  block either, in its context or from `read_sender_history`
+  (`understanding::scrubbed`). The two-door tests check that no tool serves the
+  ledger's fields, not what a model writes in prose.
 
 ### Kept senders
 

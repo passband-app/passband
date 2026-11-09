@@ -113,6 +113,10 @@ pub const ROUTE_CEILINGS: &[(&str, &str, RequestCeiling)] = &[
     ("POST", "/client/assistant/messages", RequestCeiling::Long),
     ("POST", "/client/invites", RequestCeiling::Long),
     ("POST", "/client/shredder/run", RequestCeiling::Long),
+    // NOT HERE: `/client/memory` and `/client/memory/{id}` are store calls
+    // under the local ceiling. The model call behind them is the nightly
+    // profile pass, in the sync engine, never on a request.
+    //
     // The routes that await a model (`ROUTE_CLASSES` in `http_metrics`
     // charts the same ones as model time).
     ("GET", "/client/rules/suggest", RequestCeiling::Upstream),
@@ -263,6 +267,28 @@ mod tests {
             route_ceiling("POST", "/client/rules"),
             RequestCeiling::Upstream
         );
+    }
+
+    /// The owner-profile routes (docs/UNDERSTANDING.md §6) never wait on a
+    /// model: local ceiling, local time.
+    #[test]
+    fn the_memory_routes_are_local() {
+        for (method, template) in [
+            ("GET", "/client/memory"),
+            ("PUT", "/client/memory/{id}"),
+            ("DELETE", "/client/memory/{id}"),
+        ] {
+            assert_eq!(
+                route_ceiling(method, template),
+                RequestCeiling::Local,
+                "{method} {template}"
+            );
+            assert_eq!(
+                crate::http_metrics::route_class(method, template),
+                squelch_core::metrics::RouteClass::Local,
+                "{method} {template}"
+            );
+        }
     }
 
     /// Every route the latency histogram charts as model time awaits a

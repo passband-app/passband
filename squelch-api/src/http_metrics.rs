@@ -32,11 +32,14 @@ pub const ROUTE_CLASSES: &[(&str, &str, RouteClass)] = &[
     // A relay: the response head is the gateway's, so the clock stops on the
     // provider's time to first byte.
     ("POST", "/client/assistant/messages", RouteClass::Llm),
+    // NOT HERE, on purpose: `/client/memory` (GET, and PUT/DELETE on `{id}`)
+    // is a store read and two store writes. The profile pass that fills it
+    // spends its model call in the sync engine, never on a request.
 ];
 
 /// Anything not in the table, an unmatched path included, is the daemon's own
 /// time.
-fn route_class(method: &str, route: &str) -> RouteClass {
+pub(crate) fn route_class(method: &str, route: &str) -> RouteClass {
     crate::limits::route_lookup(ROUTE_CLASSES, method, route, RouteClass::Local)
 }
 

@@ -130,9 +130,13 @@ enum Lane: String, Sendable {
     ///
     /// `calendar` is `AppStore.calendarPageAvailable`: whether the guide's
     /// topic list may name the Calendar page (`AgentTools.definitions`).
-    func definitions(calendar: Bool) -> [Wire.ToolDef] {
+    ///
+    /// `understanding` is the `understanding` hidden feature: whether the
+    /// guide's topic index may name the Usage page's Understanding section.
+    func definitions(calendar: Bool, understanding: Bool = false) -> [Wire.ToolDef] {
         let allowed = toolNames
-        return AgentTools.definitions(calendar: calendar).filter { allowed.contains($0.name) }
+        return AgentTools.definitions(calendar: calendar, understanding: understanding)
+            .filter { allowed.contains($0.name) }
     }
 
     /// The lane's own model preference. The search lane runs on every deeper
@@ -196,7 +200,6 @@ final class AssistantSession {
     /// session: an answer cites what it consulted, not what some earlier
     /// question did.
     private var cites: [String: ToolCitation] = [:]
-    private var citeOrder: [String] = []
     private var readIds: [String] = []
     /// Threads already SHOWN as cards this answer. Excluded from the citation
     /// row: a card the user can click is its own source line, and repeating it
@@ -272,7 +275,9 @@ final class AssistantSession {
 
     /// Safety valve on the tool loop. Eight is enough for search → read → act
     /// with room to correct itself, and short enough that a confused model
-    /// stops costing money.
+    /// stops costing money. The LAST of them runs with tools switched off and
+    /// a nudge to answer, so hitting the valve ends in an answer built from
+    /// what was found, never in an error the reader has to decode.
     private static let maxTurns = 8
     /// Room for a real send_email/save_draft body. Too low and a long draft is
     /// truncated mid-argument, which costs a whole turn to recover from.
@@ -492,7 +497,6 @@ final class AssistantSession {
         askedThreadIds.removeAll()
         rollbackMark = 0
         cites.removeAll()
-        citeOrder.removeAll()
         readIds.removeAll()
         shownIds.removeAll()
         // A fresh conversation has been narrowed zero times, and the words
@@ -660,10 +664,14 @@ final class AssistantSession {
         elidedAtRunStart = elidedResults
         turnContext[history.count] = questionContext(pin)
         append(.user, text: question)
-        history.append(.init(role: "user", content: .text(question)))
+        // THE LANE IS A SEARCH, NOT A CHAT: the model is told it is reading a
+        // search box ("User is searching for: …"), so a bare "rekordbox" reads
+        // as a thing to find rather than a message to answer. The transcript
+        // keeps the reader's own words.
+        let wire = lane == .search ? SearchLanePrompt.searchingFor(question) : question
+        history.append(.init(role: "user", content: .text(wire)))
         // A fresh answer cites its own sources.
         cites.removeAll()
-        citeOrder.removeAll()
         readIds.removeAll()
         shownIds.removeAll()
 
@@ -695,7 +703,7 @@ final class AssistantSession {
             }
         }
 
-        for _ in 0..<Self.maxTurns {
+        for step in 0..<Self.maxTurns {
             guard alive(gen) else { return }
             // PAUSE BOUNDARY 1 OF 2: before the next provider request. Together
             // with the one before each tool call these are the ONLY two places
@@ -709,7 +717,7 @@ final class AssistantSession {
 
             let body: Data
             do {
-                body = try requestBody(model: model)
+                body = try requestBody(model: model, wrapUp: step == Self.maxTurns - 1)
             } catch {
                 fail(errorText(error))
                 return
@@ -853,7 +861,9 @@ final class AssistantSession {
             return
         }
 
-        fail("The assistant took too many steps without answering.")
+        // Only reachable if the provider ignored tool_choice on the wrap-up
+        // step. Said plainly, without the internals.
+        fail("Couldn't finish that one. Try asking it a narrower way.")
     }
 
     /// One turn's worth of stream state. Lives here rather than in the session
@@ -989,7 +999,6 @@ final class AssistantSession {
             name: call.name, input: call.input, gate: gate(),
             cite: { [weak self] citation in
                 guard let self, self.alive(gen) else { return }
-                if self.cites[citation.threadId] == nil { self.citeOrder.append(citation.threadId) }
                 // LATER READINGS WIN — a get_thread knows more about a thread
                 // than the search hit that found it — except where the newcomer
                 // knows LESS. explain_triage cites from a triage record, which
@@ -1173,14 +1182,13 @@ final class AssistantSession {
             outputTokens: outputTokens)
     }
 
-    /// Threads surfaced by search vs. actually opened: cite the opened ones
-    /// when the model drilled in, else the top hits it saw. Threads already
-    /// shown as cards are skipped either way — see `shownIds`.
+    /// ONLY THREADS THE MODEL OPENED. A search hit it merely saw is not a
+    /// source: falling back to the top hits listed five unrelated "download"
+    /// emails under "No mail about Rekordbox found". Threads already shown as
+    /// cards are skipped too, see `shownIds`.
     private func pickCitations() -> [ToolCitation] {
-        let opened = readIds.compactMap { cites[$0] }.filter { !shownIds.contains($0.threadId) }
-        if !opened.isEmpty { return Array(opened.prefix(5)) }
-        return Array(
-            citeOrder.compactMap { cites[$0] }
+        Array(
+            readIds.compactMap { cites[$0] }
                 .filter { !shownIds.contains($0.threadId) }.prefix(5))
     }
 
@@ -1253,15 +1261,20 @@ final class AssistantSession {
     /// pruned to its budget (never the current run's own results), each
     /// question with its context, a system prompt that does not change, and
     /// the keys sorted so the same request is the same bytes.
-    private func requestBody(model: AssistantModel) throws -> Data {
+    private func requestBody(model: AssistantModel, wrapUp: Bool = false) throws -> Data {
         elidedResults = Wire.elisions(
             for: history, already: elidedResults, protectedFrom: rollbackMark)
         let sent = Wire.pruned(history, eliding: elidedResults, protectedFrom: rollbackMark)
         return try Wire.Request.encoder().encode(
             Wire.Request(
                 model: model.rawValue, max_tokens: Self.maxTokens, system: system(),
-                tools: lane.definitions(calendar: AppStore.shared.calendarPageAvailable),
-                messages: Wire.withContext(sent, turnContext)))
+                tools: lane.definitions(
+                    calendar: AppStore.shared.calendarPageAvailable,
+                    understanding: AppStore.shared.hasFeature(.understanding)),
+                messages: wrapUp
+                    ? Wire.wrappingUp(Wire.withContext(sent, turnContext))
+                    : Wire.withContext(sent, turnContext),
+                tool_choice: wrapUp ? .answerOnly : nil))
     }
 
     // MARK: - system prompt

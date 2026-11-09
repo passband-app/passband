@@ -486,6 +486,93 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // Whether a relationship mark asks for a full recount. 0 on any row an
+    // earlier build of the ledger wrote, which is the plain mark it was.
+    add_column_if_missing(
+        conn,
+        "relationship_dirty",
+        "full",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+
+    // THE SEALED SET, one partial index per place a message is marked kept
+    // close (`known_sealed_mail_sql!`'s four arms), each holding only the
+    // sealed rows. The relationship ledger counts an address's sealed mail by
+    // reading these few rows and joining each to its message by key
+    // (`relationships::SEALED_COUNT_SQL`), instead of probing all four tables
+    // for every message the address ever sent. Sealed mail is a small
+    // minority, so the indexes are small. Each guarded by the columns it
+    // names: the migration suite builds partial old schemas.
+    //
+    // THE DECISIONS PREDICATE IS GUARDED BY `json_valid`, in a CASE because
+    // only a CASE is sure not to evaluate the JSON functions first. A partial
+    // index's predicate runs on EVERY write to its table, so without the guard
+    // one malformed `decision_json` would make the write itself fail. A
+    // malformed decision is not sealed here; the macro's own read of it fails
+    // as it always has.
+    for (table, columns, sql) in [
+        (
+            "triage",
+            &["account_id", "message_id", "sensitivity"][..],
+            "CREATE INDEX IF NOT EXISTS idx_triage_sealed
+             ON triage(account_id, message_id) WHERE sensitivity != 'normal'",
+        ),
+        (
+            "agent_message_decisions",
+            &["account_id", "message_id", "decision_json"][..],
+            "CREATE INDEX IF NOT EXISTS idx_agent_decisions_sealed
+             ON agent_message_decisions(account_id, message_id)
+             WHERE (CASE WHEN json_valid(decision_json) THEN json_array_length(decision_json,'$.auth.kinds')>0 OR COALESCE(json_extract(decision_json,'$.external_access.restricted'),0) ELSE 0 END)",
+        ),
+        (
+            "agent_message_state",
+            &["account_id", "message_id", "access"][..],
+            "CREATE INDEX IF NOT EXISTS idx_agent_state_restricted
+             ON agent_message_state(account_id, message_id) WHERE access = 'restricted'",
+        ),
+        (
+            "agent_triage_corrections",
+            &["account_id", "message_id", "field", "value_json"][..],
+            "CREATE INDEX IF NOT EXISTS idx_agent_corrections_sealed
+             ON agent_triage_corrections(account_id, message_id)
+             WHERE field = 'external_access' AND value_json = 'true'",
+        ),
+    ] {
+        if tables_exist(conn, &[table])? && has_columns(conn, table, columns)? {
+            conn.execute(sql, [])?;
+        }
+    }
+
+    // THE RELATIONSHIP LEDGER'S PER-SENDER INDEX (`relationships`): one
+    // sender's mail in arrival order, COVERING the three flags its inbound
+    // count filters on. `idx_messages_from_nocase` orders a sender's rows by
+    // rowid, which the newest-first backfill makes OLDEST-first, so "the
+    // newest 500" off it was a sort of every row the sender ever sent, and
+    // the count a table lookup per row: on a 40,000-message notifications
+    // sender that was 70 ms a statement, every round it was marked. Here the
+    // count is an index-only walk and the newest 500 are the index's own
+    // tail. Here and not in schema.sql because it covers migrated columns
+    // (see `idx_triage_remind_at`). The first open after this ships builds it
+    // over the whole table, once.
+    if has_columns(
+        conn,
+        "messages",
+        &[
+            "from_addr",
+            "received_at",
+            "is_sent",
+            "is_spam",
+            "is_archive",
+        ],
+    )? {
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_from_received
+             ON messages(account_id, from_addr COLLATE NOCASE, received_at,
+                         is_sent, is_spam, is_archive)",
+            [],
+        )?;
+    }
+
     // stage2_usage grew `category` INSIDE ITS PRIMARY KEY. ALTER ADD COLUMN
     // cannot change a PK, and the bump upsert's ON CONFLICT(account_id, day,
     // category) needs that exact unique index, so an old table must be REBUILT —
@@ -932,6 +1019,10 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // See the function: Amazon's Shipped/Delivered decisions were always
     // stored, and only lacked a key to project on.
     project_amazon_boxes(conn);
+    // See the function: the same, for eBay purchases.
+    project_ebay_packages(conn);
+    // See the function: and for every other store, by order number.
+    project_order_fallbacks(conn);
     // See the function: a drop-off receipt's box is going away, not coming.
     drop_sent_packages(conn);
 
@@ -944,6 +1035,29 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
             "event_revisit_asked",
             "skipped",
             "INTEGER NOT NULL DEFAULT 0",
+        )?;
+    }
+
+    // Cross-sender links between ghosts and the user's accepted changes
+    // (`triage::event_identity`) came after the ghost tables.
+    add_column_if_missing(conn, "ghost_events", "linked_to", "INTEGER")?;
+    add_column_if_missing(conn, "ghost_events", "link_ack", "TEXT")?;
+    add_column_if_missing(
+        conn,
+        "ghost_event_sources",
+        "accepted",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    // A deleted ghost takes its links with it: a ghost left pointing at a
+    // gone id would stay out of Google and out of the identity check for
+    // good, and fold under whatever new ghost reuses that id.
+    if tables_exist(conn, &["ghost_events"])? {
+        conn.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS ghost_event_links_follow_ghost
+         AFTER DELETE ON ghost_events BEGIN
+             UPDATE ghost_events SET linked_to = NULL, link_ack = NULL
+             WHERE account_id = OLD.account_id AND linked_to = OLD.id;
+         END;",
         )?;
     }
 
@@ -1819,6 +1933,60 @@ fn project_amazon_boxes_once(conn: &Connection) -> Result<usize> {
         AMAZON_BOXES_KEY,
         agent_deliveries::project_amazon_boxes,
     )
+}
+
+/// The `app_settings` key marking an account whose stored eBay decisions
+/// have been projected by [`project_ebay_packages`].
+pub(super) const EBAY_PACKAGES_KEY: &str = "ebay_packages_projected";
+
+/// ONE-TIME: put every eBay purchase the stored decisions already describe on
+/// the Shipments rail (`agent_deliveries::project_ebay_packages`). eBay's mail
+/// prints no tracking number, so before package keys its records projected
+/// nothing, from Order confirmed to PACKAGE DELIVERED.
+///
+/// Gated and failure-tolerant exactly as [`project_amazon_boxes`] is.
+fn project_ebay_packages(conn: &Connection) {
+    match once_per_account(
+        conn,
+        EBAY_PACKAGES_KEY,
+        agent_deliveries::project_ebay_packages,
+    ) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("squelch: migration projected {n} eBay package(s)"),
+        Err(error) => {
+            eprintln!("squelch: eBay package backfill failed ({error}); will retry next open");
+            if !conn.is_autocommit() {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+        }
+    }
+}
+
+/// The `app_settings` key marking an account whose stored trackless
+/// decisions have been projected by order ([`project_order_fallbacks`]).
+pub(super) const ORDER_FALLBACKS_KEY: &str = "order_fallbacks_projected";
+
+/// ONE-TIME: put every order the stored decisions describe without a carrier
+/// number or a store package id on the Shipments rail, keyed by sender and
+/// order number (`agent_deliveries::project_order_fallbacks`). Runs after the
+/// Amazon and eBay passes, so their packages exist to cover their orders.
+///
+/// Gated and failure-tolerant exactly as [`project_amazon_boxes`] is.
+fn project_order_fallbacks(conn: &Connection) {
+    match once_per_account(
+        conn,
+        ORDER_FALLBACKS_KEY,
+        agent_deliveries::project_order_fallbacks,
+    ) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("squelch: migration projected {n} order(s) without tracking"),
+        Err(error) => {
+            eprintln!("squelch: order backfill failed ({error}); will retry next open");
+            if !conn.is_autocommit() {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+        }
+    }
 }
 
 /// The `app_settings` key marking an account whose stored drop-off receipts

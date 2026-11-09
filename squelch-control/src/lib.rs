@@ -50,12 +50,14 @@ pub mod posthog;
 pub mod ratelimit;
 pub mod reconnect;
 pub mod resend;
+pub mod retention;
 pub mod seal;
 pub mod sessions;
 pub mod share;
 pub mod state;
 pub mod store;
 pub mod tenant;
+mod transport;
 pub mod warden;
 pub mod workos;
 
@@ -119,9 +121,18 @@ use axum::{
 /// an admin URL rather than 403: there is no door to knock on, and no admin
 /// token for a stranger to spend their bucket guessing at.
 ///
-/// `/healthz` sits outside every layer so liveness answers while a client is
-/// throttled.
+/// `/healthz` sits outside every rate-limit and body layer so liveness answers
+/// while a client is throttled. Only the transport-header layer
+/// (`transport.rs`) wraps it, as it wraps every route.
 pub fn router(state: ControlState) -> Router {
+    let secure = !state.config().is_insecure();
+    routes(state).layer(middleware::from_fn_with_state(
+        secure,
+        transport::transport_security,
+    ))
+}
+
+fn routes(state: ControlState) -> Router {
     let form = Router::new()
         .route("/", get(handlers::signup_form))
         .route("/reconnect/status", get(reconnect::status))

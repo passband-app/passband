@@ -119,8 +119,53 @@ data "aws_cloudfront_cache_policy" "optimized" {
   name = "Managed-CachingOptimized"
 }
 
-data "aws_cloudfront_response_headers_policy" "security" {
-  name = "Managed-SecurityHeadersPolicy"
+# The managed SecurityHeadersPolicy's headers, plus a Content-Security-Policy,
+# which the managed policy does not set and a DAST scan reports as Medium (the
+# CASA assessment runs one: docs/VERIFICATION.md). The site loads nothing but
+# its own files; the one cross-origin call is the waitlist form's fetch to
+# control. Inline styles stay allowed because React's `style` props and the
+# static pages' <style> blocks use them. Checked with every page loaded in
+# Chromium under this exact policy, waitlist submit included: no violations.
+# A new third-party script, font or API call on the site needs a line here.
+resource "aws_cloudfront_response_headers_policy" "security" {
+  name    = "passband-site-security"
+  comment = "passband.app: managed security headers plus CSP"
+
+  security_headers_config {
+    content_security_policy {
+      content_security_policy = join("; ", [
+        "default-src 'self'",
+        "script-src 'self'",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data:",
+        "font-src 'self'",
+        "connect-src 'self' https://signup.passband.app",
+        "object-src 'none'",
+        "base-uri 'none'",
+        "form-action 'self'",
+        "frame-ancestors 'none'",
+        "upgrade-insecure-requests",
+      ])
+      override = true
+    }
+    strict_transport_security {
+      access_control_max_age_sec = 31536000
+      include_subdomains         = false
+      preload                    = false
+      override                   = true
+    }
+    content_type_options {
+      override = true
+    }
+    frame_options {
+      frame_option = "DENY"
+      override     = true
+    }
+    referrer_policy {
+      referrer_policy = "strict-origin-when-cross-origin"
+      override        = true
+    }
+  }
 }
 
 resource "aws_cloudfront_distribution" "site" {
@@ -145,7 +190,7 @@ resource "aws_cloudfront_distribution" "site" {
     cached_methods             = ["GET", "HEAD"]
     compress                   = true
     cache_policy_id            = data.aws_cloudfront_cache_policy.optimized.id
-    response_headers_policy_id = data.aws_cloudfront_response_headers_policy.security.id
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.security.id
 
     function_association {
       event_type   = "viewer-request"

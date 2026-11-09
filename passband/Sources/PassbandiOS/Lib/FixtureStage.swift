@@ -821,7 +821,7 @@
                 event("e7", "Dinner with the Denver team", at(3, 19), at(3, 21), place: "Tavernetta"),
                 event("e8", "Dentist", at(9, 8, 30), at(9, 9, 30), calendar: "Personal", color: home),
             ]
-            let ghosts = [
+            var ghosts = [
                 ghost(1, .reservation, "Dinner at Nopa", at(0, 19, 30), end: at(0, 21, 30), estimated: true,
                       place: "Nopa, 560 Divisadero", commitment: .committed, message: 4),
                 ghost(2, .invite, "Climbing at Mission Cliffs", at(1, 18), place: "Mission Cliffs",
@@ -842,6 +842,15 @@
                           message_id: 7, thread_id: "practice-7", kind: .ticket,
                           attachment: .init(id: 71, filename: "Japanese Breakfast tickets.pdf", mime: "application/pdf"))),
             ]
+            // The venue's own mail about the same show says doors moved an
+            // hour: folded under the ticket's card, offered, not applied.
+            if let i = ghosts.firstIndex(where: { $0.id == 8 }) {
+                ghosts[i].sources.append(
+                    GhostSource(message_id: 8, thread_id: "practice-8", role: .updated, linked: true, verified: true))
+                ghosts[i].pending_change = LinkedChange(
+                    ghost_id: 8, from: 9, kind: .moved, start: at(6, 21), all_day: false, end: nil,
+                    verified: true, message_id: 8, thread_id: "practice-8")
+            }
             return TimelineFeed(
                 ghosts: ghosts, events: events,
                 calendar: TimelineCalendarStatus(granted: true, synced_at: iso.string(from: now)),

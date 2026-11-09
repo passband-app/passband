@@ -2133,12 +2133,69 @@ pub(crate) fn ghost_view(
             "band": l.band,
             "reason": (!l.reason.is_empty()).then_some(&l.reason),
         })),
+        // `linked`: another sender's mail about the same event, folded
+        // under this ghost; `verified` false labels mail that did not pass
+        // authentication, so it cannot borrow the card's standing.
         "sources": ghost.sources.iter().map(|s| json!({
             "message_id": s.message_id,
             "thread_id": s.thread_id,
             "role": s.role,
+            "linked": s.linked,
+            "verified": s.verified,
         })).collect::<Vec<_>>(),
     })
+}
+
+/// A linked ghost's change as the card offers it: what it says (a new start,
+/// or cancelled), from which ghost, and the mail that says it. `ghost_id`
+/// (the ghost it is offered on) is added by the caller.
+fn linked_change_view(
+    from: &squelch_core::types::GhostEvent,
+    kind: squelch_core::gcal::LinkedChange,
+) -> serde_json::Value {
+    use squelch_core::gcal::LinkedChange;
+    let source = from.sources.last();
+    json!({
+        "from": from.id,
+        "kind": match kind {
+            LinkedChange::Moved => "moved",
+            LinkedChange::Cancelled => "cancelled",
+        },
+        "start": from.start.to_string(),
+        "all_day": from.all_day(),
+        "end": from.effective_end().filter(|e| !e.estimated).map(|e| e.end.to_string()),
+        "verified": from.verified(),
+        "message_id": source.map(|s| s.message_id),
+        "thread_id": source.map(|s| s.thread_id.clone()),
+    })
+}
+
+/// `POST /client/timeline/ghosts/{id}/change` `{from, accept}`: the user's
+/// answer to the change linked ghost `from` offers on ghost `id`. `accept`
+/// true takes it (the other sender's mail then supplies this ghost's facts,
+/// so an event Passband keeps on Google moves with it); false keeps this
+/// ghost as it is, and the same change is not offered again. 404 when
+/// `from` is not linked under `id`.
+#[derive(Debug, Deserialize)]
+pub struct LinkedChangeBody {
+    from: i64,
+    accept: bool,
+}
+
+pub async fn resolve_linked_change(
+    State(state): State<ApiState>,
+    Path(ghost_id): Path<i64>,
+    Json(body): Json<LinkedChangeBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let at = Utc::now();
+    let found = store_call(&state, move |store, account_id| {
+        store.resolve_linked_change(account_id, ghost_id, body.from, body.accept, at)
+    })
+    .await?;
+    if !found {
+        return Err(ApiError::not_found());
+    }
+    Ok((no_store(), Json(json!({ "updated": true, "id": ghost_id }))))
 }
 
 /// `GET /client/timeline?from=&to=`: the calendar ghosts and the real Google
@@ -2196,7 +2253,9 @@ pub async fn get_timeline(
     let (granted, reminder_email) = crate::calendar_remind::calendar_reach(&state).await;
     let (ghosts, urls, events, calendars, status, places, owned, mut tickets) =
         store_call(&state, move |store, account_id| {
-            let ghosts = store.list_ghost_events(account_id, from, to)?;
+            // With link partners outside the window: a link folds into one
+            // card wherever its two ghosts start.
+            let ghosts = store.list_ghost_events_with_links(account_id, from, to)?;
             let ids: Vec<i64> = ghosts.iter().map(|g| g.id).collect();
             let urls = store.ghost_url_refs(account_id, &ids)?;
             // The tickets button (docs/CALENDAR.md, "Reminders and
@@ -2250,18 +2309,28 @@ pub async fn get_timeline(
     // sender's copy must not hide the shown ghost behind an event, nor fill
     // its tickets button.
     let folded = squelch_core::gcal::fold_ghosts(&ghosts, &urls);
+    // A linked ghost's change, offered on the ghost it is shown under. Read
+    // before the copies are dropped below.
+    let changes: Vec<serde_json::Value> = squelch_core::gcal::linked_changes(&ghosts, &folded)
+        .into_iter()
+        .map(|change| match change {
+            Some((i, kind)) => linked_change_view(&ghosts[i], kind),
+            None => serde_json::Value::Null,
+        })
+        .collect();
     let mut ghosts = ghosts;
     for (i, into) in folded.iter().enumerate() {
         let Some(w) = *into else { continue };
         let same_sender =
             ghosts[w].owner_scope.is_some() && ghosts[w].owner_scope == ghosts[i].owner_scope;
         let sources = ghosts[i].sources.clone();
-        for source in sources {
+        for mut source in sources {
             if !ghosts[w]
                 .sources
                 .iter()
                 .any(|s| s.message_id == source.message_id)
             {
+                source.linked |= !same_sender;
                 ghosts[w].sources.push(source);
             }
         }
@@ -2278,13 +2347,22 @@ pub async fn get_timeline(
             tickets.ghosts.entry(ghosts[w].id).or_insert(t);
         }
     }
-    let (ghosts, matched): (Vec<_>, Vec<_>) = ghosts
+    let (ghosts, matched, changes): (Vec<_>, Vec<_>, Vec<_>) = ghosts
         .into_iter()
         .zip(matched)
+        .zip(changes)
         .zip(&folded)
         .filter(|(_, into)| into.is_none())
-        .map(|(pair, _)| pair)
-        .unzip();
+        .map(|(((g, m), c), _)| (g, m, c))
+        .fold(
+            (Vec::new(), Vec::new(), Vec::new()),
+            |(mut gs, mut ms, mut cs), (g, m, c)| {
+                gs.push(g);
+                ms.push(m);
+                cs.push(c);
+                (gs, ms, cs)
+            },
+        );
     use squelch_core::gcal::own::OwnState;
     let mine: std::collections::HashSet<(&str, &str)> = owned
         .iter()
@@ -2292,11 +2370,37 @@ pub async fn get_timeline(
         .map(|o| (o.calendar_id.as_str(), o.event_id.as_str()))
         .collect();
     let now = now.with_timezone(from.offset());
+    // A change on a ghost that is drawn as its real event rides on the
+    // event too, or hiding the ghost would hide the change.
+    let mut event_changes: std::collections::HashMap<usize, serde_json::Value> = Default::default();
+    // Only on an event Passband keeps: accepting moves that one with the
+    // ghost (`gcal::own`). The user's own event stays theirs to move, and
+    // offering there would split one card into two at accept.
+    for ((g, m), change) in ghosts.iter().zip(&matched).zip(&changes) {
+        if let (Some(i), false) = (m, change.is_null())
+            && mine.contains(&(
+                events[*i].calendar_id.as_str(),
+                events[*i].row.event_id.as_str(),
+            ))
+        {
+            let mut change = change.clone();
+            change["ghost_id"] = json!(g.id);
+            event_changes.insert(*i, change);
+        }
+    }
     let ghosts: Vec<_> = ghosts
         .iter()
         .zip(matched)
-        .map(|(g, matched)| {
+        .zip(changes)
+        .map(|((g, matched), change)| {
             let mut view = ghost_view(g, now);
+            view["pending_change"] = if change.is_null() {
+                change
+            } else {
+                let mut change = change;
+                change["ghost_id"] = json!(g.id);
+                change
+            };
             // A ghost that is an event's shares its tickets.
             view["tickets"] = tickets
                 .ghosts
@@ -2318,8 +2422,14 @@ pub async fn get_timeline(
         .unwrap_or_default();
     let events: Vec<_> = events
         .iter()
-        .map(|e| {
+        .enumerate()
+        .map(|(i, e)| {
             let mut view = calendar_event_view(e, &account_email);
+            // Only when there is one: an event is otherwise served the same
+            // here as by the write that made or changed it.
+            if let Some(change) = event_changes.remove(&i) {
+                view["pending_change"] = change;
+            }
             view["tickets"] = tickets
                 .events
                 .get(&squelch_core::gcal::remind::event_key(
@@ -3698,11 +3808,73 @@ fn timezone_view(tz: Option<squelch_core::timezone::InferredZone>) -> Option<Per
     })
 }
 
+/// One relationship-ledger row on the wire (docs/UNDERSTANDING.md §2.1), for
+/// the contact card and `/client/relationships`. Every key always present,
+/// `null` where the ledger does not know: an unknown median is not zero.
+/// Timestamps RFC 3339; `fatigue_score` on 0..1; `fatigue_reasons` the
+/// Reading purge's own reason list (`{"code": ..., <numbers>}`), whose copy
+/// the client owns.
+#[derive(Debug, Serialize)]
+pub struct RelationshipView {
+    addr: String,
+    display_name: Option<String>,
+    received_count: i64,
+    received_per_month: Option<f32>,
+    received_first_at: Option<String>,
+    received_last_at: Option<String>,
+    sent_count: i64,
+    sent_last_at: Option<String>,
+    initiated_count: i64,
+    inbound_threads: i64,
+    replied_threads: i64,
+    median_reply_ms: Option<i64>,
+    attention_rows: i64,
+    opened_count: i64,
+    median_read_fraction: Option<f32>,
+    link_clicks: i64,
+    corrections: i64,
+    fatigue_score: Option<f32>,
+    fatigue_reasons: Vec<squelch_core::triage::sender_fatigue::Reason>,
+}
+
+impl From<squelch_core::relationship::Relationship> for RelationshipView {
+    fn from(r: squelch_core::relationship::Relationship) -> Self {
+        let rfc = |at: Option<DateTime<Utc>>| at.map(|at| at.to_rfc3339());
+        Self {
+            addr: r.addr,
+            display_name: r.display_name,
+            received_count: r.received_count,
+            received_per_month: r.received_per_month,
+            received_first_at: rfc(r.received_first_at),
+            received_last_at: rfc(r.received_last_at),
+            sent_count: r.sent_count,
+            sent_last_at: rfc(r.sent_last_at),
+            initiated_count: r.initiated_count,
+            inbound_threads: r.inbound_threads,
+            replied_threads: r.replied_threads,
+            median_reply_ms: r.median_reply_ms,
+            attention_rows: r.attention_rows,
+            opened_count: r.opened_count,
+            median_read_fraction: r.median_read_fraction,
+            link_clicks: r.link_clicks,
+            corrections: r.corrections,
+            fatigue_score: r.fatigue_score,
+            fatigue_reasons: r.fatigue_reasons,
+        }
+    }
+}
+
 /// The wire shape of the reader's contact card. The optional parts are ABSENT,
 /// never null, when there is nothing to say: no mail from them, never written
-/// to, no rule covers them.
+/// to, no rule covers them. `relationship` is the one exception: under the
+/// `understanding` hidden feature it is always present, `null` when the
+/// ledger has no row, so a client can tell an older daemon (no key) from a
+/// person with no history (null). With the feature OFF the key is absent,
+/// which is exactly what an older daemon serves.
 #[derive(Debug, Serialize)]
 pub struct PersonView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relationship: Option<Option<RelationshipView>>,
     addr: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     display_name: Option<String>,
@@ -3741,11 +3913,34 @@ pub async fn get_person(
     if addr.is_empty() || !addr.contains('@') || addr.len() > 320 {
         return Err(ApiError::bad_request("addr must be an email address"));
     }
-    let p = store_call(&state, move |store, account_id| {
-        store.person_record(account_id, &addr)
+    // The ledger computes for everyone and is SHOWN only under the
+    // `understanding` feature (docs/UNDERSTANDING.md §5). Off, it is not even
+    // READ: the card runs exactly the queries it always did, so no fault in
+    // the ledger can cost a mailbox without the flag its contact card.
+    let understanding = state
+        .features()
+        .enabled(squelch_core::features::UNDERSTANDING);
+    let (p, relationship) = store_call(&state, move |store, account_id| {
+        let record = store.person_record(account_id, &addr)?;
+        // A ledger that cannot answer leaves the key off the card (as with
+        // the flag off) rather than failing the whole card. The log line
+        // carries no address: the card is one person's.
+        let relationship = if understanding {
+            match store.relationship(account_id, &addr) {
+                Ok(row) => Some(row),
+                Err(e) => {
+                    eprintln!("squelch: relationship ledger unreadable ({e}); card without it");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        Ok((record, relationship))
     })
     .await?;
     let view = PersonView {
+        relationship: relationship.map(|row| row.map(RelationshipView::from)),
         addr: p.addr,
         display_name: p.display_name,
         is_self: p.is_self,
@@ -3787,6 +3982,72 @@ pub async fn get_person(
         } else {
             None
         },
+    };
+    Ok((no_store(), Json(view)))
+}
+
+// --- GET /client/relationships -----------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct RelationshipsQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    sort: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RelationshipsView {
+    /// Whole days the attention columns cover; under 14 they say little.
+    coverage_days: i64,
+    /// The newest recount among the rows, `null` before the first one.
+    computed_at: Option<String>,
+    rows: Vec<RelationshipView>,
+}
+
+/// The most rows one read returns. The table is one row per correspondent, so
+/// this is a page of the owner's own address book, not a dump of it.
+const RELATIONSHIPS_MAX: usize = 200;
+
+/// GET /client/relationships?limit=50&sort=replies|volume|fatigue|recent — the
+/// relationship ledger, ranked (docs/UNDERSTANDING.md §2.1).
+///
+/// HUMAN DOOR ONLY, like `/client/person` and for its reason: who the owner
+/// answers, how fast, and whose mail they ignore is the correspondent graph
+/// the agent door is never handed. No `/mcp` tool serves any of it (an
+/// invariant test in squelch-mcp holds that). `no-store`, like the card.
+/// `sort` defaults to `replies`; an unknown one is a 400 rather than a quiet
+/// default, so a client typo is not mistaken for an empty ranking.
+///
+/// BEHIND THE `understanding` HIDDEN FEATURE: off, it answers the opaque 404
+/// the memory routes do, before reading anything. The ledger behind it keeps
+/// computing either way.
+pub async fn get_relationships(
+    State(state): State<ApiState>,
+    Query(params): Query<RelationshipsQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    use squelch_core::store::sqlite::relationships::RelationshipSort;
+    if !state
+        .features()
+        .enabled(squelch_core::features::UNDERSTANDING)
+    {
+        return Err(ApiError::not_found());
+    }
+    let sort = match params.sort.as_deref().map(str::trim) {
+        None | Some("") => RelationshipSort::Replies,
+        Some(s) => RelationshipSort::parse(s).ok_or_else(|| {
+            ApiError::bad_request("sort must be replies, volume, fatigue or recent")
+        })?,
+    };
+    let limit = params.limit.unwrap_or(50).clamp(1, RELATIONSHIPS_MAX);
+    let list = store_call(&state, move |store, account_id| {
+        store.list_relationships(account_id, sort, limit)
+    })
+    .await?;
+    let view = RelationshipsView {
+        coverage_days: list.coverage_days,
+        computed_at: list.computed_at.map(|at| at.to_rfc3339()),
+        rows: list.rows.into_iter().map(RelationshipView::from).collect(),
     };
     Ok((no_store(), Json(view)))
 }
@@ -4778,7 +5039,8 @@ pub async fn get_usage(
         // ONE match, so the model label and the prices can never come from
         // different arms: a category priced as Stage-1 but labelled with the
         // notify model would read as a 25x cost regression in the app.
-        let (model, price_in, price_out) = if name == "stage2" {
+        let (model, price_in, price_out) = if squelch_core::metrics::runs_investigation_model(name)
+        {
             (
                 state.stage2_model.as_ref(),
                 state.stage2_price_in_per_mtok,

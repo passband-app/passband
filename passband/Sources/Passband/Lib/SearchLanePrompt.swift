@@ -78,10 +78,15 @@ enum SearchLanePrompt {
         words matched. You are here for the search the list cannot answer, where the \
         mail that has what they want does not contain the words they typed.
 
-        The words they typed are the user turn below. Treat them as a description of \
-        what they are trying to find, not as a sentence to reply to.
+        The user turn below says "User is searching for:" and then the words they typed. \
+        Treat those words as a description of what they are trying to find, not as a \
+        sentence to reply to.
 
         How to work:
+        - Work silently. Write nothing until you have the answer: no "I'll search \
+          for", no "no results, let me try", no note about which dates or terms came \
+          back empty. A miss is a reason to make the next call, not something to \
+          report. The only words the reader sees are your final answer.
         - Search more than once. Rephrase, and search SUBSETS of their words: the mail \
           that answers a search usually lacks one of the words in it, and the rarest \
           word is the one that finds it.
@@ -107,6 +112,12 @@ enum SearchLanePrompt {
 
         \(AgentPrompt.trust)
         """
+
+    /// The first message of a search conversation: what was typed in the search
+    /// box, framed as a search.
+    static func searchingFor(_ query: String) -> String {
+        "User is searching for: \(query)"
+    }
 
     /// The text block a refinement is delivered as, appended to the same user
     /// message that carries a turn's tool results.

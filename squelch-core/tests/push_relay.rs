@@ -1517,6 +1517,74 @@ async fn a_calendar_ping_goes_to_tagged_devices_once() {
     h.stop().await;
 }
 
+/// The morning brief: pushed once, to tagged IPHONES only (an untagged
+/// phone and a Mac row are both skipped), as `"<tag>:brief:<YYYYMMDD>"` with
+/// the relay's brief fallback line, one request per tag so each mailbox keeps
+/// its own banner, and without touching the event cursor.
+#[tokio::test]
+async fn a_brief_ping_goes_to_tagged_iphones_once() {
+    let (base, relay) = spawn_relay().await;
+    let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+    let acct = store.ensure_account("me@example.com").unwrap();
+    let (events, _) = broadcast::channel::<i64>(256);
+    store.attach_event_notifier(events.clone()).unwrap();
+    let (pings, _) = broadcast::channel::<squelch_core::push::BriefPing>(8);
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let pusher = Pusher::for_test(store.clone() as Arc<dyn Store>, acct, &base)
+        .with_brief_pings(pings.subscribe());
+    let handle = tokio::spawn(pusher.run(events.subscribe(), shutdown_rx));
+    let h = Harness {
+        store,
+        acct,
+        shutdown,
+        handle,
+    };
+    h.register(DEV_A);
+    h.register_tagged(DEV_B, "3F2A9C1E-7B44-4D0A-9E21-8C5B6D0F1A32");
+    // A Mac row (the release-push work registers these): never briefed.
+    h.store
+        .upsert_device(
+            h.acct,
+            DEV_C,
+            "macos",
+            Some("3F2A9C1E-7B44-4D0A-9E21-8C5B6D0F1A32"),
+            None,
+        )
+        .unwrap();
+    wait_for("the initial cursor", Duration::from_secs(2), || {
+        h.cursor().is_some()
+    })
+    .await;
+    let cursor = h.cursor();
+
+    pings
+        .send(squelch_core::push::BriefPing {
+            day: chrono::NaiveDate::from_ymd_opt(2026, 11, 5).unwrap(),
+        })
+        .unwrap();
+    wait_for("the brief push", Duration::from_secs(5), || {
+        relay.count() == 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(relay.count(), 1, "one request: untagged and Mac skipped");
+
+    let body = relay.bodies().remove(0);
+    assert_eq!(body["device_tokens"], json!([DEV_B]));
+    assert_eq!(
+        body["event_id"],
+        json!("3F2A9C1E-7B44-4D0A-9E21-8C5B6D0F1A32:brief:20261105")
+    );
+    assert_eq!(body["kind"], json!("brief"));
+    assert_eq!(
+        body["collapse_id"],
+        json!("brief-20261105-3F2A9C1E-7B44-4D0A-9E21-8C5B6D0F1A32")
+    );
+    assert_eq!(h.cursor(), cursor, "a brief ping is not an event");
+
+    h.stop().await;
+}
+
 /// A banner clear: pushed once, to TAGGED devices only, as
 /// `"<tag>:clear:<event id>"` with the relay's silent `clear` kind, and
 /// without touching the event cursor.

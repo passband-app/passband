@@ -123,6 +123,11 @@ pub const USER_PENDING_LIMIT: i64 = 500;
 /// window is what stops a poller from asking the cluster about them forever.
 const FIRST_PAIR_WINDOW_DAYS: i64 = 90;
 
+/// The most people [`ControlStore::retention_facts`] hands the overview. Not a
+/// page size: a beta this size cannot reach it, and it is the bound that stops
+/// one page render from being unbounded memory if that ever stops being true.
+const RETENTION_FACTS_LIMIT: i64 = 10_000;
+
 /// TIMESTAMPS ARE RFC3339 TEXT, AND EVERY ONE OF THEM IS `COLLATE "C"`.
 ///
 /// The shape is [`stamp`]'s and did not change with the engine, because the
@@ -354,7 +359,33 @@ const ADDED_COLUMNS: [(&str, &str); 4] = [
 /// giving a name and there is nothing to backfill one from, so the column
 /// arrives empty for all of them and the board renders those rows exactly as it
 /// did before.
-const USER_ADDED_COLUMNS: [(&str, &str); 1] = [("name", "TEXT")];
+///
+/// THE RETENTION COLUMNS after it are written by the retention poller
+/// ([`crate::retention`]) and nothing else, out of the tenant daemon's own
+/// `token activity` answer. All timestamps, all nullable, because every row
+/// starts out not known:
+///
+/// - `last_seen_at` / `last_action_at`: the newest moment any of this person's
+///   apps connected / DID something (a write on the client door). Only ever
+///   move forward (`GREATEST`), so a daemon that lost its device table does
+///   not make somebody look like they never came back.
+/// - `mac_paired_at` / `ios_paired_at`: the first time an app on that platform
+///   paired. Only ever move back (`LEAST`).
+/// - `activity_read_at`: the last time a daemon actually ANSWERED. NULL means
+///   nothing is known about this person's usage yet (their daemon predates
+///   the command, or the poller has not reached them), which the board says
+///   rather than counting them as inactive.
+/// - `activity_tried_at`: the last time the poller ASKED, whatever came back.
+///   It is the poller's cadence and its backoff in one column.
+const USER_ADDED_COLUMNS: [(&str, &str); 7] = [
+    ("name", "TEXT"),
+    ("last_seen_at", "TEXT COLLATE \"C\""),
+    ("last_action_at", "TEXT COLLATE \"C\""),
+    ("mac_paired_at", "TEXT COLLATE \"C\""),
+    ("ios_paired_at", "TEXT COLLATE \"C\""),
+    ("activity_read_at", "TEXT COLLATE \"C\""),
+    ("activity_tried_at", "TEXT COLLATE \"C\""),
+];
 
 /// The same, for `tenants`: the triage virtual-key columns arrived after the
 /// first hosted deployment, the assistant pair after them, and the share token
@@ -488,6 +519,31 @@ pub struct UserRow {
     /// Activation: when a device that is not the console first paired with this
     /// person's daemon. The top rung of the ladder.
     pub first_paired_at: Option<DateTime<Utc>>,
+    /// Retention, from the person's own daemon (see [`USER_ADDED_COLUMNS`]):
+    /// the last time one of their apps DID something.
+    pub last_action_at: Option<DateTime<Utc>>,
+    /// The last time one of their apps connected at all.
+    pub last_seen_at: Option<DateTime<Utc>>,
+    /// When the Mac app first paired.
+    pub mac_paired_at: Option<DateTime<Utc>>,
+    /// When the iPhone app first paired.
+    pub ios_paired_at: Option<DateTime<Utc>>,
+    /// When their daemon last answered the retention read. `None` means the
+    /// four above are not known yet, as opposed to known to be empty.
+    pub activity_read_at: Option<DateTime<Utc>>,
+}
+
+/// One signed-up person as the retention panel reads them: dates only, no
+/// address and no label, because the panel counts people and names nobody.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionFacts {
+    pub signed_up_at: DateTime<Utc>,
+    pub first_paired_at: Option<DateTime<Utc>>,
+    pub last_action_at: Option<DateTime<Utc>>,
+    pub last_seen_at: Option<DateTime<Utc>>,
+    pub ios_paired_at: Option<DateTime<Utc>>,
+    /// `None`: nothing is known about this person's usage yet.
+    pub activity_read_at: Option<DateTime<Utc>>,
 }
 
 /// What a recorded signup hands back: the row it landed on, the id that row is
@@ -1988,6 +2044,141 @@ impl ControlStore {
         row.map(|r| Ok(r.try_get(0)?)).transpose()
     }
 
+    /// The labels the retention poller should ask about next: signed up, an
+    /// ACTIVE tenant (the activation join, for the same reason), and not asked
+    /// since `asked_before`. Never-asked first, then the longest-unasked, at
+    /// most `limit`.
+    ///
+    /// NO WINDOW, unlike [`ControlStore::users_awaiting_first_pair`]: retention
+    /// is exactly the question of whether somebody from three months ago is
+    /// still here. What bounds the work is `asked_before`, which every outcome
+    /// moves (see [`ControlStore::mark_activity_tried`]), so each person costs
+    /// at most one exec per refresh interval however their daemon answers.
+    pub async fn users_due_activity(
+        &self,
+        limit: i64,
+        asked_before: DateTime<Utc>,
+    ) -> Result<Vec<String>> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT u.tenant_label
+                   FROM users u
+                   JOIN tenants t ON t.label = u.tenant_label AND t.status = $3
+                  WHERE u.signed_up_at IS NOT NULL
+                    AND (u.activity_tried_at IS NULL OR u.activity_tried_at < $1)
+                  ORDER BY u.activity_tried_at ASC NULLS FIRST, u.signed_up_at ASC
+                  LIMIT $2",
+                &[&stamp(asked_before), &limit, &STATUS_ACTIVE],
+            )
+            .await?;
+        rows.iter().map(|r| Ok(r.try_get(0)?)).collect()
+    }
+
+    /// Record what a tenant's daemon said about its apps. `true` when a row
+    /// took it.
+    ///
+    /// MONOTONE, so the daemon's answer can only add to what is known: the
+    /// "last" stamps take the later of stored and reported (`GREATEST`), the
+    /// "first pairing" stamps the earlier (`LEAST`). Both ignore a NULL, so a
+    /// platform the daemon did not mention leaves its column as it was. The
+    /// compare is on `stamp`'s fixed-width text under `COLLATE "C"`, which is
+    /// what makes it chronological.
+    ///
+    /// The timestamps are the DAEMON'S, never `now`; `now` is only when we
+    /// heard.
+    pub async fn record_activity(
+        &self,
+        tenant_label: &str,
+        activity: &crate::warden::ClientActivity,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        let opt = |t: Option<DateTime<Utc>>| t.map(stamp);
+        let changed = self
+            .client()
+            .await?
+            .execute(
+                "UPDATE users SET
+                    last_seen_at = GREATEST(last_seen_at, $2),
+                    last_action_at = GREATEST(last_action_at, $3),
+                    mac_paired_at = LEAST(mac_paired_at, $4),
+                    ios_paired_at = LEAST(ios_paired_at, $5),
+                    first_paired_at = LEAST(first_paired_at, $7),
+                    activity_read_at = $6,
+                    activity_tried_at = $6
+                  WHERE tenant_label = $1",
+                &[
+                    &tenant_label,
+                    &opt(activity.last_seen_at()),
+                    &opt(activity.last_action_at()),
+                    &opt(activity.mac.map(|p| p.first_paired_at)),
+                    &opt(activity.ios.map(|p| p.first_paired_at)),
+                    &stamp(now),
+                    // The activation poller only reaches the 25 oldest
+                    // unpaired signups, so a newer one can act for weeks with
+                    // no first pairing on file. The daemon's own answer fills
+                    // it, and the panel's "of N activated" counts them.
+                    &opt(activity.first_paired_at),
+                ],
+            )
+            .await?;
+        Ok(changed == 1)
+    }
+
+    /// Record that the poller asked about this tenant and learned nothing it
+    /// can store (an old daemon, a pod mid-roll, a warden error). Moves the
+    /// cadence column only; what is known stays exactly as it was.
+    pub async fn mark_activity_tried(&self, tenant_label: &str, now: DateTime<Utc>) -> Result<()> {
+        self.client()
+            .await?
+            .execute(
+                "UPDATE users SET activity_tried_at = $2 WHERE tenant_label = $1",
+                &[&tenant_label, &stamp(now)],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Every signed-up person's retention dates, for the overview's panel.
+    ///
+    /// UNCAPPED BY THE LISTING, on purpose: [`ControlStore::list_users`] keeps
+    /// the newest [`USER_APPROVED_LIMIT`] approved rows, and a cohort table cut
+    /// at that would quietly drop the oldest cohorts' people. Signed up is
+    /// coalesced through the invite exactly as [`USER_COLUMNS`] does it, so the
+    /// panel and the funnel agree on who signed up.
+    pub async fn retention_facts(&self) -> Result<Vec<RetentionFacts>> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT COALESCE(u.signed_up_at, i.used_at) AS signed_up,
+                        u.first_paired_at, u.last_action_at, u.last_seen_at,
+                        u.ios_paired_at, u.activity_read_at
+                   FROM users u LEFT JOIN invite_codes i ON i.id = u.invite_id
+                  WHERE COALESCE(u.signed_up_at, i.used_at) IS NOT NULL
+                  ORDER BY signed_up DESC
+                  LIMIT $1",
+                &[&RETENTION_FACTS_LIMIT],
+            )
+            .await?;
+        let opt = |r: &Row, i: usize| -> Result<Option<DateTime<Utc>>> {
+            Ok(r.try_get::<_, Option<String>>(i)?.map(parse_ts))
+        };
+        rows.iter()
+            .map(|r| {
+                Ok(RetentionFacts {
+                    signed_up_at: parse_ts(r.try_get::<_, String>(0)?),
+                    first_paired_at: opt(r, 1)?,
+                    last_action_at: opt(r, 2)?,
+                    last_seen_at: opt(r, 3)?,
+                    ios_paired_at: opt(r, 4)?,
+                    activity_read_at: opt(r, 5)?,
+                })
+            })
+            .collect()
+    }
+
     /// The labels whose owners have signed up and have not paired a device yet,
     /// oldest signup first, at most `limit` of them.
     ///
@@ -2059,6 +2250,12 @@ fn user_row(r: &Row) -> Result<UserRow> {
         // POSITIONALLY, so slotting a column into the middle would silently
         // re-point every field after it at its neighbour's value.
         name: r.try_get(11)?,
+        // And the retention columns after THAT, for the same reason.
+        last_action_at: r.try_get::<_, Option<String>>(12)?.map(parse_ts),
+        last_seen_at: r.try_get::<_, Option<String>>(13)?.map(parse_ts),
+        mac_paired_at: r.try_get::<_, Option<String>>(14)?.map(parse_ts),
+        ios_paired_at: r.try_get::<_, Option<String>>(15)?.map(parse_ts),
+        activity_read_at: r.try_get::<_, Option<String>>(16)?.map(parse_ts),
     })
 }
 
@@ -2112,7 +2309,8 @@ fn tenant_row(r: &Row) -> Result<TenantRow> {
 const USER_COLUMNS: &str = "u.id, u.email, u.created_at, u.status, u.approved_at,
         u.invite_id, u.notified_at,
         COALESCE(u.signed_up_at, i.used_at), COALESCE(u.tenant_label, i.used_by_label),
-        u.account_email, u.first_paired_at, u.name
+        u.account_email, u.first_paired_at, u.name,
+        u.last_action_at, u.last_seen_at, u.mac_paired_at, u.ios_paired_at, u.activity_read_at
    FROM users u LEFT JOIN invite_codes i ON i.id = u.invite_id";
 
 /// Bring an older database's tables up to the schema above.
@@ -4271,6 +4469,154 @@ SQUELCH_TEST_PG_URL is not set, and these tests run against a real Postgres.
         // anybody turning it off.
         assert!(s.mark_user_first_paired("ada", now()).await.unwrap());
         assert!(s.users_awaiting_first_pair(25).await.unwrap().is_empty());
+    }
+
+    /// The retention poller's candidate set: signed up with an active tenant,
+    /// never asked first, and gone until the refresh interval once asked,
+    /// whatever the answer was.
+    #[tokio::test]
+    async fn retention_asks_each_live_signup_once_per_interval() {
+        let s = store().await;
+        s.add_user_waiting("waiting@example.com", None)
+            .await
+            .unwrap();
+        for (i, label) in ["ada", "bea", "old"].iter().enumerate() {
+            s.insert_tenant(label, &format!("{label}@example.com"))
+                .await
+                .unwrap();
+            s.record_signup(
+                500 + i as i64,
+                &format!("{label}@example.com"),
+                label,
+                now() - days(200 - i as i64),
+            )
+            .await
+            .unwrap();
+        }
+        // No tenant row: nowhere to ask.
+        s.record_signup(600, "ghost@example.com", "ghost", now())
+            .await
+            .unwrap();
+        // Torn down.
+        s.insert_tenant("grace", "grace@example.com").await.unwrap();
+        s.record_signup(601, "grace@example.com", "grace", now())
+            .await
+            .unwrap();
+        s.client()
+            .await
+            .unwrap()
+            .execute(
+                "UPDATE tenants SET status = 'stopped' WHERE label = 'grace'",
+                &[],
+            )
+            .await
+            .unwrap();
+
+        let cutoff = now() - chrono::Duration::hours(4);
+        // No window: a signup from 200 days ago is exactly who retention is
+        // about. Oldest signup first among the never-asked.
+        assert_eq!(
+            s.users_due_activity(25, cutoff).await.unwrap(),
+            vec!["ada", "bea", "old"]
+        );
+        assert_eq!(s.users_due_activity(1, cutoff).await.unwrap(), vec!["ada"]);
+
+        // Asked: an answer and a non-answer both take the row out.
+        s.record_activity("ada", &crate::warden::ClientActivity::default(), now())
+            .await
+            .unwrap();
+        s.mark_activity_tried("bea", now()).await.unwrap();
+        assert_eq!(s.users_due_activity(25, cutoff).await.unwrap(), vec!["old"]);
+        // And back once the interval has passed, longest-unasked first.
+        s.mark_activity_tried("old", now() - days(1)).await.unwrap();
+        assert_eq!(
+            s.users_due_activity(25, now() + chrono::Duration::hours(1))
+                .await
+                .unwrap(),
+            vec!["old", "ada", "bea"]
+        );
+    }
+
+    /// What the daemon reports lands monotonically: "last" only moves later,
+    /// "first" only earlier, and a platform it did not mention keeps its
+    /// column. A tried-but-unanswered read moves nothing but the cadence.
+    #[tokio::test]
+    async fn activity_is_recorded_monotonically_with_the_daemons_dates() {
+        use crate::warden::{ClientActivity, PlatformActivity};
+        let s = store().await;
+        let n = now();
+        s.insert_tenant("ada", "ada@example.com").await.unwrap();
+        let rec = s
+            .record_signup(404, "ada@example.com", "ada", n - days(30))
+            .await
+            .unwrap();
+        let row = || async { s.user_entry(rec.user_id).await.unwrap().unwrap() };
+
+        s.mark_activity_tried("ada", n).await.unwrap();
+        let r = row().await;
+        assert_eq!(r.activity_read_at, None, "asked is not answered");
+        assert_eq!(r.last_action_at, None);
+
+        let t = |d: i64| n - days(d);
+        let first = ClientActivity {
+            first_paired_at: Some(t(29)),
+            mac: Some(PlatformActivity {
+                first_paired_at: t(29),
+                last_seen_at: Some(t(2)),
+                last_action_at: Some(t(3)),
+            }),
+            ios: Some(PlatformActivity {
+                first_paired_at: t(20),
+                last_seen_at: Some(t(1)),
+                last_action_at: None,
+            }),
+        };
+        assert!(s.record_activity("ada", &first, n).await.unwrap());
+        let r = row().await;
+        assert_eq!(r.last_seen_at, Some(t(1)));
+        assert_eq!(r.last_action_at, Some(t(3)));
+        assert_eq!(r.mac_paired_at, Some(t(29)));
+        assert_eq!(r.ios_paired_at, Some(t(20)));
+        assert_eq!(r.activity_read_at, Some(n));
+        assert_eq!(
+            r.first_paired_at,
+            Some(t(29)),
+            "the daemon's first pairing fills it"
+        );
+
+        // A later answer that knows less (the phone gone, older stamps) takes
+        // nothing back; a newer action moves forward.
+        let second = ClientActivity {
+            first_paired_at: Some(t(29)),
+            mac: Some(PlatformActivity {
+                first_paired_at: t(10),
+                last_seen_at: Some(t(5)),
+                last_action_at: Some(t(0)),
+            }),
+            ios: None,
+        };
+        assert!(s.record_activity("ada", &second, n).await.unwrap());
+        let r = row().await;
+        assert_eq!(r.last_seen_at, Some(t(1)), "never moves back");
+        assert_eq!(r.last_action_at, Some(t(0)), "moves forward");
+        assert_eq!(r.mac_paired_at, Some(t(29)), "first stays first");
+        assert_eq!(
+            r.ios_paired_at,
+            Some(t(20)),
+            "an unmentioned platform stays"
+        );
+
+        assert!(
+            !s.record_activity("nobody", &second, n).await.unwrap(),
+            "a label with no funnel row takes nothing"
+        );
+
+        let facts = s.retention_facts().await.unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].signed_up_at, n - days(30));
+        assert_eq!(facts[0].last_action_at, Some(t(0)));
+        assert_eq!(facts[0].ios_paired_at, Some(t(20)));
+        assert_eq!(facts[0].activity_read_at, Some(n));
     }
 
     /// The shape this crate wrote before `users` existed: a `waitlist` table

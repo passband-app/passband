@@ -27,6 +27,7 @@ scrape_configs:
       - targets:
           - https://signup.passband.app/healthz
           - https://warden.passband.app/healthz
+          - https://relay.squelch.sh/healthz
           - https://passband.app/
     relabel_configs:
       - source_labels: [__address__]

@@ -1508,6 +1508,18 @@ pub const FYE_HEADLINE_USAGE_CATEGORY: &str = "fye_headline";
 /// notify rates nor Stage-1's: the fourth arm of both cost estimators.
 pub const SMART_CLEAR_USAGE_CATEGORY: &str = "smart_clear";
 
+/// The owner-profile pass (docs/UNDERSTANDING.md §2.3). Runs the configured
+/// INVESTIGATION model, the one stage 2 runs, so both cost estimators price it
+/// at the stage-2 rates ([`runs_investigation_model`]); left to fall through it
+/// would be costed at Stage-1's.
+pub const PROFILE_USAGE_CATEGORY: &str = "profile";
+
+/// Does this ledger category run the investigation model (stage 2's)? The one
+/// list both cost estimators consult, for the reason [`runs_notify_model`] is.
+pub fn runs_investigation_model(category: &str) -> bool {
+    category == "stage2" || category == PROFILE_USAGE_CATEGORY
+}
+
 /// Does this ledger category run [`crate::config::NotifyConfig::model`]? The
 /// ONE list both cost estimators consult, so a small-model category cannot be
 /// priced as small in one and as Stage-1 in the other.
@@ -1541,7 +1553,7 @@ pub fn estimate_cost_usd(usage: &[LlmCategoryUsage], config: &Config) -> f64 {
     usage
         .iter()
         .map(|u| {
-            let (price_in, price_out) = if u.category == "stage2" {
+            let (price_in, price_out) = if runs_investigation_model(&u.category) {
                 (
                     config.stage2.price_in_per_mtok,
                     config.stage2.price_out_per_mtok,

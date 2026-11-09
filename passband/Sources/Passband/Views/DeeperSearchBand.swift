@@ -68,16 +68,19 @@ struct DeeperSearchBand: View {
             RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(Palette.hairline, lineWidth: 0.75)
         )
-        // THE WHOLE BOX IS THE WAY INTO THE CHAT, on a shell that hosts its
-        // own (the phone): a tap anywhere but on an email card, or on one of
-        // the box's own buttons, opens the conversation. Those are Buttons and
-        // take their own taps first; this hears only what lands between them.
-        // Only once there is a conversation the chat can take.
+        // THE WHOLE BOX IS THE WAY INTO THE CHAT: a click anywhere but on an
+        // email card, or on one of the box's own buttons, opens the
+        // conversation (full screen on the Mac, a push on the phone). Those
+        // are Buttons and take their own clicks first; this hears only what
+        // lands between them. Only once there is a conversation to open.
         .contentShape(RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
         .onTapGesture {
-            guard let openInChat, tapOpensChat else { return }
-            openInChat()
+            guard tapOpensChat else { return }
+            (openInChat ?? store.openSearchLaneInChat)()
         }
+        #if os(macOS)
+            .pointerStyle(tapOpensChat ? .link : nil)
+        #endif
         .padding(.horizontal, expanded ? 0 : Space.s14)
         .padding(.bottom, expanded ? 0 : Space.s8)
         // STRUCTURE ONLY, for AskBar's reason: rows arriving is a change worth
@@ -89,12 +92,12 @@ struct DeeperSearchBand: View {
 
     private var header: some View {
         HStack(spacing: Space.scaled(7)) {
-            Image(systemName: "sparkles")
-                .font(Typo.ui(11, weight: .semibold))
-                .foregroundStyle(Palette.accent)
-            Text("Deeper search")
-                .font(Typo.row)
-                .foregroundStyle(Palette.inkFaint)
+            // The wordmark's face ("passband" in the mail bar), lowercase and
+            // bare like it. Sparkles in accent blue read as an ad for the
+            // feature sitting on top of the answer.
+            Text("deeper search")
+                .font(Typo.serif(19, weight: .medium))
+                .foregroundStyle(Palette.ink)
             if let reason {
                 Text(reason)
                     .font(Typo.micro)
@@ -147,9 +150,12 @@ struct DeeperSearchBand: View {
     }
 
     /// The box's background tap goes to the chat: the same moment the expand
-    /// button is offered and enabled.
+    /// button is offered and enabled. The Mac's bar can watch a lane that is
+    /// still answering, so there that is any time the button is live.
     private var tapOpensChat: Bool {
-        search.laneStarted && !session.transcript.isEmpty && hostedChatOffered && hostedChatReady
+        guard search.laneStarted && !session.transcript.isEmpty else { return false }
+        if openInChat == nil { return store.canOpenSearchLaneInChat }
+        return hostedChatOffered && hostedChatReady
     }
 
     /// A caller-owned chat is offered once the lane has stopped talking: there
@@ -169,7 +175,9 @@ struct DeeperSearchBand: View {
     @ViewBuilder
     private var content: some View {
         if !search.laneStarted {
-            offer
+            // Automatic is about to start on its own (QueryReadiness is
+            // waiting the reader out), so there is nothing to offer.
+            if prefs.deeperSearch == .onRequest { offer }
         } else {
             // The status line, while there is work to say something about.
             if session.running, let tool = latestTool {
@@ -195,10 +203,16 @@ struct DeeperSearchBand: View {
                 }
             }
             if let line = answerLine, !line.isEmpty {
+                // Selectable on the phone, where a long press selects and a tap
+                // still opens the chat. On the Mac a click into selectable text
+                // is a selection, not the box's click, and the full answer is
+                // one click away in the chat, selectable there.
                 Text(line)
                     .font(Typo.row)
                     .foregroundStyle(Palette.ink)
-                    .textSelection(.enabled)
+                    #if os(iOS)
+                        .textSelection(.enabled)
+                    #endif
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -208,39 +222,44 @@ struct DeeperSearchBand: View {
         }
     }
 
+    /// On the Mac there is no button: ⌘↩ asks, as the panel's "Ask agent"
+    /// corner says too.
+    #if os(macOS)
+        private static let offerLine = "Press ⌘↩ to have the agent read the mail and answer this."
+    #else
+        private static let offerLine = "Read the mail itself and answer this?"
+    #endif
+
     /// The on-request posture: the band says what it could do and waits to be
     /// asked. Nothing has been spent at this point, and nothing will be until
-    /// this is pressed.
+    /// the reader asks.
     @ViewBuilder
     private var offer: some View {
         HStack(spacing: Space.s8) {
-            Text("Read the mail itself and answer this?")
+            Text(Self.offerLine)
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaint)
             Spacer(minLength: Space.s4)
+            // No button on the Mac: the panel's own "Ask agent ⌘↩" in its
+            // bottom corner is the way in, and two ways to say it was clutter.
+            #if os(iOS)
             if let trigger = offeredTrigger {
-                #if os(macOS)
-                    Button("ask the agent") { store.startDeeperSearch(trigger: trigger) }
-                        .buttonStyle(.glass)
+                // PLAIN, with the glass painted by hand. On the phone the
+                // band is a List row, and a Button of any other style in a
+                // row can take a tap anywhere on the row: a stray tap would
+                // spend a model call the reader never asked for.
+                Button { store.startDeeperSearch(trigger: trigger) } label: {
+                    Text("ask the agent")
                         .font(Typo.chip)
-                        .help("Runs the assistant over these results. It costs a model call.")
-                #else
-                    // PLAIN, with the glass painted by hand. On the phone the
-                    // band is a List row, and a Button of any other style in a
-                    // row can take a tap anywhere on the row: a stray tap would
-                    // spend a model call the reader never asked for.
-                    Button { store.startDeeperSearch(trigger: trigger) } label: {
-                        Text("ask the agent")
-                            .font(Typo.chip)
-                            .foregroundStyle(Palette.ink)
-                            .padding(.horizontal, Space.s12)
-                            .padding(.vertical, Space.s6)
-                            .glassCapsule()
-                            .contentShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                #endif
+                        .foregroundStyle(Palette.ink)
+                        .padding(.horizontal, Space.s12)
+                        .padding(.vertical, Space.s6)
+                        .glassCapsule()
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
             }
+            #endif
         }
     }
 

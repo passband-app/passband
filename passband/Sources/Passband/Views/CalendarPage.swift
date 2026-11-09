@@ -386,7 +386,7 @@
                 scrollTarget = rows[i].id
                 return true
             }
-            return modeBindings() + writeBindings(selected: selected, day: nil) + [
+            return modeBindings() + writeBindings(selected: selected, day: nil) + changeBindings(selected: selected) + [
                 KeyBinding(declining: "j", "next") { step(+1) },
                 KeyBinding(declining: "k", "previous") { step(-1) },
                 KeyBinding(declining: "ArrowDown", "next") { step(+1) },
@@ -429,6 +429,26 @@
                 KeyBinding(declining: "Backspace", "delete event") {
                     guard free(), let event = selected?.event, CalendarWrite.canEdit(event) else { return false }
                     store.askDeleteEvent(event)
+                    return true
+                },
+            ]
+        }
+
+        /// ⇧A and ⇧K, on all three: accept, or keep mine, a change another
+        /// sender's mail offers on the selected card (`LinkedChange`). Exact
+        /// case, and declining where nothing is offered, so a bare `a` is
+        /// still the agenda and `k` still steps back.
+        private func changeBindings(selected: AgendaItem?) -> [KeyBinding] {
+            let free = { !store.modalOverlayOpen && !store.eventPaneOpen }
+            return [
+                KeyBinding(declining: "A", "accept the change", exactCase: true) {
+                    guard free(), let change = selected?.pendingChange else { return false }
+                    Task { await store.answerLinkedChange(change, accept: true, viaKey: true) }
+                    return true
+                },
+                KeyBinding(declining: "K", "keep mine", exactCase: true) {
+                    guard free(), let change = selected?.pendingChange else { return false }
+                    Task { await store.answerLinkedChange(change, accept: false, viaKey: true) }
                     return true
                 },
             ]
@@ -478,7 +498,7 @@
                 store.calendarMonthItem = order[i].id
                 return true
             }
-            return modeBindings() + writeBindings(selected: item, day: day) + [
+            return modeBindings() + writeBindings(selected: item, day: day) + changeBindings(selected: item) + [
                 KeyBinding(declining: "ArrowLeft", "previous day") { move(.days(-1)) },
                 KeyBinding(declining: "ArrowRight", "next day") { move(.days(1)) },
                 KeyBinding(declining: "ArrowUp", "a week back") { move(.days(-7)) },
@@ -532,7 +552,7 @@
                 store.calendarMonthItem = id
                 return true
             }
-            return modeBindings() + writeBindings(selected: item, day: day) + [
+            return modeBindings() + writeBindings(selected: item, day: day) + changeBindings(selected: item) + [
                 KeyBinding(declining: "ArrowLeft", "previous day") { move(.days(-1)) },
                 KeyBinding(declining: "ArrowRight", "next day") { move(.days(1)) },
                 KeyBinding(declining: "ArrowUp", "previous") { step(-1) },
@@ -725,6 +745,9 @@
                 }
                 if item.unverified {
                     UnverifiedMark()
+                }
+                if item.pendingChange != nil {
+                    ChangeOfferedMark()
                 }
             }
             .lineLimit(1)

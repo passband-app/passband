@@ -4,7 +4,8 @@ import SwiftUI
 /// card over the real board while the daemon works through the mail. The board
 /// stays live and blurred underneath (`AppStore.modalOverlayOpen`), so what
 /// this card counts is filling in behind it. It goes by itself when the
-/// catch-up ends, or at "Start now", Enter or Esc.
+/// catch-up ends, or at "Start now", Enter or Esc. On the Mac a second card
+/// beside it offers the iPhone app (`FirstLoadIPhoneCard`) while they wait.
 struct FirstLoadVeil: View {
     @Environment(AppStore.self) private var store
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -14,47 +15,11 @@ struct FirstLoadVeil: View {
 
     var body: some View {
         OverlayScrim(onDismiss: { firstLoad.dismiss(store) }) {
-            ModalCard(width: 640) {
-                VStack(alignment: .leading, spacing: Space.scaled(22)) {
-                    Label("PASSBAND", systemImage: "sparkles")
-                        .font(Typo.sectionLabel)
-                        .tracking(2)
-                        .foregroundStyle(Palette.accentInk)
-                    VStack(alignment: .leading, spacing: Space.s10) {
-                        Text(firstLoad.finishing ? "Your inbox is ready." : "Working through your inbox.")
-                            .font(Typo.serif(32, weight: .medium))
-                            .foregroundStyle(Palette.ink)
-                            .contentTransition(.opacity)
-                        Text("Your board is filling in behind this. Start whenever you like.")
-                            .font(Typo.ui(15))
-                            .foregroundStyle(Palette.inkDim)
-                    }
-                    progress
-                    if let shown = firstLoad.snapshot {
-                        HStack(spacing: Space.s10) {
-                            tile(shown.sorted, "emails sorted", "tray", Palette.accent)
-                            tile(shown.noise, "set aside as noise", "moon", Palette.positive)
-                            tile(shown.attention, "need your attention", "eye", Palette.accentInk)
-                        }
-                        .animation(reduceMotion ? nil : .easeOut(duration: 0.35), value: shown)
-                    }
-                    if let trouble {
-                        Label(trouble, systemImage: store.refreshError != nil ? "wifi.exclamationmark" : "exclamationmark.circle")
-                            .font(Typo.ui(13))
-                            .foregroundStyle(Palette.inkDim)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    HStack(spacing: Space.s14) {
-                        Button("Start now") { firstLoad.dismiss(store) }
-                            .buttonStyle(.borderedProminent)
-                        KeyHint("enter", "start now")
-                    }
-                }
-                .padding(Space.s14)
-            }
-            .opacity(appeared ? 1 : 0)
-            .scaleEffect(appeared || reduceMotion ? 1 : 0.96)
-            .offset(y: appeared || reduceMotion ? 0 : 12)
+            pair
+                .opacity(appeared ? 1 : 0)
+                .scaleEffect(appeared || reduceMotion ? 1 : 0.96)
+                .offset(y: appeared || reduceMotion ? 0 : 12)
+                .padding(Space.s24)
         }
         .onAppear {
             withAnimation(reduceMotion ? nil : .easeOut(duration: 0.45)) { appeared = true }
@@ -64,6 +29,88 @@ struct FirstLoadVeil: View {
             KeyBinding("Enter", "start now") { firstLoad.dismiss(store) },
             KeyBinding("Escape", "close") { firstLoad.dismiss(store) },
         ])
+    }
+
+    /// ON THE MAC, A PAIR: the progress on the left and, beside it, the iPhone
+    /// card (`FirstLoadIPhoneCard`, TestFlightNudge's rules), on one top edge and
+    /// one height. A window too narrow for both shows the progress alone, and
+    /// the ad goes to the corner card instead (`TestFlightNudge.veilEnded`).
+    /// A phone already connected: the progress alone, centred, as it always was.
+    @ViewBuilder private var pair: some View {
+        #if os(macOS)
+            // The forced preview shows the pair whatever this Mac's daemon
+            // says, so it can be looked at from a desk whose phone is paired.
+            if TestFlightNudge.shared.offeredInVeil, FirstLoad.forced || store.iosConnected != true {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: Space.s24) {
+                        progressCard
+                            .frame(maxHeight: .infinity, alignment: .top)
+                        FirstLoadIPhoneCard()
+                            .frame(maxHeight: .infinity)
+                    }
+                    // One height for both: each card fills the taller's.
+                    .fixedSize(horizontal: false, vertical: true)
+                    alone
+                }
+                .transition(.opacity)
+            } else {
+                alone
+            }
+        #else
+            alone
+        #endif
+    }
+
+    /// The progress card on its own, at its own height (it fills a pair's).
+    private var alone: some View {
+        progressCard.fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var progressCard: some View {
+        ModalCard(width: 640) {
+            VStack(alignment: .leading, spacing: Space.scaled(22)) {
+                // The Sitrep masthead's wordmark, as it is there.
+                Text("passband")
+                    .font(Typo.serif(19, weight: .medium))
+                    .foregroundStyle(Palette.ink)
+                VStack(alignment: .leading, spacing: Space.s10) {
+                    Text(firstLoad.finishing ? "Your inbox is ready." : "Working through your inbox.")
+                        .font(Typo.serif(32, weight: .medium))
+                        .foregroundStyle(Palette.ink)
+                        .contentTransition(.opacity)
+                    Text("Your board is filling in behind this. Start whenever you like.")
+                        .font(Typo.ui(15))
+                        .foregroundStyle(Palette.inkDim)
+                }
+                progress
+                if let shown = firstLoad.snapshot {
+                    HStack(spacing: Space.s10) {
+                        tile(shown.sorted, "emails sorted", "tray", Palette.accent)
+                        tile(shown.noise, "set aside as noise", "moon", Palette.positive)
+                        tile(shown.attention, "need your attention", "eye", Palette.accentInk)
+                    }
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.35), value: shown)
+                }
+                if let trouble {
+                    Label(trouble, systemImage: store.refreshError != nil ? "wifi.exclamationmark" : "exclamationmark.circle")
+                        .font(Typo.ui(13))
+                        .foregroundStyle(Palette.inkDim)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                // On the floor of a card stretched to the pair's height. One
+                // stack, so the spacer does not cost a second gap of its own.
+                VStack(alignment: .leading, spacing: 0) {
+                    Spacer(minLength: 0)
+                    HStack(spacing: Space.s14) {
+                        Button("Start now") { firstLoad.dismiss(store) }
+                            .buttonStyle(.borderedProminent)
+                        KeyHint("enter", "start now")
+                    }
+                }
+            }
+            .padding(Space.s14)
+            .frame(maxHeight: .infinity, alignment: .top)
+        }
     }
 
     /// The bar, and under it how far along and roughly how long is left. The

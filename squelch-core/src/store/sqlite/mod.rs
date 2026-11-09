@@ -650,15 +650,15 @@ use crate::metrics::{NotifyDecision, NotifyLane};
 use crate::store::SmartBlockMemo;
 use crate::store::{
     AccountIdentity, AccountPhoto, AgentDraftOutcome, AttachmentBytes, BankingApplied,
-    BlankBodyScan, ClientActed, ClientPlatform, ClientSeen, ClientTag, ContactEntry, Device,
-    DeviceToken, Draft, DraftFields, DraftKey, ExtractQueued, FtsQuery, HealScope, InboxUnread,
-    IssuedDeviceToken, LeggedHit, MailActivityDay, MarketingApplied, MarketingOffer,
-    MessageMissingRecipients, MessageOpen, MessageUnsub, MintedPairingCode, MissingVector,
-    NewAuditEntry, NewEvent, NewNotifyDecision, NotifyDecisionRow, PersonNamed, SPAM_SYNCED_AT_KEY,
-    SealedBody, SealedMessage, SearchDiagnostics, SearchFilter, SearchSort, SenderDigestRow,
-    SenderDomainEntry, SenderEntry, SentMessage, Stage1Applied, Stage2CapOverrides, Stage2Usage,
-    Stage2UsageDay, Store, SyncState, TermDf, TrackedMessage, TriageDebug, TriagedMessage,
-    UsageTokens,
+    BlankBodyScan, ClientActed, ClientActivity, ClientPlatform, ClientSeen, ClientTag,
+    ContactEntry, Device, DeviceToken, Draft, DraftFields, DraftKey, ExtractQueued, FtsQuery,
+    HealScope, InboxUnread, IssuedDeviceToken, LeggedHit, MailActivityDay, MarketingApplied,
+    MarketingOffer, MessageMissingRecipients, MessageOpen, MessageUnsub, MintedPairingCode,
+    MissingVector, NewAuditEntry, NewEvent, NewNotifyDecision, NotifyDecisionRow, PersonNamed,
+    PlatformActivity, SPAM_SYNCED_AT_KEY, SealedBody, SealedMessage, SearchDiagnostics,
+    SearchFilter, SearchSort, SenderDigestRow, SenderDomainEntry, SenderEntry, SentMessage,
+    Stage1Applied, Stage2CapOverrides, Stage2Usage, Stage2UsageDay, Store, SyncState, TermDf,
+    TrackedMessage, TriageDebug, TriagedMessage, UsageTokens,
 };
 use crate::triage::rule_suggest::SmartBlock;
 use crate::types::{
@@ -1463,12 +1463,41 @@ impl Store for SqliteStore {
         self.list_ghost_events(account_id, from, to)
     }
 
+    fn list_ghost_events_with_links(
+        &self,
+        account_id: AccountId,
+        from: DateTime<chrono::FixedOffset>,
+        to: DateTime<chrono::FixedOffset>,
+    ) -> Result<Vec<crate::types::GhostEvent>> {
+        self.list_ghost_events_with_links(account_id, from, to)
+    }
+
     fn ghost_url_refs(
         &self,
         account_id: AccountId,
         ids: &[i64],
     ) -> Result<std::collections::HashMap<i64, Vec<String>>> {
         self.ghost_url_refs(account_id, ids)
+    }
+
+    fn event_identity_candidates(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        records: &[crate::triage::ghost::GhostProposal],
+    ) -> Result<crate::triage::event_identity::Questions> {
+        self.event_identity_candidates(account_id, message_id, records)
+    }
+
+    fn resolve_linked_change(
+        &self,
+        account_id: AccountId,
+        shown: i64,
+        from: i64,
+        accept: bool,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.resolve_linked_change(account_id, shown, from, accept, at)
     }
 
     fn patch_ghost_user(

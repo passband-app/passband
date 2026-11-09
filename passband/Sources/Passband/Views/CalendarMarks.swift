@@ -214,3 +214,16 @@ struct UnverifiedMark: View {
             .accessibilityHint("The mail this came from did not pass sender authentication.")
     }
 }
+
+/// Another sender's mail about this event says something different, and the
+/// card offers it to accept or turn down (`LinkedChange`). A word in the
+/// faint ink, like the band: the row is not changed until the user says so.
+struct ChangeOfferedMark: View {
+    var body: some View {
+        Text("change offered")
+            .font(Typo.micro)
+            .foregroundStyle(Palette.inkFaint)
+            .help("Another sender's mail about this event says something different. Open it to accept or keep yours.")
+            .accessibilityHint("Another sender's mail about this event says something different.")
+    }
+}

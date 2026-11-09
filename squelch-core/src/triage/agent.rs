@@ -14,10 +14,10 @@ use std::collections::{BTreeMap, BTreeSet};
 /// The version of the prompt with the `understanding` flag ON: the file plus
 /// [`UNDERSTANDING_SEGMENTS`]. A const because a const is what a stored string
 /// is compared against; what a run reports is [`prompt_version`].
-pub const PROMPT_VERSION: &str = "agent-triage-v21";
+pub const PROMPT_VERSION: &str = "agent-triage-v23";
 /// The version of the prompt with the flag OFF: the prompt file alone, byte
 /// for byte main's (a test pins that), so it keeps main's version string.
-pub const PROMPT_VERSION_BASE: &str = "agent-triage-v19";
+pub const PROMPT_VERSION_BASE: &str = "agent-triage-v22";
 
 /// The version a run reports, by the variant it ran: decisions and their
 /// diagnostics carry it, and an eval groups gold runs by it, so two different
@@ -882,6 +882,14 @@ pub fn normalize_decision(decision: &mut MessageDecision) {
         decision.auth.critical = false;
     }
     event_dates_are_not_deadlines(decision);
+    // The identity verdict is the identity check's alone
+    // (`triage::event_identity`), added after this. One in the agent's own
+    // answer came from the mail it read, and would link anywhere it named.
+    for record in &mut decision.records {
+        if let RecordProposal::Event { identity, .. } = record {
+            *identity = None;
+        }
+    }
 }
 
 /// A ticket's date is when the event happens, not when anything is due: it
@@ -1893,7 +1901,7 @@ mod tests {
                 PROMPT_VERSION_BASE,
                 PROMPT_VERSION
             ),
-            (2_000, "agent-triage-v19", "agent-triage-v21")
+            (2_000, "agent-triage-v22", "agent-triage-v23")
         );
     }
     /// OFF IS THE PROMPT AS IT WAS. With the `understanding` flag off, both
@@ -2369,6 +2377,7 @@ mod tests {
             identity_refs: vec![],
             likelihood: None,
             evidence: vec![],
+            identity: None,
         }
     }
     fn day(value: &str) -> Option<SupportedTime> {
@@ -2427,6 +2436,25 @@ mod tests {
         normalize_decision(&mut invited);
         assert_eq!(invited.attention.factors.attention_at, day("2026-11-06"));
         assert!(invited.attention.show_in_fye);
+    }
+    /// The agent never supplies an identity verdict: mail it read could put
+    /// one there naming any ghost, and the store would follow it.
+    #[test]
+    fn an_identity_verdict_in_the_agents_answer_is_dropped() {
+        let mut decision = valid();
+        let mut record = ticket("2026-11-06", EventCommitment::Committed);
+        if let RecordProposal::Event { identity, .. } = &mut record {
+            *identity = Some(crate::triage::decision::EventIdentity {
+                offered: vec![42],
+                same_as: Some(42),
+            });
+        }
+        decision.records = vec![record];
+        normalize_decision(&mut decision);
+        assert!(matches!(
+            &decision.records[0],
+            RecordProposal::Event { identity: None, .. }
+        ));
     }
     #[test]
     fn reading_kind_is_offered_and_defaults_on_stored_rows() {

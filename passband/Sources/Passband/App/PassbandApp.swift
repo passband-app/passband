@@ -345,7 +345,7 @@ struct PassbandCommands: Commands {
         }
 
         CommandMenu("Inbox") {
-            Button("Ask Your Inbox…") { store.askBarOpen = true }
+            Button("Ask Your Inbox…") { store.openAskBar() }
                 .keyboardShortcut("k", modifiers: [.command])
                 .disabled(blocked)
             Button("New Ask Chat") { store.newAskChat() }

@@ -1028,6 +1028,12 @@ pub fn link_ghosts(
 /// One step at a time, never by chaining: a ghost folds only when everything
 /// it may fold into ends at ONE ghost shown, so a date-only "Hamilton" never
 /// joins the 2pm and the 8pm shows into one.
+///
+/// A STORED LINK (`GhostEvent::linked_to`, the identity check's judgement
+/// that another sender's ghost is the same event) folds a ghost into the one
+/// it names whenever that one is listed, whatever their days, starts or
+/// states: a promoter's "moved to Saturday" or "cancelled" must sit on the
+/// user's card, as a change to accept ([`linked_changes`]), not beside it.
 pub fn fold_ghosts(
     ghosts: &[crate::types::GhostEvent],
     urls: &std::collections::HashMap<i64, Vec<String>>,
@@ -1089,6 +1095,18 @@ pub fn fold_ghosts(
                 .collect();
         }
     }
+    let index: std::collections::HashMap<i64, usize> =
+        ghosts.iter().enumerate().map(|(i, g)| (g.id, i)).collect();
+    for (g, ghost) in ghosts.iter().enumerate() {
+        if let Some(&h) = ghost.linked_to.and_then(|id| index.get(&id))
+            && h != g
+        {
+            out[g] = vec![h];
+            // The link says which is shown; a URL fold the other way would
+            // only make a cycle.
+            out[h].retain(|&x| x != g);
+        }
+    }
     // Where each ghost ends up: itself when it folds into nothing, or into
     // more than one ghost shown, or round a cycle.
     fn resolve(
@@ -1124,6 +1142,55 @@ pub fn fold_ghosts(
             (r != g).then_some(r)
         })
         .collect()
+}
+
+/// What a linked ghost changes about the ghost it is shown under, for the
+/// card to offer: it is cancelled while that one is live, or it starts at
+/// another time ([`display_same_start`] says no).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkedChange {
+    Moved,
+    Cancelled,
+}
+
+/// For each ghost SHOWN (`folded[i]` None), the linked ghost whose change it
+/// offers, if any: a ghost folded into it by a stored link (not by a shared
+/// URL, which is no judgement that the two agree) whose facts differ
+/// ([`LinkedChange`]) and are not the ones the user already kept theirs over
+/// (`link_ack`). The most recently updated, when several do.
+pub fn linked_changes(
+    ghosts: &[crate::types::GhostEvent],
+    folded: &[Option<usize>],
+) -> Vec<Option<(usize, LinkedChange)>> {
+    use crate::types::GhostMailState;
+    let mut out: Vec<Option<(usize, LinkedChange)>> = vec![None; ghosts.len()];
+    for (i, child) in ghosts.iter().enumerate() {
+        let Some(w) = folded[i] else { continue };
+        let shown = &ghosts[w];
+        if child.linked_to != Some(shown.id) {
+            continue;
+        }
+        let cancelled = child.mail_state == GhostMailState::Cancelled;
+        let change = if cancelled && shown.mail_state == GhostMailState::Live {
+            LinkedChange::Cancelled
+        } else if !cancelled && !display_same_start(&child.start, &shown.start) {
+            LinkedChange::Moved
+        } else {
+            continue;
+        };
+        let facts = crate::triage::event_identity::link_facts(&child.start, cancelled);
+        if child.link_ack.as_deref() == Some(facts.as_str()) {
+            continue;
+        }
+        let newer = match out[w] {
+            Some((j, _)) => (child.updated_at, child.id) > (ghosts[j].updated_at, ghosts[j].id),
+            None => true,
+        };
+        if newer {
+            out[w] = Some((i, change));
+        }
+    }
+    out
 }
 
 #[cfg(test)]

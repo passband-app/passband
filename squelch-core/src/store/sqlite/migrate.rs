@@ -1019,6 +1019,10 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // See the function: Amazon's Shipped/Delivered decisions were always
     // stored, and only lacked a key to project on.
     project_amazon_boxes(conn);
+    // See the function: the same, for eBay purchases.
+    project_ebay_packages(conn);
+    // See the function: and for every other store, by order number.
+    project_order_fallbacks(conn);
     // See the function: a drop-off receipt's box is going away, not coming.
     drop_sent_packages(conn);
 
@@ -1031,6 +1035,29 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
             "event_revisit_asked",
             "skipped",
             "INTEGER NOT NULL DEFAULT 0",
+        )?;
+    }
+
+    // Cross-sender links between ghosts and the user's accepted changes
+    // (`triage::event_identity`) came after the ghost tables.
+    add_column_if_missing(conn, "ghost_events", "linked_to", "INTEGER")?;
+    add_column_if_missing(conn, "ghost_events", "link_ack", "TEXT")?;
+    add_column_if_missing(
+        conn,
+        "ghost_event_sources",
+        "accepted",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    // A deleted ghost takes its links with it: a ghost left pointing at a
+    // gone id would stay out of Google and out of the identity check for
+    // good, and fold under whatever new ghost reuses that id.
+    if tables_exist(conn, &["ghost_events"])? {
+        conn.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS ghost_event_links_follow_ghost
+         AFTER DELETE ON ghost_events BEGIN
+             UPDATE ghost_events SET linked_to = NULL, link_ack = NULL
+             WHERE account_id = OLD.account_id AND linked_to = OLD.id;
+         END;",
         )?;
     }
 
@@ -1906,6 +1933,60 @@ fn project_amazon_boxes_once(conn: &Connection) -> Result<usize> {
         AMAZON_BOXES_KEY,
         agent_deliveries::project_amazon_boxes,
     )
+}
+
+/// The `app_settings` key marking an account whose stored eBay decisions
+/// have been projected by [`project_ebay_packages`].
+pub(super) const EBAY_PACKAGES_KEY: &str = "ebay_packages_projected";
+
+/// ONE-TIME: put every eBay purchase the stored decisions already describe on
+/// the Shipments rail (`agent_deliveries::project_ebay_packages`). eBay's mail
+/// prints no tracking number, so before package keys its records projected
+/// nothing, from Order confirmed to PACKAGE DELIVERED.
+///
+/// Gated and failure-tolerant exactly as [`project_amazon_boxes`] is.
+fn project_ebay_packages(conn: &Connection) {
+    match once_per_account(
+        conn,
+        EBAY_PACKAGES_KEY,
+        agent_deliveries::project_ebay_packages,
+    ) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("squelch: migration projected {n} eBay package(s)"),
+        Err(error) => {
+            eprintln!("squelch: eBay package backfill failed ({error}); will retry next open");
+            if !conn.is_autocommit() {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+        }
+    }
+}
+
+/// The `app_settings` key marking an account whose stored trackless
+/// decisions have been projected by order ([`project_order_fallbacks`]).
+pub(super) const ORDER_FALLBACKS_KEY: &str = "order_fallbacks_projected";
+
+/// ONE-TIME: put every order the stored decisions describe without a carrier
+/// number or a store package id on the Shipments rail, keyed by sender and
+/// order number (`agent_deliveries::project_order_fallbacks`). Runs after the
+/// Amazon and eBay passes, so their packages exist to cover their orders.
+///
+/// Gated and failure-tolerant exactly as [`project_amazon_boxes`] is.
+fn project_order_fallbacks(conn: &Connection) {
+    match once_per_account(
+        conn,
+        ORDER_FALLBACKS_KEY,
+        agent_deliveries::project_order_fallbacks,
+    ) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("squelch: migration projected {n} order(s) without tracking"),
+        Err(error) => {
+            eprintln!("squelch: order backfill failed ({error}); will retry next open");
+            if !conn.is_autocommit() {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+        }
+    }
 }
 
 /// The `app_settings` key marking an account whose stored drop-off receipts

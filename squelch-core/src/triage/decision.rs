@@ -307,6 +307,23 @@ pub struct DurationEstimate {
     pub minutes: i64,
     pub basis: String,
 }
+/// The identity verdict for one event record: the ghosts it was shown and
+/// the one the model said it is. `same_as` counts only when it is in
+/// `offered` (the store re-checks); None with ghosts offered is "a new
+/// event", which keeps the record off every offered ghost.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventIdentity {
+    #[serde(default)]
+    pub offered: Vec<i64>,
+    #[serde(default)]
+    pub same_as: Option<i64>,
+}
+impl EventIdentity {
+    /// The pick, only when it was one of the offered ghosts.
+    pub fn pick(&self) -> Option<i64> {
+        self.same_as.filter(|id| self.offered.contains(id))
+    }
+}
 /// A prior for a non-committed event becoming a commitment.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct EventLikelihood {
@@ -372,6 +389,13 @@ pub enum RecordProposal {
         #[serde(default)]
         likelihood: Option<EventLikelihood>,
         evidence: Vec<EvidenceRef>,
+        /// Which existing ghost this record is, as a second model call judged
+        /// it after the investigation (`triage::event_identity`). Never part
+        /// of the agent's own schema: the worker fills it before the commit.
+        /// None when nothing was asked (no candidate) or the call failed, and
+        /// then the store's own rules decide.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<EventIdentity>,
     },
     FinancialUpdate {
         institution: String,
@@ -557,6 +581,7 @@ mod tests {
                 reason: "paid".into(),
             }),
             evidence: vec![],
+            identity: None,
         };
         let json = serde_json::to_value(&record).unwrap();
         assert_eq!(json["event_kind"], "ticket");

@@ -167,6 +167,7 @@ fn each_stored_reason_clears_its_own_row_with_provenance() {
             identity_refs: vec![],
             likelihood: None,
             evidence: vec![],
+            identity: None,
         }];
         // An offer that has ended too: the event is first in the order.
         d.ends = time(now - Duration::days(5));

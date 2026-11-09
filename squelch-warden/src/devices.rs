@@ -1,4 +1,5 @@
-//! Parsing what `squelchd token first-paired` printed inside a tenant pod.
+//! Parsing what `squelchd token first-paired` and `squelchd token activity`
+//! printed inside a tenant pod.
 //!
 //! The activation signal (issue #89) is ONE TIMESTAMP and nothing else. The
 //! daemon's side of that contract is one line on stdout — an RFC3339 instant, or
@@ -56,10 +57,129 @@ pub fn parse_first_paired(stdout: &str) -> Option<Option<DateTime<Utc>>> {
     Some(Some(parsed.with_timezone(&Utc)))
 }
 
+/// The platforms `token activity` may name. A CLOSED set, the daemon's own
+/// (`squelch_core::store::ClientPlatform`): a key outside it is a platform a
+/// newer daemon learned about and this warden did not, and it is skipped
+/// rather than carried onward as a string nobody downstream has a column for.
+pub const ACTIVITY_PLATFORMS: [&str; 2] = ["macos", "ios"];
+
+/// What `squelchd token activity` reported, parsed. Every timestamp is an
+/// instant in UTC; nothing else is in here, by construction.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Activity {
+    /// The activation fact, the same answer `token first-paired` gives.
+    #[serde(serialize_with = "ser_opt_ts")]
+    pub first_paired_at: Option<DateTime<Utc>>,
+    /// One entry per known platform that has ever connected.
+    pub platforms: std::collections::BTreeMap<String, PlatformActivity>,
+}
+
+/// One platform's line in [`Activity`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct PlatformActivity {
+    #[serde(serialize_with = "ser_ts")]
+    pub first_paired_at: DateTime<Utc>,
+    #[serde(serialize_with = "ser_opt_ts")]
+    pub last_seen_at: Option<DateTime<Utc>>,
+    #[serde(serialize_with = "ser_opt_ts")]
+    pub last_action_at: Option<DateTime<Utc>>,
+}
+
+/// One spelling on the warden's wire, whatever the daemon printed: UTC,
+/// seconds, `Z`.
+fn ser_ts<S: serde::Serializer>(at: &DateTime<Utc>, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+}
+
+fn ser_opt_ts<S: serde::Serializer>(at: &Option<DateTime<Utc>>, s: S) -> Result<S::Ok, S::Error> {
+    match at {
+        Some(at) => ser_ts(at, s),
+        None => s.serialize_none(),
+    }
+}
+
+/// Read `squelchd token activity`'s stdout: one line of JSON.
+///
+/// `None` when the output is not that command's output, which the caller
+/// turns into a 500. STRICT where it matters: the line must be a JSON object,
+/// every key the contract names must be PRESENT (a missing `last_action_at`
+/// is not read as "never acted"), and every timestamp must be RFC3339 or an
+/// explicit `null` where the contract allows one. A garbled line must never
+/// come out as an empty [`Activity`], because the control plane would store
+/// that as "nobody uses this mailbox".
+///
+/// TOLERANT where a newer daemon could legitimately differ: an extra key is
+/// ignored, and a platform outside [`ACTIVITY_PLATFORMS`] is skipped (its
+/// value is still held to the shape, so garbage cannot hide under a new key).
+/// The first non-empty line decides, as in [`parse_first_paired`].
+pub fn parse_activity(stdout: &str) -> Option<Activity> {
+    use serde_json::Value;
+    let line = stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let Value::Object(top) = serde_json::from_str::<Value>(line).ok()? else {
+        return None;
+    };
+    let ts = |v: &Value| -> Option<DateTime<Utc>> {
+        Some(
+            DateTime::parse_from_rfc3339(v.as_str()?)
+                .ok()?
+                .with_timezone(&Utc),
+        )
+    };
+    // Present, and either null or a timestamp. `Some(None)` is an explicit
+    // null; `None` is a refusal.
+    let opt_ts = |obj: &serde_json::Map<String, Value>, key: &str| match obj.get(key)? {
+        Value::Null => Some(None),
+        v => ts(v).map(Some),
+    };
+
+    let first_paired_at = opt_ts(&top, "first_paired_at")?;
+    let Value::Object(raw_platforms) = top.get("platforms")? else {
+        return None;
+    };
+    let mut platforms = std::collections::BTreeMap::new();
+    for (name, value) in raw_platforms {
+        let Value::Object(p) = value else {
+            return None;
+        };
+        let line = PlatformActivity {
+            first_paired_at: ts(p.get("first_paired_at")?)?,
+            last_seen_at: opt_ts(p, "last_seen_at")?,
+            last_action_at: opt_ts(p, "last_action_at")?,
+        };
+        if ACTIVITY_PLATFORMS.contains(&name.as_str()) {
+            platforms.insert(name.clone(), line);
+        }
+    }
+    Some(Activity {
+        first_paired_at,
+        platforms,
+    })
+}
+
+/// Whether a failed `token activity` exec failed because the daemon is too
+/// old to have the subcommand: clap's own refusal, on stderr.
+///
+/// READ, NEVER LOGGED. The caller decides on this and logs the reason word,
+/// not the stream.
+///
+/// Its own answer because the control plane must treat that tenant as "not
+/// known yet" (the next fleet roll fixes it) rather than as broken or as
+/// inactive. Matched on clap's fixed wording naming THIS subcommand, so any
+/// other failure (a panic, a store that will not open) stays a 500.
+pub fn activity_unsupported(stderr: &str) -> bool {
+    stderr.contains("unrecognized subcommand 'activity'")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{first_paired_none_stdout, first_paired_stdout};
+    use crate::testing::{
+        activity_none_stdout, activity_stdout, activity_unsupported_stderr,
+        first_paired_none_stdout, first_paired_stdout,
+    };
 
     /// The fixture is a captured copy of the shipped output. When the daemon's
     /// one line changes, this is the test that says so.
@@ -111,5 +231,88 @@ mod tests {
         ] {
             assert_eq!(parse_first_paired(output), None, "{output:?}");
         }
+    }
+
+    /// The fixture is the daemon's real line (the same string
+    /// `squelchd`'s own test asserts it prints).
+    #[test]
+    fn parses_the_daemons_real_activity_output() {
+        let parsed = parse_activity(&activity_stdout()).expect("the daemon answered");
+        let ts = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        assert_eq!(parsed.first_paired_at, Some(ts("2026-03-01T09:30:00Z")));
+        assert_eq!(
+            parsed.platforms["macos"],
+            PlatformActivity {
+                first_paired_at: ts("2026-03-01T09:30:00Z"),
+                last_seen_at: Some(ts("2026-03-09T08:00:00Z")),
+                last_action_at: Some(ts("2026-03-08T07:00:00Z")),
+            }
+        );
+        assert_eq!(parsed.platforms["ios"].last_action_at, None);
+        assert_eq!(parsed.platforms.len(), 2);
+
+        // Nobody ever paired: an answer, with nothing in it.
+        assert_eq!(
+            parse_activity(&activity_none_stdout()),
+            Some(Activity::default())
+        );
+        // Re-serialized in the one spelling, nothing added.
+        assert_eq!(
+            serde_json::to_value(&parsed).unwrap()["platforms"]["ios"],
+            serde_json::json!({
+                "first_paired_at": "2026-03-02T10:00:00Z",
+                "last_seen_at": "2026-03-09T09:00:00Z",
+                "last_action_at": null,
+            })
+        );
+    }
+
+    /// A newer daemon may add a key or a platform; neither is a disagreement.
+    #[test]
+    fn activity_tolerates_what_a_newer_daemon_could_add() {
+        let parsed = parse_activity(
+            r#"{"first_paired_at":null,"v":2,"platforms":{"android":{"first_paired_at":"2026-03-01T09:30:00Z","last_seen_at":null,"last_action_at":null},"ios":{"first_paired_at":"2026-03-01T04:30:00-05:00","last_seen_at":null,"last_action_at":null,"extra":1}}}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.platforms.keys().collect::<Vec<_>>(), ["ios"]);
+        assert_eq!(
+            parsed.platforms["ios"].first_paired_at.to_rfc3339(),
+            "2026-03-01T09:30:00+00:00"
+        );
+    }
+
+    /// Garbled output is a refusal, never an empty answer.
+    #[test]
+    fn garbled_activity_is_refused_rather_than_read_as_nobody() {
+        for output in [
+            "",
+            "\n",
+            "none\n",
+            "null\n",
+            "[]\n",
+            "{}\n",
+            r#"{"platforms":{}}"#,
+            r#"{"first_paired_at":null}"#,
+            r#"{"first_paired_at":"yesterday","platforms":{}}"#,
+            r#"{"first_paired_at":null,"platforms":[]}"#,
+            r#"{"first_paired_at":null,"platforms":{"ios":null}}"#,
+            r#"{"first_paired_at":null,"platforms":{"ios":{"first_paired_at":null,"last_seen_at":null,"last_action_at":null}}}"#,
+            r#"{"first_paired_at":null,"platforms":{"ios":{"first_paired_at":"2026-03-01T09:30:00Z","last_action_at":null}}}"#,
+            r#"{"first_paired_at":null,"platforms":{"android":{"first_paired_at":"soon"}}}"#,
+            "error: unrecognized subcommand 'activity'\n",
+        ] {
+            assert_eq!(parse_activity(output), None, "{output:?}");
+        }
+    }
+
+    /// clap's refusal names the subcommand; nothing else counts as "too old".
+    #[test]
+    fn only_claps_refusal_reads_as_a_daemon_too_old() {
+        assert!(activity_unsupported(&activity_unsupported_stderr()));
+        assert!(!activity_unsupported(""));
+        assert!(!activity_unsupported("thread 'main' panicked at 'store'\n"));
+        assert!(!activity_unsupported(
+            "error: unrecognized subcommand 'first-paired'\n"
+        ));
     }
 }

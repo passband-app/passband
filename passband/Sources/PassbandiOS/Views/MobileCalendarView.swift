@@ -748,7 +748,7 @@ private struct MobileAgendaRow: View {
 
     private var hasSubline: Bool {
         item.location != nil || item.cancelled || end != nil || (item.band != nil && !item.cancelled)
-            || response != nil || item.unverified
+            || response != nil || item.unverified || item.pendingChange != nil
     }
 
     private var response: String? {
@@ -781,6 +781,9 @@ private struct MobileAgendaRow: View {
             }
             if item.unverified {
                 UnverifiedMark()
+            }
+            if item.pendingChange != nil {
+                ChangeOfferedMark()
             }
             if let place = item.location {
                 Text(place)

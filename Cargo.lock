@@ -4021,6 +4021,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
 
 [[package]]
+name = "qrcodegen"
+version = "1.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4339fc7a1021c9c1621d87f5e3505f2805c8c105420ba2f2a4df86814590c142"
+
+[[package]]
 name = "quinn"
 version = "0.11.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5225,6 +5231,7 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "chrono",
+ "chrono-tz",
  "flate2",
  "futures",
  "http-body-util",
@@ -5288,6 +5295,7 @@ dependencies = [
  "http-body-util",
  "oauth2",
  "percent-encoding",
+ "qrcodegen",
  "rcgen",
  "regex",
  "reqwest",

@@ -1329,6 +1329,75 @@ impl Warden {
         })
     }
 
+    /// When client apps first paired, last connected and last acted on this
+    /// tenant's mailbox, per platform, read out of its pod with `squelchd token
+    /// activity`. The retention signal, and [`Warden::first_paired`]'s bigger
+    /// sibling: same gates, same pod choice, same no-logging rule.
+    ///
+    /// - `Ok(Some(activity))` - the daemon answered.
+    /// - `Ok(None)` - the daemon is TOO OLD to have the subcommand (clap
+    ///   refused it by name). Not a failure: the control plane records "not
+    ///   known yet" and the next fleet roll is the fix. Telling this apart from
+    ///   a broken daemon is the reason for the variant: a tenant on an old
+    ///   image must not read as inactive, and must not page anybody either.
+    /// - `Err(..)` - 404 / 503 exactly as for `first_paired`, or a 500 with a
+    ///   machine reason for any other non-zero exit and for output that is not
+    ///   the contract. NEVER A GUESS: garbled output must not become "nobody
+    ///   uses this mailbox".
+    ///
+    /// Stdout and stderr are read and NEVER LOGGED, on any branch.
+    pub async fn activity(
+        &self,
+        raw_label: &str,
+    ) -> Result<Option<devices::Activity>, WardenError> {
+        let name = TenantName::parse(raw_label)?;
+        if self.identity(&name).await?.is_none() {
+            return Err(WardenError::NotFound);
+        }
+        if self.status_of(&name).await? != TenantStatus::Active {
+            return Err(WardenError::NotRunning);
+        }
+        let pod = self
+            .cluster
+            .ready_pod(&objects::pod_selector(&name), DEVICES_POD_WAIT)
+            .await
+            .map_err(|e| fail(name.as_str(), "no_ready_pod", &e))?;
+        let output = self
+            .cluster
+            .exec(&pod, &objects::activity_argv())
+            .await
+            .map_err(|e| fail(name.as_str(), "activity_failed", &e))?;
+        if !output.ok {
+            if devices::activity_unsupported(&output.stderr) {
+                // Expected for every tenant until the daemon release rolls,
+                // so not an error and not worth a line per poll.
+                tracing::debug!(
+                    tenant = %name,
+                    reason = "activity_unsupported",
+                    "squelchd in this pod predates token activity"
+                );
+                return Ok(None);
+            }
+            tracing::error!(
+                tenant = %name,
+                reason = "activity_failed",
+                "squelchd token activity exited non-zero"
+            );
+            return Err(WardenError::cluster("activity_failed"));
+        }
+        // STDOUT ONLY, for the reason `first_paired` gives.
+        devices::parse_activity(&output.stdout)
+            .map(Some)
+            .ok_or_else(|| {
+                tracing::error!(
+                    tenant = %name,
+                    reason = "activity_unparsed",
+                    "squelchd token activity succeeded but printed something that is not its contract"
+                );
+                WardenError::cluster("activity_unparsed")
+            })
+    }
+
     /// What the cluster says about this tenant.
     pub async fn status(&self, raw_label: &str) -> Result<TenantStatus, WardenError> {
         let name = TenantName::parse(raw_label)?;
@@ -3758,6 +3827,56 @@ mod tests {
         h.cluster
             .exec_prints(&crate::testing::first_paired_none_stdout());
         assert_eq!(h.warden.first_paired("alice").await.unwrap(), None);
+    }
+
+    /// `token activity` from the tenant's own pod, argv string for string; an
+    /// old daemon's clap refusal is "not known yet", any other failure is not.
+    #[tokio::test]
+    async fn activity_reads_the_daemons_line_and_knows_an_old_daemon() {
+        let h = Harness::new();
+        assert_eq!(
+            h.warden.activity("alice").await.unwrap_err(),
+            WardenError::NotFound
+        );
+        h.warden
+            .create_tenant("alice", "alice@example.com")
+            .await
+            .unwrap();
+        assert_eq!(
+            h.warden.activity("alice").await.unwrap_err(),
+            WardenError::NotRunning
+        );
+        assert!(h.cluster.last_exec().is_none());
+        h.warden
+            .set_credentials("alice", &armored("alice"))
+            .await
+            .unwrap();
+
+        h.cluster.exec_prints(&crate::testing::activity_stdout());
+        let activity = h.warden.activity("alice").await.unwrap().unwrap();
+        assert_eq!(activity.platforms.len(), 2);
+        let (pod, argv) = h.cluster.last_exec().unwrap();
+        assert_eq!(pod, "alice-abc123");
+        assert_eq!(
+            argv,
+            vec!["/usr/local/bin/squelchd", "token", "activity"],
+            "the argv is a contract with the daemon's CLI"
+        );
+
+        h.cluster
+            .exec_fails_with(&crate::testing::activity_unsupported_stderr());
+        assert_eq!(h.warden.activity("alice").await.unwrap(), None);
+
+        h.cluster.exec_fails_with("thread 'main' panicked\n");
+        assert_eq!(
+            h.warden.activity("alice").await.unwrap_err(),
+            WardenError::cluster("activity_failed")
+        );
+        h.cluster.exec_prints("{}\n");
+        assert_eq!(
+            h.warden.activity("alice").await.unwrap_err(),
+            WardenError::cluster("activity_unparsed")
+        );
     }
 
     /// An unknown label is the same 404 `status` gives, decided off the same

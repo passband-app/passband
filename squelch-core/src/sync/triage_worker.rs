@@ -706,7 +706,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             outcome = run_agent(connection(), &config, scrub, &reader).await;
         }
         match outcome {
-            Ok(run) => {
+            Ok(mut run) => {
                 self.note_provider_success();
                 // An investigation answered: its ladder starts over, and the
                 // two-timeouts rule may fail the next job that times out
@@ -732,6 +732,18 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     "usage": run.usage,
                 });
                 for usage in run.usage {
+                    let _ = self
+                        .store
+                        .stage2_bump_usage(self.account_id, day, usage.into());
+                }
+                // Is each event one the user already has? One small call,
+                // only when the store has a candidate; a failure leaves the
+                // store's own rules to decide (`triage::event_identity`).
+                let model = config.agent.model.as_deref().unwrap_or(&base_model);
+                if let Some(usage) = self
+                    .check_event_identity(job.message_id, &mut run.decision, llm, model)
+                    .await
+                {
                     let _ = self
                         .store
                         .stage2_bump_usage(self.account_id, day, usage.into());
@@ -774,6 +786,66 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     at: now,
                 };
                 self.handle_agent_failure(job, error, day, &limits, false, start)
+            }
+        }
+    }
+
+    /// The identity check for one decision's event records
+    /// (`triage::event_identity`): asks the store for candidates, and only
+    /// when there are some, asks the model once and writes its verdicts onto
+    /// the records. Returns the call's usage to bill. A store or model
+    /// failure is logged by kind and leaves the decision as it was.
+    async fn check_event_identity(
+        &self,
+        message_id: i64,
+        decision: &mut crate::triage::decision::MessageDecision,
+        llm: &crate::config::ResolvedLlm,
+        model: &str,
+    ) -> Option<crate::triage::llm::Usage> {
+        use crate::triage::event_identity;
+        use crate::triage::llm::LlmOutcome;
+        let records = crate::triage::ghost::launder_events(&decision.records);
+        if records.is_empty() {
+            return None;
+        }
+        let questions =
+            match self
+                .store
+                .event_identity_candidates(self.account_id, message_id, &records)
+            {
+                Ok(q) if !q.records.is_empty() => q,
+                Ok(_) => return None,
+                Err(_) => {
+                    eprintln!("squelch: event identity candidates failed for message {message_id}");
+                    return None;
+                }
+            };
+        match event_identity::ask(
+            &self.http,
+            &llm.url,
+            &llm.api_key,
+            llm.provider,
+            model,
+            questions.scope.as_deref(),
+            &questions.records,
+        )
+        .await
+        {
+            Ok(LlmOutcome::Ok(answers, usage)) => {
+                event_identity::apply(decision, &questions.records, &answers);
+                usage
+            }
+            Ok(LlmOutcome::Refused(usage)) => usage,
+            Ok(LlmOutcome::Failed(kind, usage)) => {
+                eprintln!("squelch: event identity check failed for message {message_id} ({kind})");
+                usage
+            }
+            Err(e) => {
+                eprintln!(
+                    "squelch: event identity check failed for message {message_id} ({})",
+                    e.kind
+                );
+                None
             }
         }
     }

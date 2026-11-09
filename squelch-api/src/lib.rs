@@ -26,6 +26,7 @@ mod invite_mail;
 pub mod limits;
 mod markdown;
 mod memory;
+mod morning_brief;
 mod pair;
 mod renotify;
 mod scheduled_send;
@@ -61,6 +62,8 @@ pub use limits::{
     LONG_REQUEST_TIMEOUT, REQUEST_TIMEOUT, ROUTE_CEILINGS, RequestCeiling, RequestTimeouts,
     STORE_CALL_SLOTS, UPSTREAM_REQUEST_TIMEOUT, route_ceiling,
 };
+/// The morning brief's worker and its pass.
+pub use morning_brief::{BriefOutcome, MorningBriefTiming, morning_brief_worker, run_brief_pass};
 /// Smart re-notify's worker and its pass (issue #625).
 pub use renotify::{
     PassOutcome, RenotifyTiming, close_stale_renotify_sessions, renotify_worker, run_renotify_pass,
@@ -392,6 +395,13 @@ fn client_router(state: ApiState) -> Router {
         // Push-device registration. Human door only — the agent door never
         // learns a device exists.
         .route("/client/devices", post(devices::register_device))
+        // The morning brief: today's banner for the phone's notification
+        // extension, and the owner's switch. HUMAN DOOR ONLY.
+        .route("/client/brief", get(morning_brief::get_brief))
+        .route(
+            "/client/brief/settings",
+            get(morning_brief::get_settings).put(morning_brief::put_settings),
+        )
         // Unregister carries the token in the BODY, not a path segment: a device
         // token is capability material, and a URL path is the most-logged part
         // of a request.
@@ -504,6 +514,10 @@ fn calendar_routes(state: ApiState) -> Router<ApiState> {
         // directions: the agent door has no timeline route.
         .route("/client/timeline", get(handlers::get_timeline))
         .route("/client/timeline/ghosts/{id}", patch(handlers::patch_ghost))
+        .route(
+            "/client/timeline/ghosts/{id}/change",
+            post(handlers::resolve_linked_change),
+        )
         // Calendar search (docs/CALENDAR.md §10.1): the search box's Events
         // block, and the in-app assistant's `search_calendar`, which gets the
         // agent view (no address of anyone). Agent MCP's `search_calendar`

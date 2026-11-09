@@ -216,9 +216,13 @@ Or enter this code at {signup_url}:
 {code}
 
 Works once, expires in {ttl} days.
+
+Passband is on iPhone too, in alpha on TestFlight:
+{testflight}
 ",
         link = invite_link(code, signup_url),
         ttl = crate::invites::DEFAULT_TTL_DAYS,
+        testflight = crate::pages::TESTFLIGHT_URL,
     )
 }
 
@@ -265,11 +269,13 @@ fn html_body(code: &str, signup_url: &str) -> String {
 <p style="font-size: 13px; color: #808E9F; margin: 0 0 8px;">Or enter this code at <a href="{url}" style="color: #82BAF5;">{url}</a></p>
 <p style="font: 17px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0.04em; color: #E9EEF5; background: #121A26; border: 1px solid #1d2633; border-radius: 10px; padding: 12px 16px; display: inline-block; margin: 0 0 16px;">{code}</p>
 <p style="font-size: 13px; color: #62707F; margin: 0;">Works once, expires in {ttl} days.</p>
+<p style="font-size: 13px; color: #808E9F; margin: 36px 0 0; padding: 20px 0 0; border-top: 1px solid #1d2633;">Passband is on iPhone too. <a href="{testflight}" style="color: #82BAF5;">Join the alpha on TestFlight</a></p>
 </div>
 </td></tr></table>
 "##,
         mark = MARK_URL,
         ttl = crate::invites::DEFAULT_TTL_DAYS,
+        testflight = escape_html(crate::pages::TESTFLIGHT_URL),
     )
 }
 
@@ -394,6 +400,8 @@ mod tests {
             );
             // House copy rule.
             assert!(!part.contains('\u{2014}'), "{part}");
+            // The iPhone alpha, last and quiet.
+            assert!(part.contains(crate::pages::TESTFLIGHT_URL), "{part}");
         }
         // The code sits on its own line in the text part, so it can be
         // selected, and NEVER in the link.

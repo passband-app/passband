@@ -307,7 +307,13 @@ struct SearchView: View {
                 results(expanded: expanded)
             }
         }
-        .keyBindings(.modal, bindings)
+        // QUIET UNDER AN OVERLAY. Every `.modal` set is consulted, newest
+        // first, and these are `allowInInput`: with the ask bar open over
+        // search, Enter in ITS field would open a hit behind it instead of
+        // sending the follow-up, and the arrows would walk hits nobody can see.
+        // Reading `modalOverlayOpen` here re-renders the panel when it flips,
+        // which is what refreshes the registered set.
+        .keyBindings(.modal, store.modalOverlayOpen ? [] : bindings)
         // `/` mounts this panel mid-keystroke, and focus set in the pass that
         // mounts the field lands before the field is in the window, so the
         // caret never arrives. One turn later it does (SettingsView's editor
@@ -789,7 +795,7 @@ struct SearchView: View {
         // one, it is asked again.
         if entry.kind == .question {
             if store.openQuestionFromHistory(entry.text) {
-                store.askBarOpen = true
+                store.openAskBarFromSearch()
             } else {
                 focused = true
             }
@@ -948,21 +954,14 @@ struct SearchView: View {
         // this view's, because the rule about `off` also has to serve the
         // picker being flipped under a lane that is already running (see
         // ShellWatchers) — and a rule spelled twice is a rule that will
-        // disagree with itself. The moves are executed here; the deciding is
-        // pure and asserted in test.sh.
-        switch DeeperSearchPolicy.settled(
-            verdict: verdict, choice: prefs.deeperSearch,
-            laneStarted: store.search.laneStarted)
-        {
-        case .nothing:
-            break
-        case .stop:
-            store.resetSearchLane(keepingVerdict: true)
-        case .refine:
-            store.refineDeeperSearch()
-        case .start(let trigger):
-            store.startDeeperSearch(trigger: trigger)
-        }
+        // disagree with itself. The moves are executed by
+        // `AppStore.settleDeeperSearch`; the deciding is pure and asserted in
+        // test.sh.
+        store.settleDeeperSearch(
+            DeeperSearchPolicy.settled(
+                verdict: verdict, choice: prefs.deeperSearch,
+                laneStarted: store.search.laneStarted),
+            query: term)
     }
 
     /// Append the page after the one on screen. Cursors are only meaningful

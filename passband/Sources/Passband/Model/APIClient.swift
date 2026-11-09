@@ -742,6 +742,21 @@ actor APIClient {
         return try decode(GhostPatchResult.self, from: data)
     }
 
+    /// `POST /client/timeline/ghosts/{id}/change`: the user's answer to a
+    /// change another sender's mail offers on their card (`LinkedChange`).
+    /// `id` is the change's `ghost_id`, `from` its linked ghost; accept takes
+    /// the change, false keeps the card as it is. A 404 means the link is
+    /// gone, and throws like any refusal.
+    func answerLinkedChange(_ id: Int, from: Int, accept: Bool) async throws -> GhostPatchResult {
+        try await post(
+            "/client/timeline/ghosts/\(id)/change", body: LinkedChangeAnswer(from: from, accept: accept))
+    }
+
+    private struct LinkedChangeAnswer: Encodable {
+        let from: Int
+        let accept: Bool
+    }
+
     // MARK: - calendar events (wave 3: writes to the user's own calendars)
 
     /// `POST /client/calendar/events`: create at Google, answered 201 with the
@@ -1348,6 +1363,18 @@ actor APIClient {
     /// or nothing at all) a 2xx means it now holds `enabled`.
     func setCalendarReminderSettings(enabled: Bool) async throws {
         try await putNoContent(CalendarReminderRoute.settings, body: CalendarReminderSettings(enabled: enabled))
+    }
+
+    // MARK: - the morning brief
+
+    /// The owner's switch. A daemon older than the brief answers 404, which
+    /// the card reads as "not offered here".
+    func getMorningBriefSettings() async throws -> CalendarReminderSettings {
+        try await get(MorningBriefRoute.settings)
+    }
+
+    func setMorningBriefSettings(enabled: Bool) async throws {
+        try await putNoContent(MorningBriefRoute.settings, body: CalendarReminderSettings(enabled: enabled))
     }
 
     // MARK: - translation languages

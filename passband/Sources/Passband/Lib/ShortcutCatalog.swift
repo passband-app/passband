@@ -110,6 +110,7 @@ enum ShortcutCatalog {
             Item(["Enter"], "open the mail behind it"),
             Item(["y"], "going (again: not going)"),
             Item(["x"], "dismiss"),
+            Item(["⇧A", "⇧K"], "another sender's change: accept / keep mine"),
             Item(["n"], "new event"),
             Item(["e"], "edit event"),
             Item(["⌘↵"], "save the event"),

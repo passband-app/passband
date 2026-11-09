@@ -24,6 +24,7 @@ serde_json = { workspace = true }
 # The IMAP send dedupe key (src/send_dedupe.rs); already in the lock via squelch-core.
 sha2 = "0.11"
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 thiserror = { workspace = true }
 # Full-feature axum for JSON extractors, query, path, and routing. Tracks the
 # same axum 0.8 line squelch-mcp pins.
@@ -44,7 +45,7 @@ tokio-stream = "0.1"
 # thread view with every message's HTML inline, search): gzip only, because
 # every client and proxy speaks it and `flate2` is already in the tree, where
 # brotli would be a new crate for ~15% more on JSON.
-tower-http = { version = "0.6", features = ["cors", "compression-gzip"] }
+tower-http = { version = "0.7", features = ["cors", "compression-gzip"] }
 tokio-util = "0.7"
 # Gmail write ops: HTTP client (rustls, no native-tls) mirroring the read
 # engine, base64url for send payloads, regex for the outbound secret guard.

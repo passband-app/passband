@@ -315,6 +315,55 @@ struct DevicesAnswer {
     first_paired_at: Option<String>,
 }
 
+/// One platform's retention facts, parsed. See [`TenantActivity`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlatformActivity {
+    pub first_paired_at: chrono::DateTime<chrono::Utc>,
+    pub last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_action_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// What a tenant's daemon reports through `GET .../activity`: timestamps only.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClientActivity {
+    pub first_paired_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub mac: Option<PlatformActivity>,
+    pub ios: Option<PlatformActivity>,
+}
+
+impl ClientActivity {
+    /// The newest last-seen across platforms.
+    pub fn last_seen_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        [self.mac, self.ios]
+            .into_iter()
+            .flatten()
+            .filter_map(|p| p.last_seen_at)
+            .max()
+    }
+
+    /// The newest last-action across platforms.
+    pub fn last_action_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        [self.mac, self.ios]
+            .into_iter()
+            .flatten()
+            .filter_map(|p| p.last_action_at)
+            .max()
+    }
+}
+
+/// The retention read, in the three shapes the poller must tell apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TenantActivity {
+    /// The daemon answered.
+    Known(ClientActivity),
+    /// The daemon is too old to have `token activity`: NOT KNOWN YET, which
+    /// is neither "inactive" nor a failure. The next fleet roll fixes it.
+    Unsupported,
+    /// The warden has never heard of the label (or predates the route, whose
+    /// 404 looks the same). Nothing to record.
+    NoTenant,
+}
+
 impl TenantStatus {
     /// Whether this tenant is a half-finished signup that the SAME mailbox may
     /// come back and complete. Anything else (active, failed, stopped, or a
@@ -548,6 +597,16 @@ pub trait Warden: Send + Sync {
     /// Used before consent to check that a label is free.
     async fn status(&self, label: &str) -> Result<Option<TenantStatus>, WardenError>;
 
+    /// DESTROY a tenant: workload, mail volume, credential and identity, so
+    /// the label is free for a signup that starts from nothing. The admin
+    /// board's delete button, and nothing else.
+    ///
+    /// Idempotent on the warden's side, so a timeout or a half-finished call is
+    /// answered by pressing it again. A warden too old to have the route
+    /// answers 404, which comes back as [`WardenError::NotFound`] rather than
+    /// success: an old warden must never be read as having deleted anything.
+    async fn purge(&self, label: &str) -> Result<(), WardenError>;
+
     /// Mint a FRESH pairing code for a tenant that already exists, by running
     /// `squelchd pair` inside its pod.
     ///
@@ -570,6 +629,12 @@ pub trait Warden: Send + Sync {
         &self,
         label: &str,
     ) -> Result<Option<Option<chrono::DateTime<chrono::Utc>>>, WardenError>;
+
+    /// Per-platform first pairing, last seen and last action for this tenant's
+    /// daemon, from `GET /v1/tenants/{label}/activity`: the retention signal.
+    /// Every error (the warden's 503 `not_running` and its 500s included)
+    /// means ask later, as for [`Warden::first_paired`].
+    async fn activity(&self, label: &str) -> Result<TenantActivity, WardenError>;
 }
 
 /// The real client: one reqwest client, one bearer, one base URL.
@@ -902,6 +967,31 @@ impl Warden for HttpWarden {
         }
     }
 
+    async fn purge(&self, label: &str) -> Result<(), WardenError> {
+        crate::labels::validate(label).map_err(|_| WardenError::LabelRefused)?;
+        // NO BODY. The warden waits for the pod to exit before it deletes the
+        // volume, which is a pod's termination grace on top of a round trip, so
+        // this gets its own budget: long enough for that, short enough to
+        // answer before the load balancer in front of the admin page gives up.
+        let resp = self
+            .http
+            .post(self.url(&format!("/v1/tenants/{label}/purge")))
+            .bearer_auth(&self.token)
+            .timeout(crate::config::PURGE_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| transport_error(e, label))?;
+
+        match resp.status().as_u16() {
+            204 | 200 => Ok(()),
+            401 | 403 => Err(WardenError::Unauthorized),
+            // The route itself is missing: this warden predates purge.
+            404 | 405 => Err(WardenError::NotFound),
+            422 => Err(WardenError::LabelRefused),
+            _ => Err(WardenError::Failed),
+        }
+    }
+
     async fn status(&self, label: &str) -> Result<Option<TenantStatus>, WardenError> {
         crate::labels::validate(label).map_err(|_| WardenError::LabelRefused)?;
         let resp = self
@@ -962,6 +1052,81 @@ impl Warden for HttpWarden {
             _ => Err(WardenError::Failed),
         }
     }
+
+    async fn activity(&self, label: &str) -> Result<TenantActivity, WardenError> {
+        crate::labels::validate(label).map_err(|_| WardenError::LabelRefused)?;
+        let resp = self
+            .http
+            .get(self.url(&format!("/v1/tenants/{label}/activity")))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|e| transport_error(e, label))?;
+
+        match resp.status().as_u16() {
+            200 => {
+                let body = read_capped(resp, label).await?;
+                // Half an answer is not an answer: one bad timestamp or one
+                // missing key refuses the whole body.
+                parse_activity_body(&body).ok_or(WardenError::Unreachable)
+            }
+            404 => Ok(TenantActivity::NoTenant),
+            401 | 403 => Err(WardenError::Unauthorized),
+            _ => Err(WardenError::Failed),
+        }
+    }
+}
+
+/// `GET /v1/tenants/{label}/activity`'s 200 body, read by hand rather than
+/// derived, because serde reads an ABSENT `Option` field as `None` and here
+/// absence is not an answer: a body missing `last_action_at` must not be
+/// stored as "never acted", and a body missing `activity` must not read as
+/// "daemon too old". So every key the contract names must be present, null
+/// only where it allows null, and every timestamp must parse; anything else
+/// is `None`, which the caller refuses whole. Extra keys are ignored, and a
+/// platform this crate has no column for is skipped, the warden's own rule.
+fn parse_activity_body(body: &[u8]) -> Option<TenantActivity> {
+    use serde_json::{Map, Value};
+    let Value::Object(top) = serde_json::from_slice::<Value>(body).ok()? else {
+        return None;
+    };
+    let activity = match top.get("activity")? {
+        Value::Null => return Some(TenantActivity::Unsupported),
+        Value::Object(a) => a,
+        _ => return None,
+    };
+    let ts = |v: &Value| {
+        chrono::DateTime::parse_from_rfc3339(v.as_str()?)
+            .ok()
+            .map(|t| t.with_timezone(&chrono::Utc))
+    };
+    let opt = |obj: &Map<String, Value>, key: &str| match obj.get(key)? {
+        Value::Null => Some(None),
+        v => ts(v).map(Some),
+    };
+    let mut out = ClientActivity {
+        first_paired_at: opt(activity, "first_paired_at")?,
+        ..Default::default()
+    };
+    let Value::Object(platforms) = activity.get("platforms")? else {
+        return None;
+    };
+    for (name, p) in platforms {
+        let Value::Object(p) = p else {
+            return None;
+        };
+        let line = PlatformActivity {
+            first_paired_at: ts(p.get("first_paired_at")?)?,
+            last_seen_at: opt(p, "last_seen_at")?,
+            last_action_at: opt(p, "last_action_at")?,
+        };
+        match name.as_str() {
+            "macos" => out.mac = Some(line),
+            "ios" => out.ios = Some(line),
+            _ => {}
+        }
+    }
+    Some(TenantActivity::Known(out))
 }
 
 /// The operator surface: the two routes a human runs at a shell.
@@ -1995,6 +2160,105 @@ mod tests {
         assert!(matches!(
             w.first_paired("garbled").await,
             Err(WardenError::Unreachable)
+        ));
+    }
+
+    /// The activity route on the wire: the daemon's line, an old daemon's
+    /// null, a missing tenant, and the refusals.
+    #[tokio::test]
+    async fn activity_reads_every_shape_the_warden_answers() {
+        use axum::{
+            Json, Router, extract::Path, http::StatusCode, response::IntoResponse, routing::get,
+        };
+        use serde_json::json;
+
+        let app = Router::new().route(
+            "/v1/tenants/{label}/activity",
+            get(|Path(label): Path<String>| async move {
+                let ok = |v: serde_json::Value| (StatusCode::OK, Json(v)).into_response();
+                match label.as_str() {
+                    "both" => ok(json!({"activity": {
+                        "first_paired_at": "2026-03-01T09:30:00Z",
+                        "platforms": {
+                            "ios": {"first_paired_at": "2026-03-02T10:00:00Z",
+                                    "last_seen_at": "2026-03-09T09:00:00Z",
+                                    "last_action_at": null},
+                            "macos": {"first_paired_at": "2026-03-01T09:30:00Z",
+                                      "last_seen_at": "2026-03-09T08:00:00Z",
+                                      "last_action_at": "2026-03-08T07:00:00Z"},
+                            "android": {"first_paired_at": "2026-03-01T09:30:00Z",
+                                        "last_seen_at": null, "last_action_at": null}
+                        }
+                    }})),
+                    "empty" => ok(json!({"activity": {"first_paired_at": null, "platforms": {}}})),
+                    "old" => ok(json!({"activity": null})),
+                    "missing-key" => ok(json!({"activity": {
+                        "first_paired_at": null,
+                        "platforms": {"ios": {"first_paired_at": "2026-03-02T10:00:00Z",
+                                              "last_seen_at": null}}
+                    }})),
+                    "garbled" => {
+                        ok(json!({"activity": {"first_paired_at": "soon", "platforms": {}}}))
+                    }
+                    "nokey" => ok(json!({})),
+                    "rolling" => (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({"error": "not_running"})),
+                    )
+                        .into_response(),
+                    _ => {
+                        (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response()
+                    }
+                }
+            }),
+        );
+        let w = mock_warden(app).await;
+        let ts = |s: &str| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+
+        let TenantActivity::Known(both) = w.activity("both").await.unwrap() else {
+            panic!("the daemon answered");
+        };
+        assert_eq!(both.first_paired_at, Some(ts("2026-03-01T09:30:00Z")));
+        assert_eq!(
+            both.mac,
+            Some(PlatformActivity {
+                first_paired_at: ts("2026-03-01T09:30:00Z"),
+                last_seen_at: Some(ts("2026-03-09T08:00:00Z")),
+                last_action_at: Some(ts("2026-03-08T07:00:00Z")),
+            })
+        );
+        assert_eq!(both.ios.unwrap().last_action_at, None);
+        assert_eq!(both.last_seen_at(), Some(ts("2026-03-09T09:00:00Z")));
+        assert_eq!(both.last_action_at(), Some(ts("2026-03-08T07:00:00Z")));
+
+        assert_eq!(
+            w.activity("empty").await.unwrap(),
+            TenantActivity::Known(ClientActivity::default())
+        );
+        assert_eq!(
+            w.activity("old").await.unwrap(),
+            TenantActivity::Unsupported
+        );
+        assert_eq!(w.activity("gone").await.unwrap(), TenantActivity::NoTenant);
+        assert!(matches!(
+            w.activity("missing-key").await,
+            Err(WardenError::Unreachable)
+        ));
+        assert!(matches!(
+            w.activity("garbled").await,
+            Err(WardenError::Unreachable)
+        ));
+        assert!(matches!(
+            w.activity("nokey").await,
+            Err(WardenError::Unreachable)
+        ));
+        assert!(matches!(
+            w.activity("rolling").await,
+            Err(WardenError::Failed)
         ));
     }
 }

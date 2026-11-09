@@ -71,6 +71,13 @@ pub const KNOWN: &[Feature] = &[
                   are queued instead of waiting for tomorrow. The 10,000-run daily breaker and \
                   the monthly LLM budget still apply.",
     },
+    Feature {
+        key: UNDERSTANDING,
+        summary: "Deep understanding of the owner: the nightly profile pass and the memory \
+                  entries it writes (Settings shows every one), the relationship evidence and \
+                  memory lines triage is told about, and the Understanding section on the Usage \
+                  page. Off, the agent prompt is the prompt everyone else gets.",
+    },
 ];
 
 /// The daemon's background and access lane caps (see
@@ -83,6 +90,28 @@ pub const KNOWN: &[Feature] = &[
 /// not touch. OFF IS THE CAPS AS CONFIGURED, which is every daemon that never
 /// heard of the key. docs/TRIAGE-OPERATIONS.md, "Spend and revisit limits".
 pub const UNCAPPED_TRIAGE: &str = "uncapped_triage";
+
+/// Deep user understanding (docs/UNDERSTANDING.md §5): the nightly profile
+/// pass (`triage::profile`), the entries triage reads from it
+/// (`triage::memory::StoreMemoryContext`), the review page's routes
+/// (`/client/memory`), the relationship evidence triage is shown, the
+/// Understanding section on the Usage page, and every sentence of the agent
+/// prompt about any of it (`triage::agent::UNDERSTANDING_SEGMENTS`).
+///
+/// OFF STOPS NEW USE AND NEW SERVING; IT DOES NOT UNDO THE PAST. From the next
+/// run on, the pass does not run and spends nothing, triage is handed no
+/// memory lines or relationship evidence and gets the prompt byte for byte as
+/// every other mailbox does, and the routes 404. What already happened
+/// stands: decisions made under the flag-on prompt stay and are served until
+/// something re-triages them (a flip triggers no re-triage), each such run's
+/// `run_metadata` still says `understanding: true`, entries already written
+/// stay in the store unserved, and `/client/usage` keeps the `profile` spend
+/// it already booked inside its window. The relationship ledger still
+/// COMPUTES for everyone (it is deterministic and free); only what it shows
+/// is gated. It ships dark because it spends tokens and writes sentences
+/// about people, and the first weeks are for reading what the model writes
+/// about a handful of tenants before anyone else sees it.
+pub const UNDERSTANDING: &str = "understanding";
 
 /// Smart re-notify (issue #625, docs/RENOTIFY.md): the daemon records the Mac
 /// app's connections and, at a moment the owner can act, sends a `renotify`

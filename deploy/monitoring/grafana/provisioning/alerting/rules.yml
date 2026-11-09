@@ -518,3 +518,395 @@ groups:
               expression: A
               conditions:
                 - evaluator: { type: gte, params: [0.85] }
+
+  # A tenant out of triage budget. Nothing is broken and nothing crashes: mail
+  # keeps syncing and simply stops being judged, which is why no other rule
+  # here notices. Two kinds of budget, three rules:
+  #
+  # - The daemon's DAILY run caps (`[agent].daily_run_cap` and its lanes),
+  #   reset at 00:00 UTC. Read from squelchd_triage_daily_runs against
+  #   squelchd_triage_daily_run_cap, which already includes any one-day grant,
+  #   so a `squelchd triage grant` clears the alert on the next scrape.
+  # - The MONTHLY dollar budget on the tenant's Bifrost virtual key. The
+  #   daemon cannot tell it apart from the other config-shaped 4xx (it lands
+  #   in squelchd_llm_config_failures_total with a bad key or a rejected
+  #   model), so that rule says "budget first" and names the other two.
+  #
+  # Every rule is one series per tenant (`max by (cluster, tenant, ...)`, with
+  # `last_over_time` across the scrape gap a pod roll leaves), for the reason
+  # `tenant-sync-stale` gives: per pod, every daemon roll re-announced every
+  # tenant that was already out of budget. The daily gauges come from the
+  # tenant's database, so a new pod reports the same numbers as the old one.
+  - orgId: 1
+    name: triage-budget
+    folder: Passband
+    interval: 1m
+    rules:
+      # The one that matters most: the total cap is spent, so newly arrived
+      # mail is parked until midnight UTC instead of triaged. Fires once and
+      # resolves at the reset (or on a grant). `cap > 0` leaves out a daemon
+      # with the cap configured to nothing, which is not "out of budget".
+      - uid: tenant-triage-daily-cap
+        title: Tenant out of daily triage runs
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: 'tenant {{ $labels.tenant }} spent its daily triage cap: new mail goes untriaged until 00:00 UTC'
+          description: >-
+            Mail still syncs; it is just not judged until the reset. "Daily triage runs, share of
+            cap" and "Triage jobs held" on the dashboard show how fast it got there. A real mail
+            day: `kubectl -n tenants exec deploy/{{ $labels.tenant }} -- squelchd triage grant
+            <runs>` (a grant is spend against the monthly Bifrost budget). A loop or a rule
+            fan-out: find that first, a grant only feeds it.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                max by (cluster, tenant) (last_over_time(squelchd_triage_daily_runs{scope="total"}[10m]))
+                  - max by (cluster, tenant) (last_over_time(squelchd_triage_daily_run_cap{scope="total"}[10m]) > 0)
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gte, params: [0] }
+
+      # The lanes under the total: access (sent, spam and archive rows an
+      # agent asked to read, the archive check's own sub-cap included) and
+      # revisits (`[revisit].daily_cap`). One message a day per tenant per
+      # lane at most, since it resolves at the reset or the release.
+      #
+      # Read from the jobs a cap HOLDS, not from runs against the cap. Runs
+      # are charged to a lane even when nothing enforces it: a tenant with
+      # `uncapped_triage` on reads `access 900 of 500` by design
+      # (TRIAGE-OPERATIONS.md), and runs >= cap would have fired on it every
+      # day. Held jobs are the harm itself, and the flag releases them, so
+      # they also answer for the revisit lane, which exports no run gauge.
+      #
+      # The BACKGROUND lane is left out on purpose (2026-11-04). Its cap is
+      # how an onboarding backlog drains (200 a day, so a new mailbox sits at
+      # it daily for weeks), which made it a message a day per new signup
+      # saying the design was working. Its share-of-cap panel is still on the
+      # dashboard.
+      - uid: tenant-triage-lane-cap
+        title: Tenant triage jobs held by a lane cap
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: info
+        annotations:
+          summary: 'tenant {{ $labels.tenant }}: {{ $values.A.Value }} {{ $labels.scope }} jobs held until 00:00 UTC by a daily cap'
+          description: >-
+            access: a heavy day of access checks waiting for tomorrow (a grant, or the
+            uncapped_triage feature on /admin/features, releases them; archive checks only as far
+            as their own sub-cap allows). revisit: autonomous revisits parked by
+            [revisit].daily_cap, which neither a grant nor uncapped_triage raises. New mail is not
+            held by either; that is `tenant-triage-daily-cap`.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: max by (cluster, tenant, scope) (last_over_time(squelchd_triage_jobs_held{scope=~"access|revisit"}[10m]))
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+
+      # The monthly budget (2026-10-05: ellie's $75 key was spent and triage
+      # stalled for days before anyone looked). A spent budget is a 402 on
+      # EVERY call, so the counter climbs steadily; one stray 4xx does not
+      # hold for 15 minutes. Per tenant, so a fleet-wide key or model problem
+      # arrives as one message per tenant, and several at once is the hint
+      # that it is not a budget.
+      - uid: tenant-llm-config-failing
+        title: Tenant LLM calls refused (budget, key or model)
+        condition: C
+        for: 15m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: 'tenant {{ $labels.tenant }}: gateway refusing LLM calls, triage stalled'
+          description: >-
+            Usually the tenant's monthly Bifrost budget is spent: read it with a GET on
+            /api/governance/virtual-keys and top it up with `squelch-control llm topup
+            {{ $labels.tenant }}` (ECS Exec on control). Every tenant at once is not a budget:
+            a rejected model (the 2026-08-19 class: `squelch-control llm sync --check`) or a
+            bad key. Rows stay queued and drain after the fix.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 900, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: max by (cluster, tenant) (increase(squelchd_llm_config_failures_total[15m]))
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+
+  # Tenant backups: litestream on carrier streaming every tenant's SQLite to
+  # R2 (deploy/hosted/litestream/). It failed silently four times between
+  # 2026-09-26 and 2026-11-04 (issue #696): one tenant's replica, or every
+  # tenant's after a restart, stuck in an error loop for days while the unit
+  # stayed "active". litestream 0.3.13 exports nothing that says so, so
+  # litestream-health.sh reads the journal every minute and writes these
+  # series through node-exporter's textfile collector.
+  - orgId: 1
+    name: backups
+    folder: Passband
+    interval: 1m
+    rules:
+      # The #696 shape, and any other error a replica cannot get out of: its
+      # last error is newer than its last upload, and it errored in the last
+      # five minutes, for ten minutes running. `last_over_time(...[10m])` on every
+      # series here, as on the tenant rules above, so a node-exporter roll or a
+      # remote-write gap does not empty the query and restart the `for` clock. A transient R2 500 clears on
+      # the next upload. An idle tenant does not sync, so it cannot error and
+      # cannot fire; once its database changes, it does.
+      - uid: litestream-replica-stuck
+        title: Tenant backup stuck
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: 'tenant {{ $labels.tenant }}: backup to R2 failing, nothing uploaded since'
+          description: >-
+            Read the error first: `journalctl -u litestream --since -10min | grep {{ $labels.tenant }}`.
+            `lz4: bad magic number` is issue #696: check litestream.service still has
+            LoadCredential=age-identity (`systemctl cat litestream | grep LoadCredential`).
+            If the replica will not recover, `sudo /usr/local/bin/litestream-reset.sh` starts
+            every tenant on a fresh generation (deploy/hosted/litestream/README.md).
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                max by (cluster, tenant) (
+                  (last_over_time(passband_litestream_last_error_timestamp_seconds[10m])
+                    > last_over_time(passband_litestream_last_upload_timestamp_seconds[10m]))
+                  and (time() - last_over_time(passband_litestream_last_error_timestamp_seconds[10m]) < 300)
+                )
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+
+      # The backstop for a replicator that is not erroring because it is not
+      # doing anything at all: hung, or not configured for the tenant.
+      # litestream 0.3.13 takes a snapshot whenever none is younger than its
+      # 24h retention (checked hourly), even for a tenant that never writes,
+      # so a healthy tenant uploads at least every ~25 hours. A brand-new
+      # tenant reads 0 until its first snapshot, minutes after signup; the 30m
+      # `for` covers that.
+      - uid: litestream-tenant-stale
+        title: Tenant backup stale
+        condition: C
+        for: 30m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: 'tenant {{ $labels.tenant }}: nothing uploaded to R2 in 26+ hours'
+          description: >-
+            Even an idle tenant gets a daily retention snapshot, so this is litestream not
+            working for this tenant. `litestream databases` should list it with an s3 replica;
+            `journalctl -u litestream | grep {{ $labels.tenant }}` for what it last did.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: time() - max by (cluster, tenant) (last_over_time(passband_litestream_last_upload_timestamp_seconds[10m]))
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [93600] }
+
+      # litestream.service not active: a restart loop (a missing age key fails
+      # the unit at start, on purpose), or stopped by hand and not started.
+      - uid: litestream-down
+        title: Backups down (litestream not running)
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: 'litestream.service on {{ $labels.cluster }} is not running: no tenant is backing up'
+          description: >-
+            `systemctl status litestream` and `journalctl -u litestream -n 50`. A
+            `litestream-replicate: FATAL` line means the age identity did not load: check
+            /etc/litestream/backup-age.key (root 0600) and LoadCredential= in the unit.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: max by (cluster) (last_over_time(passband_litestream_service_active[10m]))
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+
+      # The exporter itself: without it every rule above is silent. Fires when
+      # carrier's node metrics arrive but this series does not (exporter timer
+      # stopped, node-exporter lost its textfile flag), or it stopped updating.
+      # Carrier going dark entirely is `carrier-metrics-missing`'s.
+      - uid: litestream-health-missing
+        title: Backup health exporter not reporting
+        condition: C
+        for: 15m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: 'litestream-health on carrier is not reporting: backup alerts are blind'
+          description: >-
+            `systemctl status litestream-health.timer` and
+            `cat /var/lib/node-exporter/textfile/litestream.prom` on carrier; node-exporter must run
+            with --collector.textfile.directory (deploy/hosted/80-monitoring.yaml).
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                (time() - max(passband_litestream_health_run_timestamp_seconds))
+                  or on() (vector(1e9) and on() count(node_uname_info{cluster="carrier"})
+                    unless on() count(passband_litestream_health_run_timestamp_seconds))
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [600] }
+
+  # The public doors, from the outside. Until 2026-11-05 these probes fed the
+  # dashboard only, so an endpoint could be down, and the LLM canary red, with
+  # nobody told: the canary was red for four days once (prometheus.yml, "THE
+  # LLM CANARY"). The CASA assessment asks how an outage reaches a person;
+  # these are the answer.
+  - orgId: 1
+    name: probes
+    folder: Passband
+    interval: 1m
+    rules:
+      - uid: public-endpoint-down
+        title: Public endpoint down
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: '{{ $labels.instance }} is failing its probe from the monitor box'
+          description: >-
+            The blackbox probe on the AWS monitor box cannot get a 2xx from this URL.
+            signup and relay are ECS services (`aws ecs describe-services --cluster passband`);
+            warden is on carrier; passband.app is CloudFront.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: min by (instance) (probe_success{job="blackbox-http"})
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+
+      # Two probes in a row, not one: the canary runs every 15m, so a 35m
+      # window holds two results, and max over it is 0 only when both failed.
+      # Keep the window wider than twice the scrape interval if that changes.
+      - uid: llm-canary-failing
+        title: LLM canary failing
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: 'LLM calls through bifrost.passband.app are failing'
+          description: >-
+            Two canary calls in a row through the gateway every tenant uses have failed, so
+            hosted triage is failing too. Check the provider key's models and budget in the
+            Bifrost UI, and `aws logs tail /passband/bifrost`.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 2400, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: max(max_over_time(probe_success{job="blackbox-bifrost-llm"}[35m]))
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }

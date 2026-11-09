@@ -34,20 +34,49 @@ inherits that obligation. That tradeoff was made deliberately; this is the bill.
 
 Ordered by what stops the submission soonest.
 
-- [ ] **The consent screen still says "Squelch."** It must say **Passband** —
-      the name on the home page, in the app, and on the App Store listing.
-      A mismatch fails brand verification on the first automated pass.
-      (`docs/HOSTED.md`, "Naming", has owed this since 2026-08-03.)
-- [ ] **Verify `passband.app` in Google Search Console**, as an owner, from the
-      same Google account that owns the Cloud project. Brand verification checks
+- [x] **Published: In production since 2026-11-05.** It was in Testing
+      (checked in Google Auth Platform
+      → Audience, 2026-11-05: Testing, External, 16 of 100 lifetime users, 15
+      of them listed test users). In Testing, Google expires every refresh
+      token seven days after consent, so every hosted user's mailbox goes dark
+      a week after signup until they reconnect, and nobody off the test-user
+      list can sign up at all. That looks exactly like churn. Press **Publish
+      app**. In production but unverified, tokens last; the cost is the
+      "Google hasn't verified this app" interstitial at consent (Advanced →
+      Go to Passband) and the 100-user lifetime cap, both of which
+      verification removes. Tokens minted while in Testing keep their
+      seven-day life, so every existing user must reconnect once after
+      publishing: the app's Gmail-disconnected banner sends them to
+      `signup.passband.app/reconnect` when theirs lapses, or send each of them
+      the link the day you publish so nobody sees the outage first.
+- [x] **The consent screen says "Passband"** (checked 2026-11-05, Branding →
+      App name). The logo is uploaded too. A logo on an app in production
+      requires verification; if Google refuses to publish over it, remove it
+      and add it back with the verification submission.
+- [x] **The Cloud project belongs to the passband.app organization** (migrated
+      2026-11-05; project id `squelch-501806` unchanged, so every OAuth client
+      id and every existing refresh token is unchanged). `braelyn@passband.app`
+      is an owner; `bboynton97@gmail.com` stays as a second owner until a
+      signup has been seen working end to end (a reconnect was, the same day).
+      The `passband.app` TXT records include an older `google-site-verification`
+      token from the Workspace setup: keep it beside the Search Console one. Never switch
+      the consent screen's user type to Internal: being in an org now offers
+      it, and it would lock out every account outside passband.app.
+- [x] **Verify `passband.app` in Google Search Console** (done 2026-11-05),
+      as an owner, from `braelyn@passband.app` (an owner of the Cloud project). A Domain
+      property, proved by a TXT record at Namecheap, where `passband.app`'s DNS
+      is hosted (`deploy/hosted/PRODUCTION.md`, the registrar table). Brand verification checks
       the top private domain of every URL on the consent screen.
-- [ ] **Declare `https://passband.app/about` as the application home page** —
-      not `https://passband.app`. The React homepage serves a 1,328-byte empty
+- [x] **`https://passband.app/about` is the application home page** (set
+      2026-11-05; it was `https://passband.app`). Developer contact is
+      `braelyn@passband.app`. The React homepage serves a 1,328-byte empty
       `#root` with no functional description and no privacy link, which is
       exactly what the automated home page check looks for. `/about` is static
       HTML (added 2026-08-25) and carries the description, the scope table, and
       the policy links without executing a bundle.
-- [ ] **Confirm what Bifrost retains.** The gateway keeps its config and log
+- [x] **Confirm what Bifrost retains.** Checked 2026-11-05 in the Bifrost UI
+      (Config → Logs, over the tailnet): Disable Content Logging is ON;
+      Log Retention Days is 7. Screenshots of both kept as CASA evidence. The gateway keeps its config and log
       stores as SQLite under `/app/data` on EFS (`bifrost_store = "efs"`,
       `deploy/aws/tofu/main/ecs.tf`). Bifrost's defaults log every request
       body, i.e. Gmail message content, to `/app/data/logs.db` for 365 days.
@@ -56,13 +85,22 @@ Ordered by what stops the submission soonest.
       `deploy/aws/CUTOVER.md`). The setting lives in Bifrost's config store,
       not in the task definition, so before the assessment re-check it under
       Config → Logs and keep the evidence. The Railway volume the gateway ran
-      on before the move goes with the Railway project's deletion (CUTOVER.md
-      Phase 10); confirm that has happened. **Do this before the assessment,
-      not during.**
-- [ ] **`/mcp` bearer auth** (`deploy/hosted/PRODUCTION.md`). An unauthenticated
-      agent door is not something to be explaining to an assessor. Tenant
-      Ingresses currently route around it; make that structural, or build the
-      auth.
+      on before the move, which had grown a multi-gigabyte `logs.db`, went
+      with the Railway project (deleted 2026-11-05, operator-confirmed).
+      **Do this before the assessment, not during.**
+- [x] **`/mcp` auth: confirm it is live.** Checked 2026-11-05 on
+      `braelyn.passband.email`: `/mcp` without a token answers `401` with the
+      `resource_metadata` challenge, and the metadata names
+      `https://secure-soul-15.authkit.app`. Fleet-wide Ingress check the same
+      day: all 11 tenants route `/mcp` and `/.well-known/oauth-protected-resource`.
+      Original note: Built (OAuth through WorkOS
+      AuthKit, 2026-10-01), and the checked-in warden config sets
+      `SQUELCH_WARDEN_MCP_OAUTH_ISSUER` (`deploy/hosted/15-warden-config.yaml`).
+      Before the assessment, prove carrier runs that config: an unauthenticated
+      `POST https://<label>.passband.email/mcp` answers `401` with a
+      `www-authenticate: Bearer resource_metadata=...` header (the check is in
+      `deploy/hosted/SETUP.md`, "Publishing the agent door"). Then tick this and
+      record the date in `deploy/hosted/PRODUCTION.md`.
 
 Cleared as of 2026-08-25:
 
@@ -73,6 +111,31 @@ Cleared as of 2026-08-25:
       hosted tenants routed through our own Anthropic account.
 - [x] Terms of service extended to hosted accounts.
 - [x] `/about` written and routed.
+
+Cleared as of 2026-11-05:
+
+- [x] HSTS (`max-age=31536000`) and `X-Content-Type-Options: nosniff` on every
+      response from control and from tenant daemons
+      (`squelch-control/src/transport.rs`, `squelch-api/src/transport.rs`).
+      Neither service sent HSTS before, and a missing one is the first thing a
+      DAST scan reports on each page. The daemon sends it only when Traefik
+      says the request arrived over https, so self-host on loopback is
+      unchanged. The push relay and the warden got the same layer, keyed on
+      the load balancer's or Traefik's `X-Forwarded-Proto` (the shared check
+      is `squelch_httpauth::forwarded_https`).
+- [x] A Content-Security-Policy on `passband.app` (CloudFront response headers
+      policy `passband-site-security`, `deploy/aws/tofu/main/site.tf`), which
+      the managed policy it replaces never set. Every page was loaded in
+      Chromium under the exact policy, waitlist submit included, with no
+      violations. **Needs a `tofu apply`** (the CI site deploy does not apply
+      tofu); until then the managed policy is still the live one.
+- [x] SAST pre-scan (Semgrep, the community Rust, TypeScript, Dockerfile,
+      Terraform, Kubernetes and secrets rules). Nothing to fix: every secret
+      hit is a test fixture or PostHog's public client key, the root-user hits
+      are images whose entrypoint drops privileges with `setpriv`, the
+      Kubernetes hits are node-exporter's documented host access, and every
+      SQL string built with `format!` interpolates only a literal table name,
+      an enum, or test code. `cargo deny` covers dependencies in CI.
 
 ## What gets submitted
 
@@ -204,8 +267,9 @@ reviewer needs one continuous frame proving that client ID granted that consent.
 2. **Hosted consent (Web client).** Start at `signup.passband.app`, click
    through to Google. Hold on the consent screen for a slow five seconds with
    the address bar in frame and legible: the URL must show `client_id=...` and
-   the screen must show **Passband**. Scroll the consent screen so all three
-   Gmail permissions are visible. Approve.
+   the screen must show **Passband**. Scroll the consent screen so every
+   permission is visible: the one Gmail permission (`gmail.modify`) and the two
+   calendar ones. Approve.
 3. **Self-host consent (Desktop client).** Run `squelchd auth` in a terminal,
    let it open the browser, and hold the same shot: address bar with the second
    client's `client_id`, consent screen showing **Passband**. Approve. This is
@@ -242,6 +306,40 @@ Engage an App Defense Alliance authorized lab once scope verification is under
 way; the assessment and Google's review can overlap, and the LOA date starts the
 12-month clock, so do not start it early for nothing.
 
+### Which route
+
+Google's restricted-scope review emails a request for the assessment, naming
+the tier. When it arrives:
+
+- **Lab: TAC Security** (the lab Google points developers to, Tier 2 from
+  about $540 per app per year as of 2025; check the current price). The lab
+  runs the DAST scan itself, and you answer its questionnaire. This is the
+  default: one invoice, and an assessor to argue scope with.
+- **Self-scan** (`appdefensealliance.dev/casa`): run the CASA-configured scan
+  yourself, fix the CWEs it flags, submit the results and the questionnaire
+  in the CASA portal, and a lab validates them. Cheaper in money, dearer in
+  operator time. Only worth it if the lab quote is unexpectedly large.
+
+Either way the Letter of Validation goes to Google from the portal.
+
+### Pre-scan before engaging the lab
+
+Run the scan the lab will run, first, so its first report is clean. OWASP ZAP's
+baseline scan is passive (it spiders and reads responses, no attack traffic),
+so it is safe against production. From a laptop, not this repo's CI:
+
+```sh
+for t in https://signup.passband.app https://passband.app/about \
+         https://<label>.passband.email https://relay.squelch.sh; do
+  docker run --rm -t ghcr.io/zaproxy/zaproxy:stable zap-baseline.py -t "$t" -I
+done
+```
+
+`bifrost.passband.app` answers only our own egress and `carrier`, so scan it
+from carrier or note it to the assessor as not publicly reachable. Fix anything
+Medium or above before the lab's scan, and write down the reason for every Low
+that stays.
+
 **Assessment scope is everything that touches Gmail data**, which is more than
 the daemon:
 
@@ -252,6 +350,10 @@ the daemon:
 | `bifrost.passband.app` | Message content in transit to Anthropic. Source-restricted: it answers only our own egress and `carrier`, so it is not publicly reachable |
 | The push/read-receipt relay | Opaque tokens only, but it is our surface |
 | `carrier` (Hetzner) and the k3s cluster | Where the mail and the sealed tokens rest |
+
+Draft questionnaire answers, chapter by chapter with evidence, and the list of
+what to fix before the lab looks: `docs/CASA-SAQ.md`. The incident response
+plan it points to: `docs/INCIDENT-RESPONSE.md`.
 
 Have ready before the DAST scan, because the questionnaire asks for all of it:
 the threat model (`docs/SECURITY.md`), the tenant isolation story (namespace,
@@ -271,9 +373,14 @@ Answers we should have written down before we are asked, not after.
   `docs/BROKER.md` sets out why the alternatives are worse. Be ready to say so
   in one paragraph.
 - **Message content reaching Anthropic.** Disclosed in the privacy policy for
-  both tiers. The load-bearing facts: no training on the content,
-  security-sensitive mail is detected deterministically and never sent to a
-  model at all, and self-host requires the user's own key.
+  both tiers. The load-bearing facts: no training on the content; the triage
+  model is what recognizes security-sensitive mail, so it reads login codes
+  once like any other message (there is no rule-based detector ahead of it:
+  `docs/SECURITY.md` §4d), and once sealed that mail never reaches the
+  assistant or the agent door; self-host requires the user's own key. Do not
+  tell a reviewer the model never sees login codes. An earlier draft of this
+  line and of the privacy policy said so, and it stopped being true with the
+  triage rewrite.
 - **Why both a Desktop and a Web client.** A refresh token is bound to the
   client that minted it; routing self-host refreshes through our infra would put
   our uptime in the path of every hourly refresh and every token in our reach.

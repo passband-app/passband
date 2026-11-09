@@ -126,6 +126,11 @@ pub struct AgentDraftCreated {
     /// [`draft_link`]. Given with every draft, so the agent always has a way
     /// to point its human at it.
     pub link: String,
+    /// Who the draft is addressed to, as saved: on a reply left blank, the
+    /// sender the daemon filled in.
+    pub to: String,
+    /// The subject as saved: on a reply left blank, the thread's.
+    pub subject: String,
 }
 
 /// What asking the owner's Mac to show a draft came to.

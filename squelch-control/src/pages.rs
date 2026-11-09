@@ -25,15 +25,11 @@
 //! COPY RULES (house style): the product is Passband, the daemon is squelchd,
 //! and there are no em dashes in anything a person reads.
 
+use crate::reconnect::{Purpose, ReconnectView};
 use axum::{
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
-use chrono::{DateTime, Utc};
-
-use crate::reconnect::{Purpose, ReconnectView};
-use crate::store::{FeatureBoard, UserRow};
-use squelch_core::features::Feature;
 
 /// The Content-Security-Policy every page carries. The single allowance is the
 /// inline `<style>`; `frame-ancestors 'none'` (with the older `X-Frame-Options`
@@ -58,6 +54,19 @@ pub(crate) const GMAIL_MARK: &str = r##"<span class="mark" aria-hidden="true"><s
 pub(crate) const OUTLOOK_MARK: &str = r##"<span class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" width="17" height="17"><rect x="9" y="4" width="14" height="16" rx="1.8" fill="#28A8EA"/><path d="M9.5 8.5 16 13l6.5-4.5" fill="none" stroke="#0A5EA8" stroke-width="1.3" stroke-linejoin="round"/><rect x="1" y="6" width="12" height="12" rx="1.8" fill="#0078D4"/><ellipse cx="7" cy="12" rx="2.7" ry="3.2" fill="none" stroke="#fff" stroke-width="1.7"/></svg></span>"##;
 
 const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self' https://accounts.google.com https://login.microsoftonline.com https://login.live.com; frame-ancestors 'none'; base-uri 'none'";
+
+/// The policy on the admin console's pages behind the door, and only there.
+///
+/// [`CSP`] with ONE allowance: scripts and fetches from this origin, which is
+/// the console's own `/admin/app.js` (see `admin.js`) fetching the console's
+/// own pages. Still no inline script and no third party, so nothing an escaped
+/// string could become runs. The doors in front of it, the signup pages, and
+/// every other page keep [`CSP`]: somebody deciding whether to hand over their
+/// mail runs no code at all, and that is the rule this exception is not.
+const CSP_ADMIN_APP: &str = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+
+/// Where the console's script is served, and the one script tag that names it.
+pub const ADMIN_SCRIPT_PATH: &str = "/admin/app.js";
 
 /// Escape text for HTML.
 pub fn escape_html(s: &str) -> String {
@@ -137,6 +146,47 @@ pub fn deep_link(tenant_url: &str, pair_code: &str, analytics_id: Option<&str>) 
 /// when a release does.
 const DOWNLOAD_URL: &str = "https://passband.app/download/latest";
 
+/// The public TestFlight invite for the iPhone app. The same link the Mac app's
+/// iPhone ask carries (`TestFlightNudge.joinURL` in the Swift client); change
+/// both together. Hardcoded for the reason [`DOWNLOAD_URL`] is.
+pub(crate) const TESTFLIGHT_URL: &str = "https://testflight.apple.com/join/nt7BD5H1";
+
+/// [`TESTFLIGHT_URL`] as a QR code, inline SVG. Rendered once per process.
+///
+/// SVG MARKUP, NOT AN IMAGE, because `img-src` is `'none'` here (see [`MARK`]
+/// for the same reasoning). One path, one unit per module, the standard
+/// four-module quiet zone inside the viewBox so the code scans on any ground.
+/// Dark modules on a white tile ALWAYS, in both palettes: phone cameras read a
+/// light-on-dark code badly, so the dark theme does not invert it.
+fn testflight_qr() -> &'static str {
+    static SVG: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        use qrcodegen::{QrCode, QrCodeEcc};
+        // A 42-byte URL always fits; an `Err` would be a bug in the constant.
+        let Ok(qr) = QrCode::encode_text(TESTFLIGHT_URL, QrCodeEcc::Medium) else {
+            return String::new();
+        };
+        qr_svg(&qr)
+    });
+    &SVG
+}
+
+fn qr_svg(qr: &qrcodegen::QrCode) -> String {
+    const QUIET: i32 = 4;
+    let size = qr.size();
+    let mut d = String::new();
+    for y in 0..size {
+        for x in 0..size {
+            if qr.get_module(x, y) {
+                d.push_str(&format!("M{} {}h1v1h-1z", x + QUIET, y + QUIET));
+            }
+        }
+    }
+    let side = size + 2 * QUIET;
+    format!(
+        r##"<svg class="qr" viewBox="0 0 {side} {side}" role="img" aria-label="QR code for the Passband iPhone alpha on TestFlight" shape-rendering="crispEdges"><rect width="{side}" height="{side}" fill="#fff"/><path fill="#0B1220" d="{d}"/></svg>"##
+    )
+}
+
 /// Where a finished console login sends the browser: the tenant's own console,
 /// carrying the pairing code it will claim.
 ///
@@ -197,7 +247,9 @@ const MARK: &str = concat!(
     r#"<rect x="849.8" y="699.3" width="44.4" height="72.7" rx="22.2"/>"#,
     r#"</g><path fill="none" stroke="currentColor" stroke-width="12" "#,
     r#"stroke-linecap="round" stroke-linejoin="round" d="#,
-    r#"M-12 768L12 765L33 760L54 752L69 745L87 733L102 721L117 707L135 686"#,
+    // The quote that opens `d` is on THIS line: `d="#` above would end the
+    // raw string at that quote and leave the attribute unquoted.
+    r#""M-12 768L12 765L33 760L54 752L69 745L87 733L102 721L117 707L135 686"#,
     r#"L159 653L189 602L279 420L309 364L339 316L369 279L384 265L399 254"#,
     r#"L414 244L429 238L462 229L501 227L552 228L588 235L606 242L621 251"#,
     r#"L636 262L651 275L681 311L711 357L744 418L834 600L861 646L888 685"#,
@@ -238,7 +290,7 @@ pub async fn newsreader() -> Response {
 /// link-free also keeps it free of configuration, which is what lets the shell
 /// carry it rather than every call site having to pass an origin down.
 fn page(status: StatusCode, title: &str, body: &str) -> Response {
-    render(status, title, body, r#" class="auth""#)
+    render(status, title, body, Shell::Auth)
 }
 
 /// The same shell on the OPERATOR'S surface: the landing page's dark ground in
@@ -246,11 +298,31 @@ fn page(status: StatusCode, title: &str, body: &str) -> Response {
 /// `body.console` block in the stylesheet for what that means and why the
 /// colours are restated there rather than inherited from the dark media query.
 ///
-/// The three pages behind the admin token, and nothing else. A signup page is
-/// read once by somebody deciding whether to hand over their mail; this is read
-/// every day by one person who already decided.
-fn console(status: StatusCode, title: &str, body: &str) -> Response {
-    render(status, title, body, r#" class="console""#)
+/// The admin doors (sign in, confirm, cross-origin) and nothing else: one
+/// panel, centred. The pages behind the door are [`console_app`]. A signup page
+/// is read once by somebody deciding whether to hand over their mail; these are
+/// read every day by one person who already decided.
+pub(crate) fn console(status: StatusCode, title: &str, body: &str) -> Response {
+    render(status, title, body, Shell::Console)
+}
+
+/// The console as an app: the masthead and `sidebar` in a column down the left,
+/// `body` beside it. `sidebar` is markup the caller built and escaped; it rides
+/// in under the masthead so the brand stays where every other page has it,
+/// first in the document.
+pub(crate) fn console_app(status: StatusCode, title: &str, sidebar: &str, body: &str) -> Response {
+    render(status, title, body, Shell::App(sidebar))
+}
+
+/// Which frame [`render`] puts a page in.
+#[derive(Clone, Copy)]
+enum Shell<'a> {
+    /// The signup and account pages: the masthead above the column.
+    Auth,
+    /// The admin doors.
+    Console,
+    /// The admin app, carrying its sidebar.
+    App(&'a str),
 }
 
 /// The operator surface's own stylesheet, appended to the shell's only on the
@@ -266,19 +338,31 @@ const CONSOLE_CSS: &str = include_str!("console.css");
 const CONSOLE_CHROME: &str =
     r#"<div class="fx" aria-hidden="true"><i class="glow"></i><i class="grat"></i></div>"#;
 
-fn render(status: StatusCode, title: &str, body: &str, body_class: &str) -> Response {
+fn render(status: StatusCode, title: &str, body: &str, shell: Shell) -> Response {
     let title = escape_html(title);
     let masthead =
         format!(r#"<header class="brand">{MARK}<span class="wordmark">Passband</span></header>"#);
-    let is_console = body_class == r#" class="console""#;
-    let opening = if body_class == r#" class="auth""# {
-        format!("{masthead}<main>")
-    } else if is_console {
-        format!("{CONSOLE_CHROME}<main>{masthead}")
-    } else {
-        format!("<main>{masthead}")
+    let (body_class, opening, closing) = match shell {
+        Shell::Auth => (r#" class="auth""#, format!("{masthead}<main>"), "</main>"),
+        Shell::Console => (
+            r#" class="console""#,
+            format!("{CONSOLE_CHROME}<main>{masthead}"),
+            "</main>",
+        ),
+        Shell::App(sidebar) => (
+            r#" class="console app""#,
+            format!(
+                r#"{CONSOLE_CHROME}<div class="shell"><aside class="side">{masthead}{sidebar}</aside><main>"#
+            ),
+            // `ADMIN_SCRIPT_PATH`, spelled out because this is a `&'static str`;
+            // a test holds the two together.
+            r#"</main></div><script src="/admin/app.js" defer></script>"#,
+        ),
     };
-    let console_css = if is_console { CONSOLE_CSS } else { "" };
+    let console_css = match shell {
+        Shell::Console | Shell::App(_) => CONSOLE_CSS,
+        Shell::Auth => "",
+    };
     let html = format!(
         r#"<!doctype html>
 <html lang="en">
@@ -546,8 +630,22 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
 .auth details li {{ margin: 0 0 0.25rem; }}
 .auth details p {{ color: var(--faint); margin: 0; }}
 .auth details strong {{ color: var(--ink); font-weight: 500; }}
+/* The iPhone block on the success page: secondary to the download, so no rig
+   and no button, a hairline above and the code on its own white tile. */
+.auth .phone {{ display: flex; align-items: center; gap: 1.4rem; margin: 2.5rem 0 0;
+  padding: 1.75rem 0 0; border-top: 1px solid var(--hair); }}
+.auth .phone .qr {{ display: block; flex: none; width: 7.5rem; height: 7.5rem;
+  border-radius: 0.6rem; box-shadow: 0 0 0 1px var(--hair), 0 10px 26px var(--rig-shadow); }}
+.auth .phone .rig-label {{ display: block; margin: 0 0 0.45rem; color: var(--faintest);
+  font-size: 0.68rem; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; }}
+.auth .phone p {{ margin: 0; font-size: 0.9rem; line-height: 1.55; }}
+.auth .phone .phone-link {{ margin-top: 0.6rem; font-size: 0.85rem; }}
 @media (max-width: 600px) {{
   .auth main {{ margin-top: 3rem; }}
+  .auth .phone .qr, .auth .phone .on-desk {{ display: none; }}
+}}
+@media (min-width: 601px) {{
+  .auth .phone .on-phone {{ display: none; }}
 }}
 @media (prefers-reduced-motion: reduce) {{
   .auth :is(.rig, a.button, button, .arrow) {{ transition-duration: 0.01ms; }}
@@ -557,7 +655,7 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
 {console_css}</style>
 </head>
 <body{body_class} data-theme="{theme}">{opening}
-{body}</main></body>
+{body}{closing}</body>
 </html>
 "#,
         title = title,
@@ -566,6 +664,7 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
         theme = crate::appearance::current().name(),
         body = body,
         body_class = body_class,
+        closing = closing,
     );
     (
         status,
@@ -577,7 +676,13 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
             // through to Google must not carry this URL as a referer.
             (header::CACHE_CONTROL, "no-store, no-cache"),
             (header::REFERRER_POLICY, "no-referrer"),
-            (header::CONTENT_SECURITY_POLICY, CSP),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                match shell {
+                    Shell::App(_) => CSP_ADMIN_APP,
+                    Shell::Auth | Shell::Console => CSP,
+                },
+            ),
             (header::X_FRAME_OPTIONS, "DENY"),
         ],
         html,
@@ -777,6 +882,12 @@ pub fn signup_form_with(
 /// yet, and the app's own onboarding signs in with Gmail and pairs itself
 /// through [`app_signed_in`], so this page carries no deep link and no pairing
 /// code: a second connect path here was a step the app already does.
+///
+/// THE IPHONE IS THE SECOND THING, NOT A SECOND BUTTON. Under the download sits
+/// a quiet block with a QR code for the TestFlight alpha: this page is almost
+/// always open on the Mac, and a phone that has the app from day one is the
+/// phone that gets the pushes that bring people back. On a narrow screen (the
+/// page opened on the phone itself) the code is hidden and the link carries it.
 pub fn success(tenant_url: &str) -> Response {
     let host = tenant_url
         .trim_start_matches("https://")
@@ -787,9 +898,18 @@ pub fn success(tenant_url: &str) -> Response {
         &format!(
             r#"<h1>Your mailbox is ready</h1>
 <p class="lead">{host} is live. Get the app, then sign in to finish.</p>
-<a class="button" href="{download}">Download Passband for Mac <span class="arrow" aria-hidden="true">→</span></a>"#,
+<a class="button" href="{download}">Download Passband for Mac <span class="arrow" aria-hidden="true">→</span></a>
+<section class="phone" aria-labelledby="phone-label">
+{qr}<div>
+<span class="rig-label" id="phone-label">Also on iPhone</span>
+<p><span class="on-desk">Scan to join the alpha on TestFlight.</span><span class="on-phone">Passband for iPhone is in alpha on TestFlight.</span> Your phone is where the notifications land.</p>
+<p class="phone-link"><a href="{testflight}">Join the iPhone alpha</a></p>
+</div>
+</section>"#,
             host = escape_html(host),
             download = DOWNLOAD_URL,
+            qr = testflight_qr(),
+            testflight = TESTFLIGHT_URL,
         ),
     )
 }
@@ -1160,772 +1280,7 @@ pub fn agent_confirm(mailbox: &str, csrf: &str, allow_http: bool) -> Response {
     resp
 }
 
-/// The admin door: one field, and nothing that describes what is behind it.
-///
-/// Anybody can ask for `/admin`, so this page says as little as a page can. It
-/// names no waitlist, no counts, and no operator.
-///
-/// `error` is present only on a refusal, so it decides the status too: a
-/// message rendered here means the request was turned away, and a 200 with a
-/// "not accepted" sentence in it is a lie to everything that reads status
-/// codes.
-pub fn admin_login(error: Option<&str>) -> Response {
-    let status = if error.is_some() {
-        StatusCode::UNAUTHORIZED
-    } else {
-        StatusCode::OK
-    };
-    admin_door(status, &stop_note(error))
-}
-
-/// The door after a DELIBERATE sign out, which is not a refusal and must not be
-/// dressed as one.
-///
-/// A 200 and a quiet note, where [`admin_login`] would answer 401 with a red
-/// banner. The rule that function states still holds and this is the other half
-/// of it: a 200 carrying "not accepted" is a lie to everything that reads status
-/// codes, and so is a 401 for a request that did exactly what was asked.
-pub fn admin_signed_out() -> Response {
-    admin_door(StatusCode::OK, r#"<p class="hint">Signed out.</p>"#)
-}
-
-/// The form both doors show, with whatever note belongs above it.
-fn admin_door(status: StatusCode, note: &str) -> Response {
-    console(
-        status,
-        "Passband admin",
-        &format!(
-            r#"<h1>Passband admin</h1>
-{note}
-<form method="post" action="/admin/login">
-<label for="token">Admin token</label>
-<input type="password" id="token" name="token" autocomplete="current-password"
-  autocapitalize="off" spellcheck="false" required>
-<button type="submit">Sign in</button>
-</form>"#
-        ),
-    )
-}
-
-/// The CSRF refusal, naming the origin this deployment answers to and the one
-/// the request actually stated.
-///
-/// A 403 with no words is the right shape for a page on some other origin that
-/// pressed these buttons, and the wrong shape for the operator, who meets the
-/// same refusal when an extension, a proxy, or a sandboxed frame rewrites those
-/// headers under an address bar that reads correctly. Both are told the same
-/// thing, because the attacker's half of it is a request they wrote themselves.
-///
-/// `report` arrives already filtered by [`crate::admin`] and is escaped here
-/// too: the rule is that nothing is interpolated raw.
-pub fn admin_cross_origin(expected: &str, report: &str) -> Response {
-    console(
-        StatusCode::FORBIDDEN,
-        "Passband admin",
-        &format!(
-            r#"<h1>That request did not come from this site</h1>
-<p>This page only accepts form posts made by a page loaded from
-<code>{expected}</code>, and this one stated something else. Nothing was
-changed.</p>
-<p class="muted">What arrived: <code>{report}</code></p>
-<p class="muted">A browser on this origin sends its own address here. Something
-between the form and this service rewrote it, which is usually an extension, a
-proxy, or the page running inside a sandboxed frame. Opening
-<code>{expected}/admin</code> in an ordinary tab is the fix.</p>"#,
-            expected = escape_html(expected.trim_end_matches('/')),
-            report = escape_html(report),
-        ),
-    )
-}
-
-/// The dashboard: who is waiting, who has been approved, and the two buttons.
-///
-/// ALWAYS 200, even carrying an `error`. The list under it is correct either
-/// way, and the banner says what the button did NOT do (a row already approved,
-/// an invite already spent); that is a finished page describing a real state,
-/// not a failed request.
-///
-/// THE CODE IS NOT HERE, and cannot be. Only its hash was kept, so the one
-/// remedy for a lost invite is a fresh one, which is what the send buttons are.
-pub fn admin_page(pending: &[UserRow], approved: &[UserRow], error: Option<&str>) -> Response {
-    let waiting: String = pending
-        .iter()
-        .map(|r| {
-            format!(
-                r#"<tr><td class="who">{who}</td><td class="when">{joined}</td><td class="act">{action}</td></tr>
-"#,
-                who = who_cell(r),
-                joined = day(r.created_at),
-                // "Approve", not "Approve and email invite". The long label was
-                // the only disclosure that pressing it sends mail, and it paid
-                // for that by repeating three words down every row of the board
-                // in the loudest thing on the page. The sentence above the table
-                // says it once, and the button is a word.
-                action = action_form("/admin/approve", r.id, "Approve", true),
-            )
-        })
-        .collect();
-
-    let history: String = approved
-        .iter()
-        .map(|r| {
-            // Two shapes for one row. A stamped `notified_at` is the quiet
-            // case (the mail went out; the button is there for the person who
-            // lost it), and a missing one is the loud case: this row is
-            // approved and nobody was told.
-            // THREE STATES, AND THE LAST ONE IS THE POINT OF THE COLUMN.
-            //
-            // Redemption was always in the store (`invite_codes.used_at`, joined
-            // on in `list_users`) and the re-send handler already refused a
-            // spent code with INVITE_SPENT. What was missing was SAYING so: the
-            // only way to learn somebody had signed up was to press a button and
-            // read the refusal. Now the board says it, and offers NO button on
-            // that row, because the one it used to offer could only ever fail.
-            //
-            // No button is the honest answer rather than a tidy one. A spent
-            // code means a mailbox exists, and minting a second for the same
-            // person is a tenant nobody approved, which is what the handler's
-            // refusal is there to stop.
-            //
-            // THE TOP RUNG IS ACTIVATION, and it sits ABOVE "signed up" because
-            // the ladder is read as PRECEDENCE and not as history: somebody
-            // active signed up too, the row has space for one answer, and the
-            // answer worth having is the furthest they got. Same `.done` family
-            // as the rung below and the same no-button rule, for the same
-            // reason: there is nothing left to mail somebody who is using the
-            // product.
-            let outcome = if let Some(at) = r.first_paired_at {
-                let label = tenant_code(r);
-                format!(
-                    r#"<span class="done">active</span><span class="muted">{}</span>{label}"#,
-                    day(at),
-                )
-            } else if let Some(at) = r.signed_up_at {
-                let label = tenant_code(r);
-                format!(
-                    r#"<span class="done">signed up</span><span class="muted">{}</span>{label}"#,
-                    day(at),
-                )
-            } else if let Some(at) = r.notified_at {
-                format!(
-                    r#"<span class="muted">Invited {}</span> {}"#,
-                    day(at),
-                    action_form("/admin/send", r.id, "Re-send", true),
-                )
-            } else {
-                // A PILL, not the `.stop` rule. `.stop` is a left border meant
-                // for a whole paragraph, and inline beside a button it drew a
-                // stray red tick that ran into the label next to it.
-                format!(
-                    r#"<span class="flag">email not sent</span>{}"#,
-                    action_form("/admin/send", r.id, "Send invite", false),
-                )
-            };
-            let approved_on = r
-                .approved_at
-                .map(|at| format!("<br>approved {}", day(at)))
-                .unwrap_or_default();
-            // For the stylesheet only: an active row's pill is green.
-            let rung = if r.first_paired_at.is_some() {
-                r#" class="active""#
-            } else {
-                ""
-            };
-            format!(
-                r#"<tr{rung}><td class="who">{who}</td><td class="when">joined {joined}{approved_on}</td><td class="act">{outcome}</td></tr>
-"#,
-                who = who_cell(r),
-                joined = day(r.created_at),
-            )
-        })
-        .collect();
-
-    // "OF THOSE" NESTS, so an active person is counted in BOTH numbers:
-    // everybody active signed up. Partitioning them instead would make
-    // "3 signed up, 2 active" read as five people.
-    let accepted_count = approved.iter().filter(|r| r.signed_up_at.is_some()).count();
-    let active_count = approved
-        .iter()
-        .filter(|r| r.first_paired_at.is_some())
-        .count();
-    let rungs = [
-        Rung {
-            label: "waiting",
-            count: pending.len(),
-            colour: "var(--warn)",
-            of: None,
-        },
-        Rung {
-            label: "approved",
-            count: approved.len(),
-            colour: "var(--accent)",
-            of: None,
-        },
-        Rung {
-            label: "signed up",
-            count: accepted_count,
-            colour: "var(--accent-ink)",
-            of: Some((approved.len(), "approved")),
-        },
-        Rung {
-            label: "active",
-            count: active_count,
-            colour: "var(--positive)",
-            of: Some((accepted_count, "signed up")),
-        },
-    ];
-
-    console(
-        StatusCode::OK,
-        "Waitlist",
-        &format!(
-            r#"<section class="hero">
-{tabs}
-<h1 data-text="Waitlist">Waitlist</h1>
-<p class="sr">{waiting_count} waiting, {approved_count} approved recently,
-{accepted_count} of those signed up, {active_count} of those active</p>
-</section>
-{scope}
-{error_html}
-<div class="racks">
-<section class="rack wait">
-<div class="rack-head"><span class="led"></span><h2>Waiting</h2><span class="count">{waiting_count}</span>
-<p class="hint">Approving mints one invite code and emails it. The code works
-once and expires in {ttl} days.</p></div>
-{waiting_table}
-</section>
-<section class="rack done-list">
-<div class="rack-head"><span class="led"></span><h2>Approved recently</h2><span class="count">{approved_count}</span></div>
-{history_table}
-</section>
-<section class="rack send">
-<div class="rack-head"><span class="led"></span><h2>Invite someone directly</h2></div>
-<form class="invite" method="post" action="/admin/invite">
-<label class="sr" for="email">Email address</label>
-<input type="email" id="email" name="email" placeholder="them@example.com"
-  autocomplete="off" autocapitalize="off" spellcheck="false" required>
-<button type="submit">Mint and email an invite</button>
-</form>
-<p class="hint">They do not have to be on the list first.</p>
-</section>
-</div>
-<div class="footer-row">
-<form class="signout" method="post" action="/admin/logout">
-<button type="submit" class="quiet">Sign out</button>
-</form>
-<p class="hint">This session lasts {session_days} days.</p>
-</div>"#,
-            tabs = admin_tabs(AdminTab::Waitlist),
-            scope = scope(&rungs),
-            error_html = stop_note(error),
-            waiting_count = pending.len(),
-            approved_count = approved.len(),
-            session_days = crate::cookie::ADMIN_COOKIE_TTL_SECS / (24 * 60 * 60),
-            waiting_table = table(
-                r#"<th>Who</th><th>Joined</th><th></th>"#,
-                &waiting,
-                "Nobody is waiting.",
-            ),
-            history_table = table(
-                r#"<th>Who</th><th>Dates</th><th>Outcome</th>"#,
-                &history,
-                "Nobody has been approved yet.",
-            ),
-            ttl = crate::invites::DEFAULT_TTL_DAYS,
-        ),
-    )
-}
-
-/// The two pages behind the admin token, as the strip above each one's title.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AdminTab {
-    Waitlist,
-    Features,
-}
-
-/// The way between the operator's pages. Plain links: no JavaScript here, and
-/// each page is a whole document.
-fn admin_tabs(current: AdminTab) -> String {
-    let tab = |tab: AdminTab, href: &str, label: &str| {
-        let here = if tab == current {
-            r#" aria-current="page""#
-        } else {
-            ""
-        };
-        format!(r#"<a href="{href}"{here}>{label}</a>"#)
-    };
-    format!(
-        r#"<nav class="tabs" aria-label="Admin pages">{}{}</nav>"#,
-        tab(AdminTab::Waitlist, "/admin", "Waitlist"),
-        tab(AdminTab::Features, "/admin/features", "Features"),
-    )
-}
-
-/// The form field names on the features page. Here so the page that writes
-/// them and the handler that reads them cannot drift apart.
-///
-/// `FEATURE_TENANT_FIELD` rides once per row as a hidden field and says "this
-/// tenant was on the page", which is what lets an UNTICKED box mean "off": a
-/// checkbox that is not ticked sends nothing at all, so without it a tenant
-/// with every box cleared would be indistinguishable from one who was never
-/// listed.
-pub const FEATURE_TENANT_FIELD: &str = "t";
-/// One COLUMN the page drew, as a hidden field, for the same reason the tenant
-/// field exists turned ninety degrees: a save may only untick boxes in columns
-/// this page actually had. A tab rendered before a deploy added a feature has
-/// no boxes for it, and must not read their absence as "off for everyone".
-pub const FEATURE_KEY_FIELD: &str = "k";
-/// One ticked box: `<tenant id>.<feature key>`.
-pub const FEATURE_GRANT_FIELD: &str = "g";
-/// One ticked box on the "everyone" row: a feature key.
-pub const FEATURE_EVERYONE_FIELD: &str = "all";
-
-/// The features page: which hidden features each tenant has been let into.
-///
-/// `board` is `None` when the store did not answer, and then THERE IS NO FORM.
-/// A form drawn over an empty list would post "every box is unticked" and the
-/// save would believe it, so the one thing this page must never do is offer a
-/// Save button under a list it failed to read.
-///
-/// ALWAYS 200, for the reason [`admin_page`] is: a banner over a real state is
-/// a finished page.
-///
-/// EVERYTHING FROM THE STORE IS ESCAPED, and so are the registry's own strings,
-/// which are compiled in and would be safe raw. The rule on this page is that
-/// nothing is interpolated raw, and it has no exceptions for good behaviour.
-pub fn admin_features(
-    registry: &[Feature],
-    board: Option<&FeatureBoard>,
-    error: Option<&str>,
-    saved: bool,
-    refresh_minutes: u64,
-) -> Response {
-    let legend: String = registry
-        .iter()
-        .map(|f| {
-            format!(
-                "<dt><code>{}</code></dt><dd>{}</dd>\n",
-                escape_html(f.key),
-                escape_html(f.summary),
-            )
-        })
-        .collect();
-
-    let body = match (registry.is_empty(), board) {
-        (true, _) => r#"<section class="rack"><div class="rack-head"><span class="led"></span><h2>Tenants</h2></div>
-<p class="muted">This build hides nothing: every feature it has is on for everyone. A hidden feature
-shows up here once it is listed in <code>squelch-core/src/features.rs</code> and that build is deployed.</p>
-</section>"#
-            .to_string(),
-        (false, None) => String::new(),
-        (false, Some(board)) => {
-            let head: String = registry
-                .iter()
-                .map(|f| format!("<th>{}</th>", escape_html(f.key)))
-                .collect();
-            let boxes = |name: &str, prefix: &str, on: &dyn Fn(&str) -> bool| -> String {
-                registry
-                    .iter()
-                    .map(|f| {
-                        let key = escape_html(f.key);
-                        let checked = if on(f.key) { " checked" } else { "" };
-                        format!(
-                            r#"<td class="tick"><label><input type="checkbox" name="{name}" value="{prefix}{key}"{checked}><span>{key}</span></label></td>"#
-                        )
-                    })
-                    .collect()
-            };
-            let everyone_row = format!(
-                r#"<tr class="everyone"><td class="who">Everyone<br><span class="muted">every tenant, and anybody who signs up later</span></td>{}</tr>
-"#,
-                boxes(FEATURE_EVERYONE_FIELD, "", &|key| board
-                    .everyone
-                    .contains(key)),
-            );
-            let tenant_rows: String = board
-                .tenants
-                .iter()
-                .map(|t| {
-                    // A row whose daemon cannot ask is still tickable: the
-                    // grant is stored and goes live when a token is minted.
-                    // What it must not do is look like every other row.
-                    let tokenless = if t.has_token {
-                        ""
-                    } else {
-                        r#"<br><span class="flag">no control token</span><span class="muted">waits for <code>share mint</code></span>"#
-                    };
-                    format!(
-                        r#"<tr><td class="who"><input type="hidden" name="{FEATURE_TENANT_FIELD}" value="{id}"><code>{label}</code><br><span class="muted">{email}</span>{tokenless}</td>{boxes}</tr>
-"#,
-                        id = t.id,
-                        label = escape_html(&t.label),
-                        email = escape_html(&t.account_email),
-                        boxes = boxes(FEATURE_GRANT_FIELD, &format!("{}.", t.id), &|key| t
-                            .features
-                            .contains(key)),
-                    )
-                })
-                .collect();
-            let nobody = if board.tenants.is_empty() {
-                r#"<p class="muted">No active tenants yet.</p>"#
-            } else {
-                ""
-            };
-            let columns: String = registry
-                .iter()
-                .map(|f| {
-                    format!(
-                        r#"<input type="hidden" name="{FEATURE_KEY_FIELD}" value="{}">"#,
-                        escape_html(f.key)
-                    )
-                })
-                .collect();
-            format!(
-                r#"<form class="features" method="post" action="/admin/features">{columns}
-<section class="rack">
-<div class="rack-head"><span class="led"></span><h2>Tenants</h2><span class="count">{count}</span>
-<p class="hint">A ticked box is on. A mailbox's daemon hears about a change within {refresh_minutes} minutes, with no restart.</p></div>
-<table class="matrix"><tr><th>Who</th>{head}</tr>
-{everyone_row}{tenant_rows}</table>
-{nobody}
-</section>
-<div class="footer-row"><button type="submit">Save</button>
-<p class="hint">Saves the whole page at once.</p></div>
-</form>"#,
-                count = board.tenants.len(),
-            )
-        }
-    };
-
-    let saved_note = if saved && error.is_none() {
-        r#"<p class="hint saved" role="status">Saved.</p>"#
-    } else {
-        ""
-    };
-    let legend = if legend.is_empty() {
-        String::new()
-    } else {
-        format!(
-            r#"<section class="rack"><div class="rack-head"><span class="led"></span><h2>Hidden features</h2><span class="count">{}</span></div>
-<dl class="legend">
-{legend}</dl>
-</section>"#,
-            registry.len(),
-        )
-    };
-
-    console(
-        StatusCode::OK,
-        "Features",
-        &format!(
-            r#"<section class="hero">
-{tabs}
-<h1 data-text="Features">Features</h1>
-</section>
-{error_html}{saved_note}
-<div class="racks">
-{legend}
-{body}
-</div>
-<div class="footer-row">
-<form class="signout" method="post" action="/admin/logout">
-<button type="submit" class="quiet">Sign out</button>
-</form>
-</div>"#,
-            tabs = admin_tabs(AdminTab::Features),
-            error_html = stop_note(error),
-        ),
-    )
-}
-
-/// One rung of the funnel, as the scope draws it: a carrier with a marker.
-struct Rung {
-    label: &'static str,
-    count: usize,
-    /// A CSS colour, always one of the stylesheet's own variables. Never data.
-    colour: &'static str,
-    /// The rung this one is a fraction of, and its name, for the rate under it.
-    of: Option<(usize, &'static str)>,
-}
-
-/// The funnel as the landing page's analyzer would draw it: a noise floor with
-/// one carrier per rung standing out of it, and a marker on each peak.
-///
-/// THE PEAKS ARE THE DATA. Each carrier's height is its count on a log scale
-/// against the largest rung, so a board of 200 waiting and 3 active still
-/// shows three as a real signal rather than a flat line. A rung of zero is a
-/// carrier that is not there: just the floor, which is the honest picture.
-///
-/// THE NOISE IS NOT. It comes from a fixed seed, so the same counts draw the
-/// same trace on every refresh and the only thing that moves the picture is
-/// the funnel moving. Decoration that changed on every load would read as the
-/// data changing.
-///
-/// Everything here is numbers the server computed and labels it owns; no
-/// string from the store reaches the SVG, so there is nothing to escape.
-fn scope(rungs: &[Rung; 4]) -> String {
-    const W: f64 = 1000.0;
-    const H: f64 = 300.0;
-    const FLOOR: f64 = 262.0;
-    const RANGE: f64 = 200.0;
-    let centres = [125.0, 375.0, 625.0, 875.0];
-    let max = rungs.iter().map(|r| r.count).max().unwrap_or(0);
-    let heights: Vec<f64> = rungs
-        .iter()
-        .map(|r| {
-            if r.count == 0 || max == 0 {
-                0.0
-            } else {
-                // A single person still clears the floor by a visible margin.
-                36.0 + (RANGE - 36.0) * ((1 + r.count) as f64).ln() / ((1 + max) as f64).ln()
-            }
-        })
-        .collect();
-
-    // A tiny LCG: deterministic, dependency free, and plenty random for grass.
-    let noise = |seed: u64| {
-        let mut state = seed;
-        move || {
-            state = state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            ((state >> 33) as f64) / ((1u64 << 31) as f64)
-        }
-    };
-    let signal = |x: f64| -> f64 {
-        centres
-            .iter()
-            .zip(&heights)
-            .map(|(c, h)| {
-                let d = x - c;
-                // A sharp Lorentzian carrier on a broad skirt, which is the
-                // shape a real carrier has through a resolution filter.
-                h * (0.8 / (1.0 + (d / 11.0).powi(2)) + 0.2 / (1.0 + (d / 55.0).powi(2)))
-            })
-            .sum()
-    };
-    let trace = |seed: u64, grass: f64| -> String {
-        let mut rnd = noise(seed);
-        let mut d = String::new();
-        let mut x = 0.0;
-        while x <= W {
-            let y = (FLOOR - grass * rnd() - signal(x)).max(8.0);
-            d.push_str(&format!(
-                "{}{x:.0} {y:.1}",
-                if x == 0.0 { "M" } else { "L" }
-            ));
-            x += 4.0;
-        }
-        d
-    };
-    let live = trace(7, 12.0);
-
-    let markers: String = rungs
-        .iter()
-        .enumerate()
-        .map(|(i, r)| {
-            let top = (FLOOR - 12.0 - heights[i]).max(8.0);
-            format!(
-                r#"<i class="mkr" style="--c:{c};left:{l:.2}%;top:{t:.2}%"></i>"#,
-                c = r.colour,
-                l = centres[i] / W * 100.0,
-                t = top / H * 100.0,
-            )
-        })
-        .collect();
-    let readouts: String = rungs
-        .iter()
-        .map(|r| {
-            // A rate only where there is one to state. The top two rungs are
-            // just their counts.
-            let sub = match r.of {
-                Some((of, name)) if of > 0 => format!(
-                    r#"<div class="sub">{}% of {name}</div>"#,
-                    (r.count as f64 / of as f64 * 100.0).round()
-                ),
-                _ => String::new(),
-            };
-            format!(
-                r#"<div class="readout" style="--c:{c}"><div class="lbl">{label}</div><span class="num">{count}</span>{sub}</div>"#,
-                c = r.colour,
-                label = r.label,
-                count = r.count,
-            )
-        })
-        .collect();
-
-    format!(
-        r#"<figure class="scope" aria-hidden="true"><div class="scope-screen"><svg viewBox="0 0 {W} {H}" preserveAspectRatio="none"><path class="fill" d="{live} L{W} {H} L0 {H} Z"/><path class="trace" vector-effect="non-scaling-stroke" pathLength="4000" d="{live}"/></svg>{markers}</div><div class="readouts">{readouts}</div></figure>"#,
-    )
-}
-
-/// The one question the operator answers before any invite leaves the building.
-///
-/// A DOCUMENT AND NOT A `confirm()`, because the CSP at the top of this file is
-/// `default-src 'none'` with no `script-src` at all, and every page here is
-/// tested for having no `<script>` in it. An interruption that cannot be script
-/// has to be a page, so this is one: the address it concerns, the question, and
-/// the two ways out.
-///
-/// WHY THE QUESTION IS WORTH A WHOLE PAGE. The OAuth client is not verified yet
-/// (`docs/VERIFICATION.md`), so Google refuses consent to any account that is
-/// not on the project's test-user list. An invite mailed to somebody who is not
-/// on that list is an invite to a wall: the code is spent, the row reads
-/// "invited", and the first anyone hears of it is the person writing back to say
-/// Google would not let them in. Asking costs a click. Not asking costs a
-/// signup and a re-mint, and the board cannot tell the two apart afterwards.
-///
-/// NOTHING HAS HAPPENED YET when this renders. Every caller checks for the
-/// confirmation BEFORE it approves, mints, revokes, or mails, so cancelling here
-/// is genuinely a no-op rather than a half-finished approval.
-pub fn admin_confirm(
-    action: &str,
-    hidden: &[(&str, &str)],
-    who: &str,
-    confirm_label: &str,
-) -> Response {
-    let fields: String = hidden
-        .iter()
-        .map(|(name, value)| {
-            format!(
-                r#"<input type="hidden" name="{}" value="{}">"#,
-                escape_html(name),
-                escape_html(value),
-            )
-        })
-        .collect();
-    console(
-        StatusCode::OK,
-        "One thing first",
-        &format!(
-            r#"<h1>One thing first</h1>
-<p class="stop"><strong>Have you added this person to the Google
-test user list?</strong></p>
-<p>{who}</p>
-<p class="hint">Passband's OAuth client is not verified yet, so Google will not
-let an account finish consent unless that account is on the project's test-user
-list. Mailing an invite to somebody who is not on it sends them to a wall, and
-the code is spent by the time they tell you. Add them in the Google Cloud
-console first, then come back and press this.</p>
-<form method="post" action="{action}">{fields}<input type="hidden" name="{CONFIRM_FIELD}" value="yes">
-<button type="submit">{confirm_label}</button>
-</form>
-<p class="hint"><a href="/admin">Cancel and go back.</a> Nothing has been
-approved, minted, or mailed.</p>"#,
-            who = escape_html(who),
-            action = escape_html(action),
-            confirm_label = escape_html(confirm_label),
-            fields = fields,
-            CONFIRM_FIELD = CONFIRM_FIELD,
-        ),
-    )
-}
-
-/// The hidden field that says the operator answered the question on
-/// [`admin_confirm`]. Lives here so the page that writes it and the handlers
-/// that read it cannot drift to two different spellings.
-pub const CONFIRM_FIELD: &str = "confirmed";
-
-/// The "who" cell: the address this person is known by, — when the Google
-/// account that actually signed up is a DIFFERENT address — a muted line naming
-/// that too, and last, the name they typed into the form.
-///
-/// THE ADDRESS STAYS ON TOP even though the name is the more human of the two.
-/// Every button on this page acts on an address, every refusal names one, and
-/// the operator's own question before approving anybody ("is this account on
-/// the Google test-user list?") is asked about an address. The name is context
-/// for that decision and is rendered as context: beneath, and absent entirely
-/// on the rows that have none rather than padded out with a dash.
-///
-/// THE LINES ARE ORDERED BY AUTHORITY, AND THE NAME IS QUOTED. Both of those
-/// are one fix for one hole. The name arrives here as free text on a public,
-/// unauthenticated form, and it used to render in the same muted line, with the
-/// same wrapper, as the `signed up as` provenance below — so a stranger who
-/// submitted the name `signed up as ada@example.com` produced a row that was
-/// byte-for-byte identical to a genuine Google-verified one. That inverts the
-/// trust ordering the whole page rests on: the provenance line is the ONE thing
-/// on it that claims to come from Google rather than from a form, and on the
-/// Waiting table it cannot legitimately appear at all, because `account_email`
-/// is only ever written beside `signed_up_at`.
-///
-/// So the page asserts first and quotes last. The curly quotes are the frame,
-/// and `store::normalize_name` strips both of those characters out of every
-/// stored name, which is what makes the frame something free text cannot spell:
-/// a quoted line is what somebody typed, an unquoted one is what this page
-/// knows.
-///
-/// AN INVITE IS A BEARER CODE, so the two are not promised to match: a person
-/// can be invited at work and sign up with a personal mailbox, or forward the
-/// mail to somebody else entirely. Before this line the board silently showed
-/// the invited address for a mailbox belonging to another address, which is the
-/// one thing an operator reading this page cannot afford to guess at.
-///
-/// Shown only on a MISMATCH. Repeating the same address twice on every signed-up
-/// row would be noise that trains the eye to skip the line that matters.
-///
-/// ALL THREE are escaped, like everything else on this page. `account_email`
-/// comes from Google and the address had to pass `is_email` to be stored at
-/// all, so the rule is not carried by either of them: the name is free text a
-/// stranger typed into a public form, and it is the one this page would break
-/// on. Nothing here is interpolated raw regardless of how well-behaved its
-/// source is believed to be.
-fn who_cell(r: &UserRow) -> String {
-    let mut cell = escape_html(&r.email);
-    if let Some(account) = r.account_email.as_deref()
-        && account != r.email
-    {
-        cell.push_str(&format!(
-            r#"<br><span class="muted">signed up as {}</span>"#,
-            escape_html(account)
-        ));
-    }
-    // Escaped like everything else here, and this one is the reason the rule
-    // exists: it is the only string on this page that a stranger typed into a
-    // public form. The quotes are the page's own and cannot be part of the
-    // name; see above.
-    if let Some(name) = r.name.as_deref() {
-        cell.push_str(&format!(
-            "<br><span class=\"given\">\u{201c}{}\u{201d}</span>",
-            escape_html(name)
-        ));
-    }
-    cell
-}
-
-/// The mailbox a row became, as a `<code>` label, or nothing at all.
-///
-/// Shared by the two `.done` rungs so the label renders identically on both: an
-/// active row is a signed-up row that got further, and a difference in how they
-/// spell the same tenant would read as a difference in what happened.
-fn tenant_code(r: &UserRow) -> String {
-    r.tenant_label
-        .as_deref()
-        .map(|l| format!(" <code>{}</code>", escape_html(l)))
-        .unwrap_or_default()
-}
-
-/// One row's button, as its own form. No JavaScript on this page, so a button
-/// that acts is a form that posts, and the row it acts on rides in a hidden
-/// field.
-fn action_form(action: &str, id: i64, label: &str, quiet: bool) -> String {
-    let class = if quiet { r#" class="quiet""# } else { "" };
-    format!(
-        r#"<form method="post" action="{action}"><input type="hidden" name="id" value="{id}"><button type="submit"{class}>{label}</button></form>"#,
-        action = escape_html(action),
-        label = escape_html(label),
-    )
-}
-
-/// A table, or a sentence saying there is nothing to put in one.
-fn table(head: &str, rows: &str, empty: &str) -> String {
-    if rows.is_empty() {
-        format!(r#"<p class="muted">{}</p>"#, escape_html(empty))
-    } else {
-        format!("<table><tr>{head}</tr>\n{rows}</table>")
-    }
-}
-
-/// The error banner every page above renders the same way.
+/// The refusal banner the signup form renders.
 ///
 /// `role="alert"` because these pages have no JavaScript and a refusal is a
 /// whole new document: without it, a screen reader lands the user back at the
@@ -1940,13 +1295,6 @@ fn stop_note(error: Option<&str>) -> String {
             )
         })
         .unwrap_or_default()
-}
-
-/// A date as the operator reads it. Escaped like everything else: the rule is
-/// that nothing is interpolated raw, and an exception for "this one is only
-/// ever digits" is how the rule stops being one.
-fn day(ts: DateTime<Utc>) -> String {
-    escape_html(&ts.format("%Y-%m-%d").to_string())
 }
 
 /// Something went wrong after the user left for Google. `status` is the HTTP
@@ -1969,6 +1317,8 @@ pub fn problem(status: StatusCode, heading: &str, detail: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admin_views::tests::{row, waiting};
+    use crate::admin_views::{admin_login, admin_overview};
     use axum::body::to_bytes;
 
     /// The mailbox is ESCAPED on the confirmation page (the store holds
@@ -2263,6 +1613,46 @@ mod tests {
         assert!(!html.contains("<script"), "{html}");
     }
 
+    /// The iPhone alpha rides the success page as a QR code and a link, and it
+    /// is NOT a second button: the download stays the one thing to press. The
+    /// code is markup (the CSP admits no image) and encodes the TestFlight link.
+    #[tokio::test]
+    async fn the_success_page_offers_the_iphone_alpha_without_a_second_button() {
+        let html = document_of(success("https://ada.passband.email")).await;
+        assert!(
+            html.contains(&format!(r#"href="{TESTFLIGHT_URL}""#)),
+            "{html}"
+        );
+        assert!(html.contains(r#"<svg class="qr""#), "{html}");
+        assert!(!html.contains("<img"), "{html}");
+        assert_eq!(html.matches(r#"class="button""#).count(), 1, "{html}");
+        assert!(!html.contains('\u{2014}'), "{html}");
+    }
+
+    /// The SVG draws exactly the code qrcodegen made: one square per dark
+    /// module, inside a viewBox that leaves the four-module quiet zone.
+    #[test]
+    fn the_testflight_qr_draws_every_dark_module_with_a_quiet_zone() {
+        let qr = qrcodegen::QrCode::encode_text(TESTFLIGHT_URL, qrcodegen::QrCodeEcc::Medium)
+            .expect("the link fits");
+        let size = qr.size();
+        let dark = (0..size)
+            .flat_map(|y| (0..size).map(move |x| (x, y)))
+            .filter(|&(x, y)| qr.get_module(x, y))
+            .count();
+        let svg = testflight_qr();
+        assert_eq!(svg, qr_svg(&qr));
+        assert_eq!(svg.matches("h1v1h-1z").count(), dark);
+        // The top-left finder's corner module sits 4 in from the edge, so the
+        // quiet zone is real on every side, not only counted into the viewBox.
+        assert!(svg.contains("M4 4h1v1h-1z"), "{svg}");
+        let side = size + 8;
+        assert!(
+            svg.contains(&format!(r#"viewBox="0 0 {side} {side}""#)),
+            "{svg}"
+        );
+    }
+
     /// The app page's fallback is FOLDED AWAY BUT LABELLED WITH THE SYMPTOM.
     ///
     /// A `contains` over the whole document cannot tell a code somebody can read
@@ -2381,390 +1771,6 @@ mod tests {
         assert!(!html.contains("href"), "{html}");
     }
 
-    /// A user row as the store hands one over.
-    fn row(id: i64, email: &str, notified: bool) -> UserRow {
-        // 2026-01-01T00:00:00Z.
-        let at = DateTime::from_timestamp(1_767_225_600, 0).unwrap();
-        UserRow {
-            id,
-            email: email.to_string(),
-            name: None,
-            created_at: at,
-            status: crate::store::USER_APPROVED.to_string(),
-            approved_at: Some(at),
-            invite_id: Some(7),
-            notified_at: notified.then_some(at),
-            signed_up_at: None,
-            tenant_label: None,
-            account_email: None,
-            first_paired_at: None,
-        }
-    }
-
-    /// The same row after they spent the code: a mailbox exists.
-    fn accepted_row(id: i64, email: &str, label: &str) -> UserRow {
-        let at = DateTime::from_timestamp(1_767_225_600, 0).unwrap();
-        UserRow {
-            signed_up_at: Some(at),
-            tenant_label: Some(label.to_string()),
-            account_email: Some(email.to_string()),
-            ..row(id, email, true)
-        }
-    }
-
-    /// ...and after a device that is not the console paired with it: the top of
-    /// the ladder.
-    fn active_row(id: i64, email: &str, label: &str) -> UserRow {
-        let at = DateTime::from_timestamp(1_767_225_600, 0).unwrap();
-        UserRow {
-            first_paired_at: Some(at),
-            ..accepted_row(id, email, label)
-        }
-    }
-
-    /// The dashboard is the one page that renders a string a stranger typed
-    /// into a public form, so it is the one page where escaping is the whole
-    /// defense. `<`, `>`, and `"` all survive the address shape check.
-    #[tokio::test]
-    async fn the_dashboard_escapes_an_address_that_is_an_attack() {
-        let hostile = r#""><script>alert(1)</script>@evil.test"#;
-        let html = body_of(admin_page(
-            &[row(1, hostile, false)],
-            &[row(2, hostile, true)],
-            Some("<b>nope</b>"),
-        ))
-        .await;
-        assert!(!html.contains("<script>alert(1)"), "{html}");
-        assert!(!html.contains("<b>nope</b>"), "{html}");
-        assert!(html.contains("&lt;script&gt;"), "{html}");
-        assert!(html.contains("&quot;&gt;"), "{html}");
-    }
-
-    /// The direct-invite form is ON the dashboard, and it is styled: the shared
-    /// stylesheet named two input types by hand, so an `email` input rendered as
-    /// an unstyled browser default next to the ones that are not.
-    #[tokio::test]
-    async fn the_dashboard_carries_a_styled_form_for_inviting_directly() {
-        let page = body_of(admin_page(&[], &[], None)).await;
-        assert!(page.contains(r#"action="/admin/invite""#), "{page}");
-        assert!(page.contains(r#"name="email""#), "{page}");
-        assert!(page.contains("Mint and email an invite"), "{page}");
-        assert!(page.contains("input[type=email]"), "{page}");
-        // Both palettes, or it is an unstyled box in one of them, plus the
-        // console surface, which restates every colour rather than inheriting
-        // the dark media query (see the `body.console` block).
-        assert_eq!(page.matches("input[type=email]").count(), 3, "{page}");
-        assert!(!page.contains("<script"), "{page}");
-    }
-
-    /// Which button a row gets is the whole state machine the operator sees: a
-    /// stamped row is quiet, an unstamped one is loud and asks to be pressed.
-    #[tokio::test]
-    async fn an_unsent_invite_says_so_and_offers_the_button() {
-        let sent = body_of(admin_page(&[], &[row(1, "ada@example.com", true)], None)).await;
-        assert!(sent.contains("Invited 2026-01-01"), "{sent}");
-        // Quiet: this row is fine, and the button is only there for somebody
-        // who lost the mail. Matched WITH its label, because the board carries
-        // a quiet sign-out button of its own at the foot.
-        assert!(
-            sent.contains(r#"<button type="submit" class="quiet">Re-send</button>"#),
-            "{sent}"
-        );
-        assert!(!sent.contains("email not sent"), "{sent}");
-
-        let failed = body_of(admin_page(&[], &[row(1, "ada@example.com", false)], None)).await;
-        assert!(
-            failed.contains(r#"<span class="flag">email not sent</span>"#),
-            "{failed}"
-        );
-        // Loud, and the only row action on the board that is: this one is asking
-        // to be pressed. No `class="quiet"` on THIS button, which is what the
-        // label in the match is for.
-        assert!(
-            failed.contains(r#"<button type="submit">Send invite</button>"#),
-            "{failed}"
-        );
-
-        let waiting = body_of(admin_page(&[row(1, "ada@example.com", false)], &[], None)).await;
-        assert!(waiting.contains(">Approve</button>"), "{waiting}");
-        assert!(waiting.contains(r#"name="id" value="1""#), "{waiting}");
-        assert!(waiting.contains(r#"action="/admin/approve""#), "{waiting}");
-        // No JavaScript on this page either: a button that acts is a form.
-        assert!(!waiting.contains("<script"), "{waiting}");
-    }
-
-    /// THE FAR END OF THE FUNNEL, which the board could not show at all before
-    /// the redemption join: an invite that was spent means a mailbox, and the
-    /// row says which one.
-    ///
-    /// NO BUTTON ON THAT ROW. `admin::send` refuses a spent code (INVITE_SPENT)
-    /// because a second code for somebody who already has a mailbox is a tenant
-    /// nobody approved, so offering the press was offering a guaranteed
-    /// refusal, and pressing it was the only way to discover they had signed up.
-    #[tokio::test]
-    async fn a_spent_invite_says_which_mailbox_it_became_and_offers_no_button() {
-        let html = document_of(admin_page(
-            &[],
-            &[accepted_row(1, "ada@example.com", "ada")],
-            None,
-        ))
-        .await;
-        assert!(
-            html.contains(r#"<span class="done">signed up</span>"#),
-            "{html}"
-        );
-        assert!(html.contains("<code>ada</code>"), "{html}");
-        assert!(html.contains("1 of those signed up"), "{html}");
-        // The whole point: no press, and nothing that could mint a second code.
-        assert!(!html.contains("Re-send"), "{html}");
-        assert!(!html.contains("/admin/send"), "{html}");
-
-        // An outstanding invite is unchanged: still offered, still quiet.
-        let waiting_on_them =
-            document_of(admin_page(&[], &[row(1, "ada@example.com", true)], None)).await;
-        assert!(waiting_on_them.contains("Re-send"), "{waiting_on_them}");
-        assert!(
-            !waiting_on_them.contains("signed up</span>"),
-            "{waiting_on_them}"
-        );
-        assert!(
-            waiting_on_them.contains("0 of those signed up"),
-            "{waiting_on_them}"
-        );
-    }
-
-    /// THE TOP OF THE LADDER (#89): somebody who signed up AND opened the app.
-    /// The whole point of the column was that "did anyone we invited ever run
-    /// it" had no answer anywhere; this is the answer, on the row.
-    ///
-    /// Same `.done` family and same no-button rule as the rung below it, and the
-    /// tally nests: an active person is counted as signed up too.
-    #[tokio::test]
-    async fn an_active_row_says_so_and_offers_no_button() {
-        let html = document_of(admin_page(
-            &[],
-            &[active_row(1, "ada@example.com", "ada")],
-            None,
-        ))
-        .await;
-        assert!(
-            html.contains(r#"<span class="done">active</span>"#),
-            "{html}"
-        );
-        assert!(html.contains("<code>ada</code>"), "{html}");
-        // Precedence, not history: the further rung wins the cell outright.
-        assert!(!html.contains("signed up</span>"), "{html}");
-        assert!(
-            html.contains("1 of those signed up, 1 of those active"),
-            "{html}"
-        );
-        // Nothing left to mail somebody who is using the product.
-        assert!(!html.contains("Re-send"), "{html}");
-        assert!(!html.contains("/admin/send"), "{html}");
-
-        // A signed-up row that never paired is the other half of the count.
-        let not_yet = document_of(admin_page(
-            &[],
-            &[accepted_row(1, "ada@example.com", "ada")],
-            None,
-        ))
-        .await;
-        assert!(
-            not_yet.contains("1 of those signed up, 0 of those active"),
-            "{not_yet}"
-        );
-        assert!(!not_yet.contains(r#">active</span>"#), "{not_yet}");
-    }
-
-    /// The name is context under the address, on both tables, and only when
-    /// there is one: a row without a name is the row that has always been
-    /// there and renders exactly as it did.
-    #[tokio::test]
-    async fn a_name_sits_under_the_address_when_there_is_one() {
-        let named = UserRow {
-            name: Some("Ada Lovelace".to_string()),
-            status: crate::store::USER_PENDING.to_string(),
-            approved_at: None,
-            invite_id: None,
-            notified_at: None,
-            ..row(1, "ada@example.com", false)
-        };
-        let html = document_of(admin_page(&[named], &[], None)).await;
-        assert!(html.contains("ada@example.com"), "{html}");
-        assert!(
-            html.contains("<span class=\"given\">\u{201c}Ada Lovelace\u{201d}</span>"),
-            "{html}"
-        );
-        // The address is what every button here acts on, so it stays first.
-        let who = html.find("ada@example.com").unwrap();
-        assert!(who < html.find("Ada Lovelace").unwrap(), "{html}");
-
-        // The one string on this page a stranger typed into a public form.
-        let hostile = UserRow {
-            name: Some(r#"<script>alert(1)</script>"#.to_string()),
-            ..row(2, "eve@evil.test", true)
-        };
-        let html = document_of(admin_page(&[], &[hostile], None)).await;
-        assert!(html.contains("&lt;script&gt;alert(1)"), "{html}");
-
-        // No name, no extra line and no empty one.
-        let html = document_of(admin_page(&[], &[row(3, "grace@example.com", true)], None)).await;
-        assert!(!html.contains(r#"class="given""#), "{html}");
-        assert!(html.contains("grace@example.com"), "{html}");
-    }
-
-    /// A NAME CANNOT SPELL THE ONE LINE ON THIS PAGE THAT COMES FROM GOOGLE.
-    ///
-    /// The provenance line is the page's most authoritative field and the name
-    /// beneath it is free text off a public form. They shared a wrapper once,
-    /// and a stranger submitting the name `signed up as ada@example.com`
-    /// rendered a row byte-for-byte identical to a genuine one — an operator
-    /// reading "this person already signed up as somebody I recognize" and
-    /// approving an invite for an address that had done no such thing.
-    ///
-    /// Two things stop it and this test holds both: the frame (curly quotes
-    /// that `normalize_name` strips out of every stored name, so nothing inside
-    /// one can be one) and the order (what the page knows first, what somebody
-    /// typed last).
-    #[tokio::test]
-    async fn a_name_cannot_forge_the_line_that_came_from_google() {
-        let forged = UserRow {
-            name: Some("signed up as ada@example.com".to_string()),
-            status: crate::store::USER_PENDING.to_string(),
-            approved_at: None,
-            invite_id: None,
-            notified_at: None,
-            ..row(1, "eve@evil.test", false)
-        };
-        let forged = document_of(admin_page(&[forged], &[], None)).await;
-        let genuine = UserRow {
-            account_email: Some("ada@example.com".to_string()),
-            ..accepted_row(1, "eve@evil.test", "eve")
-        };
-        let genuine = document_of(admin_page(&[], &[genuine], None)).await;
-
-        let cell = |html: &str| {
-            let start = html.find("eve@evil.test").unwrap();
-            html[start..start + 120].to_string()
-        };
-        assert_ne!(
-            cell(&forged),
-            cell(&genuine),
-            "the forgery is indistinguishable"
-        );
-        // The genuine line is unquoted and unmarked; the forged one is neither.
-        assert!(
-            genuine.contains(r#"<span class="muted">signed up as ada@example.com</span>"#),
-            "{genuine}"
-        );
-        assert!(
-            forged.contains(
-                "<span class=\"given\">\u{201c}signed up as ada@example.com\u{201d}</span>"
-            ),
-            "{forged}"
-        );
-        assert!(
-            !forged.contains(r#"<span class="muted">signed up as"#),
-            "{forged}"
-        );
-
-        // And on a row that carries both, the page's own line comes first.
-        let both = UserRow {
-            name: Some("signed up as ada@bigco.com".to_string()),
-            account_email: Some("eve-real@evil.test".to_string()),
-            ..accepted_row(1, "eve@evil.test", "eve")
-        };
-        let html = document_of(admin_page(&[], &[both], None)).await;
-        assert!(
-            html.find("eve-real@evil.test").unwrap() < html.find("ada@bigco.com").unwrap(),
-            "{html}"
-        );
-    }
-
-    /// AN INVITE IS A BEARER CODE, so the address that was invited and the
-    /// Google account that signed up are two different facts. When they differ
-    /// the board says so, and when they agree it says nothing rather than
-    /// printing one address twice.
-    ///
-    /// The second line is ESCAPED like everything else here: it arrives from
-    /// Google rather than from the public form, and the rule on this page does
-    /// not care where a string came from.
-    #[tokio::test]
-    async fn a_signup_under_another_address_says_which() {
-        let mismatch = UserRow {
-            account_email: Some(r#"<script>alert(1)</script>@evil.test"#.to_string()),
-            ..accepted_row(1, "ada@example.com", "ada")
-        };
-        let html = document_of(admin_page(&[], &[mismatch], None)).await;
-        assert!(html.contains("signed up as"), "{html}");
-        assert!(html.contains("ada@example.com"), "{html}");
-        assert!(!html.contains("<script>alert(1)"), "{html}");
-        assert!(html.contains("&lt;script&gt;"), "{html}");
-        assert!(
-            html.contains(r#"<span class="muted">signed up as"#),
-            "{html}"
-        );
-
-        // Same address on both sides: one line, no second address, no noise.
-        let agreed = document_of(admin_page(
-            &[],
-            &[accepted_row(1, "ada@example.com", "ada")],
-            None,
-        ))
-        .await;
-        assert!(!agreed.contains("signed up as"), "{agreed}");
-    }
-
-    /// A DELIBERATE SIGN OUT IS NOT A REFUSAL. The session runs for a month
-    /// now, so ending one on a borrowed machine had to become a press rather
-    /// than a trip to Secrets Manager to rotate the token; and the page that press lands
-    /// on answers 200, because the request did exactly what was asked. The
-    /// expired-session door is the 401, and still says so.
-    #[tokio::test]
-    async fn signing_out_is_a_200_and_being_thrown_out_is_a_401() {
-        let out = admin_signed_out();
-        assert_eq!(out.status(), StatusCode::OK);
-        let html = document_of(out).await;
-        assert!(html.contains("Signed out."), "{html}");
-        // The door, not a dead end: the way back in is on it.
-        assert!(html.contains(r#"action="/admin/login""#), "{html}");
-        // Not dressed as a refusal.
-        assert!(!html.contains(r#"class="stop""#), "{html}");
-
-        assert_eq!(
-            admin_login(Some("Your admin session has ended.")).status(),
-            StatusCode::UNAUTHORIZED
-        );
-        assert_eq!(admin_login(None).status(), StatusCode::OK);
-    }
-
-    /// The exit is ON the board, and it is a form, because a link cannot carry
-    /// the same-origin POST every other admin action on this page is held to.
-    #[tokio::test]
-    async fn the_board_carries_the_way_out() {
-        let html = document_of(admin_page(&[], &[], None)).await;
-        assert!(html.contains(r#"action="/admin/logout""#), "{html}");
-        assert!(html.contains("Sign out"), "{html}");
-        // The page states its own lifetime rather than leaving the operator to
-        // discover it by being signed out.
-        assert!(html.contains("This session lasts 30 days"), "{html}");
-    }
-
-    /// The door names nothing that is behind it, and a refusal is a 401 rather
-    /// than a 200 with bad news in it.
-    #[tokio::test]
-    async fn the_admin_door_says_nothing_and_refuses_with_a_status() {
-        let r = admin_login(None);
-        assert_eq!(r.status(), StatusCode::OK);
-        let html = body_of(r).await;
-        assert!(html.contains(r#"type="password""#), "{html}");
-        assert!(html.contains(r#"action="/admin/login""#), "{html}");
-        assert!(!html.to_lowercase().contains("waitlist"), "{html}");
-
-        let refused = admin_login(Some("That token was not accepted."));
-        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
-    }
-
     /// House rule: no typographic dashes in anything a person reads.
     ///
     /// THE WHOLE FAMILY, not just the em dash this started as. An en dash is the
@@ -2813,13 +1819,15 @@ mod tests {
             ))
             .await,
             body_of(admin_login(Some("no"))).await,
-            body_of(admin_page(
-                &[row(1, "ada@example.com", false)],
-                &[row(2, "bob@example.com", true)],
-                Some("no"),
+            body_of(admin_overview(
+                Some(&[
+                    waiting(1, "ada@example.com"),
+                    row(2, "bob@example.com", true),
+                ]),
+                Some(&[]),
+                None,
             ))
             .await,
-            body_of(admin_page(&[], &[], None)).await,
         ] {
             for dash in BANNED {
                 assert!(!html.contains(dash), "U+{:04X} in {html}", u32::from(dash));
@@ -2852,7 +1860,12 @@ mod tests {
             ))
             .await,
             body_of(admin_login(None)).await,
-            body_of(admin_page(&[row(1, "ada@example.com", false)], &[], None)).await,
+            body_of(admin_overview(
+                Some(&[waiting(1, "ada@example.com")]),
+                Some(&[]),
+                None,
+            ))
+            .await,
         ] {
             assert!(html.contains(r#"<header class="brand">"#), "{html}");
             assert!(
@@ -2860,6 +1873,8 @@ mod tests {
                 "{html}"
             );
             assert!(html.contains("<svg"), "{html}");
+            // The passband curve's path is quoted, or the browser drops it.
+            assert!(html.contains(r#" d="M-12 768"#), "{html}");
             // Inline, not fetched: an `<img src>` or a `url()` in the masthead
             // would be a request `default-src 'none'` refuses, i.e. a broken
             // logo. The stylesheet's one `url()` is the same-origin font.
@@ -2924,7 +1939,7 @@ mod tests {
             problem(StatusCode::BAD_REQUEST, "Nope", "Try again."),
             console_problem(StatusCode::BAD_REQUEST, "Nope", "Try again."),
             admin_login(None),
-            admin_page(&[row(1, "ada@example.com", false)], &[], None),
+            admin_overview(Some(&[waiting(1, "ada@example.com")]), Some(&[]), None),
         ] {
             let h = r.headers().clone();
             assert_eq!(h[header::X_FRAME_OPTIONS], "DENY");

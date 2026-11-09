@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use squelch_api::{
-    ApiState, DEVICE_AUTH_CONCURRENCY, ROUTE_CEILINGS, RequestTimeouts, STORE_CALL_SLOTS,
-    attach_event_channel, record_http_metrics, router, serve, serve_with_header_timeout,
+    ApiState, ROUTE_CEILINGS, RequestTimeouts, STORE_CALL_SLOTS, attach_event_channel,
+    record_http_metrics, router, serve, serve_with_header_timeout,
 };
 use squelch_core::metrics::{SyncMetrics, render};
 use squelch_core::store::{NewEvent, SqliteStore, Store};
@@ -560,7 +560,7 @@ async fn the_device_token_check_keeps_its_permit_on_the_thread_it_parks() {
     assert!(statuses.iter().all(|s| *s == 504), "{statuses:?}");
     let peak = peak.load(Ordering::Relaxed);
     assert!(
-        peak <= base + 1 + DEVICE_AUTH_CONCURRENCY + 10,
+        peak <= base + 1 + squelch_api::DEVICE_AUTH_CONCURRENCY + 10,
         "peak {peak} threads over a base of {base}: the lookups took threads past their permits"
     );
     drop(wedge);

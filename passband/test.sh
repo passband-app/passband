@@ -85,6 +85,15 @@ run_suite calendar-fold \
   Sources/Passband/Model/WireTypes.swift \
   Tests/CalendarFoldTests.swift
 
+# Event identity on the wire: another sender's mail linked under the user's
+# card, and the change it offers. Every new key optional and lenient: an
+# unknown kind or a malformed offer costs the offer, never the card.
+run_suite linked-change \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Tests/LinkedChangeWireTests.swift
+
 # The search panel's Events block: which query goes to which search
 # (`in:calendar`, the mail-only operators), the wire it reads, three rows
 # then "N more", and each row's day, time and place in the user's zone.
@@ -241,6 +250,11 @@ run_suite fixture-api \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/APIError.swift \
   Sources/Passband/Model/FixtureMail.swift \
+  Sources/Passband/Lib/UsageSeries.swift \
+  Sources/Passband/Model/UnderstandingWire.swift \
+  Sources/Passband/Lib/HiddenFeatures.swift \
+  Sources/Passband/Lib/UnderstandingSeries.swift \
+  Sources/Passband/Lib/UnderstandingFixture.swift \
   Sources/Passband/Model/FixtureAPI.swift \
   Tests/FixtureAPITests.swift
 
@@ -288,6 +302,7 @@ run_suite credential-probe \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/APIError.swift \
   Sources/Passband/Lib/CalendarWrite.swift \
+  Sources/Passband/Model/UnderstandingWire.swift \
   Sources/Passband/Model/APIClient.swift \
   Sources/Passband/Lib/ClientIdentity.swift \
   Sources/Passband/Lib/TriageTargets.swift \
@@ -596,6 +611,33 @@ run_suite usage-series \
   Sources/Passband/Lib/UsageSeries.swift \
   Tests/UsageSeriesTests.swift
 
+# The Understanding section under it: the ledger placed on the People chart's
+# ladder (answered, read, ignored, just arrived), the two ranked lists, the
+# reply-time words, every sentence said about a person, and the memory
+# entries grouped by kind. Foundation only, like the series above.
+run_suite understanding-series \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/UsageSeries.swift \
+  Sources/Passband/Model/UnderstandingWire.swift \
+  Sources/Passband/Lib/HiddenFeatures.swift \
+  Sources/Passband/Lib/UnderstandingSeries.swift \
+  Sources/Passband/Lib/UnderstandingFixture.swift \
+  Tests/UnderstandingSeriesTests.swift
+
+# The two wire shapes it reads, as a daemon built beside this client sends
+# them: missing fields, nulls, unknown kinds and origins, one bad row among
+# good ones. Each costs only itself.
+run_suite understanding-wire \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/UsageSeries.swift \
+  Sources/Passband/Model/UnderstandingWire.swift \
+  Sources/Passband/Lib/HiddenFeatures.swift \
+  Sources/Passband/Lib/UnderstandingSeries.swift \
+  Sources/Passband/Lib/UnderstandingFixture.swift \
+  Tests/UnderstandingWireTests.swift
+
 # The clear board: the streak of clear days and the tally under the carrier.
 run_suite clear-board \
   Sources/Passband/Lib/UsageSeries.swift \
@@ -695,6 +737,24 @@ run_suite calendar-reminder \
   Sources/Passband/Model/RenotifyBanner.swift \
   Sources/Passband/Model/CalendarReminder.swift \
   Tests/CalendarReminderTests.swift
+
+# The morning brief (squelch-api's morning_brief): the phone's
+# `<tag>:brief:<day>` push id, refused when tag-less or malformed and never
+# read as a mail event, the banner the extension draws from /client/brief,
+# and a tap that opens the board whether or not the banner was dressed.
+run_suite morning-brief \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Sources/Passband/Lib/SenderIdentity.swift \
+  Sources/Passband/Lib/AuthLabels.swift \
+  Sources/Passband/Lib/AgentDraftLink.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Model/EventBanner.swift \
+  Sources/Passband/Model/RenotifyBanner.swift \
+  Sources/Passband/Model/CalendarReminder.swift \
+  Tests/MorningBriefTests.swift
 
 # What auth mail asks of the owner (docs/AUTH-MAIL-HANDLING.md, "Clients"): the
 # sealed row from both daemon versions, which kinds open a question and for

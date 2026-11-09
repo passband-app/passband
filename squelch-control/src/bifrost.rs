@@ -703,6 +703,39 @@ impl BifrostClient {
         }
     }
 
+    /// Top up a key's one budget by `amount_usd` for its current window, found
+    /// by the key's id rather than its name, and read back.
+    ///
+    /// What signup gives a fresh triage key: a new mailbox's first-run backfill is a one-off bill the size of a
+    /// month, and it must not leave the person dark for the rest of their
+    /// first month. The override expires at the first reset, so month two is
+    /// on the ordinary limit with nothing for anybody to undo.
+    ///
+    /// A key with anything but exactly one budget was not made by a mint, and
+    /// guessing which budget to raise is how the wrong one gets raised: that
+    /// is an error, as is a read-back that does not show the top-up.
+    pub async fn top_up_key(&self, vk_id: &str, amount_usd: f64) -> Result<(), BifrostError> {
+        let find = || async {
+            let key = self
+                .list_virtual_keys()
+                .await?
+                .into_iter()
+                .find(|k| k.id == vk_id)
+                .ok_or(BifrostError::Failed)?;
+            match key.budgets.as_slice() {
+                [budget] => Ok(budget.clone()),
+                _ => Err(BifrostError::Unbudgeted),
+            }
+        };
+        let budget = find().await?;
+        self.set_budget_override(vk_id, &budget.id, amount_usd)
+            .await?;
+        if (find().await?.override_amount - amount_usd).abs() > 0.005 {
+            return Err(BifrostError::Failed);
+        }
+        Ok(())
+    }
+
     /// Mint the TRIAGE virtual key, named `tenant-<label>`, with a monthly
     /// budget of `budget_usd`, attached to every provider key the gateway
     /// lists and allowed exactly the configured triage models.
@@ -940,6 +973,9 @@ mod tests {
         overrides: Vec<(&'static str, String, String, Value)>,
         /// When set, the budget-override route answers this status.
         override_status: Option<u16>,
+        /// When set, an override PUT answers 200 but the listing never shows
+        /// it: the gateway that says yes and does nothing.
+        override_ignored: bool,
     }
 
     type Shared = Arc<Mutex<Recorder>>;
@@ -1062,12 +1098,27 @@ mod tests {
                      body: String| async move {
                         let mut r = rec.lock().unwrap();
                         r.auths.push(auth_of(&headers));
-                        r.overrides.push((
-                            "PUT",
-                            id,
-                            budget,
-                            serde_json::from_str(&body).unwrap_or(Value::Null),
-                        ));
+                        let body: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                        // The listing shows an accepted override, as the live
+                        // gateway's does, so a read-back can be checked.
+                        if r.override_status.is_none()
+                            && !r.override_ignored
+                            && let Some(keys) = r
+                                .listing
+                                .as_mut()
+                                .and_then(|l| l["virtual_keys"].as_array_mut())
+                        {
+                            for b in keys
+                                .iter_mut()
+                                .filter(|k| k["id"] == id.as_str())
+                                .filter_map(|k| k["budgets"].as_array_mut())
+                                .flatten()
+                                .filter(|b| b["id"] == budget.as_str())
+                            {
+                                b["override_amount"] = body["amount"].clone();
+                            }
+                        }
+                        r.overrides.push(("PUT", id, budget, body));
                         StatusCode::from_u16(r.override_status.unwrap_or(200)).unwrap()
                     },
                 )
@@ -1572,6 +1623,82 @@ mod tests {
 
         rec.lock().unwrap().override_status = Some(404);
         let err = c.set_budget_override("vk-1", "b-1", 5.0).await.unwrap_err();
+        assert!(matches!(err, BifrostError::Failed), "{err:?}");
+    }
+    /// A listing holding one minted key with the budgets given.
+    fn listing_with(budgets: Value) -> Value {
+        json!({
+            "virtual_keys": [
+                { "id": "vk-other", "name": "tenant-bob", "budgets": [{ "id": "b-other", "max_limit": 75, "current_usage": 0 }] },
+                { "id": "vk-123", "name": "tenant-ada", "budgets": budgets },
+            ],
+        })
+    }
+
+    /// A signup's top-up lands on the budget of the key it names by id, not
+    /// on any other key's, as one cycle of the amount asked for.
+    #[tokio::test]
+    async fn a_key_top_up_raises_that_keys_one_budget() {
+        let rec: Shared = Arc::new(Mutex::new(Recorder {
+            listing: Some(listing_with(
+                json!([{ "id": "b-1", "max_limit": 75, "current_usage": 0 }]),
+            )),
+            ..Default::default()
+        }));
+        let c = client_for(&rec).await;
+
+        c.top_up_key("vk-123", 75.0).await.unwrap();
+
+        let r = rec.lock().unwrap();
+        assert_eq!(r.overrides.len(), 1);
+        let (method, vk, budget, body) = &r.overrides[0];
+        assert_eq!(
+            (*method, vk.as_str(), budget.as_str()),
+            ("PUT", "vk-123", "b-1")
+        );
+        assert_eq!(
+            body,
+            &json!({ "amount": 75.0, "mode": "cycles", "cycles": 1 })
+        );
+    }
+
+    /// A key with no budget or more than one is not what a mint makes, and a
+    /// gateway that accepts the write but does not show it has not given the
+    /// tenant anything: all three are errors, and the first two write nothing.
+    #[tokio::test]
+    async fn a_key_top_up_refuses_odd_budgets_and_an_unread_write() {
+        for budgets in [
+            json!([]),
+            json!([
+                { "id": "b-1", "max_limit": 75, "current_usage": 0 },
+                { "id": "b-2", "max_limit": 5, "current_usage": 0 },
+            ]),
+        ] {
+            let rec: Shared = Arc::new(Mutex::new(Recorder {
+                listing: Some(listing_with(budgets)),
+                ..Default::default()
+            }));
+            let c = client_for(&rec).await;
+            let err = c.top_up_key("vk-123", 75.0).await.unwrap_err();
+            assert!(matches!(err, BifrostError::Unbudgeted), "{err:?}");
+            assert!(rec.lock().unwrap().overrides.is_empty());
+        }
+
+        let rec: Shared = Arc::new(Mutex::new(Recorder {
+            listing: Some(listing_with(
+                json!([{ "id": "b-1", "max_limit": 75, "current_usage": 0 }]),
+            )),
+            override_ignored: true,
+            ..Default::default()
+        }));
+        let c = client_for(&rec).await;
+        let err = c.top_up_key("vk-123", 75.0).await.unwrap_err();
+        assert!(matches!(err, BifrostError::Failed), "{err:?}");
+        assert_eq!(rec.lock().unwrap().overrides.len(), 1);
+
+        // A key the gateway does not list is an error, not a top-up of some
+        // other key's budget.
+        let err = c.top_up_key("vk-missing", 75.0).await.unwrap_err();
         assert!(matches!(err, BifrostError::Failed), "{err:?}");
     }
 }

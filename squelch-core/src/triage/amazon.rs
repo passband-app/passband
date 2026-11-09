@@ -121,7 +121,7 @@ fn tracker_link(raw: &str, depth: u8) -> Option<AmazonPackage> {
     }
 }
 
-/// Amazon's order number: `113-1810790-1724205`.
+/// Amazon's order number: `113-0000000-0000001`.
 fn is_order_id(s: &str) -> bool {
     let parts: Vec<&str> = s.split('-').collect();
     parts.len() == 3
@@ -131,7 +131,7 @@ fn is_order_id(s: &str) -> bool {
             .all(|(n, p)| p.len() == *n && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// Amazon's shipment id: a short ASCII alphanumeric token (`N4RLGpMz1`).
+/// Amazon's shipment id: a short ASCII alphanumeric token (`N0FAKE001`).
 fn is_shipment_id(s: &str) -> bool {
     (6..=24).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric())
 }
@@ -143,21 +143,21 @@ mod tests {
     const FROM: &str = "shipment-tracking@amazon.com";
 
     /// The plain-text part of a real Shipped mail, trimmed.
-    const SHIPPED_TEXT: &str = "Your package was shipped!\n\nOrder #\n113-1810790-1724205\n\n\
-        Track package\nhttps://www.amazon.com/progress-tracker/package?_encoding=UTF8&orderId=113-1810790-1724205&packageIndex=0&shipmentId=N4RLGpMz1&vt=NOTIFICATIONS&ref_=p_btn_fed_track_package\n";
+    const SHIPPED_TEXT: &str = "Your package was shipped!\n\nOrder #\n113-0000000-0000001\n\n\
+        Track package\nhttps://www.amazon.com/progress-tracker/package?_encoding=UTF8&orderId=113-0000000-0000001&packageIndex=0&shipmentId=N0FAKE001&vt=NOTIFICATIONS&ref_=p_btn_fed_track_package\n";
 
     /// The HTML part of a real Delivered mail: the tracker behind the click
     /// redirect, plus the two feedback links whose `shipmentId` is another id.
     const DELIVERED_HTML: &str = concat!(
-        r#"<a href="https://www.amazon.com/gp/r.html?C=1KB&amp;K=2NG&amp;R=QDG&amp;T=C&amp;U=https%3A%2F%2Fwww.amazon.com%2Fprogress-tracker%2Fpackage%3F_encoding%3DUTF8%26orderId%3D113-1810790-1724205%26packageIndex%3D0%26shipmentId%3DN4RLGpMz1%26vt%3DNOTIFICATIONS&amp;H=BYA">Track package</a>"#,
-        r#"<a href="https://www.amazon.com/gp/r.html?C=1KB&amp;U=https%3A%2F%2Fwww.amazon.com%2Fprogress-tracker%2Fpackage%3F_encoding%3DUTF8%26itemId%3Djnkoouiqloprxop%26orderId%3D113-1810790-1724205%26packageIndex%3D0%26shipmentId%3D505428063344301%26intent%3Dfeedback_happy">Great</a>"#,
-        r#"<a href="https://www.amazon.com/gp/r.html?C=1KB&amp;U=https%3A%2F%2Fwww.amazon.com%2Fprogress-tracker%2Fpackage%3F_encoding%3DUTF8%26itemId%3Djnkoouiqloprxop%26orderId%3D113-1810790-1724205%26packageIndex%3D0%26shipmentId%3D505428063344301%26intent%3Dfeedback_unhappy">Not so great</a>"#,
+        r#"<a href="https://www.amazon.com/gp/r.html?C=1KB&amp;K=2NG&amp;R=QDG&amp;T=C&amp;U=https%3A%2F%2Fwww.amazon.com%2Fprogress-tracker%2Fpackage%3F_encoding%3DUTF8%26orderId%3D113-0000000-0000001%26packageIndex%3D0%26shipmentId%3DN0FAKE001%26vt%3DNOTIFICATIONS&amp;H=BYA">Track package</a>"#,
+        r#"<a href="https://www.amazon.com/gp/r.html?C=1KB&amp;U=https%3A%2F%2Fwww.amazon.com%2Fprogress-tracker%2Fpackage%3F_encoding%3DUTF8%26itemId%3Dfakeitemabcdefg%26orderId%3D113-0000000-0000001%26packageIndex%3D0%26shipmentId%3D500000000000001%26intent%3Dfeedback_happy">Great</a>"#,
+        r#"<a href="https://www.amazon.com/gp/r.html?C=1KB&amp;U=https%3A%2F%2Fwww.amazon.com%2Fprogress-tracker%2Fpackage%3F_encoding%3DUTF8%26itemId%3Dfakeitemabcdefg%26orderId%3D113-0000000-0000001%26packageIndex%3D0%26shipmentId%3D500000000000001%26intent%3Dfeedback_unhappy">Not so great</a>"#,
     );
 
     fn box1() -> AmazonPackage {
         AmazonPackage {
-            order_id: "113-1810790-1724205".into(),
-            shipment_id: "N4RLGpMz1".into(),
+            order_id: "113-0000000-0000001".into(),
+            shipment_id: "N0FAKE001".into(),
         }
     }
 
@@ -168,7 +168,7 @@ mod tests {
             package_from_mail("order-update@amazon.com", Some(true), "", DELIVERED_HTML);
         assert_eq!(shipped, Some(box1()));
         assert_eq!(delivered, Some(box1()), "feedback links are not the box");
-        assert_eq!(box1().key(), "amazon:113-1810790-1724205:N4RLGpMz1");
+        assert_eq!(box1().key(), "amazon:113-0000000-0000001:N0FAKE001");
     }
 
     #[test]
@@ -204,7 +204,7 @@ mod tests {
     #[test]
     fn two_boxes_in_one_mail_is_no_guess() {
         let two = format!(
-            "{SHIPPED_TEXT}\nhttps://www.amazon.com/progress-tracker/package?orderId=113-1810790-1724205&shipmentId=Nh06jx4Hr\n"
+            "{SHIPPED_TEXT}\nhttps://www.amazon.com/progress-tracker/package?orderId=113-0000000-0000001&shipmentId=N0FAKE002\n"
         );
         assert_eq!(package_from_mail(FROM, Some(true), &two, ""), None);
     }
@@ -212,11 +212,11 @@ mod tests {
     #[test]
     fn malformed_ids_are_refused() {
         for (order, shipment) in [
-            ("113-1810790", "N4RLGpMz1"),
-            ("113-1810790-17242O5", "N4RLGpMz1"),
-            ("113-1810790-1724205", "N4R"),
-            ("113-1810790-1724205", "N4RL%3Cx%3E"),
-            ("113-1810790-1724205", "N4RLGpMz1N4RLGpMz1N4RLGpMz1"),
+            ("113-0000000", "N0FAKE001"),
+            ("113-0000000-00000O1", "N0FAKE001"),
+            ("113-0000000-0000001", "N0F"),
+            ("113-0000000-0000001", "N0FA%3Cx%3E"),
+            ("113-0000000-0000001", "N0FAKE001N0FAKE001N0FAKE001"),
         ] {
             let text = format!(
                 "https://www.amazon.com/progress-tracker/package?orderId={order}&shipmentId={shipment}"
@@ -231,8 +231,8 @@ mod tests {
 
     #[test]
     fn ordered_mail_without_a_tracker_names_nothing() {
-        let ordered = "Ordered: \"ENTTEC DMX USB Pro\"\nOrder #\n113-0329833-9629046\n\
-            https://www.amazon.com/gp/your-account/order-details?orderID=113-0329833-9629046\n";
+        let ordered = "Ordered: \"ENTTEC DMX USB Pro\"\nOrder #\n113-0000000-0000002\n\
+            https://www.amazon.com/gp/your-account/order-details?orderID=113-0000000-0000002\n";
         assert_eq!(
             package_from_mail("auto-confirm@amazon.com", Some(true), ordered, ""),
             None
@@ -243,7 +243,7 @@ mod tests {
     fn the_click_target_is_built_from_the_ids() {
         assert_eq!(
             box1().tracking_url(),
-            "https://www.amazon.com/progress-tracker/package?orderId=113-1810790-1724205&shipmentId=N4RLGpMz1"
+            "https://www.amazon.com/progress-tracker/package?orderId=113-0000000-0000001&shipmentId=N0FAKE001"
         );
         assert!(is_package_key(&box1().key()));
         assert!(!is_package_key("TBA303392911000"));

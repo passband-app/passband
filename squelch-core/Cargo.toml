@@ -70,7 +70,7 @@ sha2 = "0.11"
 # OS entropy for read-tracking tokens. Deliberately the raw syscall wrapper
 # rather than a PRNG crate: a tracking token is minted once and must be
 # unguessable, so there is nothing to seed and nothing to reseed.
-getrandom = "0.3"
+getrandom = "0.4"
 # SO_REUSEADDR on the consent listener, which std::net cannot set before bind.
 # The fixed-port flows (`auth --write --headless`) bind the same port twice in
 # one run, and on Linux the first flow's connection in TIME_WAIT refuses the

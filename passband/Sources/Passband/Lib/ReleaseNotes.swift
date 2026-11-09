@@ -270,6 +270,27 @@ struct ReleaseCatchUp: Sendable, Equatable {
 enum ReleaseNotes {
     /// THE TABLE. Newest first, and the only place a release note is written.
     static let all: [ReleaseNote] = [
+        // QUIET: first-run fixes shipped ahead of a new user, no card.
+        ReleaseNote(
+            version: "0.0.19",
+            date: "2026-11-04",
+            headline: "First-Run Update",
+            items: [
+                ReleaseItem(.app, "Your first open shows your real inbox while it catches up"),
+                ReleaseItem(.app, "The assistant can take you straight to a page"),
+                ReleaseItem(.app, "Click a guest on an event to open their contact card"),
+                ReleaseItem(.app, "Event pictures arrive with the event"),
+                ReleaseItem(.app, "Smoother flow mode and faster scrolling in All mail"),
+                ReleaseItem(.app, "UI improvements"),
+                ReleaseItem(.app, "Bug fixes"),
+                ReleaseItem(.daemon, "One calendar entry per event, even when several senders mail about it"),
+                ReleaseItem(.daemon, "Multi-night tickets read as nights"),
+                ReleaseItem(.daemon, "Bought tickets go on your calendar, not For your eyes"),
+                ReleaseItem(.daemon, "Account setup and security mail reach For your eyes when it matters"),
+                ReleaseItem(.daemon, "A new account's Reading board starts with the last week"),
+                ReleaseItem(.daemon, "Bug fixes"),
+            ],
+            quiet: true),
         // QUIET: onboarding fixes shipped ahead of a new user, no card.
         ReleaseNote(
             version: "0.0.18",

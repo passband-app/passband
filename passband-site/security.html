@@ -28,69 +28,260 @@
       media="(prefers-color-scheme: dark)"
     />
     <link rel="apple-touch-icon" href="/icon-180.png" />
+    <link rel="preload" href="/newsreader-var.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/site.css" />
     <style>
-      body {
-        font-family: system-ui, sans-serif;
-        max-width: 42rem;
-        margin: 0 auto;
-        padding: 3rem 1.25rem 5rem;
-        line-height: 1.65;
-        color: #1a1a1a;
+      /* SECURITY MODEL: summaries, labeled blocks and the diagrams. Full outlines
+         only; never a one-sided edge stripe. */
+      .prose code { background: rgba(233, 238, 245, 0.05); box-shadow: none; color: #C9D3E0; }
+      .sec-num { margin: 4.5rem 0 0.6rem; font: 600 11px/1 var(--mono); letter-spacing: 0.1em; color: var(--accent-ink); }
+      .sec-num + h2 { margin-top: 0; }
+      .sec-lede { margin: 0 0 1.75rem !important; color: var(--ink); font-size: 1.15rem; line-height: 1.6; }
+      .lbl { margin: 1.75rem 0 0.6rem !important; font: 600 10.5px/1 var(--mono); letter-spacing: 0.12em;
+        text-transform: uppercase; color: var(--faintest); }
+      .inv { margin: 0 0 1.5rem; padding: 1.1rem 1.25rem 1.2rem; border-radius: 14px;
+        background: rgba(78, 155, 234, 0.07); box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.28); }
+      .inv .lbl { margin-top: 0 !important; color: var(--accent-ink); }
+      .inv p:last-child { margin: 0; color: var(--ink); }
+      .dnb { margin: 1.75rem 0; padding: 1.1rem 1.25rem 0.4rem; border-radius: 14px;
+        background: rgba(232, 172, 76, 0.06); box-shadow: inset 0 0 0 1px rgba(232, 172, 76, 0.28); }
+      .dnb .lbl { margin-top: 0 !important; color: var(--warn); }
+      .dnb li::marker { color: var(--warn); }
+      .prose details { margin: 0 0 1.15rem; border-radius: 12px; background: var(--canvas);
+        box-shadow: inset 0 0 0 1px var(--hair-strong); }
+      .prose summary { cursor: pointer; padding: 0.85rem 1.1rem; color: var(--ink); font-weight: 600; font-size: 0.95rem;
+        list-style: none; display: flex; justify-content: space-between; gap: 1rem; }
+      .prose summary::-webkit-details-marker { display: none; }
+      .prose summary::after { content: "Show"; font: 500 11px/1.9 var(--mono); letter-spacing: 0.08em;
+        text-transform: uppercase; color: var(--faint); }
+      .prose details[open] summary::after { content: "Hide"; }
+      .prose details > :not(summary) { margin-left: 1.1rem; margin-right: 1.1rem; }
+      .prose details > ul { padding-left: 1.25rem; }
+
+      /* DIAGRAMS */
+      .viz { margin: 0 0 1.75rem; padding: 1.25rem; border-radius: 16px; background: var(--canvas);
+        box-shadow: inset 0 0 0 1px var(--hair-strong); color: var(--dim); font-size: 0.88rem; line-height: 1.45; }
+      .viz-title { margin: 0 0 1rem !important; font: 600 10.5px/1.4 var(--mono); letter-spacing: 0.12em;
+        text-transform: uppercase; color: var(--faint); }
+      .viz figcaption { margin-top: 0.9rem; color: var(--faint); font-size: 0.82rem; }
+      .viz ul, .viz ol { margin: 0; padding: 0; list-style: none; }
+      .viz li { margin: 0; }
+      .viz a { color: var(--accent-ink); text-decoration: none; }
+      .viz a:hover { text-decoration: underline; }
+      .tag { display: block; margin-bottom: 0.45rem; font: 600 10px/1 var(--mono); letter-spacing: 0.1em;
+        text-transform: uppercase; color: var(--accent-ink); }
+      .mnode { padding: 0.85rem 0.95rem; border-radius: 12px; background: var(--card);
+        box-shadow: inset 0 0 0 1px var(--hair-strong); min-width: 0; }
+      .mnode b { display: block; color: var(--ink); font-size: 0.92rem; font-weight: 600; }
+      .mnode > span:not(.tag) { display: block; margin-top: 0.2rem; color: var(--faint); font-size: 0.8rem; }
+      .mnode ul { margin-top: 0.55rem; display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.82rem; }
+      .arr { flex: none; align-self: center; width: 1.1rem; height: 1px; background: var(--hair-strong); position: relative; }
+      .arr::after { content: ""; position: absolute; right: 0; top: -3px; border: 3.5px solid transparent;
+        border-left: 5px solid rgba(233, 238, 245, 0.35); border-right: 0; }
+      .chip { display: inline-block; padding: 0.4rem 0.7rem; border-radius: 99px; background: var(--card);
+        box-shadow: inset 0 0 0 1px var(--hair-strong); color: var(--dim); font-size: 0.82rem; }
+      .chip.hl { box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.45); }
+      .chip.warn { color: var(--warn); box-shadow: inset 0 0 0 1px rgba(232, 172, 76, 0.4); }
+
+      .map-in { display: flex; gap: 0.5rem; align-items: stretch; }
+      .map-in .mnode { flex: 1 1 0; }
+      .map-in .src { flex: 0.6 1 0; display: flex; flex-direction: column; justify-content: center; }
+      .map-split { display: flex; justify-content: flex-end; padding-right: calc(16.5% - 0.5px); }
+      .map-split i { width: 1px; height: 1.1rem; background: var(--hair-strong); }
+      .map-doors { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; padding-top: 0.6rem;
+        border-top: 1px solid var(--hair-strong); }
+      .door.agent .tag { color: var(--warn); }
+      .map-out { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-top: 1.1rem;
+        padding-top: 1rem; border-top: 1px dashed var(--hair-strong); }
+      .map-out .tag { margin: 0 0.4rem 0 0; }
+
+      .ly { padding: 0.7rem 0.7rem 0.7rem; border-radius: 14px; background: rgba(78, 155, 234, 0.035);
+        box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.2); }
+      .ly .ly { margin-top: 0.6rem; }
+      .ly > p { margin: 0 0.2rem !important; color: var(--ink); font-weight: 600; font-size: 0.86rem; }
+      .ly > p b { display: inline-grid; place-items: center; width: 1.35rem; height: 1.35rem; margin-right: 0.45rem;
+        border-radius: 99px; background: rgba(130, 186, 245, 0.16); color: var(--accent-ink); font: 600 11px/1 var(--mono); }
+      .ly > p span { display: block; margin: 0.2rem 0 0 1.8rem; color: var(--faint); font-weight: 400; font-size: 0.8rem; }
+      .core { margin-top: 0.7rem; padding: 0.9rem; border-radius: 10px; text-align: center; color: var(--ink);
+        background: var(--card); box-shadow: inset 0 0 0 1px var(--hair-strong); font-family: var(--serif); font-size: 1.05rem; }
+
+      .steps-row { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0.5rem; counter-reset: st; }
+      .steps-row li { counter-increment: st; padding: 0.75rem 0.8rem; border-radius: 12px; background: var(--card);
+        box-shadow: inset 0 0 0 1px var(--hair-strong); }
+      .steps-row li::before { content: "0" counter(st); display: block; margin-bottom: 0.45rem;
+        font: 600 10.5px/1 var(--mono); color: var(--accent-ink); letter-spacing: 0.1em; }
+      .steps-row li.hl { box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.5); }
+      .steps-row b { display: block; color: var(--ink); font-size: 0.86rem; }
+      .steps-row span { display: block; margin-top: 0.2rem; color: var(--faint); font-size: 0.78rem; }
+      .pipe-out { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-top: 0.8rem; }
+
+      .gate-grid { display: grid; grid-template-columns: 1.3fr repeat(3, minmax(0, 1fr)); gap: 0.4rem; }
+      .gh { padding: 0 0.3rem 0.3rem; color: var(--faint); font-size: 0.8rem; }
+      .gh b { color: var(--ink); font-weight: 600; }
+      .gh code { display: block; margin-top: 0.25rem; width: fit-content; font-size: 0.74rem; }
+      .rh { align-self: center; color: var(--ink); font-size: 0.84rem; font-weight: 600; }
+      .cell { padding: 0.75rem 0.6rem; border-radius: 10px; text-align: center; color: var(--faint);
+        background: var(--card); box-shadow: inset 0 0 0 1px var(--hair); font-size: 0.82rem; }
+      .cell.keep { color: var(--positive); background: rgba(79, 192, 138, 0.08);
+        box-shadow: inset 0 0 0 1px rgba(79, 192, 138, 0.4); font-weight: 600; }
+
+      .access .table-wrap { margin: 0; }
+      .access table { min-width: 34rem; }
+      .access td.y, .access td.m, .access td.n { font-weight: 600; white-space: nowrap; }
+      .access td.y { color: var(--positive); }
+      .access td.m { color: var(--warn); }
+      .access td.n { color: var(--danger); }
+
+      .dest { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.5rem; }
+      .dest li { padding: 0.75rem 0.85rem; border-radius: 12px; background: var(--card); box-shadow: inset 0 0 0 1px var(--hair); }
+      .dest b { display: block; color: var(--faint); font-size: 0.86rem; text-decoration: line-through;
+        text-decoration-color: rgba(255, 122, 104, 0.6); }
+      .dest span { display: block; margin-top: 0.2rem; color: var(--faintest); font-size: 0.78rem; }
+      .dest li.ok { background: rgba(79, 192, 138, 0.08); box-shadow: inset 0 0 0 1px rgba(79, 192, 138, 0.4); }
+      .dest li.ok b { color: var(--positive); text-decoration: none; }
+      .dest li.ok span { color: var(--dim); }
+
+      .g-flow { display: flex; gap: 0.6rem; align-items: center; }
+      .g-flow > .mnode { flex: 0 1 15rem; }
+      .g-branch { display: flex; flex-direction: column; gap: 0.6rem; flex: 1; min-width: 0; }
+      .g-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; }
+      .g-sub { padding-left: 1.5rem; position: relative; }
+      .g-sub::before { content: ""; position: absolute; left: 0.6rem; top: -0.6rem; width: 0.6rem; height: 1.25rem;
+        border-left: 1px solid var(--hair-strong); border-bottom: 1px solid var(--hair-strong); border-bottom-left-radius: 6px; }
+      .kinds { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-top: 1rem; }
+      .kinds span { margin-right: 0.3rem; font: 600 10px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--faintest); }
+
+      .t3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.5rem; }
+      .t { padding: 0.9rem 0.95rem; border-radius: 12px; background: var(--card); box-shadow: inset 0 0 0 1px var(--hair-strong); }
+      .t b { display: block; color: var(--ink); font-size: 0.92rem; }
+      .t > span:not(.tag) { display: block; margin-top: 0.25rem; color: var(--faint); font-size: 0.8rem; }
+      .t.stop { background: rgba(232, 172, 76, 0.06); box-shadow: inset 0 0 0 1px rgba(232, 172, 76, 0.4); }
+      .t.stop .tag { color: var(--warn); }
+
+      @media (max-width: 640px) {
+        .map-in, .g-flow { flex-direction: column; }
+        .map-in .arr, .g-flow > .arr { width: 1px; height: 0.9rem; }
+        .map-in .arr::after, .g-flow > .arr::after { display: none; }
+        .map-split { display: none; }
+        .map-doors { grid-template-columns: 1fr; border-top: 0; }
+        .g-flow > .mnode { flex: none; width: 100%; box-sizing: border-box; }
+        .steps-row { grid-template-columns: 1fr 1fr; }
+        .dest, .t3 { grid-template-columns: 1fr 1fr; }
+        .gate-grid { grid-template-columns: 1fr repeat(3, minmax(0, 1fr)); font-size: 0.8rem; }
       }
-      h1 { font-size: 1.8rem; margin-bottom: 0.25rem; }
-      h2 { font-size: 1.15rem; margin-top: 2.2rem; }
-      h3 { font-size: 1rem; margin-top: 1.6rem; }
-      .meta { color: #777; font-size: 0.9rem; margin-top: 0; }
-      a { color: #3556c9; }
-      nav { margin-bottom: 2rem; font-size: 0.9rem; }
-      ul { padding-left: 1.3rem; }
-      li { margin: 0.3rem 0; }
-      table {
-        border-collapse: collapse;
-        width: 100%;
-        font-size: 0.9rem;
-        margin: 1rem 0;
+      /* §4c ladder, §4d hosted lanes, §8 and §9 variants */
+      .rungs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.5rem; align-items: end; }
+      .rungs li { padding: 0.85rem 0.95rem; border-radius: 12px; background: var(--card); box-shadow: inset 0 0 0 1px var(--hair-strong); }
+      .rungs li:nth-child(1) { min-height: 5.5rem; }
+      .rungs li:nth-child(2) { min-height: 7rem; }
+      .rungs li:nth-child(3) { min-height: 8.5rem; }
+      .rungs b { display: block; color: var(--ink); font-size: 0.92rem; }
+      .rungs li > span:not(.tag) { display: block; margin-top: 0.25rem; color: var(--faint); font-size: 0.8rem; }
+      .rungs li.def { box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.5); background: rgba(78, 155, 234, 0.07); }
+      .rungs li.stop { background: rgba(232, 172, 76, 0.06); box-shadow: inset 0 0 0 1px rgba(232, 172, 76, 0.4); }
+      .rungs li.stop .tag { color: var(--warn); }
+      .h-flow { display: flex; gap: 0.5rem; align-items: center; }
+      .h-flow > .mnode { flex: 0 0 9.5rem; }
+      .h-lanes { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+      .h-row { display: flex; align-items: center; gap: 0.5rem; }
+      .h-row .mnode { flex: 1; }
+      .mnode.none { background: transparent; box-shadow: inset 0 0 0 1px var(--hair); border: 1px dashed var(--hair-strong); }
+      .mnode.none b { color: var(--faint); text-decoration: line-through; text-decoration-color: rgba(255, 122, 104, 0.6); }
+      .t.ok { background: rgba(79, 192, 138, 0.07); box-shadow: inset 0 0 0 1px rgba(79, 192, 138, 0.4); }
+      .t.ok .tag { color: var(--positive); }
+      .dest li.ex { background: rgba(232, 172, 76, 0.06); box-shadow: inset 0 0 0 1px rgba(232, 172, 76, 0.35); }
+      .dest li.ex b { color: var(--warn); text-decoration: none; }
+      .dest li.ex span { color: var(--dim); }
+      @media (max-width: 640px) {
+        .rungs { grid-template-columns: 1fr; }
+        .rungs li { min-height: 0 !important; }
+        .h-flow { flex-direction: column; align-items: stretch; }
+        .h-flow > .mnode { flex: none; }
+        .h-row > .arr { display: none; }
       }
-      th, td {
-        border: 1px solid #ddd;
-        padding: 0.45rem 0.6rem;
-        text-align: left;
-        vertical-align: top;
-      }
-      th { background: #f6f6f6; font-weight: 600; }
-      .tier {
-        border-left: 3px solid #3556c9;
-        padding-left: 1rem;
-        margin: 1.2rem 0;
-      }
-      code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88em; background: #f3f3f3; padding: 0.08em 0.3em; border-radius: 3px; }
-      pre { background: #f6f6f6; padding: 0.8rem 1rem; overflow-x: auto; border-radius: 6px; line-height: 1.45; }
-      pre code { background: none; padding: 0; font-size: 0.85em; }
-      .tbl { overflow-x: auto; }
-      blockquote { margin: 1rem 0; padding-left: 1rem; border-left: 3px solid #ddd; color: #555; }
     </style>
   </head>
   <body>
-    <nav><a href="/">&larr; Passband</a> &middot; <a href="/privacy">Privacy Policy</a></nav>
-    <h1>Security Model</h1>
-    <p class="meta">How Passband and its daemon, squelchd, handle untrusted mail, secrets and access.</p>
+    <header class="top">
+      <a class="brand" href="/"><img src="/mark.svg" alt="" width="42" height="23" /><span>passband</span></a>
+      <nav class="nav">
+        <a class="keep" href="/self-host">Self-host</a>
+        <a class="keep" href="/trust">Trust</a>
+      </nav>
+    </header>
 
-<p>One section per surface: the <strong>invariant</strong>, the <strong>enforcement point</strong> (<code>file:symbol</code>
-- the line that actually holds it), and <strong>what a maintainer must not break</strong>.
-Verified against the tree on 2026-07-30; §6 was written against it on 2026-08-18.
+    <main>
+      <section class="hero">
+        <p class="eyebrow"><b>Security</b></p>
+        <h1>Security Model</h1>
+        <p class="lede">How Passband and its daemon, squelchd, handle untrusted mail, secrets and access.</p>
+      </section>
+
+      <div class="doc">
+        <nav class="toc" aria-label="On this page">
+          <p>On this page</p>
+          <ol>
+          <li><a href="#s1">1. HTML sanitization at ingest</a></li>
+          <li><a href="#s2">2. Rendering sandbox</a></li>
+          <li><a href="#s3">3. Image loading and trackers</a></li>
+          <li><a href="#s4">4. Human and agent access after the triage rewrite</a></li>
+          <li><a href="#s4b">4b. Provider spam</a></li>
+          <li><a href="#s4c">4c. Agent writes: drafts and sending</a></li>
+          <li><a href="#s4d">4d. Hosted mail text in processes we operate</a></li>
+          <li><a href="#s5">5. Outbound secret guard</a></li>
+          <li><a href="#s6">6. The embedded assistant</a></li>
+          <li><a href="#s7">7. Automatic unsubscribe</a></li>
+          <li><a href="#s8">8. Agent door authentication</a></li>
+          <li><a href="#s9">9. Google Calendar</a></li>
+          <li><a href="#reporting-a-vulnerability">Reporting a vulnerability</a></li>
+          </ol>
+        </nav>
+        <article class="prose">
+<p>One section per surface: the <strong>invariant</strong>, the <strong>enforcement point</strong> (<code>file:symbol</code> - the line that actually holds it), and <strong>what a maintainer must not break</strong>.
+Verified against the tree on 2026-07-30; §6 was written against it on 2026-08-18,
+§8 on 2026-10-01.
 Stale source comments are flagged, not trusted.</p>
-<h2>1. HTML sanitization at ingest</h2>
-<p><strong>Invariant.</strong> <code>messages.body_html</code> never contains active content: no <code>&lt;script&gt;</code>, no
+<figure class="viz map" aria-label="How mail moves through Passband">
+<p class="viz-title">How mail moves, and where each rule sits</p>
+<div class="map-in">
+  <div class="mnode src"><b>Gmail</b><span>Mail arrives</span></div>
+  <i class="arr" aria-hidden="true"></i>
+  <div class="mnode"><span class="tag">Ingest</span><b>Checked once, on arrival</b>
+    <ul><li><a href="#s1">&sect;1 Scrub the HTML</a></li><li><a href="#s3">&sect;3 Record Gmail&#39;s auth verdict</a></li><li><a href="#s4b">&sect;4b Hold spam back</a></li></ul></div>
+  <i class="arr" aria-hidden="true"></i>
+  <div class="mnode"><span class="tag">Store</span><b>squelchd</b><span>Stored already scrubbed</span>
+    <ul><li><a href="#s4d">&sect;4d Hosted: two services see text</a></li></ul></div>
+</div>
+<div class="map-split" aria-hidden="true"><i></i></div>
+<div class="map-doors">
+  <div class="mnode door"><span class="tag">Human door</span><b>You, in the Passband app</b>
+    <ul><li><a href="#s2">&sect;2 Locked-down viewer</a></li><li><a href="#s3">&sect;3 Images through our proxy</a></li><li><a href="#s9">&sect;9 Your calendar</a></li></ul></div>
+  <div class="mnode door agent"><span class="tag">Agent door</span><b>The assistant and MCP agents</b>
+    <ul><li><a href="#s4">&sect;4 No codes, nothing unchecked</a></li><li><a href="#s4c">&sect;4c Drafts by default, send if allowed</a></li><li><a href="#s6">&sect;6 Gmail changes wait for your tap</a></li><li><a href="#s8">&sect;8 Only the owner gets in</a></li></ul></div>
+</div>
+<div class="map-out">
+  <span class="tag">Outgoing</span>
+  <span class="chip">Your reply or forward</span><i class="arr" aria-hidden="true"></i>
+  <span class="chip hl"><a href="#s5">&sect;5 Secret guard</a></span><i class="arr" aria-hidden="true"></i>
+  <span class="chip">Gmail</span>
+  <span class="chip"><a href="#s7">&sect;7 Unsubscribe, when you ask</a></span>
+</div>
+</figure>
+<p class="sec-num">&sect;1</p>
+<h2 id="s1">HTML sanitization at ingest</h2>
+<p class="sec-lede">Every incoming email is scrubbed once, the moment it arrives, so nothing that could run code is ever stored.</p>
+<div class="inv"><p class="lbl">Invariant</p><p><code>messages.body_html</code> never contains active content: no <code>&lt;script&gt;</code>, no
 <code>on*</code> handlers, no <code>javascript:</code>/<code>data:</code> URLs, no forms, no nested browsing contexts,
-no <code>&lt;meta&gt;</code>/<code>&lt;link&gt;</code>/<code>&lt;base&gt;</code>.</p>
-<p><strong>Enforcement.</strong> <code>squelch-core/src/sync/html.rs:sanitize_email_html</code> - a closed
+no <code>&lt;meta&gt;</code>/<code>&lt;link&gt;</code>/<code>&lt;base&gt;</code>.</p></div>
+<p class="lbl">Enforcement</p>
+<p><code>squelch-core/src/sync/html.rs:sanitize_email_html</code> - a closed
 <code>ammonia::Builder</code> allow-list, run once at ingest before storage; pure, no I/O,
 fixture-tested in the same file. Four deliberate deviations from ammonia&#39;s
 defaults: <code>url_schemes</code> narrowed to <code>{http, https, mailto, cid}</code>; <code>&lt;style&gt;</code> kept with
 CSS verbatim (<code>rm_clean_content_tags</code> then <code>add_tags</code> - that order, or ammonia
 panics); <code>style</code>/<code>class</code>/<code>id</code> added to the generic attribute set; <code>link_rel</code>
 pinned to <code>noopener noreferrer</code>.</p>
-<p><strong>Do not break.</strong></p>
+<div class="dnb"><p class="lbl">Do not break</p>
 <ul>
 <li>Never widen <code>url_schemes</code>; <code>data:</code> coming back re-admits inline
 <code>data:text/html</code> payloads and is the only reason <code>data:</code> image URIs drop today.
@@ -109,12 +300,26 @@ image passes (§3) depend on that for correctness and for linear runtime.</li>
 <li>HTML never crosses the agent door; MCP serves flattened text only.</li>
 <li><code>body_html</code> is <strong>baked at ingest</strong> - a sanitizer change does not retroactively fix
 stored mail. Delete the <code>sync_state</code> <code>history</code> row and restart <code>squelchd</code> to
-re-ingest (triage is preserved).</li>
-</ul>
-<h2>2. Rendering sandbox</h2>
-<p><strong>Invariant.</strong> A body renders with no script execution, no network except the image
-proxy, no navigation, no cookies, nothing on disk.</p>
-<p><strong>Enforcement.</strong> <code>passband/Sources/Passband/Views/EmailWebView.swift</code> -
+re-ingest (triage is preserved). The <code>sync_cursor</code> row needs no edit: for a
+Gmail account the <code>history</code> row is the cursor (<code>store/sqlite/sync_cursor.rs</code>).</li>
+</ul></div>
+<p class="sec-num">&sect;2</p>
+<h2 id="s2">Rendering sandbox</h2>
+<p class="sec-lede">Even scrubbed mail opens inside a locked-down viewer. There are five separate locks, and any one of them would stop scripts, network calls and navigation on its own.</p>
+<div class="inv"><p class="lbl">Invariant</p><p>A body renders with no script execution, no network except the image
+proxy, no navigation, no cookies, nothing on disk.</p></div>
+<figure class="viz layers" aria-label="Five rendering layers">
+<p class="viz-title">Five locks around every email body, each enough on its own</p>
+<div class="ly"><p><b>5</b> Throwaway storage <span>No cookies, nothing on disk, an opaque origin</span></p>
+<div class="ly"><p><b>4</b> Navigation refused <span>Only loads we started; links open outside; no popups</span></p>
+<div class="ly"><p><b>3</b> Content Security Policy <span>No script source, no http or https; images only via the proxy</span></p>
+<div class="ly"><p><b>2</b> JavaScript off <span>Page script cannot run at all</span></p>
+<div class="ly"><p><b>1</b> Scrubbed at ingest <span>&sect;1: no scripts, handlers, forms or frames stored</span></p>
+<div class="core">The email body</div>
+</div></div></div></div></div>
+</figure>
+<p class="lbl">Enforcement</p>
+<p><code>passband/Sources/Passband/Views/EmailWebView.swift</code> -
 five independent layers, each sufficient alone. Layer 1 is §1 above; the rest,
 numbered as the source comments number them:</p>
 <ol start="2">
@@ -134,7 +339,7 @@ so two loads would otherwise race one permission) and cancels everything else; a
 <code>FrameRelay.webView(_:createWebViewWith:…)</code> returns nil - no popups.</li>
 <li>A shared <strong>non-persistent</strong> <code>WKWebsiteDataStore</code>; <code>baseURL: nil</code> for an opaque origin.</li>
 </ol>
-<p><strong>Do not break.</strong></p>
+<div class="dnb"><p class="lbl">Do not break</p>
 <ul>
 <li>The delegate signature
 <code>webView(_:decidePolicyFor:decisionHandler: @escaping @MainActor @Sendable …)</code>
@@ -150,11 +355,38 @@ leaves &quot;one sender&#39;s mail in another&#39;s frame&quot; to a hash collis
 <code>Coordinator.release</code> refuses it because <code>loadedPoolKey</code> is nil. Keep
 <code>WebFramePool.discard</code> unwiring the relay too: the content controller retains it,
 so merely dropping the frame leaves a live callback target.</li>
-</ul>
-<h2>3. Image loading and trackers</h2>
-<p><strong>Invariant.</strong> Remote images may load, but only through our own audited fetch path,
+</ul></div>
+<p class="sec-num">&sect;3</p>
+<h2 id="s3">Image loading and trackers</h2>
+<p class="sec-lede">Images can load, but only through Passband&#39;s own fetcher: no cookies, no referrer. Tracking pixels are removed unless the sender is someone you write to and Gmail vouches for them.</p>
+<div class="inv"><p class="lbl">Invariant</p><p>Remote images may load, but only through our own audited fetch path,
 never with cookies or a referrer, and never for a reference we did not mint.
-Tracking pixels are stripped from mail whose sender the user has never written to.</p>
+Tracking pixels are stripped from mail whose sender the user has never written to.</p></div>
+<figure class="viz gate" aria-label="When tracking pixels survive">
+<p class="viz-title">When tracking pixels survive: both halves, or nothing</p>
+<div class="gate-grid" role="table">
+<div class="gh" role="columnheader"></div>
+<div class="gh" role="columnheader">Gmail auth <b>pass</b><code>Some(true)</code></div>
+<div class="gh" role="columnheader">Gmail auth <b>fail</b><code>Some(false)</code></div>
+<div class="gh" role="columnheader">Never checked<code>NULL</code></div>
+<div class="rh" role="rowheader">Sender you have written to</div>
+<div class="cell keep">Pixels kept</div><div class="cell">Stripped</div><div class="cell">Stripped</div>
+<div class="rh" role="rowheader">Anyone else</div>
+<div class="cell">Stripped</div><div class="cell">Stripped</div><div class="cell">Stripped</div>
+</div>
+<figcaption>Kept pixels still need remote images switched on, and still load only through the proxy.</figcaption>
+</figure>
+<figure class="viz pipe" aria-label="Image rewrite order">
+<p class="viz-title">What happens to an image, in this exact order</p>
+<ol class="steps-row">
+<li><b>Strip trackers</b><span>Tiny, hidden or known pixels</span></li>
+<li><b>Dedupe repeats</b><span>Same image, once</span></li>
+<li><b>Read links</b><span>Before anything is rewritten</span></li>
+<li><b>Resolve cid:</b><span>Only to this message&#39;s own parts</span></li>
+<li class="hl"><b>Rewrite to proxy</b><span>Always last; signed per launch</span></li>
+</ol>
+<div class="pipe-out"><span class="chip">passband-img: handler checks the signature</span><i class="arr" aria-hidden="true"></i><span class="chip">Fetch with no cookies, no referrer, image/* only</span></div>
+</figure>
 <p>Outbound read tracking is the mirror image of this section and is documented
 separately in TRACKING.md.</p>
 <p><strong>Current behavior - VERIFIED, and not what old comments claimed.</strong> Remote images
@@ -164,7 +396,7 @@ There is no per-message <code>i</code> keystroke gate - that was the retired des
 On <em>On demand</em> <code>img-src</code> collapses to <code>data:</code>, an opt-in bar appears, and <strong>no
 request is made</strong> (the proxy scheme is absent from the policy, so the document
 refuses it before the handler is reached).</p>
-<p><strong>Enforcement.</strong></p>
+<p class="lbl">Enforcement</p>
 <ul>
 <li><code>Lib/Trackers.swift:strip</code> drops <code>&lt;img&gt;</code> elements on strong signals only: both
 declared dimensions ≤ 2px, <code>display:none</code>/<code>visibility:hidden</code>, or a short
@@ -206,7 +438,7 @@ column existed. Absence of proof withholds a permissive feature.
 <strong>Nothing is backfilled.</strong> <code>store/sqlite/migrate.rs</code> adds the column to an
 existing <code>messages</code> table with every historical row left NULL; a re-sync refills
 it through the message upsert.
-<strong>Residual risks, accepted:</strong><ul>
+<details><summary>Residual risks, accepted</summary><ul>
 <li>The evidence is header SHAPE, not a signature - nothing in the bytes is
 cryptographically bound to Google. On an ingestion path where Gmail prepends
 nothing (POP with the marker somehow absent, or <code>users.messages.import</code>/
@@ -222,7 +454,7 @@ the suffix itself.</li>
 usually emits), which DELEGATES the binding to Gmail enforcing RFC 6376 §3.5:
 an <code>i=</code> domain must be <code>d=</code> or a subdomain of it. When both are present that
 relationship is checked here instead of assumed.</li>
-</ul>
+</ul></details>
 </li>
 <li><code>Lib/ImageProxy.swift:rewrite</code> rewrites every http(s) image reference - <code>&lt;img src&gt;</code>, <code>style=&quot;…&quot;</code> <code>url()</code>, <code>&lt;style&gt;</code> block CSS - to
 <code>passband-img://local/&lt;hmac&gt;?u=&lt;encoded&gt;</code>. Default-port <code>http://</code> targets are
@@ -237,9 +469,25 @@ a signature cannot be replayed across launches. Provenance, not secrecy - mail c
 spell <code>passband-img:</code> itself in a kept <code>&lt;style&gt;</code> block, which <code>rewrite</code> neuters to
 <code>passband-img-blocked:</code> before minting anything.</li>
 <li><code>Model/ImageStore.swift</code> owns the fetch: ephemeral session, no cookies, empty
-referrer, <code>image/*</code> only, redirects re-guarded per hop, files named <code>sha256(url)</code>
+referrer, images only (an <code>image/*</code> header, or failing that a raster magic number
+per <code>Lib/ImageSniff.swift</code>, never svg), redirects re-guarded per hop, files named <code>sha256(url)</code>
 and a manifest holding <strong>no URLs</strong> - a directory listing the reader&#39;s mail URLs
 would be a readable index of their correspondence.</li>
+<li><code>Model/HeroCache.swift:HeroDisk</code> keeps the Reading cards&#39; rendered 108px
+thumbnails across launches and account switches, by the same rule: files named
+<code>sha256(hero src)</code>, and an index from <code>sha256(lowercased sender address)</code> to the
+last one that sender sent, holding <strong>no URLs and no addresses</strong>. Fetching it
+still goes through <code>HeroBytes</code> (ephemeral, no cookies, empty referrer) behind
+the remote-images pref, and painting from it is gated on the same pref.
+<strong>Residual risks, accepted:</strong> the hashes are unsalted, so someone holding the
+file can CONFIRM a guessed sender or url, though not list them; <code>ImageStore</code>
+accepts the same exposure. The sender index trusts free-text <code>From</code>: a forged
+mail that carries art can file that art under a real sender, and that sender&#39;s
+card paints it on its first frame (and whenever its own fetch fails) until
+their next real mail replaces it. It cannot ERASE a sender&#39;s art, because a
+verdict of &quot;no art&quot; never unlinks; and it cannot outlast the real sender&#39;s
+next resolve. Closing it would need the daemon to expose each message&#39;s
+<code>auth_pass</code> to the client.</li>
 <li><strong><code>cid:</code> references are the local mirror of all this.</strong> <code>Lib/CidImages.swift</code>
 matches each <code>&lt;img src=&quot;cid:…&quot;&gt;</code> against this message&#39;s own attachment rows by
 normalized Content-ID (§1 keeps the scheme so there is something to match) and
@@ -255,7 +503,7 @@ attachment. Bytes come from the authenticated human door
 (<code>GET /client/attachments/{id}</code>), served by the same <code>ImageSchemeHandler</code> under
 the same live-set discipline, refused again over <code>inlineMaxBytes</code>.</li>
 </ul>
-<p><strong>Do not break.</strong></p>
+<div class="dnb"><p class="lbl">Do not break</p>
 <ul>
 <li>The order in <code>EmailWebView.Prepared.make</code>: <code>Trackers.strip</code> → <code>ImageRepeats</code>
 dedupe → the <code>hasNetworkImages</code>/<code>extractLinks</code> reads → <code>CidImages.rewrite</code> →
@@ -279,38 +527,209 @@ an ingestion path Gmail never stamped.</li>
 <code>Message::header_raw</code> resolves to the LAST occurrence - the forgeable one - and
 <code>headers_raw()</code> DROPS non-UTF-8 headers, which would let an attacker hide the
 genuine verdict and promote one they wrote.</li>
-</ul>
-<h2>4. Human and agent access after the triage rewrite</h2>
-<p><strong>Invariant.</strong> Humans and internal triage models can read all their mail, including
+</ul></div>
+<p class="sec-num">&sect;4</p>
+<h2 id="s4">Human and agent access after the triage rewrite</h2>
+<p class="sec-lede">You can read all of your mail. AI agents, the built-in assistant included, cannot read login codes or reset links, and cannot read anything that has not been checked yet.</p>
+<div class="inv"><p class="lbl">Invariant</p><p>Humans and internal triage models can read all their mail, including
 pending assessments and actionable authentication. External user agents, including
 the embedded assistant, cannot read actionable authentication secrets or their
-derivatives. Informational login/security alerts are normally allowed.</p>
+derivatives. Informational login/security alerts are normally allowed.</p></div>
+<figure class="viz access" aria-label="Who can read what">
+<p class="viz-title">Who can read what</p>
+<div class="table-wrap"><table>
+<thead><tr><th></th><th>Everyday mail</th><th>Login and security alerts</th><th>Codes and reset links</th><th>Not checked yet</th></tr></thead>
+<tbody>
+<tr><td>You, in the app</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td></tr>
+<tr><td>Internal triage models</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td></tr>
+<tr><td>The assistant and MCP agents</td><td class="y">Yes</td><td class="m">Normally</td><td class="n">Never</td><td class="n">No, until checked</td></tr>
+</tbody></table></div>
+<figcaption>Old archive mail counts as not checked yet: to an agent it does not exist until a check clears it.</figcaption>
+</figure>
 <p><strong>Assessment.</strong> The triage model decides whether actual access-granting material
 is present. There is no deterministic sealing detector in ingest. A missing or
 stale assessment denies external access until a current allowed decision exists.
 Model summaries, notification text, reasons, and evidence locations must not quote
 credentials. This is a model-output requirement; it is not a claim that arbitrary
 model output can be proven secret-free by a string filter.</p>
-<p><strong>Enforcement.</strong> <code>store/sqlite/messages.rs:external_messages_allowed_conn</code> checks the
+<p class="lbl">Enforcement</p>
+<p><code>store/sqlite/messages.rs:external_messages_allowed_conn</code> checks the
 current assessment and source provenance, of one message or of a set at once, under
 the store lock. External whole-thread
 reads require the thread&#39;s sources to be allowed. MCP and dedicated
 <code>/client/agent/</code> routes use these checks for messages and derived results. Search
 rehydrates results under the same guard instead of releasing stale cached snippets.
 Account ownership is checked independently of access assessment.</p>
+<p><strong>Archive mail (issue #422).</strong> Mail older than the backfill window is stored
+with <code>messages.is_archive = 1</code> and an <code>agent_message_state</code> row left at
+<code>pending</code>: no model call is spent on it at ingest. To an external reader such a
+row does not exist yet, which is a different thing from &quot;pending&quot; on live mail:</p>
+<ul>
+<li>The thread guard (<code>thread_guard_and_subject</code>) OMITS an archive sibling whose
+access is NULL or <code>pending</code> instead of closing the thread on it. The row is
+left out of the messages, the count and the subject (the thread is titled by
+the oldest message the reader may see). A thread of nothing but such rows is
+not found. A <code>restricted</code> sibling, archive or not, an archive row the owner
+sealed by hand, and any NON-archive pending sibling close the thread as before.</li>
+<li>The check is bought when an external caller surfaces the row: an agent search
+whose KEYWORD leg matches it (<code>search_mail</code>, <code>GET /client/agent/search</code>) queues
+one <code>access</code> job with trigger <code>archive_access</code>, best-ranked first, and an
+explicit thread open at the door (<code>get_thread</code>, <code>GET /client/agent/thread/{id}</code>)
+queues the SAME job for the thread&#39;s newest unassessed archive siblings, at
+most eight an open. A row the vector leg alone returned is never queued:
+nearest neighbours are not matches. A row that already has a job at its
+revision (finished, or parked on the daily budget) is not queued again; the
+one exception is a row whose latest check FAILED, which may be asked for
+again once that failure is a day old, and comes back as <code>archive_access</code>
+whatever queued it first.</li>
+<li>Three ceilings bound what a caller can make the daemon spend on archive mail,
+and every agent-door path that queues work on an archive row goes through the
+one function that keeps them (<code>request_archive_access_conn</code>): ten rows per
+call, twenty <code>archive_access</code> jobs outstanding per account, and
+<code>triage.agent.archive_access_daily_cap</code> (default 50) a day, charged on top of
+the total and access-lane budgets. Nothing is queued once today&#39;s access
+budget, or the total, is spent. A check that has been deferred even once loses its place
+ahead of ordinary background work. The thread READ itself (<code>thread_view</code>,
+which is also how create_draft and send_email check a reply target) queues
+nothing for an archive row, and neither does the source repair the triage
+agent&#39;s evidence tools run; <code>source_access</code> is for live mail only.</li>
+<li>The door waits for the checks it queued only while the refine lane says it
+can run (a poll has succeeded, a model is configured, the provider circuit is
+closed), gives up after two seconds if no worker has picked one up, and stops
+at eight seconds (MCP) or six (HTTP). <code>get_thread</code> waits the same way for the
+sibling checks its own open queued, BEFORE it applies the guard, so a thread
+is not served with a sibling missing and then closed when the verdict lands.</li>
+<li>UNTIL THE ROW IS <code>allowed</code> NOTHING OF IT IS RETURNED. No id, subject, sender
+or snippet, and no count or flag either. WHICH rows a search returns is the
+same set whether or not mail the caller cannot read matched: a search that
+matched only unassessed archive mail returns the same empty list as one that
+matched nothing. That is a statement about membership and it is the whole
+of the guarantee. The ORDER of the readable rows, and their <code>relevance</code>
+numbers, are not covered by it at the keyword leg (residual 3), and neither
+is how long the search took (residuals 1 and 2).
+An earlier draft reported a count of pending matches; that is an oracle (ask
+it about any word, phrase, sender or date and read the answer off mail nobody
+has cleared) and it must not come back in any form. What the response does
+carry is the same for every query: <code>indexed_since</code>, a DATE that is the walk&#39;s
+cursor (or, with no walk, where agent-readable mail first becomes dense, never
+one row&#39;s timestamp), and <code>archive</code> = <code>{target, walk_complete, older_mail}</code>
+where <code>older_mail</code> is the constant <code>&quot;checked_on_first_match&quot;</code>.</li>
+<li>HIDDEN MAIL TAKES NO PLACE IN AN EXTERNAL SEARCH. Both agent doors run one
+store method (<code>external_search_filtered</code>). Its recall legs carry a PREFILTER
+in their own SQL (<code>external_candidate_sql!</code>: the row is <code>allowed</code>, the owner
+has not sealed it, and no sibling the thread guard counts is un-allowed or
+sealed), so a row the caller cannot be shown is never ranked, windowed or
+hydrated. The keyword leg carries it in its FTS query. The vector leg does
+not use the vec0 nearest-neighbour index at all for these callers, because
+that index picks its neighbours over the whole account and can only be
+filtered afterwards: it selects the rows that pass the prefilter first, reads
+each one&#39;s stored vector, and orders them by <code>vec_distance_l2</code> (the metric
+the vec0 table ranks by), keeping the nearest 4,096 (<code>nearest_readable</code>). A
+hidden row is never measured, so no number of hidden rows, however near the
+query, moves a readable row down that list or off it. The human door keeps
+the vec0 index unchanged. The prefilter is a necessary condition and
+authorizes nothing: each
+leg&#39;s list is then cut to what the AUTHORITY allows
+(<code>external_messages_allowed_conn</code>, with its recursive check of every source a
+decision consumed, plus the thread guard <code>thread_allowed_with_conn</code>) BEFORE the legs are fused,
+and every hit is rehydrated through the same authority on the way out. Which
+readable rows come back is therefore decided over readable mail alone. Their
+order is too at the vector leg and in the fusion; at the keyword leg it is
+not quite (residual 3). Do not replace the authority
+with the prefilter, and do not loosen one without the other:
+<code>the_external_prefilter_is_implied_by_the_authority</code> holds them together.</li>
+<li>The rows a search asks an access check for are chosen by a separate query
+bounded at ten (<code>archive_surface_candidates</code>), before the search runs, so the
+search itself runs once. A query with no text the index can look up
+(operators alone: a sender, a date range) is not a keyword match and buys
+nothing, at either door.</li>
+<li>Accepted residuals. None of these returns a field of a hidden row; each is
+something a caller can infer from a response it was entitled to.<details><summary>The four residuals</summary><ol>
+<li>SURFACING TIME. The time a search takes says that some unassessed archive
+row keyword-matched and a check was queued and waited for. Bounded by the
+ceilings above, and carries no content.</li>
+<li>KEYWORD LATENCY. A query whose words match hidden mail is slower than one
+whose words match nothing. FTS5 walks and scores every row a word
+matches before the prefilter can discard it, so the time grows with how
+many hidden rows say the word. Measured in a debug build over 4,200
+hidden rows that all match: 18 ms when one readable row matches too,
+17 ms when only hidden rows match, 0.3 ms for a word nobody says (it was
+1.3 s before the prefilter). A caller who can time its searches can
+therefore tell &quot;some mail I cannot read says this word, and roughly how
+much&quot; from &quot;none does&quot;. Not bounded by the surfacing caps: no check is
+queued and none is needed for the effect.</li>
+<li>KEYWORD RANKING. Full-text relevance (bm25) is computed from word
+statistics over the whole full-text index: how many stored messages
+contain each word, and the average length of a stored message. The index
+holds all mail, readable or not. So the relative order of two READABLE
+hits, and their <code>relevance</code> numbers, can change with whether, and how
+often, a word appears in mail the caller cannot read. That includes
+unassessed archive mail, and it equally includes <code>restricted</code> and
+owner-sealed LIVE mail. In plain terms: a caller with two readable
+messages that each contain a different word can search for both words,
+see which message ranks first, and learn something about whether one of
+those words also appears in mail it cannot see. One mail carrying the
+word is enough to flip the order of two otherwise evenly matched hits.
+It is about one bit per query, a word-existence signal, never a field of
+the hidden mail. Single-word queries are affected too, through the
+average document length: enough long hidden messages reorder two
+readable hits of different lengths. It applies to keyword mode and to
+hybrid mode (the keyword leg&#39;s order feeds the fusion), not to semantic
+mode. It PREDATES the archive tier: sealed and restricted live mail sits
+in the same index and moves the same statistics; the archive adds more
+hidden mail to the index, not a new channel. It is
+NOT bounded by the surfacing caps, which limit model calls and not
+searches. Removing it means scoring against statistics of readable mail
+only, which FTS5 cannot do; that is a ranking change and has not been
+made.</li>
+<li>VECTOR LEG COST. The exact scan in <code>nearest_readable</code> reads and measures
+every readable vector of the account on each semantic or hybrid agent
+search, where the vec0 index would not. Its time depends on how much mail
+the account holds, not on the query, so it says nothing about any word.
+It also holds the store lock for that long, so live ingest and the
+human door wait behind it. Measured in a debug build over 10,000
+readable rows, one message per thread: about 245 ms for the leg, and
+more on mailboxes with long threads; a release build has not been timed. A readable row beyond the 4,096 nearest READABLE rows is still
+found by the keyword leg or not at all.</li>
+</ol></details>
+</li>
+<li>PROMOTION is the one way <code>is_archive</code> changes, 1 to 0 and never back: the
+owner, at the human door, re-triages one archive message or corrects how it
+is filed (<code>promote_archive_conn</code>, called from <code>retriage_reset</code>&#39;s
+single-message arm and from <code>correct_agent_triage_conn</code> for every field but
+<code>external_access</code>). Nothing at the agent door, in the walk, in a live
+re-sighting or in a heal reaches it. A promoted row is live mail in every
+respect: while its access is pending it CLOSES its thread like any live
+pending row, and it is RE-JUDGED like any live row. The triage that promotion
+queues writes access from its own decision, so a <code>restricted</code> an earlier
+access check put on the row holds only until that triage commits and may
+become <code>allowed</code>. The one verdict that is permanent is the owner&#39;s own seal
+(<code>external_access</code> corrected to true), which survives promotion and every
+later triage. Sealing or unsealing an archive row by hand does not promote it
+and queues nothing. The owner&#39;s OWN archive mail (sent, or from their
+address) is never promoted and never queued, whichever path names it.</li>
+<li><code>cache_allowed</code> on the human routes is stricter than the agent guard
+(<code>human_cache_allowed</code>): the human reader is served the archive sibling, so a
+thread carrying an unassessed one is not cacheable.</li>
+<li>A reminder the owner sets on an archive message lists it at the human door
+like any reminded row. It does not surface at the agent door until the row
+is <code>allowed</code>.</li>
+</ul>
+<p>Do not widen the omission: it is exactly <code>is_archive = 1</code> AND access NULL or
+<code>pending</code> AND no owner seal (<code>archive_unassessed_sql!</code> in <code>store/sqlite/mod.rs</code>).</p>
 <p>The human <code>/client/v2/messages/{id}</code> endpoint can open the exact message immediately.
 It returns <code>Cache-Control: no-store</code>; <code>cache_allowed</code> controls client prefetch
 eligibility. Human read, attachment, draft, and reply paths do not treat a legacy
 <code>sensitivity=sealed</code> value as a denial. The legacy sealed list/reveal API remains a
 compatibility surface, not the new access authority.</p>
-<p><strong>Do not break.</strong></p>
+<div class="dnb"><p class="lbl">Do not break</p>
 <ul>
 <li>Do not let the embedded assistant call unrestricted human read endpoints.</li>
 <li>Do not treat a missing assessment as allowed, or trust a client-only filter.</li>
 <li>Keep source provenance with derived summaries, attention, records, and drafts.</li>
 <li>Internal evidence readers stay account-scoped and never execute email instructions.</li>
 <li>Keep user message access independent from the speed or availability of triage.</li>
-</ul>
+</ul></div>
 <p>See TRIAGE-OPERATIONS.md for the current execution contract.</p>
 <p><strong>Staged outbound attachments.</strong> <code>outbound_attachments</code> holds composer files until
 a send consumes them or their owning draft is deleted. Unclaimed uploads are
@@ -319,18 +738,55 @@ on MCP, never audit file contents, and use <code>no-store</code>. Byte responses
 content-type whitelist, <code>nosniff</code>, and attachment disposition as inbound files.
 The outbound guard scans text and message parts at send time; binary files are
 not scanned. Restricting external-agent access does not delete human drafts or
-their attachments.</p>
-<h2>4b. Provider spam</h2>
-<p><strong>Invariant.</strong> Mail the provider filed as spam is stored and readable on one
+their attachments. However many drafts an account holds (one per reply target,
+one per forwarded message, any number of new-message drafts), they are served
+only on <code>/client/drafts</code> and the owner&#39;s own are never audited. The agent door
+cannot list, read, edit or delete a draft; the one thing it can do, when the
+owner allows it, is ADD one (§4c).</p>
+<p>A staged file has a SECOND claim, <code>scheduled_send_id</code>, beside <code>draft_id</code>: the
+outbox row (<code>scheduled_sends</code>, docs/SCHEDULED-SEND.md) that will send it. The
+outbox is human-only, served only on <code>/client/scheduled</code>, with no MCP surface
+at all (an agent&#39;s send is immediate and cannot be scheduled); unlike drafts it IS audited (ids and reasons only, never the
+frozen request). A scheduled row holds its files for as long as it waits, up
+to 366 days, and a failed row for 30 days more; only a cancel releases them
+(back to unclaimed, the one-day clock restarted), and the compose door&#39;s
+DELETE answers 404 for a file an outbox row holds. A fired row reads, sends and
+consumes ONLY the files it holds, never an unclaimed one: file ids are reused
+rowids, and the unclaimed arm would let somebody&#39;s fresh, unscanned upload go
+out in place of a file the row lost.</p>
+<p><strong>Recipients and the contact card are human-door data.</strong> To and Cc are stored
+for every message and Bcc only for the account&#39;s own sends. The store enforces
+the Bcc rule in SQL, because on received mail that header is a leak or a
+forgery. They ride on <code>ClientMessage</code> beside <code>html</code>; the agent door&#39;s
+<code>SanitizedMessage</code> has no recipient fields at all. <code>GET /client/person</code> (the
+reader&#39;s contact card) answers for one address at a time, excludes sealed mail
+from every count and list, and has no MCP counterpart. The contacts seed stays
+sent-only, so being copied in beside a stranger never earns them the
+known-contact floor.</p>
+<p class="sec-num">&sect;4b</p>
+<h2 id="s4b">Provider spam</h2>
+<p class="sec-lede">Spam is kept for you to look at, and away from everything else: no model reads it, no agent sees it, and it never notifies you.</p>
+<div class="inv"><p class="lbl">Invariant</p><p>Mail the provider filed as spam is stored and readable on one
 human-door page, and is otherwise absent: it never reaches an LLM, never crosses
-the agent door, is never embedded, and never fires a notification.</p>
+the agent door, is never embedded, and never fires a notification.</p></div>
+<figure class="viz spam" aria-label="Where spam can go">
+<p class="viz-title">Where provider spam can go</p>
+<ul class="dest">
+<li class="ok"><b>The spam page</b><span>Fetched only when you open it</span></li>
+<li><b>Triage models</b><span>Never scored</span></li>
+<li><b>Embeddings</b><span>Never embedded</span></li>
+<li><b>Agent door</b><span>Not found, by design</span></li>
+<li><b>Notifications</b><span>Never fires</span></li>
+<li><b>Lists, counts, search</b><span>Filtered out in SQL</span></li>
+</ul>
+</figure>
 <p><strong>Why it is a security rule and not only a cost one.</strong> Spam is attacker-authored
 text selected for its ability to talk a reader into things, and a Stage-1 prompt
 is a reader. It is also the bulk of what arrives, so &quot;score it like anything
 else&quot; would mean spending the most model calls on the least trustworthy corpus.
 The same reasoning is why the agent door gets <strong>no spam at all</strong> rather than
 spam it is told to distrust: everything the agent reads is text it may act on.</p>
-<p><strong>Enforcement, in order.</strong></p>
+<p class="lbl">Enforcement, in order</p>
 <ul>
 <li><strong>Fetched only when asked for.</strong> The poll loop does not walk the <code>SPAM</code> label
 at all - not on backfill, not on a history tick, not on a catch-up.
@@ -345,18 +801,19 @@ label cannot be hidden by a later spam sighting.</li>
 Stage-1 - after the seal check, so a misfiled OTP is still sealed and sealed
 still outranks spam. <code>ingest_message</code> stamps the <code>&#39;n/a&#39;</code> stage markers, which
 is what keeps the row out of both LLM queues.</li>
-<li><strong>Never embedded.</strong> <code>SyncEngine::ingest_one</code> returns <code>None</code> for a spam row, the
-same structural gate sealed mail gets. An embedding is a similarity claim, and
-spam is written to imitate the mail it impersonates.</li>
+<li><strong>Never embedded.</strong> <code>SyncEngine::ingest_one</code> returns no embed text for a spam
+row, and <code>messages_missing_vectors</code> selects <code>is_spam = 0</code>. An embedding is a
+similarity claim, and spam is written to imitate the mail it impersonates.</li>
 <li><strong>SQL absence.</strong> Every band, queue, count and search leg pairs <code>is_spam = 0</code>
 with its <code>is_sent = 0</code>. The one caller asking for the other side is
 <code>GET /client/updates?spam=only</code>; an unrecognized value is a 400, never a
 silent full listing.</li>
 <li><strong>The page&#39;s rows carry the mail&#39;s own words, and only there.</strong> Nothing
 triaged a spam row, so its <code>one_line</code> is the empty string and the page would
-be a column of senders against a blank. <code>attention_updates</code> fills <code>subject</code>
-and <code>preview</code> (the stored 200-character snippet) on <code>SpamScope::Only</code> and on
-nothing else. Both are <code>Option</code>, skipped when <code>None</code>, so the agent door&#39;s
+be a column of senders against a blank. The human door&#39;s listing
+(<code>human_agent_updates</code>) fills <code>subject</code> and <code>preview</code> (the stored
+200-character snippet) on the rows it serves, spam or not. Both are
+<code>Option</code>, skipped when <code>None</code>, so the agent door&#39;s
 <code>Update</code> never grows the keys at all - the same discipline <code>from_name</code> holds,
 for the sharper version of its reason: this is text out of the corpus written
 to talk readers into things. A person reading their own spam folder expects
@@ -379,12 +836,443 @@ The sync suite asserts the &quot;not fetched routinely&quot; half against the mo
 LOG rather than against what landed: &quot;no spam rows appeared&quot; would also pass if
 the walk ran and the folder happened to be empty, and the thing being avoided is
 the request.</p>
-<h2>5. Outbound secret guard</h2>
-<p><strong>Invariant.</strong> A secret-looking outgoing body is blocked unless the caller
+<p class="sec-num">&sect;4c</p>
+<h2 id="s4c">Agent writes: drafts and sending</h2>
+<p class="sec-lede">Agents can leave drafts by default and can send only if you turn that on. Everything an agent writes goes through the same pipeline and checks as your own mail, with fewer options.</p>
+<div class="inv"><p class="lbl">Invariant</p><p>An agent writes mail only as far as the mailbox owner has said
+it may, only through the human door&#39;s own send pipeline, and never with more
+latitude than the owner has there. With nothing chosen it may leave drafts and
+cannot send: no mail leaves a mailbox on an agent&#39;s say-so unless the owner
+chose that level. Nothing here changes what an agent can READ.</p></div>
+<figure class="viz ladder" aria-label="Agent write levels">
+<p class="viz-title">What an agent may write, set per mailbox by you</p>
+<ol class="rungs">
+<li><span class="tag">none</span><b>Read only</b><span>No drafts, no sending</span></li>
+<li class="def"><span class="tag">drafts &middot; the default</span><b>Leave drafts for you</b><span>Marked &ldquo;from your agent&rdquo;; mail leaves only when you press send</span></li>
+<li class="stop"><span class="tag">send &middot; opt-in</span><b>Send with your approval</b><span>Same pipeline and secret guard as yours, with no override</span></li>
+</ol>
+<div class="kinds"><span>Never for agents</span><code>attachments</code><code>forwards</code><code>send groups</code><code>read tracking</code><code>scheduling</code></div>
+<figcaption>An agent cannot change this setting, and a value the daemon cannot read counts as none.</figcaption>
+</figure>
+<p><strong>The setting.</strong> <code>app_settings</code> key <code>agent.write_access</code>, per mailbox:
+<code>none</code>, <code>drafts</code>, <code>send</code>; each level includes the ones before it. A mailbox
+that has never set it is at <code>drafts</code> (<code>AgentWriteAccess::UNSET</code>; the owner&#39;s
+product decision, 2026-10-06). That default is safe to hold for the reason
+<code>drafts</code> is the hard gate at all: a draft is a local row, marked as the
+agent&#39;s, that becomes mail only when the owner presses send. What it does
+cost is stated under the residual risks below.
+<code>squelch-core/src/agent_write.rs:AgentWriteAccess::load</code> reads it, and a
+STORED value this build does not recognize FAILS CLOSED to <code>none</code>, not to the
+unset default: &quot;the owner chose something we cannot read&quot; is not &quot;the owner
+never chose&quot;. The type has no <code>Default</code> impl so that a failed read can never
+be spelled <code>unwrap_or_default()</code>. It is set
+only on the human door (<code>GET</code>/<code>PUT /client/settings/agent-access</code>, bearer-authed,
+audited as <code>agent.write_access</code> with <code>before-&gt;after</code>; the ledger row is written
+FIRST and a failed row leaves the setting unchanged). The agent door has no
+tool or route that changes it. It is read from the store on every call, so
+turning it off stops the next tool call, not the next restart.</p>
+<p class="lbl">Enforcement</p>
+<p>The agent door (<code>squelch-mcp</code>) holds a <code>dyn AgentMailer</code> and
+nothing else: no write credential, no message builder, no draft or outbox store
+call (<code>squelch-mcp/src/main.rs:the_mcp_crate_never_reaches_the_draft_store_itself</code>
+scans its source for those identifiers). The one implementation is
+<code>squelch-api/src/agent_write.rs:ApiAgentMailer</code>, which <code>squelchd serve</code> hands
+over via <code>ApiState::agent_mailer</code>. The standalone <code>squelch-mcp</code> binary passes
+none and offers neither tool. For each call the mailer:</p>
+<ul>
+<li>re-reads the setting and refuses below the needed level (the MCP server
+also hides tools the level does not allow, but listing is a courtesy and
+this check is the gate);</li>
+<li>resolves a reply target by PERFORMING THE AGENT DOOR&#39;S OWN READ
+(<code>readable_parent</code>: the message must appear in the <code>thread_view</code> that
+<code>get_thread</code> serves), so an agent can only reply to mail it can read, and a
+restricted, pending or spam id answers the same <code>not found</code> as an unknown
+one. It asks the read rather than re-listing the read&#39;s conditions: a first
+version re-listed them and left out spam (§4b);</li>
+<li>DECIDES THE RECIPIENTS ITSELF: the <code>to</code> the agent stated, else the parent&#39;s
+stored From, and the <code>cc</code> the agent stated or none. The owner&#39;s own reply
+honors the parent&#39;s <code>Reply-To</code> and derives copies from its headers; an
+agent&#39;s does not, because the agent is shown only a message&#39;s From and its
+human approves only what the agent shows them. A <code>Reply-To</code> nobody in that
+conversation saw must not decide where approved mail goes. The resolved
+<code>to</code>/<code>cc</code> are returned in the tool result;</li>
+<li>for <code>send_email</code>, runs <code>validate_send</code>, the outbound guard (§5) and
+<code>perform_send</code>, as <code>POST /client/actions/send</code> does, with <code>override_guard</code>
+hard-wired to <code>false</code>. The guard reads MORE than it does for the owner:
+recipients and subject as well as the body, and the body a second time
+with markdown emphasis marks removed (<code>guard_text</code>), since for an agent
+all of it is model output and this is the one check with no override;</li>
+<li>for <code>create_draft</code>, INSERTS a local draft marked <code>drafts.from_agent = 1</code>
+and never edits one: a reply whose message already has a draft is refused,
+because that row may be the owner&#39;s own unfinished writing and an agent
+cannot see it to know. At most 25 unsent agent drafts per mailbox. The
+client marks such a draft &quot;from your agent&quot; in the drafts list AND inside
+the composer it is restored into (<code>AgentDraftNotice</code>), with its recipient
+fields laid open: a reply draft is restored straight into the reply box
+when the owner presses <code>r</code>, so a mark only on the list would never be seen;</li>
+<li>refuses, for both tools, a body with no visible character, a header field
+carrying any control character or Unicode line separator, and more than 50
+recipients;</li>
+<li>audits every call that reaches it, refusals included, as actor <code>agent</code>
+(ids, counts and fixed reason strings only, never content). A draft and its
+ledger row are one transaction, like <code>set_sender_rule</code>. NOT audited: a
+<code>send_email</code> call the MCP server turns away for <code>human_approved</code> not being
+<code>true</code>, which never reaches the mailer; and, as on the human door, a send&#39;s
+success row is best-effort once the mail has left.</li>
+</ul>
+<p>An agent&#39;s composition is deliberately narrower than the owner&#39;s: no
+attachments, no forward, no send group, no read tracking, no scheduling.</p>
+<p><strong>The draft card (MCP Apps).</strong> <code>create_draft</code> names a <code>ui://</code> resource
+(<code>squelch-mcp/src/draft_card.html</code>) that app-capable clients such as Claude
+render in a sandboxed frame in place of the raw result. The HTML is static and
+holds no mail: the client hands it the tool&#39;s own arguments and result
+(subject, recipients, the body the agent wrote, the draft id), which the agent
+already had. It loads nothing from the network (empty CSP allow-list), writes
+everything with <code>textContent</code>, and its one action asks the client to call
+<code>open_draft</code> for that draft, over the same authenticated agent session; it
+never names <code>send_email</code>. <code>resources/read</code> serves it to any authenticated
+session whatever the write setting, because it is the same file for everyone;
+it is listed only while drafts are allowed.</p>
+<p><strong>Asking for a draft on screen (<code>open_draft</code>, and <code>open: true</code> on
+<code>create_draft</code>).</strong> At <code>drafts</code> and above an agent may ask the owner&#39;s Mac to
+bring one of its drafts up in the composer. This is the first thing the agent
+door can do that reaches the owner&#39;s SCREEN AND KEYBOARD FOCUS, so it is held
+to these rules:</p>
+<ul>
+<li>It is a request to an app, not a reach into a machine. The daemon publishes
+the draft id on an in-memory channel (<code>ApiState::draft_opens</code>); a Mac app
+that asked for it on its own authenticated event stream
+(<code>GET /client/events?opens=1</code>) receives an unpersisted, dated <code>open_draft</code>
+frame. Nothing is stored or replayed, and the app drops a frame more than a
+minute old, so a Mac that wakes from sleep has no window thrown at it.</li>
+<li>The phone is told by push, ONCE PER DRAFT. The same request hands a
+<code>DraftPing</code> (draft id + creation second) to the APNs pusher over a second
+in-memory channel (<code>ApiState::draft_pings</code>); it is not an event, is never
+persisted, and is tried once. The relay sees <code>&quot;&lt;tag&gt;:draft:&lt;id&gt;:&lt;created&gt;&quot;</code>
+and <code>kind: &quot;draft&quot;</code>, which picks a fixed fallback line and can carry no
+text of its own; no subject, recipient or body crosses it. The phone&#39;s
+service extension resolves the draft from its own daemon and opens it only
+if the daemon says an agent wrote it at that second. A tap opens the
+composer; nothing on the phone sends without the owner pressing send.
+Asking again for the same draft never buzzes the phone again
+(<code>ApiState::draft_pinged</code>).</li>
+<li>Only a draft an agent wrote can be named. The mailer refuses any other id
+with the same <code>not found</code> as an unknown one, and the app checks
+<code>from_agent</code> AGAIN against the daemon&#39;s own draft list before opening
+anything.</li>
+<li><strong>It can open a draft; it must never be able to send one.</strong> Bringing an
+app to the front under somebody who is typing delivers their next
+keystrokes to it, and in an agent&#39;s chat Cmd+Enter is &quot;submit&quot;. So:
+a composer opened by a request has <code>ComposeState.keyboardSendLocked</code> set,
+and Cmd+Enter does not send it; only the send button does, and a click
+cannot be typed ahead. Keyboard focus is taken off the composer after it
+opens. And when the owner has anything of their own being written in
+Passband, the app does not come forward at all (their own half-written
+mail would be the thing a typed-ahead Cmd+Enter sent): a toast waits
+instead, and nothing on screen is replaced. It never switches accounts.</li>
+<li>It is rationed: one request per five seconds per mailbox, across all
+agents (<code>ApiState::draft_open_clock</code>). The clock is checked BEFORE the
+draft is looked up, and a request inside the interval is refused alike
+whatever it named and writes no ledger row. In the other order the
+refusal would tell an agent whether the owner had sent or discarded a
+draft, and every attempt would be a row.</li>
+<li>The agent is told the truth. The result says whether any Mac was listening
+(the channel&#39;s receiver count), and the instructions tell it not to claim a
+draft is on screen when none was, and that an open draft or a link is not
+approval to send.</li>
+<li>Audited as <code>draft.open</code> (<code>ok:mac</code>, <code>ok:no_mac</code>, <code>failed:target</code>), at most
+one row per interval. Best-effort, like the human door&#39;s action rows.</li>
+</ul>
+<p><strong>The <code>passband://draft/&lt;id&gt;?mailbox=&lt;address&gt;&amp;t=&lt;created&gt;</code> link</strong> every draft
+comes back with is UNTRUSTED INPUT on the app side: any web page or local
+process can open one. It is parsed strictly (<code>Lib/AgentDraftLink.swift</code>:
+exactly the minted shape, no user, port, fragment or second path segment). It
+is bound to one draft by <code>t</code>, the second that draft was created, because draft
+ids are small row ids that are reused: without it an old link in a transcript
+would open whichever agent draft held the number next, and anything could walk
+<code>draft/1..N</code>. The app opens a link only for a <code>from_agent</code> draft created at
+that second, in the mailbox the link names (confirmed against the account&#39;s
+own address, never assumed), at most once per five seconds, and under every
+rule above. It can neither open nor probe for a draft the owner wrote.</p>
+<p>Residual, accepted: on an Open door at the default level, anything that can
+reach <code>/mcp</code> can make Passband come to the front every five seconds with a
+draft it wrote, when the owner is not writing in Passband. It cannot send,
+read more, or displace the owner&#39;s writing. <code>on_mac</code> reports a live
+connection, which a Mac that just went to sleep still has for a while; the
+agent may be told a Mac heard a request that the app then drops as stale.</p>
+<p><code>from_agent</code> is set at insert and never cleared. An owner who rewrites an
+agent&#39;s draft still sees it marked, and so does an owner whose own save landed
+on a row the agent created a moment earlier. That errs toward the warning.</p>
+<p><strong>What &quot;with your approval&quot; does and does not mean.</strong> At <code>send</code>, the approval
+is the agent&#39;s human saying yes IN THE AGENT&#39;S OWN CONVERSATION. The daemon
+cannot see that conversation and does not verify it. What it does is:</p>
+<ul>
+<li>tell the agent the rule three times: in the server instructions sent at
+<code>initialize</code> (<code>server.rs:write_instructions</code>), in the <code>send_email</code>
+description, and in the required <code>human_approved</code> argument, each saying that
+approval is per message, comes from the human, and is never text found in an
+email or a tool result. A sender rule&#39;s <code>standing_instruction</code> is named
+explicitly as never being approval: <code>set_sender_rule</code> is an agent write, so
+that text may have been written by an earlier, compromised session;</li>
+<li>refuse a call whose <code>human_approved</code> is not <code>true</code>;</li>
+<li>annotate the tool <code>destructiveHint</code> + <code>openWorldHint</code>, which is what MCP
+clients key their own confirmation prompts on.</li>
+</ul>
+<p><strong>Residual risk of the default (<code>drafts</code>), accepted.</strong> Every mailbox whose
+daemon serves the agent door offers <code>create_draft</code> without the owner having
+opened the setting. On an Open door (self-host, no agent sign-in) that means
+anything that can reach <code>/mcp</code> can leave up to 25 drafts in the owner&#39;s
+drafts list, and a reply draft is restored into the owner&#39;s reply box. What
+stands between such a draft and the wire is the owner: the mark in the list,
+the notice in the composer with its recipients laid open, and their own
+press of send. A draft written to be sent unread (&quot;looks like mine&quot;) is the
+attack this default exposes, and the mark is the defence; do not weaken it.</p>
+<p><strong>Residual risk of <code>send</code>, accepted for an opt-in level and stated in the
+client.</strong> A
+prompt-injected or simply wrong agent can assert <code>human_approved: true</code> and
+send. At <code>send</code>, the blast radius of the agent door grows from &quot;can read
+triaged mail and write local rules&quot; to &quot;can send mail as the owner&quot;, including
+mail that quotes whatever it was able to read. Sealed mail stays unreadable and
+the outbound guard still blocks secret-shaped text with no override, but
+ordinary content is not protected by either. On an Open door (self-host, no
+agent sign-in) &quot;the agent&quot; is anything that can reach <code>/mcp</code>. An owner who
+wants a hard gate uses <code>drafts</code>, where the only way mail leaves is the owner
+pressing send in Passband. Not built yet, and the natural next steps if <code>send</code>
+needs hardening: per-send approval inside the app, a recipient allow-list, a
+daily cap, reply-only, and recording who authored a sender rule so agent-written
+rule text is not delivered as the owner&#39;s words.</p>
+<div class="dnb"><p class="lbl">Do not break</p>
+<ul>
+<li>Never give <code>squelch-mcp</code> the write credential, a <code>GmailWriteClient</code>, or a
+direct draft/outbox store call. Agent writes go through <code>AgentMailer</code>.</li>
+<li>Never let an agent path pass <code>override_guard: true</code>.</li>
+<li>Never resolve an agent&#39;s reply target with <code>action_message_ref</code> alone; it
+applies no agent access check. And never re-list the agent door&#39;s read
+conditions beside it: ask <code>thread_view</code>.</li>
+<li>Never let an agent&#39;s send take its recipients from the pipeline&#39;s
+derivation (<code>Reply-To</code>, the parent&#39;s Cc). State <code>to</code> and <code>cc</code> on the
+<code>SendBody</code>.</li>
+<li>Never let the unset level be <code>send</code>. Sending is only ever a choice.</li>
+<li>Keep an unreadable stored setting, and a failed read, meaning <code>none</code>.</li>
+<li>Keep the setting off the agent door: an agent that could raise its own
+level has no level.</li>
+</ul></div>
+<p class="sec-num">&sect;4d</p>
+<h2 id="s4d">Hosted mail text in processes we operate</h2>
+<p class="sec-lede">On hosted, your mail text leaves your own instance for exactly two of our services: the AI gateway that triages it, and the search embedder, which never sees spam or login codes.</p>
+<div class="inv"><p class="lbl">Invariant</p><p>On hosted, a tenant&#39;s mail text leaves its own pod for exactly two
+processes we run: the LLM gateway and the shared embedding service. Provider spam
+reaches neither. Sealed mail (login codes, reset links, sign-in alerts, anything
+the model or a person restricted) never reaches the embedding service, nor the
+in-process embedder on self-host. Self-host reaches neither process. Nothing else
+of ours is handed mail text.</p></div>
+<p><strong>What each one sees.</strong> They are gated differently, on purpose.</p>
+<ul>
+<li><strong>The LLM gateway</strong> (Bifrost, <code>SQUELCH_ANTHROPIC_BASE_URL</code>, <code>docs/HOSTED.md</code>)
+receives what triage, translation and the hosted assistant send it, and it IS
+NOT filtered by sealed status. It cannot be: there is no local login-code
+detector, and since the triage rewrite (<code>4b7099de</code>) the triage model is what
+decides whether a message is authentication or restricted. Triage therefore
+reads every non-spam message, login codes included, because judging them is
+its job; translation reads foreign mail before its first triage for the same
+reason. Access is enforced where mail leaves toward an external reader (§4).
+A remote service with a per-tenant virtual key, reached over https only
+(<code>squelch-warden/src/config.rs</code>, <code>SQUELCH_WARDEN_LLM_BASE_URL</code>).</li>
+<li><strong>The embedding service</strong> (<code>squelch-embed</code>, <code>docs/EMBED-SERVICE.md</code>) receives
+the subject and body, cut to <code>protocol::MAX_CHARS_PER_TEXT</code> (8192
+characters), of only the messages that pass
+the sealed gate below, the English of a translated one under the same gate,
+plus the text of every search query that takes the vector leg
+(<code>query_embed_text</code> in <code>squelch-core/src/store/sqlite/search.rs</code>). It is in
+use only when the operator sets <code>SQUELCH_WARDEN_EMBED_URL</code>; unset, each tenant
+embeds in-process, behind the same gate.</li>
+</ul>
+<figure class="viz hosted" aria-label="Where hosted mail text goes">
+<p class="viz-title">Hosted: where mail text goes outside your instance</p>
+<div class="h-flow">
+<div class="mnode src"><span class="tag">Your instance</span><b>Your squelchd</b><span>One per account</span></div>
+<div class="h-lanes">
+<div class="h-row"><i class="arr" aria-hidden="true"></i><div class="mnode"><span class="tag">LLM gateway</span><b>Triage, translation, assistant</b><span>Every non-spam message, login codes included, because judging them is triage&#39;s job</span></div></div>
+<div class="h-row"><i class="arr" aria-hidden="true"></i><div class="mnode"><span class="tag">Embedding service</span><b>Search vectors</b><span>Only mail known not to be sealed; never spam</span></div></div>
+<div class="h-row"><i class="arr" aria-hidden="true"></i><div class="mnode none"><b>Anything else of ours</b><span>Never handed mail text</span></div></div>
+</div>
+</div>
+<div class="kinds"><span>The embedder</span><code>logs no text</code><code>stores nothing</code><code>one request per pass</code><code>no cache</code><code>no tenant name</code><code>no egress</code></div>
+<figcaption>Self-host uses neither service: it embeds in-process and calls no process of ours.</figcaption>
+</figure>
+<p><strong>The sealed gate, at the store side.</strong> One predicate,
+<code>embeddable_mail_sql!</code> (<code>squelch-core/src/store/sqlite/mod.rs</code>), built from
+the canonical sealed predicates (<code>known_sealed_mail_sql!</code>, <code>sealed_mail_sql!</code>)
+rather than written a third time. A message may be embedded only when it is
+not spam, is not KNOWN sealed (an auth decision, a restriction by the model or
+a person, or the retired <code>triage.sensitivity</code> column), and EITHER has a stored
+triage decision for its current content (the decision&#39;s revision equals
+<code>agent_message_state.revision</code>) with its access assessment settled, OR is the
+owner&#39;s own mail (<code>own_mail_sql!</code>) whose access check has settled and did not
+restrict it. NOTHING IS EMBEDDED UNTIL IT IS KNOWN NOT TO BE SEALED.</p>
+<ul>
+<li><strong>Where it is asked.</strong> Before any text is handed to an embedder: at ingest
+(<code>SyncEngine::ingest_one</code>, through <code>Store::message_embeddable</code>), by the drain
+(<code>messages_missing_vectors</code>, <code>translations_missing_vectors</code>), and on the
+translation path (<code>SyncEngine::embed_translation</code>). Again under the store
+lock at the write (<code>write_embedded_vectors</code>, <code>upsert_translation_vector</code>), so a
+decision that sealed a message while its text was at the embedder wins.</li>
+<li><strong>Undecided mail waits.</strong> At ingest an inbound message has no decision, so it
+could still be a login code: it gets no vector until a decision that does not
+seal it lands, and the applied decision raises the drain&#39;s flag. A decision
+about older content is not a decision: when a message&#39;s content changes, its
+revision moves past the decision&#39;s, and it waits again for one about the new
+text. Mail whose
+triage is DELAYED (the daily run cap, a spent budget, a failing model, no
+model configured on a self-host) has no vector meanwhile, and mail never
+triaged by design (an archive row nobody promoted, an old message given only
+a <code>source_access</code> check) has none at all. Keyword search still finds all of
+it: FTS is not gated by this. That is the accepted trade-off.</li>
+<li><strong>The owner&#39;s own mail is the one class embedded without a triage
+decision, and it waits for its access check.</strong> It is filed access-only and
+never triaged, and it is not a login code someone sent the owner, but it can
+still carry one (a forwarded code), which is what the access check is for.
+So it is embedded only once that check has settled, not while it is pending,
+and only if it did not restrict the message. If a person restricts it later,
+its vector goes at that event; if a restriction is lifted, the store is
+marked for the drain and the vector comes back.</li>
+<li><strong>Vectors that already exist go.</strong> <code>purge_forbidden_vectors_conn</code>
+(<code>search.rs</code>) deletes the original&#39;s and the translation&#39;s vector for a
+message that is known sealed, or is in the agent pipeline and no longer
+passes the gate (new content awaiting its re-triage). It runs inside the
+transaction of every event that can seal: a triage commit, an access commit,
+a person&#39;s correction, the compatibility sensitivity endpoint, and a content
+change. It also runs as a sweep at every store open, which removes vectors
+embedded before the gate existed: on one real mailbox (2,781 messages, 2,499
+vectors) the first open removed 360, 143 of them known sealed, in about 30 ms.
+It is a scan of the vectors table, so it costs about 1 s at 100k vectors, at
+every open. The FTS index and the message are untouched.</li>
+<li><strong>A daemon from before the gate undoes it.</strong> The schema is compatible both
+ways, so rolling a tenant back to an older daemon works, and that daemon&#39;s
+drain re-embeds every vector the sweep deleted, sealed mail included. The next
+open on a gated daemon deletes them again. A rollback past the gate is a
+return of the exposure for as long as it lasts, and <code>deploy/hosted/ROLLOUT.md</code>
+says so where rollbacks are planned.</li>
+<li><strong>Spam</strong> is excluded by the same predicate (<code>m.is_spam = 0</code>), as before.</li>
+</ul>
+<p>The embedder itself checks nothing (<code>squelch-core/src/embed/remote.rs</code>, module
+docs): a second gate inside it would be one more thing to keep in step with the
+first. Tests: <code>squelch-core/src/store/sqlite/tests/embed_gate.rs</code> (every case
+seals through the agent pipeline with the legacy column still <code>normal</code>),
+<code>sync::tests::no_embedder_ever_reads_a_login_code</code>, and
+<code>translate_pass::tests::the_english_of_mail_that_may_be_sealed_reaches_no_embedder</code>.</p>
+<p><strong>What the embedding service does not do</strong>, each backed by code or a test:</p>
+<ul>
+<li><strong>Logs no text.</strong> Its log lines carry counts, statuses and error words. The
+session&#39;s error type carries nothing (<code>squelch-embed/src/session.rs</code>,
+<code>SessionError</code>), and <code>no_text_or_address_reaches_metrics_or_logs</code> in
+<code>squelch-embed/src/http.rs</code> drives every path with a canary text and fails if
+it reaches a log line or the metrics. A panic prints a fixed word, the
+thread name and a source location from the process&#39;s own hook, never the
+panic&#39;s payload,
+and a canary test holds that too. The daemon-side client&#39;s errors carry a
+status, a closed error word or a transport class, never request or response
+text, and its config&#39;s <code>Debug</code> redacts the token.</li>
+<li><strong>Stores nothing.</strong> Read-only root filesystem, the baked weights read-only,
+one 64Mi <code>/tmp</code> the service does not write to (<code>deploy/hosted/65-embed.yaml</code>).
+A request&#39;s texts live for one forward pass and are dropped; a request whose
+caller hung up, or that waited past its lane&#39;s deadline, is skipped, never
+run.</li>
+<li><strong>Never puts two requests in one pass.</strong> Each request is its own forward
+pass. Batching requests together was a cross-tenant side channel: a pass pads
+every text to the longest, so tenant B&#39;s latency carried the token length of
+tenant A&#39;s text it happened to share a pass with. One pass per request
+removes the sharing; what tenant B can still observe is that the single
+worker was busy, which says someone was embedding something and nothing about
+what (<code>squelch-embed/src/coalescer.rs</code>, module docs).</li>
+<li><strong>Caches nothing, and dedups nothing.</strong> A content-keyed shortcut is a
+cross-tenant oracle on latency: tenant B would learn that tenant A received a
+byte-identical message.</li>
+<li><strong>Runs as its own uid.</strong> 10003, not the tenants&#39; 10001 or the warden&#39;s
+10002, so where user namespaces are off a tenant process and the embedder
+are still different users on the node.</li>
+<li><strong>Is never told a tenant&#39;s name.</strong> No tenant name or account id is in the
+path, a header or the body (<code>EmbedRequest</code> is <code>deny_unknown_fields</code>, one
+field). The bearer token is one fleet-wide value, deliberately not per tenant.
+The accept loop discards the peer address before any handler runs
+(<code>squelch-embed/src/http.rs</code>, <code>serve</code>), so nothing can key a log, metric,
+cache or limit on it.</li>
+<li><strong>Has no egress.</strong> Its NetworkPolicy has <code>egress: []</code>, not even DNS, and the
+weights are baked into the image, so a compromised embedder holding text in
+flight has nowhere to send it. Ingress is tenant pods on 8850 and the
+monitoring agent on 9464.</li>
+<li><strong>Exports closed labels only.</strong> Every metric label value comes from an enum
+(<code>lane</code>: <code>interactive</code>, <code>backfill</code>, <code>none</code>; <code>outcome</code>: a closed set), and a
+test refuses any label outside those sets or anything shaped like an IP
+address (<code>squelch-embed/src/metrics.rs</code>).</li>
+</ul>
+<p><strong>What the shared token is worth.</strong> Against a compromised tenant, nothing: every
+tenant holds it. The boundary is the NetworkPolicy pair (each tenant&#39;s one
+egress rule to the service, the service&#39;s ingress rule). The token is for the
+day the CNI is not enforcing policy and something that is not a tenant lands on
+the pod network: it gets a 401. It cannot be rotated without restarting every
+tenant today (<code>deploy/hosted/SETUP.md</code> §10b, Rollback); a rolling rotation
+path is an open follow-up.</p>
+<p><strong>One tenant can deny service to the others, and that is accepted.</strong> The
+service is never told who is calling, so it has no per-tenant limit to apply.
+A compromised tenant pod (or one daemon backfilling hard) can keep the single
+worker busy and fill a lane&#39;s share, and the other tenants&#39; requests wait,
+expire or get 429s. What it cannot do is make that unbounded or read anything
+by it: every lane has a fixed share of queued texts (<code>INTERACTIVE_SHARE</code> 16,
+<code>BACKFILL_SHARE</code> 96 in <code>squelch-embed/src/coalescer.rs</code>), interactive is served
+first, every job has a deadline (<code>INTERACTIVE_DEADLINE</code>, <code>BACKFILL_DEADLINE</code> in
+<code>protocol.rs</code>), a body is at most 256 KiB (<code>MAX_BODY_BYTES</code>), and body parsing
+and open connections are capped (<code>BODY_PERMITS</code>, about 32, and
+<code>MAX_CONNECTIONS</code>, about 256, in <code>http.rs</code>). The cost of the attack is degraded
+search for everyone on the node, which falls back to keyword results, and no
+mail is lost. A per-tenant limit would need the tenant&#39;s identity on the wire,
+which is the thing this section forbids.</p>
+<p><strong>Plaintext on the pod network, on purpose.</strong> The traffic never leaves the node,
+and the only observer of it would already hold the node and could read the
+tenants&#39; SQLite files directly. The warden&#39;s validator therefore allows <code>http://</code>
+for <code>SQUELCH_WARDEN_EMBED_URL</code> only for an in-cluster host (a single-label
+Service name, <code>*.svc</code>, <code>*.svc.cluster.local</code>) and refuses public hostnames and
+IP literals, the mirror image of the https requirement on the gateway URL.</p>
+<p><strong>Self-host.</strong> A self-host daemon sets no <code>SQUELCH_EMBED_URL</code> and no gateway: it
+builds its own embedding session in-process and talks to no process of ours.</p>
+<div class="dnb"><p class="lbl">Do not break</p>
+<ul>
+<li>Never add a cache, a dedup or a persisted queue to <code>squelch-embed</code>.</li>
+<li>Never put a tenant name, account id or per-tenant credential on the wire to it,
+and never key anything on the peer address.</li>
+<li>Never give its NetworkPolicy an egress rule; weights stay baked.</li>
+<li>Never add a metric label whose value comes from a request.</li>
+<li>Never embed through a raw vector write (<code>upsert_message_vector(s)</code>, which
+exist for fixtures); production writes go through <code>write_embedded_vectors</code>.</li>
+<li>Never widen <code>embeddable_mail_sql!</code> to a class of mail that could be inbound
+auth mail nobody has triaged. Never gate it on <code>triage.sensitivity</code> alone.</li>
+<li>An event that can seal a message must call <code>purge_forbidden_vectors_conn</code> in
+its own transaction.</li>
+</ul></div>
+<p class="sec-num">&sect;5</p>
+<h2 id="s5">Outbound secret guard</h2>
+<p class="sec-lede">Before mail leaves, Passband looks for anything shaped like a secret. If it finds one it stops and asks, and it never copies the secret anywhere.</p>
+<div class="inv"><p class="lbl">Invariant</p><p>A secret-looking outgoing body is blocked unless the caller
 explicitly overrides, and the matched text is never copied anywhere - not into a
-response, a log, or the audit row.</p>
-<p><strong>Enforcement.</strong> <code>squelch-api/src/guard.rs:scan</code> / <code>scan_kinds</code>, called from
-<code>handlers::action_send</code> before the message leaves the process. Detects <code>pem_block</code>,
+response, a log, or the audit row.</p></div>
+<figure class="viz guard" aria-label="Outbound secret guard">
+<p class="viz-title">The outbound check</p>
+<div class="g-flow">
+<div class="mnode"><span class="tag">Scanned</span><b>Everything you are about to send</b><span>Your note, plus a forward&#39;s original and its text attachments</span></div>
+<i class="arr" aria-hidden="true"></i>
+<div class="g-branch">
+<div class="g-row"><span class="chip">Nothing found</span><i class="arr" aria-hidden="true"></i><span class="chip">Sent</span></div>
+<div class="g-row"><span class="chip warn">Looks like a secret</span><i class="arr" aria-hidden="true"></i><span class="chip">Stopped; told only the kind</span></div>
+<div class="g-row g-sub"><span class="chip">You choose to override</span><i class="arr" aria-hidden="true"></i><span class="chip">Sent, with an audit row</span></div>
+</div>
+</div>
+<div class="kinds"><span>Detects</span><code>pem_block</code><code>api_key</code><code>otp_code</code><code>long_hex</code><code>long_base64</code></div>
+<figcaption>The matched text itself never leaves the process: not in the response, a log, or the audit row.</figcaption>
+</figure>
+<p class="lbl">Enforcement</p>
+<p><code>squelch-api/src/guard.rs:scan</code> / <code>scan_kinds</code>, called from
+<code>handlers::action_send</code> before the message leaves the process, and from
+<code>scheduled_send::schedule</code> when a mail is scheduled. Detects <code>pem_block</code>,
 <code>api_key</code> (vendor prefixes), <code>otp_code</code> (6–8 digits near an auth word), <code>long_hex</code>
 (≥32), <code>long_base64</code> (≥40). A non-empty match set returns HTTP 422 listing only the
 <strong>kinds</strong>; <code>override_guard: true</code> sends anyway and writes a <code>guard_override:&lt;kinds&gt;</code>
@@ -425,10 +1313,27 @@ This is deliberate and matches every mainstream mail client: passband strips tra
 out of what it RENDERS to its user, not out of what its user chooses to pass on.
 Rewriting a stranger&#39;s markup on the way out would forward something other than what
 arrived, and the user&#39;s decision is to send <em>this message</em>.</p>
-<p><strong>Do not break.</strong> <code>GuardMatch::kind()</code> is the only thing that may leave the process -
+<p><strong>Scheduled sends are judged once, when scheduled.</strong> <code>scheduled_send::schedule</code>
+runs the same scan while the user is there to answer: the note, the staged text
+files, and for a forward the ORIGINAL, read on the write token at schedule time
+and unioned into one verdict. <code>override_guard: true</code> persists in the frozen
+request. At fire time the worker calls <code>perform_send</code> with <code>SendGuard::Settled</code>,
+so nothing re-scans: the content is frozen, and a forward&#39;s original is
+re-fetched from Gmail at fire (Gmail&#39;s raw bytes are immutable, so what is sent
+is what was judged). A cancel hands the request back WITHOUT <code>override_guard</code>,
+so a reschedule is judged again.</p>
+<p><strong>Scheduled sends carry a visible fingerprint (privacy).</strong> Every mail the outbox
+fires goes out with <code>X-Passband-Outbox: &lt;token&gt;</code> and a <code>Message-ID</code> of
+<code>&lt;token@passband.app&gt;</code>, where the token is 48 hex chars of fresh randomness minted
+per row (docs/SCHEDULED-SEND.md §4). Recipients can see both: they reveal that the
+mail was sent by Passband&#39;s scheduler, and carry nothing else, no account, mailbox,
+user or row id, so two scheduled mails from one user are not linkable by them.
+Interactive sends carry neither.</p>
+<div class="dnb"><p class="lbl">Do not break</p><p><code>GuardMatch::kind()</code> is the only thing that may leave the process -
 never return, log, or audit the matched substring. Keep the override audited; an
-un-audited bypass is not a bypass we can reason about.</p>
-<p><strong>Post-send echo (audit contract).</strong> After a successful send,
+un-audited bypass is not a bypass we can reason about.</p></div>
+<details><summary>Post-send echo (audit contract)</summary>
+<p>After a successful send,
 <code>handlers::echo_sent</code> fetches the sent message back (<code>format=raw</code>, write token) and
 ingests it locally so the thread shows the reply immediately. It is strictly
 best-effort - the mail has already left, so nothing here may fail the request - and
@@ -447,8 +1352,11 @@ with fewer files than the tray showed), <code>rejected:attachment_cid_clash</cod
 files carry one <code>content_id</code>, so the body&#39;s reference would resolve to a coin flip),
 <code>failed:fetch_original</code> (the forwarded
 original could not be read back, so nothing was sent), <code>rejected:compose</code>,
-<code>failed:gmail</code>, <code>ok</code>, <code>ok:forward</code>):</p>
-<div class="tbl"><table>
+<code>paced</code> (the mailbox&#39;s Gmail budget held a call on the way, the send itself, a
+forward&#39;s original or a reply&#39;s parent, so nothing was posted; answered 503),
+<code>failed:gmail</code>, <code>ok</code>, <code>ok:forward</code>). A fired scheduled send&#39;s <code>send.echo</code> detail
+is marked <code>scheduled:&lt;id&gt;:</code> exactly as its <code>send</code> row is:</p>
+<div class="table-wrap"><table>
 <thead>
 <tr>
 <th><code>send.echo</code> detail</th>
@@ -461,7 +1369,7 @@ original could not be read back, so nothing was sent), <code>rejected:compose</c
 </tr>
 <tr>
 <td><code>skipped:sealed</code></td>
-<td>the outbound copy tripped seal detection; nothing was committed.</td>
+<td>not written today: <code>ingest_sent</code> always commits (see below). The branch stays so the audit vocabulary is stable.</td>
 </tr>
 <tr>
 <td><code>failed:fetch</code></td>
@@ -476,28 +1384,118 @@ original could not be read back, so nothing was sent), <code>rejected:compose</c
 <td>echoed; <code>&lt;local id&gt;</code> is the local <code>messages.id</code>.</td>
 </tr>
 </tbody></table></div>
-<p>The echoed row goes through the SAME seal-first ingest as any other message
-(<code>sync::ingest::ingest_sent</code>, <code>is_sent: true</code>), so it runs no LLM. Because seal
-detection precedes the <code>is_sent</code> branch, a reply quoting an OTP trips it - and such
-a copy is <strong>not written at all</strong> (<code>Ok(None)</code>, <code>skipped:sealed</code>). Committing it would
-put a sealed row in the thread, and <code>thread_guard_and_subject</code> 404s any thread
-holding one, so the echo would hide the counterparty&#39;s mail the user was reading a
-second ago; skipping degrades to &quot;the reply appears on the next backfill&quot;, the
-pre-echo status quo. The read-back is also capped at <strong>5s</strong>
+<p>The echoed row goes through the SAME ingest as any other message
+(<code>sync::ingest::ingest_sent</code>, <code>is_sent: true</code>), so it runs no LLM, and it is
+<strong>always committed</strong>, including a reply that quotes a one-time code. There is no
+deterministic sealing detector at ingest any more (§4): the copy is stored like any
+other row and is pending until the durable agent assesses its access, so the human
+door shows it at once while the agent door does not, and a restricted verdict
+closes it to agents as it would any message. The human thread does not 404 on it
+(<code>auth_sent_echo_is_stored_and_the_human_thread_still_opens</code>). <code>ingest_sent</code> still
+returns an <code>Option</code> and the <code>skipped:sealed</code> branch in <code>echo_sent</code> remains, but
+nothing reaches it today. The read-back is also capped at <strong>5s</strong>
 (<code>ECHO_FETCH_TIMEOUT_SECS</code>): the client&#39;s POST timeout is 15s and <code>action_send</code> has
 already made two serial Gmail calls, so bookkeeping may not spend the rest of that
 budget. Keep the echo&#39;s failures audited and swallowed; keep it out of core&#39;s write
 surface (the fetch lives in <code>squelch-api/src/write/gmail.rs</code>, core takes bytes).</p>
-<h2>6. The embedded assistant</h2>
+</details>
+<details><summary>Scheduled send (audit contract)</summary>
+<p>The outbox door audits under three actions of
+its own, target = the message a reply or forward is about (<code>schedule</code>) or the row id
+(<code>schedule.cancel</code>, <code>schedule.now</code>), details ids and reasons only. A FIRED send
+writes the ordinary <code>send</code> row, marked with its outbox row:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>action / detail</th>
+<th>meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>schedule</code> · every <code>send</code> refusal above</td>
+<td>the same ordered refusals a send meets (<code>rejected:confirm</code>, <code>rejected:attachment_missing</code>, <code>rejected:no_write_credential</code>, <code>failed:target</code>, ...), in the same order.</td>
+</tr>
+<tr>
+<td><code>schedule</code> · <code>rejected:send_at</code></td>
+<td><code>send_at</code> missing, not RFC3339, not in the future, or more than 366 days out.</td>
+</tr>
+<tr>
+<td><code>schedule</code> · <code>rejected:group_fanout</code></td>
+<td>an <code>individual</code> group: one minted Message-ID cannot name N messages.</td>
+</tr>
+<tr>
+<td><code>schedule</code> · <code>rejected:too_many_scheduled</code></td>
+<td>the account already holds 100 live outbox rows.</td>
+</tr>
+<tr>
+<td><code>schedule</code> · <code>failed:group</code> / <code>failed:store</code></td>
+<td>the group did not resolve / the insert failed.</td>
+</tr>
+<tr>
+<td><code>schedule</code> · <code>blocked:guard</code> / <code>guard_override:&lt;kinds&gt;</code></td>
+<td>the verdict, given at schedule time.</td>
+</tr>
+<tr>
+<td><code>schedule</code> · <code>ok:&lt;id&gt;</code></td>
+<td>scheduled; <code>&lt;id&gt;</code> is the outbox row.</td>
+</tr>
+<tr>
+<td><code>schedule.cancel</code> · <code>ok</code> / <code>rejected:sending</code> / <code>failed:not_found</code></td>
+<td>cancelled / in Gmail&#39;s hands (409) / unknown, another account&#39;s, sent or cancelled (404).</td>
+</tr>
+<tr>
+<td><code>schedule.now</code> · <code>ok</code> / <code>rejected:sending</code> / <code>failed:not_found</code></td>
+<td>queued for the next tick / in Gmail&#39;s hands (409) / nothing to queue (404).</td>
+</tr>
+<tr>
+<td><code>send</code> · <code>scheduled:&lt;id&gt;:&lt;outcome&gt;</code></td>
+<td>a fired row went out; <code>&lt;outcome&gt;</code> is the plain send&#39;s (<code>ok</code>, <code>ok:forward</code>, <code>ok:bcc:N</code>, ...).</td>
+</tr>
+<tr>
+<td><code>send</code> · <code>scheduled:&lt;id&gt;:recovered</code></td>
+<td>Gmail already held the row&#39;s mail, found by its minted Message-ID or its <code>X-Passband-Outbox</code> token (a lapsed lease, or a re-fire after an ambiguous failure): settled, NOT sent again.</td>
+</tr>
+<tr>
+<td><code>send</code> · <code>scheduled:&lt;id&gt;:failed:*</code> / <code>scheduled:&lt;id&gt;:rejected:*</code> / <code>scheduled:&lt;id&gt;:paced</code></td>
+<td>a fired row&#39;s refusal, the plain send&#39;s detail marked with the row. <code>paced</code> spent no attempt.</td>
+</tr>
+<tr>
+<td><code>send</code> · <code>scheduled:&lt;id&gt;:failed:request</code> / <code>failed:attachment_missing</code> / <code>failed:crash_loop</code> / <code>failed:recovery</code> / <code>failed:group_fanout</code></td>
+<td>a TERMINAL outcome the worker decided without reaching the send (so no plain send row exists to mark): an unreadable request, a lost file, a row that kept dying mid-send, a recovery or pre-fire search never able to ask Gmail, an (unreachable) fan-out. The worker writes these itself.</td>
+</tr>
+<tr>
+<td><code>send</code> · <code>scheduled:&lt;id&gt;:rejected:no_write_credential</code> / <code>failed:search</code> / <code>failed:store</code></td>
+<td>a worker-side attempt that never reached the send: no credential before the pre-fire search, the search refused (a revoked grant surfaces here, or a 4xx other than 403/429, which are &quot;not now&quot; like a transport error), the row&#39;s files unreadable. Each spends an attempt, and is written only when the settle moved the row (a worker that outlived its claim writes nothing).</td>
+</tr>
+<tr>
+<td><code>send.echo</code> · <code>scheduled:&lt;id&gt;:&lt;detail&gt;</code></td>
+<td>the echo of a fired or recovered row, the plain detail marked with the row.</td>
+</tr>
+</tbody></table></div>
+<p>The fire-time grace deferral (<code>recovery:grace</code>) and an unreachable pre-fire
+search (<code>recovery:unreachable</code>) are &quot;not now&quot; answers that spend no attempt and
+write no ledger row; the listing&#39;s <code>last_error</code> says why the row waits.</p>
+</details>
+<p class="sec-num">&sect;6</p>
+<h2 id="s6">The embedded assistant</h2>
+<p class="sec-lede">The assistant sees only what the app is allowed to show it, and anything that would change your Gmail waits for your tap.</p>
 <blockquote>
 <p>The dedicated <code>/client/agent/</code> read routes and source checks in §4 supersede
 references below to using ordinary human endpoints or legacy sealing.</p>
 </blockquote>
-<p><strong>Invariant.</strong> The agent inside Passband reads only what the human door serves, so
+<div class="inv"><p class="lbl">Invariant</p><p>The agent inside Passband reads only what the human door serves, so
 sealed mail is absent from it for the same reason it is absent from the door; and it
 cannot touch the mailbox without a human tap that has already happened by the time
-the call goes out.</p>
-<p><strong>Enforcement.</strong></p>
+the call goes out.</p></div>
+<figure class="viz tiers3" aria-label="Assistant tool tiers">
+<p class="viz-title">The assistant&#39;s fourteen tools, in three tiers</p>
+<div class="t3">
+<div class="t"><span class="tag">Reads</span><b>Never gated</b><span>Through the same door the app uses</span></div>
+<div class="t"><span class="tag">Safe writes</span><b>This database only</b><span>Status, sender rules, drafts; reversible in the app</span></div>
+<div class="t stop"><span class="tag">Gmail writes</span><b>Wait for your tap</b><span>Archive, label, send, unsubscribe</span></div>
+</div>
+</figure>
+<p class="lbl">Enforcement</p>
 <ul>
 <li><strong>Reads inherit §4.</strong> Every tool call in
 <code>passband/Sources/Passband/Assistant/AgentTools.swift</code> goes through <code>APIClient</code>,
@@ -524,8 +1522,65 @@ Hosted holds no key in the app at all: <code>POST /client/assistant/messages</co
 (<code>squelch-api/src/assistant.rs</code>) relays with a daemon-held credential and streams
 the bytes back, human door only, and 404s when no gateway is configured. The
 conversation body is treated like mail content and logged in neither direction.</li>
+<li><strong>Saved chats on disk.</strong> The conversation behind a question in search history is
+the one place the client keeps a transcript at rest
+(<code>passband/Sources/Passband/Lib/QuestionChats.swift</code>): one file per account under
+Application Support&#39;s <code>Passband/QuestionChats</code>, excluded from backup, 0600 in a
+0700 directory on the Mac and under complete file protection on the phone. A chat
+expires 30 days after it was last saved, goes when its question leaves history,
+and the file is deleted when history is cleared or the account is removed. A
+restored chat is re-sanitized (no card comes back live) and is refused if its
+history names a tool the chat no longer offers.</li>
+<li><strong>The last board on disk.</strong> The client also keeps at rest the board a launch
+paints before the daemon answers
+(<code>passband/Sources/Passband/Lib/BoardFile.swift</code>): the bands&#39; rows (subject,
+sender, the triage&#39;s one-line summary and preview), the calendar and shipment
+cards, the hero&#39;s headline, the head of each mail page, and the ids (ids only)
+of the threads that hold auth mail, so the prefetch fence is up before the
+sealed list is fetched again. It is written through the same code as the
+saved chats (<code>PrivateFile.swift</code>): one file per account under Application
+Support&#39;s <code>Passband/Boards</code>, excluded from backup, written atomically, 0600 in
+a 0700 directory on the Mac, complete file protection on the phone, contents
+never logged. NEVER on disk: the sealed list and the banking and receipt cards
+(the amounts and balances extracted from that mail), which the persisted type
+has no place for, and auth mail by every signal there is for it, since a
+preview can be the code. A row goes when its decision names an auth kind
+(feed rows), when its zone is <code>auth</code> (mail-page rows, which carry no
+decision), or when its thread is one the store fences (the sealed list, the
+bands&#39; auth rows), and every other row and card of that thread goes with it.
+So does a mail-page row triage has not placed yet: the newest mail is where a
+code that just arrived sits. A page is cut at its first such row rather than
+holed. The rules run on the way in and again on the way back out, so a file
+written any other way still cannot paint auth mail. Billing and receipt mail
+is otherwise mail like any other: its rows on a mail page are kept. The
+headline is kept only for the band it was written about, and not when a band
+row was taken out. Only what the daemon has answered for this session is
+written: never a board still repainted from disk or a switch, never a page
+that has not loaded since, and nothing after the credentials are
+re-validated in Settings until the next account change. A band that is
+nothing but auth mail is not written at all, and the file goes. A board the daemon last answered for more than a
+week ago is not painted and is deleted, by the read that finds it or by the
+launch sweep, which also deletes the board of every account no longer on the
+install. The file goes when the account is removed, when the same daemon is
+connected again or re-validated (the credentials may open another mailbox),
+and whenever the daemon refuses the saved credentials. Never written for the
+fixture inbox.</li>
+<li><strong>The last calendar on disk.</strong> The client keeps the calendar feed it last
+loaded for each account, so the Calendar page paints before the daemon
+answers (<code>passband/Sources/Passband/Model/CalendarDisk.swift</code>): events
+(titles, places, descriptions, guests and their addresses), ghosts and the
+calendars&#39; names. Kept by the board&#39;s rules: written through
+<code>PrivateFile.swift</code>, one file per account (named by a hash of the account
+id) under Application Support&#39;s <code>Passband/CalendarCache</code>, contents never
+logged; not painted and deleted a week after it was saved; swept at launch
+with the boards (stale, or an account no longer on the install); deleted
+when the account is removed, when the same daemon is connected again or
+re-validated (and nothing written again under that epoch), when the daemon
+refuses the saved credentials, and when the <code>calendar</code> feature turns off;
+never written for the fixture inbox. Only what the daemon answered is
+written.</li>
 </ul>
-<p><strong>What a maintainer must not break.</strong></p>
+<div class="dnb"><p class="lbl">Do not break</p>
 <ul>
 <li><strong>Prompt injection is the standing threat, and the gate is the answer to it.</strong>
 Mail bodies reach this model as data, so assume the text is adversarial and
@@ -537,12 +1592,901 @@ read to a store call that bypasses the door.</li>
 <li>Do not log the relay body, in either direction, at any level.</li>
 <li>A decline is a legitimate answer with <code>is_error</code> false. Do not turn it into a
 failure the model feels invited to retry.</li>
+</ul></div>
+<p class="sec-num">&sect;7</p>
+<h2 id="s7">Automatic unsubscribe</h2>
+<p class="sec-lede">Passband follows an unsubscribe link only after you ask, only for authenticated mail, only out to the public internet, and presses at most one button.</p>
+<div class="inv"><p class="lbl">Invariant</p><p>The daemon fetches a URL a stranger chose only after the user asked
+to unsubscribe from that stranger, reaches only the public internet when it does,
+and takes at most one action on the page it finds: the one a person would take by
+pressing its single button.</p></div>
+<p>This reverses an older rule (&quot;the server never fetches the unsubscribe link&quot;) on
+purpose. The link is no more dangerous than it was; what changed is who follows
+it. That move is what the guard below exists for.</p>
+<figure class="viz pipe" aria-label="Automatic unsubscribe checks">
+<p class="viz-title">Every check an automatic unsubscribe has to pass</p>
+<ol class="steps-row">
+<li><b>You asked</b><span>And confirmed; nothing prefetches a link</span></li>
+<li><b>Mail we trust</b><span>Not spam, and Gmail&#39;s auth passed</span></li>
+<li><b>Sender&#39;s own link</b><span>A footer link must match the From domain</span></li>
+<li><b>Public internet</b><span>Never a private or local address</span></li>
+<li class="hl"><b>One button</b><span>At most the one a person would press</span></li>
+</ol>
+<div class="pipe-out"><span class="chip">Any check fails</span><i class="arr" aria-hidden="true"></i><span class="chip">You get the link to open in your own browser</span></div>
+</figure>
+<p class="lbl">Enforcement</p>
+<ul>
+<li><strong>Never before the ask.</strong> Nothing prefetches, previews or probes an unsubscribe
+link: an unsubscribe may complete on a plain GET. The job starts from
+<code>POST /client/unsubscribe</code> with <code>auto: true</code> (<code>squelch-api/src/unsub_job.rs</code>),
+human door only; the agent door has no unsubscribe route at all, and the
+assistant&#39;s tool goes through the confirm card (§6). <code>auto: true</code> also needs
+<code>confirm: true</code>, like every other route that acts for the user: without it
+the daemon answers 400 and audits <code>rejected:confirm</code> before reading the
+message or fetching anything
+(<code>auto_without_confirm_is_refused_before_anything_is_fetched</code>). A request
+without <code>auto</code> needs no <code>confirm</code>: its answer is a link the person opens in
+their own browser.</li>
+<li><strong>Not for mail we cannot trust.</strong> Spam (<code>is_spam</code>) and mail without a passing
+authentication verdict (<code>auth_pass</code> not true) are never unsubscribed from
+automatically: fetching a spammer&#39;s link confirms the address is live, and an
+unauthenticated From line may not be the link&#39;s real author. Mail from before
+the verdict was recorded (<code>auth_pass</code> NULL) is treated the same way. All fall
+back to the browser, with the reason (<code>auto_refused</code>) for the client to say.</li>
+<li><strong>A footer link must be the sender&#39;s own.</strong> A header link is the sender naming
+its endpoint. A link picked out of the body runs automatically only when its
+site matches the From domain&#39;s (<code>unsub_job::choose_plan</code>): a colleague&#39;s
+forward of a newsletter is authenticated mail from the colleague carrying
+someone else&#39;s footer, and following it would unsubscribe the colleague.</li>
+<li><strong>SSRF guard, in code, for every deployment</strong> (<code>squelch-api/src/unsub_fetch.rs</code>).
+http/https only, ports 80/443 only, no userinfo. Names resolve through a resolver
+that returns PUBLIC addresses only (no loopback, private, link-local, CGNAT,
+multicast, reserved, or v4-in-v6 forms of those); reqwest connects to exactly what
+it returned, so DNS rebinding has nothing to rebind. IP literals, which never
+reach a resolver, are checked per hop. Redirects are followed by hand so every
+hop passes both checks; a 307/308 never carries a body to another host, and
+the https-first retry falls back to http only when nothing was sent. Hosted
+tenants also sit behind their NetworkPolicy; a self-host has only this, which
+is why it is not optional. One gap is inherent: a self-host on a network with
+global IPv6 can reach its LAN&#39;s devices at their global addresses on 80/443,
+because those addresses ARE public.</li>
+<li><strong>One action, and it has to prove itself</strong> (<code>squelch-api/src/unsub_html.rs</code>). A
+form is submitted only when exactly one submit control plausibly unsubscribes
+(one lone button, or the one among several that says so), with no password or
+file field, no required choice left unmade, and NOTHING TYPED: an empty field
+stays empty, and a required one refuses the form. A link is followed only when
+its own text says unsubscribe; it may point at any public host, which is no
+more than the sender&#39;s redirects could already do. &quot;Undo&quot;, &quot;cancel&quot; and
+&quot;resubscribe&quot; controls are never actions. Hidden text never counts as the
+page&#39;s answer. The page that comes back must say the user is unsubscribed (in
+so many words, or by the page reader&#39;s verdict); otherwise the job hands the
+link to the user. Optional surveys are never answered.</li>
+<li><strong>The page reader is fenced, cheap, capped and billed</strong>
+(<code>squelch-core/src/triage/unsub_page.rs</code>). The page is untrusted input inside the
+usual fence; any non-answer is <code>unclear</code>, which costs the user one click. Its
+calls bill to <code>unsub_page</code> and stop at a daily cap.</li>
+<li><strong>Bounded.</strong> 1 MiB bodies, per-request timeouts, a 45s job budget (slot wait
+included), four jobs at once, a cookie jar that lives for one job. Parsing is
+linear (a tag budget, a per-form control cap, no inner scan past its parent)
+and runs on the blocking pool. A panic inside a job still settles its row.</li>
+<li><strong>The link stays out of logs and the audit.</strong> Audit rows carry the sender and the
+verdict; transport errors are reduced to their kind before they can be printed.</li>
 </ul>
+<p><strong>The browser rung</strong> (<code>squelch-api/src/unsub_browser.rs</code>, <code>unsub_cdp.rs</code>,
+<code>squelch-core/src/triage/unsub_agent.rs</code>). Everything above describes the plain
+reader, which holds on every daemon. A daemon that was given a Browserbase key
+(every hosted tenant; a self-host only if it brings its own) has one more
+rung: a page the reader gave up on for a reason a real browser could fix
+(<code>choose_topics</code>, <code>needs_browser</code>, <code>unclear</code>; never a dead link) is opened in a
+rented remote browser that the notify model steers. On that rung the &quot;one
+action, nothing typed&quot; rule above is deliberately replaced by this one:</p>
+<ul>
+<li><strong>The page&#39;s scripts never run near the daemon.</strong> The browser is Browserbase&#39;s,
+on their network, reached over one WebSocket. Nothing the page executes can
+reach the daemon, its volume, its loopback doors or its neighbours. The same
+per-hop URL check the fetcher uses still decides whether a link is handed over
+at all.</li>
+<li><strong>The agent has a closed vocabulary, enforced on the page and not in the
+prompt</strong> (<code>unsub_browser::permit</code>). Press a link or button, turn a checkbox,
+radio or switch on or off, choose a select&#39;s option, fill an email field. Every
+action names a control by number, and the number is checked against the
+controls the daemon itself found, kind included. A short list of labels is
+never pressed whoever asks: resubscribe, undo, sign in, create or delete an
+account, download, buy.</li>
+<li><strong>Exactly one string can be typed</strong>, the address the mail was sent to
+(<code>unsub_job::address_to_type</code>: the account&#39;s address, or its plus address when
+that is what the message was addressed to), and only into a field that is for
+an email address. The model&#39;s answer carries no text of its own: there is no
+action that types what the model says, and no free-text field in its output
+for a page to have it fill in. A password, a name or a card number cannot be
+entered because nothing can enter one.</li>
+<li><strong>What the model reads is what a person would see.</strong> The page is read from an
+isolated JavaScript world the page&#39;s own scripts cannot see into. Text that is
+in the markup but not on screen (hidden, collapsed, clipped, off the page) is
+not read, because the agent&#39;s &quot;done&quot; is taken from this text. The page&#39;s own
+square brackets are rewritten, so it cannot draw a control that is not there.
+It goes to the model inside the usual fence.</li>
+<li><strong>Bounded and billed.</strong> Eight steps a job, sixteen actions a step, 100 seconds
+on top of the plain ladder, two browsers at once, a daily cap on steps, and
+usage under <code>unsub_agent</code>. A step that changes nothing twice ends the job.</li>
+<li><strong>A person is asked when a person is what the page wants.</strong> A sign-in, a
+captcha (sessions are created with captcha solving OFF), a confirmation link
+sent by mail, a question only the user can answer: each ends the job as
+<code>needs_you</code> with that reason and the original link.</li>
+<li><strong>Failure of the machinery changes nothing.</strong> No browser to rent, a dropped
+socket, the model&#39;s cap: the outcome is whatever the plain reader had already
+decided.</li>
+<li><strong>What Browserbase learns.</strong> The unsubscribe link (which already names the
+recipient to the sender), the page it leads to, and the address if a form asks
+for it. Sessions are created with recording and logging off. No mail, no
+credentials and no other mailbox data are reachable from the rung; it has no
+route to the store at all. Browserbase is a subprocessor for every hosted
+mailbox.</li>
+</ul>
+<div class="dnb"><p class="lbl">Do not break</p>
+<ul>
+<li>Do not build a second outbound client for sender-chosen URLs, or call
+<code>reqwest</code> directly on one: <code>Fetcher</code> is the guard, and a client without it is an
+SSRF primitive aimed at the daemon&#39;s own door on loopback.</li>
+<li>Do not prefetch an unsubscribe link to &quot;show a preview&quot; or to classify it early.</li>
+<li>Do not make <code>Action::submission</code> type anything. The page&#39;s host is the
+sender&#39;s choice at every hop, so there is no site an address could be safely
+typed into, and the account&#39;s primary address is not necessarily the one the
+list knows.</li>
+<li>Do not give the browser agent a way to type anything but the one address, and
+do not add a free-text field to its output. The vocabulary is the fence.</li>
+<li>Do not move a check out of <code>permit</code> and into the prompt. The prompt is advice
+to a model reading a hostile page; <code>permit</code> is what actually happens.</li>
+<li>Do not run the browser inside a tenant pod or on a self-host&#39;s own machine
+without first giving it the fetcher&#39;s network guard: a real browser loads
+subresources and runs scripts, and the public-only resolver covers neither.</li>
+<li>Do not turn session recording, logging or captcha solving on.</li>
+<li><code>needs_you</code> sends the user to the ORIGINAL link, not a post-redirect hop that may
+depend on this job&#39;s cookies.</li>
+</ul></div>
+<p class="sec-num">&sect;8</p>
+<h2 id="s8">Agent door authentication</h2>
+<p class="sec-lede">On hosted, only you can use your mailbox&#39;s agent door, with a sign-in that opens nothing else. If the setup is incomplete the door stays shut rather than falling open.</p>
+<div class="inv"><p class="lbl">Invariant</p><p>On a hosted tenant, only the owner of that tenant&#39;s mailbox can use
+its agent door, and only through a credential that cannot open the human door. A
+daemon whose agent-door settings are incomplete serves nothing on <code>/mcp</code>. A
+self-hosted daemon with no settings behaves exactly as it always has.</p></div>
+<figure class="viz tiers3" aria-label="Agent door modes">
+<p class="viz-title">The agent door runs in one of three modes, fixed at startup</p>
+<div class="t3">
+<div class="t"><span class="tag">Open &middot; self-host</span><b>No sign-in</b><span>Only for a listener whose reach you control</span></div>
+<div class="t ok"><span class="tag">OAuth &middot; hosted</span><b>A token on every request</b><span>Bound to your mailbox; cannot open the human door</span></div>
+<div class="t stop"><span class="tag">Misconfigured</span><b>Shut</b><span>Answers 503 to everything; never falls back to Open</span></div>
+</div>
+</figure>
+<p><strong>Three modes</strong>, chosen once at startup by <code>squelch-mcp/src/auth.rs:AgentDoorAuth::from_env</code>
+and applied by <code>squelch-mcp/src/lib.rs:agent_door_router</code>, the only public way to
+build the HTTP agent door (the bare rmcp service is private to the crate):</p>
+<ul>
+<li><strong>Open.</strong> Neither <code>SQUELCH_MCP_OAUTH_ISSUER</code> nor <code>SQUELCH_MCP_PUBLIC_URL</code> is set.
+No auth layer at all; the only guard is rmcp&#39;s Host allow-list (loopback plus
+<code>SQUELCH_MCP_ALLOWED_HOSTS</code>). This is self-host, and it is fit only for a listener
+the owner controls the reach of. No metadata routes exist.</li>
+<li><strong>OAuth.</strong> Both are set, each a valid <code>https</code> URL (<code>http</code> only on loopback), and
+the public URL&#39;s path is exactly <code>/mcp</code> with no query or fragment (the resource
+IS the door, so any other path could never match a token&#39;s <code>aud</code>). Every
+<code>/mcp</code> request needs a bearer token, verified below. Two unauthenticated GET routes
+publish RFC 9728 protected-resource metadata naming the issuer.</li>
+<li><strong>Misconfigured.</strong> Exactly one is set, one does not parse, the public URL&#39;s path
+is anything but exactly <code>/mcp</code>, or OAuth is configured
+but the daemon has no real account email to bind tokens to (unset, or the
+<code>me@localhost</code> placeholder; <code>AgentDoorAuth::for_account</code>, applied inside
+<code>agent_door_router</code> so no host can skip it). <code>/mcp</code> answers 503
+to everything, no metadata is published, and startup logs which setting is at
+fault. It never falls back to Open: the likeliest way to get here is a hosted pod
+that lost one variable, and that pod&#39;s <code>/mcp</code> is published. The human door is
+unaffected.</li>
+</ul>
+<p><strong>Roles.</strong> The daemon is a <strong>resource server only</strong>. WorkOS AuthKit is the
+authorization server: it runs registration, consent and token issuance, and our
+control plane supplies the identity (a Google sign-in, mapped to a mailbox) through
+AuthKit&#39;s Standalone Connect hop. The daemon never issues a token, never sees the
+user&#39;s Google credential, and never calls AuthKit about a specific token. It
+verifies AuthKit&#39;s RS256 access tokens locally against the issuer&#39;s JWKS.</p>
+<p><strong>Verification, in order</strong> (<code>auth.rs:Verifier::verify</code>). Each step is a refusal on
+failure, and the cheap, local steps come before anything that touches keys:</p>
+<ol>
+<li>An <code>Authorization: Bearer</code> header (<code>squelch-httpauth:parse_bearer</code>). Absent or
+not Bearer: 401 with <code>WWW-Authenticate: Bearer resource_metadata=&quot;...&quot;</code>.</li>
+<li>The token is at most 8 KiB. Checked before any decoding.</li>
+<li>The JWT header parses, <code>alg</code> is exactly <code>RS256</code>, and there is no <code>crit</code>
+header (RFC 7515 §4.1.11: we understand no extensions, so we accept none).
+<code>none</code> does not parse, and every HS* algorithm is refused here, before any key
+is looked up, so the RSA public key can never be fed to HMAC.</li>
+<li>The header has a <code>kid</code>, and the JWKS cache has an RSA signing key of at least
+2048 bits for it. See &quot;The key set&quot; below for when the cache refreshes. If no
+refresh has ever succeeded, or none has for 24 hours, the answer is 503, never
+a pass.</li>
+<li>The signature verifies under that key.</li>
+<li><code>iss</code> equals our issuer and <code>aud</code> (a string, or an array) contains our public
+URL. Both are exact string compares after trimming one trailing <code>/</code>.</li>
+<li><code>exp</code> is present and not past, with 60 seconds of leeway; <code>nbf</code>, if present, is
+not in the future, with the same leeway.</li>
+<li><strong><code>email</code> equals this daemon&#39;s account email</strong>, trimmed and ASCII-case-insensitive.
+A token with no <code>email</code> claim is refused.</li>
+</ol>
+<p>Every refusal after step 1 is a 401 with <code>error=&quot;invalid_token&quot;</code> added to the
+challenge, and an empty body, with one exception: when no key set can be trusted
+(step 4: never fetched, or no successful fetch for 24 hours) the answer is a 503
+with no challenge, because the token was never judged. A token that passes bounds
+its response (<code>auth.rs:response_lifetime</code>): the body is ended when the token&#39;s <code>exp</code>
+plus the leeway passes, so a long-lived GET event stream closes and the client
+must come back with a fresh token. Two clamps keep that bound from misfiring. A
+FLOOR of 30 seconds lets a response opened by a token accepted late in its leeway
+finish, rather than return an empty body after the tool has already run. A CAP of
+24 hours applies whatever <code>exp</code> says, and the arithmetic is total, so an absurd
+<code>exp</code> (<code>1e300</code>) gets a normal response instead of a panicked connection. Nothing an
+agent receives outlives the credential that asked for it by more than the floor.
+The library verifies the signature and nothing else:
+every claim check is ours, because its defaults check <code>aud</code> and <code>iss</code> only when
+present and leave <code>nbf</code> off.</p>
+<p><strong>The key set</strong> (<code>auth.rs:JwksClient</code>). Fetched lazily from <code>&lt;issuer&gt;/oauth2/jwks</code>
+(or the override), with no redirects followed (a redirect is a failed fetch, since
+the https check covered only the configured URL) and the body read in chunks that
+stop at 256 KiB. A fetch happens when a <code>kid</code> is unknown or when the cached set is
+older than one hour, and never more than once per 60 seconds whatever arrives: a
+spray of random <code>kid</code>s cannot drive outbound fetches, and since a throttled request
+does not extend the window, a newly published key is usable at most 60 seconds
+after the last fetch. A successful fetch REPLACES the set, so a key the issuer
+withdraws stops verifying within about an hour, and a JWKS with no usable keys
+empties the set. A failed fetch keeps the old set, so an issuer blip does not log
+every agent out, but only until 24 hours have passed without one success; then
+nothing is trusted (503). A fresh cached key is never delayed by a refresh in
+flight.</p>
+<p><strong>Step 8 is the tenant boundary.</strong> One wildcard resource indicator,
+<code>https://*.passband.email/mcp</code>, covers the whole fleet, so any Passband user can
+obtain a correctly signed, unexpired token whose <code>aud</code> names someone else&#39;s tenant.
+<code>aud</code> says &quot;this token is for a Passband daemon&quot;; only <code>email</code> says whose. Without
+step 8, tenant A&#39;s owner could read tenant B&#39;s mail with a token AuthKit issued
+quite properly.</p>
+<p><strong>The <code>email</code> claim exists only because the operator puts it there.</strong> A WorkOS
+Connect access token carries <code>iss</code>, <code>aud</code>, <code>sub</code>, <code>client_id</code>, <code>org_id</code>, <code>sid</code>,
+<code>scope</code>, <code>jti</code>, <code>exp</code> and <code>iat</code>, and no <code>email</code>. The claim appears only when the
+environment&#39;s JWT template is set to <code>{&quot;email&quot;: {{ user.email }}}</code>. Without the
+template every token is refused as <code>missing_email</code>, which is the fail-closed
+direction: a forgotten template locks agents out, it does not let them in. <code>sub</code>
+is WorkOS&#39;s own user id, not anything the control plane chose, so it cannot stand
+in for the mailbox.</p>
+<p><strong>The doors do not share credentials.</strong> <code>/mcp</code> never accepts an <code>sqd_</code> device
+token or the <code>SQUELCH_API_TOKEN</code> master token: neither is a JWT, so step 3 refuses
+it, and nothing on the agent path consults the device-token table. <code>/client/*</code>
+never accepts an agent JWT: the bearer check there knows only the master token and
+issued device tokens. The two routers are merged side by side in
+<code>squelchd:build_serve_router</code>, so neither inherits the other&#39;s auth, CORS or body
+limits. Both directions are pinned against the real combined router in squelchd&#39;s
+tests. The agent door still has no path to the write credential, and sealed
+material stays structurally absent from it under §4: nothing here touches tool
+logic.</p>
+<p><strong>Rollout fails closed.</strong> The warden never renders <code>SQUELCH_MCP_ALLOWED_HOSTS</code>. The
+public hostname reaches the rmcp Host allow-list only from <code>agent_door_router</code>, and
+only in OAuth mode. So an older daemon image behind a newly published <code>/mcp</code>
+Ingress path answers 403 from the Host guard rather than serving mail without a
+token.</p>
+<p><strong>Logging.</strong> A refusal is counted under one closed category (<code>auth.rs:Refusal</code>,
+e.g. <code>wrong_mailbox</code>, <code>expired</code>), and only the counts are ever written. No token, no claim value and no email
+address reaches a log line or a response; a misconfiguration names the setting,
+not its value. Both binaries&#39; startup lines (<code>squelchd serve</code> and the standalone
+<code>squelch-mcp --http</code>) print the same mode text (<code>AgentDoorAuth::describe</code>): the
+mode and, in OAuth mode, the public URL, which the metadata publishes anyway.</p>
+<p><strong>Accepted costs.</strong></p>
+<ul>
+<li><strong>WorkOS can mint a token that reads a mailbox.</strong> AuthKit holds the signing key,
+so a compromise of WorkOS (or of our WorkOS API key, which completes the identity
+hop) can produce a token that passes every step above. That is the price of not
+running our own authorization server.</li>
+<li><strong>Revocation is a WorkOS-side operator action, not instant, and not ours.</strong> The
+daemon checks no revocation list. Access tokens are short-lived, but AuthKit
+also issues refresh tokens (<code>offline_access</code> is among the standard scopes a
+dynamically registered client gets), so an approved agent keeps access for as
+long as its grant lives on the WorkOS side. Ending that access means revoking
+the grant in WorkOS, which today is something an operator does. The
+access-token lifetime only bounds how long a revoked grant&#39;s last token keeps
+working, and the stream bound above makes that true for open streams too.</li>
+</ul>
+<p><strong>The phishing shape that remains.</strong> An attacker can register their own MCP client
+with AuthKit, start a flow, and send the victim the resulting login link. If the
+victim signs in and approves, the attacker&#39;s client gets a token for the victim&#39;s
+mailbox. Client names under dynamic registration are chosen by whoever registers
+the client and are not verified by anyone, so &quot;Claude&quot; on a consent screen proves
+nothing. The defence is two screens the victim must get past: our control plane&#39;s
+own confirmation page, which names the mailbox and is shown after Google sign-in
+and before anything is sent to WorkOS (<code>/agent/auth</code>, then Google, then confirm,
+then the POST that completes the hop), and then AuthKit&#39;s consent screen naming
+the client. Both depend on the victim reading them.</p>
+<p><strong>Not proxied on purpose.</strong> The daemon does not serve
+<code>/.well-known/oauth-authorization-server</code>. Clients that predate the 2025-06-18
+authorization spec and expect the resource server to also be the authorization
+server will not work, and that is accepted rather than worked around.</p>
+<p><strong>Browser-based MCP clients are not supported.</strong> <code>/mcp</code> sends no CORS headers, by
+choice for now, so a page in a browser cannot call it. The protected-resource
+metadata is CORS-open because it is public. Server-side and native clients, which
+is every agent we document, are unaffected.</p>
+<p><strong>Refusal logging is rate-bounded.</strong> Refusals are unauthenticated, so they are
+counted per category and written as at most one summary line per minute
+(<code>auth.rs:RefusalLog</code>), never one line per request.</p>
+<div class="dnb"><p class="lbl">Do not break</p>
+<ul>
+<li>Do not drop or weaken step 8, and never swap the binding to <code>sub</code>: <code>sub</code> is
+WorkOS&#39;s user id, and <code>email</code> (from the JWT template) is the claim this daemon
+checks against its own mailbox.</li>
+<li>Do not remove the stream bound or the key-set maximum age and ceiling.</li>
+<li>Do not let a misconfiguration fall back to Open, and do not mount the agent door
+any way other than <code>agent_door_router</code>.</li>
+<li>Do not render <code>SQUELCH_MCP_ALLOWED_HOSTS</code> from the warden.</li>
+<li>Do not let the agent door accept a human door credential, or the human door an
+agent JWT.</li>
+<li>Do not log anything from a token, including on the 401 path.</li>
+</ul></div>
+<p class="sec-num">&sect;9</p>
+<h2 id="s9">Google Calendar</h2>
+<p class="sec-lede">Your calendar is shown to you and nobody else: no agents, no logs, no triage. Two narrow, documented exceptions let a small model shorten a place name and plan reminders.</p>
+<div class="inv"><p class="lbl">Invariant</p><p>Calendar data (event titles, places, descriptions, organizers,
+guests&#39; addresses, names and answers, links, calendar names) is human-door data: served on <code>GET /client/timeline</code> (and
+in the answer to the user&#39;s own write) and nowhere else, never in a log line,
+never in a triage prompt. TWO EXCEPTIONS, each the owner&#39;s decision. First
+(2026-10-28): an event&#39;s location string, alone, goes to the configured
+provider&#39;s small (<code>notify</code>) model to be cut down to the place the card shows
+(see &quot;The card&#39;s place&quot; below). Second (2026-10-29): to plan an event&#39;s
+reminder, the same small model reads the event (title, times, place,
+description, the user&#39;s answer, busy or free, the COUNT of other guests and
+whether the user organizes it) and the subjects, sender display names and
+attachment filenames of the mail linked to it (see &quot;Calendar reminders&quot;
+below). Nothing calendar-related is on <code>/mcp</code> or <code>/client/agent/*</code>. The daemon writes to a calendar when the user creates,
+edits or deletes one event from the human door, and, ONE EXCEPTION (the owner&#39;s
+decision, 2026-10-28, behind the <code>calendar_own</code> hidden feature since 2026-10-30), when it
+replaces Gmail&#39;s own copy of an event with its own and keeps that event current
+from authenticated mail (see &quot;Passband&#39;s own events&quot; below). Nothing else
+writes on its own. Google emails an event&#39;s guests only when a human-door
+write says <code>notify: true</code>; no other input, default or code path can ask for
+it, and Passband&#39;s own writes always send <code>sendUpdates=none</code>.</p></div>
+<figure class="viz spam" aria-label="Where calendar data can go">
+<p class="viz-title">Where calendar data can go</p>
+<ul class="dest">
+<li class="ok"><b>Your timeline in the app</b><span>The human door only</span></li>
+<li class="ex"><b>Small model: the place</b><span>The location text alone, cut to the place</span></li>
+<li class="ex"><b>Small model: reminders</b><span>The event and its linked mail&#39;s subjects</span></li>
+<li><b>Agent door and MCP</b><span>Nothing calendar-related</span></li>
+<li><b>Logs</b><span>Never a title, place or address</span></li>
+<li><b>Triage prompts</b><span>Never</span></li>
+</ul>
+<figcaption>Guests are emailed only when your own edit says to notify them.</figcaption>
+</figure>
+<p class="lbl">Enforcement</p>
+<ul>
+<li><strong>Five tables, human door only.</strong> <code>calendar_calendars</code>, <code>calendar_events</code>,
+<code>calendar_places</code> (the card&#39;s place per location text), <code>calendar_owned</code>
+(which event Passband made for which ghost, <code>gcal/own.rs</code>) and
+<code>calendar_event_guests</code> (an event&#39;s attendees, deleted with it by a trigger)
+(<code>squelch-core/src/store/sqlite/calendar.rs</code>) are written by the sync loop
+(<code>squelch-core/src/gcal/sync.rs</code>) and, one row at a time after Google accepted
+it, by the user&#39;s own write (<code>squelch-api/src/calendar_write.rs</code>); they are read
+only by <code>handlers.rs:get_timeline</code> and those write handlers.
+Every query is scoped by <code>account_id</code>. A log line names a calendar by its
+position in the pass, never its id, which is usually an address.</li>
+<li><strong>Laundered and capped</strong> (<code>gcal/mod.rs:read_event</code>). A shared calendar is written
+by other people, so its text is treated like mail: titles and places lose control,
+bidi and invisible characters and stop at 200 characters, a meeting link loses
+its query, an organizer is kept only when it is an address, ids are bounded. At
+most 25 calendars, 5000 events per calendar (the nearest to now kept), 40 pages of
+250 per calendar per pass, 8 MB per response, one listing of 5000. Google is asked
+for less in the first place: a <code>fields</code> mask names only what is read, and
+<code>maxAttendees=100</code> bounds the guest list, so an invitation anyone can send never
+delivers attachments, conference data, a guest&#39;s comment or more than 100 guests
+to the daemon. Of each guest only the address (kept only when it is one), the
+name (laundered like a title), the answer and two flags are stored; past 100,
+Google sends the user&#39;s entry alone and the event is marked truncated.
+Each event&#39;s <code>eventType</code> is read only to mark Gmail&#39;s own events
+(<code>fromGmail</code>), which the edit guard then refuses, since Google does.
+Its description is read (the app shows it): markup becomes text, each line is
+laundered like a place, and it stops at 2000 characters. Google&#39;s own
+boilerplate on an event it made from mail (&quot;To see detailed information for
+automatically created events like this one...&quot;) is dropped with its link
+(<code>triage/ghost.rs:strip_google_boilerplate</code>).</li>
+<li><strong>Passband&#39;s own events</strong> (<code>gcal/own.rs</code>, <code>gcal/sync.rs:own_events</code>). Off
+unless the <code>calendar_own</code> hidden feature is ticked for the tenant. It touches only events
+on the PRIMARY calendar: Gmail&#39;s own (<code>fromGmail</code>) that are the user&#39;s by
+every organizer test and carry no other guest, and the events Passband made
+in their place. An invitation from anyone else is never written. Every
+write sends <code>sendUpdates=none</code>, never names attendees, and is audited
+(actor <code>passband-calendar</code>, target <code>calendar:&lt;calendar&gt;/&lt;event&gt;</code>, detail
+<code>ok</code> or an error kind; never a title or a place). Only a ghost from mail
+that passed sender authentication adopts or moves an event. A cancellation
+from mail marks the event (&quot;Canceled: &quot;, free), it does not delete it. The
+user&#39;s deletion of Passband&#39;s event, or dismissal of the ghost, ends
+Passband&#39;s hold on it for good. At most 10 writes a pass, 100 a day.
+KNOWN GAP against docs/CALENDAR.md &quot;Before anything writes to a real
+calendar&quot;: a time or place change comes from what the triage model read in
+the mail, not from structured calendar data (an iCalendar UID), so on a
+shared sending platform another host&#39;s mail that the model reads as the
+same booking could move the event. The marking-not-deleting of
+cancellations and the authentication rule bound it; structured updates are
+the fix.</li>
+<li><strong>The card&#39;s place</strong> (<code>gcal/place.rs</code>). After a pass that synced, the loop
+sends up to 10 stored locations longer than 40 characters (upcoming first) to
+the provider and <code>notify</code> model that already read the owner&#39;s mail, each on
+its own, fenced as untrusted, with nothing else of the event: no title,
+guests, notes, ids or account. The answer, a <code>name</code> and an <code>address</code>, is
+laundered like a title and HELD TO THE INPUT IN CODE: every word of each
+must be a word of the location (<code>place::grounded</code>), so the model can only
+drop text, never add an address, a link or anything a hostile location
+asked for; an answer that adds a word is discarded and the location kept. Stored in <code>calendar_places</code> keyed by the
+location text (one call per distinct text), pruned when no event holds it,
+served on <code>GET /client/timeline</code> only, as <code>place</code> (name, address and the
+original location) beside the untouched <code>location</code>. An event Passband owns
+is written with the name and address as its location, so the address
+survives Gmail&#39;s copy being deleted. At most 100 calls per account per day (attempts counted in
+memory, spend in the usage ledger under <code>calendar_place</code>). No key, no call.
+The location text is never logged.</li>
+<li><strong>Calendar reminders</strong> (<code>gcal/remind.rs</code>, <code>squelch-api/src/calendar_remind.rs</code>,
+<code>store/sqlite/calendar_remind.rs</code>; the owner&#39;s decision of 2026-10-29,
+against the recommendation to leave the description out and to template
+the banner&#39;s line). ONLY THE USER&#39;S EVENTS (<code>remind::attends</code>): an event
+is planned, fired, given the fallback, links ghosts or claims one only when
+it is on one of the owner&#39;s own calendars (primary, or <code>owner</code> access) and
+they accepted or said maybe, or it is their own (<code>users_own</code>), or it is
+unanswered and its organizer is a known contact (the owner has written to
+them); never when declined. A stranger&#39;s invitation, which Google adds
+unasked, gets no model call and no banner, cannot capture the user&#39;s
+booking, and its tickets are only ever the fallback from its own linked
+ghosts. Once per item version (a hash of what it read), the
+worker sends each upcoming event of the user&#39;s and committed or going ghost to the
+provider and <code>notify</code> model that already read the owner&#39;s mail, fenced as
+untrusted: title, start and end, place, description (at most 1500
+characters), the user&#39;s answer, busy or free, how many other guests (a
+number: never a guest&#39;s name or address, never the organizer&#39;s address),
+whether the user organizes it; for each linked mail its subject, sender
+DISPLAY NAME (never the address, and none when the name holds an <code>@</code>),
+received date and non-inline attachment
+filenames and types (never a body, never bytes); and the same day&#39;s other
+bookings (title, start, kind). Linked mail is only the sources of ghosts
+from mail that passed authentication, and the store&#39;s read of it
+(<code>calendar_linked_mail</code>) re-applies the ghost rule itself: never spam, sent,
+sealed (<code>SEALED_SQL</code>) or unreviewed mail. The answer is HELD TO THE INPUT
+IN CODE (<code>remind::settle</code>): the lead is one of 10, 30, 60, 120, 180
+minutes; the line, which reaches the lock screen, loses control, bidi and
+invisible characters (<code>order_link::plain</code>), is NFKC-folded, and is DROPPED
+whole by <code>remind::line_shaped</code> (its own rule; triage&#39;s <code>ghost::mail_shaped</code>
+is unchanged), tested after invisible characters and combining marks are
+dropped: a URL or any dotted host (last label a country code, 3+ ASCII
+letters, or any non-ASCII letters), a dot written or spaced out before a
+top-level domain (with a space before the dot in any case, else with the
+domain in lower case), <code>hxxp</code>, <code>[at]</code>, an <code>@</code> touching a letter or digit,
+6+ digits unbroken or in 3+ hyphen-joined groups, 7+ across the
+separators a number is printed with (<code>/ , _ ·</code> and every dash included,
+look-alike <code>l I o</code> counted inside a run, dates with a year masked first),
+and vanity or keypad-spelled numbers; then cut to
+90 characters (docs/CALENDAR.md has the measured corpus). An entry code
+(<code>remind::settle_code</code>) is served only when it appears word for word in
+the item&#39;s own title, location or description (not a piece of a longer
+hyphenated number), is at most 2 letters then digits, <code>#</code> or <code>*</code>, 3 to 12
+characters with 2 to 6 digits (no phone number in any country, no spelled
+number), and comes from a current plan; its label uses only a closed list
+of words naming what a code opens, else &quot;Code&quot;, so it can never ask the
+reader to call or pay. The title, place and
+line are stripped of bidi controls and invisible marks again on the
+device; every mail, attachment and booking number is bounds-checked
+(out of range is none), and a booking&#39;s mail counts only once the answer
+names that booking as the same thing; a stored pick is served only while
+its mail is still one of the item&#39;s (eligible) sources. At most 200 calls
+per account per UTC day, every ATTEMPT counted durably
+(<code>calendar_reminder_calls</code>, so timeouts and restarts buy none; spend in the
+usage ledger under <code>calendar_remind</code>) and 15 per pass, nearest first; an
+item whose ask failed backs off 30 minutes, doubling to 4 hours. No key:
+no call, and every reminder is a fixed 30-minute one with no line. Failure
+stores no plan. BANNER CAPS: once per start instant, at most two per item
+per owner-local day however its start moves, and never twice for one real
+thing under its ghost&#39;s and its event&#39;s keys within 24 hours. Logs carry
+counts only. The plan (<code>calendar_reminders</code>) and each
+firing (<code>calendar_reminder_fires</code>, its frame kept 7 days) are human door
+only: the frame goes to open Mac streams (<code>calendar_reminder</code>, no <code>id:</code>) and
+is served by <code>GET /client/calendar/reminders/{id}</code>, account-scoped, the
+same 404 for unknown, expired and another mailbox&#39;s; fire ids are
+AUTOINCREMENT (never reused), and the app and the extension show a fetched
+frame only when its <code>at</code> is the push&#39;s <code>fired</code>. The phone&#39;s push
+carries only <code>&quot;&lt;tag&gt;:cal:&lt;fire id&gt;:&lt;fired&gt;&quot;</code> and the relay&#39;s fixed
+<code>kind: &quot;calendar&quot;</code> line (&quot;An event is coming up&quot;); no title, time or place
+crosses the relay. A booking from mail that failed authentication is never
+reminded. The owner preference (<code>app_settings</code> key <code>calendar_reminders</code>,
+<code>GET</code>/<code>PUT /client/calendar/reminders/settings</code>) turns off every plan,
+call and firing; the timeline&#39;s <code>tickets</code> field is served either way.</li>
+<li><strong><code>html_link</code> is an allow-list</strong> (<code>gcal/mod.rs:google_link</code>): https, a host that is
+<code>google.com</code> or ends in <code>.google.com</code>, no userinfo, at most 2048 characters.
+Anything else is dropped, because the client opens it.</li>
+<li><strong>No redirects, no bodies in errors</strong> (<code>gcal/client.rs</code>). The client refuses
+redirects (every request carries a bearer token) and reduces a failure to its
+kind (<code>auth</code>, <code>quota</code>, <code>unavailable</code>).</li>
+<li><strong>Calendar failures stay out of Gmail.</strong> The loop is its own task; no failure of
+it touches Gmail health or sync.</li>
+<li><strong>Sealed mail feeds no ghost</strong> (<code>store/sqlite/ghosts.rs:ELIGIBLE</code>, <code>may_feed</code>).
+A calendar ghost is built only from a message that is not sent, not spam and
+not sealed, where sealed is what the Auth page&#39;s <code>sealed_messages</code> reads today:
+a stored decision naming an auth kind (a sign-in alert, a login code), or an
+access review that is not <code>allowed</code> (<code>restricted</code>, or still <code>pending</code> after the
+message changed). The retired <code>triage.sensitivity</code> column is NOT the test: the
+agent pipeline no longer writes it. The same predicate runs at reconcile, at
+rebuild and in SQL at listing time, so a message that becomes sealed after its
+ghost was built stops serving it at once; a decision that does not parse feeds
+nothing.</li>
+</ul>
+<p><strong>The user&#39;s own writes</strong> (<code>squelch-api/src/calendar_write.rs</code>). <code>POST /client/calendar/events</code>, <code>PATCH</code> and <code>DELETE /client/calendar/events/{calendar_id}/{id}</code>,
+on the human door only, bearer authed, <code>no-store</code>. The order is fixed: the grant,
+the body (title 1 to 200 characters, refused rather than cut; one precision; the
+end after the start; place and description cut to 200 and 2000; all three lose
+control and invisible characters but are otherwise sent as typed, so a link keeps
+its query at Google, while the stored copy is Google&#39;s answer laundered by
+<code>read_event</code>),
+the calendar (one being read, on which the user is <code>owner</code> or <code>writer</code>), the
+stored event and the edit guard (<code>gcal/mod.rs:SyncedEvent::editable</code>: the user&#39;s
+own event, by <code>organizer.self</code>, no organizer named at all, or the mailbox&#39;s own
+address; it FAILS CLOSED, so an organizer Google names whose address does not
+read, stored as <code>organizer_unreadable</code>, and an event whose stored guest list
+marks someone other than this calendar as organizer, are somebody else&#39;s), and
+only then Google, through the same <code>CalendarCredentials</code> resolver the sync uses,
+with <code>sendUpdates=none</code> unless the request asked otherwise (below). Only Google&#39;s success
+changes a row, and what is stored is Google&#39;s answer read by the sync&#39;s own
+<code>read_event</code>. A write is never retried. A refusal Google answered is a 502; a
+write that went out and got no usable answer (a timeout or a lost connection after
+sending, a 2xx body that does not read: <code>CallError::Uncertain</code>) is a 504 saying
+Google may have made the change, kicks a sync and stores nothing, so the client
+refreshes before offering to send again (a &quot;tell guests&quot; is not repeated on a
+guess). A write Google accepted whose answer the daemon could not read or store
+is that same 504, never a refusal. Every error body names its kind in a <code>code</code>
+from a closed list (docs/CALENDAR.md section 8, &quot;What a refusal says&quot;), and the
+app gives a pane&#39;s fields back ONLY on a code that says nothing reached Google
+(or Google refused it), with that code&#39;s own status; anything else, including
+no code, an unknown code, any 500 and a bare 502, freezes the pane. The whole write (token refresh, guest reread, write) runs under one 35
+second deadline, below the app&#39;s 45 second wait; past it the answer is the same
+504 and kick, and the app treats a wait of its own that runs out, or a
+connection lost mid-request, as that 504 too. A create may name its own event id
+(base32hex, 5 to 1024 characters, else a 400); the daemon reads that id before
+inserting. An event already there (or found after a 409 <code>duplicate</code> from Google)
+is answered, with no insert and no second invitation (audited <code>ok:existing ... notified=false</code>), ONLY when it is the event the create would make: same
+calendar, laundered title, location and notes, start, end, all-day flag and
+guest set. Anything else under the id is a 409 with no write
+(<code>rejected:id_in_use</code>), so an id cannot be used to claim an event with another
+title, place, notes, time or guest list than the request described. What it does
+NOT compare is <code>notify</code>: Google&#39;s event does not say whether its guests were
+mailed, so a create asking for invitations could be answered by an event made
+without them. The app never sends that, because a create is resent only from a
+frozen pane and only as the exact body first sent, so a resend never changes
+<code>notify</code>; a different client could, and would be told 200 with nobody invited
+(the audit row says <code>notified=false</code>). A second
+create with an id whose first create is still in flight (an in-memory set of
+account, calendar and id, released however the first ends) is a 409 before
+Google hears it (<code>rejected:in_flight</code>). This makes a duplicate from a retried
+create unlikely, not impossible: Google does not guarantee to catch a taken id
+at insert time and a read may lag one just made, and the read is per calendar.
+The app closes the rest from its side: after an uncertain save it freezes the
+pane and can only send the same body again (docs/CALENDAR.md section 5). A delete
+Google answers 410 found the event gone and removes the local row; a 404 does the
+same only on the primary calendar or on a calendar <code>calendarList.get</code> still
+lists, not deleted, with an <code>accessRole</code> of <code>owner</code> or <code>writer</code>; otherwise it is
+a 410 &quot;that calendar is no longer available to you&quot; that leaves the row for the
+kicked sync (Google answers 404 for a calendar the user lost, and for an event
+they can no longer see). A calendar list read that fails is a 502 and deletes
+nothing. The app refuses a &quot;delete and tell guests&quot; whose calendar may no
+longer tell them rather than deleting silently. Event and calendar ids of <code>.</code> or <code>..</code> (or empty) are refused at read
+and again when the URL is built, because a URL path would read them as &quot;here&quot;
+and &quot;up one&quot;. Error bodies are fixed strings that never
+echo the request; logs carry the action and an error kind, never an id. Every
+attempt writes one audit row (<code>calendar_event_create</code> / <code>_edit</code> / <code>_delete</code>,
+actor <code>client-api</code>, target <code>calendar:&lt;calendar_id&gt;/&lt;event_id&gt;</code>, detail <code>ok</code> or the
+reason), never a title, place, description or guest&#39;s address. The target DOES
+carry the calendar id, and a calendar id can be an address: the primary calendar
+is stored as <code>primary</code>, but a personal calendar someone shared with the user is
+named by its owner&#39;s address. Audit rows are human-door data like the rest. The
+row is written even when the client disconnects mid-request: each write&#39;s checks,
+Google call and audit run in a task of their own that the handler awaits, so
+dropping the request does not cancel them. The <code>calendar:</code> prefix keeps the
+audit listing&#39;s join to <code>messages</code> (a numeric target) from matching a calendar id
+that starts with digits. The in-app assistant has no tool that reaches any of
+these routes (see &quot;The assistant&#39;s calendar tool&quot; below).</p>
+<p><strong>Guests: a human-door route can make Google email third parties</strong>
+(docs/CALENDAR.md §8, &quot;Guests, invited by Google&quot;). Since wave 5 the three write
+routes can carry guests, and with <code>notify: true</code> Google Calendar sends each guest
+its own invitation, update or cancellation. Passband writes none of that mail and
+sends none through Gmail, but the effect is the same class as sending mail: it
+reaches people outside the account and cannot be undone. What gates it:</p>
+<ul>
+<li><strong>One switch, default off.</strong> <code>sendUpdates</code> is <code>all</code> only when the request&#39;s
+<code>notify</code> is the JSON value <code>true</code> (<code>?notify=true</code> on a delete, given once).
+Absent or <code>false</code> is <code>none</code>; any other value is a 400, not a guess
+(<code>gcal/write.rs:notify</code>, <code>notify_query</code>). The client type that reaches the URL
+(<code>gcal/client.rs:Notify</code>) has two values and defaults to the silent one, and
+<code>sendUpdates</code> is always named, never left to Google&#39;s default.</li>
+<li><strong>The human door alone.</strong> The three routes are bearer authed on <code>/client</code>; no
+agent route or MCP tool can name a guest or set <code>notify</code>, and nothing the
+daemon does on its own (the sync, triage, ghosts) calls a write. The
+assistant&#39;s one calendar tool can put addresses in the event pane&#39;s guests
+line, where the user sees them as pills; it cannot send the request, and
+<code>notify</code> is decided only by which save control the user then presses.</li>
+<li><strong>Whose calendar.</strong> Guests only on the user&#39;s own calendar (the primary one, or
+one they are <code>owner</code> of): <code>gcal/mod.rs:may_invite</code>. A shared calendar the user
+can write to cannot be made to invite anyone, nor to mail an update or a
+cancellation: <code>notify: true</code> on an edit or a delete there is a 400
+(<code>calendar_write.rs:refuse_notify_unless_own</code>, &quot;guests can only be told about
+changes on your own calendar&quot;), refused before Google hears anything. The
+client offers only the silent controls on such a calendar, with one line
+saying why.</li>
+<li><strong>Whose event.</strong> An existing event&#39;s guest list changes only when the event is
+the user&#39;s own, the user organizes it, and the stored list is whole
+(<code>SyncedEvent::guest_editable</code>). Google replaces the attendee array on a patch,
+so the daemon never sends a list built from a truncated one: it rereads the
+event&#39;s attendees from Google inside the request, refuses if that read is
+truncated or holds a guest with no address, and hands every kept guest back
+exactly as read. An edit that names no <code>guests</code> sends no <code>attendees</code> key.</li>
+<li><strong>What a guest can be.</strong> At most 50 per request, each one plain ASCII
+<code>local@domain</code> (no display name, quoting, comment, whitespace or control
+character), no duplicates, never the owner. The daemon sets no other attendee
+field and no invitation text; the title, place and description Google puts in
+its mail are the event&#39;s own, typed by the user.</li>
+<li><strong>What is audited.</strong> Every attempt&#39;s row carries <code> guests=&lt;n&gt; notified=&lt;true|false&gt;</code> after its outcome, on failures too (a write that timed
+out may have gone through, and is audited <code>failed:uncertain</code>), even when the
+app disconnects mid-request, and never a guest&#39;s address. Guests&#39; addresses are in no
+log line and no error body.</li>
+</ul>
+<p>What this does NOT cover: a client that sends <code>notify: true</code> when the user did
+not mean it (the client&#39;s controls must say what they send, and offer it only
+where the daemon would accept it; the daemon cannot tell intent), and Google&#39;s own behaviour with <code>sendUpdates=none</code>, which the reference
+hedges (&quot;some emails might still be sent&quot;) and which has not been tested against
+a real account.</p>
+<p><strong>The assistant&#39;s calendar tool (client, wave 6).</strong> The embedded assistant
+(§6) has one calendar tool, <code>create_calendar_event</code>, and it is a draft, not a
+write (<code>passband/Sources/Passband/Lib/EventProposal.swift</code>,
+<code>AgentTools.createCalendarEvent</code>).</p>
+<ul>
+<li><strong>It calls no route.</strong> The tool reads the model&#39;s proposal, validates it with
+the event pane&#39;s own rules, and opens the pane on the Calendar page filled
+in. The create route is reached only by the user pressing the pane&#39;s save
+control, with the same body rules, create id and uncertain-write handling as
+an event they typed. So a prompt injection in mail the assistant read can at
+worst put a filled-in pane in front of the user. It cannot add an event or
+cause an invitation BY ITSELF. Exactly: an event is added, or an invitation
+sent, only by (a) a click on the pane&#39;s own save control, or (b) <code>↵</code> or
+<code>⌘↵</code> pressed after the user has clicked or typed inside that pane
+(<code>EventProposals.keysMayAct</code>; <code>↵</code> never saves a draft with guests in any
+case). What the claim does NOT cover is the user&#39;s own judgement: someone
+who clicks &quot;add and invite N&quot; on a pane whose title, place and guests an
+injected email chose has added it. The pane shows all of them whole
+(below), which is the whole of that defence.</li>
+<li><strong>It never takes the screen or the keyboard from somebody</strong>
+(<code>EventProposals.landing</code>, <code>CalendarStore.proposeEvent</code>). A run goes on
+after the assistant&#39;s bar is closed (a citation clicked, &quot;edit in
+composer&quot;), so a tool call can land while the user is doing something else.
+The proposal is REFUSED, with a fixed sentence, unless the assistant&#39;s bar
+is open at that moment, and while a composer or an inline reply holds
+anything typed: mail being written is never closed for it. An email being
+read is not closed either; the pane is then parked, whole, and shown when
+the user goes to the Calendar page. The pane it opens never takes the
+caret, and <code>↵</code> and <code>⌘↵</code> do nothing in it (a toast says to click add) until
+the user has clicked or typed in it, so a key typed ahead, or meant for the
+composer or the reader that was on screen, cannot add or invite. Modelled
+on the agent door&#39;s <code>open_draft</code> (<code>ComposeState.keyboardSendLocked</code>). That
+path in turn treats an event pane holding anything (typed, parked, or with
+a write out or in doubt) as something being written: the agent&#39;s draft
+waits in drafts and Passband does not come forward over it, nor for a
+draft the composer did not actually take (<code>EventPaneTravel.heldByUser</code>,
+<code>agentDraftMayComeForward</code>).</li>
+<li><strong>The title and the place are the only text the assistant supplies.</strong> Each
+is one line of at most 200 characters (the daemon&#39;s own caps, and what the
+pane&#39;s one-line fields show whole); longer, or with a line break or a tab
+in it, the call is refused, not trimmed (<code>EventProposals.oneLine</code>). The
+tool has no notes or description parameter, and <code>EventProposals.read</code>
+refuses a call that carries one under any of the names a model reaches for
+(<code>notes</code>, <code>note</code>, <code>description</code>, <code>body</code>, <code>details</code>, <code>agenda</code>, <code>summary</code>,
+<code>message</code>), in any case. Any OTHER field the tool does not list is refused
+by name too (&quot;unknown field&quot;), so nothing is dropped in silence and the
+model is told rather than left to believe something was saved. The reason
+is the guests: Google emails an event&#39;s description and place to them, and
+model-written prose must never reach other people through Passband. The
+notes line of the pane it opens is always empty.</li>
+<li><strong>It never invites.</strong> Proposed guests are shown as guest pills. Google emails
+them only if the user presses the control labelled &quot;add and invite N&quot;; plain
+Enter does not save an event with guests (§ &quot;Guests&quot; above).</li>
+<li><strong>It does not read the calendar.</strong> No event reaches the model. A proposal
+names a calendar or leaves it to the primary; a name that matches no writable
+calendar is refused with a fixed sentence that lists none of them. The one
+thing the tool may ask the daemon is the page&#39;s own timeline read
+(<code>refreshCalendar</code>), once, when the client holds no feed yet (the Calendar
+page has not been opened this session): the answer stays in the store and
+none of it goes to the model. A feed that still is not there is &quot;could not
+reach the calendar&quot;, never &quot;no calendar&quot;.</li>
+<li><strong>It never replaces the user&#39;s work.</strong> A pane holding anything (typed, or an
+earlier proposal, on screen or parked) refuses the tool with a fixed sentence
+the model relays.</li>
+<li><strong>Mac only.</strong> Offered only on the Mac (<code>AgentTools.Tool.isAvailable</code>); on
+the phone a call naming it is answered as any unknown tool. It is also gated
+on the <code>calendar</code> flag (CALENDAR.md §11). No edit or delete tool.
+Nothing was added to <code>/mcp</code>, <code>/client/agent/*</code> or the relay.</li>
+</ul>
+<p><strong>Who a name is: <code>GET /client/calendar/people</code> (wave 6).</strong> The event pane reads
+&quot;with steven&quot; out of a new event&#39;s title (a deterministic parser in the client,
+no model) and asks the daemon who that most likely is, to SUGGEST a guest.</p>
+<ul>
+<li>With the other calendar routes (<code>calendar_routes</code>, behind the <code>calendar</code>
+flag), bearer authed on the human door, <code>no-store</code>, at most three answers. Not
+on the agent door, <code>/mcp</code> or the assistant relay.</li>
+<li><strong>A candidate is somebody the user has written to</strong> (<code>contacts</code>, <code>sent_count &gt; 0</code>), never the account&#39;s own address. Receiving mail from someone never makes
+them a candidate, so mail under a matching display name cannot plant a guest.</li>
+<li><strong>A list or a help desk is not a person.</strong> A candidate with no name from the
+user&#39;s own Sent mail is named by the newest From name on its readable mail,
+and a group or a desk the user once wrote to sends as <code>&quot;Steven Ng via Team&quot;</code>
+or <code>&quot;Steven from Acme&quot;</code>. So an address with no stored name is not offered AT
+ALL when any of its readable mail carries <code>List-Unsubscribe</code> or a From name
+of that shape (a later word that is &quot;via&quot;, &quot;from&quot; or &quot;at&quot;;
+<code>contacts.rs::list_shaped</code>). It is offered only under a name the user&#39;s own
+Sent mail gave it. What this does not catch: a relay that rewrites From to
+the bare poster&#39;s name and sends no <code>List-Unsubscribe</code>.</li>
+<li><strong>Ranking reads mail only where mail may be read.</strong> Inbound mail counts toward
+&quot;most recently exchanged&quot; only when it is not sent, not spam, not sealed (the
+ghosts&#39; <code>ELIGIBLE</code> test plus the legacy column, never <code>triage.sensitivity</code>
+alone) and passed sender authentication (<code>auth_pass = 1</code>; never evaluated
+reads as no).</li>
+<li><strong>Nothing is added by the answer.</strong> The client draws it as a dashed
+suggestion with a checkmark and an x; it is not in the draft&#39;s guests, does
+not change the save control and is never sent until the user accepts it, and
+then only as any typed guest would be.</li>
+<li>A name under two characters (empty included) is a 400 with a fixed body and
+never reaches the store: one letter matches a large part of anybody&#39;s
+contacts, and every match is a probe of that person&#39;s mail under the
+store&#39;s one mutex. Over-long (more than 64 characters) or <code>@</code>-bearing input
+answers an empty list. The input is never echoed. The probes are index
+seeks on one sender with no sort (<code>MAX(received_at)</code>, or one unsorted pass
+for a contact with no stored name).</li>
+</ul>
+<p><strong>What the event pane sends to Apple (client).</strong> The location line of the
+client&#39;s event pane suggests places from Apple&#39;s MapKit
+(<code>MKLocalSearchCompleter</code>, then <code>MKLocalSearch</code> for the one picked). The text
+typed into that one field leaves the device for Apple, from the client and
+only once it is two characters long; the title, the times, the notes, the
+calendar and the account do not, the daemon is not involved, and no location
+permission is requested. Google&#39;s Places API is not used.</p>
+<p><strong>What the event card fetches (client, <code>Model/EventVisuals.swift</code>).</strong> The
+calendar card&#39;s picture is, in order: a photo from the mail behind the event,
+or the venue from Apple MapKit, or nothing. The photo is fetched only while
+&quot;load remote images&quot; is on, from the newest message by someone else in the
+event&#39;s threads, at most four of its images, through <code>HeroBytes</code> (ephemeral
+session, no cookies, no referrer, no cache, 8 MB, <code>image/*</code> only), exactly
+like a Reading card&#39;s hero; a sender learns no more than opening the mail
+would tell them. The venue lookup sends the card&#39;s place text alone to Apple
+(<code>MKLocalSearch</code>, then <code>MKLookAroundSceneRequest</code> for the item it returns),
+never for a link or a call, and Apple&#39;s answer is used only when its name
+matches the place. No location permission, no key, no Google.</p>
+<p>The picture each card resolved is kept on disk (<code>EventVisualDisk</code>, in
+Application Support&#39;s Passband/EventVisualCache) so the card paints it on its
+first frame: an index of kind, source thread id, venue point and name, plus a
+PNG per photo or Look Around still. It is mail content at rest and is written
+the §6 way, through <code>PrivateFile</code> (excluded from backup, 0600 in 0700 on the
+Mac, complete protection on the phone). File names are sha256 of the account
+id plus the card&#39;s key, so no event id, thread id or place shows in them.
+Nothing is written for the practice inbox, an entry older than 30 days is
+dropped unpainted, a photo is not painted while &quot;load remote images&quot; is off,
+and an account&#39;s entries go when the account is removed.</p>
+<p><strong>The token is the union; the slot is the boundary.</strong> Self-host
+<code>squelchd auth --calendar</code> stores its token in its own credential slot
+(<code>CredentialKind::Calendar</code>). Google unions grants per Cloud project and the consent
+asks with <code>include_granted_scopes</code>, so that token carries EVERYTHING this OAuth
+client was granted for the account, Gmail scopes included (<code>gmail.modify</code>, the
+one Gmail scope since 2026-10-27; legacy grants may also carry <code>gmail.readonly</code>
+and <code>gmail.send</code>). Asking for less cannot
+narrow it; only a separate Cloud project could. What keeps calendar code away from
+mail is the slot and the code paths: the calendar loop loads only the Calendar slot
+(or, without one, the Read slot when it records <code>calendar.events</code>) and only calls
+the Calendar API, and no mail path loads the Calendar slot. Hosted is unchanged: the
+control plane seals ONE token into the Read and Write slots, as before, and a
+calendar grant adds <code>calendar.events</code> and <code>calendarlist.readonly</code> to that one token.</p>
+<p><strong>The loopback consent endpoint (self-host only).</strong> <code>POST /client/calendar/connect</code>
+(human door, bearer authed) lets the app&#39;s Connect button grant calendar on a
+daemon with no control plane. A daemon that knows a console origin answers 409
+and starts nothing; one with no OAuth client answers 409 too. Otherwise it mints a
+fresh <code>state</code> and PKCE pair through <code>squelch_core::auth::LoopbackConsent</code>, the
+builder <code>squelchd auth --calendar</code> uses, so the URL is the CLI&#39;s (calendar scopes,
+<code>access_type=offline</code>, <code>prompt=consent</code>, <code>include_granted_scopes=true</code>,
+<code>login_hint</code> set to the configured mailbox). The redirect lands on a listener bound
+to <code>127.0.0.1</code> only (port 8847, or <code>SQUELCH_AUTH_PORT</code>), which refuses non-loopback
+peers and serves one route, <code>/</code>. One consent is pending per daemon: a new call
+replaces it, a matching redirect consumes it, it expires after ten minutes, and
+the listener stops when nothing is pending. A redirect is redeemed only when its
+<code>state</code> matches the pending one in constant time; a wrong or stale <code>state</code> gets a
+plain page and changes nothing. The code then goes through the same guarded
+exchange as every other consent: the grant must include <code>calendar.events</code>, and
+Google&#39;s profile must name the configured mailbox (case-insensitive). Any refusal
+stores nothing and shows a page that names no address. A good consent is stored
+in the Calendar slot through the configured backend (keyring on macOS, file
+elsewhere) by the same call the CLI makes, the <code>granted</code> cache is dropped, and the
+calendar sync is kicked. Pages carry no scripts and no links, under
+<code>default-src &#39;none&#39;</code>. Logs name the event kind only, never the code, the <code>state</code>,
+a token or an address. Anything on this machine can reach the listener while it is
+up, but a code it delivers is useless without the PKCE verifier held in the
+daemon, and only the redirect carrying the pending <code>state</code> is redeemed.</p>
+<p><strong>Credentials file writes.</strong> The calendar resolver is a third writer of the
+credentials file beside the Gmail Read and Write stores, so every write goes
+through one read-modify-write (<code>credentials.rs:update_credentials_file</code>) under a
+process-wide mutex and an advisory lock on <code>&lt;credentials file&gt;.lock</code> (owner-only),
+which also covers <code>squelchd auth</code> run beside a running daemon. A writer waits at
+most 10 seconds for the lock and then fails like any other credential write. Each
+write has its own temp name; temp files a crashed writer left are removed after a
+minute.</p>
+<div class="dnb"><p class="lbl">Do not break</p>
+<ul>
+<li>Do not add a calendar route to the agent door or MCP, or put calendar text in a
+triage prompt, without a decision recorded in docs/CALENDAR.md §10.</li>
+<li>Do not log an event&#39;s title, place, description, organizer, attendee, link or a
+calendar id.</li>
+<li>Do not change a local calendar row before Google accepted the write, retry a
+write, or audit a write&#39;s text or a guest&#39;s address.</li>
+<li>Do not send <code>sendUpdates=all</code> from anything but a request whose <code>notify</code> is
+literally <code>true</code>, give <code>Notify</code> another default or a third value, or let a write
+leave <code>sendUpdates</code> off the URL.</li>
+<li>Do not build an <code>attendees</code> array from stored rows, from a truncated list, or for
+an edit that did not name <code>guests</code>; do not widen <code>may_invite</code> past the user&#39;s own
+calendars, or accept <code>notify: true</code> on a calendar it refuses; do not let
+anything derived from mail set guests or <code>notify</code>.</li>
+<li>Do not read an organizer that is present but unreadable as &quot;no organizer&quot;; the
+edit guard fails closed.</li>
+<li>Do not report a write whose answer was lost as refused (it may have happened),
+or run a write&#39;s Google call and audit inside the request future alone.</li>
+<li>Do not gate ghosts on <code>triage.sensitivity</code>; use the sealed test
+<code>sealed_messages</code> uses.</li>
+<li>Do not give the assistant&#39;s calendar tool a notes or description parameter,
+or let anything it supplies but the title, the place and the times reach an
+event&#39;s body; do not trim an over-long title or place, or drop a field it
+does not know, in silence.</li>
+<li>Do not let the assistant&#39;s calendar tool call a write route, set <code>notify</code>,
+skip the pane, replace a pane that holds anything, or be offered while the
+Calendar page is not; do not hand the model an event or a list of calendars.</li>
+<li>Do not let a proposed pane take the caret, act on <code>↵</code> or <code>⌘↵</code> before the
+user has clicked or typed in it, open while the assistant&#39;s bar is closed,
+or close mail being written or an email being read. Do not let an agent&#39;s
+<code>open_draft</code> bring Passband forward over an event pane that holds anything.</li>
+<li>Do not offer a contact with no stored name under a list-shaped From name.</li>
+<li>Do not let <code>/client/calendar/people</code> return somebody the user has not written
+to, read sealed, spam or auth-failed mail for its ranking, or move to the
+agent door.</li>
+<li>Do not let a mail path load the Calendar slot, or the calendar loop load the
+Write slot: the token in either can do more than its job.</li>
+<li>Do not loosen <code>google_link</code>, drop the <code>fields</code> mask or <code>maxAttendees</code>, or ask
+for more of an attendee than the mask names in a request whose answer is stored.</li>
+<li>Do not write the credentials file except through <code>update_credentials_file</code>.</li>
+</ul></div>
+<h2 id="reporting-a-vulnerability">Reporting a vulnerability</h2>
+<p>
+  Email <a href="mailto:braelyn@passband.app">braelyn@passband.app</a>. We
+  will acknowledge within 72 hours.
+</p>
+        </article>
+      </div>
+    </main>
 
-    <h2>Reporting a vulnerability</h2>
-    <p>
-      Email <a href="mailto:braelyn@passband.app">braelyn@passband.app</a>. We
-      will acknowledge within 72 hours.
-    </p>
+    <footer class="foot">
+      <div class="foot-grid">
+        <a class="foot-mark" href="/" aria-label="Passband home"><img src="/mark.svg" alt="" width="42" height="23" /></a>
+        <nav aria-label="Legal">
+          <p>Legal</p>
+          <a href="/terms">Terms of Service</a>
+          <a href="/privacy">Privacy Policy</a>
+        </nav>
+        <nav aria-label="Security">
+          <p>Security</p>
+          <a href="/trust">Trust</a>
+          <a href="/security">Threat model</a>
+          <a href="mailto:braelyn@passband.app">Report a vulnerability</a>
+        </nav>
+        <nav aria-label="Connect">
+          <p>Connect</p>
+          <a href="/about">About</a>
+          <a href="/self-host">Self-host</a>
+          <a href="https://github.com/passband-app/passband/releases" target="_blank" rel="noopener noreferrer">Changelog</a>
+          <a href="https://github.com/passband-app/passband" target="_blank" rel="noopener noreferrer">GitHub</a>
+          <a href="mailto:braelyn@passband.app">Email</a>
+        </nav>
+      </div>
+      <p class="foot-legal">&copy; 2026 Passband. All rights reserved.</p>
+    </footer>
   </body>
 </html>

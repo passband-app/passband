@@ -169,6 +169,10 @@ enum Analytics {
         // guests, and never who.
         "calendar_opened", "calendar_connect_clicked", "calendar_connect_dismissed",
         "calendar_ghost_marked",
+        // The user's answer to a change another sender's mail offered on
+        // their card: `answer` accepted or kept, `kind` moved or cancelled,
+        // `via` key or click. Never the sender, the event or the time.
+        "calendar_linked_change",
         "calendar_event_created", "calendar_event_edited", "calendar_event_deleted",
         // Discovery: which feature sets get found and which get kept. `full`
         // only: this is the "which actions are used" layer, not whether the
@@ -222,7 +226,10 @@ enum Analytics {
         // is anywhere near this, at any level.
         "invite_sent", "invite_nudge_accepted", "invite_nudge_dismissed",
         // The TestFlight ask closing, with one bool: whether the link was
-        // copied. A QR scan leaves no trace, so this is a floor on uptake.
+        // copied, and `source`, which road put it up. A QR scan leaves no
+        // trace, so this is a floor on uptake. first_load_ended carries two
+        // more bools for the veil's own iPhone ad: `iphone` (drawn) and
+        // `copied`.
         "ios_nudge_closed",
         // The agent-door ad closing, with one bool: whether its button was
         // taken to Settings > Agents. Whether an agent then connects is not
@@ -257,6 +264,9 @@ enum Analytics {
             // "cleared" for the null that takes the mark off. "calendar" (the
             // page, and thread_opened's source from it) is a MainView.
             "going", "dismissed", "cleared",
+            // calendar_linked_change: the answer and the kind of change.
+            // "cancelled" is the kind's own word.
+            "accepted", "kept", "moved", "cancelled",
             // calendar_opened's `view`: which way the page was drawn when it
             // opened (CalendarViewMode's raw values).
             "agenda", "month", "week",
@@ -290,6 +300,11 @@ enum Analytics {
             // makes the duplicate free, and naming it here is what keeps this
             // list readable as the vocabulary of THIS event.
             "rail", "settings", "nudge",
+            // ios_nudge_closed sources: which road put the iPhone card up.
+            // "nudge" (two days in) is above; "first_load" is the veil handing
+            // its QR row off, "onboarding" the card shortly after a first look
+            // that had no veil (TestFlightNudge).
+            "first_load", "onboarding",
             // renotify_* triggers: the daemon's closed Trigger set.
             "client_online", "meeting_end",
             // calendar_reminder_opened targets: what the tap showed.

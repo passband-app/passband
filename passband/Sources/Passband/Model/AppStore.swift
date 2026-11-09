@@ -818,6 +818,9 @@ final class AppStore {
     /// The owner's event reminder switch, as the daemon holds it. Fetched by
     /// the settings card (Model/CalendarReminders.swift).
     var calendarReminderPref: CalendarReminderPrefState = .unknown
+    /// The owner's morning brief switch, as the daemon holds it, in the same
+    /// four states. Fetched by the settings card (Model/MorningBriefPref.swift).
+    var morningBriefPref: CalendarReminderPrefState = .unknown
     /// The connect card, while it is up. Its own property, apart from the
     /// feed: `modalOverlayOpen` reads it, and the whole shell reads that.
     var calendarConnectAsk: CalendarConnectAsk?
@@ -860,6 +863,10 @@ final class AppStore {
     /// an answer is applied only if nothing newer has started since it was
     /// asked for. Not observed: it is bookkeeping, never drawn.
     @ObservationIgnored var calendarLoadGeneration = 0
+    /// Linked ghosts (`LinkedChange.from`) whose change is being answered:
+    /// a second press before the first lands would find the link gone and
+    /// toast an error over a change that was applied.
+    @ObservationIgnored var answeringLinkedChanges: Set<Int> = []
     /// Bumped by `dropCalendarState` (an account switch, the gate closing):
     /// a write still out when it was bumped answers into nothing
     /// (`CalendarWriteTicket`). Bookkeeping, never drawn.
@@ -1508,9 +1515,73 @@ final class AppStore {
     @ObservationIgnored var ruleDrafts: [String: RuleDraft] = [:]
     var groupEditor: GroupEditorRequest?
     var askBarOpen = false {
-        // Every way the bar closes ends the watch: it is a view of the lane
-        // for as long as this one opening lasts, never a mode ⌘K reopens into.
-        didSet { if !askBarOpen { askBarWatchesLane = false } }
+        // Every way the bar closes ends the watch and the full-screen layout:
+        // both belong to this one opening, never a mode ⌘K reopens into.
+        didSet {
+            if !askBarOpen {
+                askBarWatchesLane = false
+                askBarFullscreen = false
+                askBarFoldedSearch = false
+            }
+        }
+    }
+    /// The search panel was EXPANDED when the full-screen bar opened and was
+    /// folded to its strip for it (see `foldSearchUnderAskBar`), so Esc can
+    /// put it back the way it was.
+    private var askBarFoldedSearch = false
+    /// THE BAR TAKES THE WINDOW, for a conversation that came out of search
+    /// (the deeper search band, ⌘↩, a question from search history). The
+    /// answer there is the reason the reader asked for more room, so it gets
+    /// all of it; Esc closes it and the search panel is still underneath.
+    /// ⌘K on its own stays the modal. Set only on the ways in from search.
+    private(set) var askBarFullscreen = false
+
+    /// Whether the bar is showing a conversation that came out of search, which
+    /// is what its header names ("deeper search" rather than "ask your inbox").
+    var askBarShowsSearch: Bool {
+        askBarWatchesLane || chatHoldsSearchLane || chatQuestionKey != nil
+    }
+
+    /// ⌘K ON ITS OWN: talking to the agent, which is not search. It never
+    /// shows a conversation that came out of search (adopted from the deeper
+    /// search lane, or a question brought back from search history): that
+    /// one is saved under its question in search history, and ⌘K starts clean
+    /// instead. A ⌘K conversation of its own is kept as it always was.
+    func openAskBar() {
+        // Not mid-answer: a follow-up still running after Esc would be
+        // cancelled and lost (it is saved to search history when it ends).
+        if !askBarOpen, !assistant.running, chatHoldsSearchLane || chatQuestionKey != nil {
+            askBarWatchesLane = false
+            assistant.clear()
+        }
+        askBarOpen = true
+    }
+
+    /// Open the bar full screen over the search it came from.
+    func openAskBarFromSearch() {
+        askBarFullscreen = true
+        askBarOpen = true
+        foldSearchUnderAskBar()
+    }
+
+    /// AN EXPANDED SEARCH COVERS THE RAIL, and the full-screen bar leaves the
+    /// rail's column clear to show it, so the panel would show through there
+    /// instead. Fold it to its strip under the bar, as `openThread` does under
+    /// the reader, and remember to unfold it on the way back.
+    private func foldSearchUnderAskBar() {
+        guard askBarOpen, askBarFullscreen, search.expanded else { return }
+        search.expanded = false
+        askBarFoldedSearch = true
+    }
+
+    /// The bar's own close (Esc, the scrim, a card that opened a thread). Back
+    /// to search means back to the search AS IT WAS: an expanded panel folded
+    /// for the bar unfolds. Not over a thread a card just opened, which wants
+    /// the strip beside it, and not if search itself has gone.
+    func closeAskBar() {
+        let unfold = askBarFoldedSearch && threadId == nil && sideView == .search
+        askBarOpen = false
+        if unfold { search.expanded = true }
     }
     /// THE BAR IS SHOWING THE SEARCH LANE, LIVE. ⌘↩ over a lane that is still
     /// answering cannot hand the conversation over (a running loop owns its
@@ -1855,6 +1926,20 @@ final class AppStore {
         settings = ConnectionSettings(serverURL: "https://fixtures.invalid", apiToken: "fixtures")
         connError = nil
         connStatus = .connected
+    }
+
+    /// `--fixture-usage` (FixtureMode.stagesUsage): the fixture transport with
+    /// the Understanding fixture staged, and the Usage page on screen. Staged
+    /// BEFORE the fixtures are entered, so the first stats already claim the
+    /// feature. Unreachable in a shipped build, where the flag is always
+    /// false and the staging is compiled out.
+    func stageUsagePage() async {
+        guard FixtureMode.stagesUsage else { return }
+        #if !PASSBAND_RELEASE
+            await FixtureAPI.shared.stageUnderstanding()
+        #endif
+        await enterFixtures()
+        setView(.usage)
     }
 
     /// Fill the fixture board before a scene is raised over it: bands, zones,
@@ -3132,6 +3217,7 @@ final class AppStore {
         focusedMessageView = nil
         compose = nil
         inlineReply = nil
+        outgoingReplies = []
         sideView = .none
         // Overlays holding an account-scoped id. A rule editor left open
         // across a switch would save the old account's rule to the new
@@ -3177,6 +3263,7 @@ final class AppStore {
         tracking = nil
         translateConfig = .unknown
         calendarReminderPref = .unknown
+        morningBriefPref = .unknown
         ticketPreview = nil
         // `route(to:)` first: it is what turns a closed calendar into the
         // sitrep, and the history has to name the page actually shown.
@@ -3256,6 +3343,21 @@ final class AppStore {
         routeWasPointer = viaPointer
         activeView = view
         routeAsks &+= 1
+        leaveFullscreenAskBar()
+    }
+
+    /// A ROUTE CHANGES THE PAGE UNDER A FULL-SCREEN ASK BAR, which is opaque:
+    /// a rail click, ⌘[ / ⌘], a notification tap. Idle, it closes, the way a
+    /// rail click leaves the reader. Mid-answer it drops to the modal instead,
+    /// because the run may be the one routing (the calendar tool lands its
+    /// proposal on the calendar page, and expects the bar to stay over it).
+    private func leaveFullscreenAskBar() {
+        guard askBarOpen, askBarFullscreen else { return }
+        if askBarSession.running {
+            askBarFullscreen = false
+        } else {
+            askBarOpen = false
+        }
     }
 
     /// Bumped by every route. The phone's shell answers a route with a tab and
@@ -4693,6 +4795,14 @@ final class AppStore {
         } else {
             expandSearchLaneToChat()
         }
+        // The Mac's way in from search is always full screen (see
+        // `askBarFullscreen`); the phone pushes its own chat and never gets
+        // here. Only if it opened: `expandSearchLaneToChat` can decline, and a
+        // flag left behind would make the next plain ⌘K full screen.
+        if askBarOpen {
+            askBarFullscreen = true
+            foldSearchUnderAskBar()
+        }
     }
 
     /// The watched lane has finished: the chat takes the conversation over.
@@ -4830,6 +4940,47 @@ final class AppStore {
 
     private var searchEvidenceTask: Task<Void, Never>?
     var preparingSearchEvidence: Bool { searchEvidenceTask != nil }
+    /// A start or refinement waiting out `QueryReadiness`: the quiet, then the
+    /// small model's "done typing?" check. Replaced by every settled query.
+    @ObservationIgnored private var laneGate: Task<Void, Never>?
+
+    /// A SETTLED QUERY'S MOVE, executed: both shells' `judge` land here so the
+    /// gate is one rule. `stop` is immediate (stopping never costs money); a
+    /// start or refinement first waits for the reader to stop typing and for
+    /// the small model to agree the words read as finished. Any keystroke
+    /// lands a new settled query, which replaces the gate.
+    func settleDeeperSearch(_ move: DeeperSearchPolicy.Move, query: String) {
+        laneGate?.cancel()
+        laneGate = nil
+        switch move {
+        case .nothing:
+            return
+        case .stop:
+            resetSearchLane(keepingVerdict: true)
+        case .refine, .start:
+            laneGate = Task { [weak self] in
+                // The judge runs DURING the quiet wait, not after it: the wait
+                // is max(quiet, judge) instead of their sum. A keystroke
+                // cancels this task, and the judge's answer with it.
+                async let finished = QueryReadiness.looksFinished(query)
+                try? await Task.sleep(for: QueryReadiness.quiet)
+                guard !Task.isCancelled, let self, self.search.query.trimmed == query else { return }
+                // "Still typing" is a reason to wait longer, never a reason not
+                // to answer: a judge that misreads a whole question only costs
+                // the grace, and a keystroke before then replaces this gate.
+                if await !finished {
+                    try? await Task.sleep(for: QueryReadiness.typingGrace)
+                }
+                guard !Task.isCancelled, self.search.query.trimmed == query else { return }
+                self.laneGate = nil
+                switch move {
+                case .start(let trigger): self.startDeeperSearch(trigger: trigger)
+                case .refine: self.refineDeeperSearch()
+                case .nothing, .stop: break
+                }
+            }
+        }
+    }
 
     /// A question from search history, asked again: its words go back in the
     /// field and to the agent. With deeper search off it is simply searched.
@@ -4852,9 +5003,10 @@ final class AppStore {
     }
 
     /// START THE DEEPER SEARCH on the query the panel has just answered, with
-    /// the hits it answered with. Called by the classifier's automatic path and
-    /// by the band's own button, so the two cannot disagree about what starting
-    /// means (docs/SEARCH.md §6.1, §6.5).
+    /// the hits it answered with. Called by the automatic path (through
+    /// `settleDeeperSearch`) and by an explicit ask (⌘↩, the panel's "Ask
+    /// agent", the phone band's button), so they cannot disagree about what
+    /// starting means (docs/SEARCH.md §6.1, §6.5).
     ///
     /// The event carries the trigger and the model tier and NOTHING ELSE: the
     /// query is the reader's own words about their own mail, and no part of it,
@@ -4982,6 +5134,8 @@ final class AppStore {
     /// (`f` asks "what else is from this person"), so its verdict goes too and
     /// the band unmounts until the new query has been judged.
     func resetSearchLane(keepingVerdict: Bool = false) {
+        laneGate?.cancel()
+        laneGate = nil
         searchEvidenceTask?.cancel()
         searchEvidenceTask = nil
         searchLane.clear()
@@ -5904,18 +6058,66 @@ final class AppStore {
     /// ceremony, and the daemon does the widening. It is fixed here rather than
     /// toggled later, so what the header says is what the opening keystroke
     /// asked for.
-    func openInlineReply(replyTo messageId: Int, replyAll: Bool = false) {
-        guard inlineReply == nil else { return }
+    func openInlineReply(
+        replyTo messageId: Int, replyAll: Bool = false, quiet: Bool = false,
+        rows: [DraftView]? = nil
+    ) {
+        guard inlineReply == nil else {
+            // `r` on a reply that is already open, typically one the reader
+            // reopened quietly from its draft: hand it the caret.
+            if !quiet { inlineReplyFocus &+= 1 }
+            return
+        }
         // Same rule as the pane composer: a reply gets the whole reader, not
-        // the sliver left beside an open search strip.
-        if sideView.isOpen { closeSide() }
-        inlineReply = ComposeState(
+        // the sliver left beside an open search strip. Not for a quiet
+        // reopen: nobody asked for a composer, so nothing else moves.
+        if sideView.isOpen, !quiet { closeSide() }
+        var state = ComposeState(
             replyToMessageId: messageId, body: Prefs.shared.signatureSeed,
             includeTracker: trackingDefault, replyAll: replyAll)
+        state.quietOpen = quiet
+        inlineReply = state
         DraftSaver.shared.noteOpened(.inlineReply)
         // Both ways in (the reader's `r` and the list's hand-off) come through
         // here, so the restore is wired once.
-        Task { await restoreReply(messageId) }
+        Task { await restoreReply(messageId, rows: rows) }
+    }
+
+    /// Bumped by `r` over an inline reply that is already open; the editor
+    /// takes the caret when it moves (see `InlineReply`).
+    var inlineReplyFocus = 0
+
+    /// THE READER LANDED ON A THREAD THAT HOLDS A SAVED REPLY: open the inline
+    /// composer on it, filled, so the half-written answer is where it was left
+    /// instead of one `r` away and invisible. Quiet (see
+    /// `ComposeState.quietOpen`): it does not take the caret.
+    ///
+    /// Only when the open asked for nothing else (no `r` hand-off) and no
+    /// reply is open. The newest draft wins if somebody left two in one
+    /// thread; the other is still on the drafts page.
+    func reopenSavedReply(threadId: String, messageIds: Set<Int>) async {
+        guard inlineReply == nil, pendingReplyMessageId == nil else { return }
+        let e = epoch
+        // Settle first, as `restoreReply` does: the reply to this thread
+        // closed a moment ago flushed fire-and-forget.
+        await DraftSaver.shared.settle()
+        guard e == epoch, let rows = await fetchDrafts(), e == epoch else { return }
+        adoptDraftsRows(rows)
+        guard self.threadId == threadId, inlineReply == nil, pendingReplyMessageId == nil
+        else { return }
+        let saved = rows.filter { row in
+            guard row.forward_of_message_id == nil, let parent = row.reply_to_message_id else {
+                return false
+            }
+            return messageIds.contains(parent) && !isHeld(row) && !isDeleting(row.id)
+        }
+        guard
+            let draft = saved.max(by: {
+                (Fmt.date($0.updated_at) ?? .distantPast) < (Fmt.date($1.updated_at) ?? .distantPast)
+            }),
+            let parent = draft.reply_to_message_id
+        else { return }
+        openInlineReply(replyTo: parent, quiet: true, rows: rows)
     }
 
     /// Fill the just-opened inline composer from the draft keyed to this parent.
@@ -5924,19 +6126,25 @@ final class AppStore {
     /// `to` and its `Re: <subject>` from the parent, but a Bcc never derives
     /// from anything — so a saved one has to come back, or closing a reply to
     /// think about it would silently un-blind-copy somebody.
-    private func restoreReply(_ messageId: Int) async {
+    private func restoreReply(_ messageId: Int, rows given: [DraftView]? = nil) async {
         let e = epoch
         // Same rule as the new message: a reply to this message in the hold
         // owns this draft row until its send deletes it.
         guard !holdsDraft(replyTo: messageId) else { return }
         // SETTLE FIRST, as `refreshDrafts` does: an inline reply to this
         // message closed a moment ago flushed fire-and-forget, and the list
-        // must see that save, not the one before it.
-        await DraftSaver.shared.settle()
+        // must see that save, not the one before it. A caller that just did
+        // both (`reopenSavedReply`) hands its list in.
+        var rows = given
+        if rows == nil {
+            await DraftSaver.shared.settle()
+            guard e == epoch else { return }
+            rows = await fetchDrafts()
+        }
         // A row whose delete is in its undo window (or went out) is gone as
         // far as the reader knows; restoring it would undo the delete.
         guard e == epoch,
-            let rows = await fetchDrafts(),
+            let rows,
             let draft = rows.first(where: { $0.reply_to_message_id == messageId }),
             !holdsDraft(replyTo: messageId), !isDeleting(draft.id)
         else { return }
@@ -6335,6 +6543,7 @@ final class AppStore {
             undos.removeAll { $0.id == held.undoId }
             let state = withDetachedDraft(held.state)
             holding.remove(state.id)
+            dropOutgoing(state.id)
             if !save {
                 pushToast("\(verb): its account was removed", .error)
             } else if state.forwardOfMessageId != nil && !draftsV2Available {
@@ -6362,6 +6571,52 @@ final class AppStore {
         let id = UUID()
     }
     private(set) var lastSendEcho: SendEcho?
+
+    /// AN INLINE REPLY THAT HAS LEFT ITS COMPOSER BUT NOT THE BUILDING: in
+    /// its undo hold, or on the wire. The reader draws it where the sent copy
+    /// will land, faded, so pressing send does not make the words vanish for
+    /// five seconds. Gone on undo or failure (the composer comes back with
+    /// them), and on success once the reader holds the echo, so the ghost
+    /// hands over to the real message rather than blinking out first.
+    struct OutgoingReply: Identifiable, Equatable {
+        /// The composer's identity (`ComposeState.id`).
+        let id: UUID
+        let threadId: String
+        let body: String
+        let to: String
+        let cc: String
+        let startedAt: Date
+        /// The sent copy, once the send came back with one. The reader stops
+        /// drawing the ghost the moment its thread holds this id.
+        var echoMessageId: Int?
+    }
+    private(set) var outgoingReplies: [OutgoingReply] = []
+
+    private func dropOutgoing(_ composer: UUID) {
+        outgoingReplies.removeAll { $0.id == composer }
+    }
+
+    /// The send came back. Sent with an echo: keep the ghost until the reader
+    /// has the real copy (it filters by `echoMessageId`), with a bound in case
+    /// that reload never lands. Anything else: gone now.
+    private func noteOutgoingLanded(_ composer: UUID, outcome: SendOutcome, sameAccount: Bool) {
+        guard sameAccount, case .sent(let result) = outcome, let echo = result.echo_message_id,
+            let i = outgoingReplies.firstIndex(where: { $0.id == composer })
+        else {
+            dropOutgoing(composer)
+            return
+        }
+        outgoingReplies[i].echoMessageId = echo
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(15))
+            self?.dropOutgoing(composer)
+        }
+    }
+
+    /// The reader holds the sent copy of these ghosts: retire them.
+    func noteEchoesShown(_ messageIds: Set<Int>) {
+        outgoingReplies.removeAll { $0.echoMessageId.map(messageIds.contains) ?? false }
+    }
 
     /// THE SEND: close the composer now, send in `sendHold` seconds unless the
     /// toast's undo (or `u`) puts it back first.
@@ -6395,6 +6650,13 @@ final class AppStore {
         }
         heldSends[key] = held
         holding.insert(state.id)
+        // Only an inline reply: it is the one whose thread is known (the
+        // reader it was typed under), the same rule `lastSendEcho` keeps.
+        if slot == .inlineReply, state.replyToMessageId != nil, let thread = threadId {
+            outgoingReplies.append(OutgoingReply(
+                id: state.id, threadId: thread, body: state.body, to: state.to, cc: state.cc,
+                startedAt: Date()))
+        }
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(Self.sendHold))
             await self?.release(key)
@@ -6423,6 +6685,7 @@ final class AppStore {
         guard var held = heldSends.removeValue(forKey: key) else { return false }
         held.state = withDetachedDraft(held.state)
         holding.remove(held.state.id)
+        dropOutgoing(held.state.id)
         putBack(held, error: nil)
         return true
     }
@@ -6444,6 +6707,7 @@ final class AppStore {
         held.state = withDetachedDraft(held.state)
         holding.remove(held.state.id)
         guard held.epoch == epoch else {
+            dropOutgoing(held.state.id)
             // An account change that parked nothing (the gate teardown): the
             // daemon it was written for is not configured any more, so there
             // is nowhere to send it or save it. Say so, at least.
@@ -6475,6 +6739,7 @@ final class AppStore {
             }
         }
         let outcome = await ComposeSubmit.fire(held.state, override: held.override)
+        noteOutgoingLanded(held.state.id, outcome: outcome, sameAccount: held.epoch == epoch)
         // The account changed while it was on the wire: whatever came back
         // belongs to the OLD account, and its message ids mean nothing here.
         // Reopening it would point the retry at the new one, so the outcome

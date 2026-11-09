@@ -29,11 +29,12 @@ dotenvy = "0.15"
 # `auth --import` prompt. The raw termios calls rather than a password-prompt
 # crate, because the prompt itself is three lines and already written.
 libc = { workspace = true }
+# `token activity`'s one machine-readable line. Already in the tree through
+# squelch-core; named here because the binary now builds JSON itself.
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 # The agent door's fixture keys, token signer and stub JWKS server, for the
 # combined-router tests (both doors, OAuth mode).
 squelch-mcp = { path = "../squelch-mcp", features = ["testing"] }
-# JSON-RPC bodies in the agent door wire test.
-serde_json = { workspace = true }

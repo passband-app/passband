@@ -25,6 +25,10 @@ ignore = [
     # tokenizers; basic-toml is read at build time by age's i18n macros.
     { id = "RUSTSEC-2024-0436", reason = "unmaintained compile-time proc-macro, transitive" },
     { id = "RUSTSEC-2026-0374", reason = "unmaintained, build-time only via age's i18n macros" },
+    # pin-utils: repo archived 2026-10-01, no vulnerability. Transitive via
+    # async-imap 0.12 (IMAP support); leaves when async-imap drops it for
+    # core::pin::pin!.
+    { id = "RUSTSEC-2026-0441", reason = "unmaintained, no vuln; transitive via async-imap" },
 ]
 
 [licenses]

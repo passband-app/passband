@@ -256,6 +256,19 @@ fn client_router(state: ApiState) -> Router {
         .route("/client/rules/suggest", get(handlers::suggest_rule))
         .route("/client/rules/{id}", put(handlers::update_rule))
         .route("/client/rules/{id}", delete(handlers::delete_rule))
+        // `t`: the owner's words become a sender rule or a general rule, which
+        // a small model decides (`triage::teach`). Human door only.
+        .route("/client/teach", post(handlers::teach))
+        .route("/client/general-rules", get(handlers::list_general_rules))
+        .route("/client/general-rules", post(handlers::create_general_rule))
+        .route(
+            "/client/general-rules/{id}",
+            put(handlers::update_general_rule),
+        )
+        .route(
+            "/client/general-rules/{id}",
+            delete(handlers::delete_general_rule),
+        )
         // Local drafts: served EXCLUSIVELY here. Unsent compositions stay on
         // this machine — the agent door has no drafts route and never learns the
         // table exists. The keyed PUT edits in place (one draft per reply

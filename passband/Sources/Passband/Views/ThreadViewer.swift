@@ -854,11 +854,11 @@ struct ThreadViewer: View {
                     #if os(macOS)
                         Kbd("t")
                     #endif
-                    Text("new rule").font(Typo.micro)
+                    Text("teach").font(Typo.micro)
                 }
             }
             .buttonStyle(.textAction)
-            .help("write a rule for this sender — shows the ones already in effect")
+            .help("teach Passband what you want from mail like this")
 
             Button {
                 // A job waiting on the user finishes from here too; anything
@@ -2061,11 +2061,10 @@ struct ThreadViewer: View {
                 openReplyAll()
                 return true
             },
-            // `t` = tune sender rule, same as on a list row: one verb, one key
-            // everywhere. The target differs (the thread's sender rather than the
-            // selected row's) but that is the only sender in view here. This
-            // frees `r` for reply.
-            KeyBinding("t", "new sender rule") { openSenderRule() },
+            // `t` = teach Passband, same as on a list row: one verb, one key
+            // everywhere. The context is the newest message rather than the
+            // selected row. This frees `r` for reply.
+            KeyBinding("t", "teach Passband") { openSenderRule() },
             // A new message from the reader, in the modal composer over it. The two
             // draft slots are independent, so this cannot disturb an inline reply
             // open underneath — and with one open the body has focus, so `c` is
@@ -2188,11 +2187,15 @@ struct ThreadViewer: View {
             sender: m.from_addr)
     }
 
-    /// The rule composer for THIS thread's sender — the same request shape `t`
-    /// uses on a list row, so there is one composer in the app, not two.
+    /// The teach card, with the newest message the user did NOT send as
+    /// context: the same request `t` makes on a list row, so there is one card
+    /// in the app, not two. Never the user's own reply, which would make "this
+    /// sender" the user. A thread of only their own mail teaches with no email.
     private func openSenderRule() {
-        guard let newestSender else { return }
-        Actions.tune(sender: newestSender)
+        let inbound = messages.last { $0.is_sent != true }
+        Actions.teach(
+            sender: inbound.map { $0.from_addr.trimmingCharacters(in: .whitespaces).lowercased() },
+            messageId: inbound?.id)
     }
 
     // MARK: - reply

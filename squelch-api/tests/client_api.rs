@@ -12434,7 +12434,7 @@ fn seed_suggest_msg(
     from: &str,
     subject: &str,
     sensitivity: Sensitivity,
-) {
+) -> i64 {
     let mut m = msg(acct, gmail, gmail, subject, "body");
     m.from_addr = from.to_string();
     let id = store.upsert_message(&m).unwrap();
@@ -12442,6 +12442,7 @@ fn seed_suggest_msg(
     store
         .set_triage(id, acct, 10, Tier::Noise, sensitivity, kind, "", "", None)
         .unwrap();
+    id
 }
 
 /// A state whose rule suggester points at a mock answering `suggestion`.
@@ -12507,6 +12508,59 @@ async fn rule_suggestion_is_cleaned_and_billed_to_its_own_category() {
         usage_categories(&store, acct),
         vec!["rule_suggest".to_string()]
     );
+}
+
+#[tokio::test]
+async fn a_suggestion_for_one_email_is_always_dont_show_me_from() {
+    let answer =
+        serde_json::json!({ "kind": "Terms of Service updates.", "sender": "Notion" }).to_string();
+    let body = serde_json::json!({
+        "content": [{ "type": "text", "text": answer }],
+        "stop_reason": "end_turn",
+        "usage": { "input_tokens": 60, "output_tokens": 8 }
+    })
+    .to_string();
+    // One message only: too little history for the sender path, so an answer
+    // here can only have come from the email.
+    let mut id = 0;
+    let Harness { app, store, acct } = app_with_suggest_body(body, |store, acct| {
+        id = seed_suggest_msg(
+            store,
+            acct,
+            "g1",
+            "legal@notion.so",
+            "We're updating our terms",
+            Sensitivity::Normal,
+        );
+    })
+    .await;
+
+    let resp = app
+        .clone()
+        .oneshot(authed(
+            "GET",
+            &format!("/client/rules/suggest?sender=legal@notion.so&message_id={id}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(
+        json["suggestion"],
+        "dont show me terms of service updates from Notion"
+    );
+    assert_eq!(suggest_calls(&store, acct), 1);
+
+    // A message that is not there offers nothing and spends nothing.
+    let resp = app
+        .oneshot(authed(
+            "GET",
+            "/client/rules/suggest?sender=legal@notion.so&message_id=999999",
+        ))
+        .await
+        .unwrap();
+    assert!(body_json(resp).await["suggestion"].is_null());
+    assert_eq!(suggest_calls(&store, acct), 1);
 }
 
 /// The suggester answering a smart-block call with these three fields.
@@ -16213,4 +16267,394 @@ async fn the_hydrate_post_needs_the_human_door_token() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+// --- teach + general rules ---------------------------------------------------
+
+#[tokio::test]
+async fn teach_with_no_model_saves_a_general_rule_and_crud_works() {
+    let Harness { app, store, acct } = harness(|_, _| {});
+    let text = "emails to Alex about grant funding for Northwind Bakery: NEVER show me those";
+
+    let resp = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/client/teach",
+            serde_json::json!({ "text": format!("  {text}  ") }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    assert_eq!(created["kind"], "general");
+    assert_eq!(created["text"], text);
+    let id = created["id"].as_i64().unwrap();
+    assert!(store.list_sender_rules(acct).unwrap().is_empty());
+
+    let listed = body_json(
+        app.clone()
+            .oneshot(authed("GET", "/client/general-rules"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed[0]["id"].as_i64().unwrap(), id);
+    assert_eq!(listed[0]["text"], text);
+
+    let resp = app
+        .clone()
+        .oneshot(authed_json(
+            "PUT",
+            &format!("/client/general-rules/{id}"),
+            serde_json::json!({ "text": "never show me grant mail" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        store.list_general_rules(acct).unwrap()[0].text,
+        "never show me grant mail"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(authed("DELETE", &format!("/client/general-rules/{id}")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(store.list_general_rules(acct).unwrap().is_empty());
+
+    for (method, path) in [
+        ("DELETE", format!("/client/general-rules/{id}")),
+        ("PUT", format!("/client/general-rules/{id}")),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(authed_json(
+                method,
+                &path,
+                serde_json::json!({ "text": "x" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{method} {path}");
+    }
+
+    // Undo of a delete is a verbatim create.
+    let resp = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/client/general-rules",
+            serde_json::json!({ "text": "back again" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    for bad in ["   ", &"x".repeat(1001)] {
+        let resp = app
+            .clone()
+            .oneshot(authed_json(
+                "POST",
+                "/client/teach",
+                serde_json::json!({ "text": bad }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+async fn app_with_teach_answer(
+    about: &str,
+    named: &str,
+    disposition: &str,
+    seed: impl FnOnce(&SqliteStore, i64),
+) -> Harness {
+    let inner = format!(
+        r#"{{\"about\":\"{about}\",\"named\":\"{named}\",\"disposition\":\"{disposition}\"}}"#
+    );
+    let body = format!(
+        r#"{{"content":[{{"type":"text","text":"{inner}"}}],"stop_reason":"end_turn","usage":{{"input_tokens":50,"output_tokens":5}}}}"#
+    );
+    let url = spawn_classifier_mock(200, body).await;
+    harness_pointing_inference_at(url, seed)
+}
+
+#[tokio::test]
+async fn teach_about_this_sender_rules_on_the_source_messages_address() {
+    let seeded = std::cell::Cell::new(0i64);
+    let Harness { app, store, acct } = app_with_teach_answer(
+        "this_sender",
+        "ignored@else.com",
+        "squelch",
+        |store, acct| {
+            seeded.set(seed_unsub_msg(
+                store,
+                acct,
+                "g1",
+                "Promo@Shop.com",
+                None,
+                false,
+            ));
+        },
+    )
+    .await;
+
+    let resp = app
+        .oneshot(authed_json(
+            "POST",
+            "/client/teach",
+            serde_json::json!({ "text": "never show me these", "source_message_id": seeded.get() }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    assert_eq!(created["kind"], "sender");
+    assert_eq!(created["match_pattern"], "promo@shop.com");
+    assert_eq!(created["disposition"], "squelch");
+    assert!(created["replaced"].is_null());
+
+    let rules = store.list_sender_rules(acct).unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].match_pattern, "promo@shop.com");
+    assert_eq!(rules[0].want_text, "never show me these");
+    assert!(store.list_general_rules(acct).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn teach_hands_back_the_rule_it_overwrote() {
+    let seeded = std::cell::Cell::new(0i64);
+    let Harness { app, store, acct } =
+        app_with_teach_answer("this_sender", "", "surface", |store, acct| {
+            seeded.set(seed_unsub_msg(store, acct, "g1", "a@b.com", None, false));
+            store
+                .set_sender_rule(
+                    acct,
+                    "a@b.com",
+                    "only invoices",
+                    squelch_core::types::Disposition::Filtered,
+                )
+                .unwrap();
+        })
+        .await;
+    let created = body_json(
+        app.oneshot(authed_json(
+            "POST",
+            "/client/teach",
+            serde_json::json!({ "text": "always show them", "source_message_id": seeded.get() }),
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(created["replaced"]["want_text"], "only invoices");
+    assert_eq!(created["replaced"]["disposition"], "filtered");
+    assert_eq!(store.list_sender_rules(acct).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn teach_without_a_source_cannot_make_a_this_sender_rule() {
+    let Harness { app, store, acct } =
+        app_with_teach_answer("this_sender", "", "squelch", |_, _| {}).await;
+    let created = body_json(
+        app.oneshot(authed_json(
+            "POST",
+            "/client/teach",
+            serde_json::json!({ "text": "mute them" }),
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(created["kind"], "general");
+    assert!(store.list_sender_rules(acct).unwrap().is_empty());
+    assert_eq!(store.list_general_rules(acct).unwrap().len(), 1);
+}
+
+/// A classifier mock that answers by what the request contains: the first
+/// `(needle, inner_json)` whose needle appears in the request wins, the last
+/// is the default.
+async fn spawn_dispatching_mock(answers: Vec<(&'static str, String)>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let answers = answers.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 65536];
+                let mut n = 0;
+                // Read until the JSON body has arrived.
+                loop {
+                    let got = sock.read(&mut buf[n..]).await.unwrap_or(0);
+                    n += got;
+                    let seen = String::from_utf8_lossy(&buf[..n]);
+                    if got == 0 || seen.trim_end().ends_with('}') {
+                        break;
+                    }
+                }
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let inner = answers
+                    .iter()
+                    .find(|(needle, _)| req.contains(needle))
+                    .unwrap_or_else(|| answers.last().unwrap())
+                    .1
+                    .clone();
+                let text = serde_json::to_string(&inner).unwrap();
+                let body = format!(
+                    r#"{{"content":[{{"type":"text","text":{text}}}],"stop_reason":"end_turn","usage":{{"input_tokens":50,"output_tokens":5}}}}"#
+                );
+                let resp = format!(
+                    "HTTP/1.1 200 X\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn teach_like_this_carries_a_description_of_the_email() {
+    let seeded = std::cell::Cell::new(0i64);
+    let url = spawn_dispatching_mock(vec![
+        (
+            "BEGIN EMAIL",
+            r#"{"needs_example":true,"kind_of_email":"seasonal sale promotions from Sephora"}"#
+                .into(),
+        ),
+        (
+            "",
+            r#"{"about":"general","named":"","disposition":"filtered"}"#.into(),
+        ),
+    ])
+    .await;
+    let Harness { app, store, acct } = harness_pointing_inference_at(url, |store, acct| {
+        seeded.set(seed_unsub_msg(
+            store,
+            acct,
+            "g1",
+            "deals@sephora.com",
+            None,
+            false,
+        ));
+    });
+    let resp = app
+        .oneshot(authed_json(
+            "POST",
+            "/client/teach",
+            serde_json::json!({ "text": "dont show me promotions like this", "source_message_id": seeded.get() }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    assert_eq!(created["kind"], "general");
+    let want =
+        "dont show me promotions like this (this means: seasonal sale promotions from Sephora)";
+    assert_eq!(created["text"], want);
+    assert_eq!(store.list_general_rules(acct).unwrap()[0].text, want);
+}
+
+#[tokio::test]
+async fn a_full_list_merges_overlapping_rules_to_make_room() {
+    let ids = std::cell::RefCell::new(Vec::new());
+    let seed = |store: &SqliteStore, acct: i64| {
+        for i in 0..squelch_core::store::sqlite::MAX_GENERAL_RULES {
+            ids.borrow_mut().push(
+                store
+                    .create_general_rule(acct, &format!("rule {i}"))
+                    .unwrap(),
+            );
+        }
+    };
+    // Build the harness first so the ids are known for the mock's answer.
+    let (state, store, acct) = state_with(seed);
+    let (a, b) = (ids.borrow()[0], ids.borrow()[1]);
+    let url = spawn_dispatching_mock(vec![
+        (
+            "slots_to_free",
+            format!(r#"{{"merges":[{{"ids":[{a},{b}],"text":"rule 0 and rule 1"}}]}}"#),
+        ),
+        (
+            "",
+            r#"{"about":"general","named":"","disposition":"filtered"}"#.into(),
+        ),
+    ])
+    .await;
+    let state = state.with_rule_inference(Some(
+        squelch_core::triage::rule_infer::RuleInferClient::new(
+            reqwest::Client::new(),
+            url,
+            "sk-test",
+            squelch_core::config::Stage2Provider::Anthropic,
+            "claude-haiku-4-5",
+        ),
+    ));
+    let app = router(state);
+    let resp = app
+        .oneshot(authed_json(
+            "POST",
+            "/client/teach",
+            serde_json::json!({ "text": "one more" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    assert_eq!(created["merged"][0]["text"], "rule 0 and rule 1");
+    assert_eq!(
+        created["merged"][0]["replaced_ids"],
+        serde_json::json!([a, b])
+    );
+    // The owner's own words come back, so undo can restore them.
+    assert_eq!(
+        created["merged"][0]["replaced"],
+        serde_json::json!([{ "id": a, "text": "rule 0" }, { "id": b, "text": "rule 1" }])
+    );
+    let texts: Vec<String> = store
+        .list_general_rules(acct)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.text)
+        .collect();
+    assert_eq!(texts.len(), squelch_core::store::sqlite::MAX_GENERAL_RULES);
+    assert!(!texts.contains(&"rule 0".to_string()));
+    assert!(texts.contains(&"rule 0 and rule 1".to_string()));
+    assert!(
+        texts.contains(&"rule 2".to_string()),
+        "untouched rules stay verbatim"
+    );
+    assert!(texts.contains(&"one more".to_string()));
+}
+
+#[tokio::test]
+async fn a_full_list_with_no_model_refuses_and_writes_nothing() {
+    let Harness { app, store, acct } = harness(|store, acct| {
+        for i in 0..squelch_core::store::sqlite::MAX_GENERAL_RULES {
+            store
+                .create_general_rule(acct, &format!("rule {i}"))
+                .unwrap();
+        }
+    });
+    let resp = app
+        .oneshot(authed_json(
+            "POST",
+            "/client/teach",
+            serde_json::json!({ "text": "one more" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        store.list_general_rules(acct).unwrap().len(),
+        squelch_core::store::sqlite::MAX_GENERAL_RULES
+    );
 }

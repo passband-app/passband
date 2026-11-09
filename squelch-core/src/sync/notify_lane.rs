@@ -30,6 +30,8 @@ pub struct Candidate {
     is_known_contact: bool,
     is_bulk: bool,
     sender_preferences: Option<String>,
+    /// The owner's general rules (not about one sender), as JSON.
+    general_rules: Option<String>,
 }
 
 impl Candidate {
@@ -56,6 +58,11 @@ impl Candidate {
                 None
             } else {
                 Some(serde_json::to_string(&context.matched_rules).expect("rules are JSON"))
+            },
+            general_rules: if context.general_rules.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_string(&context.general_rules).expect("rules are JSON"))
             },
         })
     }
@@ -104,6 +111,7 @@ pub fn candidate(
         is_known_contact: known_contact(&triaged.message.from_addr),
         is_bulk: triaged.message.list_unsubscribe.is_some(),
         sender_preferences,
+        general_rules: None,
     })
 }
 
@@ -248,6 +256,7 @@ impl<S: Store + 'static> NotifyLane<S> {
             is_known_contact,
             is_bulk,
             sender_preferences,
+            general_rules,
         } = c;
 
         let m = ModelRow {
@@ -328,6 +337,7 @@ impl<S: Store + 'static> NotifyLane<S> {
             is_known_contact,
             is_bulk,
             sender_preferences: sender_preferences.as_deref(),
+            general_rules: general_rules.as_deref(),
         };
         let outcome = tokio::time::timeout(
             Duration::from_secs(self.cfg.fast_deadline_secs()),
@@ -1456,6 +1466,15 @@ mod tests {
         let preferences = candidate.sender_preferences.unwrap();
         assert!(preferences.contains("matching preference"));
         assert!(!preferences.contains("unrelated rule"));
+        assert!(candidate.general_rules.is_none());
+        context.general_rules = vec![serde_json::json!({"id":1,"text":"never grant mail"})];
+        let candidate = candidate_from_context(&context, &cfg()).unwrap();
+        assert!(
+            candidate
+                .general_rules
+                .unwrap()
+                .contains("never grant mail")
+        );
         context.matched_rules.clear();
         assert!(
             candidate_from_context(&context, &cfg())

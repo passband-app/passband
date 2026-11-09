@@ -82,11 +82,19 @@ struct ActionLayer: View {
                 // Keyed by the request: a click on an in-effect rule swaps the
                 // request under an open card, and without a fresh identity the
                 // edit card would inherit the tune card's @State.
-                RuleEditor(
-                    request: request,
-                    draft: request.draftKey.flatMap { store.ruleDrafts[$0] }
-                ) { store.closeRuleEditor() }
-                .id(request.id)
+                if request.teach || request.general != nil {
+                    TeachCard(
+                        request: request,
+                        draft: request.draftKey.flatMap { store.ruleDrafts[$0] }
+                    ) { store.closeRuleEditor() }
+                    .id(request.id)
+                } else {
+                    RuleEditor(
+                        request: request,
+                        draft: request.draftKey.flatMap { store.ruleDrafts[$0] }
+                    ) { store.closeRuleEditor() }
+                    .id(request.id)
+                }
             }
             if let request = store.groupEditor {
                 GroupEditor(request: request) { store.closeGroupEditor() }

@@ -655,37 +655,62 @@ impl SqliteStore {
     /// inserts its text. Every source must still exist (a rule deleted while
     /// the model was thinking fails the whole thing, nothing written). Returns
     /// the new ids in merge order.
-    pub(super) fn merge_general_rules(
+    pub(super) fn merge_and_create_general_rule(
         &self,
         account_id: AccountId,
         merges: &[(Vec<i64>, String)],
-    ) -> Result<Vec<i64>> {
+        new_text: &str,
+    ) -> Result<crate::types::MergedGeneralRules> {
+        let new_text = validate_general_rule(new_text)?;
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
         let now = Utc::now().to_rfc3339();
-        let mut ids = Vec::with_capacity(merges.len());
+        let mut merged = Vec::with_capacity(merges.len());
         for (sources, text) in merges {
             let text = validate_general_rule(text)?;
+            let mut replaced = Vec::with_capacity(sources.len());
             for id in sources {
-                let n = tx.execute(
-                    "DELETE FROM general_rules WHERE account_id=?1 AND id=?2",
-                    params![account_id, id],
-                )?;
-                if n == 0 {
+                let old: Option<String> = tx
+                    .query_row(
+                        "DELETE FROM general_rules WHERE account_id=?1 AND id=?2 RETURNING text",
+                        params![account_id, id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let Some(old) = old else {
                     return Err(CoreError::InvalidInput(
                         "a rule changed while merging; try again".into(),
                     ));
-                }
+                };
+                replaced.push((*id, old));
             }
             tx.execute(
                 "INSERT INTO general_rules(account_id, text, created_at, updated_at)
                      VALUES (?1, ?2, ?3, ?3)",
                 params![account_id, text, now],
             )?;
-            ids.push(tx.last_insert_rowid());
+            merged.push((tx.last_insert_rowid(), replaced));
         }
+        // The cap, checked inside the same transaction: a teach that raced
+        // this one into the freed slot fails the whole thing, merge included.
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM general_rules WHERE account_id=?1",
+            params![account_id],
+            |r| r.get(0),
+        )?;
+        if count as usize >= MAX_GENERAL_RULES {
+            return Err(CoreError::InvalidInput(
+                "a rule changed while merging; try again".into(),
+            ));
+        }
+        tx.execute(
+            "INSERT INTO general_rules(account_id, text, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?3)",
+            params![account_id, new_text, now],
+        )?;
+        let id = tx.last_insert_rowid();
         tx.commit()?;
-        Ok(ids)
+        Ok(crate::types::MergedGeneralRules { id, merged })
     }
 
     pub(super) fn delete_general_rule(&self, account_id: AccountId, id: i64) -> Result<bool> {

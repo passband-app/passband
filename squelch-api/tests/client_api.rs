@@ -16442,6 +16442,11 @@ async fn a_full_list_merges_overlapping_rules_to_make_room() {
         created["merged"][0]["replaced_ids"],
         serde_json::json!([a, b])
     );
+    // The owner's own words come back, so undo can restore them.
+    assert_eq!(
+        created["merged"][0]["replaced"],
+        serde_json::json!([{ "id": a, "text": "rule 0" }, { "id": b, "text": "rule 1" }])
+    );
     let texts: Vec<String> = store
         .list_general_rules(acct)
         .unwrap()

@@ -2101,14 +2101,16 @@ pub trait Store:
     /// Delete a general rule. `false` => unknown id.
     fn delete_general_rule(&self, account_id: AccountId, id: i64) -> Result<bool>;
 
-    /// Replace groups of general rules with one merged rule each, atomically.
-    /// Each entry is (source ids, merged text). Fails whole if any source is
-    /// gone or any text is invalid.
-    fn merge_general_rules(
+    /// Replace groups of general rules with one merged rule each, then add
+    /// `new_text`, all in one transaction. Each entry is (source ids, merged
+    /// text). Fails whole if any source is gone, any text is invalid, or the
+    /// list is still full.
+    fn merge_and_create_general_rule(
         &self,
         account_id: AccountId,
         merges: &[(Vec<i64>, String)],
-    ) -> Result<Vec<i64>>;
+        new_text: &str,
+    ) -> Result<crate::types::MergedGeneralRules>;
 
     /// The non-sealed, non-spam email a teach was written on, for the describer.
     fn teach_example(

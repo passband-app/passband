@@ -1722,12 +1722,13 @@ impl Store for SqliteStore {
         self.delete_general_rule(account_id, id)
     }
 
-    fn merge_general_rules(
+    fn merge_and_create_general_rule(
         &self,
         account_id: AccountId,
         merges: &[(Vec<i64>, String)],
-    ) -> Result<Vec<i64>> {
-        self.merge_general_rules(account_id, merges)
+        new_text: &str,
+    ) -> Result<crate::types::MergedGeneralRules> {
+        self.merge_and_create_general_rule(account_id, merges, new_text)
     }
 
     fn teach_example(

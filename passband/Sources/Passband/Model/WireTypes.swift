@@ -1311,6 +1311,14 @@ struct MergedRule: Codable, Sendable, Equatable {
     var id: Int
     var text: String
     var replaced_ids: [Int]
+    /// The owner's own rules this merge replaced, word for word, so undo can
+    /// put them back. Absent from a daemon that predates it.
+    var replaced: [MergedSource]? = nil
+}
+
+struct MergedSource: Codable, Sendable, Equatable {
+    var id: Int
+    var text: String
 }
 
 struct ReplacedRule: Codable, Sendable, Equatable {

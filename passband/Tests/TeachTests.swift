@@ -34,6 +34,9 @@ struct TeachTests {
             "general reads as all mail")
         var full = result("general", nil)
         full.merged = [MergedRule(id: 9, text: "m", replaced_ids: [1, 2, 3])]
+        let wire = #"{"id":9,"text":"m","replaced_ids":[1,2],"replaced":[{"id":1,"text":"a"},{"id":2,"text":"b"}]}"#
+        let decoded = try? JSONDecoder().decode(MergedRule.self, from: Data(wire.utf8))
+        expect(decoded?.replaced?.map(\.text) == ["a", "b"], "merge carries the replaced texts")
         expect(
             Teach.savedLabel(full) == "got it. merged 3 similar rules to make room",
             "a merge says so")

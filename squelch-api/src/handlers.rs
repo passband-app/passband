@@ -3269,19 +3269,35 @@ pub async fn teach(
         bill_rule_inference(store, account_id, merge_usage);
         match plan {
             teach::TeachPlan::General => {
-                let merged = match &merge_plan {
+                // At the cap the merge and the new rule land together or not
+                // at all. Each merge carries the texts it replaced, so undo
+                // can restore the owner's own words.
+                let (id, merged) = match &merge_plan {
                     Some(m) => {
-                        let ids = store.merge_general_rules(account_id, m)?;
-                        m.iter()
-                            .zip(ids)
-                            .map(|((sources, text), id)| {
-                                json!({ "id": id, "text": text, "replaced_ids": sources })
+                        let out = store.merge_and_create_general_rule(account_id, m, &described)?;
+                        let merged = m
+                            .iter()
+                            .zip(out.merged)
+                            .map(|((sources, text), (id, replaced))| {
+                                let replaced: Vec<_> = replaced
+                                    .into_iter()
+                                    .map(|(id, text)| json!({ "id": id, "text": text }))
+                                    .collect();
+                                json!({
+                                    "id": id,
+                                    "text": text,
+                                    "replaced_ids": sources,
+                                    "replaced": replaced,
+                                })
                             })
-                            .collect::<Vec<_>>()
+                            .collect::<Vec<_>>();
+                        (out.id, merged)
                     }
-                    None => Vec::new(),
+                    None => (
+                        store.create_general_rule(account_id, &described)?,
+                        Vec::new(),
+                    ),
                 };
-                let id = store.create_general_rule(account_id, &described)?;
                 Ok(json!({
                     "kind": "general",
                     "id": id,
@@ -3306,7 +3322,7 @@ pub async fn teach(
                 let replaced = store
                     .list_sender_rules(account_id)?
                     .into_iter()
-                    .find(|r| r.match_pattern.eq_ignore_ascii_case(&pattern))
+                    .find(|r| r.match_pattern == pattern)
                     .map(|r| {
                         json!({
                             "want_text": r.want_text,

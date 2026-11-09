@@ -153,7 +153,7 @@ fn build_user_message(input: &NotifyInput<'_>, max_body_chars: usize) -> String 
         serde_json::to_string(&input.sender_preferences).expect("string serialization");
     let general = serde_json::to_string(&input.general_rules).expect("string serialization");
     let mut user = format!(
-        "=== TRUSTED CONTEXT ===\nis_known_contact: {}\nis_bulk: {}\nsender_preferences: {}\n         general_rules: {}\n\n\
+        "=== TRUSTED CONTEXT ===\nis_known_contact: {}\nis_bulk: {}\nsender_preferences: {}\ngeneral_rules: {}\n\n\
          -----BEGIN UNTRUSTED EMAIL-----\nfrom: {}\nsubject: {}\nbody:\n{}",
         if input.is_known_contact { "yes" } else { "no" },
         if input.is_bulk { "yes" } else { "no" },

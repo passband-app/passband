@@ -554,6 +554,14 @@ pub struct GeneralRule {
     pub updated_at: DateTime<Utc>,
 }
 
+/// What a teach at the cap did: the new rule's id, and each merged rule with
+/// the (id, text) of the rules it replaced, so undo can put them back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergedGeneralRules {
+    pub id: i64,
+    pub merged: Vec<(i64, Vec<(i64, String)>)>,
+}
+
 str_enum! {
     /// HOW A SEND GROUP ADDRESSES ITS MEMBERS. A property of the AUDIENCE, not
     /// of any one message: an investor list is individually-addressed every

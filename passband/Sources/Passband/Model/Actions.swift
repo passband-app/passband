@@ -325,6 +325,16 @@ enum Actions {
     static func undoTeach(_ result: TeachResult) async throws {
         if !result.isSender {
             try await APIClient.shared.deleteGeneralRule(result.id)
+            // A teach at the cap merged rules to make room: take the merged
+            // rule back out and restore the owner's originals word for word.
+            // Deletes first, so the list never goes past the cap on the way.
+            for merge in result.merged ?? [] {
+                guard let sources = merge.replaced, !sources.isEmpty else { continue }
+                try await APIClient.shared.deleteGeneralRule(merge.id)
+                for source in sources {
+                    _ = try await APIClient.shared.createGeneralRule(text: source.text)
+                }
+            }
         } else if let replaced = result.replaced, let pattern = result.match_pattern {
             try await APIClient.shared.updateRule(
                 result.id,

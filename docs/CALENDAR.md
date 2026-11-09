@@ -125,10 +125,56 @@ same sender feed the same row.
   id and the user's dismissal when a re-triage rewords a title; otherwise a
   new ghost. A cancellation that matches nothing creates nothing: there is no
   event to cancel.
-- **Ghosts never merge.** Each record is assigned to exactly one ghost and the
-  assignment is remembered. A record that could match several is given to one
-  and the others are left alone. A duplicate ghost is an acceptable outcome;
-  a ghost lost or rewritten by someone else's mail is not.
+- **A new booking stays apart without a verdict (the backstop).** A
+  `created` record joins a ghost by ref only on the same calendar day, and
+  not when both carry their own references (an order or confirmation number,
+  not an event page) and share none. So a second order for the next night of
+  a festival is its own ghost (it used to merge by the shared event page,
+  and the newer order moved the Friday ghost, and any Google event Passband
+  kept for it, to Saturday), and a second order for the same night is a
+  duplicate until the identity check says otherwise.
+- **The identity check** (`triage::event_identity`, BUILT 2026-11-05). Before
+  a decision commits, each event record is shown the live ghosts it could be
+  (near in time, and sharing a reference, an event page, a title word or the
+  venue; at most five, unlinked, fed by other mail) and one small model call
+  names which one it is, or none. Code enforces the answer: an id that was
+  not offered is ignored, and every offered ghost not picked is off limits to
+  the record. A pick from the ghost's OWN authenticated sender joins it
+  whatever the rules above say (more tickets for the same night, an airline
+  rebooking under a new reference, a postponement up to a week). A pick of
+  ANOTHER sender's ghost (a promoter, a friend, a stranger, authenticated or
+  not) is a LINK (`ghost_events.linked_to`): the record keeps a ghost of its
+  own that folds under the user's on screen, never changes it and never
+  reaches Google. The committed ghost is the one shown, whichever mail came
+  first. When the call fails or finds no candidate, the backstop decides.
+  The verdict is the check's alone: one in the agent's own answer is
+  dropped (`normalize_decision`), since mail could put it there. A stored
+  pick is followed on replay only while its ghost still starts within the
+  window asked about, and a deleted ghost unlinks the ghosts under it
+  (trigger `ghost_event_links_follow_ghost`). A linked ghost still counts
+  when Gmail's event is matched for adoption (`gcal::own`): two ghosts of a
+  link both matching is "more than one", so neither adopts, whichever is
+  shown. A link is not undone by a later re-decision; that waits on knowing
+  which mail made it.
+- **A linked ghost's change is the user's to accept.** When a linked ghost
+  starts at another time or is cancelled, the card it folds under offers it
+  ("Endzeit says Sat 9pm"; `pending_change` on the ghost, and on its real
+  event when the ghost is drawn as one Passband keeps; an event the user made
+  is theirs to move, so it carries no offer). The timeline lists a link's
+  partner wherever it starts, so a pair across the window's edge still folds
+  into one card. Accept
+  (`POST /client/timeline/ghosts/{id}/change {from, accept: true}`) moves
+  that mail onto the user's ghost as rows the user vouched for
+  (`ghost_event_sources.accepted`): they supply facts (the newest record
+  wins, so an event Passband keeps on Google moves with it) and never keys
+  or commitment, and stay there when that mail is decided again. Keep (`accept: false`) remembers the linked ghost's facts
+  (`link_ack`), and the same change is not offered again.
+- **Ghosts never merge on their own.** Each record is assigned to exactly one
+  ghost and the assignment is remembered. A record that could match several
+  is given to one and the others are left alone. A duplicate ghost is an
+  acceptable outcome; a ghost lost or rewritten by someone else's mail is
+  not. The two ways rows come together are the identity check's same-sender
+  pick and the user accepting a linked change.
 - **States:** `ghost`, `held`, `materialized` (written to the real calendar),
   `cancelled`, `dismissed`, `expired` (its time passed).
 - **Self-healing.** A later message from the same sender about the same
@@ -1621,7 +1667,10 @@ Read only (slice B). The only writes are the user's own, described under
   ghost, so a date-only copy never joins a matinee and an evening show. The
   one shown carries every copy's mail; a copy's event match and tickets
   carry over only from the same sender. Display only: nothing is merged or
-  stored.
+  stored. A stored link (above, §3.2) folds a ghost under the one it names
+  whatever their days or states, and wins over a URL fold the other way.
+  Each source says whether it is `linked` (another sender's mail) and
+  `verified`, so an unauthenticated stranger's mail is labelled on the card.
 - **Titles for the day match.** "One title holds the other" means whole
   words in a run ("Dinner" in "Dinner with Sam", never "art" in "party"). When
   the starts match only by day (all-day against timed), a held title must be

@@ -802,6 +802,34 @@ pub struct ClientActed {
     pub acted_at: DateTime<Utc>,
 }
 
+/// What `squelchd token activity` reports: when this mailbox first paired a
+/// client, and per platform when one first paired, last connected and last
+/// acted. TIMESTAMPS ONLY, by construction: no device name, no token id, no
+/// count of devices. See
+/// [`SqliteStore::client_activity`](sqlite::SqliteStore::client_activity).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClientActivity {
+    /// Exactly [`SqliteStore::first_client_pairing_at`](sqlite::SqliteStore::first_client_pairing_at)'s
+    /// answer, so the two commands can never disagree about activation.
+    pub first_paired_at: Option<DateTime<Utc>>,
+    /// One entry per platform that has ever named itself on this mailbox. A
+    /// platform that never has is ABSENT, not zeroed.
+    pub platforms: std::collections::BTreeMap<ClientPlatform, PlatformActivity>,
+}
+
+/// One platform's line in [`ClientActivity`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlatformActivity {
+    /// The earliest `created_at` among tokens whose app named itself as this
+    /// platform. Revoked tokens count: a pairing does not un-happen.
+    pub first_paired_at: DateTime<Utc>,
+    /// The newest `client_seen_at`: the app was open and connected.
+    pub last_seen_at: Option<DateTime<Utc>>,
+    /// The newest `client_action_at`: the app DID something (a write on the
+    /// client door).
+    pub last_action_at: Option<DateTime<Utc>>,
+}
+
 /// A device token at the ONE moment its plaintext exists.
 ///
 /// Returned by [`SqliteStore::issue_device_token`](sqlite::SqliteStore::issue_device_token)
@@ -1693,6 +1721,38 @@ pub trait Store:
         from: DateTime<chrono::FixedOffset>,
         to: DateTime<chrono::FixedOffset>,
     ) -> Result<Vec<crate::types::GhostEvent>>;
+
+    /// [`Store::list_ghost_events`] plus each listed ghost's link partners
+    /// (`ghost_events.linked_to`, either way) wherever they start, for the
+    /// timeline, which folds a link into one card.
+    fn list_ghost_events_with_links(
+        &self,
+        account_id: AccountId,
+        from: DateTime<chrono::FixedOffset>,
+        to: DateTime<chrono::FixedOffset>,
+    ) -> Result<Vec<crate::types::GhostEvent>>;
+
+    /// The identity check's prefilter (`triage::event_identity`): for each
+    /// of `message_id`'s laundered event `records` (by position), the live
+    /// ghosts it could be. Records with no candidate are left out.
+    fn event_identity_candidates(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        records: &[crate::triage::ghost::GhostProposal],
+    ) -> Result<crate::triage::event_identity::Questions>;
+
+    /// The user's answer to the change a linked ghost (`from`, another
+    /// sender's) shows on `shown`: accept it, or keep `shown` as it is.
+    /// False when `from` is not linked under `shown` in this account.
+    fn resolve_linked_change(
+        &self,
+        account_id: AccountId,
+        shown: i64,
+        from: i64,
+        accept: bool,
+        at: DateTime<Utc>,
+    ) -> Result<bool>;
 
     /// The event-page URLs each of these ghosts is keyed by, without the
     /// sender scope, for display folding only (`gcal::fold_ghosts`). Ghosts

@@ -85,6 +85,15 @@ run_suite calendar-fold \
   Sources/Passband/Model/WireTypes.swift \
   Tests/CalendarFoldTests.swift
 
+# Event identity on the wire: another sender's mail linked under the user's
+# card, and the change it offers. Every new key optional and lenient: an
+# unknown kind or a malformed offer costs the offer, never the card.
+run_suite linked-change \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Tests/LinkedChangeWireTests.swift
+
 # The search panel's Events block: which query goes to which search
 # (`in:calendar`, the mail-only operators), the wire it reads, three rows
 # then "N more", and each row's day, time and place in the user's zone.
@@ -728,6 +737,24 @@ run_suite calendar-reminder \
   Sources/Passband/Model/RenotifyBanner.swift \
   Sources/Passband/Model/CalendarReminder.swift \
   Tests/CalendarReminderTests.swift
+
+# The morning brief (squelch-api's morning_brief): the phone's
+# `<tag>:brief:<day>` push id, refused when tag-less or malformed and never
+# read as a mail event, the banner the extension draws from /client/brief,
+# and a tap that opens the board whether or not the banner was dressed.
+run_suite morning-brief \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Sources/Passband/Lib/SenderIdentity.swift \
+  Sources/Passband/Lib/AuthLabels.swift \
+  Sources/Passband/Lib/AgentDraftLink.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Model/EventBanner.swift \
+  Sources/Passband/Model/RenotifyBanner.swift \
+  Sources/Passband/Model/CalendarReminder.swift \
+  Tests/MorningBriefTests.swift
 
 # What auth mail asks of the owner (docs/AUTH-MAIL-HANDLING.md, "Clients"): the
 # sealed row from both daemon versions, which kinds open a question and for

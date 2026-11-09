@@ -454,6 +454,8 @@ final class Notifier {
         /// A reminder push the extension could not dress: fetched first, and
         /// shown only when the fire is the one the push was sent for.
         case calendarPush(fireId: Int, fired: Int, showTickets: Bool)
+        /// The morning brief: the board.
+        case board
     }
 
     /// A tap: front the app, restore the window if it was closed, open the
@@ -537,6 +539,12 @@ final class Notifier {
     ///
     /// The same analytics event as a thread tap, because it is the same act (a
     /// banner opened) and the bool already says which shape it had.
+    /// A tap on the morning brief: the board of the mailbox it came from.
+    func handleMorningBriefTap(accountId: UUID?) {
+        Analytics.capture("notification_opened", ["has_thread": false])
+        deliver(.board, accountId: accountId)
+    }
+
     func handleAuthTap(accountId: UUID?) {
         Analytics.capture("notification_opened", ["has_thread": false])
         deliver(.auth, accountId: accountId)
@@ -666,6 +674,11 @@ final class Notifier {
                 Self.captureReminderOpened(target, showTickets: showTickets)
                 store.openCalendarReminder(target)
             }
+        case .board:
+            // The board, with nothing open over it: the brief is about the
+            // whole day, so a thread left open last night is not the answer.
+            AppStore.shared.closeThread()
+            AppStore.shared.setView(.sitrep)
         }
     }
 }
@@ -809,6 +822,8 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
                 Notifier.shared.handleCalendarReminderTap(tap, showTickets: showTickets)
             case .calendarReminderPush(let push):
                 Notifier.shared.handleCalendarPushTap(push, showTickets: showTickets)
+            case .morningBrief(let account):
+                Notifier.shared.handleMorningBriefTap(accountId: account ?? accountId)
             case .message(let messageId):
                 Notifier.shared.handleMessageTap(messageId: messageId, accountId: accountId)
             case .event(let unresolved):

@@ -1,4 +1,4 @@
-//! The control-plane wire: nine routes and a health check.
+//! The control-plane wire: ten routes and a health check.
 //!
 //! ```text
 //! POST   /v1/tenants                     -> 201 { recipient }
@@ -8,6 +8,7 @@
 //! GET    /v1/tenants/{label}             -> 200 { status } | 404
 //! GET    /v1/tenants/{label}/drift       -> 200 { status, deployment_present, foreign, changes }
 //! GET    /v1/tenants/{label}/devices     -> 200 { first_paired_at } | 404 | 503
+//! GET    /v1/tenants/{label}/activity    -> 200 { activity } | 404 | 503
 //! POST   /v1/tenants/{label}/reconcile   -> 200 { deployment, status } | 409
 //! POST   /v1/tenants/{label}/pair        -> 200 { pair_code, pair_url, deep_link }
 //! DELETE /v1/tenants/{label}             -> 204
@@ -468,6 +469,37 @@ pub async fn get_devices(State(state): State<WardenState>, Path(label): Path<Str
             }),
         )
             .into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// The retention signal, and the entire body of `GET .../activity`.
+///
+/// `activity` is the daemon's `token activity` line, re-rendered from parsed
+/// instants (UTC, seconds, `Z`), or `null` when the tenant's daemon is too old
+/// to have the subcommand. That `null` is "not known yet", NOT "nobody uses
+/// this", which is why an empty mailbox is an object with nothing in it
+/// instead. Every other way of not knowing is a status code, as on `devices`.
+///
+/// Timestamps only, per platform; no names, no ids, no counts.
+#[derive(Debug, Serialize)]
+struct ActivityResponse {
+    activity: Option<crate::devices::Activity>,
+}
+
+/// `GET /v1/tenants/{label}/activity` - when client apps first paired, last
+/// connected and last acted on this tenant's mailbox, for the control plane's
+/// retention panel.
+///
+/// ITS OWN ROUTE rather than more fields on `devices`, for two reasons. The
+/// `devices` body is ONE FIELD by contract, and every control plane already
+/// deployed reads it; and the two execs differ in what an old daemon does.
+/// `first-paired` exists on every daemon in the fleet, while `activity` does
+/// not until the next release rolls, so folding them would make the
+/// activation stamp wait on a retention command it does not need.
+pub async fn get_activity(State(state): State<WardenState>, Path(label): Path<String>) -> Response {
+    match state.warden().activity(&label).await {
+        Ok(activity) => (StatusCode::OK, Json(ActivityResponse { activity })).into_response(),
         Err(e) => e.into_response(),
     }
 }
@@ -1078,6 +1110,75 @@ mod tests {
             body,
             serde_json::json!({ "error": "first_paired_unparsed" })
         );
+    }
+
+    /// `GET .../activity`: the parsed line, a `null` for a daemon too old to
+    /// have the command, and a terse 500 for anything else.
+    #[tokio::test]
+    async fn activity_route_carries_timestamps_and_knows_an_old_daemon() {
+        let h = Harness::new();
+        let (status, _) = call(&h, authed("GET", "/v1/tenants/alice/activity", "")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        call(&h, authed("POST", "/v1/tenants", &create_body("alice"))).await;
+        let (status, body) = call(&h, authed("GET", "/v1/tenants/alice/activity", "")).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, serde_json::json!({ "error": "not_running" }));
+        call(
+            &h,
+            authed(
+                "PUT",
+                "/v1/tenants/alice/credentials",
+                &credential_body("alice"),
+            ),
+        )
+        .await;
+
+        h.cluster.exec_prints(&crate::testing::activity_stdout());
+        let (status, body) = call(&h, authed("GET", "/v1/tenants/alice/activity", "")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            serde_json::json!({ "activity": {
+                "first_paired_at": "2026-03-01T09:30:00Z",
+                "platforms": {
+                    "ios": {
+                        "first_paired_at": "2026-03-02T10:00:00Z",
+                        "last_seen_at": "2026-03-09T09:00:00Z",
+                        "last_action_at": null,
+                    },
+                    "macos": {
+                        "first_paired_at": "2026-03-01T09:30:00Z",
+                        "last_seen_at": "2026-03-09T08:00:00Z",
+                        "last_action_at": "2026-03-08T07:00:00Z",
+                    },
+                },
+            }})
+        );
+        assert!(!body.to_string().contains("example.com"));
+
+        h.cluster
+            .exec_prints(&crate::testing::activity_none_stdout());
+        let (_, body) = call(&h, authed("GET", "/v1/tenants/alice/activity", "")).await;
+        assert_eq!(
+            body,
+            serde_json::json!({ "activity": { "first_paired_at": null, "platforms": {} } })
+        );
+
+        h.cluster
+            .exec_fails_with(&crate::testing::activity_unsupported_stderr());
+        let (status, body) = call(&h, authed("GET", "/v1/tenants/alice/activity", "")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({ "activity": null }));
+
+        h.cluster.exec_fails();
+        let (status, body) = call(&h, authed("GET", "/v1/tenants/alice/activity", "")).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body, serde_json::json!({ "error": "activity_failed" }));
+
+        h.cluster.exec_prints("who knows\n");
+        let (status, body) = call(&h, authed("GET", "/v1/tenants/alice/activity", "")).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body, serde_json::json!({ "error": "activity_unparsed" }));
     }
 
     #[tokio::test]

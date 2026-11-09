@@ -106,7 +106,7 @@ struct MobileAgentView: View {
                     if session.transcript.isEmpty {
                         opener
                     }
-                    ForEach(session.transcript) { item in
+                    ForEach(session.transcript.chatRows) { item in
                         row(item).frame(maxWidth: .infinity, alignment: .leading)
                     }
                     if session.awaitingOutput {

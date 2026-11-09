@@ -233,6 +233,14 @@ enum SettingsSearch {
             ]),
         SettingsEntry(
             card: .notifications,
+            title: "Morning brief",
+            blurb: "A short note on your iPhone at 8 each morning about what today holds.",
+            keywords: [
+                "morning", "brief", "morning brief", "daily", "daily summary", "summary",
+                "digest", "today", "8am", "what today holds", "agenda", "iphone", "phone",
+            ]),
+        SettingsEntry(
+            card: .notifications,
             title: "Test banner",
             blurb: "Posts a notification right now to prove banners reach you.",
             keywords: [

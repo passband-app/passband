@@ -162,7 +162,7 @@ enum Pairing {
 
     /// The name this device carries in `squelchd token list`, so revoking the
     /// right one later is a matter of reading the row. The Mac's sharing name
-    /// ("Braelyn's MacBook Pro") is what a person recognises; the hostname is
+    /// ("Jamie's MacBook Pro") is what a person recognises; the hostname is
     /// the fallback, minus the `.local` that Bonjour hangs off it.
     static func defaultDeviceName() -> String {
         #if os(macOS)

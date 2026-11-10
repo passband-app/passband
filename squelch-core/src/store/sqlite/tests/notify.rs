@@ -273,8 +273,8 @@ fn the_rollout_query_and_its_three_joins_come_out_right_on_a_fixture() {
     }
 
     // RESCUED counts both rescuable fast decisions. A query written against
-    // `declined_by_model` alone reads 1 here and would have missed every
-    // notification the gateway outage of 2026-08-19 cost.
+    // `declined_by_model` alone reads 1 here and would miss every
+    // notification a gateway outage costs.
     assert_eq!(
         join(&conn, "sent", &["declined_by_model", "unavailable"]),
         2

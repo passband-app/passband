@@ -32,9 +32,9 @@
 # and then TIMES OUT counts: a failed lookup or a fast refusal proves nothing,
 # and a probe run inside `tenants` is blocked by its own default-deny), then
 # suspend the roller, set SQUELCH_WARDEN_EMBED_URL in `15-warden-config.yaml`,
-# restart the warden, move the owner's own tenant with
+# restart the warden, move one canary tenant with
 # `cexec "squelch-control reconcile <label>"` (control runs on AWS ECS; `cexec`
-# is in deploy/aws/CUTOVER.md), and only then verify with a real POST from
+# wraps `aws ecs execute-command`), and only then verify with a real POST from
 # inside that tenant (its egress rule exists only once the warden renders it).
 # The daemon image has bash and no curl:
 #

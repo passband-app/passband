@@ -5,7 +5,7 @@ OpenTofu for everything Passband runs on AWS. The contract is
 
 **No secret value ever goes through tofu.** Tofu creates Secrets Manager
 *containers* (`passband/<service>/<ENV_NAME>`) and never a version, so no value
-can land in state, a plan, a variable or a file. Values go in by hand (CUTOVER.md Phase 2 has the piped forms):
+can land in state, a plan, a variable or a file. Values go in by hand:
 
 ```sh
 aws secretsmanager put-secret-value \
@@ -31,25 +31,41 @@ Files in `main/`: `network.tf` (VPC, subnets, hand-rolled fck-nat),
 
 ## Apply order
 
-**The first-time procedure is `deploy/aws/CUTOVER.md`** (it built the
-production account, 2026-10-23 to 26), and only there, so there are not two
-versions to drift apart. Day to day, a change here is `tofu plan` then `tofu
-apply` from `main/`. In outline, and where each first-time step lives:
+Day to day, a change here is `tofu plan` then `tofu apply` from `main/`.
+Real values (state bucket, KMS key, carrier egress, and the rest) live only in
+gitignored files: `main/terraform.tfvars` (from `terraform.tfvars.example`)
+and `bootstrap/backend.hcl` (from `backend.hcl.example`). Initialize the
+bootstrap root with:
 
-| Step | CUTOVER.md |
-|---|---|
-| GitHub first: the `aws-production` environment (main only) and the repo's customized OIDC sub (`repo`, `context`, `job_workflow_ref`), before the deploy role is used. `tofu output github_deploy_oidc_sub` is the exact string the role trusts | Phase 0d |
-| `bootstrap/` with local state, then `-migrate-state` into the bucket it made | Phase 1a |
-| `main/terraform.tfvars`, including `fck_nat_ami_name`, `carrier_egress_cidrs`, `operator_cidrs = []` | Phase 1b |
-| Certificates (`-target`), validation CNAMEs at the DNS provider | Phase 1c |
-| Full apply with services at 0; confirm the security-alerts SNS subscription | Phase 1d |
-| Every secret value; the RDS app role (through an SSM port-forward, SCRAM verifier, `operator_db_access` on then off) | Phase 2 |
-| Repo variables from `tofu output github_repo_variables`, arm, first CI run | Phase 3a-3c |
-| `services_running = true` (the apply waits for steady state) | Phase 3d |
-| Bifrost first-run config with `operator_cidrs` set to your /32, then back to `[]` | Phase 4 |
+```sh
+(cd bootstrap && tofu init -backend-config=backend.hcl)
+```
 
-Run as the operator's session (`aws login --profile passband`), never with
-access keys. Requires OpenTofu >= 1.8.
+The main root's backend reads `state_bucket` and `state_kms_key_arn` from
+`terraform.tfvars`, so a plain `tofu init` works there.
+
+A first-time build of a new account, in order:
+
+1. GitHub first: the `aws-production` environment (main only) and the repo's
+   customized OIDC sub (`repo`, `context`, `job_workflow_ref`), before the
+   deploy role is used. `tofu output github_deploy_oidc_sub` is the exact
+   string the role trusts.
+2. `bootstrap/` with local state (backend block commented out), then fill
+   `backend.hcl` from its outputs and run
+   `tofu init -backend-config=backend.hcl -migrate-state`.
+3. `main/terraform.tfvars`, including `fck_nat_ami_name`,
+   `carrier_egress_cidrs`, `operator_cidrs = []`.
+4. Certificates (`-target`), validation CNAMEs at the DNS provider.
+5. Full apply with services at 0; confirm the security-alerts SNS subscription.
+6. Every secret value; the RDS app role (through an SSM port-forward, SCRAM
+   verifier, `operator_db_access` on then off).
+7. Repo variables from `tofu output github_repo_variables`, then the first CI run.
+8. `services_running = true` (the apply waits for steady state).
+9. Bifrost first-run config with `operator_cidrs` set to your /32, then back
+   to `[]`.
+
+Run as the operator's session (`aws login`), never with access keys.
+Requires OpenTofu >= 1.8.
 
 ## Who owns what after the first apply
 
@@ -92,8 +108,7 @@ source-ip values per rule, so alb.tf cuts each allow-list into rules of 3.
 `audit.tf` wires CloudTrail to EventBridge to an encrypted SNS topic that
 mails `budget_email` on: Secrets Manager reads/writes by anyone but the ECS
 execution roles and the monitor role, ECS Exec, SSM sessions, IAM writes,
-console sign-ins, and anything that stops or rewrites the trail. Its header
-comment lists what it cannot see. GuardDuty is `enable_guardduty` (off; about
+console sign-ins, and anything that stops or rewrites the trail. GuardDuty is `enable_guardduty` (off; about
 $5-15/month).
 
 ## Bumping the NAT AMI

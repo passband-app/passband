@@ -3753,21 +3753,21 @@ mod microsoft_tests {
     #[test]
     fn the_stored_accounts_id_keeps_the_configured_address() {
         let me: GraphMe = serde_json::from_str(
-            r#"{"id":"313658d2f27bcf04","mail":"braelyn@passband.app","userPrincipalName":"braelyn@passband.app"}"#,
+            r#"{"id":"a1b2c3d4e5f60718","mail":"jamie@example.com","userPrincipalName":"jamie@example.com"}"#,
         )
         .unwrap();
-        let want = Some("passband-qa@outlook.com");
+        let want = Some("qa-account@outlook.com");
         assert_eq!(
-            me.address_for(want, Some("313658d2f27bcf04")).as_deref(),
-            Some("passband-qa@outlook.com")
+            me.address_for(want, Some("a1b2c3d4e5f60718")).as_deref(),
+            Some("qa-account@outlook.com")
         );
         assert_eq!(
             me.address_for(want, Some("someone-else")).as_deref(),
-            Some("braelyn@passband.app")
+            Some("jamie@example.com")
         );
         assert_eq!(
             me.address_for(want, None).as_deref(),
-            Some("braelyn@passband.app")
+            Some("jamie@example.com")
         );
         // No id from Graph proves nothing.
         let anon: GraphMe = serde_json::from_str(r#"{"mail":"x@outlook.com"}"#).unwrap();

@@ -1,16 +1,11 @@
 # AWS: the production design
 
 Production (control, relay, bifrost, monitoring, the landing site) runs on AWS
-as described here. Why AWS: our previous host's customer env-var store was
-breached on 2026-10-21, so every secret was rotated and every service moved.
-The move finished 2026-10-26; `CUTOVER.md` is its record.
+as described here.
 Tenants (the k3s box `carrier` on Hetzner) stay put for now; they move later as
 k3s on EC2, and EKS only when a second node is needed.
 
-This file is the contract. Builders implement it; a change to anything below is
-a question for the operator, not a judgement call.
-
-## Decisions (locked 2026-10-23)
+## Decisions
 
 | | |
 |---|---|
@@ -92,11 +87,10 @@ Blackbox has NO public route, ever.
   `maximhq/bifrost:v1.6.9` by digest), pushed to ECR.
 - Secret: `ANTHROPIC_API_KEY`. Env: `APP_HOST`, `APP_PORT`.
 - **Store:** if Bifrost v1.6.9 supports a Postgres config store AND log store
-  (check its source/docs at that tag, cite what you found), use the same RDS
+ , use the same RDS
   instance with a separate database `bifrost` and its own role. Otherwise EFS at
   `/app/data`, single task, same min 0 / max 100 rule. Either way content
-  logging is OFF (it is a UI/config setting, see `deploy/hosted/PRODUCTION.md`
-  "The LLM gateway"); the runbook must include checking it.
+  logging is OFF (it is a UI/config setting); the runbook must include checking it.
 - `desired_count = 1`.
 
 ### monitoring (EC2 `monitor`)
@@ -127,10 +121,10 @@ Blackbox has NO public route, ever.
 
 - `.github/workflows/deploy-aws.yml`: on push to `main` (path-filtered per
   service) and `workflow_dispatch` (per service). Every job is gated on the repo
-  variable `AWS_DEPLOY_ENABLED == 'true'` (set since 2026-10-24); unset it to
+  variable `AWS_DEPLOY_ENABLED == 'true'`; unset it to
   stop all AWS deploys at once.
 - GitHub → AWS via OIDC, one role, trust restricted to
-  the customized immutable sub (`repo:passband-app@<id>/passband@<id>:environment:aws-production:job_workflow_ref:...deploy-aws.yml@refs/heads/main`; CUTOVER.md 0d) (and the `workflow_dispatch`
+  the customized immutable sub (`repo:passband-app@<id>/passband@<id>:environment:aws-production:job_workflow_ref:...deploy-aws.yml@refs/heads/main`) (and the `workflow_dispatch`
   environment). Permissions: push to these ECR repos, update these ECS
   services, SSM SendCommand to the monitor instance, S3 sync + CloudFront
   invalidation for the site. Nothing else.
@@ -152,15 +146,14 @@ Blackbox has NO public route, ever.
    EFS, the monitor data volume, the state bucket.
 5. **Least privilege per task**: each ECS task role/execution role reads only
    its own `passband/<service>/*` secrets.
-6. **No new `SQUELCH_*` env vars** (operator rule) except where this design
-   names one. The TLS change rides on the existing `DATABASE_URL`'s `sslmode`.
-7. Plain commit messages, no Co-Authored-By trailers. Builders do NOT commit.
+6. **No new `SQUELCH_*` env vars** except where this design names one. The
+   TLS change rides on the existing `DATABASE_URL`'s `sslmode`.
 
 ## Cost target
 
 Roughly $70–100/month: ALB, 3 small Fargate ARM tasks, db.t4g.micro, t4g.small,
 t4g.nano NAT, EFS/EBS pennies. Add an AWS Budgets alarm at $150/month to the
-operator's email. Flag anything that pushes past this.
+operator's email.
 
 ## Out of scope (for now)
 

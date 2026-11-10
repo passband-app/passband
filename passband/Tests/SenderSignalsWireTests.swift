@@ -96,12 +96,12 @@ struct SenderSignalsWireTests {
     }
 
     static func relayAddressesShowTheirDomain() {
-        let pm = "e6f85070728474e32e7ac94e8835fd9f+296450@inbound.postmarkapp.com"
+        let pm = "0a1b2c3d4e5f60718293a4b5c6d7e8f9+123456@inbound.postmarkapp.com"
         let line = SenderSignals(reply_to: pm).line(senderKnown: false)
         expect(line?.parts == ["Replies go to inbound.postmarkapp.com"], "a routing tag shows its domain: \(line?.parts ?? [])")
         expect(line?.detail == "Replies go to \(pm)", "the tooltip keeps the whole address")
         expect(SenderSignals.readableAddress("reply+8a7d6c5b4e3f2a1b@help.example") == "help.example", "a ticket tag")
-        expect(SenderSignals.readableAddress("support@taxfyle.zendesk.com") == "support@taxfyle.zendesk.com", "a person-shaped mailbox stays")
+        expect(SenderSignals.readableAddress("support@acme.zendesk.com") == "support@acme.zendesk.com", "a person-shaped mailbox stays")
         expect(SenderSignals.readableAddress("jane.doe2024@corp.example") == "jane.doe2024@corp.example", "a few digits stay")
         expect(SenderSignals.readableAddress("no-at-sign") == "no-at-sign", "not an address")
     }

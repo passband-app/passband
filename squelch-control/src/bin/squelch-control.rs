@@ -134,9 +134,8 @@ enum LlmCommand {
     /// The provider key's `models` list is the one place a model id is
     /// spelled that NOTHING owned: not the warden, not signup, not `llm
     /// mint`. It is a second allow-list sitting behind every virtual key's,
-    /// and on 2026-08-25 it was still naming `claude-opus-4-8` while the
-    /// whole fleet had moved to `claude-opus-5`, so every tenant's triage
-    /// call died at routing and the fleet ran heuristics-only for days. This
+    /// and when it still names an old model after the fleet moves to a new
+    /// one, every tenant's triage call dies at routing. This
     /// writes that list from `SQUELCH_CONTROL_LLM_MODELS` and
     /// `SQUELCH_CONTROL_ASSISTANT_MODELS`, which is what makes those two
     /// variables the actual source of truth rather than two thirds of one.
@@ -785,10 +784,10 @@ async fn llm_topup(
 ///   would converge the gateway and leave the POD holding a key the warden
 ///   installed, so the fix is `llm mint <label>`, which rotates both ends.
 ///
-/// The whitespace check is not decoration. The canary's virtual key was typed
-/// into the gateway UI as `anthropic/claude-opus-5 , claude-opus-5 ` and
-/// stored with the spaces intact; the gateway matches exactly, so every probe
-/// 403'd for four days while the entry LOOKED right in every listing. An
+/// The whitespace check is not decoration. A virtual key typed into the
+/// gateway UI as `anthropic/claude-opus-5 , claude-opus-5 ` is stored with the
+/// spaces intact; the gateway matches exactly, so every probe 403s while the
+/// entry LOOKS right in every listing. An
 /// untrimmed entry is reported for every key, managed or not, because it is
 /// invisible in exactly the places a human would go to check.
 async fn llm_sync(bifrost: &BifrostClient, llm: &BifrostConfig, check: bool) -> anyhow::Result<()> {

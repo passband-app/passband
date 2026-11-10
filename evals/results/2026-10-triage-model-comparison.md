@@ -1,8 +1,8 @@
 # Triage model comparison, October 2026
 
 Tested 2026-10-01 (Claude models) and 2026-10-02 (open-weight models on
-Fireworks) with `squelch-eval` (see `../README.md`) against the owner's own
-mailbox. Total spend: about $44 on the Anthropic API and $28 on Fireworks.
+Fireworks) with `squelch-eval` (see `../README.md`) against one development
+mailbox.
 
 **Verdict.** Claude Opus 5.5 at effort `low` is the only change with no
 measurable loss: 37% cheaper and twice as fast as the production config
@@ -20,8 +20,8 @@ run reads as if it had covered the whole dataset.
 
 - Every stored agent decision since the 2026-09-20 cutover with exactly one
   applied triage run: 1,109 cases out of 1,158 decisions (44 messages were
-  triaged more than once and their first decision is gone; 8 were the
-  owner's own mail; 1 had no stored decision).
+  triaged more than once and their first decision is gone; 8 were mail the
+  mailbox owner sent; 1 had no stored decision).
 - Fidelity: 1,004 exact, 102 reconstructed (threads), 3 suspect (excluded).
 - Gold distribution: 97 FYE items, 35 auth mails, 13 restricted, 53 pushes,
   331 with records, 678 Reading. The majority class ("promotional, Reading,
@@ -71,8 +71,8 @@ Notes on cost:
   (`us.api.fireworks.ai`, 1.5x the base price). GLM 5.3, GLM 5.3 Flash,
   DeepSeek V4.1 Flash and Kimi K3 have US-only routers; Qwen, MiniMax and
   gpt-oss do not and ran on the default endpoint, whose serving region
-  Fireworks does not state. The owner approved the default endpoint for
-  testing only; production would need the US routers.
+  Fireworks does not state. The default endpoint is acceptable for testing
+  only; production would need the US routers.
 
 ## 3. Accuracy against today's Opus (`report --reference production@xhigh`)
 
@@ -133,8 +133,7 @@ text: Opus `low` 0.61, Sonnet 0.53 to 0.56, Kimi 0.77, DeepSeek 1.03.
 better. It shows 14 items `xhigh` does not and buries 4 it does. Text is a
 third shorter and reasons diverge more (`reason_sim` -0.05). Half the
 latency. One config change (`[stage2] effort = "low"`, or
-`SQUELCH_STAGE2_EFFORT=low`). Set on the owner's local daemon on 2026-10-01
-to compare with the hosted account, which stayed on `xhigh`.
+`SQUELCH_STAGE2_EFFORT=low`).
 
 **Sonnet 5.5 (`medium` and `low` behave alike).** Matches Opus on kinds,
 Reading, auth detection and the push threshold. Two real gaps. It leaves
@@ -174,7 +173,7 @@ and files almost everything under Reading (194 false of 95 real). GLM 5.3
 Flash is the cheapest model tested and the same shape, worse.
 
 **Qwen 3.8 Max at `low` (Fireworks).** Slow (39 s median, 90 s p95 at the
-timeout), 2.78 turns per email, 45 of 246 failed, hit its $8 cap at case
+timeout), 2.78 turns per email, 45 of 246 failed, hit its spend cap at case
 246. Pushed 33 false against 14 real on the cases it finished.
 
 **gpt-oss-120b and MiniMax M3 (Fireworks).** 177 and 162 failures: the
@@ -256,7 +255,7 @@ without a login, naming door and Wi-Fi codes, PINs, document upload links
 and private file or gallery links, (b) spells out what a meaningful
 development is for FYE, and (c) asks for user-facing text without em
 dashes. Sonnet 5.5 `medium` and Opus 5.5 `low` were re-run on the same 393
-cases and scored against the v5 `xhigh` reference (about $14).
+cases and scored against the v5 `xhigh` reference.
 
 | | Sonnet v5 | Sonnet v6 | Opus `low` v5 | Opus `low` v6 |
 |---|---|---|---|---|
@@ -290,7 +289,7 @@ and if so which.
 
 ## 9. Open follow-ups
 
-1. A second production rep for the noise floor (about $18).
+1. A second production rep for the noise floor.
 2. Opus 5.5 at `medium`, untested.
 3. Decide the sealing policy for login-free links (section 8), write
    prompt v7 to match, then re-run Sonnet 5.5, Opus `low` and Kimi K3.

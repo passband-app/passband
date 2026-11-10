@@ -272,7 +272,7 @@ enum PhoneReleaseNotes {
 
     /// THE PHONE'S GATE. A NEWCOMER is somebody this install met at the
     /// Connect gate with no mailbox on it. They are shown the LATEST release
-    /// when they first reach the Sitrep (owner's call, 2026-10-30: new users
+    /// when they first reach the Sitrep (new users
     /// see what is new too), and nothing older: they are stamped with the
     /// release just below it, so the first sync after connecting raises one
     /// release. On a build below the whole table there is nothing to show, so

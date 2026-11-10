@@ -17,7 +17,7 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
 /// The merchant half of an order's identity: lowercase alphanumerics, so
-/// "Bill's Exhausts" and "BILLS EXHAUSTS" are one namespace.
+/// "Rivera Exhaust Works" and "RIVERA EXHAUST WORKS" are one namespace.
 pub fn merchant_key(merchant: &str) -> String {
     merchant
         .chars()
@@ -27,7 +27,7 @@ pub fn merchant_key(merchant: &str) -> String {
 }
 
 /// The order half: uppercase alphanumerics of the SANITIZED reference, so
-/// "#21470", "Order 21470" and "21470" are one order.
+/// "#50417", "Order 50417" and "50417" are one order.
 pub fn order_key(order_ref: &str) -> String {
     order_ref
         .chars()
@@ -393,9 +393,9 @@ mod tests {
 
     #[test]
     fn keys_fold_spelling() {
-        assert_eq!(merchant_key("Bill's Exhausts"), "billsexhausts");
-        assert_eq!(merchant_key("BILLS EXHAUSTS"), "billsexhausts");
-        assert_eq!(order_key("#21470"), "21470");
+        assert_eq!(merchant_key("Rivera Exhaust Works"), "riveraexhaustworks");
+        assert_eq!(merchant_key("RIVERA EXHAUST WORKS"), "riveraexhaustworks");
+        assert_eq!(order_key("#50417"), "50417");
         assert_eq!(order_key("a1-b2"), "A1B2");
     }
 
@@ -438,20 +438,25 @@ mod tests {
         let old = row(
             1,
             5,
-            "Austin Racing DB Killer AUR10",
-            vec![order(Some("Bill's Exhausts"), "21470")],
+            "Trackside Muffler Insert TM10",
+            vec![order(Some("Rivera Exhaust Works"), "50417")],
         );
-        let mut new = row(2, 1, "", vec![order(Some("BILLS EXHAUSTS"), "#21470")]);
+        let mut new = row(
+            2,
+            1,
+            "",
+            vec![order(Some("RIVERA EXHAUST WORKS"), "#50417")],
+        );
         new.merchant = None;
         let cards = group_shipments(vec![old, new]);
         assert_eq!(cards.len(), 1);
         let card = &cards[0];
         assert_eq!(card.id, 2, "newest last_update represents");
         assert_eq!(
-            card.item_name, "Austin Racing DB Killer AUR10",
+            card.item_name, "Trackside Muffler Insert TM10",
             "name from the group"
         );
-        assert_eq!(card.merchant.as_deref(), Some("Bill's Exhausts"));
+        assert_eq!(card.merchant.as_deref(), Some("Rivera Exhaust Works"));
         assert_eq!(card.legs.len(), 1);
         assert_eq!(card.legs[0].id, 1);
         assert_eq!(card.orders.len(), 1);
@@ -498,8 +503,8 @@ mod tests {
         assert_eq!(sanitize_merchant(Some("Shopify")), None);
         assert_eq!(sanitize_merchant(Some("  ")), None);
         assert_eq!(
-            sanitize_merchant(Some("Bill's\u{202E} Exhausts")).as_deref(),
-            Some("Bill's Exhausts")
+            sanitize_merchant(Some("Rivera\u{202E} Exhaust Works")).as_deref(),
+            Some("Rivera Exhaust Works")
         );
         assert_eq!(sanitize_merchant(Some("Amazon")).as_deref(), Some("Amazon"));
     }
@@ -533,39 +538,39 @@ mod tests {
 
     #[test]
     fn a_name_that_is_the_store_carrier_or_order_is_dropped() {
-        let refs = vec!["21470".to_string()];
+        let refs = vec!["50417".to_string()];
         let name = |raw: &str| {
             sanitize_agent_item_name(
                 Some(raw),
                 "Your order shipped",
-                Some("Bill's Exhausts"),
+                Some("Rivera Exhaust Works"),
                 "ups",
                 &refs,
             )
         };
-        assert_eq!(name("Bills Exhausts"), None);
-        assert_eq!(name("#21470"), None);
+        assert_eq!(name("Rivera Exhaust Works"), None);
+        assert_eq!(name("#50417"), None);
         // A ref the item laundering alone would keep, as a product code.
-        let lettered = vec!["BX-21470".to_string()];
+        let lettered = vec!["BX-50417".to_string()];
         assert_eq!(
-            sanitize_agent_item_name(Some("BX-21470"), "Shipped", None, "ups", &lettered),
+            sanitize_agent_item_name(Some("BX-50417"), "Shipped", None, "ups", &lettered),
             None
         );
-        assert!(sanitize_agent_item_name(Some("BX-21470"), "Shipped", None, "ups", &[]).is_some());
+        assert!(sanitize_agent_item_name(Some("BX-50417"), "Shipped", None, "ups", &[]).is_some());
         assert_eq!(name("Arriving soon"), None);
         assert_eq!(
-            name("Austin Racing DB Killer AUR10").as_deref(),
-            Some("Austin Racing DB Killer AUR10")
+            name("Trackside Muffler Insert TM10").as_deref(),
+            Some("Trackside Muffler Insert TM10")
         );
     }
 
     #[test]
     fn refs_are_sanitized_and_deduped() {
         let refs = sanitize_order_refs(&[
-            "Order #21470".into(),
-            "21470".into(),
+            "Order #50417".into(),
+            "50417".into(),
             "https://evil.example/x".into(),
         ]);
-        assert_eq!(refs, vec!["21470".to_string()]);
+        assert_eq!(refs, vec!["50417".to_string()]);
     }
 }

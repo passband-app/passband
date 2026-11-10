@@ -74,7 +74,7 @@ struct EventDraftTests {
     static func day(_ s: String) -> Date { cal.startOfDay(for: at(s + "T12:00:00-07:00")) }
 
     static func draft(
-        _ title: String = "Dreamers Dinner", date: String = "Thu Oct 8", start: String = "7:45pm",
+        _ title: String = "Potluck Dinner", date: String = "Thu Oct 8", start: String = "7:45pm",
         end: String = "9pm", allDay: Bool = false, endDate: String = "", location: String = "",
         notes: String = "", calendarId: String? = "primary"
     ) -> EventDraft {
@@ -85,7 +85,7 @@ struct EventDraftTests {
     }
 
     static func event(
-        _ id: String = "e1", title: String? = "Dreamers Dinner", start: String, end: String?,
+        _ id: String = "e1", title: String? = "Potluck Dinner", start: String, end: String?,
         allDay: Bool = false, calendar: String = "primary", location: String? = nil,
         description: String? = nil, editable: Bool? = true
     ) -> TimelineEvent {
@@ -178,7 +178,7 @@ struct EventDraftTests {
 
     static func aTimedDraftToTheWire() {
         let w = wire(draft(location: "  Zuni Cafe ", notes: " table for 4 "))
-        expect(w?.calendar_id == "primary" && w?.title == "Dreamers Dinner" && w?.all_day == false, "the fields")
+        expect(w?.calendar_id == "primary" && w?.title == "Potluck Dinner" && w?.all_day == false, "the fields")
         expect(w?.start == "2026-10-08T19:45:00-07:00", "the start with its offset")
         expect(w?.end == "2026-10-08T21:00:00-07:00", "the end with its offset")
         expect(w?.location == "Zuni Cafe" && w?.description == "table for 4", "trimmed")
@@ -363,7 +363,7 @@ struct EventDraftTests {
         let dinner = moved(draft(), "2026-10-14")
         expect(dinner.date == "Wed Oct 14" && dinner.start == "7:45pm" && dinner.end == "9pm",
                "the day moves and the times stay")
-        expect(dinner.title == "Dreamers Dinner" && dinner.endDate.isEmpty, "nothing else changes")
+        expect(dinner.title == "Potluck Dinner" && dinner.endDate.isEmpty, "nothing else changes")
         let trip = moved(draft(date: "Oct 14", allDay: true, endDate: "Oct 19"), "2026-10-21")
         expect(trip.date == "Wed Oct 21" && trip.endDate == "Mon Oct 26", "a run of days keeps its length")
         let oneDay = moved(draft(allDay: true), "2026-10-21")
@@ -385,7 +385,7 @@ struct EventDraftTests {
         }
         let dinner = row(draft())
         expect(dinner?.id == EventForm.provisionalId, "one id, whatever is typed")
-        expect(dinner?.title == "Dreamers Dinner" && dinner?.start == at("2026-10-08T19:45:00-07:00")
+        expect(dinner?.title == "Potluck Dinner" && dinner?.start == at("2026-10-08T19:45:00-07:00")
                && dinner?.end == at("2026-10-08T21:00:00-07:00") && dinner?.allDay == false,
                "on the day and at the times the fields say")
         expect(dinner?.event?.color == "#039be5", "in the chosen calendar's colour")
@@ -598,7 +598,7 @@ struct EventDraftTests {
         let a = event("a", start: "2026-10-08T09:00:00-07:00", end: "2026-10-08T10:00:00-07:00")
         let before = TimelineFeed(events: [a])
         let body = EventWrite(
-            calendar_id: "primary", title: "Dreamers Dinner", start: "2026-10-08T19:45:00-07:00",
+            calendar_id: "primary", title: "Potluck Dinner", start: "2026-10-08T19:45:00-07:00",
             end: "2026-10-08T21:00:00-07:00", all_day: false, location: nil, description: nil)
         let had = CalendarWrite.keys(before)
         expect(CalendarWrite.made(body, before: had, in: before) == nil,
@@ -1025,7 +1025,7 @@ struct EventDraftTests {
         expect(CalendarWrite.edited(a, passcode, in: TimelineFeed(events: [a])) == nil,
                "W5: a change that cannot be seen is not confirmed")
         // A title that did not move is not this edit, whatever was typed.
-        expect(CalendarWrite.edited(a, EventPatch(title: "Dreamers  Dinner"), in: TimelineFeed(events: [a])) == nil,
+        expect(CalendarWrite.edited(a, EventPatch(title: "Potluck  Dinner"), in: TimelineFeed(events: [a])) == nil,
                "a title still as it was is not confirmed")
         // Times sent as a pair: an unchanged start is not asked to move.
         let later = EventPatch(start: "2026-10-08T09:00:00-07:00", end: "2026-10-08T11:00:00-07:00")

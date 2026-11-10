@@ -295,16 +295,14 @@ through an incoming webhook.
 | Embedding service refusing requests | `squelch_embed_requests_total` moving for `unauthorized`, `not_ready` or `error`, or for `queue_full` on the interactive lane or before a request has a lane (`none`) | 10m |
 | Embedding service near its memory limit | `squelch-embed`'s working set is 85% or more of its own limit (768Mi today) | 5m |
 
-The first and the third are 2026-09-28: the quota was full at five tenants and
-the first anyone heard of it was a new user stuck on a signup that timed out.
-The second is what the fix to that did: the quota was raised on the box with a
-`kubectl patch` the file in git did not carry, so a hard line changing, or the
-set of lines changing, is now announced, expected once after an apply of the
-file and otherwise a patch the file does not record
-(`deploy/hosted/PRODUCTION.md`, "How many tenants fit"); the quota being deleted
-outright is the seventh rule's, which reads these series. The fourth is the sync
-alert this README recommended above, which until now nothing fired. The fifth
-is 2026-09-29: memory is the box's bottleneck, and with nothing reserved
+The first and the third exist because a full quota makes signups time out
+with no other signal. The second catches drift between the quota on the box
+and the file in git: a hard line changing, or the set of lines changing, is
+announced, expected once after an apply of the file and otherwise a
+`kubectl patch` the file does not record; the quota being deleted outright is
+the seventh rule's, which reads these series. The fourth is the sync alert
+this README recommended above. The fifth exists because memory is the box's
+bottleneck, and with nothing reserved
 for k3s and no swap the RAM is the only wall, so this fires before a global OOM
 rather than after one. The sixth is the disk, which the tenants quota does not
 guard: a claim is nominal on local-path (`deploy/hosted/70-tenant-limits.yaml`),

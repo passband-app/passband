@@ -120,8 +120,7 @@ data "aws_cloudfront_cache_policy" "optimized" {
 }
 
 # The managed SecurityHeadersPolicy's headers, plus a Content-Security-Policy,
-# which the managed policy does not set and a DAST scan reports as Medium (the
-# CASA assessment runs one: docs/VERIFICATION.md). The site loads nothing but
+# which the managed policy does not set and a DAST scan reports as Medium. The site loads nothing but
 # its own files; the one cross-origin call is the waitlist form's fetch to
 # control. Inline styles stay allowed because React's `style` props and the
 # static pages' <style> blocks use them. Checked with every page loaded in

@@ -408,7 +408,7 @@ mod tests {
     /// and an unknown field must not fail the parse.
     fn detail(category: &str, summary: &str) -> String {
         json!({
-            "trackingNumber": "9400111899223817428490",
+            "trackingNumber": "9400100000000000000000",
             "statusCategory": category,
             "status": category,
             "statusSummary": summary,
@@ -504,7 +504,7 @@ mod tests {
         // The `oneOf` can answer `TrackingSummary`, which has no status fields at
         // all — the newest event line is the only verbatim text available.
         let body = json!({
-            "trackingNumber": "9400111899223817428490",
+            "trackingNumber": "9400100000000000000000",
             "expectedDeliveryDate": "2022-06-22",
             "eventSummaries": [
                 "Out for Delivery, 06/17/2022, 6:10 am, FAIRFAX, VA 22032",
@@ -788,7 +788,7 @@ mod tests {
                                 );
                             }
                             Json(json!({
-                                "trackingNumber": "9400111899223817428490",
+                                "trackingNumber": "9400100000000000000000",
                                 "statusCategory": "Delivered",
                                 "statusSummary": "Your item was delivered at 12:55 pm on April 05, 2024 in FALMOUTH, MA 02540",
                                 "trackingEvents": [
@@ -812,7 +812,7 @@ mod tests {
         let client = UspsClient::for_test(base, reqwest::Client::new());
 
         for _ in 0..2 {
-            let t = client.track("9400111899223817428490").await.unwrap();
+            let t = client.track("9400100000000000000000").await.unwrap();
             assert_eq!(t.status, Some(ShipmentStatus::Delivered));
             assert_eq!(
                 t.delivered_at,
@@ -832,7 +832,7 @@ mod tests {
             }),
             "USPS's client-credentials example is a JSON body, not Basic auth"
         );
-        assert_eq!(s.paths, ["9400111899223817428490"; 2]);
+        assert_eq!(s.paths, ["9400100000000000000000"; 2]);
         assert_eq!(s.queries, ["expand=DETAIL"; 2]);
         assert_eq!(s.authorizations, ["Bearer usps-test-token"; 2]);
     }

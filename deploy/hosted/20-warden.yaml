@@ -130,9 +130,9 @@ spec:
 # externalTrafficPolicy: Local) FIRST, or every caller looks like a cluster
 # address and this list refuses control too.
 #
-# Control calls from a fixed address: since the AWS cutover
-# (deploy/aws/CUTOVER.md Phase 6) it egresses through the NAT EIP,
-# `tofu -chdir=deploy/aws/tofu/main output -raw nat_egress_ip`.
+# Control calls from a fixed address: it egresses through the NAT EIP,
+# `tofu -chdir=deploy/aws/tofu/main output -raw nat_egress_ip`. The manifest
+# carries the token CONTROL_NAT_EIP; substitute it before applying (SETUP.md).
 #
 # Operators: call the API from the box itself through a port-forward,
 #   kubectl -n warden port-forward svc/squelch-warden 8852:8852
@@ -147,7 +147,7 @@ spec:
   ipAllowList:
     sourceRange:
       # 3. EDIT ME: control's egress (the AWS NAT EIP), as a /32.
-      - 184.33.248.151/32
+      - CONTROL_NAT_EIP/32
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress

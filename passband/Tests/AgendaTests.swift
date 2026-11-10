@@ -432,22 +432,22 @@ struct AgendaTests {
     /// without one (an older daemon, or not cleaned yet) the location shows.
     static func theCleanedPlaceIsWhatTheCardShows() {
         var raw = event("p", "Dinner", start: "2026-10-06T19:00:00-07:00")
-        raw.location = "Dingles Public House, Tock is now part of the Resy network."
+        raw.location = "Brambles Public House, Reserved through TableBook."
         let shown = { (e: TimelineEvent) in Agenda.item(e, calendar: cal)?.location }
         expect(shown(raw) == raw.location, "no place yet: the location")
         expect(Agenda.item(raw, calendar: cal)?.placeAddress == nil, "no place yet: no address")
         var cleaned = raw
         cleaned.place = TimelinePlace(
-            name: "Dingles Public House", address: "165 Main St, Northampton", original: raw.location)
+            name: "Brambles Public House", address: "88 Orchard Ave, Fairview", original: raw.location)
         let item = Agenda.item(cleaned, calendar: cal)
-        expect(item?.location == "Dingles Public House", "the cleaned name")
-        expect(item?.placeAddress == "165 Main St, Northampton", "the address under it")
+        expect(item?.location == "Brambles Public House", "the cleaned name")
+        expect(item?.placeAddress == "88 Orchard Ave, Fairview", "the address under it")
         expect(
-            item?.placeQuery == "Dingles Public House, 165 Main St, Northampton",
+            item?.placeQuery == "Brambles Public House, 88 Orchard Ave, Fairview",
             "the map asks for both")
         var onlyAddress = raw
-        onlyAddress.place = TimelinePlace(address: "165 Main St")
-        expect(shown(onlyAddress) == "165 Main St", "an address alone is the line")
+        onlyAddress.place = TimelinePlace(address: "88 Orchard Ave")
+        expect(shown(onlyAddress) == "88 Orchard Ave", "an address alone is the line")
         expect(Agenda.item(onlyAddress, calendar: cal)?.placeAddress == nil, "and not repeated")
         var nothing = raw
         nothing.place = TimelinePlace(original: raw.location)
@@ -457,14 +457,14 @@ struct AgendaTests {
         // memberwise init.
         let wire = """
             {"id":"p","calendar_id":"primary","start":"2026-10-06T19:00:00-07:00","all_day":false,
-             "location":"Dingles Public House, Tock is now part of the Resy network.",
-             "place":{"name":"Dingles Public House","address":"165 Main St","original":"Dingles Public House, Tock is now part of the Resy network."},
+             "location":"Brambles Public House, Reserved through TableBook.",
+             "place":{"name":"Brambles Public House","address":"88 Orchard Ave","original":"Brambles Public House, Reserved through TableBook."},
              "from_gmail":true,"passband_owned":true}
             """
         let decoded = try? JSONDecoder().decode(TimelineEvent.self, from: Data(wire.utf8))
-        expect(decoded?.place?.name == "Dingles Public House", "place name decodes")
-        expect(decoded?.place?.address == "165 Main St", "place address decodes")
-        expect(decoded?.place?.original?.hasPrefix("Dingles") == true, "place original decodes")
+        expect(decoded?.place?.name == "Brambles Public House", "place name decodes")
+        expect(decoded?.place?.address == "88 Orchard Ave", "place address decodes")
+        expect(decoded?.place?.original?.hasPrefix("Brambles") == true, "place original decodes")
         expect(decoded?.from_gmail == true, "from_gmail decodes")
         expect(decoded?.passband_owned == true, "passband_owned decodes")
         let bad = """
@@ -683,7 +683,7 @@ struct AgendaTests {
 
     /// FINDING 1 OF THE REVIEW: stats outlive an account switch, so until the
     /// active account's own poll lands, nothing about connecting is offered.
-    /// Wave 4: "make calendar 2, all mail 3, etc". With the page offered it
+    /// Calendar is 2, all mail 3, and so on. With the page offered it
     /// is second in the count; without it the numbers are the old ones.
     static func theNumberKeysCountTheCalendarOnlyWhenOffered() {
         let pages = ["sitrep", "emails", "auth", "rules", "groups"]

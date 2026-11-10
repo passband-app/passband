@@ -611,8 +611,8 @@ record carries, besides carrier, tracking number and status:
 
 | Field | Meaning |
 |---|---|
-| `item_name` | What is in the box, as a short label ("Austin Racing DB Killer AUR10"). Null when the mail does not say. |
-| `merchant` | Who sold it, as the customer knows the store ("Bill's Exhausts"). Never the carrier, never a relay platform like Shopify. |
+| `item_name` | What is in the box, as a short label ("Trackside Muffler Insert TM10"). Null when the mail does not say. |
+| `merchant` | Who sold it, as the customer knows the store ("Rivera Exhaust Works"). Never the carrier, never a relay platform like Shopify. |
 | `order_refs` | Every order number the box carries. When a ship notice is about an order but does not print its number, the agent looks it up in the sender's history (`read_sender_history`, `search_mail`) and cites that earlier message as evidence. Any message a tool exposed during the run is valid evidence. |
 
 All three default when absent, so decisions stored before they existed still
@@ -646,8 +646,8 @@ there ("amazon.com") instead, with no `order_merchant_msg`.
 **Order links.** `shipment_order_links(account_id, shipment_id, merchant_key,
 order_key, merchant, order_ref, source, message_id, merchant_msg)` records which
 orders each package carries, many-to-many. `merchant_key` is the merchant's lowercase alphanumerics
-("Bill's Exhausts" and "BILLS EXHAUSTS" are both `billsexhausts`); `order_key`
-is the ref's uppercase alphanumerics (`#21470` is `21470`). ONE MERCHANT PER BOX:
+("Rivera Exhaust Works" and "RIVERA EXHAUST WORKS" are both `riveraexhaustworks`); `order_key`
+is the ref's uppercase alphanumerics (`#50417` is `50417`). ONE MERCHANT PER BOX:
 every agent link of a package is filed under the package's single seller, the
 newest proposal that named one, whatever each proposal said; a proposal that
 names orders but no merchant borrows it the same way. One box is sold by one

@@ -16,8 +16,7 @@
 //! timeout, response bodies capped, and errors whose `Display` names nothing.
 //! NOTHING HERE LOGS the address or the name. Callers log the row id.
 //!
-//! Deleting an account deletes this person in PostHog by hand; see
-//! `deploy/hosted/PRODUCTION.md`, "Erasing a tenant".
+//! Deleting an account deletes this person in PostHog by hand.
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -47,8 +47,8 @@ enum EventVisualPick {
 
     /// Is Apple's answer the place the event names? Its name (or, for an
     /// address, its first line) and the event's first comma part must share
-    /// their words: every word of the shorter is in the longer. "Dingles
-    /// Public House" names "Dingles Public House, 165 Main St"; "Dingle Pub"
+    /// their words: every word of the shorter is in the longer. "Brambles
+    /// Public House" names "Brambles Public House, 88 Orchard Ave"; "Bramble Pub"
     /// does not.
     ///
     /// When the place says where it is (anything after the first comma), the

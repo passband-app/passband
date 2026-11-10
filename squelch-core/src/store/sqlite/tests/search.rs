@@ -53,7 +53,7 @@ fn human_search_includes_restricted_mail_and_delete_rule_works() {
 // strict block first, the any-only block below it, and an exact page cut out
 // of the two together.
 
-/// The motivating query in miniature. The mail that answers it says "abstract"
+/// The motivating query in miniature. The mail that answers it says "fieldnotes"
 /// and "wifi" and never says "conference" or "password", and "wifi" appears in
 /// exactly one message — which is precisely why ANDing the four words threw
 /// away the one row worth having.
@@ -62,7 +62,7 @@ fn a_word_the_best_mail_lacks_no_longer_hides_it() {
     let (store, acct) = store();
 
     let right = triaged(acct, "g-right", "t-right")
-        .subject("Abstract is today.")
+        .subject("Fieldnotes is today.")
         .body("Have your QR code ready when you get to the venue. Wifi and the FAQ are on the same page.")
         .seed(&store);
     // Mail that carries the common words and none of the rare ones.
@@ -72,7 +72,7 @@ fn a_word_the_best_mail_lacks_no_longer_hides_it() {
         .seed(&store);
 
     let hits = store
-        .search(acct, "abstract conference wifi password", 10, 0)
+        .search(acct, "fieldnotes conference wifi password", 10, 0)
         .unwrap();
     let ids: Vec<i64> = hits.iter().map(|h| h.id).collect();
     assert_eq!(
@@ -391,12 +391,12 @@ fn the_keyword_and_hybrid_legs_agree_about_what_a_query_means() {
     let (store, acct) = store();
 
     let right = triaged(acct, "g-right", "t-right")
-        .subject("Abstract is today.")
+        .subject("Fieldnotes is today.")
         .body("Wifi and the FAQ are on the same page.")
         .seed(&store);
 
     let keyword: Vec<i64> = store
-        .search(acct, "abstract conference wifi password", 10, 0)
+        .search(acct, "fieldnotes conference wifi password", 10, 0)
         .unwrap()
         .iter()
         .map(|h| h.id)
@@ -404,7 +404,7 @@ fn the_keyword_and_hybrid_legs_agree_about_what_a_query_means() {
     let hybrid: Vec<i64> = store
         .hybrid_search(
             acct,
-            "abstract conference wifi password",
+            "fieldnotes conference wifi password",
             &SearchFilter::default(),
             SearchSort::Recent,
             false,
@@ -2060,13 +2060,13 @@ fn the_fts_table_drives_every_join() {
 fn unfinished_search_groups_before_strict_matches_and_page_boundaries() {
     let (store, acct) = store();
     let done_strict = triaged(acct, "done-strict", "done-strict")
-        .subject("anjuna tickets")
+        .subject("festival tickets")
         .seed(&store);
     let open_partial = triaged(acct, "open-partial", "open-partial")
         .subject("tickets")
         .seed(&store);
     let open_strict = triaged(acct, "open-strict", "open-strict")
-        .subject("anjuna tickets")
+        .subject("festival tickets")
         .seed(&store);
     let done_partial = triaged(acct, "done-partial", "done-partial")
         .subject("tickets")
@@ -2078,14 +2078,14 @@ fn unfinished_search_groups_before_strict_matches_and_page_boundaries() {
     }
     let other = store.ensure_account("other-search@example.com").unwrap();
     triaged(other, "sealed", "sealed")
-        .subject("anjuna tickets")
+        .subject("festival tickets")
         .sealed(SealedKind::Otp)
         .seed(&store);
     for sort in [SearchSort::Recent, SearchSort::BestMatch] {
         let full = store
             .search_unfinished_first(
                 acct,
-                "anjuna tickets",
+                "festival tickets",
                 &SearchFilter::default(),
                 sort,
                 true,
@@ -2108,7 +2108,7 @@ fn unfinished_search_groups_before_strict_matches_and_page_boundaries() {
                     store
                         .search_unfinished_first(
                             acct,
-                            "anjuna tickets",
+                            "festival tickets",
                             &SearchFilter::default(),
                             sort,
                             true,
@@ -2125,7 +2125,7 @@ fn unfinished_search_groups_before_strict_matches_and_page_boundaries() {
         }
     }
     // Opt-in: ordinary search still places strict matches before partial ones.
-    let ordinary = store.search(acct, "anjuna tickets", 50, 0).unwrap();
+    let ordinary = store.search(acct, "festival tickets", 50, 0).unwrap();
     assert!(
         ordinary.iter().position(|h| h.id == done_strict).unwrap()
             < ordinary.iter().position(|h| h.id == open_partial).unwrap()
@@ -2307,7 +2307,7 @@ fn first_keyword_page_only_counts_when_it_reaches_the_strict_seam() {
     let (store, acct) = store();
     for i in 0..4 {
         triaged(acct, &format!("strict-{i}"), &format!("strict-{i}"))
-            .subject("anjuna tickets")
+            .subject("festival tickets")
             .seed(&store);
     }
     triaged(acct, "partial-count", "partial-count")
@@ -2317,7 +2317,7 @@ fn first_keyword_page_only_counts_when_it_reaches_the_strict_seam() {
     let (first, count) = store
         .search_filtered_counted(
             acct,
-            "anjuna tickets",
+            "festival tickets",
             &filter,
             SearchSort::Recent,
             true,
@@ -2333,7 +2333,7 @@ fn first_keyword_page_only_counts_when_it_reaches_the_strict_seam() {
     let (all, count) = store
         .search_filtered_counted(
             acct,
-            "anjuna tickets",
+            "festival tickets",
             &filter,
             SearchSort::Recent,
             true,

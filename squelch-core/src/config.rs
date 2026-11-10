@@ -337,9 +337,9 @@ pub struct SyncConfig {
     /// half idle. Overlapping the GETs lets the budget be the only limiter,
     /// which is what it is for.
     ///
-    /// 2, MEASURED. On a real mailbox (805 INBOX + 9 SENT over 30 days, release
-    /// build, 2026-09-28) the window took 333 s at width 1, 226 s at width 2 and
-    /// 228 s at width 4: from two onward the shared Gmail budget (about four
+    /// 2, MEASURED. On a 30-day window of an ordinary mailbox (release build)
+    /// width 2 took about two thirds of the time of width 1, and width 4 was no
+    /// faster than width 2: from two onward the shared Gmail budget (about four
     /// `messages.get` a second under the Standard profile) is the only limiter,
     /// so a wider window buys nothing. What it costs is memory: every in-flight
     /// message is a raw RFC 822 body held until it is ingested, plus its base64
@@ -1297,8 +1297,8 @@ pub struct EmbedConfig {
     /// released, against a hosted pod limit of 1 Gi; a batch of 8 costs +324 MB;
     /// a batch of 1 costs +21-44 MB. At the shipped `max_tokens` of 256 the same
     /// batch of 8 costs about +123 MB and a batch of 1 about +13 MB; the ratio
-    /// between batch sizes is the point and it does not move. 64 is what got two
-    /// tenant daemons OOM-killed on 2026-08-19.
+    /// between batch sizes is the point and it does not move. A batch of 64 gets
+    /// a hosted daemon OOM-killed.
     ///
     /// Throughput is not what this trades against, because the pass is only
     /// ever draining what ingest could not embed at the time and ingest embeds
@@ -1687,11 +1687,10 @@ pub struct Stage2Config {
     /// more thinking), not a bigger brain.
     pub model: String,
     /// Reasoning depth, sent as `output_config.effort`. This is the triage
-    /// agent's effort too. `low` since October 2026: replaying 393 of the
-    /// owner's triaged emails through the agent at `low` matched the `xhigh`
-    /// run on every placement and security metric, buried 4 of 93 FYE items
-    /// it showed (and showed 14 it did not), halved latency and cut cost 37%,
-    /// because output tokens were two thirds of the bill
+    /// agent's effort too. `low` by default: replaying a sample of triaged
+    /// mail through the agent at `low` matched the `xhigh` run on every
+    /// placement and security metric, halved latency and cut cost by about a
+    /// third, because output tokens were two thirds of the bill
     /// (`evals/results/2026-10-triage-model-comparison.md`). This is the
     /// STEADY-STATE effort: the jobs a new account's user is waiting on run
     /// at [`Self::onboarding_effort`] for its first [`Self::onboarding_days`],
@@ -1901,7 +1900,7 @@ impl Stage2Config {
     /// against the gateway (which accepts only virtual keys) until
     /// `squelch-control llm mint` re-applies the Deployment. The sync passes
     /// treat those 401s as config-level — rows stay queued — so the backlog
-    /// survives until the re-apply; see deploy/hosted/PRODUCTION.md, "History".
+    /// survives until the re-apply.
     pub fn resolve_llm(&self) -> Option<ResolvedLlm> {
         // Validate the override BEFORE provider inference: a rejected URL is
         // absent everywhere, so it cannot flip a key onto the Anthropic wire
@@ -3694,7 +3693,7 @@ archive_days = 730
         unsafe {
             std::env::set_var(
                 "SQUELCH_MCP_ALLOWED_HOSTS",
-                " braelyns-mbp.tail15becf.ts.net , example.com:8080 ,",
+                " laptop.tailnet.example , example.com:8080 ,",
             );
         }
         let hosts = mcp_allowed_hosts();
@@ -3702,7 +3701,7 @@ archive_days = 730
         assert!(hosts.contains(&"localhost".to_string()));
         assert!(hosts.contains(&"127.0.0.1".to_string()));
         // ...and the extras are added, trimmed, blanks dropped.
-        assert!(hosts.contains(&"braelyns-mbp.tail15becf.ts.net".to_string()));
+        assert!(hosts.contains(&"laptop.tailnet.example".to_string()));
         assert!(hosts.contains(&"example.com:8080".to_string()));
         assert_eq!(hosts.len(), 5);
         unsafe {
@@ -4010,7 +4009,7 @@ archive_access_daily_cap = 9
     }
 
     /// Both stages run the SAME model on purpose: escalation buys context,
-    /// not a bigger model. Since October 2026 it does not buy reasoning depth
+    /// not a bigger model. It does not buy reasoning depth
     /// either: the eval found `low` as good as `xhigh` on triage, so both
     /// stages sit at `low`. If the models ever diverge by default, the
     /// escalation story has quietly changed and the prompts and docs that

@@ -41,7 +41,7 @@ struct EventVisualPickTests {
     }
 
     static func onlyAPlaceToGoIsLookedUp() {
-        expect(EventVisualPick.wantsVenue("Dingles Public House"), "a venue")
+        expect(EventVisualPick.wantsVenue("Brambles Public House"), "a venue")
         expect(EventVisualPick.wantsVenue("165 Main St, Brooklyn"), "an address")
         expect(!EventVisualPick.wantsVenue("zoom.us/j/123"), "a meeting link")
         expect(!EventVisualPick.wantsVenue("Zoom"), "a call")
@@ -53,21 +53,21 @@ struct EventVisualPickTests {
 
     static func applesAnswerMustBeThePlaceNamed() {
         expect(
-            EventVisualPick.venueMatches(place: "Dingles Public House", name: "Dingles Public House"),
+            EventVisualPick.venueMatches(place: "Brambles Public House", name: "Brambles Public House"),
             "the same name")
         expect(
             EventVisualPick.venueMatches(
-                place: "Dingles Public House, 165 Main St", name: "Dingles Public House",
-                address: "165 Main St, Northampton, MA 01060"),
+                place: "Brambles Public House, 88 Orchard Ave", name: "Brambles Public House",
+                address: "88 Orchard Ave, Fairview, OR 97024"),
             "the name before the address")
         expect(EventVisualPick.venueMatches(place: "The Grill", name: "Grill"), "small words are free")
         expect(
             EventVisualPick.venueMatches(place: "Café Mogador", name: "Cafe Mogador"),
             "accents are free")
         expect(
-            !EventVisualPick.venueMatches(place: "Dingles Public House", name: "Dingle Pub"),
+            !EventVisualPick.venueMatches(place: "Brambles Public House", name: "Bramble Pub"),
             "a lookalike")
-        expect(!EventVisualPick.venueMatches(place: "Dingles Public House", name: nil), "no name")
+        expect(!EventVisualPick.venueMatches(place: "Brambles Public House", name: nil), "no name")
         expect(
             EventVisualPick.venueMatches(
                 place: "Starbucks, 12 Main St, Portland ME", name: "Starbucks",
@@ -84,7 +84,7 @@ struct EventVisualPickTests {
             "an address to check and none to check it against")
         expect(
             EventVisualPick.venueMatches(
-                place: "Dingles Public House, Suite", name: "Dingles Public House", address: nil),
+                place: "Brambles Public House, Suite", name: "Brambles Public House", address: nil),
             "only street words after the comma: nothing to check")
     }
 

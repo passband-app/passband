@@ -479,7 +479,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
         assert!(
             detect_bill(
-                "Braelyn, your June account statement is available.",
+                "Jamie, your June account statement is available.",
                 "Access your account statements quickly and easily.",
                 now
             )

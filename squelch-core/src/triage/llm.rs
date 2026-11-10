@@ -874,9 +874,8 @@ pub fn qualify_gateway_model(model: &str) -> Option<String> {
 /// list does not contain the configured model answers 400 in 0ms, before any
 /// upstream call). Callers must leave the row queued and stop the pass: the
 /// remaining rows would fail identically, and a row marked processed here is
-/// foreclosed from triage even after the config is fixed. The 2026-08-19
-/// fleet outage foreclosed two days of hosted mail exactly that way — every
-/// verdict silently fell back to the ingest heuristic.
+/// foreclosed from triage even after the config is fixed, and every verdict
+/// silently falls back to the ingest heuristic.
 ///
 /// Row-level permanent kinds (`json_parse`, `max_tokens_truncation`,
 /// `response_decode`, `importance_out_of_range`) stay outside this predicate:
@@ -1025,7 +1024,7 @@ mod tests {
     fn config_failures_split_from_the_row_level_permanent_class_by_kind() {
         assert!(is_config_failure("http_401:authentication_error"));
         assert!(is_config_failure("http_403:permission_error"));
-        // The 2026-08-19 outage class: a gateway virtual key rejecting the
+        // The canonical case: a gateway virtual key rejecting the
         // configured model answers 400 for every row alike.
         assert!(is_config_failure("http_400:invalid_request_error"));
         // Gateway budget exhausted: month-scoped config, not a row fact.

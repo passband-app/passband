@@ -836,11 +836,11 @@ mod tests {
         let s = detect_shipment(
             "auto-reply@usps.com",
             "USPS Tracking update",
-            "Your item 9400111899223817428490 is in transit.",
+            "Your item 9400100000000000000000 is in transit.",
         )
         .expect("usps shipment");
         assert_eq!(s.carrier, "usps");
-        assert_eq!(s.tracking_number, "9400111899223817428490");
+        assert_eq!(s.tracking_number, "9400100000000000000000");
         assert!(
             s.tracking_url
                 .as_deref()
@@ -880,11 +880,11 @@ mod tests {
         let s = detect_shipment(
             "shipment-tracking@amazon.com",
             "Your Amazon package has shipped",
-            "Carrier: Amazon. Tracking ID TBA303392911000.",
+            "Carrier: Amazon. Tracking ID TBA000123456789.",
         )
         .expect("amazon shipment");
         assert_eq!(s.carrier, "amazon");
-        assert_eq!(s.tracking_number, "TBA303392911000");
+        assert_eq!(s.tracking_number, "TBA000123456789");
         assert!(
             s.tracking_url.is_none(),
             "amazon has no public tracking url"
@@ -1438,10 +1438,10 @@ mod tests {
             "ebay@ebay.com",
             "Your package is now with its carrier!",
             "Item 234567890123 (https://www.ebay.com/itm/123456789012) shipped via USPS. \
-             Tracking number 9400111899223817428490.",
+             Tracking number 9400100000000000000000.",
         )
         .expect("the real IMpb is a shipment");
-        assert_eq!(s.tracking_number, "9400111899223817428490");
+        assert_eq!(s.tracking_number, "9400100000000000000000");
         assert_eq!(s.carrier, "usps");
     }
 
@@ -1539,17 +1539,17 @@ mod tests {
             !is_ambiguous_tracking_shape("1z999aa10123456784"),
             "UPS, as the case-insensitive detector would have captured it"
         );
-        assert!(!is_ambiguous_tracking_shape("TBA303392911000"), "Amazon");
+        assert!(!is_ambiguous_tracking_shape("TBA000123456789"), "Amazon");
         assert!(
-            !is_ambiguous_tracking_shape("9400111899223817428490"),
+            !is_ambiguous_tracking_shape("9400100000000000000000"),
             "IMpb 94"
         );
         assert!(
-            !is_ambiguous_tracking_shape("9205590164917312751089"),
+            !is_ambiguous_tracking_shape("9205500000000000000018"),
             "IMpb 92"
         );
         assert!(
-            !is_ambiguous_tracking_shape("9300120111410471677883"),
+            !is_ambiguous_tracking_shape("9300100000000000000027"),
             "IMpb 93"
         );
     }

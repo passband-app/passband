@@ -189,7 +189,7 @@ data "aws_iam_policy_document" "github_assume" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      # The CUSTOMIZED sub (CUTOVER.md Phase 0d sets the repo's OIDC template to
+      # The CUSTOMIZED sub (the repo's OIDC template is set to
       # include_claim_keys ["repo", "context", "job_workflow_ref"]). GitHub
       # renders that as
       #   repo:<owner/name>:environment:<env>:job_workflow_ref:<owner/name>/<path>@<ref>

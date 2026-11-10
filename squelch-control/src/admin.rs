@@ -191,7 +191,7 @@ fn origin_matches(expected: &str, headers: &HeaderMap) -> bool {
         // attacker cannot write that header at all. Absent metadata IS refused,
         // which is stricter than the no-Origin case below: a client that sends
         // `null` and no metadata is claiming an opaque origin with nothing to
-        // corroborate it. Found live 2026-08-14, on an operator's own browser.
+        // corroborate it. Real browsers do send this shape.
         Some("null") => site.unwrap_or(false),
         Some(origin) => origin.trim_end_matches('/') == expected.trim_end_matches('/'),
         // Nothing stated at all. A request with neither header is not a browser

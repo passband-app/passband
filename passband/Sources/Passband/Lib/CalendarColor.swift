@@ -9,7 +9,7 @@
 // Tomato, Banana, Peacock and Grape at full saturation, picked by the user
 // one calendar at a time with no thought for how they sit together. Drawn as
 // given, a month of them is confetti on a pale blue glass app. Muted to grey,
-// the founder's "more color" is lost.
+// the colour that tells calendars apart is lost.
 //
 // THE ANSWER: KEEP THE HUE, OWN THE LIGHTNESS AND THE CHROMA. Each hex is read
 // into OKLCH (a perceptual space: equal steps of L look equally light whatever

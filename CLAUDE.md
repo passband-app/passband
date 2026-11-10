@@ -2,12 +2,10 @@
 
 ## Deploys: merge to `main`; production is AWS
 
-Production runs on AWS (account `824648488986`, `us-west-2`). It moved off
-Railway after Railway's env-var breach on 2026-10-21, and Railway serves
-nothing now. The architecture is `deploy/aws/DESIGN.md`, the infrastructure is
-OpenTofu in `deploy/aws/tofu/` (its README says how to apply it), and
-`deploy/aws/CUTOVER.md` is the record of the move. Tenants are not on AWS:
-they still run on `carrier` (k3s on Hetzner), managed by the warden.
+Production runs on AWS (`us-west-2`). The architecture is
+`deploy/aws/DESIGN.md` and the infrastructure is OpenTofu in `deploy/aws/tofu/`
+(its README says how to apply it). Tenants are not on AWS: they run on
+`carrier` (k3s), managed by the warden.
 
 **A merge to `main` is the deploy.** `.github/workflows/deploy-aws.yml` runs
 on every push to `main`, path-filtered per service, and deploys whatever the
@@ -47,22 +45,15 @@ provisioned with `allowUiUpdates: false`. So a dashboard change is a change to
 `passband-health.json`, merged to `main`, and the monitor box pulls the new
 image itself.
 
-Verify what actually shipped rather than trusting the deploy status, from an
-SSM session on the box (`aws ssm start-session --target <instance id>`; the id
-is the repo variable `AWS_MONITOR_INSTANCE_ID`):
-
-```sh
-cd /opt/passband-monitor && sudo docker compose exec -T grafana \
-  grep -c last_over_time /etc/grafana/dashboards/passband-health.json
-```
+Verify what actually shipped on the monitor box rather than trusting the deploy
+status. The access steps are in the operator's private notes, not in this repo.
 
 ## Draft PRs: CI runs when a PR is ready, not on every push
 
 Open every PR as a **draft**, and mark it ready for review only once it is
 done. `ci` (Rust) and `ci-passband` (Swift) skip draft PRs, and marking a PR
-ready starts a full run. This repo is private, so every CI minute is billed, and
-`ci-passband` runs on a macOS runner at 10x the Linux rate. A PR that pushes
-ten times while a draft costs one CI run instead of ten.
+ready starts a full run. `ci-passband` runs on a macOS runner and is slow, so a
+PR that pushes ten times while a draft costs one CI run instead of ten.
 
 That makes the draft stage your own responsibility to keep green:
 
@@ -87,15 +78,9 @@ for agents, which push often.
 
 ## Verifying against production
 
-Read state from the real services before believing a doc about them. Two
-findings from one afternoon in August 2026, both from docs that were true when
-written:
-
-- `deploy/monitoring/README.md` said to redeploy Grafana by hand. Grafana had
-  been auto-deploying from `main` for some time.
-- `deploy/hosted/SETUP.md` §6b said to set the Bifrost provider key's models to
-  `claude-haiku-4-5, claude-sonnet-5`. The fleet had moved to `claude-opus-5`
-  and every hosted tenant's triage had been failing for four days.
+Read state from the real services before believing a doc about them. Docs
+drift: a deploy step that went automatic, or a model list that moved on, still
+reads as true in the doc that described it.
 
 The AWS CLI works here once you log in (`aws login --profile passband`, then
 `export AWS_PROFILE=passband AWS_REGION=us-west-2`; sessions last about 12
@@ -104,27 +89,46 @@ hours), so the current answer is usually one command away:
 - Config a service is really running with:
   `aws ecs describe-task-definition --task-definition <control|relay|bifrost>`.
 - Logs: `aws logs tail /passband/<control|relay|bifrost> --follow`.
-- An operator command on control (`squelch-control llm sync --check`,
-  `tenants`, `llm mint`, ...) runs over ECS Exec, enabled on control only:
-
-  ```sh
-  t=$(aws ecs list-tasks --cluster passband --service-name control \
-    --desired-status RUNNING --query 'taskArns[0]' --output text)
-  aws ecs execute-command --cluster passband --task "$t" --container control \
-    --interactive --command "squelch-control llm sync --check"
-  ```
-
-  Exec session output is logged to `/passband/ecs-exec`, so never print a
-  secret there (no `env`, no `printenv`).
-- The monitor box: `aws ssm start-session --target <AWS_MONITOR_INSTANCE_ID>`.
-- A secret: `aws secretsmanager get-secret-value --secret-id
-  passband/<svc>/<NAME> --query SecretString --output text`, piped into
-  whatever needs it, never printed.
-
-Every Secrets Manager read or write, ECS Exec, SSM session and console sign-in
-mails a security alert to the operator. That is the tripwire working, not a
-reason to avoid the command: just expect the mail.
+- Operator commands on control, the monitor box and secret reads: the access
+  steps are in the operator's private notes, not in this repo. Never print a
+  secret.
 
 ## Commits
 
 Plain commit messages. No `Co-Authored-By` trailers.
+
+## The repo is public: what never goes in it
+
+Everything committed here is public, including history. Before writing a
+comment, doc, fixture, test, commit message or PR description, check it
+against both lists below. A rewrite of git history is the only fix after the
+fact, so the check happens before the commit.
+
+**Never personal data.**
+
+- No real people: not the owner's name, personal email, devices, contacts,
+  friends, beta users or tenant labels.
+- Nothing from a real mailbox or calendar: no subjects, bodies, senders,
+  orders, tracking or confirmation numbers, reservations, bills, searches or
+  mailbox statistics.
+- Fixtures use invented people at `.example` domains and fake numbers. When a
+  real message is the bug report, reduce it to a synthetic one with the same
+  shape.
+- Never quote what the owner said in a session, and never attribute a
+  decision to them ("the founder:", "owner's call, <date>", "user decision").
+  State the rule and its reason.
+
+**Never infrastructure or security detail.**
+
+- No AWS account IDs, ARNs, IP addresses, instance IDs, tailnet or machine
+  names, auth-provider tenant IDs or cloud project IDs. Real values live in
+  gitignored config (`terraform.tfvars`, `backend.hcl`) or Secrets Manager.
+  Committed files carry placeholders.
+- No security gaps or open-weakness lists.
+- No descriptions of how alerting or tripwires work, or what they miss.
+- No access recipes specific to this install.
+- No incident or outage stories: no dates of what broke, how long it was
+  down, or who noticed. Keep the rule the incident taught, without the story.
+- No tenant or user counts, and no spend figures.
+
+Private operational notes belong outside this repo.

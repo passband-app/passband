@@ -444,7 +444,7 @@ mod tests {
         let c = detect_calendar(
             "sam@gmail.com",
             Some("Sam Doe"),
-            "Invitation: Design review @ Wed Jul 22, 2026 10am - 11am (PDT) (bboynton97@gmail.com)",
+            "Invitation: Design review @ Wed Jul 22, 2026 10am - 11am (PDT) (jamie.rivera@example.com)",
             "",
             at(2026, 7, 20),
         )
@@ -476,13 +476,13 @@ mod tests {
         let c = detect_calendar(
             "calendar-notification@google.com",
             Some("Google Calendar"),
-            "Canceled event: 1:1 Braelyn/Sam @ Thu Jul 23, 2026 2pm - 2:30pm (PDT)",
+            "Canceled event: 1:1 Jamie/Sam @ Thu Jul 23, 2026 2pm - 2:30pm (PDT)",
             "This event has been canceled.",
             at(2026, 7, 20),
         )
         .expect("cancellation");
         assert_eq!(c.kind, CalendarKind::Cancellation);
-        assert_eq!(c.event_title.as_deref(), Some("1:1 Braelyn/Sam"));
+        assert_eq!(c.event_title.as_deref(), Some("1:1 Jamie/Sam"));
         assert_eq!(c.starts_at, Some(ts(2026, 7, 23, 14, 0)));
     }
 
@@ -553,21 +553,21 @@ mod tests {
         // An RSVP relayed from a PERSONAL address: no calendar-service sender
         // and no prefix, so the structured subject template has to carry it.
         let c = detect_calendar(
-            "ellie@elliehuxtable.com",
-            Some("Ellie Huxtable"),
-            "Ellie Huxtable accepted your Indiana trip invitation (Aug 5\u{2013}10, 2026)",
+            "riley@rileypark.example",
+            Some("Riley Park"),
+            "Riley Park accepted your Lake trip invitation (Aug 5\u{2013}10, 2026)",
             "",
             at(2026, 7, 20),
         )
         .expect("relayed RSVP");
         assert_eq!(c.kind, CalendarKind::Response);
-        assert_eq!(c.event_title.as_deref(), Some("Indiana trip"));
+        assert_eq!(c.event_title.as_deref(), Some("Lake trip"));
         assert_eq!(
             c.starts_at,
             Some(ts(2026, 8, 5, 0, 0)),
             "range start, en dash"
         );
-        assert_eq!(c.organizer.as_deref(), Some("Ellie Huxtable"));
+        assert_eq!(c.organizer.as_deref(), Some("Riley Park"));
     }
 
     #[test]
@@ -595,7 +595,7 @@ mod tests {
         let c = detect_calendar(
             "e@e.com",
             None,
-            "Ellie Huxtable tentatively accepted your dinner invitation (Aug 5, 2026)",
+            "Riley Park tentatively accepted your dinner invitation (Aug 5, 2026)",
             "",
             at(2026, 7, 20),
         )
@@ -605,7 +605,7 @@ mod tests {
         let c = detect_calendar(
             "e@e.com",
             None,
-            "Ellie Huxtable accepted your housewarming invitation",
+            "Riley Park accepted your housewarming invitation",
             "",
             at(2026, 7, 20),
         )
@@ -621,7 +621,7 @@ mod tests {
         let c = detect_calendar(
             "friend@gmail.com",
             Some("Friend"),
-            "Re: Indiana trip",
+            "Re: Lake trip",
             "I accepted your invitation, see you there!",
             at(2026, 7, 20),
         );
@@ -735,15 +735,15 @@ mod tests {
         let c = detect_calendar(
             "reservations@opentable.com",
             Some("OpenTable"),
-            "Your reservation confirmation for EPIC Steak",
-            "Reservation confirmed\nThanks for using OpenTable!\nEPIC Steak\n\
+            "Your reservation confirmation for Ember Steak",
+            "Reservation confirmed\nThanks for using OpenTable!\nEmber Steak\n\
              Table for 4 on Monday, August 3, 2026 at 6:00 pm\n\
-             Name: Braelyn Boynton\nConfirmation #: 2110425567",
+             Name: Jamie Rivera\nConfirmation #: 4815162342",
             at(2026, 7, 31),
         )
         .expect("opentable reservation");
         assert_eq!(c.kind, CalendarKind::Reservation);
-        assert_eq!(c.event_title.as_deref(), Some("EPIC Steak"));
+        assert_eq!(c.event_title.as_deref(), Some("Ember Steak"));
         assert_eq!(c.starts_at, Some(ts(2026, 8, 3, 18, 0)));
         assert_eq!(c.organizer.as_deref(), Some("OpenTable"));
     }
@@ -795,8 +795,8 @@ mod tests {
         let c = detect_calendar(
             "noreply@expedia.com",
             Some("Expedia"),
-            "Expedia car rental confirmation - Wed, Aug 5 - (Itinerary # 73512995336428)",
-            "Pick-up: Wednesday, August 5, 2026 at 10:00 am. Itinerary # 73512995336428.",
+            "Expedia car rental confirmation - Wed, Aug 5 - (Itinerary # 71234567890123)",
+            "Pick-up: Wednesday, August 5, 2026 at 10:00 am. Itinerary # 71234567890123.",
             at(2026, 7, 31),
         )
         .expect("car rental reservation");
@@ -812,8 +812,8 @@ mod tests {
         let c = detect_calendar(
             "reservations@opentable.com",
             Some("OpenTable"),
-            "Confirm your reservation at EPIC Steak",
-            "Confirmation #: 2110425567. Table for 4.",
+            "Confirm your reservation at Ember Steak",
+            "Confirmation #: 4815162342. Table for 4.",
             at(2026, 7, 31),
         );
         assert!(c.is_none(), "imperative must not match: {c:?}");

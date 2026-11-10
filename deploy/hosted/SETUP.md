@@ -229,15 +229,15 @@ this volume is now deliberately not the root disk. §11 puts a backup back under
 it — Litestream, streaming each tenant's database to R2, age-encrypted — and the
 path you choose here is the path that section scans, so pick it now and keep it.
 Read
-"Backups today, stated honestly" under Operating notes for what each of the two
+"Backups, by mechanism" under Operating notes for what each of the two
 mechanisms does and does not cover.
 
 ## 2b. Reserve the node's own memory
 
 **Nothing in this section is applied by reading it.** It is four changes to the
 host, three of which restart something, and applying them to a live box is a
-separate and deliberate ops step. `PRODUCTION.md` records which of them this box
-has actually taken. Do them in the order below, while you are watching, and do
+separate and deliberate ops step. Keep a note of which of them each box has
+actually taken. Do them in the order below, while you are watching, and do
 them before the box is full rather than after: a new ceiling binds the next
 tenant, not the ones already running.
 
@@ -250,8 +250,8 @@ the pods cgroup gets the lot:
 cat /sys/fs/cgroup/kubepods.slice/memory.max     # 3.72 GiB, on a 3814 MiB box
 ```
 
-The box is also running the things that make it a box. Measured on carrier on
-2026-08-26, with four tenants on it:
+The box is also running the things that make it a box. Measured on a 4 GB node
+with a handful of tenants on it:
 
 | | RSS |
 |---|---|
@@ -270,29 +270,28 @@ reclaimable pages twice.
 
 There is also more of this box than any RSS column shows. `free -m` the same
 afternoon reported 743 MiB available of 3814. The host processes above plus the
-four tenant pods' ~1.1 GB account for roughly 2.5 GB of the ~3.1 GB in use; the
+tenant pods' ~1.1 GB account for roughly 2.5 GB of the ~3.1 GB in use; the
 rest is kernel, which is to say slab, page tables, kernel stacks and socket
 buffers. Most of that is reclaimable. The part that is not still has to come out
 of somebody's budget, and there is exactly one budget on this box that can hold
 it: the one that is set to zero.
 
-That gap is not a warning, it is an ambush, and it fired on 2026-08-19. At 21:13
-and again at 21:20 the kernel killed a tenant's `squelchd`:
+That gap is how a global OOM happens: the kernel kills a tenant's `squelchd`
+even though no pod is over its limit:
 
 ```sh
 journalctl -k | grep -i 'out of memory'
 # oom-kill:constraint=CONSTRAINT_NONE,...,global_oom,task_memcg=/kubepods.slice/...,task=squelchd
 ```
 
-`constraint=CONSTRAINT_NONE` plus `global_oom` is the whole diagnosis. This was
+`constraint=CONSTRAINT_NONE` plus `global_oom` is the whole diagnosis. This is
 not a container exceeding its limit: that is a cgroup OOM, it names an
-`oom_memcg=`, and it kills inside the cgroup that asked for the memory. Nothing
-was over its limit. The machine ran out, and the kernel chose its victim by
+`oom_memcg=`, and it kills inside the cgroup that asked for the memory. The
+machine ran out, and the kernel chose its victim by
 badness score, which on this box means largest RSS, which means a tenant daemon.
-The tenant whose mail stopped syncing was not the tenant who caused it: it was a
-coin flip, run twice. And it happened with four tenants on the box, which is the
-part worth sitting with. Nothing was near the ceiling the scheduler was working
-to. The ceiling was the wrong number.
+The tenant whose mail stops syncing is not necessarily the tenant who caused
+it. Nothing needs to be near the ceiling the scheduler is working to; the
+ceiling is the wrong number.
 
 Four measures below. The first is the one that matters; the other three are what
 make its number affordable. The files they install live in
@@ -488,8 +487,7 @@ crictl ps               # k3s's runtime: this is where the tenant containers are
 ```
 
 `docker images` is the check that matters, and it is the one that is easy to
-skip. `PRODUCTION.md`'s open items note that the warden image on this node is
-still hand-built; if it was hand-built *here*, what that left behind is a cached
+skip. If the warden image was ever hand-built *on this node*, what that left behind is a cached
 image and a layer store, not a running container, so `docker ps -a` is empty and
 `docker images` is not. Disabling the daemon does not delete any of it, but it
 does take away the thing that can rebuild from it, and finding that out during
@@ -615,11 +613,10 @@ changing anything anyone would think to look at. Tenant pods are Burstable
 because the warden requests less than it limits, and that is a property worth
 keeping on purpose.
 
-**Swap is a net, not a fix, and it is a quiet one.** It converts the 19 Aug
+**Swap is a net, not a fix, and it is a quiet one.** It converts global
 kills into an afternoon of a slow tenant, which is a straight trade of a loud
-failure for a soft one, and soft failures are the kind nobody notices for four
-days around here. `node_memory_SwapFree_bytes` is already scraped by
-node-exporter (`PRODUCTION.md`, "Monitoring"); a box that is steadily consuming
+failure for a soft one, and soft failures are the kind nobody notices.
+`node_memory_SwapFree_bytes` is already scraped by node-exporter; a box that is steadily consuming
 swap is a box that needs the daemon-side fix, not more zram.
 
 ### What this does not fix
@@ -653,7 +650,7 @@ gate, and until this section is applied it is the broken one: it believes in
 3.72 GiB and would place a sixth tenant that the quota had already decided
 against. Apply (a) and the two agree, which is the whole point of applying it.
 
-The sixth tenant is a resize (RAM only, `PRODUCTION.md`) or the daemon-side work
+The sixth tenant is a resize (RAM only) or the daemon-side work
 landing first: releasing the model when idle, and not holding two copies of it.
 That is what raises the number. This section only guarantees that until then the
 failure is a signup that is refused rather than a mailbox that stops.
@@ -845,8 +842,7 @@ there is **no cluster-side operator secret for any of this**: the per-tenant
 keys, and the real key lives only in Secrets Manager
 (`passband/bifrost/ANTHROPIC_API_KEY`), injected into the gateway's task.
 
-The gateway, on AWS (the layout is `PRODUCTION.md` → "The LLM gateway"; the
-first stand-up as it was run is `deploy/aws/CUTOVER.md` Phase 4):
+The gateway, on AWS (the layout is `deploy/aws/DESIGN.md`, "bifrost"):
 
 1. The ECS service `bifrost` is tofu's (`deploy/aws/tofu/main`), and its image
    is `deploy/aws/docker/Dockerfile.bifrost`: the upstream image pinned by
@@ -865,8 +861,7 @@ first stand-up as it was run is `deploy/aws/CUTOVER.md` Phase 4):
    for the NAT Elastic IP (control, blackbox), carrier's egress and any
    temporary `operator_cidrs`; everyone else gets a 404. Tenant egress already
    allows any public 443 host, so the cluster needs nothing. Operators reach
-   the UI over the tailnet (`deploy/aws/CUTOVER.md`, "Operator access to the
-   Bifrost and Grafana UIs").
+   the UI over a private network path, never the public internet.
 5. First boot: enable auth with an admin credential (`PUT /api/config` with
    `auth_config` — or the web UI) and turn on `enforce_auth_on_inference`
    (Settings → Client Settings, or `client_config` in the same call) so a
@@ -889,8 +884,15 @@ first stand-up as it was run is `deploy/aws/CUTOVER.md` Phase 4):
    Run it once here, and again after **every** change to the model the fleet
    runs. `squelch-control llm sync --check` reports and exits 1 without
    writing, so it can run as a check. Both run inside the control task over
-   ECS Exec (`cexec "squelch-control llm sync"`, the helper in
-   `PRODUCTION.md` → "AWS"), as does `llm mint` below.
+   ECS Exec, as does `llm mint` below. A helper for that:
+
+   ```sh
+   cexec() { local t; t=$(aws ecs list-tasks --cluster passband --service-name control \
+       --desired-status RUNNING --query 'taskArns[0]' --output text)
+     aws ecs execute-command --cluster passband --task "$t" --container control \
+       --interactive --command "$*"; }
+   cexec squelch-control llm sync
+   ```
 
    **A model is allow-listed twice, and the second list is the one that gets
    forgotten.** A virtual key's `allowed_models` is matched against the id
@@ -901,17 +903,15 @@ first stand-up as it was run is `deploy/aws/CUTOVER.md` Phase 4):
    provider`, which is the different failure of a virtual key with no
    `key_ids`.
 
-   That gap is what took the hosted fleet down for four days in August 2026.
-   `SQUELCH_CONTROL_LLM_MODELS`, the warden's stage models, and every virtual
-   key had moved to `claude-opus-5`; this list still said `claude-opus-4-8`,
-   so every tenant 400'd at routing and ran heuristics-only while every place
-   an operator would look read as correct. `llm sync` exists so this list has
+   If `SQUELCH_CONTROL_LLM_MODELS`, the warden's stage models, and every
+   virtual key move to a new model while this list still names the old one,
+   every tenant 400s at routing and runs heuristics-only while every place an
+   operator would look reads as correct. `llm sync` exists so this list has
    an owner instead of a person who has to remember it.
 
    Two properties of this key are worth knowing before touching it by hand:
 
-   - **Empty does not mean "allow everything."** Verified live on
-     2026-08-25: emptying `models` leaves the key serving nothing at all,
+   - **Empty does not mean "allow everything."** Emptying `models` leaves the key serving nothing at all,
      the same as the `["*"]` wildcard. It is an allow-list that has to name
      every model, which is why the answer is a sync command and not a
      deletion.
@@ -923,8 +923,20 @@ first stand-up as it was run is `deploy/aws/CUTOVER.md` Phase 4):
      by hand, do the same.
 
    Verify with a request through a test virtual key before pointing any
-   tenant at it, from an address the ALB admits (`deploy/aws/CUTOVER.md`
-   Phase 4, step 6, has the exact request).
+   tenant at it, from an address the ALB admits. Make the key in the UI with
+   a small budget and the allowed models typed exactly
+   `anthropic/claude-opus-5-5,claude-opus-5-5` (no spaces), then:
+
+   ```sh
+   IFS= read -rs VK; echo      # paste the test VK
+   printf 'header = "x-api-key: %s"\n' "$VK" | curl -sS -K - https://bifrost.passband.app/anthropic/v1/messages \
+     -H 'anthropic-version: 2023-06-01' -H 'content-type: application/json' \
+     -d '{"model":"anthropic/claude-opus-5-5","max_tokens":16,"messages":[{"role":"user","content":"say ok"}]}' | jq '.type, .content[0].text // .error'
+   unset VK
+   ```
+
+   Expect `"message"` and text, and in the UI's Logs the request with token
+   counts and no request or response body. Delete the test key afterwards.
 
 Then point both planes at it:
 
@@ -1131,10 +1143,9 @@ The failure modes recover differently, and none is gentle:
 `deploy/hosted/70-tenant-limits.yaml` is a LimitRange and a ResourceQuota on
 `tenants`. **Size them to your box before you apply them, and do not apply
 them as shipped to a box that is not `carrier`**: the shipped numbers are
-`carrier`'s, thirty tenants on 4 vCPU / 16 GB (`PRODUCTION.md`), and applied
+`carrier`'s, sized for thirty tenants on 4 vCPU / 16 GB, and applied
 to the 2 vCPU / 4 GB floor above they would admit thirty tenants onto a box
-that can run five, which is the 2026-08-19 failure below with a different
-number on it. The file's comment works the same arithmetic for the floor
+that can run five, which is the global-OOM failure in §2b. The file's comment works the same arithmetic for the floor
 (five). Your box here means what §2b left spendable once the node's own memory
 is reserved, not the RAM on the invoice: this quota is the API server's gate
 and the node's allocatable is the scheduler's, and the two agree on the same
@@ -1167,15 +1178,15 @@ Sizing, in the order that matters:
   for itself, so the scheduler believes the whole machine is available to pods
   and would admit a sixth tenant onto a box that cannot run one. The 1200 MiB
   above is a fact about the machine, not something the scheduler knows. Making
-  it a second gate is a kubelet `systemReserved`, which is its own change (PR
-  #151 adds it here as §2b); until that is applied, this quota is the refusal.
+  it a second gate is a kubelet `systemReserved`, which is its own change
+  (§2b); until that is applied, this quota is the refusal.
 - **The request itself has to be true.** It is a promise about a daemon's
   resting size and the scheduler has nothing else to go on. A daemon that has
   embedded anything keeps its ONNX session resident and rests at roughly
-  300-500 MB, so 384Mi is about the p50 and not a comfortable number. While
-  this said 256Mi, four tenants ran a 4 GB box out of memory on 2026-08-19 and
-  the kernel OOM-killed two of them: tenant pods are burstable, so they are
-  what it picks. At 384Mi the signup that would not fit is refused instead
+  300-500 MB, so 384Mi is about the p50 and not a comfortable number. At
+  256Mi a handful of tenants can run a 4 GB box out of memory, and the kernel
+  OOM-kills tenants first: tenant pods are burstable, so they are what it
+  picks. At 384Mi the signup that would not fit is refused instead
   (below), which is the failure you want and the one you can read.
 - **Limits may oversubscribe.** Tenants are idle most of the time and a sync
   burst is seconds long. 4x requests is comfortable on one node; much past that
@@ -1209,10 +1220,9 @@ Sizing, in the order that matters:
   the tenants the memory line does, `count/secrets` to at least four times
   `pods`, plus two for every claim slot beyond the pod slots (a cancelled
   tenant keeps two), plus those, or a full quota stops meaning a full box:
-  the patch `carrier` ran before
-  this file (`PRODUCTION.md`) had `limits.cpu: "12"`, `requests.storage:
-  200Gi` and `count/secrets: "100"`, which would have refused the thirteenth,
-  twentieth and twenty-fourth tenant while memory had room for thirty. A unit
+  `limits.cpu: "12"`, `requests.storage: 200Gi` and `count/secrets: "100"`
+  would refuse the thirteenth, twentieth and twenty-fourth tenant while
+  memory had room for thirty. A unit
   test in the warden divides every line of the committed file by what the
   committed ConfigMap makes a tenant ask for and holds each to the memory
   line, and holds the ConfigMap inside the LimitRange.
@@ -1245,20 +1255,44 @@ Three edits, in two files:
   ConfigMap cannot hold for both; this binary is the renderer, and a roller on an
   older one renders older tenants.
 
+**Placeholders filled at apply time.** Four manifests carry install-specific
+values as placeholders, so the real ones never live in git:
+
+| Placeholder | File(s) | Value |
+|---|---|---|
+| `CARRIER_EGRESS_IP` (as `CARRIER_EGRESS_IP/32`) | `50-warden-networkpolicy.yaml`, `90-warden-roller.yaml` | the node's public egress address |
+| `CONTROL_NAT_EIP` (as `CONTROL_NAT_EIP/32`) | `20-warden.yaml` | the control plane's NAT Elastic IP (`tofu output` in `deploy/aws/tofu/main`) |
+| `https://example.authkit.app` | `15-warden-config.yaml` | the AuthKit issuer ("Publishing the agent door") |
+
+Keep the values in your private operator notes, export them, and apply those
+four files through a substitution instead of a bare `kubectl apply -f`:
+
+```sh
+export CARRIER_EGRESS_IP=... CONTROL_NAT_EIP=... MCP_OAUTH_ISSUER=https://...
+hosted_apply() {
+  sed -e "s/CARRIER_EGRESS_IP/$CARRIER_EGRESS_IP/g" \
+      -e "s/CONTROL_NAT_EIP/$CONTROL_NAT_EIP/g" \
+      -e "s#https://example.authkit.app#$MCP_OAUTH_ISSUER#g" "$1" | kubectl apply -f -
+}
+```
+
+Every `hosted_apply` below and later in this file means that function. The
+other manifests have no placeholders and apply as they are.
+
 ```sh
 kubectl apply -f deploy/hosted/10-warden-rbac.yaml
 kubectl apply -f deploy/hosted/30-tenants-default-deny.yaml
-kubectl apply -f deploy/hosted/15-warden-config.yaml
-kubectl apply -f deploy/hosted/20-warden.yaml
+hosted_apply deploy/hosted/15-warden-config.yaml
+hosted_apply deploy/hosted/20-warden.yaml
 
 # Check the API server's in-cluster address matches the policy before applying it.
 kubectl -n default get svc kubernetes -o jsonpath='{.spec.clusterIP}'; echo
-kubectl apply -f deploy/hosted/50-warden-networkpolicy.yaml
+hosted_apply deploy/hosted/50-warden-networkpolicy.yaml
 
 # The fleet roller: the same image on a timer, walking existing tenants onto the
 # warden's current render one at a time. Nothing to converge yet on a fresh box,
 # which is the cheapest possible first run. Same two CIDRs to check as above.
-kubectl apply -f deploy/hosted/90-warden-roller.yaml
+hosted_apply deploy/hosted/90-warden-roller.yaml
 
 kubectl -n warden rollout status deploy/squelch-warden
 ```
@@ -1267,7 +1301,7 @@ The ConfigMap goes on before the two things that consume it. From then on, every
 change to it is two commands rather than one:
 
 ```sh
-kubectl apply -f deploy/hosted/15-warden-config.yaml
+hosted_apply deploy/hosted/15-warden-config.yaml
 kubectl -n warden rollout restart deploy/squelch-warden
 ```
 
@@ -1357,7 +1391,7 @@ dropped. Set the node network on the warden and re-apply:
 ```sh
 kubectl get node -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}'; echo
 # put that address as a /32 in SQUELCH_WARDEN_NODE_CIDR in 15-warden-config.yaml
-kubectl apply -f deploy/hosted/15-warden-config.yaml
+hosted_apply deploy/hosted/15-warden-config.yaml
 kubectl -n warden rollout restart deploy/squelch-warden
 ```
 
@@ -1439,7 +1473,7 @@ cache the backfill outruns the embedder and thousands of messages land with no
 vectors: search is keyword-only until the vector backfill catches up, on a
 mailbox whose owner just signed up. It is also the prerequisite for
 `SQUELCH_WARDEN_HTTP_READINESS`, which puts that download inside every readiness
-wait the warden makes (see PRODUCTION.md, "Turning on the HTTP readiness probe").
+wait the warden makes.
 
 **The chosen mechanism: one shared read-only volume, copied into each tenant's
 volume by its init container.** The warden mounts the shared PVC into the init
@@ -1560,7 +1594,7 @@ box the tenant you seed from is the one step 9 provisioned.
 Uncomment the line, apply, and restart the warden:
 
 ```sh
-kubectl apply -f deploy/hosted/15-warden-config.yaml
+hosted_apply deploy/hosted/15-warden-config.yaml
 kubectl -n warden rollout restart deploy/squelch-warden
 kubectl -n warden exec deploy/squelch-warden -- printenv SQUELCH_WARDEN_MODEL_PVC
 # squelch-models
@@ -1569,7 +1603,7 @@ kubectl -n warden exec deploy/squelch-warden -- printenv SQUELCH_WARDEN_MODEL_PV
 The mount is part of a tenant's pod spec, so the roller reads it as drift and
 every existing tenant takes one pod restart for it. The roller converges one
 tenant per run, so the fleet catches up at the CronJob schedule times the number
-of tenants: on the `*/5` schedule, four tenants is about twenty minutes. That is
+of tenants: on the `*/5` schedule, about five minutes a tenant. That is
 expected, and worth knowing before you watch the fleet cycle.
 
 If a tenant pod goes Pending instead, that is this knob, and the message says so
@@ -1741,8 +1775,8 @@ the moment each tenant restarts onto it, knob or no knob:
 - **A tenant whose triage is not running gets no new vectors.** One at its
   daily run cap, out of LLM budget, or unminted (`llm mint`) embeds no inbound
   mail until triage catches up. Keyword search still finds all of it. A
-  tenant that has blown its budget wants `squelch-control llm topup <label>`
-  (PRODUCTION.md, "The LLM gateway"), and an unminted one `llm mint <label>`.
+  tenant that has blown its budget wants `squelch-control llm topup <label>`,
+  and an unminted one `llm mint <label>`.
 - **Own mail needs its access check to have run.** The owner's own mail is
   embedded only once its access check has settled as allowed. Two kinds of own
   mail never get that check, so they get no vectors on this release AND lose
@@ -1874,20 +1908,19 @@ Then uncomment `SQUELCH_WARDEN_EMBED_URL: "http://squelch-embed:8850"` in
 `15-warden-config.yaml`, apply, restart, and confirm:
 
 ```sh
-kubectl apply -f deploy/hosted/15-warden-config.yaml
+hosted_apply deploy/hosted/15-warden-config.yaml
 kubectl -n warden rollout restart deploy/squelch-warden
 kubectl -n warden exec deploy/squelch-warden -- printenv SQUELCH_WARDEN_EMBED_URL
 # http://squelch-embed:8850
 ```
 
 From this moment new signups get the new shape. Existing tenants do not move
-until the roller runs. Move ONE, and pick which: the canary is the owner's own
-mailbox, not a user's. Control runs on AWS ECS, so the CLI is reached through
-ECS Exec, with the `cexec` shell function from `deploy/aws/CUTOVER.md`, "Shell
-setup":
+until the roller runs. Move ONE, and pick which: a canary tenant, not a user's
+mailbox. Control runs on AWS ECS, so the CLI is reached through ECS Exec, with
+the `cexec` shell function from §6b:
 
 ```sh
-T=<the owner's own tenant label>
+T=<the canary tenant label>
 cexec "squelch-control reconcile $T"
 ```
 
@@ -1958,7 +1991,7 @@ kubectl -n warden patch cronjob squelch-warden-roll -p '{"spec":{"suspend":false
 The roller walks the remaining tenants onto the new render one per tick, five
 minutes each. Each tenant's memory drops when it restarts.
 
-**Before step 9, measure the light shape.** 128Mi and 512Mi rest on August
+**Before step 9, measure the light shape.** 128Mi and 512Mi rest on
 measurements of a daemon with no session, not on a fleet running this build,
 and step 9 is what lets the fleet grow past the thirty the old shape fit. A
 limit that is too small is an OOM loop on exactly the tenants with the most
@@ -2073,7 +2106,7 @@ the service cannot say.
 Comment `SQUELCH_WARDEN_EMBED_URL` out again, apply, restart the warden:
 
 ```sh
-kubectl apply -f deploy/hosted/15-warden-config.yaml
+hosted_apply deploy/hosted/15-warden-config.yaml
 kubectl -n warden rollout restart deploy/squelch-warden
 ```
 
@@ -2234,14 +2267,14 @@ Where each half lives:
 | **recipient** (public) | `LITESTREAM_AGE_RECIPIENT` in `/etc/litestream/env` | the replicator, to seal |
 | **identity** (private) | `/etc/litestream/backup-age.key`, root 0600 | the replicator (systemd `LoadCredential=`, at start), and a human restoring |
 
-**The replicator holds the identity, and has to.** This runbook used to keep it
-out, so that the always-running process could not open a backup. That broke
-backups four times (issue #696): litestream 0.3.13 recovers each replica's
+**The replicator holds the identity, and has to.** Keeping it out, so that the
+always-running process cannot open a backup, breaks backups: litestream 0.3.13
+recovers each replica's
 position after every start and every failed upload by reading back the last
 WAL segment it wrote, which is ciphertext, and without the identity it fails
 with `lz4: bad magic number` and that tenant stops backing up for good. The
-split did not protect anything either: the key file is on this same box, and
-the replicator runs as root with `CAP_DAC_OVERRIDE`, so it could always read
+split protects nothing either: the key file is on this same box, and
+the replicator runs as root with `CAP_DAC_OVERRIDE`, so it can always read
 it. It also reads every tenant's live database, which is all the key unlocks.
 
 What is kept: the identity is still **not in `/etc/litestream/env`** next to
@@ -2530,8 +2563,8 @@ chown --reference="$(dirname "$DB")" "$DB"      # see the note below
 
 # 4. Litestream's local state for this tenant describes the database you just
 #    replaced. Clear it and let it re-derive from the replica. (Safe for the
-#    OTHER tenants only because the replicator holds the identity: before
-#    issue #696 was fixed, the restart in step 5 broke every one of them.)
+#    OTHER tenants only because the replicator holds the identity; without it
+#    the restart in step 5 would break every one of them.)
 rm -rf /var/lib/litestream/<label>
 install -d -m 0700 -o root -g root /var/lib/litestream/<label>
 
@@ -2650,7 +2683,7 @@ why the next section still says what it says.
 
 ### What this section was verified against
 
-Litestream **v0.3.13**, on 2026-08-11. The config schema, the `age` block, the
+Litestream **v0.3.13**. The config schema, the `age` block, the
 CLI surface and the failure messages quoted above were read out of the v0.3.13
 source and then confirmed by running the real v0.3.13 binary against a scratch
 tenant layout: the generator's render is accepted (`litestream databases` reports
@@ -2660,14 +2693,13 @@ an `s3` replica per tenant), a replicate → restore round trip comes back with
 `lz4: bad magic number`. The `.deb` asset names and layout above come from the
 v0.3.13 release, not from memory.
 
-**What that drill missed** (issue #696, found 2026-11-04 in the v0.3.13 source):
-it tested restore, never a *restart* of a replicator that had already uploaded
-WAL. `Replica.Sync` keeps the replica position in memory only, clears it on any
+**Restart, not just restore.** A restore drill does not exercise a *restart*
+of a replicator that has already uploaded WAL. `Replica.Sync` keeps the replica position in memory only, clears it on any
 sync error, and `calcPos` recovers it by reading the last WAL segment back,
 decrypting only if `identities:` is configured. With recipients only, every
-restart and every transient R2 error stopped a tenant's backups for good. The
-replicator now holds the identity (step 3) and the `backups` alerts watch for
-the failure shape.
+restart and every transient R2 error stops a tenant's backups for good, so the
+replicator holds the identity (step 3) and the `backups` alerts watch for the
+failure shape.
 
 Not verified, and worth ten seconds on the box the first time you install:
 `systemd-analyze verify /etc/systemd/system/litestream*.{service,timer}`. The
@@ -2751,8 +2783,7 @@ tenants behind takes ten ticks, and the run says how many are left. It moves the
 onto a new
 DEPLOYMENT only: a change that lands on a tenant's Service, Ingress,
 NetworkPolicy or PVC is invisible to it and wants `squelch-control reconcile`
-per tenant. Exit codes and the levers: `PRODUCTION.md`, "Rolling the daemon
-image".
+per tenant. Exit codes and the levers: `ROLLOUT.md`.
 
 **Backups.** Three things, of very different sizes:
 
@@ -2769,43 +2800,38 @@ image".
 Back up the first even if you skip the second. Without a tenant's identity, that
 tenant's stored credential is unrecoverable and they consent with Google again.
 
-### Backups today, stated honestly
+### Backups, by mechanism
 
-What is actually running on the install this runbook was written from, as of
-2026-08-11. Three mechanisms, each covering a different half of a different
-problem, and one gap that is still open:
+Three mechanisms, each covering a different half of a different problem:
 
 - **Provider server backups are ROOT DISK ONLY.** Hetzner's backups (7 daily
   snapshots) image the server's own disk. They do **not** include attached block
   volumes, ever, and nothing in the console says so at the moment you enable
   them.
-- That happens to cover the load-bearing half. The k3s datastore lives on root
+- That covers the load-bearing half. The k3s datastore lives on root
   (`/var/lib/rancher/k3s/server/db`), and it holds every tenant's identity
-  Secret. Encrypted at rest, so the snapshot is not a pile of keys — but it is
+  Secret. Encrypted at rest, so the snapshot is not a pile of keys, but it is
   the difference between "restore" and "every tenant re-consents".
 - It does **not** cover the mailboxes, because they are on the block volume.
-- **Litestream IS wired up** (built 2026-08-10, retargeted to the 0.3.13 line
-  2026-08-11, §11 above). One host-level systemd service streams every tenant's
-  SQLite to Cloudflare R2 continuously, at `tenants/<label>/store.db`,
-  discovered automatically within two minutes of a tenant existing. That closes
-  the mailbox half: losing the volume is now minutes of mail rather than every
-  index on the box.
+- **Litestream** (§11 above). One host-level systemd service streams every
+  tenant's SQLite to Cloudflare R2 continuously, at `tenants/<label>/store.db`,
+  discovered automatically within two minutes of a tenant existing. That covers
+  the mailbox half: losing the volume is minutes of mail rather than every index
+  on the box.
 - **It is encrypted with a key we hold.** Every snapshot and WAL segment is
   age-sealed to `LITESTREAM_AGE_RECIPIENT` before upload, so R2 holds ciphertext
   and Cloudflare cannot read a tenant's mail index. The private half lives at
   `/etc/litestream/backup-age.key` and in the password manager, and **nowhere
-  else** — losing it makes every backup permanently unreadable. That is the
-  trade this bought, and it is why litestream is pinned to 0.3.13 (§11 step 1).
-- **It is alerted on.** 0.3.13 failed silently four times between 2026-09-26
-  and 2026-11-04 (issue #696) while the unit stayed active. `litestream-health`
-  now reads its journal every minute, and Grafana's `backups` group pages on a
-  stuck replica, a tenant with nothing uploaded in 26 hours, and the service
-  being down.
+  else**: losing it makes every backup permanently unreadable. That is why
+  litestream is pinned to 0.3.13 (§11 step 1).
+- **It is alerted on.** A replicator can fail silently while its unit stays
+  active, so `litestream-health` reads its journal every minute, and Grafana's
+  `backups` group pages on a stuck replica, a tenant with nothing uploaded in
+  26 hours, and the service being down.
 - **What Litestream does NOT do.** It backs up **only SQLite**. The identity
   Secrets are in the k3s datastore, not on the volume, and the sealed
-  `credentials.json` is on the volume but is not a database — so neither is in
-  R2. The remaining gap is not disclosure any more; it is that the Secrets are
-  still not on any schedule.
+  `credentials.json` is on the volume but is not a database, so neither is in
+  R2. Those are the operator's to take off the box (below).
 
 So, in plain terms, what each loss costs:
 
@@ -2821,9 +2847,7 @@ So, in plain terms, what each loss costs:
 | the backup age key, to nobody (just lost) | every backup in R2 is permanently unreadable, fleet-wide, and nothing tells you until you try to restore. Password manager. Today |
 
 The shape to take away: **Litestream covers the big, noisy half; the Secrets are
-still the whole recovery story and they are still not covered by anything on a
-schedule.** So keep server backups ON, and if you take nothing else off this box
-regularly, take `kubectl -n tenants get secret -o yaml` and
+the whole recovery story.** So keep server backups ON, and regularly take `kubectl -n tenants get secret -o yaml` and
 `/etc/litestream/backup-age.key` — encrypted, somewhere that is not this box.
 They are kilobytes, and they are the things neither Hetzner nor R2 will hand
 back to you.
@@ -3135,9 +3159,8 @@ Check each of these, and do not publish until every one is true:
   mailbox address the control plane sent means the binding is checking the
   wrong thing: stop.
 - **(b) Note what `sub` is, and that nothing depends on it.** WorkOS's docs
-  say `sub` on a Connect user token is the WorkOS user id (`user_...`). On the
-  production environment on 2026-10-05 it came back as the lowercased mailbox
-  instead, which is the id the control plane completes the flow with. Either
+  say `sub` on a Connect user token is the WorkOS user id (`user_...`). In
+  practice it can come back as the lowercased mailbox instead, which is the id the control plane completes the flow with. Either
   is fine: the daemon authorizes on `email` and never reads `sub`. Anyone who
   later reaches for `sub` should start from the fact that it has been both.
 - **(c) Nothing in the environment can mint a user, or a session, with an
@@ -3213,17 +3236,18 @@ revoke anything; keep looking until one makes this fail, and write the one that
 works into this section.
 
 **4. Only then: set the issuer and let the roll converge.** In
-`15-warden-config.yaml`, uncomment and fill in
+`15-warden-config.yaml`, uncomment
 
 ```yaml
-  SQUELCH_WARDEN_MCP_OAUTH_ISSUER: "https://<something>.authkit.app"
+  SQUELCH_WARDEN_MCP_OAUTH_ISSUER: "https://example.authkit.app"
 ```
 
-apply it, and restart the serving warden in the same minute (rule 2 at the top
+leaving the placeholder as it is (`hosted_apply`, §8, swaps in
+`$MCP_OAUTH_ISSUER`, the `$ISSUER` from step 2), apply it with `hosted_apply`, and restart the serving warden in the same minute (rule 2 at the top
 of that file). Every tenant's Deployment now drifts by two variables, so the
 roller takes them one per tick, and each reconcile re-applies that tenant's
-Ingress right after its Deployment: the two halves land together. A
-four-tenant fleet is about twenty minutes. Then check it, on one tenant:
+Ingress right after its Deployment: the two halves land together, about
+five minutes a tenant. Then check it, on one tenant:
 
 ```sh
 T=https://$TENANT.passband.email

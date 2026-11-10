@@ -1616,7 +1616,6 @@ mod tests {
         assert!(section.contains("SQUELCH_MCP_ALLOWED_HOSTS"));
         assert!(section.contains("Hosted Passband addresses do not publish it"));
         assert!(!section.contains("bearer"));
-        assert!(!section.contains("PRODUCTION.md"));
         assert!(!section.contains('\u{2014}'), "no em dashes");
     }
 

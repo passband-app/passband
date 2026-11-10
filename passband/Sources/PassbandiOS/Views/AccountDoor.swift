@@ -84,7 +84,7 @@ struct AccountSwitcher: View {
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
                 // Only when it would SAY something new: `displayName` already
-                // falls back to the host, and a row reading "baddiebox:8848"
+                // falls back to the host, and a row reading "homeserver:8848"
                 // twice is noise dressed as detail.
                 if let host = subtitle(account) {
                     Text(host)

@@ -22,13 +22,12 @@ workflows run their publishing jobs in GitHub environments (`release-mac`,
 from its own tag pattern, and the Mac and iOS signing secrets live in those
 environments rather than at repo level, so no other workflow or branch can
 read them. Only repository admins can create, move or delete the release tags
-(tag ruleset). Required reviewers on an environment would add an approval
-click, but GitHub offers them on private repos only on Enterprise.
+(tag ruleset). Required reviewers on an environment add an approval click
+before any publishing job runs.
 
 Existing per-surface runbooks this document links instead of duplicating:
 [`passband/RELEASING.md`](../passband/RELEASING.md) (the app),
 [`deploy/hosted/SETUP.md`](../deploy/hosted/SETUP.md) (hosted, generic),
-[`deploy/hosted/PRODUCTION.md`](../deploy/hosted/PRODUCTION.md) (this install),
 [`deploy/DOCKER.md`](../deploy/DOCKER.md) (self-host containers),
 [`deploy/DEPLOY.md`](../deploy/DEPLOY.md) (bare metal),
 [`deploy/monitoring/README.md`](../deploy/monitoring/README.md) (dashboards).
@@ -135,7 +134,7 @@ done
 The check is anonymous, which is the point: the carrier pulls with no
 credentials, so an empty answer is a package the carrier cannot pull either.
 **`squelch-embed` was a new package at its first release, and GHCR creates a
-new package PRIVATE** (it takes the private repository's visibility). The
+new package PRIVATE** by default. The
 one-time fix, making it public and giving `passband-app/passband` Write under
 Manage Actions access, is `deploy/hosted/SETUP.md` §10b step 1; any future new
 image needs the same before its first deploy.
@@ -193,7 +192,7 @@ Five things about it that will surprise you anyway:
   real mail followed by a read pass that refuses to roll anything if that mailbox
   is carrying today's render and not up. **Every tick but the last exits 3 and
   marks its Job failed**, which is by design and is why an alert on failed Jobs
-  alone is the wrong alert — see PRODUCTION.md.
+  alone is the wrong alert.
 
 - **The serving warden does not see a ConfigMap change until it restarts.**
   `envFrom` is read at pod start. The roller is a fresh pod every 5 minutes and
@@ -228,8 +227,7 @@ kubectl -n warden patch cronjob squelch-warden-roll -p '{"spec":{"suspend":true}
 Suspending stops the next tick and not the run in flight, and
 `kubectl create job --from=cronjob` makes a standalone Job that
 `concurrencyPolicy: Forbid` does not count — two rollers, two mailboxes down at
-once. The safe manual-run recipe is in `90-warden-roller.yaml`'s header and in
-PRODUCTION.md.
+once. The safe manual-run recipe is in `90-warden-roller.yaml`'s header.
 
 Exit 0 is a converged fleet (nothing to do counts, and so does a clean
 `--dry-run`); 1 is a tenant wanting a person while the fleet keeps converging
@@ -241,8 +239,6 @@ an identity Secret whose label does not validate); 3 is a tenant rolled with mor
 queued behind it, which is every tick of a normal bump; 4 is a casualty that
 froze the fleet, which is the one code worth paging on; 64 is a bad argument
 list. Anything but 0 marks the Job failed on purpose, so 3 marks it failed too.
-PRODUCTION.md, "Rolling the daemon image", has the full table and what to do
-about each, and "Alerting on this, without alerting on normal" has the query.
 
 If the release touched monitoring (scrape config, dashboards):
 
@@ -261,7 +257,7 @@ Litestream: image rollouts do not touch it, but any restore-shaped operation
 does. The first line of every restore drill is
 `systemctl mask litestream.service litestream-config.timer` — a re-provisioned
 tenant creates an empty DB that litestream would happily stream over real
-history (PRODUCTION.md, backups section). Read the drill before you need it.
+history. Read the drill before you need it.
 
 Post-rollout verification. The first stop is the roll Job's log, which names
 every tenant it moved and every one it could not; then, per tenant:
@@ -455,27 +451,3 @@ roll the carrier promptly.
   old volume file ever had, but a migration that corrupts data still deserves
   the same one-way-door respect as tenant schemas: verify against a copy
   before shipping schema changes.
-
-## Known gaps (fix or at least know)
-
-1. No CI test gate on any tag path — the tag workflows verify versions, not
-   behavior. The preflight above is the gate.
-2. Nothing checks that the deploy pins name tags that exist in GHCR — neither
-   `SQUELCH_WARDEN_IMAGE` in `15-warden-config.yaml` nor the warden image in
-   `20-warden.yaml` and `90-warden-roller.yaml`; those are still hand-checked,
-   and so is the fact that the last two agree with each other. (The
-   tag-to-`Cargo.toml` half is closed — `release-daemon.yml` verifies it.)
-3. `60-models.yaml` pins drift behind the warden's (they did already).
-4. The warden image on carrier predates the CI job: the running
-   `squelch-warden:v0.2.0` in containerd was hand-built and exists in no
-   registry — that tag is from the retired numbering and nothing will ever
-   publish it. Do not delete it from containerd until a `daemon-*` tag is cut
-   and `20-warden.yaml` is repointed at a tag the registry actually holds
-   (PRODUCTION.md, registry-gap note).
-5. Nothing alerts when a roll does not converge. The roller walks the fleet
-   every 5 minutes and halts on the first tenant that does not come back, which
-   is the right behavior and is invisible: it shows up as a failed Job in ns
-   `warden` and nowhere else, with 72 runs of history — six hours at this
-   schedule — before the evidence rotates away. kube-state-metrics is already
-   scraped off carrier, so the alert is
-   `kube_job_status_failed{namespace="warden"} > 0`; it wants writing.

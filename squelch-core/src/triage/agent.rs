@@ -2209,11 +2209,11 @@ mod tests {
         let mut decision = valid();
         decision.records.push(RecordProposal::Delivery {
             carrier: Some("ups".into()),
-            tracking_number: Some("1ZW061R3DG21045729".into()),
+            tracking_number: Some("1Z999AA10123456792".into()),
             status: "shipped".into(),
             item_name: None,
-            merchant: Some("Bill's Exhausts".into()),
-            order_refs: vec!["21470".into()],
+            merchant: Some("Rivera Exhaust Works".into()),
+            order_refs: vec!["50417".into()],
             evidence: vec![
                 EvidenceRef {
                     message_id: 7,

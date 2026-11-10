@@ -450,11 +450,11 @@ async fn a_label_both_added_and_removed_is_refused() {
 #[test]
 fn rewrite_from_swaps_only_the_address() {
     use super::rewrite_from;
-    let raw = b"Subject: x\r\nFrom: \"Braelyn B\" <passband-qa@outlook.com>\r\nTo: a@example.com\r\n\r\nFrom: not a header\r\n";
-    let out = rewrite_from(raw, "braelyn@passband.app").unwrap();
+    let raw = b"Subject: x\r\nFrom: \"Jamie R\" <jamie-r@outlook.example>\r\nTo: a@example.com\r\n\r\nFrom: not a header\r\n";
+    let out = rewrite_from(raw, "jamie@rivera.example").unwrap();
     let out = String::from_utf8(out).unwrap();
     assert!(
-        out.contains("From: \"Braelyn B\" <braelyn@passband.app>\r\nTo:"),
+        out.contains("From: \"Jamie R\" <jamie@rivera.example>\r\nTo:"),
         "{out}"
     );
     assert!(
@@ -462,7 +462,7 @@ fn rewrite_from_swaps_only_the_address() {
         "the body is untouched"
     );
     // Already right: nothing to do.
-    assert!(rewrite_from(raw, "PASSBAND-QA@outlook.com").is_none());
+    assert!(rewrite_from(raw, "JAMIE-R@outlook.example").is_none());
     // A bare address, and an encoded-word name kept as written.
     let bare = rewrite_from(b"From: a@x.com\r\n\r\nb", "b@y.com").unwrap();
     assert_eq!(bare, b"From: b@y.com\r\n\r\nb");
@@ -486,13 +486,13 @@ async fn a_send_goes_out_as_the_address_exchange_will_use() {
         )
         .unwrap()
     };
-    let raw = b"From: Me <braelyn@passband.app>\r\nTo: a@example.com\r\nSubject: x\r\n\r\nhi";
+    let raw = b"From: Me <jamie@rivera.example>\r\nTo: a@example.com\r\nSubject: x\r\n\r\nhi";
 
     // The newest sent message's From wins over a stale /me.
     let (m, c) = mock(vec![
         (
             200,
-            r#"{"value":[{"from":{"emailAddress":{"address":"passband-qa@outlook.com"}}}]}"#,
+            r#"{"value":[{"from":{"emailAddress":{"address":"jamie-r@outlook.example"}}}]}"#,
         ),
         (201, r#"{"id":"IMM-9","conversationId":"conv-9"}"#),
         (202, ""),
@@ -506,7 +506,7 @@ async fn a_send_goes_out_as_the_address_exchange_will_use() {
         "{}",
         s[0].target
     );
-    assert!(draft_of(&s[1]).starts_with("From: Me <passband-qa@outlook.com>\r\n"));
+    assert!(draft_of(&s[1]).starts_with("From: Me <jamie-r@outlook.example>\r\n"));
 
     // Nothing sent yet: /me names it.
     let (m, c) = mock(vec![

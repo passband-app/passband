@@ -1,7 +1,7 @@
 // Sender rules from GET /client/rules, GROUPED: one section per disposition
 // (allow, filter, mute), and inside each one the rules gather by registrable
 // domain with subdomains nested under a header. A rule's `*@` never reaches the
-// screen — `*@futureme.org` is a rule about futureme.org and reads as one — and
+// screen — `*@letters.example` is a rule about letters.example and reads as one — and
 // a whole-domain rule carries that domain's icon.
 //
 // The disposition chip is GONE from the row: the section it sits in says the

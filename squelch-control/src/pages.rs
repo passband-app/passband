@@ -39,7 +39,7 @@ use axum::{
 /// submission (a long-standing, spec-contested behavior): POST /signup answers
 /// 303 to Google consent, and under `form-action 'self'` Chrome silently eats
 /// that navigation - the button "does nothing" while the server logs a
-/// perfectly healthy signup. Found live on the first real signup, 2026-08-11.
+/// perfectly healthy signup.
 /// Microsoft's two sign-in hosts are named for the same reason: an Outlook
 /// signup's 303 goes to `login.microsoftonline.com`, which bounces personal
 /// accounts through `login.live.com`.
@@ -1228,8 +1228,8 @@ pub fn app_no_tenant(heading: &str, detail: &str) -> Response {
 /// that callback one more hop of THIS form's submission. A desktop agent's
 /// callback is plain http on loopback (`http://127.0.0.1:<port>/callback`),
 /// and under `https:` alone Chrome ate the press: the completion had happened
-/// and the browser stayed on this page (seen on production, 2026-10-05, on the
-/// second authorization of one client). Loopback only, any port; plain http
+/// and the browser stayed on this page (seen on a second authorization of
+/// one client). Loopback only, any port; plain http
 /// to anywhere else stays refused.
 const CSP_AGENT_CONFIRM: &str = "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self' https: http://127.0.0.1:* http://localhost:*; frame-ancestors 'none'; base-uri 'none'";
 

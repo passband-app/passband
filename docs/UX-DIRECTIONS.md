@@ -75,7 +75,7 @@ Rejected: assumes email is a daily ritual; squelch's whole premise is that it is
 
 ## Standing constraints (from the architecture)
 
-- Client talks only to the human door (`/client/*`, bearer-authed, on baddiebox over
+- Client talks only to the human door (`/client/*`, bearer-authed, on the self-host box over
   tailnet). Stack: **Tauri 2 + React** (TypeScript, Vite). Keep the Rust side of the
   Tauri shell thin — it's a window + secure token storage; all intelligence stays
   server-side behind `/client`.
@@ -121,7 +121,7 @@ email-rendering work exists for the escape-hatch case, not as a primary surface.
 - **Density is still deliberate.** This is a power tool, not a marketing site.
   Spacing and line-height loosened, but the sitrep still reads at a glance.
 
-> **Note (user decision, 2026-07-09):** This light-first direction **supersedes**
+> **Note:** This light-first direction **supersedes**
 > the original "dark, dense, terminal-adjacent" aesthetic law. The app should be
 > less terminal-looking and more user-friendly. Dark mode is preserved as a
 > faithful translation of the old palette, now reachable through the toggle
@@ -246,7 +246,7 @@ _(Avatar-favicon + icon guidance added 2026-07-09.)_
 
 # Sidebar navigation + Sitrep as the abstracted dashboard (2026-07-09)
 
-**User decision, implementing the "abstract over single emails" principle
+**This implements the "abstract over single emails" principle
 structurally.** The app gains a persistent left nav and the Sitrep name is
 redefined: it is now the *fully-abstracted dashboard* (the default surface on
 launch), and the original band-list-of-email-rows chassis lives on unchanged as

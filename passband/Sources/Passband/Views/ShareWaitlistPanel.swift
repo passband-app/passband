@@ -1,6 +1,6 @@
 // SHARE PASSBAND, WITH NOTHING TO HAND OUT YET.
 //
-// The OAuth client is not verified (`docs/VERIFICATION.md`), so a Google
+// The OAuth client is not verified, so a Google
 // account that is not on the project's test-user list cannot finish consent.
 // An invite code mailed to somebody in that position is spent on a wall: they
 // click it, Google refuses them, and the code is gone. Until verification

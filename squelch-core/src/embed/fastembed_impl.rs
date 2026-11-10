@@ -186,8 +186,7 @@ struct ResolvedModel {
 /// CONTAINED the alias, and two entries contain `bge-small-en-v1.5`:
 /// `Xenova/bge-small-en-v1.5` (fp32, 126 MB) and `Qdrant/bge-small-en-v1.5-onnx-Q`
 /// (int8, 63 MB). Which weights a daemon loaded was therefore a coin flip per
-/// process. On 2026-08-26 the hosted fleet was found split two pods to two, with
-/// both builds downloaded onto every tenant volume.
+/// process, and both builds ended up downloaded onto every data volume.
 ///
 /// The two are not interchangeable. MEASURED on Linux glibc, over a corpus of
 /// 256 texts at the model's own 512-token `max_length`: fp32 costs +195 MB to

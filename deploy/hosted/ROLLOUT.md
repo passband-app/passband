@@ -2,13 +2,11 @@
 
 The procedure, start to finish, for getting a freshly cut `daemon-X.Y.Z` onto
 everything that runs it. This page is the checklist; it links out rather than
-re-explaining. The reasoning lives in `PRODUCTION.md` ("Rolling the daemon
-image"), `../../docs/RELEASING.md` (surfaces and tags), and
-`../../squelch-warden/README.md` (the roller).
+re-explaining. The reasoning lives in `../../docs/RELEASING.md` (surfaces and
+tags) and `../../squelch-warden/README.md` (the roller).
 
 Budget: ten minutes of typing, then **one roller tick per tenant that is
-behind** — five minutes each, unattended. A four-tenant fleet is done in twenty
-minutes. Nothing below needs watching while it converges.
+behind**, five minutes each, unattended. Nothing below needs watching while it converges.
 
 ---
 
@@ -68,7 +66,7 @@ Anything else, deal with it now:
   runs `squelch-control reconcile <label>`. Decide now whether you are shipping
   a split-version fleet.
 - **`needs a person (identity Secrets whose label does not validate)`** — same,
-  permanently. See PRODUCTION.md for how to find them.
+  permanently: the preflight log names them.
 - **`needs a person (a workload whose sealed credential Secret is gone…)`** —
   also permanent, and it means that mailbox's owner has to re-consent before
   anything can render them.
@@ -141,9 +139,10 @@ ssh carrier
 # FIRST when this release adds a verb, LAST when it drops one — see below.
 # Skip entirely when the file has not changed.
 kubectl apply -f deploy/hosted/10-warden-rbac.yaml
-kubectl apply -f deploy/hosted/15-warden-config.yaml
-kubectl apply -f deploy/hosted/20-warden.yaml
-kubectl apply -f deploy/hosted/90-warden-roller.yaml
+# hosted_apply fills the placeholders (SETUP.md §8); never a bare kubectl apply.
+hosted_apply deploy/hosted/15-warden-config.yaml
+hosted_apply deploy/hosted/20-warden.yaml
+hosted_apply deploy/hosted/90-warden-roller.yaml
 ```
 
 **RBAC ordering depends on which way the verbs move, and getting it backwards
@@ -278,7 +277,7 @@ onwards. This roll is its step 2.
 | Symptom | Exit | What it means | Do this |
 |---|---|---|---|
 | `still behind: N more`, N not falling across runs | 3 | **Stall.** The same tenant is first in the queue every tick and its apply is refused, so nothing behind it moves. | `kubectl -n warden logs job/<name>` for the machine reason (`volume_failed`, `service_failed`, `workload_failed`…). Usually a config value the API server will not accept — often not the one you meant to change. Suspend, revert it, restart the warden, unsuspend. |
-| `HALTED before applying anything` | **4** | **Casualty — the fleet is FROZEN.** A tenant carries the new render and is not serving it, so the render is the suspect. Nothing was applied to anyone, and nothing will converge on any tick until this is dealt with. | Suspend immediately. Look at that pod. This is the roller telling you the release is bad, and it is the one exit code that should page - the query is in PRODUCTION.md, "Alerting on this, without alerting on normal", and it reads the Job's failure reason rather than the exit code, which no metric carries. |
+| `HALTED before applying anything` | **4** | **Casualty — the fleet is FROZEN.** A tenant carries the new render and is not serving it, so the render is the suspect. Nothing was applied to anyone, and nothing will converge on any tick until this is dealt with. | Suspend immediately. Look at that pod. This is the roller telling you the release is bad, and it is the one exit code that should page: alert on the Job's failure reason rather than the exit code, which no metric carries. |
 | `HALTED on <label>` | 1 | That tenant's rollout did not finish. It is the only one written to, and it goes back on the queue. | `kubectl -n tenants logs deploy/<label>` and `describe pod -l app.kubernetes.io/instance=<label>`. |
 | `DOWN (no workload, and nothing recorded a cancellation)` | 1 | A job nobody finished left a mailbox with no pod. Most often a `reconcile` the CLI hung up on between the delete and the apply. The roller will not repair one unattended. | `squelch-control reconcile <label>`, and read "A reconcile can outrun the CLI" below first. |
 | `needs a person (a workload whose sealed credential Secret is gone…)` | 1 | That tenant cannot be rendered at all, so no run will ever converge it. The walk continues past it rather than halting, but the fleet is not converged while it is there. | The credential is unrecoverable from here: the owner re-consents, and `PUT /v1/tenants/<label>/credentials` puts them back. |
@@ -297,9 +296,8 @@ ready replica. Both waits are bounded by `SQUELCH_WARDEN_READY_TIMEOUT_SECS`,
 warden's reconcile lives in the request handler: when the client gives up,
 reqwest drops the connection, axum drops the handler future, and the warden stops
 wherever it had got to. If that is between the delete and the apply, the mailbox
-is down and nothing is coming to recreate it. That is not a hypothetical: on
-2026-08-19 it took one tenant down for eight minutes, and the roller's next tick
-reporting it as `DOWN` is how anyone found out.
+is down and nothing is coming to recreate it until the roller's next tick
+reports it as `DOWN`.
 
 So: **the CLI's answer is not the record of what happened. The warden's log is.**
 Two different failures, two different messages, and they mean opposite things:
@@ -313,13 +311,11 @@ Two different failures, two different messages, and they mean opposite things:
   kubectl -n tenants get deploy <label>     # NotFound means it stopped mid-recreate
   ```
 
-  The `($| )` is not decoration and a trailing space will not do instead. See
-  PRODUCTION.md, "Shipping a tenant-shape change", for the two ways the obvious
-  greps are wrong.
+  The `($| )` is not decoration and a trailing space will not do instead: a
+  bare `tenant=<label>` also matches every label that starts with it.
 
   Once the old pod is gone, running the same `reconcile` again resumes rather
-  than refusing (see PRODUCTION.md, "A reconcile that died in its own
-  delete/apply window").
+  than refusing.
 - `could not be reached` — connection refused, DNS, TLS. The call never landed
   and nothing was started. Fix the reachability and run it again.
 
@@ -328,7 +324,7 @@ The CLI now allows **ten minutes** for `reconcile` alone (`RECONCILE_TIMEOUT` in
 seconds). That covers the default warden with room to spare. **If you ever raise
 `SQUELCH_WARDEN_READY_TIMEOUT_SECS` above 300, raise that constant with it** —
 `control` cannot see the warden's configuration, so nothing enforces the pair and
-the symptom is this incident again.
+the symptom is a mailbox left down mid-recreate.
 
 To run one past the CLI's budget entirely, call the warden yourself with a
 timeout you choose:

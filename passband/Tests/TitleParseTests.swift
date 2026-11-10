@@ -129,7 +129,7 @@ struct TitleParseTests {
         }
     }
 
-    /// The founder's own example.
+    /// The canonical example.
     static func thePhrase() {
         let r = read("dinner with steven on friday 4pm")
         expect(r.title == "Dinner with Steven", "the day and time come out, \"with steven\" stays, one capital: \(r.title)")
@@ -147,7 +147,7 @@ struct TitleParseTests {
     /// is set aside.
     static func rule1OnlyTheEndIsRead() {
         table([
-            // Both orders of the founder's words.
+            // Both orders of the same words.
             ("dinner friday 4pm with steven", "dinner friday 4pm with steven | Oct 9 | 960 | steven"),
             ("dinner with steven friday 4pm", "dinner with steven friday 4pm | Oct 9 | 960 | steven"),
             ("dinner on friday 4pm with steven", "Dinner with Steven | Oct 9 | 960 | steven"),

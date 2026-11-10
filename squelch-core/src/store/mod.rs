@@ -3134,11 +3134,10 @@ pub trait Store:
     /// and that stays. But a config-level rejection (see
     /// [`crate::triage::llm::is_config_failure`]) is a 4xx in ~0ms that spends
     /// no tokens and no money — and because it is shared by every queued row,
-    /// one broken config can charge the whole day's cap in minutes. That is not
-    /// a hypothetical: on 2026-08-25 a hosted tenant's gateway misconfiguration
-    /// burned 498 of a 500-call daily cap, and because the day key is UTC, the
-    /// fleet stayed capped for 22 hours AFTER the gateway was fixed. Fixing an
-    /// outage has to restore service, not schedule it for tomorrow.
+    /// one broken config can charge the whole day's cap in minutes, and because
+    /// the day key is UTC the account would stay capped for most of a day AFTER
+    /// the gateway was fixed. Fixing an outage has to restore service, not
+    /// schedule it for tomorrow.
     ///
     /// Row-level permanent failures (`json_parse`, `max_tokens_truncation`)
     /// deliberately keep their charge: the model ran and was paid for.

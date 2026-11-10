@@ -544,13 +544,13 @@ mod tests {
         // leave it exactly where it is, and must not double it.
         let (store, acct) = store_with(&[]);
         store
-            .merge_harvested_contacts(acct, &[entry("me@example.com", Some("Braelyn"), 7, 11)])
+            .merge_harvested_contacts(acct, &[entry("me@example.com", Some("Jamie"), 7, 11)])
             .unwrap();
         assert_eq!(store.ensure_account("me@example.com").unwrap(), acct);
         let hits = store.search_contacts(acct, "me@example.com", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].sent_count, 7);
-        assert_eq!(hits[0].display_name.as_deref(), Some("Braelyn"));
+        assert_eq!(hits[0].display_name.as_deref(), Some("Jamie"));
     }
 
     // --- people_named ------------------------------------------------------

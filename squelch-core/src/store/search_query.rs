@@ -411,7 +411,7 @@ impl FtsQuery {
     /// WHY TWO. FTS5 reads a bare query as an implicit AND of every token, so
     /// one word the document lacks matches nothing however rare and decisive
     /// the others are. The mail that started this work says "wifi" and
-    /// "abstract" and never says "conference" or "password", and "wifi" occurs
+    /// "fieldnotes" and never says "conference" or "password", and "wifi" occurs
     /// in exactly one message in the mailbox: ANDed it is unfindable, ORed and
     /// ranked by bm25 it is the top hit. So the leg serves the strict matches
     /// first and then, below them, the mail that carries only some of the
@@ -674,16 +674,19 @@ mod tests {
 
     #[test]
     fn every_term_is_quoted_and_joined_both_ways() {
-        let q = FtsQuery::build("abstract conference wifi password", false);
+        let q = FtsQuery::build("fieldnotes conference wifi password", false);
         assert_eq!(
             q.strict,
-            r#""abstract" AND "conference" AND "wifi" AND "password""#
+            r#""fieldnotes" AND "conference" AND "wifi" AND "password""#
         );
         assert_eq!(
             q.any,
-            r#""abstract" OR "conference" OR "wifi" OR "password""#
+            r#""fieldnotes" OR "conference" OR "wifi" OR "password""#
         );
-        assert_eq!(q.terms, vec!["abstract", "conference", "wifi", "password"]);
+        assert_eq!(
+            q.terms,
+            vec!["fieldnotes", "conference", "wifi", "password"]
+        );
         assert!(!q.is_empty());
     }
 
@@ -724,10 +727,14 @@ mod tests {
     fn partial_widens_only_the_last_token() {
         // The word still being typed, and only that one: widening the earlier
         // terms would widen a settled word the reader has finished with.
-        let q = FtsQuery::build("abstract wif", true);
-        assert_eq!(q.strict, r#""abstract" AND "wif"*"#);
-        assert_eq!(q.any, r#""abstract" OR "wif"*"#);
-        assert_eq!(q.terms, vec!["abstract", "wif"], "the term itself is bare");
+        let q = FtsQuery::build("fieldnotes wif", true);
+        assert_eq!(q.strict, r#""fieldnotes" AND "wif"*"#);
+        assert_eq!(q.any, r#""fieldnotes" OR "wif"*"#);
+        assert_eq!(
+            q.terms,
+            vec!["fieldnotes", "wif"],
+            "the term itself is bare"
+        );
 
         let one = FtsQuery::build("wif", true);
         assert_eq!(one.strict, r#""wif"*"#);
@@ -905,9 +912,9 @@ mod tests {
         // quote. Widening its last word would match text they explicitly asked
         // not to be guessed at, and `"a b"*` is a prefix on the phrase's tail,
         // not on the phrase.
-        let q = FtsQuery::build(r#"abstract "conference room""#, true);
-        assert_eq!(q.strict, r#""abstract" AND "conference room""#);
-        assert_eq!(q.any, r#""abstract" OR "conference room""#);
+        let q = FtsQuery::build(r#"fieldnotes "conference room""#, true);
+        assert_eq!(q.strict, r#""fieldnotes" AND "conference room""#);
+        assert_eq!(q.any, r#""fieldnotes" OR "conference room""#);
         assert!(!q.strict.contains('*'), "no star: {:?}", q.strict);
 
         // A word AFTER the phrase is still the tail, and still widens.

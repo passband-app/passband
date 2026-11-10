@@ -484,7 +484,7 @@ enum ScheduledCancelUndo {
 /// daemon without `drafts_v2`), so the reopened composer's first autosave PUTs
 /// over whatever that row holds: somebody's unsent reply to the same thread.
 ///
-/// THE SCHEDULED MAIL WINS (user decision 2026-09-29). Pulling back is an
+/// THE SCHEDULED MAIL WINS. Pulling back is an
 /// explicit `edit` from the preview now, and the cancel that reopened it has
 /// already taken the mail out of the outbox: a save held back until the first
 /// keystroke (the previous rule) made Esc-without-typing LOSE the scheduled
@@ -576,7 +576,7 @@ enum PullBackDraft {
 
 /// WHAT THE PREVIEW OF AN OUTBOX ROW SAYS (Views/ScheduledPreview.swift):
 /// opening a scheduled row SHOWS it, as scheduled, and nothing about looking at
-/// it moves it (user decision 2026-09-29). Pure for the reason the row's copy
+/// it moves it. Pure for the reason the row's copy
 /// is: a status line that said "scheduled" over a row that failed, or a header
 /// that named the wrong thread, is the app lying about somebody's mail.
 enum ScheduledPreviewCopy {

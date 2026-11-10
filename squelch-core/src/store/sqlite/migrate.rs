@@ -2127,9 +2127,8 @@ fn resanitize_institutions(conn: &Connection) -> Result<usize> {
 /// heals `messages.body` and touches no triage column, so the row is left
 /// permanently retired with the very content it was waiting for sitting in it.
 ///
-/// That is not hypothetical. A sender shipping an empty text/plain part beside
-/// a full HTML one stored `body = ''` for its whole history (39 of 39 Venmo
-/// messages in one real mailbox), and every extract tick between the daemon
+/// A sender shipping an empty text/plain part beside a full HTML one stores
+/// `body = ''` for every message it sends, and every extract tick between the daemon
 /// roll and the re-fetch stamps another one.
 ///
 /// BLANKNESS IS DECIDED BY [`crate::triage::text::is_blank`], THE FUNCTION THE

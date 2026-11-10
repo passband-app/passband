@@ -841,10 +841,8 @@ pub const UNGROUNDED_YES_MIN_YESES: usize = 5;
 /// - it calls [`IMPLAUSIBLE_PASS_PERCENT`] percent or more of
 ///   [`IMPLAUSIBLE_PASS_MIN_ROWS`] or more rows expired. A backstop only.
 ///
-/// WHAT THIS IS AND IS NOT. The date gate is a floor, not protection. In one
-/// real mailbox 46% of Reading summaries passed it (316 of 686) BEFORE its
-/// word list was widened to the ways an expiry is really written, and more
-/// pass now. So a pass steered carefully enough to say yes only to rows that
+/// WHAT THIS IS AND IS NOT. The date gate is a floor, not protection: a large
+/// share of ordinary Reading summaries mention a date and pass it. So a pass steered carefully enough to say yes only to rows that
 /// mention a day can still take a good share of what was asked. What actually bounds the damage is not this function. It is that a
 /// press is ONE batch of at most [`SMART_CLEAR_MODEL_ROWS`] model-judged rows,
 /// that the batch is undone exactly with one call, and that an undo is

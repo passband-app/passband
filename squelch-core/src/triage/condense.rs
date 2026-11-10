@@ -1,7 +1,7 @@
 //! Body condensing for the model's context: the parts of an email that cost
 //! input tokens and carry nothing the triage decision needs.
 //!
-//! Measured on the local ledger (2026-09-28): the top tenth of triage calls by
+//! Measured on the local ledger: the top tenth of triage calls by
 //! input carried half of all uncached input tokens, and the largest were single
 //! plain-text newsletters of ~55k characters holding ~135 click-tracking URLs
 //! each. Threads with five or more messages averaged 2.5x the input of a

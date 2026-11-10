@@ -798,7 +798,7 @@ fn migrate_adds_shipment_provenance_and_backfills_it_from_the_pointer() {
          INSERT INTO shipments(id, account_id, tracking_number, carrier, item_name,
                                last_message_id, order_ref, first_seen, last_update)
              VALUES(1, 1, '1Z999AA10123456784', 'ups', 'Standing desk', 7, '1042', '', ''),
-                   (2, 1, '9400111899223817428490', 'usps', '', 7, NULL, '', '');",
+                   (2, 1, '9400100000000000000000', 'usps', '', 7, NULL, '', '');",
     )
     .unwrap();
 
@@ -2828,7 +2828,7 @@ fn calendar_places_are_pending_stored_and_pruned_by_location() {
     let (store, acct) = store();
     let other = store.ensure_account("other@example.com").unwrap();
     let now: DateTime<Utc> = "2026-10-05T12:00:00Z".parse().unwrap();
-    let tock = "Dingles Public House, Tock is now part of the Resy network. Explore more";
+    let tock = "Fennick Public House, Tock is now part of the Resy network. Explore more";
     let soon = "Harbor Tavern, 12 Water St, Portland. Book again on our app today";
     let past = "Old Spot, 1 Elm St. This venue now takes bookings through a new app";
     let event = |id: &str, location: Option<&str>, start: &str| EventRow {
@@ -2885,12 +2885,12 @@ fn calendar_places_are_pending_stored_and_pruned_by_location() {
             .is_empty()
     );
 
-    let dingles = crate::gcal::place::Place {
-        name: Some("Dingles Public House".to_string()),
+    let fennick = crate::gcal::place::Place {
+        name: Some("Fennick Public House".to_string()),
         address: Some("165 Main St".to_string()),
     };
     store
-        .calendar_place_put(acct, tock, Some(&dingles), now)
+        .calendar_place_put(acct, tock, Some(&fennick), now)
         .unwrap();
     store.calendar_place_put(acct, past, None, now).unwrap();
     assert_eq!(
@@ -2898,7 +2898,7 @@ fn calendar_places_are_pending_stored_and_pruned_by_location() {
         vec![soon]
     );
     let places = store.calendar_places(acct).unwrap();
-    assert_eq!(places.get(tock), Some(&Some(dingles.clone())));
+    assert_eq!(places.get(tock), Some(&Some(fennick.clone())));
     assert_eq!(places.get(past), Some(&None));
     assert!(store.calendar_places(other).unwrap().is_empty());
 

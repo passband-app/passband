@@ -28,8 +28,8 @@ struct CalendarReminderTests {
     static let contract = #"""
     {"calendar_reminder": 7, "at": 1793210000,
      "item": {"kind": "event", "calendar_id": "primary", "id": "abc",
-              "title": "Phoebe Bridgers", "start": "2026-10-30T20:00:00-07:00",
-              "end": null, "all_day": false, "place": "The Greek Theatre"},
+              "title": "The Lanterns", "start": "2026-10-30T20:00:00-07:00",
+              "end": null, "all_day": false, "place": "Riverside Hall"},
      "lead_minutes": 60, "line": "Your 2 tickets are in the Ticketmaster email",
      "open": {"message_id": 41, "thread_id": "t41", "attachment_id": 9},
      "ticket": {"message_id": 41, "thread_id": "t41", "attachment_id": 9,
@@ -59,7 +59,7 @@ struct CalendarReminderTests {
         }
         expect(s.calendar_reminder == 7 && s.at == 1_793_210_000, "fire id and stamp")
         expect(s.item.kind == .event && s.item.id == "abc" && s.item.calendar_id == "primary", "the item")
-        expect(s.item.title == "Phoebe Bridgers" && s.item.place == "The Greek Theatre", "title and place")
+        expect(s.item.title == "The Lanterns" && s.item.place == "Riverside Hall", "title and place")
         expect(s.item.agendaId == "e:primary|abc", "the page's row id: \(s.item.agendaId ?? "nil")")
         expect(s.lead_minutes == 60, "lead")
         expect(s.open == .init(message_id: 41, thread_id: "t41", attachment_id: 9), "open")
@@ -133,30 +133,30 @@ struct CalendarReminderTests {
             + #""item": {"kind": "event", "calendar_id": "primary", "id": "gym", "title": "Gym session","#
             + #""start": "2026-10-30T20:00:00-07:00", "all_day": false, "place": "Equinox"},"#
             + #""lead_minutes": 10, "line": "If the desk is empty, use the PIN or the intercom","#
-            + #""code": {"label": "Door PIN", "value": "642181"}, "open": null, "ticket": null}"#
+            + #""code": {"label": "Door PIN", "value": "735902"}, "open": null, "ticket": null}"#
         let s = CalendarReminderSignal.parse(json)
-        expect(s?.code == .init(label: "Door PIN", value: "642181"), "code decodes")
+        expect(s?.code == .init(label: "Door PIN", value: "735902"), "code decodes")
         if let s {
             let body = EventBanner.calendarReminderCopy(s).body
-            expect(body == "Door PIN 642181 · If the desk is empty, use the PIN or the intercom", "body: \(body)")
+            expect(body == "Door PIN 735902 · If the desk is empty, use the PIN or the intercom", "body: \(body)")
             var codeOnly = s
             codeOnly.line = nil
-            expect(EventBanner.calendarReminderCopy(codeOnly).body == "Door PIN 642181", "code alone")
+            expect(EventBanner.calendarReminderCopy(codeOnly).body == "Door PIN 735902", "code alone")
             var bare = s
-            bare.code = .init(label: "", value: "642181")
+            bare.code = .init(label: "", value: "735902")
             bare.line = nil
-            expect(EventBanner.calendarReminderCopy(bare).body == "642181", "no label")
+            expect(EventBanner.calendarReminderCopy(bare).body == "735902", "no label")
             var sneaky = s
-            sneaky.code = .init(label: "Door\u{202E}PIN", value: "64\u{200B}2181")
+            sneaky.code = .init(label: "Door\u{202E}PIN", value: "73\u{200B}5902")
             sneaky.line = nil
-            expect(EventBanner.calendarReminderCopy(sneaky).body == "DoorPIN 642181", "invisible marks stripped")
+            expect(EventBanner.calendarReminderCopy(sneaky).body == "DoorPIN 735902", "invisible marks stripped")
         }
         // A code of the wrong shape costs only itself.
-        let bad = json.replacingOccurrences(of: #"{"label": "Door PIN", "value": "642181"}"#, with: "42")
+        let bad = json.replacingOccurrences(of: #"{"label": "Door PIN", "value": "735902"}"#, with: "42")
         let b = CalendarReminderSignal.parse(bad)
         expect(b != nil && b?.code == nil, "bad code dropped, banner kept")
         // An older daemon sends none.
-        let old = json.replacingOccurrences(of: #""code": {"label": "Door PIN", "value": "642181"}, "#, with: "")
+        let old = json.replacingOccurrences(of: #""code": {"label": "Door PIN", "value": "735902"}, "#, with: "")
         expect(CalendarReminderSignal.parse(old)?.code == nil, "absent code")
     }
 
@@ -164,11 +164,11 @@ struct CalendarReminderTests {
         let s = CalendarReminderSignal.parse(contract)!
         let pacific = TimeZone(identifier: "America/Los_Angeles")!
         let copy = EventBanner.calendarReminderCopy(s, now: hourBefore, zone: pacific)
-        expect(copy.title == "Phoebe Bridgers", "title")
-        expect(copy.subtitle == "8pm · The Greek Theatre", "subtitle: \(copy.subtitle)")
+        expect(copy.title == "The Lanterns", "title")
+        expect(copy.subtitle == "8pm · Riverside Hall", "subtitle: \(copy.subtitle)")
         let eastern = TimeZone(identifier: "America/New_York")!
         expect(
-            EventBanner.calendarReminderCopy(s, now: hourBefore, zone: eastern).subtitle == "11pm · The Greek Theatre",
+            EventBanner.calendarReminderCopy(s, now: hourBefore, zone: eastern).subtitle == "11pm · Riverside Hall",
             "the device's own zone")
         expect(
             EventBanner.reminderClock(start: "2026-10-30T08:30:00-07:00", allDay: false, zone: pacific) == "8:30am",
@@ -306,7 +306,7 @@ struct CalendarReminderTests {
           {"id":11,"kind":"reservation","title":"Hotel","start":"2026-11-01","all_day":true,
            "commitment":"committed","state":"ghost","sources":[],"tickets":null}],
          "events":[
-          {"id":"e1","calendar_id":"primary","title":"Phoebe Bridgers","start":"2026-10-30T20:00:00-07:00",
+          {"id":"e1","calendar_id":"primary","title":"The Lanterns","start":"2026-10-30T20:00:00-07:00",
            "all_day":false,"tickets":{"message_id":41,"thread_id":"t41","kind":"reservation","attachment":null}},
           {"id":"e2","calendar_id":"primary","title":"Odd","start":"2026-10-31T20:00:00-07:00",
            "all_day":false,"tickets":{"message_id":42,"thread_id":"t42","kind":"spaceship","attachment":{"id":"x"}}},
@@ -373,10 +373,10 @@ struct CalendarReminderTests {
         let family = "\u{1F468}\u{200D}\u{1F469}"
         expect(EventBanner.stripInvisible(family) == family, "a joiner stays")
         var signal = CalendarReminderSignal.parse(contract)!
-        signal.item.title = "Phoebe\u{200B} Bridgers\u{200E}"
-        signal.item.place = "The\u{2060} Greek"
+        signal.item.title = "The\u{200B} Lanterns\u{200E}"
+        signal.item.place = "Riverside\u{2060} Hall"
         let copy = EventBanner.calendarReminderCopy(signal, now: hourBefore)
-        expect(copy.title == "Phoebe Bridgers", "title: \(copy.title)")
-        expect(copy.subtitle.hasSuffix("The Greek"), "place: \(copy.subtitle)")
+        expect(copy.title == "The Lanterns", "title: \(copy.title)")
+        expect(copy.subtitle.hasSuffix("Riverside Hall"), "place: \(copy.subtitle)")
     }
 }

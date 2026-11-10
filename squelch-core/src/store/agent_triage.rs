@@ -198,8 +198,8 @@ pub struct AgentListItem {
     pub decision_source_message_id: i64,
     pub thread_id: String,
     pub from_addr: String,
-    /// The `From:` display name, so a feed card can say "Mopar.com National
-    /// eStore" instead of printing the 32 hex characters its mailer uses as a
+    /// The `From:` display name, so a feed card can say "Example Parts Online
+    /// Store" instead of printing the 32 hex characters its mailer uses as a
     /// local-part.
     ///
     /// HUMAN-DOOR ONLY, the same discipline as `Update::from_name` and for the

@@ -462,7 +462,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Verified against litestream v0.3.13 on 2026-08-11:
+# Verified against litestream v0.3.13:
 #
 #   - `bash -n` clean.
 #   - The render was produced by this script against a scratch tenant layout
@@ -479,8 +479,8 @@ fi
 #     v0.3.13 cmd/litestream/main.go ReplicaConfig.
 #   - Empty LITESTREAM_AGE_RECIPIENT is a hard failure ("no recipients found"),
 #     not silent plaintext. Both observed, not assumed. (An empty identity in
-#     the old block-list form was "no secret keys found". Since 2026-11-04 the
-#     identity is a flow list, `[${LITESTREAM_AGE_IDENTITY}]`, which expands to
+#     the old block-list form was "no secret keys found". The identity is now
+#     a flow list, `[${LITESTREAM_AGE_IDENTITY}]`, which expands to
 #     `[]` when unset: no error by design, and litestream-replicate.sh is the
 #     guard that the replicator never runs that way.)
 #

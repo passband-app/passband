@@ -150,8 +150,8 @@ const MAX_FIELD: usize = 128;
 
 /// Ceiling on an authorization code. Google's run around 250 characters;
 /// Microsoft's (Entra work and school accounts especially) run past 1,000, and
-/// 512 refused every hosted Outlook signup on 2026-10-30 with the generic
-/// "could not be verified" page. 4096 is slack for both, and still small enough
+/// a 512 ceiling refuses every Outlook signup with the generic "could not be
+/// verified" page. 4096 is slack for both, and still small enough
 /// that nothing large reaches the token exchange.
 const MAX_CODE: usize = 4096;
 
@@ -323,8 +323,8 @@ pub async fn healthz() -> &'static str {
 /// history, and any proxy between them, and what sits there is a live code
 /// until it is redeemed or expires. What buys it is the click: an invite that
 /// has to be copied out of an email and pasted into a field loses people who
-/// would otherwise have finished. The code is single use, and the operator
-/// chose this trade knowing where it is written down (2026-08-14).
+/// would otherwise have finished. The code is single use, and the trade is
+/// deliberate.
 ///
 /// A value that is not shaped like a code renders an EMPTY field rather than
 /// itself. It is escaped either way, so this is not what stops a script; it is
@@ -1651,7 +1651,7 @@ pub async fn oauth_callback(
                 // THE SIGNUP ALLOWANCE: one more month's limit on the first
                 // window only. The first-run backfill triages up to a month of
                 // mail in a new mailbox's first days, and at ~3 cents a message
-                // a busy inbox (75 a day, 2026-11-05) spends the whole monthly
+                // a busy inbox spends the whole monthly
                 // budget on it and then sits with triage dark until the window
                 // resets. That bill is onboarding, not the person's usage. It
                 // rides the gateway's one-cycle override, so it ends by itself

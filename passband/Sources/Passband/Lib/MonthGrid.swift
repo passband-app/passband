@@ -9,14 +9,13 @@
 // hold it against fixtures (Tests/MonthGridTests.swift). Clock and zone are
 // arguments; nothing here reads `Date()` or `Calendar.current`.
 //
-// A CONVENTIONAL MONTH (wave 3, the founder: "lets do top down like gmail
-// does"). Each cell lists its day top-down: trips and stays as named bars
+// A CONVENTIONAL MONTH, read top-down. Each cell lists its day top-down: trips and stays as named bars
 // across the cells they cover, each in a lane of its week row; the day's own
 // all-day items; then its timed items by start, one row each. Whatever does
 // not fit folds into "+N more", which opens the day.
 //
-// NO GAP UNDER THE DATE (wave 4, the founder: "why do some events start right
-// under the date and others have a gap? no gap pls"). A bar holds its lane
+// NO GAP UNDER THE DATE: every day's items start directly under its date,
+// never after an empty band. A bar holds its lane
 // only over the days it covers. A cell's own items take the rows left free,
 // top-down, so a day a trip does not reach starts directly under its date,
 // and a day under a bar in the second lane fills the first. The one hole
@@ -562,7 +561,7 @@ enum MonthGrid {
     /// the window narrows the cells (it once only ever grew).
     static func cellWidth(gridWidth: Double) -> Double { max(0, gridWidth / 7) }
 
-    /// The narrowest cell that keeps a time beside a title ("7:45pm  Dreamers
+    /// The narrowest cell that keeps a time beside a title ("7:45pm  Potluck
     /// Dinner"). Below it a timed row is its title alone, and the time is in
     /// the row's help and the day column: a title cut to "Dre" beside a full
     /// time is a row that says when but not what.

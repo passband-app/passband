@@ -1,10 +1,9 @@
 //! The operator's pager: one Slack incoming webhook, one line per signup that
 //! ended somewhere a human has to look.
 //!
-//! WHY THIS EXISTS. On 2026-09-28 the `tenants` quota was full, a signup's pod
-//! was refused at admission, and the only record was a WARN and two ERRORs in
-//! this service's log. The operator found out because the person
-//! signing up said so. Every state this module announces is one that nothing
+//! WHY THIS EXISTS. A signup can fail somewhere nothing else reports: a full
+//! `tenants` quota refuses the pod at admission, and the only record is a few
+//! lines in this service's log. Every state this module announces is one that nothing
 //! else in the system will heal: an orphaned half-signup, a running tenant with
 //! no control row. Those should reach a phone, not wait in a log.
 //!
@@ -127,10 +126,10 @@ fn orphan_line(vk_id: Option<&str>, assistant_vk_id: Option<&str>) -> String {
 }
 
 /// Phase two failed: the tenant is pending (or further along than control
-/// knows) and nobody will finish it. Tonight's shape.
+/// knows) and nobody will finish it.
 ///
-/// BOTH PLACES TO LOOK, events first, because on 2026-09-28 the warden's log
-/// had nothing and the answer (`exceeded quota`) was an event on the
+/// BOTH PLACES TO LOOK, events first, because a quota refusal leaves the
+/// warden's log empty and the answer (`exceeded quota`) is an event on the
 /// ReplicaSet.
 pub fn signup_incomplete(
     label: &str,

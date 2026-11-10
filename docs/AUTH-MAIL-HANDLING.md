@@ -1,15 +1,14 @@
 # Auth mail: handle each kind for what it is
 
-Status: building, 2026-10-26. Branch `auth-kinds`, on top of PR #554 (prompt
-v11, security incidents are not auth).
+Status: built. Follows PR #554 (prompt v11, security incidents are not auth).
 
 ## Why
 
 Every auth kind used to get the same treatment: sealed, filed on the Auth
 page, kept out of FYE, and (for alerts, resets and sign-in links) a
 "That was me / Not me" card for 7 days, with the verdict kept in one Mac's
-UserDefaults. A survey of 65 real auth messages (Aug 21 to Oct 7) found that
-shape fits about a quarter of them:
+UserDefaults. A survey of several weeks of auth mail found that shape fits
+about a quarter of it:
 
 | Group | Count | Needs |
 |---|---|---|
@@ -26,7 +25,7 @@ Two patterns: **pairs** (a sign-in alert lands within a minute of the code or
 Google receipt that explains it: 5 of the 16) and **bursts** (a new phone
 produces ~9 new-device alerts across services in a week).
 
-## Decisions (owner, 2026-10-26)
+## Decisions
 
 1. New auth kinds, not a severity field.
 2. Sign-in receipts stay visible on the Auth page, with no question card.
@@ -79,7 +78,7 @@ reads a sealed kind.
 
 ### Explained alerts (pairing)
 
-Revised after security review (2026-10-26): the first version let an attacker
+Revised after security review: the first version let an attacker
 manufacture the mail that "explains" their own alert (anyone can trigger a
 reset or a signup verification; a consent screen produces both a grant and a
 receipt from google.com; a forged receipt subject named any service).
@@ -142,7 +141,7 @@ the FYE list and `placement`; a test pins that they agree. The FYE headline
 still never uses auth mail. The agent door's access rules are unchanged:
 restricted mail never reaches it, wherever it is placed.
 
-#### The model's own pick (2026-11-04, prompt `agent-triage-v18`)
+#### The model's own pick (prompt `agent-triage-v18`)
 
 A kind says what the mail is, not where it goes. The model's `show_in_fye`
 places auth mail whose priority-picked kind is `verification`,
@@ -153,15 +152,15 @@ places auth mail whose priority-picked kind is `verification`,
 Auth page. A `mine` verdict, or the mail coming in with the first-run
 backfill, takes away the pick for every kind.
 
-Why: every misfile so far (Railway's breach notice, fraud checks, a MyFTB
-registration confirmation) had the same shape. The model judged the mail
+Why: every misfile so far (a vendor's breach notice, fraud checks, a game
+server's registration confirmation) had the same shape. The model judged the mail
 worth seeing, and the auth gate overruled it, so each fix had been a new
 "this is not auth" line in the prompt. Placement does not unseal: mail with
 a live link is still kept from the agent door and search.
 
 Live probe, `claude-opus-5-5` at low effort, 6 synthetic mails x 2 reps:
-12/12 with v18. With v17's prompt and the new gate: the MyFTB mail asking
-for a PIN by post went to FYE (the model already wanted it), "registration
+12/12 with v18. With v17's prompt and the new gate: the registration mail
+asking for a PIN by post went to FYE (the model already wanted it), "registration
 complete" did not (the model did not), and app signup confirmations, an
 OTP and a sign-in alert stayed out either way.
 

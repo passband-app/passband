@@ -106,11 +106,11 @@ pub const RECONNECT_TIMEOUT: Duration = RECONCILE_TIMEOUT;
 /// operation's honest ceiling is around six minutes against a 30-second budget
 /// that could never see the end of it.
 ///
-/// WHAT BREAKS IF IT IS TOO SHORT, and this is not hypothetical. On 2026-08-19
-/// `squelch-control reconcile ellie` gave up at 30 seconds in the window
-/// between the delete and the apply. reqwest dropped the connection, axum
-/// dropped the handler future, and the warden stopped where it stood with that
-/// tenant's Deployment already gone; the mailbox was down for eight minutes.
+/// WHAT BREAKS IF IT IS TOO SHORT. A `squelch-control reconcile <label>` that
+/// gives up at 30 seconds can land in the window between the delete and the
+/// apply. reqwest drops the connection, axum drops the handler future, and the
+/// warden stops where it stands with that tenant's Deployment already gone;
+/// the mailbox stays down until someone notices.
 /// Until the warden's work is detached from the caller's connection (issue #91,
 /// fix 3) a client timeout does not merely mis-report a slow reconcile, it
 /// ABORTS one, so this number is the difference between a recreate that
@@ -352,8 +352,8 @@ pub struct Config {
     /// deployment with no admin token must not answer at an admin URL.
     pub waitlist: Option<WaitlistConfig>,
     /// The operator's Slack incoming webhook, when this deployment has one.
-    /// `None` means signups that end half-finished are only log lines, which is
-    /// how 2026-09-28 went unnoticed until the person signing up said so. A
+    /// `None` means signups that end half-finished are only log lines, which
+    /// nobody is watching. A
     /// SECRET: the URL is the whole credential, so `Debug` redacts it.
     pub alert_webhook_url: Option<String>,
     /// PostHog's ingest origin, where a hosted signup's email and name are set
@@ -1542,10 +1542,9 @@ mod tests {
 
     /// The gateway routes on `anthropic/claude-opus-5` and a daemon that has
     /// not been rolled yet still sends the bare `claude-opus-5`, so ONE list
-    /// has to hold both spellings at once. This is the exact shape that took
-    /// the control plane down on 2026-08-24: the operator widened the variable
-    /// to cover the roll, and a validator that only knew bare ids refused to
-    /// boot on it.
+    /// has to hold both spellings at once. Widening the variable to cover a
+    /// roll must not trip a validator that only knows bare ids into refusing
+    /// to boot.
     #[test]
     fn a_model_list_may_be_provider_qualified() {
         let some = |s: &str| Some(s.to_string());

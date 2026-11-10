@@ -208,10 +208,9 @@ meters each virtual key against its budget.
 
 Both claims hold for every pod this warden renders — and only those. A tenant
 provisioned before the shared-key bridge was removed still carries the legacy
-`ANTHROPIC_API_KEY` env from its old spec, and its Stage-2 calls are failing
-with 401s rather than idling, until `squelch-control llm mint` re-applies its
-Deployment. The migration steps live in `deploy/hosted/PRODUCTION.md`,
-"History".
+`ANTHROPIC_API_KEY` env from its old spec, and its Stage-2 calls fail with
+401s rather than idling until `squelch-control llm mint` re-applies its
+Deployment.
 
 ### The push relay
 
@@ -331,9 +330,6 @@ the roller when it comes round. The order is:
 1. Ship the daemon that serves the route (`SQUELCH_WARDEN_IMAGE`).
 2. Let the roller converge the whole fleet onto it, and confirm it did.
 3. Then set `SQUELCH_WARDEN_HTTP_READINESS=on` and converge again.
-
-`deploy/hosted/PRODUCTION.md`, "Rolling the daemon image", is the operator's end
-of that sequence.
 
 Behind both shapes sits `minReadySeconds` (`SQUELCH_WARDEN_MIN_READY_SECS`, 30s):
 the Deployment controller does not count a replica Available until it has stayed
@@ -514,8 +510,8 @@ credential and the volume are where they were, and only the workload is missing.
 also reads `stopped` with no marker, and rebuilding one would put a closed
 mailbox back on the internet. The warden falls back to the signal the old one
 used — a surviving Service means an interrupted reconcile, its absence means a
-teardown — for that case alone. `deploy/hosted/PRODUCTION.md`, "Tenants
-cancelled before the marker existed", says when it can be deleted.
+teardown — for that case alone. It can be deleted once no tenant cancelled
+before the marker existed remains.
 
 The marker is why this is a lookup and not a deduction. `DELETE` removes four
 objects one at a time and stops at its first error, so a cancellation can leave
@@ -633,15 +629,14 @@ other than `0` marks the Job failed on purpose:
 |---|---|---|
 | `0` | The fleet is on today's render and serving it. A run with nothing to do is this, and so is a `--dry-run` over a fleet that needs nothing. | Nothing. |
 | `1` | A tenant wants a person, and the fleet is still converging around it. | Read the log for the named label: at most the one named tenant was written, and the walk went on past the rest. **Halted** — the tenant did not come back; look at that pod. It goes back on the queue. **DOWN** — no workload and no cancellation on record, a job that did not finish; `squelch-control reconcile <label>` finishes it. **Cannot be rendered** — its sealed credential Secret is gone, so no run will ever converge it; the pod is probably still serving, and the recovery is re-consent (`PUT .../credentials`). **Never started** — a refused config value or an API server it could not reach; the log line is the sentence. **`--dry-run` found work** — this is the flag doing its job; read what it would roll, and its length is how many ticks the real roll takes. |
-| `2` | Everything this run could converge did, and something is left that no run will ever converge: another field manager owns part of a tenant's Deployment, or an identity Secret's label does not validate. | For foreign drift, `squelch-control drift <label>` to see who owns what, then `reconcile <label>` when you are ready for that mailbox to be down for a pod cycle. For an unreadable label, `PRODUCTION.md` has the recipe for finding it. Until then every run reports it again. |
+| `2` | Everything this run could converge did, and something is left that no run will ever converge: another field manager owns part of a tenant's Deployment, or an identity Secret's label does not validate. | For foreign drift, `squelch-control drift <label>` to see who owns what, then `reconcile <label>` when you are ready for that mailbox to be down for a pod cycle. For an unreadable label, list the identity Secrets in the tenant namespace and find the one whose label does not validate. Until then every run reports it again. |
 | `3` | The fleet is behind and the run is working through it. Usually "it rolled a tenant and more are queued", which is what every tick of a fleet mid-roll looks like; also the tick that spent its one attempt on a tenant that turned out to be foreign, or whose account was cancelled mid-flight. | Nothing. The next tick takes the next one. Its own code because it is the one outcome that is both "not on today's render" and "no human should do anything": `0` would make `roll` unable to say when a bump has landed, and `1` would spend the alarm on the normal case. A foreign skip raised on a tick like this is reported once the queue drains, as a `2`. |
 | `4` | **FROZEN.** A casualty stopped the run in the READ pass, before it wrote anything: a tenant carries today's render and is not serving it, so the render itself is the suspect. Nothing converged, and nothing will on any tick until this is dealt with. | Suspend and look at that pod. Its own code because it is the ONLY outcome that stops other tenants — every other failure is one tenant's problem while the walk continues. `1`, `2` and `3` can each persist forever on a tenant somebody has triaged and decided to live with, and an alert that could not tell them from this one would be muted exactly when it mattered. **Page on this.** |
 | `64` | The argument list was none of the three this binary accepts. | Fix `args:` on the CronJob. Deliberately outside the 0–4 range: a mistyped argument is not a verdict on the fleet. |
 
 Anything other than `0` marks the Job failed, because Kubernetes knows zero and
 non-zero and nothing else — so **a fleet mid-roll leaves failed Jobs in its
-history by design**. `PRODUCTION.md`, "Alerting on this, without alerting on
-normal", is what to page on instead.
+history by design**. Page on exit `4` instead, as below.
 
 What makes `4` tellable from the rest is in the CronJob rather than in this
 binary: a `podFailurePolicy` rule fails the Job on exit `4` alone, so the
@@ -657,9 +652,7 @@ that tenant is still drifted and first in the queue again on the next tick.
 Under one-per-tick pacing that is a fleet STALL and not just a noisy tenant: the
 run spends its single attempt on the same label every time, and nothing behind it
 in fleet order moves. A `still behind` count that does not fall across runs is
-the signature. `deploy/hosted/90-warden-roller.yaml` has the fix, and
-`deploy/hosted/PRODUCTION.md`, "Rolling the daemon image", is the operator's end
-of all of it.
+the signature. `deploy/hosted/90-warden-roller.yaml` has the fix.
 
 ### What the drift report cannot see
 

@@ -81,17 +81,17 @@ struct RuleGroupingTests {
 
     static func labelsDropWhatTheReaderKnows() {
         // THE ASK: a bare `*@` is noise. "the owner wrote a rule for
-        // futureme.org" is the whole of what `*@futureme.org` says.
+        // letters.example" is the whole of what `*@letters.example` says.
         expect(
-            RuleGrouping.standaloneLabel("*@futureme.org") == "futureme.org",
+            RuleGrouping.standaloneLabel("*@letters.example") == "letters.example",
             "the wildcard is dropped")
         expect(
-            RuleGrouping.standaloneLabel("*@notify.pic-time.com") == "notify.pic-time.com",
+            RuleGrouping.standaloneLabel("*@notify.proofs.example") == "notify.proofs.example",
             "a lone subdomain rule keeps its full host")
         // A mailbox rule keeps its local part: that IS the distinguishing half.
         expect(
-            RuleGrouping.standaloneLabel("justice.dixon@useintuito.com")
-                == "justice.dixon@useintuito.com",
+            RuleGrouping.standaloneLabel("sam.okafor@northwind.example")
+                == "sam.okafor@northwind.example",
             "a person's address is shown whole")
 
         // Nested under a header that already says the domain.
@@ -106,11 +106,11 @@ struct RuleGroupingTests {
     // MARK: - the tree
 
     static func oneDomainOneRuleStaysFlat() {
-        // The user's actual mailbox: every rule a different domain. No headers,
+        // A typical mailbox: every rule a different domain. No headers,
         // no indentation, and the label is the full host.
         let sections = RuleGrouping.sections([
-            rule(1, "*@futureme.org", .surface),
-            rule(2, "*@notify.pic-time.com", .surface),
+            rule(1, "*@letters.example", .surface),
+            rule(2, "*@notify.proofs.example", .surface),
         ])
         expect(sections.count == 1, "one disposition present")
         let groups = sections[0].groups
@@ -118,8 +118,8 @@ struct RuleGroupingTests {
         expect(groups.allSatisfy { !$0.showsHeader }, "a lone rule needs no header")
         expect(groups.allSatisfy { $0.rows.count == 1 }, "one row each")
         expect(groups.allSatisfy { !$0.rows[0].nested }, "and nothing is indented")
-        expect(groups[0].domain == "futureme.org", "domains sort alphabetically")
-        expect(groups[1].rows[0].label == "notify.pic-time.com", "full host on a flat row")
+        expect(groups[0].domain == "letters.example", "domains sort alphabetically")
+        expect(groups[1].rows[0].label == "notify.proofs.example", "full host on a flat row")
     }
 
     static func severalRulesNestUnderTheirDomain() {
@@ -198,7 +198,7 @@ struct RuleGroupingTests {
         // person's domain is precisely what SenderIdentity exists to keep on
         // the device. It draws initials instead.
         expect(
-            RuleGrouping.iconPattern("justice.dixon@useintuito.com") == nil,
+            RuleGrouping.iconPattern("sam.okafor@northwind.example") == nil,
             "a private correspondent's domain never leaves")
         expect(
             RuleGrouping.iconPattern("noah.c@easypromptfundssolutionshere.info") == nil,

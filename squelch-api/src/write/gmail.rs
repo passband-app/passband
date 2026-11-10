@@ -379,8 +379,8 @@ impl MailWriter for GmailWriteClient {
     /// other call here (gmail.modify grants read).
     ///
     /// A HIT IS PROOF, A MISS IS NOT: a daemon-minted id was not findable this
-    /// way minutes after its mail went out (2026-09-29, see
-    /// [`Self::find_scheduled_send`], the question recovery actually asks).
+    /// way minutes after its mail went out (see [`Self::find_scheduled_send`],
+    /// the question recovery actually asks).
     /// The search includes Spam and Trash; an error is an error, never "not
     /// found".
     async fn find_by_rfc822_msgid(&self, msgid: &str) -> Result<Option<String>, WriteError> {
@@ -406,9 +406,9 @@ impl MailWriter for GmailWriteClient {
     ///    (slack included, see `scan_window` in scheduled_send.rs): BOTH ends
     ///    matter, since a window open at the top covers every mail sent since,
     ///    and a busy mailbox would hit the page cap on every ask of an old row
-    ///    and never let it send. The header is what the live finding demands: on 2026-09-29 a
-    ///    minted id the daemon had just sent (and echoed) was NOT found by
-    ///    step 1 at 9 and 28 minutes, so Gmail may rewrite a client-supplied
+    ///    and never let it send. The header is what Gmail's behavior demands:
+    ///    a minted id the daemon had just sent (and echoed) can go unfound by
+    ///    step 1 for many minutes, so Gmail may rewrite a client-supplied
     ///    Message-ID; a custom header it has no reason to touch.
     ///
     /// Every request goes through the same budget and timeout as the rest of
@@ -516,8 +516,8 @@ fn sent_scan_url(base: &str, floor: i64, ceiling: i64, page_token: Option<&str>)
 /// `messages.list` narrowed to one `Message-ID`. THE BRACKETS COME OFF: the
 /// header value is `<id@passband.app>`, but Gmail's `rfc822msgid:` operator
 /// takes the bare `id@passband.app`, and searching with the brackets in finds NOTHING.
-/// Proven live on 2026-09-29: a mail the daemon had just sent came back
-/// "not found" with them and was requeued as maybe-sent. What is left still
+/// With them, a mail the daemon had just sent comes back "not found" and is
+/// requeued as maybe-sent. What is left still
 /// carries `@` and the colon of the operator, so the whole term is
 /// percent-encoded and nothing can end the value or open a parameter.
 fn rfc822msgid_search_url(base: &str, msgid: &str) -> String {

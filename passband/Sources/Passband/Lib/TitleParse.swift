@@ -1,6 +1,5 @@
-// A TITLE THAT UNDERSTANDS "dinner with steven on friday 4pm" (wave 6, the
-// founder: "when i type the title ... it should know to populate the date and
-// person").
+// A TITLE THAT UNDERSTANDS "dinner with steven on friday 4pm": typing the
+// title fills in the date, the time and the person.
 //
 // NO MODEL. A deterministic reader over the words of the title, built on the
 // event form's own date and time parsers (Lib/EventDraft.swift), so "fri" and

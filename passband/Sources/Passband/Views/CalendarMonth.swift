@@ -1,12 +1,11 @@
 // THE CALENDAR PAGE'S MONTH: a conventional month grid, and the selected
 // day's column beside it.
 //
-// WAVE 3 (the founder: "the horizontal bar on each day is confusing. lets do
-// top down like gmail does. lets add more color too."):
+// THE LAYOUT. Days read top-down, the way Gmail's month does, in colour:
 //   - Each cell lists its day top-down, one row per thing: trips and stays
 //     first, as named bars across the cells they cover (flat where they run
 //     on into the next row); then the day's own all-day items; then timed
-//     items by start, "7:45pm  Dreamers Dinner". What does not fit folds into
+//     items by start, "7:45pm  Potluck Dinner". What does not fit folds into
 //     "+N more", which opens the day.
 //   - Every row is a tinted chip in its calendar's colour, brought inside the
 //     app's palette by `CalendarColor` (same lightness for every calendar,

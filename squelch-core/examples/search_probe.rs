@@ -24,8 +24,7 @@
 //! real mailbox is printed rather than guessed. That rebuild is a `DROP TABLE`
 //! and a full reindex, which is why "copy it first" is enforced by
 //! [`refuse_the_live_mailbox`] rather than left to this comment: a scratch
-//! daemon has already picked up the real mailbox in this repo once, from a path
-//! nobody typed.
+//! daemon can resolve the live database from a path nobody typed.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -44,11 +43,11 @@ use squelch_core::store::{SearchFilter, SearchSort, SqliteStore, Store};
 /// builder takes the reader's text as typed, quotes and all, so this string is
 /// what a reader would put in the box.
 const QUERIES: &[&str] = &[
-    "abstract conference wifi password",
+    "fieldnotes conference wifi password",
     "conference wifi password",
     "wifi password",
     "stripe payout receipt",
-    "abstract",
+    "fieldnotes",
     "tracking number",
     r#""tracking number""#,
 ];

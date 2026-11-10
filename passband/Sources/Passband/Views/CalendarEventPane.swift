@@ -1,8 +1,7 @@
 // THE EVENT PANE: making an event on one of the user's own Google calendars,
 // or changing one, in a pane that takes half the window the way the composer
-// does (wave 4, the founder: "The new event button should work like the
-// compose pane ... all of the new event selection should be in there,
-// including selecting which calendar it goes on").
+// does. Everything about a new event is chosen in the pane, including which
+// calendar it goes on.
 //
 // BUILT ON THE COMPOSER'S BONES (Views/ComposePane.swift), on purpose: the
 // same strip of the window, the same glass edge and leftward shadow, the same

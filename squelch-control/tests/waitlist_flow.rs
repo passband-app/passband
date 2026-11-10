@@ -726,7 +726,7 @@ async fn approving_mails_a_code_that_redeems() {
         body["html"].as_str().unwrap().contains(&code),
         "both parts carry it"
     );
-    // ...and the one-click link carries it, which is the 2026-08-14 reversal of
+    // ...and the one-click link carries it, which is the deliberate reversal of
     // this crate's "no code in a URL, ever" rule. BOTH parts have to have it:
     // the button is the fast path, and the text part is what a client that
     // strips HTML leaves the person with.
@@ -1426,7 +1426,7 @@ async fn an_unconfigured_deployment_links_to_no_waitlist_at_all() {
 
 /// THE QUESTION IS A GATE, NOT A COURTESY.
 ///
-/// The OAuth client is not verified yet (`docs/VERIFICATION.md`), so Google
+/// While the OAuth client is unverified, Google
 /// refuses consent to any account that is not on the project's test-user list.
 /// A code mailed to somebody who is not on it is spent on a wall, and the board
 /// afterwards cannot tell that row from a healthy one. So every button that puts

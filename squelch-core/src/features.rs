@@ -134,9 +134,7 @@ pub const CALENDAR: &str = "calendar";
 /// calendar with events of its own, DELETING Gmail's, and keeps them current
 /// from the mail. The one place the daemon writes to, and deletes from, a
 /// calendar without the user asking for that write, and a deleted event is
-/// not ours to restore, so it ships dark and is ticked per tenant (owner's
-/// call, 2026-10-30). The key was added and removed inside PR #647 before
-/// any build offered it, so no tenant row can predate this.
+/// not ours to restore, so it ships dark and is ticked per tenant.
 pub const CALENDAR_OWN: &str = "calendar_own";
 
 /// Keys that were hidden features once and have LAUNCHED (or been dropped),
@@ -148,10 +146,8 @@ pub const CALENDAR_OWN: &str = "calendar_own";
 /// on `GET /tenant/features` and `/client/stats`. A new feature under an old
 /// name would arrive already switched on for whoever had the old one.
 ///
-/// Empty today. `calendar` sat here for a few days after it launched for
-/// everyone in October 2026; it went back behind its flag on 2026-10-31, under
-/// the SAME key on purpose, so the testers who had it ticked before the launch
-/// keep it.
+/// Empty today. A key that goes back behind its flag after a launch leaves
+/// this list and keeps the SAME key, so whoever had it ticked keeps it.
 pub const RETIRED: &[&str] = &[];
 
 /// The environment variable naming keys that are on for this daemon no matter

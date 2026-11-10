@@ -113,8 +113,8 @@ variable "carrier_egress_cidrs" {
   description = <<-EOT
     carrier's (the Hetzner k3s tenant box) public egress address(es), as /32s.
     The only sources besides the NAT EIP that may reach Bifrost, and the only
-    ones that may reach metrics (remote-write). Currently believed to be
-    5.78.205.240/32; CONFIRM before applying by running `curl -s ifconfig.me`
+    ones that may reach metrics (remote-write). No default: set it in
+    terraform.tfvars, and CONFIRM before applying by running `curl -s ifconfig.me`
     ON carrier (from a pod, if pod egress is SNATed differently). A wrong value
     here cuts every tenant off from LLM triage.
   EOT
@@ -127,7 +127,7 @@ variable "carrier_egress_cidrs" {
 
   validation {
     condition     = alltrue([for c in var.carrier_egress_cidrs : can(cidrhost(c, 0)) && !startswith(c, "0.0.0.0/")])
-    error_message = "carrier_egress_cidrs entries must be CIDRs (e.g. 5.78.205.240/32), never 0.0.0.0/0."
+    error_message = "carrier_egress_cidrs entries must be CIDRs (e.g. 203.0.113.10/32), never 0.0.0.0/0."
   }
 }
 
@@ -135,7 +135,7 @@ variable "operator_cidrs" {
   description = <<-EOT
     Extra sources allowed to reach Bifrost (UI included). Empty in steady
     state. Set it TEMPORARILY to the operator's own /32 for Bifrost first-run
-    config (CUTOVER.md Phase 4), apply, configure, then set it back to [] and
+    config, apply, configure, then set it back to [] and
     apply again.
   EOT
   type        = list(string)

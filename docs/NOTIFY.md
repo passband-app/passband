@@ -17,7 +17,7 @@ wins wherever the notes and the contract disagree.
 
 ## 1. What we measured
 
-Against the author's live daemon on 2026-09-01, 25 events over 14 days, timing
+Against one self-hosted daemon, 25 events over 14 days, timing
 from each message's `Date:` header to its `events` row:
 
 | | lag |
@@ -69,9 +69,9 @@ inside the freshness window, so not backfill). **18 of them, 24.7%, produced no
 event ever.** The worst:
 
 ```
-deadline  imp 93   ingest lag 884s   "Travelers says mortgage company never paid"
-deadline  imp 76   ingest lag 855s   "Second failed $39.99 Splitwise charge"
-deadline  imp 76   ingest lag 217s   "Second failed $24.99 DistroKid charge"
+deadline  imp 93   ingest lag 884s   "Insurer says your premium payment never arrived"
+deadline  imp 76   ingest lag 855s   "Second failed subscription charge"
+deadline  imp 76   ingest lag 217s   "Payment declined: update your card"
 ```
 
 Cause: today the only emission site that fires in practice is Stage-1's apply
@@ -103,7 +103,7 @@ By design, and the design is wrong. See §6.
 
 ## 3. The design: two lanes
 
-The core decision (Braelyn, this thread): **importance for triage and final
+The core decision: **importance for triage and final
 placement is a different question from importance for notification.** One
 verdict currently answers both, and the two want opposite error profiles.
 
@@ -154,8 +154,8 @@ error corpus read a 100% correction rate. If a rescue overwrites a
 interesting, and notify-lane accuracy reads 100% forever.
 
 **Record both directions.** Fast lane buzzed and Opus disagrees is the
-false-positive rate. Braelyn's call is that a wrong buzz is survivable
-("they open the client and the email is sorted properly"), and that is right,
+false-positive rate. A wrong buzz is survivable (the user opens the client
+and the email is sorted properly), and that holds,
 but survivable is not the same as unmeasured. `notify_rescued` against
 `notify_overturned` is the pair of counters that decides whether the threshold
 moves, in the shape `record_stage1(Stage1Verdict)` already uses.
@@ -842,7 +842,7 @@ and only the first is automatic.
    notifies and never enters the ledger; new mail earns its stamp from the
    first poll. Nobody should file that as a bug.
 
-2. **Self-host first (the author's daemon).** No config needed: the fast lane
+2. **Self-host first.** No config needed: the fast lane
    is on by default, sealed events are off. After a few days:
    `SELECT lane, decision, count(*) FROM notify_decisions GROUP BY 1,2` and
    the rescued/overturned/confirmed joins from §11.4. That number, not an
@@ -859,8 +859,8 @@ and only the first is automatic.
    spellings, so this is a confirmation, not a config change. If it is
    missing, every fast-lane call 400s, the lane parks itself for ten minutes
    at a time, every row reads `unavailable`, and the deliberate lane rescues:
-   degraded to today's behaviour, not dark, but it is exactly the drift the
-   2026-08-19 outage was. The lockstep comment in
+   degraded to today's behaviour, not dark, but it is exactly the allow-list
+   drift this step exists to catch. The lockstep comment in
    `deploy/hosted/15-warden-config.yaml` names the notify model now.
 
 4. **Daemon roll: tag, pin, apply.** Tag `daemon-X.Y.Z` (GHCR builds the
@@ -876,9 +876,8 @@ and only the first is automatic.
 
 5. **Bifrost budget: watch, no action.** The lane costs about a thousandth
    of a dollar per message on Haiku against Stage-1's few cents on Opus,
-   inside the noise of the tenant VK budget (live
-   `SQUELCH_CONTROL_LLM_BUDGET_USD=75`/month, not the code default of 5),
-   but it draws from the same pool. `/client/usage` and
+   inside the noise of the tenant VK budget
+   (`SQUELCH_CONTROL_LLM_BUDGET_USD`), but it draws from the same pool. `/client/usage` and
    `squelchd_llm_cost_usd_total` price the `notify` category at its own
    rates, so the ledger will say what it costs.
 
@@ -913,6 +912,5 @@ and only the first is automatic.
    or `[notify] sealed_enabled = false`.
 
 9. **Docs that go stale on this PR:** `deploy/hosted/SETUP.md` §6b's model
-   list (already stale; add Haiku), `PRODUCTION.md`'s gateway table
-   (Haiku is the third allow-listed model), and `docs/CHANGELOG.md` /
+   list (already stale; add Haiku) and `docs/CHANGELOG.md` /
    the daemon release body for the new knobs and the ledger.

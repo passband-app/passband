@@ -26,7 +26,7 @@ struct CalendarFoldTests {
             starts_at: start, organizer: nil, received_at: received, change: change)
     }
 
-    static let party = "Parameter & Endzeit Invite Polar Inertia"
+    static let party = "Northside Collective Presents Halcyon Drift"
 
     static func main() {
         theTicketMailAndItsReminderAreOneRow()
@@ -51,7 +51,7 @@ struct CalendarFoldTests {
         let dated = row(2, party, "2026-11-06", received: "2026-11-04T19:00:37Z")
         check(CalendarUpdate.folded([dated, order]).map(\.id) == [1], "the confirmation shows")
         // Case, spacing, and one title inside the other.
-        let short = row(4, "polar  INERTIA", "2026-11-06", received: "2026-11-05T00:00:00Z")
+        let short = row(4, "halcyon  DRIFT", "2026-11-06", received: "2026-11-05T00:00:00Z")
         check(CalendarUpdate.folded([order, short]).map(\.id) == [1], "a title inside the other")
     }
 

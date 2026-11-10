@@ -153,8 +153,8 @@ const SCANNER_MARKERS: &[&str] = &[
 ///
 /// - [`SCANNER_MARKERS`].
 /// - EdgeHTML 12 (`Edge/12.`), the 2015 Windows 10 launch browser. Nobody
-///   reads mail in it; the string lives on as a security scanner's disguise
-///   (seen on 2026-10-27 fetching a pixel the minute the mail was delivered).
+///   reads mail in it; the string lives on as a security scanner's disguise,
+///   one that fetches a pixel the minute the mail is delivered.
 ///
 /// Changing this list is safe in both directions: the store relabels every
 /// stored `unknown` and `scanner` row with it on open.
@@ -639,7 +639,7 @@ mod tests {
         assert!(pixel_lands_on_relay("https://relay.squelch.sh./", relay));
         // A hosted tenant: its own vhost, with the relay held for push alone.
         assert!(!pixel_lands_on_relay(
-            "https://ethan-2.passband.email",
+            "https://tenant-a.passband.email",
             relay
         ));
         assert!(!pixel_lands_on_relay("http://relay.squelch.sh", relay));

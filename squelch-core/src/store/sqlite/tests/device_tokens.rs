@@ -64,7 +64,7 @@ fn failed_attempts(store: &SqliteStore, acct: AccountId) -> Option<i64> {
 #[test]
 fn issued_token_round_trips_through_verify() {
     let (store, acct) = store();
-    let issued = store.issue_device_token(acct, "Braelyn's iPhone").unwrap();
+    let issued = store.issue_device_token(acct, "Jamie's iPhone").unwrap();
 
     assert!(issued.token.starts_with(TOKEN_PREFIX));
     // 32 bytes is exactly 43 unpadded base64url chars; nothing truncated, no '='.
@@ -82,7 +82,7 @@ fn issued_token_round_trips_through_verify() {
         .expect("a freshly issued token authenticates");
     assert_eq!(verified.id, issued.id);
     assert_eq!(verified.account_id, acct);
-    assert_eq!(verified.name, "Braelyn's iPhone");
+    assert_eq!(verified.name, "Jamie's iPhone");
     assert!(verified.revoked_at.is_none());
 
     // The PLAINTEXT is nowhere on disk; the stored hash is not the token.
@@ -691,10 +691,10 @@ fn claiming_a_code_yields_a_working_token() {
     let minted = store.mint_pairing_code(acct, ttl()).unwrap();
 
     let issued = store
-        .claim_pairing_code(&minted.code, "  Braelyn's iPhone  ")
+        .claim_pairing_code(&minted.code, "  Jamie's iPhone  ")
         .unwrap();
     assert_eq!(issued.account_id, acct, "the code resolved its own account");
-    assert_eq!(issued.name, "Braelyn's iPhone");
+    assert_eq!(issued.name, "Jamie's iPhone");
 
     // The token the claim handed back is a real human-door credential.
     let verified = store.verify_device_token(&issued.token).unwrap().unwrap();

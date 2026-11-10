@@ -159,7 +159,7 @@ struct SenderIdentityTests {
 
         // Initials come off the NAME, never the full address.
         expect(SenderID.initials("Sarah Chen <sarah@acme.com>") == "SC", "two words, two letters")
-        expect(SenderID.initials("bboynton97@gmail.com") == "BB", "never the domain's letters")
+        expect(SenderID.initials("jrivera97@gmail.com") == "JR", "never the domain's letters")
     }
 
     /// `readableName` is what a banner's title is built from, and the one
@@ -180,7 +180,7 @@ struct SenderIdentityTests {
         expect(r("sarah_chen@gmail.com") == "Sarah Chen", "at a consumer host too")
         expect(r("sarah@acme.com") == "Acme", "a lone word at a real domain shows the domain")
         expect(r("jsmith@acme.com") == "Acme", "because Jsmith in bold is not a name")
-        expect(r("bboynton97@gmail.com") == "bboynton97", "an opaque gmail local stands alone")
+        expect(r("jrivera97@gmail.com") == "jrivera97", "an opaque gmail local stands alone")
         expect(r("x7k2q9@outlook.com") == "x7k2q9", "the provider's name adds nothing")
 
         // Display names that are not names.

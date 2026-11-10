@@ -2,8 +2,7 @@
 # squelchd
 # (self-hosting is `docker compose up` + env vars, no Rust toolchain on the
 # box), squelch-warden and squelch-control (the hosted planes, so a rebuilt node
-# pulls a tag instead of a human rebuilding it by hand — see
-# deploy/hosted/PRODUCTION.md), and squelch-embed (the hosted shared embedding
+# pulls a tag instead of a human rebuilding it by hand), and squelch-embed (the hosted shared embedding
 # service, amd64 + arm64 like squelchd and for the same reason).
 #
 # ARCHITECTURES DIFFER PER IMAGE, on purpose:
@@ -100,8 +99,7 @@ jobs:
           cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/squelchd:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
 
   # The in-cluster tenant provisioner. Published so replacing the k3s node is a
-  # pull rather than a hand-build on the box, which is what PRODUCTION.md's
-  # registry gap was.
+  # pull rather than a hand-build on the box.
   warden-image:
     runs-on: ubuntu-latest
     # Deploys to the release-daemon environment, limited to daemon-* tags,

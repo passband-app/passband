@@ -1,7 +1,6 @@
 # What one tenant may take, and what all tenants together may take.
 #
-# THESE ARE THE NUMBERS `carrier` IS MEANT TO RUN on 4 vCPU / 16 GB
-# (deploy/hosted/PRODUCTION.md, "How many tenants fit"), in BOTH of the states
+# THESE ARE THE NUMBERS `carrier` IS MEANT TO RUN on 4 vCPU / 16 GB, in BOTH of the states
 # the warden can render a tenant in: thirty tenants embedding in-process
 # (SQUELCH_WARDEN_EMBED_URL unset, today), and sixty on the shared embedder
 # (65-embed.yaml, the knob set), where the gate is a deliberate, provisional one
@@ -84,9 +83,7 @@ spec:
     # number, and it is sized to the NODE rather than to a tenant count you
     # would like to have. A quota bigger than what the box can actually run is
     # a quota that never refuses anybody, and the kernel's OOM killer does the
-    # refusing instead, against a mailbox that is already serving. That is
-    # 2026-08-19 in one line: this said 5Gi on a 4 GB box, four tenants were
-    # enough, and two squelchd processes died.
+    # refusing instead, against a mailbox that is already serving.
     #
     # The NODE budget, on `carrier` (16 GB, of which 15985 MiB is real):
     #
@@ -149,12 +146,8 @@ spec:
     # quota means the box is full; on the shared embedder it means the
     # provisional disk gate is reached, and the next move is a measurement,
     # not a raise. Every other line clears eighty-seven, so lifting the disk
-    # gate later is those three lines and nothing else. That a line was
-    # raised without the others has happened twice: 2026-09-28, memory alone
-    # was raised and cpu, ephemeral storage, pods and PVCs all bound first;
-    # and the patch that fixed it set `limits.cpu` to 12 and left
-    # `requests.storage` at 200Gi, which would have refused the thirteenth and
-    # the twentieth tenant (see those lines). A test in the warden
+    # gate later is those three lines and nothing else. Raising one line
+    # without the others lets a different line bind first. A test in the warden
     # (`the_committed_quota_lets_memory_bind_before_any_count_line`) divides
     # every line here by what the warden's ConfigMap asks for a tenant, in
     # both states, and fails CI when one binds where this comment says it
@@ -181,8 +174,7 @@ spec:
     # thing: the kernel throttles a pod at its limit and kills nothing, so the
     # sum against 4 vCPU is no promise, and the line only has to admit more
     # than eighty-seven tenants at the warden's 1000m limit each, after the
-    # shared embedder's 2000m (the 12 the patch before this file carried would
-    # have refused the thirteenth signup).
+    # shared embedder's 2000m.
     limits.cpu: "96"
     limits.memory: 98304Mi
     # 1Gi a tenant, plus the two other pods' 128Mi each: ninety-five.
@@ -194,7 +186,7 @@ spec:
     # line is a ceiling on claims, not disk, and it is sized to the claims line
     # and never to the disk: 602Gi is a number no disk on this box has, and
     # that is the honest reading of a claim size local-path ignores. The disk
-    # is the volume (PRODUCTION.md, "The volume"), watched by the "carrier disk
+    # is the tenant volume, watched by the "carrier disk
     # high" alert and grown online when it says so (SETUP.md). It follows the
     # claims line and not what memory admits because a cancelled tenant keeps
     # its claim: a claim that cannot bind is a tenant that never comes up, and
@@ -228,7 +220,7 @@ spec:
     #
     # (local-path's directory is `/var/lib/rancher/k3s/storage` unless k3s was
     # started with `--default-local-storage-path`, which on carrier points it at
-    # the tenant volume; PRODUCTION.md, "k3s".) The per-claim sizes, their
+    # the tenant volume.) The per-claim sizes, their
     # growth over a month and the free space say what a tenant costs and how
     # many more fit; raise `pods`, `persistentvolumeclaims` and
     # `requests.storage` together off that, never one alone.

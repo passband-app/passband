@@ -698,7 +698,7 @@ function eyesRows(state) {
 function renderSitrep() {
   document.getElementById('w1').innerHTML = chrome('sitrep') + `<div class="page">
     <div class="topbar"><span class="wordmark">passband</span><span class="sublabel">sitrep</span><span class="spacer"></span><span class="faint" style="display:flex;gap:14px">${RAILICONS.mail.replace('<svg', '<svg width="17" height="17"')}${RAILICONS.search.replace('<svg', '<svg width="17" height="17"')}</span></div>
-    <div style="padding:6px 28px 18px"><div class="micro faintest">Good afternoon, Braelyn</div><div class="serif" style="font-size:38px;font-weight:500;line-height:1.1">Three items for your eyes.</div></div>
+    <div style="padding:6px 28px 18px"><div class="micro faintest">Good afternoon, Jamie</div><div class="serif" style="font-size:38px;font-weight:500;line-height:1.1">Three items for your eyes.</div></div>
     <div style="display:flex;gap:18px;padding:0 24px;align-items:flex-start">
       <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:16px">
         <div class="pane"><div class="zh"><span class="g">${ICON.eye}</span><span class="ttl">For your eyes</span><span class="cnt">3</span></div>${eyesRows('open')}</div>
@@ -887,7 +887,7 @@ function renderCompose() {
   ];
   document.getElementById('w7').innerHTML = chrome('sitrep') + `<div class="page">
     <div class="topbar"><span class="wordmark">passband</span><span class="sublabel">sitrep</span></div>
-    <div style="padding:6px 28px 18px;opacity:.9"><div class="micro faintest">Good afternoon, Braelyn</div><div class="serif" style="font-size:38px;font-weight:500;line-height:1.1">Three items for your eyes.</div></div>
+    <div style="padding:6px 28px 18px;opacity:.9"><div class="micro faintest">Good afternoon, Jamie</div><div class="serif" style="font-size:38px;font-weight:500;line-height:1.1">Three items for your eyes.</div></div>
     <div style="padding:0 24px;width:560px"><div class="pane"><div class="zh"><span class="g">${ICON.eye}</span><span class="ttl">For your eyes</span><span class="cnt">3</span></div>${eyesRows('open').replace(/<div class="sched">[\s\S]*?<\/div><\/div>(?=\s*<div class="orow">)/, '')}</div></div>
     <div class="timepane">
       <div class="hd"><span style="font-size:13px;font-weight:600">Your time</span><span class="micro faint">Tue and Wed, 9am to 6pm</span><span class="spacer" style="flex:1"></span>${kbd('esc')}</div>

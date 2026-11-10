@@ -70,7 +70,8 @@
 #     green one. An alert that pages on `kube_job_status_failed` alone will fire
 #     on every ordinary image bump. What makes the one failure that matters
 #     tellable from those is `podFailurePolicy` in the jobTemplate below, which
-#     gets exit 4 a Failed condition of its own; PRODUCTION.md has the query.
+#     gets exit 4 a Failed condition of its own; the alert rules
+#     (deploy/monitoring/grafana/provisioning/alerting/rules.yml) carry the query.
 #   - **Convergence time is the schedule times the fleet.** The schedule below
 #     is the lever, and it trades directly against how long a bad render has to
 #     be noticed in. It was fifteen minutes while the fleet was small and is
@@ -153,8 +154,6 @@
 # changed in `15-warden-config.yaml`, and restarting the warden - then unsuspend.
 # `squelch-control reconcile <label>` on that one tenant reproduces the refusal
 # with the API server's own message when the reason word is not enough.
-#
-# `deploy/hosted/PRODUCTION.md` has the exit codes and what to do about each.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -220,8 +219,7 @@ spec:
   #
   # These corpses are counted by nothing, and that is deliberate: a Job pod ends
   # every run not-ready and stays that way forever, so any pod-health query has
-  # to exclude Job-owned pods outright rather than by phase. The dashboard's
-  # "Pods not ready" read 3 for a day over three of them before it learned that.
+  # to exclude Job-owned pods outright rather than by phase.
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 72
   jobTemplate:
@@ -257,19 +255,17 @@ spec:
       # kube-state-metrics does not export a one-shot pod's exit code. It builds
       # `kube_pod_container_status_last_terminated_exitcode` from a container's
       # `lastState`, and a pod that runs once and exits puts its code in
-      # `state.terminated` and leaves `lastState` empty - so the query
-      # PRODUCTION.md recommended for two months matched nothing, ever, on any
-      # cluster. A frozen fleet was silent. That is what this rule fixes, and the
+      # `state.terminated` and leaves `lastState` empty, so a query on it
+      # matches nothing on any cluster. That is what this rule fixes, and the
       # method is to make the Job controller do the classifying: a pod failure
       # matching a `FailJob` rule sets the Job's Failed condition reason to
       # `PodFailurePolicy` instead of `BackoffLimitExceeded`, and the reason IS
       # exported, as a label on `kube_job_status_failed`.
       #
       # So exit 4 becomes a different series from every other nonzero exit, which
-      # is the whole ask: 4 pages, everything else goes on a board. See
-      # PRODUCTION.md, "Alerting on this, without alerting on normal", for the
-      # query, the kube-state-metrics wrinkle underneath it, and a probe you can
-      # run in sixty seconds to prove the whole path still works.
+      # is the whole ask: 4 pages, everything else goes on a board. The alert
+      # rules (deploy/monitoring/grafana/provisioning/alerting/rules.yml) carry
+      # the query.
       #
       # ONLY exit 4 belongs here, and only `FailJob`.
       #
@@ -434,8 +430,9 @@ spec:
     - to:
         # CHECK ME. The API server's real endpoint - on a single-node k3s, the
         # node's own IP, which is what kube-router actually filters on.
+        # CARRIER_EGRESS_IP is a token: substitute it before applying (SETUP.md).
         - ipBlock:
-            cidr: 5.78.205.240/32
+            cidr: CARRIER_EGRESS_IP/32
       ports:
         - protocol: TCP
           port: 6443

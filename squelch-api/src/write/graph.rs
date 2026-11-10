@@ -263,10 +263,9 @@ impl GraphWriteClient {
     /// The address Exchange sends this account's mail as. FIRST the From on
     /// the newest Sent Items message, because that is what Exchange actually
     /// used, and it enforces the current primary whatever a draft says.
-    /// `/me` comes second: seen live 2026-10-29, it went on naming the old
-    /// primary for a day after the owner changed it, while Exchange was
-    /// already sending as the new one. `None` on any failure, and the message
-    /// then goes as composed.
+    /// `/me` comes second: it can go on naming the old primary for a day
+    /// after the owner changes it, while Exchange already sends as the new
+    /// one. `None` on any failure, and the message then goes as composed.
     async fn send_as(&self) -> Option<String> {
         #[derive(serde::Deserialize)]
         struct Addr {
@@ -521,7 +520,7 @@ impl MailWriter for GraphWriteClient {
         // primary address (an alias, or the configured address before an
         // alias change has propagated) is not refused: Exchange silently
         // replaces it with the mailbox's hidden `outlook_<hex>@outlook.com`
-        // address. Seen live 2026-10-28. Writing the real one keeps the From
+        // address. Writing the real one keeps the From
         // the reader sees and the one the recipient gets the same.
         let rewritten = if self.resolve_send_as {
             match self.send_as().await {

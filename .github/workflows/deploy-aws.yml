@@ -86,8 +86,7 @@ jobs:
       site: ${{ steps.plan.outputs.site }}
     steps:
       # Credentials persisted HERE ONLY (a read-only token, in a job with no
-      # AWS access): paths-filter fetches the push's base commit with git,
-      # and the repo is private.
+      # AWS access): paths-filter fetches the push's base commit with git.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'push'
 

@@ -1,6 +1,6 @@
 //! Transport security headers over every route control serves.
 //!
-//! The CASA Tier 2 assessment's DAST scan (docs/VERIFICATION.md) flags any
+//! A CASA Tier 2 assessment's DAST scan flags any
 //! response without `Strict-Transport-Security` or
 //! `X-Content-Type-Options: nosniff`. Control knows its own scheme from
 //! `SQUELCH_CONTROL_PUBLIC_URL`, so HSTS goes on whenever that is https and

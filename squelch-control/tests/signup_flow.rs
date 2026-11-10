@@ -70,8 +70,8 @@ const CAL_LIST: &str = "https://www.googleapis.com/auth/calendar.calendarlist.re
 /// its mailbox is an `@outlook.com` alias.
 const MS_CLIENT_ID: &str = "11111111-2222-3333-4444-555555555555";
 const MS_CLIENT_SECRET: &str = "ms-hosted-secret";
-const MS_ID: &str = "313658d2f27bcf04";
-const MS_SIGNIN: &str = "braelyn@passband.test";
+const MS_ID: &str = "a1b2c3d4e5f60718";
+const MS_SIGNIN: &str = "jamie@rivera.test";
 const MS_MAILBOX: &str = "passband-qa@outlook.com";
 const MS_GRANT: &str = "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read https://graph.microsoft.com/Calendars.ReadWrite openid";
 
@@ -1676,8 +1676,8 @@ async fn the_emailed_link_suggests_a_username_from_the_address() {
 
 /// The alerts, end to end through the real handler: a half-finished signup
 /// reaches the operator with the label and where to look, the finished retry
-/// reaches them too, and neither carries the mailbox. 2026-09-28 was a
-/// half-finished signup that nobody heard about until the person said so.
+/// reaches them too, and neither carries the mailbox. Without them a
+/// half-finished signup is a log line nobody reads.
 #[tokio::test]
 async fn the_operator_hears_about_a_half_finished_signup_and_its_retry() {
     let h = Harness::new().await;

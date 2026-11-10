@@ -35,7 +35,7 @@ pub fn parse_bearer(value: &str) -> Option<&str> {
 
 /// The `Strict-Transport-Security` value every door sends over https. One
 /// year, the floor the HSTS preload list and most scanners expect (the CASA
-/// assessment's DAST scan among them: docs/VERIFICATION.md). No
+/// assessment's DAST scan among them). No
 /// `includeSubDomains`: each host speaks for itself, not for its siblings.
 pub const HSTS: &str = "max-age=31536000";
 

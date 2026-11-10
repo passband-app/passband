@@ -246,6 +246,6 @@ mod tests {
             "https://www.amazon.com/progress-tracker/package?orderId=113-0000000-0000001&shipmentId=N0FAKE001"
         );
         assert!(is_package_key(&box1().key()));
-        assert!(!is_package_key("TBA303392911000"));
+        assert!(!is_package_key("TBA000123456789"));
     }
 }

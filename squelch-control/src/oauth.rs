@@ -213,8 +213,8 @@ pub enum Flow {
     /// daemon can hold. It differs only in what the callback does with it,
     /// which is to re-seal an existing mailbox rather than provision a new one.
     ///
-    /// CALENDAR IS ASKED FOR AGAIN (the founder, 2026-10-29: "the reconnect
-    /// flow for email should also reconnect calendar"). It used to lean on
+    /// CALENDAR IS ASKED FOR AGAIN: reconnecting email also reconnects
+    /// calendar. It used to lean on
     /// `include_granted_scopes`, but a reconnect is needed exactly when the old
     /// grant died, and a REVOKED grant leaves Google nothing to include: the
     /// new token came back Gmail-only, the install replaced the whole
@@ -1475,7 +1475,7 @@ mod tests {
     /// a personal account's internal address.
     #[test]
     fn the_outlook_mailbox_is_where_mail_arrives_not_the_sign_in_label() {
-        let personal = me("313658d2f27bcf04", Some("braelyn@passband.app"));
+        let personal = me("a1b2c3d4e5f60718", Some("jamie@example.com"));
         let to = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(
             outlook_mailbox(
@@ -1493,7 +1493,7 @@ mod tests {
         // internal address, never the label.
         assert_eq!(
             outlook_mailbox(&personal, &[]).as_deref(),
-            Some("outlook_313658d2f27bcf04@outlook.com")
+            Some("outlook_a1b2c3d4e5f60718@outlook.com")
         );
         // A personal account whose own address is Microsoft's.
         let native = me("0123456789abcdef", Some("ada@hotmail.com"));

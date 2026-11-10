@@ -57,7 +57,7 @@ The emailed link is `/?invite=CODE`, and `GET /` fills the form in from it. That
 reverses this crate's first rule, which was that a code never appears in a URL:
 the query string reaches the edge's access log, the recipient's history, and any
 proxy between them, and a live code sits in all three until it is redeemed or
-lapses. It is a deliberate trade for the click, taken 2026-08-14, bounded by the
+lapses. It is a deliberate trade for the click, bounded by the
 code being single use. A parameter not shaped like a code renders an empty field.
 
 The "join the waitlist" link closes the loop from the other end: a person with
@@ -383,10 +383,9 @@ place a model has to be allow-listed and the one nothing owned. A virtual key's
 `allowed_models` is matched against the id the daemon sent
 (`anthropic/claude-opus-5`); the provider key's list is matched after the
 provider prefix is resolved away (`claude-opus-5`). A model in the first and
-not the second answers `400 no keys found that support model`, which is how
-every hosted tenant ran heuristic-only triage for four days in August 2026
-while each tenant's virtual key, the warden's config and the daemon all named
-the model correctly. Run it after **every** change to the fleet's model, and
+not the second answers `400 no keys found that support model`, and the fleet falls back to
+heuristic-only triage even though each tenant's virtual key, the warden's
+config and the daemon all name the model correctly. Run it after **every** change to the fleet's model, and
 run `--check` to ask whether they agree right now.
 
 Virtual keys are **reported, never rewritten**: converging one here would leave
@@ -444,19 +443,9 @@ is OpenTofu in `deploy/aws/tofu/main/`; the architecture is
    carries `sslmode=verify-full` (see the table above for what that verifies).
    The `/data` mount point in the image is a transition artifact from the
    SQLite days and nothing mounts it.
-4. **Operator CLI.** ECS Exec is enabled on `control` only, so the CLI below
-   runs inside the live task:
-
-   ```sh
-   t=$(aws ecs list-tasks --cluster passband --service-name control \
-     --desired-status RUNNING --query 'taskArns[0]' --output text)
-   aws ecs execute-command --cluster passband --task "$t" --container control \
-     --interactive --command "squelch-control tenants"
-   ```
-
-   Session output is logged to `/passband/ecs-exec`, so never print a secret
-   there (no `env`, no `printenv`). Service logs: `aws logs tail
-   /passband/control --follow`.
+4. **Operator CLI.** The CLI below runs inside the live task over ECS Exec.
+   Exec session output is logged, so never print a secret there (no `env`, no
+   `printenv`).
 5. **Domain and OAuth.** `signup.passband.app` (the product domain, never the
    tenant base domain) points at the ALB; DNS is at the registrar, not in
    tofu. The same hostname must be registered as an authorized redirect URI
@@ -465,9 +454,7 @@ is OpenTofu in `deploy/aws/tofu/main/`; the architecture is
 6. Health check: `GET /healthz`.
 
 DNS for the rest of the hosted tier (`*.<base domain>` tenant wildcard and
-`warden.passband.app` pointing at the k3s node) is in `deploy/hosted/SETUP.md`;
-what the live deployment actually looks like — box, domains, secret inventory —
-is `deploy/hosted/PRODUCTION.md`.
+`warden.passband.app` pointing at the k3s node) is in `deploy/hosted/SETUP.md`.
 
 ## Notes on the surface
 

@@ -7,8 +7,8 @@
 //! This module speaks five of its routes: list the provider keys a virtual key
 //! must be attached to, REWRITE a provider key's model filter, list the
 //! virtual keys it holds, mint a virtual key with a monthly budget, and revoke
-//! one by id. All were verified against the deployed gateway (Bifrost v1.6.9,
-//! 2026-08-13 and 2026-08-25); where the docs and the wire disagreed, the wire
+//! one by id. All were verified against the deployed gateway (Bifrost v1.6.9);
+//! where the docs and the wire disagreed, the wire
 //! won:
 //!
 //! - The budget field is `budgets`, an ARRAY. A singular `budget` object is
@@ -29,13 +29,12 @@
 //!   virtual key's `allowed_models` is matched against the id the daemon sent
 //!   (`anthropic/claude-opus-5`); the PROVIDER key's `models` is matched after
 //!   the provider prefix is resolved away (`claude-opus-5`). A model in the
-//!   first and not the second answers 400 "no keys found that support model",
-//!   which is how the whole fleet ran heuristics-only for days in August 2026
-//!   while every virtual key looked correct. [`BifrostClient::
+//!   first and not the second answers 400 "no keys found that support model"
+//!   while every virtual key looks correct. [`BifrostClient::
 //!   set_provider_key_models`] and `squelch-control llm sync` exist so that
 //!   second list has an owner.
-//! - EMPTY IS NOT "ALLOW EVERYTHING" on either list. Verified live on
-//!   2026-08-25: emptying a provider key's `models` left it serving nothing,
+//! - EMPTY IS NOT "ALLOW EVERYTHING" on either list. Verified live:
+//!   emptying a provider key's `models` left it serving nothing,
 //!   the same as the `["*"]` wildcard. Both lists must name every model.
 //! - A READ MASKS THE PROVIDER CREDENTIAL (`sk-a****gQAA`) and names the env
 //!   var the real one comes from. The obvious read-modify-write therefore
@@ -180,7 +179,7 @@ pub struct ProviderKeyState {
     /// claude-opus-5` — the prefix is already gone by the time it is compared.
     ///
     /// EMPTY IS NOT "ALLOW EVERYTHING". Verified against the live gateway
-    /// (v1.6.9, 2026-08-25): emptying this list left the key serving nothing
+    /// (v1.6.9): emptying this list left the key serving nothing
     /// at all, exactly as the `["*"]` wildcard does. It is an allow-list that
     /// has to name every model the fleet uses.
     pub models: Vec<String>,
@@ -1451,8 +1450,8 @@ mod tests {
         );
     }
 
-    /// The whitespace that took the canary down for four days does not survive
-    /// the derivation either.
+    /// Stray whitespace in a configured id does not survive the derivation
+    /// either.
     #[test]
     fn provider_models_trim() {
         let triage = vec!["anthropic/claude-opus-5 ".to_string(), " ".to_string()];

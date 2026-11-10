@@ -11,7 +11,9 @@
 #   SPARKLE_PRIVATE_KEY      the EdDSA private key (generate_keys -x output)
 #   TAP_PUSH_TOKEN           fine-grained PAT, contents:write on homebrew-tap
 #   RELEASES_PUSH_TOKEN      fine-grained PAT, contents:write on passband-releases
-#                            (TEMPORARY, see the "Mirror" step)
+#                            (see the "Mirror" step)
+#
+# Repo secret: APPLE_ID, the Apple ID notarytool signs in as.
 #   MAC_PUSH_PROFILE         OPTIONAL base64 Developer ID provisioning profile for
 #                            app.passband.client with Push Notifications; without
 #                            it the app ships with no APNs (passband/build.sh)
@@ -25,7 +27,7 @@ permissions:
   contents: write
 
 env:
-  APPLE_ID: bboynton97@gmail.com
+  APPLE_ID: ${{ secrets.APPLE_ID }}
   APPLE_TEAM_ID: AAT39BQ9LV
 
 jobs:
@@ -135,13 +137,13 @@ jobs:
             --title "Passband $VERSION" \
             --notes-file "$NOTES"
 
-      # TEMPORARY, while this repo is private: its release assets 404 for the
-      # public, so every download (Sparkle, the site's button, Homebrew) goes
-      # through passband.app/download to a public, releases-only mirror
-      # instead (passband-site/server.ts). BEFORE the appcast on purpose: if
-      # the mirror upload fails, the feed never advertises a zip nobody can
-      # fetch. To undo when the repo is public again: delete this step, point
-      # server.ts back at this repo, and delete passband-app/passband-releases.
+      # Every download (Sparkle, the site's button, Homebrew) goes through
+      # passband.app/download to the public, releases-only mirror
+      # passband-app/passband-releases (passband-site/server.ts and the
+      # CloudFront function both point there). BEFORE the appcast on purpose:
+      # if the mirror upload fails, the feed never advertises a zip nobody can
+      # fetch. Retiring the mirror means pointing those redirects back at this
+      # repo first, then deleting this step.
       - name: Mirror the zip to the public releases repo
         env:
           GH_TOKEN: ${{ secrets.RELEASES_PUSH_TOKEN }}

@@ -45,9 +45,8 @@ const MAX_SLOWDOWN: u32 = 16;
 /// bills for it, and lets Google's own refusals set the pace.
 ///
 /// It starts at 80% of the published per-user budget. The published costs are
-/// not the whole story: on 2026-09-27 hosted tenants were refused at about a
-/// third of the published limit, every catch-up dying around the hundredth
-/// message read, with no other caller on the project. So a quota refusal
+/// not the whole story: Google can refuse a mailbox well below the published
+/// limit with no other caller on the project. So a quota refusal
 /// halves the rate and pauses the whole mailbox for a minute (sync, sweeps and
 /// the write door together), and each minute without one speeds back up by a
 /// tenth, never past the starting rate. The mailbox settles just under what

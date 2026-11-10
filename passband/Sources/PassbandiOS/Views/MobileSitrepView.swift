@@ -435,8 +435,8 @@ private struct BoardFootnote: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             // A healthy stamp only when it is late: "synced just now" under
-            // every board was a line of reassurance nobody reads (the founder:
-            // "drop it"). Stale, it is a warning, and stays.
+            // every board was a line of reassurance nobody reads, so it is
+            // dropped. Stale, it is a warning, and stays.
             let stamp = SyncStatus.syncedStamp(
                 stats: store.stats, clientRefresh: store.lastRefresh, date: Fmt.date)
             if stamp.warn {
@@ -519,10 +519,9 @@ private struct VisibleWarmKeeper: View {
     }
 }
 
-/// QUICK LOOK, DOCKED. The founder: "stay
-/// pinned to the bottom until you scroll down enough to unlock it, then it
-/// should zoom to cover the empty space. basically stay out of the way unless
-/// you want to see it."
+/// QUICK LOOK, DOCKED. It stays pinned to the bottom until the board is
+/// scrolled far enough to unlock it, then grows to cover the empty space: out
+/// of the way unless it is wanted.
 ///
 /// So it has two states and nothing between them to manage:
 ///   - DOCKED: a strip at the foot of the board, its name and what is in it

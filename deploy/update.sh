@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Update squelchd on baddiebox and restart it, in one command.
+# Update squelchd on a self-hosted box and restart it, in one command.
 #
 #   ./deploy/update.sh            # pull latest, rebuild, install, restart
 #   ./deploy/update.sh --no-pull  # skip git pull (build the working tree as-is)

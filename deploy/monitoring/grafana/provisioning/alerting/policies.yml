@@ -1,6 +1,6 @@
 # Everything to Slack. One receiver, so the tree is one node.
 #
-# ONE MESSAGE PER STATE CHANGE, asked for on 2026-10-08: a tenant going stale
+# ONE MESSAGE PER STATE CHANGE: a tenant going stale
 # says so once, its recovery says so once, and nothing in between. Two settings
 # make that true and either one alone does not:
 #

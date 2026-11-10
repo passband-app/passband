@@ -4,11 +4,13 @@
 # in-cluster Service address AND its real endpoint, because kube-router
 # evaluates egress AFTER the Service VIP is DNATed to the endpoint — an
 # allowlist naming only 10.43.0.1 matches no packet that actually leaves the
-# pod (learned live: the warden's first provision failed `cluster_unavailable`
-# until the endpoint was added). Confirm both with:
+# pod. Confirm both with:
 #
 #     kubectl -n default get svc kubernetes -o jsonpath='{.spec.clusterIP}'
 #     kubectl get endpointslices -n default -l kubernetes.io/service-name=kubernetes
+#
+# The manifest carries the token CARRIER_EGRESS_IP for the node's own address;
+# substitute it before applying (SETUP.md).
 #
 # If you passed --service-cidr to k3s, put your address here or the warden will
 # come up and be unable to do anything at all.
@@ -88,7 +90,7 @@ spec:
         # single-node k3s this is the node's own IP, and post-DNAT this is the
         # address kube-router actually filters on.
         - ipBlock:
-            cidr: 5.78.205.240/32
+            cidr: CARRIER_EGRESS_IP/32
       ports:
         - protocol: TCP
           port: 6443

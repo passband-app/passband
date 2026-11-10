@@ -572,7 +572,7 @@ private struct TicketsRow: View {
 }
 
 /// A change another sender's mail offers on this card (`LinkedChange`):
-/// "Endzeit says Sat Nov 7, 9pm" or "Endzeit says it's cancelled", and the
+/// "Northside says Sat Nov 7, 9pm" or "Northside says it's cancelled", and the
 /// two answers. Quiet and roomy, in the same well as the mail behind it; no
 /// colour, because nothing has changed yet. The sender is named from the
 /// linked mail itself, through the same prefetch cache `SourceRow` reads.

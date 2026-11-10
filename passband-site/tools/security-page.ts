@@ -161,7 +161,7 @@ const VISUALS: Record<string, Visual> = {
 <ol class="rungs">
 <li><span class="tag">none</span><b>Read only</b><span>No drafts, no sending</span></li>
 <li class="def"><span class="tag">drafts &middot; the default</span><b>Leave drafts for you</b><span>Marked &ldquo;from your agent&rdquo;; mail leaves only when you press send</span></li>
-<li class="stop"><span class="tag">send &middot; opt-in</span><b>Send with your approval</b><span>Same pipeline and secret guard as yours, with no override</span></li>
+<li class="stop"><span class="tag">send &middot; opt-in</span><b>Send with your approval</b><span>Same pipeline as yours, plus a secret check with no override</span></li>
 </ol>
 <div class="kinds"><span>Never for agents</span><code>attachments</code><code>forwards</code><code>send groups</code><code>read tracking</code><code>scheduling</code></div>
 <figcaption>An agent cannot change this setting, and a value the daemon cannot read counts as none.</figcaption>
@@ -186,14 +186,13 @@ const VISUALS: Record<string, Visual> = {
   "5": {
     before: '<p class="lbl">Enforcement</p>',
     html: `<figure class="viz guard" aria-label="Outbound secret guard">
-<p class="viz-title">The outbound check</p>
+<p class="viz-title">The outbound check, on agent sends</p>
 <div class="g-flow">
-<div class="mnode"><span class="tag">Scanned</span><b>Everything you are about to send</b><span>Your note, plus a forward&#39;s original and its text attachments</span></div>
+<div class="mnode"><span class="tag">Scanned</span><b>Everything an agent is about to send</b><span>Recipients, subject and body; links skipped for the long-run checks</span></div>
 ${arr}
 <div class="g-branch">
 <div class="g-row"><span class="chip">Nothing found</span>${arr}<span class="chip">Sent</span></div>
-<div class="g-row"><span class="chip warn">Looks like a secret</span>${arr}<span class="chip">Stopped; told only the kind</span></div>
-<div class="g-row g-sub"><span class="chip">You choose to override</span>${arr}<span class="chip">Sent, with an audit row</span></div>
+<div class="g-row"><span class="chip warn">Looks like a secret</span>${arr}<span class="chip">Refused, no override; told only the kind</span></div>
 </div>
 </div>
 <div class="kinds"><span>Detects</span><code>pem_block</code><code>api_key</code><code>otp_code</code><code>long_hex</code><code>long_base64</code></div>

@@ -10,10 +10,9 @@
 //! non-numeric id) carries it too.
 //!
 //! THE SCHEDULE HANDLER DOES EVERYTHING A SEND DOES BEFORE THE GMAIL CALL,
-//! because the user is present to answer: validation, the files, the outbound
-//! guard (a forward's original is read now), and the write credential. The
-//! worker then fires the frozen request through the same `perform_send` a
-//! send uses, with the guard SETTLED: nothing re-scans.
+//! because the user is present to answer: validation, the files, the forward's
+//! original (read now), and the write credential. The worker then fires the
+//! frozen request through the same `perform_send` a send uses.
 //!
 //! LOGS AND AUDIT ROWS CARRY IDS, STATES AND REASONS ONLY. The stored
 //! `request` is mail content and is never logged or audited.
@@ -41,9 +40,8 @@ use std::time::Duration;
 use crate::error::ApiError;
 use crate::group_send;
 use crate::handlers::{
-    Fire, MAX_FORWARD_RAW_BYTES, OutboundAttachmentView, SendBody, SendGuard, SendOutcome,
-    account_provider, audit_action, composition_kinds, dedup_ids, echo_sent,
-    forward_original_kinds, guard_verdict, load_send_attachments, mail_attachment, perform_send,
+    Fire, MAX_FORWARD_RAW_BYTES, OutboundAttachmentView, SendBody, SendOutcome, account_provider,
+    audit_action, dedup_ids, echo_sent, load_send_attachments, mail_attachment, perform_send,
     read_forward_original, resolve_target, send_target, store_call, validate_send, write_client,
     write_refusal,
 };
@@ -262,17 +260,15 @@ async fn schedule(state: &ApiState, req: ScheduleBody) -> Result<Response, ApiEr
     )
     .await?;
 
-    // 5. THE GUARD RUNS NOW, once, over everything the mail will carry. A
-    // forward's original is read here on the write token (which is why a
-    // forward needs the credential before the verdict, and a plain send asks
-    // for it after, as the send route does).
-    let mut kinds = composition_kinds(&body.body, &attachments);
+    // 5. A forward's original is read NOW on the write token, so one that is
+    // gone or past the size ceiling is refused while the user is here rather
+    // than landing as "didn't send" hours later.
     let mut have_client = false;
     if let Some(original_id) = body.forward_of_message_id {
         let client = require_write_client(state, target.clone()).await?;
         have_client = true;
         let staged: usize = attachments.iter().map(|a| a.data.len()).sum();
-        let (_, original) = read_forward_original(
+        read_forward_original(
             state,
             &*client,
             AUDIT_SCHEDULE,
@@ -282,33 +278,17 @@ async fn schedule(state: &ApiState, req: ScheduleBody) -> Result<Response, ApiEr
             None,
         )
         .await?;
-        for kind in forward_original_kinds(&original) {
-            if !kinds.contains(&kind) {
-                kinds.push(kind);
-            }
-        }
     }
-    // The bytes were only needed for the scan; the store keeps them.
+    // The bytes were only needed for the checks above; the store keeps them.
     drop(attachments);
-    if let Some(err) = guard_verdict(
-        state,
-        AUDIT_SCHEDULE,
-        &kinds,
-        body.override_guard,
-        target.clone(),
-    )
-    .await
-    {
-        return Err(err);
-    }
 
     // 6. No point queueing a mail that can never go out.
     if !have_client {
         require_write_client(state, target.clone()).await?;
     }
 
-    // 7. A reply's parent, where a send meets it: after the files, the guard
-    // and the credential, so a body with two problems gets the send route's
+    // 7. A reply's parent, where a send meets it: after the files and the
+    // credential, so a body with two problems gets the send route's
     // answer. A parent that is not stored at all (another account's, never
     // synced, deleted since) would fail at fire time three times over and
     // land as "didn't send" hours later; asked now, it is the same 404 a send
@@ -324,8 +304,7 @@ async fn schedule(state: &ApiState, req: ScheduleBody) -> Result<Response, ApiEr
     // 8. Mint the Message-ID and freeze the request: `confirm` forced true
     // (the user confirmed by scheduling) and `draft_id` stripped (the draft is
     // consumed HERE, and a fired send must not delete whatever draft reuses
-    // that id later). `override_guard` persists: the fire path honours it by
-    // not asking again.
+    // that id later).
     let message_id_header = mint_message_id()?;
     let draft_id = body.draft_id.take();
     body.confirm = true;
@@ -529,10 +508,10 @@ pub async fn list_scheduled_sends(State(state): State<ApiState>) -> Result<Respo
 /// `attachments` the files it held, now unclaimed, so the tray can be redrawn
 /// and the composer's next autosave re-claims them. No draft is created here.
 ///
-/// `request` comes back WITHOUT `override_guard` and `confirm`: both were
-/// answers the user gave for the mail as it stood, and a reopened composer is
-/// a new question. The client sets `confirm` itself, and a reschedule is
-/// judged by the guard again.
+/// `request` comes back WITHOUT `confirm`: it was an answer the user gave for
+/// the mail as it stood, and a reopened composer is a new question. A row
+/// queued before the outbound guard was retired may still carry
+/// `override_guard`; it is dropped too, so no client sees the dead field.
 ///
 /// `409` for a row already in Gmail's hands; `404` for an unknown id, another
 /// account's, or one already sent or cancelled. Audited, ids only.
@@ -1328,7 +1307,7 @@ async fn rebuild_sent_copy(state: &ApiState, row: &ScheduledSend) -> Option<Opti
         message_id: &row.message_id_header,
         copy_at: Some(at),
     };
-    match perform_send(state, &body, attachments, SendGuard::Settled, Some(fired)).await {
+    match perform_send(state, &body, attachments, Some(fired)).await {
         Ok(SendOutcome::Sent {
             echo_message_id, ..
         }) => {
@@ -1480,7 +1459,7 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
         message_id: &row.message_id_header,
         copy_at: None,
     };
-    match perform_send(state, &body, attachments, SendGuard::Settled, Some(fired)).await {
+    match perform_send(state, &body, attachments, Some(fired)).await {
         Ok(SendOutcome::Sent {
             echo_message_id,
             thread_id,
@@ -2107,7 +2086,6 @@ mod tests {
             "body": "hi",
             "body_format": "markdown",
             "confirm": true,
-            "override_guard": true,
             "include_tracker": false,
             "attachment_ids": [3, 3, 4]
         }))

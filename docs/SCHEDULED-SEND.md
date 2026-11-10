@@ -86,17 +86,13 @@ Gmail call, because the user is present to answer:
    same rule as reminders). Also `send_at` at most 1 year out, counted as
    366 days so the same date next year is accepted across a leap day.
 3. Every `attachment_ids` entry resolves, else 400 `rejected:attachment_missing`.
-4. The outbound guard runs NOW. A verdict is a 422 exactly as on a send;
-   `override_guard: true` persists in `request` and the fire path does NOT
-   re-scan (content is frozen, the answer would be the same). For a FORWARD
-   the scan today also covers the original message, which `forward_send`
-   fetches on the write token mid-send; so the schedule handler fetches the
-   original itself, unions its kinds with the note's and the attachments',
-   and judges once here. The worker then calls `perform_send` with
-   `SendGuard::Settled` for every kind of send.
+4. A FORWARD's original is fetched NOW on the write token, so one that is
+   gone or past `MAX_FORWARD_RAW_BYTES` is refused while the user is here,
+   not hours later at fire time. (There is no outbound guard on this route:
+   it runs on agent sends only, see docs/SECURITY.md §5.)
 5. `write_client` must exist, else 403 (no point queueing a mail that can
    never go out). Then a reply's parent must resolve, else 404: the send
-   route's order (400, 422, 403, 404), so a body with two problems gets the
+   route's order (400, 403, 404), so a body with two problems gets the
    answer a send would give. The lookup is unfiltered, like the send's: a
    sealed parent resolves.
 6. Mint `message_id_header`.
@@ -353,7 +349,7 @@ how long after a send `in:sent` lists it. `rfc822msgid:` takes the BARE id
 | route | does |
 |---|---|
 | `GET /client/scheduled` | rows in `scheduled`/`sending`/`failed`, oldest `send_at` first, with `to`, `cc`, `bcc` (each `""` when the request had none; a reply's `""` cc still derives at fire time), `subject`, `reply_to_message_id`, `forward_of_message_id`, `send_at`, `state`, `last_error`, `attempts`, `attachments`, plus the parent context PR #289's `DRAFT_SELECT` LEFT JOIN computes for the picker (`thread_id`, `parent_subject`, `parent_from`, `parent_from_addr`). Lift that join into a shared helper rather than pasting it |
-| `DELETE /client/scheduled/{id}` | `scheduled` or `failed` → `cancelled`, releases attachment claims back to unclaimed, returns the `request` so the client can reopen it in the composer, WITHOUT `override_guard` and `confirm` (the client sets `confirm` itself, and a reschedule is judged by the guard again). A `sending` row is 409 (it is in Gmail's hands). No server-side draft is created: the composer's next autosave does that through the normal keyed/by-id path, and re-claims the files (well inside the 24h unclaimed TTL) |
+| `DELETE /client/scheduled/{id}` | `scheduled` or `failed` → `cancelled`, releases attachment claims back to unclaimed, returns the `request` so the client can reopen it in the composer, WITHOUT `confirm` (the client sets `confirm` itself; a row queued before the guard was retired also has any old `override_guard` stripped). A `sending` row is 409 (it is in Gmail's hands). No server-side draft is created: the composer's next autosave does that through the normal keyed/by-id path, and re-claims the files (well inside the 24h unclaimed TTL) |
 | `POST /client/scheduled/{id}/now` | `scheduled`/`failed` → `send_at = now`; the worker is woken for it. 202. A `maybe_sent` row still waits out `RECOVERY_GRACE` from its last attempt and is searched for first (§4 step 3): "now" moves the clock, never the double-send defense. A `sending` row is 409, the same answer a cancel gets; `sent`/`cancelled`/unknown is 404 |
 | `/client/stats` | gains `scheduled_send: true`. The client hides every schedule door without it (same trap as `compose_attachments`: an old daemon must not 404 a click) |
 
@@ -464,8 +460,6 @@ request.
   still injects it.
 - Never log or audit `request` content: ids, states, reasons only.
 - `/mcp` never sees `scheduled_sends` or its attachments (two-door).
-- The guard runs at schedule time and its `override_guard` is honored at
-  fire time; nothing re-scans.
 - Exactly-once: a row is sent only from `sending` under a lease, and
   recovery answers via the minted Message-ID and the `X-Passband-Outbox`
   token (the §4 lookup) before any retry.

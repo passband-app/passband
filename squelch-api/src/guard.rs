@@ -1,6 +1,7 @@
-//! Outbound secret guard for `POST /client/actions/send`: scan the body for
-//! secret-looking patterns and block with a 422 unless the caller passes
-//! `override_guard: true`.
+//! Outbound secret guard for an AGENT's send (`agent_write`): scan what the
+//! agent wrote for secret-looking patterns and refuse it, with no override.
+//! The owner's own sends are not scanned: what they mail is their call. The
+//! guard exists for the send no human read before it left.
 //!
 //! SECURITY: only the KIND of match ever leaves the process — never the matched
 //! text, in a response, a log, or an audit row. See docs/SECURITY.md §5.
@@ -38,8 +39,8 @@ impl GuardMatch {
     }
 }
 
-// Compiled once. Deliberately broad: false positives are acceptable because the
-// guard is overridable.
+// Compiled once. Broad, but not so broad that an agent cannot mail a link: the
+// long-run checks skip URLs (see `scan`).
 
 /// Vendor key prefixes: `sk-` (OpenAI/Stripe-ish), `AKIA` (AWS), `gh?_`
 /// (GitHub), `xox?-` (Slack), `AIza`/`ya29.` (Google).
@@ -79,6 +80,10 @@ static RE_OTP: LazyLock<Regex> = LazyLock::new(|| {
     .expect("otp regex")
 });
 
+/// A URL, up to the first whitespace or closing bracket/quote.
+static RE_URL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?i)\bhttps?://[^\s<>()\[\]"']+"#).expect("url regex"));
+
 /// A PEM block header.
 static RE_PEM: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"-----BEGIN [A-Z0-9 ]+-----").expect("pem regex"));
@@ -99,10 +104,17 @@ pub fn scan(body: &str) -> Vec<GuardMatch> {
     }
     // Long-run checks last: an API key usually also trips base64/hex, and the
     // more specific kind reads first.
-    if RE_LONG_HEX.is_match(body) {
+    //
+    // They SKIP URLS. Nearly every link in real mail carries a long run: an
+    // unsubscribe id, a tracking token, or just a path, since `/` and `-` are
+    // base64url characters. Read as secrets, they blocked almost any mail with
+    // a link in it. A vendor key inside a URL is still caught by the prefix
+    // check above, which reads the whole text.
+    let without_urls = RE_URL.replace_all(body, " ");
+    if RE_LONG_HEX.is_match(&without_urls) {
         hits.push(GuardMatch::LongHex);
     }
-    if RE_LONG_B64.is_match(body) {
+    if RE_LONG_B64.is_match(&without_urls) {
         hits.push(GuardMatch::LongBase64);
     }
     hits
@@ -174,6 +186,32 @@ mod tests {
     fn long_base64_caught() {
         let body = "token=QWxhZGRpbjpvcGVuIHNlc2FtZQ1234567890abcdefGHIJKLMNOP";
         assert!(kinds(body).contains(&"long_base64"));
+    }
+
+    #[test]
+    fn ordinary_links_are_not_secrets() {
+        // The shapes a newsletter's footer and body carry: an unsubscribe id
+        // of exactly 32 hex, and a help-centre path past 40 base64url chars.
+        let body = "Guide: https://help.example.com/features/tasks/connect-google-tasks-todoist?utm_source=weekly\n\
+                    Unsubscribe https://list.example.dev/unsubscribe?e=a%40b.c&s=3e4a58f7c5d1373eee1bde54b8d117c4 \
+                    (or <https://example.com/u/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08>)";
+        assert!(
+            scan(body).is_empty(),
+            "links tripped the guard: {:?}",
+            kinds(body)
+        );
+    }
+
+    #[test]
+    fn a_bare_run_beside_a_link_is_still_caught() {
+        let body = "see https://example.com/x and 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        assert!(kinds(body).contains(&"long_hex"));
+    }
+
+    #[test]
+    fn a_vendor_key_inside_a_link_is_still_caught() {
+        let body = "https://example.com/hook?key=sk-abcDEF0123456789ghijKLMNopq";
+        assert!(kinds(body).contains(&"api_key"));
     }
 
     #[test]

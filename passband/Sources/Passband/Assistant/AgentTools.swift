@@ -869,11 +869,8 @@ enum AgentTools {
             verifiedSender: verified?.sender, verifiedSubject: verified?.subject,
             replyToMessageId: replyTo, to: to, cc: cc, bcc: bcc, subject: subject, body: body)
         return await confirmed(action, gate) {
-            // No override_guard, ever, from here: the outbound guard's whole job
-            // is to stop a secret leaving, and a model that just wrote the body
-            // is exactly the caller that must not get to wave it through. A 422
-            // comes back to the model verbatim (the kinds are already redacted
-            // server-side) so it can rewrite and ask again.
+            // The human door's send: the user has just approved this exact
+            // message on the card above, so what it carries is their call.
             let result = try await APIClient.shared.actionSend(
                 body: body, replyToMessageId: replyTo, to: to,
                 // Omitted unless the model asked for one, which keeps a plain
@@ -1479,9 +1476,7 @@ enum AgentTools {
                 save_draft. On a reply, pass reply_to_message_id AND \
                 reply_to_thread_id, and leave `to` and `subject` out: the recipient \
                 and Re: line are derived from the parent, and the card shows the user \
-                the recipient Passband reads back from it. An outbound guard may refuse \
-                a body carrying credentials; if it does, rewrite without them rather \
-                than trying again unchanged.
+                the recipient Passband reads back from it.
                 """,
             input_schema: .init(
                 properties: [

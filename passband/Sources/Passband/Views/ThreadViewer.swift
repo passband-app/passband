@@ -669,13 +669,15 @@ struct ThreadViewer: View {
                 Spacer(minLength: Space.s12)
                 HStack(alignment: .firstTextBaseline, spacing: Space.s12) {
                     actions
-                    Button { store.closeThread() } label: {
-                        HStack(spacing: Space.s4) {
-                            Kbd("esc")
-                            Text("back").font(Typo.micro)
+                    if !composeHidesKeyVerbs {
+                        Button { store.closeThread() } label: {
+                            HStack(spacing: Space.s4) {
+                                Kbd("esc")
+                                Text("back").font(Typo.micro)
+                            }
                         }
+                        .buttonStyle(.textAction)
                     }
-                    .buttonStyle(.textAction)
                 }
                 .lineLimit(1)
                 .fixedSize()
@@ -857,66 +859,80 @@ struct ThreadViewer: View {
                 .help("dev: reset this email's LLM verdicts and re-run triage")
             }
 
-            Button { openSenderRule() } label: {
-                HStack(spacing: Space.s4) {
-                    // The key chip is the Mac's promise that a key does this.
-                    // A phone has no keyboard to promise anything to.
-                    #if os(macOS)
-                        Kbd("t")
-                    #endif
-                    Text("teach").font(Typo.micro)
-                }
-            }
-            .buttonStyle(.textAction)
-            .help("teach Passband what you want from mail like this")
-
-            Button {
-                // A job waiting on the user finishes from here too; anything
-                // else asks again, which is how a re-request has always worked.
-                if let unsub, unsub.status == .needsYou {
-                    UnsubscribeJobs.shared.finish(.init(
-                        sender: unsub.sender,
-                        phase: .needsYou(reason: unsub.status_reason, url: unsub.status_url)))
-                    self.unsub?.status = .opened
-                } else {
-                    confirmMode = .ask
-                }
-            } label: {
-                if let unsub {
-                    // Its own minute: the reader no longer redraws with every
-                    // poll, and "N ago" would stop where it was first drawn.
-                    TimelineView(.everyMinute) { _ in
-                        Text(Self.unsubHint(unsub))
-                            .font(Typo.micro)
-                    }
-                } else {
+            if !composeHidesKeyVerbs {
+                Button { openSenderRule() } label: {
                     HStack(spacing: Space.s4) {
+                        // The key chip is the Mac's promise that a key does this.
+                        // A phone has no keyboard to promise anything to.
                         #if os(macOS)
-                            Kbd("u")
+                            Kbd("t")
                         #endif
-                        Text("unsubscribe").font(Typo.micro)
-                    }
-                }
-            }
-            .buttonStyle(.textAction)
-            .help("unsubscribe from this sender")
-
-            // THE VERB YOU CAME HERE FOR, last, beside `back`: the far corner is
-            // where the way out lives, and `e` is the other way out. The same
-            // call as the key, so the reading stack advances here too instead
-            // of closing. Mac only — it is here to teach the key, and the phone
-            // resolves from the list's swipes.
-            #if os(macOS)
-                Button { Task { await doneAndClose() } } label: {
-                    HStack(spacing: Space.s4) {
-                        Kbd("e")
-                        Text("done").font(Typo.micro)
+                        Text("teach").font(Typo.micro)
                     }
                 }
                 .buttonStyle(.textAction)
-                .help("mark done and close — d works too, and E moves to the next")
-            #endif
+                .help("teach Passband what you want from mail like this")
+
+                Button {
+                    // A job waiting on the user finishes from here too; anything
+                    // else asks again, which is how a re-request has always worked.
+                    if let unsub, unsub.status == .needsYou {
+                        UnsubscribeJobs.shared.finish(.init(
+                            sender: unsub.sender,
+                            phase: .needsYou(reason: unsub.status_reason, url: unsub.status_url)))
+                        self.unsub?.status = .opened
+                    } else {
+                        confirmMode = .ask
+                    }
+                } label: {
+                    if let unsub {
+                        // Its own minute: the reader no longer redraws with every
+                        // poll, and "N ago" would stop where it was first drawn.
+                        TimelineView(.everyMinute) { _ in
+                            Text(Self.unsubHint(unsub))
+                                .font(Typo.micro)
+                        }
+                    } else {
+                        HStack(spacing: Space.s4) {
+                            #if os(macOS)
+                                Kbd("u")
+                            #endif
+                            Text("unsubscribe").font(Typo.micro)
+                        }
+                    }
+                }
+                .buttonStyle(.textAction)
+                .help("unsubscribe from this sender")
+
+                // THE VERB YOU CAME HERE FOR, last, beside `back`: the far corner is
+                // where the way out lives, and `e` is the other way out. The same
+                // call as the key, so the reading stack advances here too instead
+                // of closing. Mac only — it is here to teach the key, and the phone
+                // resolves from the list's swipes.
+                #if os(macOS)
+                    Button { Task { await doneAndClose() } } label: {
+                        HStack(spacing: Space.s4) {
+                            Kbd("e")
+                            Text("done").font(Typo.micro)
+                        }
+                    }
+                    .buttonStyle(.textAction)
+                    .help("mark done and close — d works too, and E moves to the next")
+                #endif
+            }
         }
+    }
+
+    /// THE PANE COMPOSER OWNS THE KEYS while it is up, so `t`, `u`, `e` and
+    /// `esc` do nothing to the thread, and their chips would be promises the
+    /// bar cannot keep in a strip compose has already halved. They come back
+    /// with the pane's close. Mac only: a phone's composer covers the reader.
+    private var composeHidesKeyVerbs: Bool {
+        #if os(macOS)
+            store.composeOpen
+        #else
+            false
+        #endif
     }
 
     @ViewBuilder

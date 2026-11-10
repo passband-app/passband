@@ -2715,7 +2715,7 @@ pub(crate) const NAME_MAX_CHARS: usize = 128;
 /// Empty in, `None` out covers the two cases that reach here from a browser: a
 /// field the person left blank, and a form posted by a client that does not
 /// know the field exists.
-fn normalize_name(name: &str) -> Option<String> {
+pub(crate) fn normalize_name(name: &str) -> Option<String> {
     let cleaned: String = name
         .split_whitespace()
         .map(|word| {

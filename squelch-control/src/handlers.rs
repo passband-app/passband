@@ -661,12 +661,18 @@ pub async fn waitlist(State(state): State<ControlState>, body: Bytes) -> Respons
     let name = field_capped(&body, "name", MAX_NAME_READ);
 
     match state.store().add_user_waiting(&email, Some(&name)).await {
-        // PRIVACY: whether this submission created a row, and nothing else.
-        // Never the address, on either branch.
+        // PRIVACY: the log gets whether this submission created a row, and
+        // nothing else. Never the address, on either branch.
         Ok(created) => {
             tracing::info!(created, "waitlist submission");
             if created {
-                state.alert(alert::waitlist_joined(&state.config().public_url));
+                // The name as the store saved it, so Slack shows what the
+                // admin page shows. Never the address.
+                let name = crate::store::normalize_name(&name);
+                state.alert(alert::waitlist_joined(
+                    &state.config().public_url,
+                    name.as_deref(),
+                ));
             }
             waitlist_answer(origin, StatusCode::OK, WAITLIST_JOINED)
         }

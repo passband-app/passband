@@ -458,14 +458,15 @@ async fn a_submission_lands_on_the_list_once() {
     assert_eq!(rows[0].status, "pending");
 }
 
-/// A new address pings the operator's Slack once, and the ping carries no
-/// address or name. A resubmission pings nobody, so the public form cannot be
-/// used to spam the channel with one address.
+/// A new address pings the operator's Slack once, with the name and without
+/// the address. A resubmission pings nobody, so the public form cannot be used
+/// to spam the channel with one address.
 #[tokio::test]
-async fn a_new_submission_pings_slack_once_without_the_address() {
+async fn a_new_submission_pings_slack_once_with_the_name_not_the_address() {
     let h = Harness::new().await;
 
-    let (status, _, body) = h.join_named("Ada Lovelace", APPLICANT).await;
+    // Padded the way a careless paste is: Slack gets the tidied name.
+    let (status, _, body) = h.join_named("  Ada \t Lovelace ", APPLICANT).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
     // Posted from a spawned task: wait for it rather than racing it.
@@ -479,14 +480,17 @@ async fn a_new_submission_pings_slack_once_without_the_address() {
     }
     assert_eq!(alerts.len(), 1, "{alerts:?}");
     let a = &alerts[0];
-    assert!(a.contains("joined the waitlist"), "{a}");
+    assert!(
+        a.starts_with(":wave: Ada Lovelace joined the waitlist."),
+        "{a}"
+    );
     assert!(
         a.contains("https://signup.passband.test/admin/users"),
         "{a}"
     );
     assert!(
-        !a.contains('@') && !a.contains("Ada"),
-        "who joined reached Slack: {a}"
+        !a.contains('@') && !a.contains("example"),
+        "the address reached Slack: {a}"
     );
 
     // The same address again: a 200 as before, and silence.
@@ -500,6 +504,19 @@ async fn a_new_submission_pings_slack_once_without_the_address() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(h.alerts().len(), 1);
+
+    // No name (an older cached form) still pings, as "Someone".
+    let (status, _, _) = h.join("grace@example.com").await;
+    assert_eq!(status, StatusCode::OK);
+    let mut alerts = Vec::new();
+    for _ in 0..200 {
+        alerts = h.alerts();
+        if alerts.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(alerts[1].starts_with(":wave: Someone joined"), "{alerts:?}");
 }
 
 /// The name the form asks for reaches the row, tidied, and reaches the board.

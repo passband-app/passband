@@ -688,6 +688,64 @@ enum EventForm {
         return candidates.min { ahead($0) < ahead($1) }
     }
 
+    // MARK: the times menu
+
+    /// One line of a time well's menu: what it writes into the well, and what
+    /// the menu says ("10:30am", or for an end "10:30am (1.5 hrs)").
+    /// `minutes` is after the start's midnight, so an end past midnight is
+    /// over 1440.
+    struct TimeChoice: Equatable, Sendable {
+        let minutes: Int
+        let text: String
+        let label: String
+        let current: Bool
+    }
+
+    /// How far each side of a menu reaches. Half hours, twelve of them: a
+    /// short menu that always holds the well's own time, with anything
+    /// farther one typed word away.
+    static let choiceStep = 30
+    static let choiceCount = 24
+
+    /// The start well's menu: half hours from two hours before what it says
+    /// (9am when it says nothing readable), inside the one day. The time it
+    /// says is ticked when it is one of them.
+    static func startChoices(_ raw: String) -> [TimeChoice] {
+        let at = parseTime(raw)?.minutes
+        let anchor = at ?? 9 * 60
+        let last = 1440 - choiceStep
+        var first = (anchor / choiceStep) * choiceStep - 4 * choiceStep
+        first = max(0, min(first, last - (choiceCount - 1) * choiceStep))
+        return (0..<choiceCount).map { i in
+            let m = first + i * choiceStep
+            return TimeChoice(minutes: m, text: clockText(m), label: clockText(m), current: m == at)
+        }
+    }
+
+    /// The end well's menu: half hours after the start, each with how long
+    /// that makes the event. Without a readable start, the start's own list.
+    static func endChoices(start: String, end: String) -> [TimeChoice] {
+        guard let s = parseTime(start)?.minutes else { return startChoices(end) }
+        let at = parseEnd(end, after: s)
+        return (1...choiceCount).map { i in
+            let length = i * choiceStep
+            let m = s + length
+            return TimeChoice(
+                minutes: m, text: clockText(m), label: "\(clockText(m)) (\(durationText(length)))",
+                current: at == m % 1440)
+        }
+    }
+
+    /// "30 min", "1 hr", "1.5 hrs", "2 hrs", "1 hr 15 min".
+    static func durationText(_ minutes: Int) -> String {
+        if minutes < 60 { return "\(minutes) min" }
+        let h = minutes / 60
+        let m = minutes % 60
+        if m == 0 { return h == 1 ? "1 hr" : "\(h) hrs" }
+        if m == 30 { return "\(h).5 hrs" }
+        return "\(h) hr\(h == 1 ? "" : "s") \(m) min"
+    }
+
     // MARK: text the card prints
 
     /// "Thu Oct 8", with the year when it is not this one.

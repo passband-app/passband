@@ -25,6 +25,7 @@ struct EventDraftTests {
     static func main() {
         timesRead()
         endsReadAgainstTheStart()
+        theTimesMenu()
         datesRead()
         aTimedDraftToTheWire()
         anAllDayDraftToTheWireWithTheInclusiveEnd()
@@ -145,6 +146,32 @@ struct EventDraftTests {
         expect(e("1", after: 11) == 13 * 60, "1 after 11am is 1pm")
         expect(e("8pm", after: 21) == 20 * 60, "a stated 8pm stays 8pm, whatever the start")
         expect(e("07:00", after: 22) == 7 * 60, "a 24-hour end is taken as written")
+    }
+
+    /// The wells' menus: a short run of half hours that holds the well's own
+    /// time, and an end menu that counts from the start.
+    static func theTimesMenu() {
+        let morning = EventForm.startChoices("10am")
+        expect(morning.count == 24, "twelve hours of half hours")
+        expect(morning.first?.text == "8am", "the start menu opens two hours before 10am")
+        let starts = EventForm.startChoices("7pm")
+        expect(starts.first?.text == "12pm", "an evening start shifts the run back to stay inside the day")
+        expect(starts.last?.text == "11:30pm", "and stops inside the day")
+        expect(starts.first { $0.current }?.text == "7pm", "7pm is ticked")
+        expect(EventForm.startChoices("11pm").first?.text == "12pm", "a late start shifts the run back, never past midnight")
+        expect(EventForm.startChoices("1am").first?.text == "12am", "an early one starts at midnight")
+        expect(EventForm.startChoices("").first?.text == "7am", "nothing readable centres on 9am")
+        expect(!EventForm.startChoices("7:45pm").contains { $0.current }, "an off-grid time ticks nothing")
+        expect(EventForm.parseTime(starts[13].text)?.minutes == 18 * 60 + 30, "what a pick writes reads back")
+
+        let ends = EventForm.endChoices(start: "10pm", end: "11pm")
+        expect(ends.first?.label == "10:30pm (30 min)", "the end menu starts half an hour after the start")
+        expect(ends[1].label == "11pm (1 hr)" && ends[1].current, "and ticks the end it holds")
+        expect(ends[2].label == "11:30pm (1.5 hrs)", "half hours read as halves")
+        expect(ends[5].text == "1am", "past midnight is the small hours")
+        expect(EventForm.parseEnd(ends[5].text, after: 22 * 60) == 60, "and reads back as the next morning")
+        expect(EventForm.endChoices(start: "", end: "10am").first?.text == "8am", "no start: the start's own list")
+        expect(EventForm.durationText(75) == "1 hr 15 min", "an odd length says its minutes")
     }
 
     // MARK: typed dates

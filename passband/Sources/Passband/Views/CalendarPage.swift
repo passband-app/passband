@@ -477,9 +477,11 @@
 
         /// The month's keys. Arrows move the day (and turn the page off the
         /// grid's edge), `t` is today, `[` `]` and `,` `.` the months; j/k
-        /// step through the selected day's items, and Enter goes one level
+        /// step through the selected day's items. Enter on a selected item
+        /// opens its mail; on the day itself (nothing selected) it makes a
+        /// new event there, or, with no calendar to write to, goes one level
         /// in: the day (where it is not already beside the grid), then its
-        /// first item, then that item's mail, as the detail's own hint says.
+        /// first item.
         /// Escape is the routed host's (`AppStore.calendarMonthBack`).
         private func monthBindings(order: [AgendaItem], item: AgendaItem?, day: Date) -> [KeyBinding] {
             // Beside the event pane the grid still MOVES (arrows, `t`, the
@@ -513,6 +515,11 @@
                 KeyBinding(declining: "Enter", "open") {
                     guard free() else { return false }
                     if let item { return open(item) }
+                    // A day with nothing selected on it: a new event there.
+                    if store.calendarCanCreate {
+                        store.openEventEditor(day: day)
+                        return true
+                    }
                     if !monthTwoPanes, !store.calendarDayOpen {
                         store.calendarDayOpen = true
                         return true
@@ -538,7 +545,8 @@
         /// The week's keys. Left and right move the day (and turn the week off
         /// its edge), `[` `]` and `,` `.` turn a week, `t` is today. j / k and
         /// the up and down arrows walk the selected day's items, top-down as
-        /// drawn; Enter opens the first of them, then that item's mail. The
+        /// drawn. Enter on an item opens its mail; on the day, a new event
+        /// there (else the day's first item). The
         /// rest (`n`, `e`, ⌫, `y`, `x`) are the month's.
         private func weekBindings(order: [AgendaItem], item: AgendaItem?, day: Date) -> [KeyBinding] {
             let free = { !store.modalOverlayOpen && !store.eventPaneOpen }
@@ -567,6 +575,10 @@
                 KeyBinding(declining: "Enter", "open") {
                     guard free() else { return false }
                     if let item { return open(item) }
+                    if store.calendarCanCreate {
+                        store.openEventEditor(day: day)
+                        return true
+                    }
                     guard let first = order.first else { return false }
                     store.calendarMonthItem = first.id
                     return true

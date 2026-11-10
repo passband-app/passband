@@ -315,6 +315,7 @@ fn seed_meeting(
         description: None,
         guests: Vec::new(),
         guests_truncated: false,
+        meeting: None,
     };
     assert!(store.calendar_put_event(acct, PRIMARY, &row).unwrap());
 }

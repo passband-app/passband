@@ -30,11 +30,12 @@
 //!   `attendeesOmitted` set, which is stored as the event's truncated mark.
 //!   Either way [`super::read_event`] still finds the user's own answer.
 //! - `fields` (partial response) names only what the daemon reads, so an
-//!   invitation anyone can send cannot fill a page with attachments,
-//!   conference data or its guests' comments: of each attendee only the
-//!   address, the name, the answer and the two flags are asked for. Its
-//!   description is read (the app shows it), laundered and cut to 2000
-//!   characters as it is stored.
+//!   invitation anyone can send cannot fill a page with attachments, a
+//!   conference's details or its guests' comments: of each attendee only the
+//!   address, the name, the answer and the two flags are asked for, and of a
+//!   conference only its entry points' type and link, read for which service
+//!   it is on ([`super::meeting`]) and not kept. Its description is read (the
+//!   app shows it), laundered and cut to 2000 characters as it is stored.
 //! - `events.patch`: "Array fields, if specified, overwrite the existing
 //!   arrays; this discards any previous array elements." So a guest edit
 //!   sends the FULL attendee list, built from a fresh read of the event
@@ -70,14 +71,15 @@ const LIST_PAGE_SIZE: u32 = 250;
 pub const MAX_ATTENDEES: u32 = super::MAX_GUESTS as u32;
 
 /// Of one event, exactly what [`super::read_event`] reads. Anything else an
-/// event carries (attachments, conference data, what a guest wrote when
-/// answering) is never sent. One macro so a listed event and a written one
+/// event carries (attachments, a conference's passcodes and PINs, what a
+/// guest wrote when answering) is never sent. One macro so a listed event and a written one
 /// are asked for alike.
 macro_rules! event_fields {
     () => {
         "id,status,iCalUID,summary,description,location,colorId,eventType,start,end,\
 organizer(email,self),attendeesOmitted,\
-attendees(email,displayName,responseStatus,organizer,self),transparency,htmlLink,updated"
+attendees(email,displayName,responseStatus,organizer,self),transparency,htmlLink,updated,\
+hangoutLink,conferenceData(entryPoints(entryPointType,uri))"
     };
 }
 
@@ -385,6 +387,25 @@ impl CalendarApi {
             .filter(|s| !s.is_empty())
             .map(str::to_string);
         Ok(ReplyTarget { self_email, series })
+    }
+
+    /// What Join opens: the event's meeting link read from Google now
+    /// ([`super::meeting::join_url`]), whole. Only the fields a meeting can
+    /// be in are asked for. Held for this one request, never stored or
+    /// logged.
+    pub async fn join_url(
+        &self,
+        token: &str,
+        calendar_id: &str,
+        event_id: &str,
+    ) -> Result<Option<String>, CallError> {
+        let mut url = self.url(&["calendars", calendar_id, "events", event_id])?;
+        url.query_pairs_mut().append_pair(
+            "fields",
+            "hangoutLink,conferenceData(entryPoints(entryPointType,uri)),location,description",
+        );
+        let body = self.get(url, token).await?;
+        Ok(super::meeting::join_url(&body))
     }
 
     /// `events.get` of one event, in the shape a write's answer has

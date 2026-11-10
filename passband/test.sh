@@ -171,6 +171,7 @@ run_suite calendar-reply \
   Sources/Passband/Lib/TitleParse.swift \
   Sources/Passband/Lib/EventGuests.swift \
   Sources/Passband/Lib/CalendarReply.swift \
+  Sources/Passband/Lib/CalendarJoin.swift \
   Tests/CalendarReplyTests.swift
 
 # The title that understands "dinner with steven on friday 4pm" (wave 6): a
@@ -319,6 +320,7 @@ run_suite credential-probe \
   Sources/Passband/Lib/CalendarWrite.swift \
   Sources/Passband/Lib/Agenda.swift \
   Sources/Passband/Lib/CalendarReply.swift \
+  Sources/Passband/Lib/CalendarJoin.swift \
   Sources/Passband/Model/UnderstandingWire.swift \
   Sources/Passband/Model/APIClient.swift \
   Sources/Passband/Lib/ClientIdentity.swift \

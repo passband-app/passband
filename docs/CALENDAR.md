@@ -1581,8 +1581,11 @@ Read only (slice B). The only writes are the user's own, described under
   zone, and of each event its id, status, iCal id, title, description, place,
   colour id, start, end, organizer address and `self` flag,
   `attendeesOmitted`, of each attendee the address, name, `responseStatus`,
-  `organizer` and `self`, transparency, link and update time. Attachments,
-  conference data and what a guest wrote when answering are never sent. The
+  `organizer` and `self`, transparency, link and update time, and (since
+  2026-11-10) `hangoutLink` and a conference's entry points' type and uri,
+  read only for which meeting service the event is on (see "Join"). Attachments,
+  a conference's passcodes, PINs and other details, and what a guest wrote
+  when answering are never sent. The
   description (added in wave 3, which shows
   it) is laundered and cut to 2000 characters as it is stored, and Google's
   own boilerplate on an event it created from mail ("To see detailed
@@ -2089,6 +2092,28 @@ mails itself).
 - **Not here:** proposing a new time (Google's API cannot), answering from
   the assistant or MCP (answering mails the organizer), Outlook and IMAP
   calendars (tracked in its own issue).
+
+### Join (BUILT 2026-11-10)
+
+An event with an online meeting has a Join button on its card ("Join Zoom",
+"Join Google Meet", "Join Teams", "Join Webex", or "Join" for another video
+service Google's conference names).
+
+- **The link is never stored or served.** A meeting link's query (and some
+  paths) is its passcode, and the stored copy of every event stays laundered
+  without one. The sync keeps only the service, `meeting` (`zoom`, `meet`,
+  `teams`, `webex`, `video`), served on the timeline. Pressing Join calls
+  `GET /client/calendar/events/{calendar_id}/{id}/join`, which reads the
+  event from Google at that moment (only `hangoutLink`, the conference's
+  entry points, the location and the description) and answers `{"url"}`,
+  whole. Nothing is stored, audited or logged; human door only.
+- **Where a meeting is found** (`gcal::meeting`): Google's conference's
+  `video` entry point first, then `hangoutLink`, then the first https link in
+  the location and then the description whose host runs meetings (Zoom,
+  Meet, Teams, Webex). Only those hosts: a description is written by whoever
+  sent the invitation, and Join must not open any link in it.
+- A store from before the `meeting` column forgets its sync tokens once and
+  rereads every calendar in full with the new fields.
 
 ### Who a name is (BUILT in wave 6)
 

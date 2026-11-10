@@ -345,6 +345,7 @@
 		8CCC6315E27DD5683F55D274 /* CidImages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C9C77BCE41A573ED04E49AA /* CidImages.swift */; };
 		8CE0E4896AE3E381845DD88F /* FromOperator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5C36FCC4B2230B257E66F84 /* FromOperator.swift */; };
 		8CEADD78B1FF98E1321B70E1 /* StaysHintMark.swift in Sources */ = {isa = PBXBuildFile; fileRef = E30603BDC03A9EAB6868D105 /* StaysHintMark.swift */; };
+		8D581CAEF00BD276E2FC6389 /* CalendarJoin.swift in Sources */ = {isa = PBXBuildFile; fileRef = F15DA0EB0190B4B443447925 /* CalendarJoin.swift */; };
 		8DD946F7BC6990641C19ACC1 /* ProcessView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 639F5C0DB9AE5A1AE8DF69A1 /* ProcessView.swift */; };
 		8E0A761537D622572268F5BE /* CalendarPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF3AEBAA095F871B94011983 /* CalendarPage.swift */; };
 		8E1F8DB308ED83F7376BE9B5 /* GroupsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CC257E1C6D252919F11B337 /* GroupsView.swift */; };
@@ -402,6 +403,7 @@
 		A252756AF0D9655F2C1477B7 /* Ranking.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7079893CCCC8806D2B5099D8 /* Ranking.swift */; };
 		A32CA97991D874737EE663DA /* CidImages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C9C77BCE41A573ED04E49AA /* CidImages.swift */; };
 		A372FA80031511CB86B00633 /* FlowHintLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B89109A60AE480F8E27CE702 /* FlowHintLayer.swift */; };
+		A3C5380F01299F656C4A882A /* CalendarJoin.swift in Sources */ = {isa = PBXBuildFile; fileRef = F15DA0EB0190B4B443447925 /* CalendarJoin.swift */; };
 		A4D2D8EEAA4AAAA8CF563A39 /* Discovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38667680A97A3FCB46750B21 /* Discovery.swift */; };
 		A4D978627F18622168350E91 /* EventVisuals.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87589710B34A706B58D7D586 /* EventVisuals.swift */; };
 		A4DAE234F5C7BDED52D12A55 /* ConnectionHealth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FCD987D800267801D7B4DFE /* ConnectionHealth.swift */; };
@@ -985,6 +987,7 @@
 		EF3AEBAA095F871B94011983 /* CalendarPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalendarPage.swift; sourceTree = "<group>"; };
 		EFF2F03B0D68F54C0DC28777 /* ImageRepeats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageRepeats.swift; sourceTree = "<group>"; };
 		F1286F3A9C5723C0228031FE /* ClientIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientIdentity.swift; sourceTree = "<group>"; };
+		F15DA0EB0190B4B443447925 /* CalendarJoin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalendarJoin.swift; sourceTree = "<group>"; };
 		F1E7DFB379AF677D44E393FF /* AgentTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentTools.swift; sourceTree = "<group>"; };
 		F2064377C33D5ECB0B915EAF /* UserNotifications.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UserNotifications.framework; path = System/Library/Frameworks/UserNotifications.framework; sourceTree = SDKROOT; };
 		F2BD37CBEFEA8CEB215E3247 /* ThreadViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadViewer.swift; sourceTree = "<group>"; };
@@ -1161,6 +1164,7 @@
 				503FC9C1D4DC302286F1647F /* AuthPolicy.swift */,
 				B25DDDE9C4977F3B5EE6178E /* BoardFile.swift */,
 				8FE5B9275BB40CCA53586887 /* CalendarColor.swift */,
+				F15DA0EB0190B4B443447925 /* CalendarJoin.swift */,
 				13719A77138D802F21158B5B /* CalendarReply.swift */,
 				36347E8295E58B4AA8DCEBD6 /* CalendarSearch.swift */,
 				A19BF25A7D06A8FEDAE42B1F /* CalendarVisibility.swift */,
@@ -1746,6 +1750,7 @@
 				C18770528FEE3E791BCC3EFB /* CalendarDisk.swift in Sources */,
 				0985F82E82262D75DAD4A857 /* CalendarEventEditor.swift in Sources */,
 				A172DC7A574B508E1B91152E /* CalendarEventPane.swift in Sources */,
+				8D581CAEF00BD276E2FC6389 /* CalendarJoin.swift in Sources */,
 				AA943FA80D1A16355F794F49 /* CalendarMarks.swift in Sources */,
 				3F02CE2BCEB2A2903CA15A38 /* CalendarMonth.swift in Sources */,
 				8E0A761537D622572268F5BE /* CalendarPage.swift in Sources */,
@@ -2045,6 +2050,7 @@
 				2340DCA0B3EC78CC786121E6 /* CalendarDisk.swift in Sources */,
 				1B83207DE8310AE4C42A5753 /* CalendarEventEditor.swift in Sources */,
 				184050DE6C81DF4550E804C4 /* CalendarEventPane.swift in Sources */,
+				A3C5380F01299F656C4A882A /* CalendarJoin.swift in Sources */,
 				240B5441D4F292BDC77DDD62 /* CalendarMarks.swift in Sources */,
 				8F3D05F55FFA11A414E4E0CC /* CalendarMonth.swift in Sources */,
 				68CA514BEB4C542A8303626D /* CalendarPage.swift in Sources */,

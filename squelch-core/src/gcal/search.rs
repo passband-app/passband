@@ -753,6 +753,7 @@ mod tests {
                     from_gmail: false,
                     guests: Vec::new(),
                     guests_truncated: false,
+                    meeting: None,
                 },
             })
         };

@@ -926,6 +926,17 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // The online meeting's service (2026-11-10), for the card's Join button.
+    // A row from before it reads as having none, so when the column is new
+    // every calendar forgets its token and last full read, and the next pass
+    // rereads each in full with the conference fields in the mask.
+    if add_column_if_missing(conn, "calendar_events", "meeting", "TEXT")? {
+        conn.execute(
+            "UPDATE calendar_calendars SET sync_token=NULL, full_synced_at=NULL",
+            [],
+        )?;
+    }
+
     // The card's place gained its street address (2026-10-29). A table made
     // before it holds names only, under the old prompt, so every row is
     // pending again anyway.

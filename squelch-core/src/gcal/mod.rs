@@ -35,6 +35,7 @@
 //! at [`MAX_GUESTS`] ([`client`]).
 
 pub mod client;
+pub mod meeting;
 pub mod own;
 pub mod place;
 pub mod remind;
@@ -400,6 +401,9 @@ pub struct EventRow {
     /// Google holds more attendees than `guests` (`attendeesOmitted`, or a
     /// list past the cap). The guest list is then read-only.
     pub guests_truncated: bool,
+    /// The online meeting the event has, by service: never its link, which
+    /// is read from Google when Join is pressed ([`meeting`]).
+    pub meeting: Option<meeting::MeetingKind>,
 }
 
 impl EventRow {
@@ -770,6 +774,7 @@ pub fn read_event(
             .and_then(ghost::launder_description),
         guests,
         guests_truncated,
+        meeting: meeting::meeting_kind(item),
     })))
 }
 
@@ -1263,6 +1268,7 @@ mod tests {
             description: None,
             guests: Vec::new(),
             guests_truncated: false,
+            meeting: None,
         }
     }
 

@@ -857,6 +857,8 @@ final class AppStore {
     /// recurring invitation's detail, by `Agenda.itemId`. Absent follows
     /// `CalendarReply.defaultsToSeries`.
     var calendarReplySeries: [String: Bool] = [:]
+    /// A Join press waiting on its link, by `Agenda.itemId`.
+    var calendarJoining: Set<String> = []
     /// Where the event pane's write stands (`EventPaneState`): editable,
     /// out, frozen after an answer that never came, or done. Reset with the
     /// pane.

@@ -1275,6 +1275,7 @@ async fn a_first_sync_reads_the_window_in_full_and_serves_every_field() {
             "html_link",
             "id",
             "location",
+            "meeting",
             "organizer",
             "recurring",
             "respondable",
@@ -1322,6 +1323,8 @@ async fn a_first_sync_reads_the_window_in_full_and_serves_every_field() {
             // The boss's invitation: the user may answer it.
             "respondable": true,
             "recurring": false,
+            // "Zoom: zoom.us/j/123" in the location.
+            "meeting": "zoom",
             // No booking mail is linked to it.
             "tickets": null,
         })
@@ -2799,12 +2802,20 @@ async fn every_request_names_the_fields_it_reads_and_bounds_the_attendees() {
     }
     for never in [
         "attachments",
-        "conferenceData",
         "comment",
         "additionalGuests",
+        // Of a conference, only the entry points' type and uri, which the
+        // sync reads for WHICH service and then drops: never its passcode,
+        // PIN or meeting code fields, nor anything else of it.
+        "passcode",
+        "pin",
+        "meetingCode",
+        "conferenceSolution",
+        "conferenceData,",
     ] {
         assert!(!EVENTS_FIELDS.contains(never), "{never}");
     }
+    assert!(EVENTS_FIELDS.contains("conferenceData(entryPoints(entryPointType,uri))"));
     assert_eq!(g.list_requests.len(), 2);
     for query in &g.list_requests {
         assert_eq!(query["fields"], LIST_FIELDS, "{query:?}");
@@ -2867,6 +2878,7 @@ fn row_at(id: String, now: DateTime<Utc>, minutes: i64) -> squelch_core::gcal::E
         description: None,
         guests: Vec::new(),
         guests_truncated: false,
+        meeting: None,
     }))
 }
 
@@ -3226,6 +3238,7 @@ async fn creating_an_event_goes_to_google_then_the_store_and_is_served() {
             "from_gmail": false,
             "respondable": false,
             "recurring": false,
+            "meeting": null,
         })
     );
     // Stored at once, served by the timeline as answered, and the next sync
@@ -7547,4 +7560,81 @@ async fn a_reply_answers_only_the_users_own_entry_and_tells_the_organizer() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(writes(&w).last().unwrap().event.as_deref(), Some("party"));
+}
+
+// --- Join -----------------------------------------------------------------------
+
+/// THE JOIN LINK IS NEVER STORED OR SERVED: the timeline says only which
+/// service ("zoom"), and Join reads the link, passcode and all, from Google
+/// when pressed.
+#[tokio::test]
+async fn join_reads_the_meeting_link_from_google_and_nothing_stores_it() {
+    let (w, start) = write_world("join").await;
+    {
+        let mut g = w.google();
+        let mut call = timed("call", "Standup", start + Duration::hours(9), 15);
+        call["conferenceData"] = json!({"entryPoints": [
+            {"entryPointType": "video", "uri": "https://us02web.zoom.us/j/555?pwd=Sesame42"}]});
+        call["description"] = json!("Join https://us02web.zoom.us/j/555?pwd=Sesame42");
+        let mut meet = timed("meet", "1:1", start + Duration::hours(10), 30);
+        meet["hangoutLink"] = json!("https://meet.google.com/abc-defg-hij");
+        g.full.get_mut(PRIMARY).unwrap()[0].extend([call, meet]);
+    }
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    let served_call = served(&w, "call").await.unwrap();
+    assert_eq!(served_call["meeting"], "zoom");
+    assert_eq!(served(&w, "meet").await.unwrap()["meeting"], "meet");
+    assert_eq!(served(&w, "own").await.unwrap()["meeting"], Value::Null);
+    let timeline = w.timeline().await.to_string();
+    assert!(
+        !timeline.contains("Sesame42"),
+        "the passcode is served nowhere"
+    );
+
+    let (status, joined, cache) = send(
+        &w.app,
+        "GET",
+        &format!("{}/join", event_uri("primary", "call")),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{joined}");
+    assert_eq!(cache.as_deref(), Some("no-store"));
+    assert_eq!(
+        joined["url"], "https://us02web.zoom.us/j/555?pwd=Sesame42",
+        "whole, from Google"
+    );
+    let reads = w.google().reads.clone();
+    let (_, _, q) = reads.iter().rev().find(|(_, id, _)| id == "call").unwrap();
+    assert!(
+        q["fields"].contains("conferenceData"),
+        "asked for where a meeting can be"
+    );
+
+    // No meeting, or no such event: refused before Google.
+    let before = w.google().reads.len();
+    let (status, none, _) = send(
+        &w.app,
+        "GET",
+        &format!("{}/join", event_uri("primary", "own")),
+        None,
+    )
+    .await;
+    assert_eq!(
+        (status, none["code"].as_str()),
+        (StatusCode::NOT_FOUND, Some("no_meeting"))
+    );
+    let (status, _, _) = send(
+        &w.app,
+        "GET",
+        &format!("{}/join", event_uri("primary", "nope")),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(w.google().reads.len(), before, "Google was not asked");
+    assert!(
+        !audit(&w).iter().any(|(a, _, _)| a.contains("join")),
+        "a read: no audit row"
+    );
 }

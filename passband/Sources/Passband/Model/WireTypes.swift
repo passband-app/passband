@@ -2132,6 +2132,9 @@ struct TimelineEvent: Codable, Sendable, Hashable, Identifiable {
     var respondable: Bool? = nil
     /// One of a recurring series: an answer may cover all of them.
     var recurring: Bool? = nil
+    /// The online meeting's service ("zoom", "meet", "teams", "webex",
+    /// "video"), for the Join button. Never the link (Lib/CalendarJoin.swift).
+    var meeting: String? = nil
 }
 
 /// How a guest answered, in the daemon's four words.

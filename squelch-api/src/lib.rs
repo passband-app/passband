@@ -544,6 +544,12 @@ fn calendar_routes(state: ApiState) -> Router<ApiState> {
             "/client/calendar/events/{calendar_id}/{id}/reply",
             post(calendar_write::reply_event),
         )
+        // The event's meeting link, read from Google when Join is pressed and
+        // kept nowhere (it carries the passcode). HUMAN DOOR ONLY.
+        .route(
+            "/client/calendar/events/{calendar_id}/{id}/join",
+            get(calendar_write::join_link),
+        )
         // The event pane's guest suggestion: people the user has written to
         // whose name a title mentions. A read, and HUMAN DOOR ONLY: it is a
         // lookup into who the user writes to, which the agent door, the agent

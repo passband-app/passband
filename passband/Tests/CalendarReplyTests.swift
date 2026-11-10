@@ -25,6 +25,7 @@ struct CalendarReplyTests {
         linksLand()
         seriesDefaults()
         words()
+        joinLabels()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -159,6 +160,16 @@ struct CalendarReplyTests {
         for text in [CalendarReply.uncertainText, CalendarReply.failureText(nil), CalendarReply.failureText(.notInvited)] {
             expect(!text.contains("\u{2014}"), "no em dash: \(text)")
         }
+    }
+
+    static func joinLabels() {
+        expect(CalendarJoin.label("zoom") == "Join Zoom", "zoom")
+        expect(CalendarJoin.label("meet") == "Join Google Meet", "meet")
+        expect(CalendarJoin.label("teams") == "Join Teams", "teams")
+        expect(CalendarJoin.label("video") == "Join", "another video service")
+        expect(CalendarJoin.label("hologram") == "Join", "a word from a newer daemon still joins")
+        expect(CalendarJoin.label(nil) == nil && CalendarJoin.label("") == nil, "no meeting, no button")
+        expect(CalendarJoin.path(calendarId: "primary", eventId: "e1").hasSuffix("/e1/join"), "the join route")
     }
 
     static func expect(_ cond: Bool, _ what: String) {

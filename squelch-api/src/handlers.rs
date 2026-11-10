@@ -2548,6 +2548,9 @@ pub(crate) fn calendar_event_view(
         // the event is one of a recurring series ("all events" is offered).
         "respondable": event.may_respond(),
         "recurring": squelch_core::gcal::instance_series(&row.event_id).is_some(),
+        // The online meeting's service ("zoom", "meet", ...), for a Join
+        // button. Never its link: Join reads that from Google when pressed.
+        "meeting": row.meeting.map(|m| m.as_str()),
     })
 }
 

@@ -21,6 +21,7 @@
 //! UTC sort key, so the two listings apply one `[from, to)` rule, by start.
 use super::ghosts::{in_range, listing_order, sort_key};
 use super::*;
+use crate::gcal::meeting::MeetingKind;
 use crate::gcal::{
     AccessRole, CalendarErrorKind, CalendarMeta, CalendarStatus, EventItem, EventRow, Guest,
     GuestResponse, MAX_EVENTS_PER_CALENDAR, MAX_GUESTS, PRIMARY, PageApplied, SelfResponse,
@@ -960,7 +961,8 @@ impl SqliteStore {
 const EVENT_COLUMNS: &str = "e.calendar_id,c.summary,e.event_id,e.ical_uid,e.status,e.summary,
     e.location,e.starts_at,e.ends_at,e.start_timezone,e.organizer_email,e.self_response,
     e.transparent,e.html_link,e.updated_at,c.is_primary,c.color,c.access_role,e.color_id,
-    e.organizer_self,e.description,e.guests_truncated,e.organizer_unreadable,e.from_gmail";
+    e.organizer_self,e.description,e.guests_truncated,e.organizer_unreadable,e.from_gmail,
+    e.meeting";
 
 /// One guest read from `email,name,response,is_organizer,is_self` starting
 /// at column `at`.
@@ -988,6 +990,7 @@ fn synced_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<(bool, SyncedE
     let response: Option<String> = r.get(11)?;
     let role: Option<String> = r.get(17)?;
     let primary: bool = r.get(15)?;
+    let meeting: Option<String> = r.get(24)?;
     Ok(Some((
         primary,
         SyncedEvent {
@@ -1017,6 +1020,7 @@ fn synced_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<(bool, SyncedE
                 description: r.get(20)?,
                 guests: Vec::new(),
                 guests_truncated: r.get(21)?,
+                meeting: meeting.as_deref().and_then(MeetingKind::parse),
             },
         },
     )))
@@ -1183,8 +1187,8 @@ fn upsert_event(
         "INSERT INTO calendar_events(account_id,calendar_id,event_id,ical_uid,status,summary,location,
              starts_at,start_sort,ends_at,all_day,start_timezone,organizer_email,self_response,
              transparent,html_link,updated_at,color_id,organizer_self,description,guests_truncated,
-             organizer_unreadable,from_gmail)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)
+             organizer_unreadable,from_gmail,meeting)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)
          ON CONFLICT(account_id,calendar_id,event_id) DO UPDATE SET
              ical_uid=excluded.ical_uid, status=excluded.status, summary=excluded.summary,
              location=excluded.location, starts_at=excluded.starts_at,
@@ -1194,7 +1198,8 @@ fn upsert_event(
              html_link=excluded.html_link, updated_at=excluded.updated_at,
              color_id=excluded.color_id, organizer_self=excluded.organizer_self,
              description=excluded.description, guests_truncated=excluded.guests_truncated,
-             organizer_unreadable=excluded.organizer_unreadable, from_gmail=excluded.from_gmail",
+             organizer_unreadable=excluded.organizer_unreadable, from_gmail=excluded.from_gmail,
+             meeting=excluded.meeting",
         params![
             account,
             calendar_id,
@@ -1219,6 +1224,7 @@ fn upsert_event(
             row.guests_truncated,
             row.organizer_unreadable,
             row.from_gmail,
+            row.meeting.map(MeetingKind::as_str),
         ],
     )?;
     // The guest list is replaced whole: what Google sent is what is held.

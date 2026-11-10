@@ -729,6 +729,7 @@ mod tests {
             description: None,
             guests: Vec::new(),
             guests_truncated: false,
+            meeting: None,
         }
     }
 

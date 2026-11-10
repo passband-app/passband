@@ -122,6 +122,7 @@ enum ReplayIconNames {
         "tray.and.arrow.down",
         "ups.com",
         "usps.com",
+        "video.fill",
         "wand.and.sparkles",
         "wand.and.stars",
         "waveform",

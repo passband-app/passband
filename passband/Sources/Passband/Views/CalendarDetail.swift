@@ -51,6 +51,10 @@ struct CalendarDetail: View {
                     estimateNote
                 }
             }
+            // An online meeting: one press to it, right under when it is.
+            if let event = item.event, let label = CalendarJoin.label(event.meeting), !FixtureMode.isEnabled {
+                JoinButton(event: event, label: label)
+            }
             facts
             // The tickets, boarding pass or booking the mail holds: one tap
             // to what the door wants to see.
@@ -521,6 +525,37 @@ struct HintButton: View {
             }
             .buttonStyle(.plain)
         #endif
+    }
+}
+
+/// JOIN (Lib/CalendarJoin.swift): the meeting link is asked for when this is
+/// pressed, never held by the page, and opened in the browser, which hands a
+/// Zoom or Teams link on to its app.
+private struct JoinButton: View {
+    @Environment(AppStore.self) private var store
+    let event: TimelineEvent
+    let label: String
+
+    var body: some View {
+        let joining = store.calendarJoining.contains(Agenda.itemId(event))
+        Button {
+            Task { await store.joinMeeting(event) }
+        } label: {
+            HStack(spacing: Space.s6) {
+                Image(systemName: "video.fill")
+                    .font(Typo.ui(11, weight: .semibold))
+                Text(label)
+                    .font(Typo.ui(12, weight: .semibold))
+                if joining {
+                    WaitDots(tone: Palette.inkFaint)
+                }
+            }
+        }
+        .buttonStyle(.glass)
+        .controlSize(.regular)
+        .disabled(joining)
+        .pointingHand()
+        .help("Open the meeting")
     }
 }
 

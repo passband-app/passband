@@ -179,6 +179,9 @@ enum Analytics {
         // one, `via` key, click or mail (the invitation email's own link).
         // Never the event, the organizer or the time.
         "calendar_invite_answered",
+        // Join pressed on an event's card: `service` is the daemon's closed
+        // word (zoom, meet, teams, webex, video). Never the link or the event.
+        "calendar_meeting_joined",
         // Discovery: which feature sets get found and which get kept. `full`
         // only: this is the "which actions are used" layer, not whether the
         // product works. Whether anybody visits the page is its `$screen`

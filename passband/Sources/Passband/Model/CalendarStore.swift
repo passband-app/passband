@@ -1056,6 +1056,29 @@ extension AppStore {
         return true
     }
 
+    /// Join: the meeting link, asked of the daemon (which reads it from
+    /// Google now) and opened. Never kept.
+    func joinMeeting(_ event: TimelineEvent) async {
+        let key = Agenda.itemId(event)
+        guard CalendarJoin.label(event.meeting) != nil, !FixtureMode.isEnabled,
+            !calendarJoining.contains(key)
+        else { return }
+        calendarJoining.insert(key)
+        defer { calendarJoining.remove(key) }
+        do {
+            let url = try await APIClient.shared.calendarJoinURL(calendarId: event.calendar_id, id: event.id)
+            guard Opener.isHTTP(url) else {
+                pushToast(CalendarJoin.failedText, .error)
+                return
+            }
+            Opener.open(url)
+            Analytics.capture("calendar_meeting_joined", ["service": event.meeting ?? "video"])
+        } catch {
+            let gone = (error as? APIError)?.code == "no_meeting"
+            pushToast(gone ? CalendarJoin.goneText : CalendarJoin.failedText, .error)
+        }
+    }
+
     /// A Yes / No / Maybe link in Google's invitation email, clicked in the
     /// reader: answered here when the event is on the synced calendar and is
     /// the user's to answer, instead of a browser tab. False hands the link

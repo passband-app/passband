@@ -187,6 +187,7 @@ pub(crate) const ALREADY_DELETED: &str =
 pub(crate) const ID_IN_USE: &str = "that event id is already used for a different event";
 pub(crate) const ALREADY_CREATING: &str = "that event is already being created";
 pub(crate) const NOT_INVITED: &str = "you are not a guest of this event";
+pub(crate) const NO_MEETING: &str = "this event has no online meeting";
 
 /// EVERY ERROR BODY NAMES ITS KIND, `{"error", "code"}`: a closed list the
 /// app reads (docs/CALENDAR.md §8, "What a refusal says"). The app keys on
@@ -223,6 +224,7 @@ pub(crate) mod code {
     pub(crate) const NOT_GRANTED: &str = "not_granted";
     pub(crate) const NOT_EDITABLE: &str = "not_editable";
     pub(crate) const NOT_INVITED: &str = "not_invited";
+    pub(crate) const NO_MEETING: &str = "no_meeting";
     pub(crate) const NOT_FOUND: &str = "not_found";
     pub(crate) const ID_IN_USE: &str = "id_in_use";
     pub(crate) const ALREADY_CREATING: &str = "already_creating";
@@ -1020,4 +1022,58 @@ async fn reply(
     })
     .await;
     finish(&state, REPLY, audit_target, note, ok, outcome).await
+}
+
+// --- GET /client/calendar/events/{calendar_id}/{id}/join ---------------------
+
+const JOIN: &str = "calendar_event_join";
+
+fn no_meeting() -> Refusal {
+    Refusal::new(
+        "rejected:no_meeting",
+        StatusCode::NOT_FOUND,
+        code::NO_MEETING,
+        NO_MEETING,
+    )
+}
+
+/// `GET /client/calendar/events/{calendar_id}/{id}/join`: `{"url"}`, the
+/// event's meeting link as Google holds it NOW, passcode and all
+/// (`squelch_core::gcal::meeting`). A READ: nothing is written, audited or
+/// kicked, and the link is stored and logged nowhere. Only for a stored
+/// event the sync found a meeting on; 404 [`code::NO_MEETING`] when Google's
+/// copy no longer has one.
+pub async fn join_link(
+    State(state): State<ApiState>,
+    Path((calendar_id, event_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let work = async {
+        let creds = granted(&state).await?;
+        let (_, stored) = stored_event(&state, &calendar_id, &event_id).await?;
+        if stored.row.meeting.is_none() {
+            return Err(no_meeting());
+        }
+        let (token, api) = google(&state, &creds, JOIN).await?;
+        api.join_url(&token, &calendar_id, &event_id)
+            .await
+            .map_err(|e| {
+                eprintln!("squelch-api: {JOIN}: Google refused the read ({e})");
+                Refusal::new(
+                    "failed:google",
+                    StatusCode::BAD_GATEWAY,
+                    code::GOOGLE_REFUSED,
+                    GOOGLE_REFUSED,
+                )
+            })?
+            .ok_or_else(no_meeting)
+    };
+    let url = match tokio::time::timeout(state.calendar_write_deadline, work).await {
+        Ok(Ok(url)) => url,
+        Ok(Err(refusal)) => return Err(refusal.error),
+        Err(_) => {
+            return Err(ApiError::new(StatusCode::GATEWAY_TIMEOUT, GOOGLE_REFUSED)
+                .with_code(code::GOOGLE_REFUSED));
+        }
+    };
+    Ok((no_store(), Json(serde_json::json!({ "url": url }))))
 }

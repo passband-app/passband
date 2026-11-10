@@ -213,8 +213,8 @@ pub enum Flow {
     /// daemon can hold. It differs only in what the callback does with it,
     /// which is to re-seal an existing mailbox rather than provision a new one.
     ///
-    /// CALENDAR IS ASKED FOR AGAIN: reconnecting email also reconnects
-    /// calendar. It used to lean on
+    /// CALENDAR IS ASKED FOR AGAIN (the founder, 2026-10-29: "the reconnect
+    /// flow for email should also reconnect calendar"). It used to lean on
     /// `include_granted_scopes`, but a reconnect is needed exactly when the old
     /// grant died, and a REVOKED grant leaves Google nothing to include: the
     /// new token came back Gmail-only, the install replaced the whole

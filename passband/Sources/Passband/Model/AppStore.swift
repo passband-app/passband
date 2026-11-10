@@ -7330,8 +7330,8 @@ final class AppStore {
         return scheduledRows.first { $0.id == id }
     }
 
-    /// Enter / click on an outbox row: SHOW it, as scheduled.
-    /// Nothing about opening it cancels it, pulls it into a
+    /// Enter / click on an outbox row: SHOW it, as scheduled (user decision
+    /// 2026-09-29). Nothing about opening it cancels it, pulls it into a
     /// composer or moves it to drafts; only the preview's `edit` does that.
     /// A `sending` row opens too: it has a status to show, just no verbs.
     func openScheduledPreview(_ row: ScheduledSendView) {

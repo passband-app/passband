@@ -664,8 +664,9 @@ projection does.
 
 ## 5. Surfaces
 
-The first round of the visual design is `docs/calendar-ux-preview.html`, and
-these directions from it stand:
+The visual design pass is done by Opus 5.5 (DECIDED). Its first round is
+`docs/calendar-ux-preview.html`, and these directions from it stand until the
+founder says otherwise:
 
 - A ghost is an empty container, never a faded one. Its text stays at full
   strength, so it does not read as a disabled control.
@@ -689,7 +690,7 @@ and the model's own words as attributed quotes; ghosts take going and dismiss.
 The connect card is shown once per account as a modal, then a quiet banner,
 with a waiting state and a line for the sync state.
 
-Wave 4, from using wave 3 on screen:
+Wave 4, from the founder using wave 3 on screen:
 
 - **Number keys.** Calendar is `2` and every later page is one higher
   (Sitrep 1, Calendar 2, All mail 3, Auth 4, Rules 5, Groups 6). `⇧C` still
@@ -774,8 +775,9 @@ Wave 4, from using wave 3 on screen:
   event pane with that day and those times. A plain click does nothing new, a
   press on an existing block is that block's click, and Esc mid-drag drops it.
 
-Wave 6 adds a week view, an editable end day on the event form, and a title
-that reads its own day, time and guest ("dinner with sam on friday 4pm"):
+Wave 6, from the founder ("lets add a week view too", "you should be able to
+change the end date on the create event form", "when i type the title, i
+should be able to type 'dinner with steven on friday 4pm'"):
 
 - **Week.** The header reads Month | Week | Agenda (`m` / `w` / `a`), Month
   still the default. The week is seven of the month's day columns over one
@@ -946,12 +948,14 @@ already a known sore spot (#265). The pane sits beside the composer.
 
 ### Reminders and tickets (DECIDED)
 
-A notification arrives a well-chosen time before each event (an hour, 30
-minutes or 10 minutes), with something that helps: for a concert, tapping it
-shows the email with the tickets. Any event with tickets in mail gets a
-one-tap button that shows them (the email or the attachment).
+The owner's ask (2026-10-29): a notification a well-chosen time before each
+event ("1hr, 30m or 10m"), with something that helps ("if its a concert,
+tapping the notif can show you the email with your tickets"); and on any event
+with tickets in mail, a one-tap button that shows them (the email or the
+attachment).
 
-Decisions:
+Owner decisions (AskUserQuestion, 2026-10-29), each against my
+recommendation where noted:
 
 - **The model reads the event, description included.** The description is
   often where the useful detail is (an entry code, what to bring). A second
@@ -1101,8 +1105,9 @@ versions off that list, and their items fall to the fallback until planned.
 - `same_as`: candidate indexes. Out of range ones are dropped.
 - `code` (prompt `calendar-remind-v2`): `{label, value}` or
   null, an entry code the person needs on arrival (a door PIN, a gate code).
-  An event whose description says "If no one is at the front desk, use PIN
-  735902 to enter" hands over the PIN right before the person walks in. The line rule drops codes on purpose (a steered line must
+  The owner's ask: an event whose description says "If no one is at the
+  front desk, use PIN 735902 to enter" should hand over the PIN right before
+  they walk in. The line rule drops codes on purpose (a steered line must
   not carry one), so the code has its own field, HELD TO THE ITEM'S OWN TEXT
   in code (`remind::settle_code`), as the card's place is held to the
   location: the value must appear word for word, as a whole word (not a
@@ -1298,7 +1303,7 @@ answer without the mail being opened:
 
 When an open mail lists times ("Monday, October 19th: 10am to 3pm ET",
 "Thursday: 11am to 1pm, 2:45 to 4:30pm ET"), each offered time gets a hint
-beside it saying whether the user is free then. The motivating case is an
+beside it saying whether the user is free then. The founder's example is an
 assistant relaying a week of someone else's windows: five days, seven windows,
 all in another timezone.
 
@@ -1310,7 +1315,8 @@ all in another timezone.
   several per day, and they carry the sender's zone. The triage record's
   `candidates` (deferred from wave 1) is a list of ranges with a zone, and the
   meeting may be with someone other than the sender.
-- **Drawn in the mail itself** (to be revisited, tracked in issue #352). The hint sits inline, right where the
+- **Drawn in the mail itself** (founder's preference, 2026-10-01; to be
+  revisited, tracked in issue #352). The hint sits inline, right where the
   offered time is written. The open design problem is trust: a mail must not
   be able to draw something that passes for Passband saying "free", so the
   inline mark has to be something sender HTML cannot imitate, or be verifiable
@@ -1323,7 +1329,7 @@ all in another timezone.
   needs no permission. Free and busy appear only once the real calendar is
   connected: a ghost-only "free" would be a guess presented as a fact.
 
-### One click to accept
+### One click to accept (founder's ask, 2026-10-01)
 
 Clicking an offered time the user is free for does three things at once, and
 then the only thing left is Send:
@@ -1502,8 +1508,9 @@ from the plan below:
   installed or queued, and the page says calendar was not connected.
 - **Signup and reconnect** now also send `include_granted_scopes=true`, so a
   later plain reconnect hands back a token that still carries calendar.
-  A reconnect also REQUESTS the calendar scopes (optional, as signup does),
-  since a reconnect for email should also reconnect calendar: a reconnect is needed when the old grant died, a
+  Since 2026-10-29 a reconnect also REQUESTS the calendar scopes (optional,
+  as signup does; the founder: "the reconnect flow for email should also
+  reconnect calendar"): a reconnect is needed when the old grant died, a
   revoked grant leaves `include_granted_scopes` nothing to keep, and the
   install replaces the whole credentials file, so a Gmail-only repair left
   calendar disconnected and asking for a second trip.
@@ -2107,7 +2114,7 @@ Wave 1's ghosts only ever show. Before a later wave lets one become a real
 event, or lets mail move or delete one, these exist:
 
 ("Passband owns the events mail makes" above is the first
-such wave. Where it stands against this
+such wave, decided by the owner on 2026-10-28. Where it stands against this
 list: it never notifies and never touches guests; it adopts only from
 authenticated mail, and only an event Gmail itself already added, so it adds
 nothing Gmail had not; the user's dismissal stands in for "this mail is
@@ -2177,10 +2184,11 @@ SEARCHES it (§10.1, DECIDED).
 
 ### 10.1 Search (DECIDED)
 
-Calendar events are searchable by keyword and by agents: an **Events block**
-in the search results (not interleaved, not filter chips), served to **both**
-the in-app assistant and Agent MCP, with ghosts drawn as ghosts, and only
-**committed ghosts** searched (see "Ghosts" below).
+The founder: "lets make calendar events searchable by the agent and keyword
+search." Decided with them the same day: an **Events block** in the search
+results (not interleaved, not filter chips), **both** the in-app assistant and
+Agent MCP, and ghosts drawn as ghosts. Narrowed the same day to
+**committed ghosts only** (see "Ghosts" below).
 
 **Why a block and not one list.** A mail hit's date is when it arrived; an
 event's is when it happens. Their scores are not comparable either. Sorted
@@ -2229,9 +2237,10 @@ upcoming), then past events, most recent first, on the owner's clock (their
 zone, as every ghost `state` served here also reads it). `total` is the number of
 hits before the limit.
 
-**Ghosts: commitments only.** Search covers real events on the calendar, and
-events from mail only when triage made an event from that mail. Search is for
-the calendar, and a ghost is searched only when it
+**Ghosts: commitments only** (the founder, 2026-10-28, after the first
+build served every ghost: "only search through real events in the actual
+calendar not events from mail unless triage made an event based on that
+mail"). Search is for the calendar, and a ghost is searched only when it
 is what §3.3 puts on the real calendar: commitment `committed` (a booking,
 a ticket, a reservation the user made), or an invitation the user marked
 going. Invited, proposed and unknown ghosts are possibilities and are not
@@ -2288,7 +2297,8 @@ search is not run) and lists every hit. The block is drawn only while the
 Calendar page is available. The phone draws the same block in its Search
 tab; a hit opens the Calendar tab in Day mode on that event's detail.
 
-**The in-app assistant drafts events (BUILT in wave 6).** It has ONE calendar tool,
+**The in-app assistant drafts events (BUILT in wave 6).** The founder: "lets
+give the assistant the ability to create events." It has ONE calendar tool,
 `create_calendar_event` (title, start, end, all_day, and optionally a
 calendar by name, a location and guest addresses), and the tool writes
 nothing:
@@ -2438,7 +2448,8 @@ Each wave is useful on its own and is committed when verified.
 - Whether to backfill senders' `Date` offsets for existing correspondents (a
   headers-only fetch) or let the timezone inference learn forward only.
 - The month view (hour strips per day, no titles) is the least conventional
-  surface and has not been judged in use yet.
-- Whether the agent door serves the timeline (it SEARCHES it, §10.1; a listing by date is still open).
+  surface and has not been judged by the founder yet.
+- Whether the agent door serves the timeline (it SEARCHES it since
+  2026-10-28, §10.1; a listing by date is still open).
 - Google's scope names, their classification, and the amendment process, all
   to be verified at build time.

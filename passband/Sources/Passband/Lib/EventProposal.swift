@@ -1,5 +1,5 @@
-// THE ASSISTANT PROPOSES, THE PERSON ADDS: the assistant can create events,
-// but only as a draft the person confirms.
+// THE ASSISTANT PROPOSES, THE PERSON ADDS (wave 6, the founder: "lets give
+// the assistant the ability to create events").
 //
 // The in-app assistant has ONE calendar tool, `create_calendar_event`, and it
 // writes nothing. It turns what the model asked for into the event pane's own

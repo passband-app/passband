@@ -5,7 +5,7 @@ automatically. The reader shows the English with a header saying it was
 translated, and one click shows the original. Both versions are indexed for
 keyword search and semantic search.
 
-Design decisions:
+Decisions locked with the user (2026-10-21):
 
 - Model: **`claude-sonnet-5`**. It is already on every tenant's Bifrost
   allow-list (`DEFAULT_LLM_MODELS` in `squelch-control/src/config.rs`), so

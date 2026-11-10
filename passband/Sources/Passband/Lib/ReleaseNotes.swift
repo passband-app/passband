@@ -521,7 +521,7 @@ enum ReleaseNotes {
         ReleaseNote(
             version: "0.0.8",
             date: "2026-09-25",
-            headline: "Rebuilt onboarding, search and triage",
+            headline: "Biggest update by far. Now we're a real product?",
             items: [
                 ReleaseItem(.app, "Rebuilt onboarding"),
                 ReleaseItem(.app, "Attach files to emails", symbol: "paperclip"),
@@ -660,8 +660,8 @@ enum ReleaseNotes {
                     .app,
                     "The check now chip is gone from Shipments. Carriers are polled on a "
                         + "schedule."),
-                ReleaseItem(.app, "Cleaner punctuation in generated text"),
-                ReleaseItem(.ios, "Notifications on your iPhone"),
+                ReleaseItem(.app, "No more goddam emdashes"),
+                ReleaseItem(.ios, "Mobile notifications finally!!"),
                 ReleaseItem(.ios, "Switch accounts, and add one"),
                 ReleaseItem(.ios, "Mark emails as done in the thread"),
                 ReleaseItem(.ios, "Conversational threads look like message bubbles"),

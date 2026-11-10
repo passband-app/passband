@@ -114,9 +114,6 @@ fact, so the check happens before the commit.
 - Fixtures use invented people at `.example` domains and fake numbers. When a
   real message is the bug report, reduce it to a synthetic one with the same
   shape.
-- Never quote what the owner said in a session, and never attribute a
-  decision to them ("the founder:", "owner's call, <date>", "user decision").
-  State the rule and its reason.
 
 **Never infrastructure or security detail.**
 

@@ -1,4 +1,4 @@
-// A SCHEDULED MAIL, READ-ONLY, AS SCHEDULED (see
+// A SCHEDULED MAIL, READ-ONLY, AS SCHEDULED (user decision 2026-09-29;
 // docs/SCHEDULED-SEND.md §6 "Sent"). Enter / click on an outbox row opens THIS
 // in the reader's slot, where a sent row's thread would open: what it says,
 // who it goes to, what it carries and when it goes. Looking at it changes

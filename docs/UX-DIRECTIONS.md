@@ -121,7 +121,7 @@ email-rendering work exists for the escape-hatch case, not as a primary surface.
 - **Density is still deliberate.** This is a power tool, not a marketing site.
   Spacing and line-height loosened, but the sitrep still reads at a glance.
 
-> **Note:** This light-first direction **supersedes**
+> **Note (user decision, 2026-07-09):** This light-first direction **supersedes**
 > the original "dark, dense, terminal-adjacent" aesthetic law. The app should be
 > less terminal-looking and more user-friendly. Dark mode is preserved as a
 > faithful translation of the old palette, now reachable through the toggle
@@ -246,7 +246,7 @@ _(Avatar-favicon + icon guidance added 2026-07-09.)_
 
 # Sidebar navigation + Sitrep as the abstracted dashboard (2026-07-09)
 
-**This implements the "abstract over single emails" principle
+**User decision, implementing the "abstract over single emails" principle
 structurally.** The app gains a persistent left nav and the Sitrep name is
 redefined: it is now the *fully-abstracted dashboard* (the default surface on
 launch), and the original band-list-of-email-rows chassis lives on unchanged as

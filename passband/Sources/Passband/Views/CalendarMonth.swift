@@ -1,7 +1,8 @@
 // THE CALENDAR PAGE'S MONTH: a conventional month grid, and the selected
 // day's column beside it.
 //
-// THE LAYOUT. Days read top-down, the way Gmail's month does, in colour:
+// WAVE 3 (the founder: "the horizontal bar on each day is confusing. lets do
+// top down like gmail does. lets add more color too."):
 //   - Each cell lists its day top-down, one row per thing: trips and stays
 //     first, as named bars across the cells they cover (flat where they run
 //     on into the next row); then the day's own all-day items; then timed

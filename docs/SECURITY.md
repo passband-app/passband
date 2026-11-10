@@ -1516,7 +1516,8 @@ counted per category and written as at most one summary line per minute
 **Invariant.** Calendar data (event titles, places, descriptions, organizers,
 guests' addresses, names and answers, links, calendar names) is human-door data: served on `GET /client/timeline` (and
 in the answer to the user's own write) and nowhere else, never in a log line,
-never in a triage prompt. TWO EXCEPTIONS. First: an event's location string, alone, goes to the configured
+never in a triage prompt. TWO EXCEPTIONS, each the owner's decision. First
+(2026-10-28): an event's location string, alone, goes to the configured
 provider's small (`notify`) model to be cut down to the place the card shows
 (see "The card's place" below). Second: to plan an event's
 reminder, the same small model reads the event (title, times, place,
@@ -1598,9 +1599,9 @@ it, and Passband's own writes always send `sendUpdates=none`.
   memory, spend in the usage ledger under `calendar_place`). No key, no call.
   The location text is never logged.
 - **Calendar reminders** (`gcal/remind.rs`, `squelch-api/src/calendar_remind.rs`,
-  `store/sqlite/calendar_remind.rs`). The model reads the event's
-  description and writes the banner's line itself, because a fixed template
-  cannot say what a reminder is for. ONLY THE USER'S EVENTS (`remind::attends`): an event
+  `store/sqlite/calendar_remind.rs`; the owner's decision of 2026-10-29,
+  against the recommendation to leave the description out and to template
+  the banner's line). ONLY THE USER'S EVENTS (`remind::attends`): an event
   is planned, fired, given the fallback, links ghosts or claims one only when
   it is on one of the owner's own calendars (primary, or `owner` access) and
   they accepted or said maybe, or it is their own (`users_own`), or it is

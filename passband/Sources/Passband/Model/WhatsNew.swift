@@ -10,7 +10,7 @@
 // where the other has finished. That first look ending for the first time
 // (`meetNewcomer`) stamps the release just below the latest,
 // so their first time on the Sitrep shows the latest release and nothing older
-// (it used to stamp current and show nothing). It also settles the transition INTO this
+// (owner's call, 2026-10-30; it used to stamp current and show nothing). It also settles the transition INTO this
 // feature, which has no other honest signal: an install that predates the stamp
 // but has had its first look is an established install, owed the release it just
 // took and nothing older (see ReleaseNotes.unseen).
@@ -110,8 +110,8 @@ final class WhatsNew {
 
     /// The first look at a mailbox has just ended, for the first time on this
     /// Mac (`FirstLoad`). New users are
-    /// shown the LATEST release when they reach the Sitrep, and
-    /// nothing older: stamp the release just below it, then
+    /// shown the LATEST release when they reach the Sitrep (owner's call,
+    /// 2026-10-30), and nothing older: stamp the release just below it, then
     /// ask. If they are not on the Sitrep yet, arriving there asks again
     /// (RootView's ShellWatchers); if they quit first, the next launch's
     /// first sync does. The phone does the same at its Connect gate. An

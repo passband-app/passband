@@ -42,8 +42,8 @@ enum CalendarGate {
         !available && active == calendar
     }
 
-    /// THE NUMBER KEYS, WITH THE CALENDAR IN THEM: calendar is 2, all mail
-    /// 3, and so on. The calendar is second on the rail, so
+    /// THE NUMBER KEYS, WITH THE CALENDAR IN THEM (wave 4, the founder: "make
+    /// calendar 2, all mail 3, etc"). The calendar is second on the rail, so
     /// while it is offered it is second in the count and every later page is
     /// one higher. While it is NOT offered the numbers are exactly the ones
     /// from before it existed: nobody's fingers are renumbered by a page

@@ -103,7 +103,7 @@ By design, and the design is wrong. See §6.
 
 ## 3. The design: two lanes
 
-The core decision: **importance for triage and final
+The core decision (Braelyn, this thread): **importance for triage and final
 placement is a different question from importance for notification.** One
 verdict currently answers both, and the two want opposite error profiles.
 
@@ -154,8 +154,8 @@ error corpus read a 100% correction rate. If a rescue overwrites a
 interesting, and notify-lane accuracy reads 100% forever.
 
 **Record both directions.** Fast lane buzzed and Opus disagrees is the
-false-positive rate. A wrong buzz is survivable (the user opens the client
-and the email is sorted properly), and that holds,
+false-positive rate. Braelyn's call is that a wrong buzz is survivable
+("they open the client and the email is sorted properly"), and that is right,
 but survivable is not the same as unmeasured. `notify_rescued` against
 `notify_overturned` is the pair of counters that decides whether the threshold
 moves, in the shape `record_stage1(Stage1Verdict)` already uses.

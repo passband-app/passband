@@ -4,7 +4,8 @@
 // PURE, and Foundation only, like Lib/MonthGrid.swift beside it
 // (Tests/WeekGridTests.swift). Clock and zone are arguments.
 //
-// NOTHING NEW IS INVENTED HERE. A week is seven of the month's day columns over one hours axis, so
+// NOTHING NEW IS INVENTED HERE (wave 6, the founder: "lets add a week view
+// too"). A week is seven of the month's day columns over one hours axis, so
 // each day is `MonthGrid.column` as it stands: the night folded into its cap,
 // the hours from 7am, overlapping blocks side by side (`MonthGrid.lanes`).
 // The strip across the top is one of the month's week rows: the same bars in

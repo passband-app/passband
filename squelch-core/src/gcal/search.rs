@@ -329,8 +329,9 @@ pub fn order<T: Timed>(hits: &mut [T], now: DateTime<Utc>, today: NaiveDate, off
 /// real calendar), or an invitation the owner said they are going to, and
 /// only while the mail has not cancelled it and the owner has not dismissed
 /// it. Invitations, proposals and maybes are possibilities, not calendar
-/// events, and stay out: search covers the real calendar, plus mail events
-/// only where triage made an event from that mail.
+/// events, and stay out (the founder, 2026-10-28: "only search through real
+/// events in the actual calendar not events from mail unless triage made an
+/// event based on that mail").
 fn searchable(ghost: &GhostEvent) -> bool {
     use crate::triage::decision::EventCommitment;
     use crate::types::GhostMailState;

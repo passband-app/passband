@@ -256,7 +256,7 @@ The iPhone catches up.
 
 ## 0.0.8 (2026-09-25)
 
-Rebuilt onboarding, search and triage
+Biggest update by far. Now we're a real product?
 
 ### Mac
 
@@ -354,11 +354,11 @@ Move through emails faster, better search, and notifications to your phone.
 - When your mailbox is catching up after a week away, the re-triage screen says so and counts (1,240 of 4,500 messages) rather than telling you the counter has not moved in a while.
 - Cmd-Enter saves a rule
 - The check now chip is gone from Shipments. Carriers are polled on a schedule.
-- Cleaner punctuation in generated text
+- No more goddam emdashes
 
 ### iPhone
 
-- Notifications on your iPhone
+- Mobile notifications finally!!
 - Switch accounts, and add one
 - Mark emails as done in the thread
 - Conversational threads look like message bubbles

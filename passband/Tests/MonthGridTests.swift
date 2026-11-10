@@ -570,7 +570,7 @@ struct MonthGridTests {
         ghost(id, title, start: "\(d)T\(time):00-07:00", commitment: .committed)
     }
 
-    /// One trip ends on Friday the 9th and another
+    /// The founder's screenshot: one trip ends on Friday the 9th and another
     /// starts on Saturday the 10th. They share the first lane, in the same
     /// week row, and both sit directly under their dates.
     static func aLaneIsFreeTheDayAfterItsSpanEnds() {
@@ -833,7 +833,7 @@ struct MonthGridTests {
         expect(slots(200) > slots(140), "a taller cell holds more")
     }
 
-    /// Widen the window, the grid widens; narrow it, it
+    /// The founder's bug: widen the window, the grid widens; narrow it, it
     /// stayed wide. The cell width is a pure seventh of the container's
     /// width, so it has no memory of the width before.
     static func cellsFollowTheContainersWidth() {

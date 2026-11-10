@@ -1943,7 +1943,8 @@ agent JWT.</li>
 <div class="inv"><p class="lbl">Invariant</p><p>Calendar data (event titles, places, descriptions, organizers,
 guests&#39; addresses, names and answers, links, calendar names) is human-door data: served on <code>GET /client/timeline</code> (and
 in the answer to the user&#39;s own write) and nowhere else, never in a log line,
-never in a triage prompt. TWO EXCEPTIONS. First: an event&#39;s location string, alone, goes to the configured
+never in a triage prompt. TWO EXCEPTIONS, each the owner&#39;s decision. First
+(2026-10-28): an event&#39;s location string, alone, goes to the configured
 provider&#39;s small (<code>notify</code>) model to be cut down to the place the card shows
 (see &quot;The card&#39;s place&quot; below). Second: to plan an event&#39;s
 reminder, the same small model reads the event (title, times, place,
@@ -2037,9 +2038,9 @@ survives Gmail&#39;s copy being deleted. At most 100 calls per account per day (
 memory, spend in the usage ledger under <code>calendar_place</code>). No key, no call.
 The location text is never logged.</li>
 <li><strong>Calendar reminders</strong> (<code>gcal/remind.rs</code>, <code>squelch-api/src/calendar_remind.rs</code>,
-<code>store/sqlite/calendar_remind.rs</code>). The model reads the event&#39;s
-description and writes the banner&#39;s line itself, because a fixed template
-cannot say what a reminder is for. ONLY THE USER&#39;S EVENTS (<code>remind::attends</code>): an event
+<code>store/sqlite/calendar_remind.rs</code>; the owner&#39;s decision of 2026-10-29,
+against the recommendation to leave the description out and to template
+the banner&#39;s line). ONLY THE USER&#39;S EVENTS (<code>remind::attends</code>): an event
 is planned, fired, given the fallback, links ghosts or claims one only when
 it is on one of the owner&#39;s own calendars (primary, or <code>owner</code> access) and
 they accepted or said maybe, or it is their own (<code>users_own</code>), or it is

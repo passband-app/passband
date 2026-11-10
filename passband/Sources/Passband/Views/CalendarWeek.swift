@@ -1,4 +1,5 @@
-// THE CALENDAR PAGE'S WEEK: seven days side by side over one hours axis, and the all-day items
+// THE CALENDAR PAGE'S WEEK (wave 6, the founder: "lets add a week view
+// too"): seven days side by side over one hours axis, and the all-day items
 // and trips in a strip across the top.
 //
 // BUILT FROM THE MONTH'S PIECES, NOT BESIDE THEM. Each day is the month's own

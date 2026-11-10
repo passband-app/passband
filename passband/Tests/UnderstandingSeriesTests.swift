@@ -1,6 +1,6 @@
 // The Understanding section's arithmetic, pinned. Every sentence the page says
 // about a person is a claim built from the ledger's counts, and every way it
-// can be wrong is invisible until somebody reads it about someone they work with:
+// can be wrong is invisible until somebody reads it about their own cofounder:
 // a recruiter answered once ranked over the person answered 31 times, a
 // newsletter nobody opens drawn among the people, a reply time that says
 // "within minutes" for a day. So the placements, the rankings, the grouping

@@ -25,7 +25,7 @@ Two patterns: **pairs** (a sign-in alert lands within a minute of the code or
 Google receipt that explains it: 5 of the 16) and **bursts** (a new phone
 produces ~9 new-device alerts across services in a week).
 
-## Decisions
+## Decisions (owner, 2026-10-26)
 
 1. New auth kinds, not a severity field.
 2. Sign-in receipts stay visible on the Auth page, with no question card.

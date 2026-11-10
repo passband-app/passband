@@ -2173,6 +2173,10 @@ impl Store for SqliteStore {
         self.list_devices(account_id)
     }
 
+    fn client_versions_seen(&self, account_id: AccountId) -> Result<Vec<ClientSeen>> {
+        SqliteStore::client_versions_seen(self, account_id)
+    }
+
     fn delete_device_by_token(&self, account_id: AccountId, token: &str) -> Result<bool> {
         self.delete_device_by_token(account_id, token)
     }

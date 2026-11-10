@@ -363,6 +363,7 @@
 		91072B199B1161CD7D310819 /* PhosphorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C6A02D8A42FF0B05E18ED65 /* PhosphorView.swift */; };
 		911E2DC6E6549AECE86FFBAA /* Sounds in Resources */ = {isa = PBXBuildFile; fileRef = F538ABF63F676ADB2910AE59 /* Sounds */; };
 		913D465C949CCE810929D314 /* ThreadArrivals.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB8DC0D632309B6B97130426 /* ThreadArrivals.swift */; };
+		91675715C67BDD4C40980BA9 /* MacPush.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14252058D08BFDFF32FDB395 /* MacPush.swift */; };
 		91774D41994F36BA146947E7 /* Badge.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3B428F6536347775B3EA5DC /* Badge.swift */; };
 		918EB3663E912FF4F36229C2 /* EmailWebCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BFBFFBE499370A5F88E2540 /* EmailWebCore.swift */; };
 		919AA24C1449A248D1A67FC1 /* FullPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4720F5550C00C23ABD01C011 /* FullPage.swift */; };
@@ -453,6 +454,7 @@
 		B3215470A61F7820D9D7C348 /* AgentsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B934097D54904EB956A1B16 /* AgentsSection.swift */; };
 		B36D0542B36A1421D26CA968 /* Platform.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37AEAA24984488DA00EBD6C4 /* Platform.swift */; };
 		B3BD3AFC1DED8C5544D23602 /* PassbandiOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F714235A8E6F4742ABF772B3 /* PassbandiOSApp.swift */; };
+		B48C8EBF719C782321296674 /* MacPush.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14252058D08BFDFF32FDB395 /* MacPush.swift */; };
 		B5D62B99FA378656F0BCF7DD /* AttachmentThumbs.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE85FBF58B14F2DC27FC16FB /* AttachmentThumbs.swift */; };
 		B61FE6C642D7928417FD3B94 /* FlowHintLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B89109A60AE480F8E27CE702 /* FlowHintLayer.swift */; };
 		B65E72D6B22EB9694BFEB245 /* AuthView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89A44DCD12D99794B8DF43B0 /* AuthView.swift */; };
@@ -696,6 +698,7 @@
 		10544C7DF8CDBA851AF0D9D8 /* Actions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Actions.swift; sourceTree = "<group>"; };
 		12468DFB107CC662204BCE84 /* MobileRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileRootView.swift; sourceTree = "<group>"; };
 		133F67D29E63121188F93025 /* SearchHighlight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchHighlight.swift; sourceTree = "<group>"; };
+		14252058D08BFDFF32FDB395 /* MacPush.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacPush.swift; sourceTree = "<group>"; };
 		149B084F47F6D25F0A650BD0 /* CatchUpProgressRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatchUpProgressRow.swift; sourceTree = "<group>"; };
 		151C06F2A835787B0FDEDB24 /* FindInThread.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindInThread.swift; sourceTree = "<group>"; };
 		15B8541C2F7C988507905103 /* RefinementSlot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RefinementSlot.swift; sourceTree = "<group>"; };
@@ -1211,6 +1214,7 @@
 				17A72FA204008ACE31765EA1 /* ImageTrim.swift */,
 				1A74374DEAEE21CDF9A5067D /* Loadable.swift */,
 				2DE8FCBB5A4C2A9DA4FBB852 /* LoginItem.swift */,
+				14252058D08BFDFF32FDB395 /* MacPush.swift */,
 				C10C0C8780CCB9C6BAB2709C /* MailCSP.swift */,
 				35224D41EE816E52C2396950 /* MailList.swift */,
 				9C229EB225D28FC28ADBE84D /* Mailto.swift */,
@@ -1864,6 +1868,7 @@
 				4A484A26530C0131828B0A16 /* Loadable.swift in Sources */,
 				184BB7DACF3D0EB860D35674 /* LoginCodePanel.swift in Sources */,
 				9281DA1AEBA29675A4C3F198 /* LoginItem.swift in Sources */,
+				B48C8EBF719C782321296674 /* MacPush.swift in Sources */,
 				C44797D33062B1E2B2A342FE /* MailCSP.swift in Sources */,
 				12FA01A347B0C6F768928A55 /* MailFilterBar.swift in Sources */,
 				46D44A7303D12ED7AD0C0852 /* MailList.swift in Sources */,
@@ -2162,6 +2167,7 @@
 				331C84737DCE609E6D6C6980 /* ListRow.swift in Sources */,
 				7D89527CD3EF7C51C4EB8242 /* Loadable.swift in Sources */,
 				AB480597C6D05F1334086DE1 /* LoginItem.swift in Sources */,
+				91675715C67BDD4C40980BA9 /* MacPush.swift in Sources */,
 				85A261179BDC0C4F5BEB9F4A /* MailCSP.swift in Sources */,
 				F20F889E8EACBA347A96080A /* MailFilterBar.swift in Sources */,
 				39106BE6F52C41CBE345A57E /* MailList.swift in Sources */,

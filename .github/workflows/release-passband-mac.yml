@@ -12,6 +12,9 @@
 #   TAP_PUSH_TOKEN           fine-grained PAT, contents:write on homebrew-tap
 #   RELEASES_PUSH_TOKEN      fine-grained PAT, contents:write on passband-releases
 #                            (TEMPORARY, see the "Mirror" step)
+#   MAC_PUSH_PROFILE         OPTIONAL base64 Developer ID provisioning profile for
+#                            app.passband.client with Push Notifications; without
+#                            it the app ships with no APNs (passband/build.sh)
 name: release-passband-mac
 
 on:
@@ -88,6 +91,20 @@ jobs:
             --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_APP_PASSWORD"
 
+      # The Developer ID provisioning profile that lets the app hold an APNs
+      # token (release announcements; see passband/build.sh). Optional: with
+      # the secret unset the app ships exactly as before, without push.
+      - name: Write push profile
+        env:
+          MAC_PUSH_PROFILE_B64: ${{ secrets.MAC_PUSH_PROFILE }}
+        run: |
+          if [ -z "$MAC_PUSH_PROFILE_B64" ]; then
+            echo "::notice::MAC_PUSH_PROFILE is not set; this build has no push"
+            exit 0
+          fi
+          printf '%s' "$MAC_PUSH_PROFILE_B64" | base64 --decode > "$RUNNER_TEMP/push.provisionprofile"
+          echo "MAC_PUSH_PROFILE=$RUNNER_TEMP/push.provisionprofile" >> "$GITHUB_ENV"
+
       - name: Build, sign, notarize
         run: ./passband/build-release.sh
 
@@ -147,6 +164,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SPARKLE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
+          # Re-fetch the release tags as they are: checkout on a tag push
+          # can leave the pushed tag lightweight, and make-appcast.sh reads
+          # an annotated tag's message for `quiet`.
+          # With the job's token: checkout does not persist credentials,
+          # and this must not depend on the repo being public.
+          git -c http.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')" \
+            fetch --force --quiet origin 'refs/tags/passband-mac-*:refs/tags/passband-mac-*'
           cd passband
           mkdir -p releases
           gh release list --limit 100 --json tagName \

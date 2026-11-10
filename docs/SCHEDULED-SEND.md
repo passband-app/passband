@@ -15,7 +15,7 @@ a row by its key (`Reply(parent)`, `Forward(parent)`, or "newest keyless row"
 for an old app), and DraftSaver autosaves through those keys. A scheduled
 reply parked as a draft row would be silently rewritten the next time the
 user opened a reply to the same message, and an older app's key-less PUT
-could overwrite a scheduled new message. A frozen, guard-checked request with
+could overwrite a scheduled new message. A frozen, validated request with
 a lease and a state machine must be unreachable by any autosave path, so it
 is its own table. Scheduling CONSUMES the draft it came from (§3 step 7);
 cancelling hands the request back to the composer, whose next autosave makes
@@ -86,17 +86,13 @@ Gmail call, because the user is present to answer:
    same rule as reminders). Also `send_at` at most 1 year out, counted as
    366 days so the same date next year is accepted across a leap day.
 3. Every `attachment_ids` entry resolves, else 400 `rejected:attachment_missing`.
-4. The outbound guard runs NOW. A verdict is a 422 exactly as on a send;
-   `override_guard: true` persists in `request` and the fire path does NOT
-   re-scan (content is frozen, the answer would be the same). For a FORWARD
-   the scan today also covers the original message, which `forward_send`
-   fetches on the write token mid-send; so the schedule handler fetches the
-   original itself, unions its kinds with the note's and the attachments',
-   and judges once here. The worker then calls `perform_send` with
-   `SendGuard::Settled` for every kind of send.
+4. A FORWARD's original is fetched NOW on the write token, so one that is
+   gone or past `MAX_FORWARD_RAW_BYTES` is refused while the user is here,
+   not hours later at fire time. (There is no outbound guard on this route:
+   it runs on agent sends only, see docs/SECURITY.md §5.)
 5. `write_client` must exist, else 403 (no point queueing a mail that can
    never go out). Then a reply's parent must resolve, else 404: the send
-   route's order (400, 422, 403, 404), so a body with two problems gets the
+   route's order (400, 403, 404), so a body with two problems gets the
    answer a send would give. The lookup is unfiltered, like the send's: a
    sealed parent resolves.
 6. Mint `message_id_header`.
@@ -119,7 +115,7 @@ it existed), for the fire's attribution (§4 step 5).
 
 Step 1 of the build (a01c6f3) fixed the shapes the handler and worker use:
 `validate_send(&SendBody) -> Result<(), SendFailure>` is pure (the caller
-audits), `perform_send(state, body, attachments, SendGuard, message_id)
+audits), `perform_send(state, body, attachments, fire)
 -> Result<SendOutcome, SendFailure>`, and `SendFailure.reason` is the audit
 detail string (`failed:gmail`, `rejected:no_write_credential`, ...), which
 is exactly what `last_error` stores. Fan-out keeps answering 200 (the doc
@@ -284,8 +280,7 @@ runs whenever a row comes due):
      the body that tells them apart once the budget has read it. A genuine
      permission 403 costs the give-up's 30 minutes before the user sees it.
    A row never marked goes straight to the send.
-4. **Send** through `perform_send(state, body, files, SendGuard::Settled,
-   Some(Fire))`. Recipients, subject and threading derive from the parent at
+4. **Send** through `perform_send(state, body, files, Some(Fire))`. Recipients, subject and threading derive from the parent at
    fire time, as today. `group_id` is ATTRIBUTION ONLY at fire time: the
    frozen `to`/`bcc` lists are what go out; a group flipped to `individual`
    since is recorded as the one message it went as (never fanned out), and a
@@ -353,7 +348,7 @@ how long after a send `in:sent` lists it. `rfc822msgid:` takes the BARE id
 | route | does |
 |---|---|
 | `GET /client/scheduled` | rows in `scheduled`/`sending`/`failed`, oldest `send_at` first, with `to`, `cc`, `bcc` (each `""` when the request had none; a reply's `""` cc still derives at fire time), `subject`, `reply_to_message_id`, `forward_of_message_id`, `send_at`, `state`, `last_error`, `attempts`, `attachments`, plus the parent context PR #289's `DRAFT_SELECT` LEFT JOIN computes for the picker (`thread_id`, `parent_subject`, `parent_from`, `parent_from_addr`). Lift that join into a shared helper rather than pasting it |
-| `DELETE /client/scheduled/{id}` | `scheduled` or `failed` → `cancelled`, releases attachment claims back to unclaimed, returns the `request` so the client can reopen it in the composer, WITHOUT `override_guard` and `confirm` (the client sets `confirm` itself, and a reschedule is judged by the guard again). A `sending` row is 409 (it is in Gmail's hands). No server-side draft is created: the composer's next autosave does that through the normal keyed/by-id path, and re-claims the files (well inside the 24h unclaimed TTL) |
+| `DELETE /client/scheduled/{id}` | `scheduled` or `failed` → `cancelled`, releases attachment claims back to unclaimed, returns the `request` so the client can reopen it in the composer, WITHOUT `confirm` (the client sets `confirm` itself; a row queued before the guard was retired also has any old `override_guard` stripped). A `sending` row is 409 (it is in Gmail's hands). No server-side draft is created: the composer's next autosave does that through the normal keyed/by-id path, and re-claims the files (well inside the 24h unclaimed TTL) |
 | `POST /client/scheduled/{id}/now` | `scheduled`/`failed` → `send_at = now`; the worker is woken for it. 202. A `maybe_sent` row still waits out `RECOVERY_GRACE` from its last attempt and is searched for first (§4 step 3): "now" moves the clock, never the double-send defense. A `sending` row is 409, the same answer a cancel gets; `sent`/`cancelled`/unknown is 404 |
 | `/client/stats` | gains `scheduled_send: true`. The client hides every schedule door without it (same trap as `compose_attachments`: an old daemon must not 404 a click) |
 
@@ -381,14 +376,13 @@ gone by. Picking a time:
 
 - the clock becomes a chip `Tue 9:00 ×`. `×` clears it.
 - the Send verb reads `schedule ⌘↵`. Same key. The button says what it does.
-- `send anyway ⌘⇧↵` (guard verdict showing) becomes `schedule anyway`.
 
 ⌘↵ with a time set POSTs `/client/scheduled` immediately, closes the
 composer, and toasts "scheduled for Tue 9:00" with undo. Undo = DELETE and
 reopen the composer with the returned request and the time still set. There
 is no 5s hold for a scheduled mail: it is cancellable from Sent any time.
 
-A 422 guard verdict or a 4xx reopens the composer exactly as a failed send
+A 4xx reopens the composer exactly as a failed send
 does (`putBack`).
 
 `ComposeState.sendAt: Date?` is the only new state. `DraftSaver` does not
@@ -453,7 +447,8 @@ write client, builds RFC822, sends, and settles. Split it:
 - `validate_send(&SendBody) -> Result<(), ApiError>` (the ordered checks)
 - `perform_send(state, body: &SendBody, message_id: Option<&str>) -> Result<SendOutcome, SendFailure>`
   (write client → derive → render → build → `client.send` → `finish_send`)
-- `action_send` = validate → guard → perform. Byte-identical behavior.
+- `action_send` = validate → perform. (Until #769 there was a guard step
+  between them; human sends are no longer scanned.)
 
 `group_send::run`/`send_one` is the existing precedent for sending outside a
 request.
@@ -464,8 +459,6 @@ request.
   still injects it.
 - Never log or audit `request` content: ids, states, reasons only.
 - `/mcp` never sees `scheduled_sends` or its attachments (two-door).
-- The guard runs at schedule time and its `override_guard` is honored at
-  fire time; nothing re-scans.
 - Exactly-once: a row is sent only from `sending` under a lease, and
   recovery answers via the minted Message-ID and the `X-Passband-Outbox`
   token (the §4 lookup) before any retry.
@@ -503,7 +496,7 @@ the unthreaded path would be a 400 (nobody to address) or, on reply-all, a
 1. **Daemon**: §7 refactor (byte-identical, tests green), then table + store
    fns + attachment claim, routes, worker with recovery, stats gate. Tests:
    claim atomicity, lease expiry recovery both branches, retry backoff,
-   cancel releases claims, sweep, guard at schedule time.
+   cancel releases claims, sweep.
 2. **Mac client**: clock + chip + palette, verb flip, POST + undo toast,
    Sent pinned group with three verbs, failed toast. Seen on screen.
 3. **Follow-up PR, immediately after**: undo-send moves onto the outbox.

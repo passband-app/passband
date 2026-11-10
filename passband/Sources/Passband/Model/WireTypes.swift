@@ -2886,7 +2886,6 @@ struct SendBody: Codable, Sendable {
     /// Absent = single-part plain text, exactly the pre-markdown wire.
     var body_format: String?
     var confirm: Bool
-    var override_guard: Bool?
     /// Server-side draft to delete once the send succeeds.
     var draft_id: Int?
     /// Mint a read-tracking pixel for this send. OMITTED when false, the same
@@ -3392,7 +3391,6 @@ struct ScheduledRequest: Codable, Sendable, Hashable {
     var body: String?
     var body_format: String?
     var confirm: Bool?
-    var override_guard: Bool?
     var include_tracker: Bool?
     var reply_all: Bool?
     var attachment_ids: [Int]?

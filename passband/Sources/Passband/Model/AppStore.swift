@@ -6426,7 +6426,6 @@ final class AppStore {
     private struct HeldSend {
         var state: ComposeState
         var slot: DraftSaver.Slot
-        var override: Bool
         /// The thread the reader was on, for putting an inline reply back
         /// where it was typed. See `putBack`.
         var threadId: String?
@@ -6638,16 +6637,14 @@ final class AppStore {
     /// toast's undo (or `u`) puts it back first.
     ///
     /// There is no review step in front of this any more. The hold is what
-    /// replaced it: a send you did not mean is undone by one keystroke, and the
-    /// outbound guard still runs on the real send, reopening the composer with
-    /// its verdict when it blocks.
+    /// replaced it: a send you did not mean is undone by one keystroke.
     ///
     /// The draft is NOT flushed on the way out. The daemon's copy stays as the
     /// autosave left it until the send deletes it (`draftId` rides along), and
     /// a flush racing the send could put it back after the delete. An undo or a
     /// failure reopens the composer with everything, so nothing typed is lost
     /// either way.
-    func sendWithUndo(_ slot: DraftSaver.Slot, override: Bool = false) {
+    func sendWithUndo(_ slot: DraftSaver.Slot) {
         guard var state = slot == .compose ? compose : inlineReply, !state.sending else { return }
         state.error = nil
         DraftSaver.shared.noteSent(slot)
@@ -6656,8 +6653,7 @@ final class AppStore {
         case .inlineReply: inlineReply = nil
         }
         let key = UUID()
-        var held = HeldSend(
-            state: state, slot: slot, override: override, threadId: threadId, epoch: epoch)
+        var held = HeldSend(state: state, slot: slot, threadId: threadId, epoch: epoch)
         // `messageId: -1`: this undo resolves nothing, so the id it un-hides
         // on firing must match no message.
         held.undoId = pushUndo(kind: .send, messageId: -1, label: Self.holdLabel(state)) {
@@ -6754,7 +6750,7 @@ final class AppStore {
                 firingDraftIds.remove(at: i)
             }
         }
-        let outcome = await ComposeSubmit.fire(held.state, override: held.override)
+        let outcome = await ComposeSubmit.fire(held.state)
         noteOutgoingLanded(held.state.id, outcome: outcome, sameAccount: held.epoch == epoch)
         // The account changed while it was on the wire: whatever came back
         // belongs to the OLD account, and its message ids mean nothing here.
@@ -6763,7 +6759,6 @@ final class AppStore {
         guard held.epoch == epoch else {
             switch outcome {
             case .sent: pushToast("sent", .success)
-            case .guardBlocked: pushToast("not sent: the outbound guard stopped it", .error)
             case .forbidden: pushToast("not sent: \(ComposeCopy.noWriteCredential)", .error)
             case .failure(let text): pushToast("not sent: \(text)", .error)
             }
@@ -6792,12 +6787,6 @@ final class AppStore {
             {
                 lastSendEcho = SendEcho(threadId: thread)
             }
-        case .guardBlocked(let kinds):
-            var state = held.state
-            state.guardKinds = kinds
-            putBack(HeldSend(
-                state: state, slot: held.slot, override: false, threadId: held.threadId,
-                epoch: held.epoch), error: nil, blocked: true)
         case .forbidden:
             putBack(held, error: ComposeCopy.noWriteCredential)
         case .failure(let text):
@@ -6836,12 +6825,11 @@ final class AppStore {
     /// or a fresh one), so it is always kept. A forward is saved only on a
     /// `drafts_v2` daemon (see `DraftSaver.save`), so elsewhere it cannot be
     /// kept either.
-    private func putBack(_ held: HeldSend, error: String?, blocked: Bool = false) {
+    private func putBack(_ held: HeldSend, error: String?) {
         guard held.epoch == epoch else { return }
         var state = held.state
         state.sending = false
         state.error = error
-        let reason = blocked ? "the outbound guard stopped it" : error
         if held.slot == .inlineReply, threadId == held.threadId,
             inlineReply.map(isBlankComposer) ?? true
         {
@@ -6868,15 +6856,15 @@ final class AppStore {
                 // The header's count says "it is in your drafts" too; it
                 // settles first, so it sees this save land.
                 Task { await refreshDrafts() }
-                pushToast("not sent: \(reason ?? "undone"). It is in your drafts", .error)
+                pushToast("not sent: \(error ?? "undone"). It is in your drafts", .error)
             } else {
                 pushToast(
-                    "not sent: \(reason ?? "undone"). Another draft is open in its place, "
+                    "not sent: \(error ?? "undone"). Another draft is open in its place, "
                         + "so it could not be kept", .error)
             }
             return
         }
-        if let reason { pushToast("not sent: \(reason)", .error) }
+        if let error { pushToast("not sent: \(error)", .error) }
     }
 
     // MARK: - scheduled send
@@ -6890,8 +6878,7 @@ final class AppStore {
     /// Set (or, with nil, clear) when a composer's mail goes.
     ///
     /// NOT AN EDIT: no `DraftSaver.noteChange`, because `sendAt` is an intent
-    /// and a draft saves words (see `DraftPayload`). Nor does it relock a guard
-    /// override: the verdict judged the mail, and a time is not the mail.
+    /// and a draft saves words (see `DraftPayload`).
     func setSendAt(_ slot: DraftSaver.Slot, _ date: Date?) {
         switch slot {
         case .compose:
@@ -6916,16 +6903,15 @@ final class AppStore {
     /// app could lose it. The composer closes, the POST leaves, and the toast
     /// that follows carries the undo: DELETE the row and reopen the composer.
     ///
-    /// Everything that can refuse it (validation, the files, the outbound
-    /// guard, the write credential) answers on this POST, while the sender is
-    /// here, and every refusal reopens the composer through `putBack` exactly
-    /// as a failed send does, time still set: a guard verdict makes ⌘⇧↵
-    /// "schedule anyway".
+    /// Everything that can refuse it (validation, the files, the write
+    /// credential) answers on this POST, while the sender is here, and every
+    /// refusal reopens the composer through `putBack` exactly as a failed
+    /// send does, time still set.
     ///
     /// The draft is not flushed on the way out, for the reason `sendWithUndo`
     /// gives: the POST names it and the daemon deletes it in the same
     /// transaction that files the mail.
-    func scheduleCompose(_ slot: DraftSaver.Slot, override: Bool = false) {
+    func scheduleCompose(_ slot: DraftSaver.Slot) {
         guard let state = slot == .compose ? compose : inlineReply, !state.sending,
             let sendAt = state.sendAt
         else { return }
@@ -6946,8 +6932,7 @@ final class AppStore {
         case .inlineReply: inlineReply = nil
         }
         if schedulePicker == slot { schedulePicker = nil }
-        let held = HeldSend(
-            state: closing, slot: slot, override: override, threadId: threadId, epoch: epoch)
+        let held = HeldSend(state: closing, slot: slot, threadId: threadId, epoch: epoch)
         // Parked in `scheduling` until the POST leaves, where an account
         // switch or a quit starting now still finds it (see `parkHeldSends`).
         let key = UUID()
@@ -6985,8 +6970,7 @@ final class AppStore {
         let replyKey = forwardKey == nil ? state.replyToMessageId : nil
         if let forwardKey { firingForwardKeys.append(forwardKey) } else { firingReplyKeys.append(replyKey) }
         if let draftId { firingDraftIds.append(draftId) }
-        let outcome = await ComposeSubmit.schedule(
-            state, at: sendAt, override: held.override, draftId: draftId)
+        let outcome = await ComposeSubmit.schedule(state, at: sendAt, draftId: draftId)
         if let forwardKey {
             if let i = firingForwardKeys.firstIndex(of: forwardKey) { firingForwardKeys.remove(at: i) }
         } else if let i = firingReplyKeys.firstIndex(of: replyKey) {
@@ -6998,15 +6982,13 @@ final class AppStore {
         guard held.epoch == epoch else {
             switch outcome {
             case .scheduled: pushToast(ScheduleCopy.scheduledToast(sendAt), .success)
-            case .guardBlocked: pushToast("not scheduled: the outbound guard stopped it", .error)
             case .forbidden(let text), .failure(let text):
                 pushToast("not scheduled: \(text)", .error)
             }
             return
         }
         let back = HeldSend(
-            state: state, slot: held.slot, override: false, threadId: held.threadId,
-            epoch: held.epoch)
+            state: state, slot: held.slot, threadId: held.threadId, epoch: held.epoch)
         switch outcome {
         case .scheduled(let created):
             // The schedule consumed its draft row: drop it from the cache and
@@ -7029,10 +7011,6 @@ final class AppStore {
                 guard let self else { throw HoldError.alreadySent }
                 try await self.unschedule(created.id, held: back, sendAt: sendAt, epoch: e)
             }
-        case .guardBlocked(let kinds):
-            var blocked = back
-            blocked.state.guardKinds = kinds
-            putBack(blocked, error: nil, blocked: true)
         case .forbidden(let text), .failure(let text):
             putBack(back, error: text)
         }
@@ -7069,7 +7047,7 @@ final class AppStore {
             ?? (try? JSONDecoder().decode(
                 ScheduledRequest.self,
                 from: JSONEncoder().encode(
-                    SendBody(compose: held.state, override: held.override, draftId: nil))))
+                    SendBody(compose: held.state, draftId: nil))))
             ?? ScheduledRequest()
         var back = held
         back.state = ComposeState.reopened(
@@ -7492,13 +7470,7 @@ final class AppStore {
                 // composer says what went wrong. An "undo failed" toast beside
                 // it would be a second, contradicting account of one event.
                 reopen { state in
-                    if let api = error as? APIError, api.kind == .guardBlocked {
-                        // As `putBack` does for a blocked send: the verdict
-                        // shows, and ⌘⇧↵ reads "schedule anyway".
-                        state.guardKinds = api.guardKinds ?? parseGuardKinds(api.message)
-                    } else {
-                        state.error = errText(error, "could not schedule it again")
-                    }
+                    state.error = errText(error, "could not schedule it again")
                 }
                 return
             }

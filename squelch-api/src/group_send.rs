@@ -11,11 +11,6 @@
 //! IS the progress: `reached` climbs and `pending` falls as the job walks the
 //! list, so the Groups page's ordinary history read watches a send happen
 //! without a socket, an event kind, or a second endpoint.
-//!
-//! ONE GUARD VERDICT PER SEND, matching what `action_send` already promises a
-//! forward: the outbound guard scans the body once, before the first message
-//! goes, because twelve identical 422s for one composition would read as the
-//! first override having been ignored.
 
 use std::sync::Arc;
 use std::time::Duration;

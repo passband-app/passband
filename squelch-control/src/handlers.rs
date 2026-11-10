@@ -665,6 +665,9 @@ pub async fn waitlist(State(state): State<ControlState>, body: Bytes) -> Respons
         // Never the address, on either branch.
         Ok(created) => {
             tracing::info!(created, "waitlist submission");
+            if created {
+                state.alert(alert::waitlist_joined(&state.config().public_url));
+            }
             waitlist_answer(origin, StatusCode::OK, WAITLIST_JOINED)
         }
         Err(e) => {

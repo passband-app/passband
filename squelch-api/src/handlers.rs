@@ -36,7 +36,6 @@ use std::time::Duration;
 
 use crate::error::ApiError;
 use crate::group_send;
-use crate::guard;
 use crate::state::ApiState;
 use crate::write::gmail::GmailWriteClient;
 use crate::write::imap::{IMAP_NO_SMTP, ImapWriter, StoreOutbox};
@@ -1421,44 +1420,6 @@ pub(crate) fn mail_attachment(a: squelch_core::store::OutboundAttachment) -> Mai
         method: None,
         data: a.data,
     }
-}
-
-/// The guard kinds found in the TEXT of a set of attachments. A PEM key
-/// pasted into `notes.txt` and dragged onto a mail is the same exfil shape as
-/// one pasted into the body — arguably the more natural one — so every
-/// `text/*` part is scanned as text, and so is every `message/*` part (an
-/// attached email is plain RFC822 text carrying whatever its bodies carried).
-/// BINARY PARTS STAY UNSCANNED (a key inside a zip passes): the guard is a
-/// seatbelt against the accident, not a DLP boundary, and it is overridable by
-/// design.
-fn attachment_text_kinds(attachments: &[MailAttachment]) -> Vec<&'static str> {
-    let mut kinds = Vec::new();
-    for att in attachments {
-        let mime = att.mime.to_ascii_lowercase();
-        if !(mime.starts_with("text/") || mime.starts_with("message/")) {
-            continue;
-        }
-        let text = String::from_utf8_lossy(&att.data);
-        for kind in guard::scan_kinds(&text) {
-            if !kinds.contains(&kind) {
-                kinds.push(kind);
-            }
-        }
-    }
-    kinds
-}
-
-/// The guard kinds a composition carries in what the sender put in it: the
-/// typed body and the text of every staged file, deduped. A forward's
-/// original is judged separately ([`forward_original_kinds`]) and unioned in.
-pub(crate) fn composition_kinds(body: &str, attachments: &[MailAttachment]) -> Vec<&'static str> {
-    let mut kinds = guard::scan_kinds(body);
-    for kind in attachment_text_kinds(attachments) {
-        if !kinds.contains(&kind) {
-            kinds.push(kind);
-        }
-    }
-    kinds
 }
 
 /// The staged files a send CONSUMED, dropped once the mail is away — the same
@@ -5486,7 +5447,6 @@ pub async fn set_triage_config(
 // --- ACTIONS: the ONLY write capability in the system -----------------------
 //
 // Non-negotiable gates: every body MUST carry `"confirm": true` (else 400);
-// `send` runs the outbound secret guard (422 unless `"override_guard": true`);
 // EVERY action, attempted or completed, appends an audit row. Without a write
 // credential the action is a 403 — sync/triage/MCP never load the write token.
 
@@ -6117,16 +6077,12 @@ pub struct SendBody {
     pub(crate) subject: Option<String>,
     pub(crate) body: String,
     /// `"markdown"` = `body` is markdown source: it goes out verbatim as the
-    /// text/plain part with a server-rendered HTML alternative beside it. The
-    /// guard scans `body` either way — the HTML is derived from nothing else.
+    /// text/plain part with a server-rendered HTML alternative beside it.
     /// Absent/other = today's single-part plain send, byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) body_format: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) confirm: bool,
-    /// Override the outbound secret guard (still audited).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub(crate) override_guard: bool,
     /// The local draft this send consumes, discarded once the mail is away. Only
     /// a successful send clears it — every rejection leaves the composition
     /// recoverable.
@@ -6399,50 +6355,6 @@ async fn link_tracker(state: &ApiState, token: &str, message_id: i64) {
     }
 }
 
-/// The outbound guard's verdict on a set of REDACTED match kinds: `Some` is the
-/// 422 that stops the send, `None` clears it (writing the `guard_override` row on
-/// the way past when there was something to override).
-///
-/// ONE VERDICT PER SEND. A forward unions its note's kinds with the original's
-/// before calling this, so the user is asked once and overrides once — two
-/// separate blocks on one composition would read as the first override having
-/// been ignored.
-///
-/// `action` is the audit action both rows are written under: `send`, or
-/// `schedule` for the verdict a scheduled send is given when it is queued.
-pub(crate) async fn guard_verdict(
-    state: &ApiState,
-    action: &'static str,
-    matches: &[&'static str],
-    override_guard: bool,
-    target: Option<String>,
-) -> Option<ApiError> {
-    if matches.is_empty() {
-        return None;
-    }
-    if !override_guard {
-        audit_action(state, action, target, "blocked:guard").await;
-        return Some(ApiError {
-            status: StatusCode::UNPROCESSABLE_ENTITY,
-            message: format!(
-                "outbound guard blocked send; matched (redacted) kinds: {}. \
-                 resend with \"override_guard\": true to send anyway",
-                matches.join(", ")
-            ),
-            code: None,
-        });
-    }
-    // Overridden: record that the guard was bypassed (kinds only).
-    audit_action(
-        state,
-        action,
-        target,
-        &format!("guard_override:{}", matches.join(",")),
-    )
-    .await;
-    None
-}
-
 /// Everything that happens AFTER a send's bytes are built: the Gmail call, and
 /// the bookkeeping on either side of it.
 ///
@@ -6674,24 +6586,6 @@ impl From<SendFailure> for ApiError {
     }
 }
 
-/// What [`perform_send`] still owes the outbound guard.
-///
-/// A plain send is judged BEFORE it gets there (by `action_send`, or at
-/// schedule time), so it owes nothing. A FORWARD'S VERDICT WAITS on the
-/// original, which is only read inside the send: most of what it sends is
-/// somebody else's mail. That is the one case the core itself must judge.
-#[derive(Debug)]
-pub(crate) enum SendGuard {
-    /// Judge a forward once, after its original is fetched, over these kinds
-    /// (the note's and the staged files') unioned with the original's. The
-    /// request path.
-    ForwardOwed(Vec<&'static str>),
-    /// Already judged, and `override_guard` already honored where it applied.
-    /// NOTHING RE-SCANS: the scheduled-send worker fires a frozen request
-    /// whose answer was given when the user was there to give it.
-    Settled,
-}
-
 /// A scheduled send being FIRED by the worker (docs/SCHEDULED-SEND.md §4): the
 /// row it came from and the `Message-ID` minted when it was scheduled. Every
 /// fired send carries both that id and its outbox token ([`outbox_token`], the
@@ -6795,8 +6689,8 @@ pub(crate) fn validate_send(body: &SendBody) -> Result<(), SendFailure> {
         ));
     }
 
-    // AN UNRESOLVED GROUP TOKEN NEVER REACHES THE WIRE. Checked before the guard
-    // so it costs nothing, and checked at all because the quiet failure is the
+    // AN UNRESOLVED GROUP TOKEN NEVER REACHES THE WIRE. Checked before the
+    // write credential so it costs nothing, and checked at all because the quiet failure is the
     // dangerous one: `parse_addr_list` would drop `#preseed investors` as
     // unemittable and send to everyone else on the line, silently missing the
     // audience the user believed they had addressed.
@@ -6825,10 +6719,12 @@ pub(crate) fn validate_send(body: &SendBody) -> Result<(), SendFailure> {
     Ok(())
 }
 
-/// `POST /client/actions/send`: validate, read the staged files, judge, send.
+/// `POST /client/actions/send`: validate, read the staged files, send.
 ///
-/// The judging stays HERE and out of [`perform_send`], because the scheduled
-/// path judges at schedule time and must never be asked again at fire time.
+/// NO OUTBOUND GUARD ON THIS DOOR. The person sending wrote or chose every word
+/// and pressed send; what they mail is their call. An older client's
+/// `override_guard` is an unknown field now, and serde ignores it. The guard lives on the agent door
+/// only (`agent_write`), where no human reads the body before it leaves.
 pub async fn action_send(
     State(state): State<ApiState>,
     Json(body): Json<SendBody>,
@@ -6855,17 +6751,7 @@ pub async fn action_send(
         return Ok(Json(json));
     }
 
-    // OUTBOUND GUARD: report only REDACTED kinds, never the matched text. Scanned
-    // here, before any Gmail spend. A FORWARD'S VERDICT WAITS — most of what it
-    // sends is the original, which has not been read yet — so its kinds are
-    // unioned in and judged once, in `forward_send`.
-    //
-    // ONE VERDICT FOR A FAN-OUT TOO: it is one composition, so it is asked about
-    // once here and never again per recipient.
-    //
-    // THE FILES ARE READ FIRST, so a send naming a file that is gone is refused
-    // before the guard spends anything — and so the guard can read them: a
-    // text attachment is scanned exactly as a forward's would be.
+    // A send naming a file that is gone is refused here, before any spend.
     let attachments = load_send_attachments(
         &state,
         "send",
@@ -6874,28 +6760,11 @@ pub async fn action_send(
         target.clone(),
     )
     .await?;
-    let matches = composition_kinds(&body.body, &attachments);
-    let owed = if body.forward_of_message_id.is_some() {
-        SendGuard::ForwardOwed(matches)
-    } else {
-        if let Some(err) = guard_verdict(
-            &state,
-            "send",
-            &matches,
-            body.override_guard,
-            target.clone(),
-        )
-        .await
-        {
-            return Err(err);
-        }
-        SendGuard::Settled
-    };
 
     // Gmail's path is as it was: in the request. (It has the same latent
     // shape, a cut after `messages.send` returned; a much shorter window, and
     // Gmail files Sent itself.)
-    let outcome = perform_send(&state, &body, attachments, owed, None).await?;
+    let outcome = perform_send(&state, &body, attachments, None).await?;
     // 200 for a fan-out too, as it always has been: the Groups page reads
     // `status: "sending"`, not the code.
     Ok(Json(outcome.to_json()))
@@ -6909,7 +6778,7 @@ pub async fn action_send(
 /// task, the send finishes and settles whoever is listening, the retry
 /// included.
 ///
-/// The files, the guard and the send, as `action_send` does them for Gmail.
+/// The files and the send, as `action_send` does them for Gmail.
 /// The error says whether it stands for the dedupe window: only a send that
 /// may have gone does; a refusal can be fixed and sent again.
 async fn imap_send_now(
@@ -6918,27 +6787,11 @@ async fn imap_send_now(
     target: Option<String>,
 ) -> Result<serde_json::Value, (ApiError, bool)> {
     let refused = |e: ApiError| (e, false);
-    let attachments = load_send_attachments(
-        &state,
-        "send",
-        &body.attachment_ids,
-        body.draft_id,
-        target.clone(),
-    )
-    .await
-    .map_err(refused)?;
-    let matches = composition_kinds(&body.body, &attachments);
-    let owed = if body.forward_of_message_id.is_some() {
-        SendGuard::ForwardOwed(matches)
-    } else {
-        if let Some(err) =
-            guard_verdict(&state, "send", &matches, body.override_guard, target).await
-        {
-            return Err(refused(err));
-        }
-        SendGuard::Settled
-    };
-    match perform_send(&state, &body, attachments, owed, None).await {
+    let attachments =
+        load_send_attachments(&state, "send", &body.attachment_ids, body.draft_id, target)
+            .await
+            .map_err(refused)?;
+    match perform_send(&state, &body, attachments, None).await {
         Ok(outcome) => Ok(outcome.to_json()),
         Err(f) => {
             let keep = f.maybe_sent;
@@ -6947,15 +6800,14 @@ async fn imap_send_now(
     }
 }
 
-/// Everything a send does once it has been validated and judged: resolve the
+/// Everything a send does once it has been validated: resolve the
 /// write client, derive the audience, subject and threading from the parent,
 /// mint the tracker, render, build the RFC822, send, and settle
 /// ([`finish_send`]). Shared by `action_send` and the scheduled-send worker,
 /// which is why it takes no request and writes no response.
 ///
 /// `attachments` are the files [`load_send_attachments`] resolved for
-/// `body.attachment_ids`. `owed` is what the outbound guard is still owed (see
-/// [`SendGuard`]). `fire` is the scheduled send being fired: its minted
+/// `body.attachment_ids`. `fire` is the scheduled send being fired: its minted
 /// `Message-ID` and its `X-Passband-Outbox` token are written onto the
 /// outgoing message, and its row id marks the success ledger row (see
 /// [`Fire`]); `None` lets Gmail mint the id and writes no token, which is
@@ -6974,7 +6826,6 @@ pub(crate) async fn perform_send(
     state: &ApiState,
     body: &SendBody,
     attachments: Vec<MailAttachment>,
-    owed: SendGuard,
     fire: Option<Fire<'_>>,
 ) -> Result<SendOutcome, SendFailure> {
     let target = send_target(body);
@@ -6996,15 +6847,14 @@ pub(crate) async fn perform_send(
             &*client,
             target,
             original_id,
-            owed,
             attachments,
             fire,
         )
         .await;
     }
 
-    // A GROUP SEND resolves its audience here, once, after the guard has cleared
-    // and the write credential is known good — so a fan-out that is going to be
+    // A GROUP SEND resolves its audience here, once, after the write
+    // credential is known good — so a fan-out that is going to be
     // refused is refused before any of it has gone.
     //
     // A FIRED SCHEDULED SEND IS DIFFERENT: its `group_id` is ATTRIBUTION ONLY.
@@ -7438,7 +7288,7 @@ fn forward_raw_too_large(len: usize) -> bool {
 /// files riding in the same message), and parse it.
 ///
 /// Shared by the forward send and by scheduling a forward, which reads the
-/// original NOW so the guard can judge it while the user is there
+/// original NOW so a gone or oversized one is refused while the user is there
 /// (docs/SCHEDULED-SEND.md §3 step 4). `action` is the audit action every
 /// refusal is written under (`send` / `schedule`), and `fire` marks it when a
 /// scheduled send is being fired (see [`fired`]).
@@ -7524,73 +7374,12 @@ pub(crate) async fn read_forward_original(
     Ok((original_ref, original))
 }
 
-/// The outbound guard's kinds over a forward's ORIGINAL, deduped: what the
-/// forward sends that the sender did not type. The caller unions them with the
-/// note's and the staged files' and asks [`guard_verdict`] once.
-pub(crate) fn forward_original_kinds(original: &ForwardedOriginal) -> Vec<&'static str> {
-    // BOTH VIEWS OF THE ORIGINAL ARE SCANNED. When a text/plain part exists,
-    // mail-parser hands back exactly that part and never converts the html
-    // alternative down — so a message whose text half is innocuous and whose html
-    // half holds the PEM block would ship with the secret unread. The html view
-    // goes through the same html-to-text converter mail-parser uses internally,
-    // which is what makes the scan see the words a recipient would see.
-    let html_text = original
-        .html
-        .as_deref()
-        .map(mail_parser::decoders::html::html_to_text)
-        .unwrap_or_default();
-
-    // AND SO ARE TEXT ATTACHMENTS. A PEM key pasted into `notes.txt` and dragged
-    // onto a mail is the same exfil shape as one pasted into the body — arguably
-    // the more natural one — and scanning only the bodies let it through while
-    // this code called forwarding the classic exfil shape. Every `text/*` part
-    // is scanned as text, and so is every `message/*` part — an attached email
-    // ("see the thread below") is plain RFC822 text carrying whatever its bodies
-    // carried. mail-parser has already transcoded text parts to UTF-8, so the
-    // lossy conversion below only ever fires on genuinely broken bytes.
-    // BINARY PARTS STAY UNSCANNED (a key inside a zip or an `id_rsa` with no
-    // text mime passes): the guard is a seatbelt against the accident, not a DLP
-    // boundary, and it is overridable by design.
-    let mut kinds: Vec<&'static str> = Vec::new();
-    let attachment_text: Vec<String> = original
-        .attachments
-        .iter()
-        .filter(|a| {
-            let mime = a.mime.to_ascii_lowercase();
-            mime.starts_with("text/") || mime.starts_with("message/")
-        })
-        .map(|a| String::from_utf8_lossy(&a.data).into_owned())
-        .collect();
-    for kind in guard::scan_kinds(&original.text)
-        .into_iter()
-        .chain(guard::scan_kinds(&html_text))
-        .chain(attachment_text.iter().flat_map(|t| guard::scan_kinds(t)))
-    {
-        if !kinds.contains(&kind) {
-            kinds.push(kind);
-        }
-    }
-    kinds
-}
-
 /// The FORWARD path of `action_send`, entered once the confirm gate, the body
 /// validations and the write credential are behind it.
 ///
-/// Shape: read the original's raw bytes with the write token, guard what they
-/// contain, compose, send UNTHREADED. Two invariants earn their own sentences:
-///
-/// - FORWARDING IS THE CLASSIC EXFIL SHAPE, so the original's own text — its
-///   text bodies, an html-to-text view of its html, and the contents of every
-///   `text/*` attachment — goes through the same guard the note does, and
-///   `override_guard` is the ceremony's second act rather than a formality. What
-///   is scanned is what is SENT: the scan runs on the parse of the raw fetch,
-///   never on the stored row, because the stored body is a sanitized, flattened
-///   memory of the message and the bytes on the wire are the original.
-/// - The fetch failing is LOUD (502), like reply-all's audience read: what is
-///   forwarded IS the request, so there is nothing to degrade to.
-///
-/// `owed` is [`SendGuard::ForwardOwed`] on the request path. `Settled` skips
-/// the scan outright: that forward was judged before it was queued.
+/// Shape: read the original's raw bytes with the write token, compose, send
+/// UNTHREADED. The fetch failing is LOUD (502), like reply-all's audience
+/// read: what is forwarded IS the request, so there is nothing to degrade to.
 #[allow(clippy::too_many_arguments)]
 async fn forward_send(
     state: &ApiState,
@@ -7598,7 +7387,6 @@ async fn forward_send(
     client: &dyn MailWriter,
     target: Option<String>,
     original_id: i64,
-    owed: SendGuard,
     attachments: Vec<MailAttachment>,
     fire: Option<Fire<'_>>,
 ) -> Result<SendOutcome, SendFailure> {
@@ -7615,23 +7403,6 @@ async fn forward_send(
         fire,
     )
     .await?;
-
-    // A forward judged before it was queued is not judged again; nothing
-    // below is read for any other reason, so it is skipped whole.
-    if let SendGuard::ForwardOwed(note_kinds) = owed {
-        // ONE verdict over the note AND what it quotes (kinds only, deduped).
-        let mut kinds = note_kinds;
-        for kind in forward_original_kinds(&original) {
-            if !kinds.contains(&kind) {
-                kinds.push(kind);
-            }
-        }
-        if let Some(err) =
-            guard_verdict(state, "send", &kinds, body.override_guard, target.clone()).await
-        {
-            return Err(SendFailure::new("blocked:guard", err));
-        }
-    }
 
     // Validated non-empty before any Gmail spend (see `action_send`).
     let to = body.to.clone().unwrap_or_default();

@@ -1,90 +1,74 @@
 // The NETWORK half of the send ceremony, lifted out of the pane composer so the
 // reader's inline reply fires the identical request and maps the identical
 // failures. What stays with each caller is only the UI half: which toast, which
-// surface closes, where the verdict renders.
-//
-// The ceremony itself is unchanged and still lives in the views: submit once
-// WITHOUT override to get the outbound-guard verdict, then a second, explicit
-// act to override it.
+// surface closes.
 
 import Foundation
 
-/// What a send attempt came back as. `guardBlocked` is not a failure — it is the
-/// verdict half of the ceremony, carrying the REDACTED kinds the guard matched.
+/// What a send attempt came back as.
 enum SendOutcome: Sendable {
     case sent(SendResult)
-    case guardBlocked([String])
     case forbidden
     case failure(String)
 }
 
-/// What a schedule attempt came back as: the send's verdicts, with the outbox
+/// What a schedule attempt came back as: the send's outcomes, with the outbox
 /// row in place of a sent message. `forbidden` carries the daemon's words.
 enum ScheduleOutcome: Sendable {
     case scheduled(ScheduledCreated)
-    case guardBlocked([String])
     case forbidden(String)
     case failure(String)
 }
 
 @MainActor
 enum ComposeSubmit {
-    /// Submit a draft. `override` is the explicit SECOND act after a
-    /// `guardBlocked` verdict; never pass true on a first attempt, or the verdict
-    /// never happens.
+    /// Submit a draft.
     ///
     /// `draftId` rides along so the daemon deletes the autosaved draft in the same
     /// transaction as the send: one round-trip, no window in which the mail has
     /// gone out and a draft of it is still restorable. nil means the composer never
     /// autosaved (nothing typed since it opened, or the save never landed), and
     /// then there is nothing to delete.
-    static func fire(_ c: ComposeState, override: Bool) async -> SendOutcome {
+    static func fire(_ c: ComposeState) async -> SendOutcome {
         do {
             // The body is `SendBody(compose:)`, the ONE mapping a schedule
             // uses too; see there for why each field is what it is.
             let result = try await APIClient.shared.send(
-                SendBody(compose: c, override: override, draftId: c.draftId),
+                SendBody(compose: c, draftId: c.draftId),
                 attachmentBytes: c.attachments.reduce(0) { $0 + $1.size })
-            capture(c, override, scheduled: false, "sent")
+            capture(c, scheduled: false, "sent")
             return .sent(result)
-        } catch let apiError as APIError where apiError.kind == .guardBlocked {
-            capture(c, override, scheduled: false, "guard_blocked")
-            return .guardBlocked(apiError.guardKinds ?? [])
         } catch let apiError as APIError where apiError.kind == .forbidden {
-            capture(c, override, scheduled: false, "forbidden")
+            capture(c, scheduled: false, "forbidden")
             return .forbidden
         } catch {
-            capture(c, override, scheduled: false, "failure")
+            capture(c, scheduled: false, "failure")
             return .failure(errText(error, "send failed"))
         }
     }
 
     /// Put the composer in the daemon's outbox for `sendAt`. The same body a
-    /// send carries (plus `send_at`), and the same verdicts: the outbound
-    /// guard runs NOW, on the schedule, while the sender is here to answer
-    /// it, and `override` is the same explicit second act.
+    /// send carries (plus `send_at`), and the same outcomes: what a send
+    /// checks runs NOW, on the schedule, while the sender is here to answer.
     ///
     /// `draftId` is `DraftSaver.currentDraftId(of:)`, read by the caller after
     /// the saves in flight have settled: the daemon deletes that draft in the
     /// same transaction that files the mail, so the draft cannot outlive it.
     static func schedule(
-        _ c: ComposeState, at sendAt: Date, override: Bool, draftId: Int?
+        _ c: ComposeState, at sendAt: Date, draftId: Int?
     ) async -> ScheduleOutcome {
         do {
             let created = try await APIClient.shared.scheduleSend(
-                SendBody(compose: c, override: override, draftId: draftId), at: sendAt,
+                SendBody(compose: c, draftId: draftId), at: sendAt,
                 attachmentBytes: c.attachments.reduce(0) { $0 + $1.size })
-            capture(c, override, scheduled: true, "scheduled")
+            capture(c, scheduled: true, "scheduled")
             return .scheduled(created)
-        } catch let apiError as APIError where apiError.kind == .guardBlocked {
-            capture(c, override, scheduled: true, "guard_blocked")
-            return .guardBlocked(apiError.guardKinds ?? [])
         } catch let apiError as APIError where apiError.kind == .forbidden {
-            capture(c, override, scheduled: true, "forbidden")
+            capture(c, scheduled: true, "forbidden")
             // The daemon's own sentence, which names the missing credential.
             return .forbidden(apiError.message)
         } catch {
-            capture(c, override, scheduled: true, "failure")
+            capture(c, scheduled: true, "failure")
             return .failure(errText(error, "could not schedule it"))
         }
     }
@@ -98,16 +82,15 @@ enum ComposeSubmit {
     /// `c.sendAt`: a composer can hold a time and still send at once (the
     /// scheduling gate off, an older daemon), and that send is not a schedule.
     private static func capture(
-        _ c: ComposeState, _ override: Bool, scheduled: Bool, _ outcome: String
+        _ c: ComposeState, scheduled: Bool, _ outcome: String
     ) {
         var props: [String: Any] = [
             "kind": c.analyticsKind,
             "outcome": outcome,
-            "override": override,
             "tracked": c.includeTracker,
             // Whether it went to the outbox rather than out. A bool, so a
-            // guard verdict on a schedule is still told from one on a send
-            // without a second outcome vocabulary.
+            // failure on a schedule is still told from one on a send without
+            // a second outcome vocabulary.
             "scheduled": scheduled,
             // Whether the send used the copy lists at all — booleans, so
             // nothing about WHO is anywhere near this (see Analytics' closed

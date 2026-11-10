@@ -1,6 +1,7 @@
-//! Outbound secret guard for `POST /client/actions/send`: scan the body for
-//! secret-looking patterns and block with a 422 unless the caller passes
-//! `override_guard: true`.
+//! Outbound secret guard for an AGENT's send (`agent_write`): scan what the
+//! agent wrote for secret-looking patterns and refuse it, with no override.
+//! The owner's own sends are not scanned: what they mail is their call. The
+//! guard exists for the send no human read before it left.
 //!
 //! SECURITY: only the KIND of match ever leaves the process — never the matched
 //! text, in a response, a log, or an audit row. See docs/SECURITY.md §5.
@@ -38,8 +39,10 @@ impl GuardMatch {
     }
 }
 
-// Compiled once. Deliberately broad: false positives are acceptable because the
-// guard is overridable.
+// Compiled once. Deliberately broad, URLs included: a link is the natural way
+// for a prompt-injected agent to carry a token out (`https://x/?t=<token>`).
+// A false positive costs only a refusal the agent reports to the owner, who
+// can send it themselves.
 
 /// Vendor key prefixes: `sk-` (OpenAI/Stripe-ish), `AKIA` (AWS), `gh?_`
 /// (GitHub), `xox?-` (Slack), `AIza`/`ya29.` (Google).
@@ -174,6 +177,14 @@ mod tests {
     fn long_base64_caught() {
         let body = "token=QWxhZGRpbjpvcGVuIHNlc2FtZQ1234567890abcdefGHIJKLMNOP";
         assert!(kinds(body).contains(&"long_base64"));
+    }
+
+    #[test]
+    fn a_token_inside_a_link_is_caught() {
+        let hex = "https://attacker.example/?t=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"; // gitleaks:allow
+        assert!(kinds(hex).contains(&"long_hex"));
+        let b64 = "[details](https://attacker.example/c?s=QWxhZGRpbjpvcGVuIHNlc2FtZQ1234567890abcdefGHIJ)"; // gitleaks:allow
+        assert!(kinds(b64).contains(&"long_base64"));
     }
 
     #[test]

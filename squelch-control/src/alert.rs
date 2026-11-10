@@ -1,5 +1,5 @@
 //! The operator's pager: one Slack incoming webhook, one line per signup that
-//! ended somewhere a human has to look.
+//! ended somewhere a human has to look, and one per new waitlist entry.
 //!
 //! WHY THIS EXISTS. A signup can fail somewhere nothing else reports: a full
 //! `tenants` quota refuses the pod at admission, and the only record is a few
@@ -183,6 +183,15 @@ pub fn signup_provisioned(label: &str) -> String {
     format!(":tada: New tenant provisioned: `{label}`")
 }
 
+/// A new address landed on the waitlist. Carries no address and no name, for
+/// the reason the module header gives: the admin page is where those live.
+/// Sent only for a NEW row, so resubmitting the form cannot page anybody.
+pub fn waitlist_joined(public_url: &str) -> String {
+    format!(
+        ":wave: Someone joined the waitlist. <{public_url}/admin/users|Review on the admin page>"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -305,5 +314,9 @@ mod tests {
         assert!(!msgs[2].contains("`vk-1`") && msgs[2].contains("`vk-2`"));
         // No keys minted, no orphan line.
         assert!(!signup_incomplete("ethan", &err, None, None).contains("Orphaned"));
+
+        let w = waitlist_joined("https://signup.passband.app");
+        assert!(w.contains("https://signup.passband.app/admin/users"), "{w}");
+        assert!(!w.contains('@') && !w.contains('\u{2014}'), "{w}");
     }
 }

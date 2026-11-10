@@ -162,7 +162,7 @@ struct ProductGuideTests {
             ShortcutCatalog.calendarGroup.items.first { $0.desc == desc }?.keys ?? []
         }
         let guide = ProductGuide.text(.calendar, runningVersion: nil)
-        expect(key("new event") == ["n"] && guide.contains("n, or \"New event\""), "n makes an event")
+        expect(key("new event") == ["n", "c"] && guide.contains("n or c, or \"New event\""), "n and c make an event")
         expect(key("edit event") == ["e"] && guide.contains("e edits"), "e edits one")
         expect(key("save the event") == ["⌘↵"] && guide.contains("⌘↵ saves"), "⌘↵ saves")
         expect(key("delete event") == ["⌫"] && guide.contains("⌫ deletes"), "⌫ deletes")

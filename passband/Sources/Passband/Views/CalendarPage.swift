@@ -413,18 +413,23 @@
             ]
         }
 
-        /// `n`, `e` and ⌫, on both: a new event (on the month's selected day,
+        /// `n` (or `c`), `e` and ⌫, on both: a new event (on the month's selected day,
         /// or today from the agenda), and the selected event edited or
         /// deleted. Each declines where it does not apply: a daemon that lists
         /// no writable calendar, a ghost, an event that is not the user's.
         private func writeBindings(selected: AgendaItem?, day: Date?) -> [KeyBinding] {
             let free = { !store.modalOverlayOpen && !store.eventPaneOpen }
+            func newEvent() -> Bool {
+                guard free(), store.calendarCanCreate else { return false }
+                store.openEventEditor(day: day)
+                return true
+            }
             return [
-                KeyBinding(declining: "n", "new event") {
-                    guard free(), store.calendarCanCreate else { return false }
-                    store.openEventEditor(day: day)
-                    return true
-                },
+                KeyBinding(declining: "n", "new event") { newEvent() },
+                // `c` creates everywhere else (a message), so here it creates
+                // an event. Where no calendar is writable it declines, and the
+                // list's `c` (new message) answers as before.
+                KeyBinding(declining: "c", "new event") { newEvent() },
                 KeyBinding(declining: "e", "edit event") {
                     guard free(), let event = selected?.event, CalendarWrite.canEdit(event) else { return false }
                     store.openEventEditor(editing: event)
@@ -555,7 +560,7 @@
         /// the up and down arrows walk the selected day's items, top-down as
         /// drawn. Enter on an item opens its mail; on the day, a new event
         /// there (else the day's first item). The
-        /// rest (`n`, `e`, ⌫, `y`, `x`) are the month's.
+        /// rest (`n`, `c`, `e`, ⌫, `y`, `x`) are the month's.
         private func weekBindings(order: [AgendaItem], item: AgendaItem?, day: Date) -> [KeyBinding] {
             let free = { !store.modalOverlayOpen && !store.eventPaneOpen }
             func move(_ m: MonthMove) -> Bool {

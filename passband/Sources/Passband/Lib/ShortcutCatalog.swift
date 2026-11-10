@@ -41,7 +41,7 @@ enum ShortcutCatalog {
                 Item(["e", "d"], "mark done"),
                 Item(["v"], "fix a wrong triage verdict"),
                 Item(["h"], "remind me about this later"),
-                Item(["t"], "tune sender rule"),
+                Item(["t"], "teach Passband"),
                 Item(["f"], "search this sender"),
                 Item(["u"], "undo last action"),
             ]),

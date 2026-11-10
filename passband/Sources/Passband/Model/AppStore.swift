@@ -323,7 +323,7 @@ struct RefreshError: Equatable, Sendable {
 /// `AppStore.cancelScheduledRow`).
 enum UndoKind: Sendable {
     case archive, done, label, ruleDelete, groupDelete, remind, send, draftDelete, schedule,
-        scheduledCancel, ghostDismiss, skip
+        scheduledCancel, ghostDismiss, skip, teach
 
     /// Whether firing this undo changes anything the sitrep shows, and so
     /// whether `fireUndo` un-hides a resolved id and pulls the poller. The two
@@ -333,7 +333,7 @@ enum UndoKind: Sendable {
     var touchesSitrep: Bool {
         switch self {
         case .archive, .done, .label, .ruleDelete, .groupDelete, .remind: true
-        case .send, .draftDelete, .schedule, .scheduledCancel, .ghostDismiss, .skip: false
+        case .send, .draftDelete, .schedule, .scheduledCancel, .ghostDismiss, .skip, .teach: false
         }
     }
 }
@@ -365,6 +365,8 @@ struct PendingUndo: Identifiable, Sendable {
     /// and the (now-deleted) group id for groupDelete.
     var messageId: Int
     var label: String
+    /// The toast once undone, when "undone: <label>" would read wrong.
+    var undoneText: String?
     var createdAt: Date = Date()
     /// When the chip leaves on its own, for its countdown.
     var expiresAt: Date?
@@ -429,12 +431,24 @@ struct RemindTarget: Identifiable, Sendable {
     var onScheduled: (@MainActor @Sendable () -> Void)?
 }
 
-/// The rule editor's open request. Three shapes: tune (`sender`), create from
-/// scratch (`rule == .some(nil)`), or edit an existing rule.
+/// The rule editor's open request. Shapes: teach (`teach`, with or without a
+/// `sender` for context), edit a general rule (`general`), edit an existing
+/// sender rule (`rule`), or a sender rule from `sender` / `pattern` (the
+/// reading zone's CTA and the old create path).
+///
+/// Teach and general open `TeachCard`; everything else opens `RuleEditor`.
+/// One slot on the store, so every place that closes or blurs for the rule
+/// editor does the same for the teach card.
 struct RuleEditorRequest: Identifiable, Sendable {
     let id = UUID()
     var sender: String?
     var rule: SenderRule?
+    /// `t`: one sentence to the daemon, which decides what it becomes.
+    var teach = false
+    /// The email `t` was pressed on, sent so the daemon knows the sender.
+    var sourceMessageId: Int?
+    /// A general rule being edited in the plain text card.
+    var general: GeneralRule?
     /// Preselect a disposition (the reading zone's CTA preselects "filtered").
     var disposition: Disposition?
     var want: String?
@@ -451,6 +465,8 @@ struct RuleEditorRequest: Identifiable, Sendable {
     /// blank create. A caller that hands over its own want text has already
     /// written the sentence, so a stale draft does not get to overwrite it.
     var draftKey: String? {
+        if let general { return "general:\(general.id)" }
+        if teach { return "teach:\(sender.map(SenderID.address) ?? "")" }
         if let rule { return "rule:\(rule.id)" }
         guard want == nil else { return nil }
         if let sender { return "sender:\(SenderID.address(sender))|\(pattern ?? "")" }
@@ -818,6 +834,9 @@ final class AppStore {
     /// The owner's event reminder switch, as the daemon holds it. Fetched by
     /// the settings card (Model/CalendarReminders.swift).
     var calendarReminderPref: CalendarReminderPrefState = .unknown
+    /// The owner's morning brief switch, as the daemon holds it, in the same
+    /// four states. Fetched by the settings card (Model/MorningBriefPref.swift).
+    var morningBriefPref: CalendarReminderPrefState = .unknown
     /// The connect card, while it is up. Its own property, apart from the
     /// feed: `modalOverlayOpen` reads it, and the whole shell reads that.
     var calendarConnectAsk: CalendarConnectAsk?
@@ -1522,9 +1541,73 @@ final class AppStore {
     @ObservationIgnored var ruleDrafts: [String: RuleDraft] = [:]
     var groupEditor: GroupEditorRequest?
     var askBarOpen = false {
-        // Every way the bar closes ends the watch: it is a view of the lane
-        // for as long as this one opening lasts, never a mode ⌘K reopens into.
-        didSet { if !askBarOpen { askBarWatchesLane = false } }
+        // Every way the bar closes ends the watch and the full-screen layout:
+        // both belong to this one opening, never a mode ⌘K reopens into.
+        didSet {
+            if !askBarOpen {
+                askBarWatchesLane = false
+                askBarFullscreen = false
+                askBarFoldedSearch = false
+            }
+        }
+    }
+    /// The search panel was EXPANDED when the full-screen bar opened and was
+    /// folded to its strip for it (see `foldSearchUnderAskBar`), so Esc can
+    /// put it back the way it was.
+    private var askBarFoldedSearch = false
+    /// THE BAR TAKES THE WINDOW, for a conversation that came out of search
+    /// (the deeper search band, ⌘↩, a question from search history). The
+    /// answer there is the reason the reader asked for more room, so it gets
+    /// all of it; Esc closes it and the search panel is still underneath.
+    /// ⌘K on its own stays the modal. Set only on the ways in from search.
+    private(set) var askBarFullscreen = false
+
+    /// Whether the bar is showing a conversation that came out of search, which
+    /// is what its header names ("deeper search" rather than "ask your inbox").
+    var askBarShowsSearch: Bool {
+        askBarWatchesLane || chatHoldsSearchLane || chatQuestionKey != nil
+    }
+
+    /// ⌘K ON ITS OWN: talking to the agent, which is not search. It never
+    /// shows a conversation that came out of search (adopted from the deeper
+    /// search lane, or a question brought back from search history): that
+    /// one is saved under its question in search history, and ⌘K starts clean
+    /// instead. A ⌘K conversation of its own is kept as it always was.
+    func openAskBar() {
+        // Not mid-answer: a follow-up still running after Esc would be
+        // cancelled and lost (it is saved to search history when it ends).
+        if !askBarOpen, !assistant.running, chatHoldsSearchLane || chatQuestionKey != nil {
+            askBarWatchesLane = false
+            assistant.clear()
+        }
+        askBarOpen = true
+    }
+
+    /// Open the bar full screen over the search it came from.
+    func openAskBarFromSearch() {
+        askBarFullscreen = true
+        askBarOpen = true
+        foldSearchUnderAskBar()
+    }
+
+    /// AN EXPANDED SEARCH COVERS THE RAIL, and the full-screen bar leaves the
+    /// rail's column clear to show it, so the panel would show through there
+    /// instead. Fold it to its strip under the bar, as `openThread` does under
+    /// the reader, and remember to unfold it on the way back.
+    private func foldSearchUnderAskBar() {
+        guard askBarOpen, askBarFullscreen, search.expanded else { return }
+        search.expanded = false
+        askBarFoldedSearch = true
+    }
+
+    /// The bar's own close (Esc, the scrim, a card that opened a thread). Back
+    /// to search means back to the search AS IT WAS: an expanded panel folded
+    /// for the bar unfolds. Not over a thread a card just opened, which wants
+    /// the strip beside it, and not if search itself has gone.
+    func closeAskBar() {
+        let unfold = askBarFoldedSearch && threadId == nil && sideView == .search
+        askBarOpen = false
+        if unfold { search.expanded = true }
     }
     /// THE BAR IS SHOWING THE SEARCH LANE, LIVE. ⌘↩ over a lane that is still
     /// answering cannot hand the conversation over (a running loop owns its
@@ -2233,6 +2316,8 @@ final class AppStore {
             connError = nil
             #if os(iOS)
                 await PushRegistration.shared.registerAndSync()
+            #else
+                await MacPush.shared.accountAdded()
             #endif
             Analytics.capture("connect_succeeded")
             identifyPerson()
@@ -2392,6 +2477,8 @@ final class AppStore {
         }
         #if os(iOS)
             await PushRegistration.shared.registerAndSync()
+        #else
+            await MacPush.shared.accountAdded()
         #endif
         return (true, nil)
     }
@@ -3202,6 +3289,7 @@ final class AppStore {
         tracking = nil
         translateConfig = .unknown
         calendarReminderPref = .unknown
+        morningBriefPref = .unknown
         ticketPreview = nil
         // `route(to:)` first: it is what turns a closed calendar into the
         // sitrep, and the history has to name the page actually shown.
@@ -3281,6 +3369,21 @@ final class AppStore {
         routeWasPointer = viaPointer
         activeView = view
         routeAsks &+= 1
+        leaveFullscreenAskBar()
+    }
+
+    /// A ROUTE CHANGES THE PAGE UNDER A FULL-SCREEN ASK BAR, which is opaque:
+    /// a rail click, ⌘[ / ⌘], a notification tap. Idle, it closes, the way a
+    /// rail click leaves the reader. Mid-answer it drops to the modal instead,
+    /// because the run may be the one routing (the calendar tool lands its
+    /// proposal on the calendar page, and expects the bar to stay over it).
+    private func leaveFullscreenAskBar() {
+        guard askBarOpen, askBarFullscreen else { return }
+        if askBarSession.running {
+            askBarFullscreen = false
+        } else {
+            askBarOpen = false
+        }
     }
 
     /// Bumped by every route. The phone's shell answers a route with a tab and
@@ -4718,6 +4821,14 @@ final class AppStore {
         } else {
             expandSearchLaneToChat()
         }
+        // The Mac's way in from search is always full screen (see
+        // `askBarFullscreen`); the phone pushes its own chat and never gets
+        // here. Only if it opened: `expandSearchLaneToChat` can decline, and a
+        // flag left behind would make the next plain ⌘K full screen.
+        if askBarOpen {
+            askBarFullscreen = true
+            foldSearchUnderAskBar()
+        }
     }
 
     /// The watched lane has finished: the chat takes the conversation over.
@@ -4855,6 +4966,47 @@ final class AppStore {
 
     private var searchEvidenceTask: Task<Void, Never>?
     var preparingSearchEvidence: Bool { searchEvidenceTask != nil }
+    /// A start or refinement waiting out `QueryReadiness`: the quiet, then the
+    /// small model's "done typing?" check. Replaced by every settled query.
+    @ObservationIgnored private var laneGate: Task<Void, Never>?
+
+    /// A SETTLED QUERY'S MOVE, executed: both shells' `judge` land here so the
+    /// gate is one rule. `stop` is immediate (stopping never costs money); a
+    /// start or refinement first waits for the reader to stop typing and for
+    /// the small model to agree the words read as finished. Any keystroke
+    /// lands a new settled query, which replaces the gate.
+    func settleDeeperSearch(_ move: DeeperSearchPolicy.Move, query: String) {
+        laneGate?.cancel()
+        laneGate = nil
+        switch move {
+        case .nothing:
+            return
+        case .stop:
+            resetSearchLane(keepingVerdict: true)
+        case .refine, .start:
+            laneGate = Task { [weak self] in
+                // The judge runs DURING the quiet wait, not after it: the wait
+                // is max(quiet, judge) instead of their sum. A keystroke
+                // cancels this task, and the judge's answer with it.
+                async let finished = QueryReadiness.looksFinished(query)
+                try? await Task.sleep(for: QueryReadiness.quiet)
+                guard !Task.isCancelled, let self, self.search.query.trimmed == query else { return }
+                // "Still typing" is a reason to wait longer, never a reason not
+                // to answer: a judge that misreads a whole question only costs
+                // the grace, and a keystroke before then replaces this gate.
+                if await !finished {
+                    try? await Task.sleep(for: QueryReadiness.typingGrace)
+                }
+                guard !Task.isCancelled, self.search.query.trimmed == query else { return }
+                self.laneGate = nil
+                switch move {
+                case .start(let trigger): self.startDeeperSearch(trigger: trigger)
+                case .refine: self.refineDeeperSearch()
+                case .nothing, .stop: break
+                }
+            }
+        }
+    }
 
     /// A question from search history, asked again: its words go back in the
     /// field and to the agent. With deeper search off it is simply searched.
@@ -4877,9 +5029,10 @@ final class AppStore {
     }
 
     /// START THE DEEPER SEARCH on the query the panel has just answered, with
-    /// the hits it answered with. Called by the classifier's automatic path and
-    /// by the band's own button, so the two cannot disagree about what starting
-    /// means (docs/SEARCH.md §6.1, §6.5).
+    /// the hits it answered with. Called by the automatic path (through
+    /// `settleDeeperSearch`) and by an explicit ask (⌘↩, the panel's "Ask
+    /// agent", the phone band's button), so they cannot disagree about what
+    /// starting means (docs/SEARCH.md §6.1, §6.5).
     ///
     /// The event carries the trigger and the model tier and NOTHING ELSE: the
     /// query is the reader's own words about their own mail, and no part of it,
@@ -5007,6 +5160,8 @@ final class AppStore {
     /// (`f` asks "what else is from this person"), so its verdict goes too and
     /// the band unmounts until the new query has been judged.
     func resetSearchLane(keepingVerdict: Bool = false) {
+        laneGate?.cancel()
+        laneGate = nil
         searchEvidenceTask?.cancel()
         searchEvidenceTask = nil
         searchLane.clear()
@@ -6281,7 +6436,6 @@ final class AppStore {
     private struct HeldSend {
         var state: ComposeState
         var slot: DraftSaver.Slot
-        var override: Bool
         /// The thread the reader was on, for putting an inline reply back
         /// where it was typed. See `putBack`.
         var threadId: String?
@@ -6493,16 +6647,14 @@ final class AppStore {
     /// toast's undo (or `u`) puts it back first.
     ///
     /// There is no review step in front of this any more. The hold is what
-    /// replaced it: a send you did not mean is undone by one keystroke, and the
-    /// outbound guard still runs on the real send, reopening the composer with
-    /// its verdict when it blocks.
+    /// replaced it: a send you did not mean is undone by one keystroke.
     ///
     /// The draft is NOT flushed on the way out. The daemon's copy stays as the
     /// autosave left it until the send deletes it (`draftId` rides along), and
     /// a flush racing the send could put it back after the delete. An undo or a
     /// failure reopens the composer with everything, so nothing typed is lost
     /// either way.
-    func sendWithUndo(_ slot: DraftSaver.Slot, override: Bool = false) {
+    func sendWithUndo(_ slot: DraftSaver.Slot) {
         guard var state = slot == .compose ? compose : inlineReply, !state.sending else { return }
         state.error = nil
         DraftSaver.shared.noteSent(slot)
@@ -6511,8 +6663,7 @@ final class AppStore {
         case .inlineReply: inlineReply = nil
         }
         let key = UUID()
-        var held = HeldSend(
-            state: state, slot: slot, override: override, threadId: threadId, epoch: epoch)
+        var held = HeldSend(state: state, slot: slot, threadId: threadId, epoch: epoch)
         // `messageId: -1`: this undo resolves nothing, so the id it un-hides
         // on firing must match no message.
         held.undoId = pushUndo(kind: .send, messageId: -1, label: Self.holdLabel(state)) {
@@ -6609,7 +6760,7 @@ final class AppStore {
                 firingDraftIds.remove(at: i)
             }
         }
-        let outcome = await ComposeSubmit.fire(held.state, override: held.override)
+        let outcome = await ComposeSubmit.fire(held.state)
         noteOutgoingLanded(held.state.id, outcome: outcome, sameAccount: held.epoch == epoch)
         // The account changed while it was on the wire: whatever came back
         // belongs to the OLD account, and its message ids mean nothing here.
@@ -6618,7 +6769,6 @@ final class AppStore {
         guard held.epoch == epoch else {
             switch outcome {
             case .sent: pushToast("sent", .success)
-            case .guardBlocked: pushToast("not sent: the outbound guard stopped it", .error)
             case .forbidden: pushToast("not sent: \(ComposeCopy.noWriteCredential)", .error)
             case .failure(let text): pushToast("not sent: \(text)", .error)
             }
@@ -6647,12 +6797,6 @@ final class AppStore {
             {
                 lastSendEcho = SendEcho(threadId: thread)
             }
-        case .guardBlocked(let kinds):
-            var state = held.state
-            state.guardKinds = kinds
-            putBack(HeldSend(
-                state: state, slot: held.slot, override: false, threadId: held.threadId,
-                epoch: held.epoch), error: nil, blocked: true)
         case .forbidden:
             putBack(held, error: ComposeCopy.noWriteCredential)
         case .failure(let text):
@@ -6691,12 +6835,11 @@ final class AppStore {
     /// or a fresh one), so it is always kept. A forward is saved only on a
     /// `drafts_v2` daemon (see `DraftSaver.save`), so elsewhere it cannot be
     /// kept either.
-    private func putBack(_ held: HeldSend, error: String?, blocked: Bool = false) {
+    private func putBack(_ held: HeldSend, error: String?) {
         guard held.epoch == epoch else { return }
         var state = held.state
         state.sending = false
         state.error = error
-        let reason = blocked ? "the outbound guard stopped it" : error
         if held.slot == .inlineReply, threadId == held.threadId,
             inlineReply.map(isBlankComposer) ?? true
         {
@@ -6723,15 +6866,15 @@ final class AppStore {
                 // The header's count says "it is in your drafts" too; it
                 // settles first, so it sees this save land.
                 Task { await refreshDrafts() }
-                pushToast("not sent: \(reason ?? "undone"). It is in your drafts", .error)
+                pushToast("not sent: \(error ?? "undone"). It is in your drafts", .error)
             } else {
                 pushToast(
-                    "not sent: \(reason ?? "undone"). Another draft is open in its place, "
+                    "not sent: \(error ?? "undone"). Another draft is open in its place, "
                         + "so it could not be kept", .error)
             }
             return
         }
-        if let reason { pushToast("not sent: \(reason)", .error) }
+        if let error { pushToast("not sent: \(error)", .error) }
     }
 
     // MARK: - scheduled send
@@ -6745,8 +6888,7 @@ final class AppStore {
     /// Set (or, with nil, clear) when a composer's mail goes.
     ///
     /// NOT AN EDIT: no `DraftSaver.noteChange`, because `sendAt` is an intent
-    /// and a draft saves words (see `DraftPayload`). Nor does it relock a guard
-    /// override: the verdict judged the mail, and a time is not the mail.
+    /// and a draft saves words (see `DraftPayload`).
     func setSendAt(_ slot: DraftSaver.Slot, _ date: Date?) {
         switch slot {
         case .compose:
@@ -6771,16 +6913,15 @@ final class AppStore {
     /// app could lose it. The composer closes, the POST leaves, and the toast
     /// that follows carries the undo: DELETE the row and reopen the composer.
     ///
-    /// Everything that can refuse it (validation, the files, the outbound
-    /// guard, the write credential) answers on this POST, while the sender is
-    /// here, and every refusal reopens the composer through `putBack` exactly
-    /// as a failed send does, time still set: a guard verdict makes ⌘⇧↵
-    /// "schedule anyway".
+    /// Everything that can refuse it (validation, the files, the write
+    /// credential) answers on this POST, while the sender is here, and every
+    /// refusal reopens the composer through `putBack` exactly as a failed
+    /// send does, time still set.
     ///
     /// The draft is not flushed on the way out, for the reason `sendWithUndo`
     /// gives: the POST names it and the daemon deletes it in the same
     /// transaction that files the mail.
-    func scheduleCompose(_ slot: DraftSaver.Slot, override: Bool = false) {
+    func scheduleCompose(_ slot: DraftSaver.Slot) {
         guard let state = slot == .compose ? compose : inlineReply, !state.sending,
             let sendAt = state.sendAt
         else { return }
@@ -6801,8 +6942,7 @@ final class AppStore {
         case .inlineReply: inlineReply = nil
         }
         if schedulePicker == slot { schedulePicker = nil }
-        let held = HeldSend(
-            state: closing, slot: slot, override: override, threadId: threadId, epoch: epoch)
+        let held = HeldSend(state: closing, slot: slot, threadId: threadId, epoch: epoch)
         // Parked in `scheduling` until the POST leaves, where an account
         // switch or a quit starting now still finds it (see `parkHeldSends`).
         let key = UUID()
@@ -6840,8 +6980,7 @@ final class AppStore {
         let replyKey = forwardKey == nil ? state.replyToMessageId : nil
         if let forwardKey { firingForwardKeys.append(forwardKey) } else { firingReplyKeys.append(replyKey) }
         if let draftId { firingDraftIds.append(draftId) }
-        let outcome = await ComposeSubmit.schedule(
-            state, at: sendAt, override: held.override, draftId: draftId)
+        let outcome = await ComposeSubmit.schedule(state, at: sendAt, draftId: draftId)
         if let forwardKey {
             if let i = firingForwardKeys.firstIndex(of: forwardKey) { firingForwardKeys.remove(at: i) }
         } else if let i = firingReplyKeys.firstIndex(of: replyKey) {
@@ -6853,15 +6992,13 @@ final class AppStore {
         guard held.epoch == epoch else {
             switch outcome {
             case .scheduled: pushToast(ScheduleCopy.scheduledToast(sendAt), .success)
-            case .guardBlocked: pushToast("not scheduled: the outbound guard stopped it", .error)
             case .forbidden(let text), .failure(let text):
                 pushToast("not scheduled: \(text)", .error)
             }
             return
         }
         let back = HeldSend(
-            state: state, slot: held.slot, override: false, threadId: held.threadId,
-            epoch: held.epoch)
+            state: state, slot: held.slot, threadId: held.threadId, epoch: held.epoch)
         switch outcome {
         case .scheduled(let created):
             // The schedule consumed its draft row: drop it from the cache and
@@ -6884,10 +7021,6 @@ final class AppStore {
                 guard let self else { throw HoldError.alreadySent }
                 try await self.unschedule(created.id, held: back, sendAt: sendAt, epoch: e)
             }
-        case .guardBlocked(let kinds):
-            var blocked = back
-            blocked.state.guardKinds = kinds
-            putBack(blocked, error: nil, blocked: true)
         case .forbidden(let text), .failure(let text):
             putBack(back, error: text)
         }
@@ -6924,7 +7057,7 @@ final class AppStore {
             ?? (try? JSONDecoder().decode(
                 ScheduledRequest.self,
                 from: JSONEncoder().encode(
-                    SendBody(compose: held.state, override: held.override, draftId: nil))))
+                    SendBody(compose: held.state, draftId: nil))))
             ?? ScheduledRequest()
         var back = held
         back.state = ComposeState.reopened(
@@ -7347,13 +7480,7 @@ final class AppStore {
                 // composer says what went wrong. An "undo failed" toast beside
                 // it would be a second, contradicting account of one event.
                 reopen { state in
-                    if let api = error as? APIError, api.kind == .guardBlocked {
-                        // As `putBack` does for a blocked send: the verdict
-                        // shows, and ⌘⇧↵ reads "schedule anyway".
-                        state.guardKinds = api.guardKinds ?? parseGuardKinds(api.message)
-                    } else {
-                        state.error = errText(error, "could not schedule it again")
-                    }
+                    state.error = errText(error, "could not schedule it again")
                 }
                 return
             }
@@ -7813,11 +7940,13 @@ final class AppStore {
 
     @discardableResult
     func pushUndo(
-        kind: UndoKind, messageId: Int, label: String, rewind: WalkRewind? = nil,
+        kind: UndoKind, messageId: Int, label: String, undoneText: String? = nil,
+        rewind: WalkRewind? = nil,
         revert: @escaping @Sendable () async throws -> Void
     ) -> UUID {
         var entry = PendingUndo(
-            kind: kind, messageId: messageId, label: label, rewind: rewind, revert: revert)
+            kind: kind, messageId: messageId, label: label, undoneText: undoneText, rewind: rewind,
+            revert: revert)
         entry.expiresAt = entry.createdAt.addingTimeInterval(Self.undoTTL)
         undos.append(entry)
         let id = entry.id
@@ -7876,7 +8005,9 @@ final class AppStore {
             // the email returning would be the same news twice. A skip that
             // cannot walk back (the walk has moved on) changed nothing at all.
             let rewound = entry.rewind.map(rewindWalk) ?? false
-            if !rewound && entry.kind != .skip { pushToast("undone: \(entry.label)", .info) }
+            if !rewound && entry.kind != .skip {
+                pushToast(entry.undoneText ?? "undone: \(entry.label)", .info)
+            }
             Analytics.capture("undo_fired", ["kind": String(describing: entry.kind)])
             // The bands dropped the row optimistically and the next poll is up
             // to a tick out — pull now, or the undo reads as broken on the sitrep.

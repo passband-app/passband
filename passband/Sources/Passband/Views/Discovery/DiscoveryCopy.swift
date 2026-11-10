@@ -76,7 +76,7 @@ extension FeatureSet {
             .init(nil, "When the time comes, it is back at the top as if it had just arrived."),
         ]
         case .teach: [
-            .init("t", "Tell Passband how to treat a sender, in your own words."),
+            .init("t", "Teach Passband what you want, in your own words."),
             .init("v", "Sorted wrong? Say where it belongs."),
             .init("u", "Inside a newsletter, unsubscribe without hunting for the link."),
             .init(nil, "Passband sorts with all of it in mind from then on."),

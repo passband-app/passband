@@ -11,6 +11,9 @@ actor FixtureAPI {
     private var referenceDate: Date
     private var rules: [SenderRule] = []
     private var nextRuleID = 1
+    /// General rules (about all mail), for the session only.
+    private var generalRules: [GeneralRule] = []
+    private var nextGeneralID = 1
     /// Send groups, held WITH their membership; the list read strips it, the
     /// way the daemon's does. Empty in the fixture mail, which never makes one: they
     /// are here so the Groups page and its editor answer in the fixture inbox instead
@@ -30,6 +33,8 @@ actor FixtureAPI {
     /// add and remove answer the way a daemon's do. Nothing in the fixture inbox is
     /// translated by it; `reset` drops it.
     private var readLanguages: [String] = []
+    /// The fixture's morning brief switch, on as a daemon's is by default.
+    private var morningBrief = true
     private var statusOverrides: [Int: AttentionStatus] = [:]
     private var tierOverrides: [Int: Tier] = [:]
     private var importanceOverrides: [Int: Int] = [:]
@@ -47,7 +52,8 @@ actor FixtureAPI {
         self.accountEmail = accountEmail
         referenceDate = Date()
         rules = []; nextRuleID = 1; drafts = [:]; nextDraftID = 1; clearedShipments = []
-        groups = []; nextGroupID = 1; groupHistory = [:]; readLanguages = []
+        generalRules = []; nextGeneralID = 1
+        groups = []; nextGroupID = 1; groupHistory = [:]; readLanguages = []; morningBrief = true
         statusOverrides = [:]; tierOverrides = [:]; importanceOverrides = [:]; reminders = [:]
     }
     func snapshot() -> FixtureMail { mailbox }
@@ -368,6 +374,12 @@ actor FixtureAPI {
             data = try encode(rules)
         case ("POST", "/client/rules"):
             data = try saveRule(body, id: nil)
+        case ("POST", "/client/teach"):
+            data = try teach(body)
+        case ("GET", "/client/general-rules"):
+            data = try encode(generalRules)
+        case ("POST", "/client/general-rules"):
+            data = try encode(GeneralRuleSaved(id: saveGeneral(body, id: nil)))
         case ("GET", "/client/rules/suggest"):
             // No model in the fixture inbox: the card shows its generic example.
             data = try encode(RuleSuggestion(suggestion: nil))
@@ -442,6 +454,11 @@ actor FixtureAPI {
             data = try json(["triggered": false])
         case ("GET", "/client/invites"):
             data = try json(["can_share": false])
+        case ("GET", "/client/brief/settings"):
+            data = try json(["enabled": morningBrief])
+        case ("PUT", "/client/brief/settings"):
+            morningBrief = body["enabled"] as? Bool ?? morningBrief
+            data = try json(["enabled": morningBrief])
         case ("GET", "/client/tracking-config"):
             data = try json(["available": false, "default_enabled": false])
         case ("GET", "/client/translate-config"):
@@ -517,6 +534,11 @@ actor FixtureAPI {
                       let id = Int(components[2]) {
                 guard drafts.removeValue(forKey: id) != nil else { throw missing() }
                 data = Data()
+            } else if components.count == 3, components[1] == "general-rules", let id = Int(components[2]) {
+                guard generalRules.contains(where: { $0.id == id }) else { throw missing() }
+                if method == "PUT" { data = try encode(GeneralRuleSaved(id: saveGeneral(body, id: id))) }
+                else if method == "DELETE" { generalRules.removeAll { $0.id == id }; data = Data() }
+                else { throw unsupported() }
             } else if components.count == 3, components[1] == "rules", let id = Int(components[2]) {
                 guard rules.contains(where: { $0.id == id }) else { throw missing() }
                 if method == "PUT" { data = try saveRule(body, id: id) }
@@ -623,6 +645,49 @@ actor FixtureAPI {
         }
         return try encode(CreatedRule(rule_id: ruleID, disposition: disposition))
     }
+    /// No model in the fixture inbox: a sentence taught from an email becomes
+    /// a rule on that sender's domain, one taught from nowhere a general rule.
+    private func teach(_ body: [String: Any]) throws -> Data {
+        let text = (body["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, text.count <= 1000 else {
+            throw APIError(.badRequest, 400, "keep it under 1000 characters")
+        }
+        if let source = body["source_message_id"] as? Int,
+            let message = mailbox.messages.first(where: { $0.id == source })
+        {
+            let addr = address(message)
+            let pattern = addr.split(separator: "@").last.map { "*@\($0)" } ?? addr
+            // Patterns are unique: an existing rule is overwritten in place.
+            let existing = rules.first { $0.match_pattern == pattern }
+            _ = try saveRule(["match_pattern": pattern, "want": text], id: existing?.id)
+            let saved = rules.last!
+            return try encode(
+                TeachResult(
+                    kind: "sender", id: saved.id, text: text, match_pattern: pattern,
+                    disposition: saved.disposition,
+                    replaced: existing.map {
+                        ReplacedRule(want_text: $0.want_text, disposition: $0.disposition)
+                    }))
+        }
+        guard generalRules.count < 40 else {
+            throw APIError(.badRequest, 400, "That is the most rules about all mail Passband keeps.")
+        }
+        let id = try saveGeneral(["text": text], id: nil)
+        return try encode(TeachResult(kind: "general", id: id, text: text))
+    }
+
+    private func saveGeneral(_ body: [String: Any], id: Int?) throws -> Int {
+        let text = (body["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { throw APIError(.badRequest, 400, "A rule needs some text") }
+        let ruleID = id ?? nextGeneralID
+        if id == nil { nextGeneralID += 1 }
+        let created = generalRules.first { $0.id == ruleID }?.created_at ?? stamp()
+        generalRules.removeAll { $0.id == ruleID }
+        generalRules.append(
+            GeneralRule(id: ruleID, text: text, created_at: created, updated_at: stamp()))
+        return ruleID
+    }
+
     /// `members` REPLACES the membership, as the daemon's PUT does. An edit
     /// keeps the row's id and what it has sent; a create is a new row with no
     /// history, which is exactly what an undone delete comes back as.

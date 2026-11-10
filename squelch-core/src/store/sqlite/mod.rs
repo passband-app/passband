@@ -636,6 +636,7 @@ pub use self::agent_triage::{
 pub use self::calendar::EventMatch;
 use self::migrate::migrate;
 pub use self::retention::{HISTORY_RETENTION_DAYS, HistoryPruned};
+pub use self::rules::{MAX_GENERAL_RULE_CHARS, MAX_GENERAL_RULES};
 pub use self::search::{EXTERNAL_RECALL_MAX, ExternalSearchMode};
 
 use std::path::Path;
@@ -650,23 +651,23 @@ use crate::metrics::{NotifyDecision, NotifyLane};
 use crate::store::SmartBlockMemo;
 use crate::store::{
     AccountIdentity, AccountPhoto, AgentDraftOutcome, AttachmentBytes, BankingApplied,
-    BlankBodyScan, ClientActed, ClientPlatform, ClientSeen, ClientTag, ContactEntry, Device,
-    DeviceToken, Draft, DraftFields, DraftKey, ExtractQueued, FtsQuery, HealScope, InboxUnread,
-    IssuedDeviceToken, LeggedHit, MailActivityDay, MarketingApplied, MarketingOffer,
-    MessageMissingRecipients, MessageOpen, MessageUnsub, MintedPairingCode, MissingVector,
-    NewAuditEntry, NewEvent, NewNotifyDecision, NotifyDecisionRow, PersonNamed, SPAM_SYNCED_AT_KEY,
-    SealedBody, SealedMessage, SearchDiagnostics, SearchFilter, SearchSort, SenderDigestRow,
-    SenderDomainEntry, SenderEntry, SentMessage, Stage1Applied, Stage2CapOverrides, Stage2Usage,
-    Stage2UsageDay, Store, SyncState, TermDf, TrackedMessage, TriageDebug, TriagedMessage,
-    UsageTokens,
+    BlankBodyScan, ClientActed, ClientActivity, ClientPlatform, ClientSeen, ClientTag,
+    ContactEntry, Device, DeviceToken, Draft, DraftFields, DraftKey, ExtractQueued, FtsQuery,
+    HealScope, InboxUnread, IssuedDeviceToken, LeggedHit, MailActivityDay, MarketingApplied,
+    MarketingOffer, MessageMissingRecipients, MessageOpen, MessageUnsub, MintedPairingCode,
+    MissingVector, NewAuditEntry, NewEvent, NewNotifyDecision, NotifyDecisionRow, PersonNamed,
+    PlatformActivity, SPAM_SYNCED_AT_KEY, SealedBody, SealedMessage, SearchDiagnostics,
+    SearchFilter, SearchSort, SenderDigestRow, SenderDomainEntry, SenderEntry, SentMessage,
+    Stage1Applied, Stage2CapOverrides, Stage2Usage, Stage2UsageDay, Store, SyncState, TermDf,
+    TrackedMessage, TriageDebug, TriagedMessage, UsageTokens,
 };
 use crate::triage::rule_suggest::SmartBlock;
 use crate::types::{
     AccountId, AttachmentInfo, AttentionStatus, AuditEntry, BandCounts, Banking, CalendarUpdate,
     ClientAttachment, ClientMessage, ClientThreadView, Deadline, Disposition, Event, EventKind,
-    GroupHistoryEntry, GroupMember, GroupMode, NewMessage, OpenRate, Receipt, RetriageProgress,
-    SanitizedMessage, SealedKind, SearchHit, SendGroup, SenderRule, Sensitivity, ShredCandidate,
-    StoreStats, ThreadView, Tier, TriageAxis, TriageFeedback, UnsubscribeRecord,
+    GeneralRule, GroupHistoryEntry, GroupMember, GroupMode, NewMessage, OpenRate, Receipt,
+    RetriageProgress, SanitizedMessage, SealedKind, SearchHit, SendGroup, SenderRule, Sensitivity,
+    ShredCandidate, StoreStats, ThreadView, Tier, TriageAxis, TriageFeedback, UnsubscribeRecord,
 };
 
 /// `app_settings` key recording when this account's open ledger started, so the
@@ -1705,6 +1706,39 @@ impl Store for SqliteStore {
         self.list_sender_rules(account_id)
     }
 
+    fn list_general_rules(&self, account_id: AccountId) -> Result<Vec<GeneralRule>> {
+        self.list_general_rules(account_id)
+    }
+
+    fn create_general_rule(&self, account_id: AccountId, text: &str) -> Result<i64> {
+        self.create_general_rule(account_id, text)
+    }
+
+    fn update_general_rule(&self, account_id: AccountId, id: i64, text: &str) -> Result<bool> {
+        self.update_general_rule(account_id, id, text)
+    }
+
+    fn delete_general_rule(&self, account_id: AccountId, id: i64) -> Result<bool> {
+        self.delete_general_rule(account_id, id)
+    }
+
+    fn merge_and_create_general_rule(
+        &self,
+        account_id: AccountId,
+        merges: &[(Vec<i64>, String)],
+        new_text: &str,
+    ) -> Result<crate::types::MergedGeneralRules> {
+        self.merge_and_create_general_rule(account_id, merges, new_text)
+    }
+
+    fn teach_example(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+    ) -> Result<Option<crate::triage::teach::TeachExample>> {
+        self.teach_example(account_id, message_id)
+    }
+
     fn sender_rule_digest(
         &self,
         account_id: AccountId,
@@ -1728,6 +1762,10 @@ impl Store for SqliteStore {
 
     fn ingest_archive_message(&self, triaged: &TriagedMessage) -> Result<Option<i64>> {
         self.ingest_archive_message(triaged)
+    }
+
+    fn ingest_lite_archive_message(&self, triaged: &TriagedMessage) -> Result<Option<i64>> {
+        self.ingest_lite_archive_message(triaged)
     }
 
     fn archive_walked_to(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>> {
@@ -2137,6 +2175,10 @@ impl Store for SqliteStore {
 
     fn list_devices(&self, account_id: AccountId) -> Result<Vec<Device>> {
         self.list_devices(account_id)
+    }
+
+    fn client_versions_seen(&self, account_id: AccountId) -> Result<Vec<ClientSeen>> {
+        SqliteStore::client_versions_seen(self, account_id)
     }
 
     fn delete_device_by_token(&self, account_id: AccountId, token: &str) -> Result<bool> {

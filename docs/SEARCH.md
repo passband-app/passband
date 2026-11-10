@@ -403,10 +403,25 @@ more terms and no strict keyword hit. A query carrying an operator (`from:`,
 `after:`, `before:`) is **never** deeper: operators are structured intent and
 the reader is already speaking the index's language. One or two plain words
 are never deeper either: "wifi" is a lookup, and its one hit is on screen.
+**One word is never deeper, whatever the word**: "when" or "my" alone is a
+reader pausing mid-sentence. A leading question word needs three words ("when
+is rent"); `?` and first person keep the two-word floor ("my landlord").
 
 The decision is made once per settled query (after the panel's 220 ms
 debounce and the fetch), so the rule never fires mid-keystroke, and it is
 shown: the deeper band (§6.4) says which signal started it.
+
+**Deciding is not starting.** A settled query the rule calls deeper (or a
+refinement of a running lane) waits for 600 ms more of quiet, and during that
+wait asks Haiku one question with no tools and four output tokens: does this read as
+finished, or cut off mid-thought ("when did i download the")? "Finished"
+starts or refines the lane at once (`QueryReadiness`,
+`AppStore.settleDeeperSearch`); "typing" waits 2 s more and then starts anyway
+unless the reader typed on, so a misread holds a whole question back briefly
+but never blocks it. Any failure or a check slower than 1.2 s counts as
+finished. Stopping is immediate, and an explicit ask (⌘Enter, the panel's
+"Ask agent", the phone band's button) skips the check. While the check runs
+in automatic mode the band shows no offer: it is about to start on its own.
 
 ## 6. Wave 2: the agent lane
 
@@ -489,6 +504,12 @@ pause glyph and the last state. Expanded (Enter in the bar), the band becomes
 the **right column** beside the results, which is the side-by-side the
 request asked for. Cards open the thread exactly as AskBar's do.
 
+On the Mac a click anywhere else on the band (or its expand arrow, the
+panel's "Open in chat", or ⌘↩) opens the conversation in AskBar's
+**full-screen** layout rather than the ⌘K modal: the answer gets the window,
+and Esc closes it back onto the search it came from, which never left. The
+phone already did the same with a push.
+
 The band names its trigger in small type ("no email has all four words") so a
 reader who did not want the lane can see why it ran and shorten the query.
 
@@ -497,7 +518,7 @@ reader who did not want the lane can see why it ran and shorten the query.
 On self-host the lane runs on the user's own key, on hosted on the relay's
 credential. Either way it is spend the reader did not tap for, so it is a
 setting, `Deeper search`: **automatic** (the classifier starts it), **on
-request** (the band offers a button, iOS-style), **off**. Default automatic.
+request** (the band offers it: a button on the phone, ⌘Enter on the Mac), **off**. Default automatic.
 Every lane start is one `search_deeper_started` event carrying the trigger
 kind and the model tier, added to `Analytics.allowedEvents` and its strings
 to `allowedStrings`, because both are closed sets and a stray string is a
@@ -523,3 +544,64 @@ is a thread id, never a URL from the mail.
 
 iOS keeps its space-counting rule for now. The lane is a `SearchSession`
 concern and ports once the Mac shape has been used for a week.
+
+## 8. Old mail: five years, lite past the first
+
+The archive walk (`sync.archive_days`) reaches back **five years by default
+(1825 days)**; it reached one before. It is the same walk, at the same pace
+(30 messages a minute, one week per chunk, backwards), under the same guards:
+the free-space floor and the per-database ceiling are asked before every
+batch whatever the target is, so a walk in its fourth year stops for a short
+disk exactly as the first year's did. Its target is measured from now on every
+chunk, so a walk that finished at 365 days is not finished at 1825 and resumes
+from the cursor it left; nothing about the stored cursor changes.
+
+**Mail more than a year back is stored LITE** (`sync::ARCHIVE_LITE_AFTER_DAYS`,
+365, not a setting): an archive row like any other, with its text (`body`),
+its subject, its snippet, its recipients and its place in the full-text index,
+and WITHOUT `body_html`, which is the bulk of a row. `messages.html_lite = 1`
+says so, because a NULL `body_html` alone also means plain-text mail. Rows
+already stored before this keep what they have; nothing is rewritten.
+
+What that means for each way of finding mail:
+
+- **Keyword search** finds a lite row exactly as it finds any archive row: the
+  full-text index holds its subject and text.
+- **Meaning search** never reached archive mail (archive rows are not
+  embedded), and still does not. Old mail is found by words.
+- **The agents** (the ⌘K lane, the Mac assistant, MCP) read text, never HTML,
+  so a lite row reads to them exactly as a full one. Their prompts now say to
+  try several keyword variants (synonyms, the sender's name or company, product
+  names, a date range) before concluding old mail is not there, and to word a
+  miss as "search covers mail since `indexed_since`", which moves back as the
+  walk does.
+- **The reader** is served the text, with `lite: true` on the message. Only
+  when it DISPLAYS the thread does it ask `POST /client/thread/{id}/hydrate`,
+  which fetches each lite message's raw mail from the provider (Gmail,
+  Microsoft Graph or IMAP, through the write door's `fetch_raw`), extracts the
+  HTML by the same rule ingest uses (`sync::ingest::html_body_from_raw`),
+  caches it on the row and clears the mark. The reader then refetches and lays
+  the HTML over the text in place.
+
+Why the hydrate is its own POST and not part of the GET: the client warms
+threads through the GET (search results, hovers, the sitrep), so a GET that
+hydrated would turn one search for an old invoice into a provider fetch per
+result. This is the deferred-translation pattern (`POST .../translate`) for
+the same reason.
+
+Why the HTML is cached for good rather than for a while: what a person opens is
+bounded by their attention, a few old threads a week against tens of thousands
+of rows, so what hydration puts back is noise beside what lite saves, and a
+cache that expired would need a sweep and would refetch on every reopen. A
+hydrated row is exactly a year-old row. Only `body_html` and the mark move:
+`body`, the index and the content snapshot do not, so no revision advances and
+nothing is queued. Bounds per call: the newest 12 lite messages of the thread,
+4 fetches at a time, 8 seconds each. A message the provider no longer has
+(404) or one with no HTML part is cleared without HTML; any other failure
+leaves it lite for the next open. A mailbox with no write credential cannot
+fetch (the same 403 every write gets) and keeps showing text.
+
+The next disk lever, if five years turns out to be too much: `messages_fts`
+stores its own copy of `body`, so every row carries its text twice. An
+external-content FTS table would halve the text, at the cost of a migration
+that rebuilds the index.

@@ -359,7 +359,7 @@ waiting_saturation_days = 7
 [sync]
 backfill_days = 30
 backfill_bulk_triage_days = 7
-archive_days = 365
+archive_days = 1825
 ```
 
 These are supported configuration fields; see [TRIAGE-OPERATIONS.md](TRIAGE-OPERATIONS.md) for enforced spend and revisit limits. Bound total input/output tokens and account spend as well as wall time; retain existing usage ledgers and gateway/model resolution rather than hardcoding a model or price in this design. Reserve model-turn budget for a final answer; exhaustion without a valid answer produces pending/retry, not an invented result. Keep fast-notification capacity separate from migration/investigation work.

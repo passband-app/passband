@@ -403,6 +403,16 @@ row does not exist yet, which is a different thing from "pending" on live mail:
 - A reminder the owner sets on an archive message lists it at the human door
   like any reminded row. It does not surface at the agent door until the row
   is `allowed`.
+- LITE ROWS (archive mail more than a year back, `messages.html_lite = 1`,
+  docs/SEARCH.md §8) are archive rows in every respect above; they only lack
+  `body_html`. The HTML is fetched back from the provider by
+  `POST /client/thread/{id}/hydrate`, which is HUMAN DOOR ONLY (the agent
+  doors serve text and have no HTML to hydrate), runs the fetched mail
+  through the same sanitizer ingest does, and writes `body_html` and the
+  mark and nothing else: `body`, the full-text index and the content snapshot
+  are untouched, so hydration advances no revision, queues no job and changes
+  nothing an agent can read. Reading a thread (the GET the client prefetches
+  through) never hydrates.
 
 Do not widen the omission: it is exactly `is_archive = 1` AND access NULL or
 `pending` AND no owner seal (`archive_unassessed_sql!` in `store/sqlite/mod.rs`).
@@ -428,8 +438,7 @@ a send consumes them or their owning draft is deleted. Unclaimed uploads are
 swept after a day by the next upload. These human-only routes never expose bytes
 on MCP, never audit file contents, and use `no-store`. Byte responses use the same
 content-type whitelist, `nosniff`, and attachment disposition as inbound files.
-The outbound guard scans text and message parts at send time; binary files are
-not scanned. Restricting external-agent access does not delete human drafts or
+Restricting external-agent access does not delete human drafts or
 their attachments. However many drafts an account holds (one per reply target,
 one per forwarded message, any number of new-message drafts), they are served
 only on `/client/drafts` and the owner's own are never audited. The agent door
@@ -580,12 +589,11 @@ none and offers neither tool. For each call the mailer:
   human approves only what the agent shows them. A `Reply-To` nobody in that
   conversation saw must not decide where approved mail goes. The resolved
   `to`/`cc` are returned in the tool result;
-- for `send_email`, runs `validate_send`, the outbound guard (§5) and
-  `perform_send`, as `POST /client/actions/send` does, with `override_guard`
-  hard-wired to `false`. The guard reads MORE than it does for the owner:
-  recipients and subject as well as the body, and the body a second time
-  with markdown emphasis marks removed (`guard_text`), since for an agent
-  all of it is model output and this is the one check with no override;
+- for `send_email`, runs `validate_send`, the outbound secret guard (§5) and
+  `perform_send`. The guard has no override here. It reads recipients and
+  subject as well as the body, and the body a second time with markdown
+  emphasis marks removed (`guard_text`), since for an agent all of it is
+  model output;
 - for `create_draft`, INSERTS a local draft marked `drafts.from_agent = 1`
   and never edits one: a reply whose message already has a draft is refused,
   because that row may be the owner's own unfinished writing and an agent
@@ -735,7 +743,7 @@ rule text is not delivered as the owner's words.
 **Do not break.**
 - Never give `squelch-mcp` the write credential, a `GmailWriteClient`, or a
   direct draft/outbox store call. Agent writes go through `AgentMailer`.
-- Never let an agent path pass `override_guard: true`.
+- Never give the agent send path a way past the outbound guard (§5).
 - Never resolve an agent's reply target with `action_message_ref` alone; it
   applies no agent access check. And never re-list the agent door's read
   conditions beside it: ask `thread_view`.
@@ -932,41 +940,39 @@ builds its own embedding session in-process and talks to no process of ours.
 
 ## 5. Outbound secret guard
 
-**Invariant.** A secret-looking outgoing body is blocked unless the caller
-explicitly overrides, and the matched text is never copied anywhere — not into a
+**Invariant.** An agent's send that looks like it carries a secret is refused,
+with no override, and the matched text is never copied anywhere: not into a
 response, a log, or the audit row.
 
+**Scope: the agent door only.** The guard runs on `agent_write`'s `send_email`
+(§4c), where mail goes out under the owner's standing consent
+and no human reads the body first. That is the prompt-injection case: mail the
+agent read tells it to send a key somewhere. The owner's own sends (compose,
+reply, forward, scheduled send, invites, and the in-app assistant, whose every
+send the owner approves on a card) are NOT scanned. A person who wrote or chose
+the words and pressed send decides what they mail. It used to scan those too,
+with an override; on real mail it fired on nearly every forwarded newsletter (an
+unsubscribe id is a long hex run), so the override became a reflex and the
+guard protected nothing. An older client's `override_guard` field is ignored.
+
 **Enforcement.** `squelch-api/src/guard.rs:scan` / `scan_kinds`, called from
-`handlers::action_send` before the message leaves the process, and from
-`scheduled_send::schedule` when a mail is scheduled. Detects `pem_block`,
-`api_key` (vendor prefixes), `otp_code` (6–8 digits near an auth word), `long_hex`
-(≥32), `long_base64` (≥40). A non-empty match set returns HTTP 422 listing only the
-**kinds**; `override_guard: true` sends anyway and writes a `guard_override:<kinds>`
-audit row. False positives are acceptable precisely because it is overridable.
+`agent_write` before `perform_send`. Detects `pem_block`, `api_key` (vendor
+prefixes), `otp_code` (6–8 digits near an auth word), `long_hex` (≥32) and
+`long_base64` (≥40). URLs are scanned like everything else: a link
+(`https://x/?t=<token>`) is the natural way for an injected agent to carry a
+token out, and a false positive costs only a refusal the agent reports to the
+owner, who can send the mail themselves. A match refuses the send, tells the agent only the
+**kinds**, and writes a `blocked:guard` audit row. Agent sends are never
+forwards and carry no files, so there is no original or attachment to scan.
 
-**Forwards are scanned twice over.** Forwarding is the classic exfiltration shape —
-a clean note wrapped around someone else's secret — so `handlers::forward_send`
-scans the ORIGINAL as well as the note, unions the kinds and issues ONE 422 / one
-`guard_override` row for both. The scan runs on the raw bytes re-fetched from Gmail
-and about to be composed, never on the stored row: the stored body is a sanitized,
-flattened memory of the message and the bytes on the wire are the original.
-
-*Exactly what is scanned* on a forward: the sender's typed note, the original's
-decoded text bodies — every part in mail-parser's `text_body` list — an html-to-text
-conversion of its `html_body` view, **and** the contents of every `text/*` and
-`message/*` attachment part. Both body views are needed because when a `text/plain`
-part exists mail-parser never converts the html alternative down, so an alternative
-whose text half is innocuous and whose html half carries the key would otherwise ship
-unread. The text attachments are scanned because a PEM key pasted into `notes.txt`
-and dragged onto a mail is the same exfiltration shape as one pasted into the body —
-arguably the more natural one — and mail-parser has already transcoded each such part
-to UTF-8, so reading it as text costs nothing; `message/*` parts (an attached email,
-a bounce report) are plain RFC822 text and are read the same way. Two known limits,
-stated rather than implied: **attachment bytes under any other mime are not scanned**
-(a key inside a zip, or an `id_rsa` carrying an `application/octet-stream` mime,
-passes), and **html attribute values are not scanned** (the converter yields visible
-text, so a secret inside an `href` or a `data-` attribute survives). The guard is a seatbelt against the accident, not a DLP
-boundary against a determined sender — it is overridable by design.
+**Known gaps, stated rather than implied.**
+- *The in-app assistant's approval card renders markdown*, so a link shows its
+  text, not its target: `[here](https://x/?k=<token>)` reads as "here". That
+  card is the only check on an assistant send now. Showing link targets on the
+  card would close it; not built.
+- *Agent drafts are not scanned* (`create_draft`, here or in §4c). The owner
+  sends a draft from the composer, which shows the raw text, so it is a human
+  send like any other.
 
 **Forwarded HTML goes out verbatim, trackers included.** The original's markup is
 embedded as it arrived (the only edit is stripping the `<meta>` tags that DECLARE a
@@ -983,16 +989,6 @@ out of what it RENDERS to its user, not out of what its user chooses to pass on.
 Rewriting a stranger's markup on the way out would forward something other than what
 arrived, and the user's decision is to send *this message*.
 
-**Scheduled sends are judged once, when scheduled.** `scheduled_send::schedule`
-runs the same scan while the user is there to answer: the note, the staged text
-files, and for a forward the ORIGINAL, read on the write token at schedule time
-and unioned into one verdict. `override_guard: true` persists in the frozen
-request. At fire time the worker calls `perform_send` with `SendGuard::Settled`,
-so nothing re-scans: the content is frozen, and a forward's original is
-re-fetched from Gmail at fire (Gmail's raw bytes are immutable, so what is sent
-is what was judged). A cancel hands the request back WITHOUT `override_guard`,
-so a reschedule is judged again.
-
 **Scheduled sends carry a visible fingerprint (privacy).** Every mail the outbox
 fires goes out with `X-Passband-Outbox: <token>` and a `Message-ID` of
 `<token@passband.app>`, where the token is 48 hex chars of fresh randomness minted
@@ -1002,8 +998,9 @@ user or row id, so two scheduled mails from one user are not linkable by them.
 Interactive sends carry neither.
 
 **Do not break.** `GuardMatch::kind()` is the only thing that may leave the process —
-never return, log, or audit the matched substring. Keep the override audited; an
-un-audited bypass is not a bypass we can reason about.
+never return, log, or audit the matched substring. Never add an override to the
+agent path: it is exactly the decision a prompt-injected agent would be talked
+into making.
 
 **Post-send echo (audit contract).** After a successful send,
 `handlers::echo_sent` fetches the sent message back (`format=raw`, write token) and
@@ -1011,8 +1008,8 @@ ingests it locally so the thread shows the reply immediately. It is strictly
 best-effort — the mail has already left, so nothing here may fail the request — and
 audits under its own action `send.echo`, alongside the `send` row's own outcomes
 (`rejected:confirm`, `rejected:forward_and_reply`, `rejected:empty_body` — skipped for
-a forward, whose note may legitimately be empty — `blocked:guard`,
-`guard_override:<kinds>`, `rejected:no_write_credential` (including the forward whose
+a forward, whose note may legitimately be empty — `blocked:guard` (agent sends
+only), `rejected:no_write_credential` (including the forward whose
 raw fetch found the write credential dead — a 403 telling the user to re-run
 `squelchd auth --write`, never the 502 that would blame Gmail), `failed:target`,
 `rejected:no_recipient`, `rejected:too_large` (the original exceeds
@@ -1064,7 +1061,6 @@ writes the ordinary `send` row, marked with its outbox row:
 | `schedule` · `rejected:group_fanout` | an `individual` group: one minted Message-ID cannot name N messages. |
 | `schedule` · `rejected:too_many_scheduled` | the account already holds 100 live outbox rows. |
 | `schedule` · `failed:group` / `failed:store` | the group did not resolve / the insert failed. |
-| `schedule` · `blocked:guard` / `guard_override:<kinds>` | the verdict, given at schedule time. |
 | `schedule` · `ok:<id>` | scheduled; `<id>` is the outbox row. |
 | `schedule.cancel` · `ok` / `rejected:sending` / `failed:not_found` | cancelled / in Gmail's hands (409) / unknown, another account's, sent or cancelled (404). |
 | `schedule.now` · `ok` / `rejected:sending` / `failed:not_found` | queued for the next tick / in Gmail's hands (409) / nothing to queue (404). |
@@ -1102,8 +1098,8 @@ the call goes out.
   reaches `perform`. That single funnel is the entire reason the `confirm: true`
   those calls carry is a true statement rather than a default.
 - **The daemon does not take the client's word for it.** Every mutating `/client/*`
-  route demands the flag itself and audits the attempt, and a send still meets the
-  outbound secret guard (§5). A client that lied would be recorded doing it.
+  route demands the flag itself and audits the attempt. A client that lied would be
+  recorded doing it.
 - **A half-arrived instruction is not an instruction.**
   `passband/Sources/Passband/Assistant/Assistant.swift` executes a `tool_use` only
   after its message has closed, so a partially streamed tool input never runs.

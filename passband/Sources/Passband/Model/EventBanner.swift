@@ -77,6 +77,10 @@ enum EventBanner {
         /// could not dress: only the fire id survived, so the app asks the
         /// daemon what it was before it routes.
         case calendarReminderPush(CalendarPush)
+        /// The morning brief, dressed or not: the board, in the account it
+        /// came from. `accountId` nil only when a dressed banner lost its
+        /// account key, which the tap queue reads as "the active account".
+        case morningBrief(accountId: UUID?)
         case reveal(messageId: Int, threadId: String, sender: String)
         case authPage
         case message(Int)
@@ -87,6 +91,8 @@ enum EventBanner {
     static func tapRoute(_ userInfo: [AnyHashable: Any]) -> TapRoute {
         let route = userInfo[routeKey] as? String
         if route == updateRoute { return .update }
+        // The daemon's release announcement (Macs only): this same update.
+        if releasePush(userInfo["event_id"] as? String) != nil { return .update }
         if route == testRoute { return .test }
         // BEFORE anything else reads the payload: a draft push carries no
         // message, thread or event, and must never fall through to them.
@@ -113,6 +119,13 @@ enum EventBanner {
         }
         if let push = calendarPush(userInfo["event_id"] as? String) {
             return .calendarReminderPush(push)
+        }
+        // The brief names no mail either: it opens the board.
+        if route == morningBriefRoute {
+            return .morningBrief(accountId: (userInfo[accountKey] as? String).flatMap(UUID.init(uuidString:)))
+        }
+        if let push = briefPush(userInfo["event_id"] as? String) {
+            return .morningBrief(accountId: push.accountId)
         }
         if let renotify = renotifyTap(userInfo) { return .renotify(renotify) }
         let messageId =
@@ -317,6 +330,29 @@ enum EventBanner {
         return UnresolvedPush(accountId: account, eventId: event)
     }
 
+    /// The pusher's release announcement, `"<account>:release:macos:<version>"`
+    /// (squelch-core's `release_feed`): a new Mac version is out. Strict like
+    /// the others: the tag, two literals, and dotted digits. Never an event
+    /// push: `unresolvedPush` splits at the LAST colon, so this shape's account
+    /// half is never a UUID there.
+    struct ReleasePush: Equatable, Sendable {
+        var accountId: UUID
+        var version: String
+    }
+
+    static func releasePush(_ raw: String?) -> ReleasePush? {
+        guard let raw, raw.count <= 256 else { return nil }
+        let parts = raw.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 4, parts[1] == "release", parts[2] == "macos",
+            let account = UUID(uuidString: String(parts[0]))
+        else { return nil }
+        let version = parts[3].split(separator: ".", omittingEmptySubsequences: false)
+        guard (2...4).contains(version.count),
+            version.allSatisfy({ (1...5).contains($0.utf8.count) && $0.utf8.allSatisfy { (48...57).contains($0) } })
+        else { return nil }
+        return ReleasePush(accountId: account, version: String(parts[3]))
+    }
+
     /// The pusher's draft ping, `"<account>:draft:<id>:<created>"`: the tag
     /// the client registered, a literal, the draft's row id, and its creation
     /// time in Unix seconds. STRICT like `AgentDraftLink`: exactly that shape,
@@ -339,6 +375,50 @@ enum EventBanner {
             let created = plainNumber(parts[3], maxDigits: 11)
         else { return nil }
         return DraftPush(accountId: account, draftId: id, created: created)
+    }
+
+    // MARK: - the morning brief
+
+    /// The tap route a dressed morning brief carries in `routeKey`.
+    static let morningBriefRoute = "morning_brief"
+
+    /// The pusher's morning brief, `"<account>:brief:<YYYYMMDD>"`: the tag,
+    /// the literal, and the owner's local day. Strict like `draftPush`, and
+    /// never mistaken for an event push (`unresolvedPush` splits at the LAST
+    /// colon, so this shape's account half is never a UUID there).
+    struct BriefPush: Equatable, Sendable {
+        var accountId: UUID
+        /// The day as the daemon wrote it, `20261105`.
+        var day: Int
+    }
+
+    static func briefPush(_ raw: String?) -> BriefPush? {
+        guard let raw, raw.count <= 256 else { return nil }
+        let parts = raw.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[1] == "brief", parts[2].count == 8,
+            let account = UUID(uuidString: String(parts[0])),
+            let day = plainNumber(parts[2], maxDigits: 8)
+        else { return nil }
+        return BriefPush(accountId: account, day: day)
+    }
+
+    /// The brief's banner body, from what `GET /client/brief` served: the
+    /// daemon's sentences, folded to one paragraph. There is no title: the
+    /// lock screen already names the app above it. nil when there is nothing
+    /// to say (the day emptied between the push and the fetch), which keeps
+    /// the relay's "Your morning brief is ready". The words are the daemon's;
+    /// this only refuses to show an empty or runaway banner.
+    static func morningBriefBody(_ brief: MorningBrief) -> String? {
+        let body = (brief.body ?? "")
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+        guard !body.isEmpty else { return nil }
+        return String(body.prefix(240))
+    }
+
+    /// What a dressed brief carries for its tap: the route and the account.
+    static func morningBriefUserInfo(account: UUID) -> [AnyHashable: Any] {
+        [routeKey: morningBriefRoute, accountKey: account.uuidString]
     }
 
     /// The pusher's banner clear, `"<account>:clear:<event id>"`, delivered

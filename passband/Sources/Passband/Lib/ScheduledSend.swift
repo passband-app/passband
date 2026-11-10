@@ -19,11 +19,6 @@ enum ScheduleCopy {
         scheduled ? "schedule" : "send"
     }
 
-    /// The override, past a guard verdict. Same flip, same reason.
-    static func overrideVerb(scheduled: Bool) -> String {
-        scheduled ? "schedule anyway" : "send anyway"
-    }
-
     /// The set clock's label and the toast's time: `Fmt.sendAtChip`.
     static func chip(_ sendAt: Date, now: Date = Date(), calendar: Calendar = .current)
         -> String
@@ -431,17 +426,16 @@ enum ScheduledCursor {
 /// The undo of a cancel from the Sent page: put the mail back in the outbox.
 enum ScheduledCancelUndo {
     /// The re-POST's body, from the request the DELETE handed back. The
-    /// daemon strips `override_guard` and `confirm` from that request on
-    /// purpose: `confirm` is the client's to set, and a reschedule is judged
-    /// by the outbound guard AGAIN (a verdict does not survive a cancel).
-    /// No `draft_id`: scheduling consumed the draft long ago.
+    /// daemon strips `confirm` from that request on purpose: `confirm` is
+    /// the client's to set. No `draft_id`: scheduling consumed the draft long
+    /// ago.
     static func body(_ r: ScheduledRequest) -> SendBody {
         SendBody(
             reply_to_message_id: r.reply_to_message_id,
             forward_of_message_id: r.forward_of_message_id,
             to: r.to, cc: r.cc, bcc: r.bcc, group_id: r.group_id,
             subject: r.subject, body: r.body ?? "", body_format: r.body_format,
-            confirm: true, override_guard: nil, draft_id: nil,
+            confirm: true, draft_id: nil,
             include_tracker: r.include_tracker, reply_all: r.reply_all,
             attachment_ids: r.attachment_ids)
     }

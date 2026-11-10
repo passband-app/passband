@@ -252,6 +252,9 @@ struct ThreadViewer: View {
         /// How many messages have a translation ready: one landing is a new
         /// document under a new key, which nothing has measured yet.
         let translations: Int
+        /// How many messages have HTML: a lite message's landing is a new
+        /// document, which nothing has measured yet.
+        let hydrated: Int
         let width: CGFloat
         /// A bubble measures its document at the bubble's measure, so a flip is
         /// a whole new set of heights to take — under a whole new set of keys.
@@ -454,6 +457,7 @@ struct ThreadViewer: View {
             // opening work rather than ahead of it: it is a drafts fetch.
             async let reopened: Void = reopenSavedReply()
             await requestDeferredTranslations()
+            await requestHydration()
             await refreshOpens()
             if aged { await revalidate() }
             await reopened
@@ -494,7 +498,8 @@ struct ThreadViewer: View {
         .task(
             id: MeasurePass(
                 thread: threadId, count: messages.count,
-                translations: thread?.readyTranslations ?? 0, width: bodyWidth, style: style,
+                translations: thread?.readyTranslations ?? 0, hydrated: thread?.htmlBodies ?? 0,
+                width: bodyWidth, style: style,
                 ready: styleReady, density: prefs.density)
         ) {
             // A window resize walks the width a pixel at a time, and each step
@@ -651,19 +656,31 @@ struct ThreadViewer: View {
     private var header: some View {
         #if os(macOS)
             HStack(alignment: .firstTextBaseline, spacing: Space.s12) {
+                // THE TEXT GIVES WAY, THE VERBS DO NOT. When the compose pane
+                // takes half the window, an HStack left to itself squeezes
+                // every label at once and "unsubscribe" wraps to three lines.
+                // The verbs keep their own width; the participants go first,
+                // then the subject ellipsizes.
                 subjectLine(lines: 1)
+                    .layoutPriority(1)
                 if !participantLine.isEmpty {
                     participantsText
                 }
                 Spacer(minLength: Space.s12)
-                actions
-                Button { store.closeThread() } label: {
-                    HStack(spacing: Space.s4) {
-                        Kbd("esc")
-                        Text("back").font(Typo.micro)
+                HStack(alignment: .firstTextBaseline, spacing: Space.s12) {
+                    actions
+                    if !composeHidesKeyVerbs {
+                        Button { store.closeThread() } label: {
+                            HStack(spacing: Space.s4) {
+                                Kbd("esc")
+                                Text("back").font(Typo.micro)
+                            }
+                        }
+                        .buttonStyle(.textAction)
                     }
                 }
-                .buttonStyle(.textAction)
+                .lineLimit(1)
+                .fixedSize()
             }
             // These metrics match every other page's bar: the page gutter,
             // and the reader's rule ends on the line the rail's top edge is
@@ -842,66 +859,80 @@ struct ThreadViewer: View {
                 .help("dev: reset this email's LLM verdicts and re-run triage")
             }
 
-            Button { openSenderRule() } label: {
-                HStack(spacing: Space.s4) {
-                    // The key chip is the Mac's promise that a key does this.
-                    // A phone has no keyboard to promise anything to.
-                    #if os(macOS)
-                        Kbd("t")
-                    #endif
-                    Text("new rule").font(Typo.micro)
-                }
-            }
-            .buttonStyle(.textAction)
-            .help("write a rule for this sender — shows the ones already in effect")
-
-            Button {
-                // A job waiting on the user finishes from here too; anything
-                // else asks again, which is how a re-request has always worked.
-                if let unsub, unsub.status == .needsYou {
-                    UnsubscribeJobs.shared.finish(.init(
-                        sender: unsub.sender,
-                        phase: .needsYou(reason: unsub.status_reason, url: unsub.status_url)))
-                    self.unsub?.status = .opened
-                } else {
-                    confirmMode = .ask
-                }
-            } label: {
-                if let unsub {
-                    // Its own minute: the reader no longer redraws with every
-                    // poll, and "N ago" would stop where it was first drawn.
-                    TimelineView(.everyMinute) { _ in
-                        Text(Self.unsubHint(unsub))
-                            .font(Typo.micro)
-                    }
-                } else {
+            if !composeHidesKeyVerbs {
+                Button { openSenderRule() } label: {
                     HStack(spacing: Space.s4) {
+                        // The key chip is the Mac's promise that a key does this.
+                        // A phone has no keyboard to promise anything to.
                         #if os(macOS)
-                            Kbd("u")
+                            Kbd("t")
                         #endif
-                        Text("unsubscribe").font(Typo.micro)
-                    }
-                }
-            }
-            .buttonStyle(.textAction)
-            .help("unsubscribe from this sender")
-
-            // THE VERB YOU CAME HERE FOR, last, beside `back`: the far corner is
-            // where the way out lives, and `e` is the other way out. The same
-            // call as the key, so the reading stack advances here too instead
-            // of closing. Mac only — it is here to teach the key, and the phone
-            // resolves from the list's swipes.
-            #if os(macOS)
-                Button { Task { await doneAndClose() } } label: {
-                    HStack(spacing: Space.s4) {
-                        Kbd("e")
-                        Text("done").font(Typo.micro)
+                        Text("teach").font(Typo.micro)
                     }
                 }
                 .buttonStyle(.textAction)
-                .help("mark done and close — d works too, and E moves to the next")
-            #endif
+                .help("teach Passband what you want from mail like this")
+
+                Button {
+                    // A job waiting on the user finishes from here too; anything
+                    // else asks again, which is how a re-request has always worked.
+                    if let unsub, unsub.status == .needsYou {
+                        UnsubscribeJobs.shared.finish(.init(
+                            sender: unsub.sender,
+                            phase: .needsYou(reason: unsub.status_reason, url: unsub.status_url)))
+                        self.unsub?.status = .opened
+                    } else {
+                        confirmMode = .ask
+                    }
+                } label: {
+                    if let unsub {
+                        // Its own minute: the reader no longer redraws with every
+                        // poll, and "N ago" would stop where it was first drawn.
+                        TimelineView(.everyMinute) { _ in
+                            Text(Self.unsubHint(unsub))
+                                .font(Typo.micro)
+                        }
+                    } else {
+                        HStack(spacing: Space.s4) {
+                            #if os(macOS)
+                                Kbd("u")
+                            #endif
+                            Text("unsubscribe").font(Typo.micro)
+                        }
+                    }
+                }
+                .buttonStyle(.textAction)
+                .help("unsubscribe from this sender")
+
+                // THE VERB YOU CAME HERE FOR, last, beside `back`: the far corner is
+                // where the way out lives, and `e` is the other way out. The same
+                // call as the key, so the reading stack advances here too instead
+                // of closing. Mac only — it is here to teach the key, and the phone
+                // resolves from the list's swipes.
+                #if os(macOS)
+                    Button { Task { await doneAndClose() } } label: {
+                        HStack(spacing: Space.s4) {
+                            Kbd("e")
+                            Text("done").font(Typo.micro)
+                        }
+                    }
+                    .buttonStyle(.textAction)
+                    .help("mark done and close — d works too, and E moves to the next")
+                #endif
+            }
         }
+    }
+
+    /// THE PANE COMPOSER OWNS THE KEYS while it is up, so `t`, `u`, `e` and
+    /// `esc` do nothing to the thread, and their chips would be promises the
+    /// bar cannot keep in a strip compose has already halved. They come back
+    /// with the pane's close. Mac only: a phone's composer covers the reader.
+    private var composeHidesKeyVerbs: Bool {
+        #if os(macOS)
+            store.composeOpen
+        #else
+            false
+        #endif
     }
 
     @ViewBuilder
@@ -2056,11 +2087,10 @@ struct ThreadViewer: View {
                 openReplyAll()
                 return true
             },
-            // `t` = tune sender rule, same as on a list row: one verb, one key
-            // everywhere. The target differs (the thread's sender rather than the
-            // selected row's) but that is the only sender in view here. This
-            // frees `r` for reply.
-            KeyBinding("t", "new sender rule") { openSenderRule() },
+            // `t` = teach Passband, same as on a list row: one verb, one key
+            // everywhere. The context is the newest message rather than the
+            // selected row. This frees `r` for reply.
+            KeyBinding("t", "teach Passband") { openSenderRule() },
             // A new message from the reader, in the modal composer over it. The two
             // draft slots are independent, so this cannot disturb an inline reply
             // open underneath — and with one open the body has focus, so `c` is
@@ -2183,11 +2213,15 @@ struct ThreadViewer: View {
             sender: m.from_addr)
     }
 
-    /// The rule composer for THIS thread's sender — the same request shape `t`
-    /// uses on a list row, so there is one composer in the app, not two.
+    /// The teach card, with the newest message the user did NOT send as
+    /// context: the same request `t` makes on a list row, so there is one card
+    /// in the app, not two. Never the user's own reply, which would make "this
+    /// sender" the user. A thread of only their own mail teaches with no email.
     private func openSenderRule() {
-        guard let newestSender else { return }
-        Actions.tune(sender: newestSender)
+        let inbound = messages.last { $0.is_sent != true }
+        Actions.teach(
+            sender: inbound.map { $0.from_addr.trimmingCharacters(in: .whitespaces).lowercased() },
+            messageId: inbound?.id)
     }
 
     // MARK: - reply
@@ -2336,7 +2370,9 @@ struct ThreadViewer: View {
             return
         }
         ThreadPrefetch.shared.note(threadId, view)
-        guard let merged = current.mergingTranslations(from: view) else { return }
+        let translated = current.mergingTranslations(from: view)
+        guard let merged = (translated ?? current).mergingHydrated(from: view) ?? translated
+        else { return }
         thread = merged
         marks = Self.marks(for: merged.messages, style: style, originals: originals)
     }
@@ -3209,6 +3245,26 @@ struct ThreadViewer: View {
         }
         // The cached copy still says `deferred`; this refetch replaces it with
         // `pending`, so a reopen in the next minute does not read stale.
+        await refreshTranslations()
+    }
+
+    /// MAIL MORE THAN A YEAR OLD arrives LITE: its text, without the HTML the
+    /// daemon did not keep. The reader shows the text at once and, being the
+    /// one party that knows the thread is on screen, asks the daemon to fetch
+    /// the HTML back from the mail provider, once per open, then refetches and
+    /// lays it over the text in place (`refreshTranslations`, which merges
+    /// both). Never from `ThreadPrefetch`: a warmed search result is not an
+    /// open, and each lite message is a provider fetch. A failed ask leaves
+    /// the text, and the next open asks again.
+    private func requestHydration() async {
+        guard messages.contains(where: { $0.lite == true }) else { return }
+        let epoch = store.epoch
+        do {
+            try await APIClient.shared.hydrateThread(threadId)
+        } catch {
+            return
+        }
+        guard store.isCurrent(epoch), !Task.isCancelled else { return }
         await refreshTranslations()
     }
 

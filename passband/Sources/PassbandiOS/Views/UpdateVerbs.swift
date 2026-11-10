@@ -74,9 +74,9 @@ struct UpdateVerbs {
                 remindAt: update.remind_at))
     }
 
-    /// `t` (registered in ActionLayer for the list context).
-    func tune() {
-        Actions.tune(sender: update.sender)
+    /// `t`: teach Passband, from this row's email.
+    func teach() {
+        Actions.teach(sender: update.sender, messageId: update.id)
     }
 
     /// `v`.
@@ -110,7 +110,7 @@ struct SwipeVerb: Identifiable {
 
 extension UpdateVerbs {
     /// THE SPAM PAGE SWAPS BOTH RAILS, because three of the four ordinary verbs
-    /// are meaningless on a row nothing triaged: tune argues with a verdict that
+    /// are meaningless on a row nothing triaged: teach argues with a verdict that
     /// was never reached, archive removes an INBOX label the message does not
     /// carry, and reply answers a machine. What is left is the one thing anybody
     /// opens this folder to do.
@@ -138,7 +138,7 @@ extension UpdateVerbs {
         let done = doneVerbs
         if isSpamPage { return done }
         return done + [
-            SwipeVerb(title: "Tune", symbol: "slider.horizontal.3", tint: Palette.accent, run: tune)
+            SwipeVerb(title: "Teach", symbol: "lightbulb", tint: Palette.accent, run: teach)
         ]
     }
 
@@ -195,8 +195,8 @@ struct UpdateContextMenu: ViewModifier {
                         systemImage: "bell")
                 }
                 Divider()
-                Button { verbs.tune() } label: {
-                    Label("Tune this sender", systemImage: "slider.horizontal.3")
+                Button { verbs.teach() } label: {
+                    Label("Teach Passband", systemImage: "lightbulb")
                 }
                 Button { verbs.fixTriage() } label: {
                     Label("Fix triage", systemImage: "wand.and.sparkles")
@@ -255,7 +255,7 @@ extension View {
     /// five-second undo behind it.
     func swipeVerbs(_ verbs: UpdateVerbs) -> some View {
         // No full swipe on a FINISHED row: with Done withheld, the leading
-        // verb there is Tune, and a habitual flick would open it.
+        // verb there is Teach, and a habitual flick would open it.
         swipeActions(edge: .trailing, allowsFullSwipe: !verbs.finished) {
             ForEach(verbs.trailingVerbs) { verb in
                 Button {

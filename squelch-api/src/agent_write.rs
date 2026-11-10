@@ -4,14 +4,16 @@
 //! WRAPPED, NOT HANDED OVER. The agent door never holds the Gmail write
 //! credential and never builds a message. It passes a composition to
 //! [`ApiAgentMailer`], which runs it through the SAME pipeline the owner's own
-//! send takes (`validate_send`, the outbound secret guard, `perform_send`),
-//! with three differences, all of them narrower:
+//! send takes (`validate_send`, `perform_send`), with three differences, all
+//! of them narrower:
 //!
 //! - the owner's [`AgentWriteAccess`] is read from the store on every call and
 //!   decides whether anything happens at all;
-//! - the guard cannot be overridden. A person may look at what the guard found
-//!   and send anyway; an agent may not, because the override is exactly the
-//!   decision a prompt-injected agent would be talked into making;
+//! - the outbound secret guard ([`crate::guard`]) runs, and cannot be
+//!   overridden. The owner's own sends are not scanned at all: they wrote it
+//!   and pressed send. An agent's send goes out under standing consent with no
+//!   human reading the body, so a prompt-injected agent mailing a key away is
+//!   exactly the send this door must refuse;
 //! - every ledger row is written by actor `agent`, not `client-api`, so the
 //!   audit page tells the owner which sends were not typed by them.
 //!
@@ -46,8 +48,7 @@ use squelch_core::store::{AgentDraftOutcome, DraftFields, NewAuditEntry, Store};
 
 use crate::error::ApiError;
 use crate::handlers::{
-    SendBody, SendGuard, SendOutcome, audit_action, composition_kinds, guard_verdict, no_store,
-    perform_send, store_call, validate_send,
+    SendBody, SendOutcome, audit_action, no_store, perform_send, store_call, validate_send,
 };
 use crate::state::ApiState;
 use crate::write::mime::{count_addrs, reply_subject};
@@ -273,10 +274,8 @@ fn validate_shape(compose: &AgentCompose) -> Result<(), AgentWriteError> {
 
 /// Everything of an agent's composition the outbound guard reads.
 ///
-/// MORE THAN THE BODY, which is all the owner's own send scans. The owner
-/// typed their subject and chose their recipients; an agent's are as much
-/// model output as its body, and for an agent the guard is the one check with
-/// no override, so a key moved into the subject line or a display name must
+/// MORE THAN THE BODY. An agent's subject and recipients are as much model
+/// output as its body, and the guard has no override here, so a key moved into the subject line or a display name must
 /// not walk past it. The body is scanned twice: as written, and with markdown
 /// emphasis marks removed, so `sk-abc**DEF**...` reads as the token it
 /// renders to.
@@ -459,11 +458,12 @@ impl AgentMailer for ApiAgentMailer {
                     store.account_email(account_id)?,
                     draft.created_at.timestamp(),
                     // A phone the pusher can route a draft to: untagged rows
-                    // are skipped by it, so they do not count as a phone.
+                    // are skipped by it, and a Mac is never sent one, so
+                    // neither counts as a phone.
                     store
                         .list_devices(account_id)?
                         .iter()
-                        .any(|d| d.tag.is_some()),
+                        .any(|d| d.tag.is_some() && d.platform != squelch_core::push::MAC_PLATFORM),
                 ))),
                 _ => Ok(None),
             }
@@ -582,8 +582,6 @@ impl AgentMailer for ApiAgentMailer {
             body_format: Some("markdown".into()),
             // The owner's standing consent is the setting checked above.
             confirm: true,
-            // NEVER for an agent. See the module docs.
-            override_guard: false,
             draft_id: None,
             include_tracker: None,
             attachment_ids: Vec::new(),
@@ -593,11 +591,10 @@ impl AgentMailer for ApiAgentMailer {
             audit_action(&self.state, "send", target, f.reason).await;
             return Err(AgentWriteError::Invalid(f.error.message));
         }
-        let kinds = composition_kinds(&guard_text(&to, &cc, &bcc, &subject, &body.body), &[]);
-        if guard_verdict(&self.state, "send", &kinds, false, target)
-            .await
-            .is_some()
-        {
+        // Kinds only, never the matched text (docs/SECURITY.md §5).
+        let kinds = crate::guard::scan_kinds(&guard_text(&to, &cc, &bcc, &subject, &body.body));
+        if !kinds.is_empty() {
+            audit_action(&self.state, "send", target, "blocked:guard").await;
             return Err(AgentWriteError::Blocked(format!(
                 "Passband's outbound guard blocked this message: it looks like it contains a \
                  secret ({}). An agent cannot override the guard. Tell the owner; they can \
@@ -606,7 +603,7 @@ impl AgentMailer for ApiAgentMailer {
             )));
         }
 
-        match perform_send(&self.state, &body, Vec::new(), SendGuard::Settled, None).await {
+        match perform_send(&self.state, &body, Vec::new(), None).await {
             Ok(SendOutcome::Sent { thread_id, .. }) => Ok(AgentSent { thread_id, to, cc }),
             // Unreachable: no group is ever set on an agent's send.
             Ok(SendOutcome::Sending { .. }) => Err(internal()),

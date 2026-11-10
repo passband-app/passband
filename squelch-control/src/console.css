@@ -333,6 +333,16 @@ html.is-loading #results { opacity: 0.6; }
 .console table.conv { margin: 0.4rem 0 0.4rem; }
 .console table.conv td.when { text-align: right; }
 .console table.conv th:not(:first-child) { text-align: right; }
+.console table.conv td.when .muted { margin-left: 0.35rem; font: 500 0.8rem/1 var(--mono); color: var(--faint); }
+.console table.conv .m { display: none; }
+/* RETENTION: the headline readouts sit inside the panel, under its head. */
+.console .rack .readouts { grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0 -1.25rem 0.5rem;
+  border-top: 0; border-bottom: 1px solid var(--hair); }
+.console .rack .readout .num { font-size: clamp(1.5rem, 2.6vw, 1.9rem); }
+.console table.cohorts { margin-top: 0.25rem; }
+.console table.cohorts th { white-space: nowrap; }
+.console table.cohorts td.when { width: 8.5rem; white-space: nowrap; }
+.console .rack > .foot { margin: 0.6rem 0 0.9rem; }
 /* THE FEED and THE LADDER: a dot in the stage's colour, what happened, when. */
 .console .feed { list-style: none; margin: 0.5rem 0 0.4rem; padding: 0; }
 .console .feed li { --c: var(--faintest); display: grid; grid-template-columns: 0.5rem minmax(0, 1fr) auto;
@@ -421,6 +431,13 @@ html.is-loading #results { opacity: 0.6; }
   .console td.when { margin: 0.3rem 0 0.55rem; white-space: normal; }
   .console td.act { text-align: left; white-space: normal; }
   .console .matrix td.tick { display: inline-block; width: auto; margin: 0.6rem 1.1rem 0 0; }
+  .console .rack .readouts { grid-template-columns: minmax(0, 1fr); margin: 0 -1rem 0.5rem; }
+  .console .rack .readout { border-left: 0; }
+  .console .rack .readout + .readout { border-top: 1px solid var(--hair); }
+  .console table.conv .m { display: inline; color: var(--faint); }
+  .console table.conv td.when { text-align: left; }
+  .console table.cohorts td.when { width: auto; }
+  .console table.conv td.when .muted { margin-left: 0; }
   .console .matrix td.tick span { display: inline; }
   body.console:not(.app) main { padding: 1.6rem 1.25rem 1.4rem; }
   .app .facts { grid-template-columns: minmax(0, 1fr); gap: 0.2rem; }

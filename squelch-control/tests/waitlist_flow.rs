@@ -64,13 +64,28 @@ struct Recorder {
     sends: Vec<(String, Value)>,
     /// When true, the provider answers 500 the way an outage does.
     fail: bool,
+    /// The `text` of every post to the operator's Slack webhook, which this
+    /// same mock serves at `/hook`.
+    alerts: Vec<String>,
 }
 
 type Shared = Arc<Mutex<Recorder>>;
 
-/// A mock Resend: the one route this crate speaks.
+/// A mock Resend: the one route this crate speaks. Plus `/hook`, standing in
+/// for the operator's Slack webhook.
 async fn spawn_resend(rec: Shared) -> String {
     let app = Router::new()
+        .route(
+            "/hook",
+            post(
+                |AxumState(rec): AxumState<Shared>, body: String| async move {
+                    let parsed: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                    let text = parsed["text"].as_str().unwrap_or_default().to_string();
+                    rec.lock().unwrap().alerts.push(text);
+                    StatusCode::OK
+                },
+            ),
+        )
         .route(
             "/emails",
             post(
@@ -198,7 +213,7 @@ impl Harness {
             profile_url: "http://127.0.0.1:1/profile".into(),
             userinfo_url: "http://127.0.0.1:1/userinfo".into(),
             microsoft: None,
-            alert_webhook_url: None,
+            alert_webhook_url: Some(format!("{resend_url}/hook")),
             posthog_url: None,
             // No agent door: `/agent/auth` is not mounted.
             workos: None,
@@ -365,6 +380,10 @@ impl Harness {
         self.rec.lock().unwrap().sends.clone()
     }
 
+    fn alerts(&self) -> Vec<String> {
+        self.rec.lock().unwrap().alerts.clone()
+    }
+
     fn fail_sends(&self, fail: bool) {
         self.rec.lock().unwrap().fail = fail;
     }
@@ -437,6 +456,67 @@ async fn a_submission_lands_on_the_list_once() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].email, APPLICANT, "stored normalized");
     assert_eq!(rows[0].status, "pending");
+}
+
+/// A new address pings the operator's Slack once, with the name and without
+/// the address. A resubmission pings nobody, so the public form cannot be used
+/// to spam the channel with one address.
+#[tokio::test]
+async fn a_new_submission_pings_slack_once_with_the_name_not_the_address() {
+    let h = Harness::new().await;
+
+    // Padded the way a careless paste is: Slack gets the tidied name.
+    let (status, _, body) = h.join_named("  Ada \t Lovelace ", APPLICANT).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Posted from a spawned task: wait for it rather than racing it.
+    let mut alerts = Vec::new();
+    for _ in 0..200 {
+        alerts = h.alerts();
+        if !alerts.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(alerts.len(), 1, "{alerts:?}");
+    let a = &alerts[0];
+    assert!(
+        a.starts_with(":wave: Ada Lovelace joined the waitlist."),
+        "{a}"
+    );
+    assert!(
+        a.contains("https://signup.passband.test/admin/users"),
+        "{a}"
+    );
+    assert!(
+        !a.contains('@') && !a.contains("example"),
+        "the address reached Slack: {a}"
+    );
+
+    // The same address again: a 200 as before, and silence.
+    let (status, _, _) = h.join("ADA@EXAMPLE.COM").await;
+    assert_eq!(status, StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(h.alerts().len(), 1, "{:?}", h.alerts());
+
+    // A refused submission pings nobody either.
+    let (status, _, _) = h.join("not an address").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(h.alerts().len(), 1);
+
+    // No name (an older cached form) still pings, as "Someone".
+    let (status, _, _) = h.join("grace@example.com").await;
+    assert_eq!(status, StatusCode::OK);
+    let mut alerts = Vec::new();
+    for _ in 0..200 {
+        alerts = h.alerts();
+        if alerts.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(alerts[1].starts_with(":wave: Someone joined"), "{alerts:?}");
 }
 
 /// The name the form asks for reaches the row, tidied, and reaches the board.

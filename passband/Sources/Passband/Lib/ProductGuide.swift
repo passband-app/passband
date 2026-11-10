@@ -86,7 +86,7 @@ enum ProductGuide {
             case .triage:
                 "how mail gets sorted, what done means, fixing a wrong call"
             case .senderRules:
-                "rules for a sender (allow, mute, filter) and the Rules pane in Settings"
+                "teaching Passband (t), sender rules (allow, mute, filter), rules about all mail, and the Rules pane in Settings"
             case .reminders:
                 "remind me later: parking an email until a time"
             case .search:
@@ -277,6 +277,7 @@ enum ProductGuide {
 
         The window:
         - Closing the window does not quit Passband. Notifications keep arriving, and clicking the Dock icon reopens it.
+        - Passband opens at login once it is in Applications, starting hidden, so notifications arrive after a restart. "Open at login" in Settings > General > Notifications turns that off.
         """
 
     private static let sitrep = """
@@ -296,7 +297,7 @@ enum ProductGuide {
 
         Keys on For your eyes (a row has to be highlighted first, with j / k or by hovering):
         - j / k or the arrows move. Enter opens the email.
-        - e or d marks it done. r replies. h sets a reminder. v fixes a wrong triage call. t writes a rule for that sender.
+        - e or d marks it done. r replies. h sets a reminder. v fixes a wrong triage call. t teaches Passband something, with that email as context.
         - c starts a new message, with or without a highlight.
         - The first time on a Mac the user leaves a For your eyes email with Esc without marking it done, the board rings that row for a few seconds with "Stays here until you mark it done." It shows once.
 
@@ -407,7 +408,7 @@ enum ProductGuide {
 
         Acting on the sender:
         - u: unsubscribe. Passband asks first, then usually does it in the background, and the reader closes. Progress shows at the bottom right of the Sitrep. If the sender's page needs a choice, a card there offers "Finish on their site". For spam or a sender Passband cannot verify, it opens the unsubscribe page in the browser instead. If the email has no unsubscribe link, the dialog offers "Block sender".
-        - t: write a rule for this sender. v: fix a wrong triage call. See sender_rules and triage.
+        - t: teach Passband something, with this email as context. v: fix a wrong triage call. See sender_rules and triage.
         - Clicking a sender's name or avatar (or a guest's name on a calendar event) opens their contact card: how much mail has gone each way, any rule that applies, recent threads, and buttons to email them or see their mail.
 
         How the thread looks:
@@ -462,7 +463,6 @@ enum ProductGuide {
         - ⌘Enter sends. Plain Enter is a new line.
         - Undo send: the mail is held for 5 seconds, with a chip at the bottom left. Clicking it brings the composer back with everything in it. u does the same, except inside an open email, where u means unsubscribe.
         - A reply sent from inside an email shows in the thread right away, slightly faded, while it is held and sending. It turns solid when the sent copy arrives, and disappears if the send is undone or fails (the composer comes back instead).
-        - If the outbound guard blocks a send because the body looks like it carries a secret, the composer reopens with a "send anyway" button (⌘⇧Enter). Any edit re-locks it.
 
         Send later:
         - The clock beside send, or ⌘⇧L, opens "Send later". Pick a preset or type a time ("friday", "in 3 hours", "the 24th"), then ⌘Enter schedules it.
@@ -500,7 +500,7 @@ enum ProductGuide {
 
         Keys on a highlighted row:
         - j / k move, Enter opens the email.
-        - e or d done, r reply, h remind, v fix triage, t write a rule for this sender.
+        - e or d done, r reply, h remind, v fix triage, t teach Passband.
         - f searches everything from this sender.
         - a opens "browse all": a side panel of mail ranked by importance, with a noise filter slider that + and - move.
         - T goes to Rules and A to the audit log, both in Settings. g goes to Auth.
@@ -532,7 +532,7 @@ enum ProductGuide {
         When triage gets one wrong:
         - Press v on the email (Sitrep, Emails list or the reader) for "Fix triage". Pick the correction: put it in For your eyes or take it out, add it to Reading or remove it, change its kind (bill, receipt, delivery, event, promotion and so on), or restrict or allow agent access to it. Typing filters the list and Enter applies.
         - A correction fixes that message and is kept to refine triage. It does not create a rule.
-        - To change how a sender is handled from now on, write a sender rule: t on one of their emails. See sender_rules.
+        - To change how mail is handled from now on, teach Passband: press t and say what you want, about one sender or about any kind of email. See sender_rules.
         - This assistant can explain why a specific email landed where it did.
 
         Other:
@@ -543,24 +543,30 @@ enum ProductGuide {
         """
 
     private static let senderRules = """
-        A sender rule tells triage what the user wants from a sender, in their own \
-        words.
+        Rules tell triage what the user wants, in their own words. The user does \
+        not pick who a rule is about: they teach Passband a sentence, and Passband \
+        works out whether it is about one sender or about all their mail.
 
-        What a rule is:
+        Teaching Passband (t):
+        - Press t in the reader, or on a highlighted row on the Sitrep or in the Emails list. The "teach Passband" card opens with one field: "what should Passband know?". The email's sender shows on the card as context, and Passband may suggest a sentence read from that email, always in the form "dont show me <kind of email> from <sender>" (for example "dont show me terms of service updates from Notion"); Tab takes the suggestion.
+        - Write anything: "always show me mail from my accountant", or "emails to Alex about grant funding for Northwind Bakery: never show me those". Passband decides whether it is about the sender of that email (it becomes a sender rule) or about all mail (it becomes a rule about all mail). A sentence that names an address or a domain can become a rule for that sender.
+        - Enter saves, Option+Enter adds a line, Esc cancels and keeps what was typed. Saving can take a few seconds while Passband reads the sentence.
+        - Afterwards the chip at the bottom left says what it became ("Applies to mail from ..." or "Applies to all your mail"). Press u, or click it, within 5 seconds to undo.
+        - From Settings > Rules (key {key:rules}, or T on the Emails page): n. The same card, with no email behind it.
+        - This assistant can write a sender rule when asked. It only adds rules; it never changes one the user wrote.
+
+        What a sender rule is:
         - A match: one address, or a whole domain.
         - A sentence saying what the user wants ("only order confirmations", "always show these").
         - A disposition, which Passband works out from the sentence unless it is set by hand: allow (always surface this sender), mute (keep them out of the Sitrep unless something escalates), or filter (the sentence decides what gets through).
 
-        Making one:
-        - From an email: press t in the reader, or on a highlighted row on the Sitrep or in the Emails list. The editor opens for that sender and may suggest a sentence; Tab takes the suggestion.
-        - From Settings > Rules (key {key:rules}, or T on the Emails page): n. Typing in the match field lists senders who have written to the user, by name or address; typing *@ lists whole domains instead. Arrows pick, Enter or Tab takes one, Esc hides the list.
-        - In the editor: Enter saves, Option+Enter adds a line, Esc cancels and keeps what was typed. "advanced" (⌘D) shows the match pattern and the disposition picker, and with it open Tab cycles the disposition.
-        - This assistant can write one when asked. It only adds rules; it never changes one the user wrote.
+        What a rule about all mail is:
+        - Just the sentence. Triage reads it on every email, so it can be about who an email is addressed to, what it is about, or any kind of mail.
 
         Managing them:
-        - In Settings > Rules: j / k move, e or Enter or a click edits, x deletes (with undo).
-        - On the iPhone, Rules is in Settings (the person icon at the top left of the Sitrep, then Settings at the bottom): + makes one, tap a rule to edit it, swipe it to the left to delete it (with undo). Swiping a mail row to the left and choosing Tune writes a rule for that sender.
-        - Rules are grouped by what they do (allow, filter, mute) and then by domain.
+        - In Settings > Rules: rules about all mail come first under "All mail", then sender rules grouped by what they do (allow, filter, mute) and then by domain. j / k move, e or Enter or a click edits, x deletes (with undo).
+        - Editing a sender rule opens its own editor: Enter saves, Esc cancels. "advanced" (⌘D) shows the match pattern and the disposition picker, and with it open Tab cycles the disposition. Editing a rule about all mail is one text field.
+        - On the iPhone, Rules is in Settings (the person icon at the top left of the Sitrep, then Settings at the bottom): + teaches Passband something, tap a rule to edit it, swipe it to the left to delete it (with undo). Swiping a mail row to the left and choosing Teach does what t does on the Mac.
         - A rule shapes mail from now on. It does not move mail already on the board. The exception is "Block sender", offered when unsubscribing from an email that has no unsubscribe link: it mutes that address and clears their open mail.
         - Rules live in Passband only. They never change anything in Gmail.
         """
@@ -593,7 +599,8 @@ enum ProductGuide {
         What it searches:
         - Subjects and bodies, by keyword and by meaning. Subject words count more, word forms match (password finds passwords), and a quoted phrase has to appear exactly.
         - Login codes and spam are not searchable.
-        - Search covers the mail Passband has indexed. Where the older-mail archive is on, that includes up to a year of mail from before Passband was connected, added gradually in the background and listed with finished mail, and the assistant can say how far back search currently reaches.
+        - Search covers the mail Passband has indexed. Where the older-mail archive is on, that includes up to five years of mail from before Passband was connected, added gradually in the background and listed with finished mail, and the assistant can say how far back search currently reaches.
+        - Mail more than a year old is found by its words, not by meaning, so search for words the email would contain (the sender, the company, the product). When one opens, its text shows first and the full formatted email appears a moment later, fetched from the mail provider; without a connection the text is what shows.
         - Results are one list ranked by the search order setting, with the matching words highlighted, on the Mac and the iPhone.
 
         Finding a sender:
@@ -617,7 +624,7 @@ enum ProductGuide {
         Deeper search:
         - When a search reads like a question ("where is the wifi password"), an agent reads the mail alongside the results and points at the answer with email cards and one line.
         - Settings > Assistant > Deeper search sets when it runs: Automatic, On request (a button to press) or Off. It has a model setting of its own.
-        - "Open in chat", or ⌘Enter, continues the same question in this assistant with room for follow-ups.
+        - Clicking anywhere on the deeper search box (except an email card, which opens that email), "Open in chat", or ⌘Enter opens the conversation full screen in this assistant, with room for follow-ups. Esc goes back to the search results.
         - On the iPhone it works the same way in the Search tab, above the results, with the same setting under Assistant on the Account page. The expand arrow on it opens the conversation in the agent chat once it has finished. The Ask the agent row above the results does what the Mac's Ask agent button does: it asks the agent, then opens the conversation in the chat once there is one. With Deeper search off it is turned off, as on the Mac.
         """
 
@@ -659,6 +666,7 @@ enum ProductGuide {
     private static let assistant = """
         This assistant:
         - ⌘K opens it from anywhere. Esc closes the bar, and the conversation stays until ⌘⇧K (new chat) or an account switch.
+        - ⌘K is its own chat, separate from search. A deeper search opened full screen is not what ⌘K shows next: ⌘K starts fresh, and that search's conversation comes back from search history.
         - If an email is open when the question is asked, an "in:" chip names it and "this email" means that one.
         - It can search and read mail, look up shipments, receipts, bills and calendar items, explain why an email was triaged the way it was, show emails as clickable cards, and answer questions about Passband itself.
         - It marks things done, writes sender rules and saves drafts without asking, because those stay inside Passband.
@@ -708,6 +716,7 @@ enum ProductGuide {
         - The account badge and the switcher show the photo from the mailbox's Google profile when Passband has been allowed to read it, and the account's initial otherwise. An account connected before this existed shows its initial until it is reconnected.
         - Notifications arrive for every account, not only the one on screen.
         - The first time a mailbox is connected on a Mac, while Passband is still working through its mail, a card over the Sitrep says so: how many emails of how many are in, roughly how long is left, and how many have been sorted, set aside as noise, or need the user's attention so far. The Sitrep fills in behind it. "Start now", Enter or Esc closes it early; it closes by itself when the mail is all in, and it is not shown again on that Mac. There is no guided tour.
+        - Beside that card, a second card offers the iPhone app, unless a phone is already connected to the mailbox: a QR code to scan with the iPhone's camera, which opens the TestFlight invite to the iPhone alpha, and "Copy link". "Start now", Enter or Esc closes both. If the cards close by themselves, a card at the bottom right of the window carries the same code on; after "Start now" nothing follows. On a window too narrow for two cards side by side, only the progress card shows and the bottom-right card offers the iPhone app when it closes. A mailbox that needs no catch-up card gets that bottom-right card a little after it is connected instead. Either way the iPhone app is offered once; the link is always in Settings > Accounts.
         - If the account's server is not answering at launch, Passband keeps retrying on its own. After a couple of seconds the loading screen offers "Try again now", "Switch to" each other account, and "Connect a different server". The Accounts menu and ⌘1 to ⌘9 switch from there too. Nothing is removed: the Connect screen's "Try saved connection again" goes back to the saved account.
         - If the Google sign-in expires, a banner on the Sitrep says Passband cannot read the mail. On a hosted account it has a Reconnect button.
 
@@ -716,6 +725,7 @@ enum ProductGuide {
         - Only urgent and deadline banners play a sound. It is chosen in Settings > General > Notifications, where "Test banner" posts one.
         - While Passband is the front window, banners go to Notification Center only. Clicking a banner opens that message.
         - Event reminders come a while before each event, with the tickets one click away when the mail holds them. They show even while Passband is the front window. "Event reminders" in Settings > General > Notifications turns them off for the mailbox.
+        - Morning brief: once a day, at 8am where the user is (or as soon after as the server is up, never past 11am), the iPhone gets one quiet notification with a short summary of what today holds: a bill due today or tomorrow, packages arriving today, and the first event left on today's calendar ("PG&E bill due tomorrow. A package arrives today. First up: Dentist at 9:30 AM."). It has no title and no date, and it never counts the mail waiting on the user. Days with nothing to say get no notification. Tapping it opens the board. It goes to the iPhone only, never the Mac. "Morning brief" in Settings > General > Notifications turns it off for the mailbox.
 
         Updates:
         - Passband checks for a new version every hour and downloads it in the background. It installs the next time Passband quits.

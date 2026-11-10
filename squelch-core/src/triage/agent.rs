@@ -14,10 +14,10 @@ use std::collections::{BTreeMap, BTreeSet};
 /// The version of the prompt with the `understanding` flag ON: the file plus
 /// [`UNDERSTANDING_SEGMENTS`]. A const because a const is what a stored string
 /// is compared against; what a run reports is [`prompt_version`].
-pub const PROMPT_VERSION: &str = "agent-triage-v23";
+pub const PROMPT_VERSION: &str = "agent-triage-v25";
 /// The version of the prompt with the flag OFF: the prompt file alone, byte
 /// for byte main's (a test pins that), so it keeps main's version string.
-pub const PROMPT_VERSION_BASE: &str = "agent-triage-v22";
+pub const PROMPT_VERSION_BASE: &str = "agent-triage-v24";
 
 /// The version a run reports, by the variant it ran: decisions and their
 /// diagnostics carry it, and an eval groups gold runs by it, so two different
@@ -1901,7 +1901,7 @@ mod tests {
                 PROMPT_VERSION_BASE,
                 PROMPT_VERSION
             ),
-            (2_000, "agent-triage-v22", "agent-triage-v23")
+            (2_000, "agent-triage-v24", "agent-triage-v25")
         );
     }
     /// OFF IS THE PROMPT AS IT WAS. With the `understanding` flag off, both

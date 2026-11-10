@@ -411,6 +411,12 @@ struct ClientMessage: Codable, Sendable, Identifiable, Hashable, SenderStringCon
     /// authentication). ABSENT on a daemon that predates it, which falls back to the
     /// local rule in `senderLine`.
     var sender_signals_warn: Bool?
+    /// A LITE ARCHIVE MESSAGE: more than a year old, stored with its text and
+    /// without its HTML, so `html` is nil because it was not kept. The reader
+    /// shows `content` and, once it is displaying the thread, asks
+    /// `APIClient.hydrateThread` for the HTML. ABSENT (nil) on everything
+    /// else and from an older daemon.
+    var lite: Bool?
 
     var attachmentList: [Attachment] { attachments ?? [] }
 
@@ -714,6 +720,30 @@ extension ClientThreadView {
         }
         return changed ? merged : nil
     }
+
+    /// THIS THREAD WITH THE HTML `fresh` HYDRATED laid over its lite messages,
+    /// and nothing else changed, for `mergingTranslations`' reason: the reader
+    /// is already showing the text, and the HTML arriving must not move it.
+    /// Only a message that was lite here and is no longer lite in `fresh`
+    /// changes. nil when none did.
+    func mergingHydrated(from fresh: ClientThreadView) -> ClientThreadView? {
+        var incoming: [Int: ClientMessage] = [:]
+        for m in fresh.messages where m.lite != true { incoming[m.id] = m }
+        var merged = self
+        var changed = false
+        for i in merged.messages.indices where merged.messages[i].lite == true {
+            guard let m = incoming[merged.messages[i].id] else { continue }
+            merged.messages[i].html = m.html
+            merged.messages[i].lite = nil
+            changed = true
+        }
+        return changed ? merged : nil
+    }
+
+    /// How many messages have HTML. Part of the reader's measuring-pass
+    /// identity: a lite message's HTML landing is a document nothing has
+    /// measured yet.
+    var htmlBodies: Int { messages.reduce(0) { $0 + (($1.html?.isEmpty ?? true) ? 0 : 1) } }
 
     /// Same messages, same order: the only case the poll may merge into. Any
     /// other difference is an arrival, which the in-place refresh owns.
@@ -1277,6 +1307,69 @@ struct CreatedRule: Codable, Sendable {
     /// pre-inference daemon answers with `rule_id` alone: absent means "the
     /// server did not say", never "no disposition".
     var disposition: Disposition?
+}
+
+/// `POST /client/teach`: one sentence the owner wrote, and the email it was
+/// written from when there is one. The daemon decides what it becomes.
+struct TeachBody: Codable, Sendable {
+    var text: String
+    var source_message_id: Int? = nil
+}
+
+/// What the sentence became. `kind` is "sender" (an ordinary sender rule,
+/// `id` is its rule id) or "general" (a rule triage reads on every email).
+/// Kept as a string so an unexpected kind still decodes; anything that is
+/// not "sender" is treated as general.
+struct TeachResult: Codable, Sendable, Equatable {
+    var kind: String
+    var id: Int
+    var text: String
+    var match_pattern: String?
+    var disposition: Disposition?
+    /// Sender patterns are unique, so a teach can overwrite the rule already
+    /// on that pattern. This is what it said before; nil when nothing was
+    /// replaced. The undo puts it back instead of deleting the rule.
+    var replaced: ReplacedRule? = nil
+    /// General rules the daemon merged to make room when the list was full.
+    /// Absent from older daemons and when nothing was merged.
+    var merged: [MergedRule]? = nil
+
+    var isSender: Bool { kind == "sender" }
+}
+
+struct MergedRule: Codable, Sendable, Equatable {
+    var id: Int
+    var text: String
+    var replaced_ids: [Int]
+    /// The owner's own rules this merge replaced, word for word, so undo can
+    /// put them back. Absent from a daemon that predates it.
+    var replaced: [MergedSource]? = nil
+}
+
+struct MergedSource: Codable, Sendable, Equatable {
+    var id: Int
+    var text: String
+}
+
+struct ReplacedRule: Codable, Sendable, Equatable {
+    var want_text: String
+    var disposition: Disposition
+}
+
+/// A rule about all mail, not one sender. `GET /client/general-rules`.
+struct GeneralRule: Codable, Sendable, Identifiable, Hashable {
+    var id: Int
+    var text: String
+    var created_at: String
+    var updated_at: String
+}
+
+struct GeneralRuleBody: Codable, Sendable {
+    var text: String
+}
+
+struct GeneralRuleSaved: Codable, Sendable {
+    var id: Int
 }
 
 // MARK: - unsubscribe
@@ -2375,6 +2468,23 @@ enum CalendarReminderRoute {
     static let settings = "/client/calendar/reminders/settings"
 }
 
+/// THE MORNING BRIEF'S ROUTES, for the app (APIClient) and the phone's
+/// notification extension.
+enum MorningBriefRoute {
+    /// Today's banner, built by the daemon when asked (`MorningBrief`).
+    static let brief = "/client/brief"
+    /// The owner's switch: `{"enabled": bool}` both ways, on by default.
+    static let settings = "/client/brief/settings"
+}
+
+/// `GET /client/brief`: the owner's local day and the banner's body, a few
+/// short sentences ("PG&E bill due tomorrow. A package arrives today.").
+/// `body` null on a day with nothing to say. There is no title.
+struct MorningBrief: Codable, Sendable, Hashable {
+    var day: String?
+    var body: String?
+}
+
 /// `{"enabled": bool}` on `CalendarReminderRoute.settings`.
 struct CalendarReminderSettings: Codable, Sendable, Hashable {
     var enabled: Bool
@@ -2788,7 +2898,6 @@ struct SendBody: Codable, Sendable {
     /// Absent = single-part plain text, exactly the pre-markdown wire.
     var body_format: String?
     var confirm: Bool
-    var override_guard: Bool?
     /// Server-side draft to delete once the send succeeds.
     var draft_id: Int?
     /// Mint a read-tracking pixel for this send. OMITTED when false, the same
@@ -3294,7 +3403,6 @@ struct ScheduledRequest: Codable, Sendable, Hashable {
     var body: String?
     var body_format: String?
     var confirm: Bool?
-    var override_guard: Bool?
     var include_tracker: Bool?
     var reply_all: Bool?
     var attachment_ids: [Int]?

@@ -234,7 +234,10 @@ enum Analytics {
         // is anywhere near this, at any level.
         "invite_sent", "invite_nudge_accepted", "invite_nudge_dismissed",
         // The TestFlight ask closing, with one bool: whether the link was
-        // copied. A QR scan leaves no trace, so this is a floor on uptake.
+        // copied, and `source`, which road put it up. A QR scan leaves no
+        // trace, so this is a floor on uptake. first_load_ended carries two
+        // more bools for the veil's own iPhone ad: `iphone` (drawn) and
+        // `copied`.
         "ios_nudge_closed",
         // The agent-door ad closing, with one bool: whether its button was
         // taken to Settings > Agents. Whether an agent then connects is not
@@ -257,7 +260,7 @@ enum Analytics {
     private static let allowedStrings: Set<String> =
         Set(MainView.allCases.map(\.rawValue)).union([
             // compose_send / compose_opened
-            "new", "reply", "forward", "sent", "guard_blocked", "forbidden", "failure",
+            "new", "reply", "forward", "sent", "forbidden", "failure",
             // compose_send's outcome for a mail put in the daemon's outbox.
             "scheduled",
             // undo_fired kinds: `String(describing:)` of every UndoKind case.
@@ -265,6 +268,7 @@ enum Analytics {
             // trips the debug assert.
             "archive", "done", "label", "ruleDelete", "groupDelete", "remind", "send",
             "draftDelete", "schedule", "scheduledCancel", "ghostDismiss", "skip",
+            // (and "teach", listed once below with the discovery skills)
             // calendar_ghost_marked states: the PATCH's own words, plus
             // "cleared" for the null that takes the mark off. "calendar" (the
             // page, and thread_opened's source from it) is a MainView.
@@ -305,6 +309,11 @@ enum Analytics {
             // makes the duplicate free, and naming it here is what keeps this
             // list readable as the vocabulary of THIS event.
             "rail", "settings", "nudge",
+            // ios_nudge_closed sources: which road put the iPhone card up.
+            // "nudge" (two days in) is above; "first_load" is the veil handing
+            // its QR row off, "onboarding" the card shortly after a first look
+            // that had no veil (TestFlightNudge).
+            "first_load", "onboarding",
             // renotify_* triggers: the daemon's closed Trigger set.
             "client_online", "meeting_end",
             // calendar_reminder_opened targets: what the tap showed.

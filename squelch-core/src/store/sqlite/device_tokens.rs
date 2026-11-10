@@ -705,6 +705,70 @@ impl SqliteStore {
         Ok(acted)
     }
 
+    /// Whether people come back, and on which app: the retention fact the
+    /// hosted control plane reads through `squelchd token activity`.
+    ///
+    /// The activation fact's bigger sibling, held to the same discipline:
+    /// TIMESTAMPS ONLY. Per platform, when one first paired, last connected
+    /// and last acted; no device name, no token id, no count. Two phones are
+    /// one `ios` line carrying the earlier pairing and the later stamps.
+    ///
+    /// `first_paired_at` IS [`SqliteStore::first_client_pairing_at`]'s answer,
+    /// called rather than re-derived, so `token first-paired` and `token
+    /// activity` cannot disagree about activation.
+    ///
+    /// REVOKED ROWS COUNT, for "last" as well as "first". A revoked token
+    /// cannot move its stamps any more, so the newest stamp it carries is a
+    /// true statement about when this person last used the app, and dropping
+    /// it would make "unpaired the old Mac" read as "stopped using Passband".
+    /// The console is excluded by name ([`CONSOLE_DEVICE_NAME`]) exactly as
+    /// the activation reader excludes it; it never sends the client header, so
+    /// it would carry no platform anyway, and the name rule says so twice.
+    ///
+    /// A token whose app never named itself (an app older than the client
+    /// header) counts toward `first_paired_at` and toward no platform. A
+    /// platform this build does not know is skipped, as in
+    /// [`SqliteStore::client_versions_seen`]. Folded in Rust over PARSED
+    /// timestamps, like every other time comparison in this module.
+    pub fn client_activity(&self, account_id: AccountId) -> Result<ClientActivity> {
+        let first_paired_at = self.first_client_pairing_at(account_id)?;
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT client_platform, created_at, client_seen_at, client_action_at
+             FROM device_tokens
+             WHERE account_id = ?1 AND name <> ?2 AND client_platform IS NOT NULL",
+        )?;
+        let rows = stmt
+            .query_map(params![account_id, CONSOLE_DEVICE_NAME], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    dt(r, 1)?,
+                    dt_opt(r, 2)?,
+                    dt_opt(r, 3)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let mut platforms = std::collections::BTreeMap::<ClientPlatform, PlatformActivity>::new();
+        for (platform, created_at, seen_at, acted_at) in rows {
+            let Some(platform) = ClientPlatform::parse(&platform) else {
+                continue;
+            };
+            let entry = platforms.entry(platform).or_insert(PlatformActivity {
+                first_paired_at: created_at,
+                last_seen_at: None,
+                last_action_at: None,
+            });
+            entry.first_paired_at = entry.first_paired_at.min(created_at);
+            entry.last_seen_at = entry.last_seen_at.max(seen_at);
+            entry.last_action_at = entry.last_action_at.max(acted_at);
+        }
+        Ok(ClientActivity {
+            first_paired_at,
+            platforms,
+        })
+    }
+
     // ---- pairing ---------------------------------------------------------
 
     /// Mint a pairing code for `account_id`, SUPERSEDING every code the account

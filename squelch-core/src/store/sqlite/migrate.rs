@@ -198,6 +198,9 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // The archive tier's marker. 0 on every pre-existing row, which is the
     // honest reading: nothing stored before the walk existed came from it.
     add_column_if_missing(conn, "messages", "is_archive", "INTEGER NOT NULL DEFAULT 0")?;
+    // The lite archive marker (schema.sql). 0 on every pre-existing row: rows
+    // already stored keep their HTML, and only the walk sets it.
+    add_column_if_missing(conn, "messages", "html_lite", "INTEGER NOT NULL DEFAULT 0")?;
     // The archive walk's forward edge. NULL on a cursor row written before it
     // existed, which the store reads as that row's `walked_to`.
     add_column_if_missing(conn, "archive_walk", "covered_to", "TEXT")?;
@@ -1034,6 +1037,10 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // See the function: Amazon's Shipped/Delivered decisions were always
     // stored, and only lacked a key to project on.
     project_amazon_boxes(conn);
+    // See the function: the same, for eBay purchases.
+    project_ebay_packages(conn);
+    // See the function: and for every other store, by order number.
+    project_order_fallbacks(conn);
     // See the function: a drop-off receipt's box is going away, not coming.
     drop_sent_packages(conn);
 
@@ -1944,6 +1951,60 @@ fn project_amazon_boxes_once(conn: &Connection) -> Result<usize> {
         AMAZON_BOXES_KEY,
         agent_deliveries::project_amazon_boxes,
     )
+}
+
+/// The `app_settings` key marking an account whose stored eBay decisions
+/// have been projected by [`project_ebay_packages`].
+pub(super) const EBAY_PACKAGES_KEY: &str = "ebay_packages_projected";
+
+/// ONE-TIME: put every eBay purchase the stored decisions already describe on
+/// the Shipments rail (`agent_deliveries::project_ebay_packages`). eBay's mail
+/// prints no tracking number, so before package keys its records projected
+/// nothing, from Order confirmed to PACKAGE DELIVERED.
+///
+/// Gated and failure-tolerant exactly as [`project_amazon_boxes`] is.
+fn project_ebay_packages(conn: &Connection) {
+    match once_per_account(
+        conn,
+        EBAY_PACKAGES_KEY,
+        agent_deliveries::project_ebay_packages,
+    ) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("squelch: migration projected {n} eBay package(s)"),
+        Err(error) => {
+            eprintln!("squelch: eBay package backfill failed ({error}); will retry next open");
+            if !conn.is_autocommit() {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+        }
+    }
+}
+
+/// The `app_settings` key marking an account whose stored trackless
+/// decisions have been projected by order ([`project_order_fallbacks`]).
+pub(super) const ORDER_FALLBACKS_KEY: &str = "order_fallbacks_projected";
+
+/// ONE-TIME: put every order the stored decisions describe without a carrier
+/// number or a store package id on the Shipments rail, keyed by sender and
+/// order number (`agent_deliveries::project_order_fallbacks`). Runs after the
+/// Amazon and eBay passes, so their packages exist to cover their orders.
+///
+/// Gated and failure-tolerant exactly as [`project_amazon_boxes`] is.
+fn project_order_fallbacks(conn: &Connection) {
+    match once_per_account(
+        conn,
+        ORDER_FALLBACKS_KEY,
+        agent_deliveries::project_order_fallbacks,
+    ) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("squelch: migration projected {n} order(s) without tracking"),
+        Err(error) => {
+            eprintln!("squelch: order backfill failed ({error}); will retry next open");
+            if !conn.is_autocommit() {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+        }
+    }
 }
 
 /// The `app_settings` key marking an account whose stored drop-off receipts

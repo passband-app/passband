@@ -47,7 +47,7 @@ use squelch_control::config::{
     WaitlistConfig,
 };
 use squelch_control::warden::HttpWarden;
-use squelch_control::{ControlState, activation, invites, router, seal};
+use squelch_control::{ControlState, activation, invites, retention, router, seal};
 use tower::ServiceExt as _;
 
 /// The throwaway Postgres schema every harness in this file is built on.
@@ -171,6 +171,12 @@ struct Recorder {
     /// tenant the poller must leave for the next pass.
     devices_paired: BTreeMap<String, Option<String>>,
     devices_unavailable: Vec<String>,
+    /// What `GET /v1/tenants/{label}/activity` answers, by label: a present
+    /// entry is a 200 with this as the body's `activity` (Null = a daemon too
+    /// old to have the command), an absent one is a 404. Every ask is
+    /// counted in `activity_asks`.
+    activity: BTreeMap<String, Value>,
+    activity_asks: Vec<String>,
     /// The `text` of every post to the operator's webhook, which this mock
     /// serves at `/hook` so every harness has alerts wired the way production
     /// does.
@@ -577,6 +583,22 @@ async fn spawn_warden(rec: Shared) -> String {
                         }
                         Some(_) => Json(json!({"status":"pending"})).into_response(),
                         None => json_status(StatusCode::NOT_FOUND, "unknown"),
+                    }
+                },
+            ),
+        )
+        .route(
+            "/v1/tenants/{label}/activity",
+            get(
+                |AxumState(rec): AxumState<Shared>,
+                 axum::extract::Path(label): axum::extract::Path<String>,
+                 headers: HeaderMap| async move {
+                    let mut r = rec.lock().unwrap();
+                    r.warden_bearers.push(bearer_of(&headers));
+                    r.activity_asks.push(label.clone());
+                    match r.activity.get(&label) {
+                        Some(a) => Json(json!({ "activity": a })).into_response(),
+                        None => json_status(StatusCode::NOT_FOUND, "not_found"),
                     }
                 },
             ),
@@ -2654,6 +2676,86 @@ async fn the_activation_poller_stamps_once_and_quiesces() {
     let after_third = read().await;
     assert_eq!(after_third[0].1.as_deref(), Some(ada_stamp.as_str()));
     assert!(after_third[1].1.is_some());
+}
+
+/// The retention poller end to end against the mock warden: a daemon that
+/// answers is recorded with its own dates, one too old to have the command is
+/// left NOT KNOWN, and both are left alone until the refresh interval passes.
+#[tokio::test]
+async fn the_retention_poller_records_activity_and_waits_out_the_interval() {
+    let h = Harness::new().await;
+    let now = chrono::Utc::now();
+    for (i, label) in ["ada", "bea"].iter().enumerate() {
+        let email = format!("{label}@example.com");
+        h.state.store().insert_tenant(label, &email).await.unwrap();
+        h.state
+            .store()
+            .record_signup(9100 + i as i64, &email, label, now)
+            .await
+            .unwrap();
+    }
+    {
+        let mut r = h.rec.lock().unwrap();
+        r.activity.insert(
+            "ada".into(),
+            json!({
+                "first_paired_at": "2026-08-20T09:30:00Z",
+                "platforms": {
+                    "ios": {"first_paired_at": "2026-08-21T10:00:00Z",
+                            "last_seen_at": "2026-08-25T09:00:00Z",
+                            "last_action_at": "2026-08-24T08:00:00Z"},
+                    "macos": {"first_paired_at": "2026-08-20T09:30:00Z",
+                              "last_seen_at": "2026-08-25T10:00:00Z",
+                              "last_action_at": null}
+                }
+            }),
+        );
+        r.activity.insert("bea".into(), Value::Null);
+    }
+    assert_eq!(retention::poll_activity(&h.state).await, 1);
+
+    let read = || async {
+        common::raw_client(&h.db_url)
+            .await
+            .query(
+                "SELECT tenant_label, last_seen_at, last_action_at, mac_paired_at,
+                        ios_paired_at, activity_read_at, activity_tried_at
+                   FROM users ORDER BY id",
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (0..7)
+                    .map(|i| r.get::<_, Option<String>>(i))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let same = |a: &Option<String>, b: &str| {
+        chrono::DateTime::parse_from_rfc3339(a.as_deref().expect("stamped")).unwrap()
+            == chrono::DateTime::parse_from_rfc3339(b).unwrap()
+    };
+    let rows = read().await;
+    let ada = &rows[0];
+    // The DAEMON's dates: newest seen and action across apps, each app's
+    // first pairing.
+    assert!(same(&ada[1], "2026-08-25T10:00:00Z"));
+    assert!(same(&ada[2], "2026-08-24T08:00:00Z"));
+    assert!(same(&ada[3], "2026-08-20T09:30:00Z"));
+    assert!(same(&ada[4], "2026-08-21T10:00:00Z"));
+    assert!(ada[5].is_some() && ada[6].is_some());
+    // bea's daemon predates the command: asked, and nothing known.
+    let bea = &rows[1];
+    assert_eq!(&bea[1..6], &[None, None, None, None, None]);
+    assert!(bea[6].is_some(), "the attempt is stamped");
+
+    // Next pass, inside the interval: nobody is asked again.
+    let asks = h.rec.lock().unwrap().activity_asks.len();
+    assert_eq!(retention::poll_activity(&h.state).await, 0);
+    assert_eq!(h.rec.lock().unwrap().activity_asks.len(), asks);
+    assert_eq!(read().await, rows);
 }
 
 // --- reconnect ---------------------------------------------------------------

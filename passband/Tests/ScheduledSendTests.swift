@@ -66,9 +66,6 @@ struct ScheduledSendTests {
     static func theVerbSaysWhatTheButtonDoes() {
         equal(ScheduleCopy.sendVerb(scheduled: false), "send", "no time: send")
         equal(ScheduleCopy.sendVerb(scheduled: true), "schedule", "a time: schedule")
-        equal(ScheduleCopy.overrideVerb(scheduled: false), "send anyway", "override, no time")
-        equal(
-            ScheduleCopy.overrideVerb(scheduled: true), "schedule anyway", "override, a time")
     }
 
     // MARK: - drafts
@@ -92,10 +89,10 @@ struct ScheduledSendTests {
     static func theScheduleBodyIsTheSendBodyPlusWhen() {
         var c = composer()
         c.sendAt = Date(timeIntervalSince1970: 1_800_000_000)
-        let send = json(SendBody(compose: c, override: false, draftId: nil))
+        let send = json(SendBody(compose: c, draftId: nil))
         let scheduled = json(
             ScheduleBody(
-                send: SendBody(compose: c, override: false, draftId: nil),
+                send: SendBody(compose: c, draftId: nil),
                 send_at: "2027-01-15T08:00:00Z"))
         equal(scheduled["send_at"] as? String, "2027-01-15T08:00:00Z", "send_at rides along")
         equal(scheduled["confirm"] as? Bool, true, "confirm: true, as a send")
@@ -113,25 +110,20 @@ struct ScheduledSendTests {
         equal(scheduled["subject"] as? String, "lunch", "subject")
         equal(scheduled["body_format"] as? String, "markdown", "markdown")
         equal(scheduled["attachment_ids"] as? [Int], [11, 12], "staged files, tray order")
-        equal(scheduled["override_guard"] as? Bool, false, "no override on a first try")
+        check(scheduled["override_guard"] == nil, "no override_guard: the field is gone")
         check(scheduled["include_tracker"] == nil, "an untracked send says nothing")
         check(scheduled["reply_all"] == nil, "a new message never widens")
-
-        let override = json(
-            ScheduleBody(
-                send: SendBody(compose: c, override: true, draftId: nil), send_at: "x"))
-        equal(override["override_guard"] as? Bool, true, "schedule anyway carries consent")
     }
 
     static func aScheduleNamesTheDraftItConsumes() {
         let body = json(
             ScheduleBody(
-                send: SendBody(compose: composer(), override: false, draftId: 42),
+                send: SendBody(compose: composer(), draftId: 42),
                 send_at: "2027-01-15T08:00:00Z"))
         equal(body["draft_id"] as? Int, 42, "draft_id is the one passed in")
         let none = json(
             ScheduleBody(
-                send: SendBody(compose: composer(), override: false, draftId: nil),
+                send: SendBody(compose: composer(), draftId: nil),
                 send_at: "2027-01-15T08:00:00Z"))
         check(none["draft_id"] == nil, "no draft, no key")
     }
@@ -140,6 +132,8 @@ struct ScheduledSendTests {
 
     /// A DELETE /client/scheduled/{id} answer, verbatim in shape: the files
     /// in UPLOAD order (12 before 11), the request in tray order (11, 12).
+    /// An older row's frozen request may still carry `override_guard`; it
+    /// decodes, and the key is dropped.
     static let cancelFixture = """
         {"status":"cancelled","id":9,
          "request":{"to":"ana@x.test","cc":"bo@x.test","bcc":"dana@x.test",
@@ -170,7 +164,6 @@ struct ScheduledSendTests {
         equal(state.attachments.map(\.filename), ["a.png", "b.pdf"], "with their names")
         equal(state.stagedAttachmentIds, [11, 12], "and every file is staged")
         equal(state.draftId, nil, "the consumed draft is not named again")
-        equal(state.guardKinds, [], "no verdict is carried over")
 
         // A reply that was still deriving its audience says so again.
         let reply = ScheduledRequest(reply_to_message_id: 5, body: "yes", reply_all: true)
@@ -179,7 +172,7 @@ struct ScheduledSendTests {
         equal(back.recipientsStated, false, "no cc key: the daemon derives again")
         equal(back.replyAll, true, "reply-all comes back")
         // And round-trips to the same wire it left as.
-        let wire = json(SendBody(compose: back, override: false, draftId: nil))
+        let wire = json(SendBody(compose: back, draftId: nil))
         check(wire["cc"] == nil, "and the resend still sends no cc")
         equal(wire["reply_all"] as? Bool, true, "and still widens")
     }
@@ -451,8 +444,7 @@ struct ScheduledSendTests {
     }
 
     static func aCancelsUndoRebuildsTheSchedule() {
-        // The DELETE's request, as the daemon returns it: override_guard and
-        // confirm STRIPPED.
+        // The DELETE's request, as the daemon returns it: confirm STRIPPED.
         let raw = """
             {"status":"cancelled","id":9,
              "request":{"reply_to_message_id":5,"cc":"","bcc":"dana@x.test",
@@ -473,7 +465,7 @@ struct ScheduledSendTests {
         equal(wire["body"] as? String, "yes", "body")
         equal(wire["body_format"] as? String, "markdown", "format")
         equal(wire["confirm"] as? Bool, true, "confirm is the client's to set")
-        check(wire["override_guard"] == nil, "never a carried-over override")
+        check(wire["override_guard"] == nil, "no override_guard on the wire")
         check(wire["draft_id"] == nil, "no draft")
         equal(wire["include_tracker"] as? Bool, true, "tracker")
         equal(wire["reply_all"] as? Bool, true, "reply all")
@@ -567,7 +559,7 @@ struct ScheduledSendTests {
         equal(fromGroup.groupMode, .individual, "the mode")
         equal(fromGroup.groupName, "Book club", "the name")
         equal(fromGroup.groupId, 42, "and the id on the wire")
-        let body = json(SendBody(compose: fromGroup, override: false, draftId: nil))
+        let body = json(SendBody(compose: fromGroup, draftId: nil))
         check(body["to"] == nil, "still no `to` when rescheduled")
         equal(body["group_id"] as? Int, 42, "the audience rides as group_id")
 

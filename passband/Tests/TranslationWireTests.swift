@@ -32,6 +32,7 @@ struct TranslationWireTests {
         thePollIsFastThenSlowThenStops()
         aStaleRefetchIsDropped()
         thePollMergesOnlyTranslations()
+        aHydratedLiteMessageTakesItsHTMLAndNothingElse()
         theStripCopyHasNoDashes()
         theLanguageConfigDecodes()
         aSparseLanguageConfigStillDecodes()
@@ -360,6 +361,36 @@ struct TranslationWireTests {
         expect(current.sameMessages(as: fresh), "fresh carries the same messages")
         expect(!current.sameMessages(as: arrival), "an arrival is not the same messages")
         expect(current.readyTranslations == 0 && merged.readyTranslations == 1, "ready count")
+    }
+
+    /// A LITE message (archive mail past a year, served as text) is laid over
+    /// with the HTML a hydrate fetched, in place, and nothing else moves. The
+    /// flag decodes, and is absent on everything else.
+    static func aHydratedLiteMessageTakesItsHTMLAndNothingElse() {
+        func view(_ messages: [String]) -> ClientThreadView? {
+            let json = #"{"thread_id":"t","subject":"Mooring","messages":["#
+                + messages.joined(separator: ",") + "]}"
+            return try? JSONDecoder().decode(ClientThreadView.self, from: Data(json.utf8))
+        }
+        let lite = #"{"id":7,"from_addr":"a@harbour.example","received_at":"2023-10-21T10:00:00Z","content":"Paid","lite":true}"#
+        let hydrated = #"{"id":7,"from_addr":"a@harbour.example","received_at":"2023-10-21T10:00:00Z","content":"Paid again","html":"<p>Paid</p>"}"#
+        let other = #"{"id":8,"from_addr":"b@harbour.example","received_at":"2023-10-22T10:00:00Z","content":"Thanks""#
+        guard
+            let current = view([lite, other + "}"]),
+            let fresh = view([hydrated, other + #","tier":"fyi"}"#]),
+            let still = view([lite, other + "}"])
+        else { return expect(false, "lite fixtures decode") }
+        expect(current.messages[0].lite == true, "lite decodes")
+        expect(current.messages[1].lite == nil, "and is absent elsewhere")
+        guard let merged = current.mergingHydrated(from: fresh) else {
+            return expect(false, "landed HTML is a change")
+        }
+        expect(merged.messages[0].html == "<p>Paid</p>", "the HTML is taken")
+        expect(merged.messages[0].lite == nil, "and it is no longer lite")
+        expect(merged.messages[0].content == "Paid", "nothing else on the message moves")
+        expect(merged.messages[1].tier == nil, "nor on the others")
+        expect(current.mergingHydrated(from: still) == nil, "still lite is no change")
+        expect(current.htmlBodies == 0 && merged.htmlBodies == 1, "the html count moves")
     }
 
     /// The strip's strings are views (not compiled here), so the house rule

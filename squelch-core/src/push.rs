@@ -16,7 +16,8 @@ use tokio::sync::{broadcast, watch};
 use crate::config::Config;
 use crate::error::{CoreError, Result};
 use crate::metrics::{ApnsPushOutcome, SyncMetrics};
-use crate::store::{Store, SyncState};
+use crate::release_feed::{self, Decision};
+use crate::store::{Device, Store, SyncState};
 use crate::types::{AccountId, Event};
 
 /// The pusher's cursor row in `sync_state`: `uidvalidity` unused, `last_uid`
@@ -49,6 +50,20 @@ const BACKOFF_CAP: Duration = Duration::from_secs(300);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(35);
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The Mac app's APNs topic, its bundle id. A Mac device row is pushed under
+/// this whatever `[pusher] topic` says: that setting names the PHONE app's
+/// topic, which a Mac token is not valid for.
+pub const MAC_TOPIC: &str = "app.passband.client";
+
+/// The `devices.platform` a Mac registers under.
+pub const MAC_PLATFORM: &str = "macos";
+
+/// How often the release feed is read ([`crate::release_feed`]). Hourly, as
+/// every Mac's Sparkle already reads it; the first read waits a few minutes
+/// so a daemon that restarts in a loop is not a loop of fetches.
+const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(3600);
+const RELEASE_FIRST_CHECK: Duration = Duration::from_secs(300);
+
 /// How the event id goes out. A bare int for an untagged device; otherwise
 /// `"<tag>:<id>"`, the tag being the opaque label the client registered with.
 ///
@@ -80,6 +95,23 @@ struct Route {
     tag: Option<String>,
     /// The device row's declared environment; `None` = the client never said.
     environment: Option<String>,
+    /// A Mac's token, pushed under [`MAC_TOPIC`]. Macs get release pings and
+    /// nothing else (see [`Route::of`]'s callers).
+    mac: bool,
+}
+
+impl Route {
+    fn of(d: Device) -> (Self, String) {
+        let mac = d.platform == MAC_PLATFORM;
+        (
+            Self {
+                tag: d.tag,
+                environment: d.environment,
+                mac,
+            },
+            d.token,
+        )
+    }
 }
 
 /// The complete wire body, and THE PRIVACY BOUNDARY: the content-bearing fields
@@ -98,8 +130,9 @@ pub struct PushRequest<'a> {
     pub environment: Option<&'a str>,
     /// Which of the relay's FIXED fallback lines the alert carries: absent for
     /// mail, `"draft"` for a [`DraftPing`], `"calendar"` for a
-    /// [`CalendarPing`], `"clear"` for a [`ClearPing`] (no line at all: a
-    /// silent push). A closed set the relay enforces;
+    /// [`CalendarPing`], `"brief"` for a [`BriefPing`], `"clear"` for a
+    /// [`ClearPing`] (no line at all: a silent push). A closed set the relay
+    /// enforces;
     /// it picks a line and can never carry one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<&'static str>,
@@ -191,6 +224,71 @@ impl ClearPing {
         format!("clear-{}", self.event_id)
     }
 }
+
+/// A new version of the Mac app is out ([`crate::release_feed`]). Not
+/// durable either, but not fire-and-forget: the version is recorded as
+/// announced only once some device took it, so a relay outage means the next
+/// hourly check tries again.
+///
+/// On the wire it is `"<tag>:release:macos:<version>"`. The version is public
+/// news, not mail. The collapse id has no tag in it ON PURPOSE: a Mac with
+/// two mailboxes hears from two daemons, and one shared collapse id folds
+/// those into one Notification Center entry (each still arrives as a banner).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleasePing {
+    pub version: String,
+}
+
+impl ReleasePing {
+    fn event_id(&self, tag: Option<&str>) -> Option<PushEventId> {
+        tag.map(|tag| PushEventId::Tagged(format!("{tag}:release:macos:{}", self.version)))
+    }
+
+    fn collapse_id(&self) -> String {
+        format!("release-macos-{}", self.version)
+    }
+}
+
+/// The owner's morning brief is ready (squelch-api's `morning_brief`): once a
+/// local day, around 08:00 in the owner's zone. Not durable, like
+/// [`DraftPing`]: a brief that cannot go out at 8 is not worth a buzz at noon,
+/// and the daemon's own day stamp, not this ping, is what stops a second one.
+///
+/// On the wire it is `"<tag>:brief:<YYYYMMDD>"`, the owner's local day. The
+/// relay sees no count, no bill and no event: the phone's extension fetches
+/// `GET /client/brief` from its own daemon. Untagged devices are skipped, and
+/// so is every device that is not an iPhone: the brief is the phone's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BriefPing {
+    pub day: chrono::NaiveDate,
+}
+
+impl BriefPing {
+    fn stamp(&self) -> String {
+        self.day.format("%Y%m%d").to_string()
+    }
+
+    fn event_id(&self, tag: Option<&str>) -> Option<PushEventId> {
+        tag.map(|tag| PushEventId::Tagged(format!("{tag}:brief:{}", self.stamp())))
+    }
+
+    /// The day AND the tag: two mailboxes on one phone each send a brief,
+    /// and with the day alone APNs would let the second silently replace the
+    /// first. Clamped to APNs' 64 bytes on a char boundary (a tag is a short
+    /// client-minted label, so this never bites in practice).
+    fn collapse_id(&self, tag: &str) -> String {
+        let id = format!("brief-{}-{tag}", self.stamp());
+        let mut end = id.len().min(MAX_COLLAPSE_ID);
+        while end > 0 && !id.is_char_boundary(end) {
+            end -= 1;
+        }
+        id[..end].to_string()
+    }
+}
+
+/// The platform an iPhone registers under (`devices.platform`). The morning
+/// brief goes to these rows only.
+pub const IOS_PLATFORM: &str = "ios";
 
 /// One token's outcome, as the relay reports it. `status` is the APNs HTTP
 /// status VERBATIM; `410` is data (delete the row), not an error. `reason` is
@@ -397,6 +495,12 @@ pub struct Pusher {
     /// Banners to take down; see [`ClearPing`]. `None` until
     /// [`Pusher::with_clear_pings`].
     clear_pings: Option<broadcast::Receiver<ClearPing>>,
+    /// Where to read the release feed ([`crate::release_feed::FEED_URL`]).
+    /// `None` reads nothing: a test pusher, unless it asks for one.
+    release_feed: Option<String>,
+    /// The morning brief; see [`BriefPing`]. `None` until
+    /// [`Pusher::with_brief_pings`].
+    brief_pings: Option<broadcast::Receiver<BriefPing>>,
 }
 
 impl Pusher {
@@ -433,6 +537,8 @@ impl Pusher {
             draft_pings: None,
             calendar_pings: None,
             clear_pings: None,
+            release_feed: Some(release_feed::FEED_URL.to_string()),
+            brief_pings: None,
         }))
     }
 
@@ -454,6 +560,8 @@ impl Pusher {
             draft_pings: None,
             calendar_pings: None,
             clear_pings: None,
+            release_feed: None,
+            brief_pings: None,
         }
     }
 
@@ -478,6 +586,19 @@ impl Pusher {
     /// Listen for banners to take down (see [`ClearPing`]).
     pub fn with_clear_pings(mut self, pings: broadcast::Receiver<ClearPing>) -> Self {
         self.clear_pings = Some(pings);
+        self
+    }
+
+    /// TEST HOOK: read the release feed from here (a mock server).
+    #[doc(hidden)]
+    pub fn with_release_feed(mut self, url: &str) -> Self {
+        self.release_feed = Some(url.to_string());
+        self
+    }
+
+    /// Listen for the morning brief (see [`BriefPing`]).
+    pub fn with_brief_pings(mut self, pings: broadcast::Receiver<BriefPing>) -> Self {
+        self.brief_pings = Some(pings);
         self
     }
 
@@ -541,19 +662,15 @@ impl Pusher {
             // The TAG and the ENVIRONMENT ride with each token: they decide which
             // payload and which APNs host the token's push goes out on, so they
             // cannot be dropped here the way the rest of the row is.
+            // MACS ARE LEFT OUT: a running Mac has its own banners off the
+            // event stream, and the Mac has no extension to fill a mail push
+            // in, so all one could show is the fixed fallback line.
             let mut devices: Vec<(Route, String)> = self
                 .store
                 .list_devices(self.account_id)?
                 .into_iter()
-                .map(|d| {
-                    (
-                        Route {
-                            tag: d.tag,
-                            environment: d.environment,
-                        },
-                        d.token,
-                    )
-                })
+                .map(Route::of)
+                .filter(|(r, _)| !r.mac)
                 .collect();
 
             // Nothing registered: an event nobody can receive is history, not
@@ -684,6 +801,51 @@ impl Pusher {
         .await;
     }
 
+    /// Push one [`BriefPing`] to every tagged IPHONE, ONCE, best effort as
+    /// [`Self::push_draft`] is. One send per tag, so each mailbox's banner
+    /// has a collapse id of its own ([`BriefPing::collapse_id`]).
+    async fn push_brief(&self, ping: BriefPing) {
+        let devices: Vec<(Route, String)> = match self.store.list_devices(self.account_id) {
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|d| d.tag.is_some() && d.platform == IOS_PLATFORM)
+                .map(Route::of)
+                .collect(),
+            Err(e) => {
+                eprintln!("squelch: APNs pusher could not list devices for the morning brief: {e}");
+                return;
+            }
+        };
+        let mut tags: Vec<String> = Vec::new();
+        for (route, _) in &devices {
+            if let Some(tag) = &route.tag
+                && !tags.contains(tag)
+            {
+                tags.push(tag.clone());
+            }
+        }
+        for tag in tags {
+            let group: Vec<(Route, String)> = devices
+                .iter()
+                .filter(|(r, _)| r.tag.as_deref() == Some(tag.as_str()))
+                .cloned()
+                .collect();
+            let outcome = self
+                .fan_out(&group, ping.collapse_id(&tag), Some("brief"), |tag| {
+                    ping.event_id(tag)
+                })
+                .await;
+            for token in &outcome.dead {
+                if let Err(e) = self.store.delete_device_by_token(self.account_id, token) {
+                    eprintln!("squelch: APNs pusher could not drop a device: {e}");
+                }
+            }
+            if outcome.relay_failed || outcome.nothing_landed() {
+                eprintln!("squelch: the morning brief reached no device; not retried");
+            }
+        }
+    }
+
     /// The non-durable push every ping makes: every TAGGED device, once, the
     /// relay's `kind` line, a failure logged and dropped.
     async fn push_once(
@@ -693,19 +855,13 @@ impl Pusher {
         what: &str,
         id_for: impl Fn(Option<&str>) -> Option<PushEventId>,
     ) {
+        // Phones only, for the reason `drain` leaves Macs out.
         let devices: Vec<(Route, String)> = match self.store.list_devices(self.account_id) {
             Ok(rows) => rows
                 .into_iter()
                 .filter(|d| d.tag.is_some())
-                .map(|d| {
-                    (
-                        Route {
-                            tag: d.tag,
-                            environment: d.environment,
-                        },
-                        d.token,
-                    )
-                })
+                .map(Route::of)
+                .filter(|(r, _)| !r.mac)
                 .collect(),
             Err(e) => {
                 eprintln!("squelch: APNs pusher could not list devices for {what}: {e}");
@@ -746,11 +902,16 @@ impl Pusher {
             // and with neither the field is omitted for the relay's default.
             let environment = route.environment.as_deref().or(self.environment.as_deref());
             for chunk in tokens.chunks(MAX_TOKENS_PER_REQUEST) {
+                let topic = if route.mac {
+                    Some(MAC_TOPIC)
+                } else {
+                    self.topic.as_deref()
+                };
                 let body = PushRequest {
                     device_tokens: chunk,
                     event_id: event_id.clone(),
                     collapse_id: Some(collapse.clone()),
-                    topic: self.topic.as_deref(),
+                    topic,
                     environment,
                     kind,
                 };
@@ -821,6 +982,135 @@ impl Pusher {
         outcome
     }
 
+    /// Read the release feed and push the newest Mac release to this
+    /// account's Macs when [`release_feed::decide`] says so, once. Phones are
+    /// never told. Every failure is logged and left for the next hourly check.
+    pub async fn check_release(&self) {
+        let Some(url) = self.release_feed.as_deref() else {
+            return;
+        };
+        let Some(feed) = self.fetch_feed(url).await else {
+            return;
+        };
+        let releases = release_feed::releases(&feed);
+        if releases.is_empty() {
+            eprintln!("squelch: release feed listed no release; nothing to announce");
+            return;
+        }
+        let announced = match self
+            .store
+            .get_app_setting(self.account_id, release_feed::ANNOUNCED_KEY)
+        {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("squelch: release check could not read its record: {e}");
+                return;
+            }
+        };
+        let seen = match self.store.client_versions_seen(self.account_id) {
+            Ok(seen) => seen,
+            Err(e) => {
+                eprintln!("squelch: release check could not read client versions: {e}");
+                return;
+            }
+        };
+        let version = match release_feed::decide(
+            &releases,
+            chrono::Utc::now(),
+            &seen,
+            announced.as_deref(),
+        ) {
+            Decision::Wait => return,
+            Decision::Record(version) => return self.mark_announced(&version),
+            Decision::Announce(version) => version,
+        };
+        let devices: Vec<(Route, String)> = match self.store.list_devices(self.account_id) {
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|d| d.tag.is_some())
+                .map(Route::of)
+                .filter(|(r, _)| r.mac)
+                .collect(),
+            Err(e) => {
+                eprintln!("squelch: release check could not list devices: {e}");
+                return;
+            }
+        };
+        if devices.is_empty() {
+            return self.mark_announced(&version);
+        }
+        let ping = ReleasePing {
+            version: version.clone(),
+        };
+        let outcome = self
+            .fan_out(&devices, ping.collapse_id(), Some("release"), |tag| {
+                ping.event_id(tag)
+            })
+            .await;
+        for token in &outcome.dead {
+            if let Err(e) = self.store.delete_device_by_token(self.account_id, token) {
+                eprintln!("squelch: APNs pusher could not drop a device: {e}");
+            }
+        }
+        if outcome.delivered == 0 && (outcome.relay_failed || outcome.failed > 0) {
+            eprintln!("squelch: release {version} reached no Mac; trying again next check");
+            return;
+        }
+        eprintln!(
+            "squelch: announced release {version} to {} Mac(s)",
+            outcome.delivered
+        );
+        self.mark_announced(&version);
+    }
+
+    fn mark_announced(&self, version: &str) {
+        if let Err(e) =
+            self.store
+                .set_app_setting(self.account_id, release_feed::ANNOUNCED_KEY, version)
+        {
+            eprintln!("squelch: release check could not record {version}: {e}");
+        }
+    }
+
+    /// GET the feed, bounded. No bearer rides this client's requests unless
+    /// one is added, and none is: the feed is public.
+    async fn fetch_feed(&self, url: &str) -> Option<String> {
+        // Its own short timeout: this runs in the push loop, ahead of mail.
+        let Ok(resp) = self
+            .http
+            .get(url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+        else {
+            eprintln!("squelch: release feed unreachable");
+            return None;
+        };
+        if !resp.status().is_success() {
+            eprintln!(
+                "squelch: release feed answered HTTP {}",
+                resp.status().as_u16()
+            );
+            return None;
+        }
+        if resp
+            .content_length()
+            .is_some_and(|n| n as usize > release_feed::MAX_FEED_BYTES)
+        {
+            eprintln!("squelch: release feed is too large; ignored");
+            return None;
+        }
+        let Ok(bytes) = resp.bytes().await else {
+            eprintln!("squelch: release feed body unreadable");
+            return None;
+        };
+        if bytes.len() > release_feed::MAX_FEED_BYTES {
+            eprintln!("squelch: release feed is too large; ignored");
+            return None;
+        }
+        String::from_utf8(bytes.to_vec()).ok()
+    }
+
     /// Run until shutdown, waking on the events broadcast, a coarse
     /// [`IDLE_INTERVAL`] tick, or the shutdown watch. After a relay failure only
     /// shutdown may cut the backoff short — a wake must not turn a dead relay
@@ -833,10 +1123,19 @@ impl Pusher {
         let mut pings = self.draft_pings.take();
         let mut reminders = self.calendar_pings.take();
         let mut clears = self.clear_pings.take();
+        let mut briefs = self.brief_pings.take();
         let mut backoff: Option<Duration> = None;
+        let mut next_release_check = tokio::time::Instant::now() + RELEASE_FIRST_CHECK;
         loop {
             if *shutdown.borrow() {
                 return Ok(());
+            }
+            // Checked on the loop's own wakes (at least once a minute idle,
+            // once per backoff step otherwise), which is plenty for an hourly
+            // job and needs no arm of its own in either select.
+            if tokio::time::Instant::now() >= next_release_check {
+                next_release_check = tokio::time::Instant::now() + RELEASE_CHECK_INTERVAL;
+                self.check_release().await;
             }
             // Drain FIRST: a daemon that restarts with a stale cursor catches up
             // immediately instead of waiting out an idle interval.
@@ -870,6 +1169,9 @@ impl Pusher {
                             Some(ping) = next_ping(&mut clears) => {
                                 if let Some(ping) = ping { self.push_clear(ping).await; }
                             }
+                            Some(ping) = next_ping(&mut briefs) => {
+                                if let Some(ping) = ping { self.push_brief(ping).await; }
+                            }
                             _ = shutdown.changed() => {
                                 if *shutdown.borrow() { return Ok(()); }
                             }
@@ -895,6 +1197,9 @@ impl Pusher {
                         Some(ping) = next_ping(&mut clears) => {
                             if let Some(ping) = ping { self.push_clear(ping).await; }
                         }
+                        Some(ping) = next_ping(&mut briefs) => {
+                            if let Some(ping) = ping { self.push_brief(ping).await; }
+                        }
                         _ = shutdown.changed() => {
                             if *shutdown.borrow() { return Ok(()); }
                         }
@@ -905,7 +1210,7 @@ impl Pusher {
     }
 }
 
-/// The next ping (a draft, a calendar reminder or a clear): `Some(Some(p))` for a
+/// The next ping (a draft, a calendar reminder, a clear or a brief): `Some(Some(p))` for a
 /// ping, `Some(None)` when some were missed (lagged: dropped, they are not
 /// durable), and pending forever once there is no channel, so a `select!` arm
 /// on it simply never fires.
@@ -1077,6 +1382,7 @@ mod tests {
         Route {
             tag: tag.map(str::to_string),
             environment: environment.map(str::to_string),
+            mac: false,
         }
     }
 

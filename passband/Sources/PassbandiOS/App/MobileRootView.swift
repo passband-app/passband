@@ -385,11 +385,19 @@ private struct MobileShell: View {
                 // without the first a half-written rule is lost to a tap off
                 // the card, and without the second a request swapped under an
                 // open card inherits the last one's fields.
-                RuleEditor(
-                    request: request,
-                    draft: request.draftKey.flatMap { store.ruleDrafts[$0] }
-                ) { store.closeRuleEditor() }
-                .id(request.id)
+                if request.teach || request.general != nil {
+                    TeachCard(
+                        request: request,
+                        draft: request.draftKey.flatMap { store.ruleDrafts[$0] }
+                    ) { store.closeRuleEditor() }
+                    .id(request.id)
+                } else {
+                    RuleEditor(
+                        request: request,
+                        draft: request.draftKey.flatMap { store.ruleDrafts[$0] }
+                    ) { store.closeRuleEditor() }
+                    .id(request.id)
+                }
             }
         }
         // The group editor, off the same `store.groupEditor` the Mac's action

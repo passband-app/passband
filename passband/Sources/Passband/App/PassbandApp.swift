@@ -59,11 +59,28 @@ struct PassbandApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// A hidden login launch owes the boot screen event to whenever the
+    /// person first brings Passband forward.
+    private var screenOwed = false
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // FIRST, before anything can run the event loop: the launch event is
+        // only readable here (nil in willFinishLaunching, gone one hop later).
+        LoginItem.shared.noteLaunchEvent()
         NSApp.setActivationPolicy(.regular)
-        // A staged page is for looking at, launched behind whatever the
-        // person is typing into: taking focus would hand it their keys.
-        if !FixtureMode.stagesUsage { NSApp.activate(ignoringOtherApps: true) }
+        // A login launch stays out of the way: hidden, not in front. The Dock
+        // icon, a banner tap or ⌘Tab brings the window back. Hidden now and
+        // again after the first pass of the run loop, in case the SwiftUI
+        // window is ordered in after this.
+        let atLogin = LoginItem.shared.launchedAtLogin
+        if atLogin {
+            NSApp.hide(nil)
+            DispatchQueue.main.async { NSApp.hide(nil) }
+        } else if !FixtureMode.stagesUsage {
+            // A staged page is for looking at, launched behind whatever the
+            // person is typing into: taking focus would hand it their keys.
+            NSApp.activate(ignoringOtherApps: true)
+        }
         // A staged page at a given window width (`--fixture-usage-width=980`,
         // or `min` for the narrowest the window allows), for checking how it
         // wraps without anyone dragging a corner. The window's frame autosave
@@ -82,6 +99,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // was not running is delivered the moment a delegate exists, and a
         // center without one drops it.
         Notifier.shared.install()
+        // The release push token, for a build that carries the profile.
+        MacPush.shared.start()
+        // On by default, once per install; see LoginItem.
+        LoginItem.shared.adoptDefault()
         // Look at the floating code panel without waiting for a login code:
         // same posture as PASSBAND_FIRST_LOAD, a launch environment only.
         if let code = ProcessInfo.processInfo.environment["PASSBAND_PREVIEW_LOGIN_CODE"] {
@@ -98,8 +119,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Analytics.start()
         SessionReplay.shared.start()
         // The boot view never passes through route(to:), so its screen event
-        // is recorded here or not at all.
-        Analytics.screen(AppStore.shared.activeView.rawValue)
+        // is recorded here, or for a hidden login launch, on the first
+        // activation (nobody is looking at it until then).
+        if atLogin {
+            screenOwed = true
+        } else {
+            Analytics.screen(AppStore.shared.activeView.rawValue)
+        }
         AppStore.shared.identifyPerson()
     }
 
@@ -107,9 +133,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// a thread style changed in Settings or a second mailbox added last week
     /// should describe the install by the next session, not the next update.
     func applicationDidBecomeActive(_ notification: Notification) {
+        // Back from System Settings, where the login item may have changed.
+        LoginItem.shared.refresh()
+        if screenOwed {
+            screenOwed = false
+            Analytics.screen(AppStore.shared.activeView.rawValue)
+        }
         AppStore.shared.identifyPerson()
         AppStore.shared.attentionResume()
+        MacPush.shared.start()
     }
+
+    func application(_ application: NSApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        Task { @MainActor in await MacPush.shared.received(deviceToken) }
+    }
+
+    /// Refused a token (no entitlement, no network): nothing to undo. The
+    /// next activation past the throttle asks again.
+    func application(_ application: NSApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {}
 
     /// Another app came forward. An email left open behind it is not being
     /// read, and the dwell clock must not go on counting it. The reader pauses
@@ -345,7 +386,7 @@ struct PassbandCommands: Commands {
         }
 
         CommandMenu("Inbox") {
-            Button("Ask Your Inbox…") { store.askBarOpen = true }
+            Button("Ask Your Inbox…") { store.openAskBar() }
                 .keyboardShortcut("k", modifiers: [.command])
                 .disabled(blocked)
             Button("New Ask Chat") { store.newAskChat() }

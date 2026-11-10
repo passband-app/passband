@@ -233,8 +233,7 @@ actor APIClient {
             if let err = obj?["error"] as? String {
                 message = err
             }
-            let guards = kind == .guardBlocked ? parseGuardKinds(message) : nil
-            throw APIError(kind, http.statusCode, message, guardKinds: guards, code: obj?["code"] as? String)
+            throw APIError(kind, http.statusCode, message, code: obj?["code"] as? String)
         }
         return (data, http)
     }
@@ -524,6 +523,18 @@ actor APIClient {
         let escaped =
             threadId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? threadId
         try await postNoContent("/client/thread/\(escaped)/translate")
+    }
+
+    /// Ask the daemon to fetch back the HTML of this thread's LITE messages
+    /// (archive mail more than a year old, stored as text; `ClientMessage.lite`).
+    /// Called by the reader DISPLAYING the thread, and by nothing else, for
+    /// `translateThread`'s reason: the prefetch reads threads nobody opened,
+    /// and each lite message is a fetch from the mail provider. The reader
+    /// refetches the thread afterwards to pick the HTML up.
+    func hydrateThread(_ threadId: String) async throws {
+        let escaped =
+            threadId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? threadId
+        try await postNoContent("/client/thread/\(escaped)/hydrate")
     }
 
     /// Whether this daemon can share invites, and what the mail could say.
@@ -925,10 +936,13 @@ actor APIClient {
 
     /// A small model's guess at the rule the owner might write about `sender`,
     /// or nil. Only ever shown as a placeholder: the owner takes it with tab.
-    /// A daemon too old for the route 404s, which the caller reads as none.
-    func suggestRule(sender: String) async throws -> String? {
+    /// With `messageId` it is read from that email and is always "dont show me
+    /// <kind> from <sender>". A daemon too old for the route 404s, which the
+    /// caller reads as none.
+    func suggestRule(sender: String, messageId: Int? = nil) async throws -> String? {
         let answer: RuleSuggestion = try await get(
-            "/client/rules/suggest", query: ["sender": sender])
+            "/client/rules/suggest",
+            query: ["sender": sender, "message_id": messageId.map(String.init)])
         return answer.suggestion
     }
 
@@ -962,6 +976,36 @@ actor APIClient {
     }
 
     func deleteRule(_ id: Int) async throws { try await deleteNoContent("/client/rules/\(id)") }
+
+    // MARK: - teaching
+
+    /// One sentence, read by a small model that decides whether it is about a
+    /// sender or about all mail. The model can take ~12s, so this waits longer
+    /// than the usual 15s idle. A daemon too old for the route answers 404.
+    func teach(_ body: TeachBody) async throws -> TeachResult {
+        try await post("/client/teach", body: body, timeout: 45)
+    }
+
+    /// A daemon too old for the route answers 404; the Rules page reads that
+    /// as "no general section".
+    func listGeneralRules() async throws -> [GeneralRule] {
+        try await get("/client/general-rules")
+    }
+
+    /// Saved verbatim, no model. The undo of a delete uses it.
+    @discardableResult
+    func createGeneralRule(text: String) async throws -> GeneralRuleSaved {
+        try await post("/client/general-rules", body: GeneralRuleBody(text: text))
+    }
+
+    @discardableResult
+    func updateGeneralRule(_ id: Int, text: String) async throws -> GeneralRuleSaved {
+        try await put("/client/general-rules/\(id)", body: GeneralRuleBody(text: text))
+    }
+
+    func deleteGeneralRule(_ id: Int) async throws {
+        try await deleteNoContent("/client/general-rules/\(id)")
+    }
 
     // MARK: - unsubscribe
 
@@ -1165,15 +1209,13 @@ actor APIClient {
             body: LabelBody(message_id: messageId, add: add, remove: remove, confirm: true))
     }
 
-    /// Send. Two-phase by design: call without `overrideGuard` for the verdict
-    /// (a guarded body yields a 422 with `.guardKinds`), then with it after
-    /// explicit consent. A nil `subject` on a reply is omitted from the JSON, so
-    /// the daemon derives `Re: <parent subject>`; pass "" only to mean it.
+    /// Send. A nil `subject` on a reply is omitted from the JSON, so the
+    /// daemon derives `Re: <parent subject>`; pass "" only to mean it.
     @discardableResult
     func actionSend(
         body: String, replyToMessageId: Int? = nil, to: String? = nil, cc: String? = nil,
         bcc: String? = nil, groupId: Int? = nil, subject: String? = nil,
-        overrideGuard: Bool = false, draftId: Int? = nil, includeTracker: Bool = false,
+        draftId: Int? = nil, includeTracker: Bool = false,
         replyAll: Bool = false, forwardOfMessageId: Int? = nil, attachmentIds: [Int] = [],
         attachmentBytes: Int = 0
     ) async throws -> SendResult {
@@ -1198,9 +1240,9 @@ actor APIClient {
                 group_id: groupId,
                 subject: subject, body: body,
                 // Both composers write markdown; the daemon renders the HTML
-                // half from this same source after the guard has scanned it.
+                // half from this same source.
                 body_format: "markdown",
-                confirm: true, override_guard: overrideGuard, draft_id: draftId,
+                confirm: true, draft_id: draftId,
                 // Omitted rather than `false`, like `subject`: an untracked send
                 // says nothing about tracking at all.
                 include_tracker: includeTracker ? true : nil,
@@ -1226,9 +1268,9 @@ actor APIClient {
     /// CLIENT-side while the daemon finished would be retried, and the
     /// recipient would get it twice.
     ///
-    /// A schedule gets the same budget. It sends nothing, but a forward is
-    /// guard-scanned by fetching the original from Gmail, and a tray full of
-    /// files is read back and scanned too, all before the 201.
+    /// A schedule gets the same budget. It sends nothing, but a forward's
+    /// original is fetched from Gmail, and a tray full of files is read back
+    /// and checked too, all before the 201.
     private static func sendTimeout(_ body: SendBody, _ attachmentBytes: Int) -> TimeInterval {
         body.forward_of_message_id == nil && (body.attachment_ids ?? []).isEmpty
             ? Self.requestTimeout
@@ -1239,10 +1281,8 @@ actor APIClient {
 
     /// Put a mail in the daemon's outbox: the send body a send would carry,
     /// plus when. Everything a send checks before Gmail (validation, the
-    /// files, the outbound guard, the write credential) is checked NOW, while
-    /// the sender is here to answer: a 422 carries `.guardKinds` exactly as a
-    /// send's does, and a resend with `override_guard` goes through. The
-    /// draft named by `draft_id` is consumed by this call.
+    /// files, the write credential) is checked NOW, while the sender is here
+    /// to answer. The draft named by `draft_id` is consumed by this call.
     func scheduleSend(_ body: SendBody, at sendAt: Date, attachmentBytes: Int = 0) async throws
         -> ScheduledCreated
     {
@@ -1381,6 +1421,18 @@ actor APIClient {
     /// or nothing at all) a 2xx means it now holds `enabled`.
     func setCalendarReminderSettings(enabled: Bool) async throws {
         try await putNoContent(CalendarReminderRoute.settings, body: CalendarReminderSettings(enabled: enabled))
+    }
+
+    // MARK: - the morning brief
+
+    /// The owner's switch. A daemon older than the brief answers 404, which
+    /// the card reads as "not offered here".
+    func getMorningBriefSettings() async throws -> CalendarReminderSettings {
+        try await get(MorningBriefRoute.settings)
+    }
+
+    func setMorningBriefSettings(enabled: Bool) async throws {
+        try await putNoContent(MorningBriefRoute.settings, body: CalendarReminderSettings(enabled: enabled))
     }
 
     // MARK: - translation languages

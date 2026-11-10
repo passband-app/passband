@@ -29,9 +29,9 @@ use crate::triage::rule_suggest::SmartBlock;
 use crate::triage::{CalendarInfo, CarrierTrack, DeadlineHit, ReceiptInfo, ShipmentInfo};
 use crate::types::{
     AccountId, AttachmentInfo, AttentionStatus, AuditEntry, Banking, CalendarUpdate, Deadline,
-    Disposition, Event, EventKind, FieldReasons, NewMessage, OpenRate, Receipt, RetriageProgress,
-    SealedKind, SearchHit, SenderRule, Sensitivity, ShredCandidate, StoreStats, ThreadView, Tier,
-    TriageAxis, TriageFeedback, UnsubscribeRecord,
+    Disposition, Event, EventKind, FieldReasons, GeneralRule, NewMessage, OpenRate, Receipt,
+    RetriageProgress, SealedKind, SearchHit, SenderRule, Sensitivity, ShredCandidate, StoreStats,
+    ThreadView, Tier, TriageAxis, TriageFeedback, UnsubscribeRecord,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -800,6 +800,34 @@ pub struct ClientSeen {
 pub struct ClientActed {
     pub platform: ClientPlatform,
     pub acted_at: DateTime<Utc>,
+}
+
+/// What `squelchd token activity` reports: when this mailbox first paired a
+/// client, and per platform when one first paired, last connected and last
+/// acted. TIMESTAMPS ONLY, by construction: no device name, no token id, no
+/// count of devices. See
+/// [`SqliteStore::client_activity`](sqlite::SqliteStore::client_activity).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClientActivity {
+    /// Exactly [`SqliteStore::first_client_pairing_at`](sqlite::SqliteStore::first_client_pairing_at)'s
+    /// answer, so the two commands can never disagree about activation.
+    pub first_paired_at: Option<DateTime<Utc>>,
+    /// One entry per platform that has ever named itself on this mailbox. A
+    /// platform that never has is ABSENT, not zeroed.
+    pub platforms: std::collections::BTreeMap<ClientPlatform, PlatformActivity>,
+}
+
+/// One platform's line in [`ClientActivity`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlatformActivity {
+    /// The earliest `created_at` among tokens whose app named itself as this
+    /// platform. Revoked tokens count: a pairing does not un-happen.
+    pub first_paired_at: DateTime<Utc>,
+    /// The newest `client_seen_at`: the app was open and connected.
+    pub last_seen_at: Option<DateTime<Utc>>,
+    /// The newest `client_action_at`: the app DID something (a write on the
+    /// client door).
+    pub last_action_at: Option<DateTime<Utc>>,
 }
 
 /// A device token at the ONE moment its plaintext exists.
@@ -2060,6 +2088,37 @@ pub trait Store:
 
     fn list_sender_rules(&self, account_id: AccountId) -> Result<Vec<SenderRule>>;
 
+    /// The owner's general rules (not about one sender), oldest first.
+    fn list_general_rules(&self, account_id: AccountId) -> Result<Vec<GeneralRule>>;
+
+    /// Save a general rule verbatim (trimmed). `InvalidInput` when empty, too
+    /// long, or past the per-account cap. Re-triages nothing.
+    fn create_general_rule(&self, account_id: AccountId, text: &str) -> Result<i64>;
+
+    /// Rewrite a general rule. `false` => unknown id.
+    fn update_general_rule(&self, account_id: AccountId, id: i64, text: &str) -> Result<bool>;
+
+    /// Delete a general rule. `false` => unknown id.
+    fn delete_general_rule(&self, account_id: AccountId, id: i64) -> Result<bool>;
+
+    /// Replace groups of general rules with one merged rule each, then add
+    /// `new_text`, all in one transaction. Each entry is (source ids, merged
+    /// text). Fails whole if any source is gone, any text is invalid, or the
+    /// list is still full.
+    fn merge_and_create_general_rule(
+        &self,
+        account_id: AccountId,
+        merges: &[(Vec<i64>, String)],
+        new_text: &str,
+    ) -> Result<crate::types::MergedGeneralRules>;
+
+    /// The non-sealed, non-spam email a teach was written on, for the describer.
+    fn teach_example(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+    ) -> Result<Option<crate::triage::teach::TeachExample>>;
+
     /// The newest `limit` messages from `from_addr` with what became of each,
     /// for suggesting a rule about that sender. SEALED ROWS ARE EXCLUDED IN
     /// SQL: a sealed subject is as forbidden to a model as its body.
@@ -2132,6 +2191,14 @@ pub trait Store:
     /// caller explicitly surfaces it. Contacts, the unsubscribe ledger and
     /// timezone observations are not touched.
     fn ingest_archive_message(&self, triaged: &TriagedMessage) -> Result<Option<i64>>;
+
+    /// [`Store::ingest_archive_message`] for archive mail more than a year
+    /// old: the same row, insert-only and marked `is_archive`, but LITE. Its
+    /// `body_html` is not kept (whatever the caller carried) and the row is
+    /// marked `html_lite`, so the reader knows the HTML can be fetched back
+    /// from the provider when the owner opens it. `body` and the full-text
+    /// index are kept: keyword search finds it like any other archive row.
+    fn ingest_lite_archive_message(&self, triaged: &TriagedMessage) -> Result<Option<i64>>;
 
     /// The archive walk's cursor: the oldest instant the walk has fully
     /// covered, or `None` before its first chunk.
@@ -2736,6 +2803,11 @@ pub trait Store:
     /// Every registered device for the account, oldest first — a stable order, so
     /// a push fan-out and its response array line up reproducibly.
     fn list_devices(&self, account_id: AccountId) -> Result<Vec<Device>>;
+
+    /// Each (platform, version) this account's apps have connected as, with
+    /// when. See [`SqliteStore::client_versions_seen`](sqlite::SqliteStore::client_versions_seen);
+    /// on the trait for the pusher's release check ([`crate::release_feed`]).
+    fn client_versions_seen(&self, account_id: AccountId) -> Result<Vec<ClientSeen>>;
 
     /// Drop one device by token, scoped to the account. Two callers: the human
     /// door's DELETE, and the pusher on APNs `410 Unregistered`.

@@ -124,6 +124,16 @@ CREATE TABLE IF NOT EXISTS messages (
     -- archive ingest of an id already stored is a no-op, and so is a live
     -- sighting of an archive row (`SqliteStore::ingest_message_inner`).
     is_archive  INTEGER NOT NULL DEFAULT 0,
+    -- A LITE ARCHIVE ROW: 1 when the archive walk stored this message more
+    -- than a year back (`sync::ARCHIVE_LITE_AFTER_DAYS`) and left `body_html`
+    -- NULL to save the disk, keeping `body` and the full-text index so keyword
+    -- search still finds it. NULL `body_html` alone cannot say this: plain-text
+    -- mail has none either. Cleared, with `body_html` filled, the first time
+    -- the owner's reader displays the thread and the HTML is fetched back from
+    -- the provider (`POST /client/thread/{id}/hydrate`), or cleared alone when
+    -- the provider no longer has the message. Never set on anything else, and
+    -- 0 on every row stored before it existed: those keep what they have.
+    html_lite   INTEGER NOT NULL DEFAULT 0,
     UNIQUE(account_id, gmail_msg_id)
 );
 
@@ -219,6 +229,20 @@ CREATE TABLE IF NOT EXISTS sender_rules (
     updated_at    TEXT NOT NULL,
     UNIQUE(account_id, match_pattern)
 );
+
+-- GENERAL RULES: the owner's standing instructions that are not about one
+-- sender ("emails to Alex about grant funding for Northwind Bakery are never
+-- for me"). No pattern and no disposition: the triage model reads every one on
+-- every email and decides whether it applies. Forward-only like sender rules,
+-- so a write here re-triages nothing.
+CREATE TABLE IF NOT EXISTS general_rules (
+    id          INTEGER PRIMARY KEY,
+    account_id  INTEGER NOT NULL,
+    text        TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_general_rules_account ON general_rules(account_id, id);
 
 -- ATTENTION LIFECYCLE (sitrep seen-ledger):
 --   status       'new' | 'open' | 'done'. A row starts 'new'; the first time it

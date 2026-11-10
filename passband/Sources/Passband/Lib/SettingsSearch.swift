@@ -170,9 +170,21 @@ enum SettingsSearch {
         var entries = baseGeneralEntries
         #if os(macOS)
             entries.append(densityEntry)
+            entries.append(loginItemEntry)
         #endif
         return entries
     }()
+
+    /// Mac only, like the row: the phone has no login items.
+    private static let loginItemEntry = SettingsEntry(
+        card: .notifications,
+        title: "Open at login",
+        blurb: "Starts Passband when you log in, so banners arrive after a restart.",
+        keywords: [
+            "open at login", "launch at login", "start at login", "login item", "login items",
+            "startup", "start up", "on startup", "boot", "restart", "reboot", "auto start",
+            "autostart", "launch", "background", "always running",
+        ])
 
     private static let densityEntry = SettingsEntry(
         card: .appearance,
@@ -230,6 +242,14 @@ enum SettingsSearch {
                 "reminder", "reminders", "event reminder", "calendar", "calendar notification",
                 "event", "events", "before an event", "upcoming", "coming up", "alert before",
                 "tickets", "boarding pass", "remind me",
+            ]),
+        SettingsEntry(
+            card: .notifications,
+            title: "Morning brief",
+            blurb: "A short note on your iPhone at 8 each morning about what today holds.",
+            keywords: [
+                "morning", "brief", "morning brief", "daily", "daily summary", "summary",
+                "digest", "today", "8am", "what today holds", "agenda", "iphone", "phone",
             ]),
         SettingsEntry(
             card: .notifications,

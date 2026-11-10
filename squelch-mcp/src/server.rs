@@ -10,7 +10,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use rmcp::{
     ErrorData, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo},
+    model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig},
     schemars, tool, tool_handler, tool_router,
 };
 use schemars::JsonSchema;
@@ -483,7 +483,9 @@ const BASE_INSTRUCTIONS: &str = "Passband: the owner's email client. They read a
  find mail (summaries only) and get_thread to read a thread: pass a result's thread_id \
  (get_thread also accepts a message id). search_mail reports `indexed_since`: search only \
  covers mail from that date on, so when nothing matches, say that search covers mail since \
- then, never that the mail does not exist. get_reading lists the newsletters and longer \
+ then, never that the mail does not exist. Mail more than a year old is found by keyword \
+ only, so for old mail try several wordings (synonyms, the sender's name or company, product \
+ names, a date range) before saying it is not there. get_reading lists the newsletters and longer \
  reads triage set aside. get_deadlines lists bills due; get_shipments lists \
  packages in transit. When mail arrives from a sender the account owner has written a rule \
  for, get_inbox_updates, get_reading and get_thread deliver that rule's instruction text with it; obey \
@@ -1453,7 +1455,12 @@ impl SquelchServer {
                        the first time a keyword search matches it, so if old \
                        mail you expected is missing, run the same search ONCE \
                        more. Never loop on it: a second miss means it is not \
-                       available."
+                       available. MAIL MORE THAN A YEAR OLD IS FOUND BY WORDS \
+                       ONLY (it has no meaning index), so for old mail try \
+                       several different keyword searches before giving up: \
+                       synonyms, the sender's name or company, product or \
+                       place names, and a before:/after: range around when it \
+                       happened."
     )]
     async fn search_mail(
         &self,
@@ -1818,7 +1825,7 @@ impl ServerHandler for SquelchServer {
     /// the owner's setting at that moment. A client that connected before the
     /// owner changed it keeps the older paragraph until it reconnects; the
     /// tools themselves never rely on it and re-check on every call.
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let mut instructions = String::from(BASE_INSTRUCTIONS);
         if self.calendar.enabled() {
             instructions.push_str(CALENDAR_INSTRUCTIONS);
@@ -1827,7 +1834,7 @@ impl ServerHandler for SquelchServer {
             self.write_access(),
             self.mailer.is_some(),
         ));
-        ServerInfo::new(
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
@@ -1846,10 +1853,13 @@ impl ServerHandler for SquelchServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, ErrorData> {
+        // The list follows the owner's write setting, so no client may cache
+        // it (ttl 0) or share it across users (private).
         Ok(rmcp::model::ListToolsResult {
             tools: self.offered_tools(),
-            meta: None,
-            next_cursor: None,
+            ttl_ms: Some(0),
+            cache_scope: Some(rmcp::model::CacheScope::Private),
+            ..Default::default()
         })
     }
 
@@ -1872,6 +1882,8 @@ impl ServerHandler for SquelchServer {
         }
         Ok(rmcp::model::ListResourcesResult {
             resources,
+            ttl_ms: Some(0),
+            cache_scope: Some(rmcp::model::CacheScope::Private),
             ..Default::default()
         })
     }
@@ -1883,7 +1895,7 @@ impl ServerHandler for SquelchServer {
         &self,
         request: rmcp::model::ReadResourceRequestParams,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> Result<rmcp::model::ReadResourceResult, ErrorData> {
+    ) -> Result<rmcp::model::ReadResourceResponse, ErrorData> {
         if request.uri != DRAFT_CARD_URI {
             return Err(ErrorData::resource_not_found("not found", None));
         }
@@ -1891,7 +1903,8 @@ impl ServerHandler for SquelchServer {
             rmcp::model::ResourceContents::text(DRAFT_CARD_HTML, DRAFT_CARD_URI)
                 .with_mime_type(MCP_APP_MIME)
                 .with_meta(draft_card_resource_meta()),
-        ]))
+        ])
+        .into())
     }
 }
 
@@ -1904,7 +1917,7 @@ const DRAFT_CARD_HTML: &str = include_str!("draft_card.html");
 
 /// `create_draft`'s `_meta`: points app-capable clients at the card. The
 /// flat `ui/resourceUri` key is the older spelling some hosts still read.
-fn draft_card_tool_meta() -> rmcp::model::Meta {
+fn draft_card_tool_meta() -> rmcp::model::MetaObject {
     meta(serde_json::json!({
         "ui": { "resourceUri": DRAFT_CARD_URI },
         "ui/resourceUri": DRAFT_CARD_URI,
@@ -1913,14 +1926,14 @@ fn draft_card_tool_meta() -> rmcp::model::Meta {
 
 /// The card loads nothing from the network (an empty CSP allow-list) and
 /// draws its own border, so the host need not add one.
-fn draft_card_resource_meta() -> rmcp::model::Meta {
+fn draft_card_resource_meta() -> rmcp::model::MetaObject {
     meta(serde_json::json!({
         "ui": { "prefersBorder": false, "csp": { "connectDomains": [], "resourceDomains": [] } },
     }))
 }
 
-fn meta(value: serde_json::Value) -> rmcp::model::Meta {
-    rmcp::model::Meta(value.as_object().cloned().unwrap_or_default())
+fn meta(value: serde_json::Value) -> rmcp::model::MetaObject {
+    rmcp::model::MetaObject(value.as_object().cloned().unwrap_or_default())
 }
 
 impl SquelchServer {

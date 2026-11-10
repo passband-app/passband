@@ -717,19 +717,11 @@ struct MobileSearchView: View {
         guard query == term else { return }
         let verdict = SearchIntent.classify(query: query, diagnostics: store.search.diagnostics)
         store.search.lastVerdict = verdict
-        switch DeeperSearchPolicy.settled(
-            verdict: verdict, choice: prefs.deeperSearch,
-            laneStarted: store.search.laneStarted)
-        {
-        case .nothing:
-            break
-        case .stop:
-            store.resetSearchLane(keepingVerdict: true)
-        case .refine:
-            store.refineDeeperSearch()
-        case .start(let trigger):
-            store.startDeeperSearch(trigger: trigger)
-        }
+        store.settleDeeperSearch(
+            DeeperSearchPolicy.settled(
+                verdict: verdict, choice: prefs.deeperSearch,
+                laneStarted: store.search.laneStarted),
+            query: query)
     }
 
     // MARK: - fetching

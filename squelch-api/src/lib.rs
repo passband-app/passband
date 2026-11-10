@@ -26,6 +26,7 @@ mod invite_mail;
 pub mod limits;
 mod markdown;
 mod memory;
+mod morning_brief;
 mod pair;
 mod renotify;
 mod scheduled_send;
@@ -61,6 +62,8 @@ pub use limits::{
     LONG_REQUEST_TIMEOUT, REQUEST_TIMEOUT, ROUTE_CEILINGS, RequestCeiling, RequestTimeouts,
     STORE_CALL_SLOTS, UPSTREAM_REQUEST_TIMEOUT, route_ceiling,
 };
+/// The morning brief's worker and its pass.
+pub use morning_brief::{BriefOutcome, MorningBriefTiming, morning_brief_worker, run_brief_pass};
 /// Smart re-notify's worker and its pass (issue #625).
 pub use renotify::{
     PassOutcome, RenotifyTiming, close_stale_renotify_sessions, renotify_worker, run_renotify_pass,
@@ -193,6 +196,14 @@ fn client_router(state: ApiState) -> Router {
             "/client/thread/{thread_id}/translate",
             post(handlers::translate_thread),
         )
+        // "Fetch back the HTML of what I am showing." A lite archive message
+        // (more than a year old) is stored as text; the GET serves it so, for
+        // the prefetch reason above, and the reader displaying the thread asks
+        // here. HUMAN DOOR ONLY.
+        .route(
+            "/client/thread/{thread_id}/hydrate",
+            post(handlers::hydrate_thread),
+        )
         // "Languages I read": mail in them is never translated.
         .route(
             "/client/translate-config",
@@ -245,6 +256,19 @@ fn client_router(state: ApiState) -> Router {
         .route("/client/rules/suggest", get(handlers::suggest_rule))
         .route("/client/rules/{id}", put(handlers::update_rule))
         .route("/client/rules/{id}", delete(handlers::delete_rule))
+        // `t`: the owner's words become a sender rule or a general rule, which
+        // a small model decides (`triage::teach`). Human door only.
+        .route("/client/teach", post(handlers::teach))
+        .route("/client/general-rules", get(handlers::list_general_rules))
+        .route("/client/general-rules", post(handlers::create_general_rule))
+        .route(
+            "/client/general-rules/{id}",
+            put(handlers::update_general_rule),
+        )
+        .route(
+            "/client/general-rules/{id}",
+            delete(handlers::delete_general_rule),
+        )
         // Local drafts: served EXCLUSIVELY here. Unsent compositions stay on
         // this machine — the agent door has no drafts route and never learns the
         // table exists. The keyed PUT edits in place (one draft per reply
@@ -392,6 +416,13 @@ fn client_router(state: ApiState) -> Router {
         // Push-device registration. Human door only — the agent door never
         // learns a device exists.
         .route("/client/devices", post(devices::register_device))
+        // The morning brief: today's banner for the phone's notification
+        // extension, and the owner's switch. HUMAN DOOR ONLY.
+        .route("/client/brief", get(morning_brief::get_brief))
+        .route(
+            "/client/brief/settings",
+            get(morning_brief::get_settings).put(morning_brief::put_settings),
+        )
         // Unregister carries the token in the BODY, not a path segment: a device
         // token is capability material, and a URL path is the most-logged part
         // of a request.

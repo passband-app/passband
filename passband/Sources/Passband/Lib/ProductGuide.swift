@@ -459,7 +459,6 @@ enum ProductGuide {
         - ⌘Enter sends. Plain Enter is a new line.
         - Undo send: the mail is held for 5 seconds, with a chip at the bottom left. Clicking it brings the composer back with everything in it. u does the same, except inside an open email, where u means unsubscribe.
         - A reply sent from inside an email shows in the thread right away, slightly faded, while it is held and sending. It turns solid when the sent copy arrives, and disappears if the send is undone or fails (the composer comes back instead).
-        - If the outbound guard blocks a send because the body looks like it carries a secret, the composer reopens with a "send anyway" button (⌘⇧Enter). Any edit re-locks it.
 
         Send later:
         - The clock beside send, or ⌘⇧L, opens "Send later". Pick a preset or type a time ("friday", "in 3 hours", "the 24th"), then ⌘Enter schedules it.

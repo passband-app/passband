@@ -11,9 +11,7 @@
 //
 // The ceremony is the pane composer's, and LOCKED: ⌘Enter closes the reply and
 // holds it five seconds behind an undo toast (`AppStore.sendWithUndo`), then it
-// goes out ONCE WITHOUT override. A blocked verdict reopens the reply with the
-// guard's kinds, and only that unlocks ⌘⇧Enter to send anyway. Both composers
-// hand the same state to the same hold, so there is one request shape and one
+// goes out once. Both composers hand the same state to the same hold, so there is one request shape and one
 // error mapping. The body is markdown, live-styled by the same
 // MarkdownTextView the pane uses.
 //
@@ -81,7 +79,6 @@ struct InlineReply: View {
     @State private var fetchedRecipients: (key: String, set: ReplyRecipients?)?
 
     private var compose: ComposeState? { store.inlineReply }
-    private var guarded: Bool { !(compose?.guardKinds.isEmpty ?? true) }
     /// A send time is set: the verbs say "schedule" (see `ScheduleCopy`).
     /// Only while the daemon keeps an outbox, as in the pane.
     private var scheduled: Bool { compose?.sendAt != nil && store.scheduledSendAvailable }
@@ -184,8 +181,6 @@ struct InlineReply: View {
                     editor(compose)
                     // The files, under the editor. Nothing when empty.
                     AttachmentTray(slot: .inlineReply)
-                    // A held send came back blocked.
-                    if guarded { GuardVerdictBox(kinds: compose.guardKinds) }
                     if let error = compose.error {
                         Text(error).font(Typo.micro).foregroundStyle(Palette.danger)
                     }
@@ -431,12 +426,10 @@ struct InlineReply: View {
 
     #if os(macOS)
         private var hints: [KeyHint] {
-            var hints = [KeyHint("⌘enter", ScheduleCopy.sendVerb(scheduled: scheduled))]
-            if guarded {
-                hints.append(KeyHint("⌘⇧enter", ScheduleCopy.overrideVerb(scheduled: scheduled)))
-            }
-            hints.append(KeyHint("esc", "dismiss"))
-            return hints
+            [
+                KeyHint("⌘enter", ScheduleCopy.sendVerb(scheduled: scheduled)),
+                KeyHint("esc", "dismiss"),
+            ]
         }
 
         /// The send keys, as the last line of the composer: the clock just
@@ -460,13 +453,13 @@ struct InlineReply: View {
     #if !os(macOS)
         // MARK: - the phone's card
 
-        /// Address line, editor, files and verdicts, controls: one glass card,
+        /// Address line, editor, files and errors, controls: one glass card,
         /// top to bottom in the order a reply is written.
         private func card(_ compose: ComposeState, parent: ClientMessage) -> some View {
             VStack(alignment: .leading, spacing: 0) {
                 addressLine(compose, parent: parent)
                 // Its own row, always drawn for an agent's draft. It used to
-                // sit with the files and verdicts below, a block that is only
+                // sit with the files and errors below, a block that is only
                 // there when one of THOSE is, so most agent drafts opened on
                 // the phone carried no mark at all.
                 if compose.fromAgent {
@@ -494,12 +487,10 @@ struct InlineReply: View {
                 growingEditor(compose)
                     .padding(.horizontal, Self.gutter)
                     .padding(.top, Space.s6)
-                if !compose.attachments.isEmpty || guarded || compose.error != nil {
+                if !compose.attachments.isEmpty || compose.error != nil {
                     VStack(alignment: .leading, spacing: Space.scaled(9)) {
                         // The files, under the editor. Nothing when empty.
                         AttachmentTray(slot: .inlineReply)
-                        // A held send came back blocked.
-                    if guarded { GuardVerdictBox(kinds: compose.guardKinds) }
                         if let error = compose.error {
                             Text(error).font(Typo.micro).foregroundStyle(Palette.danger)
                         }
@@ -591,18 +582,15 @@ struct InlineReply: View {
             .frame(minHeight: Self.editorFloor, alignment: .top)
         }
 
-        /// THE PHONE'S HALF OF THE CEREMONY. The same `send(override:)`, the
-        /// same rule that a blocked verdict is the ONLY thing that unlocks an
-        /// override: what changes is that a thumb presses them instead of
-        /// ⌘Enter and ⌘⇧Enter.
+        /// THE PHONE'S HALF OF THE CEREMONY. The same `send()`: what changes
+        /// is that a thumb presses it instead of ⌘Enter.
         ///
         /// What the mail CARRIES on the left (files, the tracker), when and
         /// whether it GOES on the right, the clock just left of the verb it
         /// changes, as in the pane. One row when it fits. A set send time
-        /// turns the clock into a chip and a blocked verdict adds a second
-        /// verb, and either can ask for more than a phone is wide, so the
-        /// verbs drop to a row of their own rather than squeezing every
-        /// control on the line into an ellipsis.
+        /// turns the clock into a chip, which can ask for more than a phone
+        /// is wide, so the verbs drop to a row of their own rather than
+        /// squeezing every control on the line into an ellipsis.
         private func controls(_ compose: ComposeState) -> some View {
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: Space.s8) {
@@ -635,14 +623,7 @@ struct InlineReply: View {
             // When it goes, just left of the verbs: "send this tomorrow
             // morning" is what a reply typed at midnight wants.
             ScheduleClock(slot: .inlineReply)
-            if guarded {
-                Button { send(override: true) } label: {
-                    verbLabel(ScheduleCopy.overrideVerb(scheduled: scheduled))
-                }
-                .buttonStyle(.glassProminent)
-                .tint(Palette.danger)
-            }
-            Button { send(override: false) } label: {
+            Button { send() } label: {
                 verbLabel(ScheduleCopy.sendVerb(scheduled: scheduled))
             }
             .buttonStyle(.glassProminent)
@@ -680,14 +661,7 @@ struct InlineReply: View {
                     store.noteKeyboardSendLocked()
                     return
                 }
-                send(override: false)
-            },
-            // Explicit override: a blocked verdict, nothing else. Declines
-            // otherwise.
-            KeyBinding(declining: "shift+Enter", "send anyway", meta: true, allowInInput: true) {
-                guard !store.askBarOpen, guarded else { return false }
-                send(override: true)
-                return true
+                send()
             },
             // The clock's chord, as in the pane (`ScheduleClock.chord`).
             KeyBinding(
@@ -710,11 +684,8 @@ struct InlineReply: View {
                 // The autosave's one hook for this composer — the body is the only
                 // field it has, and it is bound through here.
                 guard store.inlineReply?[keyPath: keyPath] != value else { return }
-                // An edit relocks the override, as in the pane: consent covers
-                // the mail the guard judged, not this one.
                 patch {
                     $0[keyPath: keyPath] = value
-                    $0.guardKinds = []
                     // Typed into: it is a composer now, not a draft on show.
                     $0.quietOpen = false
                 }
@@ -733,7 +704,6 @@ struct InlineReply: View {
                 guard store.inlineReply?.recipients != value else { return }
                 patch {
                     $0.stateRecipients(value)
-                    $0.guardKinds = []
                     $0.quietOpen = false
                 }
                 DraftSaver.shared.noteChange(.inlineReply)
@@ -756,7 +726,7 @@ struct InlineReply: View {
 
     /// Same two checks as the pane composer, then the same hold, or with a
     /// time set the same outbox.
-    private func send(override: Bool) {
+    private func send() {
         guard let compose = store.inlineReply else { return }
         // Same seed rule as the pane: an untouched signature is an empty body.
         guard !Prefs.shared.isBodyUntouched(compose.body) else {
@@ -770,9 +740,9 @@ struct InlineReply: View {
             return
         }
         if scheduled {
-            store.scheduleCompose(.inlineReply, override: override)
+            store.scheduleCompose(.inlineReply)
         } else {
-            store.sendWithUndo(.inlineReply, override: override)
+            store.sendWithUndo(.inlineReply)
         }
     }
 }

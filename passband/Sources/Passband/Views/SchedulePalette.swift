@@ -227,13 +227,11 @@ struct SchedulePalette: View {
     /// allowInInput for the remind palette's reason: the field has focus, and
     /// without it Escape would fall through to the composer underneath.
     ///
-    /// ⌘↵ AND ⌘⇧↵ ARE THE PALETTE'S. Both composers bind them to send, and
-    /// the composer's set sits under this one in the same context (the pane)
-    /// or under a context this one covers (the inline reply): left unbound
-    /// here, a ⌘↵ typed into this field would send the mail from under the
-    /// palette before a time was picked. ⌘↵ sets the pick like ↵ does; the
-    /// override is swallowed, because consent to the guard is never given
-    /// from a time picker.
+    /// ⌘↵ IS THE PALETTE'S. Both composers bind it to send, and the
+    /// composer's set sits under this one in the same context (the pane) or
+    /// under a context this one covers (the inline reply): left unbound here,
+    /// a ⌘↵ typed into this field would send the mail from under the palette
+    /// before a time was picked. ⌘↵ sets the pick like ↵ does.
     private var bindings: [KeyBinding] {
         [
             KeyBinding("Escape", "cancel", allowInInput: true) { onClose() },
@@ -247,7 +245,6 @@ struct SchedulePalette: View {
             KeyBinding("Enter", "set send time", meta: true, allowInInput: true) {
                 applySelection()
             },
-            KeyBinding("shift+Enter", "set send time", meta: true, allowInInput: true) {},
         ]
     }
 

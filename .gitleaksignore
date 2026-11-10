@@ -36,3 +36,4 @@ f1f732790e2b0c3306e96a491025700a310c6554:squelch-api/src/guard.rs:generic-api-ke
 f1f732790e2b0c3306e96a491025700a310c6554:squelch-api/src/guard.rs:github-pat:151
 f505076ffb5e502e482294f08175f81ba884e271:squelch-control/src/sessions.rs:generic-api-key:395
 f505076ffb5e502e482294f08175f81ba884e271:squelch-control/src/sessions.rs:generic-api-key:477
+ed6d1245abf48c4fe38faa2a6d170dd6cb4bcae7:squelch-api/src/guard.rs:generic-api-key:213

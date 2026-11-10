@@ -233,8 +233,7 @@ actor APIClient {
             if let err = obj?["error"] as? String {
                 message = err
             }
-            let guards = kind == .guardBlocked ? parseGuardKinds(message) : nil
-            throw APIError(kind, http.statusCode, message, guardKinds: guards, code: obj?["code"] as? String)
+            throw APIError(kind, http.statusCode, message, code: obj?["code"] as? String)
         }
         return (data, http)
     }
@@ -1192,15 +1191,13 @@ actor APIClient {
             body: LabelBody(message_id: messageId, add: add, remove: remove, confirm: true))
     }
 
-    /// Send. Two-phase by design: call without `overrideGuard` for the verdict
-    /// (a guarded body yields a 422 with `.guardKinds`), then with it after
-    /// explicit consent. A nil `subject` on a reply is omitted from the JSON, so
-    /// the daemon derives `Re: <parent subject>`; pass "" only to mean it.
+    /// Send. A nil `subject` on a reply is omitted from the JSON, so the
+    /// daemon derives `Re: <parent subject>`; pass "" only to mean it.
     @discardableResult
     func actionSend(
         body: String, replyToMessageId: Int? = nil, to: String? = nil, cc: String? = nil,
         bcc: String? = nil, groupId: Int? = nil, subject: String? = nil,
-        overrideGuard: Bool = false, draftId: Int? = nil, includeTracker: Bool = false,
+        draftId: Int? = nil, includeTracker: Bool = false,
         replyAll: Bool = false, forwardOfMessageId: Int? = nil, attachmentIds: [Int] = [],
         attachmentBytes: Int = 0
     ) async throws -> SendResult {
@@ -1225,9 +1222,9 @@ actor APIClient {
                 group_id: groupId,
                 subject: subject, body: body,
                 // Both composers write markdown; the daemon renders the HTML
-                // half from this same source after the guard has scanned it.
+                // half from this same source.
                 body_format: "markdown",
-                confirm: true, override_guard: overrideGuard, draft_id: draftId,
+                confirm: true, draft_id: draftId,
                 // Omitted rather than `false`, like `subject`: an untracked send
                 // says nothing about tracking at all.
                 include_tracker: includeTracker ? true : nil,
@@ -1253,9 +1250,9 @@ actor APIClient {
     /// CLIENT-side while the daemon finished would be retried, and the
     /// recipient would get it twice.
     ///
-    /// A schedule gets the same budget. It sends nothing, but a forward is
-    /// guard-scanned by fetching the original from Gmail, and a tray full of
-    /// files is read back and scanned too, all before the 201.
+    /// A schedule gets the same budget. It sends nothing, but a forward's
+    /// original is fetched from Gmail, and a tray full of files is read back
+    /// and checked too, all before the 201.
     private static func sendTimeout(_ body: SendBody, _ attachmentBytes: Int) -> TimeInterval {
         body.forward_of_message_id == nil && (body.attachment_ids ?? []).isEmpty
             ? Self.requestTimeout
@@ -1266,10 +1263,8 @@ actor APIClient {
 
     /// Put a mail in the daemon's outbox: the send body a send would carry,
     /// plus when. Everything a send checks before Gmail (validation, the
-    /// files, the outbound guard, the write credential) is checked NOW, while
-    /// the sender is here to answer: a 422 carries `.guardKinds` exactly as a
-    /// send's does, and a resend with `override_guard` goes through. The
-    /// draft named by `draft_id` is consumed by this call.
+    /// files, the write credential) is checked NOW, while the sender is here
+    /// to answer. The draft named by `draft_id` is consumed by this call.
     func scheduleSend(_ body: SendBody, at sendAt: Date, attachmentBytes: Int = 0) async throws
         -> ScheduledCreated
     {

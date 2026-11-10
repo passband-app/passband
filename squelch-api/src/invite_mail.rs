@@ -18,8 +18,8 @@
 //! has to look at four sets of braces to write two sentences.
 //!
 //! MARKDOWN IN, exactly like the composer (`body_format: "markdown"`), and the
-//! HTML half is rendered by [`crate::markdown`] from the same source the
-//! outbound guard scanned. That is not a convenience: it means an invite cannot
+//! HTML half is rendered by [`crate::markdown`] from the same markdown source
+//! as the text half. That is not a convenience: it means an invite cannot
 //! carry markup the composer would have refused, and there is no second
 //! renderer here to drift from the first.
 //!

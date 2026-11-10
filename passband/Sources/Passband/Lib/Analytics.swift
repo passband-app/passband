@@ -252,7 +252,7 @@ enum Analytics {
     private static let allowedStrings: Set<String> =
         Set(MainView.allCases.map(\.rawValue)).union([
             // compose_send / compose_opened
-            "new", "reply", "forward", "sent", "guard_blocked", "forbidden", "failure",
+            "new", "reply", "forward", "sent", "forbidden", "failure",
             // compose_send's outcome for a mail put in the daemon's outbox.
             "scheduled",
             // undo_fired kinds: `String(describing:)` of every UndoKind case.

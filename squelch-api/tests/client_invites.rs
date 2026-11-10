@@ -375,14 +375,6 @@ async fn nothing_is_minted_for_a_request_that_could_never_send() {
         // is one nobody can act on, and minting a code for it would spend quota
         // on nothing.
         json!({ "recipients": ["a@x.test"], "subject": "s", "body": "just some words" }),
-        // A secret in the draft: the same outbound guard every other send
-        // passes, on a send that is no less real for being an invite.
-        json!({ "recipients": ["a@x.test"], "subject": "s",
-                "body": "my key is sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA {{invite}}" }),
-        // And in the subject, which is as outbound as the body.
-        json!({ "recipients": ["a@x.test"],
-                "subject": "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-                "body": "{{invite}}" }),
     ] {
         let resp = h
             .app
@@ -396,6 +388,34 @@ async fn nothing_is_minted_for_a_request_that_could_never_send() {
         log.lock().unwrap().is_empty(),
         "a refused press mints nothing"
     );
+}
+
+/// What a human sends is their call: an invite whose subject and body look
+/// like secrets is minted and sent, not refused. The outbound guard runs on
+/// the agent's send only.
+#[tokio::test]
+async fn an_invite_that_looks_like_it_holds_a_secret_still_sends() {
+    let (control, log) = spawn_control(vec![minted(9)]).await;
+    let (gmail, sends) = mock_gmail(1).await;
+    let h = sharing_app(Some(control), gmail);
+    let key = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+    let resp = h
+        .app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/client/invites",
+            json!({ "recipients": ["a@x.test"], "subject": key,
+                     "body": format!("my key is {key} {{{{invite}}}}") }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["results"][0]["sent"], true, "{body}");
+    assert_eq!(log.lock().unwrap().len(), 1);
+    assert_eq!(sends.await.unwrap().len(), 1);
 }
 
 /// The same name twice is one invite. A pasted list with a repeat in it would

@@ -601,20 +601,6 @@ pub async fn post_invites(
             invite_mail::INVITE_MARKER
         )));
     }
-    // THE SAME OUTBOUND GUARD EVERY OTHER SEND PASSES, over the WHOLE draft now
-    // rather than one note: every word of it is text the user typed, this send
-    // is no less real than one they compose by hand, and a pasted key on its
-    // way out is exactly what the guard is for. Kinds only, never the matched
-    // text. The subject rides along - it is as outbound as the body.
-    if !crate::guard::scan_kinds(&draft).is_empty()
-        || !crate::guard::scan_kinds(&subject).is_empty()
-    {
-        audit_action(&state, "invite", None, "rejected:guard").await;
-        return Err(ApiError::bad_request(
-            "that draft looks like it has a secret in it",
-        ));
-    }
-
     // Before any mint: a code minted with no way to mail it is spent quota.
     let client = crate::handlers::write_client(&state).await?;
 

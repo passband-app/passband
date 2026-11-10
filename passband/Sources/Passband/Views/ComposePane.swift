@@ -1,9 +1,7 @@
 // The send ceremony — the one irreversible action in the app. ⌘Enter closes
 // the composer and HOLDS the mail for five seconds behind an undo toast
-// (`AppStore.sendWithUndo`); only then does it go out, once *without*
-// override_guard. A clean pass is sent; a 422 reopens this composer with the
-// redacted guard kinds, and sending past them is a distinct act (⌘⇧Enter or
-// the danger button). 403 means no write credential.
+// (`AppStore.sendWithUndo`); only then does it go out. A refusal reopens this
+// composer with the reason; 403 means no write credential.
 //
 // There used to be a review phase between the two. The hold replaced it: a
 // read-back screen on every send taxed every mail to catch the rare wrong one,
@@ -56,7 +54,6 @@ struct ComposePane: View {
     @State private var groupMemberCount = 0
 
     private var compose: ComposeState? { store.compose }
-    private var guarded: Bool { !(compose?.guardKinds.isEmpty ?? true) }
     /// A send time is set: the verbs say "schedule", and ⌘↵ files the mail in
     /// the daemon's outbox instead of holding it for five seconds. Only while
     /// the daemon keeps an outbox: a gate that went off under a set time (an
@@ -201,11 +198,6 @@ struct ComposePane: View {
             // eye starts, not under the last line of the body.
             if compose.fromAgent { AgentDraftNotice() }
             editPane(compose)
-            // A held send came back blocked: the verdict, and with it
-            // the override in the footer.
-            if guarded {
-                GuardVerdictBox(kinds: compose.guardKinds)
-            }
             if let error = compose.error {
                 Text(error).font(Typo.micro).foregroundStyle(Palette.danger)
             }
@@ -217,15 +209,11 @@ struct ComposePane: View {
         .padding(.vertical, Space.s14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
-        // NO FOOTER ON A PHONE, unless the guard blocked a send. Send
-        // went to the header and cancel to the drag-down gesture, and a
-        // bar left behind with nothing in it would still cost its own
-        // height between the editor and the keyboard. A blocked send
-        // needs the override, and the override deserves a wide target.
+        // NO FOOTER ON A PHONE. Send went to the header and cancel to the
+        // drag-down gesture, and a bar left behind with nothing in it would
+        // still cost its own height between the editor and the keyboard.
         #if os(macOS)
             footer(compose)
-        #else
-            if guarded { footer(compose) }
         #endif
     }
 
@@ -296,11 +284,6 @@ struct ComposePane: View {
                 // Two doors out, one of them costing a corner of the bar, was a
                 // button spent on something the gesture already did.
                 //
-                // A BLOCKED send keeps the corner for the plain send (after
-                // editing the match out) and puts the override in a footer of
-                // its own: sending through the guard stays a wide, deliberate
-                // target rather than a chip in the corner.
-                //
                 // ATTACH IS NOT UP HERE: it is a paperclip on the keyboard's
                 // bar, with the formatting verbs (`MarkdownTextView.attaching`).
                 //
@@ -311,7 +294,7 @@ struct ComposePane: View {
                 // is set.
                 if !onList {
                     ScheduleClock(slot: .compose)
-                    Button(ScheduleCopy.sendVerb(scheduled: scheduled)) { send(override: false) }
+                    Button(ScheduleCopy.sendVerb(scheduled: scheduled)) { send() }
                         .buttonStyle(.glassProminent)
                         .tint(Palette.accent)
                 }
@@ -554,9 +537,9 @@ struct ComposePane: View {
         // half a window wide the hints lost the fight for room and wrapped
         // mid-word. One statement per verb: the button, with its key beside it.
         HStack(spacing: Space.s8) {
-            // THE MESSAGE OPTIONS, DESKTOP ONLY. The phone renders this bar
-            // only for a blocked send (see the call site), and its attach
-            // chip lives in the header beside send instead: the tracker switch
+            // THE MESSAGE OPTIONS, DESKTOP ONLY. The phone renders no footer
+            // (see the call site), and its attach chip lives in the header
+            // beside send instead: the tracker switch
             // is what a phone would have to give the row for, and one switch
             // nobody came here to touch is not worth a strip of chrome between
             // the editor and the keyboard. A phone that wants the pixel changes
@@ -575,22 +558,11 @@ struct ComposePane: View {
             #if os(macOS)
                 ScheduleClock(slot: .compose)
             #endif
-            // Past a blocked verdict the plain send stays (the match may have
-            // been edited out) and the override stands beside it in danger red:
-            // two acts, never one button that quietly means both.
-            //
-            // A SET TIME FLIPS BOTH VERBS, "schedule" and "schedule anyway":
-            // same keys, and the button says what it does. One computed string
-            // each (`ScheduleCopy`), so the label and the act cannot disagree.
-            if guarded {
-                Button { send(override: true) } label: {
-                    keyed(ScheduleCopy.overrideVerb(scheduled: scheduled), "⌘⇧↵")
-                }
-                    .buttonStyle(.glassProminent)
-                    .tint(Palette.danger)
-            }
+            // A SET TIME FLIPS THE VERB to "schedule": same key, and the
+            // button says what it does. One computed string (`ScheduleCopy`),
+            // so the label and the act cannot disagree.
             #if os(macOS)
-                Button { send(override: false) } label: {
+                Button { send() } label: {
                     keyed(ScheduleCopy.sendVerb(scheduled: scheduled), "⌘↵")
                 }
                     .buttonStyle(.glassProminent)
@@ -770,8 +742,6 @@ struct ComposePane: View {
             let full = (try? await APIClient.shared.group(group.id)) ?? group
             let members = (full.members ?? []).map(\.addr)
             patch { state in
-                // A new audience relocks send-anyway, same as typing one.
-                state.guardKinds = []
                 state.groupId = full.id
                 state.groupMode = full.mode
                 state.groupName = full.name
@@ -854,19 +824,7 @@ struct ComposePane: View {
                     store.noteKeyboardSendLocked()
                     return true
                 }
-                send(override: false)
-                return true
-            },
-            // Past a blocked verdict only; declines otherwise, so the chord is
-            // not a quiet way to skip a guard that has not spoken.
-            KeyBinding(declining: "shift+Enter", "send anyway", meta: true, allowInInput: true) {
-                // THE ASK BAR IS A MODAL ON TOP OF THIS PANE, and KeyMonitor
-                // walks the sets newest-first; a chord typed into its field
-                // must not send THROUGH the outbound guard from under it.
-                guard !modalAbove, guarded, store.compose?.page != .drafts else {
-                    return false
-                }
-                send(override: true)
+                send()
                 return true
             },
             // THE CLOCK'S CHORD (`ScheduleClock.chord`, ⌘⇧L). Declines where
@@ -897,10 +855,7 @@ struct ComposePane: View {
             get: { store.compose?.recipients ?? Recipients() },
             set: { value in
                 guard store.compose?.recipients != value else { return }
-                patch {
-                    $0.stateRecipients(value)
-                    $0.guardKinds = []
-                }
+                patch { $0.stateRecipients(value) }
                 DraftSaver.shared.noteChange(.compose)
             })
     }
@@ -913,13 +868,7 @@ struct ComposePane: View {
                 // the autosave hooks HERE and nowhere else: there is no way to edit
                 // the draft without arming a save.
                 guard store.compose?[keyPath: keyPath] != value else { return }
-                // AN EDIT RELOCKS THE OVERRIDE. "Send anyway" is consent to
-                // the mail the guard judged; after a keystroke it is a
-                // different mail, and the plain send is what judges it again.
-                patch {
-                    $0[keyPath: keyPath] = value
-                    $0.guardKinds = []
-                }
+                patch { $0[keyPath: keyPath] = value }
                 DraftSaver.shared.noteChange(.compose)
             })
     }
@@ -943,7 +892,7 @@ struct ComposePane: View {
     /// have to happen while the composer is still on screen to show their
     /// answer. The checks are the same for both: a scheduled mail is still a
     /// mail, and its tray is still the promise.
-    private func send(override: Bool) {
+    private func send() {
         guard let compose = store.compose else { return }
         // Untouched covers the seeded signature: a signature under nothing is
         // not a message, and must not be one keystroke from going out.
@@ -967,9 +916,9 @@ struct ComposePane: View {
             return
         }
         if scheduled {
-            store.scheduleCompose(.compose, override: override)
+            store.scheduleCompose(.compose)
         } else {
-            store.sendWithUndo(.compose, override: override)
+            store.sendWithUndo(.compose)
         }
     }
 }
@@ -1093,9 +1042,6 @@ struct MailtoConfirm: View {
 
 // MARK: - shared chrome
 
-/// THE outbound-guard verdict, rendered identically wherever a reply started.
-/// The one screen whose job is talking a reader out of a mistake must not read
-/// differently in the pane composer and in the reader's inline one.
 /// Says, inside the composer, that an agent wrote what is in it. The drafts
 /// list marks such a draft too, but a reply draft is restored straight into
 /// the reply box when the owner presses `r`, without the list ever being
@@ -1120,36 +1066,6 @@ struct AgentDraftNotice: View {
         .overlay(
             RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(Palette.accent.opacity(0.4), lineWidth: 1))
-    }
-}
-
-struct GuardVerdictBox: View {
-    /// The redacted kinds the guard matched. Never rendered as markup — they are
-    /// server strings.
-    let kinds: [String]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: Space.s4) {
-            HStack(spacing: Space.s4) {
-                Text("outbound guard blocked · matched (redacted):")
-                    .font(Typo.micro)
-                Text(kinds.joined(separator: ", "))
-                    .font(Typo.mono(11, weight: .semibold))
-            }
-            .foregroundStyle(Palette.danger)
-            Text("review the recipients and body, then override to send anyway.")
-                .font(Typo.micro)
-                .foregroundStyle(Palette.inkFaint)
-        }
-        .padding(Space.s10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
-                .fill(Palette.dangerSoft)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
-                .strokeBorder(Palette.danger.opacity(0.4), lineWidth: 1))
     }
 }
 

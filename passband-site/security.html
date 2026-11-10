@@ -714,6 +714,16 @@ thread carrying an unassessed one is not cacheable.</li>
 <li>A reminder the owner sets on an archive message lists it at the human door
 like any reminded row. It does not surface at the agent door until the row
 is <code>allowed</code>.</li>
+<li>LITE ROWS (archive mail more than a year back, <code>messages.html_lite = 1</code>,
+docs/SEARCH.md §8) are archive rows in every respect above; they only lack
+<code>body_html</code>. The HTML is fetched back from the provider by
+<code>POST /client/thread/{id}/hydrate</code>, which is HUMAN DOOR ONLY (the agent
+doors serve text and have no HTML to hydrate), runs the fetched mail
+through the same sanitizer ingest does, and writes <code>body_html</code> and the
+mark and nothing else: <code>body</code>, the full-text index and the content snapshot
+are untouched, so hydration advances no revision, queues no job and changes
+nothing an agent can read. Reading a thread (the GET the client prefetches
+through) never hydrates.</li>
 </ul>
 <p>Do not widen the omission: it is exactly <code>is_archive = 1</code> AND access NULL or
 <code>pending</code> AND no owner seal (<code>archive_unassessed_sql!</code> in <code>store/sqlite/mod.rs</code>).</p>
@@ -736,8 +746,7 @@ a send consumes them or their owning draft is deleted. Unclaimed uploads are
 swept after a day by the next upload. These human-only routes never expose bytes
 on MCP, never audit file contents, and use <code>no-store</code>. Byte responses use the same
 content-type whitelist, <code>nosniff</code>, and attachment disposition as inbound files.
-The outbound guard scans text and message parts at send time; binary files are
-not scanned. Restricting external-agent access does not delete human drafts or
+Restricting external-agent access does not delete human drafts or
 their attachments. However many drafts an account holds (one per reply target,
 one per forwarded message, any number of new-message drafts), they are served
 only on <code>/client/drafts</code> and the owner&#39;s own are never audited. The agent door
@@ -857,7 +866,7 @@ chose that level. Nothing here changes what an agent can READ.</p></div>
 <ol class="rungs">
 <li><span class="tag">none</span><b>Read only</b><span>No drafts, no sending</span></li>
 <li class="def"><span class="tag">drafts &middot; the default</span><b>Leave drafts for you</b><span>Marked &ldquo;from your agent&rdquo;; mail leaves only when you press send</span></li>
-<li class="stop"><span class="tag">send &middot; opt-in</span><b>Send with your approval</b><span>Same pipeline and secret guard as yours, with no override</span></li>
+<li class="stop"><span class="tag">send &middot; opt-in</span><b>Send with your approval</b><span>Same pipeline as yours, plus a secret check with no override</span></li>
 </ol>
 <div class="kinds"><span>Never for agents</span><code>attachments</code><code>forwards</code><code>send groups</code><code>read tracking</code><code>scheduling</code></div>
 <figcaption>An agent cannot change this setting, and a value the daemon cannot read counts as none.</figcaption>
@@ -904,12 +913,11 @@ agent&#39;s does not, because the agent is shown only a message&#39;s From and i
 human approves only what the agent shows them. A <code>Reply-To</code> nobody in that
 conversation saw must not decide where approved mail goes. The resolved
 <code>to</code>/<code>cc</code> are returned in the tool result;</li>
-<li>for <code>send_email</code>, runs <code>validate_send</code>, the outbound guard (§5) and
-<code>perform_send</code>, as <code>POST /client/actions/send</code> does, with <code>override_guard</code>
-hard-wired to <code>false</code>. The guard reads MORE than it does for the owner:
-recipients and subject as well as the body, and the body a second time
-with markdown emphasis marks removed (<code>guard_text</code>), since for an agent
-all of it is model output and this is the one check with no override;</li>
+<li>for <code>send_email</code>, runs <code>validate_send</code>, the outbound secret guard (§5) and
+<code>perform_send</code>. The guard has no override here. It reads recipients and
+subject as well as the body, and the body a second time with markdown
+emphasis marks removed (<code>guard_text</code>), since for an agent all of it is
+model output;</li>
 <li>for <code>create_draft</code>, INSERTS a local draft marked <code>drafts.from_agent = 1</code>
 and never edits one: a reply whose message already has a draft is refused,
 because that row may be the owner&#39;s own unfinished writing and an agent
@@ -1053,7 +1061,7 @@ rule text is not delivered as the owner&#39;s words.</p>
 <ul>
 <li>Never give <code>squelch-mcp</code> the write credential, a <code>GmailWriteClient</code>, or a
 direct draft/outbox store call. Agent writes go through <code>AgentMailer</code>.</li>
-<li>Never let an agent path pass <code>override_guard: true</code>.</li>
+<li>Never give the agent send path a way past the outbound guard (§5).</li>
 <li>Never resolve an agent&#39;s reply target with <code>action_message_ref</code> alone; it
 applies no agent access check. And never re-list the agent door&#39;s read
 conditions beside it: ask <code>thread_view</code>.</li>
@@ -1260,18 +1268,27 @@ its own transaction.</li>
 <p class="sec-num">&sect;5</p>
 <h2 id="s5">Outbound secret guard</h2>
 <p class="sec-lede">Before mail leaves, Passband looks for anything shaped like a secret. If it finds one it stops and asks, and it never copies the secret anywhere.</p>
-<div class="inv"><p class="lbl">Invariant</p><p>A secret-looking outgoing body is blocked unless the caller
-explicitly overrides, and the matched text is never copied anywhere - not into a
+<div class="inv"><p class="lbl">Invariant</p><p>An agent&#39;s send that looks like it carries a secret is refused,
+with no override, and the matched text is never copied anywhere: not into a
 response, a log, or the audit row.</p></div>
+<p><strong>Scope: the agent door only.</strong> The guard runs on <code>agent_write</code>&#39;s <code>send_email</code>
+(§4c), where mail goes out under the owner&#39;s standing consent
+and no human reads the body first. That is the prompt-injection case: mail the
+agent read tells it to send a key somewhere. The owner&#39;s own sends (compose,
+reply, forward, scheduled send, invites, and the in-app assistant, whose every
+send the owner approves on a card) are NOT scanned. A person who wrote or chose
+the words and pressed send decides what they mail. It used to scan those too,
+with an override; on real mail it fired on nearly every forwarded newsletter (an
+unsubscribe id is a long hex run), so the override became a reflex and the
+guard protected nothing. An older client&#39;s <code>override_guard</code> field is ignored.</p>
 <figure class="viz guard" aria-label="Outbound secret guard">
-<p class="viz-title">The outbound check</p>
+<p class="viz-title">The outbound check, on agent sends</p>
 <div class="g-flow">
-<div class="mnode"><span class="tag">Scanned</span><b>Everything you are about to send</b><span>Your note, plus a forward&#39;s original and its text attachments</span></div>
+<div class="mnode"><span class="tag">Scanned</span><b>Everything an agent is about to send</b><span>Recipients, subject and body, links included</span></div>
 <i class="arr" aria-hidden="true"></i>
 <div class="g-branch">
 <div class="g-row"><span class="chip">Nothing found</span><i class="arr" aria-hidden="true"></i><span class="chip">Sent</span></div>
-<div class="g-row"><span class="chip warn">Looks like a secret</span><i class="arr" aria-hidden="true"></i><span class="chip">Stopped; told only the kind</span></div>
-<div class="g-row g-sub"><span class="chip">You choose to override</span><i class="arr" aria-hidden="true"></i><span class="chip">Sent, with an audit row</span></div>
+<div class="g-row"><span class="chip warn">Looks like a secret</span><i class="arr" aria-hidden="true"></i><span class="chip">Refused, no override; told only the kind</span></div>
 </div>
 </div>
 <div class="kinds"><span>Detects</span><code>pem_block</code><code>api_key</code><code>otp_code</code><code>long_hex</code><code>long_base64</code></div>
@@ -1279,34 +1296,24 @@ response, a log, or the audit row.</p></div>
 </figure>
 <p class="lbl">Enforcement</p>
 <p><code>squelch-api/src/guard.rs:scan</code> / <code>scan_kinds</code>, called from
-<code>handlers::action_send</code> before the message leaves the process, and from
-<code>scheduled_send::schedule</code> when a mail is scheduled. Detects <code>pem_block</code>,
-<code>api_key</code> (vendor prefixes), <code>otp_code</code> (6–8 digits near an auth word), <code>long_hex</code>
-(≥32), <code>long_base64</code> (≥40). A non-empty match set returns HTTP 422 listing only the
-<strong>kinds</strong>; <code>override_guard: true</code> sends anyway and writes a <code>guard_override:&lt;kinds&gt;</code>
-audit row. False positives are acceptable precisely because it is overridable.</p>
-<p><strong>Forwards are scanned twice over.</strong> Forwarding is the classic exfiltration shape -
-a clean note wrapped around someone else&#39;s secret - so <code>handlers::forward_send</code>
-scans the ORIGINAL as well as the note, unions the kinds and issues ONE 422 / one
-<code>guard_override</code> row for both. The scan runs on the raw bytes re-fetched from Gmail
-and about to be composed, never on the stored row: the stored body is a sanitized,
-flattened memory of the message and the bytes on the wire are the original.</p>
-<p><em>Exactly what is scanned</em> on a forward: the sender&#39;s typed note, the original&#39;s
-decoded text bodies - every part in mail-parser&#39;s <code>text_body</code> list - an html-to-text
-conversion of its <code>html_body</code> view, <strong>and</strong> the contents of every <code>text/*</code> and
-<code>message/*</code> attachment part. Both body views are needed because when a <code>text/plain</code>
-part exists mail-parser never converts the html alternative down, so an alternative
-whose text half is innocuous and whose html half carries the key would otherwise ship
-unread. The text attachments are scanned because a PEM key pasted into <code>notes.txt</code>
-and dragged onto a mail is the same exfiltration shape as one pasted into the body -
-arguably the more natural one - and mail-parser has already transcoded each such part
-to UTF-8, so reading it as text costs nothing; <code>message/*</code> parts (an attached email,
-a bounce report) are plain RFC822 text and are read the same way. Two known limits,
-stated rather than implied: <strong>attachment bytes under any other mime are not scanned</strong>
-(a key inside a zip, or an <code>id_rsa</code> carrying an <code>application/octet-stream</code> mime,
-passes), and <strong>html attribute values are not scanned</strong> (the converter yields visible
-text, so a secret inside an <code>href</code> or a <code>data-</code> attribute survives). The guard is a seatbelt against the accident, not a DLP
-boundary against a determined sender - it is overridable by design.</p>
+<code>agent_write</code> before <code>perform_send</code>. Detects <code>pem_block</code>, <code>api_key</code> (vendor
+prefixes), <code>otp_code</code> (6–8 digits near an auth word), <code>long_hex</code> (≥32) and
+<code>long_base64</code> (≥40). URLs are scanned like everything else: a link
+(<code>https://x/?t=&lt;token&gt;</code>) is the natural way for an injected agent to carry a
+token out, and a false positive costs only a refusal the agent reports to the
+owner, who can send the mail themselves. A match refuses the send, tells the agent only the
+<strong>kinds</strong>, and writes a <code>blocked:guard</code> audit row. Agent sends are never
+forwards and carry no files, so there is no original or attachment to scan.</p>
+<p><strong>Known gaps, stated rather than implied.</strong></p>
+<ul>
+<li><em>The in-app assistant&#39;s approval card renders markdown</em>, so a link shows its
+text, not its target: <code>[here](https://x/?k=&lt;token&gt;)</code> reads as &quot;here&quot;. That
+card is the only check on an assistant send now. Showing link targets on the
+card would close it; not built.</li>
+<li><em>Agent drafts are not scanned</em> (<code>create_draft</code>, here or in §4c). The owner
+sends a draft from the composer, which shows the raw text, so it is a human
+send like any other.</li>
+</ul>
 <p><strong>Forwarded HTML goes out verbatim, trackers included.</strong> The original&#39;s markup is
 embedded as it arrived (the only edit is stripping the <code>&lt;meta&gt;</code> tags that DECLARE a
 charset - a <code>charset</code> attribute or the <code>http-equiv=&quot;Content-Type&quot;</code> spelling - which
@@ -1321,15 +1328,6 @@ This is deliberate and matches every mainstream mail client: passband strips tra
 out of what it RENDERS to its user, not out of what its user chooses to pass on.
 Rewriting a stranger&#39;s markup on the way out would forward something other than what
 arrived, and the user&#39;s decision is to send <em>this message</em>.</p>
-<p><strong>Scheduled sends are judged once, when scheduled.</strong> <code>scheduled_send::schedule</code>
-runs the same scan while the user is there to answer: the note, the staged text
-files, and for a forward the ORIGINAL, read on the write token at schedule time
-and unioned into one verdict. <code>override_guard: true</code> persists in the frozen
-request. At fire time the worker calls <code>perform_send</code> with <code>SendGuard::Settled</code>,
-so nothing re-scans: the content is frozen, and a forward&#39;s original is
-re-fetched from Gmail at fire (Gmail&#39;s raw bytes are immutable, so what is sent
-is what was judged). A cancel hands the request back WITHOUT <code>override_guard</code>,
-so a reschedule is judged again.</p>
 <p><strong>Scheduled sends carry a visible fingerprint (privacy).</strong> Every mail the outbox
 fires goes out with <code>X-Passband-Outbox: &lt;token&gt;</code> and a <code>Message-ID</code> of
 <code>&lt;token@passband.app&gt;</code>, where the token is 48 hex chars of fresh randomness minted
@@ -1338,8 +1336,9 @@ mail was sent by Passband&#39;s scheduler, and carry nothing else, no account, m
 user or row id, so two scheduled mails from one user are not linkable by them.
 Interactive sends carry neither.</p>
 <div class="dnb"><p class="lbl">Do not break</p><p><code>GuardMatch::kind()</code> is the only thing that may leave the process -
-never return, log, or audit the matched substring. Keep the override audited; an
-un-audited bypass is not a bypass we can reason about.</p></div>
+never return, log, or audit the matched substring. Never add an override to the
+agent path: it is exactly the decision a prompt-injected agent would be talked
+into making.</p></div>
 <details><summary>Post-send echo (audit contract)</summary>
 <p>After a successful send,
 <code>handlers::echo_sent</code> fetches the sent message back (<code>format=raw</code>, write token) and
@@ -1347,8 +1346,8 @@ ingests it locally so the thread shows the reply immediately. It is strictly
 best-effort - the mail has already left, so nothing here may fail the request - and
 audits under its own action <code>send.echo</code>, alongside the <code>send</code> row&#39;s own outcomes
 (<code>rejected:confirm</code>, <code>rejected:forward_and_reply</code>, <code>rejected:empty_body</code> - skipped for
-a forward, whose note may legitimately be empty - <code>blocked:guard</code>,
-<code>guard_override:&lt;kinds&gt;</code>, <code>rejected:no_write_credential</code> (including the forward whose
+a forward, whose note may legitimately be empty - <code>blocked:guard</code> (agent sends
+only), <code>rejected:no_write_credential</code> (including the forward whose
 raw fetch found the write credential dead - a 403 telling the user to re-run
 <code>squelchd auth --write</code>, never the 502 that would blame Gmail), <code>failed:target</code>,
 <code>rejected:no_recipient</code>, <code>rejected:too_large</code> (the original exceeds
@@ -1440,10 +1439,6 @@ writes the ordinary <code>send</code> row, marked with its outbox row:</p>
 <td>the group did not resolve / the insert failed.</td>
 </tr>
 <tr>
-<td><code>schedule</code> · <code>blocked:guard</code> / <code>guard_override:&lt;kinds&gt;</code></td>
-<td>the verdict, given at schedule time.</td>
-</tr>
-<tr>
 <td><code>schedule</code> · <code>ok:&lt;id&gt;</code></td>
 <td>scheduled; <code>&lt;id&gt;</code> is the outbox row.</td>
 </tr>
@@ -1517,8 +1512,8 @@ unsubscribe) route through <code>AgentTools.confirmed(_:_:)</code>, where only <
 reaches <code>perform</code>. That single funnel is the entire reason the <code>confirm: true</code>
 those calls carry is a true statement rather than a default.</li>
 <li><strong>The daemon does not take the client&#39;s word for it.</strong> Every mutating <code>/client/*</code>
-route demands the flag itself and audits the attempt, and a send still meets the
-outbound secret guard (§5). A client that lied would be recorded doing it.</li>
+route demands the flag itself and audits the attempt. A client that lied would be
+recorded doing it.</li>
 <li><strong>A half-arrived instruction is not an instruction.</strong>
 <code>passband/Sources/Passband/Assistant/Assistant.swift</code> executes a <code>tool_use</code> only
 after its message has closed, so a partially streamed tool input never runs.</li>

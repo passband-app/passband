@@ -119,8 +119,11 @@ auth returns a bare 401 with no detail.
 - SQL is parameterized throughout. The only `format!`-built SQL interpolates
   literal table names, enums or test values (Semgrep pre-scan,
   `docs/VERIFICATION.md`).
-- Outgoing mail is scanned for secrets (keys, PEM blocks, codes) before it
-  leaves; a hit needs an explicit, audited override (`squelch-api/src/guard.rs`).
+- Mail an AI agent sends on the owner's behalf (MCP `send_email`) is scanned
+  for secrets (keys, PEM blocks, codes, long tokens, links included) before it
+  leaves, and a hit is refused with no override and audited
+  (`squelch-api/src/guard.rs`). Mail the owner sends themselves is not
+  scanned: what they send is their call.
 
 ## V6 Cryptography
 
@@ -143,7 +146,7 @@ auth returns a bare 401 with no detail.
   a canary), the guard logs only the kind of secret it found.
 - Security events are logged without values: admin sign-in, cross-origin
   refusals, MCP and warden refusals as counts. A per-account `audit_log`
-  records sends, guard overrides, token revokes and agent-access changes.
+  records sends, guard refusals, token revokes and agent-access changes.
 - AWS: CloudTrail (all regions, log-file validation, 365 days) and tripwire
   emails on every human secret read, shell session, console sign-in and IAM
   write (`deploy/aws/tofu/main/audit.tf`).

@@ -118,11 +118,6 @@ struct ComposeState: Sendable, Equatable {
     /// would otherwise be typed into their draft. `r` or a click takes it.
     /// Display only; never saved and never sent.
     var quietOpen = false
-    /// Redacted guard kinds from a 422, set when a held send comes back
-    /// blocked and the composer reopens on it. Empty means the guard passed (or
-    /// hasn't been asked yet). Non-empty is the ONLY state that offers an
-    /// override.
-    var guardKinds: [String] = []
     var sending = false
     var error: String?
     /// Ask the daemon to mint a read-tracking pixel for this one send. Seeded
@@ -240,7 +235,7 @@ enum ComposePage: Sendable, Equatable {
 ///
 /// A draft saves WORDS, NEVER INTENTS. Nothing that says what should HAPPEN
 /// to the mail belongs here: not a scheduled "send at", not the tracker
-/// switch, not a guard override, not a group's send mode. A draft is
+/// switch, not a group's send mode. A draft is
 /// reopened and read by a person before anything is done with it, and an
 /// intent restored from a row would act without that read.
 /// `ComposeState.sendAt` is the field this rule exists for: it is NOT here,
@@ -292,7 +287,7 @@ extension SendBody {
     /// `draftId` is passed rather than read off `c`, because a schedule names
     /// the id `DraftSaver.currentDraftId(of:)` knows (a late create's answer),
     /// not the one the slot happened to hold when the composer closed.
-    init(compose c: ComposeState, override: Bool, draftId: Int?) {
+    init(compose c: ComposeState, draftId: Int?) {
         let staged = c.stagedAttachmentIds
         self.init(
             // Only a reply names a parent; a forward names an original. Never
@@ -329,9 +324,9 @@ extension SendBody {
             subject: c.subject.isEmpty ? nil : c.subject,
             body: c.body,
             // Both composers write markdown; the daemon renders the HTML half
-            // from this same source after the guard has scanned it.
+            // from this same source.
             body_format: "markdown",
-            confirm: true, override_guard: override, draft_id: draftId,
+            confirm: true, draft_id: draftId,
             // The composer's own switch, every time: the daemon's stored
             // default is a client preference it never applies itself. Omitted
             // rather than `false`, like `subject`.

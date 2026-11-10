@@ -497,6 +497,14 @@ pub struct ClientMessage {
     /// rows read before the column existed, and from an older daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_signals: Option<SenderSignals>,
+    /// A LITE ARCHIVE ROW: mail the archive walk stored more than a year back
+    /// with its text and without its HTML (`messages.html_lite`), so `html` is
+    /// null because it was not kept, not because the mail had none. The reader
+    /// shows `content` and, only once it is DISPLAYING the thread, asks
+    /// `POST /client/thread/{id}/hydrate` to fetch the HTML from the provider.
+    /// Absent (false) on everything else and from an older daemon.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lite: bool,
 }
 
 /// One attachment's metadata on the HUMAN DOOR. Carries NO bytes.
@@ -1658,6 +1666,7 @@ mod tests {
                     bcc_addrs: None,
                     translation: None,
                     sender_signals: None,
+                    lite: false,
                 },
                 ClientMessage {
                     id: 2,
@@ -1681,6 +1690,7 @@ mod tests {
                     bcc_addrs: Some("blind@b.com".into()),
                     translation: None,
                     sender_signals: None,
+                    lite: false,
                 },
             ],
         };

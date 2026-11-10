@@ -1764,6 +1764,10 @@ impl Store for SqliteStore {
         self.ingest_archive_message(triaged)
     }
 
+    fn ingest_lite_archive_message(&self, triaged: &TriagedMessage) -> Result<Option<i64>> {
+        self.ingest_lite_archive_message(triaged)
+    }
+
     fn archive_walked_to(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>> {
         self.archive_walked_to(account_id)
     }

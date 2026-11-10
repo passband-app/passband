@@ -526,6 +526,18 @@ actor APIClient {
         try await postNoContent("/client/thread/\(escaped)/translate")
     }
 
+    /// Ask the daemon to fetch back the HTML of this thread's LITE messages
+    /// (archive mail more than a year old, stored as text; `ClientMessage.lite`).
+    /// Called by the reader DISPLAYING the thread, and by nothing else, for
+    /// `translateThread`'s reason: the prefetch reads threads nobody opened,
+    /// and each lite message is a fetch from the mail provider. The reader
+    /// refetches the thread afterwards to pick the HTML up.
+    func hydrateThread(_ threadId: String) async throws {
+        let escaped =
+            threadId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? threadId
+        try await postNoContent("/client/thread/\(escaped)/hydrate")
+    }
+
     /// Whether this daemon can share invites, and what the mail could say.
     /// Asked before anything is shown, so a daemon that cannot share never
     /// renders a button whose only outcome is a refusal.

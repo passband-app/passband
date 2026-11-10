@@ -1945,12 +1945,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     }
 
     /// How long the lane waits after the error the last chunk returned: the
-    /// quota backoff when Gmail refused it, the flat [`ArchivePace::
-    /// error_backoff`] for anything else.
+    /// quota backoff when Gmail refused it, else the error backoff that error
+    /// earned ([`ArchivePace::error_backoff`], doubling per consecutive
+    /// failure up to [`ArchivePace::error_backoff_cap`]).
     fn archive_error_wait(&self) -> Duration {
-        self.archive
-            .state()
+        let state = self.archive.state();
+        state
             .quota_wait
+            .or(state.error_wait)
             .unwrap_or(self.archive_pace.error_backoff)
     }
 
@@ -2024,6 +2026,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 state.skips_counted.clear();
                 state.quota_wait = None;
                 state.quota_backoff = None;
+                state.error_wait = None;
+                state.error_backoff = None;
+            }
+            // A finished walk asked the provider and was answered (or had
+            // nothing to ask): the run of failures is over too.
+            Ok(ArchiveStep::Done) => {
+                state.error_wait = None;
+                state.error_backoff = None;
             }
             Err(_) if refused => {
                 let wait = state.quota_backoff.unwrap_or(pace.quota_backoff);
@@ -2041,7 +2051,19 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // Nothing is counted against the CHUNK. What may eventually be
             // stepped over is one message that has itself failed, pass after
             // pass, and that is booked where it fails ([`Self::archive_skip`]).
-            Err(_) => state.quota_wait = None,
+            //
+            // THE WAIT GROWS WITH THE RUN OF FAILURES. Most errors here are
+            // transient (a laptop waking with no network yet, one dropped
+            // connection) and are gone in seconds, so the first retry comes
+            // quickly; one that keeps failing is an outage, and the wait
+            // doubles toward the cap so the walk stops knocking every few
+            // seconds. Separate from the quota backoff, which is untouched.
+            Err(_) => {
+                state.quota_wait = None;
+                let wait = state.error_backoff.unwrap_or(pace.error_backoff);
+                state.error_backoff = Some((wait * 2).min(pace.error_backoff_cap));
+                state.error_wait = Some(wait);
+            }
             Ok(_) => {}
         }
         out
@@ -3816,7 +3838,18 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         } else if origin == IngestOrigin::Archive {
             // Insert-only: an id the store already holds is left as it is, and
             // there is nothing to embed for a row this call did not write.
-            let Some(id) = self.store.ingest_archive_message(&triaged)? else {
+            //
+            // MORE THAN A YEAR BACK IT IS STORED LITE: the text and the index,
+            // not the HTML, which is the bulk of a row and is fetched back from
+            // the provider if the owner ever opens it. Dropped here so the
+            // bytes are never written; the store drops it again regardless.
+            let stored = if archive_row_is_lite(triaged.message.received_at, self.archive_now()) {
+                triaged.message.body_html = None;
+                self.store.ingest_lite_archive_message(&triaged)?
+            } else {
+                self.store.ingest_archive_message(&triaged)?
+            };
+            let Some(id) = stored else {
                 return Ok(None);
             };
             id
@@ -4358,9 +4391,13 @@ struct ArchivePace {
     /// it and the poll lane, the sweeps and the write door queue behind an
     /// archive request at most a third of the time.
     rest_factor: u32,
-    /// The wait after any error inside the walk before the same chunk is tried
-    /// again.
+    /// The FIRST wait after an error inside the walk (other than a quota
+    /// refusal) before the same chunk is tried again. Doubles per consecutive
+    /// failure up to `error_backoff_cap`; a walked chunk, or a walk found
+    /// finished, resets it.
     error_backoff: Duration,
+    /// The longest that wait gets.
+    error_backoff_cap: Duration,
     /// How often an idle walk looks again while it is held off (no poll has
     /// succeeded yet, or a window of mail is being fetched).
     held_recheck: Duration,
@@ -4406,7 +4443,15 @@ impl Default for ArchivePace {
             // three even bursts rather than one of 25 and a long wait.
             batch: 10,
             rest_factor: 2,
-            error_backoff: Duration::from_secs(5 * 60),
+            // 15s, 30s, 1m, 2m, 4m, then 5m for as long as it keeps failing.
+            // The first retry is soon because the usual cause (a laptop
+            // waking before its network, one dropped connection) is gone in
+            // seconds, and it used to cost a flat five minutes. The cap stays
+            // at the old flat wait: a failed request that is not a quota
+            // refusal costs the budget next to nothing, so waiting longer
+            // than five minutes only delays recovery from a real outage.
+            error_backoff: Duration::from_secs(15),
+            error_backoff_cap: Duration::from_secs(5 * 60),
             held_recheck: Duration::from_secs(30),
             done_recheck: Duration::from_secs(60 * 60),
             per_minute: 30,
@@ -4419,6 +4464,22 @@ impl Default for ArchivePace {
             forward_lag: ChronoDuration::hours(24),
         }
     }
+}
+
+/// THE LITE TIER'S EDGE, in days: archive mail received longer ago than this
+/// is stored without its HTML (`messages.html_lite`). A year, because that is
+/// how far the archive reached before it reached five, and it is where the
+/// reader stops being a place people browse and becomes a place search lands
+/// them: the text is what keyword search and the agent read, and the HTML is
+/// fetched back from the provider when the owner opens the thread. Not a
+/// setting: it trades disk for one provider fetch per old message opened, and
+/// that trade does not change per deployment.
+pub const ARCHIVE_LITE_AFTER_DAYS: i64 = 365;
+
+/// Whether an archive message received at `received_at` is stored lite,
+/// judged against the walk's clock `now`.
+fn archive_row_is_lite(received_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    received_at < now - ChronoDuration::days(ARCHIVE_LITE_AFTER_DAYS)
 }
 
 /// 2024-01-01T00:00:00Z. A clock reading earlier than this is wrong, and the
@@ -4495,6 +4556,10 @@ struct ArchiveState {
     quota_backoff: Option<Duration>,
     /// The wait the LAST error earned, when it was a quota refusal.
     quota_wait: Option<Duration>,
+    /// The wait the next non-quota error earns; `None` is the starting one.
+    error_backoff: Option<Duration>,
+    /// The wait the LAST error earned, when it was not a quota refusal.
+    error_wait: Option<Duration>,
     quota_day: Option<chrono::NaiveDate>,
     quota_refusals_today: u32,
     /// The current minute of the absolute ceiling: when it began and how many
@@ -9674,6 +9739,7 @@ Q0/00yfa39rgtJLa0DnOoA==
         ArchivePace {
             rest_factor: 0,
             error_backoff: Duration::from_millis(10),
+            error_backoff_cap: Duration::from_millis(80),
             held_recheck: Duration::from_millis(5),
             ..ArchivePace::default()
         }
@@ -9943,6 +10009,153 @@ Q0/00yfa39rgtJLa0DnOoA==
             ArchiveStep::Walked
         );
         assert_eq!(g.calls("get:g-too-old"), 1);
+    }
+
+    /// A multipart/alternative message with a text half and an HTML half, both
+    /// saying `word`.
+    fn html_eml(at: DateTime<Utc>, word: &str) -> String {
+        format!(
+            "From: Harbour Office <office@harbour.example>\r\n\
+             To: me@example.com\r\n\
+             Subject: Mooring invoice\r\n\
+             Date: {}\r\n\
+             MIME-Version: 1.0\r\n\
+             Content-Type: multipart/alternative; boundary=\"b\"\r\n\
+             \r\n\
+             --b\r\n\
+             Content-Type: text/plain; charset=\"UTF-8\"\r\n\
+             \r\n\
+             The {word} mooring is paid.\r\n\
+             --b\r\n\
+             Content-Type: text/html; charset=\"UTF-8\"\r\n\
+             \r\n\
+             <table><tr><td>The <b>{word}</b> mooring is paid.</td></tr></table>\r\n\
+             --b--\r\n",
+            at.to_rfc2822()
+        )
+    }
+
+    /// FIVE YEARS. A walk that finished at the old one-year default is not
+    /// finished at the new one: its cursor stays where it stopped, the target
+    /// moves back four years, and the next chunk carries on from the cursor.
+    /// What it stores out there is LITE: text and index, no HTML. Inside the
+    /// year an archive row keeps its HTML as it always did.
+    #[tokio::test]
+    async fn a_walk_finished_at_one_year_extends_to_five_and_stores_old_mail_lite() {
+        let (store, acct) = store_at_cursor(Some(100));
+        // Where a 365-day walk stopped: a little past its target.
+        let finished = days_ago(365) - ChronoDuration::hours(1);
+        store.set_archive_walked_to(acct, finished).unwrap();
+        let at = finished - ChronoDuration::days(2);
+        let g = MockGmail::default();
+        g.old_mail("g-2024", at, html_eml(at, "kittiwake"));
+        let base = serve_mock(g.clone()).await;
+        let (_tx, mut rx) = never_shutdown();
+
+        let one_year = archive_engine(store.clone(), acct, &base, 365);
+        assert_eq!(
+            one_year.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Done,
+            "finished, at a year"
+        );
+        assert_eq!(g.calls("list-all"), 0);
+
+        let default_days = Config::default().sync.archive_days;
+        assert_eq!(default_days, 1825, "five years by default");
+        let five = archive_engine(store.clone(), acct, &base, default_days);
+        assert_eq!(
+            five.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked,
+            "not finished at five"
+        );
+        assert_eq!(
+            g.queries(""),
+            vec![archive_q(finished - ChronoDuration::days(7), finished)],
+            "resumed from the cursor the one-year walk left"
+        );
+        assert_eq!(g.calls("get:g-2024"), 1);
+        assert_eq!(
+            store.archive_walked_to(acct).unwrap(),
+            Some(finished - ChronoDuration::days(7))
+        );
+        assert_eq!(
+            five.metrics.archive_walk().map(|(_, done)| done),
+            Some(false)
+        );
+
+        let view = store.thread_view_with_html(acct, "g-2024").unwrap();
+        let m = &view.messages[0];
+        assert!(store.message_is_archive(acct, m.id).unwrap());
+        assert!(m.lite, "more than a year back: lite");
+        assert_eq!(m.html, None, "its HTML is not kept");
+        assert!(m.content.contains("kittiwake"), "its text is");
+        let hits = store.search(acct, "kittiwake", 10, 0).unwrap();
+        assert_eq!(hits.iter().map(|h| h.id).collect::<Vec<_>>(), [m.id]);
+
+        // INSIDE THE YEAR, the walk keeps the HTML as it always has.
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.old_mail("g-recent", at, html_eml(at, "fulmar"));
+        let base = serve_mock(g.clone()).await;
+        let eng = archive_engine(store.clone(), acct, &base, default_days);
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        let view = store.thread_view_with_html(acct, "g-recent").unwrap();
+        assert!(!view.messages[0].lite);
+        assert!(
+            view.messages[0]
+                .html
+                .as_deref()
+                .is_some_and(|h| h.contains("fulmar"))
+        );
+    }
+
+    /// THE GUARDS HOLD AT FIVE YEARS. The floor and the ceiling are asked per
+    /// batch whatever the target is, so a walk out in its third year stops
+    /// for a short disk or a full database exactly as the first year's did,
+    /// with nothing fetched and the cursor where it was.
+    #[tokio::test]
+    async fn the_five_year_walk_still_holds_at_the_disk_floor_and_its_ceiling() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(800);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.old_mail("g-old", at, html_eml(at, "gannet"));
+        let base = serve_mock(g.clone()).await;
+        let eng = archive_engine(store.clone(), acct, &base, 1825);
+        let (_tx, mut rx) = never_shutdown();
+
+        for full in [
+            // Under the 2 GiB floor.
+            (|| Some(disk_mb(2047, 0, 0))) as fn() -> Option<crate::store::ArchiveDisk>,
+            // A fifth of a 49 GiB tenant volume is the floor there: 5 GiB.
+            || Some(disk_mb(5 * 1024 - 1, 49 * 1024, 0)),
+            // At the 4 GiB database ceiling.
+            || Some(disk_mb(u64::MAX >> 20, 0, 4096)),
+            // Free space that cannot be read.
+            || None,
+        ] {
+            eng.archive.state().disk_probe = Some(full);
+            assert_eq!(
+                eng.archive_walk_chunk(&mut rx).await.unwrap(),
+                ArchiveStep::Held
+            );
+        }
+        assert_eq!(g.calls("get:g-old"), 0, "held means nothing fetched");
+        assert_eq!(store.archive_walked_to(acct).unwrap(), Some(cursor));
+
+        eng.archive.state().disk_probe = Some(|| Some(crate::store::ArchiveDisk::UNBOUNDED));
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(g.calls("get:g-old"), 1);
     }
 
     /// `archive_days = 0` IS OFF: no listing, no cursor row, no gauge.
@@ -10696,8 +10909,8 @@ Q0/00yfa39rgtJLa0DnOoA==
             assert_eq!(booked(&eng, "g-ok"), 0);
             assert_eq!(
                 eng.archive_error_wait(),
-                eng.archive_pace.error_backoff,
-                "not a quota refusal, so the flat wait"
+                eng.archive_pace.error_backoff * 2u32.pow(pass - 1),
+                "not a quota refusal, so the error backoff, doubling per pass"
             );
             assert!(!eng.archive.in_flight.load(Ordering::Relaxed));
             assert_eq!(eng.metrics.archive_skipped(), 0);
@@ -11391,6 +11604,54 @@ Q0/00yfa39rgtJLa0DnOoA==
         assert_eq!(pace.per_minute, 30);
         assert_eq!(pace.per_minute_window, Duration::from_secs(60));
         assert!(pace.batch <= pace.per_minute);
+    }
+
+    /// THE ERROR BACKOFF: a failure that is not a quota refusal waits the
+    /// first step, each consecutive one twice the last, never past the cap;
+    /// a walked chunk starts the run over. By default 15s, 30s, 1m, 2m, 4m,
+    /// then 5m.
+    #[tokio::test]
+    async fn the_archive_error_backoff_doubles_caps_and_resets_on_success() {
+        let d = ArchivePace::default();
+        let mut wait = d.error_backoff;
+        let mut seen = vec![wait.as_secs()];
+        for _ in 0..6 {
+            wait = (wait * 2).min(d.error_backoff_cap);
+            seen.push(wait.as_secs());
+        }
+        assert_eq!(seen, [15, 30, 60, 120, 240, 300, 300]);
+
+        let (store, acct) = store_at_cursor(Some(100));
+        store.set_archive_walked_to(acct, days_ago(40)).unwrap();
+        let g = MockGmail::default();
+        let base = serve_mock(g.clone()).await;
+        let mut eng = archive_engine(store.clone(), acct, &base, 365);
+        eng.archive_pace.error_backoff = Duration::from_secs(10);
+        eng.archive_pace.error_backoff_cap = Duration::from_secs(40);
+        let (_tx, mut rx) = never_shutdown();
+
+        // Five failed listings in a row: 10, 20, 40, then held at the cap.
+        g.0.lock().unwrap().all_mail_failures = 5;
+        let mut waits = Vec::new();
+        for _ in 0..5 {
+            assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
+            waits.push(eng.archive_error_wait().as_secs());
+        }
+        assert_eq!(waits, [10, 20, 40, 40, 40], "grows, then the cap holds");
+
+        // A walked chunk ends the run: the next failure starts small again.
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(eng.archive_error_wait(), Duration::from_secs(10));
+        g.0.lock().unwrap().all_mail_failures = 1;
+        assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
+        assert_eq!(
+            eng.archive_error_wait(),
+            Duration::from_secs(10),
+            "reset by the success"
+        );
     }
 
     /// THE ABSOLUTE CEILING, on a virtual clock: 30 in a minute and the 31st

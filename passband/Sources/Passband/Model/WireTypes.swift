@@ -411,6 +411,12 @@ struct ClientMessage: Codable, Sendable, Identifiable, Hashable, SenderStringCon
     /// authentication). ABSENT on a daemon that predates it, which falls back to the
     /// local rule in `senderLine`.
     var sender_signals_warn: Bool?
+    /// A LITE ARCHIVE MESSAGE: more than a year old, stored with its text and
+    /// without its HTML, so `html` is nil because it was not kept. The reader
+    /// shows `content` and, once it is displaying the thread, asks
+    /// `APIClient.hydrateThread` for the HTML. ABSENT (nil) on everything
+    /// else and from an older daemon.
+    var lite: Bool?
 
     var attachmentList: [Attachment] { attachments ?? [] }
 
@@ -714,6 +720,30 @@ extension ClientThreadView {
         }
         return changed ? merged : nil
     }
+
+    /// THIS THREAD WITH THE HTML `fresh` HYDRATED laid over its lite messages,
+    /// and nothing else changed, for `mergingTranslations`' reason: the reader
+    /// is already showing the text, and the HTML arriving must not move it.
+    /// Only a message that was lite here and is no longer lite in `fresh`
+    /// changes. nil when none did.
+    func mergingHydrated(from fresh: ClientThreadView) -> ClientThreadView? {
+        var incoming: [Int: ClientMessage] = [:]
+        for m in fresh.messages where m.lite != true { incoming[m.id] = m }
+        var merged = self
+        var changed = false
+        for i in merged.messages.indices where merged.messages[i].lite == true {
+            guard let m = incoming[merged.messages[i].id] else { continue }
+            merged.messages[i].html = m.html
+            merged.messages[i].lite = nil
+            changed = true
+        }
+        return changed ? merged : nil
+    }
+
+    /// How many messages have HTML. Part of the reader's measuring-pass
+    /// identity: a lite message's HTML landing is a document nothing has
+    /// measured yet.
+    var htmlBodies: Int { messages.reduce(0) { $0 + (($1.html?.isEmpty ?? true) ? 0 : 1) } }
 
     /// Same messages, same order: the only case the poll may merge into. Any
     /// other difference is an arrival, which the in-place refresh owns.

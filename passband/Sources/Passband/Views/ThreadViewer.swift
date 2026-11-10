@@ -252,6 +252,9 @@ struct ThreadViewer: View {
         /// How many messages have a translation ready: one landing is a new
         /// document under a new key, which nothing has measured yet.
         let translations: Int
+        /// How many messages have HTML: a lite message's landing is a new
+        /// document, which nothing has measured yet.
+        let hydrated: Int
         let width: CGFloat
         /// A bubble measures its document at the bubble's measure, so a flip is
         /// a whole new set of heights to take — under a whole new set of keys.
@@ -454,6 +457,7 @@ struct ThreadViewer: View {
             // opening work rather than ahead of it: it is a drafts fetch.
             async let reopened: Void = reopenSavedReply()
             await requestDeferredTranslations()
+            await requestHydration()
             await refreshOpens()
             if aged { await revalidate() }
             await reopened
@@ -494,7 +498,8 @@ struct ThreadViewer: View {
         .task(
             id: MeasurePass(
                 thread: threadId, count: messages.count,
-                translations: thread?.readyTranslations ?? 0, width: bodyWidth, style: style,
+                translations: thread?.readyTranslations ?? 0, hydrated: thread?.htmlBodies ?? 0,
+                width: bodyWidth, style: style,
                 ready: styleReady, density: prefs.density)
         ) {
             // A window resize walks the width a pixel at a time, and each step
@@ -2339,7 +2344,9 @@ struct ThreadViewer: View {
             return
         }
         ThreadPrefetch.shared.note(threadId, view)
-        guard let merged = current.mergingTranslations(from: view) else { return }
+        let translated = current.mergingTranslations(from: view)
+        guard let merged = (translated ?? current).mergingHydrated(from: view) ?? translated
+        else { return }
         thread = merged
         marks = Self.marks(for: merged.messages, style: style, originals: originals)
     }
@@ -3212,6 +3219,26 @@ struct ThreadViewer: View {
         }
         // The cached copy still says `deferred`; this refetch replaces it with
         // `pending`, so a reopen in the next minute does not read stale.
+        await refreshTranslations()
+    }
+
+    /// MAIL MORE THAN A YEAR OLD arrives LITE: its text, without the HTML the
+    /// daemon did not keep. The reader shows the text at once and, being the
+    /// one party that knows the thread is on screen, asks the daemon to fetch
+    /// the HTML back from the mail provider, once per open, then refetches and
+    /// lays it over the text in place (`refreshTranslations`, which merges
+    /// both). Never from `ThreadPrefetch`: a warmed search result is not an
+    /// open, and each lite message is a provider fetch. A failed ask leaves
+    /// the text, and the next open asks again.
+    private func requestHydration() async {
+        guard messages.contains(where: { $0.lite == true }) else { return }
+        let epoch = store.epoch
+        do {
+            try await APIClient.shared.hydrateThread(threadId)
+        } catch {
+            return
+        }
+        guard store.isCurrent(epoch), !Task.isCancelled else { return }
         await refreshTranslations()
     }
 

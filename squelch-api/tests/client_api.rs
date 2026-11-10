@@ -16097,6 +16097,178 @@ async fn the_translate_post_needs_the_human_door_token() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+// --- lite archive rows: GET serves text, POST .../hydrate fetches the HTML ----
+
+/// A LITE archive row through the real write: mail three years old, stored
+/// with its text and without its HTML, in thread `thread`.
+fn seed_lite(store: &SqliteStore, acct: i64, gmail: &str, thread: &str) -> i64 {
+    use squelch_core::sync::ingest::{RawFetched, ingest};
+    let when = chrono::Utc::now() - chrono::Duration::days(3 * 365);
+    let fetched = RawFetched {
+        account_id: acct,
+        gmail_msg_id: gmail.into(),
+        gmail_thread_id: Some(thread.into()),
+        raw: "From: Harbour Office <office@harbour.example>\r\nTo: me@example.com\r\n\
+              Subject: Mooring invoice\r\n\r\nThe lighthouse mooring is paid.\r\n"
+            .as_bytes()
+            .to_vec(),
+        internal_date: Some(when),
+        is_sent: false,
+        is_spam: false,
+        account_addr: "me@example.com".into(),
+    };
+    let triaged = ingest(&fetched, &Default::default(), chrono::Utc::now(), |_| false);
+    store
+        .ingest_lite_archive_message(&triaged)
+        .unwrap()
+        .unwrap()
+}
+
+/// THE GET IS A READ, and the client prefetches through it: a lite row is
+/// served as its text with `lite: true`, and no provider fetch happens however
+/// often it is read. The reader displaying it POSTs, which fetches the raw
+/// message once, caches its HTML, and the next GET serves that HTML.
+#[tokio::test]
+async fn a_lite_row_is_text_on_every_read_and_hydrated_only_by_the_post() {
+    let (base, handle) = mock_gmail_seq(vec![(
+        200,
+        alternative_raw_response(
+            "The lighthouse mooring is paid.",
+            "<table><tr><td>The <b>lighthouse</b> mooring is paid.</td></tr></table>",
+        ),
+    )])
+    .await;
+    let Harness { app, store, acct } = app_with_writes(base, |store, acct| {
+        seed_lite(store, acct, "g-old", "t-old");
+    });
+
+    for _ in 0..3 {
+        let resp = app
+            .clone()
+            .oneshot(authed("GET", "/client/thread/t-old"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let m = &json["messages"][0];
+        assert_eq!(m["lite"], true);
+        assert!(m["html"].is_null());
+        assert!(m["content"].as_str().unwrap().contains("lighthouse"));
+    }
+
+    let resp = app
+        .clone()
+        .oneshot(authed("POST", "/client/thread/t-old/hydrate"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["hydrated"], 1);
+    assert_eq!(json["failed"], 0);
+
+    let reqs = handle.await.unwrap();
+    assert_eq!(reqs.len(), 1, "one fetch, by the POST and nothing else");
+    assert!(reqs[0].starts_with("GET "));
+    assert!(reqs[0].contains("/messages/g-old?format=raw"));
+
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/thread/t-old"))
+        .await
+        .unwrap();
+    let json = body_json(resp).await;
+    let m = &json["messages"][0];
+    assert!(m.get("lite").is_none(), "no longer lite");
+    let html = m["html"].as_str().expect("the HTML is served now");
+    assert!(html.contains("<b>lighthouse</b>"), "{html}");
+
+    // Hydrated is hydrated: a second POST asks the provider nothing (the mock
+    // has stopped listening, so a fetch would count as failed).
+    let resp = app
+        .clone()
+        .oneshot(authed("POST", "/client/thread/t-old/hydrate"))
+        .await
+        .unwrap();
+    let json = body_json(resp).await;
+    assert_eq!(
+        (json["hydrated"].as_i64(), json["failed"].as_i64()),
+        (Some(0), Some(0))
+    );
+    // Search still finds it by its text.
+    assert_eq!(store.search(acct, "lighthouse", 10, 0).unwrap().len(), 1);
+}
+
+/// A MESSAGE THE PROVIDER NO LONGER HAS is cleared without HTML, so the
+/// reader stops asking; a fetch that FAILS leaves the row lite for the next
+/// open.
+#[tokio::test]
+async fn a_hydrate_clears_a_gone_message_and_keeps_a_failed_one_lite() {
+    let (base, handle) = mock_gmail_seq(vec![(404, "{}".to_string())]).await;
+    let Harness { app, .. } = app_with_writes(base, |store, acct| {
+        seed_lite(store, acct, "g-gone", "t-gone");
+    });
+    let resp = app
+        .clone()
+        .oneshot(authed("POST", "/client/thread/t-gone/hydrate"))
+        .await
+        .unwrap();
+    let json = body_json(resp).await;
+    assert_eq!(
+        (json["hydrated"].as_i64(), json["failed"].as_i64()),
+        (Some(0), Some(0))
+    );
+    handle.await.unwrap();
+    let json = body_json(
+        app.clone()
+            .oneshot(authed("GET", "/client/thread/t-gone"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(json["messages"][0].get("lite").is_none());
+    assert!(json["messages"][0]["html"].is_null());
+
+    let (base, handle) = mock_gmail_seq(vec![(500, "{}".to_string())]).await;
+    let Harness { app, .. } = app_with_writes(base, |store, acct| {
+        seed_lite(store, acct, "g-flaky", "t-flaky");
+    });
+    let json = body_json(
+        app.clone()
+            .oneshot(authed("POST", "/client/thread/t-flaky/hydrate"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(json["hydrated"], 0);
+    assert!(json["failed"].as_i64().unwrap() >= 1);
+    handle.abort();
+    let json = body_json(
+        app.oneshot(authed("GET", "/client/thread/t-flaky"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(json["messages"][0]["lite"], true, "tried again next open");
+}
+
+#[tokio::test]
+async fn the_hydrate_post_needs_the_human_door_token() {
+    let (state, _store, _acct) = common::state_with(|store, acct| {
+        seed_lite(store, acct, "g-old", "t-old");
+    });
+    let resp = router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/client/thread/t-old/hydrate")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 // --- teach + general rules ---------------------------------------------------
 
 #[tokio::test]

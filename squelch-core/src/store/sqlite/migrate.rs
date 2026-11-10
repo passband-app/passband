@@ -198,6 +198,9 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // The archive tier's marker. 0 on every pre-existing row, which is the
     // honest reading: nothing stored before the walk existed came from it.
     add_column_if_missing(conn, "messages", "is_archive", "INTEGER NOT NULL DEFAULT 0")?;
+    // The lite archive marker (schema.sql). 0 on every pre-existing row: rows
+    // already stored keep their HTML, and only the walk sets it.
+    add_column_if_missing(conn, "messages", "html_lite", "INTEGER NOT NULL DEFAULT 0")?;
     // The archive walk's forward edge. NULL on a cursor row written before it
     // existed, which the store reads as that row's `walked_to`.
     add_column_if_missing(conn, "archive_walk", "covered_to", "TEXT")?;

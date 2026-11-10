@@ -1012,7 +1012,7 @@ impl SqliteStore {
                          AND LOWER(TRIM(COALESCE(m.from_addr, ''))) =
                              LOWER(TRIM(COALESCE(a.email, ''))))) AS authored_by_account,
                     tr.source_lang, tr.status, tr.subject, tr.body, tr.body_html,
-                    tr.missing_facts, m.sender_signals
+                    tr.missing_facts, m.sender_signals, m.html_lite
              FROM messages m
              LEFT JOIN triage t ON t.message_id = m.id
              LEFT JOIN accounts a ON a.id = m.account_id
@@ -1070,6 +1070,7 @@ impl SqliteStore {
                     sender_signals: crate::types::SenderSignals::from_column(
                         r.get::<_, Option<String>>(23)?.as_deref(),
                     ),
+                    lite: r.get::<_, i64>(24)? != 0,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1166,13 +1167,21 @@ impl SqliteStore {
     }
 
     pub(super) fn ingest_message(&self, triaged: &TriagedMessage) -> Result<i64> {
-        self.ingest_message_inner(triaged, None, false)
+        self.ingest_message_inner(triaged, None, false, false)
             .map(|id| id.expect("a plain ingest never refuses"))
     }
 
     /// See [`crate::store::Store::ingest_archive_message`].
     pub(super) fn ingest_archive_message(&self, triaged: &TriagedMessage) -> Result<Option<i64>> {
-        self.ingest_message_inner(triaged, None, true)
+        self.ingest_message_inner(triaged, None, true, false)
+    }
+
+    /// See [`crate::store::Store::ingest_lite_archive_message`].
+    pub(super) fn ingest_lite_archive_message(
+        &self,
+        triaged: &TriagedMessage,
+    ) -> Result<Option<i64>> {
+        self.ingest_message_inner(triaged, None, true, true)
     }
 
     /// See [`crate::store::Store::ingest_message_fresh`].
@@ -1181,7 +1190,7 @@ impl SqliteStore {
         triaged: &TriagedMessage,
         scope: HealScope,
     ) -> Result<Option<i64>> {
-        self.ingest_message_inner(triaged, Some(scope), false)
+        self.ingest_message_inner(triaged, Some(scope), false, false)
     }
 
     /// The one ingest write. `heal` is the blank-body heal's flavour: refuse
@@ -1195,12 +1204,18 @@ impl SqliteStore {
     /// row like sent mail's, an agent state row with no job behind it, and none
     /// of the side effects an arrival has (contacts, the unsubscribe ledger,
     /// timezone observations).
+    ///
+    /// `lite` (archive only) is the five-year tier's flavour of that: the row
+    /// keeps no `body_html` and is marked `html_lite`, whatever the caller
+    /// carried. Everything else about it is an archive row's.
     fn ingest_message_inner(
         &self,
         triaged: &TriagedMessage,
         heal: Option<HealScope>,
         archive: bool,
+        lite: bool,
     ) -> Result<Option<i64>> {
+        let lite = lite && archive;
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
 
@@ -1283,9 +1298,14 @@ impl SqliteStore {
             triaged.date_offset_minutes.filter(|_| !archive),
         )?;
         if archive {
+            // A LITE ROW drops its HTML in this same statement, so the store
+            // holds the line whatever the caller passed; the walk clears it
+            // before the insert as well, so the bytes are never written.
             tx.execute(
-                "UPDATE messages SET is_archive = 1 WHERE account_id = ?1 AND id = ?2",
-                params![triaged.message.account_id, id],
+                "UPDATE messages SET is_archive = 1, html_lite = ?3,
+                     body_html = CASE WHEN ?3 = 1 THEN NULL ELSE body_html END
+                 WHERE account_id = ?1 AND id = ?2",
+                params![triaged.message.account_id, id, lite as i64],
             )?;
             if let Some(name) = kept_name {
                 tx.execute(
@@ -1778,6 +1798,59 @@ impl SqliteStore {
         )
         .optional()
         .map_err(Into::into)
+    }
+
+    /// The thread's LITE rows (`messages.html_lite`), newest first and at
+    /// most `cap` of them: `(id, provider message id)`, for the reader's
+    /// hydrate. Nothing else is asked of the row: the HTML comes from the
+    /// provider, never from what is stored.
+    pub fn lite_messages_in_thread(
+        &self,
+        account_id: AccountId,
+        thread_id: &str,
+        cap: usize,
+    ) -> Result<Vec<(i64, String)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, gmail_msg_id FROM messages
+             WHERE account_id = ?1 AND thread_id = ?2 AND html_lite = 1
+             ORDER BY received_at DESC LIMIT ?3",
+        )?;
+        let rows = stmt
+            .query_map(params![account_id, thread_id, cap as i64], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// CACHE A HYDRATED BODY on a lite row and clear its mark, so the next
+    /// open is served from the store like any year-old row. `None` is the
+    /// provider's answer that the message has no HTML (plain-text mail) or no
+    /// longer exists: the mark is cleared and nothing is fetched again.
+    ///
+    /// ONLY `body_html` AND THE MARK MOVE. `body`, the full-text index and the
+    /// content snapshot are untouched, so the agent's revision does not
+    /// advance and nothing is re-queued: the archive row stays write-once in
+    /// everything a model or a search reads. Guarded on the mark, so a second
+    /// hydrate racing the first writes nothing. `true` when this call wrote.
+    pub fn store_hydrated_html(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        html: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "UPDATE messages SET body_html = ?3, html_lite = 0
+             WHERE account_id = ?1 AND id = ?2 AND html_lite = 1",
+            params![
+                account_id,
+                message_id,
+                html.filter(|h| !h.trim().is_empty())
+            ],
+        )?;
+        Ok(n > 0)
     }
 
     pub(super) fn message_is_archive(

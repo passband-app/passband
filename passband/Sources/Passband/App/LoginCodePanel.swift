@@ -113,6 +113,10 @@ final class LoginCodePanel {
         // code is as likely to be full screen as not.
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.hidesOnDeactivate = false
+        // Shown while the app is HIDDEN (a login launch starts that way)
+        // without un-hiding it: a hideable panel ordered front un-hides the
+        // whole app, main window and all.
+        panel.canHide = false
         panel.becomesKeyOnlyIfNeeded = true
         panel.isOpaque = false
         panel.backgroundColor = .clear

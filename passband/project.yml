@@ -69,6 +69,8 @@ targets:
       - sdk: WebKit.framework
       - sdk: Security.framework
       - sdk: UserNotifications.framework
+      # Open at login (Sources/Passband/Lib/LoginItem.swift).
+      - sdk: ServiceManagement.framework
       # The attachment preview IS the system's Quick Look panel; see
       # Sources/Passband/Views/QuickLookPanel.swift.
       - sdk: QuickLookUI.framework

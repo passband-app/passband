@@ -902,10 +902,47 @@ struct NotificationsSection: View {
     @State private var delivered: Bool?
     /// The system said no when "Respect Do Not Disturb" asked to read the Focus.
     @State private var focusRefused = false
+    #if os(macOS)
+        private var loginItem: LoginItem { LoginItem.shared }
+    #endif
 
     var body: some View {
         @Bindable var prefs = prefs
         SectionCard(label: "Notifications") {
+            // First, because every banner below depends on it: Passband only
+            // speaks while it runs. Hidden on a dev build, which never
+            // registers (see LoginItem).
+            #if os(macOS)
+                if LoginItem.available {
+                    SettingsRow(
+                        title: "Open at login",
+                        detail: loginItem.error
+                            ?? (loginItem.needsApproval
+                                ? "Off in System Settings, General, Login Items. Turn it on there."
+                                : "Passband starts when you log in, so banners arrive after a restart without opening it first.")
+                    ) {
+                        HStack(spacing: 8) {
+                            if loginItem.needsApproval {
+                                Button("Open") { loginItem.openSystemSettings() }
+                                    .buttonStyle(.glass)
+                                    .controlSize(.small)
+                            }
+                            Toggle(
+                                "Open at login",
+                                isOn: Binding(
+                                    get: { loginItem.enabled }, set: { loginItem.set($0) })
+                            )
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            // Waiting on System Settings: the switch cannot
+                            // change it, the Open button can.
+                            .disabled(loginItem.needsApproval)
+                        }
+                    }
+                    RowDivider()
+                }
+            #endif
             SettingsRow(
                 title: "Sound",
                 detail: "Plays on urgent and deadline banners. Other mail arrives silently."
@@ -964,6 +1001,8 @@ struct NotificationsSection: View {
         .task(id: store.epoch) { await store.refreshCalendarReminderPref() }
         .task(id: store.epoch) { await store.refreshMorningBriefPref() }
         #if os(macOS)
+            // System Settings can flip it while the pane is closed.
+            .onAppear { LoginItem.shared.refresh() }
             // Turning it on is the moment to ask: a switch that reads on while
             // the system refuses to say whether a Focus is up would be a lie.
             .onChange(of: prefs.loginCodesRespectFocus) { _, on in

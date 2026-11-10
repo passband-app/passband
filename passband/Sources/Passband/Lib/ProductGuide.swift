@@ -277,6 +277,7 @@ enum ProductGuide {
 
         The window:
         - Closing the window does not quit Passband. Notifications keep arriving, and clicking the Dock icon reopens it.
+        - Passband opens at login once it is in Applications, starting hidden, so notifications arrive after a restart. "Open at login" in Settings > General > Notifications turns that off.
         """
 
     private static let sitrep = """

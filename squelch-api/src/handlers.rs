@@ -2472,6 +2472,7 @@ pub async fn get_timeline(
                 "primary": c.is_primary,
                 "writable": c.writable(),
                 "can_invite": c.can_invite(),
+                "meet": c.offers_meet(),
             })
         })
         .collect();

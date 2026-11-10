@@ -936,6 +936,10 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    // Whether Google allows a Meet on each calendar (2026-11-10), for "Add
+    // Google Meet". Filled by the next pass's calendar list; until then NULL,
+    // which reads as allowed on the primary calendar only.
+    add_column_if_missing(conn, "calendar_calendars", "meet", "INTEGER")?;
 
     // The card's place gained its street address (2026-10-29). A table made
     // before it holds names only, under the old prompt, so every row is

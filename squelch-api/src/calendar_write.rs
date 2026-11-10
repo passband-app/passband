@@ -23,6 +23,12 @@
 //! and stored, and the kicked sync brings in the rest. Audited as
 //! `calendar_event_reply`, detail `ok:<answer>[:series]`.
 //!
+//! A MEET. A create or an edit may say `meet: true`, and Google makes a
+//! Google Meet for the event and puts it in the invitation; an edit's
+//! `meet: false` removes the event's Meet. Guarded by [`meet_allowed`]. The
+//! link comes back like any conference and is never stored (see
+//! `squelch_core::gcal::meeting`).
+//!
 //! THE ORDER IS THE CONTRACT: check everything (the grant, the body, the
 //! calendar, the event and the edit guard), then Google, then the local row,
 //! then the sync kick. Google's refusal (or silence) leaves every local row
@@ -150,6 +156,7 @@ use axum::response::IntoResponse;
 use serde_json::Value;
 use squelch_core::credentials::CalendarCredentials;
 use squelch_core::gcal::client::{API_BASE, CalendarApi, CallError, Notify};
+use squelch_core::gcal::meeting::MeetingKind;
 use squelch_core::gcal::write::{self, Invalid};
 use squelch_core::gcal::{EventRow, SelfResponse, StoredCalendar, SyncedEvent, read_written_event};
 
@@ -188,6 +195,8 @@ pub(crate) const ID_IN_USE: &str = "that event id is already used for a differen
 pub(crate) const ALREADY_CREATING: &str = "that event is already being created";
 pub(crate) const NOT_INVITED: &str = "you are not a guest of this event";
 pub(crate) const NO_MEETING: &str = "this event has no online meeting";
+pub(crate) const NO_MEET: &str = "Google Meet is not available on that calendar";
+pub(crate) const HAS_MEETING: &str = "this event already has an online meeting";
 
 /// EVERY ERROR BODY NAMES ITS KIND, `{"error", "code"}`: a closed list the
 /// app reads (docs/CALENDAR.md §8, "What a refusal says"). The app keys on
@@ -199,7 +208,7 @@ pub(crate) const NO_MEETING: &str = "this event has no online meeting";
 /// - [`code::INVALID`] 400: the body, a guest address, the delete's query.
 /// - [`code::UNKNOWN_CALENDAR`], [`code::READ_ONLY`],
 ///   [`code::CANNOT_INVITE`], [`code::GUESTS_READ_ONLY`],
-///   [`code::CANNOT_NOTIFY`] 400.
+///   [`code::CANNOT_NOTIFY`], [`code::NO_MEET`], [`code::HAS_MEETING`] 400.
 /// - [`code::NOT_GRANTED`], [`code::NOT_EDITABLE`], [`code::NOT_INVITED`] 403.
 /// - [`code::NOT_FOUND`] 404: no such stored event.
 /// - [`code::ID_IN_USE`], [`code::ALREADY_CREATING`],
@@ -225,6 +234,8 @@ pub(crate) mod code {
     pub(crate) const NOT_EDITABLE: &str = "not_editable";
     pub(crate) const NOT_INVITED: &str = "not_invited";
     pub(crate) const NO_MEETING: &str = "no_meeting";
+    pub(crate) const NO_MEET: &str = "no_meet";
+    pub(crate) const HAS_MEETING: &str = "has_meeting";
     pub(crate) const NOT_FOUND: &str = "not_found";
     pub(crate) const ID_IN_USE: &str = "id_in_use";
     pub(crate) const ALREADY_CREATING: &str = "already_creating";
@@ -497,6 +508,36 @@ fn refuse_notify_unless_own(calendar: &StoredCalendar, notify: Notify) -> Result
     Ok(())
 }
 
+/// THE MEET GUARD: a Meet is asked for only on a calendar where Google
+/// allows one ([`StoredCalendar::offers_meet`]), never on top of a meeting
+/// the event already has (it would replace a Zoom or Teams add-on), and only
+/// a Meet is removed (`meet: false` on anything else is refused, so it can
+/// never take away a conference someone else set up).
+fn meet_allowed(
+    calendar: &StoredCalendar,
+    meet: Option<bool>,
+    has: Option<MeetingKind>,
+) -> Result<(), Refusal> {
+    match meet {
+        None => Ok(()),
+        Some(true) if !calendar.offers_meet() => Err(Refusal::new(
+            "rejected:no_meet",
+            StatusCode::BAD_REQUEST,
+            code::NO_MEET,
+            NO_MEET,
+        )),
+        Some(true) if has.is_some() => Err(Refusal::new(
+            "rejected:has_meeting",
+            StatusCode::BAD_REQUEST,
+            code::HAS_MEETING,
+            HAS_MEETING,
+        )),
+        Some(true) => Ok(()),
+        Some(false) if has == Some(MeetingKind::Meet) => Ok(()),
+        Some(false) => Err(Refusal::body(write::NO_MEET_TO_REMOVE)),
+    }
+}
+
 /// THE WRITE'S DEADLINE: `work` (everything from the grant check to the
 /// stored answer) gets [`ApiState::calendar_write_deadline`] in all. Past it
 /// the work is dropped, Google calls and all, and the answer is the 504 a
@@ -619,7 +660,8 @@ async fn put(state: &ApiState, calendar_id: &str, row: &EventRow) -> Result<(), 
 // --- POST /client/calendar/events --------------------------------------------
 
 /// `POST /client/calendar/events` with `{"calendar_id", "title", "start",
-/// "end", "all_day", "location"?, "description"?, "guests"?, "notify"?}`.
+/// "end", "all_day", "location"?, "description"?, "guests"?, "notify"?,
+/// "meet"?}`. `meet: true` has Google make a Meet for it.
 /// See the module doc. With `notify: true` Google mails each guest an
 /// invitation; without it the guests are on the event and nobody is told.
 pub async fn create_event(
@@ -664,6 +706,7 @@ async fn create(state: ApiState, body: Bytes) -> Result<(StatusCode, Value), Api
         if !draft.guests.is_empty() {
             may_carry_guests(&cal, &draft.guests, creds.account_email())?;
         }
+        meet_allowed(&cal, draft.meet.then_some(true), None)?;
         let google_body = write::insert_body(&draft).map_err(Refusal::body)?;
         // One create per id at a time: a second send while the first is
         // still out is refused before Google hears it, not raced.
@@ -801,6 +844,7 @@ async fn edit(
             }
         }
         refuse_notify_unless_own(&cal, edit.notify)?;
+        meet_allowed(&cal, edit.meet, stored.row.meeting)?;
         let times = edit.times(&stored.row).map_err(Refusal::body)?;
         let (token, api) = google(&state, &creds, EDIT).await?;
         let attendees = match &edit.guests {

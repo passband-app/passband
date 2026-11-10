@@ -71,7 +71,7 @@ impl SqliteStore {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT calendar_id,summary,is_primary,selected,time_zone,sync_token,synced_at,
-                    full_synced_at,last_error_kind,failures,retry_at,truncated,color,access_role
+                    full_synced_at,last_error_kind,failures,retry_at,truncated,color,access_role,meet
              FROM calendar_calendars WHERE account_id=?1
              ORDER BY is_primary DESC, calendar_id",
         )?;
@@ -94,6 +94,7 @@ impl SqliteStore {
                     truncated: r.get(11)?,
                     color: r.get(12)?,
                     access_role: role.as_deref().and_then(AccessRole::parse),
+                    meet: r.get(14)?,
                 })
             })?
             .collect::<std::result::Result<_, _>>()?;
@@ -115,15 +116,16 @@ impl SqliteStore {
         for cal in calendars {
             tx.execute(
                 "INSERT INTO calendar_calendars(account_id,calendar_id,summary,is_primary,selected,time_zone,
-                                                color,access_role)
-                 VALUES(?1,?2,?3,?4,1,?5,?6,?7)
+                                                color,access_role,meet)
+                 VALUES(?1,?2,?3,?4,1,?5,?6,?7,?8)
                  ON CONFLICT(account_id,calendar_id) DO UPDATE SET
                     summary=COALESCE(excluded.summary,summary),
                     is_primary=excluded.is_primary,
                     selected=1,
                     time_zone=COALESCE(excluded.time_zone,time_zone),
                     color=COALESCE(excluded.color,color),
-                    access_role=COALESCE(excluded.access_role,access_role)",
+                    access_role=COALESCE(excluded.access_role,access_role),
+                    meet=COALESCE(excluded.meet,meet)",
                 params![
                     account,
                     cal.calendar_id,
@@ -132,6 +134,7 @@ impl SqliteStore {
                     cal.time_zone,
                     cal.color,
                     cal.access_role.map(AccessRole::as_str),
+                    cal.meet,
                 ],
             )?;
         }

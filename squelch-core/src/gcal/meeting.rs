@@ -17,8 +17,45 @@
 //! 3. A link in the location, then in the description, on a host known to
 //!    run meetings ([`kind_of_host`]). Only those: a description is written by
 //!    whoever sent the invitation, and Join must not open just any link in it.
+//!
+//! MAKING A MEET. A create or an edit may ask Google for a new Meet
+//! ([`create_request`], sent with `conferenceDataVersion=1`, which every
+//! insert and patch names). Google makes the room and puts the link in the
+//! invitation it mails; the answer comes back through the sync like any
+//! conference, so the card's Join button is the same one. Only where the
+//! calendar allows it ([`super::StoredCalendar::offers_meet`]).
 
-use serde_json::Value;
+use serde_json::{Value, json};
+
+/// Google's name for a Meet, in `conferenceSolutionKey.type` and in a
+/// calendar's `allowedConferenceSolutionTypes`.
+pub const MEET_TYPE: &str = "hangoutsMeet";
+
+/// The `conferenceData` that asks Google for a new Meet. `request_id` is
+/// Google's idempotency key for it: "If the request ID is the same as in a
+/// previous request, the request is ignored", so a create sent again under
+/// its own event id ([`request_id`]) never makes a second room.
+pub fn create_request(request_id: &str) -> Value {
+    json!({
+        "createRequest": {
+            "requestId": request_id,
+            "conferenceSolutionKey": {"type": MEET_TYPE},
+        }
+    })
+}
+
+/// The request id for [`create_request`]: the create's own event id when it
+/// has one (so a resend is the same request), else 32 random hex digits.
+pub fn request_id(event_id: Option<&str>) -> String {
+    if let Some(id) = event_id {
+        return format!("meet-{id}");
+    }
+    let mut bytes = [0u8; 16];
+    // A failure to read randomness is a fixed id: Google then answers a
+    // second Meet request with the first room, never a wrong one.
+    let _ = getrandom::fill(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
 
 /// The longest join link handed out.
 const URL_CAP: usize = 2048;

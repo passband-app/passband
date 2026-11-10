@@ -101,6 +101,8 @@ struct Google {
     /// Answer this many of the next one-event reads 404, found or not, as a
     /// replica that has not caught up would.
     stale_reads: usize,
+    /// Meet rooms made, for their links.
+    rooms: usize,
 }
 type Fake = Arc<Mutex<Google>>;
 
@@ -135,6 +137,25 @@ fn merge(target: &mut Value, patch: &Value) {
             }
         }
     }
+}
+
+/// Google's conference handling on a written event: a `createRequest` for a
+/// Meet becomes a room, but only under `conferenceDataVersion=1`; without it
+/// Google "ignores conference data in the event's body".
+fn make_meet(event: &mut Value, q: &HashMap<String, String>, n: usize) {
+    let Some(request) = event.pointer("/conferenceData/createRequest").cloned() else {
+        return;
+    };
+    if q.get("conferenceDataVersion").map(String::as_str) != Some("1")
+        || request.pointer("/conferenceSolutionKey/type") != Some(&json!("hangoutsMeet"))
+    {
+        event.as_object_mut().unwrap().remove("conferenceData");
+        return;
+    }
+    event["conferenceData"] = json!({
+        "entryPoints": [{"entryPointType": "video", "uri": format!("https://meet.google.com/new-room-{n}")}],
+        "conferenceSolution": {"key": {"type": "hangoutsMeet"}},
+    });
 }
 
 /// Google's `maxAttendees` on one event of an answer: "If there are more than
@@ -255,6 +276,8 @@ async fn insert_route(
         }
     };
     let mut event = body;
+    g.rooms += 1;
+    make_meet(&mut event, &q, g.rooms);
     event["id"] = json!(id);
     event["status"] = json!("confirmed");
     event["iCalUID"] = json!(format!("{id}@google.com"));
@@ -324,6 +347,9 @@ async fn patch_route(
     } else {
         merge(event, &body);
     }
+    let rooms = g.rooms + 1;
+    let event = g.find(&calendar, &id).unwrap();
+    make_meet(event, &q, rooms);
     event["updated"] = json!("2026-10-05T11:00:00.000Z");
     let mut event = event.clone();
     omit_attendees(&mut event, &q);
@@ -3887,11 +3913,11 @@ async fn colours_and_writable_calendars_are_served() {
         body["calendars"],
         json!([
             {"id": "primary", "name": "Me", "color": "#9fe1e7", "primary": true, "writable": true,
-             "can_invite": true},
+             "can_invite": true, "meet": true},
             {"id": HOLIDAYS, "name": "Holidays", "color": "#16a765", "primary": false,
-             "writable": false, "can_invite": false},
+             "writable": false, "can_invite": false, "meet": false},
             {"id": TEAM, "name": "Team", "color": "#f83a22", "primary": false, "writable": true,
-             "can_invite": false},
+             "can_invite": false, "meet": false},
         ])
     );
     assert_eq!(served(&w, "own").await.unwrap()["color"], "#9fe1e7");
@@ -3905,7 +3931,7 @@ async fn colours_and_writable_calendars_are_served() {
     assert_eq!(
         plain.timeline().await["calendars"],
         json!([{"id": "primary", "name": "Calendar primary", "color": null, "primary": true,
-                "writable": true, "can_invite": true}])
+                "writable": true, "can_invite": true, "meet": true}])
     );
     // A list role that drops to reader stops the calendar being writable.
     w.google().list[1]["accessRole"] = json!("reader");
@@ -7637,4 +7663,169 @@ async fn join_reads_the_meeting_link_from_google_and_nothing_stores_it() {
         !audit(&w).iter().any(|(a, _, _)| a.contains("join")),
         "a read: no audit row"
     );
+}
+
+#[tokio::test]
+async fn a_meet_is_asked_of_google_only_where_the_calendar_allows_one() {
+    let (w, start) = write_world("meet").await;
+    // The team calendar's entry says Meet is allowed; the holidays one is
+    // read-only, and a calendar whose entry says nothing allows it only when
+    // it is the primary one.
+    {
+        let mut g = w.google();
+        g.list[1]["conferenceProperties"] =
+            json!({"allowedConferenceSolutionTypes": ["hangoutsMeet"]});
+        g.list[2]["conferenceProperties"] =
+            json!({"allowedConferenceSolutionTypes": ["eventHangout"]});
+    }
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    let calendars = w.timeline().await["calendars"].clone();
+    let offers = |id: &str| {
+        calendars
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .map(|c| c["meet"].clone())
+    };
+    assert_eq!(offers("primary"), Some(json!(true)), "the primary, unsaid");
+    assert_eq!(offers(TEAM), Some(json!(true)), "the list says so");
+    assert_eq!(offers(HOLIDAYS), Some(json!(false)), "read-only");
+    let lists = w.google().list_requests.clone();
+    assert!(
+        lists
+            .last()
+            .unwrap()
+            .get("fields")
+            .is_some_and(|f| f.contains("conferenceProperties(allowedConferenceSolutionTypes)")),
+        "the list asks which conferences each calendar allows"
+    );
+
+    // A create with `meet: true`: Google is asked for a room, keyed to the
+    // create's own id, and the event comes back as a Meet.
+    let begin = start + Duration::days(1);
+    let create = json!({
+        "calendar_id": "primary", "title": "Planning", "all_day": false,
+        "start": rfc(begin), "end": rfc(begin + Duration::minutes(30)),
+        "id": "planning1", "meet": true,
+    });
+    let (status, body, _) = send(&w.app, "POST", "/client/calendar/events", Some(create)).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let write = writes(&w).last().unwrap().clone();
+    assert_eq!(write.query["conferenceDataVersion"], "1");
+    assert_eq!(
+        write.body["conferenceData"],
+        json!({"createRequest": {"requestId": "meet-planning1",
+                                 "conferenceSolutionKey": {"type": "hangoutsMeet"}}})
+    );
+    assert_eq!(body["meeting"], "meet", "Join is there at once");
+    assert!(
+        !body.to_string().contains("new-room"),
+        "the link is not served"
+    );
+
+    // A create without it asks for nothing.
+    let plain = json!({
+        "calendar_id": "primary", "title": "Lunch", "all_day": false,
+        "start": rfc(begin), "end": rfc(begin + Duration::hours(1)),
+    });
+    let (status, body, _) = send(&w.app, "POST", "/client/calendar/events", Some(plain)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(
+        writes(&w)
+            .last()
+            .unwrap()
+            .body
+            .get("conferenceData")
+            .is_none()
+    );
+    assert_eq!(body["meeting"], Value::Null);
+    let lunch = body["id"].as_str().unwrap().to_string();
+
+    // Refused before Google: a calendar without Meet, a bad value.
+    let sent = writes(&w).len();
+    let mut on_holidays = json!({
+        "calendar_id": TEAM, "title": "x", "all_day": false,
+        "start": rfc(begin), "end": rfc(begin + Duration::hours(1)), "meet": "yes",
+    });
+    let (status, body, _) = send(
+        &w.app,
+        "POST",
+        "/client/calendar/events",
+        Some(on_holidays.clone()),
+    )
+    .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid"))
+    );
+    {
+        let mut g = w.google();
+        g.list[1]["conferenceProperties"] = json!({"allowedConferenceSolutionTypes": []});
+    }
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    on_holidays["meet"] = json!(true);
+    let (status, body, _) =
+        send(&w.app, "POST", "/client/calendar/events", Some(on_holidays)).await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("no_meet"))
+    );
+    assert_eq!(writes(&w).len(), sent, "Google heard nothing");
+
+    // An edit adds one to an event without a meeting...
+    let (status, body, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri("primary", &lunch),
+        Some(json!({"meet": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let write = writes(&w).last().unwrap().clone();
+    assert_eq!(write.query["conferenceDataVersion"], "1");
+    let request = write.body["conferenceData"]["createRequest"]["requestId"]
+        .as_str()
+        .unwrap();
+    assert_eq!(request.len(), 32, "a fresh request id");
+    assert_eq!(body["meeting"], "meet");
+    // ...never a second one on top...
+    let sent = writes(&w).len();
+    let (status, body, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri("primary", &lunch),
+        Some(json!({"meet": true})),
+    )
+    .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("has_meeting"))
+    );
+    // ...and removes only a Meet.
+    let (status, body, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri("primary", "own"),
+        Some(json!({"meet": false})),
+    )
+    .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid"))
+    );
+    assert_eq!(writes(&w).len(), sent, "Google heard nothing");
+    let (status, body, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri("primary", &lunch),
+        Some(json!({"meet": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        writes(&w).last().unwrap().body,
+        json!({"conferenceData": null})
+    );
+    assert_eq!(body["meeting"], Value::Null);
 }

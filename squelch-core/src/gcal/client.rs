@@ -99,7 +99,7 @@ pub const EVENT_FIELDS: &str = event_fields!();
 /// [`super::read_calendar_entry`] reads.
 pub const LIST_FIELDS: &str = "nextPageToken,\
 items(id,summary,summaryOverride,primary,selected,deleted,hidden,timeZone,\
-backgroundColor,colorId,accessRole)";
+backgroundColor,colorId,accessRole,conferenceProperties(allowedConferenceSolutionTypes))";
 
 /// The partial response of the read a guest edit starts with
 /// ([`CalendarApi::event_attendees`]): the attendee entries WHOLE, every
@@ -508,7 +508,11 @@ impl CalendarApi {
 
     /// A write's URL. `sendUpdates` is ALWAYS named (never left to Google's
     /// default) and is `notify`'s value; when an event comes back, the
-    /// one-event fields mask and the same attendee bound the sync uses.
+    /// one-event fields mask and the same attendee bound the sync uses, and
+    /// `conferenceDataVersion=1`. Without it Google "ignores conference data
+    /// in the event's body", so a Meet asked for would silently not be made.
+    /// A body that does not name `conferenceData` leaves the event's alone
+    /// either way.
     fn write_url(
         &self,
         segments: &[&str],
@@ -520,6 +524,7 @@ impl CalendarApi {
             let mut q = url.query_pairs_mut();
             q.append_pair("sendUpdates", notify.send_updates());
             if answers {
+                q.append_pair("conferenceDataVersion", "1");
                 q.append_pair("maxAttendees", &MAX_ATTENDEES.to_string());
                 q.append_pair("fields", EVENT_FIELDS);
             }

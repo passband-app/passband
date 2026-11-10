@@ -1079,6 +1079,7 @@ impl CalendarSync {
                         time_zone: c.time_zone,
                         color: c.color,
                         access_role: c.access_role,
+                        meet: c.meet,
                     })
                     .collect();
                 if !kept.iter().any(|c| c.calendar_id == PRIMARY) {

@@ -2435,6 +2435,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
                 "truncated",
                 "color",
                 "access_role",
+                "meet",
             ]
         );
         assert_eq!(
@@ -2549,7 +2550,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
     let reopened = SqliteStore::open(&path).unwrap();
     {
         let conn = reopened.lock().unwrap();
-        assert_eq!(columns(&conn, "calendar_calendars").len(), 15);
+        assert_eq!(columns(&conn, "calendar_calendars").len(), 16);
         assert_eq!(columns(&conn, "calendar_events").len(), 24);
         // A store from before guests was synced one attendee at a time: its
         // tokens are forgotten, so the next pass reads every calendar in full

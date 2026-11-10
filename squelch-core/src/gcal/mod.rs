@@ -165,6 +165,10 @@ pub struct CalendarMeta {
     /// palette's colour for its `colorId`.
     pub color: Option<String>,
     pub access_role: Option<AccessRole>,
+    /// Whether Google lets a Meet be made on this calendar
+    /// (`conferenceProperties.allowedConferenceSolutionTypes` names
+    /// `hangoutsMeet`). None when the list did not say (no list scope).
+    pub meet: Option<bool>,
 }
 
 impl CalendarMeta {
@@ -178,6 +182,7 @@ impl CalendarMeta {
             time_zone: None,
             color: None,
             access_role: Some(AccessRole::Owner),
+            meet: None,
         }
     }
 }
@@ -240,6 +245,8 @@ pub struct StoredCalendar {
     pub truncated: bool,
     pub color: Option<String>,
     pub access_role: Option<AccessRole>,
+    /// [`CalendarMeta::meet`], as last read.
+    pub meet: Option<bool>,
 }
 
 impl StoredCalendar {
@@ -253,6 +260,15 @@ impl StoredCalendar {
     /// may carry guests set from the app. See [`may_invite`].
     pub fn can_invite(&self) -> bool {
         self.selected && may_invite(self.is_primary, self.access_role)
+    }
+
+    /// Whether the app may offer "Add Google Meet" on an event of this
+    /// calendar: one it may write, where Google allows a Meet. A calendar
+    /// whose list entry was never read (no list scope) is the primary one
+    /// alone, and a primary calendar is taken to allow it; Google's refusal
+    /// is the answer where it does not.
+    pub fn offers_meet(&self) -> bool {
+        self.writable() && self.meet.unwrap_or(self.is_primary)
     }
 }
 
@@ -831,6 +847,11 @@ pub fn read_calendar_entry(item: &Value) -> Option<(CalendarMeta, bool)> {
                 .get("accessRole")
                 .and_then(Value::as_str)
                 .and_then(AccessRole::parse),
+            meet: item
+                .get("conferenceProperties")
+                .and_then(|p| p.get("allowedConferenceSolutionTypes"))
+                .and_then(Value::as_array)
+                .map(|types| types.iter().any(|t| t.as_str() == Some(meeting::MEET_TYPE))),
         },
         wanted,
     ))

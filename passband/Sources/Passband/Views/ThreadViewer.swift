@@ -656,19 +656,29 @@ struct ThreadViewer: View {
     private var header: some View {
         #if os(macOS)
             HStack(alignment: .firstTextBaseline, spacing: Space.s12) {
+                // THE TEXT GIVES WAY, THE VERBS DO NOT. When the compose pane
+                // takes half the window, an HStack left to itself squeezes
+                // every label at once and "unsubscribe" wraps to three lines.
+                // The verbs keep their own width; the participants go first,
+                // then the subject ellipsizes.
                 subjectLine(lines: 1)
+                    .layoutPriority(1)
                 if !participantLine.isEmpty {
                     participantsText
                 }
                 Spacer(minLength: Space.s12)
-                actions
-                Button { store.closeThread() } label: {
-                    HStack(spacing: Space.s4) {
-                        Kbd("esc")
-                        Text("back").font(Typo.micro)
+                HStack(alignment: .firstTextBaseline, spacing: Space.s12) {
+                    actions
+                    Button { store.closeThread() } label: {
+                        HStack(spacing: Space.s4) {
+                            Kbd("esc")
+                            Text("back").font(Typo.micro)
+                        }
                     }
+                    .buttonStyle(.textAction)
                 }
-                .buttonStyle(.textAction)
+                .lineLimit(1)
+                .fixedSize()
             }
             // These metrics match every other page's bar: the page gutter,
             // and the reader's rule ends on the line the rail's top edge is

@@ -1284,7 +1284,7 @@ guard protected nothing. An older client&#39;s <code>override_guard</code> field
 <figure class="viz guard" aria-label="Outbound secret guard">
 <p class="viz-title">The outbound check, on agent sends</p>
 <div class="g-flow">
-<div class="mnode"><span class="tag">Scanned</span><b>Everything an agent is about to send</b><span>Recipients, subject and body; links skipped for the long-run checks</span></div>
+<div class="mnode"><span class="tag">Scanned</span><b>Everything an agent is about to send</b><span>Recipients, subject and body, links included</span></div>
 <i class="arr" aria-hidden="true"></i>
 <div class="g-branch">
 <div class="g-row"><span class="chip">Nothing found</span><i class="arr" aria-hidden="true"></i><span class="chip">Sent</span></div>
@@ -1298,12 +1298,22 @@ guard protected nothing. An older client&#39;s <code>override_guard</code> field
 <p><code>squelch-api/src/guard.rs:scan</code> / <code>scan_kinds</code>, called from
 <code>agent_write</code> before <code>perform_send</code>. Detects <code>pem_block</code>, <code>api_key</code> (vendor
 prefixes), <code>otp_code</code> (6–8 digits near an auth word), <code>long_hex</code> (≥32) and
-<code>long_base64</code> (≥40). The two long-run checks skip URLs: a link&#39;s path, tracking
-token or unsubscribe id is not a secret, and reading them as one blocked any
-mail with a link. A vendor key inside a URL is still caught by the prefix check,
-which reads the whole text. A match refuses the send, tells the agent only the
+<code>long_base64</code> (≥40). URLs are scanned like everything else: a link
+(<code>https://x/?t=&lt;token&gt;</code>) is the natural way for an injected agent to carry a
+token out, and a false positive costs only a refusal the agent reports to the
+owner, who can send the mail themselves. A match refuses the send, tells the agent only the
 <strong>kinds</strong>, and writes a <code>blocked:guard</code> audit row. Agent sends are never
 forwards and carry no files, so there is no original or attachment to scan.</p>
+<p><strong>Known gaps, stated rather than implied.</strong></p>
+<ul>
+<li><em>The in-app assistant&#39;s approval card renders markdown</em>, so a link shows its
+text, not its target: <code>[here](https://x/?k=&lt;token&gt;)</code> reads as &quot;here&quot;. That
+card is the only check on an assistant send now. Showing link targets on the
+card would close it; not built.</li>
+<li><em>Agent drafts are not scanned</em> (<code>create_draft</code>, here or in §4c). The owner
+sends a draft from the composer, which shows the raw text, so it is a human
+send like any other.</li>
+</ul>
 <p><strong>Forwarded HTML goes out verbatim, trackers included.</strong> The original&#39;s markup is
 embedded as it arrived (the only edit is stripping the <code>&lt;meta&gt;</code> tags that DECLARE a
 charset - a <code>charset</code> attribute or the <code>http-equiv=&quot;Content-Type&quot;</code> spelling - which

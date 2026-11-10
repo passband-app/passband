@@ -958,12 +958,21 @@ guard protected nothing. An older client's `override_guard` field is ignored.
 **Enforcement.** `squelch-api/src/guard.rs:scan` / `scan_kinds`, called from
 `agent_write` before `perform_send`. Detects `pem_block`, `api_key` (vendor
 prefixes), `otp_code` (6–8 digits near an auth word), `long_hex` (≥32) and
-`long_base64` (≥40). The two long-run checks skip URLs: a link's path, tracking
-token or unsubscribe id is not a secret, and reading them as one blocked any
-mail with a link. A vendor key inside a URL is still caught by the prefix check,
-which reads the whole text. A match refuses the send, tells the agent only the
+`long_base64` (≥40). URLs are scanned like everything else: a link
+(`https://x/?t=<token>`) is the natural way for an injected agent to carry a
+token out, and a false positive costs only a refusal the agent reports to the
+owner, who can send the mail themselves. A match refuses the send, tells the agent only the
 **kinds**, and writes a `blocked:guard` audit row. Agent sends are never
 forwards and carry no files, so there is no original or attachment to scan.
+
+**Known gaps, stated rather than implied.**
+- *The in-app assistant's approval card renders markdown*, so a link shows its
+  text, not its target: `[here](https://x/?k=<token>)` reads as "here". That
+  card is the only check on an assistant send now. Showing link targets on the
+  card would close it; not built.
+- *Agent drafts are not scanned* (`create_draft`, here or in §4c). The owner
+  sends a draft from the composer, which shows the raw text, so it is a human
+  send like any other.
 
 **Forwarded HTML goes out verbatim, trackers included.** The original's markup is
 embedded as it arrived (the only edit is stripping the `<meta>` tags that DECLARE a

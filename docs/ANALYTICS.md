@@ -261,7 +261,7 @@ the page: `sitrep`, `emails`, `reader`. Keyboard adoption is
 | Event | Properties | Question |
 |---|---|---|
 | `compose_opened` | `kind`: `new` `reply` `forward` | |
-| `compose_send` (M) | `kind`, `outcome`: `sent` `guard_blocked` `forbidden` `failure`; `override`, `tracked`, `copied`, `blind`, `attachments`, `inline_images`; `group_mode`: `to` `bcc` `individual` | Whether sends go, what shape they take. Nothing about who. |
+| `compose_send` (M) | `kind`, `outcome`: `sent` `forbidden` `failure`; `tracked`, `copied`, `blind`, `attachments`, `inline_images`; `group_mode`: `to` `bcc` `individual` | Whether sends go, what shape they take. Nothing about who. |
 
 ### Search and assistant
 

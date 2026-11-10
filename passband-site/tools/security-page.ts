@@ -188,7 +188,7 @@ const VISUALS: Record<string, Visual> = {
     html: `<figure class="viz guard" aria-label="Outbound secret guard">
 <p class="viz-title">The outbound check, on agent sends</p>
 <div class="g-flow">
-<div class="mnode"><span class="tag">Scanned</span><b>Everything an agent is about to send</b><span>Recipients, subject and body; links skipped for the long-run checks</span></div>
+<div class="mnode"><span class="tag">Scanned</span><b>Everything an agent is about to send</b><span>Recipients, subject and body, links included</span></div>
 ${arr}
 <div class="g-branch">
 <div class="g-row"><span class="chip">Nothing found</span>${arr}<span class="chip">Sent</span></div>

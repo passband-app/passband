@@ -15,7 +15,7 @@ a row by its key (`Reply(parent)`, `Forward(parent)`, or "newest keyless row"
 for an old app), and DraftSaver autosaves through those keys. A scheduled
 reply parked as a draft row would be silently rewritten the next time the
 user opened a reply to the same message, and an older app's key-less PUT
-could overwrite a scheduled new message. A frozen, guard-checked request with
+could overwrite a scheduled new message. A frozen, validated request with
 a lease and a state machine must be unreachable by any autosave path, so it
 is its own table. Scheduling CONSUMES the draft it came from (§3 step 7);
 cancelling hands the request back to the composer, whose next autosave makes
@@ -115,7 +115,7 @@ it existed), for the fire's attribution (§4 step 5).
 
 Step 1 of the build (a01c6f3) fixed the shapes the handler and worker use:
 `validate_send(&SendBody) -> Result<(), SendFailure>` is pure (the caller
-audits), `perform_send(state, body, attachments, SendGuard, message_id)
+audits), `perform_send(state, body, attachments, fire)
 -> Result<SendOutcome, SendFailure>`, and `SendFailure.reason` is the audit
 detail string (`failed:gmail`, `rejected:no_write_credential`, ...), which
 is exactly what `last_error` stores. Fan-out keeps answering 200 (the doc
@@ -280,8 +280,7 @@ runs whenever a row comes due):
      the body that tells them apart once the budget has read it. A genuine
      permission 403 costs the give-up's 30 minutes before the user sees it.
    A row never marked goes straight to the send.
-4. **Send** through `perform_send(state, body, files, SendGuard::Settled,
-   Some(Fire))`. Recipients, subject and threading derive from the parent at
+4. **Send** through `perform_send(state, body, files, Some(Fire))`. Recipients, subject and threading derive from the parent at
    fire time, as today. `group_id` is ATTRIBUTION ONLY at fire time: the
    frozen `to`/`bcc` lists are what go out; a group flipped to `individual`
    since is recorded as the one message it went as (never fanned out), and a
@@ -377,14 +376,13 @@ gone by. Picking a time:
 
 - the clock becomes a chip `Tue 9:00 ×`. `×` clears it.
 - the Send verb reads `schedule ⌘↵`. Same key. The button says what it does.
-- `send anyway ⌘⇧↵` (guard verdict showing) becomes `schedule anyway`.
 
 ⌘↵ with a time set POSTs `/client/scheduled` immediately, closes the
 composer, and toasts "scheduled for Tue 9:00" with undo. Undo = DELETE and
 reopen the composer with the returned request and the time still set. There
 is no 5s hold for a scheduled mail: it is cancellable from Sent any time.
 
-A 422 guard verdict or a 4xx reopens the composer exactly as a failed send
+A 4xx reopens the composer exactly as a failed send
 does (`putBack`).
 
 `ComposeState.sendAt: Date?` is the only new state. `DraftSaver` does not
@@ -449,7 +447,8 @@ write client, builds RFC822, sends, and settles. Split it:
 - `validate_send(&SendBody) -> Result<(), ApiError>` (the ordered checks)
 - `perform_send(state, body: &SendBody, message_id: Option<&str>) -> Result<SendOutcome, SendFailure>`
   (write client → derive → render → build → `client.send` → `finish_send`)
-- `action_send` = validate → guard → perform. Byte-identical behavior.
+- `action_send` = validate → perform. (Until #769 there was a guard step
+  between them; human sends are no longer scanned.)
 
 `group_send::run`/`send_one` is the existing precedent for sending outside a
 request.
@@ -497,7 +496,7 @@ the unthreaded path would be a 400 (nobody to address) or, on reply-all, a
 1. **Daemon**: §7 refactor (byte-identical, tests green), then table + store
    fns + attachment claim, routes, worker with recovery, stats gate. Tests:
    claim atomicity, lease expiry recovery both branches, retry backoff,
-   cancel releases claims, sweep, guard at schedule time.
+   cancel releases claims, sweep.
 2. **Mac client**: clock + chip + palette, verb flip, POST + undo toast,
    Sent pinned group with three verbs, failed toast. Seen on screen.
 3. **Follow-up PR, immediately after**: undo-send moves onto the outbox.

@@ -184,7 +184,7 @@ pub struct ScheduleBody {
 
 /// `POST /client/scheduled` — queue a finished mail for `send_at`.
 /// `201 {"id", "send_at"}`. Refusals are the send route's own, in the send
-/// route's order (400, then 422, then 403, then 404), audited under
+/// route's order (400, then 403, then 404), audited under
 /// `schedule` with the same details.
 pub async fn schedule_send(
     State(state): State<ApiState>,

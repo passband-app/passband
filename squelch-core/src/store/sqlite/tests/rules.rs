@@ -377,7 +377,7 @@ fn a_rule_change_requeues_no_stored_mail() {
     };
     let before = jobs();
     let id = store
-        .set_sender_rule(acct, "*", "nothing about SBA loans", Disposition::Filtered)
+        .set_sender_rule(acct, "*", "nothing about grants", Disposition::Filtered)
         .unwrap();
     assert!(
         store
@@ -400,7 +400,7 @@ fn a_rule_change_requeues_no_stored_mail() {
 fn a_catch_all_rule_is_accepted() {
     let (store, acct) = store();
     store
-        .set_sender_rule(acct, "*", "nothing about SBA loans", Disposition::Filtered)
+        .set_sender_rule(acct, "*", "nothing about grants", Disposition::Filtered)
         .unwrap();
     assert_eq!(store.list_sender_rules(acct).unwrap()[0].match_pattern, "*");
 }

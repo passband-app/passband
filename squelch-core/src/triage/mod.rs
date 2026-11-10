@@ -37,6 +37,7 @@ pub mod rules;
 pub mod sender_fatigue;
 pub mod shipment;
 pub mod smart_clear;
+pub mod teach;
 pub(crate) mod text;
 pub mod unsub_agent;
 pub mod unsub_page;
@@ -68,6 +69,10 @@ mod tests {
             ("prompts/profile-v1.txt", profile::system_prompt()),
             ("fye_headline", fye_headline::SYSTEM_PROMPT),
             ("rule_suggest", rule_suggest::SYSTEM_PROMPT),
+            ("rule_suggest", rule_suggest::EMAIL_SUGGEST_SYSTEM_PROMPT),
+            ("teach", teach::SYSTEM_PROMPT),
+            ("teach", teach::DESCRIBE_PROMPT),
+            ("teach", teach::CONSOLIDATE_PROMPT),
             ("smart_clear", smart_clear::SYSTEM_PROMPT),
             ("rule_infer", rule_infer::SYSTEM_PROMPT),
             ("unsub_agent", unsub_agent::SYSTEM_PROMPT),

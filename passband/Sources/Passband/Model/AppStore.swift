@@ -323,7 +323,7 @@ struct RefreshError: Equatable, Sendable {
 /// `AppStore.cancelScheduledRow`).
 enum UndoKind: Sendable {
     case archive, done, label, ruleDelete, groupDelete, remind, send, draftDelete, schedule,
-        scheduledCancel, ghostDismiss, skip
+        scheduledCancel, ghostDismiss, skip, teach
 
     /// Whether firing this undo changes anything the sitrep shows, and so
     /// whether `fireUndo` un-hides a resolved id and pulls the poller. The two
@@ -333,7 +333,7 @@ enum UndoKind: Sendable {
     var touchesSitrep: Bool {
         switch self {
         case .archive, .done, .label, .ruleDelete, .groupDelete, .remind: true
-        case .send, .draftDelete, .schedule, .scheduledCancel, .ghostDismiss, .skip: false
+        case .send, .draftDelete, .schedule, .scheduledCancel, .ghostDismiss, .skip, .teach: false
         }
     }
 }
@@ -365,6 +365,8 @@ struct PendingUndo: Identifiable, Sendable {
     /// and the (now-deleted) group id for groupDelete.
     var messageId: Int
     var label: String
+    /// The toast once undone, when "undone: <label>" would read wrong.
+    var undoneText: String?
     var createdAt: Date = Date()
     /// When the chip leaves on its own, for its countdown.
     var expiresAt: Date?
@@ -429,12 +431,24 @@ struct RemindTarget: Identifiable, Sendable {
     var onScheduled: (@MainActor @Sendable () -> Void)?
 }
 
-/// The rule editor's open request. Three shapes: tune (`sender`), create from
-/// scratch (`rule == .some(nil)`), or edit an existing rule.
+/// The rule editor's open request. Shapes: teach (`teach`, with or without a
+/// `sender` for context), edit a general rule (`general`), edit an existing
+/// sender rule (`rule`), or a sender rule from `sender` / `pattern` (the
+/// reading zone's CTA and the old create path).
+///
+/// Teach and general open `TeachCard`; everything else opens `RuleEditor`.
+/// One slot on the store, so every place that closes or blurs for the rule
+/// editor does the same for the teach card.
 struct RuleEditorRequest: Identifiable, Sendable {
     let id = UUID()
     var sender: String?
     var rule: SenderRule?
+    /// `t`: one sentence to the daemon, which decides what it becomes.
+    var teach = false
+    /// The email `t` was pressed on, sent so the daemon knows the sender.
+    var sourceMessageId: Int?
+    /// A general rule being edited in the plain text card.
+    var general: GeneralRule?
     /// Preselect a disposition (the reading zone's CTA preselects "filtered").
     var disposition: Disposition?
     var want: String?
@@ -451,6 +465,8 @@ struct RuleEditorRequest: Identifiable, Sendable {
     /// blank create. A caller that hands over its own want text has already
     /// written the sentence, so a stale draft does not get to overwrite it.
     var draftKey: String? {
+        if let general { return "general:\(general.id)" }
+        if teach { return "teach:\(sender.map(SenderID.address) ?? "")" }
         if let rule { return "rule:\(rule.id)" }
         guard want == nil else { return nil }
         if let sender { return "sender:\(SenderID.address(sender))|\(pattern ?? "")" }
@@ -7942,11 +7958,13 @@ final class AppStore {
 
     @discardableResult
     func pushUndo(
-        kind: UndoKind, messageId: Int, label: String, rewind: WalkRewind? = nil,
+        kind: UndoKind, messageId: Int, label: String, undoneText: String? = nil,
+        rewind: WalkRewind? = nil,
         revert: @escaping @Sendable () async throws -> Void
     ) -> UUID {
         var entry = PendingUndo(
-            kind: kind, messageId: messageId, label: label, rewind: rewind, revert: revert)
+            kind: kind, messageId: messageId, label: label, undoneText: undoneText, rewind: rewind,
+            revert: revert)
         entry.expiresAt = entry.createdAt.addingTimeInterval(Self.undoTTL)
         undos.append(entry)
         let id = entry.id
@@ -8005,7 +8023,9 @@ final class AppStore {
             // the email returning would be the same news twice. A skip that
             // cannot walk back (the walk has moved on) changed nothing at all.
             let rewound = entry.rewind.map(rewindWalk) ?? false
-            if !rewound && entry.kind != .skip { pushToast("undone: \(entry.label)", .info) }
+            if !rewound && entry.kind != .skip {
+                pushToast(entry.undoneText ?? "undone: \(entry.label)", .info)
+            }
             Analytics.capture("undo_fired", ["kind": String(describing: entry.kind)])
             // The bands dropped the row optimistically and the next poll is up
             // to a tick out — pull now, or the undo reads as broken on the sitrep.

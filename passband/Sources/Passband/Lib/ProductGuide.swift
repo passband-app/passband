@@ -86,7 +86,7 @@ enum ProductGuide {
             case .triage:
                 "how mail gets sorted, what done means, fixing a wrong call"
             case .senderRules:
-                "rules for a sender (allow, mute, filter) and the Rules pane in Settings"
+                "teaching Passband (t), sender rules (allow, mute, filter), rules about all mail, and the Rules pane in Settings"
             case .reminders:
                 "remind me later: parking an email until a time"
             case .search:
@@ -277,6 +277,7 @@ enum ProductGuide {
 
         The window:
         - Closing the window does not quit Passband. Notifications keep arriving, and clicking the Dock icon reopens it.
+        - Passband opens at login once it is in Applications, starting hidden, so notifications arrive after a restart. "Open at login" in Settings > General > Notifications turns that off.
         """
 
     private static let sitrep = """
@@ -296,7 +297,7 @@ enum ProductGuide {
 
         Keys on For your eyes (a row has to be highlighted first, with j / k or by hovering):
         - j / k or the arrows move. Enter opens the email.
-        - e or d marks it done. r replies. h sets a reminder. v fixes a wrong triage call. t writes a rule for that sender.
+        - e or d marks it done. r replies. h sets a reminder. v fixes a wrong triage call. t teaches Passband something, with that email as context.
         - c starts a new message, with or without a highlight.
         - The first time on a Mac the user leaves a For your eyes email with Esc without marking it done, the board rings that row for a few seconds with "Stays here until you mark it done." It shows once.
 
@@ -403,7 +404,7 @@ enum ProductGuide {
 
         Acting on the sender:
         - u: unsubscribe. Passband asks first, then usually does it in the background, and the reader closes. Progress shows at the bottom right of the Sitrep. If the sender's page needs a choice, a card there offers "Finish on their site". For spam or a sender Passband cannot verify, it opens the unsubscribe page in the browser instead. If the email has no unsubscribe link, the dialog offers "Block sender".
-        - t: write a rule for this sender. v: fix a wrong triage call. See sender_rules and triage.
+        - t: teach Passband something, with this email as context. v: fix a wrong triage call. See sender_rules and triage.
         - Clicking a sender's name or avatar (or a guest's name on a calendar event) opens their contact card: how much mail has gone each way, any rule that applies, recent threads, and buttons to email them or see their mail.
 
         How the thread looks:
@@ -496,7 +497,7 @@ enum ProductGuide {
 
         Keys on a highlighted row:
         - j / k move, Enter opens the email.
-        - e or d done, r reply, h remind, v fix triage, t write a rule for this sender.
+        - e or d done, r reply, h remind, v fix triage, t teach Passband.
         - f searches everything from this sender.
         - a opens "browse all": a side panel of mail ranked by importance, with a noise filter slider that + and - move.
         - T goes to Rules and A to the audit log, both in Settings. g goes to Auth.
@@ -528,7 +529,7 @@ enum ProductGuide {
         When triage gets one wrong:
         - Press v on the email (Sitrep, Emails list or the reader) for "Fix triage". Pick the correction: put it in For your eyes or take it out, add it to Reading or remove it, change its kind (bill, receipt, delivery, event, promotion and so on), or restrict or allow agent access to it. Typing filters the list and Enter applies.
         - A correction fixes that message and is kept to refine triage. It does not create a rule.
-        - To change how a sender is handled from now on, write a sender rule: t on one of their emails. See sender_rules.
+        - To change how mail is handled from now on, teach Passband: press t and say what you want, about one sender or about any kind of email. See sender_rules.
         - This assistant can explain why a specific email landed where it did.
 
         Other:
@@ -539,24 +540,30 @@ enum ProductGuide {
         """
 
     private static let senderRules = """
-        A sender rule tells triage what the user wants from a sender, in their own \
-        words.
+        Rules tell triage what the user wants, in their own words. The user does \
+        not pick who a rule is about: they teach Passband a sentence, and Passband \
+        works out whether it is about one sender or about all their mail.
 
-        What a rule is:
+        Teaching Passband (t):
+        - Press t in the reader, or on a highlighted row on the Sitrep or in the Emails list. The "teach Passband" card opens with one field: "what should Passband know?". The email's sender shows on the card as context, and Passband may suggest a sentence read from that email, always in the form "dont show me <kind of email> from <sender>" (for example "dont show me terms of service updates from Notion"); Tab takes the suggestion.
+        - Write anything: "always show me mail from my accountant", or "emails to Alex about grant funding for Northwind Bakery: never show me those". Passband decides whether it is about the sender of that email (it becomes a sender rule) or about all mail (it becomes a rule about all mail). A sentence that names an address or a domain can become a rule for that sender.
+        - Enter saves, Option+Enter adds a line, Esc cancels and keeps what was typed. Saving can take a few seconds while Passband reads the sentence.
+        - Afterwards the chip at the bottom left says what it became ("Applies to mail from ..." or "Applies to all your mail"). Press u, or click it, within 5 seconds to undo.
+        - From Settings > Rules (key {key:rules}, or T on the Emails page): n. The same card, with no email behind it.
+        - This assistant can write a sender rule when asked. It only adds rules; it never changes one the user wrote.
+
+        What a sender rule is:
         - A match: one address, or a whole domain.
         - A sentence saying what the user wants ("only order confirmations", "always show these").
         - A disposition, which Passband works out from the sentence unless it is set by hand: allow (always surface this sender), mute (keep them out of the Sitrep unless something escalates), or filter (the sentence decides what gets through).
 
-        Making one:
-        - From an email: press t in the reader, or on a highlighted row on the Sitrep or in the Emails list. The editor opens for that sender and may suggest a sentence; Tab takes the suggestion.
-        - From Settings > Rules (key {key:rules}, or T on the Emails page): n. Typing in the match field lists senders who have written to the user, by name or address; typing *@ lists whole domains instead. Arrows pick, Enter or Tab takes one, Esc hides the list.
-        - In the editor: Enter saves, Option+Enter adds a line, Esc cancels and keeps what was typed. "advanced" (⌘D) shows the match pattern and the disposition picker, and with it open Tab cycles the disposition.
-        - This assistant can write one when asked. It only adds rules; it never changes one the user wrote.
+        What a rule about all mail is:
+        - Just the sentence. Triage reads it on every email, so it can be about who an email is addressed to, what it is about, or any kind of mail.
 
         Managing them:
-        - In Settings > Rules: j / k move, e or Enter or a click edits, x deletes (with undo).
-        - On the iPhone, Rules is in Settings (the person icon at the top left of the Sitrep, then Settings at the bottom): + makes one, tap a rule to edit it, swipe it to the left to delete it (with undo). Swiping a mail row to the left and choosing Tune writes a rule for that sender.
-        - Rules are grouped by what they do (allow, filter, mute) and then by domain.
+        - In Settings > Rules: rules about all mail come first under "All mail", then sender rules grouped by what they do (allow, filter, mute) and then by domain. j / k move, e or Enter or a click edits, x deletes (with undo).
+        - Editing a sender rule opens its own editor: Enter saves, Esc cancels. "advanced" (⌘D) shows the match pattern and the disposition picker, and with it open Tab cycles the disposition. Editing a rule about all mail is one text field.
+        - On the iPhone, Rules is in Settings (the person icon at the top left of the Sitrep, then Settings at the bottom): + teaches Passband something, tap a rule to edit it, swipe it to the left to delete it (with undo). Swiping a mail row to the left and choosing Teach does what t does on the Mac.
         - A rule shapes mail from now on. It does not move mail already on the board. The exception is "Block sender", offered when unsubscribing from an email that has no unsubscribe link: it mutes that address and clears their open mail.
         - Rules live in Passband only. They never change anything in Gmail.
         """

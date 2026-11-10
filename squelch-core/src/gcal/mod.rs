@@ -509,6 +509,40 @@ impl SyncedEvent {
             && organizes
             && may_invite(self.calendar_primary, self.calendar_access)
     }
+
+    /// THE REPLY GUARD: whether the app offers yes / no / maybe. The user is
+    /// a guest on this copy of the event (Google gave this calendar's own
+    /// answer, `self_response`) and is not the one who sent it: neither the
+    /// organizer by Google's word, nor a guest entry that is both the user
+    /// and the organizer. Writing to the calendar is not asked: answering an
+    /// invitation is the guest's, whatever their role on the calendar.
+    pub fn may_respond(&self) -> bool {
+        self.row.self_response.is_some()
+            && !self.row.organizer_self
+            && !self.row.guests.iter().any(|g| g.is_self && g.organizer)
+    }
+}
+
+/// The series an instance of a recurring event belongs to, read from its
+/// id. Google names an instance `<series id>_<original start>`, the start as
+/// `YYYYMMDD` (all-day) or `YYYYMMDDTHHMMSSZ`, and its own ids use only
+/// `a`-`v` and digits, so the underscore and the stamp are unambiguous.
+/// A HINT for the app only (whether to offer "all events"): a reply to a
+/// series reads the real `recurringEventId` from Google first.
+pub fn instance_series(event_id: &str) -> Option<&str> {
+    let (series, stamp) = event_id.rsplit_once('_')?;
+    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    let stamp_ok = match stamp.len() {
+        8 => digits(stamp),
+        16 => {
+            digits(&stamp[..8])
+                && stamp.as_bytes()[8] == b'T'
+                && digits(&stamp[9..15])
+                && stamp.as_bytes()[15] == b'Z'
+        }
+        _ => false,
+    };
+    (stamp_ok && !series.is_empty()).then_some(series)
 }
 
 /// The synced window for a pass that starts at `now`.
@@ -1807,6 +1841,69 @@ mod tests {
         let row = upsert(item(json!(full), false));
         assert_eq!(row.guests.len(), MAX_GUESTS);
         assert!(!row.guests_truncated);
+    }
+
+    /// THE REPLY GUARD: a guest's copy, never the organizer's, whatever the
+    /// calendar role.
+    #[test]
+    fn only_a_guest_may_answer_an_invitation() {
+        let guest = |is_self: bool, organizer: bool| Guest {
+            email: "me@example.com".into(),
+            name: None,
+            response: GuestResponse::Pending,
+            organizer,
+            is_self,
+        };
+        let event = |response: Option<SelfResponse>, organizer_self: bool, guests: Vec<Guest>| {
+            SyncedEvent {
+                calendar_id: "primary".into(),
+                calendar_name: None,
+                calendar_color: None,
+                calendar_access: Some(AccessRole::Owner),
+                calendar_primary: true,
+                row: EventRow {
+                    self_response: response,
+                    organizer_self,
+                    guests,
+                    ..row("2026-10-05T09:00:00Z")
+                },
+            }
+        };
+        assert!(
+            event(
+                Some(SelfResponse::NeedsAction),
+                false,
+                vec![guest(true, false)]
+            )
+            .may_respond()
+        );
+        assert!(
+            event(Some(SelfResponse::Accepted), false, vec![]).may_respond(),
+            "an answer already given can be changed"
+        );
+        assert!(
+            !event(None, false, vec![]).may_respond(),
+            "not a guest at all"
+        );
+        assert!(
+            !event(Some(SelfResponse::Accepted), true, vec![]).may_respond(),
+            "the organizer's own copy"
+        );
+        assert!(
+            !event(Some(SelfResponse::Accepted), false, vec![guest(true, true)]).may_respond(),
+            "the user's entry is the organizer's"
+        );
+    }
+
+    #[test]
+    fn an_instance_id_names_its_series() {
+        assert_eq!(instance_series("abc123_20261110T170000Z"), Some("abc123"));
+        assert_eq!(instance_series("abc123_20261110"), Some("abc123"));
+        assert_eq!(instance_series("abc123"), None);
+        assert_eq!(instance_series("abc_123"), None, "not a stamp");
+        assert_eq!(instance_series("_20261110"), None, "no series");
+        assert_eq!(instance_series("abc_20261110T1700Z"), None);
+        assert_eq!(instance_series("abc_2026111xT170000Z"), None);
     }
 
     /// THE GUEST GUARD and THE INVITE GUARD, every arm.

@@ -293,7 +293,37 @@ async fn patch_route(
     let Some(event) = g.find(&calendar, &id) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    merge(event, &body);
+    // `attendeesOmitted: true` on an update: "only update the participant's
+    // response". The named entries' answers change; nobody is added or
+    // dropped.
+    if body.get("attendeesOmitted") == Some(&json!(true)) {
+        let mut rest = body.clone();
+        let answers = rest
+            .as_object_mut()
+            .and_then(|o| {
+                o.remove("attendeesOmitted");
+                o.remove("attendees")
+            })
+            .unwrap_or(Value::Null);
+        for answer in answers.as_array().into_iter().flatten() {
+            let email = answer["email"].as_str().unwrap_or_default();
+            if let Some(entry) = event["attendees"]
+                .as_array_mut()
+                .into_iter()
+                .flatten()
+                .find(|a| {
+                    a["email"]
+                        .as_str()
+                        .is_some_and(|e| e.eq_ignore_ascii_case(email))
+                })
+            {
+                entry["responseStatus"] = answer["responseStatus"].clone();
+            }
+        }
+        merge(event, &rest);
+    } else {
+        merge(event, &body);
+    }
     event["updated"] = json!("2026-10-05T11:00:00.000Z");
     let mut event = event.clone();
     omit_attendees(&mut event, &q);
@@ -1246,6 +1276,8 @@ async fn a_first_sync_reads_the_window_in_full_and_serves_every_field() {
             "id",
             "location",
             "organizer",
+            "recurring",
+            "respondable",
             "self_response",
             "start",
             "start_timezone",
@@ -1287,6 +1319,9 @@ async fn a_first_sync_reads_the_window_in_full_and_serves_every_field() {
             "guests_truncated": false,
             "guest_editable": false,
             "from_gmail": false,
+            // The boss's invitation: the user may answer it.
+            "respondable": true,
+            "recurring": false,
             // No booking mail is linked to it.
             "tickets": null,
         })
@@ -3189,6 +3224,8 @@ async fn creating_an_event_goes_to_google_then_the_store_and_is_served() {
             "guests_truncated": false,
             "guest_editable": true,
             "from_gmail": false,
+            "respondable": false,
+            "recurring": false,
         })
     );
     // Stored at once, served by the timeline as answered, and the next sync
@@ -7338,4 +7375,176 @@ async fn a_failed_plan_backs_off_and_counts_against_the_cap() {
         left += 1;
     }
     assert_eq!(left, squelch_core::gcal::remind::DAILY_CAP - attempts);
+}
+
+// --- replies to invitations ---------------------------------------------------
+
+fn reply_uri(calendar: &str, id: &str) -> String {
+    format!("{}/reply", event_uri(calendar, id))
+}
+
+/// A REPLY: only the user's own entry goes out (under the address they were
+/// invited as), under `attendeesOmitted`, the organizer told; every other
+/// guest stays as Google holds them. The organizer's own copy and a bad body
+/// are refused before Google hears anything. "All events" answers the
+/// series and stores the instance as Google then holds it.
+#[tokio::test]
+async fn a_reply_answers_only_the_users_own_entry_and_tells_the_organizer() {
+    let (w, start) = write_world("reply").await;
+    {
+        let mut g = w.google();
+        let mut party = timed("party", "Party", start + Duration::hours(8), 60);
+        party["organizer"] = json!({"email": "host@example.com"});
+        party["attendees"] = json!([
+            {"email": "host@example.com", "organizer": true, "responseStatus": "accepted"},
+            {"email": "me.alias@example.com", "self": true, "responseStatus": "needsAction"},
+            {"email": "pat@example.com", "responseStatus": "declined"},
+        ]);
+        let mut weekly = timed(
+            "weekly_20301110T170000Z",
+            "Weekly",
+            start + Duration::hours(10),
+            30,
+        );
+        weekly["organizer"] = json!({"email": "host@example.com"});
+        weekly["recurringEventId"] = json!("weekly");
+        weekly["attendees"] = json!([
+            {"email": "host@example.com", "organizer": true, "responseStatus": "accepted"},
+            {"email": "me@example.com", "self": true, "responseStatus": "needsAction"},
+        ]);
+        // The series itself, where a patch to it lands.
+        let mut series = weekly.clone();
+        series["id"] = json!("weekly");
+        series.as_object_mut().unwrap().remove("recurringEventId");
+        g.full.get_mut(PRIMARY).unwrap()[0].extend([party, weekly, series]);
+    }
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    let party = served(&w, "party").await.unwrap();
+    assert_eq!(party["respondable"], true);
+    assert_eq!(party["recurring"], false);
+    assert_eq!(
+        served(&w, "own").await.unwrap()["respondable"],
+        false,
+        "the user's own event"
+    );
+    assert_eq!(
+        served(&w, "weekly_20301110T170000Z").await.unwrap()["recurring"],
+        true
+    );
+
+    let before = writes(&w).len();
+    let (status, answered, cache) = send(
+        &w.app,
+        "POST",
+        &reply_uri("primary", "party"),
+        Some(json!({"response": "accepted", "notify": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answered}");
+    assert_eq!(cache.as_deref(), Some("no-store"));
+    assert_eq!(answered["self_response"], "accepted");
+    let sent = writes(&w);
+    assert_eq!(sent.len(), before + 1);
+    let write = sent.last().unwrap();
+    assert_eq!(
+        (write.method, write.event.as_deref()),
+        ("PATCH", Some("party"))
+    );
+    assert_eq!(
+        write.body,
+        json!({"attendeesOmitted": true,
+               "attendees": [{"email": "me.alias@example.com", "responseStatus": "accepted"}]}),
+        "the user's own entry, as the address they were invited as, and nobody else"
+    );
+    assert_eq!(write.query["sendUpdates"], "all", "the organizer is told");
+    {
+        let mut g = w.google();
+        let reads = g.reads.clone();
+        let (_, _, q) = reads.iter().rev().find(|(_, id, _)| id == "party").unwrap();
+        assert_eq!(q["maxAttendees"], "1", "no other guest's address is read");
+        let held = g.find(PRIMARY, "party").unwrap();
+        assert_eq!(held["attendees"][0]["responseStatus"], "accepted");
+        assert_eq!(
+            held["attendees"][2]["responseStatus"], "declined",
+            "other guests untouched"
+        );
+        assert_eq!(held["attendees"].as_array().unwrap().len(), 3);
+    }
+    assert!(audit(&w).contains(&(
+        "calendar_event_reply".to_string(),
+        Some("calendar:primary/party".to_string()),
+        Some("ok:accepted guests=2 notified=true".to_string()),
+    )));
+
+    // Refused before Google: the user's own event, an unknown one, a bad body.
+    let before = writes(&w).len();
+    let (status, refused, _) = send(
+        &w.app,
+        "POST",
+        &reply_uri("primary", "own"),
+        Some(json!({"response": "accepted", "notify": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(refused["code"], "not_invited");
+    let (status, _, _) = send(
+        &w.app,
+        "POST",
+        &reply_uri("primary", "nope"),
+        Some(json!({"response": "accepted"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, bad, _) = send(
+        &w.app,
+        "POST",
+        &reply_uri("primary", "party"),
+        Some(json!({"response": "needsAction"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(bad["code"], "invalid");
+    assert_eq!(writes(&w).len(), before, "Google heard none of them");
+
+    // "All events": the series is answered, the instance read back.
+    let (status, answered, _) = send(
+        &w.app,
+        "POST",
+        &reply_uri("primary", "weekly_20301110T170000Z"),
+        Some(json!({"response": "declined", "series": true, "notify": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answered}");
+    let write = writes(&w).last().unwrap().clone();
+    assert_eq!(
+        write.event.as_deref(),
+        Some("weekly"),
+        "the series, not the instance"
+    );
+    assert_eq!(
+        answered["id"], "weekly_20301110T170000Z",
+        "the instance is what is served"
+    );
+    assert!(
+        w.google()
+            .reads
+            .iter()
+            .rev()
+            .take(1)
+            .any(|(_, id, _)| id == "weekly_20301110T170000Z"),
+        "the instance is read again after the series is answered"
+    );
+    assert!(audit(&w).iter().any(|(a, _, d)| a == "calendar_event_reply"
+        && d.as_deref() == Some("ok:declined:series guests=1 notified=true")));
+
+    // "All events" on a single event answers that event.
+    let (status, _, _) = send(
+        &w.app,
+        "POST",
+        &reply_uri("primary", "party"),
+        Some(json!({"response": "tentative", "series": true, "notify": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(writes(&w).last().unwrap().event.as_deref(), Some("party"));
 }

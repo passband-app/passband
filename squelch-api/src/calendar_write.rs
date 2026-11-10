@@ -6,6 +6,22 @@
 //!   (200 when the id it names was already created: see below).
 //! - `PATCH  /client/calendar/events/{calendar_id}/{id}` edits, 200 with it.
 //! - `DELETE /client/calendar/events/{calendar_id}/{id}?notify=` deletes, 204.
+//! - `POST   /client/calendar/events/{calendar_id}/{id}/reply` answers an
+//!   invitation (yes / no / maybe), 200 with the event as Google now holds it.
+//!
+//! A REPLY changes the user's own attendee entry and nothing else: the
+//! patch carries only that entry under `attendeesOmitted: true`
+//! ([`write::reply_body`]), so no other guest can be touched. Only on an
+//! event the user is a guest of and did not organize
+//! ([`SyncedEvent::may_respond`]), with the address Google lists them under
+//! read fresh ([`CalendarApi::reply_target`]: an alias is answered as the
+//! alias). `notify: true` has Google tell the ORGANIZER, which is what a
+//! reply is for; the app always sends it. `series: true` answers the whole
+//! recurring series the event belongs to (Google's own `recurringEventId`,
+//! read in the same call); the series' answer is not stored (the sync keeps
+//! instances, never a series), so the instance asked about is read again
+//! and stored, and the kicked sync brings in the rest. Audited as
+//! `calendar_event_reply`, detail `ok:<answer>[:series]`.
 //!
 //! THE ORDER IS THE CONTRACT: check everything (the grant, the body, the
 //! calendar, the event and the edit guard), then Google, then the local row,
@@ -135,7 +151,7 @@ use serde_json::Value;
 use squelch_core::credentials::CalendarCredentials;
 use squelch_core::gcal::client::{API_BASE, CalendarApi, CallError, Notify};
 use squelch_core::gcal::write::{self, Invalid};
-use squelch_core::gcal::{EventRow, StoredCalendar, SyncedEvent, read_written_event};
+use squelch_core::gcal::{EventRow, SelfResponse, StoredCalendar, SyncedEvent, read_written_event};
 
 use crate::error::ApiError;
 use crate::handlers::{audit_action, calendar_event_view, no_store, store_call};
@@ -144,6 +160,7 @@ use crate::state::ApiState;
 const CREATE: &str = "calendar_event_create";
 const EDIT: &str = "calendar_event_edit";
 const DELETE: &str = "calendar_event_delete";
+const REPLY: &str = "calendar_event_reply";
 
 /// The longest id taken from a path: Google's own ids are far shorter, and
 /// anything longer cannot name a stored event (the sync refuses to store
@@ -169,6 +186,7 @@ pub(crate) const ALREADY_DELETED: &str =
     "that event was already created and has since been deleted";
 pub(crate) const ID_IN_USE: &str = "that event id is already used for a different event";
 pub(crate) const ALREADY_CREATING: &str = "that event is already being created";
+pub(crate) const NOT_INVITED: &str = "you are not a guest of this event";
 
 /// EVERY ERROR BODY NAMES ITS KIND, `{"error", "code"}`: a closed list the
 /// app reads (docs/CALENDAR.md §8, "What a refusal says"). The app keys on
@@ -181,7 +199,7 @@ pub(crate) const ALREADY_CREATING: &str = "that event is already being created";
 /// - [`code::UNKNOWN_CALENDAR`], [`code::READ_ONLY`],
 ///   [`code::CANNOT_INVITE`], [`code::GUESTS_READ_ONLY`],
 ///   [`code::CANNOT_NOTIFY`] 400.
-/// - [`code::NOT_GRANTED`], [`code::NOT_EDITABLE`] 403.
+/// - [`code::NOT_GRANTED`], [`code::NOT_EDITABLE`], [`code::NOT_INVITED`] 403.
 /// - [`code::NOT_FOUND`] 404: no such stored event.
 /// - [`code::ID_IN_USE`], [`code::ALREADY_CREATING`],
 ///   [`code::ALREADY_DELETED`] 409.
@@ -204,6 +222,7 @@ pub(crate) mod code {
     pub(crate) const CANNOT_NOTIFY: &str = "cannot_notify";
     pub(crate) const NOT_GRANTED: &str = "not_granted";
     pub(crate) const NOT_EDITABLE: &str = "not_editable";
+    pub(crate) const NOT_INVITED: &str = "not_invited";
     pub(crate) const NOT_FOUND: &str = "not_found";
     pub(crate) const ID_IN_USE: &str = "id_in_use";
     pub(crate) const ALREADY_CREATING: &str = "already_creating";
@@ -905,4 +924,100 @@ async fn delete(
     })
     .await;
     finish(&state, DELETE, audit_target, note, "ok", outcome).await
+}
+
+// --- POST /client/calendar/events/{calendar_id}/{id}/reply -------------------
+
+fn not_invited() -> Refusal {
+    Refusal::new(
+        "rejected:not_invited",
+        StatusCode::FORBIDDEN,
+        code::NOT_INVITED,
+        NOT_INVITED,
+    )
+}
+
+/// The audit detail of a reply that went through.
+fn reply_detail(response: SelfResponse, series: bool) -> &'static str {
+    match (response, series) {
+        (SelfResponse::Accepted, false) => "ok:accepted",
+        (SelfResponse::Accepted, true) => "ok:accepted:series",
+        (SelfResponse::Declined, false) => "ok:declined",
+        (SelfResponse::Declined, true) => "ok:declined:series",
+        (SelfResponse::Tentative, false) => "ok:tentative",
+        (SelfResponse::Tentative, true) => "ok:tentative:series",
+        (SelfResponse::NeedsAction, _) => "ok",
+    }
+}
+
+/// `POST /client/calendar/events/{calendar_id}/{id}/reply` with
+/// `{"response": "accepted"|"declined"|"tentative", "series"?, "notify"?}`:
+/// 200 with the event. See the module doc, "A REPLY".
+pub async fn reply_event(
+    State(state): State<ApiState>,
+    Path((calendar_id, event_id)): Path<(String, String)>,
+    body: Bytes,
+) -> Result<impl IntoResponse, ApiError> {
+    let view = detached(reply(state, calendar_id, event_id, body)).await?;
+    Ok((no_store(), Json(view)))
+}
+
+async fn reply(
+    state: ApiState,
+    calendar_id: String,
+    event_id: String,
+    body: Bytes,
+) -> Result<Value, ApiError> {
+    let mut audit_target = None;
+    let mut note = None;
+    let mut ok = "ok";
+    let outcome = within(&state, REPLY, async {
+        let creds = granted(&state).await?;
+        let reply = write::parse_reply(&json_body(&body)?).map_err(Refusal::body)?;
+        let (cal, stored) = stored_event(&state, &calendar_id, &event_id).await?;
+        audit_target = Some(target(&calendar_id, Some(&event_id)));
+        note = Some(GuestNote::of(&stored.row, reply.notify));
+        if !stored.may_respond() {
+            return Err(not_invited());
+        }
+        let (token, api) = google(&state, &creds, REPLY).await?;
+        let found = api
+            .reply_target(&token, &calendar_id, &event_id)
+            .await
+            .map_err(|e| Refusal::google(REPLY, e))?;
+        // Google lists no entry for the user on this copy: nothing to answer.
+        let Some(self_email) = found.self_email else {
+            return Err(not_invited());
+        };
+        // "All events" on an event that is not one of a series is this one.
+        let answered = match (&found.series, reply.series) {
+            (Some(series), true) => series.clone(),
+            _ => event_id.clone(),
+        };
+        let patch = write::reply_body(&self_email, reply.response);
+        let answer = api
+            .patch_event(&token, &calendar_id, &answered, &patch, reply.notify)
+            .await
+            .map_err(|e| Refusal::written(&state, REPLY, e))?;
+        ok = reply_detail(reply.response, answered != event_id);
+        // A series answered: what came back is the series, which is never
+        // stored. The instance asked about is read again and stored as
+        // Google now holds it; the kicked sync brings the others.
+        let answer = if answered == event_id {
+            answer
+        } else {
+            match api.get_event(&token, &calendar_id, &event_id).await {
+                Ok(instance) => instance,
+                Err(_) => {
+                    state.calendar_refresh.kick_now(state.account_id);
+                    return Err(Refusal::accepted_unseen("failed:answer", UNREADABLE_ANSWER));
+                }
+            }
+        };
+        let (row, view) = keep_answer(&state, &cal, &answer, creds.account_email()).await?;
+        note = Some(GuestNote::of(&row, reply.notify));
+        Ok(view)
+    })
+    .await;
+    finish(&state, REPLY, audit_target, note, ok, outcome).await
 }

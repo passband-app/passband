@@ -799,6 +799,15 @@ actor APIClient {
             query: CalendarWrite.deleteQuery(notify: notify), timeout: Self.calendarWriteTimeout)
     }
 
+    /// `POST /client/calendar/events/{calendar_id}/{id}/reply`: the user's
+    /// yes / no / maybe, sent through Google, which tells the organizer.
+    /// Answered with the event as Google now holds it.
+    func replyToCalendarEvent(calendarId: String, id: String, _ reply: ReplyWrite) async throws -> TimelineEvent {
+        try await post(
+            CalendarReply.path(calendarId: calendarId, eventId: id), body: reply,
+            timeout: Self.calendarWriteTimeout)
+    }
+
     /// RFC3339 in the user's current offset, seconds precision: "2026-10-04T00:00:00-07:00".
     nonisolated static func rfc3339Local(_ date: Date) -> String {
         let f = ISO8601DateFormatter()

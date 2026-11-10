@@ -158,6 +158,21 @@ run_suite event-draft \
   Sources/Passband/Lib/EventGuests.swift \
   Tests/EventDraftTests.swift
 
+# Answering invitations: the Yes / No / Maybe links in Google's email read
+# (and the lookalikes refused), placed on the synced calendar, and which
+# events an answer covers.
+run_suite calendar-reply \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/APIError.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Lib/CalendarWrite.swift \
+  Sources/Passband/Lib/EventDraft.swift \
+  Sources/Passband/Lib/TitleParse.swift \
+  Sources/Passband/Lib/EventGuests.swift \
+  Sources/Passband/Lib/CalendarReply.swift \
+  Tests/CalendarReplyTests.swift
+
 # The title that understands "dinner with steven on friday 4pm" (wave 6): a
 # table of phrases and what each fills, the negatives that must fill nothing,
 # the saved title, the names, the fields a title may and may not write, the
@@ -302,6 +317,8 @@ run_suite credential-probe \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/APIError.swift \
   Sources/Passband/Lib/CalendarWrite.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Lib/CalendarReply.swift \
   Sources/Passband/Model/UnderstandingWire.swift \
   Sources/Passband/Model/APIClient.swift \
   Sources/Passband/Lib/ClientIdentity.swift \

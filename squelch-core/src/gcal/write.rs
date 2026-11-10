@@ -37,8 +37,8 @@ use std::collections::HashSet;
 
 use serde_json::{Map, Value, json};
 
-use super::EventRow;
 use super::client::Notify;
+use super::{EventRow, SelfResponse};
 use crate::triage::ghost::{self, EventTime};
 use crate::triage::order_link::plain;
 use crate::triage::text::truncate_trimmed;
@@ -603,12 +603,98 @@ pub fn patch_body(
     Ok(Value::Object(body))
 }
 
+// --- answering an invitation -------------------------------------------------
+
+pub const BAD_RESPONSE: Invalid = Invalid("response must be accepted, declined or tentative");
+pub const BAD_SERIES: Invalid = Invalid("series must be true or false");
+
+/// A reply to an invitation, as the app asks for it: `{"response",
+/// "series", "notify"}`. `series` (default false) answers every event of a
+/// recurring series rather than this one; `notify` is read as everywhere
+/// else ([`notify`]), and here it means the ORGANIZER is told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reply {
+    pub response: SelfResponse,
+    pub series: bool,
+    pub notify: Notify,
+}
+
+pub fn parse_reply(body: &Value) -> Result<Reply, Invalid> {
+    let body = object(body)?;
+    let response = match body.get("response").and_then(Value::as_str) {
+        Some("accepted") => SelfResponse::Accepted,
+        Some("declined") => SelfResponse::Declined,
+        Some("tentative") => SelfResponse::Tentative,
+        _ => return Err(BAD_RESPONSE),
+    };
+    let series = match body.get("series") {
+        None | Some(Value::Bool(false)) => false,
+        Some(Value::Bool(true)) => true,
+        Some(_) => return Err(BAD_SERIES),
+    };
+    Ok(Reply {
+        response,
+        series,
+        notify: notify(body.get("notify"))?,
+    })
+}
+
+/// THE REPLY'S PATCH: the user's own attendee entry and nothing else, under
+/// `attendeesOmitted: true`, which Google reads on an update as "only update
+/// the participant's response". Every other guest is left exactly as Google
+/// holds them; nothing here can add, drop or change anyone else.
+pub fn reply_body(self_email: &str, response: SelfResponse) -> Value {
+    let status = match response {
+        SelfResponse::Accepted => "accepted",
+        SelfResponse::Declined => "declined",
+        SelfResponse::Tentative => "tentative",
+        SelfResponse::NeedsAction => "needsAction",
+    };
+    json!({
+        "attendeesOmitted": true,
+        "attendees": [{"email": self_email, "responseStatus": status}],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn at(raw: &str) -> EventTime {
         EventTime::parse(raw).unwrap()
+    }
+
+    #[test]
+    fn a_reply_reads_its_answer_and_nothing_else() {
+        let reply = parse_reply(&json!({"response": "accepted", "notify": true})).unwrap();
+        assert_eq!(reply.response, SelfResponse::Accepted);
+        assert!(!reply.series, "one event unless asked");
+        assert!(reply.notify.tells_guests());
+        let quiet = parse_reply(&json!({"response": "tentative", "series": true})).unwrap();
+        assert!(
+            quiet.series && !quiet.notify.tells_guests(),
+            "silence is the default"
+        );
+        for bad in [
+            json!({}),
+            json!({"response": "needsAction"}),
+            json!({"response": "needs_action"}),
+            json!({"response": "yes"}),
+            json!({"response": "accepted", "series": "true"}),
+            json!({"response": "accepted", "notify": "true"}),
+            json!(["accepted"]),
+        ] {
+            assert!(parse_reply(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_reply_patch_touches_only_the_users_entry() {
+        assert_eq!(
+            reply_body("me@example.com", SelfResponse::Declined),
+            json!({"attendeesOmitted": true,
+                   "attendees": [{"email": "me@example.com", "responseStatus": "declined"}]})
+        );
     }
 
     fn create(edit: impl FnOnce(&mut Value)) -> Result<NewEvent, Invalid> {

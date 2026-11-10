@@ -136,6 +136,16 @@ impl Notify {
     }
 }
 
+/// What [`CalendarApi::reply_target`] reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyTarget {
+    /// The user's own attendee address on the event; None when Google
+    /// lists no entry for them (they are not a guest of this copy).
+    pub self_email: Option<String>,
+    /// The recurring series this event is an instance of.
+    pub series: Option<String>,
+}
+
 /// The most bytes read from one response. 250 events of the largest shape
 /// Google sends stay far below it.
 const BODY_CAP: usize = 8 * 1024 * 1024;
@@ -340,6 +350,41 @@ impl CalendarApi {
             .unwrap_or_default();
         let omitted = body.get("attendeesOmitted").and_then(Value::as_bool) == Some(true);
         Ok((attendees, omitted))
+    }
+
+    /// What a reply to an invitation needs from Google before it is sent:
+    /// the address the user was invited AS (the attendee entry marked
+    /// `self`, which can be an alias of the mailbox) and the series the
+    /// event is an instance of, if any. `maxAttendees=1` makes Google hand
+    /// back only the user's own entry ("only the participant is returned"),
+    /// so no other guest's address is read at all.
+    pub async fn reply_target(
+        &self,
+        token: &str,
+        calendar_id: &str,
+        event_id: &str,
+    ) -> Result<ReplyTarget, CallError> {
+        let mut url = self.url(&["calendars", calendar_id, "events", event_id])?;
+        url.query_pairs_mut()
+            .append_pair("maxAttendees", "1")
+            .append_pair("fields", "recurringEventId,attendees(email,self)");
+        let body = self.get(url, token).await?;
+        let self_email = body
+            .get("attendees")
+            .and_then(Value::as_array)
+            .and_then(|list| {
+                list.iter()
+                    .find(|a| a.get("self").and_then(Value::as_bool) == Some(true))
+            })
+            .and_then(|a| a.get("email").and_then(Value::as_str))
+            .filter(|e| !e.trim().is_empty())
+            .map(str::to_string);
+        let series = body
+            .get("recurringEventId")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        Ok(ReplyTarget { self_email, series })
     }
 
     /// `events.get` of one event, in the shape a write's answer has

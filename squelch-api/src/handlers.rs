@@ -2544,6 +2544,10 @@ pub(crate) fn calendar_event_view(
         "guests_truncated": row.guests_truncated,
         "guest_editable": event.guest_editable(account_email),
         "from_gmail": row.from_gmail,
+        // The user is a guest who may answer (yes / no / maybe), and whether
+        // the event is one of a recurring series ("all events" is offered).
+        "respondable": event.may_respond(),
+        "recurring": squelch_core::gcal::instance_series(&row.event_id).is_some(),
     })
 }
 

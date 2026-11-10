@@ -462,6 +462,8 @@ enum CalendarWrite {
             return "Google Calendar is not connected, \(nothing)"
         case .notEditable:
             return "That calendar does not let you change its events."
+        case .notInvited:
+            return "You are not a guest of that event."
         case .notFound:
             return "That event is no longer on your calendar."
         case .idInUse:
@@ -492,6 +494,7 @@ enum CalendarRefusal: String, CaseIterable, Hashable, Sendable {
     case cannotNotify = "cannot_notify"
     case notGranted = "not_granted"
     case notEditable = "not_editable"
+    case notInvited = "not_invited"
     case notFound = "not_found"
     case idInUse = "id_in_use"
     case alreadyDeleted = "already_deleted"
@@ -502,7 +505,7 @@ enum CalendarRefusal: String, CaseIterable, Hashable, Sendable {
     var status: Int {
         switch self {
         case .invalid, .unknownCalendar, .readOnly, .cannotInvite, .guestsReadOnly, .cannotNotify: 400
-        case .notGranted, .notEditable: 403
+        case .notGranted, .notEditable, .notInvited: 403
         case .notFound: 404
         case .idInUse, .alreadyDeleted: 409
         case .calendarGone: 410

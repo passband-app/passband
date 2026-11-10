@@ -396,13 +396,17 @@
                     return open(selected)
                 },
                 KeyBinding(declining: "y", "going") {
-                    guard free(), let ghost = selected?.ghost else { return false }
+                    guard free() else { return false }
+                    // A real invitation: yes, through Google.
+                    guard let ghost = selected?.ghost else { return store.replyByKey(selected?.event, .accepted) }
                     let state: GhostState? = ghost.state == .going ? nil : .going
                     Task { await store.markGhost(ghost, state, viaKey: true) }
                     return true
                 },
                 KeyBinding(declining: "x", "dismiss") {
-                    guard free(), let ghost = selected?.ghost else { return false }
+                    guard free() else { return false }
+                    // A real invitation: no, through Google.
+                    guard let ghost = selected?.ghost else { return store.replyByKey(selected?.event, .declined) }
                     Task { await store.markGhost(ghost, .dismissed, viaKey: true) }
                     return true
                 },
@@ -529,13 +533,17 @@
                     return true
                 },
                 KeyBinding(declining: "y", "going") {
-                    guard free(), let ghost = item?.ghost else { return false }
+                    guard free() else { return false }
+                    // A real invitation: yes, through Google.
+                    guard let ghost = item?.ghost else { return store.replyByKey(item?.event, .accepted) }
                     let state: GhostState? = ghost.state == .going ? nil : .going
                     Task { await store.markGhost(ghost, state, viaKey: true) }
                     return true
                 },
                 KeyBinding(declining: "x", "dismiss") {
-                    guard free(), let ghost = item?.ghost else { return false }
+                    guard free() else { return false }
+                    // A real invitation: no, through Google.
+                    guard let ghost = item?.ghost else { return store.replyByKey(item?.event, .declined) }
                     Task { await store.markGhost(ghost, .dismissed, viaKey: true) }
                     return true
                 },
@@ -584,13 +592,17 @@
                     return true
                 },
                 KeyBinding(declining: "y", "going") {
-                    guard free(), let ghost = item?.ghost else { return false }
+                    guard free() else { return false }
+                    // A real invitation: yes, through Google.
+                    guard let ghost = item?.ghost else { return store.replyByKey(item?.event, .accepted) }
                     let state: GhostState? = ghost.state == .going ? nil : .going
                     Task { await store.markGhost(ghost, state, viaKey: true) }
                     return true
                 },
                 KeyBinding(declining: "x", "dismiss") {
-                    guard free(), let ghost = item?.ghost else { return false }
+                    guard free() else { return false }
+                    // A real invitation: no, through Google.
+                    guard let ghost = item?.ghost else { return store.replyByKey(item?.event, .declined) }
                     Task { await store.markGhost(ghost, .dismissed, viaKey: true) }
                     return true
                 },

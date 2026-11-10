@@ -703,7 +703,7 @@ struct EventDraftTests {
     static func theVerdictKeysOnTheCode() {
         let statuses: [String: Int] = [
             "invalid": 400, "unknown_calendar": 400, "read_only": 400, "cannot_invite": 400,
-            "guests_read_only": 400, "cannot_notify": 400, "not_granted": 403, "not_editable": 403,
+            "guests_read_only": 400, "cannot_notify": 400, "not_granted": 403, "not_editable": 403, "not_invited": 403,
             "not_found": 404, "id_in_use": 409, "already_deleted": 409, "calendar_gone": 410,
             "google_refused": 502,
         ]

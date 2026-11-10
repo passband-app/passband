@@ -372,6 +372,10 @@ struct EmailWebView: View {
                         store.openComposeMailto($0)
                         return
                     }
+                    // Yes / No / Maybe in Google's invitation email: answered
+                    // here, through the calendar, rather than in a browser
+                    // tab. One Passband cannot place opens as before.
+                    if store.replyFromInviteLink($0) { return }
                     // Counted only when it is a link `Opener` will actually
                     // open: an in-page anchor reaches here too and goes
                     // nowhere, and "clicked" should mean they went.

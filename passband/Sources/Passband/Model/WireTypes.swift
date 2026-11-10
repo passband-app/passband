@@ -2126,6 +2126,12 @@ struct TimelineEvent: Codable, Sendable, Hashable, Identifiable {
     /// rides here). Its `ghost_id` is the ghost to answer. Nil from an older
     /// daemon, on an event with none, and for a malformed value.
     var pending_change: LinkedChange? = nil
+    /// The user is a guest of this event and did not organize it, so it can
+    /// be answered yes / no / maybe (Lib/CalendarReply.swift). Nil from an
+    /// older daemon: no answering.
+    var respondable: Bool? = nil
+    /// One of a recurring series: an answer may cover all of them.
+    var recurring: Bool? = nil
 }
 
 /// How a guest answered, in the daemon's four words.

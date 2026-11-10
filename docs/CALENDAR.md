@@ -2044,6 +2044,52 @@ server only: no request of this wave has been sent to the real Google API.
   - what the invitation looks like when the organizer is a secondary
     calendar the user owns rather than the primary one.
 
+### Replies to invitations (BUILT 2026-11-10)
+
+Yes, no or maybe to an event someone else sent, answered through Google
+Calendar, which tells the organizer. Decided 2026-11-09: lean on Google, never
+our own invitation format (no iTIP or `.ics` of our own, nothing Passband
+mails itself).
+
+- **Route.** `POST /client/calendar/events/{calendar_id}/{id}/reply`, body
+  `{"response": "accepted"|"declined"|"tentative", "series"?, "notify"?}`.
+  Human door only, audited as `calendar_event_reply` (`ok:<answer>[:series]`).
+- **Only the user's own entry is sent.** The patch is
+  `{"attendeesOmitted": true, "attendees": [<self>]}`, which Google reads as
+  "only update the participant's response": no other guest can be added,
+  dropped or changed. The address is read fresh from Google with
+  `maxAttendees=1` (Google then returns only the participant), so an alias
+  is answered as the alias and no other guest's address is read.
+- **Who may answer** (`SyncedEvent::may_respond`): Google gave this copy a
+  `self_response`, and the user did not organize it. Served as
+  `respondable`; `recurring` says the event is an instance of a series.
+- **The organizer is told.** The app always sends `notify: true`
+  (`sendUpdates=all`). Not yet checked against real Google: that an
+  `attendeesOmitted` reply with `sendUpdates=all` mails only the organizer,
+  never the other guests.
+- **Recurring.** `series: true` answers Google's `recurringEventId` (read in
+  the same call), then re-reads and stores the instance asked about; the rest
+  arrive with the kicked sync. The app's default: the whole series while the
+  invitation is unanswered, just this one once it has been answered, and the
+  detail offers the other ("all events" / "just this one").
+- **In the app.** The detail's "Going?" row (y yes, x no, maybe), and y / x on
+  the page for a selected invitation, the same keys a ghost uses.
+- **Google's invitation email.** The Yes / No / Maybe links in it
+  (`calendar.google.com/calendar/event?action=RESPOND&eid=…&rst=1|2|3`) are
+  read in the reader (`InviteLink`): `eid` decodes to the event id and the
+  invited calendar, and an event on the synced calendar that the user may
+  answer is answered in place, with a toast, instead of opening a browser tab.
+  A link to a series answers the series through its next instance. Anything
+  Passband cannot place (not synced yet, another account, the user's own
+  event) opens in the browser as before. The link's `tok` is never used.
+- **Later, maybe (owner, 2026-11-09):** the invitation email itself shows
+  Yes / No / Maybe in the reader's own chrome (not only Google's links in the
+  body), and answering clears the invitation from the inbox (§9, "Calendar
+  mail disappears").
+- **Not here:** proposing a new time (Google's API cannot), answering from
+  the assistant or MCP (answering mails the organizer), Outlook and IMAP
+  calendars (tracked in its own issue).
+
 ### Who a name is (BUILT in wave 6)
 
 `GET /client/calendar/people?name=<text>`, with the calendar routes behind

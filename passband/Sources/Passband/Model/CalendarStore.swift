@@ -992,6 +992,83 @@ extension AppStore {
         }
     }
 
+    // MARK: - answering an invitation
+
+    /// Yes / no / maybe to an invitation, through Google, which tells the
+    /// organizer (Lib/CalendarReply.swift). `series` answers every event of
+    /// a recurring one. The answer lands in the feed in place: nothing is
+    /// selected or closed, since it can come from the mail reader with the
+    /// calendar page nowhere in sight. A reply that may have reached Google
+    /// reloads the page rather than offering to send it again.
+    @discardableResult
+    func replyToEvent(
+        _ event: TimelineEvent, _ answer: ReplyAnswer, series: Bool, via: ReplyVia
+    ) async -> Bool {
+        let key = Agenda.itemId(event)
+        guard CalendarReply.canReply(event), !FixtureMode.isEnabled, !calendarReplying.contains(key) else {
+            return false
+        }
+        let ticket = calendarTicket
+        calendarReplying.insert(key)
+        defer { calendarReplying.remove(key) }
+        do {
+            let answered = try await APIClient.shared.replyToCalendarEvent(
+                calendarId: event.calendar_id, id: event.id, ReplyWrite(answer, series: series))
+            guard calendarLands(ticket) else { return false }
+            retireCalendarLoads()
+            calendarFeed = CalendarWrite.applying(answered, to: calendarFeed)
+            pushToast(
+                CalendarReply.doneText(answer, series: series, organizer: event.organizer), .success)
+            Analytics.capture(
+                "calendar_invite_answered",
+                ["answer": answer.rawValue, "series": series, "via": via.rawValue])
+            // A series answer comes back as this one event; the others
+            // arrive with the sync the daemon kicked.
+            if series { await refreshCalendar() }
+            return true
+        } catch {
+            guard calendarLands(ticket) else { return false }
+            switch CalendarWrite.verdict(of: error) {
+            case .mayHaveHappened:
+                pushToast(CalendarReply.uncertainText, .error)
+                await refreshCalendar()
+            case .notSent:
+                pushToast(CalendarReply.failureText(nil), .error)
+            case .refused(let refusal):
+                pushToast(CalendarReply.failureText(refusal), .error)
+            }
+            return false
+        }
+    }
+
+    /// Whether an answer given on the page covers the whole series: the
+    /// user's pick on the detail, else the default.
+    func replyCoversSeries(_ event: TimelineEvent) -> Bool {
+        guard event.recurring == true else { return false }
+        return calendarReplySeries[Agenda.itemId(event)] ?? CalendarReply.defaultsToSeries(event)
+    }
+
+    /// The page's y / x: an answer to the selected invitation, as the detail
+    /// would give it. False when the event is not one to answer.
+    func replyByKey(_ event: TimelineEvent?, _ answer: ReplyAnswer) -> Bool {
+        guard let event, CalendarReply.canReply(event) else { return false }
+        Task { await replyToEvent(event, answer, series: replyCoversSeries(event), via: .key) }
+        return true
+    }
+
+    /// A Yes / No / Maybe link in Google's invitation email, clicked in the
+    /// reader: answered here when the event is on the synced calendar and is
+    /// the user's to answer, instead of a browser tab. False hands the link
+    /// back to be opened as any other.
+    func replyFromInviteLink(_ raw: String) -> Bool {
+        guard let link = InviteLink.read(raw), !FixtureMode.isEnabled,
+            let landing = CalendarReply.landing(
+                link, events: calendarFeed?.events ?? [], accountEmail: calendarAccountEmail, now: Date())
+        else { return false }
+        Task { await replyToEvent(landing.event, link.answer, series: landing.series, via: .mail) }
+        return true
+    }
+
     /// The event is gone at Google: off the page, its detail, its question
     /// and its pane closed.
     private func eventDeleted(_ event: TimelineEvent) {

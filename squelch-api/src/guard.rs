@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn a_vendor_key_inside_a_link_is_still_caught() {
-        let body = "https://example.com/hook?key=sk-abcDEF0123456789ghijKLMNopq";
+        let body = "https://example.com/hook?key=sk-abcDEF0123456789ghijKLMNopq"; // gitleaks:allow
         assert!(kinds(body).contains(&"api_key"));
     }
 

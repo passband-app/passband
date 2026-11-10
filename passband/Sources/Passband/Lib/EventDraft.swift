@@ -43,6 +43,11 @@ struct EventDraft: Hashable, Sendable {
     /// Wave 5. The guests line, as the recipient field holds it: addresses
     /// joined by commas, a half-typed one last (read by `EventGuests.read`).
     var guests = ""
+    /// A Google Meet on it. Nil FOLLOWS the guests (a new event with
+    /// somebody on it gets one; a note to self does not) until the user
+    /// sets it; an edit starts from whether the event has a Meet. Sent only
+    /// where the calendar makes one (`EventForm.wire`'s `meet`).
+    var meet: Bool?
     /// Wave 6. How the title is being read for a day, a time and a name
     /// (Lib/TitleParse.swift). Off on an edit.
     var titleRead = TitleRead()
@@ -274,6 +279,7 @@ enum EventForm {
         d.location = event.location ?? ""
         d.notes = event.description ?? ""
         d.guests = EventGuests.fieldText(event)
+        d.meet = event.meeting == "meet"
         guard let item = Agenda.item(event, calendar: calendar) else { return d }
         d.allDay = item.allDay
         d.date = dateText(item.start, today: today, calendar: calendar)
@@ -368,12 +374,20 @@ enum EventForm {
 
     // MARK: writing
 
+    /// Whether the draft asks for a Google Meet: the user's say, else on
+    /// when it names a guest.
+    static func wantsMeet(_ d: EventDraft) -> Bool {
+        d.meet ?? !EventGuests.read(d.guests).addresses.isEmpty
+    }
+
     /// A new event's body. `guests` says whether the guests line is open for
     /// this draft; closed (the default), the body names nobody whatever the
     /// line holds. `notify` is never set here: `EventGuests.notify` decides
-    /// it, at the moment a labelled control is pressed.
+    /// it, at the moment a labelled control is pressed. `meet` says the
+    /// calendar makes a Meet (`CalendarStore.meetOffered`); off, none is
+    /// asked for whatever the draft says.
     static func wire(
-        _ d: EventDraft, today: Date, calendar: Calendar, guests: GuestTerms = .closed
+        _ d: EventDraft, today: Date, calendar: Calendar, guests: GuestTerms = .closed, meet: Bool = false
     ) -> Result<EventWrite, EventDraftProblem> {
         let title = savedTitle(d, today: today, calendar: calendar)
         if let p = titleProblem(title) { return .failure(p) }
@@ -397,7 +411,7 @@ enum EventForm {
             EventWrite(
                 calendar_id: calendarId, title: title, start: start, end: end, all_day: when.allDay,
                 location: location.isEmpty ? nil : location, description: notes.isEmpty ? nil : notes,
-                guests: invited))
+                guests: invited, meet: meet && wantsMeet(d) ? true : nil))
     }
 
     /// An edit's body: only the fields that moved from what the card opened
@@ -412,7 +426,7 @@ enum EventForm {
     /// event's guests with it. Order and case are not a change.
     static func patch(
         _ d: EventDraft, from initial: EventDraft, today: Date, calendar: Calendar,
-        guests: GuestTerms = .closed
+        guests: GuestTerms = .closed, meet: Bool = false
     ) -> Result<EventPatch, EventDraftProblem> {
         var p = EventPatch()
         // An edit's title is never read for a day or a time (`TitleRead.on`
@@ -448,6 +462,7 @@ enum EventForm {
             if length(notes) > maxNotes { return .failure(.notesTooLong) }
             p.description = notes.isEmpty ? .clear : .set(notes)
         }
+        if meet, wantsMeet(d) != wantsMeet(initial) { p.meet = wantsMeet(d) }
         return .success(p)
     }
 

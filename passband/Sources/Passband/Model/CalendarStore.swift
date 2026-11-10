@@ -718,6 +718,12 @@ extension AppStore {
         EventGuests.plan(draft, editing: request.event, feed: calendarFeed)
     }
 
+    /// Whether the pane offers "Google Meet" for this draft
+    /// (`CalendarWrite.meetOffered`).
+    func meetOffered(_ draft: EventDraft, _ request: CalendarEditorRequest) -> Bool {
+        CalendarWrite.meetOffered(calendarId: draft.calendarId, editing: request.event, feed: calendarFeed)
+    }
+
     /// Save the pane. True when the daemon took it: the answer is laid into
     /// the page at once and the pane closes. A refusal keeps the pane open
     /// and editable with everything typed in it, after one quiet toast saying
@@ -749,17 +755,20 @@ extension AppStore {
         let plan = guestPlan(draft, request)
         guard let notify = EventGuests.notify(control, offered: plan.controls) else { return false }
         let terms = plan.terms(owner: calendarAccountEmail)
+        let meet = meetOffered(draft, request)
         let sent: SentWrite
         switch request.mode {
         case .create:
-            guard case .success(let made) = EventForm.wire(draft, today: now, calendar: cal, guests: terms)
+            guard
+                case .success(let made) = EventForm.wire(
+                    draft, today: now, calendar: cal, guests: terms, meet: meet)
             else { return false }
             sent = CalendarWrite.createWrite(
                 made, notify: notify, createId: request.createId, before: CalendarWrite.keys(calendarFeed))
         case .edit(let original):
             guard
                 case .success(let patch) = EventForm.patch(
-                    draft, from: request.initial, today: now, calendar: cal, guests: terms)
+                    draft, from: request.initial, today: now, calendar: cal, guests: terms, meet: meet)
             else { return false }
             // Nothing moved: nothing to send, nothing to say, and nobody
             // to tell, whichever control was pressed.

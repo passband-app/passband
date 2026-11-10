@@ -2115,6 +2115,33 @@ service Google's conference names).
 - A store from before the `meeting` column forgets its sync tokens once and
   rereads every calendar in full with the new fields.
 
+### Google Meet on an event (BUILT 2026-11-10)
+
+The event pane has a "video" row, "Google Meet", wherever Google lets a Meet
+be made. Google makes the room and puts the link in the invitation it mails;
+Passband writes none of it.
+
+- **Where it is offered.** The calendar list asks for each calendar's
+  `conferenceProperties.allowedConferenceSolutionTypes`; a calendar that
+  names `hangoutsMeet` is served `meet: true` (a calendar never listed, the
+  primary one alone without the list scope, is taken to allow it). Only on a
+  calendar the user writes, and on an edit only when the event has no meeting
+  or has a Meet: a Zoom or Teams add-on is never covered or removed.
+- **The default.** A new event's Meet follows its guests (on with somebody
+  invited, off for a note to self) until the user clicks it. An edit starts
+  from whether the event has a Meet and sends `meet` only when it moved.
+- **The wire.** `meet: true` on a create or an edit becomes
+  `conferenceData.createRequest` with `conferenceSolutionKey.type =
+  hangoutsMeet`; `meet: false` on an edit is `conferenceData: null`. Every
+  insert and patch names `conferenceDataVersion=1` (without it Google ignores
+  conference data). A create's `requestId` is `meet-<its event id>`, so a
+  create sent again is the same request and Google never makes a second
+  room. Refused before Google: `no_meet` (the calendar does not allow it),
+  `has_meeting` (an edit asking for a Meet on an event with a meeting), and
+  `invalid` for `meet: false` on an event whose meeting is not a Meet.
+- **The link**, like every meeting link, comes back through the sync as the
+  service alone (`meeting: "meet"`), and Join reads it from Google.
+
 ### Who a name is (BUILT in wave 6)
 
 `GET /client/calendar/people?name=<text>`, with the calendar routes behind

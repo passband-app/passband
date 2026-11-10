@@ -2391,6 +2391,9 @@ struct TimelineCalendar: Codable, Sendable, Hashable, Identifiable {
     /// Wave 5. Events on it may carry guests: the primary calendar, or one
     /// the user owns. Nil from an older daemon (`EventGuests.mayInvite`).
     var can_invite: Bool?
+    /// Google lets a Meet be made on events here ("Add Google Meet"). Nil
+    /// from an older daemon, which cannot make one: not offered.
+    var meet: Bool? = nil
 }
 
 enum TimelineSyncError: String, LenientRawEnum {

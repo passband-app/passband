@@ -61,6 +61,7 @@ struct EventDraftTests {
         aCreateFallbackIsTheUsersOwnNewEvent()
         theStoresPaneDecisions()
         theWave3WireDecodes()
+        aMeetFollowsTheGuestsUntilSet()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -703,7 +704,7 @@ struct EventDraftTests {
     static func theVerdictKeysOnTheCode() {
         let statuses: [String: Int] = [
             "invalid": 400, "unknown_calendar": 400, "read_only": 400, "cannot_invite": 400,
-            "guests_read_only": 400, "cannot_notify": 400, "not_granted": 403, "not_editable": 403, "not_invited": 403,
+            "guests_read_only": 400, "cannot_notify": 400, "no_meet": 400, "has_meeting": 400, "not_granted": 403, "not_editable": 403, "not_invited": 403,
             "not_found": 404, "id_in_use": 409, "already_deleted": 409, "calendar_gone": 410,
             "google_refused": 502,
         ]
@@ -1316,6 +1317,61 @@ struct EventDraftTests {
         let keys = body2.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?.keys.sorted()
         expect(keys == ["all_day", "calendar_id", "end", "start", "title"],
                "a create body leaves an empty location and note out")
+    }
+
+    /// "Google Meet": a new event's follows its guests until clicked, goes
+    /// out only where the calendar makes one, and an edit sends it only when
+    /// it moved, never over a Zoom.
+    static func aMeetFollowsTheGuestsUntilSet() {
+        let cal = Calendar(identifier: .gregorian)
+        let today = Date(timeIntervalSince1970: 1_791_000_000)
+        var d = EventForm.newDraft(day: today, now: today, calendarId: "primary", calendar: cal)
+        d.title = "Planning"
+        expect(!EventForm.wantsMeet(d), "alone: no Meet")
+        d.guests = "sam@example.com"
+        expect(EventForm.wantsMeet(d), "a guest turns it on")
+        d.meet = false
+        expect(!EventForm.wantsMeet(d), "until the user says otherwise")
+        d.meet = true
+        let open = GuestTerms(open: true, owner: "me@example.com")
+        let wire = { (offered: Bool) in
+            (try? EventForm.wire(d, today: today, calendar: cal, guests: open, meet: offered).get())?.meet
+        }
+        expect(wire(true) == true, "asked for where offered")
+        expect(wire(false) == nil, "and never where not")
+
+        func event(_ meeting: String?) -> TimelineEvent {
+            var e = TimelineEvent(
+                id: "e1", calendar_id: "primary", calendar_name: nil, title: "Sync",
+                start: "2026-10-08T10:00:00-07:00", end: "2026-10-08T11:00:00-07:00", all_day: false,
+                start_timezone: nil, location: nil, status: .confirmed, self_response: nil, busy: true,
+                organizer: nil, html_link: nil, color: nil, editable: true, description: nil)
+            e.meeting = meeting
+            return e
+        }
+        let initial = EventForm.draft(editing: event("meet"), today: today, calendar: cal)
+        expect(initial.meet == true, "an edit starts from the event's Meet")
+        var off = initial
+        off.meet = false
+        let patch = { (draft: EventDraft, offered: Bool) in
+            try? EventForm.patch(draft, from: initial, today: today, calendar: cal, meet: offered).get()
+        }
+        expect(patch(off, true)?.meet == false, "removed")
+        expect(patch(off, true)?.json()["meet"] as? Bool == false, "on the wire")
+        expect(patch(initial, true)?.isEmpty == true, "untouched: nothing")
+        expect(patch(off, false)?.meet == nil, "not offered: left alone")
+
+        let feed = TimelineFeed(calendars: [
+            TimelineCalendar(id: "primary", name: nil, color: nil, primary: true, writable: true, can_invite: true, meet: true),
+            TimelineCalendar(id: "team", name: nil, color: nil, primary: false, writable: true, can_invite: false, meet: false),
+            TimelineCalendar(id: "old", name: nil, color: nil, primary: false, writable: true, can_invite: nil),
+        ])
+        expect(CalendarWrite.meetOffered(calendarId: "primary", editing: nil, feed: feed), "a new event")
+        expect(!CalendarWrite.meetOffered(calendarId: "team", editing: nil, feed: feed), "not where Google says no")
+        expect(!CalendarWrite.meetOffered(calendarId: "old", editing: nil, feed: feed), "nor from an older daemon")
+        expect(CalendarWrite.meetOffered(calendarId: "primary", editing: event(nil), feed: feed), "an event with none")
+        expect(CalendarWrite.meetOffered(calendarId: "primary", editing: event("meet"), feed: feed), "its own Meet")
+        expect(!CalendarWrite.meetOffered(calendarId: "primary", editing: event("zoom"), feed: feed), "never over a Zoom")
     }
 
     static func expect(_ cond: Bool, _ what: String) {

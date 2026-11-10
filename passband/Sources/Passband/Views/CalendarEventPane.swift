@@ -241,6 +241,10 @@
                     PlaceSuggestions(picker: places.picker) { places.pick($0) }
                         .modifier(InlineFieldTuck(active: true))
                 }
+                if store.meetOffered(draft, request) {
+                    Hairline()
+                    InlineFieldRow(label: "video") { meetToggle }
+                }
                 Hairline()
                 notes
             }
@@ -486,6 +490,26 @@
 
         /// All day, as the composer draws its own switch: a chip that fills
         /// when it is on.
+        /// "Google Meet", on or off. Until it is clicked a new event's
+        /// follows its guests (`EventForm.wantsMeet`), so adding somebody
+        /// turns it on.
+        private var meetToggle: some View {
+            let on = EventForm.wantsMeet(draft)
+            return Button {
+                patch { $0.meet = !on }
+            } label: {
+                Chip(
+                    text: on ? "Google Meet" : "add Google Meet",
+                    tone: on ? Palette.accent : Palette.inkFaint,
+                    symbol: on ? "checkmark" : "video",
+                    filled: on)
+            }
+            .buttonStyle(.plain)
+            .pointingHand()
+            .accessibilityLabel("Google Meet")
+            .accessibilityAddTraits(on ? .isSelected : [])
+        }
+
         private var allDayToggle: some View {
             Button {
                 setAllDay(!draft.allDay)

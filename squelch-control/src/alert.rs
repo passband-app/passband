@@ -18,7 +18,9 @@
 //! to be safe in a log line), and a command to run. NEVER the account address:
 //! a webhook is a third party, and the label is already enough to find
 //! everything else from a shell. The builders below take no argument an
-//! address could arrive through, which is the whole enforcement.
+//! address could arrive through, which is the whole enforcement. The one
+//! exception to "nothing a person typed" is the waitlist name, which goes
+//! through [`escape`] first because a stranger wrote it.
 //!
 //! The URL is the secret (a Slack webhook needs no other credential), so
 //! [`AlertClient`] derives nothing and [`AlertError`] names nothing, the way
@@ -184,13 +186,25 @@ pub fn signup_provisioned(label: &str) -> String {
     format!(":tada: New tenant provisioned: `{label}`")
 }
 
-/// A new address landed on the waitlist. Carries no address and no name, for
-/// the reason the module header gives: the admin page is where those live.
+/// A new address landed on the waitlist. Carries the name they typed, when
+/// there is one, and NEVER the address: the admin page is where that lives.
 /// Sent only for a NEW row, so resubmitting the form cannot page anybody.
-pub fn waitlist_joined(public_url: &str) -> String {
-    format!(
-        ":wave: Someone joined the waitlist. <{public_url}/admin/users|Review on the admin page>"
-    )
+///
+/// `name` is already normalized by the store's rules (no control characters,
+/// whitespace collapsed, capped length). It is still a stranger's text, so it
+/// is escaped and left unformatted: a `*` in a name stays a `*`.
+pub fn waitlist_joined(public_url: &str, name: Option<&str>) -> String {
+    let who = name.map_or_else(|| "Someone".to_string(), escape);
+    format!(":wave: {who} joined the waitlist. <{public_url}/admin/users|Review on the admin page>")
+}
+
+/// Slack's three control characters, escaped the way its docs ask. Without
+/// this, a name of `<!channel>` pings the whole channel and
+/// `<https://evil.test|Approve here>` puts a link in the operator's alerts.
+fn escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 #[cfg(test)]
@@ -316,8 +330,31 @@ mod tests {
         // No keys minted, no orphan line.
         assert!(!signup_incomplete("ethan", &err, None, None).contains("Orphaned"));
 
-        let w = waitlist_joined("https://signup.passband.app");
+        let w = waitlist_joined("https://signup.passband.app", None);
+        assert!(w.contains(":wave: Someone joined"), "{w}");
         assert!(w.contains("https://signup.passband.app/admin/users"), "{w}");
         assert!(!w.contains('@') && !w.contains('\u{2014}'), "{w}");
+
+        let w = waitlist_joined("https://signup.passband.app", Some("Ada Lovelace"));
+        assert!(
+            w.starts_with(":wave: Ada Lovelace joined the waitlist."),
+            "{w}"
+        );
+    }
+
+    #[test]
+    fn a_waitlist_name_cannot_ping_the_channel_or_plant_a_link() {
+        let w = waitlist_joined(
+            "https://signup.passband.app",
+            Some("<!channel> <https://evil.test|Approve here> & co"),
+        );
+        assert!(
+            w.starts_with(
+                ":wave: &lt;!channel&gt; &lt;https://evil.test|Approve here&gt; &amp; co joined"
+            ),
+            "{w}"
+        );
+        // The only `<` left is the admin link this crate wrote.
+        assert_eq!(w.matches('<').count(), 1, "{w}");
     }
 }

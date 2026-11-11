@@ -21,13 +21,10 @@ November Update
 - **Teach Passband in your own words.** Press `t` and say what you want, like never show me policy updates
 - **Answer invites and join calls from the calendar.** Reply yes, no or maybe, join the meeting, or add a Google Meet
 - **Deeper search.** Ask a question in search and the answer fills the screen once you stop typing
-- **Search five years back.** Find mail from long before you joined Passband
 - Press `c` or Enter on a day to make a new event
 - ⌘K opens its own chat
-- Passband opens when you log in
+- Passband opens on startup
 - Reply drafts reopen with their thread
-- Press `e` to clear a For Your Eyes item while it is open
-- Sending no longer stops to warn about keys in your mail
 - Discover has been retired
 - Smoother scrolling in Reading
 - UI improvements

@@ -2364,6 +2364,9 @@ extension TimelineEvent {
         passband_owned = try? c.decodeIfPresent(Bool.self, forKey: .passband_owned)
         tickets = try? c.decodeIfPresent(CalendarTickets.self, forKey: .tickets)
         pending_change = try? c.decodeIfPresent(LinkedChange.self, forKey: .pending_change)
+        respondable = try? c.decodeIfPresent(Bool.self, forKey: .respondable)
+        recurring = try? c.decodeIfPresent(Bool.self, forKey: .recurring)
+        meeting = try? c.decodeIfPresent(String.self, forKey: .meeting)
     }
 
     private struct OneGuest: Decodable {

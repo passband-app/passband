@@ -26,6 +26,7 @@ struct CalendarReplyTests {
         seriesDefaults()
         words()
         joinLabels()
+        theWireDecodes()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -183,6 +184,25 @@ struct CalendarReplyTests {
         expect(CalendarJoin.label("hologram") == "Join", "a word from a newer daemon still joins")
         expect(CalendarJoin.label(nil) == nil && CalendarJoin.label("") == nil, "no meeting, no button")
         expect(CalendarJoin.path(calendarId: "primary", eventId: "e1").hasSuffix("/e1/join"), "the join route")
+    }
+
+    /// The daemon's keys reach the event THROUGH THE DECODER (a hand-written
+    /// one: every new key must be added to it), not only through the
+    /// memberwise init the other checks use.
+    static func theWireDecodes() {
+        let json = """
+            {"id": "e1", "calendar_id": "primary", "start": "2026-11-12T10:00:00-08:00", "all_day": false,
+             "respondable": true, "recurring": true, "meeting": "zoom"}
+            """
+        let e = try? JSONDecoder().decode(TimelineEvent.self, from: Data(json.utf8))
+        expect(e?.respondable == true, "respondable decodes")
+        expect(e?.recurring == true, "recurring decodes")
+        expect(e?.meeting == "zoom", "meeting decodes")
+        let feed = """
+            {"events": [], "ghosts": [], "calendars": [{"id": "primary", "writable": true, "meet": true}]}
+            """
+        let f = try? JSONDecoder().decode(TimelineFeed.self, from: Data(feed.utf8))
+        expect(f?.calendars?.first?.meet == true, "a calendar's meet decodes")
     }
 
     static func expect(_ cond: Bool, _ what: String) {

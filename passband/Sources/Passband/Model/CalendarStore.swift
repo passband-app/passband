@@ -1069,7 +1069,11 @@ extension AppStore {
     /// would give it. False when the event is not one to answer.
     func replyByKey(_ event: TimelineEvent?, _ answer: ReplyAnswer) -> Bool {
         guard let event, CalendarReply.canReply(event) else { return false }
-        Task { await replyToEvent(event, answer, series: replyCoversSeries(event), via: .key) }
+        let series = replyCoversSeries(event)
+        // The answer it already holds, for just this one: nothing to send,
+        // as the card's own choice does (Google would tell the organizer again).
+        if ReplyAnswer(event.self_response) == answer, !series { return true }
+        Task { await replyToEvent(event, answer, series: series, via: .key) }
         return true
     }
 
@@ -1113,6 +1117,8 @@ extension AppStore {
             let landing = CalendarReply.landing(
                 link, events: calendarFeed?.events ?? [], accountEmail: calendarAccountEmail, now: Date())
         else { return false }
+        // Already the answer the email shows filled: handled, nothing sent.
+        if ReplyAnswer(landing.event.self_response) == link.answer, !landing.series { return true }
         Task { await replyToEvent(landing.event, link.answer, series: landing.series, via: .mail) }
         return true
     }

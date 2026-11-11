@@ -57,6 +57,30 @@ pub fn request_id(event_id: Option<&str>) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The request id for a Meet asked of an EDIT: the event and the version of
+/// it the edit was made against, so the same edit sent twice (its answer
+/// lost, the row not yet synced) is the same request, and Google answers it
+/// with the room the first one made instead of a second.
+pub fn edit_request_id(event_id: &str, updated: Option<&str>) -> String {
+    let stamp: String = updated
+        .unwrap_or("")
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect();
+    format!("meet-{event_id}-{stamp}")
+}
+
+/// Whether Google holds a conference on the event itself (`conferenceData`
+/// or `hangoutLink`): what `conferenceData: null` removes. A Meet link only
+/// pasted into the location or description is not one.
+pub fn has_conference(item: &Value) -> bool {
+    conference_uri(item).is_some()
+        || item
+            .get("hangoutLink")
+            .and_then(Value::as_str)
+            .is_some_and(|l| !l.is_empty())
+}
+
 /// The longest join link handed out.
 const URL_CAP: usize = 2048;
 
@@ -137,14 +161,21 @@ fn conference_uri(item: &Value) -> Option<&str> {
 }
 
 /// Every `https://` link in free text or HTML, in order: cut at whitespace,
-/// a quote, an angle bracket or a closing bracket, trailing punctuation
-/// dropped, `&amp;` read as `&` (an `href` in an invitation's HTML).
+/// a quote, an angle bracket (written or escaped, `&lt;` `&gt;`, as an
+/// Outlook "Join: <https://...>" is in HTML) or a closing bracket, trailing
+/// punctuation dropped, `&amp;` read as `&` (an `href` in an invitation's HTML).
 fn links(text: &str) -> impl Iterator<Item = String> + '_ {
     text.match_indices("https://").map(move |(at, _)| {
         let rest = &text[at..];
-        let end = rest
-            .find(|c: char| c.is_whitespace() || "\"'<>)]".contains(c))
-            .unwrap_or(rest.len());
+        let end = [
+            rest.find(|c: char| c.is_whitespace() || "\"'<>)]".contains(c)),
+            rest.find("&lt;"),
+            rest.find("&gt;"),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(rest.len());
         rest[..end]
             .trim_end_matches(['.', ',', ';', ':', '!', '?'])
             .replace("&amp;", "&")
@@ -247,6 +278,13 @@ mod tests {
             join_url(&html).unwrap().contains("&tid=1"),
             "an href's &amp; read back"
         );
+        let escaped = json!({"description":
+            "<p>Join: &lt;https://teams.microsoft.com/l/meetup-join/19%3ameeting_X&amp;tid=1&gt;</p>"});
+        assert_eq!(
+            join_url(&escaped).as_deref(),
+            Some("https://teams.microsoft.com/l/meetup-join/19%3ameeting_X&tid=1"),
+            "an escaped angle bracket ends the link"
+        );
         let first = json!({"description": "Slides https://docs.example.com/x then https://acme.webex.com/meet/pat"});
         assert_eq!(
             meeting_kind(&first),
@@ -265,6 +303,35 @@ mod tests {
         }
         let long = json!({"location": format!("https://zoom.us/j/1?x={}", "a".repeat(3000))});
         assert_eq!(join_url(&long), None, "too long to hand out");
+    }
+
+    #[test]
+    fn only_googles_own_conference_is_removable() {
+        assert!(has_conference(
+            &json!({"hangoutLink": "https://meet.google.com/abc-defg-hij"})
+        ));
+        assert!(has_conference(&json!({"conferenceData": {"entryPoints": [
+            {"entryPointType": "video", "uri": "https://meet.google.com/abc-defg-hij"}]}})));
+        let pasted = json!({"description": "join https://meet.google.com/abc-defg-hij"});
+        assert_eq!(meeting_kind(&pasted), Some(MeetingKind::Meet));
+        assert!(
+            !has_conference(&pasted),
+            "a link in the text is not Google's conference"
+        );
+    }
+
+    #[test]
+    fn an_edits_meet_is_the_same_request_when_sent_again() {
+        let a = edit_request_id("abc123", Some("2026-11-10T18:00:00.000Z"));
+        assert_eq!(a, "meet-abc123-20261110T180000000Z");
+        assert_eq!(
+            a,
+            edit_request_id("abc123", Some("2026-11-10T18:00:00.000Z"))
+        );
+        assert_ne!(
+            a,
+            edit_request_id("abc123", Some("2026-11-11T09:00:00.000Z"))
+        );
     }
 
     #[test]

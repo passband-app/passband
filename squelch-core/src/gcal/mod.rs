@@ -536,8 +536,13 @@ impl SyncedEvent {
     /// organizer by Google's word, nor a guest entry that is both the user
     /// and the organizer. Writing to the calendar is not asked: answering an
     /// invitation is the guest's, whatever their role on the calendar.
+    ///
+    /// ONLY ON THE USER'S OWN CALENDAR, the primary: a colleague's calendar
+    /// shared in carries the colleague's answer as its `self_response`, and
+    /// replying there would answer AS them (or be refused, read-only).
     pub fn may_respond(&self) -> bool {
-        self.row.self_response.is_some()
+        self.calendar_primary
+            && self.row.self_response.is_some()
             && !self.row.organizer_self
             && !self.row.guests.iter().any(|g| g.is_self && g.organizer)
     }
@@ -1881,13 +1886,16 @@ mod tests {
             organizer,
             is_self,
         };
-        let event = |response: Option<SelfResponse>, organizer_self: bool, guests: Vec<Guest>| {
+        let on = |primary: bool,
+                  response: Option<SelfResponse>,
+                  organizer_self: bool,
+                  guests: Vec<Guest>| {
             SyncedEvent {
                 calendar_id: "primary".into(),
                 calendar_name: None,
                 calendar_color: None,
                 calendar_access: Some(AccessRole::Owner),
-                calendar_primary: true,
+                calendar_primary: primary,
                 row: EventRow {
                     self_response: response,
                     organizer_self,
@@ -1896,6 +1904,11 @@ mod tests {
                 },
             }
         };
+        let event = |response, organizer_self, guests| on(true, response, organizer_self, guests);
+        assert!(
+            !on(false, Some(SelfResponse::NeedsAction), false, vec![]).may_respond(),
+            "a calendar shared in: its answer is somebody else's"
+        );
         assert!(
             event(
                 Some(SelfResponse::NeedsAction),

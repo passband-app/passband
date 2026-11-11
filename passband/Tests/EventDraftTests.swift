@@ -1355,6 +1355,12 @@ struct EventDraftTests {
         }
         expect(wire(true) == true, "asked for where offered")
         expect(wire(false) == nil, "and never where not")
+        var following = d
+        following.meet = nil
+        expect((try? EventForm.wire(following, today: today, calendar: cal, guests: open, meet: true).get())?.meet == true,
+               "following the guests, and they are sent: a Meet")
+        let closedWire = (try? EventForm.wire(following, today: today, calendar: cal, guests: .closed, meet: true).get())?.meet
+        expect(closedWire == nil, "guests that are not sent make no Meet of their own accord")
 
         func event(_ meeting: String?) -> TimelineEvent {
             var e = TimelineEvent(

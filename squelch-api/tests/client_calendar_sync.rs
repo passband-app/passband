@@ -7787,7 +7787,10 @@ async fn a_meet_is_asked_of_google_only_where_the_calendar_allows_one() {
     let request = write.body["conferenceData"]["createRequest"]["requestId"]
         .as_str()
         .unwrap();
-    assert_eq!(request.len(), 32, "a fresh request id");
+    assert!(
+        request.starts_with(&format!("meet-{lunch}-")),
+        "keyed to the event and the version edited, so a resend is the same request: {request}"
+    );
     assert_eq!(body["meeting"], "meet");
     // ...never a second one on top...
     let sent = writes(&w).len();
@@ -7815,6 +7818,31 @@ async fn a_meet_is_asked_of_google_only_where_the_calendar_allows_one() {
         (StatusCode::BAD_REQUEST, Some("invalid"))
     );
     assert_eq!(writes(&w).len(), sent, "Google heard nothing");
+    // A Meet link only pasted into the place is found as a Meet, but it is
+    // not Google's conference, and `conferenceData: null` would leave it:
+    // refused, read from Google, rather than a save that changes nothing.
+    let pasted = json!({
+        "calendar_id": "primary", "title": "Standup", "all_day": false,
+        "start": rfc(begin), "end": rfc(begin + Duration::hours(1)),
+        "location": "https://meet.google.com/abc-defg-hij",
+    });
+    let (status, body, _) = send(&w.app, "POST", "/client/calendar/events", Some(pasted)).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["meeting"], "meet");
+    let standup = body["id"].as_str().unwrap().to_string();
+    let sent = writes(&w).len();
+    let (status, body, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri("primary", &standup),
+        Some(json!({"meet": false})),
+    )
+    .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid"))
+    );
+    assert_eq!(writes(&w).len(), sent, "nothing written");
     let (status, body, _) = send(
         &w.app,
         "PATCH",

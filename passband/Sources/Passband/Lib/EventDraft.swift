@@ -429,7 +429,7 @@ enum EventForm {
             EventWrite(
                 calendar_id: calendarId, title: title, start: start, end: end, all_day: when.allDay,
                 location: location.isEmpty ? nil : location, description: notes.isEmpty ? nil : notes,
-                guests: invited, meet: meet && wantsMeet(d) ? true : nil))
+                guests: invited, meet: meet && (d.meet ?? (invited != nil)) ? true : nil))
     }
 
     /// An edit's body: only the fields that moved from what the card opened

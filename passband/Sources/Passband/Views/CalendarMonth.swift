@@ -292,6 +292,11 @@
                             }
                         }
                         .coordinateSpace(name: Self.rowsSpace)
+                        // The page turned mid-drag: the cells it held are gone.
+                        .onChange(of: model.month) { _, _ in
+                            if sweep != nil { sweepCancelled = true }
+                            sweep = nil
+                        }
                         .simultaneousGesture(sweepGesture(cellWidth: cellWidth, rowHeight: rowHeight))
                     }
                     .scrollBounceBehavior(.basedOnSize)
@@ -363,16 +368,19 @@
         /// in the colour of the calendar a new event goes on, under the bars
         /// each row already has.
         private func sweptRun(_ sweep: Sweep, cellWidth: CGFloat, rowHeight: CGFloat) -> some View {
+            // Clamped both ends: the grid may have fewer cells than when the
+            // drag began (the page turned under it, which also drops it).
             let all = days
-            let lo = max(0, min(sweep.from, sweep.to))
-            let hi = min(all.count - 1, max(sweep.from, sweep.to))
+            let last = max(0, all.count - 1)
+            let lo = min(last, max(0, min(sweep.from, sweep.to)))
+            let hi = min(last, max(lo, max(sweep.from, sweep.to)))
             let hue = CalendarColor.parse(store.calendarWritable.first?.color).map(ChipHue.calendar) ?? .plain
             let inks = ChipColors.inks(hue)
             let inset = MonthMetrics.inset
             let fits = max(1, Int((rowHeight - MonthMetrics.numberBand - MonthMetrics.foot) / MonthMetrics.step))
-            let when = hi > lo
+            let when = hi > lo && !all.isEmpty
                 ? "\(Agenda.format(all[lo], "MMM d", calendar)) – \(Agenda.format(all[hi], "MMM d", calendar))"
-                : Agenda.format(all[max(0, lo)], "MMM d", calendar)
+                : all.isEmpty ? "" : Agenda.format(all[lo], "MMM d", calendar)
             return ZStack(alignment: .topLeading) {
                 ForEach(DaysSweep.pieces(from: lo, to: hi), id: \.row) { piece in
                     let lanes = model.weeks.indices.contains(piece.row) ? model.weeks[piece.row].lanes : 0

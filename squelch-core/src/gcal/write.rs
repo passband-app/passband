@@ -599,10 +599,13 @@ pub fn is_same_create(draft: &NewEvent, found: &EventRow, calendar_zone: Option<
 /// otherwise: the key is then NOT SENT, which leaves Google's list alone.
 /// `meet`: Some(true) asks for a new Meet, Some(false) sends
 /// `conferenceData: null`, which removes the event's conference.
+/// `meet_request`: the request id a new Meet is asked with
+/// ([`super::meeting::edit_request_id`]).
 pub fn patch_body(
     edit: &EventEdit,
     times: Option<&EventTimes>,
     attendees: Option<Vec<Value>>,
+    meet_request: &str,
 ) -> Result<Value, Invalid> {
     let mut body = Map::new();
     if let Some(attendees) = attendees {
@@ -634,7 +637,7 @@ pub fn patch_body(
         Some(true) => {
             body.insert(
                 "conferenceData".into(),
-                super::meeting::create_request(&super::meeting::request_id(None)),
+                super::meeting::create_request(meet_request),
             );
         }
         Some(false) => {
@@ -729,7 +732,7 @@ mod tests {
         );
         let remove = parse_edit(&json!({"meet": false}), "primary").unwrap();
         assert_eq!(
-            patch_body(&remove, None, None).unwrap(),
+            patch_body(&remove, None, None, "meet-test").unwrap(),
             json!({"conferenceData": null})
         );
         assert_eq!(parse_edit(&json!({"meet": 1}), "primary"), Err(BAD_MEET));
@@ -953,7 +956,7 @@ mod tests {
         assert_eq!(edit.location, Change::Clear);
         assert_eq!(edit.description, Change::Keep);
         assert_eq!(
-            patch_body(&edit, None, None).unwrap(),
+            patch_body(&edit, None, None, "meet-test").unwrap(),
             json!({"summary": "New", "location": null})
         );
         assert_eq!(parse_edit(&json!({}), "primary"), Err(NOTHING));
@@ -993,7 +996,7 @@ mod tests {
         let to_day = edit(json!({"all_day": true, "start": "2026-10-05", "end": "2026-10-06"}));
         let times = to_day.times(&timed).unwrap();
         assert_eq!(
-            patch_body(&to_day, times.as_ref(), None).unwrap(),
+            patch_body(&to_day, times.as_ref(), None, "meet-test").unwrap(),
             json!({
                 "start": {"date": "2026-10-05", "dateTime": null},
                 "end": {"date": "2026-10-07", "dateTime": null},
@@ -1264,17 +1267,23 @@ mod tests {
         // In the patch: present when given, the key absent otherwise.
         let edit = parse_edit(&json!({"guests": ["a@x.com"]}), "primary").unwrap();
         assert_eq!(
-            patch_body(&edit, None, Some(vec![json!({"email": "a@x.com"})])).unwrap(),
+            patch_body(
+                &edit,
+                None,
+                Some(vec![json!({"email": "a@x.com"})]),
+                "meet-test"
+            )
+            .unwrap(),
             json!({"attendees": [{"email": "a@x.com"}]})
         );
         let title = parse_edit(&json!({"title": "x"}), "primary").unwrap();
         assert_eq!(
-            patch_body(&title, None, None).unwrap(),
+            patch_body(&title, None, None, "meet-test").unwrap(),
             json!({"summary": "x"})
         );
         // Emptying the list sends an empty array, which is not "absent".
         assert_eq!(
-            patch_body(&edit, None, Some(Vec::new())).unwrap(),
+            patch_body(&edit, None, Some(Vec::new()), "meet-test").unwrap(),
             json!({"attendees": []})
         );
     }

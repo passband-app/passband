@@ -2072,8 +2072,10 @@ mails itself).
   dropped or changed. The address is read fresh from Google with
   `maxAttendees=1` (Google then returns only the participant), so an alias
   is answered as the alias and no other guest's address is read.
-- **Who may answer** (`SyncedEvent::may_respond`): Google gave this copy a
-  `self_response`, and the user did not organize it. Served as
+- **Who may answer** (`SyncedEvent::may_respond`): the copy on the user's
+  PRIMARY calendar, Google gave it a `self_response`, and the user did not
+  organize it. A colleague's calendar shared in carries the colleague's
+  answer, and replying there would answer as them. Served as
   `respondable`; `recurring` says the event is an instance of a series.
 - **The organizer is told.** The app always sends `notify: true`
   (`sendUpdates=all`). Not yet checked against real Google: that an
@@ -2143,9 +2145,12 @@ Passband writes none of it.
   `conferenceData.createRequest` with `conferenceSolutionKey.type =
   hangoutsMeet`; `meet: false` on an edit is `conferenceData: null`. Every
   insert and patch names `conferenceDataVersion=1` (without it Google ignores
-  conference data). A create's `requestId` is `meet-<its event id>`, so a
-  create sent again is the same request and Google never makes a second
-  room. Refused before Google: `no_meet` (the calendar does not allow it),
+  conference data). A create's `requestId` is `meet-<its event id>`, and an
+  edit's `meet-<event id>-<its updated stamp>`, so the same write sent again
+  is the same request and Google never makes a second room. `meet: false`
+  reads the event from Google first and is refused (`invalid`) when the Meet
+  is only a link pasted into the text: `conferenceData: null` cannot remove
+  that. Refused before Google: `no_meet` (the calendar does not allow it),
   `has_meeting` (an edit asking for a Meet on an event with a meeting), and
   `invalid` for `meet: false` on an event whose meeting is not a Meet.
 - **The link**, like every meeting link, comes back through the sync as the

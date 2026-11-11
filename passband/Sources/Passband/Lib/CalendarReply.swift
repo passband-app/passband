@@ -132,11 +132,15 @@ enum CalendarReply {
     /// pill's outer ends are rounded: Yes on the left, Maybe on the right.
     /// The blue is `Palette.accentInk` (light), as the mail renders light.
     nonisolated static let emailSheet: String = (1...3).map { n in
-        let link = "a[href*=\"action=RESPOND\"][href*=\"rst=\(n)&\"]"
+        // `rst` mid-query or last, as `InviteLink.read` takes either.
+        let respond = "a[href*=\"action=RESPOND\"]"
+        let links = ["\(respond)[href*=\"rst=\(n)&\"]", "\(respond)[href$=\"rst=\(n)\"]"]
         let on = "html[data-passband-rst=\"\(n)\"]"
         let corners = ["15px 0 0 15px", "0", "0 15px 15px 0"][n - 1]
-        return "\(on) td:has(> span \(link)){background:#1C63AE!important;border-radius:\(corners);}"
-            + "\(on) \(link),\(on) \(link) *{color:#fff!important;font-weight:500!important;}"
+        return links.map { link in
+            "\(on) td:has(> span \(link)){background:#1C63AE!important;border-radius:\(corners);}"
+                + "\(on) \(link),\(on) \(link) *{color:#fff!important;font-weight:500!important;}"
+        }.joined()
     }.joined()
 
     /// THE ANSWER AN INVITATION EMAIL SHOWS: Google's own Yes / No / Maybe

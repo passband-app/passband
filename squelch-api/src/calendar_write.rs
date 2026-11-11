@@ -25,7 +25,9 @@
 //!
 //! A MEET. A create or an edit may say `meet: true`, and Google makes a
 //! Google Meet for the event and puts it in the invitation; an edit's
-//! `meet: false` removes the event's Meet. Guarded by [`meet_allowed`]. The
+//! `meet: false` removes the event's Meet: one Google holds on the event,
+//! read from Google first, never a link pasted into its text. Guarded by
+//! [`meet_allowed`]. The
 //! link comes back like any conference and is never stored (see
 //! `squelch_core::gcal::meeting`).
 //!
@@ -156,7 +158,7 @@ use axum::response::IntoResponse;
 use serde_json::Value;
 use squelch_core::credentials::CalendarCredentials;
 use squelch_core::gcal::client::{API_BASE, CalendarApi, CallError, Notify};
-use squelch_core::gcal::meeting::MeetingKind;
+use squelch_core::gcal::meeting::{self, MeetingKind};
 use squelch_core::gcal::write::{self, Invalid};
 use squelch_core::gcal::{EventRow, SelfResponse, StoredCalendar, SyncedEvent, read_written_event};
 
@@ -864,7 +866,21 @@ async fn edit(
                 Some(write::merge_attendees(&current, guests).ok_or_else(guests_read_only)?)
             }
         };
-        let patch = write::patch_body(&edit, times.as_ref(), attendees).map_err(Refusal::body)?;
+        if edit.meet == Some(false) {
+            // What was found may be a Meet link pasted into the text, which
+            // `conferenceData: null` cannot take away: only one Google holds
+            // on the event is removed, read from Google now.
+            let live = api
+                .get_event(&token, &calendar_id, &event_id)
+                .await
+                .map_err(|e| Refusal::google(EDIT, e))?;
+            if !meeting::has_conference(&live) {
+                return Err(Refusal::body(write::NO_MEET_TO_REMOVE));
+            }
+        }
+        let meet_request = meeting::edit_request_id(&event_id, stored.row.updated_at.as_deref());
+        let patch = write::patch_body(&edit, times.as_ref(), attendees, &meet_request)
+            .map_err(Refusal::body)?;
         let answer = api
             .patch_event(&token, &calendar_id, &event_id, &patch, edit.notify)
             .await

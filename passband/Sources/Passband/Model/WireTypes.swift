@@ -978,8 +978,17 @@ extension CalendarUpdate {
     /// characters ("Halcyon Drift", never "Gym" in "Gymnastics"), compared
     /// with the event's first row; on the same day (a start's own date, so
     /// 7pm Pacific stays that day), at the same start unless one is a date
-    /// only. A row with no start joins only when exactly one dated event
-    /// matches it. Mail that MOVES or CANCELS an event always keeps its own
+    /// only. Starts compare by wall clock: the model writes one mail's 3:30pm
+    /// with an offset and the next one's without, and those are one start.
+    ///
+    /// Mail in ONE THREAD at the same start is one event whatever the model
+    /// titled it: a rental site relays each landlord message as a new mail in
+    /// the thread, and every one restates the tour ("Rental tour: 25 Main St",
+    /// "Apartment tour at 25 Main St"). Records from the same message never
+    /// fold this way, since the model split them on purpose.
+    ///
+    /// A row with no start joins only when exactly one dated event matches
+    /// it. Mail that MOVES or CANCELS an event always keeps its own
     /// row, so the card never hides the news under the old confirmation. The
     /// row shown is the earliest received with a start (the confirmation,
     /// which carries the tickets; reminders come later), else the earliest.
@@ -1006,10 +1015,15 @@ extension CalendarUpdate {
             guard let s = r.starts_at, s.count >= 10 else { return nil }
             return s.prefix(10)
         }
-        // The same day, and the same start unless one is only a date.
+        // The same day, and the same wall-clock start ("2026-11-13T15:30",
+        // offset or not) unless one is only a date.
         func sameStart(_ a: CalendarUpdate, _ b: CalendarUpdate) -> Bool {
             guard let x = a.starts_at, let y = b.starts_at, day(a) == day(b) else { return false }
-            return x == y || x.count == 10 || y.count == 10
+            return x.count == 10 || y.count == 10 || x.prefix(16) == y.prefix(16)
+        }
+        // Another mail of the same thread.
+        func sameThread(_ a: CalendarUpdate, _ b: CalendarUpdate) -> Bool {
+            a.thread_id != nil && a.thread_id == b.thread_id && a.message_id != b.message_id
         }
         func news(_ r: CalendarUpdate) -> Bool {
             r.change == "updated" || r.change == "cancelled"
@@ -1023,14 +1037,23 @@ extension CalendarUpdate {
             guard !news(first), let a = title(first), let b = title(rows[i]) else { return false }
             return matches(a, b)
         }
+        // A dated row's event: its title and start, or its thread and start.
+        func holds(_ g: [Int], _ i: Int) -> Bool {
+            guard !news(rows[g[0]]) else { return false }
+            let row = rows[i]
+            return g.contains { sameStart(rows[$0], row) && sameThread(rows[$0], row) }
+                || (joins(g, i) && g.contains { sameStart(rows[$0], row) })
+        }
+        // An undated row's candidates: its title, or its thread.
+        func claims(_ g: [Int], _ i: Int) -> Bool {
+            joins(g, i) || (!news(rows[g[0]]) && g.contains { sameThread(rows[$0], rows[i]) })
+        }
         for (i, row) in rows.enumerated() {
             if title(row) == nil || news(row) {
                 groups.append([i])
             } else if day(row) == nil {
                 undated.append(i)
-            } else if let g = groups.firstIndex(where: { g in
-                joins(g, i) && g.contains { sameStart(rows[$0], row) }
-            }) {
+            } else if let g = groups.firstIndex(where: { holds($0, i) }) {
                 groups[g].append(i)
             } else {
                 groups.append([i])
@@ -1038,7 +1061,7 @@ extension CalendarUpdate {
         }
         for i in undated {
             let dated = groups.indices.filter { g in
-                day(rows[groups[g][0]]) != nil && joins(groups[g], i)
+                day(rows[groups[g][0]]) != nil && claims(groups[g], i)
             }
             if dated.count == 1 {
                 groups[dated[0]].append(i)

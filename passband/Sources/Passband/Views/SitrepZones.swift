@@ -81,9 +81,18 @@ struct CalendarZone: View {
         kind == .cancellation ? Palette.danger : Palette.inkFaint
     }
 
+    /// A start may be a bare wall time ("2026-11-13T15:30:00", the event's
+    /// own zone), which `Fmt`'s RFC3339 parser rejects: those rows showed no
+    /// date at all. `startDate` reads every shape the record can carry.
     private func when(_ c: CalendarUpdate) -> String {
-        guard c.starts_at != nil else { return "" }
-        return Fmt.isToday(c.starts_at) ? Fmt.timeOfDay(c.starts_at) : Fmt.shortDate(c.starts_at)
+        guard let value = c.starts_at else { return "" }
+        if value.count == 10 { return Fmt.shortDate(value) }
+        guard let start = CalendarVisibility.startDate(value, timezone: c.start_timezone) else {
+            return ""
+        }
+        return Calendar.current.isDateInToday(start)
+            ? start.formatted(.dateTime.hour().minute())
+            : start.formatted(.dateTime.month(.abbreviated).day())
     }
 }
 

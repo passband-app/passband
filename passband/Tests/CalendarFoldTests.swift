@@ -19,10 +19,12 @@ struct CalendarFoldTests {
     }
 
     static func row(
-        _ id: Int, _ title: String?, _ start: String?, received: String, change: String? = nil
+        _ id: Int, _ title: String?, _ start: String?, received: String, change: String? = nil,
+        thread: String? = nil, message: Int? = nil
     ) -> CalendarUpdate {
         CalendarUpdate(
-            id: id, message_id: id, thread_id: "t\(id)", kind: .event, event_title: title,
+            id: id, message_id: message ?? id, thread_id: thread ?? "t\(id)", kind: .event,
+            event_title: title,
             starts_at: start, organizer: nil, received_at: received, change: change)
     }
 
@@ -36,6 +38,8 @@ struct CalendarFoldTests {
         orderAndUntitledRows()
         newsKeepsItsOwnRow()
         looseTitlesDoNotFold()
+        anOffsetDoesNotMakeANewStart()
+        aRelayedThreadIsOneEvent()
         print("calendar-fold: \(checks - failures)/\(checks) passed")
         exit(failures == 0 ? 0 : 1)
     }
@@ -121,5 +125,66 @@ struct CalendarFoldTests {
         let lunch = row(6, "Lunch", "2026-11-06", received: "2026-11-04T06:00:00Z")
         let ana = row(7, "Lunch with Ana", "2026-11-06", received: "2026-11-04T07:00:00Z")
         check(CalendarUpdate.folded([sam, lunch, ana]).count == 3, "no chain through Lunch")
+    }
+
+    static func anOffsetDoesNotMakeANewStart() {
+        // One mail's 3:30pm carries an offset, the next one's does not.
+        let a = row(1, party, "2026-11-13T15:30:00-08:00", received: "2026-11-11T13:00:00Z")
+        let b = row(2, party, "2026-11-13T15:30:00", received: "2026-11-11T06:00:00Z")
+        check(CalendarUpdate.folded([a, b]).map(\.id) == [2], "one start, offset or not")
+        let c = row(3, party, "2026-11-13T16:30:00", received: "2026-11-11T07:00:00Z")
+        check(CalendarUpdate.folded([a, c]).count == 2, "another wall clock stays apart")
+    }
+
+    static func aRelayedThreadIsOneEvent() {
+        // A rental site relays each landlord message into one thread, and the
+        // model titles the same tour a little differently every time.
+        let t = "relay"
+        let first = row(
+            1, "Apartment tour at 25 Main St", "2026-11-13T15:30:00", received: "2026-11-11T05:00:00Z",
+            change: "agreed", thread: t)
+        let second = row(
+            2, "Rental tour: 25 Main St", "2026-11-13T15:30:00", received: "2026-11-11T06:00:00Z",
+            change: "agreed", thread: t)
+        let third = row(
+            3, "Rental tour: 25 Main St", "2026-11-13T15:30:00-08:00",
+            received: "2026-11-11T13:00:00Z", change: "agreed", thread: t)
+        let meetup = row(4, "Agent meetup", "2026-11-17T17:30:00-08:00", received: "2026-11-11T02:00:00Z")
+        check(
+            CalendarUpdate.folded([third, second, first, meetup]).map(\.id) == [1, 4],
+            "the thread is one row, the earliest mail's")
+        // A dateless message in the thread joins by title only: it may be
+        // another event of the trip.
+        let chatter = row(5, "Rental tour: 25 Main St", nil, received: "2026-11-11T14:00:00Z", thread: t)
+        check(CalendarUpdate.folded([chatter, second]).map(\.id) == [2], "dateless restatement folds")
+        let car = row(11, "Car rental pickup", nil, received: "2026-11-11T14:00:00Z", thread: t)
+        check(CalendarUpdate.folded([car, first]).count == 2, "dateless other event stands")
+        // A date-only row is not a start the thread rule trusts: it would
+        // match every time of its day.
+        let flight = row(12, "Flight to Lisbon", "2026-11-13T07:00:00-08:00", received: "2026-11-11T01:00:00Z", thread: "trip")
+        let hotel = row(13, "Hotel check-in", "2026-11-13", received: "2026-11-11T02:00:00Z", thread: "trip")
+        let cruise = row(14, "Dinner cruise", "2026-11-13T19:00:00", received: "2026-11-11T03:00:00Z", thread: "trip")
+        check(CalendarUpdate.folded([flight, hotel, cruise]).count == 3, "a trip's day stands, oldest first")
+        check(CalendarUpdate.folded([cruise, hotel, flight]).count == 3, "a trip's day stands, newest first")
+        // Another time in the thread is another event (a second viewing).
+        let later = row(
+            6, "Second viewing", "2026-11-13T17:00:00", received: "2026-11-11T15:00:00Z", thread: t)
+        check(CalendarUpdate.folded([first, later]).count == 2, "another time stays apart")
+        // A move in the thread keeps its own row.
+        let moved = row(
+            7, "Rental tour: 25 Main St", "2026-11-13T15:30:00", received: "2026-11-11T16:00:00Z",
+            change: "updated", thread: t)
+        check(CalendarUpdate.folded([first, moved]).count == 2, "news keeps its row")
+        // Two records the model split from ONE message never fold by thread.
+        let x = row(8, "Matinee", "2026-11-13T15:30:00", received: "2026-11-11T05:00:00Z", thread: "o", message: 9)
+        let y = row(9, "Workshop", "2026-11-13T15:30:00", received: "2026-11-11T05:00:00Z", thread: "o", message: 9)
+        check(CalendarUpdate.folded([x, y]).count == 2, "one message's records stand")
+        // Not even through a later mail restating one of them, in either order.
+        let z = row(15, "Matinee reminder", "2026-11-13T15:30:00", received: "2026-11-12T05:00:00Z", thread: "o", message: 3)
+        check(CalendarUpdate.folded([z, x, y]).count == 2, "split records stand, newest first")
+        check(CalendarUpdate.folded([x, y, z]).count == 2, "split records stand, oldest first")
+        // Same start in two threads, titles unrelated: two events.
+        let other = row(10, "Dentist", "2026-11-13T15:30:00", received: "2026-11-11T05:00:00Z")
+        check(CalendarUpdate.folded([first, other]).count == 2, "another thread stays apart")
     }
 }

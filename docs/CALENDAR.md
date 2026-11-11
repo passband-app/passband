@@ -774,6 +774,15 @@ Wave 4, from the founder using wave 3 on screen:
   span, snapped to 15 minutes and labelled as it goes; letting go opens the
   event pane with that day and those times. A plain click does nothing new, a
   press on an existing block is that block's click, and Esc mid-drag drops it.
+- **Drag across days (2026-11-11).** On the month grid a press dragged into
+  another cell draws a dashed bar over the days as it goes (under the bars
+  each week already has); letting go opens the pane on an all-day run, first
+  day through last, either way round (`DaysSweep`, `EventForm.newDraft(from:
+  through:)`). Esc mid-drag drops it.
+- **Day picker (2026-11-11).** While the pane's Day or End day well has the
+  caret, a month of days opens under the when line (`DayPicker`). Nothing in
+  it takes the keyboard, so typing still works; a pick writes the well as if
+  typed and moves on (to the last day or the start time).
 
 Wave 6, from the founder ("lets add a week view too", "you should be able to
 change the end date on the create event form", "when i type the title, i

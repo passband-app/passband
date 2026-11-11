@@ -381,6 +381,22 @@ struct EventDraftTests {
         let early = swept(0, 15)
         expect(early.start == "12am" && early.end == "12:15am" && problem(early.withTitle("x")) == nil,
                "the day's first quarter hour saves")
+        sweptDays()
+    }
+
+    /// Days swept on the month grid open an all-day run over them, either
+    /// way round.
+    static func sweptDays() {
+        func run(_ a: String, _ b: String) -> EventDraft {
+            EventForm.newDraft(from: day(a), through: day(b), now: now, calendarId: "primary", calendar: cal)
+        }
+        let three = run("2026-10-12", "2026-10-14")
+        expect(three.allDay && three.date == "Mon Oct 12" && three.endDate == "Wed Oct 14",
+               "an all-day run, first day through last")
+        expect(run("2026-10-14", "2026-10-12") == three, "swept backwards, the same run")
+        let w = wire(three.withTitle("x"))
+        expect(w?.all_day == true && w?.start == "2026-10-12" && w?.end == "2026-10-14", "on the wire, the last day inclusive")
+        expect(run("2026-10-12", "2026-10-12").endDate.isEmpty, "one day: the same day")
     }
 
     /// A day clicked on the grid beside the pane sets the draft's date.

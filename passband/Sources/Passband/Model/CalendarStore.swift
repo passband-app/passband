@@ -499,6 +499,14 @@ extension AppStore {
         openEventPane(CalendarEditorRequest(mode: .create, initial: draft, epoch: epoch))
     }
 
+    /// Days swept on the month grid: the pane, on an all-day run over them.
+    func openEventEditor(from first: Date, through last: Date, now: Date = Date()) {
+        guard calendarCanCreate, calendarEditor == nil, calendarDeleteAsk == nil else { return }
+        let draft = EventForm.newDraft(
+            from: first, through: last, now: now, calendarId: calendarWritable.first?.id, calendar: .current)
+        openEventPane(CalendarEditorRequest(mode: .create, initial: draft, epoch: epoch))
+    }
+
     /// `e` and the detail's Edit: the same pane, filled in. Only for an event
     /// the daemon called editable.
     func openEventEditor(editing event: TimelineEvent, now: Date = Date()) {

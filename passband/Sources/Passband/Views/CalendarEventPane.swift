@@ -380,11 +380,50 @@
                         }
                     }
                 }
+                if let field = pickingDay, state.fieldsEditable {
+                    dayPicker(field, now: now, cal: cal)
+                }
                 whenLine(now: now, cal: cal)
             }
             // The wells are taller than a line of text; pulled up so the
             // first of them centres on the label beside it.
             .padding(.vertical, -Space.scaled(3))
+        }
+
+        /// The date well being typed in: a month of days opens under the
+        /// line while it is (`DayPicker`).
+        private var pickingDay: Field? {
+            focus == .date || focus == .endDate ? focus : nil
+        }
+
+        /// A day picked writes the well as if it were typed. The start goes
+        /// on to what comes next (an all-day run's last day, or the start
+        /// time); the last day is done.
+        private func dayPicker(_ field: Field, now: Date, cal: Calendar) -> some View {
+            let start = EventForm.parseDate(draft.date, today: now, calendar: cal)
+            let selected: Date?
+            if field == .date {
+                selected = start
+            } else {
+                let typed = EventForm.trimmed(draft.endDate)
+                let text = typed.isEmpty ? (EventForm.impliedEndDate(draft, today: now, calendar: cal) ?? "") : typed
+                selected = start.flatMap { EventForm.parseEndDate(text, from: $0, today: now, calendar: cal) } ?? start
+            }
+            return DayPicker(
+                selected: selected, earliest: field == .endDate ? start : nil, today: now, calendar: cal
+            ) { day in
+                if field == .date {
+                    bind(\.date, hand: .date).wrappedValue = EventForm.dateText(day, today: now, calendar: cal)
+                    focus = draft.allDay ? .endDate : .start
+                } else {
+                    let same = start.map { cal.isDate($0, inSameDayAs: day) } ?? false
+                    bind(\.endDate).wrappedValue =
+                        same && draft.allDay ? "" : EventForm.dateText(day, today: now, calendar: cal)
+                    focus = nil
+                }
+            }
+            .id(field)
+            .padding(.top, Space.s4)
         }
 
         private var dayWell: some View {

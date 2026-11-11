@@ -214,6 +214,24 @@ enum EventForm {
         return d
     }
 
+    /// A new all-day run from days swept on the month grid, first to last
+    /// inclusive, either way round. One day is a one-day all-day event.
+    static func newDraft(
+        from a: Date, through b: Date, now: Date, calendarId: String?, calendar: Calendar
+    ) -> EventDraft {
+        let first = calendar.startOfDay(for: min(a, b))
+        let last = calendar.startOfDay(for: max(a, b))
+        var d = EventDraft()
+        d.calendarId = calendarId
+        d.allDay = true
+        d.date = dateText(first, today: now, calendar: calendar)
+        d.endDate = first == last ? "" : dateText(last, today: now, calendar: calendar)
+        // The days are the user's own; the title reads only who it is with.
+        d.titleRead.on = true
+        d.titleRead.hand = [.date, .start, .end]
+        return d
+    }
+
     /// The draft moved to another day (a day clicked on the grid beside the
     /// pane). A run of days keeps its length: the end day moves with the
     /// start. An end day that does not read is left for the form to say so.

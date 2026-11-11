@@ -346,6 +346,8 @@ enum ProductGuide {
         Making and changing events (only on the user's own calendars):
         - n or c, or "New event", opens the event pane, on the selected day. Enter on a selected day in the month or week (with no event selected) does too, on that day. It takes half the window, like the composer, and the month stays usable beside it: clicking a day sets the event's date.
         - Pressing and dragging down a day's hours (the month's day column, or any day of the week view) sweeps a time, in quarter hours; letting go opens the event pane with that day and those times.
+        - Pressing and dragging across days on the month grid draws a bar over them as it goes; letting go opens the event pane with an all-day event from the first day through the last.
+        - Clicking into the event pane's Day or End day opens a small month under it: click a day, or keep typing.
         - e edits the selected event. ⌫ deletes it, after asking once.
         - Invitations from other people can be answered on the event's card: "Going?" with yes (y), no (x) and maybe. Google Calendar tells the organizer; Passband writes no email. For a repeating event the card offers "all events" or "just this one": an invitation not answered yet answers all of them, an answer changed later answers just that one, unless the user picks the other.
         - The event pane has a "video" row, "Google Meet", on calendars where Google allows one. A new event gets a Meet when it has a guest and none when it has nobody, until the user clicks it; Google makes the room and puts the link in the invitation. On an event that already has a Meet it can be turned off to remove it. It is not offered on an event with a Zoom or Teams meeting.

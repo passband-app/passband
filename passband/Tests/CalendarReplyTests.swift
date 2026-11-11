@@ -75,6 +75,14 @@ struct CalendarReplyTests {
             InviteLink.read(link(eid("abc123 me@example.com"), host: "www.google.com"))?.eventId == "abc123",
             "the older www.google.com/calendar link")
         expect(InviteLink.read(link(eid("abc123")))?.calendar == nil, "an eid with no calendar")
+        // Google shortens the calendar: "@m" is Gmail, "@g" a secondary
+        // calendar, as real invitations carry them.
+        expect(InviteLink.read(link(eid("abc123 me@m")))?.calendar == "me@gmail.com", "@m is gmail.com")
+        expect(
+            InviteLink.read(link(eid("abc123 team@g")))?.calendar == "team@group.calendar.google.com",
+            "@g is a group calendar")
+        expect(InviteLink.read(link(eid("abc123 me@mail.example")))?.calendar == "me@mail.example",
+            "a whole domain is left alone")
         let multi = "https://calendar.google.com/calendar/u/0/event?ACTION=respond&eid=\(eid("x1 a@b.c"))&rst=1"
         expect(InviteLink.read(multi)?.eventId == "x1", "a signed-in /u/0/ path, any case of action")
     }
@@ -118,6 +126,11 @@ struct CalendarReplyTests {
         expect(land("party", "team@group.calendar.google.com")?.0 == "team@group.calendar.google.com",
             "a calendar named by its id")
         expect(land("party", nil)?.1 == "party", "no calendar in the link: the event by id")
+        let gmail = InviteLink.read(link(eid("party me@m")))!
+        expect(
+            CalendarReply.landing(gmail, events: feed, accountEmail: "me@gmail.com", now: now, calendar: cal)?
+                .event.calendar_id == "primary",
+            "a real Gmail invitation lands on the primary calendar")
         expect(land("own") == nil, "the user's own event is not answered")
         expect(land("ghost") == nil, "an event not on the calendar opens in the browser")
         let series = land("weekly")

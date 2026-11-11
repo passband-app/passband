@@ -87,7 +87,20 @@ struct InviteLink: Hashable, Sendable {
         }
         let parts = decoded.split(whereSeparator: \.isWhitespace).map(String.init)
         guard let id = parts.first, !id.isEmpty else { return nil }
-        return InviteLink(eventId: id, calendar: parts.count > 1 ? parts[1] : nil, answer: answer)
+        return InviteLink(eventId: id, calendar: parts.count > 1 ? calendarId(parts[1]) : nil, answer: answer)
+    }
+
+    /// Google SHORTENS the calendar in an eid: a Gmail address ends "@m", a
+    /// secondary calendar "@g", a public one "@v". Read back into the ids
+    /// the sync stores; anything else (a Workspace address) is whole already.
+    static func calendarId(_ raw: String) -> String {
+        let expansions = [
+            "@m": "@gmail.com", "@g": "@group.calendar.google.com", "@v": "@group.v.calendar.google.com",
+        ]
+        for (short, whole) in expansions where raw.lowercased().hasSuffix(short) {
+            return String(raw.dropLast(short.count)) + whole
+        }
+        return raw
     }
 
     /// Base64, either alphabet, padded or not.

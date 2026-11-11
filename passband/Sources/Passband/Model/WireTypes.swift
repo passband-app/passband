@@ -981,11 +981,14 @@ extension CalendarUpdate {
     /// only. Starts compare by wall clock: the model writes one mail's 3:30pm
     /// with an offset and the next one's without, and those are one start.
     ///
-    /// Mail in ONE THREAD at the same start is one event whatever the model
-    /// titled it: a rental site relays each landlord message as a new mail in
-    /// the thread, and every one restates the tour ("Rental tour: 25 Main St",
-    /// "Apartment tour at 25 Main St"). Records from the same message never
-    /// fold this way, since the model split them on purpose.
+    /// Mail in ONE THREAD at the same TIMED start is one event whatever the
+    /// model titled it: a rental site relays each landlord message as a new
+    /// mail in the thread, and every one restates the tour ("Rental tour: 25
+    /// Main St", "Apartment tour at 25 Main St"). Only two timed starts count:
+    /// a date-only row matches every time that day, and a trip's thread holds
+    /// a flight, a hotel and a dinner. Records the model split from one
+    /// message never fold this way, not even through a third mail that
+    /// restates one of them. A row without a start joins by title only.
     ///
     /// A row with no start joins only when exactly one dated event matches
     /// it. Mail that MOVES or CANCELS an event always keeps its own
@@ -1021,9 +1024,12 @@ extension CalendarUpdate {
             guard let x = a.starts_at, let y = b.starts_at, day(a) == day(b) else { return false }
             return x.count == 10 || y.count == 10 || x.prefix(16) == y.prefix(16)
         }
-        // Another mail of the same thread.
-        func sameThread(_ a: CalendarUpdate, _ b: CalendarUpdate) -> Bool {
-            a.thread_id != nil && a.thread_id == b.thread_id && a.message_id != b.message_id
+        // Another mail of the same thread, at the same timed start.
+        func threadTwin(_ a: CalendarUpdate, _ b: CalendarUpdate) -> Bool {
+            guard a.thread_id != nil, a.thread_id == b.thread_id, a.message_id != b.message_id,
+                let x = a.starts_at, let y = b.starts_at, x.count > 10, y.count > 10
+            else { return false }
+            return sameStart(a, b)
         }
         func news(_ r: CalendarUpdate) -> Bool {
             r.change == "updated" || r.change == "cancelled"
@@ -1037,16 +1043,14 @@ extension CalendarUpdate {
             guard !news(first), let a = title(first), let b = title(rows[i]) else { return false }
             return matches(a, b)
         }
-        // A dated row's event: its title and start, or its thread and start.
+        // A dated row's event: its title and start, or its thread and timed
+        // start, unless a sibling record of its own message is already there.
         func holds(_ g: [Int], _ i: Int) -> Bool {
             guard !news(rows[g[0]]) else { return false }
             let row = rows[i]
-            return g.contains { sameStart(rows[$0], row) && sameThread(rows[$0], row) }
-                || (joins(g, i) && g.contains { sameStart(rows[$0], row) })
-        }
-        // An undated row's candidates: its title, or its thread.
-        func claims(_ g: [Int], _ i: Int) -> Bool {
-            joins(g, i) || (!news(rows[g[0]]) && g.contains { sameThread(rows[$0], rows[i]) })
+            if joins(g, i) && g.contains(where: { sameStart(rows[$0], row) }) { return true }
+            return g.contains { threadTwin(rows[$0], row) }
+                && !g.contains { rows[$0].message_id == row.message_id }
         }
         for (i, row) in rows.enumerated() {
             if title(row) == nil || news(row) {
@@ -1061,7 +1065,7 @@ extension CalendarUpdate {
         }
         for i in undated {
             let dated = groups.indices.filter { g in
-                day(rows[groups[g][0]]) != nil && claims(groups[g], i)
+                day(rows[groups[g][0]]) != nil && joins(groups[g], i)
             }
             if dated.count == 1 {
                 groups[dated[0]].append(i)

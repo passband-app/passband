@@ -12,6 +12,41 @@ updates itself, the phone comes through TestFlight, and the daemon is
 rolled onto hosted accounts or pulled as an image on a self-host box,
 so every note says which one it landed in.
 
+## 0.0.20 (2026-11-11)
+
+November Update
+
+### Mac
+
+- **Teach Passband in your own words.** Press `t` and say what you want, like never show me policy updates
+- **Answer invites and join calls from the calendar.** Reply yes, no or maybe, join the meeting, or add a Google Meet
+- **Deeper search.** Ask a question in search and the answer fills the screen once you stop typing
+- **Search five years back.** Find mail from long before you joined Passband
+- Press `c` or Enter on a day to make a new event
+- ⌘K opens its own chat
+- Passband opens when you log in
+- Reply drafts reopen with their thread
+- Press `e` to clear a For Your Eyes item while it is open
+- Sending no longer stops to warn about keys in your mail
+- Discover has been retired
+- Smoother scrolling in Reading
+- UI improvements
+- Bug fixes
+
+### iPhone
+
+- A morning brief on your iPhone about what today holds
+- Teach, calendar replies and deeper search
+
+### Daemon
+
+- eBay orders and orders from any store show up on Shipments
+- Drop-off receipts are no longer counted as packages
+- Events mailed by different senders are matched more carefully
+- A new account skips old newsletters on its first sync
+- Drafts Claude writes come with a button that opens them in Passband
+- Bug fixes
+
 ## 0.0.19 (2026-11-04)
 
 First-Run Update

@@ -270,6 +270,46 @@ struct ReleaseCatchUp: Sendable, Equatable {
 enum ReleaseNotes {
     /// THE TABLE. Newest first, and the only place a release note is written.
     static let all: [ReleaseNote] = [
+        ReleaseNote(
+            version: "0.0.20",
+            date: "2026-11-11",
+            headline: "November Update",
+            items: [
+                ReleaseItem(
+                    .app, "Teach Passband in your own words",
+                    detail: "Press `t` and say what you want, like never show me policy updates",
+                    symbol: "text.bubble"),
+                ReleaseItem(
+                    .app, "Answer invites and join calls from the calendar",
+                    detail: "Reply yes, no or maybe, join the meeting, or add a Google Meet",
+                    symbol: "calendar"),
+                ReleaseItem(
+                    .app, "Deeper search",
+                    detail: "Ask a question in search and the answer fills the screen once you stop typing",
+                    symbol: "magnifyingglass"),
+                ReleaseItem(
+                    .app, "Search five years back",
+                    detail: "Find mail from long before you joined Passband",
+                    symbol: "clock.arrow.circlepath", vignette: .archiveSearch),
+                ReleaseItem(.app, "Press `c` or Enter on a day to make a new event"),
+                ReleaseItem(.app, "⌘K opens its own chat"),
+                ReleaseItem(.app, "Passband opens when you log in"),
+                ReleaseItem(.app, "Reply drafts reopen with their thread"),
+                ReleaseItem(.app, "Press `e` to clear a For Your Eyes item while it is open"),
+                ReleaseItem(.app, "Sending no longer stops to warn about keys in your mail"),
+                ReleaseItem(.app, "Discover has been retired"),
+                ReleaseItem(.app, "Smoother scrolling in Reading"),
+                ReleaseItem(.app, "UI improvements"),
+                ReleaseItem(.app, "Bug fixes"),
+                ReleaseItem(.ios, "A morning brief on your iPhone about what today holds"),
+                ReleaseItem(.ios, "Teach, calendar replies and deeper search"),
+                ReleaseItem(.daemon, "eBay orders and orders from any store show up on Shipments"),
+                ReleaseItem(.daemon, "Drop-off receipts are no longer counted as packages"),
+                ReleaseItem(.daemon, "Events mailed by different senders are matched more carefully"),
+                ReleaseItem(.daemon, "A new account skips old newsletters on its first sync"),
+                ReleaseItem(.daemon, "Drafts Claude writes come with a button that opens them in Passband"),
+                ReleaseItem(.daemon, "Bug fixes"),
+            ]),
         // QUIET: first-run fixes shipped ahead of a new user, no card.
         ReleaseNote(
             version: "0.0.19",

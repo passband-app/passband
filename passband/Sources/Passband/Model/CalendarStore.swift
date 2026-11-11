@@ -1092,6 +1092,14 @@ extension AppStore {
     /// reader: answered here when the event is on the synced calendar and is
     /// the user's to answer, instead of a browser tab. False hands the link
     /// back to be opened as any other.
+    /// The answer to darken in an invitation email
+    /// (`CalendarReply.answerShown`): the synced event's, so a reply from the
+    /// card, a key or the email itself shows in the email at once.
+    func inviteAnswerShown(html: String) -> Int? {
+        guard !FixtureMode.isEnabled, let events = calendarFeed?.events else { return nil }
+        return CalendarReply.answerShown(html: html, events: events, accountEmail: calendarAccountEmail, now: Date())
+    }
+
     func replyFromInviteLink(_ raw: String) -> Bool {
         guard let link = InviteLink.read(raw), !FixtureMode.isEnabled,
             let landing = CalendarReply.landing(

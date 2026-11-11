@@ -27,6 +27,7 @@ struct CalendarReplyTests {
         words()
         joinLabels()
         theWireDecodes()
+        theEmailShowsTheAnswer()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -203,6 +204,29 @@ struct CalendarReplyTests {
             """
         let f = try? JSONDecoder().decode(TimelineFeed.self, from: Data(feed.utf8))
         expect(f?.calendars?.first?.meet == true, "a calendar's meet decodes")
+    }
+
+    /// The email's Yes / No / Maybe show the answer the synced event holds.
+    static func theEmailShowsTheAnswer() {
+        let e = eid("party me@m")
+        func html(_ id: String = e) -> String {
+            ["1", "2", "3"].map {
+                "<a href=\"https://calendar.google.com/calendar/event?action=RESPOND&amp;eid=\(id)&amp;rst=\($0)&amp;tok=x\">b</a>"
+            }.joined()
+        }
+        func shown(_ response: TimelineSelfResponse?, _ body: String = html()) -> Int? {
+            CalendarReply.answerShown(
+                html: body, events: [event("party", response: response)], accountEmail: "me@gmail.com", now: now,
+                calendar: cal)
+        }
+        expect(shown(.accepted) == 1, "yes")
+        expect(shown(.declined) == 2, "no")
+        expect(shown(.tentative) == 3, "maybe")
+        expect(shown(.needsAction) == nil, "not answered: nothing darkened")
+        expect(shown(.accepted, html(eid("ghost me@m"))) == nil, "an event not on the calendar")
+        expect(shown(.accepted, "<a href=\"https://example.com/\">x</a>") == nil, "any other mail")
+        let sheet = CalendarReply.emailSheet
+        expect(sheet.contains("data-passband-rst=\"2\"") && sheet.contains("rst=2&"), "the sheet names each answer")
     }
 
     static func expect(_ cond: Bool, _ what: String) {

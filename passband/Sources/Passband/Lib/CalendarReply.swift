@@ -123,6 +123,47 @@ enum CalendarReply {
     /// daemon) is no.
     static func canReply(_ event: TimelineEvent) -> Bool { event.respondable == true }
 
+    /// THE ANSWER ALREADY GIVEN, darkened in Google's invitation email (part
+    /// of the reader's stylesheet): the document is tagged
+    /// `data-passband-rst` with the event's answer (`answerShown`), and the
+    /// Yes / No / Maybe link carrying that `rst` is filled. Google's own pill
+    /// border is on a table outside the link, so the fill is the link's,
+    /// rounded to match.
+    nonisolated static let emailSheet: String = (1...3).map { n in
+        let pick = "html[data-passband-rst=\"\(n)\"] a[href*=\"action=RESPOND\"][href*=\"rst=\(n)&\"]"
+        return "\(pick){display:inline-block;background:#3c4043!important;border-radius:16px;}"
+            + "\(pick),\(pick) *{color:#fff!important;font-weight:500!important;}"
+    }.joined()
+
+    /// THE ANSWER AN INVITATION EMAIL SHOWS: Google's own Yes / No / Maybe
+    /// links in it, read like a click on one (`InviteLink`, `landing`), and
+    /// the answer the event on the synced calendar holds now, as the links'
+    /// `rst` (1 yes, 2 no, 3 maybe). Nil for any other mail, an event not
+    /// on the calendar, or one not answered yet.
+    static func answerShown(
+        html: String, events: [TimelineEvent], accountEmail: String?, now: Date, calendar cal: Calendar = .current
+    ) -> Int? {
+        guard html.contains("action=RESPOND") else { return nil }
+        let marker = "href=\""
+        var rest = html[...]
+        while let at = rest.range(of: marker) {
+            let tail = rest[at.upperBound...]
+            guard let close = tail.firstIndex(of: "\"") else { break }
+            let raw = tail[..<close].replacingOccurrences(of: "&amp;", with: "&")
+            rest = tail[close...]
+            guard let link = InviteLink.read(raw),
+                let landing = landing(link, events: events, accountEmail: accountEmail, now: now, calendar: cal)
+            else { continue }
+            switch ReplyAnswer(landing.event.self_response) {
+            case .accepted?: return 1
+            case .declined?: return 2
+            case .tentative?: return 3
+            case nil: return nil
+            }
+        }
+        return nil
+    }
+
     /// The route for one event.
     static func path(calendarId: String, eventId: String) -> String {
         CalendarWrite.path(calendarId: calendarId, eventId: eventId) + "/reply"

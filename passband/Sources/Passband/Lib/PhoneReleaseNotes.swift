@@ -103,6 +103,35 @@ struct PhoneReleaseNote: VersionedNote, Identifiable, Sendable {
 enum PhoneReleaseNotes {
     /// THE TABLE. Newest first, and the only place a phone note is written.
     static let all: [PhoneReleaseNote] = [
+        PhoneReleaseNote(
+            version: "0.0.15",
+            date: "2026-11-11",
+            headline: "November Update",
+            features: [
+                PhoneFeature(
+                    "A morning brief",
+                    detail: "Once a day, a short note on what today holds. Turn it off in Settings.",
+                    symbol: "sun.max"),
+                PhoneFeature(
+                    "Teach Passband in your own words",
+                    detail: "Say what you want, like never show me policy updates, and it applies to all your mail.",
+                    symbol: "text.bubble"),
+                PhoneFeature(
+                    "Answer invites from the calendar",
+                    detail: "Reply yes, no or maybe, join the meeting, or add a Google Meet.",
+                    symbol: "calendar"),
+                PhoneFeature(
+                    "Deeper search",
+                    detail: "Ask a question in search and get an answer from your mail.",
+                    symbol: "magnifyingglass"),
+            ],
+            also: [
+                PhoneAside("Search reaches five years back"),
+                PhoneAside("Reply drafts reopen with their thread"),
+                PhoneAside("eBay orders show up on Shipments"),
+                PhoneAside("UI improvements"),
+                PhoneAside("Bug fixes"),
+            ]),
         // QUIET, like the Mac's 0.0.19: recorded, never walked.
         PhoneReleaseNote(
             version: "0.0.14",

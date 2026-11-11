@@ -123,16 +123,20 @@ enum CalendarReply {
     /// daemon) is no.
     static func canReply(_ event: TimelineEvent) -> Bool { event.respondable == true }
 
-    /// THE ANSWER ALREADY GIVEN, darkened in Google's invitation email (part
+    /// THE ANSWER ALREADY GIVEN, filled in Google's invitation email (part
     /// of the reader's stylesheet): the document is tagged
     /// `data-passband-rst` with the event's answer (`answerShown`), and the
-    /// Yes / No / Maybe link carrying that `rst` is filled. Google's own pill
-    /// border is on a table outside the link, so the fill is the link's,
-    /// rounded to match.
+    /// Yes / No / Maybe cell holding the link with that `rst` is filled.
+    /// Google draws Yes / No / Maybe as three cells of one rounded 16px pill,
+    /// so the whole cell is filled (`:has`, WebKit has it) and only the
+    /// pill's outer ends are rounded: Yes on the left, Maybe on the right.
+    /// The blue is `Palette.accentInk` (light), as the mail renders light.
     nonisolated static let emailSheet: String = (1...3).map { n in
-        let pick = "html[data-passband-rst=\"\(n)\"] a[href*=\"action=RESPOND\"][href*=\"rst=\(n)&\"]"
-        return "\(pick){display:inline-block;background:#3c4043!important;border-radius:16px;}"
-            + "\(pick),\(pick) *{color:#fff!important;font-weight:500!important;}"
+        let link = "a[href*=\"action=RESPOND\"][href*=\"rst=\(n)&\"]"
+        let on = "html[data-passband-rst=\"\(n)\"]"
+        let corners = ["15px 0 0 15px", "0", "0 15px 15px 0"][n - 1]
+        return "\(on) td:has(> span \(link)){background:#1C63AE!important;border-radius:\(corners);}"
+            + "\(on) \(link),\(on) \(link) *{color:#fff!important;font-weight:500!important;}"
     }.joined()
 
     /// THE ANSWER AN INVITATION EMAIL SHOWS: Google's own Yes / No / Maybe

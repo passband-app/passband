@@ -226,7 +226,7 @@ struct CalendarReplyTests {
         expect(shown(.accepted, html(eid("ghost me@m"))) == nil, "an event not on the calendar")
         expect(shown(.accepted, "<a href=\"https://example.com/\">x</a>") == nil, "any other mail")
         let sheet = CalendarReply.emailSheet
-        expect(sheet.contains("data-passband-rst=\"2\"") && sheet.contains("rst=2&"), "the sheet names each answer")
+        expect(sheet.contains("data-passband-rst=\"2\"") && sheet.contains("rst=2&") && sheet.contains("#1C63AE"), "the sheet names each answer")
     }
 
     static func expect(_ cond: Bool, _ what: String) {

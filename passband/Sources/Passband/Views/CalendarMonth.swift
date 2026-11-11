@@ -251,6 +251,16 @@
         /// scroll view: it is offered a height and takes it, whatever its
         /// content. Its width is not trustworthy (see the file's header).
         @State private var visibleHeight: CGFloat = 0
+        /// Days being swept (drag to create): the cell pressed and the cell
+        /// under the pointer (`DaysSweep`). Nil when there is none.
+        @State private var sweep: Sweep?
+        /// Escape was pressed mid-drag: the rest of this drag is ignored.
+        @State private var sweepCancelled = false
+
+        private struct Sweep: Equatable {
+            var from: Int
+            var to: Int
+        }
 
         var body: some View {
             GeometryReader { geo in
@@ -276,6 +286,18 @@
                             }
                         }
                         .frame(width: width, alignment: .topLeading)
+                        .overlay(alignment: .topLeading) {
+                            if let sweep {
+                                sweptRun(sweep, cellWidth: cellWidth, rowHeight: rowHeight)
+                            }
+                        }
+                        .coordinateSpace(name: Self.rowsSpace)
+                        // The page turned mid-drag: the cells it held are gone.
+                        .onChange(of: model.month) { _, _ in
+                            if sweep != nil { sweepCancelled = true }
+                            sweep = nil
+                        }
+                        .simultaneousGesture(sweepGesture(cellWidth: cellWidth, rowHeight: rowHeight))
                     }
                     .scrollBounceBehavior(.basedOnSize)
                     .scrollIndicators(.hidden)
@@ -291,6 +313,117 @@
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .accessibilityElement(children: .contain)
             .accessibilityLabel(MonthGrid.title(model.month, calendar: calendar))
+        }
+
+        // MARK: drag across days to create
+
+        private static let rowsSpace = "monthRows"
+        private var days: [Date] { model.weeks.flatMap { $0.days.map(\.day) } }
+        /// Only where a new event can be made at all, as `n` is.
+        private var canSweep: Bool { store.calendarCanCreate && !store.eventPaneOpen }
+
+        private func cell(_ p: CGPoint, cellWidth: CGFloat, rowHeight: CGFloat) -> Int {
+            DaysSweep.cell(
+                x: Double(p.x), y: Double(p.y), cellWidth: Double(cellWidth), rowHeight: Double(rowHeight),
+                rows: model.weeks.count)
+        }
+
+        private func sweepGesture(cellWidth: CGFloat, rowHeight: CGFloat) -> some Gesture {
+            DragGesture(minimumDistance: CGFloat(DaySweep.clickSlop), coordinateSpace: .named(Self.rowsSpace))
+                .onChanged { value in
+                    guard canSweep, !sweepCancelled else { return }
+                    let from = cell(value.startLocation, cellWidth: cellWidth, rowHeight: rowHeight)
+                    let to = cell(value.location, cellWidth: cellWidth, rowHeight: rowHeight)
+                    if sweep == nil {
+                        // Not until it has left the day it was pressed on: a
+                        // wobble inside one cell is still a click.
+                        guard from != to else { return }
+                        store.calendarSweepCancel = {
+                            sweepCancelled = true
+                            sweep = nil
+                        }
+                    }
+                    sweep = Sweep(from: from, to: to)
+                }
+                .onEnded { _ in
+                    let swept = sweepCancelled ? nil : sweep
+                    sweep = nil
+                    sweepCancelled = false
+                    store.calendarSweepCancel = nil
+                    let all = days
+                    guard let swept, canSweep, all.indices.contains(swept.from), all.indices.contains(swept.to)
+                    else { return }
+                    let first = all[min(swept.from, swept.to)]
+                    let last = all[max(swept.from, swept.to)]
+                    // After the click the release may also be (the cell's
+                    // own tap), so the pane opens last and keeps the run.
+                    DispatchQueue.main.async {
+                        store.selectCalendarDay(first, open: false)
+                        store.openEventEditor(from: first, through: last)
+                    }
+                }
+        }
+
+        /// The run being swept: a bar like any other across its days, dashed
+        /// in the colour of the calendar a new event goes on, under the bars
+        /// each row already has.
+        private func sweptRun(_ sweep: Sweep, cellWidth: CGFloat, rowHeight: CGFloat) -> some View {
+            // Clamped both ends: the grid may have fewer cells than when the
+            // drag began (the page turned under it, which also drops it).
+            let all = days
+            let last = max(0, all.count - 1)
+            let lo = min(last, max(0, min(sweep.from, sweep.to)))
+            let hi = min(last, max(lo, max(sweep.from, sweep.to)))
+            let hue = CalendarColor.parse(store.calendarWritable.first?.color).map(ChipHue.calendar) ?? .plain
+            let inks = ChipColors.inks(hue)
+            let inset = MonthMetrics.inset
+            let fits = max(1, Int((rowHeight - MonthMetrics.numberBand - MonthMetrics.foot) / MonthMetrics.step))
+            let when = hi > lo && !all.isEmpty
+                ? "\(Agenda.format(all[lo], "MMM d", calendar)) – \(Agenda.format(all[hi], "MMM d", calendar))"
+                : all.isEmpty ? "" : Agenda.format(all[lo], "MMM d", calendar)
+            return ZStack(alignment: .topLeading) {
+                ForEach(DaysSweep.pieces(from: lo, to: hi), id: \.row) { piece in
+                    let lanes = model.weeks.indices.contains(piece.row) ? model.weeks[piece.row].lanes : 0
+                    let lane = min(lanes, fits - 1)
+                    let cells = CGFloat(piece.last - piece.first + 1)
+                    let lead: CGFloat = piece.startsHere ? inset : 0
+                    let width = max(0, cells * cellWidth - lead - (piece.endsHere ? inset : 0))
+                    let r: CGFloat = 4
+                    let shape = UnevenRoundedRectangle(
+                        topLeadingRadius: piece.startsHere ? r : 0, bottomLeadingRadius: piece.startsHere ? r : 0,
+                        bottomTrailingRadius: piece.endsHere ? r : 0, topTrailingRadius: piece.endsHere ? r : 0,
+                        style: .continuous)
+                    // The days themselves, washed, so the run reads at a glance.
+                    Rectangle()
+                        .fill(Palette.accentSoft.opacity(0.6))
+                        .frame(width: cells * cellWidth, height: rowHeight)
+                        .offset(x: CGFloat(piece.first) * cellWidth, y: CGFloat(piece.row) * rowHeight)
+                    HStack(alignment: .firstTextBaseline, spacing: Space.s6) {
+                        if piece.startsHere {
+                            Text("New event")
+                                .font(Typo.ui(10.5, weight: .semibold))
+                                .foregroundStyle(Palette.ink)
+                            Text(when)
+                                .font(Typo.num(10))
+                                .foregroundStyle(inks.ink)
+                        }
+                    }
+                    .lineLimit(1)
+                    .padding(.horizontal, Space.s6)
+                    .frame(width: width, height: MonthMetrics.rowHeight, alignment: .leading)
+                    .background {
+                        ChipFill(
+                            style: ChipStyle(hue: hue, fill: .outline, thin: false, struck: false), inks: inks,
+                            shape: shape, provisional: true)
+                    }
+                    .clipShape(shape)
+                    .offset(
+                        x: CGFloat(piece.first) * cellWidth + lead,
+                        y: CGFloat(piece.row) * rowHeight + MonthMetrics.numberBand + CGFloat(lane) * MonthMetrics.step)
+                }
+            }
+            .allowsHitTesting(false)
+            .accessibilityLabel("New event, \(when)")
         }
 
         private func headings(cellWidth: CGFloat) -> some View {

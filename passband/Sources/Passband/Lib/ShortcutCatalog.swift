@@ -111,7 +111,7 @@ enum ShortcutCatalog {
             Item(["y"], "going (again: not going)"),
             Item(["x"], "dismiss"),
             Item(["⇧A", "⇧K"], "another sender's change: accept / keep mine"),
-            Item(["n"], "new event"),
+            Item(["n", "c"], "new event"),
             Item(["e"], "edit event"),
             Item(["⌘↵"], "save the event"),
             Item(["Tab"], "new event: to a suggested guest"),

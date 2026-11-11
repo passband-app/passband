@@ -241,6 +241,10 @@
                     PlaceSuggestions(picker: places.picker) { places.pick($0) }
                         .modifier(InlineFieldTuck(active: true))
                 }
+                if store.meetOffered(draft, request) {
+                    Hairline()
+                    InlineFieldRow(label: "video") { meetToggle }
+                }
                 Hairline()
                 notes
             }
@@ -376,6 +380,9 @@
                         }
                     }
                 }
+                if let field = pickingDay, state.fieldsEditable {
+                    dayPicker(field, now: now, cal: cal)
+                }
                 whenLine(now: now, cal: cal)
             }
             // The wells are taller than a line of text; pulled up so the
@@ -383,17 +390,62 @@
             .padding(.vertical, -Space.scaled(3))
         }
 
+        /// The date well being typed in: a month of days opens under the
+        /// line while it is (`DayPicker`).
+        private var pickingDay: Field? {
+            focus == .date || focus == .endDate ? focus : nil
+        }
+
+        /// A day picked writes the well as if it were typed. The start goes
+        /// on to what comes next (an all-day run's last day, or the start
+        /// time); the last day is done.
+        private func dayPicker(_ field: Field, now: Date, cal: Calendar) -> some View {
+            let start = EventForm.parseDate(draft.date, today: now, calendar: cal)
+            let selected: Date?
+            if field == .date {
+                selected = start
+            } else {
+                let typed = EventForm.trimmed(draft.endDate)
+                let text = typed.isEmpty ? (EventForm.impliedEndDate(draft, today: now, calendar: cal) ?? "") : typed
+                selected = start.flatMap { EventForm.parseEndDate(text, from: $0, today: now, calendar: cal) } ?? start
+            }
+            return DayPicker(
+                selected: selected, earliest: field == .endDate ? start : nil, today: now, calendar: cal
+            ) { day in
+                if field == .date {
+                    bind(\.date, hand: .date).wrappedValue = EventForm.dateText(day, today: now, calendar: cal)
+                    focus = draft.allDay ? .endDate : .start
+                } else {
+                    let same = start.map { cal.isDate($0, inSameDayAs: day) } ?? false
+                    bind(\.endDate).wrappedValue =
+                        same && draft.allDay ? "" : EventForm.dateText(day, today: now, calendar: cal)
+                    focus = nil
+                }
+            }
+            .id(field)
+            .padding(.top, Space.s4)
+        }
+
         private var dayWell: some View {
             well("Day", \.date, .date, width: Typo.measure(112), fills: .date)
         }
 
+        /// The times are typed AND picked: each well keeps its caret, and a
+        /// chevron inside it opens half hours to choose from (the end's
+        /// counted from the start, with how long that makes it).
         private var startWell: some View {
-            well("Start", \.start, .start, width: Typo.measure(70), fills: .start)
+            well(
+                "Start", \.start, .start, width: Typo.measure(70) + Self.chevronRoom, fills: .start,
+                choices: EventForm.startChoices(draft.start))
         }
 
         private var endWell: some View {
-            well("End", \.end, .end, width: Typo.measure(70), fills: .end)
+            well(
+                "End", \.end, .end, width: Typo.measure(70) + Self.chevronRoom, fills: .end,
+                choices: EventForm.endChoices(start: draft.start, end: draft.end))
         }
+
+        private static var chevronRoom: CGFloat { Space.s14 }
 
         /// An all-day run's last day; empty is the same day.
         private var lastDayWell: some View {
@@ -428,16 +480,22 @@
         /// said so without a word.
         private func well(
             _ placeholder: String, _ keyPath: WritableKeyPath<EventDraft, String>, _ field: Field, width: CGFloat,
-            fills: TitleField? = nil, promptTone: Color = Palette.inkFaintest
+            fills: TitleField? = nil, promptTone: Color = Palette.inkFaintest, choices: [EventForm.TimeChoice]? = nil
         ) -> some View {
             let shape = RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
             let inferred = fills.map { draft.titleRead.filled[$0] != nil } ?? false
-            return TextField("", text: bind(keyPath, hand: fills), prompt: Text(placeholder).foregroundStyle(promptTone))
-                .textFieldStyle(.plain)
-                .font(Typo.ui(13))
-                .monospacedDigit()
-                .foregroundStyle(Palette.ink)
-                .focused($focus, equals: field)
+            let text = bind(keyPath, hand: fills)
+            return HStack(spacing: Space.s2) {
+                TextField("", text: text, prompt: Text(placeholder).foregroundStyle(promptTone))
+                    .textFieldStyle(.plain)
+                    .font(Typo.ui(13))
+                    .monospacedDigit()
+                    .foregroundStyle(Palette.ink)
+                    .focused($focus, equals: field)
+                if let choices {
+                    timeMenu(choices, placeholder: placeholder) { text.wrappedValue = $0 }
+                }
+            }
                 .padding(.horizontal, Space.scaled(7))
                 .padding(.vertical, Space.scaled(3))
                 .frame(width: width)
@@ -447,8 +505,50 @@
                 .overlay(shape.strokeBorder(Palette.accent.opacity(focus == field ? 0.55 : 0), lineWidth: 1))
         }
 
+        /// The chevron at a time well's end: a menu of `choices`, the well's
+        /// own time ticked. A pick writes the time as if it were typed.
+        private func timeMenu(
+            _ choices: [EventForm.TimeChoice], placeholder: String, pick: @escaping (String) -> Void
+        ) -> some View {
+            Menu {
+                ForEach(choices, id: \.minutes) { c in
+                    Toggle(c.label, isOn: Binding(get: { c.current }, set: { _ in pick(c.text) }))
+                }
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(Typo.ui(8, weight: .semibold))
+                    .foregroundStyle(Palette.inkFaint)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .pointingHand()
+            .help("Pick a time")
+            .accessibilityLabel("\(placeholder) time choices")
+        }
+
         /// All day, as the composer draws its own switch: a chip that fills
         /// when it is on.
+        /// "Google Meet", on or off. Until it is clicked a new event's
+        /// follows its guests (`EventForm.wantsMeet`), so adding somebody
+        /// turns it on.
+        private var meetToggle: some View {
+            let on = EventForm.wantsMeet(draft)
+            return Button {
+                patch { $0.meet = !on }
+            } label: {
+                Chip(
+                    text: on ? "Google Meet" : "add Google Meet",
+                    tone: on ? Palette.accent : Palette.inkFaint,
+                    symbol: on ? "checkmark" : "video",
+                    filled: on)
+            }
+            .buttonStyle(.plain)
+            .pointingHand()
+            .accessibilityLabel("Google Meet")
+            .accessibilityAddTraits(on ? .isSelected : [])
+        }
+
         private var allDayToggle: some View {
             Button {
                 setAllDay(!draft.allDay)

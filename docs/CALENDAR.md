@@ -774,6 +774,15 @@ Wave 4, from the founder using wave 3 on screen:
   span, snapped to 15 minutes and labelled as it goes; letting go opens the
   event pane with that day and those times. A plain click does nothing new, a
   press on an existing block is that block's click, and Esc mid-drag drops it.
+- **Drag across days (2026-11-11).** On the month grid a press dragged into
+  another cell draws a dashed bar over the days as it goes (under the bars
+  each week already has); letting go opens the pane on an all-day run, first
+  day through last, either way round (`DaysSweep`, `EventForm.newDraft(from:
+  through:)`). Esc mid-drag drops it.
+- **Day picker (2026-11-11).** While the pane's Day or End day well has the
+  caret, a month of days opens under the when line (`DayPicker`). Nothing in
+  it takes the keyboard, so typing still works; a pick writes the well as if
+  typed and moves on (to the last day or the start time).
 
 Wave 6, from the founder ("lets add a week view too", "you should be able to
 change the end date on the create event form", "when i type the title, i
@@ -1581,8 +1590,11 @@ Read only (slice B). The only writes are the user's own, described under
   zone, and of each event its id, status, iCal id, title, description, place,
   colour id, start, end, organizer address and `self` flag,
   `attendeesOmitted`, of each attendee the address, name, `responseStatus`,
-  `organizer` and `self`, transparency, link and update time. Attachments,
-  conference data and what a guest wrote when answering are never sent. The
+  `organizer` and `self`, transparency, link and update time, and (since
+  2026-11-10) `hangoutLink` and a conference's entry points' type and uri,
+  read only for which meeting service the event is on (see "Join"). Attachments,
+  a conference's passcodes, PINs and other details, and what a guest wrote
+  when answering are never sent. The
   description (added in wave 3, which shows
   it) is laundered and cut to 2000 characters as it is stored, and Google's
   own boilerplate on an event it created from mail ("To see detailed
@@ -2043,6 +2055,106 @@ server only: no request of this wave has been sent to the real Google API.
     an update" advice implies;
   - what the invitation looks like when the organizer is a secondary
     calendar the user owns rather than the primary one.
+
+### Replies to invitations (BUILT 2026-11-10)
+
+Yes, no or maybe to an event someone else sent, answered through Google
+Calendar, which tells the organizer. Decided 2026-11-09: lean on Google, never
+our own invitation format (no iTIP or `.ics` of our own, nothing Passband
+mails itself).
+
+- **Route.** `POST /client/calendar/events/{calendar_id}/{id}/reply`, body
+  `{"response": "accepted"|"declined"|"tentative", "series"?, "notify"?}`.
+  Human door only, audited as `calendar_event_reply` (`ok:<answer>[:series]`).
+- **Only the user's own entry is sent.** The patch is
+  `{"attendeesOmitted": true, "attendees": [<self>]}`, which Google reads as
+  "only update the participant's response": no other guest can be added,
+  dropped or changed. The address is read fresh from Google with
+  `maxAttendees=1` (Google then returns only the participant), so an alias
+  is answered as the alias and no other guest's address is read.
+- **Who may answer** (`SyncedEvent::may_respond`): the copy on the user's
+  PRIMARY calendar, Google gave it a `self_response`, and the user did not
+  organize it. A colleague's calendar shared in carries the colleague's
+  answer, and replying there would answer as them. Served as
+  `respondable`; `recurring` says the event is an instance of a series.
+- **The organizer is told.** The app always sends `notify: true`
+  (`sendUpdates=all`). Not yet checked against real Google: that an
+  `attendeesOmitted` reply with `sendUpdates=all` mails only the organizer,
+  never the other guests.
+- **Recurring.** `series: true` answers Google's `recurringEventId` (read in
+  the same call), then re-reads and stores the instance asked about; the rest
+  arrive with the kicked sync. The app's default: the whole series while the
+  invitation is unanswered, just this one once it has been answered, and the
+  detail offers the other ("all events" / "just this one").
+- **In the app.** The detail's "Going?" row (y yes, x no, maybe), and y / x on
+  the page for a selected invitation, the same keys a ghost uses.
+- **Google's invitation email.** The Yes / No / Maybe links in it
+  (`calendar.google.com/calendar/event?action=RESPOND&eid=…&rst=1|2|3`) are
+  read in the reader (`InviteLink`): `eid` decodes to the event id and the
+  invited calendar, and an event on the synced calendar that the user may
+  answer is answered in place, with a toast, instead of opening a browser tab.
+  A link to a series answers the series through its next instance. Anything
+  Passband cannot place (not synced yet, another account, the user's own
+  event) opens in the browser as before. The link's `tok` is never used.
+- **Later, maybe (owner, 2026-11-09):** the invitation email itself shows
+  Yes / No / Maybe in the reader's own chrome (not only Google's links in the
+  body), and answering clears the invitation from the inbox (§9, "Calendar
+  mail disappears").
+- **Not here:** proposing a new time (Google's API cannot), answering from
+  the assistant or MCP (answering mails the organizer), Outlook and IMAP
+  calendars (tracked in its own issue).
+
+### Join (BUILT 2026-11-10)
+
+An event with an online meeting has a Join button on its card ("Join Zoom",
+"Join Google Meet", "Join Teams", "Join Webex", or "Join" for another video
+service Google's conference names).
+
+- **The link is never stored or served.** A meeting link's query (and some
+  paths) is its passcode, and the stored copy of every event stays laundered
+  without one. The sync keeps only the service, `meeting` (`zoom`, `meet`,
+  `teams`, `webex`, `video`), served on the timeline. Pressing Join calls
+  `GET /client/calendar/events/{calendar_id}/{id}/join`, which reads the
+  event from Google at that moment (only `hangoutLink`, the conference's
+  entry points, the location and the description) and answers `{"url"}`,
+  whole. Nothing is stored, audited or logged; human door only.
+- **Where a meeting is found** (`gcal::meeting`): Google's conference's
+  `video` entry point first, then `hangoutLink`, then the first https link in
+  the location and then the description whose host runs meetings (Zoom,
+  Meet, Teams, Webex). Only those hosts: a description is written by whoever
+  sent the invitation, and Join must not open any link in it.
+- A store from before the `meeting` column forgets its sync tokens once and
+  rereads every calendar in full with the new fields.
+
+### Google Meet on an event (BUILT 2026-11-10)
+
+The event pane has a "video" row, "Google Meet", wherever Google lets a Meet
+be made. Google makes the room and puts the link in the invitation it mails;
+Passband writes none of it.
+
+- **Where it is offered.** The calendar list asks for each calendar's
+  `conferenceProperties.allowedConferenceSolutionTypes`; a calendar that
+  names `hangoutsMeet` is served `meet: true` (a calendar never listed, the
+  primary one alone without the list scope, is taken to allow it). Only on a
+  calendar the user writes, and on an edit only when the event has no meeting
+  or has a Meet: a Zoom or Teams add-on is never covered or removed.
+- **The default.** A new event's Meet follows its guests (on with somebody
+  invited, off for a note to self) until the user clicks it. An edit starts
+  from whether the event has a Meet and sends `meet` only when it moved.
+- **The wire.** `meet: true` on a create or an edit becomes
+  `conferenceData.createRequest` with `conferenceSolutionKey.type =
+  hangoutsMeet`; `meet: false` on an edit is `conferenceData: null`. Every
+  insert and patch names `conferenceDataVersion=1` (without it Google ignores
+  conference data). A create's `requestId` is `meet-<its event id>`, and an
+  edit's `meet-<event id>-<its updated stamp>`, so the same write sent again
+  is the same request and Google never makes a second room. `meet: false`
+  reads the event from Google first and is refused (`invalid`) when the Meet
+  is only a link pasted into the text: `conferenceData: null` cannot remove
+  that. Refused before Google: `no_meet` (the calendar does not allow it),
+  `has_meeting` (an edit asking for a Meet on an event with a meeting), and
+  `invalid` for `meet: false` on an event whose meeting is not a Meet.
+- **The link**, like every meeting link, comes back through the sync as the
+  service alone (`meeting: "meet"`), and Join reads it from Google.
 
 ### Who a name is (BUILT in wave 6)
 

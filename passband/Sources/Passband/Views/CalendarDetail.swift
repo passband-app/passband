@@ -51,6 +51,10 @@ struct CalendarDetail: View {
                     estimateNote
                 }
             }
+            // An online meeting: one press to it, right under when it is.
+            if let event = item.event, let label = CalendarJoin.label(event.meeting), !FixtureMode.isEnabled {
+                JoinButton(event: event, label: label)
+            }
             facts
             // The tickets, boarding pass or booking the mail holds: one tap
             // to what the door wants to see.
@@ -69,6 +73,11 @@ struct CalendarDetail: View {
                     change: change, sources: item.sources,
                     zone: item.ghost?.start_timezone ?? item.event?.start_timezone,
                     calendar: calendar)
+            }
+            // An invitation from someone else: yes, no or maybe, sent
+            // through Google, which tells the organizer.
+            if let event = item.event, CalendarReply.canReply(event), !FixtureMode.isEnabled {
+                ReplyBar(event: event)
             }
             actions
         }
@@ -268,7 +277,9 @@ struct CalendarDetail: View {
                             .textSelection(.enabled)
                     }
                 }
-                if let response = event.self_response, !guests.contains(where: { $0.isSelf == true }) {
+                if let response = event.self_response, !guests.contains(where: { $0.isSelf == true }),
+                    !CalendarReply.canReply(event)
+                {
                     FactRow(label: "You") { plain(responseText(response)) }
                 }
                 if event.busy == false {
@@ -354,8 +365,8 @@ struct CalendarDetail: View {
     /// place. A ghost: mark going, dismiss, or (on a ghost already marked
     /// going) take the mark off. A real event: open it in Google
     /// Calendar, and, only where the daemon says the event is the user's
-    /// to change, edit and delete. An RSVP that answers through the
-    /// calendar is a later wave; nothing here writes mail.
+    /// to change, edit and delete. An invitation's answer is the
+    /// `ReplyBar` above; nothing here writes mail.
     @ViewBuilder
     private var actions: some View {
         if let ghost = item.ghost {
@@ -514,6 +525,134 @@ struct HintButton: View {
             }
             .buttonStyle(.plain)
         #endif
+    }
+}
+
+/// JOIN (Lib/CalendarJoin.swift): the meeting link is asked for when this is
+/// pressed, never held by the page, and opened in the browser, which hands a
+/// Zoom or Teams link on to its app.
+private struct JoinButton: View {
+    @Environment(AppStore.self) private var store
+    let event: TimelineEvent
+    let label: String
+
+    var body: some View {
+        let joining = store.calendarJoining.contains(Agenda.itemId(event))
+        Button {
+            Task { await store.joinMeeting(event) }
+        } label: {
+            HStack(spacing: Space.s6) {
+                Image(systemName: "video.fill")
+                    .font(Typo.ui(11, weight: .semibold))
+                Text(label)
+                    .font(Typo.ui(12, weight: .semibold))
+                if joining {
+                    WaitDots(tone: Palette.inkFaint)
+                }
+            }
+        }
+        .buttonStyle(.glass)
+        .controlSize(.regular)
+        .disabled(joining)
+        .pointingHand()
+        .help("Open the meeting")
+    }
+}
+
+/// YES, NO OR MAYBE to an invitation someone else sent
+/// (Lib/CalendarReply.swift). The answer the event holds now is drawn
+/// picked; pressing it again sends nothing. On a recurring event, which
+/// events the answer covers, "all events" or "just this one", with the
+/// default `CalendarReply.defaultsToSeries` picks.
+private struct ReplyBar: View {
+    @Environment(AppStore.self) private var store
+    let event: TimelineEvent
+
+    var body: some View {
+        let current = ReplyAnswer(event.self_response)
+        let sending = store.calendarReplying.contains(Agenda.itemId(event))
+        let series = store.replyCoversSeries(event)
+        VStack(alignment: .leading, spacing: Space.s6) {
+            HStack(spacing: Space.s12) {
+                Text(current == nil ? "Going?" : "Your answer")
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaint)
+                ReplyChoice(key: "y", answer: .accepted, picked: current == .accepted) { send(.accepted) }
+                ReplyChoice(key: "x", answer: .declined, picked: current == .declined) { send(.declined) }
+                ReplyChoice(key: nil, answer: .tentative, picked: current == .tentative) { send(.tentative) }
+                if sending {
+                    WaitDots(tone: Palette.inkFaint)
+                }
+                Spacer(minLength: 0)
+            }
+            if event.recurring == true {
+                HStack(spacing: Space.s8) {
+                    scope("all events", on: series) { setSeries(true) }
+                    scope("just this one", on: !series) { setSeries(false) }
+                }
+            }
+        }
+        .disabled(sending)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Answer the invitation")
+    }
+
+    private func send(_ answer: ReplyAnswer) {
+        // The answer it already holds, for just this one: nothing to send.
+        if ReplyAnswer(event.self_response) == answer, !store.replyCoversSeries(event) { return }
+        let series = store.replyCoversSeries(event)
+        Task { await store.replyToEvent(event, answer, series: series, via: .click) }
+    }
+
+    private func setSeries(_ on: Bool) {
+        store.calendarReplySeries[Agenda.itemId(event)] = on
+    }
+
+    private func scope(_ text: String, on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(text)
+                .font(Typo.micro)
+                .foregroundStyle(on ? Palette.ink : Palette.inkFaint)
+                .underline(on, color: Palette.inkFaint)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointingHand()
+        .accessibilityAddTraits(on ? .isSelected : [])
+    }
+}
+
+/// One answer: its key (on the Mac), its word, and a check when it is the
+/// answer the event holds.
+private struct ReplyChoice: View {
+    let key: String?
+    let answer: ReplyAnswer
+    let picked: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: Space.s4) {
+                #if os(macOS)
+                    if let key { Kbd(key) }
+                #endif
+                if picked {
+                    Image(systemName: "checkmark")
+                        .font(Typo.ui(9, weight: .semibold))
+                        .foregroundStyle(Palette.accent)
+                }
+                Text(answer.label)
+                    .font(picked ? Typo.ui(12, weight: .semibold) : Typo.micro)
+                    .foregroundStyle(picked ? Palette.ink : (hovering ? Palette.accent : Palette.inkFaint))
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .pointingHand()
+        .accessibilityLabel(answer.label)
+        .accessibilityAddTraits(picked ? .isSelected : [])
     }
 }
 

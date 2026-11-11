@@ -37,8 +37,8 @@ use std::collections::HashSet;
 
 use serde_json::{Map, Value, json};
 
-use super::EventRow;
 use super::client::Notify;
+use super::{EventRow, SelfResponse};
 use crate::triage::ghost::{self, EventTime};
 use crate::triage::order_link::plain;
 use crate::triage::text::truncate_trimmed;
@@ -75,6 +75,8 @@ pub const BAD_GUEST: Invalid = Invalid("each guest must be one plain email addre
 pub const DUPLICATE_GUEST: Invalid = Invalid("a guest is listed twice");
 pub const GUEST_IS_OWNER: Invalid = Invalid("the calendar's owner cannot be its own guest");
 pub const BAD_NOTIFY: Invalid = Invalid("notify must be true or false");
+pub const BAD_MEET: Invalid = Invalid("meet must be true or false");
+pub const NO_MEET_TO_REMOVE: Invalid = Invalid("this event has no Google Meet to remove");
 pub const BAD_EVENT_ID: Invalid =
     Invalid("id must be 5 to 1024 characters, each a lowercase letter a to v or a digit");
 
@@ -108,6 +110,8 @@ pub struct NewEvent {
     /// Checked addresses, as typed. Empty: no guests.
     pub guests: Vec<String>,
     pub notify: Notify,
+    /// Ask Google for a new Meet on it ([`super::meeting::create_request`]).
+    pub meet: bool,
     /// The event id the client chose for it, or None to let Google choose.
     /// THE CREATE'S IDEMPOTENCY KEY: the app picks one per pane and, after an
     /// uncertain answer, resends only the same body under it, so a create
@@ -130,6 +134,10 @@ pub struct EventEdit {
     /// removes every guest).
     pub guests: Option<Vec<String>>,
     pub notify: Notify,
+    /// Some(true) adds a Meet, Some(false) removes the event's Meet, None
+    /// leaves its meeting alone. Whether the event has one is the door's
+    /// question.
+    pub meet: Option<bool>,
 }
 
 /// Check a pair of times: one precision (dates when `all_day`, instants
@@ -160,6 +168,10 @@ fn title(value: &Value) -> Result<String, Invalid> {
 
 fn time(value: &Value) -> Result<EventTime, Invalid> {
     value.as_str().and_then(EventTime::parse).ok_or(BAD_TIME)
+}
+
+fn meet(value: &Value) -> Result<bool, Invalid> {
+    value.as_bool().ok_or(BAD_MEET)
 }
 
 fn all_day(value: &Value) -> Result<bool, Invalid> {
@@ -383,7 +395,7 @@ pub fn event_id(value: &Value) -> Result<String, Invalid> {
 }
 
 /// Read a create: `{"calendar_id", "title", "start", "end", "all_day",
-/// "location"?, "description"?, "guests"?, "notify"?, "id"?}`. Unknown keys
+/// "location"?, "description"?, "guests"?, "notify"?, "meet"?, "id"?}`. Unknown keys
 /// are ignored.
 pub fn parse_create(body: &Value) -> Result<NewEvent, Invalid> {
     let body = object(body)?;
@@ -407,6 +419,10 @@ pub fn parse_create(body: &Value) -> Result<NewEvent, Invalid> {
             Some(list) => guests(list)?,
         },
         notify: notify(body.get("notify"))?,
+        meet: match body.get("meet") {
+            None | Some(Value::Null) => false,
+            Some(value) => meet(value)?,
+        },
         id: match body.get("id") {
             None | Some(Value::Null) => None,
             Some(id) => Some(event_id(id)?),
@@ -435,6 +451,7 @@ pub fn parse_edit(body: &Value, event_calendar: &str) -> Result<EventEdit, Inval
         description: text(body.get("description"), outgoing_description)?,
         guests: body.get("guests").map(guests).transpose()?,
         notify: notify(body.get("notify"))?,
+        meet: body.get("meet").map(meet).transpose()?,
     };
     // `notify` alone changes nothing: there is no "tell them again".
     let empty = edit.title.is_none()
@@ -443,7 +460,8 @@ pub fn parse_edit(body: &Value, event_calendar: &str) -> Result<EventEdit, Inval
         && edit.all_day.is_none()
         && edit.location == Change::Keep
         && edit.description == Change::Keep
-        && edit.guests.is_none();
+        && edit.guests.is_none()
+        && edit.meet.is_none();
     if empty { Err(NOTHING) } else { Ok(edit) }
 }
 
@@ -494,7 +512,8 @@ pub(crate) fn google_time(time: &EventTime, is_end: bool, edit: bool) -> Result<
 
 /// The `events.insert` body. Its text is the user's as typed, less control
 /// and invisible characters; the stored copy is laundered on the way back in
-/// (the module doc's one deliberate asymmetry).
+/// (the module doc's one deliberate asymmetry). A Meet asked for goes as
+/// [`super::meeting::create_request`], keyed to the create's own id.
 pub fn insert_body(event: &NewEvent) -> Result<Value, Invalid> {
     let mut body = json!({
         "summary": event.title,
@@ -509,6 +528,10 @@ pub fn insert_body(event: &NewEvent) -> Result<Value, Invalid> {
     }
     if let Some(id) = &event.id {
         body["id"] = json!(id);
+    }
+    if event.meet {
+        body["conferenceData"] =
+            super::meeting::create_request(&super::meeting::request_id(event.id.as_deref()));
     }
     if !event.guests.is_empty() {
         let attendees: Vec<Value> = event
@@ -532,6 +555,10 @@ pub fn insert_body(event: &NewEvent) -> Result<Value, Invalid> {
 /// A guest list Google cut short cannot be shown to match, so it does not.
 /// The calendar is the caller's: `found` was read from the calendar the
 /// create names.
+///
+/// NOT COMPARED: `meet`. The room may still be in the making when the
+/// first send's event is read back, and a resend is the same request
+/// ([`super::meeting::request_id`]), which Google does not make twice.
 ///
 /// NOT COMPARED: `notify`. Google's event does not say whether its guests
 /// were mailed, so a create that asks for invitations can be answered by an
@@ -570,10 +597,15 @@ pub fn is_same_create(draft: &NewEvent, found: &EventRow, calendar_zone: Option<
 /// start can only be checked against an end. `attendees` is the full list
 /// from [`merge_attendees`] when the edit changes the guests, and None
 /// otherwise: the key is then NOT SENT, which leaves Google's list alone.
+/// `meet`: Some(true) asks for a new Meet, Some(false) sends
+/// `conferenceData: null`, which removes the event's conference.
+/// `meet_request`: the request id a new Meet is asked with
+/// ([`super::meeting::edit_request_id`]).
 pub fn patch_body(
     edit: &EventEdit,
     times: Option<&EventTimes>,
     attendees: Option<Vec<Value>>,
+    meet_request: &str,
 ) -> Result<Value, Invalid> {
     let mut body = Map::new();
     if let Some(attendees) = attendees {
@@ -600,7 +632,72 @@ pub fn patch_body(
             }
         }
     }
+    match edit.meet {
+        None => {}
+        Some(true) => {
+            body.insert(
+                "conferenceData".into(),
+                super::meeting::create_request(meet_request),
+            );
+        }
+        Some(false) => {
+            body.insert("conferenceData".into(), Value::Null);
+        }
+    }
     Ok(Value::Object(body))
+}
+
+// --- answering an invitation -------------------------------------------------
+
+pub const BAD_RESPONSE: Invalid = Invalid("response must be accepted, declined or tentative");
+pub const BAD_SERIES: Invalid = Invalid("series must be true or false");
+
+/// A reply to an invitation, as the app asks for it: `{"response",
+/// "series", "notify"}`. `series` (default false) answers every event of a
+/// recurring series rather than this one; `notify` is read as everywhere
+/// else ([`notify`]), and here it means the ORGANIZER is told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reply {
+    pub response: SelfResponse,
+    pub series: bool,
+    pub notify: Notify,
+}
+
+pub fn parse_reply(body: &Value) -> Result<Reply, Invalid> {
+    let body = object(body)?;
+    let response = match body.get("response").and_then(Value::as_str) {
+        Some("accepted") => SelfResponse::Accepted,
+        Some("declined") => SelfResponse::Declined,
+        Some("tentative") => SelfResponse::Tentative,
+        _ => return Err(BAD_RESPONSE),
+    };
+    let series = match body.get("series") {
+        None | Some(Value::Bool(false)) => false,
+        Some(Value::Bool(true)) => true,
+        Some(_) => return Err(BAD_SERIES),
+    };
+    Ok(Reply {
+        response,
+        series,
+        notify: notify(body.get("notify"))?,
+    })
+}
+
+/// THE REPLY'S PATCH: the user's own attendee entry and nothing else, under
+/// `attendeesOmitted: true`, which Google reads on an update as "only update
+/// the participant's response". Every other guest is left exactly as Google
+/// holds them; nothing here can add, drop or change anyone else.
+pub fn reply_body(self_email: &str, response: SelfResponse) -> Value {
+    let status = match response {
+        SelfResponse::Accepted => "accepted",
+        SelfResponse::Declined => "declined",
+        SelfResponse::Tentative => "tentative",
+        SelfResponse::NeedsAction => "needsAction",
+    };
+    json!({
+        "attendeesOmitted": true,
+        "attendees": [{"email": self_email, "responseStatus": status}],
+    })
 }
 
 #[cfg(test)]
@@ -609,6 +706,75 @@ mod tests {
 
     fn at(raw: &str) -> EventTime {
         EventTime::parse(raw).unwrap()
+    }
+
+    #[test]
+    fn a_meet_is_asked_for_only_by_the_value_true() {
+        let with = create(|b| b["meet"] = json!(true)).unwrap();
+        assert!(with.meet);
+        let body = insert_body(&with).unwrap();
+        assert_eq!(
+            body["conferenceData"]["createRequest"]["conferenceSolutionKey"]["type"],
+            "hangoutsMeet"
+        );
+        assert!(!create(|_| {}).unwrap().meet, "absent: none");
+        assert!(
+            insert_body(&create(|_| {}).unwrap())
+                .unwrap()
+                .get("conferenceData")
+                .is_none()
+        );
+        assert_eq!(create(|b| b["meet"] = json!("true")), Err(BAD_MEET));
+        assert_eq!(
+            parse_edit(&json!({"meet": false}), "primary").unwrap().meet,
+            Some(false),
+            "meet alone is an edit"
+        );
+        let remove = parse_edit(&json!({"meet": false}), "primary").unwrap();
+        assert_eq!(
+            patch_body(&remove, None, None, "meet-test").unwrap(),
+            json!({"conferenceData": null})
+        );
+        assert_eq!(parse_edit(&json!({"meet": 1}), "primary"), Err(BAD_MEET));
+        assert_eq!(
+            super::super::meeting::request_id(Some("abc12")),
+            "meet-abc12"
+        );
+        let a = super::super::meeting::request_id(None);
+        assert!(a.len() == 32 && a != super::super::meeting::request_id(None));
+    }
+
+    #[test]
+    fn a_reply_reads_its_answer_and_nothing_else() {
+        let reply = parse_reply(&json!({"response": "accepted", "notify": true})).unwrap();
+        assert_eq!(reply.response, SelfResponse::Accepted);
+        assert!(!reply.series, "one event unless asked");
+        assert!(reply.notify.tells_guests());
+        let quiet = parse_reply(&json!({"response": "tentative", "series": true})).unwrap();
+        assert!(
+            quiet.series && !quiet.notify.tells_guests(),
+            "silence is the default"
+        );
+        for bad in [
+            json!({}),
+            json!({"response": "needsAction"}),
+            json!({"response": "needs_action"}),
+            json!({"response": "yes"}),
+            json!({"response": "accepted", "series": "true"}),
+            json!({"response": "accepted", "notify": "true"}),
+            json!(["accepted"]),
+        ] {
+            assert!(parse_reply(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_reply_patch_touches_only_the_users_entry() {
+        assert_eq!(
+            reply_body("me@example.com", SelfResponse::Declined),
+            json!({"attendeesOmitted": true,
+                   "attendees": [{"email": "me@example.com", "responseStatus": "declined"}]})
+        );
     }
 
     fn create(edit: impl FnOnce(&mut Value)) -> Result<NewEvent, Invalid> {
@@ -643,6 +809,7 @@ mod tests {
             description: None,
             guests: Vec::new(),
             guests_truncated: false,
+            meeting: None,
         }
     }
 
@@ -789,7 +956,7 @@ mod tests {
         assert_eq!(edit.location, Change::Clear);
         assert_eq!(edit.description, Change::Keep);
         assert_eq!(
-            patch_body(&edit, None, None).unwrap(),
+            patch_body(&edit, None, None, "meet-test").unwrap(),
             json!({"summary": "New", "location": null})
         );
         assert_eq!(parse_edit(&json!({}), "primary"), Err(NOTHING));
@@ -829,7 +996,7 @@ mod tests {
         let to_day = edit(json!({"all_day": true, "start": "2026-10-05", "end": "2026-10-06"}));
         let times = to_day.times(&timed).unwrap();
         assert_eq!(
-            patch_body(&to_day, times.as_ref(), None).unwrap(),
+            patch_body(&to_day, times.as_ref(), None, "meet-test").unwrap(),
             json!({
                 "start": {"date": "2026-10-05", "dateTime": null},
                 "end": {"date": "2026-10-07", "dateTime": null},
@@ -1100,17 +1267,23 @@ mod tests {
         // In the patch: present when given, the key absent otherwise.
         let edit = parse_edit(&json!({"guests": ["a@x.com"]}), "primary").unwrap();
         assert_eq!(
-            patch_body(&edit, None, Some(vec![json!({"email": "a@x.com"})])).unwrap(),
+            patch_body(
+                &edit,
+                None,
+                Some(vec![json!({"email": "a@x.com"})]),
+                "meet-test"
+            )
+            .unwrap(),
             json!({"attendees": [{"email": "a@x.com"}]})
         );
         let title = parse_edit(&json!({"title": "x"}), "primary").unwrap();
         assert_eq!(
-            patch_body(&title, None, None).unwrap(),
+            patch_body(&title, None, None, "meet-test").unwrap(),
             json!({"summary": "x"})
         );
         // Emptying the list sends an empty array, which is not "absent".
         assert_eq!(
-            patch_body(&edit, None, Some(Vec::new())).unwrap(),
+            patch_body(&edit, None, Some(Vec::new()), "meet-test").unwrap(),
             json!({"attendees": []})
         );
     }

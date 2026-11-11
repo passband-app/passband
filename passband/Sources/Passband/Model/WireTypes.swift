@@ -2219,6 +2219,15 @@ struct TimelineEvent: Codable, Sendable, Hashable, Identifiable {
     /// rides here). Its `ghost_id` is the ghost to answer. Nil from an older
     /// daemon, on an event with none, and for a malformed value.
     var pending_change: LinkedChange? = nil
+    /// The user is a guest of this event and did not organize it, so it can
+    /// be answered yes / no / maybe (Lib/CalendarReply.swift). Nil from an
+    /// older daemon: no answering.
+    var respondable: Bool? = nil
+    /// One of a recurring series: an answer may cover all of them.
+    var recurring: Bool? = nil
+    /// The online meeting's service ("zoom", "meet", "teams", "webex",
+    /// "video"), for the Join button. Never the link (Lib/CalendarJoin.swift).
+    var meeting: String? = nil
 }
 
 /// How a guest answered, in the daemon's four words.
@@ -2355,6 +2364,9 @@ extension TimelineEvent {
         passband_owned = try? c.decodeIfPresent(Bool.self, forKey: .passband_owned)
         tickets = try? c.decodeIfPresent(CalendarTickets.self, forKey: .tickets)
         pending_change = try? c.decodeIfPresent(LinkedChange.self, forKey: .pending_change)
+        respondable = try? c.decodeIfPresent(Bool.self, forKey: .respondable)
+        recurring = try? c.decodeIfPresent(Bool.self, forKey: .recurring)
+        meeting = try? c.decodeIfPresent(String.self, forKey: .meeting)
     }
 
     private struct OneGuest: Decodable {
@@ -2492,6 +2504,9 @@ struct TimelineCalendar: Codable, Sendable, Hashable, Identifiable {
     /// Wave 5. Events on it may carry guests: the primary calendar, or one
     /// the user owns. Nil from an older daemon (`EventGuests.mayInvite`).
     var can_invite: Bool?
+    /// Google lets a Meet be made on events here ("Add Google Meet"). Nil
+    /// from an older daemon, which cannot make one: not offered.
+    var meet: Bool? = nil
 }
 
 enum TimelineSyncError: String, LenientRawEnum {

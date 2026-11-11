@@ -108,3 +108,38 @@ enum DaySweep {
         return m == 0 ? "\(hour)\(suffix)" : "\(hour):\(String(format: "%02d", m))\(suffix)"
     }
 }
+
+/// DRAG ACROSS DAYS on the month grid: the cells between the press and the
+/// pointer become an all-day run, drawn as a bar while the drag goes on and
+/// opened in the event pane when it lets go. Cells count from the grid's
+/// first, seven to a row.
+enum DaysSweep {
+    /// The cell under a point in the rows' own space, clamped to the grid.
+    static func cell(x: Double, y: Double, cellWidth: Double, rowHeight: Double, rows: Int) -> Int {
+        guard rows > 0, cellWidth > 0, rowHeight > 0 else { return 0 }
+        let col = max(0, min(6, Int((x / cellWidth).rounded(.down))))
+        let row = max(0, min(rows - 1, Int((y / rowHeight).rounded(.down))))
+        return row * 7 + col
+    }
+
+    /// One week row's piece of a run: its columns, inclusive, and whether
+    /// the run starts or ends in it (a rounded end) or runs on (a flat one).
+    struct Piece: Hashable, Sendable {
+        let row: Int
+        let first: Int
+        let last: Int
+        let startsHere: Bool
+        let endsHere: Bool
+    }
+
+    /// The run between two cells, either way round, cut at the row breaks.
+    static func pieces(from a: Int, to b: Int) -> [Piece] {
+        let lo = min(a, b)
+        let hi = max(a, b)
+        return (lo / 7...hi / 7).map { row in
+            Piece(
+                row: row, first: row == lo / 7 ? lo % 7 : 0, last: row == hi / 7 ? hi % 7 : 6,
+                startsHere: row == lo / 7, endsHere: row == hi / 7)
+        }
+    }
+}

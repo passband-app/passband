@@ -810,6 +810,24 @@ actor APIClient {
             query: CalendarWrite.deleteQuery(notify: notify), timeout: Self.calendarWriteTimeout)
     }
 
+    /// `POST /client/calendar/events/{calendar_id}/{id}/reply`: the user's
+    /// yes / no / maybe, sent through Google, which tells the organizer.
+    /// Answered with the event as Google now holds it.
+    func replyToCalendarEvent(calendarId: String, id: String, _ reply: ReplyWrite) async throws -> TimelineEvent {
+        try await post(
+            CalendarReply.path(calendarId: calendarId, eventId: id), body: reply,
+            timeout: Self.calendarWriteTimeout)
+    }
+
+    private struct JoinLink: Decodable { let url: String }
+
+    /// `GET /client/calendar/events/{calendar_id}/{id}/join`: the meeting
+    /// link, read from Google now. Opened and kept nowhere.
+    func calendarJoinURL(calendarId: String, id: String) async throws -> String {
+        let link: JoinLink = try await get(CalendarJoin.path(calendarId: calendarId, eventId: id))
+        return link.url
+    }
+
     /// RFC3339 in the user's current offset, seconds precision: "2026-10-04T00:00:00-07:00".
     nonisolated static func rfc3339Local(_ date: Date) -> String {
         let f = ISO8601DateFormatter()

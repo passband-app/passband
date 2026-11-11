@@ -80,6 +80,7 @@ fn event(id: &str, title: &str, start: &str) -> SyncedEvent {
             description: Some("Doors at 7".into()),
             guests: Vec::new(),
             guests_truncated: false,
+            meeting: None,
         },
     }
 }

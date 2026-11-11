@@ -166,6 +166,7 @@ fn calendar_search_at_the_cap() {
                     })
                     .collect(),
                 guests_truncated: false,
+                meeting: None,
             }))
         })
         .collect();

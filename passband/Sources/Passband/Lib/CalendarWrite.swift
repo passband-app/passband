@@ -37,6 +37,8 @@ struct EventWrite: Encodable, Hashable, Sendable {
     /// closing it outright (docs/CALENDAR.md section 8). Nil is no key: Google
     /// picks the id.
     var id: String?
+    /// `true` has Google make a Google Meet for it. Nil is no key.
+    var meet: Bool?
 
     /// The body with what a labelled control decided about telling people.
     /// True is written only onto a body that names somebody.
@@ -65,6 +67,9 @@ struct EventPatch: Hashable, Sendable {
     /// Wave 5. The WHOLE new guest list (it replaces the event's), or nil to
     /// leave the guests alone. An empty list takes everyone off.
     var guests: [String]?
+    /// True adds a Google Meet, false removes the event's Meet, nil leaves
+    /// its meeting alone.
+    var meet: Bool?
 
     var isEmpty: Bool { self == EventPatch() }
 
@@ -75,6 +80,7 @@ struct EventPatch: Hashable, Sendable {
     func json(notify: Bool = false) -> [String: Any] {
         var out: [String: Any] = [:]
         if let guests { out["guests"] = guests }
+        if let meet { out["meet"] = meet }
         if notify { out["notify"] = true }
         if let title { out["title"] = title }
         if let start { out["start"] = start }
@@ -125,6 +131,19 @@ enum CalendarWrite {
     }
 
     static func canCreate(_ feed: TimelineFeed?) -> Bool { !writable(feed).isEmpty }
+
+    /// Whether the pane offers a Google Meet: the calendar it saves to makes
+    /// one (`meet`, which an older daemon never says), and the event being
+    /// edited has no meeting or has a Meet. A Zoom or Teams event keeps its
+    /// own: Passband never puts a Meet over it, or takes it away.
+    static func meetOffered(calendarId: String?, editing: TimelineEvent?, feed: TimelineFeed?) -> Bool {
+        guard let calendarId,
+            let cal = (feed?.calendars ?? []).first(where: { $0.id == calendarId }),
+            cal.writable == true, cal.meet == true
+        else { return false }
+        guard let event = editing else { return true }
+        return event.meeting == nil || event.meeting == "meet"
+    }
 
     /// An event the user may change: the daemon said so in as many words.
     /// Nil (an older daemon) is no.
@@ -420,6 +439,10 @@ enum CalendarWrite {
                 seen += 1
             }
         }
+        if let meet = patch.meet, meet != (original.meeting == "meet") {
+            guard (now.meeting == "meet") == meet else { return nil }
+            seen += 1
+        }
         return seen > 0 ? now : nil
     }
 
@@ -462,6 +485,12 @@ enum CalendarWrite {
             return "Google Calendar is not connected, \(nothing)"
         case .notEditable:
             return "That calendar does not let you change its events."
+        case .notInvited:
+            return "You are not a guest of that event."
+        case .noMeet:
+            return "Google Meet is not available on that calendar, so nothing was saved."
+        case .hasMeeting:
+            return "That event already has an online meeting, so nothing was saved."
         case .notFound:
             return "That event is no longer on your calendar."
         case .idInUse:
@@ -492,17 +521,22 @@ enum CalendarRefusal: String, CaseIterable, Hashable, Sendable {
     case cannotNotify = "cannot_notify"
     case notGranted = "not_granted"
     case notEditable = "not_editable"
+    case notInvited = "not_invited"
     case notFound = "not_found"
     case idInUse = "id_in_use"
     case alreadyDeleted = "already_deleted"
     case calendarGone = "calendar_gone"
     case googleRefused = "google_refused"
+    case noMeet = "no_meet"
+    case hasMeeting = "has_meeting"
 
     /// The status the daemon sends this code with.
     var status: Int {
         switch self {
-        case .invalid, .unknownCalendar, .readOnly, .cannotInvite, .guestsReadOnly, .cannotNotify: 400
-        case .notGranted, .notEditable: 403
+        case .invalid, .unknownCalendar, .readOnly, .cannotInvite, .guestsReadOnly, .cannotNotify, .noMeet,
+            .hasMeeting:
+            400
+        case .notGranted, .notEditable, .notInvited: 403
         case .notFound: 404
         case .idInUse, .alreadyDeleted: 409
         case .calendarGone: 410

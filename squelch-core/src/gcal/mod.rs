@@ -35,6 +35,7 @@
 //! at [`MAX_GUESTS`] ([`client`]).
 
 pub mod client;
+pub mod meeting;
 pub mod own;
 pub mod place;
 pub mod remind;
@@ -164,6 +165,10 @@ pub struct CalendarMeta {
     /// palette's colour for its `colorId`.
     pub color: Option<String>,
     pub access_role: Option<AccessRole>,
+    /// Whether Google lets a Meet be made on this calendar
+    /// (`conferenceProperties.allowedConferenceSolutionTypes` names
+    /// `hangoutsMeet`). None when the list did not say (no list scope).
+    pub meet: Option<bool>,
 }
 
 impl CalendarMeta {
@@ -177,6 +182,7 @@ impl CalendarMeta {
             time_zone: None,
             color: None,
             access_role: Some(AccessRole::Owner),
+            meet: None,
         }
     }
 }
@@ -239,6 +245,8 @@ pub struct StoredCalendar {
     pub truncated: bool,
     pub color: Option<String>,
     pub access_role: Option<AccessRole>,
+    /// [`CalendarMeta::meet`], as last read.
+    pub meet: Option<bool>,
 }
 
 impl StoredCalendar {
@@ -252,6 +260,15 @@ impl StoredCalendar {
     /// may carry guests set from the app. See [`may_invite`].
     pub fn can_invite(&self) -> bool {
         self.selected && may_invite(self.is_primary, self.access_role)
+    }
+
+    /// Whether the app may offer "Add Google Meet" on an event of this
+    /// calendar: one it may write, where Google allows a Meet. A calendar
+    /// whose list entry was never read (no list scope) is the primary one
+    /// alone, and a primary calendar is taken to allow it; Google's refusal
+    /// is the answer where it does not.
+    pub fn offers_meet(&self) -> bool {
+        self.writable() && self.meet.unwrap_or(self.is_primary)
     }
 }
 
@@ -400,6 +417,9 @@ pub struct EventRow {
     /// Google holds more attendees than `guests` (`attendeesOmitted`, or a
     /// list past the cap). The guest list is then read-only.
     pub guests_truncated: bool,
+    /// The online meeting the event has, by service: never its link, which
+    /// is read from Google when Join is pressed ([`meeting`]).
+    pub meeting: Option<meeting::MeetingKind>,
 }
 
 impl EventRow {
@@ -509,6 +529,45 @@ impl SyncedEvent {
             && organizes
             && may_invite(self.calendar_primary, self.calendar_access)
     }
+
+    /// THE REPLY GUARD: whether the app offers yes / no / maybe. The user is
+    /// a guest on this copy of the event (Google gave this calendar's own
+    /// answer, `self_response`) and is not the one who sent it: neither the
+    /// organizer by Google's word, nor a guest entry that is both the user
+    /// and the organizer. Writing to the calendar is not asked: answering an
+    /// invitation is the guest's, whatever their role on the calendar.
+    ///
+    /// ONLY ON THE USER'S OWN CALENDAR, the primary: a colleague's calendar
+    /// shared in carries the colleague's answer as its `self_response`, and
+    /// replying there would answer AS them (or be refused, read-only).
+    pub fn may_respond(&self) -> bool {
+        self.calendar_primary
+            && self.row.self_response.is_some()
+            && !self.row.organizer_self
+            && !self.row.guests.iter().any(|g| g.is_self && g.organizer)
+    }
+}
+
+/// The series an instance of a recurring event belongs to, read from its
+/// id. Google names an instance `<series id>_<original start>`, the start as
+/// `YYYYMMDD` (all-day) or `YYYYMMDDTHHMMSSZ`, and its own ids use only
+/// `a`-`v` and digits, so the underscore and the stamp are unambiguous.
+/// A HINT for the app only (whether to offer "all events"): a reply to a
+/// series reads the real `recurringEventId` from Google first.
+pub fn instance_series(event_id: &str) -> Option<&str> {
+    let (series, stamp) = event_id.rsplit_once('_')?;
+    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    let stamp_ok = match stamp.len() {
+        8 => digits(stamp),
+        16 => {
+            digits(&stamp[..8])
+                && stamp.as_bytes()[8] == b'T'
+                && digits(&stamp[9..15])
+                && stamp.as_bytes()[15] == b'Z'
+        }
+        _ => false,
+    };
+    (stamp_ok && !series.is_empty()).then_some(series)
 }
 
 /// The synced window for a pass that starts at `now`.
@@ -736,6 +795,7 @@ pub fn read_event(
             .and_then(ghost::launder_description),
         guests,
         guests_truncated,
+        meeting: meeting::meeting_kind(item),
     })))
 }
 
@@ -792,6 +852,11 @@ pub fn read_calendar_entry(item: &Value) -> Option<(CalendarMeta, bool)> {
                 .get("accessRole")
                 .and_then(Value::as_str)
                 .and_then(AccessRole::parse),
+            meet: item
+                .get("conferenceProperties")
+                .and_then(|p| p.get("allowedConferenceSolutionTypes"))
+                .and_then(Value::as_array)
+                .map(|types| types.iter().any(|t| t.as_str() == Some(meeting::MEET_TYPE))),
         },
         wanted,
     ))
@@ -1229,6 +1294,7 @@ mod tests {
             description: None,
             guests: Vec::new(),
             guests_truncated: false,
+            meeting: None,
         }
     }
 
@@ -1807,6 +1873,77 @@ mod tests {
         let row = upsert(item(json!(full), false));
         assert_eq!(row.guests.len(), MAX_GUESTS);
         assert!(!row.guests_truncated);
+    }
+
+    /// THE REPLY GUARD: a guest's copy, never the organizer's, whatever the
+    /// calendar role.
+    #[test]
+    fn only_a_guest_may_answer_an_invitation() {
+        let guest = |is_self: bool, organizer: bool| Guest {
+            email: "me@example.com".into(),
+            name: None,
+            response: GuestResponse::Pending,
+            organizer,
+            is_self,
+        };
+        let on = |primary: bool,
+                  response: Option<SelfResponse>,
+                  organizer_self: bool,
+                  guests: Vec<Guest>| {
+            SyncedEvent {
+                calendar_id: "primary".into(),
+                calendar_name: None,
+                calendar_color: None,
+                calendar_access: Some(AccessRole::Owner),
+                calendar_primary: primary,
+                row: EventRow {
+                    self_response: response,
+                    organizer_self,
+                    guests,
+                    ..row("2026-10-05T09:00:00Z")
+                },
+            }
+        };
+        let event = |response, organizer_self, guests| on(true, response, organizer_self, guests);
+        assert!(
+            !on(false, Some(SelfResponse::NeedsAction), false, vec![]).may_respond(),
+            "a calendar shared in: its answer is somebody else's"
+        );
+        assert!(
+            event(
+                Some(SelfResponse::NeedsAction),
+                false,
+                vec![guest(true, false)]
+            )
+            .may_respond()
+        );
+        assert!(
+            event(Some(SelfResponse::Accepted), false, vec![]).may_respond(),
+            "an answer already given can be changed"
+        );
+        assert!(
+            !event(None, false, vec![]).may_respond(),
+            "not a guest at all"
+        );
+        assert!(
+            !event(Some(SelfResponse::Accepted), true, vec![]).may_respond(),
+            "the organizer's own copy"
+        );
+        assert!(
+            !event(Some(SelfResponse::Accepted), false, vec![guest(true, true)]).may_respond(),
+            "the user's entry is the organizer's"
+        );
+    }
+
+    #[test]
+    fn an_instance_id_names_its_series() {
+        assert_eq!(instance_series("abc123_20261110T170000Z"), Some("abc123"));
+        assert_eq!(instance_series("abc123_20261110"), Some("abc123"));
+        assert_eq!(instance_series("abc123"), None);
+        assert_eq!(instance_series("abc_123"), None, "not a stamp");
+        assert_eq!(instance_series("_20261110"), None, "no series");
+        assert_eq!(instance_series("abc_20261110T1700Z"), None);
+        assert_eq!(instance_series("abc_2026111xT170000Z"), None);
     }
 
     /// THE GUEST GUARD and THE INVITE GUARD, every arm.

@@ -30,11 +30,12 @@
 //!   `attendeesOmitted` set, which is stored as the event's truncated mark.
 //!   Either way [`super::read_event`] still finds the user's own answer.
 //! - `fields` (partial response) names only what the daemon reads, so an
-//!   invitation anyone can send cannot fill a page with attachments,
-//!   conference data or its guests' comments: of each attendee only the
-//!   address, the name, the answer and the two flags are asked for. Its
-//!   description is read (the app shows it), laundered and cut to 2000
-//!   characters as it is stored.
+//!   invitation anyone can send cannot fill a page with attachments, a
+//!   conference's details or its guests' comments: of each attendee only the
+//!   address, the name, the answer and the two flags are asked for, and of a
+//!   conference only its entry points' type and link, read for which service
+//!   it is on ([`super::meeting`]) and not kept. Its description is read (the
+//!   app shows it), laundered and cut to 2000 characters as it is stored.
 //! - `events.patch`: "Array fields, if specified, overwrite the existing
 //!   arrays; this discards any previous array elements." So a guest edit
 //!   sends the FULL attendee list, built from a fresh read of the event
@@ -70,14 +71,15 @@ const LIST_PAGE_SIZE: u32 = 250;
 pub const MAX_ATTENDEES: u32 = super::MAX_GUESTS as u32;
 
 /// Of one event, exactly what [`super::read_event`] reads. Anything else an
-/// event carries (attachments, conference data, what a guest wrote when
-/// answering) is never sent. One macro so a listed event and a written one
+/// event carries (attachments, a conference's passcodes and PINs, what a
+/// guest wrote when answering) is never sent. One macro so a listed event and a written one
 /// are asked for alike.
 macro_rules! event_fields {
     () => {
         "id,status,iCalUID,summary,description,location,colorId,eventType,start,end,\
 organizer(email,self),attendeesOmitted,\
-attendees(email,displayName,responseStatus,organizer,self),transparency,htmlLink,updated"
+attendees(email,displayName,responseStatus,organizer,self),transparency,htmlLink,updated,\
+hangoutLink,conferenceData(entryPoints(entryPointType,uri))"
     };
 }
 
@@ -97,7 +99,7 @@ pub const EVENT_FIELDS: &str = event_fields!();
 /// [`super::read_calendar_entry`] reads.
 pub const LIST_FIELDS: &str = "nextPageToken,\
 items(id,summary,summaryOverride,primary,selected,deleted,hidden,timeZone,\
-backgroundColor,colorId,accessRole)";
+backgroundColor,colorId,accessRole,conferenceProperties(allowedConferenceSolutionTypes))";
 
 /// The partial response of the read a guest edit starts with
 /// ([`CalendarApi::event_attendees`]): the attendee entries WHOLE, every
@@ -134,6 +136,16 @@ impl Notify {
     pub fn tells_guests(self) -> bool {
         self == Self::Guests
     }
+}
+
+/// What [`CalendarApi::reply_target`] reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyTarget {
+    /// The user's own attendee address on the event; None when Google
+    /// lists no entry for them (they are not a guest of this copy).
+    pub self_email: Option<String>,
+    /// The recurring series this event is an instance of.
+    pub series: Option<String>,
 }
 
 /// The most bytes read from one response. 250 events of the largest shape
@@ -342,6 +354,60 @@ impl CalendarApi {
         Ok((attendees, omitted))
     }
 
+    /// What a reply to an invitation needs from Google before it is sent:
+    /// the address the user was invited AS (the attendee entry marked
+    /// `self`, which can be an alias of the mailbox) and the series the
+    /// event is an instance of, if any. `maxAttendees=1` makes Google hand
+    /// back only the user's own entry ("only the participant is returned"),
+    /// so no other guest's address is read at all.
+    pub async fn reply_target(
+        &self,
+        token: &str,
+        calendar_id: &str,
+        event_id: &str,
+    ) -> Result<ReplyTarget, CallError> {
+        let mut url = self.url(&["calendars", calendar_id, "events", event_id])?;
+        url.query_pairs_mut()
+            .append_pair("maxAttendees", "1")
+            .append_pair("fields", "recurringEventId,attendees(email,self)");
+        let body = self.get(url, token).await?;
+        let self_email = body
+            .get("attendees")
+            .and_then(Value::as_array)
+            .and_then(|list| {
+                list.iter()
+                    .find(|a| a.get("self").and_then(Value::as_bool) == Some(true))
+            })
+            .and_then(|a| a.get("email").and_then(Value::as_str))
+            .filter(|e| !e.trim().is_empty())
+            .map(str::to_string);
+        let series = body
+            .get("recurringEventId")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        Ok(ReplyTarget { self_email, series })
+    }
+
+    /// What Join opens: the event's meeting link read from Google now
+    /// ([`super::meeting::join_url`]), whole. Only the fields a meeting can
+    /// be in are asked for. Held for this one request, never stored or
+    /// logged.
+    pub async fn join_url(
+        &self,
+        token: &str,
+        calendar_id: &str,
+        event_id: &str,
+    ) -> Result<Option<String>, CallError> {
+        let mut url = self.url(&["calendars", calendar_id, "events", event_id])?;
+        url.query_pairs_mut().append_pair(
+            "fields",
+            "hangoutLink,conferenceData(entryPoints(entryPointType,uri)),location,description",
+        );
+        let body = self.get(url, token).await?;
+        Ok(super::meeting::join_url(&body))
+    }
+
     /// `events.get` of one event, in the shape a write's answer has
     /// ([`EVENT_FIELDS`], the same attendee bound): what a create that names
     /// its own id reads first, so a create sent twice is answered with the
@@ -442,7 +508,11 @@ impl CalendarApi {
 
     /// A write's URL. `sendUpdates` is ALWAYS named (never left to Google's
     /// default) and is `notify`'s value; when an event comes back, the
-    /// one-event fields mask and the same attendee bound the sync uses.
+    /// one-event fields mask and the same attendee bound the sync uses, and
+    /// `conferenceDataVersion=1`. Without it Google "ignores conference data
+    /// in the event's body", so a Meet asked for would silently not be made.
+    /// A body that does not name `conferenceData` leaves the event's alone
+    /// either way.
     fn write_url(
         &self,
         segments: &[&str],
@@ -454,6 +524,7 @@ impl CalendarApi {
             let mut q = url.query_pairs_mut();
             q.append_pair("sendUpdates", notify.send_updates());
             if answers {
+                q.append_pair("conferenceDataVersion", "1");
                 q.append_pair("maxAttendees", &MAX_ATTENDEES.to_string());
                 q.append_pair("fields", EVENT_FIELDS);
             }

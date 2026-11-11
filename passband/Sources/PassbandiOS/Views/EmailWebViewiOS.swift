@@ -28,6 +28,9 @@ struct EmailWebViewRepresentable: UIViewRepresentable {
     let poolKey: String?
     /// The reader's find term for this body, or nil when there is none.
     let find: FindRequest?
+    /// Google's invitation email: the answer the event holds, as its `rst`
+    /// (1 yes, 2 no, 3 maybe), darkened in the body. Nil for any other mail.
+    var inviteAnswer: Int? = nil
     let onFind: (FindRequest, FindResult) -> Void
     let onHeight: (FrameMeasurement) -> Void
     let onLoaded: () -> Void
@@ -92,6 +95,7 @@ struct EmailWebViewRepresentable: UIViewRepresentable {
             poolKey: poolKey)
         context.coordinator.setQuotesCollapsed(webView, collapsed: collapseQuotes)
         context.coordinator.setFind(webView, find)
+        context.coordinator.setInviteAnswer(webView, inviteAnswer)
     }
 
     /// Return the frame to the pool rather than dropping it — that is what makes

@@ -868,6 +868,16 @@ final class AppStore {
     /// A write to Google is out: the card's buttons wait, so one Enter is
     /// one event.
     var calendarWriting = false
+    /// Replies to invitations out now, by `Agenda.itemId`: one answer per
+    /// event at a time, so a double press is one reply. Separate from
+    /// `calendarWriting`, which the event pane owns.
+    var calendarReplying: Set<String> = []
+    /// "All events" or "just this one", where the user picked it on a
+    /// recurring invitation's detail, by `Agenda.itemId`. Absent follows
+    /// `CalendarReply.defaultsToSeries`.
+    var calendarReplySeries: [String: Bool] = [:]
+    /// A Join press waiting on its link, by `Agenda.itemId`.
+    var calendarJoining: Set<String> = []
     /// Where the event pane's write stands (`EventPaneState`): editable,
     /// out, frozen after an answer that never came, or done. Reset with the
     /// pane.

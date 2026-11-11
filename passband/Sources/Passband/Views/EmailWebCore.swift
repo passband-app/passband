@@ -354,6 +354,7 @@ struct EmailWebView: View {
                 // NOT POOLABLE — see WebFramePool.Key.
                 poolKey: cacheKey,
                 find: findRequest,
+                inviteAnswer: store.inviteAnswerShown(html: prepared.html),
                 onFind: { request, result in noteFind(request, result) },
                 onHeight: { m in
                     apply(m)
@@ -372,6 +373,10 @@ struct EmailWebView: View {
                         store.openComposeMailto($0)
                         return
                     }
+                    // Yes / No / Maybe in Google's invitation email: answered
+                    // here, through the calendar, rather than in a browser
+                    // tab. One Passband cannot place opens as before.
+                    if store.replyFromInviteLink($0) { return }
                     // Counted only when it is a link `Opener` will actually
                     // open: an in-page anchor reaches here too and goes
                     // nowhere, and "clicked" should mean they went.
@@ -1306,6 +1311,11 @@ final class EmailFrameCoordinator: NSObject {
     private var wantedFind: FindRequest?
     private var appliedFind: FindRequest?
 
+    /// The invitation answer to darken (`rst`: 1 yes, 2 no, 3 maybe), wanted
+    /// and drawn, kept apart like the find's. Nil is none.
+    private var wantedInvite: Int?
+    private var appliedInvite: Int??
+
     /// THE DENSITY THE HOST WANTS THE DOCUMENT DRAWN AT, and the one it is
     /// drawn at. Kept apart for the reason the quoted history's two are: `load`
     /// runs on every update, and a restyle is a script round trip and a full
@@ -1509,6 +1519,25 @@ final class EmailFrameCoordinator: NSObject {
         applyFind(webView)
     }
 
+    func setInviteAnswer(_ webView: WKWebView, _ rst: Int?) {
+        wantedInvite = rst
+        applyInvite(webView)
+    }
+
+    /// Tag the document with the answer the event holds; the stylesheet's
+    /// `inviteAnswerSheet` does the drawing.
+    private func applyInvite(_ webView: WKWebView, fresh: Bool = false) {
+        guard documentLive, fresh || appliedInvite != .some(wantedInvite) else { return }
+        appliedInvite = .some(wantedInvite)
+        let script =
+            if let rst = wantedInvite, (1...3).contains(rst) {
+                "document.documentElement.setAttribute('data-passband-rst','\(rst)')"
+            } else {
+                "document.documentElement.removeAttribute('data-passband-rst')"
+            }
+        webView.evaluateJavaScript(script)
+    }
+
     /// Paint the wanted term and tell the host what the document holds of it.
     /// `fresh` re-reads a document whose DRAWN text changed under a term it
     /// had already searched: the quoted history folding or unfolding.
@@ -1556,6 +1585,7 @@ final class EmailFrameCoordinator: NSObject {
         settle(webView)
         // After the collapse, so the search reads the document as it is drawn.
         applyFind(webView, fresh: true)
+        applyInvite(webView, fresh: true)
     }
 
     /// A navigation that failed will never report anything, and a host still
@@ -1787,6 +1817,7 @@ final class EmailFrameCoordinator: NSObject {
             + "table{max-width:100%;}"
             + "pre{white-space:pre-wrap!important;}"
             + "blockquote{margin:8px 0;padding-left:10px;border-left:2px solid #d8dee6;color:#555;}"
+            + CalendarReply.emailSheet
     }
 
     /// A length in CSS pixels, which are points here. Whole numbers print as

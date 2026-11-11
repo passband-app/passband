@@ -43,6 +43,11 @@ struct EventDraft: Hashable, Sendable {
     /// Wave 5. The guests line, as the recipient field holds it: addresses
     /// joined by commas, a half-typed one last (read by `EventGuests.read`).
     var guests = ""
+    /// A Google Meet on it. Nil FOLLOWS the guests (a new event with
+    /// somebody on it gets one; a note to self does not) until the user
+    /// sets it; an edit starts from whether the event has a Meet. Sent only
+    /// where the calendar makes one (`EventForm.wire`'s `meet`).
+    var meet: Bool?
     /// Wave 6. How the title is being read for a day, a time and a name
     /// (Lib/TitleParse.swift). Off on an edit.
     var titleRead = TitleRead()
@@ -209,6 +214,24 @@ enum EventForm {
         return d
     }
 
+    /// A new all-day run from days swept on the month grid, first to last
+    /// inclusive, either way round. One day is a one-day all-day event.
+    static func newDraft(
+        from a: Date, through b: Date, now: Date, calendarId: String?, calendar: Calendar
+    ) -> EventDraft {
+        let first = calendar.startOfDay(for: min(a, b))
+        let last = calendar.startOfDay(for: max(a, b))
+        var d = EventDraft()
+        d.calendarId = calendarId
+        d.allDay = true
+        d.date = dateText(first, today: now, calendar: calendar)
+        d.endDate = first == last ? "" : dateText(last, today: now, calendar: calendar)
+        // The days are the user's own; the title reads only who it is with.
+        d.titleRead.on = true
+        d.titleRead.hand = [.date, .start, .end]
+        return d
+    }
+
     /// The draft moved to another day (a day clicked on the grid beside the
     /// pane). A run of days keeps its length: the end day moves with the
     /// start. An end day that does not read is left for the form to say so.
@@ -274,6 +297,7 @@ enum EventForm {
         d.location = event.location ?? ""
         d.notes = event.description ?? ""
         d.guests = EventGuests.fieldText(event)
+        d.meet = event.meeting == "meet"
         guard let item = Agenda.item(event, calendar: calendar) else { return d }
         d.allDay = item.allDay
         d.date = dateText(item.start, today: today, calendar: calendar)
@@ -368,12 +392,20 @@ enum EventForm {
 
     // MARK: writing
 
+    /// Whether the draft asks for a Google Meet: the user's say, else on
+    /// when it names a guest.
+    static func wantsMeet(_ d: EventDraft) -> Bool {
+        d.meet ?? !EventGuests.read(d.guests).addresses.isEmpty
+    }
+
     /// A new event's body. `guests` says whether the guests line is open for
     /// this draft; closed (the default), the body names nobody whatever the
     /// line holds. `notify` is never set here: `EventGuests.notify` decides
-    /// it, at the moment a labelled control is pressed.
+    /// it, at the moment a labelled control is pressed. `meet` says the
+    /// calendar makes a Meet (`CalendarStore.meetOffered`); off, none is
+    /// asked for whatever the draft says.
     static func wire(
-        _ d: EventDraft, today: Date, calendar: Calendar, guests: GuestTerms = .closed
+        _ d: EventDraft, today: Date, calendar: Calendar, guests: GuestTerms = .closed, meet: Bool = false
     ) -> Result<EventWrite, EventDraftProblem> {
         let title = savedTitle(d, today: today, calendar: calendar)
         if let p = titleProblem(title) { return .failure(p) }
@@ -397,7 +429,7 @@ enum EventForm {
             EventWrite(
                 calendar_id: calendarId, title: title, start: start, end: end, all_day: when.allDay,
                 location: location.isEmpty ? nil : location, description: notes.isEmpty ? nil : notes,
-                guests: invited))
+                guests: invited, meet: meet && (d.meet ?? (invited != nil)) ? true : nil))
     }
 
     /// An edit's body: only the fields that moved from what the card opened
@@ -412,7 +444,7 @@ enum EventForm {
     /// event's guests with it. Order and case are not a change.
     static func patch(
         _ d: EventDraft, from initial: EventDraft, today: Date, calendar: Calendar,
-        guests: GuestTerms = .closed
+        guests: GuestTerms = .closed, meet: Bool = false
     ) -> Result<EventPatch, EventDraftProblem> {
         var p = EventPatch()
         // An edit's title is never read for a day or a time (`TitleRead.on`
@@ -448,6 +480,7 @@ enum EventForm {
             if length(notes) > maxNotes { return .failure(.notesTooLong) }
             p.description = notes.isEmpty ? .clear : .set(notes)
         }
+        if meet, wantsMeet(d) != wantsMeet(initial) { p.meet = wantsMeet(d) }
         return .success(p)
     }
 
@@ -686,6 +719,64 @@ enum EventForm {
             return d == 0 ? 1440 : d
         }
         return candidates.min { ahead($0) < ahead($1) }
+    }
+
+    // MARK: the times menu
+
+    /// One line of a time well's menu: what it writes into the well, and what
+    /// the menu says ("10:30am", or for an end "10:30am (1.5 hrs)").
+    /// `minutes` is after the start's midnight, so an end past midnight is
+    /// over 1440.
+    struct TimeChoice: Equatable, Sendable {
+        let minutes: Int
+        let text: String
+        let label: String
+        let current: Bool
+    }
+
+    /// How far each side of a menu reaches. Half hours, twelve of them: a
+    /// short menu that always holds the well's own time, with anything
+    /// farther one typed word away.
+    static let choiceStep = 30
+    static let choiceCount = 24
+
+    /// The start well's menu: half hours from two hours before what it says
+    /// (9am when it says nothing readable), inside the one day. The time it
+    /// says is ticked when it is one of them.
+    static func startChoices(_ raw: String) -> [TimeChoice] {
+        let at = parseTime(raw)?.minutes
+        let anchor = at ?? 9 * 60
+        let last = 1440 - choiceStep
+        var first = (anchor / choiceStep) * choiceStep - 4 * choiceStep
+        first = max(0, min(first, last - (choiceCount - 1) * choiceStep))
+        return (0..<choiceCount).map { i in
+            let m = first + i * choiceStep
+            return TimeChoice(minutes: m, text: clockText(m), label: clockText(m), current: m == at)
+        }
+    }
+
+    /// The end well's menu: half hours after the start, each with how long
+    /// that makes the event. Without a readable start, the start's own list.
+    static func endChoices(start: String, end: String) -> [TimeChoice] {
+        guard let s = parseTime(start)?.minutes else { return startChoices(end) }
+        let at = parseEnd(end, after: s)
+        return (1...choiceCount).map { i in
+            let length = i * choiceStep
+            let m = s + length
+            return TimeChoice(
+                minutes: m, text: clockText(m), label: "\(clockText(m)) (\(durationText(length)))",
+                current: at == m % 1440)
+        }
+    }
+
+    /// "30 min", "1 hr", "1.5 hrs", "2 hrs", "1 hr 15 min".
+    static func durationText(_ minutes: Int) -> String {
+        if minutes < 60 { return "\(minutes) min" }
+        let h = minutes / 60
+        let m = minutes % 60
+        if m == 0 { return h == 1 ? "1 hr" : "\(h) hrs" }
+        if m == 30 { return "\(h).5 hrs" }
+        return "\(h) hr\(h == 1 ? "" : "s") \(m) min"
     }
 
     // MARK: text the card prints

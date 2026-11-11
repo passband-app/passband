@@ -2435,6 +2435,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
                 "truncated",
                 "color",
                 "access_role",
+                "meet",
             ]
         );
         assert_eq!(
@@ -2463,6 +2464,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
                 "guests_truncated",
                 "organizer_unreadable",
                 "from_gmail",
+                "meeting",
             ]
         );
         assert_eq!(
@@ -2502,7 +2504,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
     {
         let upgraded = SqliteStore::open(&path).unwrap();
         let conn = upgraded.lock().unwrap();
-        assert_eq!(columns(&conn, "calendar_events").len(), 23);
+        assert_eq!(columns(&conn, "calendar_events").len(), 24);
         assert_eq!(columns(&conn, "calendar_event_guests").len(), 9);
         assert!(index_exists(&conn));
         let mail: i64 = conn
@@ -2548,8 +2550,8 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
     let reopened = SqliteStore::open(&path).unwrap();
     {
         let conn = reopened.lock().unwrap();
-        assert_eq!(columns(&conn, "calendar_calendars").len(), 15);
-        assert_eq!(columns(&conn, "calendar_events").len(), 23);
+        assert_eq!(columns(&conn, "calendar_calendars").len(), 16);
+        assert_eq!(columns(&conn, "calendar_events").len(), 24);
         // A store from before guests was synced one attendee at a time: its
         // tokens are forgotten, so the next pass reads every calendar in full
         // with the new parameters.
@@ -2601,7 +2603,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
     let reopened = SqliteStore::open(&path).unwrap();
     {
         let conn = reopened.lock().unwrap();
-        assert_eq!(columns(&conn, "calendar_events").len(), 23);
+        assert_eq!(columns(&conn, "calendar_events").len(), 24);
         let sync: (Option<String>, Option<String>) = conn
             .query_row(
                 "SELECT sync_token, full_synced_at FROM calendar_calendars",
@@ -2632,7 +2634,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
     let reopened = SqliteStore::open(&path).unwrap();
     {
         let conn = reopened.lock().unwrap();
-        assert_eq!(columns(&conn, "calendar_events").len(), 23);
+        assert_eq!(columns(&conn, "calendar_events").len(), 24);
         let sync: (Option<String>, Option<String>) = conn
             .query_row(
                 "SELECT sync_token, full_synced_at FROM calendar_calendars",
@@ -2690,6 +2692,7 @@ fn an_events_guests_are_stored_with_it_and_go_with_it() {
         description: None,
         guests,
         guests_truncated: truncated,
+        meeting: None,
     };
     let count = |id: &str| -> i64 {
         store
@@ -2852,6 +2855,7 @@ fn calendar_places_are_pending_stored_and_pruned_by_location() {
         description: None,
         guests: Vec::new(),
         guests_truncated: false,
+        meeting: None,
     };
     for account in [acct, other] {
         store
@@ -3378,6 +3382,7 @@ fn calendar_search_index_follows_every_write_and_is_rebuilt_when_stale() {
         from_gmail: false,
         guests: Vec::new(),
         guests_truncated: false,
+        meeting: None,
     };
     let counts = || -> (i64, i64, i64) {
         let conn = store.lock().unwrap();

@@ -27,6 +27,7 @@ struct DaySweepTests {
         clampsAtTheDaysEnds()
         theNightCap()
         theLabel()
+        daysAcrossTheGrid()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -119,6 +120,26 @@ struct DaySweepTests {
         expect(label(540, 600) == "9 to 10am", "whole hours")
         expect(label(1380, 1440) == "11pm to 12am", "to midnight")
         expect(label(0, 15) == "12 to 12:15am", "from midnight")
+    }
+
+    /// Drag across days on the month grid: 100pt cells, 80pt rows, 6 rows.
+    static func daysAcrossTheGrid() {
+        func cell(_ x: Double, _ y: Double) -> Int {
+            DaysSweep.cell(x: x, y: y, cellWidth: 100, rowHeight: 80, rows: 6)
+        }
+        expect(cell(50, 40) == 0 && cell(250, 40) == 2, "the first row, by column")
+        expect(cell(50, 170) == 14, "the third row's first day")
+        expect(cell(-20, -5) == 0 && cell(900, 900) == 41, "off the grid clamps to its corners")
+        let one = DaysSweep.pieces(from: 3, to: 5)
+        expect(one == [DaysSweep.Piece(row: 0, first: 3, last: 5, startsHere: true, endsHere: true)],
+               "inside one week: one bar, rounded both ends")
+        let back = DaysSweep.pieces(from: 16, to: 5)
+        expect(back.count == 3 && back[1].first == 0 && back[1].last == 6, "back across two week breaks: three bars, the middle whole")
+        expect(back.first == DaysSweep.Piece(row: 0, first: 5, last: 6, startsHere: true, endsHere: false),
+               "the first runs on to the row's end")
+        expect(back.last == DaysSweep.Piece(row: 2, first: 0, last: 2, startsHere: false, endsHere: true),
+               "the last starts at the row's beginning")
+        expect(DaysSweep.pieces(from: 6, to: 21).map(\.row) == [0, 1, 2, 3], "every row between, whole")
     }
 
     static func expect(_ cond: Bool, _ what: String) {

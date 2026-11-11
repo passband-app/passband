@@ -101,6 +101,8 @@ struct Google {
     /// Answer this many of the next one-event reads 404, found or not, as a
     /// replica that has not caught up would.
     stale_reads: usize,
+    /// Meet rooms made, for their links.
+    rooms: usize,
 }
 type Fake = Arc<Mutex<Google>>;
 
@@ -135,6 +137,25 @@ fn merge(target: &mut Value, patch: &Value) {
             }
         }
     }
+}
+
+/// Google's conference handling on a written event: a `createRequest` for a
+/// Meet becomes a room, but only under `conferenceDataVersion=1`; without it
+/// Google "ignores conference data in the event's body".
+fn make_meet(event: &mut Value, q: &HashMap<String, String>, n: usize) {
+    let Some(request) = event.pointer("/conferenceData/createRequest").cloned() else {
+        return;
+    };
+    if q.get("conferenceDataVersion").map(String::as_str) != Some("1")
+        || request.pointer("/conferenceSolutionKey/type") != Some(&json!("hangoutsMeet"))
+    {
+        event.as_object_mut().unwrap().remove("conferenceData");
+        return;
+    }
+    event["conferenceData"] = json!({
+        "entryPoints": [{"entryPointType": "video", "uri": format!("https://meet.google.com/new-room-{n}")}],
+        "conferenceSolution": {"key": {"type": "hangoutsMeet"}},
+    });
 }
 
 /// Google's `maxAttendees` on one event of an answer: "If there are more than
@@ -255,6 +276,8 @@ async fn insert_route(
         }
     };
     let mut event = body;
+    g.rooms += 1;
+    make_meet(&mut event, &q, g.rooms);
     event["id"] = json!(id);
     event["status"] = json!("confirmed");
     event["iCalUID"] = json!(format!("{id}@google.com"));
@@ -293,7 +316,40 @@ async fn patch_route(
     let Some(event) = g.find(&calendar, &id) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    merge(event, &body);
+    // `attendeesOmitted: true` on an update: "only update the participant's
+    // response". The named entries' answers change; nobody is added or
+    // dropped.
+    if body.get("attendeesOmitted") == Some(&json!(true)) {
+        let mut rest = body.clone();
+        let answers = rest
+            .as_object_mut()
+            .and_then(|o| {
+                o.remove("attendeesOmitted");
+                o.remove("attendees")
+            })
+            .unwrap_or(Value::Null);
+        for answer in answers.as_array().into_iter().flatten() {
+            let email = answer["email"].as_str().unwrap_or_default();
+            if let Some(entry) = event["attendees"]
+                .as_array_mut()
+                .into_iter()
+                .flatten()
+                .find(|a| {
+                    a["email"]
+                        .as_str()
+                        .is_some_and(|e| e.eq_ignore_ascii_case(email))
+                })
+            {
+                entry["responseStatus"] = answer["responseStatus"].clone();
+            }
+        }
+        merge(event, &rest);
+    } else {
+        merge(event, &body);
+    }
+    let rooms = g.rooms + 1;
+    let event = g.find(&calendar, &id).unwrap();
+    make_meet(event, &q, rooms);
     event["updated"] = json!("2026-10-05T11:00:00.000Z");
     let mut event = event.clone();
     omit_attendees(&mut event, &q);
@@ -1245,7 +1301,10 @@ async fn a_first_sync_reads_the_window_in_full_and_serves_every_field() {
             "html_link",
             "id",
             "location",
+            "meeting",
             "organizer",
+            "recurring",
+            "respondable",
             "self_response",
             "start",
             "start_timezone",
@@ -1287,6 +1346,11 @@ async fn a_first_sync_reads_the_window_in_full_and_serves_every_field() {
             "guests_truncated": false,
             "guest_editable": false,
             "from_gmail": false,
+            // The boss's invitation: the user may answer it.
+            "respondable": true,
+            "recurring": false,
+            // "Zoom: zoom.us/j/123" in the location.
+            "meeting": "zoom",
             // No booking mail is linked to it.
             "tickets": null,
         })
@@ -2764,12 +2828,20 @@ async fn every_request_names_the_fields_it_reads_and_bounds_the_attendees() {
     }
     for never in [
         "attachments",
-        "conferenceData",
         "comment",
         "additionalGuests",
+        // Of a conference, only the entry points' type and uri, which the
+        // sync reads for WHICH service and then drops: never its passcode,
+        // PIN or meeting code fields, nor anything else of it.
+        "passcode",
+        "pin",
+        "meetingCode",
+        "conferenceSolution",
+        "conferenceData,",
     ] {
         assert!(!EVENTS_FIELDS.contains(never), "{never}");
     }
+    assert!(EVENTS_FIELDS.contains("conferenceData(entryPoints(entryPointType,uri))"));
     assert_eq!(g.list_requests.len(), 2);
     for query in &g.list_requests {
         assert_eq!(query["fields"], LIST_FIELDS, "{query:?}");
@@ -2832,6 +2904,7 @@ fn row_at(id: String, now: DateTime<Utc>, minutes: i64) -> squelch_core::gcal::E
         description: None,
         guests: Vec::new(),
         guests_truncated: false,
+        meeting: None,
     }))
 }
 
@@ -3189,6 +3262,9 @@ async fn creating_an_event_goes_to_google_then_the_store_and_is_served() {
             "guests_truncated": false,
             "guest_editable": true,
             "from_gmail": false,
+            "respondable": false,
+            "recurring": false,
+            "meeting": null,
         })
     );
     // Stored at once, served by the timeline as answered, and the next sync
@@ -3837,11 +3913,11 @@ async fn colours_and_writable_calendars_are_served() {
         body["calendars"],
         json!([
             {"id": "primary", "name": "Me", "color": "#9fe1e7", "primary": true, "writable": true,
-             "can_invite": true},
+             "can_invite": true, "meet": true},
             {"id": HOLIDAYS, "name": "Holidays", "color": "#16a765", "primary": false,
-             "writable": false, "can_invite": false},
+             "writable": false, "can_invite": false, "meet": false},
             {"id": TEAM, "name": "Team", "color": "#f83a22", "primary": false, "writable": true,
-             "can_invite": false},
+             "can_invite": false, "meet": false},
         ])
     );
     assert_eq!(served(&w, "own").await.unwrap()["color"], "#9fe1e7");
@@ -3855,7 +3931,7 @@ async fn colours_and_writable_calendars_are_served() {
     assert_eq!(
         plain.timeline().await["calendars"],
         json!([{"id": "primary", "name": "Calendar primary", "color": null, "primary": true,
-                "writable": true, "can_invite": true}])
+                "writable": true, "can_invite": true, "meet": true}])
     );
     // A list role that drops to reader stops the calendar being writable.
     w.google().list[1]["accessRole"] = json!("reader");
@@ -7338,4 +7414,446 @@ async fn a_failed_plan_backs_off_and_counts_against_the_cap() {
         left += 1;
     }
     assert_eq!(left, squelch_core::gcal::remind::DAILY_CAP - attempts);
+}
+
+// --- replies to invitations ---------------------------------------------------
+
+fn reply_uri(calendar: &str, id: &str) -> String {
+    format!("{}/reply", event_uri(calendar, id))
+}
+
+/// A REPLY: only the user's own entry goes out (under the address they were
+/// invited as), under `attendeesOmitted`, the organizer told; every other
+/// guest stays as Google holds them. The organizer's own copy and a bad body
+/// are refused before Google hears anything. "All events" answers the
+/// series and stores the instance as Google then holds it.
+#[tokio::test]
+async fn a_reply_answers_only_the_users_own_entry_and_tells_the_organizer() {
+    let (w, start) = write_world("reply").await;
+    {
+        let mut g = w.google();
+        let mut party = timed("party", "Party", start + Duration::hours(8), 60);
+        party["organizer"] = json!({"email": "host@example.com"});
+        party["attendees"] = json!([
+            {"email": "host@example.com", "organizer": true, "responseStatus": "accepted"},
+            {"email": "me.alias@example.com", "self": true, "responseStatus": "needsAction"},
+            {"email": "pat@example.com", "responseStatus": "declined"},
+        ]);
+        let mut weekly = timed(
+            "weekly_20301110T170000Z",
+            "Weekly",
+            start + Duration::hours(10),
+            30,
+        );
+        weekly["organizer"] = json!({"email": "host@example.com"});
+        weekly["recurringEventId"] = json!("weekly");
+        weekly["attendees"] = json!([
+            {"email": "host@example.com", "organizer": true, "responseStatus": "accepted"},
+            {"email": "me@example.com", "self": true, "responseStatus": "needsAction"},
+        ]);
+        // The series itself, where a patch to it lands.
+        let mut series = weekly.clone();
+        series["id"] = json!("weekly");
+        series.as_object_mut().unwrap().remove("recurringEventId");
+        g.full.get_mut(PRIMARY).unwrap()[0].extend([party, weekly, series]);
+    }
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    let party = served(&w, "party").await.unwrap();
+    assert_eq!(party["respondable"], true);
+    assert_eq!(party["recurring"], false);
+    assert_eq!(
+        served(&w, "own").await.unwrap()["respondable"],
+        false,
+        "the user's own event"
+    );
+    assert_eq!(
+        served(&w, "weekly_20301110T170000Z").await.unwrap()["recurring"],
+        true
+    );
+
+    let before = writes(&w).len();
+    let (status, answered, cache) = send(
+        &w.app,
+        "POST",
+        &reply_uri("primary", "party"),
+        Some(json!({"response": "accepted", "notify": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answered}");
+    assert_eq!(cache.as_deref(), Some("no-store"));
+    assert_eq!(answered["self_response"], "accepted");
+    let sent = writes(&w);
+    assert_eq!(sent.len(), before + 1);
+    let write = sent.last().unwrap();
+    assert_eq!(
+        (write.method, write.event.as_deref()),
+        ("PATCH", Some("party"))
+    );
+    assert_eq!(
+        write.body,
+        json!({"attendeesOmitted": true,
+               "attendees": [{"email": "me.alias@example.com", "responseStatus": "accepted"}]}),
+        "the user's own entry, as the address they were invited as, and nobody else"
+    );
+    assert_eq!(write.query["sendUpdates"], "all", "the organizer is told");
+    {
+        let mut g = w.google();
+        let reads = g.reads.clone();
+        let (_, _, q) = reads.iter().rev().find(|(_, id, _)| id == "party").unwrap();
+        assert_eq!(q["maxAttendees"], "1", "no other guest's address is read");
+        let held = g.find(PRIMARY, "party").unwrap();
+        assert_eq!(held["attendees"][0]["responseStatus"], "accepted");
+        assert_eq!(
+            held["attendees"][2]["responseStatus"], "declined",
+            "other guests untouched"
+        );
+        assert_eq!(held["attendees"].as_array().unwrap().len(), 3);
+    }
+    assert!(audit(&w).contains(&(
+        "calendar_event_reply".to_string(),
+        Some("calendar:primary/party".to_string()),
+        Some("ok:accepted guests=2 notified=true".to_string()),
+    )));
+
+    // Refused before Google: the user's own event, an unknown one, a bad body.
+    let before = writes(&w).len();
+    let (status, refused, _) = send(
+        &w.app,
+        "POST",
+        &reply_uri("primary", "own"),
+        Some(json!({"response": "accepted", "notify": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(refused["code"], "not_invited");
+    let (status, _, _) = send(
+        &w.app,
+        "POST",
+        &reply_uri("primary", "nope"),
+        Some(json!({"response": "accepted"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, bad, _) = send(
+        &w.app,
+        "POST",
+        &reply_uri("primary", "party"),
+        Some(json!({"response": "needsAction"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(bad["code"], "invalid");
+    assert_eq!(writes(&w).len(), before, "Google heard none of them");
+
+    // "All events": the series is answered, the instance read back.
+    let (status, answered, _) = send(
+        &w.app,
+        "POST",
+        &reply_uri("primary", "weekly_20301110T170000Z"),
+        Some(json!({"response": "declined", "series": true, "notify": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answered}");
+    let write = writes(&w).last().unwrap().clone();
+    assert_eq!(
+        write.event.as_deref(),
+        Some("weekly"),
+        "the series, not the instance"
+    );
+    assert_eq!(
+        answered["id"], "weekly_20301110T170000Z",
+        "the instance is what is served"
+    );
+    assert!(
+        w.google()
+            .reads
+            .iter()
+            .rev()
+            .take(1)
+            .any(|(_, id, _)| id == "weekly_20301110T170000Z"),
+        "the instance is read again after the series is answered"
+    );
+    assert!(audit(&w).iter().any(|(a, _, d)| a == "calendar_event_reply"
+        && d.as_deref() == Some("ok:declined:series guests=1 notified=true")));
+
+    // "All events" on a single event answers that event.
+    let (status, _, _) = send(
+        &w.app,
+        "POST",
+        &reply_uri("primary", "party"),
+        Some(json!({"response": "tentative", "series": true, "notify": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(writes(&w).last().unwrap().event.as_deref(), Some("party"));
+}
+
+// --- Join -----------------------------------------------------------------------
+
+/// THE JOIN LINK IS NEVER STORED OR SERVED: the timeline says only which
+/// service ("zoom"), and Join reads the link, passcode and all, from Google
+/// when pressed.
+#[tokio::test]
+async fn join_reads_the_meeting_link_from_google_and_nothing_stores_it() {
+    let (w, start) = write_world("join").await;
+    {
+        let mut g = w.google();
+        let mut call = timed("call", "Standup", start + Duration::hours(9), 15);
+        call["conferenceData"] = json!({"entryPoints": [
+            {"entryPointType": "video", "uri": "https://us02web.zoom.us/j/555?pwd=Sesame42"}]});
+        call["description"] = json!("Join https://us02web.zoom.us/j/555?pwd=Sesame42");
+        let mut meet = timed("meet", "1:1", start + Duration::hours(10), 30);
+        meet["hangoutLink"] = json!("https://meet.google.com/abc-defg-hij");
+        g.full.get_mut(PRIMARY).unwrap()[0].extend([call, meet]);
+    }
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    let served_call = served(&w, "call").await.unwrap();
+    assert_eq!(served_call["meeting"], "zoom");
+    assert_eq!(served(&w, "meet").await.unwrap()["meeting"], "meet");
+    assert_eq!(served(&w, "own").await.unwrap()["meeting"], Value::Null);
+    let timeline = w.timeline().await.to_string();
+    assert!(
+        !timeline.contains("Sesame42"),
+        "the passcode is served nowhere"
+    );
+
+    let (status, joined, cache) = send(
+        &w.app,
+        "GET",
+        &format!("{}/join", event_uri("primary", "call")),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{joined}");
+    assert_eq!(cache.as_deref(), Some("no-store"));
+    assert_eq!(
+        joined["url"], "https://us02web.zoom.us/j/555?pwd=Sesame42",
+        "whole, from Google"
+    );
+    let reads = w.google().reads.clone();
+    let (_, _, q) = reads.iter().rev().find(|(_, id, _)| id == "call").unwrap();
+    assert!(
+        q["fields"].contains("conferenceData"),
+        "asked for where a meeting can be"
+    );
+
+    // No meeting, or no such event: refused before Google.
+    let before = w.google().reads.len();
+    let (status, none, _) = send(
+        &w.app,
+        "GET",
+        &format!("{}/join", event_uri("primary", "own")),
+        None,
+    )
+    .await;
+    assert_eq!(
+        (status, none["code"].as_str()),
+        (StatusCode::NOT_FOUND, Some("no_meeting"))
+    );
+    let (status, _, _) = send(
+        &w.app,
+        "GET",
+        &format!("{}/join", event_uri("primary", "nope")),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(w.google().reads.len(), before, "Google was not asked");
+    assert!(
+        !audit(&w).iter().any(|(a, _, _)| a.contains("join")),
+        "a read: no audit row"
+    );
+}
+
+#[tokio::test]
+async fn a_meet_is_asked_of_google_only_where_the_calendar_allows_one() {
+    let (w, start) = write_world("meet").await;
+    // The team calendar's entry says Meet is allowed; the holidays one is
+    // read-only, and a calendar whose entry says nothing allows it only when
+    // it is the primary one.
+    {
+        let mut g = w.google();
+        g.list[1]["conferenceProperties"] =
+            json!({"allowedConferenceSolutionTypes": ["hangoutsMeet"]});
+        g.list[2]["conferenceProperties"] =
+            json!({"allowedConferenceSolutionTypes": ["eventHangout"]});
+    }
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    let calendars = w.timeline().await["calendars"].clone();
+    let offers = |id: &str| {
+        calendars
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .map(|c| c["meet"].clone())
+    };
+    assert_eq!(offers("primary"), Some(json!(true)), "the primary, unsaid");
+    assert_eq!(offers(TEAM), Some(json!(true)), "the list says so");
+    assert_eq!(offers(HOLIDAYS), Some(json!(false)), "read-only");
+    let lists = w.google().list_requests.clone();
+    assert!(
+        lists
+            .last()
+            .unwrap()
+            .get("fields")
+            .is_some_and(|f| f.contains("conferenceProperties(allowedConferenceSolutionTypes)")),
+        "the list asks which conferences each calendar allows"
+    );
+
+    // A create with `meet: true`: Google is asked for a room, keyed to the
+    // create's own id, and the event comes back as a Meet.
+    let begin = start + Duration::days(1);
+    let create = json!({
+        "calendar_id": "primary", "title": "Planning", "all_day": false,
+        "start": rfc(begin), "end": rfc(begin + Duration::minutes(30)),
+        "id": "planning1", "meet": true,
+    });
+    let (status, body, _) = send(&w.app, "POST", "/client/calendar/events", Some(create)).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let write = writes(&w).last().unwrap().clone();
+    assert_eq!(write.query["conferenceDataVersion"], "1");
+    assert_eq!(
+        write.body["conferenceData"],
+        json!({"createRequest": {"requestId": "meet-planning1",
+                                 "conferenceSolutionKey": {"type": "hangoutsMeet"}}})
+    );
+    assert_eq!(body["meeting"], "meet", "Join is there at once");
+    assert!(
+        !body.to_string().contains("new-room"),
+        "the link is not served"
+    );
+
+    // A create without it asks for nothing.
+    let plain = json!({
+        "calendar_id": "primary", "title": "Lunch", "all_day": false,
+        "start": rfc(begin), "end": rfc(begin + Duration::hours(1)),
+    });
+    let (status, body, _) = send(&w.app, "POST", "/client/calendar/events", Some(plain)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(
+        writes(&w)
+            .last()
+            .unwrap()
+            .body
+            .get("conferenceData")
+            .is_none()
+    );
+    assert_eq!(body["meeting"], Value::Null);
+    let lunch = body["id"].as_str().unwrap().to_string();
+
+    // Refused before Google: a calendar without Meet, a bad value.
+    let sent = writes(&w).len();
+    let mut on_holidays = json!({
+        "calendar_id": TEAM, "title": "x", "all_day": false,
+        "start": rfc(begin), "end": rfc(begin + Duration::hours(1)), "meet": "yes",
+    });
+    let (status, body, _) = send(
+        &w.app,
+        "POST",
+        "/client/calendar/events",
+        Some(on_holidays.clone()),
+    )
+    .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid"))
+    );
+    {
+        let mut g = w.google();
+        g.list[1]["conferenceProperties"] = json!({"allowedConferenceSolutionTypes": []});
+    }
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    on_holidays["meet"] = json!(true);
+    let (status, body, _) =
+        send(&w.app, "POST", "/client/calendar/events", Some(on_holidays)).await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("no_meet"))
+    );
+    assert_eq!(writes(&w).len(), sent, "Google heard nothing");
+
+    // An edit adds one to an event without a meeting...
+    let (status, body, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri("primary", &lunch),
+        Some(json!({"meet": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let write = writes(&w).last().unwrap().clone();
+    assert_eq!(write.query["conferenceDataVersion"], "1");
+    let request = write.body["conferenceData"]["createRequest"]["requestId"]
+        .as_str()
+        .unwrap();
+    assert!(
+        request.starts_with(&format!("meet-{lunch}-")),
+        "keyed to the event and the version edited, so a resend is the same request: {request}"
+    );
+    assert_eq!(body["meeting"], "meet");
+    // ...never a second one on top...
+    let sent = writes(&w).len();
+    let (status, body, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri("primary", &lunch),
+        Some(json!({"meet": true})),
+    )
+    .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("has_meeting"))
+    );
+    // ...and removes only a Meet.
+    let (status, body, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri("primary", "own"),
+        Some(json!({"meet": false})),
+    )
+    .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid"))
+    );
+    assert_eq!(writes(&w).len(), sent, "Google heard nothing");
+    // A Meet link only pasted into the place is found as a Meet, but it is
+    // not Google's conference, and `conferenceData: null` would leave it:
+    // refused, read from Google, rather than a save that changes nothing.
+    let pasted = json!({
+        "calendar_id": "primary", "title": "Standup", "all_day": false,
+        "start": rfc(begin), "end": rfc(begin + Duration::hours(1)),
+        "location": "https://meet.google.com/abc-defg-hij",
+    });
+    let (status, body, _) = send(&w.app, "POST", "/client/calendar/events", Some(pasted)).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["meeting"], "meet");
+    let standup = body["id"].as_str().unwrap().to_string();
+    let sent = writes(&w).len();
+    let (status, body, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri("primary", &standup),
+        Some(json!({"meet": false})),
+    )
+    .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid"))
+    );
+    assert_eq!(writes(&w).len(), sent, "nothing written");
+    let (status, body, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri("primary", &lunch),
+        Some(json!({"meet": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        writes(&w).last().unwrap().body,
+        json!({"conferenceData": null})
+    );
+    assert_eq!(body["meeting"], Value::Null);
 }

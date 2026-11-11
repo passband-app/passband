@@ -25,6 +25,7 @@ struct EventDraftTests {
     static func main() {
         timesRead()
         endsReadAgainstTheStart()
+        theTimesMenu()
         datesRead()
         aTimedDraftToTheWire()
         anAllDayDraftToTheWireWithTheInclusiveEnd()
@@ -60,6 +61,7 @@ struct EventDraftTests {
         aCreateFallbackIsTheUsersOwnNewEvent()
         theStoresPaneDecisions()
         theWave3WireDecodes()
+        aMeetFollowsTheGuestsUntilSet()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -145,6 +147,32 @@ struct EventDraftTests {
         expect(e("1", after: 11) == 13 * 60, "1 after 11am is 1pm")
         expect(e("8pm", after: 21) == 20 * 60, "a stated 8pm stays 8pm, whatever the start")
         expect(e("07:00", after: 22) == 7 * 60, "a 24-hour end is taken as written")
+    }
+
+    /// The wells' menus: a short run of half hours that holds the well's own
+    /// time, and an end menu that counts from the start.
+    static func theTimesMenu() {
+        let morning = EventForm.startChoices("10am")
+        expect(morning.count == 24, "twelve hours of half hours")
+        expect(morning.first?.text == "8am", "the start menu opens two hours before 10am")
+        let starts = EventForm.startChoices("7pm")
+        expect(starts.first?.text == "12pm", "an evening start shifts the run back to stay inside the day")
+        expect(starts.last?.text == "11:30pm", "and stops inside the day")
+        expect(starts.first { $0.current }?.text == "7pm", "7pm is ticked")
+        expect(EventForm.startChoices("11pm").first?.text == "12pm", "a late start shifts the run back, never past midnight")
+        expect(EventForm.startChoices("1am").first?.text == "12am", "an early one starts at midnight")
+        expect(EventForm.startChoices("").first?.text == "7am", "nothing readable centres on 9am")
+        expect(!EventForm.startChoices("7:45pm").contains { $0.current }, "an off-grid time ticks nothing")
+        expect(EventForm.parseTime(starts[13].text)?.minutes == 18 * 60 + 30, "what a pick writes reads back")
+
+        let ends = EventForm.endChoices(start: "10pm", end: "11pm")
+        expect(ends.first?.label == "10:30pm (30 min)", "the end menu starts half an hour after the start")
+        expect(ends[1].label == "11pm (1 hr)" && ends[1].current, "and ticks the end it holds")
+        expect(ends[2].label == "11:30pm (1.5 hrs)", "half hours read as halves")
+        expect(ends[5].text == "1am", "past midnight is the small hours")
+        expect(EventForm.parseEnd(ends[5].text, after: 22 * 60) == 60, "and reads back as the next morning")
+        expect(EventForm.endChoices(start: "", end: "10am").first?.text == "8am", "no start: the start's own list")
+        expect(EventForm.durationText(75) == "1 hr 15 min", "an odd length says its minutes")
     }
 
     // MARK: typed dates
@@ -353,6 +381,22 @@ struct EventDraftTests {
         let early = swept(0, 15)
         expect(early.start == "12am" && early.end == "12:15am" && problem(early.withTitle("x")) == nil,
                "the day's first quarter hour saves")
+        sweptDays()
+    }
+
+    /// Days swept on the month grid open an all-day run over them, either
+    /// way round.
+    static func sweptDays() {
+        func run(_ a: String, _ b: String) -> EventDraft {
+            EventForm.newDraft(from: day(a), through: day(b), now: now, calendarId: "primary", calendar: cal)
+        }
+        let three = run("2026-10-12", "2026-10-14")
+        expect(three.allDay && three.date == "Mon Oct 12" && three.endDate == "Wed Oct 14",
+               "an all-day run, first day through last")
+        expect(run("2026-10-14", "2026-10-12") == three, "swept backwards, the same run")
+        let w = wire(three.withTitle("x"))
+        expect(w?.all_day == true && w?.start == "2026-10-12" && w?.end == "2026-10-14", "on the wire, the last day inclusive")
+        expect(run("2026-10-12", "2026-10-12").endDate.isEmpty, "one day: the same day")
     }
 
     /// A day clicked on the grid beside the pane sets the draft's date.
@@ -676,7 +720,7 @@ struct EventDraftTests {
     static func theVerdictKeysOnTheCode() {
         let statuses: [String: Int] = [
             "invalid": 400, "unknown_calendar": 400, "read_only": 400, "cannot_invite": 400,
-            "guests_read_only": 400, "cannot_notify": 400, "not_granted": 403, "not_editable": 403,
+            "guests_read_only": 400, "cannot_notify": 400, "no_meet": 400, "has_meeting": 400, "not_granted": 403, "not_editable": 403, "not_invited": 403,
             "not_found": 404, "id_in_use": 409, "already_deleted": 409, "calendar_gone": 410,
             "google_refused": 502,
         ]
@@ -1289,6 +1333,67 @@ struct EventDraftTests {
         let keys = body2.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?.keys.sorted()
         expect(keys == ["all_day", "calendar_id", "end", "start", "title"],
                "a create body leaves an empty location and note out")
+    }
+
+    /// "Google Meet": a new event's follows its guests until clicked, goes
+    /// out only where the calendar makes one, and an edit sends it only when
+    /// it moved, never over a Zoom.
+    static func aMeetFollowsTheGuestsUntilSet() {
+        let cal = Calendar(identifier: .gregorian)
+        let today = Date(timeIntervalSince1970: 1_791_000_000)
+        var d = EventForm.newDraft(day: today, now: today, calendarId: "primary", calendar: cal)
+        d.title = "Planning"
+        expect(!EventForm.wantsMeet(d), "alone: no Meet")
+        d.guests = "sam@example.com"
+        expect(EventForm.wantsMeet(d), "a guest turns it on")
+        d.meet = false
+        expect(!EventForm.wantsMeet(d), "until the user says otherwise")
+        d.meet = true
+        let open = GuestTerms(open: true, owner: "me@example.com")
+        let wire = { (offered: Bool) in
+            (try? EventForm.wire(d, today: today, calendar: cal, guests: open, meet: offered).get())?.meet
+        }
+        expect(wire(true) == true, "asked for where offered")
+        expect(wire(false) == nil, "and never where not")
+        var following = d
+        following.meet = nil
+        expect((try? EventForm.wire(following, today: today, calendar: cal, guests: open, meet: true).get())?.meet == true,
+               "following the guests, and they are sent: a Meet")
+        let closedWire = (try? EventForm.wire(following, today: today, calendar: cal, guests: .closed, meet: true).get())?.meet
+        expect(closedWire == nil, "guests that are not sent make no Meet of their own accord")
+
+        func event(_ meeting: String?) -> TimelineEvent {
+            var e = TimelineEvent(
+                id: "e1", calendar_id: "primary", calendar_name: nil, title: "Sync",
+                start: "2026-10-08T10:00:00-07:00", end: "2026-10-08T11:00:00-07:00", all_day: false,
+                start_timezone: nil, location: nil, status: .confirmed, self_response: nil, busy: true,
+                organizer: nil, html_link: nil, color: nil, editable: true, description: nil)
+            e.meeting = meeting
+            return e
+        }
+        let initial = EventForm.draft(editing: event("meet"), today: today, calendar: cal)
+        expect(initial.meet == true, "an edit starts from the event's Meet")
+        var off = initial
+        off.meet = false
+        let patch = { (draft: EventDraft, offered: Bool) in
+            try? EventForm.patch(draft, from: initial, today: today, calendar: cal, meet: offered).get()
+        }
+        expect(patch(off, true)?.meet == false, "removed")
+        expect(patch(off, true)?.json()["meet"] as? Bool == false, "on the wire")
+        expect(patch(initial, true)?.isEmpty == true, "untouched: nothing")
+        expect(patch(off, false)?.meet == nil, "not offered: left alone")
+
+        let feed = TimelineFeed(calendars: [
+            TimelineCalendar(id: "primary", name: nil, color: nil, primary: true, writable: true, can_invite: true, meet: true),
+            TimelineCalendar(id: "team", name: nil, color: nil, primary: false, writable: true, can_invite: false, meet: false),
+            TimelineCalendar(id: "old", name: nil, color: nil, primary: false, writable: true, can_invite: nil),
+        ])
+        expect(CalendarWrite.meetOffered(calendarId: "primary", editing: nil, feed: feed), "a new event")
+        expect(!CalendarWrite.meetOffered(calendarId: "team", editing: nil, feed: feed), "not where Google says no")
+        expect(!CalendarWrite.meetOffered(calendarId: "old", editing: nil, feed: feed), "nor from an older daemon")
+        expect(CalendarWrite.meetOffered(calendarId: "primary", editing: event(nil), feed: feed), "an event with none")
+        expect(CalendarWrite.meetOffered(calendarId: "primary", editing: event("meet"), feed: feed), "its own Meet")
+        expect(!CalendarWrite.meetOffered(calendarId: "primary", editing: event("zoom"), feed: feed), "never over a Zoom")
     }
 
     static func expect(_ cond: Bool, _ what: String) {

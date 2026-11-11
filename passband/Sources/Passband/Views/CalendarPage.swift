@@ -396,31 +396,40 @@
                     return open(selected)
                 },
                 KeyBinding(declining: "y", "going") {
-                    guard free(), let ghost = selected?.ghost else { return false }
+                    guard free() else { return false }
+                    // A real invitation: yes, through Google.
+                    guard let ghost = selected?.ghost else { return store.replyByKey(selected?.event, .accepted) }
                     let state: GhostState? = ghost.state == .going ? nil : .going
                     Task { await store.markGhost(ghost, state, viaKey: true) }
                     return true
                 },
                 KeyBinding(declining: "x", "dismiss") {
-                    guard free(), let ghost = selected?.ghost else { return false }
+                    guard free() else { return false }
+                    // A real invitation: no, through Google.
+                    guard let ghost = selected?.ghost else { return store.replyByKey(selected?.event, .declined) }
                     Task { await store.markGhost(ghost, .dismissed, viaKey: true) }
                     return true
                 },
             ]
         }
 
-        /// `n`, `e` and ⌫, on both: a new event (on the month's selected day,
+        /// `n` (or `c`), `e` and ⌫, on both: a new event (on the month's selected day,
         /// or today from the agenda), and the selected event edited or
         /// deleted. Each declines where it does not apply: a daemon that lists
         /// no writable calendar, a ghost, an event that is not the user's.
         private func writeBindings(selected: AgendaItem?, day: Date?) -> [KeyBinding] {
             let free = { !store.modalOverlayOpen && !store.eventPaneOpen }
+            func newEvent() -> Bool {
+                guard free(), store.calendarCanCreate else { return false }
+                store.openEventEditor(day: day)
+                return true
+            }
             return [
-                KeyBinding(declining: "n", "new event") {
-                    guard free(), store.calendarCanCreate else { return false }
-                    store.openEventEditor(day: day)
-                    return true
-                },
+                KeyBinding(declining: "n", "new event") { newEvent() },
+                // `c` creates everywhere else (a message), so here it creates
+                // an event. Where no calendar is writable it declines, and the
+                // list's `c` (new message) answers as before.
+                KeyBinding(declining: "c", "new event") { newEvent() },
                 KeyBinding(declining: "e", "edit event") {
                     guard free(), let event = selected?.event, CalendarWrite.canEdit(event) else { return false }
                     store.openEventEditor(editing: event)
@@ -477,9 +486,11 @@
 
         /// The month's keys. Arrows move the day (and turn the page off the
         /// grid's edge), `t` is today, `[` `]` and `,` `.` the months; j/k
-        /// step through the selected day's items, and Enter goes one level
+        /// step through the selected day's items. Enter on a selected item
+        /// opens its mail; on the day itself (nothing selected) it makes a
+        /// new event there, or, with no calendar to write to, goes one level
         /// in: the day (where it is not already beside the grid), then its
-        /// first item, then that item's mail, as the detail's own hint says.
+        /// first item.
         /// Escape is the routed host's (`AppStore.calendarMonthBack`).
         private func monthBindings(order: [AgendaItem], item: AgendaItem?, day: Date) -> [KeyBinding] {
             // Beside the event pane the grid still MOVES (arrows, `t`, the
@@ -513,6 +524,11 @@
                 KeyBinding(declining: "Enter", "open") {
                     guard free() else { return false }
                     if let item { return open(item) }
+                    // A day with nothing selected on it: a new event there.
+                    if store.calendarCanCreate {
+                        store.openEventEditor(day: day)
+                        return true
+                    }
                     if !monthTwoPanes, !store.calendarDayOpen {
                         store.calendarDayOpen = true
                         return true
@@ -522,13 +538,17 @@
                     return true
                 },
                 KeyBinding(declining: "y", "going") {
-                    guard free(), let ghost = item?.ghost else { return false }
+                    guard free() else { return false }
+                    // A real invitation: yes, through Google.
+                    guard let ghost = item?.ghost else { return store.replyByKey(item?.event, .accepted) }
                     let state: GhostState? = ghost.state == .going ? nil : .going
                     Task { await store.markGhost(ghost, state, viaKey: true) }
                     return true
                 },
                 KeyBinding(declining: "x", "dismiss") {
-                    guard free(), let ghost = item?.ghost else { return false }
+                    guard free() else { return false }
+                    // A real invitation: no, through Google.
+                    guard let ghost = item?.ghost else { return store.replyByKey(item?.event, .declined) }
                     Task { await store.markGhost(ghost, .dismissed, viaKey: true) }
                     return true
                 },
@@ -538,8 +558,9 @@
         /// The week's keys. Left and right move the day (and turn the week off
         /// its edge), `[` `]` and `,` `.` turn a week, `t` is today. j / k and
         /// the up and down arrows walk the selected day's items, top-down as
-        /// drawn; Enter opens the first of them, then that item's mail. The
-        /// rest (`n`, `e`, ⌫, `y`, `x`) are the month's.
+        /// drawn. Enter on an item opens its mail; on the day, a new event
+        /// there (else the day's first item). The
+        /// rest (`n`, `c`, `e`, ⌫, `y`, `x`) are the month's.
         private func weekBindings(order: [AgendaItem], item: AgendaItem?, day: Date) -> [KeyBinding] {
             let free = { !store.modalOverlayOpen && !store.eventPaneOpen }
             func move(_ m: MonthMove) -> Bool {
@@ -567,18 +588,26 @@
                 KeyBinding(declining: "Enter", "open") {
                     guard free() else { return false }
                     if let item { return open(item) }
+                    if store.calendarCanCreate {
+                        store.openEventEditor(day: day)
+                        return true
+                    }
                     guard let first = order.first else { return false }
                     store.calendarMonthItem = first.id
                     return true
                 },
                 KeyBinding(declining: "y", "going") {
-                    guard free(), let ghost = item?.ghost else { return false }
+                    guard free() else { return false }
+                    // A real invitation: yes, through Google.
+                    guard let ghost = item?.ghost else { return store.replyByKey(item?.event, .accepted) }
                     let state: GhostState? = ghost.state == .going ? nil : .going
                     Task { await store.markGhost(ghost, state, viaKey: true) }
                     return true
                 },
                 KeyBinding(declining: "x", "dismiss") {
-                    guard free(), let ghost = item?.ghost else { return false }
+                    guard free() else { return false }
+                    // A real invitation: no, through Google.
+                    guard let ghost = item?.ghost else { return store.replyByKey(item?.event, .declined) }
                     Task { await store.markGhost(ghost, .dismissed, viaKey: true) }
                     return true
                 },

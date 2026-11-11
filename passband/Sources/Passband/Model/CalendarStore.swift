@@ -499,6 +499,14 @@ extension AppStore {
         openEventPane(CalendarEditorRequest(mode: .create, initial: draft, epoch: epoch))
     }
 
+    /// Days swept on the month grid: the pane, on an all-day run over them.
+    func openEventEditor(from first: Date, through last: Date, now: Date = Date()) {
+        guard calendarCanCreate, calendarEditor == nil, calendarDeleteAsk == nil else { return }
+        let draft = EventForm.newDraft(
+            from: first, through: last, now: now, calendarId: calendarWritable.first?.id, calendar: .current)
+        openEventPane(CalendarEditorRequest(mode: .create, initial: draft, epoch: epoch))
+    }
+
     /// `e` and the detail's Edit: the same pane, filled in. Only for an event
     /// the daemon called editable.
     func openEventEditor(editing event: TimelineEvent, now: Date = Date()) {
@@ -718,6 +726,12 @@ extension AppStore {
         EventGuests.plan(draft, editing: request.event, feed: calendarFeed)
     }
 
+    /// Whether the pane offers "Google Meet" for this draft
+    /// (`CalendarWrite.meetOffered`).
+    func meetOffered(_ draft: EventDraft, _ request: CalendarEditorRequest) -> Bool {
+        CalendarWrite.meetOffered(calendarId: draft.calendarId, editing: request.event, feed: calendarFeed)
+    }
+
     /// Save the pane. True when the daemon took it: the answer is laid into
     /// the page at once and the pane closes. A refusal keeps the pane open
     /// and editable with everything typed in it, after one quiet toast saying
@@ -749,17 +763,20 @@ extension AppStore {
         let plan = guestPlan(draft, request)
         guard let notify = EventGuests.notify(control, offered: plan.controls) else { return false }
         let terms = plan.terms(owner: calendarAccountEmail)
+        let meet = meetOffered(draft, request)
         let sent: SentWrite
         switch request.mode {
         case .create:
-            guard case .success(let made) = EventForm.wire(draft, today: now, calendar: cal, guests: terms)
+            guard
+                case .success(let made) = EventForm.wire(
+                    draft, today: now, calendar: cal, guests: terms, meet: meet)
             else { return false }
             sent = CalendarWrite.createWrite(
                 made, notify: notify, createId: request.createId, before: CalendarWrite.keys(calendarFeed))
         case .edit(let original):
             guard
                 case .success(let patch) = EventForm.patch(
-                    draft, from: request.initial, today: now, calendar: cal, guests: terms)
+                    draft, from: request.initial, today: now, calendar: cal, guests: terms, meet: meet)
             else { return false }
             // Nothing moved: nothing to send, nothing to say, and nobody
             // to tell, whichever control was pressed.
@@ -990,6 +1007,120 @@ extension AppStore {
             }
             return false
         }
+    }
+
+    // MARK: - answering an invitation
+
+    /// Yes / no / maybe to an invitation, through Google, which tells the
+    /// organizer (Lib/CalendarReply.swift). `series` answers every event of
+    /// a recurring one. The answer lands in the feed in place: nothing is
+    /// selected or closed, since it can come from the mail reader with the
+    /// calendar page nowhere in sight. A reply that may have reached Google
+    /// reloads the page rather than offering to send it again.
+    @discardableResult
+    func replyToEvent(
+        _ event: TimelineEvent, _ answer: ReplyAnswer, series: Bool, via: ReplyVia
+    ) async -> Bool {
+        let key = Agenda.itemId(event)
+        guard CalendarReply.canReply(event), !FixtureMode.isEnabled, !calendarReplying.contains(key) else {
+            return false
+        }
+        let ticket = calendarTicket
+        calendarReplying.insert(key)
+        defer { calendarReplying.remove(key) }
+        do {
+            let answered = try await APIClient.shared.replyToCalendarEvent(
+                calendarId: event.calendar_id, id: event.id, ReplyWrite(answer, series: series))
+            guard calendarLands(ticket) else { return false }
+            retireCalendarLoads()
+            calendarFeed = CalendarWrite.applying(answered, to: calendarFeed)
+            pushToast(
+                CalendarReply.doneText(answer, series: series, organizer: event.organizer), .success)
+            Analytics.capture(
+                "calendar_invite_answered",
+                ["answer": answer.rawValue, "series": series, "via": via.rawValue])
+            // A series answer comes back as this one event; the others
+            // arrive with the sync the daemon kicked.
+            if series { await refreshCalendar() }
+            return true
+        } catch {
+            guard calendarLands(ticket) else { return false }
+            switch CalendarWrite.verdict(of: error) {
+            case .mayHaveHappened:
+                pushToast(CalendarReply.uncertainText, .error)
+                await refreshCalendar()
+            case .notSent:
+                pushToast(CalendarReply.failureText(nil), .error)
+            case .refused(let refusal):
+                pushToast(CalendarReply.failureText(refusal), .error)
+            }
+            return false
+        }
+    }
+
+    /// Whether an answer given on the page covers the whole series: the
+    /// user's pick on the detail, else the default.
+    func replyCoversSeries(_ event: TimelineEvent) -> Bool {
+        guard event.recurring == true else { return false }
+        return calendarReplySeries[Agenda.itemId(event)] ?? CalendarReply.defaultsToSeries(event)
+    }
+
+    /// The page's y / x: an answer to the selected invitation, as the detail
+    /// would give it. False when the event is not one to answer.
+    func replyByKey(_ event: TimelineEvent?, _ answer: ReplyAnswer) -> Bool {
+        guard let event, CalendarReply.canReply(event) else { return false }
+        let series = replyCoversSeries(event)
+        // The answer it already holds, for just this one: nothing to send,
+        // as the card's own choice does (Google would tell the organizer again).
+        if ReplyAnswer(event.self_response) == answer, !series { return true }
+        Task { await replyToEvent(event, answer, series: series, via: .key) }
+        return true
+    }
+
+    /// Join: the meeting link, asked of the daemon (which reads it from
+    /// Google now) and opened. Never kept.
+    func joinMeeting(_ event: TimelineEvent) async {
+        let key = Agenda.itemId(event)
+        guard CalendarJoin.label(event.meeting) != nil, !FixtureMode.isEnabled,
+            !calendarJoining.contains(key)
+        else { return }
+        calendarJoining.insert(key)
+        defer { calendarJoining.remove(key) }
+        do {
+            let url = try await APIClient.shared.calendarJoinURL(calendarId: event.calendar_id, id: event.id)
+            guard Opener.isHTTP(url) else {
+                pushToast(CalendarJoin.failedText, .error)
+                return
+            }
+            Opener.open(url)
+            Analytics.capture("calendar_meeting_joined", ["service": event.meeting ?? "video"])
+        } catch {
+            let gone = (error as? APIError)?.code == "no_meeting"
+            pushToast(gone ? CalendarJoin.goneText : CalendarJoin.failedText, .error)
+        }
+    }
+
+    /// A Yes / No / Maybe link in Google's invitation email, clicked in the
+    /// reader: answered here when the event is on the synced calendar and is
+    /// the user's to answer, instead of a browser tab. False hands the link
+    /// back to be opened as any other.
+    /// The answer to darken in an invitation email
+    /// (`CalendarReply.answerShown`): the synced event's, so a reply from the
+    /// card, a key or the email itself shows in the email at once.
+    func inviteAnswerShown(html: String) -> Int? {
+        guard !FixtureMode.isEnabled, let events = calendarFeed?.events else { return nil }
+        return CalendarReply.answerShown(html: html, events: events, accountEmail: calendarAccountEmail, now: Date())
+    }
+
+    func replyFromInviteLink(_ raw: String) -> Bool {
+        guard let link = InviteLink.read(raw), !FixtureMode.isEnabled,
+            let landing = CalendarReply.landing(
+                link, events: calendarFeed?.events ?? [], accountEmail: calendarAccountEmail, now: Date())
+        else { return false }
+        // Already the answer the email shows filled: handled, nothing sent.
+        if ReplyAnswer(landing.event.self_response) == link.answer, !landing.series { return true }
+        Task { await replyToEvent(landing.event, link.answer, series: landing.series, via: .mail) }
+        return true
     }
 
     /// The event is gone at Google: off the page, its detail, its question

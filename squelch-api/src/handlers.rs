@@ -2535,6 +2535,7 @@ pub async fn get_timeline(
                 "primary": c.is_primary,
                 "writable": c.writable(),
                 "can_invite": c.can_invite(),
+                "meet": c.offers_meet(),
             })
         })
         .collect();
@@ -2607,6 +2608,13 @@ pub(crate) fn calendar_event_view(
         "guests_truncated": row.guests_truncated,
         "guest_editable": event.guest_editable(account_email),
         "from_gmail": row.from_gmail,
+        // The user is a guest who may answer (yes / no / maybe), and whether
+        // the event is one of a recurring series ("all events" is offered).
+        "respondable": event.may_respond(),
+        "recurring": squelch_core::gcal::instance_series(&row.event_id).is_some(),
+        // The online meeting's service ("zoom", "meet", ...), for a Join
+        // button. Never its link: Join reads that from Google when pressed.
+        "meeting": row.meeting.map(|m| m.as_str()),
     })
 }
 

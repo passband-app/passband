@@ -108,7 +108,7 @@ data:
   # To go below it, comment the knob out first, let the roller converge the
   # fleet back to the in-process shape (a run exiting 0), and only then move
   # this line. SETUP.md §10b, Rollback; ROLLOUT.md, "Rolling back".
-  SQUELCH_WARDEN_IMAGE: "ghcr.io/passband-app/squelchd:daemon-0.0.18"
+  SQUELCH_WARDEN_IMAGE: "ghcr.io/passband-app/squelchd:daemon-0.0.19"
   # Everything below is a default, restated so this file is the one place an
   # operator has to look. See squelch-warden/README.md.
   SQUELCH_WARDEN_TENANT_NAMESPACE: "tenants"

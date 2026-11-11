@@ -6,8 +6,8 @@
 //!   nothing changes there.
 //! - `X-Content-Type-Options: nosniff`, unless a handler already set it.
 //!
-//! Both are what a DAST scan (the CASA assessment runs one,
-//! docs/VERIFICATION.md) reports on every response that lacks them.
+//! Both are what a DAST scan (the CASA assessment runs one) reports on
+//! every response that lacks them.
 
 use axum::{
     extract::Request,

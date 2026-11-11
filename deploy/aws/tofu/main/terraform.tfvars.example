@@ -13,8 +13,8 @@ budget_email = "ops@example.invalid" # budget alarm AND security alerts
 fck_nat_ami_name = "fck-nat-al2023-hvm-1.4.0-20260101-arm64-ebs"
 
 # carrier's egress. CONFIRM with `curl -s ifconfig.me` on carrier first.
-carrier_egress_cidrs = ["5.78.205.240/32"]
-# Your own /32, ONLY while doing Bifrost first-run config (CUTOVER.md Phase 4).
+carrier_egress_cidrs = ["203.0.113.10/32"]
+# Your own /32, ONLY while doing Bifrost first-run config.
 operator_cidrs = []
 
 # Leave false until every secret has a value and CI has pushed real images.

@@ -741,7 +741,7 @@ fn carrier_replaces_the_email_inferred_status_in_both_directions() {
             mid,
             &shipped(
                 "usps",
-                "9400111899223817428490",
+                "9400100000000000000000",
                 ShipmentStatus::OutForDelivery,
             ),
             t0,
@@ -922,7 +922,7 @@ fn list_pollable_shipments_filters_delivered_carrier_age_and_failures() {
     };
     let live = land("ups", "1Z999AA10123456784", ShipmentStatus::Shipped, now);
     land("ups", "1Z999AA10123456785", ShipmentStatus::Delivered, now);
-    land("amazon", "TBA303392911000", ShipmentStatus::Shipped, now);
+    land("amazon", "TBA000123456789", ShipmentStatus::Shipped, now);
     land("unknown", "555000111222", ShipmentStatus::Shipped, now);
     let stale = land(
         "fedex",
@@ -1172,7 +1172,7 @@ fn delivered_at_is_stamped_by_either_path_and_never_overwritten() {
         .upsert_shipment(
             acct,
             mid,
-            &shipped("usps", "9400111899223817428490", ShipmentStatus::Shipped),
+            &shipped("usps", "9400100000000000000000", ShipmentStatus::Shipped),
             t0,
         )
         .unwrap();
@@ -1945,7 +1945,7 @@ fn ship_extract_apply_replaces_the_ebay_phantom_with_the_real_impb() {
     let wrote = store
         .shipments_extract_apply(&ShipmentsApplied {
             is_shipment: true,
-            tracking_number: Some("9400111899223817428490".into()),
+            tracking_number: Some("9400100000000000000000".into()),
             order_ref: Some("234567890123".into()),
             item_name: Some("Double Take mirror".into()),
             carrier: "usps".into(),
@@ -1957,7 +1957,7 @@ fn ship_extract_apply_replaces_the_ebay_phantom_with_the_real_impb() {
 
     let rows = shipment_rows(&store, acct);
     assert_eq!(rows.len(), 1, "the phantom is gone: {rows:?}");
-    assert_eq!(rows[0].0, "9400111899223817428490");
+    assert_eq!(rows[0].0, "9400100000000000000000");
     assert_eq!(rows[0].1, "Double Take mirror");
     assert_eq!(rows[0].2.as_deref(), Some("234567890123"));
 
@@ -2077,8 +2077,8 @@ fn ship_extract_apply_negative_verdict_spares_a_real_number_it_fed() {
     let mid = ship_queued_msg(&store, acct, "g-ups", "t1");
     for number in [
         "1Z999AA10123456784",
-        "TBA303392911000",
-        "9400111899223817428490",
+        "TBA000123456789",
+        "9400100000000000000000",
     ] {
         store
             .upsert_shipment(acct, mid, &detected("ups", number, ""), Utc::now())
@@ -2910,7 +2910,7 @@ fn retired_detector_repairs_preserve_stored_facts() {
 const DROP_OFF_SUBJECT: &str = "Thanks for choosing The UPS Store";
 const DROP_OFF_BODY: &str = "Drop-Off Package Receipt\r\n\r\nPlease save for your records\r\n\
     DROP-OFF TIME:\r\n10:18 AM November 04, 2026\r\nTotal Packages:  1\r\n\r\n\
-    Below are the submitted packages for your records:\r\n\r\n * 1ZR0676H0301486638\r\n\r\n\
+    Below are the submitted packages for your records:\r\n\r\n * 1Z999AA10123456794\r\n\r\n\
     Thank you for choosing The UPS Store.";
 
 /// Ingest one message, then commit `records` for it through the real agent
@@ -2926,7 +2926,7 @@ fn commit_delivery(
     use crate::triage::decision::{EmailKind, MessageDecision, RecordProposal};
     let now = Utc::now();
     triaged(acct, gmail, gmail)
-        .from("store4546@theupsstore.com")
+        .from("store0001@theupsstore.com")
         .subject(subject)
         .body(body)
         .received_at(now)
@@ -2946,7 +2946,7 @@ fn commit_delivery(
         summary: "A package".into(),
         records: vec![RecordProposal::Delivery {
             carrier: Some("ups".into()),
-            tracking_number: Some("1ZR0676H0301486638".into()),
+            tracking_number: Some("1Z999AA10123456794".into()),
             status: "shipped".into(),
             item_name: None,
             merchant: None,
@@ -2999,12 +2999,12 @@ fn an_inbound_shipment_with_the_same_record_still_projects() {
         acct,
         "g-shipped",
         "Your package has shipped",
-        "Your order is on its way via UPS. Tracking 1ZR0676H0301486638.",
+        "Your order is on its way via UPS. Tracking 1Z999AA10123456794.",
     );
     assert_eq!(stored.records.len(), 1);
     let rows = store
         .list_shipments(acct, true, KEEP_ALL_SHIPMENTS)
         .unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].tracking_number, "1ZR0676H0301486638");
+    assert_eq!(rows[0].tracking_number, "1Z999AA10123456794");
 }

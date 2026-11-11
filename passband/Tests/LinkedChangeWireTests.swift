@@ -36,7 +36,7 @@ struct LinkedChangeWireTests {
         let src = source ?? #"{"message_id": 1, "thread_id": "t1", "role": "created"}"#
         let pc = pending.map { #", "pending_change": \#($0)"# } ?? ""
         return #"""
-            {"id": 7, "kind": "ticket", "title": "Polar Inertia", "start": "2026-11-07T21:00:00-08:00",
+            {"id": 7, "kind": "ticket", "title": "Halcyon Drift", "start": "2026-11-07T21:00:00-08:00",
              "all_day": false, "commitment": "committed", "state": "ghost",
              "sources": [\#(src)]\#(pc)}
             """#
@@ -145,20 +145,20 @@ struct LinkedChangeWireTests {
         let moved = LinkedChange(
             ghost_id: 7, from: 9, kind: .moved, start: "2026-11-07T21:00:00-08:00", all_day: false)
         check(
-            Agenda.changeLine(moved, sender: "Endzeit", zone: nil, calendar: cal) == "Endzeit says Sat Nov 7, 9pm",
-            "a move: \(Agenda.changeLine(moved, sender: "Endzeit", zone: nil, calendar: cal))")
+            Agenda.changeLine(moved, sender: "Northside", zone: nil, calendar: cal) == "Northside says Sat Nov 7, 9pm",
+            "a move: \(Agenda.changeLine(moved, sender: "Northside", zone: nil, calendar: cal))")
         let day = LinkedChange(ghost_id: 7, from: 9, kind: .moved, start: "2026-11-08", all_day: true)
-        check(Agenda.changeLine(day, sender: "Endzeit", zone: nil, calendar: cal) == "Endzeit says Sun Nov 8", "all day")
+        check(Agenda.changeLine(day, sender: "Northside", zone: nil, calendar: cal) == "Northside says Sun Nov 8", "all day")
         let off = LinkedChange(ghost_id: 7, from: 9, kind: .cancelled, start: "", all_day: false)
         check(
-            Agenda.changeLine(off, sender: "  Endzeit ", zone: nil, calendar: cal) == "Endzeit says it's cancelled",
+            Agenda.changeLine(off, sender: "  Northside ", zone: nil, calendar: cal) == "Northside says it's cancelled",
             "a cancellation")
         check(
             Agenda.changeLine(off, sender: nil, zone: nil, calendar: cal) == "Another sender says it's cancelled",
             "no sender yet")
         let bad = LinkedChange(ghost_id: 7, from: 9, kind: .moved, start: "soon", all_day: false)
         check(
-            Agenda.changeLine(bad, sender: "Endzeit", zone: nil, calendar: cal) == "Endzeit says the time changed",
+            Agenda.changeLine(bad, sender: "Northside", zone: nil, calendar: cal) == "Northside says the time changed",
             "an unreadable start invents nothing")
         for line in [moved, day, off, bad].map({ Agenda.changeLine($0, sender: "X", zone: nil, calendar: cal) }) {
             check(!line.contains("\u{2014}") && !line.contains("\u{2013}"), "no dashes: \(line)")

@@ -17,9 +17,8 @@ modules:
 
   # THE LLM CANARY: a real model call through the exact public path every
   # tenant daemon uses (gateway auth -> virtual-key model allowlist -> upstream
-  # call). The 2026-08-19 outage — every fleet LLM call 400ing at the gateway
-  # for two days — was invisible to http_2xx probes because the gateway itself
-  # was up; only a real call fails the way triage fails.
+  # call). http_2xx probes cannot see a gateway that is up but refusing every
+  # LLM call; only a real call fails the way triage fails.
   # probe_success{job="blackbox-bifrost-llm"} is the fleet-level "are LLM calls
   # going through" signal.
   #
@@ -30,8 +29,7 @@ modules:
   # merely incomplete: if the gateway ever drops `output_config.format`, the
   # model answers prose, the daemon fails `json_parse` (deliberately a
   # ROW-level failure, so the row is marked processed on its heuristic seed),
-  # and a thin canary stays GREEN through a silent re-run of the original
-  # outage. So this body carries every element the daemon sends:
+  # and a thin canary stays GREEN while triage is broken. So this body carries every element the daemon sends:
   #   - a `system` block with `cache_control: ephemeral`  (prompt caching)
   #   - `output_config.format` as a json_schema            (structured output)
   #   - `output_config.effort`                             (new in daemon-0.0.2)
@@ -58,10 +56,9 @@ modules:
   # TYPE THAT MODEL LIST WITH NO SPACES AFTER THE COMMAS. The gateway stores
   # `allowed_models` verbatim and matches it EXACTLY, so a list pasted as
   # `anthropic/claude-opus-5 , claude-opus-5 ` becomes two entries that can
-  # never match anything. That is not hypothetical: it is how this canary was
-  # first configured, and it answered 403 "Model 'claude-opus-5' is not
-  # allowed for this virtual key" on every probe from 2026-08-21 to
-  # 2026-08-25 while rendering as correct in the UI and in every JSON listing.
+  # never match anything, and the probe answers 403 "Model 'claude-opus-5' is
+  # not allowed for this virtual key" while the list renders as correct in the
+  # UI and in every JSON listing.
   # `squelch-control llm sync --check` flags untrimmed entries on every key,
   # including this one, which is the cheapest way to catch it.
   #

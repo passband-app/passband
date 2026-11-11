@@ -238,8 +238,6 @@
         </nav>
         <article class="prose">
 <p>One section per surface: the <strong>invariant</strong>, the <strong>enforcement point</strong> (<code>file:symbol</code> - the line that actually holds it), and <strong>what a maintainer must not break</strong>.
-Verified against the tree on 2026-07-30; §6 was written against it on 2026-08-18,
-§8 on 2026-10-01.
 Stale source comments are flagged, not trusted.</p>
 <figure class="viz map" aria-label="How mail moves through Passband">
 <p class="viz-title">How mail moves, and where each rule sits</p>
@@ -873,8 +871,8 @@ chose that level. Nothing here changes what an agent can READ.</p></div>
 </figure>
 <p><strong>The setting.</strong> <code>app_settings</code> key <code>agent.write_access</code>, per mailbox:
 <code>none</code>, <code>drafts</code>, <code>send</code>; each level includes the ones before it. A mailbox
-that has never set it is at <code>drafts</code> (<code>AgentWriteAccess::UNSET</code>; the owner&#39;s
-product decision, 2026-10-06). That default is safe to hold for the reason
+that has never set it is at <code>drafts</code> (<code>AgentWriteAccess::UNSET</code>), so an agent
+is useful out of the box without being able to send. That default is safe to hold for the reason
 <code>drafts</code> is the hard gate at all: a draft is a local row, marked as the
 agent&#39;s, that becomes mail only when the owner presses send. What it does
 cost is stated under the residual risks below.
@@ -1226,9 +1224,8 @@ address (<code>squelch-embed/src/metrics.rs</code>).</li>
 tenant holds it. The boundary is the NetworkPolicy pair (each tenant&#39;s one
 egress rule to the service, the service&#39;s ingress rule). The token is for the
 day the CNI is not enforcing policy and something that is not a tenant lands on
-the pod network: it gets a 401. It cannot be rotated without restarting every
-tenant today (<code>deploy/hosted/SETUP.md</code> §10b, Rollback); a rolling rotation
-path is an open follow-up.</p>
+the pod network: it gets a 401. Rotating it restarts every tenant
+(<code>deploy/hosted/SETUP.md</code> §10b, Rollback).</p>
 <p><strong>One tenant can deny service to the others, and that is accepted.</strong> The
 service is never told who is calling, so it has no per-tenant limit to apply.
 A compromised tenant pod (or one daemon backfilling hard) can keep the single
@@ -1934,14 +1931,14 @@ in the answer to the user&#39;s own write) and nowhere else, never in a log line
 never in a triage prompt. TWO EXCEPTIONS, each the owner&#39;s decision. First
 (2026-10-28): an event&#39;s location string, alone, goes to the configured
 provider&#39;s small (<code>notify</code>) model to be cut down to the place the card shows
-(see &quot;The card&#39;s place&quot; below). Second (2026-10-29): to plan an event&#39;s
+(see &quot;The card&#39;s place&quot; below). Second: to plan an event&#39;s
 reminder, the same small model reads the event (title, times, place,
 description, the user&#39;s answer, busy or free, the COUNT of other guests and
 whether the user organizes it) and the subjects, sender display names and
 attachment filenames of the mail linked to it (see &quot;Calendar reminders&quot;
 below). Nothing calendar-related is on <code>/mcp</code> or <code>/client/agent/*</code>. The daemon writes to a calendar when the user creates,
-edits or deletes one event from the human door, and, ONE EXCEPTION (the owner&#39;s
-decision, 2026-10-28, behind the <code>calendar_own</code> hidden feature since 2026-10-30), when it
+edits or deletes one event from the human door, and, ONE EXCEPTION (behind the
+<code>calendar_own</code> hidden feature), when it
 replaces Gmail&#39;s own copy of an event with its own and keeps that event current
 from authenticated mail (see &quot;Passband&#39;s own events&quot; below). Nothing else
 writes on its own. Google emails an event&#39;s guests only when a human-door

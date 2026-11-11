@@ -654,7 +654,7 @@ enum Agenda {
         return "\(date), \(clock(parsed.date, calendar))"
     }
 
-    /// The notice's line: "Endzeit says Sat Nov 7, 9pm", "Endzeit says it's
+    /// The notice's line: "Northside says Sat Nov 7, 9pm", "Northside says it's
     /// cancelled". `sender` nil (the mail not read yet, or gone) is "Another
     /// sender".
     static func changeLine(

@@ -57,7 +57,7 @@ struct EventGuestsTests {
 
     static func at(_ s: String) -> Date { AgendaTime.parse(s, zone: nil, calendar: cal)!.date }
 
-    static func draft(guests: String = "", calendarId: String? = "me", title: String = "Dreamers Dinner") -> EventDraft {
+    static func draft(guests: String = "", calendarId: String? = "me", title: String = "Potluck Dinner") -> EventDraft {
         var d = EventDraft()
         d.title = title
         d.calendarId = calendarId
@@ -80,7 +80,7 @@ struct EventGuestsTests {
         guestEditable: Bool? = true
     ) -> TimelineEvent {
         TimelineEvent(
-            id: id, calendar_id: calendar, calendar_name: "Personal", title: "Dreamers Dinner",
+            id: id, calendar_id: calendar, calendar_name: "Personal", title: "Potluck Dinner",
             start: "2026-10-08T19:45:00-07:00", end: "2026-10-08T21:00:00-07:00", all_day: false,
             start_timezone: nil, location: nil, status: .confirmed, self_response: nil, busy: true,
             organizer: nil, html_link: nil, color: "#039be5", editable: true, description: nil,
@@ -475,9 +475,9 @@ struct EventGuestsTests {
         expect(patch(cleared, .closed)?.guests == nil, "nor an emptied one")
 
         var titled = initial
-        titled.title = "Dreamers Supper"
+        titled.title = "Potluck Supper"
         let t = patch(titled)
-        expect(t?.title == "Dreamers Supper" && t?.guests == nil, "a title edit leaves the guests alone")
+        expect(t?.title == "Potluck Supper" && t?.guests == nil, "a title edit leaves the guests alone")
         let quiet = t?.json() ?? [:]
         expect(quiet["notify"] == nil && quiet["guests"] == nil, "notify is absent unless asked for")
         expect(t?.json(notify: false)["notify"] == nil, "false writes no key")

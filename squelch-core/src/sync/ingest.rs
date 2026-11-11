@@ -329,7 +329,7 @@ pub fn join_recipient_lists(lists: &[&str]) -> String {
 /// Used ONLY to filter recipient contact seeding, so mailto-unsubscribe traffic
 /// never becomes a "person I know" and pollutes triage. Combines local-part
 /// prefixes, domain first-label hints, and token-like locals (hex/UUID blobs).
-/// Ordinary addresses — including a dotted local like `rentbikes.net` — must pass.
+/// Ordinary addresses — including a dotted local like `lakeside.rentals` — must pass.
 pub fn is_robot_address(addr: &str) -> bool {
     let addr = addr.trim().to_ascii_lowercase();
     let (local, domain) = match addr.split_once('@') {
@@ -393,7 +393,7 @@ pub fn is_robot_address(addr: &str) -> bool {
     }
 
     // Break the local on the usual separators and inspect each run, so a real
-    // dotted name (rentbikes.net) never trips it — its runs are short and
+    // dotted name (lakeside.rentals) never trips it — its runs are short and
     // vowel-rich.
     for run in local.split(['.', '-', '_', '=']) {
         if is_token_blob(run) {
@@ -1092,7 +1092,7 @@ pub fn ingest(
             // IMPORTANT: for an alternative carrying ONLY an HTML part,
             // mail-parser registers that part under `text_body` too, so
             // `body_text(0)` would run MAIL-PARSER'S html-to-text — which
-            // glues adjacent block elements ("EPIC SteakTable for 4") and
+            // glues adjacent block elements ("Ember SteakTable for 4") and
             // leaks `<script type=...>` content (JSON-LD blobs), wrecking
             // every word-boundary regex and the LLM/FTS/embed text
             // downstream. Check the actual part type and route real HTML
@@ -1426,7 +1426,7 @@ mod tests {
 
     #[test]
     fn ebay_return_refund_is_not_a_past_due_bill() {
-        // The real inbox case (today = 2026-07-09): an eBay RETURN REFUND arriving
+        // The case (today = 2026-07-09): an eBay RETURN REFUND arriving
         // "by July 13th" was mis-triaged as a past-due bill "104 weeks after due
         // date". It must now produce NO bill tier, NO past_due, and no deadline row.
         let eml = "From: eBay <ebay@ebay.com>\r\n\
@@ -1467,11 +1467,11 @@ mod tests {
         // mail-parser's `text_body` list, and its converter glues block
         // elements ("SteakTable for 4") and leaks <script> JSON-LD — which
         // broke every word-boundary regex (the reservation detector saw
-        // "BoyntonConfirmation #"). Ours must separate blocks, drop scripts,
+        // "RiveraConfirmation #"). Ours must separate blocks, drop scripts,
         // and the reservation must then detect end-to-end.
         let eml = "From: OpenTable <reservations@opentable.com>\r\n\
                    To: me@example.com\r\n\
-                   Subject: Your reservation confirmation for EPIC Steak\r\n\
+                   Subject: Your reservation confirmation for Ember Steak\r\n\
                    Date: Fri, 31 Jul 2026 19:47:00 +0000\r\n\
                    MIME-Version: 1.0\r\n\
                    Content-Type: multipart/alternative; boundary=X\r\n\
@@ -1479,15 +1479,15 @@ mod tests {
                    --X\r\n\
                    Content-Type: text/html; charset=utf-8\r\n\
                    \r\n\
-                   <div>EPIC Steak</div><div>Table for 4 on Monday, August 3, 2026 at 6:00 pm</div>\
-                   <div>Name: Braelyn Boynton</div><div>Confirmation #: 2110425567</div>\
+                   <div>Ember Steak</div><div>Table for 4 on Monday, August 3, 2026 at 6:00 pm</div>\
+                   <div>Name: Jamie Rivera</div><div>Confirmation #: 4815162342</div>\
                    <script type=\"application/ld+json\">{\"@type\":\"FoodEstablishmentReservation\"}</script>\r\n\
                    --X--\r\n";
         let f = raw(1, "g-resv", eml, false);
         let t = ingest(&f, &Stage1Config::default(), Utc::now(), |_| false);
 
         assert!(
-            t.message.body.contains("Boynton Confirmation #"),
+            t.message.body.contains("Rivera Confirmation #"),
             "blocks must be separated: {}",
             t.message.body
         );
@@ -1546,7 +1546,7 @@ mod tests {
         // Same bug wearing a disguise: a part holding a couple of newlines is
         // as empty as one holding nothing, and `is_empty()` alone would miss it.
         let eml = "From: Venmo <venmo@venmo.com>\r\n\
-                   Subject: Ellie paid you $108.50\r\n\
+                   Subject: Riley paid you $42.00\r\n\
                    Date: Thu, 20 Aug 2026 23:16:16 +0000\r\n\
                    MIME-Version: 1.0\r\n\
                    Content-Type: multipart/alternative; boundary=X\r\n\
@@ -1559,12 +1559,12 @@ mod tests {
                    --X\r\n\
                    Content-Type: text/html; charset=utf-8\r\n\
                    \r\n\
-                   <div>Ellie Huxtable paid you $108.50</div>\r\n\
+                   <div>Riley Park paid you $42.00</div>\r\n\
                    --X--\r\n";
         let f = raw(1, "g-venmo2", eml, false);
         let t = ingest(&f, &Stage1Config::default(), Utc::now(), |_| false);
         assert!(
-            t.message.body.contains("Ellie Huxtable paid you"),
+            t.message.body.contains("Riley Park paid you"),
             "a whitespace-only plain part must not shadow the HTML: {:?}",
             t.message.body
         );
@@ -1894,17 +1894,17 @@ mod tests {
 
     #[test]
     fn robot_addresses_are_filtered() {
-        // Every one of these is a live example that MUST be filtered.
+        // Every one of these has the shape of a real unsubscribe address and MUST be filtered.
         let robots = [
-            "leave-HXZRUFGHTN2UJLNONA7FQQ27HY.110064@leave.mcmap.chase.com",
-            "9b284cf8-cebd-451c-95f9-cb939dc4682d+dac84f53-1111-2222-3333-444455556666+xyz@unsub.beehiiv.com",
-            "unsubscribe-mc.us22_89497e127e8f1447718905808.aef79637c2-4c8c73a87a@unsubscribe.mailchimpapp.net",
-            "dxirq3pb.560xwm.9t9eb.optout@e2ma.net",
+            "leave-QWKPZDMRTB7VXCLEFA3HJJ94NS.512288@leave.mcmap.chase.com",
+            "4f1a7c02-9d3e-4b8a-a6c1-e27f5b90d318+b3e9a1c7-1111-2222-3333-444455556666+xyz@unsub.beehiiv.com",
+            "unsubscribe-mc.us22_3c5d1e9a0b7f4a2e6d8c91f47.b1d2e3f4a5-6c7d8e9f0a@unsubscribe.mailchimpapp.net",
+            "kzvtq8mw.731qfx.4hb2c.optout@e2ma.net",
             "unsubscribe@gf.d.sender-sib.com",
             "unsubscribe@unsub.spmta.com",
-            "d6f58aa9b599316889f7d3cc20bf13bc@hous.craigslist.org",
-            "1axcsnai4asp830zv6mplv6pvulamp169hk3nf-bboynton97=gmail.com@bf02.na2.hubspotemail.net",
-            "097a2550-566e-11e6-83f0-002590e879ee@unsub.r.groupon.com",
+            "7e2c4b91a0d35f68c1b9e04a72d6f3e8@hous.craigslist.org",
+            "1qwfjdkz7ebn204xr9hlpm3cyteowk482jsu5v-jamie.rivera=example.com@bf02.na2.hubspotemail.net",
+            "5c3e8b10-2f7d-11e6-9a41-0a1b2c3d4e5f@unsub.r.groupon.com",
         ];
         for r in robots {
             assert!(is_robot_address(r), "should be filtered as robot: {r}");
@@ -1913,12 +1913,12 @@ mod tests {
 
     #[test]
     fn real_people_survive() {
-        // Real people that MUST pass through as contacts.
+        // Ordinary personal addresses that MUST pass through as contacts.
         let people = [
-            "ellie@elliehuxtable.com",
-            "bam@bamteamre.com",
-            "cameron@tcpre.com",
-            "rentbikes.net@gmail.com",
+            "riley@rileypark.example",
+            "bo@boteamre.example",
+            "morgan@tkpre.example",
+            "lakeside.rentals@example.com",
         ];
         for p in people {
             assert!(!is_robot_address(p), "should NOT be filtered: {p}");
@@ -1929,7 +1929,7 @@ mod tests {
     fn sent_mail_drops_robot_recipients_keeps_people() {
         let eml = "From: Me <me@example.com>\r\n\
                    To: Alice <alice@friends.com>, unsubscribe@unsub.spmta.com\r\n\
-                   Cc: d6f58aa9b599316889f7d3cc20bf13bc@hous.craigslist.org\r\n\
+                   Cc: 7e2c4b91a0d35f68c1b9e04a72d6f3e8@hous.craigslist.org\r\n\
                    Subject: mixed\r\n\
                    Date: Mon, 7 Jul 2026 10:00:00 +0000\r\n\
                    \r\n\

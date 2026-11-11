@@ -1,0 +1,8 @@
+# Copy to backend.hcl (gitignored) and fill in from `tofu output` in this root.
+# Then: tofu init -backend-config=backend.hcl
+bucket       = "passband-tofu-state-000000000000"
+key          = "bootstrap/terraform.tfstate"
+region       = "us-west-2"
+encrypt      = true
+kms_key_id   = "arn:aws:kms:us-west-2:000000000000:key/00000000-0000-0000-0000-000000000000"
+use_lockfile = true

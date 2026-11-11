@@ -6,7 +6,7 @@
 //   - Each cell lists its day top-down, one row per thing: trips and stays
 //     first, as named bars across the cells they cover (flat where they run
 //     on into the next row); then the day's own all-day items; then timed
-//     items by start, "7:45pm  Dreamers Dinner". What does not fit folds into
+//     items by start, "7:45pm  Potluck Dinner". What does not fit folds into
 //     "+N more", which opens the day.
 //   - Every row is a tinted chip in its calendar's colour, brought inside the
 //     app's palette by `CalendarColor` (same lightness for every calendar,

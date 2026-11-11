@@ -1447,7 +1447,7 @@ async fn live_a_refused_command_keeps_the_session_and_a_dropped_call_does_not_po
         let m = src.fetch_raw(&id, Urgency::Live).await.unwrap();
         assert!(matches!(m.raw, RawBody::Bytes(_)));
     }
-    // (Measured 2026-10-28: 10 of the 20 drops landed mid-command and were
+    // (Measured once: 10 of the 20 drops landed mid-command and were
     // retired; the count is timing-dependent, so it is not asserted.)
     let _ = other.logout().await;
 }

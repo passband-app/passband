@@ -63,7 +63,7 @@ enum RuleGrouping {
 
     /// What a rule reads as when it stands ALONE under its domain: the pattern
     /// with a bare `*@` dropped, because "the owner wrote a rule for
-    /// futureme.org" is the whole of what `*@futureme.org` says.
+    /// letters.example" is the whole of what `*@letters.example` says.
     static func standaloneLabel(_ pattern: String) -> String {
         guard let host = host(pattern) else { return pattern }
         guard let local = local(pattern) else { return host }
@@ -193,7 +193,7 @@ enum RuleGrouping {
     /// deliberately the narrowest one that answers the request: a WHOLE-DOMAIN
     /// rule (`*@garmin.com`) is a statement about a service, not about a
     /// person, and the owner wrote it as one. A rule naming one mailbox
-    /// (`justice.dixon@useintuito.com`) stays on the existing rule and keeps
+    /// (`sam.okafor@northwind.example`) stays on the existing rule and keeps
     /// its initials, because that is a private correspondent and the domain
     /// behind them is exactly what the file refuses to disclose.
     ///

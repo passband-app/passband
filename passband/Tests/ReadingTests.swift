@@ -123,13 +123,13 @@ struct ReadingTests {
         // it must still decode and fall back to the address.
         let feed = try JSONDecoder().decode(AgentFeed.self, from: Data("""
             {"version":2,"ranked_at":"2026-09-30T12:00:00Z","items":[
-              {"message_id":7,"thread_id":"mopar","from_addr":"21ebc25a592052689288153b3e3fb858@emails.revolutionparts.com",
-               "from_name":"Mopar.com National eStore",
+              {"message_id":7,"thread_id":"parts","from_addr":"8c1f0e7d2b9a4c6e5f3d1a0b9c8e7f6d@emails.partsdepot.example",
+               "from_name":"PartsDepot.com National eStore",
                "subject":"Fall Into Shipping Savings","received_at":"2026-09-30T11:00:00Z","score":1,
                "decision":{"kinds":["promotional"],"destinations":["reading"],"summary":"New gear","reason":"Bulk"},
                "attention":{"show_in_fye":false,"state":"informational","summary":"",
                  "factors":{"urgency":0,"action_need":0,"personal_relevance":0,"importance":0,"attention_at":null}}},
-              {"message_id":8,"thread_id":"old","from_addr":"offers@cmail.dickblick.com",
+              {"message_id":8,"thread_id":"old","from_addr":"offers@mail.artsupply.example",
                "subject":"Sale","received_at":"2026-09-29T11:00:00Z","score":1,
                "decision":{"kinds":["promotional"],"destinations":["reading"],"summary":"Sale","reason":"Bulk"},
                "attention":{"show_in_fye":false,"state":"informational","summary":"",
@@ -139,13 +139,13 @@ struct ReadingTests {
         let named = Reading.derive(updates: feed.items.map(\.readingRow), rules: [])
         precondition(named.count == 2)
         precondition(
-            SenderID.displayName(named[0].sender) == "Mopar.com National eStore",
+            SenderID.displayName(named[0].sender) == "PartsDepot.com National eStore",
             "A feed card is titled with the sender's display name, not its address")
         precondition(
-            named[0].address == "21ebc25a592052689288153b3e3fb858@emails.revolutionparts.com",
+            named[0].address == "8c1f0e7d2b9a4c6e5f3d1a0b9c8e7f6d@emails.partsdepot.example",
             "The name never becomes the grouping key")
         precondition(
-            named[1].sender == "offers@cmail.dickblick.com",
+            named[1].sender == "offers@mail.artsupply.example",
             "A feed with no from_name still decodes and falls back to the address")
         print("ok: 24 canonical Reading checks passed")
     }

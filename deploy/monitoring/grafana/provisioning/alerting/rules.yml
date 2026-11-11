@@ -16,11 +16,9 @@ groups:
     folder: Passband
     interval: 1m
     rules:
-      # 2026-09-28: the tenants ResourceQuota had been full at five for who
-      # knows how long, and the first anyone heard of it was a new user stuck
-      # on a signup that timed out. Every dimension, not just memory: on the
-      # 16 GB box cpu, ephemeral storage, pods and PVCs all used to bind before
-      # memory did (PRODUCTION.md, "How many tenants fit").
+      # A full tenants ResourceQuota makes signups time out silently, so warn
+      # before it fills. Every dimension, not just memory: cpu, ephemeral
+      # storage, pods and PVCs can each bind first.
       - uid: tenants-quota-near-full
         title: Tenants quota near full
         condition: C
@@ -34,7 +32,7 @@ groups:
           description: >-
             Signups start failing when any dimension reaches 100%: the warden applies the
             Deployment, the pod is refused, and the user sees a timeout.
-            Add RAM or raise the quota (PRODUCTION.md, "How many tenants fit").
+            Add RAM or raise the quota in deploy/hosted/70-tenant-limits.yaml.
         data:
           - refId: A
             datasourceUid: prometheus
@@ -57,9 +55,8 @@ groups:
                 - evaluator: { type: gte, params: [0.8] }
 
       # The quota is a file in git (deploy/hosted/70-tenant-limits.yaml), and
-      # for a while after 2026-09-28 it was not: a `kubectl patch` raised it
-      # on the box, the file kept the old numbers, and an apply of the file
-      # would have put the cap back. The warden's test can hold the file to
+      # a `kubectl patch` on the box can drift from it, so an apply of the file
+      # would silently put the old cap back. The warden's test can hold the file to
       # the ConfigMap; only the scrape can see the box. So: a hard line of the
       # quota changing, or a line appearing that was not there an hour ago,
       # or one going that was, is expected once, right after an apply of the
@@ -82,7 +79,7 @@ groups:
           description: >-
             A hard line of the tenants ResourceQuota changed. Expected right after
             `kubectl apply -f deploy/hosted/70-tenant-limits.yaml`; otherwise the box was
-            patched and the file no longer records it (PRODUCTION.md, "How many tenants fit"):
+            patched and the file no longer records it:
             put the change in the file, or apply the file.
         data:
           - refId: A
@@ -161,8 +158,7 @@ groups:
       # the pod IP, so every pod restart was a new alert: the old pod's series
       # vanished ("resolved"), the new pod's started at 0, and 15 minutes later
       # a tenant who had been stale the whole time was announced as stale
-      # again. A daemon roll did that to every stale tenant at once (2026-10-08,
-      # three in half an hour). `max by` drops the pod from the identity and
+      # again, for every stale tenant at once on a daemon roll. `max by` drops the pod from the identity and
       # takes the freshest sync any of the tenant's pods has reported;
       # `last_over_time` holds the old pod's last value across the gap before
       # the new pod is scraped, so the alert neither resolves nor restarts.
@@ -222,8 +218,8 @@ groups:
         annotations:
           summary: '{{ $labels.pod }} ({{ $labels.container }}) was OOM-killed'
           description: >-
-            The container hit its memory limit and was restarted. Read PRODUCTION.md, "If a tenant
-            is OOM-killed, read the constraint first", before raising anything. On the shared
+            The container hit its memory limit and was restarted. Find which constraint
+            binds before raising anything. On the shared
             embedder, more than one tenant doing this is the 512Mi limit being too small: pin
             SQUELCH_WARDEN_MEMORY_LIMIT in 15-warden-config.yaml and redo 70-tenant-limits.yaml.
         data:
@@ -250,13 +246,13 @@ groups:
               conditions:
                 - evaluator: { type: gt, params: [0] }
 
-      # 2026-09-29: memory is what carrier runs out of first, and the only
+      # Memory is what carrier runs out of first, and the only
       # wall it has is the RAM itself. Nothing is reserved for k3s and there
-      # is no swap (PRODUCTION.md, "The box"), so past 100% is a global OOM
+      # is no swap, so past 100% is a global OOM
       # that kills whichever tenant daemon is biggest. MemAvailable counts
       # reclaimable page cache as free, so this is memory actually held. 85%
       # of 16 GB leaves ~2.4 GB, a handful of tenants loading the embedder at
-      # once. Asked for as "ever goes over", so 2m: two evaluations in a row,
+      # once. Meant as "ever goes over", so 2m: two evaluations in a row,
       # enough to drop a single odd scrape and nothing more. If the embedder
       # sawtooth makes it chatty, raise this rather than the threshold.
       - uid: carrier-memory-high
@@ -273,7 +269,7 @@ groups:
             The box is close to a global OOM, which kills the largest tenant daemon.
             "Memory used" on the dashboard shows who grew ("of which tenant daemons");
             "Memory by pod" names them. Resize RAM (CPU and RAM only) before adding
-            tenants (PRODUCTION.md, "How many tenants fit").
+            tenants.
         data:
           - refId: A
             datasourceUid: prometheus
@@ -593,7 +589,7 @@ groups:
       # day. Held jobs are the harm itself, and the flag releases them, so
       # they also answer for the revisit lane, which exports no run gauge.
       #
-      # The BACKGROUND lane is left out on purpose (2026-11-04). Its cap is
+      # The BACKGROUND lane is left out on purpose. Its cap is
       # how an onboarding backlog drains (200 a day, so a new mailbox sits at
       # it daily for weeks), which made it a message a day per new signup
       # saying the design was working. Its share-of-cap panel is still on the
@@ -631,8 +627,8 @@ groups:
               conditions:
                 - evaluator: { type: gt, params: [0] }
 
-      # The monthly budget (2026-10-05: ellie's $75 key was spent and triage
-      # stalled for days before anyone looked). A spent budget is a 402 on
+      # A tenant's spent monthly budget stalls its triage silently, so alert on it.
+      # A spent budget is a 402 on
       # EVERY call, so the counter climbs steadily; one stray 4xx does not
       # hold for 15 minutes. Per tenant, so a fleet-wide key or model problem
       # arrives as one message per tenant, and several at once is the hint
@@ -651,7 +647,7 @@ groups:
             Usually the tenant's monthly Bifrost budget is spent: read it with a GET on
             /api/governance/virtual-keys and top it up with `squelch-control llm topup
             {{ $labels.tenant }}` (ECS Exec on control). Every tenant at once is not a budget:
-            a rejected model (the 2026-08-19 class: `squelch-control llm sync --check`) or a
+            a rejected model (`squelch-control llm sync --check`) or a
             bad key. Rows stay queued and drain after the fix.
         data:
           - refId: A
@@ -671,10 +667,8 @@ groups:
                 - evaluator: { type: gt, params: [0] }
 
   # Tenant backups: litestream on carrier streaming every tenant's SQLite to
-  # R2 (deploy/hosted/litestream/). It failed silently four times between
-  # 2026-09-26 and 2026-11-04 (issue #696): one tenant's replica, or every
-  # tenant's after a restart, stuck in an error loop for days while the unit
-  # stayed "active". litestream 0.3.13 exports nothing that says so, so
+  # R2 (deploy/hosted/litestream/). A replica can sit in an error loop while
+  # the unit stays "active", and litestream 0.3.13 exports nothing that says so, so
   # litestream-health.sh reads the journal every minute and writes these
   # series through node-exporter's textfile collector.
   - orgId: 1
@@ -682,7 +676,7 @@ groups:
     folder: Passband
     interval: 1m
     rules:
-      # The #696 shape, and any other error a replica cannot get out of: its
+      # Any error a replica cannot get out of: its
       # last error is newer than its last upload, and it errored in the last
       # five minutes, for ten minutes running. `last_over_time(...[10m])` on every
       # series here, as on the tenant rules above, so a node-exporter roll or a
@@ -836,11 +830,8 @@ groups:
               conditions:
                 - evaluator: { type: gt, params: [600] }
 
-  # The public doors, from the outside. Until 2026-11-05 these probes fed the
-  # dashboard only, so an endpoint could be down, and the LLM canary red, with
-  # nobody told: the canary was red for four days once (prometheus.yml, "THE
-  # LLM CANARY"). The CASA assessment asks how an outage reaches a person;
-  # these are the answer.
+  # The public doors, from the outside, so a down endpoint or a red LLM canary
+  # reaches a person and not only the dashboard.
   - orgId: 1
     name: probes
     folder: Passband

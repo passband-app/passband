@@ -462,11 +462,11 @@ fn standing_admits_dateless_mail_from_a_sender_the_user_has_written_to() {
     // so no deadline tier — and the surfacing clock rotated it out of view.
     let (store, acct) = store();
     let since = Utc::now() - chrono::Duration::days(30);
-    contact(&store, acct, "johanna@wvfc.org", 12);
-    contact(&store, acct, "list@wvfc.org", 0);
+    contact(&store, acct, "dana@choir.example", 12);
+    contact(&store, acct, "list@choir.example", 0);
 
-    let known = dateless(&store, acct, "g1", "t1", "johanna@wvfc.org");
-    let never_written_to = dateless(&store, acct, "g2", "t2", "list@wvfc.org");
+    let known = dateless(&store, acct, "g1", "t1", "dana@choir.example");
+    let never_written_to = dateless(&store, acct, "g2", "t2", "list@choir.example");
     let stranger = dateless(&store, acct, "g3", "t3", "hello@bigbox.com");
 
     let standing = standing_ids(&store, acct, since);
@@ -510,9 +510,9 @@ fn standing_known_contact_match_folds_address_case() {
     // lowercased by the harvest. Neither side may be assumed normalized.
     let (store, acct) = store();
     let since = Utc::now() - chrono::Duration::days(30);
-    contact(&store, acct, "johanna@wvfc.org", 3);
+    contact(&store, acct, "dana@choir.example", 3);
 
-    let shouty = dateless(&store, acct, "g1", "t1", "Johanna@WVFC.org");
+    let shouty = dateless(&store, acct, "g1", "t1", "Dana@CHOIR.example");
     assert_eq!(standing_ids(&store, acct, since), vec![shouty]);
     assert_eq!(
         store
@@ -558,8 +558,8 @@ fn standing_admits_a_thread_the_user_has_written_in() {
 fn standing_drops_a_resolved_participated_thread() {
     let (store, acct) = store();
     let since = Utc::now() - chrono::Duration::days(30);
-    contact(&store, acct, "johanna@wvfc.org", 5);
-    let known = dateless(&store, acct, "g1", "t1", "johanna@wvfc.org");
+    contact(&store, acct, "dana@choir.example", 5);
+    let known = dateless(&store, acct, "g1", "t1", "dana@choir.example");
 
     assert_eq!(standing_ids(&store, acct, since), vec![known]);
     assert!(
@@ -591,14 +591,14 @@ fn standing_correspondence_arms_do_not_cross_accounts() {
     let b = store.ensure_account("other@example.com").unwrap();
     let since = Utc::now() - chrono::Duration::days(30);
 
-    // Only account B has ever written to Johanna, or written in this thread.
-    contact(&store, b, "johanna@wvfc.org", 12);
+    // Only account B has ever written to Dana, or written in this thread.
+    contact(&store, b, "dana@choir.example", 12);
     triaged(b, "g-b-sent", "thr-shared")
         .from("other@example.com")
         .is_sent(true)
         .seed(&store);
 
-    let a_from_b_contact = dateless(&store, a, "g-a1", "t-a1", "johanna@wvfc.org");
+    let a_from_b_contact = dateless(&store, a, "g-a1", "t-a1", "dana@choir.example");
     let a_in_b_thread = dateless(&store, a, "g-a2", "thr-shared", "stranger@bigbox.com");
 
     let standing_a = standing_ids(&store, a, since);
@@ -619,7 +619,7 @@ fn standing_correspondence_arms_do_not_cross_accounts() {
     );
 
     // The same rows DO stand once account A itself is the correspondent.
-    contact(&store, a, "johanna@wvfc.org", 4);
+    contact(&store, a, "dana@choir.example", 4);
     assert_eq!(standing_ids(&store, a, since), vec![a_from_b_contact]);
     assert_eq!(
         store
@@ -640,27 +640,27 @@ fn standing_refuses_marketing_from_a_sender_the_user_has_written_to() {
     // correspondent; a blast is not that mail.
     let (store, acct) = store();
     let since = Utc::now() - chrono::Duration::days(30);
-    contact(&store, acct, "info@mudsweet.com", 1);
-    contact(&store, acct, "johanna@wvfc.org", 12);
+    contact(&store, acct, "info@bakery.example", 1);
+    contact(&store, acct, "dana@choir.example", 12);
 
     // `.ingest()` and not `.seed()`: the category is written by the Stage-1
     // apply path, and the seed terminal drops it on the floor — a `.seed()` here
     // asserts nothing at all.
     let promo = triaged(acct, "g1", "t1")
-        .from("info@mudsweet.com")
+        .from("info@bakery.example")
         .received_at(Utc::now())
         .category("marketing")
         .ingest(&store);
     // Same sender, same arm, ordinary category: the order confirmation the shop
     // sends from the same address must still stand.
     let order = triaged(acct, "g2", "t2")
-        .from("info@mudsweet.com")
+        .from("info@bakery.example")
         .received_at(Utc::now())
         .category("general")
         .ingest(&store);
     // A row triage never reached carries a NULL category. `!= 'marketing'` is
     // NULL there, not TRUE, so a bare comparison would silently drop it.
-    let untriaged = dateless(&store, acct, "g3", "t3", "johanna@wvfc.org");
+    let untriaged = dateless(&store, acct, "g3", "t3", "dana@choir.example");
 
     let standing = standing_ids(&store, acct, since);
     assert!(
@@ -694,19 +694,19 @@ fn standing_admits_marketing_the_user_replied_to_or_asked_to_see_again() {
     // deliberately parked until Friday can never come back.
     let (store, acct) = store();
     let since = Utc::now() - chrono::Duration::days(30);
-    contact(&store, acct, "info@mudsweet.com", 1);
+    contact(&store, acct, "info@bakery.example", 1);
 
     triaged(acct, "g-sent", "thr-replied")
         .from("me@example.com")
         .is_sent(true)
         .seed(&store);
     let replied = triaged(acct, "g1", "thr-replied")
-        .from("info@mudsweet.com")
+        .from("info@bakery.example")
         .received_at(Utc::now())
         .category("marketing")
         .ingest(&store);
     let recalled = triaged(acct, "g2", "thr-recalled")
-        .from("info@mudsweet.com")
+        .from("info@bakery.example")
         .received_at(Utc::now())
         .category("marketing")
         .ingest(&store);
@@ -731,10 +731,10 @@ fn human_standing_includes_restricted_correspondence() {
     // Human inventory does not use the external-agent access boundary.
     let (store, acct) = store();
     let since = Utc::now() - chrono::Duration::days(30);
-    contact(&store, acct, "johanna@wvfc.org", 5);
+    contact(&store, acct, "dana@choir.example", 5);
 
     let sealed_known = triaged(acct, "g1", "t1")
-        .from("johanna@wvfc.org")
+        .from("dana@choir.example")
         .importance(90)
         .tier(Tier::Signal)
         .sealed(SealedKind::Otp)
@@ -768,7 +768,7 @@ fn human_standing_includes_restricted_correspondence() {
 fn stats_standing_counts_threads_over_the_widened_definition() {
     // Every arm of the widened definition at once, thread collapse included.
     let (store, acct) = store();
-    contact(&store, acct, "johanna@wvfc.org", 5);
+    contact(&store, acct, "dana@choir.example", 5);
 
     let bill = ingest_normal(
         &store,
@@ -779,7 +779,7 @@ fn stats_standing_counts_threads_over_the_widened_definition() {
         95,
         Utc::now(),
     );
-    let known = dateless(&store, acct, "g-known", "t-known", "johanna@wvfc.org");
+    let known = dateless(&store, acct, "g-known", "t-known", "dana@choir.example");
     // A live thread with TWO inbound rows: one band row, one counted thread.
     triaged(acct, "g-sent", "thr-live")
         .from("me@example.com")
@@ -794,12 +794,12 @@ fn stats_standing_counts_threads_over_the_widened_definition() {
         .seed(&store);
     // Out: a stranger, a done row, a sealed row.
     dateless(&store, acct, "g-cold", "t-cold", "hello@bigbox.com");
-    let done = dateless(&store, acct, "g-done", "t-done", "johanna@wvfc.org");
+    let done = dateless(&store, acct, "g-done", "t-done", "dana@choir.example");
     store
         .set_attention_status(acct, done, AttentionStatus::Done)
         .unwrap();
     triaged(acct, "g-sealed", "t-sealed")
-        .from("johanna@wvfc.org")
+        .from("dana@choir.example")
         .sealed(SealedKind::Otp)
         .seed(&store);
 
@@ -1419,7 +1419,7 @@ fn re_arming_clears_the_fired_stamp_on_the_whole_thread() {
 /// cannot. Without `idx_contacts_addr_nocase` the standing band's contact arm
 /// walked every contact once per message in the window, which cost the sitrep's
 /// 10s poll 140ms on a thousand-message store and seconds on a bigger one, under
-/// the mutex every request waits on. That queue WAS the hosted p95 (2026-08-27).
+/// the mutex every request waits on, where it set the p95 of every request.
 ///
 /// Pinned by PLAN rather than by timing: a timing test is flaky on CI and a plan
 /// is exact. The second half drops the indexes and checks the plans degrade, so

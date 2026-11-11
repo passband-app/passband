@@ -637,8 +637,8 @@ mod tests {
             Some("1Z999AA10123456784")
         );
         assert_eq!(
-            sanitize_tracking_number(Some("9400-1118-9922-3817-4284-90"), None).as_deref(),
-            Some("9400111899223817428490")
+            sanitize_tracking_number(Some("9400-1000-0000-0000-0000-00"), None).as_deref(),
+            Some("9400100000000000000000")
         );
     }
 

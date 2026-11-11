@@ -145,7 +145,7 @@ enum TokenCommand {
     /// show it again; a lost token is re-issued, never recovered.
     Issue {
         /// The label this token carries in `token list`, so the row to revoke
-        /// later is the one you can recognize ("braelyn's iphone").
+        /// later is the one you can recognize ("jamie's iphone").
         #[arg(long)]
         name: String,
     },
@@ -3344,7 +3344,7 @@ fn cmd_serve(
         // keeps a brand-new tenant's FIRST backfill from racing that attach:
         // without it the whole 30-day window ingests with no vector while the
         // model is still downloading, and the vector pass then has to embed all
-        // of it in batches, which is the memory that OOM-killed tenant daemons.
+        // of it in batches, a memory spike that can OOM-kill a tenant daemon.
         // Only the first backfill waits; polling and catch-up never do.
         // ONE "a vector may be missing" flag for both engines over this store:
         // the sync engine's refine lane reads it, and the sweeps engine's

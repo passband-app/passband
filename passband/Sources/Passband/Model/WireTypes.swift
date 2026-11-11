@@ -543,7 +543,7 @@ struct SenderSignals: Codable, Sendable, Hashable {
 
     /// A Reply-To as the reader draws it: just the domain when the mailbox
     /// is a machine-made routing tag (Postmark's
-    /// `e6f8…fd9f+296450@inbound.postmarkapp.com`, a ticket desk's
+    /// `0a1b…e8f9+123456@inbound.postmarkapp.com`, a ticket desk's
     /// `reply+8a7d6c5b4e3f@…`), the whole address otherwise. Machine-made
     /// means six or more digits, or longer than any person's mailbox name.
     /// The full address stays in the tooltip.
@@ -975,7 +975,7 @@ extension CalendarUpdate {
     ///
     /// Two rows are one event when their titles are equal (case and spacing
     /// aside) or one's words are a run of the other's and it is at least 8
-    /// characters ("Polar Inertia", never "Gym" in "Gymnastics"), compared
+    /// characters ("Halcyon Drift", never "Gym" in "Gymnastics"), compared
     /// with the event's first row; on the same day (a start's own date, so
     /// 7pm Pacific stays that day), at the same start unless one is a date
     /// only. A row with no start joins only when exactly one dated event

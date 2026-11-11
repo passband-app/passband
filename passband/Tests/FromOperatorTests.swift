@@ -67,8 +67,8 @@ struct FromOperatorTests {
         accepting("dan@example.com", in: "from:d", gives: "from:dan@example.com ")
         accepting("dan@example.com", in: "from:", gives: "from:dan@example.com ")
         accepting(
-            "abstract@convex.dev", in: "wifi password from:abst",
-            gives: "wifi password from:abstract@convex.dev ")
+            "alex@northwind.example", in: "trip itinerary from:ale",
+            gives: "trip itinerary from:alex@northwind.example ")
         // The operator's spelling is normalised on accept: the daemon reads
         // either, and one spelling is easier to look at.
         accepting("dan@example.com", in: "From:D", gives: "from:dan@example.com ")

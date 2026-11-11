@@ -1437,8 +1437,8 @@ impl SqliteStore {
     }
 
     /// The event-page URLs each ghost in `ids` is keyed by, WITHOUT the sender
-    /// scope: `ra.co/events/2494673` for a key
-    /// `ref:ra.co:ra.co/events/2494673`. Only URL refs (a text ref is
+    /// scope: `ra.co/events/1000001` for a key
+    /// `ref:ra.co:ra.co/events/1000001`. Only URL refs (a text ref is
     /// alphanumeric, a URL ref always has a `/`). For display folding
     /// ([`crate::gcal::fold_ghosts`]) only: matching mail to a ghost keeps the
     /// scope, so a stranger quoting a URL never reaches the owner's ghost.
@@ -7026,14 +7026,14 @@ mod tests {
         use crate::triage::decision::EventIdentity;
 
         const RA: &str = "tickets@ra.co";
-        const PROMOTER: &str = "hello@endzeit.example";
+        const PROMOTER: &str = "hello@northside.example";
         const STRANGER: &str = "someone@gmail.com";
         const FRIDAY: &str = "2026-11-06T19:00:00+01:00";
         const SATURDAY: &str = "2026-11-07T19:00:00+01:00";
 
         fn party<'a>(start: &'a str, refs: &'a [&'a str]) -> Ev<'a> {
             Ev {
-                title: "Parameter & Endzeit Invite Polar Inertia",
+                title: "Northside Collective Presents Halcyon Drift",
                 start: Some(start),
                 refs,
                 location: Some("Tresor, Kopenicker Str. 70"),
@@ -7086,7 +7086,7 @@ mod tests {
             let store = fixture();
             mail_from(&store, 1, 1, "t1", 60, RA, Some(true));
             mail_from(&store, 1, 2, "t2", 30, RA, Some(true));
-            let page = "https://ra.co/events/2494673";
+            let page = "https://ra.co/events/1000001";
             decide(
                 &store,
                 1,
@@ -7124,7 +7124,7 @@ mod tests {
             for (id, ago) in [(1, 60), (2, 40), (3, 20)] {
                 mail_from(&store, 1, id, &format!("t{id}"), ago, RA, Some(true));
             }
-            let page = "https://ra.co/events/2494673";
+            let page = "https://ra.co/events/1000001";
             decide(
                 &store,
                 1,
@@ -7177,12 +7177,12 @@ mod tests {
             decide(&store, 1, 1, &party(FRIDAY, &["RA7F3K9Q2"]).decision());
             let friday = ghost_of(&store, 1);
             let mut second = party(FRIDAY, &["RA7F3K9Q2"]);
-            second.title = "Polar Inertia late show";
+            second.title = "Halcyon Drift late show";
             decide(&store, 1, 2, &judged(&second, &[friday], None));
             assert_eq!(listed(&store, 1).len(), 2);
             assert_eq!(
                 ghost_by(&store, friday).title,
-                "Parameter & Endzeit Invite Polar Inertia"
+                "Northside Collective Presents Halcyon Drift"
             );
         }
 
@@ -7611,7 +7611,7 @@ mod tests {
             let q = store
                 .event_identity_candidates(1, 4, std::slice::from_ref(&record))
                 .unwrap();
-            assert_eq!(q.scope.as_deref(), Some("endzeit.example"));
+            assert_eq!(q.scope.as_deref(), Some("northside.example"));
             assert_eq!(q.records.len(), 1);
             let ids: Vec<i64> = q.records[0].candidates.iter().map(|c| c.id).collect();
             assert_eq!(ids, vec![ticket]);

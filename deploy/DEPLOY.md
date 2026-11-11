@@ -1,6 +1,6 @@
 # Deploying squelch to a headless Linux box (Hetzner + tailnet)
 
-The "baddiebox" runbook. Target: a headless Linux VM on a tailnet. One process
+Target: a headless Linux VM on a tailnet. One process
 (`squelchd serve`) runs the Gmail sync loop AND serves both doors:
 
 - **Agent door** — MCP Streamable HTTP at `/mcp` (narrow, read-only, sealed-absent).

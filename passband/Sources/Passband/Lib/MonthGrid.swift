@@ -562,7 +562,7 @@ enum MonthGrid {
     /// the window narrows the cells (it once only ever grew).
     static func cellWidth(gridWidth: Double) -> Double { max(0, gridWidth / 7) }
 
-    /// The narrowest cell that keeps a time beside a title ("7:45pm  Dreamers
+    /// The narrowest cell that keeps a time beside a title ("7:45pm  Potluck
     /// Dinner"). Below it a timed row is its title alone, and the time is in
     /// the row's help and the day column: a title cut to "Dre" beside a full
     /// time is a row that says when but not what.

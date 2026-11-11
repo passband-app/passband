@@ -72,7 +72,7 @@ enum SenderID {
 
         // A bare address has no display name: callers treat a non-empty `name`
         // as a real one, and `initials` would render the domain's letters
-        // ("bboynton97@gmail.com" -> "BC", the C of ".com").
+        // ("jrivera97@gmail.com" -> "JC", the C of ".com").
         if s.contains("@") { return Parsed(name: "", addr: s) }
         return Parsed(name: s, addr: s)
     }
@@ -140,7 +140,7 @@ enum SenderID {
     }
 
     /// Up to two initials for a sender. THE SOURCE IS NEVER THE FULL ADDRESS —
-    /// the domain leaks in otherwise ("bboynton97@gmail.com" -> "BC"). Order: a
+    /// the domain leaks in otherwise ("jrivera97@gmail.com" -> "JC"). Order: a
     /// real display name, then the brand/robot label (so a row labelled
     /// "Corpnet" shows CO, not the IC of "info@corpnet.com"), then the
     /// local-part alone.
@@ -395,7 +395,7 @@ enum SenderID {
     ///     dotted human local-part humanized (sarah.chen@ -> "Sarah Chen");
     ///     anything else at a real domain, the domain's label ("Acme"); and
     ///     at a consumer mailbox with an opaque local-part, the local-part
-    ///     alone ("bboynton97"), because "@gmail.com" names the provider and
+    ///     alone ("jrivera97"), because "@gmail.com" names the provider and
     ///     not the sender.
     static func readableName(_ sender: String) -> String {
         let p = parse(sender)

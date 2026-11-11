@@ -186,8 +186,8 @@ fn is_recipient(to: &str) -> bool {
 /// THE CODE IS IN A QUERY STRING, which this crate's first draft refused to do.
 /// Every reason it gave still holds: the edge's access log, the recipient's
 /// history, and any proxy between them each keep a live code until it is
-/// redeemed or lapses. It is a recorded trade for the click, made 2026-08-14,
-/// and the code being single use is what bounds it. See
+/// redeemed or lapses. It is a deliberate trade for the click, and the code
+/// being single use is what bounds it. See
 /// [`crate::handlers::signup_form`], which reads the parameter back.
 ///
 /// Percent encoded even though a code is only ever Crockford base32 and dashes:

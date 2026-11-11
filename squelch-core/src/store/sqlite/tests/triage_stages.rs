@@ -1297,9 +1297,9 @@ fn a_config_failure_refund_gives_back_one_charge_and_floors_at_zero() {
 /// THE OUTAGE THIS EXISTS FOR, in miniature: a run of config-level failures
 /// must not leave the cap spent once the config is fixed.
 ///
-/// On 2026-08-25 a gateway misconfiguration charged 498 of a 500-call daily cap
-/// in about half an hour. Because the budget key is the UTC day and the charge
-/// stood, the tenant stayed capped for 22 hours after the gateway was repaired.
+/// A gateway misconfiguration can charge nearly a whole daily cap in minutes.
+/// Because the budget key is the UTC day, a charge that stood would leave the
+/// account capped for most of a day after the gateway was repaired.
 #[test]
 fn a_run_of_config_failures_leaves_the_cap_intact() {
     let (store, acct) = store();

@@ -37,7 +37,7 @@ kind: KubeletConfiguration
 # What the NODE costs, subtracted from what the scheduler may spend on pods.
 #
 # THE ARITHMETIC, so the next person can re-derive it instead of trusting it.
-# Measured on carrier, 2026-08-26, four tenants running:
+# Measured on carrier with a handful of tenants running:
 #
 #   k3s-server (API server, scheduler, controllers, kubelet)     803 MB
 #   k3s's embedded containerd                                   ~120 MB
@@ -47,7 +47,7 @@ kind: KubeletConfiguration
 #   ------------------------------------------------------------------
 #                                                              ~1120 MB  (~1068 MiB)
 #
-# journald's full RSS that day was 129 MB, but it mmaps the journal files it
+# journald's full RSS at the time was 129 MB, but it mmaps the journal files it
 # serves, so most of that is page cache the kernel drops under pressure rather
 # than memory anyone holds. Counting it in full would be counting the same
 # reclaimable pages twice. The system dockerd/containerd pair (~150 MB) is not

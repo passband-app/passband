@@ -60,9 +60,8 @@ pub struct ReplyParts {
     ///
     /// `Some` is the SCHEDULED send (docs/SCHEDULED-SEND.md §4). It is the
     /// first, cheap thing recovery searches for (`rfc822msgid:`), but it is
-    /// NOT the fingerprint recovery rests on: proven live on 2026-09-29, a
-    /// minted id the daemon had just sent was not findable by it, so Gmail
-    /// may rewrite it. [`Self::outbox_token`] is the one it cannot. The id is
+    /// NOT the fingerprint recovery rests on: a minted id the daemon has just
+    /// sent can be unfindable by it, so Gmail may rewrite it. [`Self::outbox_token`] is the one it cannot. The id is
     /// minted by the caller at schedule time, never here.
     pub message_id: Option<String>,
     /// The scheduled send's outbox token, written as [`OUTBOX_HEADER`]. `None`

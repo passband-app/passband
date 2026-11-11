@@ -34,7 +34,7 @@ struct ShipmentWireTests {
         }
     }
 
-    static let base = #""id":7,"account_id":1,"tracking_number":"1ZB8B2560323528551","carrier":"ups","status":"shipped","first_seen":"2026-09-20T10:00:00Z","last_update":"2026-09-22T10:00:00Z""#
+    static let base = #""id":7,"account_id":1,"tracking_number":"1Z999AA10123456784","carrier":"ups","status":"shipped","first_seen":"2026-09-20T10:00:00Z","last_update":"2026-09-22T10:00:00Z""#
 
     static func decode(_ json: String) -> Shipment? {
         try? JSONDecoder().decode(Shipment.self, from: Data(json.utf8))
@@ -50,16 +50,16 @@ struct ShipmentWireTests {
 
     static func aGroupedRowCarriesOrdersAndLegs() {
         let json = """
-            {\(base),"item_name":"Austin Racing DB KILLER AUR10 x 1","merchant":"Bill's Exhausts",
-             "orders":[{"merchant":"Bill's Exhausts","order_ref":"21470"}],
-             "legs":[{"id":23,"carrier":"ups","tracking_number":"1ZW061R3DG21045729","status":"delivered",
+            {\(base),"item_name":"Trackside Muffler Insert TM10 x 1","merchant":"Rivera Exhaust Works",
+             "orders":[{"merchant":"Rivera Exhaust Works","order_ref":"50417"}],
+             "legs":[{"id":23,"carrier":"ups","tracking_number":"1Z999AA10123456795","status":"delivered",
                       "tracking_url":null,"last_update":"2026-09-18T10:00:00Z","delivered_at":"2026-09-18T09:00:00Z"}]}
             """
         let row = decode(json)
         expect(row != nil, "a grouped row decodes")
         expect(row?.legs?.first?.status == .delivered && row?.legs?.first?.id == 23, "the leg keeps its fields")
-        expect(row?.displayTitle == "Austin Racing DB KILLER AUR10 x 1", "the item name is the title")
-        expect(row?.orderLine == "Bill's Exhausts · #21470 · 2 packages", "merchant, ref, and box count")
+        expect(row?.displayTitle == "Trackside Muffler Insert TM10 x 1", "the item name is the title")
+        expect(row?.orderLine == "Rivera Exhaust Works · #50417 · 2 packages", "merchant, ref, and box count")
     }
 
     static func anUnknownLegCarrierDoesNotSinkTheRow() {
@@ -73,9 +73,9 @@ struct ShipmentWireTests {
     }
 
     static func theTitleFallsBackToMerchantThenPackage() {
-        let row = decode(#"{\#(base),"item_name":"","merchant":"  🎁 Bill's   Exhausts ","orders":[{"merchant":null,"order_ref":"21470"}]}"#)
-        expect(row?.displayTitle == "Bill's Exhausts", "merchant stands in, emoji stripped, trimmed")
-        expect(row?.orderLine == "#21470", "the merchant is not repeated under itself")
+        let row = decode(#"{\#(base),"item_name":"","merchant":"  🎁 Rivera   Exhaust Works ","orders":[{"merchant":null,"order_ref":"50417"}]}"#)
+        expect(row?.displayTitle == "Rivera Exhaust Works", "merchant stands in, emoji stripped, trimmed")
+        expect(row?.orderLine == "#50417", "the merchant is not repeated under itself")
     }
 
     static func anOrderRefGetsExactlyOneHash() {
@@ -86,9 +86,9 @@ struct ShipmentWireTests {
     static func aCardStaysWhileAnyPackageIsComing() {
         let never: (String?) -> Bool = { _ in false }
         let landed = #""status":"delivered","delivered_at":"2026-09-20T10:00:00Z""#
-        let base = #""id":7,"account_id":1,"tracking_number":"1ZB8B2560323528551","carrier":"ups","first_seen":"2026-09-20T10:00:00Z","last_update":"2026-09-22T10:00:00Z","item_name":"x""#
+        let base = #""id":7,"account_id":1,"tracking_number":"1Z999AA10123456784","carrier":"ups","first_seen":"2026-09-20T10:00:00Z","last_update":"2026-09-22T10:00:00Z","item_name":"x""#
         let leg = { (status: String) in
-            #"{"id":8,"carrier":"ups","tracking_number":"1ZW061R3DG21045729","status":"\#(status)","last_update":"2026-09-19T10:00:00Z"}"#
+            #"{"id":8,"carrier":"ups","tracking_number":"1Z999AA10123456795","status":"\#(status)","last_update":"2026-09-19T10:00:00Z"}"#
         }
         let coming = decode("{\(base),\(landed),\"legs\":[\(leg("shipped"))]}")
         expect(coming?.staysOnRail(isToday: never) == true, "a delivered representative with a leg in transit stays")

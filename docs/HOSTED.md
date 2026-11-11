@@ -1,15 +1,13 @@
 # Hosted squelch: the plan
 
-Status: planned 2026-08-03. Phase 1 shipped; Phase 2 is deployed and serving —
-signup, the waitlist and its invite mail, one daemon per tenant on `carrier`, and a
-CronJob that rolls the fleet onto today's image one tenant at a time. Phase 0's
-Google verification is still open and is still the gate on user 101. This is the
-decision record and roadmap for offering squelch beyond "clone the repo and run
-cargo" — what was decided and why. What is actually deployed, box by box and secret
-by secret, is `deploy/hosted/PRODUCTION.md`; rolling a new image onto it is
-`deploy/hosted/ROLLOUT.md`.
+Status: Phase 1 shipped; Phase 2 is deployed and serving: signup, the waitlist
+and its invite mail, one daemon per tenant, and a CronJob that rolls the fleet
+onto today's image one tenant at a time. This is the decision record and roadmap
+for offering squelch beyond "clone the repo and run cargo": what was decided and
+why. Setting a hosted install up is `deploy/hosted/SETUP.md`; rolling a new image
+onto it is `deploy/hosted/ROLLOUT.md`.
 
-## Naming (decided 2026-08-03)
+## Naming
 
 The user-facing product is **Passband**; the daemon stays **squelchd** (the
 dockerd/git-plumbing pattern). The name is the other half of the same radio
@@ -18,11 +16,9 @@ band the filter lets through — the daemon kills the noise, Passband is where y
 see what made it through.
 
 - Mac client: **Passband.app**. Repo, crates, and binary names stay `squelch*`.
-- Domains (`passband.app` and `passband.email` are registered and live as of
-  2026-08-10; registrar and DNS-provider layout per zone is in
-  `deploy/hosted/PRODUCTION.md`):
+- Domains:
   `passband.app` (product/homepage, and every internal hosted surface:
-  `signup.passband.app`, `warden.passband.app` — decided 2026-08-10),
+  `signup.passband.app`, `warden.passband.app`),
   `passband.email` (tenants ONLY: a `<user>.passband.email` wildcard subdomain
   means "a tenant" and nothing else),
   `passband.io` (defensive).
@@ -49,7 +45,7 @@ Decisions made and closed:
   want hosted at all. People who want local custody self-host.
 - **No web UI for hosted.** The web surface is signup only. The product is the native
   clients plus the MCP URL.
-  *Amended 2026-08-11:* the signup-only rule is about PRODUCT web apps and it stands,
+  *Amendment:* the signup-only rule is about PRODUCT web apps and it stands,
   so there is no webmail and no hosted dashboard. The tenant-local technical console
   (issue #36) is served by each user's own daemon at `/console`, so it lands on both
   tiers and is not one more web app we operate.
@@ -138,7 +134,7 @@ A second company behind the same flows, with its own security argument:
 - **No calendar grant to start.** The Outlook consent already carries
   `Calendars.ReadWrite`; Passband's calendar is Google's until #638.
 
-### One consent, both slots (decided 2026-08-10)
+### One consent, both slots
 
 Hosted signup asks for `gmail.modify` (until 2026-10-27: `gmail.readonly`,
 `gmail.modify` and `gmail.send`) in **one** consent screen and seals the resulting grant into **both** credential slots — Read
@@ -185,7 +181,7 @@ nice; we are incapable of minting them. This sentence belongs on the website. Th
 relay was to deploy next to the existing APNs relay; it never was (see the
 correction below and `deploy/DEPLOY.md` §8).
 
-> **Correction, 2026-08-04: steps 3 and 4 above cannot be built.** Google permits
+> **Correction: steps 3 and 4 above cannot be built.** Google permits
 > Desktop-type clients to redirect only to loopback, so `auth.passband.email/callback`
 > can never be registered on the self-host client and the code never reaches the
 > broker. The crate exists (`squelch-broker`, built and audited) but this flow is
@@ -196,7 +192,7 @@ correction below and `deploy/DEPLOY.md` §8).
 > codes. Hosted's web client is unaffected: an https callback is correct there, and
 > the crate already implements it.
 
-Status: implemented in-repo as `squelch-broker` (2026-08-04) to the wire contract in
+Status: implemented in-repo as `squelch-broker` to the wire contract in
 `docs/BROKER.md`; NOT deployable for self-host (Google's desktop-client redirect
 wall — see the status banner in `docs/BROKER.md`). Self-host consent is
 `auth --export`/`--import`; the crate deploys later with the hosted web-client
@@ -232,7 +228,7 @@ docker run -v squelch-data:/data -p 8848:8848 ghcr.io/<org>/squelch
 
 ## Hosted architecture
 
-> **Superseded 2026-08-09.** The systemd-and-Caddy design below is not what
+> **Superseded.** The systemd-and-Caddy design below is not what
 > shipped. Provisioning is Kubernetes (single-node k3s), the `Provisioner` trait
 > is gone, and the control plane makes TWO calls to create a tenant rather than
 > one, because the sealing key does not exist until the cluster mints it. What
@@ -289,7 +285,7 @@ a lost Secret is re-consent rather than an escrow.
 Runbook: `deploy/hosted/SETUP.md`. Crate: `squelch-warden/README.md`.
 
 <details>
-<summary>The original single-VPS design (2026-08-03), superseded</summary>
+<summary>The original single-VPS design, superseded</summary>
 
 - Provisioning behind a trait (`Provisioner`); first impl is systemd template units
   (`squelchd@<user>`) on a single VPS. The trait is what lets the backend graduate
@@ -302,7 +298,7 @@ What changed: kube already has a control loop, a secret store encrypted at rest,
 a network policy engine and an admission controller, and reimplementing four of
 those over systemd units and a JSON state file was the actual cost of the
 "simpler" option. Litestream was dropped for now with it; backups are the Secrets
-and the volumes. (It came back on 2026-08-10, as a host-level service rather than
+and the volumes. (It came back later, as a host-level service rather than
 the per-daemon thing this design imagined — `deploy/hosted/SETUP.md` §11.)
 
 </details>
@@ -316,7 +312,7 @@ the per-daemon thing this design imagined — `deploy/hosted/SETUP.md` §11.)
   dead on the next request. The pairing flow this was a prerequisite for is shipped
   with it (`squelchd pair`).
 - `/mcp` gets real auth once internet-facing (self-host: localhost trust +
-  allowed-hosts, unchanged). **BUILT 2026-10-01 as MCP-spec OAuth, skipping the
+  allowed-hosts, unchanged). **BUILT as MCP-spec OAuth, skipping the
   bearer-token step this line used to plan**, and off until the operator turns it
   on. The MVP shipped around the question: a tenant's Ingress declared the
   human-door prefixes only, so the agent door was simply not published. That was a
@@ -347,15 +343,14 @@ the per-daemon thing this design imagined — `deploy/hosted/SETUP.md` §11.)
     structurally absent, and the agent door still cannot reach the write
     credential). And revoking an agent is no longer ours to do on the next
     request: AuthKit issues refresh tokens, so an approved agent keeps access
-    until its grant is revoked on the WorkOS side, an operator action today, and
+    until its grant is revoked on the WorkOS side, and
     the access token's lifetime only bounds how long a revoked grant's last
     token still works. That is the one place this departs from the device-token
     rule.
   - Self-host gets none of this and loses nothing: with the two env vars unset
     the door behaves exactly as before.
   - Turning it on, the rollout order, and the three WorkOS facts to verify on
-    the real environment first are in `deploy/hosted/SETUP.md`. Still owed after
-    this: per-agent listing and revoke in Settings > Agents.
+    the real environment first are in `deploy/hosted/SETUP.md`.
 - Credential file backend gains encryption-at-rest with a per-tenant key (KMS/age).
   SHIPPED, as age rather than KMS. The daemon reads `SQUELCH_CRED_AGE_IDENTITY`;
   the identity is minted in-cluster per tenant and written straight into that
@@ -375,7 +370,7 @@ the per-daemon thing this design imagined — `deploy/hosted/SETUP.md` §11.)
   is the fraud signal. The gateway also owns model choice, so a fleet-wide model
   swap is a gateway config change, not a rollout. BYOK remains future work.
 - Semantic search in hosted can run on one embedding session per node instead
-  of one per tenant pod. BUILT 2026-10-28, not yet rolled out: `squelch-embed`,
+  of one per tenant pod. BUILT: `squelch-embed`,
   a shared service in `tenants` that tenant daemons post texts to when the
   operator sets `SQUELCH_WARDEN_EMBED_URL` (`docs/EMBED-SERVICE.md`, runbook in
   `deploy/hosted/SETUP.md` §10b). **It is the second process we operate that
@@ -400,8 +395,7 @@ The actual path, in order:
 1. **Now — one box, single-node k3s.** An idle mailbox daemon is tens of MB; a
    single 64GB box plausibly carries 1–2k users. One pod per user is fine at
    this size and buys a control loop, encrypted-at-rest Secrets, NetworkPolicy
-   and admission control for free. This gets embarrassingly far, and the
-   100-user verification cap makes it moot anyway.
+   and admission control for free.
 2. **Next — Gmail push.** Hosted daemons switch from 5s polling to `users.watch` +
    Pub/Sub; the control plane receives pushes and pokes the right daemon. Idle
    tenants become nearly free and API quota stays flat as users grow. This is the
@@ -418,24 +412,21 @@ The actual path, in order:
 
 1. **Phase 0 — paper (start immediately, gates everything public):** homepage,
    privacy policy, data-handling doc, Google verification + CASA for the one project
-   with both clients. Longest lead time, zero code. **Still open**, and it is the
-   gate on user 101: the unverified cap is 100, and nothing below moves it.
-   The submission itself — the three gates, the scope justifications, the demo
-   video shot list, and what is still blocking — is
-   [docs/VERIFICATION.md](VERIFICATION.md).
+   with both clients. Longest lead time, zero code. The unverified cap is 100
+   users, and nothing below moves it.
 2. **Phase 1 — self-host as a product: SHIPPED.** GHCR multi-arch image on every
    daemon tag (`v*` then, `daemon-X.Y.Z` since the 2026-08 consolidation —
    `docs/RELEASING.md`), `auth --export`/`--import` consent, first-run auth UX.
    It shipped value to real users while verification grinds and de-risked the
    consent patterns hosted signup reuses, which was the whole point of ordering
    it first.
-   The broker is implemented in-repo as `squelch-broker` (2026-08-04) per
+   The broker is implemented in-repo as `squelch-broker` per
    `docs/BROKER.md` but blocked for this tier; it ships with the hosted callback
    instead.
 3. **Phase 2 — hosted MVP: SHIPPED and running.** `squelch-control` and
    `squelch-warden` provisioning onto single-node k3s, per-tenant age identities and
    two-phase provisioning, human-door issued tokens, web signup → app pairing,
-   invite codes. `deploy/hosted/PRODUCTION.md` is the record of that install.
+   invite codes.
    Landed after the original list and worth naming: the **waitlist** (a public form
    on `passband.app`, approval and invite mail from `/admin` through Resend, one
    table answering "have we invited them" however they arrived), **console SSO**
@@ -445,20 +436,18 @@ The actual path, in order:
    so the one condition worth paging on has its own code
    (`deploy/hosted/ROLLOUT.md`).
    Still open from this phase's original list:
-   - **`/mcp` auth. BUILT 2026-10-01** as OAuth through WorkOS AuthKit, off until
+   - **`/mcp` auth. BUILT** as OAuth through WorkOS AuthKit, off until
      the operator sets the issuer. See "Changes to existing code" above.
-   - **Litestream. BUILT 2026-08-10**, after being owed since the pre-k3s design
-     promised it "from day one"; **client-side encryption added 2026-08-11**.
-     One host-level systemd service on `carrier` streams every tenant's SQLite to
+   - **Litestream. BUILT**, with **client-side encryption**.
+     One host-level systemd service streams every tenant's SQLite to
      Cloudflare R2 continuously, at `tenants/<label>/store.db`, with a timer that
      discovers new tenants from the PVC directories within two minutes.
      Deliberately **not** a sidecar per pod: a sidecar puts the object-storage
      write credential inside every tenant pod, where one compromised tenant could
      delete the whole fleet's backups. Artifacts in `deploy/hosted/litestream/`;
      install, verification and both restore drills in `deploy/hosted/SETUP.md`
-     §11 "Backups: Litestream to R2". That closes the mailbox half of the gap —
-     losing the block volume is now minutes of mail rather than a fleet-wide
-     re-sync from Gmail.
+     §11 "Backups: Litestream to R2". Losing the block volume costs minutes of
+     mail rather than a fleet-wide re-sync from Gmail.
 
      **The backups are age-encrypted under a key we hold.** Every snapshot and
      WAL segment is sealed before upload, so R2 holds ciphertext and Cloudflare
@@ -469,16 +458,5 @@ The actual path, in order:
      third party a readable copy of other people's mail, and it comes with a
      schema footgun — 0.3 wants `replicas:` where 0.5 wants `replica:`, and
      0.3.13 accepts the 0.5 shape silently with zero replicas attached.
-
-     The custody consequence is the thing to carry away: the private half lives
-     at `/etc/litestream/backup-age.key` and in the password manager, and **losing
-     it makes every backup in R2 permanently unreadable, fleet-wide**. It joins
-     the tenant identity Secrets in the tier of things no re-sync can rebuild.
-
-     What it still does not close: **the identity Secrets are not in it.** They
-     live in the k3s datastore, covered only by Hetzner's root-disk snapshot, and
-     losing one is still that tenant re-consenting because there is no escrow.
-     `deploy/hosted/SETUP.md` → "Backups today, stated honestly" is the
-     operator's version, with the per-scenario loss table.
 4. **Phase 3 — grow up:** Gmail push, Stripe, fleet-mode vs Fly Machines decision,
    iOS against hosted.

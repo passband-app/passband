@@ -1,6 +1,5 @@
-# Secret scan on every PR and every push to main. This stands in for GitHub
-# secret scanning and push protection, which a private repo on the Team plan
-# does not get without buying Secret Protection.
+# Secret scan on every PR and every push to main, alongside GitHub's own
+# secret scanning.
 #
 # It scans the whole history, not just the PR's commits. That takes a few
 # seconds and needs no logic for working out which commits are new.

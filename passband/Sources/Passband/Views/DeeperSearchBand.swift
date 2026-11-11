@@ -5,7 +5,7 @@
 //
 // What it draws is deliberately thin. One status line while the lane works (the
 // tool chips reduced to their summaries: searching "abstract wifi", reading
-// "Abstract is today."), then the email cards, then AT MOST one line of prose.
+// "Fieldnotes is today."), then the email cards, then AT MOST one line of prose.
 // That is the lane's whole answer shape, and drawing anything more would invite
 // a model to write more.
 //

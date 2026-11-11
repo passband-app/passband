@@ -5310,8 +5310,8 @@ final class AppStore {
     /// restored into it a round-trip later (see `restoreNewMessage`); older
     /// drafts are only NOTED, by the header's "N drafts" control, never
     /// opened onto. An earlier cut landed a ⌘N with older drafts waiting on
-    /// the drafts page instead; the user asked for the composer every time
-    /// (2026-09-29): a key that sometimes opens a list is a key you cannot
+    /// the drafts page instead; ⌘N opens the composer every time,
+    /// because a key that sometimes opens a list is a key you cannot
     /// type into blind.
     ///
     /// The restore only ever fills the untouched blank composer this call

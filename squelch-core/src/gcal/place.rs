@@ -2,7 +2,7 @@
 //! by the small model to the place a person would write on a card.
 //!
 //! WHY A MODEL. A location written by a booking service is often the venue
-//! followed by the service's own marketing ("Dingles Public House, Tock is now
+//! followed by the service's own marketing ("Fennick Public House, Tock is now
 //! part of the Resy network. Explore even more of our dining network on"), and
 //! there is no fixed list of what such services write. The model reads it and
 //! keeps the place.
@@ -319,7 +319,7 @@ pub async fn clean_place(client: &PlaceClient, location: &str) -> PlaceResult {
 mod tests {
     use super::*;
 
-    const TOCK: &str = "Dingles Public House, Tock is now part of the Resy network. \
+    const TOCK: &str = "Fennick Public House, Tock is now part of the Resy network. \
                         Explore even more of our dining network on";
 
     fn named(name: &str, address: Option<&str>) -> Cleaned {
@@ -335,18 +335,18 @@ mod tests {
     #[test]
     fn an_answer_may_drop_words_but_never_add_one() {
         assert_eq!(
-            settle(TOCK, "Dingles Public House", ""),
-            named("Dingles Public House", None)
+            settle(TOCK, "Fennick Public House", ""),
+            named("Fennick Public House", None)
         );
         // Case and punctuation are free.
         assert_eq!(
-            settle(TOCK, "dingles public house.", ""),
-            named("dingles public house.", None)
+            settle(TOCK, "fennick public house.", ""),
+            named("fennick public house.", None)
         );
         // A word the location never had, in either part: the location is
         // kept whole, as the name.
         assert_eq!(
-            settle(TOCK, "Dingles Public House", "165 Main St"),
+            settle(TOCK, "Fennick Public House", "165 Main St"),
             named(TOCK, None)
         );
         assert_eq!(
@@ -401,8 +401,8 @@ mod tests {
         // A bidi override is stripped before the answer is held to the
         // location, and is never stored.
         assert_eq!(
-            settle(TOCK, "Dingles\u{202E} Public House", ""),
-            named("Dingles Public House", None)
+            settle(TOCK, "Fennick\u{202E} Public House", ""),
+            named("Fennick Public House", None)
         );
     }
 

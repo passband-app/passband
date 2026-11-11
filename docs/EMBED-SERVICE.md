@@ -1,16 +1,15 @@
 # One embedding session per node
 
-Status: designed 2026-08-26; **built 2026-10-28 on branch `better-scaling`, not
-yet rolled out**. The rollout is `deploy/hosted/SETUP.md` §10b. The design record
+Status: **built**. The rollout is `deploy/hosted/SETUP.md` §10b. The design record
 for the change that makes hosted tenant count independent of the ONNX Runtime
 session: one embedder per node, shared by every tenant, instead of one per
-tenant pod. Sections 1 to 9 below are the design as argued in August, kept as
+tenant pod. Sections 1 to 9 below are the design as argued before the build, kept as
 written; where the build differs, the next section says so and the code wins.
 
 ## As built
 
 What shipped differs from §1 to §9 in these places. Each was checked against
-the code on the branch; the file named is where to look.
+the code; the file named is where to look.
 
 - **Fleet objects are operator-applied YAML, not warden objects.** §5 had the
   warden build `embed_deployment`, `embed_service` and `embed_network_policy`
@@ -187,61 +186,45 @@ the code on the branch; the file named is where to look.
 
 ## 1. Why
 
-Every hosted tenant runs its own `squelchd` pod on `carrier` (Hetzner, 4 shared
-vCPU, 16 GB, 80 GB root; resized from a CPX21 on 2026-09-28). The numbers in
-this section were measured in August on the old box, 3 shared vCPU and 3.8 GB
-with no swap, and the arithmetic below is about that box. Each embeds mail for semantic recall with
-fastembed over ONNX Runtime, `bge-small-en-v1.5` at 384 dimensions, weights
-pinned to `Xenova/bge-small-en-v1.5` fp32.
+Every hosted tenant runs its own `squelchd` pod on a single node. Each embeds
+mail for semantic recall with fastembed over ONNX Runtime, `bge-small-en-v1.5`
+at 384 dimensions, weights pinned to `Xenova/bge-small-en-v1.5` fp32.
 
-**The fleet number is a range, not a number.** On 2026-08-26 the four tenant
-pods read **123, 293, 349 and 545 MB** RSS (`deploy/hosted/PRODUCTION.md:30` on
-PR #146's branch); a later read of the same four gave 91, 317, 376 and 509. PR
-#152 walked one process from boot: ~25 MB before any embed, +195 MB when the
-session loads, **~520 MB after one backfill batch pass**, back to ~126 MB when
-the session is dropped and ~40 MB after a `malloc_trim`. The Rust side is 25-40
-MB of any of those, so the session is 85-90% of a pod that has embedded
-anything, and the spread from 91 to 545 MB is what the arena does over a pod's
-life rather than measurement noise. Roughly 126 MB is the fp32 weights; the rest
-is ORT's arena and the activation buffers it allocates on the first run and
-retains. PR #144 measured that per-run half, which is where §2's numbers come
-from:
+**A pod's memory is a range, not a number.** One process walked from boot sits
+at ~25 MB before any embed, +195 MB when the session loads, **~520 MB after one
+backfill batch pass**, back to ~126 MB when the session is dropped and ~40 MB
+after a `malloc_trim`. The Rust side is 25-40 MB of any of those, so the session
+is 85-90% of a pod that has embedded anything, and the spread is what the arena
+does over a pod's life rather than measurement noise. Roughly 126 MB is the fp32
+weights; the rest is ORT's arena and the activation buffers it allocates on the
+first run and retains. That per-run half is where §2's numbers come from:
 
 | | `max_length` 512 | `max_length` 256 |
 |---|---|---|
 | batch-8 pass | +324 MB | +123 MB |
 | batch-1 pass | +44 MB | +13 MB |
 
-**Two gates decide the tenant count, and conflating them is how the box got
-OOM-killed.** The ResourceQuota in `deploy/hosted/70-tenant-limits.yaml` is
-admission control at the API server: `requests.memory`, and separately `pods`
-and `persistentvolumeclaims` (10 each in the file's 4 GB-floor example, 40 on
-`carrier`). The **node** is the
-scheduler, admitting a pod only if its request fits allocatable, which today is
-the whole 3.72 GiB because k3s reserves nothing and which PR #151 takes to **~2.4
-GiB** (`PRODUCTION.md:22` on that branch). `requests.memory: 5Gi` on a box with
-under 4 GB refuses nobody, so the kernel refused instead: 2026-08-19, four
-tenants, two dead `squelchd` processes. Note which way an honest request moves
-the count: **down**.
+**Two gates decide the tenant count, and they must not be conflated.** The
+ResourceQuota in `deploy/hosted/70-tenant-limits.yaml` is admission control at
+the API server: `requests.memory`, and separately `pods` and
+`persistentvolumeclaims`. The **node** is the scheduler, admitting a pod only if
+its request fits allocatable. A quota larger than the node's real memory refuses
+nobody, so the kernel's OOM killer refuses instead, and it picks a mailbox. The
+quota is the gate that should bind, because its refusal is a provision that
+fails visibly. Note which way an honest request moves the count: **down**.
 
-- **After #146 and #151, five or six.** The per-tenant request goes to 384Mi and
-  the quota to `2560Mi`: six by the quota's own arithmetic (`6 x 384Mi` fits, `7
-  x 384Mi` does not), five or six by the scheduler once the monitoring agent,
-  Traefik, CoreDNS and the warden come out of ~2.4 GiB. The quota is the gate
-  that should bind, because its refusal is a provision that fails visibly rather
-  than a mailbox the kernel picks. Idle unload (#152) is what makes a request
-  that honest defensible, taking an idle tenant to ~40 MB; it does not make the
+- **With a session per pod**, an honest per-tenant request is a few hundred MB,
+  and idle unload only makes that request defensible; it does not make the
   active case cheaper.
 - **With one shared session**, a tenant pod is 40-50 MB including the HTTP
-  client, against one 300-400 MB service on the node: `(2400 - 400) / 50` is
-  about forty. Memory stops being the gate and `pods` and
-  `persistentvolumeclaims` (10 each in the floor example) become it, which is
-  a one-line edit §9 carries.
+  client, against one 300-400 MB service on the node. Memory stops being the
+  gate and `pods` and `persistentvolumeclaims` become it, which is a one-line
+  edit §9 carries.
 
 The win survives every one of those numbers moving: today the ONNX cost is `N x
 300-500 MB`, after this it is one service plus a few MB per tenant, so **the ONNX
 line leaves the capacity arithmetic** and what is left is storage, the PVC cap
-and 3 vCPU of Gmail poll loops.
+and CPU for the Gmail poll loops.
 
 ## 2. Shape
 
@@ -709,17 +692,12 @@ both. Shared pages show up there and nowhere else;
 
 **Build when either is true:**
 
-1. **The fleet reaches four or five tenants against #146's six.** Not the "about
-   15" this document first said, which came from the 20-tenant arithmetic §1 now
-   retracts. Past the quota the choices are a bigger box, a second node, or this,
-   and the build plus rollout below is a couple of days.
+1. **The fleet nears the memory quota** set by a per-pod session, where the
+   choices are a bigger box, a second node, or this.
 2. **A week of `container_memory_working_set_bytes` per tenant pod disagrees with
-   §1**, evaluated **after #152 and #146 are deployed** and not before, because
-   until then it measures a fleet nobody has fixed. The week is the point: §1's
-   spread from 91 to 545 MB is point reads, which cannot tell an idle tenant from
-   an active one, and the whole Phase 1 case is that those differ by 10x. If idle
-   tenants are not near 40 MB, or actives above 300 MB, the trigger moves
-   whichever way the data says.
+   §1.** Point reads cannot tell an idle tenant from an active one, and the case
+   rests on those differing by 10x. If idle tenants are not near 40 MB, or
+   actives above 300 MB, the trigger moves whichever way the data says.
 
 Before either, run the §8 spike: cheap, and it can move the trigger.
 

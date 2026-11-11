@@ -2,8 +2,6 @@
 
 One section per surface: the **invariant**, the **enforcement point** (`file:symbol`
 — the line that actually holds it), and **what a maintainer must not break**.
-Verified against the tree on 2026-07-30; §6 was written against it on 2026-08-18,
-§8 on 2026-10-01.
 Stale source comments are flagged, not trusted.
 
 ## 1. HTML sanitization at ingest
@@ -549,8 +547,8 @@ chose that level. Nothing here changes what an agent can READ.
 
 **The setting.** `app_settings` key `agent.write_access`, per mailbox:
 `none`, `drafts`, `send`; each level includes the ones before it. A mailbox
-that has never set it is at `drafts` (`AgentWriteAccess::UNSET`; the owner's
-product decision, 2026-10-06). That default is safe to hold for the reason
+that has never set it is at `drafts` (`AgentWriteAccess::UNSET`), so an agent
+is useful out of the box without being able to send. That default is safe to hold for the reason
 `drafts` is the hard gate at all: a draft is a local row, marked as the
 agent's, that becomes mail only when the owner presses send. What it does
 cost is stated under the residual risks below.
@@ -896,9 +894,8 @@ seals through the agent pipeline with the legacy column still `normal`),
 tenant holds it. The boundary is the NetworkPolicy pair (each tenant's one
 egress rule to the service, the service's ingress rule). The token is for the
 day the CNI is not enforcing policy and something that is not a tenant lands on
-the pod network: it gets a 401. It cannot be rotated without restarting every
-tenant today (`deploy/hosted/SETUP.md` §10b, Rollback); a rolling rotation
-path is an open follow-up.
+the pod network: it gets a 401. Rotating it restarts every tenant
+(`deploy/hosted/SETUP.md` §10b, Rollback).
 
 **One tenant can deny service to the others, and that is accepted.** The
 service is never told who is calling, so it has no per-tenant limit to apply.
@@ -1508,14 +1505,14 @@ in the answer to the user's own write) and nowhere else, never in a log line,
 never in a triage prompt. TWO EXCEPTIONS, each the owner's decision. First
 (2026-10-28): an event's location string, alone, goes to the configured
 provider's small (`notify`) model to be cut down to the place the card shows
-(see "The card's place" below). Second (2026-10-29): to plan an event's
+(see "The card's place" below). Second: to plan an event's
 reminder, the same small model reads the event (title, times, place,
 description, the user's answer, busy or free, the COUNT of other guests and
 whether the user organizes it) and the subjects, sender display names and
 attachment filenames of the mail linked to it (see "Calendar reminders"
 below). Nothing calendar-related is on `/mcp` or `/client/agent/*`. The daemon writes to a calendar when the user creates,
-edits or deletes one event from the human door, and, ONE EXCEPTION (the owner's
-decision, 2026-10-28, behind the `calendar_own` hidden feature since 2026-10-30), when it
+edits or deletes one event from the human door, and, ONE EXCEPTION (behind the
+`calendar_own` hidden feature), when it
 replaces Gmail's own copy of an event with its own and keeps that event current
 from authenticated mail (see "Passband's own events" below). Nothing else
 writes on its own. Google emails an event's guests only when a human-door

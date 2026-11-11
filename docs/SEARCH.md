@@ -1,12 +1,12 @@
 # Search: keyword, meaning, and the agent lane
 
-Status: designed 2026-09-02, built 2026-09-02 to 2026-09-08 (waves 0 to 2 of
-§7 plus the `from:` menu of §4.1); this document was amended to what shipped
+Status: built (waves 0 to 2 of §7 plus the `from:` menu of §4.1); this
+document was amended to what shipped
 where the build taught the design something. This is the design record for making search
 find the mail you mean, not just the mail that contains your words, and it
 starts from a query that the current search handled worse than a human did.
 
-## September 18: desktop search presentation and typing latency
+## Desktop search presentation and typing latency
 
 By default, the desktop panel sends `mode=keyword&unfinished_first=true` while
 typing. Selecting `Include related` requests hybrid retrieval instead; this
@@ -22,14 +22,12 @@ remains approximate. Search hits now include `is_done`, `subject_matches` and
 `snippet_matches`, with matched surface forms supplied by FTS. Desktop results
 use a continuous responsive list, warm evidence highlights and readable previews.
 
-See [the UX investigation](SEARCH-UX-REVIEW.md) for evidence and remaining limits.
-
 ## 1. What the motivating query taught us
 
-The query was "abstract conference wifi password". The reader knew the email
+The query was "fieldnotes conference wifi password". The reader knew the email
 existed; the search panel did not surface anything useful; the ⌘K agent found
-it in one pass. Run against the live mailbox on 2026-09-02 (1,526 messages,
-1,561 FTS rows, daemon on 127.0.0.1:8848), the three legs do this:
+it in one pass. Run against a test mailbox of about 1,500 messages (daemon on
+127.0.0.1:8848), the three legs do this:
 
 | mode | hits | where the right email lands |
 |---|---|---|
@@ -37,17 +35,17 @@ it in one pass. Run against the live mailbox on 2026-09-02 (1,526 messages,
 | `semantic` | 10 | #1, but see below |
 | `hybrid` (the app's default) | 10 | #1 under `recent`, #3 under `best_match` |
 
-The right email is #1542, "Abstract is today." from the conference. It wins
+The right email is "Fieldnotes is today." from the conference. It wins
 the vector leg **only because the reader typed the conference's name**: the
-subject and sender are "Abstract", so every Abstract email clusters at the
+subject and sender are "Fieldnotes", so every Fieldnotes email clusters at the
 top. Drop that one word and it is gone: `semantic` for "conference wifi
-password" returns Telnyx IP subnets, a Cloudflare invite and a Wispr
-newsletter, and #1542 is not in the top ten.
+password" returns a hosting provider's network notice, a workspace invite and
+a newsletter, and the right email is not in the top ten.
 
 The keyword leg returned nothing for a reason worth stating precisely. The
-body of #1542 is 568 characters and reads, in the relevant part:
+body of that email is 568 characters and reads, in the relevant part:
 
-> Have your QR code ready when you get to SFJAZZ. Open the link below, scroll
+> Have your QR code ready when you get to the venue. Open the link below, scroll
 > to Check-in, and show the code at the door. … **Wifi and the FAQ are on the
 > same page.**
 
@@ -63,9 +61,9 @@ over a result, not better retrieval.
 So the query exposes two different failures, and they need two different
 fixes:
 
-1. **Lexical brittleness.** `abstract OR conference OR wifi OR password`,
-   ranked by bm25, puts #1542 at **#1 in pure keyword mode** (its bm25 is
-   -19.9; the next Abstract mail is -18.7; the password-reset noise starts at
+1. **Lexical brittleness.** `fieldnotes OR conference OR wifi OR password`,
+   ranked by bm25, puts the right email at **#1 in pure keyword mode** (its
+   bm25 is -19.9; the next Fieldnotes mail is -18.7; the password-reset noise starts at
    -7.7). "wifi" appears in exactly one message in the mailbox, so IDF alone
    does the work. The keyword leg's AND semantics threw that away. This is a
    one-line class of fix and it is §4.
@@ -76,8 +74,8 @@ fixes:
 
 One more finding from the same run: a hit the vector leg found shows the
 STORED snippet (the head of the message), because only keyword hits get an
-FTS match window. For #1542 that is "ABSTRACT IS TODAY. Hi Braelyn, Abstract
-is today. Doors are open at 9:00 AM…", which says nothing about wifi. Even
+FTS match window. For the conference email that is "FIELDNOTES IS TODAY. Hi
+Jamie, Fieldnotes is today. Doors are open at 9:00 AM…", which says nothing about wifi. Even
 when the right row is #1, the panel gives the reader no reason to believe it.
 
 ## 2. The retrieval stack today
@@ -126,9 +124,8 @@ rather than what one remembers being there.
   is a different problem from web search.
 - **Who sees the mail.** Self-host promises on-box search; the only remote
   party is the BYOK LLM the user chose. Hosted sends mail bodies to Google and
-  to Anthropic (through Bifrost) and the privacy policy was rewritten this
-  summer to say exactly that. A paid embedding or rerank API is a NEW
-  processor: a policy change and a CASA scope change, not a config change.
+  to Anthropic (through Bifrost), and the privacy policy says exactly that.
+  A paid embedding or rerank API is a NEW processor: a policy change and a CASA scope change, not a config change.
 - **Hosted memory.** See §2. A bigger embedder multiplies a number that
   already decides the tenant count.
 - **No re-embed path.** `messages_missing_vectors` finds messages with NO
@@ -177,7 +174,7 @@ pod, and then as a hosted-only decision under a policy change.
 ## 4. Wave 1: the keyword leg stops being brittle
 
 All in `squelch-core`, all covered by `store/sqlite/tests/search.rs`, and
-every ranking change is mutation-tested against the live mailbox (the recency
+every ranking change is mutation-tested against a real-sized mailbox (the recency
 PR's lesson: green proves nothing on a ranking change).
 
 1. **Tokenise and quote.** One builder (`FtsQuery::build`) for every MATCH.
@@ -264,7 +261,7 @@ account, served by `GET /client/senders?q=`. Three decisions in it:
 - **Maintained at ingest, not computed per keystroke.** The obvious query, a
   GROUP BY over `messages` with a substring LIKE on address and name, measured
   110-160 ms at 100k rows while holding the store's single connection mutex,
-  which is the shape of the p95 floor the kill-p95 branch had to remove. The
+  which is the shape of a p95 floor: one slow query blocking every other. The
   message upsert bumps the directory (inbound, non-spam only), recomputing
   `msg_count` from `messages` so a re-sighting cannot double count; the
   not-spam action bumps it too, because that is the other way a message
@@ -394,7 +391,7 @@ Two kinds of signal, both free and both explainable:
   of these and the query is a question.
 - **What retrieval did with it** (§4.8's diagnostics). Three or more terms
   and `strict_hits == 0` means the reader's words do not co-occur in any one
-  message, which is exactly the shape of "abstract conference wifi
+  message, which is exactly the shape of "fieldnotes conference wifi
   password": the words are right, the mail just does not use all of them. A
   query whose every hit is vector-only says the same thing more weakly.
 
@@ -465,8 +462,8 @@ reaches the lane one of two ways:
   chat's comments are so insistent about. If no boundary comes before the
   turn ends, the idle rule applies.
 
-Refinements coalesce: only the newest pending one is delivered. "abstract
-conf" then "abstract conference wifi" is one refinement, the second. Twelve
+Refinements coalesce: only the newest pending one is delivered. "fieldnotes
+conf" then "fieldnotes conference wifi" is one refinement, the second. Twelve
 refinements in one lane and it is reset and started fresh on the next: a
 conversation that long is a search that changed subject.
 
@@ -498,7 +495,7 @@ holding a paused conversation costs kilobytes.
 The strip (460 pt) is too narrow for two columns, so in the strip the lane is
 a **band above the hits**, collapsible, mounted only once a query has been
 judged deeper. It carries one status line while the lane works (the tool
-chips reduced to their summaries: searching "abstract wifi", reading "Abstract
+chips reduced to their summaries: searching "fieldnotes wifi", reading "Fieldnotes
 is today."), then the email cards and the one-line note. Paused, it shows the
 pause glyph and the last state. Expanded (Enter in the bar), the band becomes
 the **right column** beside the results, which is the side-by-side the
@@ -538,7 +535,7 @@ is a thread id, never a URL from the mail.
 | wave | what | proof |
 |---|---|---|
 | 0 | remove `s` (search this sender) from the reader; `/` then `from:` remains | app builds; this document |
-| 1 | §4: FTS query builder, AND-then-OR, porter + migration, subject weight, trailing prefix, BGE query instruction, match window for every hit, wire diagnostics | `search.rs` tests for each; the live-mailbox mutation run recorded in the PR; `embed_e2e_*` for the instruction |
+| 1 | §4: FTS query builder, AND-then-OR, porter + migration, subject weight, trailing prefix, BGE query instruction, match window for every hit, wire diagnostics | `search.rs` tests for each; a real-sized-mailbox mutation run recorded in the PR; `embed_e2e_*` for the instruction |
 | 2 | §5 + §6: `Lane` on `AssistantSession`, refinement injection, pause/resume, the classifier, the band and column, the setting, analytics | a swiftc test suite for the classifier and for the refinement/pause state machine (pure types, no network); seen on screen against the live daemon with the motivating query |
 | 3 | `docs/CHANGELOG.md` via `ReleaseNotes.swift`; this document's status line | `make-changelog.sh --check` |
 

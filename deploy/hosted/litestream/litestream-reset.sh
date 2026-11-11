@@ -18,7 +18,7 @@
 #
 # WHY ALL OF THEM, NEVER A SUBSET. A reset restarts the process, and a restart
 # makes every OTHER tenant recompute its position too. With the bug present,
-# resetting three broken tenants broke the six healthy ones (2026-11-02).
+# resetting only the broken tenants breaks the healthy ones.
 #
 # WHAT IT FIXES OVER THE HAND-TYPED VERSION. The service is started again
 # whatever happens after the stop (an EXIT trap), so a failed move never leaves

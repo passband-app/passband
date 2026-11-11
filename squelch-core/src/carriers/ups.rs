@@ -541,7 +541,7 @@ mod tests {
         json!({
             "trackResponse": {
                 "shipment": [{
-                    "inquiryNumber": "1Z1442YY7229014688",
+                    "inquiryNumber": "1Z999AA10111111116",
                     "package": [package]
                 }]
             }
@@ -551,7 +551,7 @@ mod tests {
     fn track(body: &Value) -> Result<CarrierTrack, TrackError> {
         let resp: TrackApiResponse =
             serde_json::from_value(body.clone()).expect("fixture is a UPS body");
-        parse_track(&resp, "1Z1442YY7229014688")
+        parse_track(&resp, "1Z999AA10111111116")
     }
 
     fn ok(body: &Value) -> CarrierTrack {
@@ -565,7 +565,7 @@ mod tests {
         // Shape and wording from UPS's own tracking sample: type `M` with the
         // granular `MP` code, before UPS has the package.
         let t = ok(&envelope(json!({
-            "trackingNumber": "1Z1442YY7229014688",
+            "trackingNumber": "1Z999AA10111111116",
             "currentStatus": {
                 "type": "M",
                 "code": "MP",
@@ -593,7 +593,7 @@ mod tests {
     #[test]
     fn in_transit_is_shipped() {
         let t = ok(&envelope(json!({
-            "trackingNumber": "1Z1442YY7229014688",
+            "trackingNumber": "1Z999AA10111111116",
             "currentStatus": {
                 "type": "I",
                 "code": "DP",
@@ -608,7 +608,7 @@ mod tests {
     #[test]
     fn out_for_delivery_is_its_own_rung() {
         let t = ok(&envelope(json!({
-            "trackingNumber": "1Z1442YY7229014688",
+            "trackingNumber": "1Z999AA10111111116",
             "currentStatus": {
                 "type": "O",
                 "description": "Out For Delivery Today",
@@ -632,7 +632,7 @@ mod tests {
         // UPS's documented Status example. `X` covers its whole exception
         // family, customs events included.
         let t = ok(&envelope(json!({
-            "trackingNumber": "1Z1442YY7229014688",
+            "trackingNumber": "1Z999AA10111111116",
             "currentStatus": {
                 "type": "X",
                 "code": "SR",
@@ -678,7 +678,7 @@ mod tests {
         // A voided label: real UPS vocabulary, no rung of ours. The status is
         // left alone and the carrier's own words are still recorded.
         let t = ok(&envelope(json!({
-            "trackingNumber": "1Z1442YY7229014688",
+            "trackingNumber": "1Z999AA10111111116",
             "currentStatus": {
                 "type": "MV",
                 "code": "VD",
@@ -694,7 +694,7 @@ mod tests {
         // `code` carries a granular out-for-delivery scan, `type` the broad
         // "in transit". The broad type is the vocabulary we map.
         let t = ok(&envelope(json!({
-            "trackingNumber": "1Z1442YY7229014688",
+            "trackingNumber": "1Z999AA10111111116",
             "currentStatus": { "type": "I", "code": "OF", "description": "Out For Delivery" }
         })));
         assert_eq!(t.status, Some(ShipmentStatus::Shipped));
@@ -714,7 +714,7 @@ mod tests {
     #[test]
     fn the_newest_activity_stands_in_for_a_missing_current_status() {
         let t = ok(&envelope(json!({
-            "trackingNumber": "1Z1442YY7229014688",
+            "trackingNumber": "1Z999AA10111111116",
             "activity": [
                 { "status": { "type": "I", "code": "AR", "description": "Arrived at Facility" },
                   "date": "20220125", "time": "031500" },
@@ -731,7 +731,7 @@ mod tests {
     #[test]
     fn eta_is_the_scheduled_date_at_the_close_of_the_quoted_window() {
         let t = ok(&envelope(json!({
-            "trackingNumber": "1Z1442YY7229014688",
+            "trackingNumber": "1Z999AA10111111116",
             "currentStatus": { "type": "I", "code": "DP", "description": "Departed from Facility" },
             "deliveryDate": [{ "type": "SDD", "date": "20260515" }],
             "deliveryTime": { "type": "EDW", "startTime": "090000", "endTime": "210000" }
@@ -746,7 +746,7 @@ mod tests {
     #[test]
     fn a_rescheduled_date_supersedes_the_scheduled_one() {
         let t = ok(&envelope(json!({
-            "trackingNumber": "1Z1442YY7229014688",
+            "trackingNumber": "1Z999AA10111111116",
             "currentStatus": { "type": "X", "code": "EX", "description": "Delivery rescheduled" },
             "deliveryDate": [
                 { "type": "SDD", "date": "20260515" },
@@ -769,7 +769,7 @@ mod tests {
     #[test]
     fn an_unparseable_date_yields_no_eta() {
         let t = ok(&envelope(json!({
-            "trackingNumber": "1Z1442YY7229014688",
+            "trackingNumber": "1Z999AA10111111116",
             "currentStatus": { "type": "I", "description": "In Transit" },
             "deliveryDate": [{ "type": "SDD", "date": "soon" }]
         })));
@@ -792,7 +792,7 @@ mod tests {
         // Local 16:30 at -05:00 is 21:30Z. UPS sends the offset, so the
         // instant is exact rather than approximate.
         let t = ok(&envelope(json!({
-            "trackingNumber": "1Z1442YY7229014688",
+            "trackingNumber": "1Z999AA10111111116",
             "currentStatus": { "type": "D", "code": "011", "description": "Delivered" },
             "activity": [{
                 "status": { "type": "D", "code": "F4", "description": "DELIVERED " },
@@ -809,7 +809,7 @@ mod tests {
     fn a_gmt_stamp_is_taken_as_gmt_and_survives_a_dropped_leading_zero() {
         // `gmtTime` "74700" is 07:47:00 GMT — UPS's own documented example.
         let t = ok(&envelope(json!({
-            "trackingNumber": "1Z1442YY7229014688",
+            "trackingNumber": "1Z999AA10111111116",
             "currentStatus": { "type": "D", "code": "011", "description": "Delivered" },
             "activity": [{
                 "status": { "type": "D", "code": "F4", "description": "DELIVERED " },
@@ -827,7 +827,7 @@ mod tests {
     fn delivered_at_falls_back_to_the_del_date_and_time() {
         // The summary without the trail: still enough to say when it landed.
         let t = ok(&envelope(json!({
-            "trackingNumber": "1Z1442YY7229014688",
+            "trackingNumber": "1Z999AA10111111116",
             "currentStatus": { "type": "D", "code": "011", "description": "Delivered" },
             "deliveryDate": [{ "type": "DEL", "date": "20220126" }],
             "deliveryTime": { "type": "DEL", "endTime": "163000" }
@@ -841,7 +841,7 @@ mod tests {
     #[test]
     fn an_undelivered_package_has_no_delivery_time() {
         let t = ok(&envelope(json!({
-            "trackingNumber": "1Z1442YY7229014688",
+            "trackingNumber": "1Z999AA10111111116",
             "currentStatus": { "type": "O", "description": "Out For Delivery Today" },
             "activity": [{
                 "status": { "type": "I", "code": "OF", "description": "Out For Delivery" },
@@ -860,7 +860,7 @@ mod tests {
         let body = json!({
             "trackResponse": {
                 "shipment": [{
-                    "inquiryNumber": "1Z5629230309413682xxxx",
+                    "inquiryNumber": "1Z999BB10222222227xxxx",
                     "warnings": [{ "code": "TW0001", "message": "Tracking Information Not Found" }]
                 }]
             }
@@ -886,7 +886,7 @@ mod tests {
         let body = json!({
             "trackResponse": {
                 "shipment": [{
-                    "inquiryNumber": "1Z1442YY7229014688",
+                    "inquiryNumber": "1Z999AA10111111116",
                     "warnings": [{ "code": "TW9999",
                                    "message": "Tracking is temporarily unavailable" }]
                 }]
@@ -913,7 +913,7 @@ mod tests {
     #[test]
     fn a_package_with_no_status_is_transient_not_a_blank_status() {
         // Reporting this would overwrite the stored raw status with "".
-        let body = envelope(json!({ "trackingNumber": "1Z1442YY7229014688" }));
+        let body = envelope(json!({ "trackingNumber": "1Z999AA10111111116" }));
         assert_eq!(track(&body), Err(TrackError::Transient));
     }
 
@@ -924,11 +924,11 @@ mod tests {
         let body = json!({
             "trackResponse": {
                 "shipment": [{
-                    "inquiryNumber": "1Z1442YY7229014688",
+                    "inquiryNumber": "1Z999AA10111111116",
                     "package": [
-                        { "trackingNumber": "1Z1442YY7229099999",
+                        { "trackingNumber": "1Z999AA10111199999",
                           "currentStatus": { "type": "M", "code": "MP", "description": "Label created" } },
-                        { "trackingNumber": "1Z1442YY7229014688",
+                        { "trackingNumber": "1Z999AA10111111116",
                           "currentStatus": { "type": "D", "code": "011", "description": "Delivered" } }
                     ]
                 }]
@@ -1034,7 +1034,7 @@ mod tests {
     /// delivery time, and the delivery scan at the head of the activity trail.
     fn delivered_fixture() -> Value {
         envelope(json!({
-            "trackingNumber": "1Z1442YY7229014688",
+            "trackingNumber": "1Z999AA10111111116",
             "currentStatus": {
                 "code": "011",
                 "description": "DELIVERED ",
@@ -1145,7 +1145,7 @@ mod tests {
         assert_eq!(client.carrier(), "ups");
 
         for _ in 0..2 {
-            let t = client.track("1Z1442YY7229014688").await.unwrap();
+            let t = client.track("1Z999AA10111111116").await.unwrap();
             assert_eq!(t.status, Some(ShipmentStatus::Delivered));
             assert_eq!(
                 t.delivered_at,
@@ -1160,7 +1160,7 @@ mod tests {
         assert_eq!(s.token_auth[0], format!("Basic {expect}"));
         assert_eq!(s.token_bodies[0], "grant_type=client_credentials");
 
-        assert_eq!(s.numbers, ["1Z1442YY7229014688", "1Z1442YY7229014688"]);
+        assert_eq!(s.numbers, ["1Z999AA10111111116", "1Z999AA10111111116"]);
         assert!(s.track_auth.iter().all(|a| a == "Bearer ups-test-token"));
         assert!(s.trans_srcs.iter().all(|src| src == TRANSACTION_SRC));
         assert!(s.trans_ids.iter().all(|id| !id.is_empty()));
@@ -1187,7 +1187,7 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let client = UpsClient::for_test(format!("http://{addr}"), reqwest::Client::new());
-        let err = client.track("1Z1442YY7229014688").await.unwrap_err();
+        let err = client.track("1Z999AA10111111116").await.unwrap_err();
         assert_eq!(err, TrackError::Auth);
         assert!(
             !err.to_string().contains("test-client-id"),

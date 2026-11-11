@@ -141,12 +141,10 @@ Cloudflare, yields ciphertext.
   replicator's environment as `LITESTREAM_AGE_IDENTITY`, and the generated
   config references it as `identities: [${LITESTREAM_AGE_IDENTITY}]`.
 
-### Why the replicator holds the identity (issue #696)
+### Why the replicator holds the identity
 
-This file used to say the opposite: the replicator held only the recipient, so
-the always-running process "could not open a single backup it writes". That
-broke backups four times between 2026-09-26 and 2026-11-04, each time silently.
-In litestream 0.3.13 (`replica.go`):
+A replicator that holds only the recipient cannot read back what it wrote,
+and litestream needs to. In litestream 0.3.13 (`replica.go`):
 
 - `Replica.Sync` keeps the replica's upload position **in memory only**. It is
   empty on start, and a deferred reset empties it again after **any** failed
@@ -156,13 +154,12 @@ In litestream 0.3.13 (`replica.go`):
   Without them it reads age ciphertext as lz4, fails with `cannot determine
   replica position: lz4: bad magic number`, and that failure empties the
   position again. The tenant never uploads again.
-- So: a restart broke every tenant whose generation had a WAL segment (the
-  config timer restarts on every signup and erasure), and a transient R2 error
-  broke one tenant at a time (2026-11-02 03:06 and 2026-11-04 14:43, no
-  restart either time). Starting a fresh generation "fixed" it only because a
-  generation with no WAL segment yet needs nothing read back.
+- So without the identity, a restart stalls every tenant whose generation has
+  a WAL segment (the config timer restarts on every signup and erasure), and
+  a transient R2 error stalls one tenant at a time. A fresh generation only
+  hides it, because a generation with no WAL segment needs nothing read back.
 
-And the split protected nothing. The key file is on this box; the replicator
+Withholding the identity also protects nothing. The key file is on this box; the replicator
 runs as root with `CAP_DAC_OVERRIDE`, so it could always read the key file; and it
 reads every tenant's live database, which is everything the key unlocks.
 What the split did buy is kept: the identity is not in `/etc/litestream/env`,
@@ -299,7 +296,7 @@ two minutes anyway.
 
 ---
 
-**Verified against litestream v0.3.13 on 2026-08-11**, using the real
+**Verified against litestream v0.3.13**, using the real
 `litestream-v0.3.13-darwin-arm64` binary from the upstream release, driven by
 `litestream-sync-config.sh` itself against a scratch tenant layout:
 
@@ -319,11 +316,9 @@ two minutes anyway.
 - endpoints with and without an `https://` scheme both reach the same URL, so
   the generator's refusal is a house rule for the runbooks' sake, not litestream's.
 
-**2026-11-04 (issue #696):** the position bug above was read out of the
-v0.3.13 source (`replica.go`: `Sync`, `calcPos`), and both triggers matched
-carrier's journal: a restart, and an R2 `InternalError` with no restart.
-`litestream-health.sh` was run with `DRY_RUN=1` against carrier's real
-journal and reported the stuck tenants correctly.
+The position bug above was read out of the v0.3.13 source (`replica.go`:
+`Sync`, `calcPos`). `litestream-health.sh` with `DRY_RUN=1` against a real
+journal reports stuck tenants correctly.
 
 **Not verified:** `systemd-analyze verify` on the units in this directory. That
 was written on macOS, which has no systemd. Run it once on the box:

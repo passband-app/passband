@@ -497,8 +497,7 @@ enum CapKind {
     /// on a UTC day silences the other for the rest of it: a mailbox that
     /// exhausts the cap at 09:00 would swallow the 14:00 line naming a broken
     /// allow-list, on the day somebody is reading the log precisely because
-    /// notifications stopped. The [[fleet LLM outage]] was a config-level 400
-    /// that read as normal for four days.
+    /// notifications stopped. A config-level 400 otherwise reads as normal.
     NotifyFastConfig,
     /// The translate pass's daily dollar budget
     /// (`[translate].daily_budget_usd`). Its stamp for today is also how
@@ -1241,7 +1240,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     // waited on, and the deadline above still bounds it. Nothing
                     // in production sends `false` today; this is what keeps a
                     // future second signal on that watch from silently
-                    // reopening the 2026-08-19 memory profile.
+                    // reopening the unembedded-backfill memory profile.
                 }
             }
         }
@@ -2938,9 +2937,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // it used to emit nothing at all while it ran: no log, no counter, no
         // freshness stamp, because `poll_once` had not returned yet. Worse, most
         // of its work is upserting mail already stored, so the message count and
-        // the database size sit still as well. On 2026-08-26 a tenant's mailbox
-        // spent half an hour in here and the only honest thing anybody could say
-        // from outside was that it was indistinguishable from wedged.
+        // the database size sit still as well. A catch-up can run for half an hour,
+        // and without this it is indistinguishable from wedged from outside.
         //
         // It is held ACROSS the trim on purpose: handing the heap back is part
         // of the catch-up as seen from outside, so progress clears when the
@@ -8640,7 +8638,7 @@ Q0/00yfa39rgtJLa0DnOoA==
 
     #[tokio::test]
     async fn an_inbox_walk_that_leaks_an_echoed_send_does_not_demote_it() {
-        // Production, 2026-10: the INBOX history walk handed back the user's
+        // The INBOX history walk can hand back the user's
         // own sends. The INBOX half ingests first and the SENT half subtracts
         // its ids, so the walk alone decided the row was received mail, and
         // it was gone from the sent page. The message's own labels

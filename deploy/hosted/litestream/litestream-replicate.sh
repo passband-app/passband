@@ -10,8 +10,7 @@
 # ciphertext. Without an identity, 0.3.13 hands the ciphertext straight to lz4,
 # fails with `cannot determine replica position: lz4: bad magic number`, and
 # that failure clears the position again: the tenant stops backing up for good,
-# silently, until someone resets its generation. Four times between 2026-09-26
-# and 2026-11-04.
+# silently, until someone resets its generation.
 #
 # Holding the identity costs no boundary that existed. The key file sits on
 # this box, and this process runs as root with CAP_DAC_OVERRIDE, so it could

@@ -430,7 +430,7 @@ struct SearchIntentTests {
     // MARK: - the prompt
 
     static let sampleHits = [
-        SearchLanePrompt.Hit(threadId: "t-1542", subject: "Abstract is today."),
+        SearchLanePrompt.Hit(threadId: "t-1001", subject: "Fieldnotes is today."),
         SearchLanePrompt.Hit(threadId: "t-91", subject: "Your password reset"),
     ]
 
@@ -456,7 +456,7 @@ struct SearchIntentTests {
         let prompt = SearchLanePrompt.system(today: "September 2, 2026", hits: sampleHits)
         expect(prompt.contains("<<<HITS"), "the local hits sit inside data markers")
         expect(prompt.contains("HITS>>>"), "and the frame is closed")
-        expect(prompt.contains("- thread t-1542: Abstract is today."), "each hit is one line")
+        expect(prompt.contains("- thread t-1001: Fieldnotes is today."), "each hit is one line")
         expect(prompt.contains("MAIL-DERIVED DATA"), "and the subjects are named as data")
         expect(prompt.contains("Trust:"), "the Trust block is in the prompt")
         expect(
@@ -526,7 +526,7 @@ struct SearchIntentTests {
         expect(
             text.contains("The reader refined the search to: abstract conference wifi"),
             "the new words are stated")
-        expect(text.contains("- thread t-1542: Abstract is today."), "with the new top hits")
+        expect(text.contains("- thread t-1001: Fieldnotes is today."), "with the new top hits")
         expect(
             text.contains("<<<HITS") && text.contains("HITS>>>"),
             "behind the same markers as the system block")

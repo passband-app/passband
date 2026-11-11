@@ -72,7 +72,7 @@ struct EventProposalTests {
     static var feed: TimelineFeed {
         var f = TimelineFeed(ghosts: [], events: [])
         f.calendars = [
-            calendarRow("me@example.com", "Braelyn", primary: true, invite: true),
+            calendarRow("me@example.com", "Jamie", primary: true, invite: true),
             calendarRow("family", "Family", invite: false),
             calendarRow("holidays", "Holidays", writable: false),
         ]
@@ -259,7 +259,7 @@ struct EventProposalTests {
         expect(refusal(proposal(calendar: "Holidays")) == EventProposals.unknownCalendarText,
                "a calendar the user cannot write to is not one")
         expect(refusal(proposal(calendar: "Work")) == EventProposals.unknownCalendarText, "nor one that is not there")
-        expect(!EventProposals.unknownCalendarText.contains("Family") && !EventProposals.unknownCalendarText.contains("Braelyn"),
+        expect(!EventProposals.unknownCalendarText.contains("Family") && !EventProposals.unknownCalendarText.contains("Jamie"),
                "the refusal names none of the user's calendars: the assistant does not read the calendar")
         // NO FEED IS NOT "NO CALENDAR" (verify7 E12): the feed is loaded by
         // the Calendar page, so before that page was opened there is none,
@@ -302,7 +302,7 @@ struct EventProposalTests {
         expect(made(proposal(guests: Array(crowd.prefix(50)))) != nil, "50 is the most")
         // A daemon older than guests: no guests line, so no proposed guests.
         var old = TimelineFeed(ghosts: [], events: [])
-        old.calendars = [calendarRow("me@example.com", "Braelyn", primary: true)]
+        old.calendars = [calendarRow("me@example.com", "Jamie", primary: true)]
         expect(refusal(proposal(guests: ["steven@example.com"]), feed: old) == EventProposals.cannotInviteText,
                "a daemon that cannot invite refuses guests")
     }

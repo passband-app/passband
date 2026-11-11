@@ -856,8 +856,8 @@ pub fn ghost_matches(
 }
 
 /// Shortest title, in characters, that may match a longer one by being in
-/// it when the two starts are only the same DAY: "Polar Inertia" in RA's
-/// "Parameter & Endzeit Invite Polar Inertia", never a stray "Show".
+/// it when the two starts are only the same DAY: "Halcyon Drift" in RA's
+/// "Northside Collective Presents Halcyon Drift", never a stray "Show".
 const DAY_MATCH_MIN_CHARS: usize = 8;
 
 /// Equal after [`normalize_title`], or one's words a run of the other's
@@ -1257,9 +1257,9 @@ mod tests {
             &utc
         ));
         assert!(ghost_matches(
-            "Phoebe Bridgers at Brooklyn Steel",
+            "The Lanterns at Brooklyn Steel",
             &start,
-            Some("phoebe bridgers"),
+            Some("the lanterns"),
             &start
         ));
         let day = at("2026-10-05");
@@ -1281,7 +1281,7 @@ mod tests {
             calendar_access: None,
             calendar_primary: true,
             row: EventRow {
-                summary: Some("Parameter & Endzeit Invite Polar Inertia".into()),
+                summary: Some("Northside Collective Presents Halcyon Drift".into()),
                 event_id: "party".into(),
                 ..row("2026-11-06T19:00:00-08:00")
             },
@@ -1291,9 +1291,9 @@ mod tests {
         assert_eq!(
             match_ghosts(
                 [
-                    ("Polar Inertia", &day),
-                    ("Parameter & Endzeit Invite Polar Inertia", &day),
-                    ("Polar Inertia", &next),
+                    ("Halcyon Drift", &day),
+                    ("Northside Collective Presents Halcyon Drift", &day),
+                    ("Halcyon Drift", &next),
                 ],
                 std::slice::from_ref(&party)
             ),

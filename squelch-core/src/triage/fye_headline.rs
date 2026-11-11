@@ -1,7 +1,7 @@
 //! The sitrep's HEADLINE: one small-model sentence of GOOD NEWS about the
 //! owner's mail, in place of a count.
 //!
-//! The rule (the owner's, 2026-10-01): this line is a boost of confidence,
+//! The rule: this line is a boost of confidence,
 //! never a reminder. It never names a problem, a bill, a request, a deadline
 //! or anything to do; the rows underneath carry those. It says only things
 //! that are both good and TRUE: someone reached out warmly, a package is on
@@ -656,7 +656,7 @@ mod tests {
             pick_headline(
                 &c(&[
                     "Several payments need fixing before services pause.",
-                    "Travelers is past due.",
+                    "Northwind Insurance is past due.",
                     "A few billing fixes with Amex and Chase, all very doable.",
                     "Maya would love a reply about the venue.",
                     "The new hiking boots are on their way.",

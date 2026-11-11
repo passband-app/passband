@@ -4,3 +4,4 @@
 *.tfplan
 terraform.tfvars
 crash.log
+backend.hcl

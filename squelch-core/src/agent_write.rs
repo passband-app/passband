@@ -46,8 +46,7 @@ pub enum AgentWriteAccess {
 }
 
 impl AgentWriteAccess {
-    /// What a mailbox that has never set the level gets: drafts (the owner's
-    /// decision, 2026-10-06). Nothing an agent does at this level leaves the
+    /// What a mailbox that has never set the level gets: drafts. Nothing an agent does at this level leaves the
     /// mailbox; the only way a draft becomes mail is the owner pressing send.
     /// Sending is never a default, only ever a choice.
     pub const UNSET: Self = AgentWriteAccess::Drafts;

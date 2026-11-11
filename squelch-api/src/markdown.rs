@@ -226,9 +226,8 @@ mod tests {
     /// line above, and not a typographic dash.
     #[test]
     fn the_default_signature_renders_as_dashes_then_a_link() {
-        let html = render_email_html(
-            "Thanks,\nBraelyn\n\n--\n\nSent from [Passband](https://passband.app)",
-        );
+        let html =
+            render_email_html("Thanks,\nJamie\n\n--\n\nSent from [Passband](https://passband.app)");
         assert!(!html.contains("<h2>"), "{html}");
         assert!(html.contains("<p>--</p>"), "{html}");
         assert!(
@@ -243,11 +242,11 @@ mod tests {
     fn signature_dashes_under_text_are_not_a_heading_underline() {
         for dashes in ["--", "-- "] {
             let html = render_email_html(&format!(
-                "Thanks,\nBraelyn\n{dashes}\n\nSent from [Passband](https://passband.app)"
+                "Thanks,\nJamie\n{dashes}\n\nSent from [Passband](https://passband.app)"
             ));
             assert!(!html.contains("<h2>"), "{dashes:?} => {html}");
             assert!(
-                html.contains("<p>Thanks,<br />\nBraelyn</p>\n<p>--</p>"),
+                html.contains("<p>Thanks,<br />\nJamie</p>\n<p>--</p>"),
                 "{dashes:?} => {html}"
             );
             assert!(

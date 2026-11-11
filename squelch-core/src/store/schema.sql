@@ -178,7 +178,7 @@ CREATE TABLE IF NOT EXISTS contacts (
 -- store the band cost 140ms and the header's `stats()` 300ms, per client, every
 -- 10s, under the store mutex both doors and the sync loop wait on; a bigger
 -- mailbox paid seconds, and that queue was the whole p95. With this index both
--- read in ~2ms. Measured 2026-08-27; tests/attention.rs pins the seek.
+-- read in ~2ms. tests/attention.rs pins the seek.
 CREATE INDEX IF NOT EXISTS idx_contacts_addr_nocase
     ON contacts(account_id, addr COLLATE NOCASE);
 

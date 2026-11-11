@@ -1475,7 +1475,7 @@ mod tests {
     /// a personal account's internal address.
     #[test]
     fn the_outlook_mailbox_is_where_mail_arrives_not_the_sign_in_label() {
-        let personal = me("313658d2f27bcf04", Some("braelyn@passband.app"));
+        let personal = me("a1b2c3d4e5f60718", Some("jamie@example.com"));
         let to = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(
             outlook_mailbox(
@@ -1493,7 +1493,7 @@ mod tests {
         // internal address, never the label.
         assert_eq!(
             outlook_mailbox(&personal, &[]).as_deref(),
-            Some("outlook_313658d2f27bcf04@outlook.com")
+            Some("outlook_a1b2c3d4e5f60718@outlook.com")
         );
         // A personal account whose own address is Microsoft's.
         let native = me("0123456789abcdef", Some("ada@hotmail.com"));

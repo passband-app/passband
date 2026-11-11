@@ -28,9 +28,8 @@ use std::sync::OnceLock;
 ///
 /// A pattern admitting exactly two decimals cannot match that at all, so the
 /// engine gives up on the "67" and resumes scanning INSIDE the number, where
-/// `28999999999999 USD` matches beautifully. Five receipts in one real mailbox
-/// were stored as their own fractional tail; a $67.29 order rendered as
-/// $28,999,999,999,999. Matching the whole number and rounding in
+/// `28999999999999 USD` matches beautifully: a receipt is stored as its own
+/// fractional tail, and a $67.29 order renders as $28,999,999,999,999. Matching the whole number and rounding in
 /// [`parse_amount`] is what keeps the value and the cents both honest.
 pub fn amount_patterns() -> &'static [Regex] {
     static P: OnceLock<Vec<Regex>> = OnceLock::new();

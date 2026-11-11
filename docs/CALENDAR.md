@@ -55,7 +55,7 @@ Standing rules (DECIDED):
   nowhere else to live.
 - **No calendar access** (as of this section's writing; signup asks for it
   since 2026-10-27, see §8). The only Google scopes were the three Gmail ones
-  and the identity pair (`docs/VERIFICATION.md`). Hosted signup and reconnect
+  and the identity pair. Hosted signup and reconnect
   require all three Gmail scopes as a floor (`squelch-control/src/oauth.rs`).
 - **One daemon is one mailbox.** The client holds one active account and keeps
   an event stream open for each of the others. Nothing merges across accounts
@@ -158,7 +158,7 @@ same sender feed the same row.
   which mail made it.
 - **A linked ghost's change is the user's to accept.** When a linked ghost
   starts at another time or is cancelled, the card it folds under offers it
-  ("Endzeit says Sat 9pm"; `pending_change` on the ghost, and on its real
+  ("Nightowl Events says Sat 9pm"; `pending_change` on the ghost, and on its real
   event when the ghost is drawn as one Passband keeps; an event the user made
   is theirs to move, so it carries no offer). The timeline lists a link's
   partner wherever it starts, so a pair across the window's edge still folds
@@ -552,8 +552,8 @@ with the wave that first depends on it.
 
 ### 3.8 Mail about a past event is done (BUILT)
 
-"24 hours after a flight lands, I don't need to see any emails about that
-flight." The triage model decides that, not code: whether a booking notice
+A day after a flight lands, its mail is usually no longer needed. The triage
+model decides that, not code: whether a booking notice
 is still needed (a refund pending, a later leg's tickets, a question to
 answer) is a judgment, and hand-written rules for it were never as accurate
 as asking. Code does two things around the model: it schedules the question
@@ -809,7 +809,7 @@ should be able to type 'dinner with steven on friday 4pm'"):
   "oct 12", "next tue"), a time or range ("4pm", "at noon", "4-6pm", "from 4
   to 5:30") and "with <name>". The wells it fills wear a soft accent wash,
   and a line under the title says what will be saved: the typed title less
-  the words that named the day and time ("Dinner with Steven": a name
+  the words that named the day and time ("Dinner with Sam": a name
   after "with" typed in lower case gets its capital, one the user
   capitalised or mixed is left alone, and the first letter gets one only
   when the words that are kept hold no capital; a title nothing came out of
@@ -824,7 +824,7 @@ should be able to type 'dinner with steven on friday 4pm'"):
   the title are neither. A day or a time is read only when it is LED ("on
   friday", "this fri", "next tue", "at 4:30", "from 4 to 5:30") or is in the
   title's trailing run, where every later word is a day or time word too
-  ("dinner with steven friday 4pm"): "Black Friday sale", "Friday dinner"
+  ("dinner with sam friday 4pm"): "Black Friday sale", "Friday dinner"
   and "4pm standup" are titles. A clock needs its am or pm, or a lead and a
   colon ("Isaiah 14:12" is a verse). A weekday in capitals ("SAT"), or with
   a capital after another capitalised word ("Taco Tuesday", "USA Today"), is
@@ -885,8 +885,7 @@ list, Esc closes the place list, then the delete question, then the pane.
   (`eventType: fromGmail`) is served with `from_gmail: true`, is never
   editable (Google refuses the change), and its card names it "added by
   Gmail". Where Passband owns such events (below), it does not stay.
-- **Passband owns the events mail makes** (2026-10-28, the owner's
-  decision; `gcal/own.rs`, behind the `calendar_own` hidden feature, ticked per tenant: it deletes Gmail's copy, and a deleted event is not ours to restore). Gmail's
+- **Passband owns the events mail makes** (`gcal/own.rs`, behind the `calendar_own` hidden feature, ticked per tenant: it deletes Gmail's copy, and a deleted event is not ours to restore). Gmail's
   frozen copy beside Passband's ghost is two items for one thing, and gets in
   the way of Passband running the calendar. So after each calendar pass:
   - **Adopt.** A Gmail event on the user's PRIMARY calendar that is the
@@ -947,7 +946,7 @@ checked against the existing keymap before it is bound. The time pane is NOT a `
 view: that panel takes the modal key context, and composer plus side panel is
 already a known sore spot (#265). The pane sits beside the composer.
 
-### Reminders and tickets (DECIDED 2026-10-29)
+### Reminders and tickets (DECIDED)
 
 The owner's ask (2026-10-29): a notification a well-chosen time before each
 event ("1hr, 30m or 10m"), with something that helps ("if its a concert,
@@ -958,18 +957,20 @@ attachment).
 Owner decisions (AskUserQuestion, 2026-10-29), each against my
 recommendation where noted:
 
-- **The model reads the event, description included** (I recommended without
-  the description). A second exception to docs/SECURITY.md §9.
-- **The model writes the banner's short line** (I recommended templated copy).
-  The line is laundered in code (below), because a stranger's invitation can
-  now steer words onto the lock screen.
+- **The model reads the event, description included.** The description is
+  often where the useful detail is (an entry code, what to bring). A second
+  exception to docs/SECURITY.md §9.
+- **The model writes the banner's short line**, rather than templated copy, so
+  the line can carry what matters for that event. The line is laundered in
+  code (below), because a stranger's invitation can steer words onto the lock
+  screen.
 - **Real events and committed ghosts, Mac and iPhone.** The model may decide an
   event needs no reminder.
 
 No feature flag, no env var: it takes hold when the
 daemon rolls. One owner preference turns it off.
 
-#### Whose events (DECIDED 2026-10-29, after review)
+#### Whose events (DECIDED)
 
 **THE ATTENDANCE RULE.** A real event is reminded (planned, fired, or given
 the fallback), links ghosts for reminding and tickets, and may claim
@@ -1102,16 +1103,16 @@ versions off that list, and their items fall to the fallback until planned.
   An index out of range is null. `open` is what tapping the banner shows;
   `ticket` is what the Tickets button shows.
 - `same_as`: candidate indexes. Out of range ones are dropped.
-- `code` (added 2026-10-30, prompt `calendar-remind-v2`): `{label, value}` or
+- `code` (prompt `calendar-remind-v2`): `{label, value}` or
   null, an entry code the person needs on arrival (a door PIN, a gate code).
   The owner's ask: an event whose description says "If no one is at the
-  front desk, use PIN 642181 to enter" should hand over the PIN right before
+  front desk, use PIN 735902 to enter" should hand over the PIN right before
   they walk in. The line rule drops codes on purpose (a steered line must
   not carry one), so the code has its own field, HELD TO THE ITEM'S OWN TEXT
   in code (`remind::settle_code`), as the card's place is held to the
   location: the value must appear word for word, as a whole word (not a
   piece of "1234-5678"), in the title, location or description, never the
-  mail; at most 2 letters then digits, `#` and `*` ("642181", "#4417",
+  mail; at most 2 letters then digits, `#` and `*` ("735902", "#4417",
   "B12"), 3 to 12 characters, 2 to 6 digits (phone numbers run from 7, and 8
   in Singapore, Hong Kong, Denmark and Norway, so 6 keeps them all out and a
   spelled number like `1800FLOWERS` has no shape to fit). The label uses only
@@ -1119,9 +1120,9 @@ versions off that list, and their items fall to the fallback until planned.
   building, locker, PIN, code, desk, callbox, intercom, Wi-Fi and the like,
   hyphenated or not), so it can never say "Call now"; anything else is
   "Code". A joiner joins numbers, not words: "1234" is no code of
-  "1234-5678", while "PIN 642181—it opens the side door" hands it over. Served
+  "1234-5678", while "PIN 735902, it opens the side door" hands it over. Served
   from a CURRENT plan only, so a PIN that changed in the description never
-  shows the old one. The banner body leads with it: "Door PIN 642181 · the
+  shows the old one. The banner body leads with it: "Door PIN 735902 · the
   line". On the iPhone the lock screen hides it until Face ID unlocks
   (Show Previews: When Unlocked, the default).
 
@@ -1185,8 +1186,8 @@ The frame:
 ```json
 {"calendar_reminder": 7, "at": 1793210000,
  "item": {"kind": "event", "calendar_id": "primary", "id": "abc",
-          "title": "Phoebe Bridgers", "start": "2026-10-30T20:00:00-07:00",
-          "end": null, "all_day": false, "place": "The Greek Theatre"},
+          "title": "The Lanterns", "start": "2026-10-30T20:00:00-07:00",
+          "end": null, "all_day": false, "place": "Riverside Hall"},
  "lead_minutes": 60, "line": "Your 2 tickets are in the Ticketmaster email",
  "code": null,
  "open": {"message_id": 41, "thread_id": "t41", "attachment_id": 9},
@@ -1197,8 +1198,8 @@ The frame:
 
 A ghost's `item` is `{"kind": "ghost", "id": <ghost id>, ...}`.
 
-The banner reads: title = the event's title; subtitle = "8pm · The Greek
-Theatre" (the start in the device's zone, "Today" for all-day; a countdown
+The banner reads: title = the event's title; subtitle = "8pm · Riverside
+Hall" (the start in the device's zone, "Today" for all-day; a countdown
 would go stale on the lock screen); body = the code, if any, then the line. The title, place and
 line are stripped of bidi controls and invisible marks on the device too.
 Tapping it shows `open` (an attachment in Quick Look, mail in the reader),
@@ -1229,7 +1230,7 @@ phone), mail in the reader.
 A per-event lead the user picks, snooze, travel time from where the user is,
 and leaving out events Google's own app already reminds about.
 
-#### As built (daemon, 2026-10-29)
+#### As built (daemon)
 
 Where the build settled something the design left open, or differs from it:
 
@@ -1337,7 +1338,7 @@ then the only thing left is Send:
    an empty line with the cursor on it for the user's own words, and the
    signature:
 
-       Taiki,
+       Priya,
 
        Let's do 10am ET on the 21st.
 
@@ -1381,13 +1382,13 @@ Rules:
   ranked down for the morning after a late event.
 - **Click a slot** to insert its time as text at the cursor. Nothing else is
   written.
-- **A time in a draft is a chip, shown in the user's own time** (DECIDED,
-  2026-10-01). In the composer an inserted time reads in the user's zone
+- **A time in a draft is a chip, shown in the user's own time** (DECIDED).
+  In the composer an inserted time reads in the user's zone
   ("7a PT") inside a small card, like the inline code cards. Hovering it says
   what goes out: "recipient sees 10a ET". On send the chip becomes plain text
   in the recipient's zone. The user thinks in their own time and never
   converts; the recipient reads theirs.
-- **Every recipient gets a time in their own zone** (DECIDED, 2026-10-01),
+- **Every recipient gets a time in their own zone** (DECIDED),
   and the zone is ALWAYS written out, never implied. A mail has one body that
   every recipient reads, so the chip sends each distinct recipient zone once,
   labelled: "10a ET / 7a PT". A zone comes from the times the sender offered,
@@ -1395,7 +1396,7 @@ Rules:
   recipient with no known zone is covered by the user's own zone, which is
   then included.
 - **Clicking the chip lists each person with the time they will see**
-  ("Taiki: 10a ET", "Jesse: 10a ET", "Dana: 7a PT", "Sam: zone unknown, sees
+  ("Priya: 10a ET", "Jesse: 10a ET", "Dana: 7a PT", "Sam: zone unknown, sees
   7a PT"). This is also where the user sees what was inferred about each
   person and can correct it.
 - Not built: a separate copy of the mail for each recipient, each showing
@@ -1476,8 +1477,7 @@ real calendar.
   means a token's recorded scopes include `calendar.events`; the list scope is
   wanted, not required. Classification is still to be confirmed against
   Google's list at filing; the working assumption is sensitive, not
-  restricted. `docs/VERIFICATION.md` carries the declarations and the
-  justification.
+  restricted.
 - **Two doors still hold.** Sync reads. Writes happen only in human-door
   handlers, as with Gmail.
 - **EventKit, on the client, as a supplement.** It reads every calendar
@@ -1546,7 +1546,7 @@ from the plan below:
   control plane passes it to Google as `login_hint` and, at the callback,
   installs nothing when a different account consented. The hint is a guard,
   never an authority: the tenant is still found from the account Google names.
-- **New signups** are asked for calendar at signup (decided 2026-10-27). It
+- **New signups** are asked for calendar at signup (DECIDED). It
   is optional, like the profile scope: a person who unticks it still gets a
   mailbox, and the calendar page offers the grant on its first visit. Tenants
   from before this grant through the calendar page.
@@ -1677,7 +1677,7 @@ Read only (slice B). The only writes are the user's own, described under
   at least 8 characters. Worked out when the timeline is listed, never stored: it hides a
   duplicate and changes no ghost.
 - **The card's place** (`gcal/place.rs`, 2026-10-28). A booking service
-  often writes its marketing into the location ("Dingles Public House, Tock is
+  often writes its marketing into the location ("Harbor Lane Tavern, Tock is
   now part of the Resy network. Explore even more of our dining network on").
   After each pass that synced, up to 10 locations longer than 40 characters
   with no answer yet (upcoming events first) go to the small `notify` model,
@@ -2057,8 +2057,8 @@ the event pane's guest suggestion (§5). No model is involved.
   guest by sending mail under a matching name. Never the account's own
   address.
 - **A given name or its prefix.** The words asked for must each start the
-  person's name from its first word ("ste" and "steven n" find "Steven Ng";
-  "ng" and "even" do not). The name is the one the user's own sent mail used
+  person's name from its first word ("sa" and "sam n" find "Sam Ng";
+  "ng" and "am" do not). The name is the one the user's own sent mail used
   when there is one.
 - **Most recent exchange first.** Two-way correspondents rank above people
   the user has only written to, by the older of the last mail each way.
@@ -2071,7 +2071,7 @@ the event pane's guest suggestion (§5). No model is involved.
 - **A list or a desk is not a person.** A contact with no name from the
   user's own sent mail is named by its newest readable From name; when any
   of that mail carries `List-Unsubscribe`, or a From name shaped like
-  "Steven Ng via Team" or "Steven from Acme", the address is not offered at
+  "Sam Ng via Team" or "Sam from Acme", the address is not offered at
   all.
 - A name under two characters is a 400 (the client asks for nothing
   shorter); over-long or address-like input answers an empty list. The
@@ -2100,19 +2100,13 @@ event's location too). No key, no bill, the same on Mac and iOS.
 
 ### Verification and disclosure
 
-- Google verification has not started (2026-09-30). It is not held for
-  calendar: the review wants a demonstration of each scope in use and this
-  feature does not exist yet. The plan was Gmail first and calendar as an
-  amendment. Since 2026-10-27 signup asks for calendar, so calendar is in the
-  Gmail submission and the calendar feature has to be demoable before filing
-  (or signup stops asking). Trade accepted: every hosted tenant's sealed token
-  can now read and write calendars, unused while the feature is off.
-- Until then the calendar grant runs under the same unverified 100-user cap as
-  everything else.
-- `docs/VERIFICATION.md` calls the Gmail mailbox "the entire product surface".
-  That document, the scope constants, the privacy policy and the trust page
-  all change BEFORE the scope ships. Calendar content reaching the model
-  through triage context (§9) is a disclosure of its own.
+- Signup asks for calendar, so calendar is part of the Google verification
+  submission, and the calendar feature has to be demoable in it. A hosted
+  tenant's sealed token can read and write calendars, unused while the
+  feature is off.
+- The scope constants, the privacy policy and the trust page change BEFORE a
+  new scope ships. Calendar content reaching the model through triage
+  context (§9) is a disclosure of its own.
 
 ### Before anything writes to a real calendar
 
@@ -2186,9 +2180,9 @@ on cancellation.)
 ## 10. Agents
 
 The agent door stays read-only. It does not serve the timeline, but it
-SEARCHES it (§10.1, DECIDED 2026-10-28).
+SEARCHES it (§10.1, DECIDED).
 
-### 10.1 Search (DECIDED 2026-10-28)
+### 10.1 Search (DECIDED)
 
 The founder: "lets make calendar events searchable by the agent and keyword
 search." Decided with them the same day: an **Events block** in the search
@@ -2212,8 +2206,7 @@ word it begins, or a word one of its plural forms begins (`s`, `es`, `ies`
 read as `y`: "meetings" finds "Meeting", "parties" finds "party"), the same
 rule for events (a word index) and ghosts (title and place, matched in
 Rust). The index is NOT stemmed: porter stored "meeting" as "meet", so a
-half-typed "meetin" found nothing while the user typed (adversarial pass,
-2026-10-28). Events match on the title, place, description, guests' names
+half-typed "meetin" found nothing while the user typed. Events match on the title, place, description, guests' names
 and, for the owner only, every address the event holds. Ghosts fold no
 diacritics, events do ("uber" finds an "Über" event, not an "Über" ghost). An event that matches EVERY term is a hit. When none does and
 there are 2+ terms, events missing exactly one term are hits instead (the
@@ -2361,13 +2354,8 @@ nothing:
 ## 11. Feature flag: `calendar`
 
 The calendar is the hidden feature `calendar` (`squelch_core::features::CALENDAR`,
-docs/FEATURES.md). It was behind the flag from its first merge (#360), launched
-for every tenant on 2026-10-28 (#637, shipped in Mac 0.0.16, iPhone 0.0.11 and
-daemon 0.0.15), and went back behind the flag on 2026-10-31. It came back under
-the SAME key on purpose, so the `tenant_features` rows ticked before the launch
-turn it on again for the testers who had it. Check `/admin/features` before
-assuming who has it: an "Everyone" default for `calendar`, if one was ever
-saved, is the whole fleet.
+docs/FEATURES.md). It is per tenant, and an "Everyone" default on
+`/admin/features` turns it on for every tenant.
 
 What the flag gates:
 
@@ -2411,7 +2399,7 @@ Each wave is useful on its own and is committed when verified.
    `ghost_events` reconcile with identity and lifecycle, commitment, estimated
    end with the kind table, model tier and the user's corrections as history,
    `/client/timeline` and the ghost PATCH. BUILT (§3.6).
-2. **Timeline (client, no new scope).** Opus 5.5 visual pass first. Merged
+2. **Timeline (client, no new scope).** Visual design pass first. Merged
    timeline model, day column, sitrep agenda replacing the Calendar zone,
    event detail with its mail, month. Ghost actions before the grant: dismiss,
    "going", adjust the end. PARTLY BUILT: a Calendar page with an agenda,

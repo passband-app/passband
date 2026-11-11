@@ -118,8 +118,7 @@ const EXIT_SKIPPED: u8 = 2;
 ///
 /// The Job is still marked Failed - Kubernetes knows zero and non-zero and
 /// nothing else - so a fleet mid-roll leaves failed Jobs in its history by
-/// design. `deploy/hosted/PRODUCTION.md` says what that looks like and how an
-/// alert should tell it from the real thing.
+/// design, and an alert has to tell that from the real thing by exit code.
 const EXIT_PROGRESSING: u8 = 3;
 /// A CASUALTY stopped the run before it wrote anything, and the fleet is
 /// FROZEN: no tenant converged, and none will on any tick until this one is
@@ -135,8 +134,7 @@ const EXIT_PROGRESSING: u8 = 3;
 /// means the fleet quietly stops converging and the next release reaches
 /// nobody.
 ///
-/// So: page on this, dashboard the rest. `deploy/hosted/PRODUCTION.md`,
-/// "Alerting on this, without alerting on normal", has the query.
+/// So: page on this, dashboard the rest.
 const EXIT_FROZEN: u8 = 4;
 /// The argument list was none of the three this binary accepts (`EX_USAGE`).
 /// Deliberately outside the 0-4 range: a mistyped CronJob argument must not

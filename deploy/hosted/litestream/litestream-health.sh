@@ -2,9 +2,8 @@
 #
 # litestream-health.sh -- turn litestream's journal into metrics, per tenant.
 #
-# WHY. Litestream 0.3.13 failed silently four times (issue #696): one tenant's
-# replica stuck in an error loop for days while the unit stayed "active" and
-# nothing paged. 0.3.13 can serve Prometheus metrics, but none of them says
+# WHY. Litestream 0.3.13 can fail silently (issue #696): a tenant's replica
+# sticks in an error loop while the unit stays "active" and nothing pages. 0.3.13 can serve Prometheus metrics, but none of them says
 # "this replica is failing" (they are DB-side), and the agent scrapes pods, not
 # host loopback. The journal does say it, one line per attempt. So this script
 # reads the new journal lines every minute and writes, for node-exporter's

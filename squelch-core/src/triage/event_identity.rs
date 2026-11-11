@@ -306,12 +306,12 @@ mod tests {
     fn question(position: usize, ids: &[i64]) -> RecordQuestion {
         RecordQuestion {
             position,
-            record: ghost::launder(&event("Polar Inertia", "2026-11-06T19:00:00+01:00")).unwrap(),
+            record: ghost::launder(&event("Halcyon Drift", "2026-11-06T19:00:00+01:00")).unwrap(),
             candidates: ids
                 .iter()
                 .map(|&id| IdentityCandidate {
                     id,
-                    title: "Polar Inertia".into(),
+                    title: "Halcyon Drift".into(),
                     start: EventTime::parse("2026-11-06T19:00:00+01:00").unwrap(),
                     location: None,
                     sender: Some("ra.co".into()),
@@ -344,8 +344,8 @@ mod tests {
     #[test]
     fn an_offered_pick_and_a_new_event_are_both_verdicts() {
         let mut d = decision(vec![
-            event("Polar Inertia", "2026-11-06T19:00:00+01:00"),
-            event("Polar Inertia", "2026-11-07T19:00:00+01:00"),
+            event("Halcyon Drift", "2026-11-06T19:00:00+01:00"),
+            event("Halcyon Drift", "2026-11-07T19:00:00+01:00"),
         ]);
         apply(
             &mut d,
@@ -370,9 +370,9 @@ mod tests {
     #[test]
     fn an_id_not_offered_or_picked_twice_leaves_no_verdict() {
         let mut d = decision(vec![
-            event("Polar Inertia", "2026-11-06T19:00:00+01:00"),
-            event("Polar Inertia", "2026-11-06T19:00:00+01:00"),
-            event("Polar Inertia", "2026-11-06T19:00:00+01:00"),
+            event("Halcyon Drift", "2026-11-06T19:00:00+01:00"),
+            event("Halcyon Drift", "2026-11-06T19:00:00+01:00"),
+            event("Halcyon Drift", "2026-11-06T19:00:00+01:00"),
         ]);
         apply(
             &mut d,
@@ -396,7 +396,7 @@ mod tests {
     fn positions_skip_records_laundering_drops() {
         let mut d = decision(vec![
             event("   ", "2026-11-06T19:00:00+01:00"),
-            event("Polar Inertia", "2026-11-06T19:00:00+01:00"),
+            event("Halcyon Drift", "2026-11-06T19:00:00+01:00"),
         ]);
         apply(&mut d, &[question(0, &[4])], &vec![(0, Some(4))]);
         assert_eq!(

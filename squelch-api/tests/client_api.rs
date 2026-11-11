@@ -195,7 +195,7 @@ async fn shipments_returns_en_route_by_default_and_delivered_with_flag() {
                 mid,
                 &ShipmentInfo {
                     carrier: "usps".into(),
-                    tracking_number: "9400111899223817428490".into(),
+                    tracking_number: "9400100000000000000000".into(),
                     item_name: "Book".into(),
                     status: ShipmentStatus::Delivered,
                     tracking_url: None,
@@ -268,7 +268,7 @@ async fn shipments_carry_the_carrier_poll_fields() {
                 mid,
                 &ShipmentInfo {
                     carrier: "usps".into(),
-                    tracking_number: "9400111899223817428490".into(),
+                    tracking_number: "9400100000000000000000".into(),
                     item_name: "Book".into(),
                     status: ShipmentStatus::Shipped,
                     tracking_url: None,
@@ -322,7 +322,7 @@ async fn shipments_carry_the_carrier_poll_fields() {
 
     let unpolled = items
         .iter()
-        .find(|i| i["tracking_number"] == "9400111899223817428490")
+        .find(|i| i["tracking_number"] == "9400100000000000000000")
         .expect("the never-polled shipment");
     for field in [
         "carrier_status_raw",
@@ -11020,9 +11020,9 @@ async fn search_unfinished_first_is_global_across_keyword_pages() {
     use squelch_core::types::AttentionStatus;
     let Harness { app, .. } = harness(|store, acct| {
         for (id, subject, done) in [
-            ("done-strict", "anjuna tickets", true),
+            ("done-strict", "festival tickets", true),
             ("open-partial", "tickets", false),
-            ("open-strict", "anjuna tickets", false),
+            ("open-strict", "festival tickets", false),
             ("done-partial", "tickets", true),
         ] {
             let id = store
@@ -11053,7 +11053,7 @@ async fn search_unfinished_first_is_global_across_keyword_pages() {
         let mut threads = Vec::new();
         loop {
             let uri = format!(
-                "/client/search?q=anjuna%20tickets&mode=keyword&unfinished_first=true&sort={sort}&limit=1{cursor}"
+                "/client/search?q=festival%20tickets&mode=keyword&unfinished_first=true&sort={sort}&limit=1{cursor}"
             );
             let response = app.clone().oneshot(authed("GET", &uri)).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
@@ -11128,9 +11128,9 @@ async fn search_plain_order_keeps_sent_mail_without_status_groups() {
     use squelch_core::types::AttentionStatus;
     let Harness { app, .. } = harness(|store, acct| {
         for (id, subject, done) in [
-            ("done-strict", "anjuna tickets", true),
+            ("done-strict", "festival tickets", true),
             ("open-partial", "tickets", false),
-            ("open-strict", "anjuna tickets", false),
+            ("open-strict", "festival tickets", false),
             ("done-partial", "tickets", true),
         ] {
             let id = store
@@ -11169,7 +11169,7 @@ async fn search_plain_order_keeps_sent_mail_without_status_groups() {
     let mut threads = Vec::new();
     loop {
         let uri = format!(
-            "/client/search?q=anjuna%20tickets&mode=keyword&include_sent=true&sort=best_match&limit=1{cursor}"
+            "/client/search?q=festival%20tickets&mode=keyword&include_sent=true&sort=best_match&limit=1{cursor}"
         );
         let response = app.clone().oneshot(authed("GET", &uri)).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -11951,7 +11951,7 @@ async fn grouped_recall_expands_without_repeating_hits_or_returning_done_early()
                 acct,
                 &key,
                 &key,
-                "anjuna tickets",
+                "festival tickets",
                 "save tickets below",
             ))
             .unwrap();
@@ -11976,7 +11976,7 @@ async fn grouped_recall_expands_without_repeating_hits_or_returning_done_early()
         let vector = store
             .embedder()
             .unwrap()
-            .embed("anjuna tickets save tickets below")
+            .embed("festival tickets save tickets below")
             .unwrap();
         store.upsert_message_vector(acct, id, &vector).unwrap();
     }
@@ -11987,7 +11987,7 @@ async fn grouped_recall_expands_without_repeating_hits_or_returning_done_early()
         let mut saw_done = false;
         for _ in 0..12 {
             let uri = format!(
-                "/client/search?q=anjuna%20tickets&mode={mode}&unfinished_first=true&limit=5{cursor}"
+                "/client/search?q=festival%20tickets&mode={mode}&unfinished_first=true&limit=5{cursor}"
             );
             let response = app.clone().oneshot(authed("GET", &uri)).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
@@ -12045,7 +12045,7 @@ async fn plain_order_recall_pages_by_cursor_without_repeats_or_groups() {
     let mut sent_id = 0;
     for i in 0..27 {
         let key = format!("recall-{i}");
-        let mut m = msg(acct, &key, &key, "anjuna tickets", "save tickets below");
+        let mut m = msg(acct, &key, &key, "festival tickets", "save tickets below");
         m.is_sent = i == 4;
         let id = store.upsert_message(&m).unwrap();
         if i == 4 {
@@ -12072,7 +12072,7 @@ async fn plain_order_recall_pages_by_cursor_without_repeats_or_groups() {
         let vector = store
             .embedder()
             .unwrap()
-            .embed("anjuna tickets save tickets below")
+            .embed("festival tickets save tickets below")
             .unwrap();
         store.upsert_message_vector(acct, id, &vector).unwrap();
     }
@@ -12084,7 +12084,7 @@ async fn plain_order_recall_pages_by_cursor_without_repeats_or_groups() {
         let mut last_cursor = None;
         for _ in 0..12 {
             let uri = format!(
-                "/client/search?q=anjuna%20tickets&mode={mode}&include_sent=true&limit=5{cursor}"
+                "/client/search?q=festival%20tickets&mode={mode}&include_sent=true&limit=5{cursor}"
             );
             let response = app.clone().oneshot(authed("GET", &uri)).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
@@ -12120,7 +12120,7 @@ async fn plain_order_recall_pages_by_cursor_without_repeats_or_groups() {
             .clone()
             .oneshot(authed(
                 "GET",
-                &format!("/client/search?q=anjuna%20tickets&mode={mode}&limit=5&cursor={c}"),
+                &format!("/client/search?q=festival%20tickets&mode={mode}&limit=5&cursor={c}"),
             ))
             .await
             .unwrap();
@@ -13806,7 +13806,7 @@ fn scan_meta(id: &str, outbox: &str, msgid: &str) -> String {
 
 #[tokio::test]
 async fn recovery_finds_a_mail_whose_message_id_gmail_rewrote_by_its_outbox_header() {
-    // THE LIVE FINDING (2026-09-29): the mail went out, but `rfc822msgid:`
+    // Gmail can rewrite a sent mail's Message-ID: the mail went out, but `rfc822msgid:`
     // for the minted id finds nothing. The Sent scan reads the outbox header
     // and settles it: recovered, never sent again.
     let (base, gmail) = mock_gmail_seq(vec![

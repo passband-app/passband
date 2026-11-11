@@ -812,8 +812,8 @@ proxy, or the page running inside a sandboxed frame. Opening
 /// all. It is a door rather than an app page on purpose: an interruption with
 /// a sidebar beside it is one the eye can wander off.
 ///
-/// WHY THE QUESTION IS WORTH A WHOLE PAGE. The OAuth client is not verified yet
-/// (`docs/VERIFICATION.md`), so Google refuses consent to any account that is
+/// WHY THE QUESTION IS WORTH A WHOLE PAGE. While the OAuth client is
+/// unverified, Google refuses consent to any account that is
 /// not on the project's test-user list. An invite mailed to somebody who is not
 /// on that list is an invite to a wall, and the first anyone hears of it is the
 /// person writing back.

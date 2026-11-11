@@ -877,7 +877,7 @@ async fn another_senders_change_is_offered_on_the_card_and_applies_only_when_acc
         w.acct,
         "venue",
         "noreply@ra.co",
-        "Parameter & Endzeit Invite Polar Inertia",
+        "Northside Collective Presents Halcyon Drift",
         at(day, "19:00"),
         EventCommitment::Committed,
         vec!["RA7F3K9Q2".into()],
@@ -901,8 +901,8 @@ async fn another_senders_change_is_offered_on_the_card_and_applies_only_when_acc
         &w.store,
         w.acct,
         "promoter",
-        "hello@endzeit.example",
-        "Polar Inertia",
+        "hello@northside.example",
+        "Halcyon Drift",
         moved_to.clone(),
         EventCommitment::Unknown,
         vec![],
@@ -968,8 +968,8 @@ async fn another_senders_change_is_offered_on_the_card_and_applies_only_when_acc
         &w.store,
         w.acct,
         "promoter2",
-        "hello@endzeit.example",
-        "Polar Inertia",
+        "hello@northside.example",
+        "Halcyon Drift",
         again.clone(),
         EventCommitment::Unknown,
         vec![],
@@ -1011,7 +1011,7 @@ async fn a_change_is_not_offered_on_an_event_the_user_made_themselves() {
     let start = minute(Utc::now() + Duration::days(4));
     w.google().full.insert(
         PRIMARY.into(),
-        vec![vec![timed("evt-show", "Polar Inertia", start, 120)]],
+        vec![vec![timed("evt-show", "Halcyon Drift", start, 120)]],
     );
     assert_eq!(w.pass().await, PassOutcome::Synced);
     let ticket_msg = seed_ghost_from(
@@ -1019,7 +1019,7 @@ async fn a_change_is_not_offered_on_an_event_the_user_made_themselves() {
         w.acct,
         "venue",
         "noreply@ra.co",
-        "Polar Inertia",
+        "Halcyon Drift",
         rfc(start),
         EventCommitment::Committed,
         vec!["RA7F3K9Q2".into()],
@@ -1040,8 +1040,8 @@ async fn a_change_is_not_offered_on_an_event_the_user_made_themselves() {
         &w.store,
         w.acct,
         "promoter",
-        "hello@endzeit.example",
-        "Polar Inertia",
+        "hello@northside.example",
+        "Halcyon Drift",
         rfc(start + Duration::days(1)),
         EventCommitment::Unknown,
         vec![],
@@ -1070,21 +1070,21 @@ async fn copies_of_one_event_from_two_senders_show_as_one_ghost() {
         &w.store,
         w.acct,
         "friend",
-        "endzeitsf@gmail.com",
+        "hello@northside.example",
         "Friday night",
         date.clone(),
         EventCommitment::Invited,
-        vec!["https://ra.co/events/2494673?p=paramzeit".into()],
+        vec!["https://ra.co/events/1000001?p=northside".into()],
     );
     seed_ghost_from(
         &w.store,
         w.acct,
         "venue",
         "noreply@ra.co",
-        "Polar Inertia",
+        "Halcyon Drift",
         date.clone(),
         EventCommitment::Committed,
-        vec!["https://ra.co/events/2494673".into()],
+        vec!["https://ra.co/events/1000001".into()],
     );
     // A third sender's copy with the venue's link folds too.
     seed_ghost_from(
@@ -1092,11 +1092,11 @@ async fn copies_of_one_event_from_two_senders_show_as_one_ghost() {
         w.acct,
         "pal",
         "pal@gmail.com",
-        "Polar Inertia tickets",
+        "Halcyon Drift tickets",
         date.clone(),
         // Committed, so search serves it (it serves no mere invitation).
         EventCommitment::Committed,
-        vec!["ra.co/events/2494673".into()],
+        vec!["ra.co/events/1000001".into()],
     );
     // A stranger matching only the title never folds, either way.
     seed_ghost_from(
@@ -1104,7 +1104,7 @@ async fn copies_of_one_event_from_two_senders_show_as_one_ghost() {
         w.acct,
         "stranger",
         "tickets@evil.example",
-        "Polar Inertia",
+        "Halcyon Drift",
         date.clone(),
         EventCommitment::Committed,
         vec!["https://evil.example/e/1".into()],
@@ -1116,10 +1116,10 @@ async fn copies_of_one_event_from_two_senders_show_as_one_ghost() {
         w.acct,
         "other",
         "buddy@gmail.com",
-        "Polar Inertia",
+        "Halcyon Drift",
         (day + Duration::days(3)).format("%Y-%m-%d").to_string(),
         EventCommitment::Committed,
-        vec!["https://ra.co/events/2494673".into()],
+        vec!["https://ra.co/events/1000001".into()],
     );
     let stored = w
         .store
@@ -1145,16 +1145,16 @@ async fn copies_of_one_event_from_two_senders_show_as_one_ghost() {
         .iter()
         .find(|g| g["sources"].as_array().unwrap().len() == 3)
         .expect("the venue's ghost carries all three mails");
-    assert_eq!(venue["title"], "Polar Inertia", "the issuer's shows");
+    assert_eq!(venue["title"], "Halcyon Drift", "the issuer's shows");
     assert_eq!(ghosts.len(), 3);
     // Search shows the one too.
-    let found = search(&w.app, "/client/calendar/search", "polar").await;
+    let found = search(&w.app, "/client/calendar/search", "halcyon").await;
     assert_eq!(
         hit_titles(&found),
         [
-            "ghost:Polar Inertia",
-            "ghost:Polar Inertia",
-            "ghost:Polar Inertia"
+            "ghost:Halcyon Drift",
+            "ghost:Halcyon Drift",
+            "ghost:Halcyon Drift"
         ],
         "{found:#}"
     );
@@ -6034,10 +6034,10 @@ async fn a_noisy_location_is_served_as_a_clean_place_and_boilerplate_notes_go() 
     use squelch_core::config::Stage2Provider;
     use squelch_core::gcal::place::{PlaceClient, USAGE_CATEGORY};
     let w = world("place", GRANTED).await;
-    let tock = "Dingles Public House, Tock is now part of the Resy network. \
+    let tock = "Fennick Public House, Tock is now part of the Resy network. \
                 Explore even more of our dining network on";
     let start = minute(Utc::now() + Duration::days(2));
-    let mut dinner = timed("evt-1", "Reservation at Dingles Public House", start, 60);
+    let mut dinner = timed("evt-1", "Reservation at Fennick Public House", start, 60);
     dinner["location"] = json!(tock);
     dinner["description"] = json!(
         "To see detailed information for automatically created events like this one, \
@@ -6051,7 +6051,7 @@ async fn a_noisy_location_is_served_as_a_clean_place_and_boilerplate_notes_go() 
         .full
         .insert(PRIMARY.into(), vec![vec![dinner, again, call]]);
 
-    let (url, bodies) = spawn_place_model("Dingles Public House", "").await;
+    let (url, bodies) = spawn_place_model("Fennick Public House", "").await;
     let sync = CalendarSync::with_api_base(w.store.clone(), w.acct, w.creds.clone(), &w.base)
         .unwrap()
         .with_features(w.features.clone())
@@ -6082,15 +6082,15 @@ async fn a_noisy_location_is_served_as_a_clean_place_and_boilerplate_notes_go() 
         let bodies = bodies.lock().unwrap();
         assert_eq!(bodies.len(), 1);
         assert!(bodies[0].contains("Tock is now part of the Resy network"));
-        assert!(!bodies[0].contains("Reservation at Dingles"));
+        assert!(!bodies[0].contains("Reservation at Fennick"));
         assert!(!bodies[0].contains("Zoom"));
     }
     let events = w.events().await;
     let by_id = |id: &str| events.iter().find(|e| e["id"] == id).unwrap().clone();
-    let dingles = json!({ "name": "Dingles Public House", "address": null, "original": tock });
-    assert_eq!(by_id("evt-1")["place"], dingles);
+    let fennick = json!({ "name": "Fennick Public House", "address": null, "original": tock });
+    assert_eq!(by_id("evt-1")["place"], fennick);
     assert_eq!(by_id("evt-1")["location"], json!(tock), "the editor's text");
-    assert_eq!(by_id("evt-2")["place"], dingles);
+    assert_eq!(by_id("evt-2")["place"], fennick);
     assert!(by_id("evt-3").get("place").is_none());
     assert_eq!(by_id("evt-3")["location"], json!("Zoom"));
 
@@ -6214,21 +6214,21 @@ async fn passband_takes_over_gmails_own_events_and_leaves_invitations_alone() {
     let w = world("own", GRANTED).await;
     let start = minute(Utc::now() + Duration::days(2));
     let later = start + Duration::days(1);
-    let mut gmail = timed("gm1", "Reservation at Dingles Public House", start, 60);
+    let mut gmail = timed("gm1", "Reservation at Fennick Public House", start, 60);
     gmail["eventType"] = json!("fromGmail");
-    gmail["location"] = json!("Dingles Public House, 165 Main St");
+    gmail["location"] = json!("Fennick Public House, 165 Main St");
     gmail["organizer"] = json!({"email": "me@example.com", "self": true});
     let mut invite = timed("gm2", "Drinks at Bemelmans", later, 60);
     invite["eventType"] = json!("fromGmail");
-    invite["organizer"] = json!({"email": "ellie@example.com"});
+    invite["organizer"] = json!({"email": "sam@example.com"});
     invite["attendees"] = json!([
-        {"email": "ellie@example.com", "organizer": true, "responseStatus": "accepted"},
+        {"email": "sam@example.com", "organizer": true, "responseStatus": "accepted"},
         {"email": "me@example.com", "self": true, "responseStatus": "accepted"}
     ]);
     w.google()
         .full
         .insert(PRIMARY.into(), vec![vec![gmail.clone(), invite]]);
-    seed_ghost(&w.store, w.acct, "g1", "Dinner at Dingles", rfc(start));
+    seed_ghost(&w.store, w.acct, "g1", "Dinner at Fennick", rfc(start));
     seed_ghost(&w.store, w.acct, "g2", "Drinks at Bemelmans", rfc(later));
     assert_eq!(w.pass().await, PassOutcome::Synced);
 
@@ -6257,7 +6257,7 @@ async fn passband_takes_over_gmails_own_events_and_leaves_invitations_alone() {
         assert_eq!(insert.query["sendUpdates"], "none");
         assert_eq!(
             insert.body["summary"],
-            "Reservation at Dingles Public House"
+            "Reservation at Fennick Public House"
         );
         assert_eq!(insert.body["description"], OWNED_NOTE);
         assert_eq!(insert.body["start"]["dateTime"], json!(rfc(start)));
@@ -6288,7 +6288,7 @@ async fn passband_takes_over_gmails_own_events_and_leaves_invitations_alone() {
     let ghosts = w.timeline().await["ghosts"].as_array().unwrap().clone();
     let dinner = ghosts
         .iter()
-        .find(|g| g["title"] == "Dinner at Dingles")
+        .find(|g| g["title"] == "Dinner at Fennick")
         .unwrap();
     assert_eq!(
         dinner["matched_event"],
@@ -6310,7 +6310,7 @@ async fn passband_takes_over_gmails_own_events_and_leaves_invitations_alone() {
     assert!(actions.contains(&(AUDIT_ACTOR, "calendar_event_adopt", "ok")));
     assert!(actions.contains(&(AUDIT_ACTOR, "calendar_event_replace_gmail", "ok")));
     let text = serde_json::to_string(&rows).unwrap();
-    for secret in ["Dingles", "Bemelmans", "Main St"] {
+    for secret in ["Fennick", "Bemelmans", "Main St"] {
         assert!(!text.contains(secret), "the audit log carries {secret}");
     }
 
@@ -6376,11 +6376,11 @@ async fn passband_takes_over_gmails_own_events_and_leaves_invitations_alone() {
 async fn a_refused_gmail_delete_takes_passbands_event_back_off_for_good() {
     let w = world("own-refused", GRANTED).await;
     let start = minute(Utc::now() + Duration::days(2));
-    let mut gmail = timed("gm1", "Reservation at Dingles Public House", start, 60);
+    let mut gmail = timed("gm1", "Reservation at Fennick Public House", start, 60);
     gmail["eventType"] = json!("fromGmail");
     gmail["organizer"] = json!({"email": "me@example.com", "self": true});
     w.google().full.insert(PRIMARY.into(), vec![vec![gmail]]);
-    seed_ghost(&w.store, w.acct, "g1", "Dinner at Dingles", rfc(start));
+    seed_ghost(&w.store, w.acct, "g1", "Dinner at Fennick", rfc(start));
     assert_eq!(w.pass().await, PassOutcome::Synced);
     w.google().fail_delete_of = Some("gm1".into());
     w.sync.own_events(Utc::now()).await;
@@ -6420,11 +6420,11 @@ async fn a_refused_gmail_delete_takes_passbands_event_back_off_for_good() {
 async fn refusals_are_not_retried_every_pass_and_a_failed_undo_is_retried() {
     let w = world("own-undo", GRANTED).await;
     let start = minute(Utc::now() + Duration::days(2));
-    let mut gmail = timed("gm1", "Reservation at Dingles Public House", start, 60);
+    let mut gmail = timed("gm1", "Reservation at Fennick Public House", start, 60);
     gmail["eventType"] = json!("fromGmail");
     gmail["organizer"] = json!({"email": "me@example.com", "self": true});
     w.google().full.insert(PRIMARY.into(), vec![vec![gmail]]);
-    seed_ghost(&w.store, w.acct, "g1", "Dinner at Dingles", rfc(start));
+    seed_ghost(&w.store, w.acct, "g1", "Dinner at Fennick", rfc(start));
     assert_eq!(w.pass().await, PassOutcome::Synced);
     w.google().fail_deletes = true;
     w.sync.own_events(Utc::now()).await;
@@ -6690,7 +6690,7 @@ async fn the_agent_gets_no_ghost_whose_thread_it_may_not_open() {
     assert_eq!(agent["total"], 0, "{agent}");
 }
 
-// --- Adversarial pass, 2026-10-28 -----------------------------------------
+// --- Adversarial cases ----------------------------------------------------
 
 #[tokio::test]
 async fn a_half_typed_word_finds_its_event_as_the_user_types() {
@@ -6975,14 +6975,14 @@ async fn an_event_is_planned_once_fires_once_and_serves_its_tickets() {
     let state = door_state.lock().unwrap().clone().unwrap();
 
     let start = minute(Utc::now() + Duration::minutes(50));
-    let mut dinner = timed("dinner", "Dinner at Dingles", start, 90);
+    let mut dinner = timed("dinner", "Dinner at Fennick", start, 90);
     dinner["attendees"] = json!([
         {"email": "me@example.com", "self": true, "responseStatus": "accepted"},
         {"email": "friend@example.com", "displayName": "Dana Friend",
          "responseStatus": "accepted"},
     ]);
     w.google().full.insert(PRIMARY.into(), vec![vec![dinner]]);
-    let message = seed_ghost(&w.store, w.acct, "g1", "Dinner at Dingles", rfc(start));
+    let message = seed_ghost(&w.store, w.acct, "g1", "Dinner at Fennick", rfc(start));
     let pdf = w
         .store
         .insert_attachment(
@@ -7008,7 +7008,7 @@ async fn an_event_is_planned_once_fires_once_and_serves_its_tickets() {
         let bodies = bodies.lock().unwrap();
         assert_eq!(bodies.len(), 1);
         let sent = &bodies[0];
-        assert!(sent.contains("Dinner at Dingles"));
+        assert!(sent.contains("Dinner at Fennick"));
         assert!(sent.contains("booking.pdf"));
         assert!(sent.contains("Other guests: 1"));
         assert!(!sent.contains("friend@example.com"), "no guest address");
@@ -7061,7 +7061,7 @@ async fn an_event_is_planned_once_fires_once_and_serves_its_tickets() {
     assert_eq!(frame["item"]["kind"], "event");
     assert_eq!(frame["item"]["id"], "dinner");
     assert_eq!(frame["item"]["calendar_id"], "primary");
-    assert_eq!(frame["item"]["title"], "Dinner at Dingles");
+    assert_eq!(frame["item"]["title"], "Dinner at Fennick");
     assert_eq!(frame["open"]["message_id"], message);
     assert_eq!(frame["open"]["attachment_id"], pdf);
     assert_eq!(frame["ticket"]["message_id"], message);

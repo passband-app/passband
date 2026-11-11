@@ -127,7 +127,7 @@ struct CalendarReminderSignal: Decodable, Equatable, Sendable {
         }
     }
 
-    /// An entry code the event's own text gives ("Door PIN 642181"), held to
+    /// An entry code the event's own text gives ("Door PIN 735902"), held to
     /// that text by the daemon (`remind::settle_code`).
     struct EntryCode: Decodable, Equatable {
         var label: String
@@ -253,8 +253,8 @@ extension EventBanner {
         "passband.calendar.\(account.uuidString).\(fire)"
     }
 
-    /// The banner: title = the event's title, subtitle = "8pm · The Greek
-    /// Theatre", body = the line (nothing when there is none).
+    /// The banner: title = the event's title, subtitle = "8pm · Riverside
+    /// Hall", body = the line (nothing when there is none).
     ///
     /// THE CLOCK TIME, NOT "in 1 hr": a banner sits on the lock screen, and
     /// a countdown read forty minutes later is wrong while a start time never
@@ -281,7 +281,7 @@ extension EventBanner {
     }
 
     /// The body: the entry code first, where a glance finds it ("Door PIN
-    /// 642181"), then the line. Either may be missing.
+    /// 735902"), then the line. Either may be missing.
     static func reminderBody(_ signal: CalendarReminderSignal) -> String {
         let line = flatten(stripInvisible(signal.line ?? ""), max: 120)
         var code = ""

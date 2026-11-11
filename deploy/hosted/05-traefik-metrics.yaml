@@ -10,10 +10,8 @@
 # WHY. The chart's default buckets are 0.1 / 0.3 / 1.2 / 5.0, four of them. A
 # p95 read from that histogram is a straight-line interpolation inside
 # whichever bucket the 95th percentile lands in, and everything above 5s reads
-# as exactly 5s. So the "Traefik p95 latency" panel showed a flat 1.1s floor
-# that was really ~0.35s of store-mutex queueing, and every spike clipped at
-# 5.0 whether it was 6s or 60s. The panel could not tell those apart, and
-# neither could anyone reading it (2026-08-27).
+# as exactly 5s, so a p95 panel shows a false floor and clips every spike at
+# 5.0 whether it was 6s or 60s.
 #
 # Cardinality: 13 buckets x (service, code, method, protocol) over a handful of
 # services is a few hundred series. Fine.

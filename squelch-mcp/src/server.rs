@@ -2897,20 +2897,20 @@ mod tests {
                 tracking_number: Some(number.into()),
                 status: "shipped".into(),
                 item_name: item.map(str::to_string),
-                merchant: Some("Bill's Exhausts".into()),
+                merchant: Some("Rivera Exhaust Works".into()),
                 order_refs: refs.iter().map(|r| r.to_string()).collect(),
                 evidence: vec![],
             }],
             ..Default::default()
         };
         for (thread, decision) in [
-            ("inbound", leg("1ZW061R3DG21045729", None, &["21470"])),
+            ("inbound", leg("1Z999AA10123456792", None, &["50417"])),
             (
                 "outbound",
                 leg(
-                    "1ZB8B2560323528551",
-                    Some("Austin Racing DB Killer AUR10"),
-                    &["#21470"],
+                    "1Z999AA10123456793",
+                    Some("Trackside Muffler Insert TM10"),
+                    &["#50417"],
                 ),
             ),
         ] {
@@ -2952,11 +2952,11 @@ mod tests {
         assert_eq!((human.len(), agent.len()), (1, 1), "one card on both doors");
         let hit = &agent[0];
         assert_eq!(hit["tracking_number"], human[0].tracking_number);
-        assert_eq!(hit["item_name"], "Austin Racing DB Killer AUR10");
+        assert_eq!(hit["item_name"], "Trackside Muffler Insert TM10");
         assert_eq!(hit["item_name"], human[0].item_name);
-        assert_eq!(hit["merchant"], "Bill's Exhausts");
+        assert_eq!(hit["merchant"], "Rivera Exhaust Works");
         assert_eq!(hit["orders"].as_array().unwrap().len(), 1);
-        assert_eq!(hit["orders"][0]["order_ref"], "21470");
+        assert_eq!(hit["orders"][0]["order_ref"], "50417");
         assert_eq!(hit["legs"].as_array().unwrap().len(), 1);
         assert_eq!(
             hit["legs"][0]["tracking_number"],
@@ -3076,7 +3076,7 @@ mod tests {
             .unwrap()
             .with_shipment_policy(policy);
         let days = |n| Utc::now() - chrono::Duration::days(n);
-        let (coming, landed) = ("1ZW061R3DG21045729", "1ZB8B2560323528551");
+        let (coming, landed) = ("1Z999AA10123456792", "1Z999AA10123456793");
         deliver(
             &store,
             account,
@@ -3160,7 +3160,7 @@ mod tests {
             .unwrap()
             .with_shipment_policy(policy);
         let days = |n| Utc::now() - chrono::Duration::days(n);
-        let (legacy, coming) = ("1ZW061R3DG21045729", "1ZB8B2560323528551");
+        let (legacy, coming) = ("1Z999AA10123456792", "1Z999AA10123456793");
         // The legacy row: the old extractor's delivered verdict on an allowed
         // mail that carries no delivery record of its own.
         let minted = ingest_decided(&store, account, "old", days(5), false, "old", vec![]);
@@ -3241,7 +3241,7 @@ mod tests {
             "a",
             hours(3),
             false,
-            "1ZW061R3DG21045729",
+            "1Z999AA10123456792",
             "shipped",
             Some("Bean Co"),
             &["5"],
@@ -3252,7 +3252,7 @@ mod tests {
             "b",
             hours(2),
             false,
-            "1ZB8B2560323528551",
+            "1Z999AA10123456793",
             "shipped",
             Some("Bean Co"),
             &["5"],
@@ -3299,7 +3299,7 @@ mod tests {
             .unwrap()
             .with_shipment_policy(policy);
         let hours = |n| Utc::now() - chrono::Duration::hours(n);
-        let number = "1ZW061R3DG21045729";
+        let number = "1Z999AA10123456792";
         deliver(
             &store,
             account,
@@ -3347,7 +3347,7 @@ mod tests {
             "box2",
             hours(1),
             false,
-            "1ZB8B2560323528551",
+            "1Z999AA10123456793",
             "shipped",
             Some("X Pharmacy"),
             &["RX-99"],

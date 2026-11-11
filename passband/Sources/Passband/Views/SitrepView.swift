@@ -716,13 +716,13 @@ private struct IngestIndicator: View {
 
 // MARK: - GREETING
 
-/// "GOOD MORNING, BRAELYN": the one line on either client that says the
+/// "GOOD MORNING, JAMIE": the one line on either client that says the
 /// human's own name.
 ///
 /// The name is seeded once from the given name on the mailbox's Google
 /// profile when the daemon has one (`Prefs.seedUserName`), and changed only in
 /// Settings > You. With no name the greeting simply has none: it never falls
-/// back to the address, so it can never say "Good evening, bboynton97".
+/// back to the address, so it can never say "Good evening, jrivera97".
 ///
 /// Shared by both clients (the Mac's `DashHero`, the phone's hero).
 struct GreetingLine: View {

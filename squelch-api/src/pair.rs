@@ -191,7 +191,7 @@ mod tests {
 
         let resp = app
             .clone()
-            .oneshot(claim_request(&minted.code, "  Braelyn's MacBook  "))
+            .oneshot(claim_request(&minted.code, "  Jamie's MacBook  "))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -201,7 +201,7 @@ mod tests {
         let token = body["token"].as_str().unwrap().to_string();
         assert!(token.starts_with("sqd_"), "the wire carries the plaintext");
         assert!(body["device_id"].as_i64().unwrap() > 0);
-        assert_eq!(body["name"], "Braelyn's MacBook", "the name is trimmed");
+        assert_eq!(body["name"], "Jamie's MacBook", "the name is trimmed");
 
         let resp = app
             .oneshot(

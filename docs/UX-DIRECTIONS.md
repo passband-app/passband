@@ -75,7 +75,7 @@ Rejected: assumes email is a daily ritual; squelch's whole premise is that it is
 
 ## Standing constraints (from the architecture)
 
-- Client talks only to the human door (`/client/*`, bearer-authed, on baddiebox over
+- Client talks only to the human door (`/client/*`, bearer-authed, on the self-host box over
   tailnet). Stack: **Tauri 2 + React** (TypeScript, Vite). Keep the Rust side of the
   Tauri shell thin — it's a window + secure token storage; all intelligence stays
   server-side behind `/client`.

@@ -11,8 +11,7 @@
 //! and the tickets fallback. The store reads and writes are
 //! `store/sqlite/calendar_remind.rs`.
 //!
-//! WHAT GOES IN (the second exception to docs/SECURITY.md §9, the owner's
-//! decision of 2026-10-29): the title, start and end in the owner's zone,
+//! WHAT GOES IN (the second exception to docs/SECURITY.md §9): the title, start and end in the owner's zone,
 //! all-day, the card's place (else the location), the description, the
 //! user's answer, busy or free, how many OTHER guests (a count, never a name
 //! or an address), whether the user organizes it, event or ghost and the
@@ -817,7 +816,7 @@ pub struct Plan {
     pub code: Option<Code>,
 }
 
-/// An entry code for the notification: "Door PIN 642181".
+/// An entry code for the notification: "Door PIN 735902".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Code {
     pub label: String,
@@ -1473,7 +1472,7 @@ pub const CODE_LABEL_CAP: usize = 24;
 /// (`place::grounded`). The value must appear in the title, the location or
 /// the description as a whole word ([`whole_word_in`]), exactly as written,
 /// so the model can copy a code but never make one up. It is at most 2
-/// letters and then digits, `#` and `*` (a keypad: "642181", "#4417",
+/// letters and then digits, `#` and `*` (a keypad: "735902", "#4417",
 /// "B12"), 3 to [`CODE_CAP`] characters, with 2 to [`CODE_MAX_DIGITS`]
 /// digits, so it is never a phone number, a spelled number (`1800FLOWERS`)
 /// or a word. The label uses only [`CODE_LABEL_WORDS`] ("Door PIN", "Gate
@@ -1533,7 +1532,7 @@ fn whole_word_in(hay: &str, needle: &str) -> bool {
     fn joined(mut side: impl Iterator<Item = char>) -> bool {
         match side.next() {
             Some(c) if c.is_alphanumeric() => true,
-            // A joiner joins numbers ("1234-5678"), not words: "642181—it
+            // A joiner joins numbers ("1234-5678"), not words: "735902—it
             // opens" and "Door 1234/Gate 5678" hand over the code.
             Some('-' | '.' | '/' | '\u{2010}'..='\u{2015}' | '\u{2212}') => {
                 side.next().is_some_and(char::is_numeric)

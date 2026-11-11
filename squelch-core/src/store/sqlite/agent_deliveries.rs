@@ -1032,7 +1032,7 @@ mod tests {
             .unwrap()
             .execute(
                 "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body)
-                 VALUES(?1,1,?2,?2,'orders@billsexhausts.test',?3,?4,'','')",
+                 VALUES(?1,1,?2,?2,'orders@riveraexhaustworks.test',?3,?4,'','')",
                 params![id, id.to_string(), subject, (Utc::now() - age).to_rfc3339()],
             )
             .unwrap();
@@ -1089,35 +1089,35 @@ mod tests {
     /// THE REAL CASE. Two UPS numbers, one order: the supplier-to-merchant leg,
     /// whose mail never prints the order number (the model found it in the
     /// sender's July thread and cites that message), and the leg to the user.
-    /// One card, named, with both rows carrying order 21470.
+    /// One card, named, with both rows carrying order 50417.
     #[test]
     fn two_numbers_on_one_order_are_one_named_card() {
         let store = fixture();
         add_message(
             &store,
             3,
-            "Austin Racing shipment update",
+            "Trackside shipment update",
             chrono::Duration::minutes(50),
         );
         add_message(
             &store,
             4,
-            "A shipment from order #21470 is on the way",
+            "A shipment from order #50417 is on the way",
             chrono::Duration::minutes(10),
         );
         let inbound = named(
-            "1ZW061R3DG21045729",
+            "1Z999AA10123456792",
             "shipped",
             None,
-            Some("Bill's Exhausts"),
-            &["21470"],
+            Some("Rivera Exhaust Works"),
+            &["50417"],
         );
         let outbound = named(
-            "1ZB8B2560323528551",
+            "1Z999AA10123456793",
             "shipped",
-            Some("Austin Racing DB Killer AUR10"),
-            Some("BILLS EXHAUSTS"),
-            &["Order #21470"],
+            Some("Trackside Muffler Insert TM10"),
+            Some("RIVERA EXHAUST WORKS"),
+            &["Order #50417"],
         );
         write(&store, 3, None, &inbound);
         write(&store, 4, None, &outbound);
@@ -1125,15 +1125,15 @@ mod tests {
             links(&store),
             vec![
                 (
-                    "1ZB8B2560323528551".into(),
-                    "billsexhausts".into(),
-                    "21470".into(),
+                    "1Z999AA10123456792".into(),
+                    "riveraexhaustworks".into(),
+                    "50417".into(),
                     "agent".into()
                 ),
                 (
-                    "1ZW061R3DG21045729".into(),
-                    "billsexhausts".into(),
-                    "21470".into(),
+                    "1Z999AA10123456793".into(),
+                    "riveraexhaustworks".into(),
+                    "50417".into(),
                     "agent".into()
                 ),
             ]
@@ -1142,15 +1142,15 @@ mod tests {
         assert_eq!(cards.len(), 1, "one order, one card");
         let card = &cards[0];
         assert_eq!(
-            card.tracking_number, "1ZB8B2560323528551",
+            card.tracking_number, "1Z999AA10123456793",
             "the newest leg represents"
         );
-        assert_eq!(card.item_name, "Austin Racing DB Killer AUR10");
-        assert_eq!(card.merchant.as_deref(), Some("BILLS EXHAUSTS"));
+        assert_eq!(card.item_name, "Trackside Muffler Insert TM10");
+        assert_eq!(card.merchant.as_deref(), Some("RIVERA EXHAUST WORKS"));
         assert_eq!(card.orders.len(), 1);
-        assert_eq!(card.orders[0].order_ref, "21470");
+        assert_eq!(card.orders[0].order_ref, "50417");
         assert_eq!(card.legs.len(), 1);
-        assert_eq!(card.legs[0].tracking_number, "1ZW061R3DG21045729");
+        assert_eq!(card.legs[0].tracking_number, "1Z999AA10123456792");
         // The poller still sees two numbers.
         assert_eq!(
             store
@@ -1405,7 +1405,7 @@ mod tests {
     #[test]
     fn a_junk_agent_name_is_not_stored() {
         let store = fixture();
-        for (id, junk) in [(1, "Arriving soon"), (2, "Bill's Exhausts")] {
+        for (id, junk) in [(1, "Arriving soon"), (2, "Rivera Exhaust Works")] {
             write(
                 &store,
                 id,
@@ -1414,8 +1414,8 @@ mod tests {
                     "1Z999AA10123456784",
                     "shipped",
                     Some(junk),
-                    Some("Bill's Exhausts"),
-                    &["21470"],
+                    Some("Rivera Exhaust Works"),
+                    &["50417"],
                 ),
             );
             assert_eq!(identity(&store, "1Z999AA10123456784").0, "", "{junk}");
@@ -2231,18 +2231,18 @@ mod tests {
         assert!(pollable.is_empty());
     }
 
-    /// Two boxes of one order (the Charmin and the hair dye) are two rows
+    /// Two boxes of one order (the paper towels and the shampoo) are two rows
     /// with two ids, folded into one card by the order they share.
     #[test]
     fn two_amazon_boxes_of_one_order_are_two_rows_one_card() {
         let store = fixture();
-        let order = "113-0712375-7928267";
+        let order = "111-0000000-0000001";
         add_amazon(
             &store,
             10,
             "shipment-tracking@amazon.com",
             Some(true),
-            "Shipped: Charmin",
+            "Shipped: Paper towels",
             &tracker(order, "N0FAKE002"),
             chrono::Duration::hours(5),
         );
@@ -2251,21 +2251,21 @@ mod tests {
             11,
             "shipment-tracking@amazon.com",
             Some(true),
-            "Shipped: Pulp Riot",
-            &tracker(order, "NHlzjr4sr"),
+            "Shipped: Shampoo",
+            &tracker(order, "N0FAKE003"),
             chrono::Duration::hours(4),
         );
         write(
             &store,
             10,
             None,
-            &trackless("shipped", Some("amazon"), "Charmin", &[order]),
+            &trackless("shipped", Some("amazon"), "Paper towels", &[order]),
         );
         write(
             &store,
             11,
             None,
-            &trackless("shipped", Some("amazon"), "Pulp Riot", &[order]),
+            &trackless("shipped", Some("amazon"), "Shampoo", &[order]),
         );
         let count: i64 = store
             .lock()
@@ -2966,7 +2966,7 @@ mod tests {
             chrono::Duration::hours(1),
         );
         let mut tba = named(
-            "TBA303392911000",
+            "TBA000123456789",
             "shipped",
             Some("Wire Brushes"),
             None,
@@ -2980,7 +2980,7 @@ mod tests {
             .into_iter()
             .map(|r| r.tracking_number)
             .collect();
-        assert_eq!(numbers, ["TBA303392911000"]);
+        assert_eq!(numbers, ["TBA000123456789"]);
     }
 
     /// A real carrier number the model also listed among the order numbers
@@ -3200,7 +3200,7 @@ mod tests {
             )
             .unwrap();
         }
-        write(&store, 1, None, &delivery("1ZR0676H0301486638", "shipped"));
+        write(&store, 1, None, &delivery("1Z999AA10123456794", "shipped"));
         write(&store, 2, None, &delivery("1Z999AA10123456784", "shipped"));
         assert_eq!(listed(&store).len(), 2);
         for expected in [1, 0] {

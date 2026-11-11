@@ -481,8 +481,7 @@ pub const BLOCKED_EGRESS_CIDRS: &[&str] = &[
 /// The limit, stated: this protects a directory THIS script wrote. A cache
 /// already half-populated under the model's real name (a download the daemon
 /// itself did not finish) is indistinguishable from a good one at `-e`, and the
-/// script leaves it alone. Repairing that is the operator's job, and the
-/// procedure is the reclaim step in `deploy/hosted/PRODUCTION.md`: delete the
+/// script leaves it alone. Repairing that is the operator's job: delete the
 /// bad directory and let the next boot seed or re-download it.
 pub const SEED_SCRIPT: &str = "set -eu\n\
     want=$(sha256sum /etc/squelch/credential/credentials.json | cut -d ' ' -f 1)\n\
@@ -4517,12 +4516,9 @@ mod tests {
     /// it is the one sized to the box (the file says why). Every other line
     /// has to admit more tenants than it does (more, not as many: a tie is
     /// lost to the first pod shaped unlike a tenant, and the model seed is
-    /// one), or a full quota stops meaning a full box: 2026-09-28, memory was
-    /// raised alone and cpu, ephemeral storage, pods and PVCs all bound first;
-    /// and the patch that fixed it carried `limits.cpu: "12"`,
-    /// `requests.storage: 200Gi` and `count/secrets: "100"` on a `pods` of 40,
-    /// which would have refused the thirteenth, the twentieth and the
-    /// twenty-fourth tenant while memory still had room for thirty.
+    /// one), or a full quota stops meaning a full box: raising memory alone
+    /// lets cpu, ephemeral storage, pods or PVCs bind first and refuse a
+    /// tenant while memory still has room.
     ///
     /// TWO STATES, because the warden renders two tenant shapes from one
     /// ConfigMap: in-process embedding (the committed file) and the shared

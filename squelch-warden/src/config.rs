@@ -88,16 +88,12 @@ pub const DEFAULT_CPU_LIMIT: &str = "1000m";
 /// A tenant daemon's memory floor: SQLite plus the ONNX embedder's working set.
 ///
 /// A request is a promise about the p50, and the scheduler is the thing that
-/// believes it. This said 256Mi until somebody measured the promise: on the
-/// carrier box (3 vCPU, 3814 MiB, no swap) the four tenant pods read 91, 317,
-/// 376 and 509 MiB on one pass and 123, 293, 349 and 545 MB on another the same
-/// day, because a daemon that has embedded anything keeps its ONNX session
+/// believes it. A daemon that has embedded anything keeps its ONNX session
 /// resident and rests at roughly 300-500 MB. 384Mi is about the p50 of that,
 /// which is a truthful number and not a comfortable one: half the fleet is
-/// above it on any given read. The scheduler was reserving 256Mi per tenant
-/// while the kernel paid three to five hundred, and on 2026-08-19 the node ran
-/// out of memory globally with FOUR tenants on it and OOM-killed two squelchd
-/// processes.
+/// above it on any given read. A request of 256Mi per tenant while the kernel
+/// pays three to five hundred lets a node run out of memory globally and
+/// OOM-kill squelchd processes.
 ///
 /// Which tenant dies in that is nobody's decision. A tenant pod is burstable
 /// (request below limit, `oom_score_adj` 933), so the kernel picks a RUNNING
@@ -328,8 +324,7 @@ pub struct Config {
     /// NOTHING HERE CHECKS THAT THE PVC EXISTS. This name is rendered straight
     /// into every tenant's pod spec, and a name that resolves to no claim
     /// leaves each new tenant pod Pending on a volume that will never bind.
-    /// Seed the volume first; `deploy/hosted/SETUP.md` step 10 is the order,
-    /// and `deploy/hosted/PRODUCTION.md` has what the failure looks like.
+    /// Seed the volume first; `deploy/hosted/SETUP.md` step 10 is the order.
     pub model_pvc: Option<String>,
     /// Which embedding weights tenant daemons load, injected as
     /// `SQUELCH_EMBED_MODEL`. Optional, and unset means the daemon's own pinned
@@ -363,8 +358,7 @@ pub struct Config {
     /// tenants DOWN, and the roller would halt on the first of them.
     ///
     /// The order is: ship the daemon that serves the route, roll the fleet onto
-    /// it, THEN turn this on and roll again. See `deploy/hosted/PRODUCTION.md`,
-    /// "Turning on the HTTP readiness probe".
+    /// it, THEN turn this on and roll again.
     ///
     /// It also puts the first-run MODEL DOWNLOAD inside every wait this warden
     /// makes. `/healthz` answers 503 until the daemon's background embedder init

@@ -537,7 +537,7 @@ struct MonthGridTests {
     }
 
     /// Thursday Oct 8: the bill first (all day), then the timed rows by
-    /// start, ghosts and real events together. "7:45pm  Dreamers Dinner".
+    /// start, ghosts and real events together. "7:45pm  Potluck Dinner".
     static func aCellListsTopDown() {
         let model = build(
             [
@@ -545,10 +545,10 @@ struct MonthGridTests {
                       commitment: .committed),
                 ghost(2, "Electric bill", start: "2026-10-08", allDay: true, commitment: .committed),
             ],
-            [colouredEvent("d", "Dreamers Dinner", start: "2026-10-08T19:45:00-07:00",
+            [colouredEvent("d", "Potluck Dinner", start: "2026-10-08T19:45:00-07:00",
                            end: "2026-10-08T21:30:00-07:00")])
         let thu = cell(model, "2026-10-08")?.items ?? []
-        expect(thu.map(\.title) == ["Electric bill", "Standup", "Dreamers Dinner"],
+        expect(thu.map(\.title) == ["Electric bill", "Standup", "Potluck Dinner"],
                "all-day first, then by start")
         let dinner = thu[2]
         expect(MonthGrid.cellTime(dinner, cellWidth: 130, calendar: cal) == "7:45pm", "a timed row leads with its time")
@@ -762,7 +762,7 @@ struct MonthGridTests {
             ghost(6, "Electric bill", start: "2026-10-08", allDay: true, commitment: .committed),
             dinner(7, "Standup", on: "2026-10-05", at: "09:30"),
             dinner(8, "Dentist", on: "2026-10-06", at: "14:00"),
-            dinner(9, "Dreamers Dinner", on: "2026-10-08", at: "19:45"),
+            dinner(9, "Potluck Dinner", on: "2026-10-08", at: "19:45"),
             dinner(10, "Halloween party", on: "2026-10-10", at: "22:00"),
             dinner(11, "Board prep", on: "2026-10-14", at: "10:00"),
             dinner(12, "Fado night", on: "2026-10-15", at: "21:00"),

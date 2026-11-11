@@ -405,7 +405,7 @@ mod tests {
         let r = detect_receipt(
             "auto@amazon.com",
             "Your Amazon.com order confirmation",
-            "Thank you for your order. Order total: $42.10. Tracking TBA303392911000.",
+            "Thank you for your order. Order total: $42.10. Tracking TBA000123456789.",
         )
         .expect("order confirmation is a receipt even with tracking");
         assert_eq!(r.amount, Some(42.10));

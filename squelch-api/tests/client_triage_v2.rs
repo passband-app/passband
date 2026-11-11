@@ -549,7 +549,7 @@ async fn feed_names_the_sender_on_the_human_door_only() {
     let h = harness(|_, _| {});
     let mut named = msg(h.acct, "named", "named-thread", "A sale", "An offer");
     named.from_addr = "21ebc25a5920@emails.example.com".into();
-    named.from_name = Some("Mopar.com National eStore".into());
+    named.from_name = Some("Example Parts Online Store".into());
     let id = h.store.upsert_message(&named).unwrap();
     assess(&h.store, h.acct, id, false);
 
@@ -566,7 +566,7 @@ async fn feed_names_the_sender_on_the_human_door_only() {
         let body = body_json(human).await;
         assert_eq!(body["items"][0]["message_id"], id, "{destination}");
         assert_eq!(
-            body["items"][0]["from_name"], "Mopar.com National eStore",
+            body["items"][0]["from_name"], "Example Parts Online Store",
             "{destination}"
         );
 
@@ -591,7 +591,7 @@ async fn feed_names_the_sender_on_the_human_door_only() {
     let internal = h.store.agent_reading(h.acct, 10).unwrap();
     assert_eq!(
         internal[0].from_name.as_deref(),
-        Some("Mopar.com National eStore")
+        Some("Example Parts Online Store")
     );
     for external in [
         h.store.external_agent_reading(h.acct, 10).unwrap(),
@@ -738,10 +738,10 @@ async fn setup_mail_takes_the_fye_pick_and_stays_sealed() {
         .store
         .upsert_message(&msg(
             h.acct,
-            "ftb",
-            "ftb-thread",
-            "MyFTB Account Registration",
-            "Activate: https://ftb.example/activate?t=SECRETTOKEN",
+            "taxportal",
+            "taxportal-thread",
+            "State Tax Portal Account Registration",
+            "Activate: https://taxportal.example/activate?t=SECRETTOKEN",
         ))
         .unwrap();
     assess_auth(&h.store, h.acct, id, true, vec![AuthKind::Verification]);

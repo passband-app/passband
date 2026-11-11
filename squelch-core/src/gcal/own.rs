@@ -273,7 +273,7 @@ pub(crate) fn distinctive(text: &str) -> HashSet<String> {
 /// Are this ghost and this event one thing? The same start, and the titles
 /// match the way the timeline's display match does ([`ghost_matches`]), or
 /// a distinctive word of the ghost's title is in the event's title or place
-/// ("Reservation at Dingles Public House" and a ghost "Dinner at Dingles"),
+/// ("Reservation at Fennick Public House" and a ghost "Dinner at Fennick"),
 /// or the ghost's place shares two with the event's title. A place word
 /// alone is not enough, and place against place never counts: two venues in
 /// one city, or on one street, share those words.
@@ -606,7 +606,7 @@ mod tests {
             start_timezone: None,
             stated_end: None,
             estimate: None,
-            location: Some("Dingles Public House".into()),
+            location: Some("Fennick Public House".into()),
             commitment: EventCommitment::Committed,
             mail_state: GhostMailState::Live,
             likelihood: None,
@@ -618,7 +618,7 @@ mod tests {
             last_message_id: Some(1),
             created_at: "2026-10-20T10:00:00Z".parse().unwrap(),
             updated_at: "2026-10-20T10:00:00Z".parse().unwrap(),
-            owner_scope: Some("dingles.example".into()),
+            owner_scope: Some("fennick.example".into()),
             linked_to: None,
             link_ack: None,
             sources: Vec::new(),
@@ -637,7 +637,7 @@ mod tests {
                 ical_uid: None,
                 tentative: false,
                 summary: Some(title.into()),
-                location: Some("Dingles Public House, Tock is now part of the Resy network".into()),
+                location: Some("Fennick Public House, Tock is now part of the Resy network".into()),
                 start: at(start),
                 end: Some(at(end)),
                 start_timezone: None,
@@ -660,10 +660,10 @@ mod tests {
     const START: &str = "2026-10-30T20:15:00-04:00";
     const END: &str = "2026-10-30T21:15:00-04:00";
 
-    fn dingles() -> SyncedEvent {
+    fn fennick() -> SyncedEvent {
         event(
             "gm1",
-            "Reservation at Dingles Public House",
+            "Reservation at Fennick Public House",
             START,
             END,
             true,
@@ -681,9 +681,9 @@ mod tests {
         settled: &Settled,
     ) -> Vec<Step> {
         let places = HashMap::from([(
-            "Dingles Public House, Tock is now part of the Resy network".to_string(),
+            "Fennick Public House, Tock is now part of the Resy network".to_string(),
             Some(Place {
-                name: Some("Dingles Public House".to_string()),
+                name: Some("Fennick Public House".to_string()),
                 address: None,
             }),
         )]);
@@ -692,8 +692,8 @@ mod tests {
 
     #[test]
     fn a_gmail_event_one_ghost_matches_is_adopted_with_the_clean_place() {
-        let g = ghost(7, "Dinner at Dingles", START);
-        let steps = plan_of(std::slice::from_ref(&g), &[dingles()], &[]);
+        let g = ghost(7, "Dinner at Fennick", START);
+        let steps = plan_of(std::slice::from_ref(&g), &[fennick()], &[]);
         let [
             Step::Adopt {
                 ghost_id,
@@ -713,8 +713,8 @@ mod tests {
                 .chars()
                 .all(|c| matches!(c, 'a'..='v' | '0'..='9'))
         );
-        assert_eq!(body["summary"], "Reservation at Dingles Public House");
-        assert_eq!(body["location"], "Dingles Public House");
+        assert_eq!(body["summary"], "Reservation at Fennick Public House");
+        assert_eq!(body["location"], "Fennick Public House");
         assert_eq!(body["description"], OWNED_NOTE);
         assert_eq!(body["extendedProperties"]["private"]["passband_ghost"], "7");
         assert!(body["start"]["dateTime"].is_string() && body["end"]["dateTime"].is_string());
@@ -722,13 +722,13 @@ mod tests {
 
     #[test]
     fn invitations_other_calendars_past_and_ambiguous_events_are_left_alone() {
-        let g = ghost(7, "Dinner at Dingles", START);
+        let g = ghost(7, "Dinner at Fennick", START);
         // Someone else organizes it.
-        let mut invite = dingles();
+        let mut invite = fennick();
         invite.row.organizer_self = false;
-        invite.row.organizer_email = Some("ellie@example.com".into());
+        invite.row.organizer_email = Some("riley@example.com".into());
         // Another guest is on it.
-        let mut shared = dingles();
+        let mut shared = fennick();
         shared.row.guests = vec![Guest {
             email: "rachel@example.com".into(),
             name: None,
@@ -737,12 +737,12 @@ mod tests {
             is_self: false,
         }];
         // Not the primary calendar.
-        let mut elsewhere = dingles();
+        let mut elsewhere = fennick();
         elsewhere.calendar_primary = false;
         // Over already.
         let past = event(
             "gm2",
-            "Reservation at Dingles Public House",
+            "Reservation at Fennick Public House",
             "2026-10-01T20:00:00-04:00",
             "2026-10-01T21:00:00-04:00",
             true,
@@ -752,7 +752,7 @@ mod tests {
         // Not Gmail's.
         let mine = event(
             "own",
-            "Reservation at Dingles Public House",
+            "Reservation at Fennick Public House",
             START,
             END,
             false,
@@ -764,18 +764,18 @@ mod tests {
             );
         }
         // Two ghosts for one Gmail event: not a guess worth a write.
-        let twin = ghost(8, "Dingles dinner", START);
-        assert!(plan_of(&[g.clone(), twin], &[dingles()], &[]).is_empty());
+        let twin = ghost(8, "Fennick dinner", START);
+        assert!(plan_of(&[g.clone(), twin], &[fennick()], &[]).is_empty());
         // No ghost at that time.
-        let later = ghost(9, "Dinner at Dingles", "2026-10-31T20:15:00-04:00");
-        assert!(plan_of(&[later], &[dingles()], &[]).is_empty());
+        let later = ghost(9, "Dinner at Fennick", "2026-10-31T20:15:00-04:00");
+        assert!(plan_of(&[later], &[fennick()], &[]).is_empty());
         // A dismissed or cancelled ghost adopts nothing.
         let mut dismissed = g.clone();
         dismissed.user_state = Some(GhostUserState::Dismissed);
         let mut cancelled = g.clone();
         cancelled.mail_state = GhostMailState::Cancelled;
-        assert!(plan_of(&[dismissed], &[dingles()], &[]).is_empty());
-        assert!(plan_of(&[cancelled], &[dingles()], &[]).is_empty());
+        assert!(plan_of(&[dismissed], &[fennick()], &[]).is_empty());
+        assert!(plan_of(&[cancelled], &[fennick()], &[]).is_empty());
     }
 
     fn bound(g: &GhostEvent, state: OwnState) -> Owned {
@@ -791,18 +791,18 @@ mod tests {
     fn passbands(g: &GhostEvent, start: &str, end: &str) -> SyncedEvent {
         let mut e = event(
             &owned_event_id(g),
-            "Reservation at Dingles Public House",
+            "Reservation at Fennick Public House",
             start,
             end,
             false,
         );
-        e.row.location = Some("Dingles Public House".into());
+        e.row.location = Some("Fennick Public House".into());
         e
     }
 
     #[test]
     fn an_owned_event_follows_the_mail_and_only_the_mail() {
-        let g = ghost(7, "Dinner at Dingles", START);
+        let g = ghost(7, "Dinner at Fennick", START);
         let o = bound(&g, OwnState::Owned);
         let mine = passbands(&g, START, END);
         // Nothing new in the mail: nothing to do, even if the user moved it.
@@ -864,11 +864,11 @@ mod tests {
         };
         assert_eq!(
             patch["summary"],
-            "Canceled: Reservation at Dingles Public House"
+            "Canceled: Reservation at Fennick Public House"
         );
         assert_eq!(patch["transparency"], "transparent");
         let mut marked = mine.clone();
-        marked.row.summary = Some("Canceled: Reservation at Dingles Public House".into());
+        marked.row.summary = Some("Canceled: Reservation at Fennick Public House".into());
         let steps = plan_of(
             std::slice::from_ref(&g),
             &[marked],
@@ -882,18 +882,18 @@ mod tests {
         else {
             panic!("one update, got {steps:?}");
         };
-        assert_eq!(patch["summary"], "Reservation at Dingles Public House");
+        assert_eq!(patch["summary"], "Reservation at Fennick Public House");
         assert_eq!(patch["transparency"], "opaque");
     }
 
     #[test]
     fn gmail_adding_it_again_is_a_duplicate_and_a_deleted_event_is_let_go() {
-        let g = ghost(7, "Dinner at Dingles", START);
+        let g = ghost(7, "Dinner at Fennick", START);
         let o = bound(&g, OwnState::Owned);
         let mine = passbands(&g, START, END);
         let steps = plan_of(
             std::slice::from_ref(&g),
-            &[mine.clone(), dingles()],
+            &[mine.clone(), fennick()],
             std::slice::from_ref(&o),
         );
         assert_eq!(
@@ -907,13 +907,13 @@ mod tests {
         // The user deleted Passband's event: let go, and Gmail's copy stays.
         let steps = plan_of(
             std::slice::from_ref(&g),
-            &[dingles()],
+            &[fennick()],
             std::slice::from_ref(&o),
         );
         assert_eq!(steps, vec![Step::Release { ghost_id: 7 }]);
         for state in [OwnState::Released, OwnState::Refused] {
             assert!(
-                plan_of(std::slice::from_ref(&g), &[dingles()], &[bound(&g, state)]).is_empty()
+                plan_of(std::slice::from_ref(&g), &[fennick()], &[bound(&g, state)]).is_empty()
             );
         }
         // The ghost is gone from the store: forget the binding, leave the
@@ -938,7 +938,7 @@ mod tests {
 
     #[test]
     fn a_refused_target_is_left_alone_until_the_cooldown_passes() {
-        let g = ghost(7, "Dinner at Dingles", START);
+        let g = ghost(7, "Dinner at Fennick", START);
         let o = bound(&g, OwnState::Owned);
         let mine = passbands(&g, START, END);
         let refused = Settled {
@@ -949,23 +949,23 @@ mod tests {
         assert!(
             plan_settled(
                 std::slice::from_ref(&g),
-                &[mine, dingles()],
+                &[mine, fennick()],
                 std::slice::from_ref(&o),
                 &refused
             )
             .is_empty()
         );
         // Nor is an adoption whose create or delete was refused.
-        assert!(plan_settled(std::slice::from_ref(&g), &[dingles()], &[], &refused).is_empty());
+        assert!(plan_settled(std::slice::from_ref(&g), &[fennick()], &[], &refused).is_empty());
     }
 
     #[test]
     fn a_failed_undo_is_tried_again_until_it_lands() {
-        let g = ghost(7, "Dinner at Dingles", START);
+        let g = ghost(7, "Dinner at Fennick", START);
         let o = bound(&g, OwnState::Undo);
         let steps = plan_of(
             std::slice::from_ref(&g),
-            &[passbands(&g, START, END), dingles()],
+            &[passbands(&g, START, END), fennick()],
             std::slice::from_ref(&o),
         );
         assert_eq!(
@@ -980,9 +980,9 @@ mod tests {
 
     #[test]
     fn a_place_of_nothing_keeps_gmails_location_on_the_adopted_event() {
-        let g = ghost(7, "Dinner at Dingles", START);
+        let g = ghost(7, "Dinner at Fennick", START);
         let raw = "Sect 102 Row G Seat 14, Gate C entrance";
-        let mut e = dingles();
+        let mut e = fennick();
         e.row.location = Some(raw.into());
         let body = adopt_body(&g, &e.row, None, "id").unwrap();
         assert_eq!(body["location"], raw);
@@ -999,7 +999,7 @@ mod tests {
     #[test]
     fn the_adopted_events_location_is_the_name_then_the_address() {
         let g = ghost(7, "Dinner at Harbor Tavern", START);
-        let mut e = dingles();
+        let mut e = fennick();
         e.row.location =
             Some("Harbor Tavern, 12 Water St, Portland. Tock is now part of Resy".into());
         let place = Place {
@@ -1065,15 +1065,15 @@ mod tests {
         assert!(!same_event(&dinner, &bar.row));
         // A generic ghost title still matches by its place's name.
         let mut generic = ghost(8, "Dinner reservation", START);
-        generic.location = Some("Dingles Public House".into());
-        assert!(same_event(&generic, &dingles().row));
+        generic.location = Some("Fennick Public House".into());
+        assert!(same_event(&generic, &fennick().row));
     }
 
     #[test]
     fn mail_that_failed_authentication_neither_adopts_nor_moves_anything() {
-        let mut g = ghost(7, "Dinner at Dingles", START);
+        let mut g = ghost(7, "Dinner at Fennick", START);
         g.owner_scope = None;
-        assert!(plan_of(std::slice::from_ref(&g), &[dingles()], &[]).is_empty());
+        assert!(plan_of(std::slice::from_ref(&g), &[fennick()], &[]).is_empty());
         let o = bound(&g, OwnState::Owned);
         let mut later = g.clone();
         later.start = at("2026-10-30T21:15:00-04:00");
@@ -1089,9 +1089,9 @@ mod tests {
         let mut e = event("gm1", "Reservation at Other Place", START, END, true);
         e.row.location = None;
         assert!(!same_event(&g, &e.row));
-        let mut named = ghost(8, "Dinner at Dingles", START);
+        let mut named = ghost(8, "Dinner at Fennick", START);
         named.location = None;
-        assert!(same_event(&named, &dingles().row));
+        assert!(same_event(&named, &fennick().row));
     }
 
     #[test]
@@ -1100,9 +1100,9 @@ mod tests {
         // day (`display_same_start`). Adoption deletes Gmail's copy, so it
         // keeps the strict start: a date never matches an instant.
         let day = &START[..10];
-        let g = ghost(7, "Dinner at Dingles", day);
-        assert!(!same_event(&g, &dingles().row));
-        assert!(plan_of(std::slice::from_ref(&g), &[dingles()], &[]).is_empty());
+        let g = ghost(7, "Dinner at Fennick", day);
+        assert!(!same_event(&g, &fennick().row));
+        assert!(plan_of(std::slice::from_ref(&g), &[fennick()], &[]).is_empty());
     }
 
     #[test]
@@ -1114,14 +1114,14 @@ mod tests {
             "2026-11-07T02:00:00-08:00",
             "2026-11-08T02:00:00-08:00",
         );
-        let gmail = event("gm9", "Polar Inertia", fri, sun, true);
+        let gmail = event("gm9", "Halcyon Drift", fri, sun, true);
         let end_of = |g: &GhostEvent| {
             let body = adopt_body(g, &gmail.row, None, "x").unwrap();
             let raw = body["end"]["dateTime"].as_str().unwrap().to_string();
             chrono::DateTime::parse_from_rfc3339(&raw).unwrap()
         };
         let parse = |raw| chrono::DateTime::parse_from_rfc3339(raw).unwrap();
-        let mut g = ghost(7, "Polar Inertia", fri);
+        let mut g = ghost(7, "Halcyon Drift", fri);
         g.stated_end = Some(at(sat));
         assert_eq!(end_of(&g), parse(sat));
         // No end from the mail: Gmail's stands.
@@ -1149,7 +1149,7 @@ mod tests {
         use crate::gcal::fold_ghosts;
         use std::collections::HashMap;
 
-        const RA: &str = "ra.co/events/2494673";
+        const RA: &str = "ra.co/events/1000001";
 
         fn from(id: i64, title: &str, start: &str, scope: &str) -> GhostEvent {
             let mut g = ghost(id, title, start);
@@ -1168,31 +1168,31 @@ mod tests {
 
         #[test]
         fn a_friends_copy_of_the_venues_link_folds_into_the_venues_ghost() {
-            // Endzeit's reply (gmail) with RA's link, and RA's own mail: two
+            // Northside's reply (gmail) with RA's link, and RA's own mail: two
             // scopes, so mail never joins them. Titles need not match.
-            let endzeit = from(1, "Friday night", "2026-11-06", "endzeitsf@gmail.com");
+            let northside = from(1, "Friday night", "2026-11-06", "hello@northside.example");
             let ra = from(
                 2,
-                "Parameter & Endzeit Invite Polar Inertia",
+                "Northside Collective Presents Halcyon Drift",
                 "2026-11-06T19:00:00-08:00",
                 "ra.co",
             );
             let both = urls(&[(1, RA), (2, RA)]);
             assert_eq!(
-                fold_ghosts(&[endzeit.clone(), ra.clone()], &both),
+                fold_ghosts(&[northside.clone(), ra.clone()], &both),
                 [Some(1), None]
             );
             // Never the other way, even when the venue's copy is date-only.
             let mut ra_day = ra.clone();
             ra_day.start = at("2026-11-06");
-            let mut endzeit_timed = endzeit.clone();
-            endzeit_timed.start = at("2026-11-06T19:00:00-08:00");
+            let mut northside_timed = northside.clone();
+            northside_timed.start = at("2026-11-06T19:00:00-08:00");
             assert_eq!(
-                fold_ghosts(&[endzeit_timed, ra_day], &both),
+                fold_ghosts(&[northside_timed, ra_day], &both),
                 [Some(1), None]
             );
             // Another sender's copy never folds by title alone.
-            let titled = from(3, "Polar Inertia", "2026-11-06", "endzeitsf@gmail.com");
+            let titled = from(3, "Halcyon Drift", "2026-11-06", "hello@northside.example");
             assert_eq!(fold_ghosts(&[titled, ra], &HashMap::new()), [None, None]);
         }
 
@@ -1200,10 +1200,10 @@ mod tests {
         fn a_stranger_cannot_take_the_owners_ghost_by_title_or_their_own_url() {
             // The reviewer's attack: evil.com is the issuer of ITS OWN page,
             // with a title that matches. No shared URL, no fold.
-            let real = from(5, "Polar Inertia", "2026-11-06", "ra.co");
+            let real = from(5, "Halcyon Drift", "2026-11-06", "ra.co");
             let mut evil = from(
                 1,
-                "Polar Inertia",
+                "Halcyon Drift",
                 "2026-11-06T23:00:00-08:00",
                 "evil.example",
             );
@@ -1220,10 +1220,10 @@ mod tests {
                 [None, Some(0)]
             );
             // A host that only ends with the scope's letters is not its site.
-            let lookalike = from(6, "Polar Inertia", "2026-11-06", "evilra.co");
+            let lookalike = from(6, "Halcyon Drift", "2026-11-06", "evilra.co");
             let near = urls(&[
-                (5, "evilra.co/events/2494673"),
-                (6, "evilra.co/events/2494673"),
+                (5, "evilra.co/events/1000001"),
+                (6, "evilra.co/events/1000001"),
             ]);
             assert_eq!(
                 fold_ghosts(&[real.clone(), lookalike], &near),
@@ -1233,10 +1233,10 @@ mod tests {
 
         #[test]
         fn the_same_senders_copies_fold_into_the_timed_then_the_older() {
-            let day = from(1, "Polar Inertia", "2026-11-06", "ra.co");
+            let day = from(1, "Halcyon Drift", "2026-11-06", "ra.co");
             let timed = from(
                 2,
-                "Parameter & Endzeit Invite Polar Inertia",
+                "Northside Collective Presents Halcyon Drift",
                 "2026-11-06T19:00:00-08:00",
                 "ra.co",
             );
@@ -1244,7 +1244,7 @@ mod tests {
                 fold_ghosts(&[day.clone(), timed], &HashMap::new()),
                 [Some(1), None]
             );
-            let later = from(3, "Polar Inertia", "2026-11-06", "ra.co");
+            let later = from(3, "Halcyon Drift", "2026-11-06", "ra.co");
             assert_eq!(fold_ghosts(&[later, day], &HashMap::new()), [Some(1), None]);
         }
 
@@ -1298,11 +1298,11 @@ mod tests {
         fn near_misses_stay_apart() {
             let both = urls(&[(1, RA), (2, RA)]);
             // The same listing, another night.
-            let fri = from(1, "Polar Inertia", "2026-11-06", "ra.co");
-            let sat = from(2, "Polar Inertia", "2026-11-07", "ra.co");
+            let fri = from(1, "Halcyon Drift", "2026-11-06", "ra.co");
+            let sat = from(2, "Halcyon Drift", "2026-11-07", "ra.co");
             assert_eq!(fold_ghosts(&[fri.clone(), sat], &both), [None, None]);
             // A dismissed or cancelled copy is never folded.
-            let mut gone = from(2, "Polar Inertia", "2026-11-06", "ra.co");
+            let mut gone = from(2, "Halcyon Drift", "2026-11-06", "ra.co");
             gone.user_state = Some(GhostUserState::Dismissed);
             assert_eq!(
                 fold_ghosts(&[fri.clone(), gone.clone()], &both),
@@ -1313,7 +1313,7 @@ mod tests {
             assert_eq!(fold_ghosts(&[fri.clone(), gone], &both), [None, None]);
             // Unauthenticated copies are no one's: no same-sender fold.
             let mut a = fri.clone();
-            let mut b = from(3, "Polar Inertia", "2026-11-06", "ra.co");
+            let mut b = from(3, "Halcyon Drift", "2026-11-06", "ra.co");
             a.owner_scope = None;
             b.owner_scope = None;
             assert_eq!(fold_ghosts(&[a, b], &HashMap::new()), [None, None]);
@@ -1324,8 +1324,8 @@ mod tests {
             // A friend's copy folds into the venue's date-only copy, which
             // folds into the venue's timed one: all show as the timed one.
             let friend = from(1, "Friday night", "2026-11-06", "pal@gmail.com");
-            let ra_day = from(2, "Polar Inertia", "2026-11-06", "ra.co");
-            let ra_timed = from(3, "Polar Inertia", "2026-11-06T19:00:00-08:00", "ra.co");
+            let ra_day = from(2, "Halcyon Drift", "2026-11-06", "ra.co");
+            let ra_timed = from(3, "Halcyon Drift", "2026-11-06T19:00:00-08:00", "ra.co");
             let u = urls(&[(1, RA), (2, RA)]);
             assert_eq!(
                 fold_ghosts(&[friend, ra_day, ra_timed], &u),
@@ -1339,12 +1339,12 @@ mod tests {
         #[test]
         fn a_linked_ghost_folds_across_days_and_offers_its_change() {
             use crate::gcal::{LinkedChange, linked_changes};
-            let ticket = from(1, "Polar Inertia", "2026-11-06T19:00:00-08:00", "ra.co");
+            let ticket = from(1, "Halcyon Drift", "2026-11-06T19:00:00-08:00", "ra.co");
             let mut moved = from(
                 2,
-                "Endzeit night",
+                "Northside night",
                 "2026-11-07T21:00:00-08:00",
-                "endzeit.example",
+                "northside.example",
             );
             moved.linked_to = Some(1);
             let folded = fold_ghosts(&[ticket.clone(), moved.clone()], &HashMap::new());
@@ -1373,9 +1373,9 @@ mod tests {
             // Agreeing with the shown ghost: nothing to offer.
             let mut agrees = from(
                 3,
-                "Endzeit night",
+                "Northside night",
                 "2026-11-06T19:00:00-08:00",
-                "endzeit.example",
+                "northside.example",
             );
             agrees.linked_to = Some(1);
             let folded = fold_ghosts(&[ticket.clone(), agrees.clone()], &HashMap::new());
@@ -1386,7 +1386,7 @@ mod tests {
         #[test]
         fn a_link_overrides_a_url_fold_the_other_way() {
             let friend = from(1, "Friday night", "2026-11-06", "pal@gmail.com");
-            let mut ra = from(2, "Polar Inertia", "2026-11-06T19:00:00-08:00", "ra.co");
+            let mut ra = from(2, "Halcyon Drift", "2026-11-06T19:00:00-08:00", "ra.co");
             ra.linked_to = Some(1);
             let u = urls(&[(1, RA), (2, RA)]);
             assert_eq!(
@@ -1402,9 +1402,9 @@ mod tests {
     /// event, and one already adopted never moves it.
     #[test]
     fn a_linked_ghost_never_adopts_or_moves_a_real_event() {
-        let mut g = ghost(7, "Dinner at Dingles", START);
+        let mut g = ghost(7, "Dinner at Fennick", START);
         g.linked_to = Some(3);
-        assert!(plan_of(std::slice::from_ref(&g), &[dingles()], &[]).is_empty());
+        assert!(plan_of(std::slice::from_ref(&g), &[fennick()], &[]).is_empty());
         let o = bound(&g, OwnState::Owned);
         let mine = passbands(&g, START, END);
         let mut later = g.clone();
@@ -1425,14 +1425,14 @@ mod tests {
     /// were before links.
     #[test]
     fn a_shown_ghost_does_not_adopt_over_its_linked_ghost() {
-        let shown = ghost(3, "Dinner at Dingles", START);
-        let mut under = ghost(7, "Dinner at Dingles", START);
+        let shown = ghost(3, "Dinner at Fennick", START);
+        let mut under = ghost(7, "Dinner at Fennick", START);
         under.linked_to = Some(3);
         assert!(
-            plan_of(std::slice::from_ref(&shown), &[dingles()], &[])
+            plan_of(std::slice::from_ref(&shown), &[fennick()], &[])
                 .iter()
                 .any(|s| matches!(s, Step::Adopt { .. }))
         );
-        assert!(plan_of(&[shown, under], &[dingles()], &[]).is_empty());
+        assert!(plan_of(&[shown, under], &[fennick()], &[]).is_empty());
     }
 }

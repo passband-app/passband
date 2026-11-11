@@ -95,9 +95,9 @@ pub enum WardenError {
     ///
     /// A reconcile is delete, wait, apply, wait. When the client gives up
     /// partway the warden is not told; it is holding a half-finished
-    /// destructive operation, and on 2026-08-19 an operator who read "could not
-    /// be reached" walked away from a tenant whose Deployment had been deleted
-    /// and not yet recreated. So this message says the warden may still be
+    /// destructive operation, and an operator who reads "could not be reached"
+    /// walks away from a tenant whose Deployment has been deleted and not yet
+    /// recreated. So this message says the warden may still be
     /// working and names the one place that can settle it.
     ///
     /// The label is interpolated because the check is useless without it, and
@@ -107,18 +107,17 @@ pub enum WardenError {
     /// THE `($| )` ALTERNATION IS LOAD-BEARING; DO NOT "SIMPLIFY" IT to a
     /// trailing space. The warden logs through `tracing_subscriber::fmt()`'s
     /// default format, which writes the message first and the fields after it,
-    /// so `tenant=<label>` is very often the LAST token on the line. The line
-    /// that reported the 2026-08-19 outage was exactly that shape:
+    /// so `tenant=<label>` is very often the LAST token on the line, as in:
     ///
     /// ```text
     /// WARN squelch_warden::provision: a tenant with no workload and no
-    /// cancellation on record; a job that did not finish left it down tenant=ellie
+    /// cancellation on record; a job that did not finish left it down tenant=jamie
     /// ```
     ///
-    /// A `"tenant=ellie "` match drops every one of those. Matching the bare
+    /// A `"tenant=jamie "` match drops every one of those. Matching the bare
     /// label instead drops nothing and catches too much: labels share prefixes
-    /// (`ellie` is inside `ellie-atuin`), and during that same incident a
-    /// prefix match on another tool sent the operator to the wrong tenant. End
+    /// (`jamie` is inside `jamie-work`), and a prefix match sends the
+    /// operator to the wrong tenant. End
     /// of line or a following space is the pair of cases that are actually the
     /// end of the label.
     ///
@@ -126,9 +125,9 @@ pub enum WardenError {
     /// in single quotes: somebody reads this mid-incident and selects to end of
     /// line, and nothing they paste should need thinking about.
     ///
-    /// THE EVENTS POINTER IS THE OTHER HALF, added 2026-09-28. The warden waits
+    /// THE EVENTS POINTER IS THE OTHER HALF. The warden waits
     /// on a pod the API server may never create, and when admission refuses it
-    /// (that night: `exceeded quota: tenants`) the warden's log says nothing
+    /// (`exceeded quota: tenants`, say) the warden's log says nothing
     /// and the reason is an event on the tenant's ReplicaSet. It goes in the
     /// middle, not the end, so the pasteable grep stays last.
     #[error(
@@ -1187,8 +1186,7 @@ impl HttpWarden {
     /// one: on the delete-recreate path this runs for minutes, and giving up on
     /// it early does not just lose the answer, it stops the warden mid-operation
     /// with the tenant's Deployment already deleted. See
-    /// [`crate::config::RECONCILE_TIMEOUT`] for the arithmetic and for the
-    /// outage that produced it.
+    /// [`crate::config::RECONCILE_TIMEOUT`] for the arithmetic.
     pub async fn reconcile(&self, label: &str) -> Result<Reconciled, WardenError> {
         crate::labels::validate(label).map_err(|_| WardenError::LabelRefused)?;
 
@@ -1248,10 +1246,9 @@ fn validate_pairing(p: &Pairing) -> Result<(), WardenError> {
 /// One `map_err(|_| WardenError::Unreachable)` used to stand at every call site
 /// here, flattening timeout, connection refused, DNS and TLS into a single
 /// sentence. Most of those really do mean the request never landed and nothing
-/// was started. A TIMEOUT means the opposite, and on 2026-08-19 that cost a
-/// live mailbox eight minutes: an operator was told "the provisioning service
-/// could not be reached" about a reconcile the warden had accepted, begun, and
-/// been cut off in the middle of.
+/// was started. A TIMEOUT means the opposite: telling an operator "the
+/// provisioning service could not be reached" about a reconcile the warden has
+/// accepted, begun, and been cut off in the middle of leaves a mailbox down.
 ///
 /// So the one case this crate can actually tell apart gets told apart.
 /// `is_timeout()` covers both the client-level budget and a per-request
@@ -1965,9 +1962,9 @@ mod tests {
         // accident, and a rounding error next to RECONCILE_TIMEOUT.
         let w = slow_warden(Duration::from_millis(600), Duration::from_millis(100)).await;
 
-        assert_eq!(w.reconcile("ellie").await.unwrap().deployment, "recreated");
+        assert_eq!(w.reconcile("jamie").await.unwrap().deployment, "recreated");
         assert!(matches!(
-            w.drift("ellie").await,
+            w.drift("jamie").await,
             Err(WardenError::TimedOut { .. })
         ));
     }
@@ -1975,31 +1972,30 @@ mod tests {
     #[tokio::test]
     async fn reconnect_outlasts_the_budget_the_read_routes_keep() {
         let w = slow_warden(Duration::from_millis(600), Duration::from_millis(100)).await;
-        w.reconnect_credentials("ellie", "ellie@example.com", crate::seal::ARMOR_HEADER)
+        w.reconnect_credentials("jamie", "jamie@example.com", crate::seal::ARMOR_HEADER)
             .await
             .unwrap();
         assert!(matches!(
-            w.drift("ellie").await,
+            w.drift("jamie").await,
             Err(WardenError::TimedOut { .. })
         ));
     }
 
-    /// A timeout must not claim unreachability, which is what every one of them
-    /// did until 2026-08-19: an operator was told the provisioning service
-    /// "could not be reached" about a reconcile the warden had accepted, begun,
-    /// and been cut off inside, and left a mailbox down for eight minutes on the
-    /// strength of it. The message has to say the opposite, and name the one
+    /// A timeout must not claim unreachability: an operator told the
+    /// provisioning service "could not be reached" about a reconcile the warden
+    /// has accepted, begun, and been cut off inside leaves a mailbox down on
+    /// the strength of it. The message has to say the opposite, and name the one
     /// place that settles which it was.
     #[tokio::test]
     async fn a_timeout_says_the_warden_may_still_be_working() {
         let w = slow_warden(Duration::from_millis(600), Duration::from_millis(100)).await;
-        let err = w.drift("ellie").await.unwrap_err();
+        let err = w.drift("jamie").await.unwrap_err();
 
         assert!(matches!(err, WardenError::TimedOut { .. }));
         let said = err.to_string();
         assert!(said.contains("may still be working"), "{said}");
         // Where a pod refused at admission shows up, which the warden's log
-        // does not say (2026-09-28, `exceeded quota`).
+        // does not say (`exceeded quota`, say).
         assert!(said.contains("kubectl -n tenants get events"), "{said}");
         // The check, with THIS tenant in it: the grep is useless without it.
         assert!(
@@ -2007,14 +2003,13 @@ mod tests {
             "{said}"
         );
         // The alternation, not a trailing space. `tenant=` is usually the last
-        // token on a warden log line, so `"tenant=ellie "` silently drops the
-        // lines that matter most - including the one that reported the
-        // 2026-08-19 outage. A bare `tenant=ellie` would match `ellie-atuin`.
-        assert!(said.contains("grep -E 'tenant=ellie($| )'"), "{said}");
-        assert!(!said.contains("tenant=ellie "), "{said}");
+        // token on a warden log line, so `"tenant=jamie "` silently drops the
+        // lines that matter most. A bare `tenant=jamie` would match `jamie-work`.
+        assert!(said.contains("grep -E 'tenant=jamie($| )'"), "{said}");
+        assert!(!said.contains("tenant=jamie "), "{said}");
         // The command runs to the end of the line, so it can be selected and
         // pasted without picking up prose or a stray quote.
-        assert!(said.ends_with("grep -E 'tenant=ellie($| )'"), "{said}");
+        assert!(said.ends_with("grep -E 'tenant=jamie($| )'"), "{said}");
         // The sentence this variant exists to stop saying.
         assert!(!said.contains("could not be reached"), "{said}");
     }
@@ -2035,11 +2030,11 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            w.drift("ellie").await,
+            w.drift("jamie").await,
             Err(WardenError::Unreachable)
         ));
         assert!(matches!(
-            w.reconcile("ellie").await,
+            w.reconcile("jamie").await,
             Err(WardenError::Unreachable)
         ));
     }

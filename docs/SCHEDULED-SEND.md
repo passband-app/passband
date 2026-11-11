@@ -4,7 +4,7 @@ Compose a mail, pick a time, and the daemon sends it then. The mail waits in
 the daemon, not the client, so a closed laptop (local daemon) or a closed
 lid anywhere (hosted daemon) does not lose it.
 
-Locked 2026-09-26. §2 through §5 are the contract the build waves carry.
+§2 through §5 are the contract the build waves carry.
 
 ## 1. Why not drafts
 
@@ -466,10 +466,10 @@ request.
   schedule time (403), and the worker treats a missing credential as a
   retryable failure, never a silent drop.
 
-### Live-route changes this branch makes
+### Live-route changes
 
 `POST /client/actions/send` is shared with the worker (`perform_send`), and
-a few of its answers changed with the split. For the PR description:
+a few of its answers changed with the split:
 
 - **Paced parent read on a plain reply**: a Gmail-budget hold on the
   parent-headers read now answers 503 ("Gmail is pacing this mailbox") and
@@ -515,13 +515,12 @@ the unthreaded path would be a 400 (nobody to address) or, on reply-all, a
    without the bounded search: acceptable only because the feature has never
    shipped, so no such row exists in the field yet.
 
-## 10. What PR #289 (drafts) left for this
+## 10. What drafts (PR #289) provides
 
-Reviewed 2026-09-28 against `origin/drafts`. The nudges landed: Cancel is
-gone from the footer, the picker sits in the header with the "how a mail
-goes out" reasoning written down, the claim predicate is one constant, and
-quit-parking is a thin `parkHeldSends(quitting:)` marked temporary. Drafts
-merges first; this branch (docs only so far) rebases.
+Drafts removed Cancel from the footer, put the picker in the header with the
+"how a mail goes out" reasoning written down, made the claim predicate one
+constant, and kept quit-parking a thin `parkHeldSends(quitting:)` marked
+temporary.
 
 Reused directly:
 
@@ -532,9 +531,6 @@ Reused directly:
   composer, the `pendingDraftDeletes` undo trio, `DraftRow`'s summary line,
   `DraftSaver.currentDraftId(of:)`, `awaitVerdict` for the stats gate.
 
-Not touched by drafts, still owed here: the `perform_send` split, the
+Built here rather than in drafts: the `perform_send` split, the
 outbox table and worker, Message-ID minting and the `rfc822msgid` lookup,
 the time palette (from `RemindTimes`), the Sent pinned group.
-
-Footer conflict is now trivial: drafts removed the Cancel button; this adds
-the clock on the left. Different hunks.

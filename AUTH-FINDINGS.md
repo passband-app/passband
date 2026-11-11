@@ -18,7 +18,7 @@ doc corrections live in the git history, not in this file.
 - `check_scope_grant` is a subset floor, not an exact match, because Google
   unions grants per Cloud project. A Read-slot credential whose refresh reports
   readonly+modify+send is accepted on purpose — an exact match would refuse the
-  Read entry of every `--export --write` blob. Do not "fix" it.
+  Read entry of every `--export --write` blob. Keep it a floor.
 
 ## B. Manual E2E checklist (real Google consents; cannot be automated)
 

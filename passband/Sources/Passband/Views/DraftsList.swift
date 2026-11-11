@@ -13,7 +13,7 @@
 // "back to your reply") while this page is up, and Esc does the same, so the
 // list itself is only drafts: every one the daemon holds, newest edit first,
 // minus mail a held send owns (`AppStore.listedDrafts`). An earlier cut put a
-// "start a new message" row on top as well; the user dropped it (2026-09-29)
+// "start a new message" row on top as well; it was dropped
 // as saying the header's thing twice. The one this pane is editing stays
 // listed, marked "editing" and inert, so the count in the header and the
 // rows here never disagree about what exists.

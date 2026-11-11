@@ -406,8 +406,8 @@ pub struct SyncMetrics {
     /// Config-level LLM failures (a 4xx shared by every row: bad key,
     /// disallowed model, spent gateway budget — see
     /// [`crate::triage::llm::is_config_failure`]), counted across every pass.
-    /// The 2026-08-19 outage was ~900 of these a day reading as generic
-    /// retryables; this is the series a dashboard alerts on.
+    /// Without it these read as generic retryables; this is the series a
+    /// dashboard alerts on.
     llm_config_failures: AtomicU64,
     translate_config_failures: AtomicU64,
     /// Unix seconds of the last LLM call ANY pass got a real verdict from.
@@ -423,8 +423,8 @@ pub struct SyncMetrics {
     /// Counted per ATTEMPT: a first run whose backfill errors before the cursor
     /// is stored comes back through the gate on the next lifecycle and pays the
     /// ceiling again, so a wedged init reads as a train of these, not one.
-    /// vectors, which the batch pass then has to embed, which is the memory that
-    /// OOM-killed two tenant daemons on 2026-08-19. A counter and not a stderr
+    /// vectors, which the batch pass then has to embed, which is enough memory to
+    /// OOM-kill a hosted daemon. A counter and not a stderr
     /// line alone, because nobody reads a tenant's stderr until something has
     /// already fallen over.
     embedder_gate_timeouts: AtomicU64,
@@ -453,9 +453,9 @@ pub struct SyncMetrics {
     embedder_loaded: AtomicU64,
 
     /// 1 when the APNs pusher task was spawned at startup, else 0. Together
-    /// with the counter below this is what makes a dead push path VISIBLE: an
-    /// outage once ran for over a month because nothing measured whether a
-    /// daemon had a pusher at all, or whether anything it sent landed.
+    /// with the counter below this is what makes a dead push path VISIBLE: without
+    /// them nothing measures whether a daemon has a pusher at all, or whether
+    /// anything it sent landed.
     apns_pusher_enabled: AtomicU64,
     /// Per-token APNs results, indexed by [`ApnsPushOutcome`].
     apns_push_results: [AtomicU64; ApnsPushOutcome::ALL.len()],
@@ -1063,8 +1063,7 @@ fn render_notify_fast(e: &mut Exposition, h: &NotifyFastHistogram) {
 /// is "broken", and the difference between 20s and 40s is not a number a
 /// dashboard needs.
 ///
-/// The bottom bounds matter more than they look: after the 2026-08-27 index fix
-/// every store read is single-digit milliseconds, and a histogram whose lowest
+/// The bottom bounds matter more than they look: every store read is single-digit milliseconds, and a histogram whose lowest
 /// bound is 100ms would render that whole regime as one flat line.
 pub const HTTP_BUCKETS: [f64; 10] = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 10.0];
 
@@ -2367,7 +2366,7 @@ mod tests {
         assert!(text.contains("squelchd_notify_fast_seconds_bucket{le=\"0.5\"} 3\n"));
     }
 
-    /// The LLM-health pair the 2026-08-19 outage went two days without: the
+    /// The LLM-health pair: the
     /// config-failure counter moves on every pass that broke on a shared 4xx,
     /// and the freshness stamp moves ONLY on a real verdict — a fallback or a
     /// refusal proves the gateway spoke, not that triage works.

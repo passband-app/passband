@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>events spike</title>
+<script type="module">
+  import { EventStream, localStorageCursor, attachLifecycle, timing } from "/dist/stream.js";
+  const log = { frames: [], statuses: [], consumed: [] };
+  let stream = null, detach = null;
+  window.spike = {
+    log, timing,
+    start({ serverUrl, token, account = "spike" }) {
+      stream = new EventStream({
+        serverUrl, token, cursor: localStorageCursor(account),
+        onConsumed: (c) => { log.consumed.push(c); if (c.type === "event") log.frames.push(c.event.id); },
+        onStatus: (s, d) => log.statuses.push({ s, d, t: performance.now() }),
+      });
+      detach = attachLifecycle(stream);
+      stream.start();
+    },
+    async stop() { detach?.(); await stream?.stop(); },
+    cursor() { return stream?.lastSeen ?? null; },
+    connections() { return stream?.connections ?? 0; },
+    setCursor(account, v) { v === null ? localStorage.removeItem(`passband.events.lastSeen.${account}`) : localStorage.setItem(`passband.events.lastSeen.${account}`, String(v)); },
+    visibility() { return document.visibilityState; },
+  };
+</script>

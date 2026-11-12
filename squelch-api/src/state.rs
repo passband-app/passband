@@ -230,6 +230,12 @@ pub struct ApiState {
     /// a LINK TARGET and nothing more: no trust flows from here, because whatever
     /// comes back is a pairing code the store adjudicates on its own terms.
     pub(crate) console_sso_url: Option<Arc<str>>,
+    /// Exact browser origins allowed to claim a pairing code cross-origin, from
+    /// `SQUELCH_PAIR_ORIGINS`. EMPTY BY DEFAULT, and empty means the pairing
+    /// route carries no CORS at all, which is the posture every self-host keeps.
+    /// Only the hosted web client's own origin is ever meant to be listed here;
+    /// see [`crate::pair::pair_router`].
+    pub(crate) pair_origins: Arc<[axum::http::HeaderValue]>,
     /// The calendar token resolver, which is also how `/client/stats` learns
     /// whether calendar is granted. `None` when no OAuth client is configured
     /// (no refresh is possible, so nothing could call the Calendar API) and in
@@ -415,6 +421,43 @@ pub struct ApiState {
     /// and the small model that reads an unsubscribe page. See
     /// [`crate::unsub_job`]. HUMAN DOOR ONLY.
     pub(crate) unsub: crate::unsub_job::UnsubJobs,
+}
+
+/// One `SQUELCH_PAIR_ORIGINS` entry, accepted only as an exact origin. See
+/// [`ApiState::with_pair_origins`].
+fn pair_origin(entry: &str) -> Option<axum::http::HeaderValue> {
+    let entry = entry.trim().trim_end_matches('/');
+    let lower = entry.to_ascii_lowercase();
+    let (scheme, authority) = lower.split_once("://")?;
+    // Nothing but host[:port]: no path, query, fragment, userinfo or wildcard.
+    if authority.is_empty()
+        || authority
+            .chars()
+            .any(|c| matches!(c, '/' | '?' | '#' | '@' | '*' | '\\') || c.is_whitespace())
+    {
+        return None;
+    }
+    // Split off an optional `:port`, keeping a bracketed IPv6 host whole.
+    let (host, port) = match authority.strip_prefix('[') {
+        Some(rest) => {
+            let (inner, after) = rest.split_once(']')?;
+            (&authority[..inner.len() + 2], after.strip_prefix(':'))
+        }
+        None => match authority.split_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (authority, None),
+        },
+    };
+    if host.is_empty() || port.is_some_and(|p| p.parse::<u16>().is_err()) {
+        return None;
+    }
+    let loopback = matches!(host, "localhost" | "127.0.0.1" | "[::1]");
+    match scheme {
+        "https" => {}
+        "http" if loopback => {}
+        _ => return None,
+    }
+    axum::http::HeaderValue::from_str(&lower).ok()
 }
 
 /// The loopback port for the self-host calendar consent: `SQUELCH_AUTH_PORT`
@@ -683,6 +726,7 @@ impl ApiState {
                 crate::auth::DEVICE_AUTH_CONCURRENCY,
             )),
             console_sso_url: None,
+            pair_origins: Arc::from(Vec::new()),
             calendar: None,
             calendar_refresh: CalendarRefresh::default(),
             calendar_api_base: None,
@@ -1029,6 +1073,28 @@ impl ApiState {
 
     pub(crate) fn console_sso_url(&self) -> Option<&str> {
         self.console_sso_url.as_deref()
+    }
+
+    /// Set the origins allowed to claim a pairing code cross-origin, from a
+    /// comma-separated `SQUELCH_PAIR_ORIGINS`.
+    ///
+    /// Each entry must be an exact ORIGIN: `https://host[:port]`, nothing after
+    /// it. Plain `http://` is accepted only for a loopback host, so a developer
+    /// can run the web client locally. Anything else — a wildcard, `null`, a
+    /// path, userinfo, a non-loopback `http://` — is dropped rather than
+    /// widened, so a typo can only ever make the list shorter.
+    pub fn with_pair_origins(mut self, raw: Option<String>) -> Self {
+        let origins: Vec<axum::http::HeaderValue> = raw
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(pair_origin)
+            .collect();
+        self.pair_origins = Arc::from(origins);
+        self
+    }
+
+    pub(crate) fn pair_origins(&self) -> &[axum::http::HeaderValue] {
+        &self.pair_origins
     }
 
     /// Attach the calendar token resolver. See [`ApiState::calendar`].
@@ -1475,6 +1541,7 @@ impl ApiState {
         );
         Ok(Self::new(store, account_id, token)
             .with_console_sso_url(std::env::var("SQUELCH_CONSOLE_SSO_URL").ok())
+            .with_pair_origins(std::env::var("SQUELCH_PAIR_ORIGINS").ok())
             .with_calendar_consent_port(auth_port_from_env())
             .with_sharing(sharing)
             // Pinned from `SQUELCH_FEATURES`, which no hosted pod sets; what

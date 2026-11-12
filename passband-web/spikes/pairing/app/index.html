@@ -1,0 +1,45 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="referrer" content="no-referrer">
+<title>Pairing spike</title>
+</head>
+<body>
+<button id="signin">Continue with Google</button>
+<pre id="out"></pre>
+<script type="module">
+import { startSignIn, takeHandoff, checkHandoff, claim, SERVER_RULES } from "/connect.js";
+
+const out = document.getElementById("out");
+const say = (s) => (out.textContent = s);
+// Dev-only: the spike daemon is plain http on loopback. Production never
+// widens the rules.
+const rules = [...SERVER_RULES, ...(window.SPIKE_EXTRA_SERVERS || [])];
+
+document.getElementById("signin").onclick = () =>
+  startSignIn(window.SPIKE_CONTROL_URL);
+
+if (location.pathname === "/connect") {
+  const h = takeHandoff();
+  const bad = checkHandoff(h, rules);
+  if (bad) {
+    say(`refused: ${bad}`);
+  } else {
+    try {
+      const { token, name } = await claim(h, "Web browser (spike)");
+      // Spike only: where the token lives is a separate decision.
+      sessionStorage.setItem("pb_token", token);
+      const stats = await fetch(`${h.url}/client/stats`, {
+        headers: { Authorization: `Bearer ${token}` },
+        credentials: "omit",
+      });
+      say(`paired as ${name}; stats ${stats.status}`);
+    } catch (e) {
+      say(`failed: ${e.message}`);
+    }
+  }
+}
+</script>
+</body>
+</html>

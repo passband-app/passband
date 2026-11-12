@@ -33,7 +33,7 @@
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State, rejection::JsonRejection},
-    http::StatusCode,
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::post,
 };
@@ -91,11 +91,30 @@ fn refused() -> Response {
 /// One route, and nothing else is ever added to it — the same discipline as
 /// [`crate::tracking::pixel_router`], so the auth boundary stays a line you can
 /// see in `lib.rs`.
+///
+/// CORS here is OFF unless `SQUELCH_PAIR_ORIGINS` names exact origins (only the
+/// hosted web client's). With none listed — every self-host, and every tenant
+/// not opted in — the route answers no preflight and sends no
+/// `Access-Control-*` header, so a page on any other origin still cannot read a
+/// minted token. With origins listed, exactly those origins get CORS, for POST
+/// with a JSON body only, and never with credentials: the claim needs no cookie
+/// and must never be sent one.
 pub fn pair_router(state: ApiState) -> Router {
-    Router::new()
+    let origins = state.pair_origins().to_vec();
+    let router = Router::new()
         .route("/client/pair", post(claim))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .with_state(state)
+        .with_state(state);
+    if origins.is_empty() {
+        return router;
+    }
+    router.layer(
+        tower_http::cors::CorsLayer::new()
+            .allow_origin(tower_http::cors::AllowOrigin::list(origins))
+            .allow_methods([axum::http::Method::POST])
+            .allow_headers([header::CONTENT_TYPE])
+            .max_age(std::time::Duration::from_secs(600)),
+    )
 }
 
 /// `POST /client/pair` — burn a pairing code, mint a device token.
@@ -398,6 +417,128 @@ mod tests {
                 .is_some(),
             "the /client/* tree is the surface CORS is meant to answer for"
         );
+    }
+
+    const WEB_APP: &str = "https://app.passband.example";
+
+    /// The fixture with the hosted web client's origin allowed to pair.
+    fn fixture_with_origins(raw: &str) -> (Arc<SqliteStore>, AccountId, Router) {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let acct = store.ensure_account("me@example.com").unwrap();
+        let state = ApiState::new(store.clone(), acct, "").with_pair_origins(Some(raw.into()));
+        (store, acct, crate::router(state))
+    }
+
+    fn preflight(origin: &str) -> Request<Body> {
+        Request::builder()
+            .method("OPTIONS")
+            .uri("/client/pair")
+            .header(header::ORIGIN, origin)
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+            .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    fn acao(resp: &Response) -> Option<&str> {
+        resp.headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|v| v.to_str().ok())
+    }
+
+    /// A listed origin can claim cross-origin: its preflight is answered for
+    /// POST + content-type, and the minted token comes back readable to it.
+    /// Credentials are never allowed, so no browser will send a cookie here.
+    #[tokio::test]
+    async fn a_listed_origin_can_pair_cross_origin() {
+        let (store, acct, app) = fixture_with_origins(WEB_APP);
+
+        let resp = app.clone().oneshot(preflight(WEB_APP)).await.unwrap();
+        assert_eq!(acao(&resp), Some(WEB_APP));
+        assert!(
+            resp.headers()
+                .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                .is_none()
+        );
+        let methods = resp
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert_eq!(methods, "POST");
+
+        let minted = store.mint_pairing_code(acct, ttl()).unwrap();
+        let mut req = claim_request(&minted.code, "Web browser");
+        req.headers_mut()
+            .insert(header::ORIGIN, header::HeaderValue::from_static(WEB_APP));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(acao(&resp), Some(WEB_APP));
+    }
+
+    /// Listing one origin opens the route to that origin and no other: a
+    /// different page gets neither a preflight grant nor a readable token.
+    #[tokio::test]
+    async fn an_unlisted_origin_still_gets_no_cors() {
+        let (store, acct, app) = fixture_with_origins(WEB_APP);
+
+        for other in [
+            "https://evil.example",
+            "https://app.passband.example.evil.example",
+            "http://app.passband.example",
+            "null",
+        ] {
+            let resp = app.clone().oneshot(preflight(other)).await.unwrap();
+            assert_eq!(acao(&resp), None, "preflight from {other}");
+
+            let minted = store.mint_pairing_code(acct, ttl()).unwrap();
+            let mut req = claim_request(&minted.code, "phone");
+            req.headers_mut().insert(
+                header::ORIGIN,
+                header::HeaderValue::from_str(other).unwrap(),
+            );
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(acao(&resp), None, "claim from {other}");
+        }
+    }
+
+    /// Only exact origins survive parsing; everything else is dropped, so a
+    /// malformed list can only ever shrink what is allowed.
+    #[test]
+    fn pair_origins_accept_exact_origins_only() {
+        let parsed = |raw: &str| {
+            let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+            let acct = store.ensure_account("me@example.com").unwrap();
+            ApiState::new(store, acct, "")
+                .with_pair_origins(Some(raw.into()))
+                .pair_origins()
+                .iter()
+                .map(|v| v.to_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            parsed(" https://App.Passband.example/ , http://localhost:5176,http://[::1]:5176"),
+            vec![
+                "https://app.passband.example",
+                "http://localhost:5176",
+                "http://[::1]:5176"
+            ]
+        );
+        for bad in [
+            "*",
+            "null",
+            "https://*.passband.example",
+            "http://app.passband.example",
+            "https://app.passband.example/path",
+            "https://user@app.passband.example",
+            "https://app.passband.example:notaport",
+            "app.passband.example",
+            "ftp://app.passband.example",
+            "https://",
+            "",
+        ] {
+            assert!(parsed(bad).is_empty(), "{bad:?} must not be allowed");
+        }
     }
 
     /// The route is mounted OUTSIDE the bearer: reaching it without a token must

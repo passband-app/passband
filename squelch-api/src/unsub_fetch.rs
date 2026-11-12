@@ -417,8 +417,8 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
 
 /// Resolves a name and keeps only its public addresses. No public address at
 /// all is an error, so the connect never happens.
-struct PublicOnly {
-    allow_local: bool,
+pub(crate) struct PublicOnly {
+    pub(crate) allow_local: bool,
 }
 
 impl Resolve for PublicOnly {
@@ -445,7 +445,7 @@ impl Resolve for PublicOnly {
 
 /// A transport error's kind, WITHOUT its URL: the URL carries the sender's
 /// per-recipient token, and these strings reach logs.
-fn redact(e: &reqwest::Error) -> String {
+pub(crate) fn redact(e: &reqwest::Error) -> String {
     let kind = if e.is_timeout() {
         "timeout"
     } else if e.is_connect() {

@@ -1053,7 +1053,7 @@ pub async fn get_account_photo(State(state): State<ApiState>) -> Result<Response
 /// `cache` is the door's own policy: the inbound door may let a browser keep
 /// a photo for an hour, the staged-upload door is `no-store` like every other
 /// read of an unsent composition.
-fn attachment_response(
+pub(crate) fn attachment_response(
     filename: &str,
     mime: &str,
     bytes: Vec<u8>,

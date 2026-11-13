@@ -466,6 +466,13 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-in-to svg { width: 9pt; height: 9pt; }
 /* The first email is read in full: what it asks, by when, what it is about,
    and the level it reaches against the squelch. */
+/* A thread's reply, coming up as it is read. */
+.pb-in-reply { display: flex; align-items: baseline; gap: 8pt; padding: 7pt 10pt; border-radius: 10pt;
+  background: rgba(78, 155, 234, 0.14); color: var(--ink); align-self: flex-start;
+  max-height: calc(var(--r, 0) * 40pt); opacity: calc(var(--r, 0) * var(--fade, 1)); overflow: hidden;
+  margin-top: calc((var(--r, 0) - 1) * 6pt); padding-block: calc(var(--r, 0) * 7pt); }
+.pb-in-reply b { font-size: 10pt; font-weight: 600; color: var(--accent-ink); }
+.pb-in-to svg { width: 10pt; height: 10pt; }
 .pb-in-read { max-height: calc(var(--r, 0) * 140pt); opacity: var(--r, 0); overflow: hidden;
   margin-top: calc((var(--r, 0) - 1) * 6pt);
   display: flex; flex-direction: column; gap: 9pt; }
@@ -495,21 +502,23 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-inmail { margin-top: 1.4rem; }
 .pb-inrun { display: flex; flex-direction: column; gap: 14px; }
 .pb-inslot { position: relative; }
-/* THE TALLY. A readout in the trust row's instrument voice: one line per
-   zone, dim until its email lands, the one that needed you in blue. */
-.pb-tally { margin: 0; max-width: 22rem; border: 1px solid rgba(130, 186, 245, 0.2); border-radius: 12px;
-  overflow: hidden; font-size: 0.9rem; }
-.pb-tally > div { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem;
-  padding: 0.6rem 0.9rem; border-top: 1px solid rgba(130, 186, 245, 0.1); transition: background 0.4s ease; }
-.pb-tally > div:first-child { border-top: 0; }
-.pb-tally dt { font: 500 10.5px/1.6 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--faintest);
-  transition: color 0.4s ease; }
-.pb-tally dd { margin: 0; color: var(--faintest); transition: color 0.4s ease; }
-.pb-tally .pb-tally-h dd { font: 500 10.5px/1.6 var(--mono); letter-spacing: 0.08em; color: var(--accent-ink); }
-.pb-tally > div[data-arrived] dt { color: var(--faint); }
-.pb-tally > div[data-arrived] dd { color: var(--ink); }
-.pb-tally > div.you[data-arrived] { background: rgba(78, 155, 234, 0.12); }
-.pb-tally > div.you[data-arrived] dt { color: var(--accent-ink); }
+/* THE TALLY. Six dots in a row, empty rings until their email lands; the
+   one that needed you rises above the rest in the accent. Then the sum in
+   two words each. */
+.pb-tally { margin: 0; max-width: 22rem; }
+.pb-tally-dots { display: flex; align-items: flex-end; gap: 0.6rem; height: 4.2rem; }
+.pb-tally-dots span { width: 2.4rem; height: 2.4rem; border-radius: 50%; display: grid; place-items: center;
+  font: 600 0.72rem/1 var(--sans); color: transparent; background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--hair-strong);
+  transition: background 0.45s ease, color 0.45s ease, box-shadow 0.45s ease, transform 0.6s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.pb-tally-dots span[data-arrived] { background: var(--a); color: var(--f); box-shadow: none; opacity: 0.55; }
+.pb-tally-dots span.you[data-arrived] { opacity: 1; transform: translateY(-1.3rem) scale(1.18);
+  box-shadow: 0 0 0 3px var(--bg), 0 0 0 5px var(--accent), 0 10px 24px -8px rgba(46, 107, 214, 0.55); }
+.pb-tally figcaption { display: flex; gap: 2rem; margin-top: 1rem; }
+.pb-tally figcaption span { display: flex; flex-direction: column; gap: 0.2rem; color: var(--faint); font-size: 0.92rem; }
+.pb-tally figcaption b { font: 500 2.6rem/1 var(--serif); color: var(--ink); }
+.pb-tally figcaption .you, .pb-tally figcaption .you b { color: var(--accent-ink); }
+@media (prefers-reduced-motion: reduce) { .pb-tally-dots span { transition: none; } }
 .pb-steps .pb-in { position: relative; left: auto; top: auto; visibility: visible; }
 .pb-steps .pb-in[data-flying] { z-index: 5; }
 @media (max-width: 900px) {
@@ -1893,15 +1902,11 @@ const STEPS: Array<{ title: string; line: ReactNode }> = [
     line: "Six emails came in. One needed you, and it is waiting at the top. The rest is where you would look for it." },
 ];
 
-// The closing tally: where this morning's six went, each line lighting as
-// its email lands.
-const TALLY: Array<[id: string, where: string, what: string]> = [
-  ["jamie", "For your eyes", "Jamie Chen"],
-  ["ship", "Shipments", "Rainforest"],
-  ["cats", "Reading", "Cats Weekly"],
-  ["filed", "Filed", "Marriott Bonvoy"],
-  ["rcpt", "Receipts", "Blue Bottle"],
-  ["cal", "Calendar", "Alex Rivera"],
+// The closing tally, as a picture: one dot per email this morning, filling
+// in as each lands; the one that needed you stands up out of the row.
+const TALLY: Array<[id: string, initials: string, tone: keyof typeof AVATAR_NIGHT]> = [
+  ["ship", "R", "ochre"], ["cats", "CW", "green"], ["jamie", "JC", "blue"],
+  ["filed", "M", "rust"], ["rcpt", "BB", "ochre"], ["cal", "AR", "violet"],
 ];
 
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
@@ -2069,14 +2074,18 @@ function Showcase() {
     <div className="pb-inrun">
       {RUN.map((m) => <div key={m.id} className="pb-inslot"><InCard m={m} /></div>)}
     </div>,
-    <dl className="pb-tally">
-      <div className="pb-tally-h"><dt>This morning</dt><dd>6 in · 1 for you</dd></div>
-      {TALLY.map(([id, where, what]) => (
-        <div key={id} data-tally={id} className={id === "jamie" ? "you" : undefined}>
-          <dt>{where}</dt><dd>{what}</dd>
-        </div>
-      ))}
-    </dl>,
+    <figure className="pb-tally" aria-label="Six emails came in this morning. One needs you.">
+      <div className="pb-tally-dots" aria-hidden="true">
+        {TALLY.map(([id, initials, tone]) => (
+          <span key={id} data-tally={id} className={id === "jamie" ? "you" : undefined}
+            style={{ ["--a" as string]: AVATAR[tone][0], ["--f" as string]: AVATAR[tone][1] }}>{initials}</span>
+        ))}
+      </div>
+      <figcaption>
+        <span><b>6</b>came in</span>
+        <span className="you"><b>1</b>needs you</span>
+      </figcaption>
+    </figure>,
   ];
 
   return (
@@ -2163,6 +2172,9 @@ const CAL_CSS = `
 .pb-day > header { display: flex; align-items: baseline; justify-content: space-between; padding: 0 4pt 2pt;
   font-size: 11.5pt; font-weight: 500; color: #818c9a; white-space: nowrap; gap: 4pt; }
 .pb-day.out > header { color: #46515d; }
+/* A chip that lands in the tour: no gap of its own until it opens. */
+.pb-day .pb-land { margin-top: -3pt; }
+.pb-day .pb-land .pb-ev { margin-top: 3pt; }
 .pb-day.out .pb-ev { filter: brightness(0.7) saturate(0.6); }
 .pb-day > header small { font-size: 9.5pt; color: var(--faintest); transition: color 0.4s ease; }
 .pb-day::after { content: ""; position: absolute; inset: 1pt; border-radius: 9pt; pointer-events: none;
@@ -2254,7 +2266,9 @@ const CAL_CSS = `
 `;
 const CAL_CSS_RESOLVED = CAL_CSS.replace(/(-?\d*\.?\d+)pt\b/g, "calc($1 * var(--pt))");
 
-type Chip = { t?: string; name: string; hue: string; kind?: "maybe" | "likely" | "thin" | "fold"; id?: string };
+type Chip = { t?: string; name: string; hue: string; kind?: "maybe" | "likely" | "thin" | "fold"; id?: string;
+  /** Not on the calendar until its thread lands in the tour (see CalShowcase). */
+  land?: string };
 // November 2026, Sunday first, as the app lays it out: five weeks, the last
 // running into December. Index 0 is Sunday November 1.
 // November 2026, Sunday first, as the app lays it out: five weeks, the last
@@ -2278,7 +2292,7 @@ const CAL_DAYS: Array<{ label: string; out?: boolean; unlikely?: number; chips: 
   { label: "15", chips: [] },
   { label: "16", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "2pm", name: "1:1 Jamie", hue: "purple" }] },
   { label: "17", chips: [{ t: "10am", name: "Board", hue: "red" }, { t: "3pm", name: "Hiring", hue: "green" }] },
-  { label: "18", chips: [{ t: "10am", name: "Design crit", hue: "purple" }, { t: "5pm", name: "Demo", hue: "teal" }] },
+  { label: "18", chips: [{ t: "10am", name: "Design crit", hue: "purple" }, { t: "2pm", name: "Coffee w/ Maya", hue: "green", land: "coffee" }, { t: "5pm", name: "Demo", hue: "teal" }] },
   { label: "19", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "2:30pm", name: "Dr. Ortiz", hue: "teal" }] },
   { label: "20", chips: [{ t: "10am", name: "Roadmap", hue: "purple" }, { t: "10pm", name: "Endzeit x Non Series", hue: "purple", kind: "maybe", id: "night" }] },
   { label: "21", chips: [] },
@@ -2298,9 +2312,11 @@ const CAL_DAYS: Array<{ label: string; out?: boolean; unlikely?: number; chips: 
   { label: "Dec 5", out: true, chips: [] },
 ];
 
-const CAL_TOUR: Array<{ key: string; title: string; line: ReactNode }> = [
-  { key: "plans", title: "Your inbox already knows your plans",
-    line: "Invitations, tickets and bookings show up on your calendar as they arrive, with the flyer, the place, and a line on how likely you are to go." },
+// The first step lights nothing: its thread flies in and becomes the event,
+// which is the picture. The second picks out the folded summit.
+const CAL_TOUR: Array<{ key?: string; title: string; line: ReactNode }> = [
+  { title: "Plans made in a reply",
+    line: "No invite, no event, just two people agreeing on a time. Your calendar app would never see it. Passband puts it there." },
   { key: "unlikely", title: "Not every invite is a plan",
     line: "The summit a vendor sent to everyone on its list folds away as unlikely. It is there if you want it, and out of the way if you don't." },
 ];
@@ -2421,12 +2437,15 @@ function CalMock({ focus }: { focus: string | undefined }) {
             <div key={day.label}
               className={`pb-day${day.out ? " out" : ""}${i === selected ? " sel" : ""}${i === 10 ? " summitday" : ""}`}>
               <header>{day.label}{day.unlikely ? <small>{day.unlikely} unlikely</small> : null}</header>
-              {day.chips.map((c) => (
-                <div key={c.name}
-                  className={`pb-ev ${c.hue}${c.kind === "fold" ? " fold thin" : c.kind ? ` ${c.kind}` : ""}${c.id ? ` ${c.id}` : ""}${c.id === "night" && i === selected && focus !== "unlikely" ? " picked" : ""}`}>
-                  {c.t && <span>{c.t}</span>}{c.name}
-                </div>
-              ))}
+              {day.chips.map((c) => {
+                const chip = (
+                  <div key={c.name}
+                    className={`pb-ev ${c.hue}${c.kind === "fold" ? " fold thin" : c.kind ? ` ${c.kind}` : ""}${c.id ? ` ${c.id}` : ""}${c.id === "night" && i === selected && focus !== "unlikely" ? " picked" : ""}`}>
+                    {c.t && <span>{c.t}</span>}{c.name}
+                  </div>
+                );
+                return c.land ? <Land key={c.name} id={c.land}>{chip}</Land> : chip;
+              })}
             </div>
           ))}
         </div>
@@ -2438,11 +2457,40 @@ function CalMock({ focus }: { focus: string | undefined }) {
 
 // The reminder an hour before doors. The line is the kind the
 // reminder model writes: short, no links, no codes.
+// The thread under the first step: an ordinary back-and-forth that settles
+// on a time. Its reply comes up as it is read, then the card leaves for
+// Wednesday and becomes the event.
+const COFFEE: Inbound = { id: "coffee", who: "Maya Lin", subject: "Could you do 2p on Wednesday?",
+  to: "Wed 18 · 2:00 PM", face: { initials: "ML", tone: "rose" } };
+
+function ThreadCard({ m }: { m: Inbound }) {
+  const face = "initials" in m.face ? m.face : null;
+  return (
+    <div className="pb-in" data-in={m.id} data-full>
+      <div className="pb-in-body">
+        <div className="pb-in-top">
+          {face && <span className="pb-avatar" style={{ background: AVATAR[face.tone][0], color: AVATAR[face.tone][1] }}>{face.initials}</span>}
+          <b>{m.who}</b>
+          <small>Re: catching up</small>
+        </div>
+        <div className="pb-in-subj">{m.subject}</div>
+        <div className="pb-in-reply"><b>You</b><span>Yeah!</span></div>
+        <span className="pb-in-to">
+          <Glyph name="calendar" />
+          {m.to}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function CalShowcase() {
   const { stepsRef, focus } = useTourFocus();
+  const pairRef = useRef<HTMLDivElement>(null);
+  useArrivals(pairRef);
   const key = focus < 0 ? undefined : CAL_TOUR[focus].key;
   return (
-    <div className="pb-pair pb-cal">
+    <div className="pb-pair pb-cal pb-mailpair" ref={pairRef}>
       <div className="pb-hold">
         <figure className="pb-panel pb-after">
           <figcaption><b>Calendar</b> built from your mail</figcaption>
@@ -2454,11 +2502,12 @@ function CalShowcase() {
         </figure>
       </div>
       <ol className="pb-steps" ref={stepsRef}>
-        {CAL_TOUR.map(({ key, title, line }, i) => (
-          <li key={key} className="pb-step" data-on={i === focus || undefined}>
+        {CAL_TOUR.map(({ title, line }, i) => (
+          <li key={title} className="pb-step" data-on={i === focus || undefined}>
             <i aria-hidden="true">{String(i + 1).padStart(2, "0")}</i>
             <h3>{title}</h3>
             <p>{line}</p>
+            {i === 0 && <div className="pb-inmail" aria-hidden="true"><div className="pb-inslot"><ThreadCard m={COFFEE} /></div></div>}
           </li>
         ))}
       </ol>
@@ -2568,13 +2617,12 @@ const LIGHT_CSS = `
 [data-theme="light"] .pb-in-meter > i { box-shadow: none; background: linear-gradient(90deg, rgba(46,107,214,0.35), var(--accent)); }
 [data-theme="light"] :is(.pb-in-read dt, .pb-in-meter > em::before) { font-family: var(--sans); letter-spacing: 0.02em; }
 /* The tally and the trust row: plain cards, sans labels. */
-[data-theme="light"] :is(.pb-tally, .pb-facts) { background: #fff; border-color: var(--hair-strong); box-shadow: var(--shadow); }
+[data-theme="light"] .pb-facts { background: #fff; border-color: var(--hair-strong); box-shadow: var(--shadow); }
 [data-theme="light"] .pb-facts::before { display: none; }
-[data-theme="light"] :is(.pb-tally > div, .pb-fact) { border-color: var(--hair); }
-[data-theme="light"] :is(.pb-tally dt, .pb-tally .pb-tally-h dd, .pb-fact dt) { font-family: var(--sans); font-size: 0.78rem;
+[data-theme="light"] .pb-fact { border-color: var(--hair); }
+[data-theme="light"] .pb-fact dt { font-family: var(--sans); font-size: 0.78rem;
   letter-spacing: 0.01em; text-transform: none; }
 [data-theme="light"] .pb-fact dt b { display: none; }
-[data-theme="light"] .pb-tally > div.you[data-arrived] { background: rgba(46,107,214,0.07); }
 [data-theme="light"] .pb-fact a { color: var(--accent); }
 
 

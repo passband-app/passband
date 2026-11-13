@@ -235,8 +235,11 @@ export function createScope(
       const g = ctx.createLinearGradient(0, baseY - amp, 0, baseY);
       // Painted every frame into a canvas that only fades, so it is laid
       // down at the fade's rate and settles at the strength written here.
+      // Fades to nothing before the floor, so the fill never ends in an
+      // edge of its own across the sky.
       g.addColorStop(0, `rgba(${P.wash}, ${0.08 * fade})`);
-      g.addColorStop(1, `rgba(${P.wash}, ${0.02 * fade})`);
+      g.addColorStop(0.7, `rgba(${P.wash}, ${0.025 * fade})`);
+      g.addColorStop(1, `rgba(${P.wash}, 0)`);
       ctx.fillStyle = g;
       ctx.fill(area);
     }

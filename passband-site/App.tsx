@@ -1,5 +1,6 @@
 import {
   type ReactNode,
+  type RefObject,
   useEffect,
   useMemo,
   useRef,
@@ -147,8 +148,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
   transform: translateY(-50%); width: min(30rem, calc(100% - 2 * var(--gutter)));
   display: flex; flex-direction: column; gap: 1.6rem; }
 .pb-beat { display: flex; flex-direction: column; gap: 1rem; }
-.pb-lede { margin: 0; font-family: var(--serif); font-size: clamp(1.55rem, 2.6vw, 2.1rem);
-  line-height: 1.15; color: var(--dim); }
+.pb-lede { margin: 0; font-size: clamp(1.05rem, 1.5vw, 1.2rem); line-height: 1.4; color: var(--dim); }
 .pb-hero { margin: 0; font-family: var(--serif); font-weight: 500;
   font-size: clamp(2.4rem, 4.6vw, 3.4rem); line-height: 1.02; letter-spacing: -0.012em; }
 .pb-sub { margin: 0; font-size: 1rem; line-height: 1.6; color: var(--dim); max-width: 27rem; }
@@ -228,8 +228,6 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-step h3 { margin: 0; font-family: var(--serif); font-weight: 500; font-size: clamp(1.5rem, 2.3vw, 2rem);
   line-height: 1.1; letter-spacing: -0.008em; }
 .pb-step p { margin: 0; color: var(--dim); font-size: 1rem; line-height: 1.6; max-width: 22rem; }
-.pb-step kbd { font: 600 0.78em/1 var(--mono); color: var(--accent-ink); padding: 0.18em 0.5em; border-radius: 99px;
-  box-shadow: inset 0 0 0 1px rgba(78, 155, 234, 0.4); white-space: nowrap; }
 /* THE CLOUDS behind the tours (see Clouds). Wide screens only: a few large,
    soft passband-coloured glows on a stage pinned while the section is on
    screen, faded at the screen's top and bottom so a section's edge never cuts
@@ -322,7 +320,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
    container the points are measured against, so the login code panel can hang
    off the window's bottom edge and still be drawn in the same points. */
 .pb-shot { position: relative; container-type: inline-size; width: var(--shot-w); }
-.pb-app, .pb-code { --pt: calc(100cqw / 1040); }
+.pb-app { --pt: calc(100cqw / 1040); }
 .pb-app { position: relative; display: grid; grid-template-columns: 60pt minmax(0, 1fr);
   grid-template-rows: 40pt minmax(0, 1fr); height: 720pt; font-size: 12pt; color: var(--ink); line-height: 1.25; }
 .pb-app-bar { grid-column: 1 / -1; display: flex; align-items: center; gap: 14pt; padding: 0 18pt 0 16pt; }
@@ -350,10 +348,10 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
   display: block; box-shadow: inset 0 0 0 0.5pt rgba(255, 255, 255, 0.12); }
 .pb-side .pb-me { object-fit: cover; }
 .pb-page { padding: 0 24pt 0; display: grid; grid-template-columns: minmax(0, 1fr) 306pt;
-  column-gap: 18pt; align-items: start; }
-.pb-dash-hero { grid-column: 1 / -1; padding: 20pt 4pt 34pt; }
+  column-gap: 18pt; align-items: start; align-content: start; }
+.pb-dash-hero { grid-column: 1 / -1; padding: 20pt 4pt 18pt; }
 .pb-dash-hero small { display: block; font-size: 10pt; font-weight: 500; letter-spacing: 0.12em;
-  text-transform: uppercase; color: var(--accent); margin-bottom: 2pt; }
+  text-transform: uppercase; color: var(--accent); margin-bottom: 7pt; }
 .pb-dash-hero b { position: relative; display: inline-block; font-family: var(--serif); font-weight: 500;
   font-size: 38pt; letter-spacing: -0.01em; line-height: 1.08; }
 .pb-col { display: flex; flex-direction: column; gap: 16pt; min-width: 0; }
@@ -364,17 +362,10 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-zone-h em { font-style: normal; font-size: 11pt; font-weight: 600; color: var(--faint);
   background: rgba(233, 238, 245, 0.08); border-radius: 99pt; padding: 1pt 6pt; }
 .pb-zone-h small { font-size: 10pt; font-weight: 500; color: var(--faintest); }
-/* FLOW MODE, in For your eyes' corner. At rest a pill says what it is; the key slides in when the tour reaches it, the way
-   it does under the pointer in the app. */
+/* FLOW MODE, in For your eyes' corner: a pill that says what it is. */
 .pb-flow { margin-left: auto; display: flex; align-items: center; gap: 5pt;
   padding: 3pt 9pt 3pt 8pt; border-radius: 99pt; background: rgba(78, 155, 234, 0.1);
-  font-size: 10pt; font-weight: 500; color: var(--dim); transition: padding 0.3s ease, background 0.3s ease; }
-.pb-flow kbd { font: 600 9.5pt/1.25 var(--mono); color: var(--accent); border-radius: 99pt;
-  background: rgba(78, 155, 234, 0.2); box-shadow: inset 0 0 0 0.75pt rgba(78, 155, 234, 0.5);
-  max-width: 0; padding: 2pt 0; margin-right: -5pt; opacity: 0; overflow: hidden;
-  transition: max-width 0.3s ease, padding 0.3s ease, margin 0.3s ease, opacity 0.3s ease; }
-.pb-shot[data-focus="flow"] .pb-flow { padding-left: 3pt; background: rgba(78, 155, 234, 0.2); color: var(--ink); }
-.pb-shot[data-focus="flow"] .pb-flow kbd { max-width: 60pt; padding: 2pt 9pt; margin-right: 0; opacity: 1; }
+  font-size: 10pt; font-weight: 500; color: var(--dim); }
 .pb-flow svg { width: 10pt; height: 10pt; color: var(--accent); }
 .pb-eye { position: relative; display: flex; align-items: center; gap: 9pt; padding: 7pt 10pt; border-radius: 9pt;
   margin-top: 1pt; white-space: nowrap; }
@@ -431,108 +422,103 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-ship-top small { font-size: 10pt; font-weight: 500; color: var(--faint); overflow: hidden; text-overflow: ellipsis; }
 .pb-ship .pb-chip.eta { --c: var(--faint); }
 
-/* AUTOMATIC UNSUBSCRIBES, bottom right of the sitrep, where the app stacks
-   them: one finished, one still working through the sender's page. */
-.pb-tray { position: absolute; right: 24pt; bottom: 22pt; display: flex; flex-direction: column;
-  align-items: flex-end; gap: 7pt; opacity: 0; transform: translateY(12pt);
-  transition: opacity 0.4s ease, transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1); }
-.pb-shot[data-focus="unsub"] .pb-tray { opacity: 1; transform: none; }
-.pb-unsub { position: relative; display: flex; align-items: center; gap: 10pt; padding: 9pt 12pt 9pt 10pt;
-  border-radius: 14pt; font-size: 12pt; color: var(--dim); white-space: nowrap;
-  background: #212d3b; box-shadow: inset 0 0 0 0.75pt #33485e, 0 10pt 26pt -8pt rgba(0, 0, 0, 0.6); }
-.pb-unsub.done { background: #1f3733; box-shadow: inset 0 0 0 0.75pt #2f5a49, 0 10pt 26pt -8pt rgba(0, 0, 0, 0.6); }
-.pb-unsub b { color: var(--ink); font-weight: 600; }
-.pb-unsub svg { width: 15pt; height: 15pt; color: var(--positive); }
-.pb-unsub i { width: 13pt; height: 13pt; margin: 1pt; border-radius: 50%; border: 1.5pt solid rgba(233, 238, 245, 0.18);
-  border-top-color: var(--dim); animation: pb-spin 0.9s linear infinite; }
-@keyframes pb-spin { to { transform: rotate(360deg); } }
+/* MAIL ARRIVING. The tour no longer lights features: it follows mail in.
+   Each email that arrives is a card that drops in over the window, is read,
+   and flies to where it belongs, where its row opens up (a grid row going
+   from 0fr to 1fr, so the rows below make room) or its count ticks. Scroll
+   drives every card; nothing runs on a timer. */
+.pb-land { height: 0; overflow: hidden; opacity: 0; }
+.pb-land > div { display: flow-root; }
+.pb-land[data-arrived] > div > *, .pb-read[data-arrived] { animation: pb-landed 1.4s ease-out; }
+@keyframes pb-landed { from { background-color: rgba(78, 155, 234, 0.3); } }
+.pb-side span[data-arrived] { animation: pb-filed 1.2s ease-out; }
+@keyframes pb-filed { from { color: var(--accent); background: rgba(78, 155, 234, 0.3); } }
+[data-count] { transition: color 0.4s ease; }
 
-/* THE LOGIN CODE PANEL. In the app it floats at the top of the screen over
-   whatever you are working in, so here it hangs off the window's top edge:
-   half in the picture, half out, which is the feature. */
-.pb-code { position: absolute; left: 50%; top: -30pt; margin-left: -150pt; z-index: 4; width: 300pt; padding: 14pt;
-  border-radius: 22pt; opacity: 0; transform: translateY(-16pt) scale(0.97); pointer-events: none;
-  transition: opacity 0.4s ease, transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
-  font-size: 12pt; line-height: 1.25; color: var(--ink);
-  background: rgba(38, 34, 68, 0.9); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
-  box-shadow: inset 0 0 0 0.75pt rgba(155, 140, 245, 0.4), 0 24pt 60pt -12pt rgba(0, 0, 0, 0.75),
-    0 0 50pt -14pt rgba(155, 140, 245, 0.45); }
-.pb-shot[data-focus="code"] .pb-code { opacity: 1; transform: none; }
-.pb-code-top { display: flex; align-items: center; gap: 10pt; }
-.pb-code-top .pb-avatar { width: 26pt; height: 26pt; font-size: 11pt; }
-.pb-code-top div { flex: 1; display: flex; flex-direction: column; gap: 1pt; }
-.pb-code-top b { font-size: 13pt; font-weight: 600; }
-.pb-code-top small { display: flex; align-items: center; gap: 4pt; font-size: 10pt; font-weight: 500; color: #9B8CF5; }
-.pb-code-top small svg { width: 10pt; height: 10pt; }
-.pb-code-top > span:last-child { font-size: 10pt; color: var(--faintest); font-variant-numeric: tabular-nums; }
-.pb-code-num { padding: 14pt 0; text-align: center; font: 600 38pt/1.1 var(--mono); letter-spacing: 0.04em; }
-.pb-code-acts { display: flex; align-items: center; gap: 8pt; font-size: 13pt; }
-.pb-code-acts span { flex: 1; display: flex; align-items: center; justify-content: center; gap: 6pt;
-  padding: 8pt 0; border-radius: 11pt; background: var(--accent); color: #fff; font-weight: 600; }
-.pb-code-acts span svg { width: 13pt; height: 13pt; }
-.pb-code-acts em { font-style: normal; font-weight: 500; color: var(--dim); padding: 8pt 14pt; }
-
-/* WHAT THE TOUR DOES TO THE PICTURE. One thing at a time: the rest of the
-   board steps back and the zone the caption is about keeps its light, with
-   an even ring so it reads as picked out rather than selected. */
-.pb-dash-hero, .pb-zone, .pb-rec { transition: opacity 0.45s ease, box-shadow 0.45s ease; }
-.pb-shot[data-focus] :is(.pb-dash-hero, .pb-zone, .pb-rec) { opacity: 0.28; }
-.pb-shot[data-focus="headline"] .pb-dash-hero,
-.pb-shot:is([data-focus="eyes"], [data-focus="flow"]) .pb-zone-eyes,
-.pb-shot[data-focus="smart"] .pb-zone-reading,
-.pb-shot[data-focus="group"] .pb-rec { opacity: 1; }
-.pb-shot:is([data-focus="eyes"], [data-focus="flow"]) .pb-zone-eyes,
-.pb-shot[data-focus="smart"] .pb-zone-reading {
-  box-shadow: inset 0 0 0 1pt rgba(130, 186, 245, 0.75), 0 0 44pt -8pt rgba(78, 155, 234, 0.65); }
-/* The grouping step lights the whole rail, each card in its own hue. */
-.pb-shot[data-focus="group"] .pb-rec {
-  box-shadow: inset 0 0 0 1pt var(--zone), 0 0 36pt -10pt var(--zone); }
-
-/* FLOW MODE, MOVING. The cursor drops down the band and each row leaves as it
-   is dealt with, one after the other and quickly, then the band refills and
-   it goes again. Each row runs the same loop a beat behind the one above. */
-.pb-shot[data-focus="flow"] .pb-eye { animation: pb-walk 4.4s calc(var(--i) * 0.5s) infinite both; }
-.pb-shot[data-focus="flow"] .pb-eye.cursor { background: none; }
-@keyframes pb-walk {
-  0%, 2% { background: rgba(78, 155, 234, 0); opacity: 1; transform: none; }
-  4%, 11% { background: rgba(78, 155, 234, 0.2); opacity: 1; transform: none; }
-  17%, 80% { background: rgba(78, 155, 234, 0); opacity: 0; transform: translateX(22pt); }
-  81% { opacity: 0; transform: translateY(6pt); }
-  90%, 100% { background: rgba(78, 155, 234, 0); opacity: 1; transform: none; }
+/* The cards live on the page, not in the app, at a fixed point size so they
+   read at the caption's scale whatever the window's size. */
+.pb-inmail { --pt: 1.15px; }
+@media (max-width: 900px) { .pb-inmail { --pt: 1px; } }
+.pb-in { position: absolute; left: 0; top: 0; width: min(290pt, 100%); box-sizing: border-box; padding: 11pt 13pt; border-radius: 14pt;
+  font-size: 12pt; line-height: 1.3; color: var(--dim); overflow: hidden;
+  background: color-mix(in srgb, rgba(52, 96, 150, 0.95) calc(var(--m, 0) * 100%), rgba(24, 34, 50, 0.97));
+  box-shadow: inset 0 0 0 0.75pt rgba(130, 186, 245, 0.4), 0 18pt 44pt -10pt rgba(0, 0, 0, 0.75),
+    0 0 40pt -12pt rgba(78, 155, 234, 0.55);
+  opacity: 0; visibility: hidden; transform-origin: 50% 50%; will-change: transform, opacity; }
+/* In flight the shell becomes the row it is about to form (its box, its
+   corners, its padding, tinting toward the blue the row flashes as it
+   lands). The avatar and sender stay, which is what a row is; the rest of
+   the card fades out of it. */
+.pb-in-body { display: flex; flex-direction: column; gap: 6pt; }
+.pb-in-body > :not(.pb-in-top), .pb-in-top small { opacity: var(--fade, 1); }
+.pb-in-body > .pb-in-read { opacity: calc(var(--r, 0) * var(--fade, 1)); }
+.pb-in-body > .pb-in-to { opacity: calc(var(--r, 0) * var(--fade, 1)); }
+.pb-in-top { display: flex; align-items: center; gap: 8pt; }
+.pb-in-top .pb-logo { width: 22pt; height: 22pt; }
+.pb-in-top b { flex: 1; min-width: 0; color: var(--ink); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pb-in-top small { font-size: 10pt; color: var(--faintest); }
+.pb-in-subj { color: var(--ink); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pb-in-to { align-self: flex-start; display: flex; align-items: center; gap: 5pt; padding: 2pt 9pt 2pt 7pt;
+  border-radius: 99pt; font-size: 10pt; font-weight: 500; color: var(--accent-ink);
+  box-shadow: inset 0 0 0 0.75pt rgba(130, 186, 245, 0.55);
+  opacity: var(--r, 0); transform: translateY(calc((1 - var(--r, 0)) * 4pt));
+  max-height: calc(var(--r, 0) * 30pt); margin-top: calc((var(--r, 0) - 1) * 6pt); overflow: hidden; }
+.pb-in-to svg { width: 9pt; height: 9pt; }
+/* The first email is read in full: what it asks, by when, what it is about,
+   and the level it reaches against the squelch. */
+.pb-in-read { max-height: calc(var(--r, 0) * 140pt); opacity: var(--r, 0); overflow: hidden;
+  margin-top: calc((var(--r, 0) - 1) * 6pt);
+  display: flex; flex-direction: column; gap: 9pt; }
+.pb-in-read dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4pt 12pt; margin: 6pt 0 0;
+  padding-top: 9pt; border-top: 0.75pt solid var(--hair-strong); }
+.pb-in-read dt { font: 500 9.5pt/1.5 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--faintest); }
+.pb-in-read dd { margin: 0; color: var(--ink); }
+.pb-in-meter { position: relative; height: 5pt; margin-top: 12pt; border-radius: 99pt; background: rgba(233, 238, 245, 0.08); }
+.pb-in-meter > i { position: absolute; inset: 0 auto 0 0; width: calc(var(--r, 0) * 84%); border-radius: 99pt;
+  background: linear-gradient(90deg, rgba(78, 155, 234, 0.25), var(--accent)); box-shadow: 0 0 12pt -2pt rgba(78, 155, 234, 0.7); }
+.pb-in-meter > em { position: absolute; left: 62%; top: -12pt; bottom: -3pt; width: 1px; background: var(--ink); opacity: 0.55; }
+.pb-in-meter > em::before { content: "squelch"; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
+  padding-bottom: 2pt; font: 500 8.5pt/1 var(--mono); font-style: normal; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); }
+/* THE MAIL IN THE CAPTIONS. Each caption carries its email in the page,
+   under the words, so it scrolls with everything else; the run under the
+   last caption is a short stack. Only a card in flight rises above the
+   window (the words and the waiting cards still pass under it on a phone),
+   so a step dims its words, never
+   itself: an opacity on the step would trap its cards beneath the window.
+   The room under the list lets the last card reach the middle of the screen
+   and land before the window lets go. */
+.pb-mailpair .pb-steps { position: relative; padding-bottom: 12svh; }
+.pb-mailpair .pb-step { min-height: 64svh; opacity: 1; justify-content: flex-start; padding-top: 10svh; }
+.pb-mailpair .pb-step > :not(.pb-inmail) { opacity: 0.26; transition: opacity 0.4s ease; }
+.pb-mailpair .pb-step[data-on] > * { opacity: 1; }
+.pb-mailpair .pb-step:last-child { min-height: 0; }
+.pb-inmail { margin-top: 1.4rem; }
+.pb-inrun { display: flex; flex-direction: column; gap: 14px; }
+.pb-inslot { position: relative; }
+/* THE TALLY. A readout in the trust row's instrument voice: one line per
+   zone, dim until its email lands, the one that needed you in blue. */
+.pb-tally { margin: 0; max-width: 22rem; border: 1px solid rgba(130, 186, 245, 0.2); border-radius: 12px;
+  overflow: hidden; font-size: 0.9rem; }
+.pb-tally > div { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem;
+  padding: 0.6rem 0.9rem; border-top: 1px solid rgba(130, 186, 245, 0.1); transition: background 0.4s ease; }
+.pb-tally > div:first-child { border-top: 0; }
+.pb-tally dt { font: 500 10.5px/1.6 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--faintest);
+  transition: color 0.4s ease; }
+.pb-tally dd { margin: 0; color: var(--faintest); transition: color 0.4s ease; }
+.pb-tally .pb-tally-h dd { font: 500 10.5px/1.6 var(--mono); letter-spacing: 0.08em; color: var(--accent-ink); }
+.pb-tally > div[data-arrived] dt { color: var(--faint); }
+.pb-tally > div[data-arrived] dd { color: var(--ink); }
+.pb-tally > div.you[data-arrived] { background: rgba(78, 155, 234, 0.12); }
+.pb-tally > div.you[data-arrived] dt { color: var(--accent-ink); }
+.pb-steps .pb-in { position: relative; left: auto; top: auto; visibility: visible; }
+.pb-steps .pb-in[data-flying] { z-index: 5; }
+@media (max-width: 900px) {
+  .pb-mailpair .pb-step { min-height: 56svh; }
 }
-
-/* SMART UNSUBSCRIBE, as a stand-in: the real page is still being designed, so
-   this only says what it is for. The senders you stopped reading get struck. */
-.pb-read { position: relative; }
-.pb-read > * { transition: opacity 0.4s ease; }
-.pb-x { position: absolute; inset: 0; margin: auto; width: 40pt; height: 40pt; color: var(--danger);
-  opacity: 0; transform: scale(0.4) rotate(-12deg);
-  filter: drop-shadow(0 0 8pt rgba(255, 122, 104, 0.55));
-  transition: opacity 0.3s ease, transform 0.45s cubic-bezier(0.3, 1.5, 0.5, 1); }
-.pb-shot[data-focus="smart"] .pb-read:not(.content) > :not(.pb-x) { opacity: 0.3; }
-.pb-shot[data-focus="smart"] .pb-x { opacity: 1; transform: none; transition-delay: calc(0.25s + var(--i) * 0.22s); }
-
-/* YOUR AGENT, off the window's lower corner: it is a different program, so
-   it is drawn as one. What it gets is the sitrep's own answer, not the pile. */
-.pb-agent { --pt: calc(100cqw / 1040); position: absolute; left: 96pt; bottom: -34pt; z-index: 4; width: 430pt;
-  border-radius: 14pt; overflow: hidden; font: 500 11pt/1.5 var(--mono); color: var(--dim);
-  background: rgba(11, 16, 24, 0.94); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
-  box-shadow: inset 0 0 0 0.75pt rgba(130, 186, 245, 0.35), 0 24pt 60pt -12pt rgba(0, 0, 0, 0.8),
-    0 0 50pt -14pt rgba(78, 155, 234, 0.5);
-  opacity: 0; transform: translateY(16pt) scale(0.97); pointer-events: none;
-  transition: opacity 0.4s ease, transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1); }
-.pb-shot[data-focus="mcp"] .pb-agent { opacity: 1; transform: none; }
-.pb-agent-top { display: flex; align-items: center; gap: 8pt; padding: 9pt 14pt; color: var(--faint);
-  border-bottom: 1px solid var(--hair); font-size: 10pt; }
-.pb-agent-top b { color: var(--ink); font-weight: 600; }
-.pb-agent-top i { width: 7pt; height: 7pt; border-radius: 50%; background: var(--positive); }
-.pb-agent-top span { margin-left: auto; }
-.pb-agent-body { padding: 12pt 14pt 14pt; display: grid; grid-template-columns: auto 1fr; gap: 3pt 12pt; }
-.pb-agent-body > p { grid-column: 1 / -1; margin: 0; }
-.pb-agent-body > p:first-child { color: var(--accent-ink); }
-.pb-agent-body b { color: var(--ink); font-weight: 600; }
-.pb-agent-body .late { color: var(--danger); } .pb-agent-body .soon { color: var(--warn); }
-.pb-agent-body > p:last-child { margin-top: 6pt; color: var(--faint); }
+@media (prefers-reduced-motion: reduce) {
+  .pb-in { display: none; }
+  .pb-land[data-arrived] > div > *, .pb-read[data-arrived], .pb-side span[data-arrived] { animation: none; }
+}
 
 /* No phone layout, on purpose: a phone gets the same window at the same
    aspect ratio, just smaller. An accurate picture of the app beats a legible
@@ -560,7 +546,6 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-fact dd { margin: 0; }
 .pb-fact-val { margin: 1rem 0 0.7rem; font-family: var(--serif); font-weight: 500;
   font-size: clamp(1.9rem, 3.2vw, 2.5rem); line-height: 1; letter-spacing: -0.01em; color: var(--ink); }
-.pb-fact-val em { font-style: normal; color: var(--accent-ink); }
 .pb-fact p { margin: 0; color: var(--dim); font-size: 0.93rem; line-height: 1.6; max-width: 22rem; }
 .pb-fact a { color: var(--accent-ink); text-decoration: none; }
 .pb-fact a:hover { text-decoration: underline; }
@@ -605,11 +590,9 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 
 @media (prefers-reduced-motion: reduce) {
   .pb-cue { transition-duration: 0.01ms; }
-  .pb-step, .pb-agent, .pb-x, .pb-code, .pb-tray, .pb-dash-hero, .pb-zone, .pb-rec, .pb-flow, .pb-flow kbd { transition: none; }
+  .pb-step, .pb-dash-hero, .pb-zone, .pb-rec { transition: none; }
   .pb-slot .pb-rig { animation: none; }
   .pb-cue::after { animation: none; }
-  .pb-unsub i { animation: none; }
-  .pb-shot[data-focus="flow"] .pb-eye { animation: none; }
 }
 `;
 
@@ -1430,16 +1413,22 @@ function Glyph({ name }: { name: GlyphName }) {
   );
 }
 
-function ZoneHead({ glyph, title, count, sub }: {
-  glyph: GlyphName; title: string; count: number; sub?: string;
+function ZoneHead({ glyph, title, count, sub, land }: {
+  glyph: GlyphName; title: string; count: number; sub?: string; land?: string;
 }) {
   return (
     <div className="pb-zone-h">
       <Glyph name={glyph} />
-      {title} <em>{count}</em>
+      {title} <em data-count={land} data-from={land ? count - 1 : undefined}>{count}</em>
       {sub && <small>{sub}</small>}
     </div>
   );
+}
+
+// A row that is not on the board yet: it opens when its email lands in the
+// tour (see Showcase), so the board the tour ends on is the board as drawn.
+function Land({ id, children }: { id: string; children: ReactNode }) {
+  return <div className="pb-land" data-land={id}><div>{children}</div></div>;
 }
 
 // The app's rail: Sitrep, Calendar, Mail and Login codes on the digit keys,
@@ -1449,7 +1438,7 @@ function Rail({ on }: { on: "sitrep" | "calendar" }) {
     <nav className="pb-side" aria-hidden="true">
       <span className={on === "sitrep" ? "on" : undefined}><Glyph name="sitrep" /></span>
       <span className={on === "calendar" ? "on" : undefined}><Glyph name="calendar" /></span>
-      <span><Glyph name="mail" /></span>
+      <span data-ping="filed"><Glyph name="mail" /></span>
       <span><Glyph name="key" /></span>
       <i className="pb-side-gap" />
       <span><Glyph name="ring" /></span>
@@ -1474,11 +1463,11 @@ const AVATAR = {
 // edge, exactly as SitrepView draws it; upcoming is an amber outline.
 const EYES: Array<{
   who: string; initials: string; tone: keyof typeof AVATAR; line: string;
-  chip?: string; overdue?: boolean; clip?: boolean;
+  chip?: string; overdue?: boolean; clip?: boolean; land?: string;
 }> = [
   { who: "Parkline Properties", initials: "PP", tone: "ochre", line: "Your lease renewal still needs a signature before the new rate lapses.", chip: "3d PAST DUE", overdue: true, clip: true },
   { who: "Dr. Ortiz's Office", initials: "DO", tone: "green", line: "Confirm Thursday's 2:30 appointment or call to reschedule.", chip: "due today" },
-  { who: "Jamie Chen", initials: "JC", tone: "blue", line: "Needs your pick between two offsite venues so they can hold the date.", chip: "due Fri" },
+  { who: "Jamie Chen", initials: "JC", tone: "blue", line: "Needs your pick between two offsite venues so they can hold the date.", chip: "due Fri", land: "jamie" },
   { who: "Alex Rivera", initials: "AR", tone: "violet", line: "Replied to your offsite dates: the 14th works for everyone." },
   { who: "Mom", initials: "M", tone: "rose", line: "Sent photos from the weekend." },
 ];
@@ -1579,25 +1568,6 @@ function Logo({ brand }: { brand: Brand }) {
 
 // What the window shows off as the page scrolls past it, in the order the
 // captions arrive. `key` is what the stylesheet switches the picture on.
-const TOUR: Array<{ key: string; title: string; line: ReactNode }> = [
-  { key: "headline", title: "Deep understanding of what matters to you",
-    line: "The sitrep opens on one sentence about your day, written from what Passband has learned you care about." },
-  { key: "eyes", title: "Only what you need to see",
-    line: "A handful of things need you today. Passband finds them, says what each one wants, and files the rest." },
-  { key: "flow", title: "Flow mode",
-    line: <>Press <kbd>space</kbd> and move through what needs you, one email after the next, until the board is clear.</> },
-  { key: "smart", title: "Smart unsubscribe",
-    line: "Passband notices the senders you have stopped reading and offers to cut them loose." },
-  { key: "group", title: "Visual smart grouping",
-    line: "Passband detects the mail that belongs together, like packages, bills, receipts and invitations, and gathers each kind into its own card." },
-  { key: "code", title: "Login codes come to you",
-    line: "A sign-in code floats over the app you are in. Copy it without opening your inbox." },
-  { key: "unsub", title: "Unsubscribe that actually works",
-    line: <>Press <kbd>u</kbd> and agents handle the rest.</> },
-  { key: "mcp", title: "An MCP to superpower your agent",
-    line: "Pre-triaged email passed on to your agent, so you only get the notifications that matter." },
-];
-
 function AppMock() {
   return (
     <div
@@ -1629,16 +1599,15 @@ function AppMock() {
           <section className="pb-zone pb-zone-eyes">
             <div className="pb-zone-h">
               <Glyph name="eye" />
-              For your eyes <em>{EYES.length}</em>
+              For your eyes <em data-count="jamie" data-from={EYES.length - 1}>{EYES.length}</em>
               <span className="pb-flow">
-                <kbd>space</kbd>
                 <Glyph name="wind" />
                 flow mode
               </span>
             </div>
-            {EYES.map(({ who, initials, tone, line, chip, overdue, clip }, i) => {
+            {EYES.map(({ who, initials, tone, line, chip, overdue, clip, land }, i) => {
               const [bg, fg] = AVATAR[tone];
-              return (
+              const row = (
                 <div key={who} className={`pb-eye${overdue ? " overdue" : ""}${i === 0 ? " cursor" : ""}`}
                   style={{ ["--i" as string]: i }}>
                   <span className="pb-avatar" style={{ background: bg, color: fg }}>{initials}</span>
@@ -1655,6 +1624,7 @@ function AppMock() {
                   )}
                 </div>
               );
+              return land ? <Land key={who} id={land}>{row}</Land> : row;
             })}
           </section>
 
@@ -1665,19 +1635,16 @@ function AppMock() {
               <small>newsletters, announcements, and offers</small>
             </div>
             <div className="pb-reading">
-              {READING.map(([brand, sender, count, blurb, content], i) => (
-                <div key={sender} className={`pb-read${content ? " content" : ""}`}>
-                  {!content && (
-                    <svg className="pb-x" viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="5"
-                      strokeLinecap="round" style={{ ["--i" as string]: i - 3 }}>
-                      <path d="M8 8l24 24M32 8 8 32" />
-                    </svg>
-                  )}
+              {READING.map(([brand, sender, count, blurb, content]) => (
+                <div key={sender} className={`pb-read${content ? " content" : ""}`}
+                  data-ping={sender === "Cats Weekly" ? "cats" : undefined}>
                   <Logo brand={brand} />
                   <div className="pb-read-text">
                     <div className="pb-read-top">
                       <b>{sender}</b>
-                      <span>{count} emails</span>
+                      {sender === "Cats Weekly"
+                        ? <span data-count="cats" data-from={count - 1} data-suffix=" emails">{count} emails</span>
+                        : <span>{count} emails</span>}
                     </div>
                     <p>{blurb}</p>
                   </div>
@@ -1689,12 +1656,14 @@ function AppMock() {
 
         <aside className="pb-rail">
           <section className="pb-rec pb-rec-cal">
-            <ZoneHead glyph="calendar" title="Calendar" count={2} />
+            <ZoneHead glyph="calendar" title="Calendar" count={2} land="cal" />
             <div className="pb-rec-row"><b>Dr. Ortiz · checkup</b><span>Thu 2:30 PM</span></div>
-            <div className="pb-rec-row"><b>Team offsite</b><span className="pb-chip">updated</span><span>Oct 14</span></div>
+            <Land id="cal">
+              <div className="pb-rec-row"><b>Team offsite</b><span className="pb-chip">updated</span><span>Oct 14</span></div>
+            </Land>
           </section>
           <section className="pb-rec pb-rec-ship">
-            <ZoneHead glyph="box" title="Shipments" count={2} />
+            <ZoneHead glyph="box" title="Shipments" count={2} land="ship" />
             <div className="pb-ship">
               <div className="pb-ship-top">
                 <Logo brand="exfed" />
@@ -1702,14 +1671,16 @@ function AppMock() {
                 <span className="pb-chip filled" style={{ ["--c" as string]: "var(--warn)" }}>out for delivery</span>
               </div>
             </div>
-            <div className="pb-ship">
-              <div className="pb-ship-top">
-                <Logo brand="rainforest" />
-                <div><b>Linen notebooks, set of 3</b><small>Rainforest · 2 items</small></div>
-                <span className="pb-chip" style={{ ["--c" as string]: "var(--accent)" }}>shipped</span>
+            <Land id="ship">
+              <div className="pb-ship">
+                <div className="pb-ship-top">
+                  <Logo brand="rainforest" />
+                  <div><b>Linen notebooks, set of 3</b><small>Rainforest · 2 items</small></div>
+                  <span className="pb-chip" style={{ ["--c" as string]: "var(--accent)" }}>shipped</span>
+                </div>
+                <span className="pb-chip eta">arrives Sat</span>
               </div>
-              <span className="pb-chip eta">arrives Sat</span>
-            </div>
+            </Land>
           </section>
           <section className="pb-rec pb-rec-bill">
             <ZoneHead glyph="bank" title="Billing" count={2} />
@@ -1717,66 +1688,16 @@ function AppMock() {
             <div className="pb-rec-row"><b>Chase ··4417</b><span className="pb-chip">statement</span></div>
           </section>
           <section className="pb-rec pb-rec-rcpt">
-            <ZoneHead glyph="receipt" title="Receipts" count={3} />
-            <div className="pb-rec-row"><b>Blue Bottle</b><span>$6.50</span></div>
+            <ZoneHead glyph="receipt" title="Receipts" count={3} land="rcpt" />
+            <Land id="rcpt">
+              <div className="pb-rec-row"><b>Blue Bottle</b><span>$6.50</span></div>
+            </Land>
             <div className="pb-rec-row"><b>DoorDash</b><span>$23.18</span></div>
             <div className="pb-rec-row"><b>Berghain Klubnacht</b><span>€25.00</span></div>
           </section>
         </aside>
       </div>
 
-      <div className="pb-tray">
-        <div className="pb-unsub done">
-          <span className="pb-avatar" style={{ background: AVATAR.rust[0], color: AVATAR.rust[1] }}>M</span>
-          <span>Unsubscribed from <b>Marriott Bonvoy</b></span>
-          <Glyph name="done" />
-        </div>
-        <div className="pb-unsub">
-          <span className="pb-avatar" style={{ background: AVATAR.violet[0], color: AVATAR.violet[1] }}>E</span>
-          <span>Unsubscribing from <b>Eventbrite</b></span>
-          <i />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// The floating login code, which in the app sits at the top of the screen
-// over whatever you are working in. A sibling of the window so it can hang
-// off its edge.
-function CodePanel() {
-  return (
-    <div className="pb-code" aria-hidden="true">
-      <div className="pb-code-top">
-        <span className="pb-avatar" style={{ background: AVATAR.blue[0], color: AVATAR.blue[1] }}>N</span>
-        <div>
-          <b>Northwind Bank</b>
-          <small><Glyph name="key" />Login code</small>
-        </div>
-        <span>24s</span>
-      </div>
-      <div className="pb-code-num">482 913</div>
-      <div className="pb-code-acts">
-        <span><Glyph name="copy" />Copy</span>
-        <em>Dismiss</em>
-      </div>
-    </div>
-  );
-}
-
-// What an agent on the Agent MCP door is handed: the same answer the sitrep
-// gives, already triaged. A sibling of the window, like the code panel.
-function AgentPanel() {
-  return (
-    <div className="pb-agent" aria-hidden="true">
-      <div className="pb-agent-top"><i /><b>Claude</b>Agent MCP<span>passband</span></div>
-      <div className="pb-agent-body">
-        <p>get_inbox_updates</p>
-        <p><b>2 need you now</b></p>
-        <span>Parkline Properties</span><span className="late">lease to sign, 3 days past due</span>
-        <span>Dr. Ortiz's Office</span><span className="soon">confirm Thursday 2:30, today</span>
-        <p>4,307 others triaged. Nothing else is worth interrupting you.</p>
-      </div>
     </div>
   );
 }
@@ -1927,11 +1848,230 @@ function Clouds({ kind }: { kind: "mail" | "events" }) {
   );
 }
 
+// THE MAIL THAT ARRIVES DURING THE TOUR, told in the left column at the
+// speed of the wheel: nothing pins, nothing waits for you. The window is the
+// only thing that holds still. The first caption carries Jamie's email, which
+// lives its whole life as it scrolls up the screen: it rises in, is read, and
+// leaves for the window once it passes the middle. The second carries the
+// run, a short stack of emails that each leave the same way, so two or three
+// are in the air at once. `to` is the zone each lands in; the mock has
+// a matching data-land row (or data-ping) and a data-count that ticks.
+type Inbound = {
+  id: string; who: string; subject: string; to: string;
+  face: { brand: Brand } | { initials: string; tone: keyof typeof AVATAR };
+};
+const JAMIE: Inbound = { id: "jamie", who: "Jamie Chen", subject: "Offsite venue: Lisbon or Porto?",
+  to: "For your eyes", face: { initials: "JC", tone: "blue" } };
+const RUN: Inbound[] = [
+  { id: "ship", who: "Rainforest", subject: "Your linen notebooks have shipped", to: "Shipments",
+    face: { brand: "rainforest" } },
+  { id: "cats", who: "Cats Weekly", subject: "Nine boxes, ranked by sit quality", to: "Reading",
+    face: { brand: "cats" } },
+  { id: "filed", who: "Marriott Bonvoy", subject: "Your points summary is ready", to: "Filed",
+    face: { initials: "M", tone: "rust" } },
+  { id: "rcpt", who: "Blue Bottle", subject: "Your receipt from Blue Bottle", to: "Receipts",
+    face: { initials: "BB", tone: "ochre" } },
+  { id: "cal", who: "Alex Rivera", subject: "Offsite: the 14th it is", to: "Calendar",
+    face: { initials: "AR", tone: "violet" } },
+];
+
+const STEPS: Array<{ title: string; line: ReactNode }> = [
+  { title: "New mail comes in",
+    line: "Passband reads it the way you would: what it asks, by when, and what it is about. Jamie's clears the squelch, so it goes to the top of your day." },
+  { title: "The rest sorts itself",
+    line: "Shipping updates, receipts, newsletters and plan changes come in all day and go where they belong. The noise never reaches you." },
+  { title: "What's left is yours",
+    line: "Six emails came in. One needed you, and it is waiting at the top. The rest is where you would look for it." },
+];
+
+// The closing tally: where this morning's six went, each line lighting as
+// its email lands.
+const TALLY: Array<[id: string, where: string, what: string]> = [
+  ["jamie", "For your eyes", "Jamie Chen"],
+  ["ship", "Shipments", "Rainforest"],
+  ["cats", "Reading", "Cats Weekly"],
+  ["filed", "Filed", "Marriott Bonvoy"],
+  ["rcpt", "Receipts", "Blue Bottle"],
+  ["cal", "Calendar", "Alex Rivera"],
+];
+
+const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
+const ease = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2);
+
+// A card rises in, is read, and leaves for its zone. `full` shows the whole
+// read (Jamie's). It opens downward into the step's spare room (steps sit at
+// their top, and are taller than what they hold), so nothing visible moves.
+function InCard({ m, full }: { m: Inbound; full?: boolean }) {
+  return (
+    <div className="pb-in" data-in={m.id} data-full={full || undefined}>
+      <div className="pb-in-body">
+      <div className="pb-in-top">
+        {"brand" in m.face
+          ? <Logo brand={m.face.brand} />
+          : <span className="pb-avatar" style={{ background: AVATAR[m.face.tone][0], color: AVATAR[m.face.tone][1] }}>{m.face.initials}</span>}
+        <b>{m.who}</b>
+        <small>now</small>
+      </div>
+      <div className="pb-in-subj">{m.subject}</div>
+      {full && (
+        <div className="pb-in-read">
+          <dl>
+            <dt>Asks</dt><dd>Pick a venue</dd>
+            <dt>By</dt><dd>Friday</dd>
+            <dt>About</dt><dd>Team offsite</dd>
+          </dl>
+          <div className="pb-in-meter"><i /><em /></div>
+        </div>
+      )}
+      <span className="pb-in-to">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M2.5 8h11m0 0L9.5 4m4 4-4 4" />
+        </svg>
+        {m.to}
+      </span>
+      </div>
+    </div>
+  );
+}
+
+// Drives the cards off where each one is on screen. Every card sits in the
+// page and scrolls with it; only a card in flight is moved, by a transform
+// from its own place to its zone in the window. d is how far past the
+// reading line the card's middle is, in screen heights.
+function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
+  useEffect(() => {
+    const pair = pairRef.current;
+    const shot = pair?.querySelector<HTMLElement>(".pb-shot");
+    if (!pair || !shot) return;
+    const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const cards = Array.from(pair.querySelectorAll<HTMLElement>(".pb-steps .pb-in"));
+    let raf = 0;
+
+    const frame = () => {
+      raf = 0;
+      const vh = innerHeight;
+      const line = vh * (innerWidth > 900 ? 0.5 : 0.62);
+      cards.forEach((card) => {
+        const id = card.dataset.in!;
+        // Measured without the flight's transform, so the page position is
+        // the card's own.
+        const home = (card.parentElement as HTMLElement).getBoundingClientRect();
+        const d = (line - (home.top + home.height / 2)) / vh;
+        // Jamie's takes its time over the read, low on the screen, before it
+        // goes; the run's cards only flash where they are going.
+        const full = card.hasAttribute("data-full");
+        const a = clamp01((d + (full ? 0.48 : 0.42)) / 0.18);
+        const r = full ? clamp01((d + 0.16) / 0.18) : clamp01((d + 0.2) / 0.14);
+        const f = full ? clamp01((d - 0.08) / 0.26) : clamp01((d + 0.04) / 0.24);
+        card.style.setProperty("--r", String(r));
+
+        const target = shot.querySelector<HTMLElement>(`[data-land="${id}"], [data-ping="${id}"]`);
+        if (!target) return;
+        const arrived = f >= 1;
+        if (arrived !== target.hasAttribute("data-arrived")) target.toggleAttribute("data-arrived", arrived);
+        shot.querySelectorAll<HTMLElement>(`[data-count="${id}"]`).forEach((el) => {
+          const n = Number(el.dataset.from) + (arrived ? 1 : 0);
+          const text = `${n}${el.dataset.suffix ?? ""}`;
+          if (el.textContent !== text) el.textContent = text;
+          el.style.color = arrived ? "var(--accent-ink)" : "";
+        });
+        pair.querySelector(`[data-tally="${id}"]`)?.toggleAttribute("data-arrived", arrived);
+
+        // The row opens through the second half of the flight, so the card
+        // and the row it becomes finish together.
+        const land = target.classList.contains("pb-land");
+        const inner = land ? (target.firstElementChild as HTMLElement) : null;
+        const rowH = inner ? inner.offsetHeight : 0;
+        const open = reduce ? (arrived ? 1 : 0) : clamp01((f - 0.45) / 0.55);
+        if (land) {
+          target.style.height = open >= 1 ? "auto" : `${open * rowH}px`;
+          target.style.opacity = String(open);
+        }
+
+        const slot = card.parentElement as HTMLElement;
+        const flying = !reduce && f > 0;
+        card.toggleAttribute("data-flying", flying);
+        if (!flying) {
+          slot.style.height = "";
+          card.style.width = card.style.height = card.style.borderRadius = card.style.padding = "";
+          card.style.removeProperty("--pt");
+          card.style.setProperty("--fade", "1");
+          card.style.setProperty("--m", "0");
+          card.dataset.w = String(card.offsetWidth);
+          card.dataset.h = String(card.offsetHeight);
+          const cs = getComputedStyle(card);
+          card.dataset.rad = cs.borderTopLeftRadius;
+          card.dataset.pv = cs.paddingTop;
+          card.dataset.pt = String(parseFloat(getComputedStyle(slot).getPropertyValue("--pt")) || 1.15);
+          card.dataset.ph = cs.paddingLeft;
+          card.style.transform = reduce ? "" : `translateY(${(1 - ease(a)) * 24}px)`;
+          card.style.opacity = String(reduce ? (arrived ? 0 : 1) : a);
+          return;
+        }
+        // Hold the card's place in the page while it changes shape.
+        if (!slot.style.height) slot.style.height = `${slot.offsetHeight}px`;
+        const w0 = Number(card.dataset.w), h0 = Number(card.dataset.h), r0 = parseFloat(card.dataset.rad ?? "16");
+        const t = target.getBoundingClientRect();
+        const row = (inner?.firstElementChild as HTMLElement | null) ?? target;
+        const r1 = parseFloat(getComputedStyle(row).borderTopLeftRadius) || 0;
+        const end = { l: t.left, t: t.top, w: t.width, h: land ? rowH : t.height };
+        const e = ease(f);
+        const lerp = (x: number, y: number) => x + (y - x) * e;
+        const x = lerp(home.left, end.l);
+        const y = lerp(home.top, end.t) - Math.sin(Math.PI * e) * 40;
+        card.style.width = `${lerp(w0, end.w)}px`;
+        card.style.height = `${lerp(h0, end.h)}px`;
+        card.style.borderRadius = `${lerp(r0, r1)}px`;
+        // The type shrinks to the window's scale (its points are 1/1040 of
+        // its width), so the sender line lands at the row's size.
+        card.style.setProperty("--pt", `${lerp(Number(card.dataset.pt), shot.offsetWidth / 1040)}px`);
+        // Padding closes in so the sender line sits centred in the row.
+        const top = card.querySelector<HTMLElement>(".pb-in-top")!.offsetHeight;
+        const pv1 = Math.max(0, (end.h - top) / 2);
+        card.style.padding = `${lerp(parseFloat(card.dataset.pv!), pv1)}px ${lerp(parseFloat(card.dataset.ph!), 10)}px`;
+        card.style.transform = `translate(${x - home.left}px, ${y - home.top}px)`;
+        card.style.setProperty("--fade", String(1 - clamp01((f - 0.05) / 0.4)));
+        card.style.setProperty("--m", String(clamp01((f - 0.4) / 0.6)));
+        card.style.opacity = String(1 - clamp01((f - 0.86) / 0.14));
+      });
+    };
+    const queue = () => {
+      if (!raf) raf = requestAnimationFrame(frame);
+    };
+    frame();
+    addEventListener("scroll", queue, { passive: true });
+    addEventListener("resize", queue);
+    return () => {
+      cancelAnimationFrame(raf);
+      removeEventListener("scroll", queue);
+      removeEventListener("resize", queue);
+    };
+  }, [pairRef]);
+}
+
 function Showcase() {
   const { stepsRef, focus } = useTourFocus();
+  const pairRef = useRef<HTMLDivElement>(null);
+  useArrivals(pairRef);
+
+  // What sits under each caption.
+  const mail = [
+    <div className="pb-inslot"><InCard m={JAMIE} full /></div>,
+    <div className="pb-inrun">
+      {RUN.map((m) => <div key={m.id} className="pb-inslot"><InCard m={m} /></div>)}
+    </div>,
+    <dl className="pb-tally">
+      <div className="pb-tally-h"><dt>This morning</dt><dd>6 in · 1 for you</dd></div>
+      {TALLY.map(([id, where, what]) => (
+        <div key={id} data-tally={id} className={id === "jamie" ? "you" : undefined}>
+          <dt>{where}</dt><dd>{what}</dd>
+        </div>
+      ))}
+    </dl>,
+  ];
 
   return (
-    <div className="pb-pair">
+    <div className="pb-pair pb-mailpair" ref={pairRef}>
       <figure className="pb-panel pb-before">
         <figcaption>
           <b>Before</b> everything, in the order it arrived
@@ -1952,21 +2092,20 @@ function Showcase() {
         </div>
         <figure className="pb-panel pb-after">
           <figcaption><b>After</b> what Passband shows you</figcaption>
-          <div className="pb-shot" data-focus={focus < 0 ? undefined : TOUR[focus].key}>
+          <div className="pb-shot">
             <div className="pb-window">
               <AppMock />
             </div>
-            <CodePanel />
-            <AgentPanel />
           </div>
         </figure>
       </div>
       <ol className="pb-steps" ref={stepsRef}>
-        {TOUR.map(({ key, title, line }, i) => (
-          <li key={key} className="pb-step" data-on={i === focus || undefined}>
+        {STEPS.map(({ title, line }, i) => (
+          <li key={title} className="pb-step" data-on={i === focus || undefined}>
             <i aria-hidden="true">{String(i + 1).padStart(2, "0")}</i>
             <h3>{title}</h3>
             <p>{line}</p>
+            <div className="pb-inmail" aria-hidden="true">{mail[i]}</div>
           </li>
         ))}
       </ol>
@@ -1984,8 +2123,12 @@ function Showcase() {
 // hatched (likely) or folded into "1 unlikely" until opened, as in
 // CalendarMarks.swift. Every name in it is invented.
 const CAL_CSS = `
-.pb-pair.pb-cal .pb-steps { grid-row: 1; padding-top: 8svh; }
-.pb-pair.pb-cal .pb-hold { grid-row: 1; }
+/* Mirrored: the window holds the left and the notes pass on its right, so
+   the second tour does not read as a repeat of the first. */
+.pb-pair.pb-cal { grid-template-columns: auto minmax(0, 1fr); }
+.pb-pair.pb-cal .pb-steps { grid-column: 2; grid-row: 1; padding-top: 8svh; }
+.pb-pair.pb-cal .pb-step { padding: 0 0 0 clamp(1.5rem, 3vw, 3rem); }
+.pb-pair.pb-cal .pb-hold { grid-column: 1; grid-row: 1; }
 .pb-calshot .pb-app-title b { font-family: var(--sans); font-weight: 700; font-size: 17pt; }
 .pb-seg { margin-left: auto; display: flex; padding: 3pt; border-radius: 99pt; background: #1a2535;
   font-size: 12pt; font-weight: 600; color: var(--ink); }
@@ -2080,45 +2223,23 @@ const CAL_CSS = `
 .pb-evkeys kbd { font: 600 9pt/1 var(--mono); padding: 2pt 5pt; margin-right: 4pt; border-radius: 4pt;
   background: #1e2b3d; color: var(--dim); }
 
-/* THE REMINDER, as the iPhone shows it: the system's own banner, dark
-   material, the app icon, title, time, and the line the model wrote. Hung off
-   the window's top right. */
-.pb-remind { --pt: calc(100cqw / 1040); position: absolute; right: 22pt; top: -34pt; z-index: 4; width: 350pt;
-  padding: 12pt 14pt 13pt 12pt; border-radius: 24pt; display: grid; grid-template-columns: 38pt minmax(0, 1fr) auto;
-  column-gap: 11pt; align-items: start; font-family: var(--sans); font-size: 13pt; line-height: 1.28; color: #f5f5f7;
-  background: rgba(46, 46, 50, 0.72); -webkit-backdrop-filter: blur(24px) saturate(1.8); backdrop-filter: blur(24px) saturate(1.8);
-  box-shadow: inset 0 0 0 0.5pt rgba(255, 255, 255, 0.14), 0 24pt 60pt -12pt rgba(0, 0, 0, 0.75),
-    0 0 50pt -14pt rgba(78, 155, 234, 0.45);
-  opacity: 0; transform: translateY(-16pt) scale(0.97); pointer-events: none;
-  transition: opacity 0.4s ease, transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1); }
-.pb-remind img { grid-row: 1 / span 3; align-self: center; width: 38pt; height: 38pt; border-radius: 9pt; }
-.pb-remind b { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.pb-remind time { font-size: 11.5pt; color: rgba(235, 235, 245, 0.55); padding-left: 8pt; }
-.pb-remind small { grid-column: 2 / -1; font-size: 13pt; font-weight: 600; }
-.pb-remind p { grid-column: 2 / -1; margin: 0; }
-
 /* WHAT THE TOUR DOES TO THE PICTURE. As on the sitrep: the rest steps back
    and the part the caption is about keeps its light, ringed and glowing. */
 .pb-calshot[data-focus] .pb-ev { opacity: 0.3; }
 .pb-calshot[data-focus] .pb-evsec { opacity: 0.3; }
-.pb-calshot:is([data-focus="plans"], [data-focus="behind"], [data-focus="remind"]) .pb-ev.night,
+.pb-calshot[data-focus="plans"] .pb-ev.night,
 .pb-calshot[data-focus="unlikely"] .pb-ev.summit { opacity: 1; }
-.pb-calshot:is([data-focus="plans"], [data-focus="unlikely"], [data-focus="remind"]) .pb-evsec.top,
-.pb-calshot[data-focus="behind"] .pb-evsec.mail { opacity: 1; }
+.pb-calshot:is([data-focus="plans"], [data-focus="unlikely"]) .pb-evsec.top { opacity: 1; }
 .pb-calshot[data-focus="plans"] .pb-ev.night,
 .pb-calshot[data-focus="unlikely"] .pb-ev.summit {
   box-shadow: inset 0 0 0 1pt rgba(130, 186, 245, 0.9), 0 0 22pt -4pt rgba(78, 155, 234, 0.8); }
-.pb-calshot[data-focus="plans"] .pb-evsec.top,
-.pb-calshot[data-focus="behind"] .pb-behind {
+.pb-calshot[data-focus="plans"] .pb-evsec.top {
   box-shadow: inset 0 0 0 1pt rgba(130, 186, 245, 0.75), 0 0 44pt -8pt rgba(78, 155, 234, 0.65); }
-.pb-calshot[data-focus="behind"] .pb-brow.update { background: rgba(78, 155, 234, 0.2); }
 .pb-calshot[data-focus="unlikely"] .pb-ev.fold { max-height: 19pt; opacity: 1; margin-top: 0; }
 .pb-calshot[data-focus="unlikely"] .pb-day.summitday > header small { color: var(--accent-ink); }
-.pb-calshot[data-focus="remind"] .pb-remind { opacity: 1; transform: none; }
-.pb-calshot[data-focus="remind"] .pb-tickets { box-shadow: 0 0 0 1pt rgba(130, 186, 245, 0.6), 0 0 28pt -4pt rgba(78, 155, 234, 0.9); }
 
 @media (prefers-reduced-motion: reduce) {
-  .pb-ev, .pb-evsec, .pb-remind, .pb-day::after, .pb-tickets, .pb-brow { transition: none; }
+  .pb-ev, .pb-evsec, .pb-day::after, .pb-tickets, .pb-brow { transition: none; }
   .pb-evcard { animation: none; }
 }
 `;
@@ -2171,12 +2292,8 @@ const CAL_DAYS: Array<{ label: string; out?: boolean; unlikely?: number; chips: 
 const CAL_TOUR: Array<{ key: string; title: string; line: ReactNode }> = [
   { key: "plans", title: "Your inbox already knows your plans",
     line: "Invitations, tickets and bookings show up on your calendar as they arrive, with the flyer, the place, and a line on how likely you are to go." },
-  { key: "behind", title: "When plans change, the event keeps up",
-    line: "Every email about an event stays attached to it. A corrected lineup or a new start time lands on the event, not at the bottom of your inbox." },
   { key: "unlikely", title: "Not every invite is a plan",
     line: "The summit a vendor sent to everyone on its list folds away as unlikely. It is there if you want it, and out of the way if you don't." },
-  { key: "remind", title: "Reminders that know the event",
-    line: "Passband picks the moment, an hour before doors or ten minutes before a call, and says what will help. Tap to see your tickets." },
 ];
 
 
@@ -2312,18 +2429,6 @@ function CalMock({ focus }: { focus: string | undefined }) {
 
 // The reminder an hour before doors. The line is the kind the
 // reminder model writes: short, no links, no codes.
-function RemindBanner() {
-  return (
-    <div className="pb-remind" aria-hidden="true">
-      <img src="/icon-180.png" alt="" />
-      <b>Endzeit x Non Series</b>
-      <time>now</time>
-      <small>In 1 hr · Downtown San Francisco</small>
-      <p>Doors at 10. Tap to see your tickets in the Endzeit email.</p>
-    </div>
-  );
-}
-
 function CalShowcase() {
   const { stepsRef, focus } = useTourFocus();
   const key = focus < 0 ? undefined : CAL_TOUR[focus].key;
@@ -2336,7 +2441,6 @@ function CalShowcase() {
             <div className="pb-window">
               <CalMock focus={key} />
             </div>
-            <RemindBanner />
           </div>
         </figure>
       </div>
@@ -2585,9 +2689,8 @@ export function App() {
           Plans arrive by email. <em>So does your calendar.</em>
         </h2>
         <p className="pb-intro">
-          Passband lays out the invitations, tickets and bookings in your mail, says how
-          likely you are to go, keeps each one current as the mail changes, and reminds you
-          when it counts.
+          Passband lays out the invitations, tickets and bookings in your mail and says how
+          likely you are to go.
         </p>
         <CalShowcase />
       </section>
@@ -2624,7 +2727,7 @@ export function App() {
           <div className="pb-fact">
             <dt><b>01</b> License</dt>
             <dd>
-              <div className="pb-fact-val">Open <em>source</em></div>
+              <div className="pb-fact-val">Open source</div>
               <p>
                 MIT licensed. Every line is <a href="https://github.com/passband-app/passband">on GitHub</a>,
                 the threat model included.
@@ -2634,7 +2737,7 @@ export function App() {
           <div className="pb-fact">
             <dt><b>02</b> Where it runs</dt>
             <dd>
-              <div className="pb-fact-val">Yours <em>or ours</em></div>
+              <div className="pb-fact-val">Yours or ours</div>
               <p>
                 <a href="/self-host">Self-host</a> the daemon on your own machine, or let us run an
                 isolated instance for you.
@@ -2644,7 +2747,7 @@ export function App() {
           <div className="pb-fact">
             <dt><b>03</b> Training on your mail</dt>
             <dd>
-              <div className="pb-fact-val"><em>Never</em></div>
+              <div className="pb-fact-val">Never</div>
               <p>
                 Not for us, not for our model provider. <a href="/trust">Where your mail goes</a>,
                 every wire of it.

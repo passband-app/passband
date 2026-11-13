@@ -37,7 +37,7 @@ use crate::mail::graph::{GRAPH_API_BASE, GraphSource, GraphSourceParts};
 use crate::mail::imap::{IMAP_ACCOUNT_SETTING, ImapCredential, ImapSource, StoredImapSlot};
 use crate::mail::{
     Changes, ChangesError, FetchedMessage, Folder, Listing, MailProvider, MailSource, Placement,
-    RawBody, SourceRefusals, SyncCursor, Urgency,
+    RawBody, SourceRefusals, SyncCursor, Urgency, synthesize_rfc822_headers,
 };
 use crate::metrics::{ArchiveHold, SyncMetrics};
 use crate::store::{ContactEntry, SPAM_SYNCED_AT_KEY, Store, SyncState, TriagedMessage};
@@ -2015,6 +2015,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         let refusals = self.archive.refusals.quota.load(Ordering::Relaxed);
         self.archive.skipped.store(0, Ordering::Relaxed);
         let out = self.archive_walk_step(shutdown, now, days).await;
+        // A chunk that stopped part way (an error, a window of mail starting,
+        // shutdown) may have parsed batches of it already, and only the
+        // walked path trims for itself. Hand those pages back here too, or a
+        // walk that keeps failing on the same chunk holds them through every
+        // backoff.
+        if matches!(out, Err(_) | Ok(ArchiveStep::Held)) {
+            crate::mem::trim_off_runtime().await;
+        }
         let refused = self.archive.refusals.quota.load(Ordering::Relaxed) != refusals;
         let pace = self.archive_pace;
         let mut state = self.archive.state();
@@ -3265,7 +3273,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                         gone += 1;
                         continue;
                     }
-                    RawBody::Missing => {
+                    // `fetch_raw` never answers a stand-in; were it to, a
+                    // snippet is no body to heal a blank one from.
+                    RawBody::Missing | RawBody::HeadersOnly(_) => {
                         gone += 1;
                         continue;
                     }
@@ -3542,11 +3552,19 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         //
         // An `Err` from any fetch drops the window, which cancels the GETs
         // still in flight. The retry re-lists, and ingest is idempotent.
-        let width = self.config.sync.fetch_concurrency.max(1);
+        //
+        // THE ARCHIVE WALK FETCHES ONE AT A TIME, and bounded. Overlap buys it
+        // nothing (it rests twice as long as it works), and a second message in
+        // flight is a second big body in memory at once.
+        let (width, cap) = if origin == IngestOrigin::Archive {
+            (1, Some(self.archive_pace.raw_cap))
+        } else {
+            (self.config.sync.fetch_concurrency.max(1), None)
+        };
         let mut queue = ids.iter().map(String::as_str);
         let mut window = futures::stream::FuturesOrdered::new();
         for id in queue.by_ref().take(width) {
-            window.push_back(Self::fetch_raw_message(&*source, id, retry));
+            window.push_back(Self::fetch_raw_message(&*source, id, retry, cap));
         }
         // Read before the first GET: a quota or auth refusal anywhere in this
         // batch means no error in it is about one message. See
@@ -3573,14 +3591,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                         archive_skip_kind(&e)
                     );
                     if let Some(id) = queue.next() {
-                        window.push_back(Self::fetch_raw_message(&*source, id, retry));
+                        window.push_back(Self::fetch_raw_message(&*source, id, retry, cap));
                     }
                     continue;
                 }
                 Err(e) => return Err(e),
             };
             if let Some(id) = queue.next() {
-                window.push_back(Self::fetch_raw_message(&*source, id, retry));
+                window.push_back(Self::fetch_raw_message(&*source, id, retry, cap));
             }
             // Only a catch-up has a denominator, so this is a no-op on the
             // ordinary incremental path — `catchup_step` moves a gauge that is
@@ -3611,8 +3629,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 received_at,
                 placement,
             } = msg;
-            let raw = match raw {
-                RawBody::Bytes(bytes) => bytes,
+            // `headers_only`: the walk's stand-in for a message over its bound,
+            // which must be stored lite whatever its age, so that opening it
+            // fetches the real HTML back.
+            let (raw, headers_only) = match raw {
+                RawBody::Bytes(bytes) => (bytes, false),
+                RawBody::HeadersOnly(bytes) => (bytes, true),
                 RawBody::Missing => continue, // nothing to ingest
                 RawBody::Undecodable(e) => {
                     // Redacted: id + error only, never content.
@@ -3674,7 +3696,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                         self.config.sync.backfill_bulk_triage_days,
                     ))
                 });
-            let ingested = match self.ingest_fetched(&fetched, &rules, now, origin, bulk_floor) {
+            let ingested = match self.ingest_fetched(
+                &fetched,
+                &rules,
+                now,
+                origin,
+                bulk_floor,
+                headers_only,
+            ) {
                 Ok(ingested) => ingested,
                 // A message the store will not take is the walk's to step
                 // over on the same terms as one Gmail will not serve.
@@ -3750,15 +3779,20 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// several of them. The timestamp is "the moment we first saw the
     /// message", read the instant the fetch returns (see the clock note in
     /// [`Self::fetch_raw_and_ingest`]).
+    ///
+    /// `cap` is the archive walk's size bound ([`ArchivePace::raw_cap`]);
+    /// `None` reads the message whole, as every live path does.
     async fn fetch_raw_message<'a>(
         source: &'a dyn MailSource,
         id: &'a str,
         retry: Urgency,
+        cap: Option<usize>,
     ) -> (&'a str, Result<(FetchedMessage, DateTime<Utc>)>) {
-        let fetched = source
-            .fetch_raw(id, retry)
-            .await
-            .map(|msg| (msg, Utc::now()));
+        let fetched = match cap {
+            Some(cap) => source.fetch_raw_bounded(id, retry, cap).await,
+            None => source.fetch_raw(id, retry).await,
+        }
+        .map(|msg| (msg, Utc::now()));
         (id, fetched)
     }
 
@@ -3772,12 +3806,15 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         now: DateTime<Utc>,
         origin: IngestOrigin,
     ) -> Result<Option<Ingested>> {
-        self.ingest_fetched(fetched, rules, now, origin, None)
+        self.ingest_fetched(fetched, rules, now, origin, None, false)
     }
 
     /// [`Self::ingest_one`], with the window read's floor for old bulk mail:
     /// list mail dated before `bulk_floor` is filed as archive (see
     /// [`files_as_old_bulk`]). `None` files nothing.
+    ///
+    /// `headers_only` marks the archive walk's stand-in for a message over its
+    /// size bound ([`RawBody::HeadersOnly`]): stored lite at any age.
     fn ingest_fetched(
         &self,
         fetched: &RawFetched,
@@ -3785,6 +3822,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         now: DateTime<Utc>,
         origin: IngestOrigin,
         bulk_floor: Option<DateTime<Utc>>,
+        headers_only: bool,
     ) -> Result<Option<Ingested>> {
         let mut triaged = ingest_with_rules(fetched, &self.config.stage1, now, rules, |addr| {
             self.store
@@ -3841,7 +3879,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // not the HTML, which is the bulk of a row and is fetched back from
             // the provider if the owner ever opens it. Dropped here so the
             // bytes are never written; the store drops it again regardless.
-            let stored = if archive_row_is_lite(triaged.message.received_at, self.archive_now()) {
+            //
+            // AND A STAND-IN IS LITE AT ANY AGE: its text is a snippet, and lite
+            // is what makes the reader fetch the real message when it is opened.
+            let stored = if headers_only
+                || archive_row_is_lite(triaged.message.received_at, self.archive_now())
+            {
                 triaged.message.body_html = None;
                 self.store.ingest_lite_archive_message(&triaged)?
             } else {
@@ -4383,6 +4426,15 @@ struct ArchivePace {
     /// Ids fetched between two rests, and between two looks at shutdown and
     /// `window_in_flight`.
     batch: usize,
+    /// THE BIGGEST MESSAGE THE WALK READS WHOLE, in decoded bytes. Anything
+    /// larger is stored from its headers and the provider's snippet as a lite
+    /// row ([`MailSource::fetch_raw_bounded`]); the reader fetches its HTML
+    /// back if the thread is ever opened. Far below the live paths' 64MB
+    /// because nobody is waiting on this mail and a tenant's pod is: one
+    /// message is held several times over while it is parsed, and a few
+    /// years of attachments back, two big ones in a batch were enough to
+    /// take a daemon past its memory limit.
+    raw_cap: usize,
     /// After each burst the walk rests this many times the burst's own elapsed
     /// time. 2 is a one-third duty cycle: whatever pace the shared
     /// [`GmailBudget`] is currently allowing, the walk takes about a third of
@@ -4440,6 +4492,7 @@ impl Default for ArchivePace {
             // A third of the minute's allowance, so the ceiling is met in
             // three even bursts rather than one of 25 and a long wait.
             batch: 10,
+            raw_cap: 16 * 1024 * 1024,
             rest_factor: 2,
             // 15s, 30s, 1m, 2m, 4m, then 5m for as long as it keeps failing.
             // The first retry is soon because the usual cause (a laptop
@@ -4692,33 +4745,6 @@ enum ArchiveStep {
     Done,
     /// `sync.archive_days` is 0.
     Off,
-}
-
-/// Rebuild a header-only RFC822 blob from a source's `(name, value)` headers
-/// so mail-parser runs over it unchanged; the trailing blank line ends the
-/// header section (empty body). Used by the Sent-contacts harvest and the
-/// recipients backfill ([`MailSource::fetch_headers`] carries headers only)
-/// and the contacts-seeding tests.
-fn synthesize_rfc822_headers(headers: &[(String, String)]) -> String {
-    let mut out = String::new();
-    for (name, value) in headers {
-        // HEADER INJECTION GUARD: Gmail names and values are single-line, but
-        // upstream is never trusted blindly — a CR/LF in either would splice a
-        // synthetic header into the blob.
-        if name.contains('\r')
-            || name.contains('\n')
-            || value.contains('\r')
-            || value.contains('\n')
-        {
-            continue;
-        }
-        out.push_str(name);
-        out.push_str(": ");
-        out.push_str(value);
-        out.push_str("\r\n");
-    }
-    out.push_str("\r\n");
-    out
 }
 
 /// Type alias helper so callers can name the concrete rule slice.
@@ -5523,6 +5549,9 @@ mod tests {
         /// gmail message id -> the `labelIds` its `messages.get` reports.
         /// Absent means the field is omitted, as the older fixtures expect.
         message_labels: HashMap<String, Vec<String>>,
+        /// gmail message id -> the `snippet` `messages.get` reports for it.
+        /// Absent is no snippet at all.
+        snippets: HashMap<String, String>,
         errors: HashMap<String, std::collections::VecDeque<(u16, String)>>,
         retry_after: Option<String>,
         /// labelId -> the verbatim 200 body `labels.get` answers with. Absent
@@ -5570,6 +5599,14 @@ mod tests {
         }
         fn body(&self, id: &str, eml: String) -> &Self {
             self.0.lock().unwrap().bodies.insert(id.to_string(), eml);
+            self
+        }
+        fn snippet(&self, id: &str, snippet: &str) -> &Self {
+            self.0
+                .lock()
+                .unwrap()
+                .snippets
+                .insert(id.to_string(), snippet.to_string());
             self
         }
         fn message_labels(&self, id: &str, labels: &[&str]) -> &Self {
@@ -5781,6 +5818,9 @@ mod tests {
                 });
                 if let Some(labels) = st.message_labels.get(&id) {
                     body["labelIds"] = json!(labels);
+                }
+                if let Some(snippet) = st.snippets.get(&id) {
+                    body["snippet"] = json!(snippet);
                 }
                 Json(body).into_response()
             }
@@ -10031,6 +10071,81 @@ Q0/00yfa39rgtJLa0DnOoA==
              --b--\r\n",
             at.to_rfc2822()
         )
+    }
+
+    /// A MESSAGE OVER THE WALK'S SIZE BOUND is never read whole. The walk
+    /// stops reading its `format=raw` answer at the bound, asks for its
+    /// metadata instead, and stores its own headers over Gmail's snippet as a
+    /// LITE row, inside the year where an archive row would otherwise keep its
+    /// HTML: lite is what makes the reader fetch the real message on open.
+    /// The message beside it, under the bound, is stored as it always was.
+    #[tokio::test]
+    async fn an_archive_message_over_the_bound_is_stored_lite_from_its_headers() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let big = format!(
+            "From: Harbour Office <office@harbour.example>\r\n\
+             To: me@example.com\r\n\
+             Subject: Survey scans\r\n\
+             Date: {}\r\n\
+             MIME-Version: 1.0\r\n\
+             Content-Type: multipart/mixed; boundary=\"b\"\r\n\
+             \r\n\
+             --b\r\n\
+             Content-Type: text/plain; charset=\"UTF-8\"\r\n\
+             \r\n\
+             The gannet survey is attached.\r\n\
+             --b\r\n\
+             Content-Type: application/pdf; name=\"scans.pdf\"\r\n\
+             Content-Disposition: attachment; filename=\"scans.pdf\"\r\n\
+             \r\n\
+             {}\r\n\
+             --b--\r\n",
+            at.to_rfc2822(),
+            "x".repeat(256 * 1024)
+        );
+        let g = MockGmail::default();
+        g.old_mail("g-big", at, big);
+        g.snippet("g-big", "The survey &amp; its scans, as promised");
+        g.old_mail("g-small", at, html_eml(at, "puffin"));
+        let base = serve_mock(g.clone()).await;
+        let mut eng = archive_engine(store.clone(), acct, &base, 1825);
+        // 64KiB of message, which with the envelope's slack is a ~150KiB
+        // response: the small message fits, the quarter-megabyte one does not.
+        eng.archive_pace.raw_cap = 64 * 1024;
+        let (_tx, mut rx) = never_shutdown();
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+
+        assert_eq!(g.calls("get:g-big"), 2, "raw, given up on, then metadata");
+        let view = store.thread_view_with_html(acct, "g-big").unwrap();
+        let m = &view.messages[0];
+        assert!(store.message_is_archive(acct, m.id).unwrap());
+        assert!(m.lite, "lite inside the year, so opening it hydrates");
+        assert_eq!(m.html, None);
+        assert_eq!(m.subject, "Survey scans", "its own headers");
+        assert!(
+            m.content.contains("The survey & its scans, as promised"),
+            "the snippet, unescaped, is its text: {:?}",
+            m.content
+        );
+        assert!(!m.content.contains("gannet"), "the body was never read");
+        let hits = store.search(acct, "survey", 10, 0).unwrap();
+        assert_eq!(hits.iter().map(|h| h.id).collect::<Vec<_>>(), [m.id]);
+
+        assert_eq!(g.calls("get:g-small"), 1);
+        let view = store.thread_view_with_html(acct, "g-small").unwrap();
+        assert!(!view.messages[0].lite);
+        assert!(
+            view.messages[0]
+                .html
+                .as_deref()
+                .is_some_and(|h| h.contains("puffin"))
+        );
     }
 
     /// FIVE YEARS. A walk that finished at the old one-year default is not

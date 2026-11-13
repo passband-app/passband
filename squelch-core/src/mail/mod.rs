@@ -169,6 +169,13 @@ pub enum RawBody {
     /// error, logged as it always was: a failure kind and an offset, and at
     /// most the one offending input byte, never the message.
     Undecodable(String),
+    /// The message was over the caller's size bound
+    /// ([`MailSource::fetch_raw_bounded`]), so this is a stand-in instead of
+    /// the message: its real headers and the provider's snippet as a
+    /// `text/plain` body, built by [`headers_only_rfc822`]. Its HTML and its
+    /// attachments were never read. The archive walk stores it as a lite row,
+    /// so the reader fetches the real HTML back if the thread is opened.
+    HeadersOnly(Vec<u8>),
 }
 
 /// One fetched message.
@@ -183,6 +190,66 @@ pub struct FetchedMessage {
     /// When the provider says it received the message.
     pub received_at: Option<DateTime<Utc>>,
     pub placement: Placement,
+}
+
+/// Rebuild a header-only RFC822 blob from a source's `(name, value)` headers
+/// so mail-parser runs over it unchanged; the trailing blank line ends the
+/// header section (empty body). Used by the Sent-contacts harvest and the
+/// recipients backfill ([`MailSource::fetch_headers`] carries headers only),
+/// by [`headers_only_rfc822`], and by the contacts-seeding tests.
+pub(crate) fn synthesize_rfc822_headers(headers: &[(String, String)]) -> String {
+    let mut out = String::new();
+    for (name, value) in headers {
+        // HEADER INJECTION GUARD: Gmail names and values are single-line, but
+        // upstream is never trusted blindly: a CR/LF in either would splice a
+        // synthetic header into the blob.
+        if name.contains('\r')
+            || name.contains('\n')
+            || value.contains('\r')
+            || value.contains('\n')
+        {
+            continue;
+        }
+        out.push_str(name);
+        out.push_str(": ");
+        out.push_str(value);
+        out.push_str("\r\n");
+    }
+    out.push_str("\r\n");
+    out
+}
+
+/// The headers that describe a body, which a [`RawBody::HeadersOnly`] stand-in
+/// replaces with its own: the original ones describe a multipart body that is
+/// not there, and mail-parser would go looking for its boundary.
+const BODY_HEADERS: [&str; 4] = [
+    "content-type",
+    "content-transfer-encoding",
+    "content-disposition",
+    "mime-version",
+];
+
+/// The [`RawBody::HeadersOnly`] stand-in for a message too big to read: its
+/// own headers, minus the ones that describe its body, over a `text/plain`
+/// body of `snippet`, the provider's own preview of the text. Keyword search
+/// and the agent then find it by sender, subject and opening line.
+pub(crate) fn headers_only_rfc822(headers: &[(String, String)], snippet: &str) -> Vec<u8> {
+    let mut kept: Vec<(String, String)> = headers
+        .iter()
+        .filter(|(name, _)| !BODY_HEADERS.contains(&name.trim().to_ascii_lowercase().as_str()))
+        .cloned()
+        .collect();
+    kept.extend(
+        [
+            ("MIME-Version", "1.0"),
+            ("Content-Type", "text/plain; charset=utf-8"),
+            ("Content-Transfer-Encoding", "8bit"),
+        ]
+        .map(|(n, v)| (n.to_string(), v.to_string())),
+    );
+    let mut out = synthesize_rfc822_headers(&kept);
+    out.push_str(snippet);
+    out.into_bytes()
 }
 
 /// One message's headers, without its body: what the contacts harvest and the
@@ -285,6 +352,29 @@ pub trait MailSource: Send + Sync {
     /// One message's raw RFC 822 bytes.
     async fn fetch_raw(&self, id: &str, urgency: Urgency) -> Result<FetchedMessage>;
 
+    /// [`Self::fetch_raw`] for a caller that cannot afford a huge message:
+    /// past `cap` bytes, [`RawBody::HeadersOnly`] instead of the whole thing.
+    ///
+    /// THE POINT IS PEAK MEMORY, not disk. A message near the 64MB ingest
+    /// bound is held several times over on its way in (the provider's
+    /// encoded response, the decoded bytes, the MIME parse's copies of each
+    /// attachment), and two of those in one batch are enough to kill a
+    /// tenant's pod. An implementation that overrides this stops reading at
+    /// the bound and never holds the big copy at all.
+    ///
+    /// The default reads the message whole and returns it as it is, so it
+    /// bounds nothing. Gmail overrides it, and is the only source the archive
+    /// walk's big-attachment years have been seen on.
+    async fn fetch_raw_bounded(
+        &self,
+        id: &str,
+        urgency: Urgency,
+        cap: usize,
+    ) -> Result<FetchedMessage> {
+        let _ = cap;
+        self.fetch_raw(id, urgency).await
+    }
+
     /// The named headers of one message, without its body.
     async fn fetch_headers(&self, id: &str, names: &[&str]) -> Result<FetchedHeaders>;
 
@@ -349,6 +439,45 @@ pub trait MailSource: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The stand-in for a message too big to read keeps the message's own
+    /// headers, replaces the ones that describe its body (its multipart
+    /// boundary is not there), refuses a header carrying a line break, and
+    /// parses as a plain-text message whose text is the snippet.
+    #[test]
+    fn a_headers_only_stand_in_is_a_plain_text_message_with_its_own_headers() {
+        let pair = |n: &str, v: &str| (n.to_string(), v.to_string());
+        let raw = headers_only_rfc822(
+            &[
+                pair("From", "Harbour Office <office@harbour.example>"),
+                pair("Subject", "Survey scans"),
+                pair("Content-Type", "multipart/mixed; boundary=\"b\""),
+                pair("mime-version", "1.0"),
+                pair("Content-Transfer-Encoding", "base64"),
+                pair("X-Spliced", "a\r\nBcc: someone@else.example"),
+            ],
+            "The survey & its scans",
+        );
+        let text = String::from_utf8(raw.clone()).unwrap();
+        assert!(!text.contains("multipart"), "{text}");
+        assert!(!text.contains("base64"), "{text}");
+        assert!(!text.contains("Bcc"), "{text}");
+        assert_eq!(text.matches("MIME-Version").count(), 1, "{text}");
+
+        let parsed = mail_parser::MessageParser::default().parse(&raw).unwrap();
+        assert_eq!(parsed.subject(), Some("Survey scans"));
+        assert_eq!(
+            parsed
+                .from()
+                .and_then(|f| f.first())
+                .and_then(|a| a.address()),
+            Some("office@harbour.example")
+        );
+        assert_eq!(
+            parsed.body_text(0).as_deref().map(str::trim),
+            Some("The survey & its scans")
+        );
+    }
 
     #[test]
     fn a_provider_round_trips_through_its_stored_value() {

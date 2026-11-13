@@ -21,7 +21,7 @@ use serde::Deserialize;
 
 use super::{
     Changes, ChangesError, FetchedHeaders, FetchedMessage, Folder, Listing, MailProvider,
-    MailSource, Placement, RawBody, SourceRefusals, SyncCursor, Urgency,
+    MailSource, Placement, RawBody, SourceRefusals, SyncCursor, Urgency, headers_only_rfc822,
 };
 use crate::credentials::CredentialStore;
 use crate::error::{CoreError, Result};
@@ -131,6 +131,10 @@ pub struct GmailMessage {
     /// only its headers.
     #[serde(default)]
     pub payload: Option<MessagePayload>,
+    /// Gmail's preview of the text, HTML-escaped (every format carries it).
+    /// Read only for the stand-in of a message too big to fetch.
+    #[serde(default)]
+    pub snippet: Option<String>,
 }
 
 /// The `payload` object of a Gmail message; only `headers` is consumed.
@@ -327,6 +331,24 @@ impl<C: CredentialStore + ?Sized> GmailSource<C> {
         url: &str,
         retry: Urgency,
     ) -> Result<T> {
+        match self.get_json_capped(url, retry, None).await? {
+            Some(parsed) => Ok(parsed),
+            None => unreachable!("an uncapped read is never over its cap"),
+        }
+    }
+
+    /// [`Self::get_json_with_retry`] that stops reading a successful response
+    /// past `cap` bytes and answers `Ok(None)`. The bytes past the cap are
+    /// never buffered: a declared `Content-Length` over it ends the read
+    /// before the body, and a chunked one ends at the chunk that crosses it.
+    /// Dropping the response closes the connection, so what Gmail was still
+    /// sending costs bandwidth and no memory.
+    async fn get_json_capped<T: for<'de> Deserialize<'de>>(
+        &self,
+        url: &str,
+        retry: Urgency,
+        cap: Option<usize>,
+    ) -> Result<Option<T>> {
         let mut backoff = self.quota_backoff;
         for attempt in 0..=GMAIL_QUOTA_RETRIES {
             let quiet = retry == Urgency::Background;
@@ -334,10 +356,22 @@ impl<C: CredentialStore + ?Sized> GmailSource<C> {
             let status = resp.status();
             if status.is_success() {
                 self.budget.note_success();
-                return resp
-                    .json::<T>()
-                    .await
-                    .map_err(|e| CoreError::Other(anyhow::anyhow!("gmail json decode: {e}")));
+                let decode = |e: serde_json::Error| {
+                    CoreError::Other(anyhow::anyhow!("gmail json decode: {e}"))
+                };
+                let Some(cap) = cap else {
+                    // Uncapped: the body whole, in the one buffer reqwest
+                    // reads it into, exactly as `Response::json` did.
+                    let body = resp
+                        .bytes()
+                        .await
+                        .map_err(|e| CoreError::Other(anyhow::anyhow!("gmail json decode: {e}")))?;
+                    return serde_json::from_slice::<T>(&body).map(Some).map_err(decode);
+                };
+                let Some(body) = read_body_capped(resp, cap).await? else {
+                    return Ok(None);
+                };
+                return serde_json::from_slice::<T>(&body).map(Some).map_err(decode);
             }
             if status == StatusCode::NOT_FOUND {
                 return Err(CoreError::NotFound);
@@ -673,27 +707,46 @@ impl<C: CredentialStore + ?Sized + 'static> MailSource for GmailSource<C> {
     async fn fetch_raw(&self, id: &str, urgency: Urgency) -> Result<FetchedMessage> {
         let url = format!("{}/messages/{id}?format=raw", self.api_base);
         let msg: GmailMessage = self.get_json_with_retry(&url, urgency).await?;
-        let has = |l: &str| msg.label_ids.iter().any(|x| x == l);
-        let placement = Placement {
-            in_inbox: has(LABEL_INBOX),
-            in_sent: has(LABEL_SENT),
-        };
-        let raw = match msg.raw.as_deref().map(decode_raw_b64url) {
-            Some(Ok(bytes)) => RawBody::Bytes(bytes),
-            Some(Err(e)) => RawBody::Undecodable(e.to_string()),
-            None => RawBody::Missing,
-        };
-        Ok(FetchedMessage {
-            id: if msg.id.is_empty() {
-                id.to_string()
-            } else {
-                msg.id
-            },
-            thread_id: msg.thread_id,
-            raw,
-            received_at: parse_internal_date(msg.internal_date.as_deref()),
-            placement,
-        })
+        Ok(fetched_from_raw(id, msg))
+    }
+
+    /// `format=raw` read up to `cap` decoded bytes' worth of response; past
+    /// that, a second `messages.get?format=metadata` for the stand-in. That
+    /// costs one extra GET against Gmail's quota for each big message, and big
+    /// messages are rare.
+    async fn fetch_raw_bounded(
+        &self,
+        id: &str,
+        urgency: Urgency,
+        cap: usize,
+    ) -> Result<FetchedMessage> {
+        let url = format!("{}/messages/{id}?format=raw", self.api_base);
+        if let Some(msg) = self
+            .get_json_capped::<GmailMessage>(&url, urgency, Some(raw_response_cap(cap)))
+            .await?
+        {
+            return Ok(fetched_from_raw(id, msg));
+        }
+        // Id only, never content.
+        eprintln!(
+            "squelch: message {id} is over the {cap}-byte bound; storing headers and preview"
+        );
+        let url = format!("{}/messages/{id}?format=metadata", self.api_base);
+        let msg: GmailMessage = self.get_json_with_retry(&url, urgency).await?;
+        let headers: Vec<(String, String)> = msg
+            .payload
+            .as_ref()
+            .map(|p| {
+                p.headers
+                    .iter()
+                    .map(|h| (h.name.clone(), h.value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let snippet = unescape_snippet(msg.snippet.as_deref().unwrap_or_default());
+        let mut fetched = fetched_from_raw(id, msg);
+        fetched.raw = RawBody::HeadersOnly(headers_only_rfc822(&headers, &snippet));
+        Ok(fetched)
     }
 
     /// `format=metadata` with only `names` requested: headers, never bodies.
@@ -723,6 +776,71 @@ impl<C: CredentialStore + ?Sized + 'static> MailSource for GmailSource<C> {
         let label: LabelResp = self.get_json(&url).await?;
         Ok((label.messages_unread, label.threads_unread))
     }
+}
+
+/// A `messages.get` answer as a [`FetchedMessage`]: `raw` decoded when the
+/// format carried it, [`RawBody::Missing`] when it did not.
+fn fetched_from_raw(id: &str, msg: GmailMessage) -> FetchedMessage {
+    let has = |l: &str| msg.label_ids.iter().any(|x| x == l);
+    let placement = Placement {
+        in_inbox: has(LABEL_INBOX),
+        in_sent: has(LABEL_SENT),
+    };
+    let raw = match msg.raw.as_deref().map(decode_raw_b64url) {
+        Some(Ok(bytes)) => RawBody::Bytes(bytes),
+        Some(Err(e)) => RawBody::Undecodable(e.to_string()),
+        None => RawBody::Missing,
+    };
+    FetchedMessage {
+        id: if msg.id.is_empty() {
+            id.to_string()
+        } else {
+            msg.id
+        },
+        thread_id: msg.thread_id,
+        raw,
+        received_at: parse_internal_date(msg.internal_date.as_deref()),
+        placement,
+    }
+}
+
+/// The JSON envelope around `raw` besides the base64 itself: the id, thread
+/// id, labels, `internalDate`, `historyId`, `sizeEstimate`, `snippet` (a few
+/// hundred bytes at most), with plenty of room.
+const RAW_ENVELOPE_SLACK: usize = 64 * 1024;
+
+/// The response bytes a `format=raw` answer for a message of `cap` decoded
+/// bytes can take: base64 is four bytes for every three, plus the envelope.
+fn raw_response_cap(cap: usize) -> usize {
+    cap.div_ceil(3) * 4 + RAW_ENVELOPE_SLACK
+}
+
+/// A successful response's body, or `None` once it passes `cap` bytes.
+async fn read_body_capped(mut resp: reqwest::Response, cap: usize) -> Result<Option<Vec<u8>>> {
+    let network = |e: reqwest::Error| CoreError::Other(anyhow::anyhow!("gmail body read: {e}"));
+    if resp.content_length().is_some_and(|n| n > cap as u64) {
+        return Ok(None);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(network)? {
+        if body.len() + chunk.len() > cap {
+            return Ok(None);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(Some(body))
+}
+
+/// Gmail's `snippet` is HTML-escaped (`&#39;`, `&amp;` and friends); the
+/// stand-in's body is plain text. Only the five entities Gmail is seen to
+/// write; anything else is left as it came.
+fn unescape_snippet(snippet: &str) -> String {
+    snippet
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
 }
 
 pub(crate) const GMAIL_QUOTA_RETRIES: usize = 2;
@@ -878,6 +996,26 @@ pub fn parse_internal_date(s: Option<&str>) -> Option<DateTime<Utc>> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn a_snippet_is_unescaped_once_and_only_for_gmails_entities() {
+        assert_eq!(
+            unescape_snippet("Tom &amp; Jerry&#39;s &quot;deal&quot; &lt;3 &gt;"),
+            "Tom & Jerry's \"deal\" <3 >"
+        );
+        // `&amp;lt;` is a literal "&lt;" in the text: decoded once, not twice.
+        assert_eq!(unescape_snippet("&amp;lt;"), "&lt;");
+        assert_eq!(unescape_snippet("&nbsp;caf\u{e9}"), "&nbsp;caf\u{e9}");
+    }
+
+    #[test]
+    fn the_raw_response_cap_covers_the_base64_and_the_envelope() {
+        assert_eq!(raw_response_cap(0), RAW_ENVELOPE_SLACK);
+        assert_eq!(raw_response_cap(3), 4 + RAW_ENVELOPE_SLACK);
+        assert_eq!(raw_response_cap(4), 8 + RAW_ENVELOPE_SLACK);
+        let sixteen = 16 * 1024 * 1024;
+        assert!(raw_response_cap(sixteen) >= sixteen / 3 * 4);
+    }
 
     /// The listing strings are Gmail's search grammar and the archive walk's
     /// whole correctness story (see the engine's forward pass), so they are

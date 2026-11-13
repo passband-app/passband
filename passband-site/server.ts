@@ -37,6 +37,11 @@ const pages: Record<string, string> = {
   // mark-light.png is the lit ramps the current (dark) invite email uses.
   "/mark.png": "mark.png",
   "/mark-light.png": "mark-light.png",
+  // The waitlist email's feature icons, rendered by tools/email-icons.swift.
+  "/email-sitrep.png": "email-sitrep.png",
+  "/email-box.png": "email-box.png",
+  "/email-wind.png": "email-wind.png",
+  "/email-key.png": "email-key.png",
   "/icon-180.png": "icon-180.png",
   "/icon-512.png": "icon-512.png",
   // The link-unfurl card, rendered by brand/og/build.sh. Crawlers do not run

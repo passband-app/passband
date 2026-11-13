@@ -793,7 +793,7 @@ async fn approving_mails_a_code_that_redeems() {
     assert_eq!(auth, &format!("Bearer {RESEND_KEY}"));
     assert_eq!(body["from"], INVITE_FROM);
     assert_eq!(body["to"][0], APPLICANT);
-    assert_eq!(body["subject"], "Your Passband invite");
+    assert_eq!(body["subject"], "You're off the Passband waitlist");
 
     // THE ASSERTION THE FEATURE RESTS ON: what was mailed is a live invite,
     // asked of the store exactly as `POST /signup` will ask it.

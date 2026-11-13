@@ -2457,6 +2457,119 @@ function CalShowcase() {
   );
 }
 
+
+// THE LIGHT PAGE. Warm paper, ink, and one friendly blue: the same page with
+// the instrument taken off it. The analyzer's chrome (graticule, markers,
+// readouts, machined controls) goes; the trace stays as a calm ink line. The
+// app's own window stays dark, because that is the app, and a dark product
+// shot on paper reads as a thing you could have. ?theme=dark shows the night
+// page.
+export const THEME: "light" | "dark" =
+  typeof location !== "undefined" && new URLSearchParams(location.search).get("theme") === "dark" ? "dark" : "light";
+
+const NIGHT_TOKENS = `
+  --bg: #090D16; --canvas: #0E141D; --card: #121A26;
+  --ink: #E9EEF5; --dim: #A8B4C4; --faint: #808E9F; --faintest: #62707F;
+  --hair: rgba(233, 238, 245, 0.08); --hair-strong: rgba(233, 238, 245, 0.14);
+  --accent: #4E9BEA; --accent-ink: #82BAF5;
+  --warn: #E8AC4C; --positive: #4FC08A; --danger: #FF7A68;`;
+
+const LIGHT_CSS = `
+:root[data-theme="light"] {
+  --bg: #FAF7F2; --canvas: #FFFFFF; --card: #FFFFFF;
+  --ink: #1D2430; --dim: #4F5867; --faint: #6F7886; --faintest: #959CA7;
+  --hair: rgba(29, 36, 48, 0.08); --hair-strong: rgba(29, 36, 48, 0.13);
+  --accent: #2E6BD6; --accent-ink: #2A62C4;
+  --warn: #B7791F; --positive: #2F8F5B; --danger: #D24B3A;
+  --shadow: 0 1px 2px rgba(29, 36, 48, 0.06), 0 12px 32px -12px rgba(29, 36, 48, 0.18);
+}
+:root[data-theme="light"] html, html[data-theme="light"] { color-scheme: light; }
+
+/* The app keeps its own night inside its window. */
+[data-theme="light"] .pb-shot { ${NIGHT_TOKENS} color: var(--ink); }
+
+/* HERO: the instrument's furniture goes, the line stays. */
+[data-theme="light"] :is(.pb-grat, .pb-mkr, .pb-mkrs, .pb-read-l, .pb-read-r) { display: none; }
+[data-theme="light"] .pb-scrim { background:
+  linear-gradient(90deg, rgba(250,247,242,0.96) 0%, rgba(250,247,242,0.85) 30%, rgba(250,247,242,0.35) 46%, rgba(250,247,242,0) 62%),
+  linear-gradient(180deg, rgba(250,247,242,0) 74%, rgba(250,247,242,0.9) 100%); }
+@media (max-width: 820px) {
+  [data-theme="light"] .pb-scrim { background:
+    linear-gradient(180deg, rgba(250,247,242,0.94) 0%, rgba(250,247,242,0.6) 26%, rgba(250,247,242,0) 36%),
+    linear-gradient(180deg, rgba(250,247,242,0) 70%, rgba(250,247,242,0.88) 82%); }
+}
+[data-theme="light"] .pb-brand img { filter: none; }
+
+/* THE BUTTON: one solid, friendly pill. No meter, no filament. */
+[data-theme="light"] .pb-cta { color: #fff; background: var(--ink); border: 0; border-radius: 999px;
+  padding: 0.95rem 1.7rem; box-shadow: 0 1px 2px rgba(29,36,48,0.12), 0 10px 24px -10px rgba(29,36,48,0.45); }
+[data-theme="light"] .pb-cta:hover, [data-theme="light"] .pb-cta:focus-visible { color: #fff; background: #2B3444;
+  box-shadow: 0 1px 2px rgba(29,36,48,0.12), 0 14px 30px -10px rgba(29,36,48,0.5); }
+[data-theme="light"] :is(.pb-cta, .pb-rig)::before, [data-theme="light"] .pb-cta-meter { display: none; }
+[data-theme="light"] .pb-cta[disabled] { color: rgba(255,255,255,0.7); }
+[data-theme="light"] .pb-cta[disabled]:hover { box-shadow: none; }
+/* The form: a white card with two fields and the same button. */
+[data-theme="light"] .pb-rig { background: #fff; border: 1px solid var(--hair-strong); border-radius: 16px;
+  box-shadow: var(--shadow); }
+[data-theme="light"] .pb-rig:hover, [data-theme="light"] .pb-rig:focus-within { border-color: rgba(46,107,214,0.45);
+  box-shadow: 0 0 0 4px rgba(46,107,214,0.1), var(--shadow); }
+[data-theme="light"] .pb-rig-name { border-bottom-color: var(--hair-strong); }
+[data-theme="light"] .pb-rig-field { color: var(--ink); }
+[data-theme="light"] .pb-rig-field::placeholder, [data-theme="light"] .pb-field-cap { color: var(--faintest); }
+[data-theme="light"] .pb-rig-field:is(:not(:placeholder-shown), :-webkit-autofill) + .pb-field-cap { color: var(--faint); }
+[data-theme="light"] .pb-rig-field:focus + .pb-field-cap { color: var(--accent); }
+[data-theme="light"] .pb-rig-field:-webkit-autofill { -webkit-text-fill-color: var(--ink); caret-color: var(--ink);
+  box-shadow: inset 0 0 0 100vw #fff; }
+[data-theme="light"] .pb-cta-in-rig { margin: 0.45rem; padding: 0.8rem 1.3rem; border-radius: 999px; border: 0; }
+[data-theme="light"] .pb-cta-in-rig:hover, [data-theme="light"] .pb-cta-in-rig:focus-visible { box-shadow: none; }
+
+/* THE TOUR. No step numbers; the windows sit on paper like photographs. */
+[data-theme="light"] .pb-step > i { display: none; }
+[data-theme="light"] .pb-window { border-color: rgba(29,36,48,0.1);
+  box-shadow: 0 2px 4px rgba(29,36,48,0.05), 0 30px 70px -28px rgba(29,36,48,0.4); }
+[data-theme="light"] .pb-after .pb-window { border-color: rgba(29,36,48,0.14);
+  box-shadow: 0 2px 4px rgba(29,36,48,0.06), 0 40px 90px -30px rgba(29,36,48,0.5); }
+[data-theme="light"] .pb-before .pb-window { filter: none; background: #fff; }
+[data-theme="light"] .pb-row { border-bottom-color: var(--hair); }
+[data-theme="light"] .pb-row-sender { color: var(--dim); }
+[data-theme="light"] .pb-unread { background: rgba(210, 75, 58, 0.1); color: var(--danger); }
+[data-theme="light"] .pb-panel figcaption b { color: var(--faint); }
+[data-theme="light"] .pb-after figcaption b { color: var(--accent); }
+[data-theme="light"] .pb-gate::before { background: linear-gradient(transparent, rgba(29,36,48,0.18) 25%, rgba(29,36,48,0.18) 75%, transparent);
+  box-shadow: none; }
+[data-theme="light"] .pb-gate span { background: #fff; color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--hair-strong), var(--shadow); }
+@media (max-width: 900px) {
+  [data-theme="light"] .pb-after { background: linear-gradient(var(--bg) 86%, rgba(250,247,242,0)); }
+  [data-theme="light"] .pb-gate::before { background: linear-gradient(90deg, transparent, rgba(29,36,48,0.18) 25%, rgba(29,36,48,0.18) 75%, transparent); }
+}
+/* The arriving mail: white cards, like a notification, darkening into the
+   app's row as they land. */
+[data-theme="light"] .pb-in { color: var(--dim);
+  background: color-mix(in srgb, rgba(52, 96, 150, 0.95) calc(var(--m, 0) * 100%), #ffffff);
+  box-shadow: inset 0 0 0 1px rgba(29,36,48,0.08), 0 1px 2px rgba(29,36,48,0.06), 0 16px 36px -14px rgba(29,36,48,0.28); }
+/* The name stays ink until the ground has darkened enough to carry it, then
+   flips light over the last stretch, so it never goes pale on pale. */
+[data-theme="light"] .pb-in-top b { color: color-mix(in srgb, #F4F7FB calc(clamp(0, (var(--m, 0) - 0.55) * 4, 1) * 100%), var(--ink)); }
+[data-theme="light"] .pb-in-subj, [data-theme="light"] .pb-in-read dd { color: var(--ink); }
+[data-theme="light"] .pb-in-to { box-shadow: inset 0 0 0 1px rgba(46,107,214,0.35); color: var(--accent); }
+[data-theme="light"] .pb-in-meter { background: rgba(29,36,48,0.08); }
+[data-theme="light"] .pb-in-meter > i { box-shadow: none; background: linear-gradient(90deg, rgba(46,107,214,0.35), var(--accent)); }
+[data-theme="light"] :is(.pb-in-read dt, .pb-in-meter > em::before) { font-family: var(--sans); letter-spacing: 0.02em; }
+/* The tally and the trust row: plain cards, sans labels. */
+[data-theme="light"] :is(.pb-tally, .pb-facts) { background: #fff; border-color: var(--hair-strong); box-shadow: var(--shadow); }
+[data-theme="light"] .pb-facts::before { display: none; }
+[data-theme="light"] :is(.pb-tally > div, .pb-fact) { border-color: var(--hair); }
+[data-theme="light"] :is(.pb-tally dt, .pb-tally .pb-tally-h dd, .pb-fact dt) { font-family: var(--sans); font-size: 0.78rem;
+  letter-spacing: 0.01em; text-transform: none; }
+[data-theme="light"] .pb-fact dt b { display: none; }
+[data-theme="light"] .pb-tally > div.you[data-arrived] { background: rgba(46,107,214,0.07); }
+[data-theme="light"] .pb-fact a { color: var(--accent); }
+
+/* The footer mark keeps its colour on paper. */
+[data-theme="light"] .pb-foot-mark { filter: none; opacity: 0.55; }
+`;
+
 // MARK: - the page
 
 // Where the analyzer draws, as fractions of the stage. Wide screens tune the
@@ -2509,6 +2622,7 @@ export function App() {
     const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
     const scene = createScope(canvas, {
       reduceMotion,
+      light: THEME === "light",
       layout: scopeLayout,
       // Written straight to the DOM: it changes every frame, and a re-render
       // per frame would buy nothing.
@@ -2596,6 +2710,7 @@ export function App() {
     <main className="pb">
       <style href="pb-page" precedence="default">{PAGE_CSS_RESOLVED}</style>
       <style href="pb-cal" precedence="default">{CAL_CSS_RESOLVED}</style>
+      <style href="pb-light" precedence="default">{LIGHT_CSS}</style>
 
       <section ref={storyRef} className="pb-story">
         <div

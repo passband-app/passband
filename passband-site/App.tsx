@@ -109,8 +109,6 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
   display: flex; flex-direction: column; align-items: center; gap: 3px;
   opacity: 0; transition: opacity 0.5s ease; }
 .pb-mkr::after { content: ""; border: 5px solid transparent; border-top: 6px solid var(--accent); border-bottom: 0; }
-.pb-mkr-n { font-style: normal; }
-.pb-mkr-face, .pb-mkrs-h, .pb-mkrs small { display: none; }
 .pb-stage[data-locked] .pb-mkr { opacity: 1; }
 .pb-mkr:nth-of-type(2) { transition-delay: 0.08s; } .pb-mkr:nth-of-type(3) { transition-delay: 0.16s; }
 .pb-mkrs { position: absolute; z-index: 2; right: var(--gutter); top: 17%; width: 19rem;
@@ -2500,7 +2498,7 @@ const LIGHT_CSS = `
 [data-theme="light"] .pb-shot { color: var(--ink); }
 
 /* HERO: the instrument's furniture goes, the line stays. */
-[data-theme="light"] :is(.pb-read-l, .pb-read-r) { display: none; }
+[data-theme="light"] :is(.pb-mkr, .pb-mkrs, .pb-read-l, .pb-read-r) { display: none; }
 [data-theme="light"] .pb-scrim { background:
   linear-gradient(90deg, rgba(250,247,242,0.96) 0%, rgba(250,247,242,0.85) 30%, rgba(250,247,242,0.35) 46%, rgba(250,247,242,0) 62%),
   linear-gradient(180deg, rgba(250,247,242,0) 74%, rgba(250,247,242,0.9) 100%); }
@@ -2640,38 +2638,27 @@ const LIGHT_CSS = `
 [data-theme="light"] .pb-evkeys kbd { background: rgba(30, 50, 70, 0.08); color: var(--dim); }
 [data-theme="light"] .pb-brow.update { background: rgba(43, 127, 212, 0.14); }
 
-/* THE HERO'S PEOPLE. The three peaks that matter carry their senders'
-   faces from the start, so the line reads as mail, not as an instrument;
-   once the squelch closes, the three come up as a card. The sky behind is
-   the app's own light canvas. */
+/* THE PEEK. The top of the app's window, standing up out of the hero's
+   floor: a promise of what the tour shows, the same window, cut by the fold.
+   It belongs to the page, not to the scope, and steps back down out of
+   sight the moment the page moves. Wide screens only: on a phone the floor
+   is where the button lives. */
+.pb-peek { position: absolute; z-index: 1; left: 50%; bottom: 0; width: min(64rem, 74vw);
+  height: clamp(7.5rem, 17svh, 11rem); overflow: hidden; pointer-events: none;
+  transform: translateX(-38%); transition: transform 0.7s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.5s ease; }
+.pb-peek .pb-shot { width: 100%; }
+.pb-peek .pb-window { border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom: 0;
+  box-shadow: 0 -2px 4px rgba(29,36,48,0.04), 0 -20px 60px -24px rgba(29,36,48,0.35); }
+.pb-stage[data-scrolled] .pb-peek { transform: translate(-38%, 105%); opacity: 0; }
+[data-theme="light"] .pb-stage .pb-cue { display: none; }
+@media (max-width: 820px) { .pb-peek { display: none; } }
+@media (prefers-reduced-motion: reduce) { .pb-peek { transition: none; } }
+
+/* THE HERO'S SKY: the app's own light canvas behind the trace. The
+   analyzer's markers and marker table stay off the day page. */
 [data-theme="light"] .pb-grat { display: block; background:
   radial-gradient(ellipse 70% 60% at 70% 60%, rgba(214, 229, 248, 0.9), rgba(230, 239, 252, 0.5) 45%, rgba(250, 247, 242, 0) 75%);
   mix-blend-mode: multiply; -webkit-mask-image: none; mask-image: none; }
-[data-theme="light"] .pb-mkr { display: flex; opacity: 0; transform: translate(-50%, calc(-100% - 8px));
-  transition: opacity 0.8s ease 0.4s; }
-[data-theme="light"] .pb-scene ~ .pb-mkr, [data-theme="light"] .pb-stage .pb-mkr { opacity: 1; }
-[data-theme="light"] .pb-mkr::after, [data-theme="light"] .pb-mkr-n { display: none; }
-[data-theme="light"] .pb-mkr .pb-mkr-face { display: grid; width: 30px; height: 30px; font-size: 11px;
-  box-shadow: 0 0 0 3px #fff, 0 6px 16px -6px rgba(29, 36, 48, 0.45); }
-[data-theme="light"] .pb-mkr-face { place-items: center; border-radius: 50%; font: 600 10px/1 var(--sans); flex: none; }
-[data-theme="light"] .pb-mkrs { display: block; top: 15%; width: 21rem; font: 400 14px/1.3 var(--sans); color: var(--ink);
-  background: #fff; border: 1px solid var(--hair-strong); border-radius: 18px; padding: 0.4rem;
-  box-shadow: 0 2px 4px rgba(29,36,48,0.05), 0 24px 60px -24px rgba(29,36,48,0.35);
-  -webkit-backdrop-filter: none; backdrop-filter: none; }
-[data-theme="light"] .pb-mkrs-h { display: flex; align-items: baseline; justify-content: space-between; margin: 0;
-  padding: 0.7rem 0.75rem 0.5rem; font: 500 1.1rem/1.2 var(--serif); }
-[data-theme="light"] .pb-mkrs-h small { display: inline; font: 400 0.78rem/1 var(--sans); color: var(--faint); }
-[data-theme="light"] .pb-mkrs div { grid-template-columns: auto 1fr auto; align-items: center; gap: 0.7rem;
-  padding: 0.55rem 0.75rem; border-top: 0; border-radius: 12px; }
-[data-theme="light"] .pb-mkrs div:first-of-type { display: none; }
-[data-theme="light"] .pb-mkrs div b { display: none; }
-[data-theme="light"] .pb-mkrs div .pb-mkr-face { display: grid; width: 30px; height: 30px; }
-[data-theme="light"] .pb-mkrs div span:nth-of-type(2) { display: flex; flex-direction: column; gap: 2px; font-weight: 600; min-width: 0; }
-[data-theme="light"] .pb-mkrs div span:nth-of-type(2) small { display: block; font-weight: 400; font-size: 0.8rem; color: var(--dim);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-[data-theme="light"] .pb-mkrs span:last-child { font-size: 0.72rem; font-weight: 600; padding: 0.2rem 0.55rem; border-radius: 99px; }
-[data-theme="light"] .pb-mkrs .late { color: var(--danger); background: rgba(214, 65, 47, 0.1); }
-[data-theme="light"] .pb-mkrs .soon { color: var(--warn); background: rgba(181, 118, 26, 0.12); }
 
 /* The footer mark keeps its colour on paper. */
 [data-theme="light"] .pb-foot-mark { filter: none; opacity: 0.55; }
@@ -2707,10 +2694,10 @@ function scopeLayout(): ScopeLayout {
 }
 
 // The carriers' names in the marker table, in the scope's order.
-const MARKERS: Array<[who: string, status: string, tone: string, initials: string, face: keyof typeof AVATAR_NIGHT, line: string]> = [
-  ["Parkline Properties", "past due", "late", "PP", "ochre", "Lease renewal needs a signature"],
-  ["Dr. Ortiz's Office", "today", "soon", "DO", "green", "Confirm Thursday at 2:30"],
-  ["Jamie Chen", "due Fri", "soon", "JC", "blue", "Pick a venue for the offsite"],
+const MARKERS: Array<[who: string, status: string, tone: string]> = [
+  ["Parkline Properties", "past due", "late"],
+  ["Dr. Ortiz's Office", "today", "soon"],
+  ["Jamie Chen", "due Fri", "soon"],
 ];
 
 export function App() {
@@ -2830,24 +2817,18 @@ export function App() {
           <div className="pb-grat" />
           {CARRIERS.map((_, i) => {
             const { x, y } = markerPoint(i, layout);
-            const [, , , initials, face] = MARKERS[i];
             return (
               <span key={i} className="pb-mkr" style={{ left: `${x * 100}%`, top: `${y * 100}%` }}
-                aria-hidden="true">
-                <em className="pb-mkr-n">{i + 1}</em>
-                <span className="pb-mkr-face" style={{ background: AVATAR[face][0], color: AVATAR[face][1] }}>{initials}</span>
-              </span>
+                aria-hidden="true">{i + 1}</span>
             );
           })}
           <div className="pb-scrim" />
           <div className="pb-mkrs" aria-label="What made it through">
-            <p className="pb-mkrs-h">Three need you today <small>of 4,312</small></p>
             <div><span>MKR</span><span>SENDER</span><span>STATUS</span></div>
-            {MARKERS.map(([who, status, tone, initials, face, line], i) => (
+            {MARKERS.map(([who, status, tone], i) => (
               <div key={who}>
                 <b>{i + 1}</b>
-                <span className="pb-mkr-face" style={{ background: AVATAR[face][0], color: AVATAR[face][1] }}>{initials}</span>
-                <span>{who}<small>{line}</small></span>
+                <span>{who}</span>
                 <span className={tone}>{status}</span>
               </div>
             ))}
@@ -2856,6 +2837,15 @@ export function App() {
           <span className="pb-read-r" aria-hidden="true">SQUELCH&nbsp;<b ref={readoutRef}>0%</b></span>
 
           <div className="pb-cue" aria-hidden="true">scroll</div>
+          {THEME === "light" && (
+            <div className="pb-peek" aria-hidden="true">
+              <div className="pb-shot">
+                <div className="pb-window">
+                  <AppMock />
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="pb-track">

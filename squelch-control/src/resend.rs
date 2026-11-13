@@ -42,7 +42,7 @@ const MAX_RECIPIENT_LEN: usize = 254;
 /// What the invite email says in its subject line. Not configurable: it is
 /// product copy, and an operator retyping it per deployment is how a phishing
 /// filter learns two different Passbands.
-const SUBJECT: &str = "Your Passband invite";
+const SUBJECT: &str = "You're off the Passband waitlist";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResendError {
@@ -200,18 +200,26 @@ fn invite_link(code: &str, signup_url: &str) -> String {
     )
 }
 
-/// The plain-text part. The code sits on its own line so that every mail client
-/// in the world lets someone select it, because the link above it is the fast
-/// path and not the only one: a client that mangles long URLs, a forwarded
-/// message, and a code typed on a different device all land on the same field.
+/// The plain-text part. Same order as the HTML: the hook, the link, the
+/// teaser, and the code last as the fallback. The code still sits on its own
+/// line so every mail client in the world lets someone select it: a client that
+/// mangles long URLs, a forwarded message, and a code typed on a different
+/// device all land on the same field.
 fn text_body(code: &str, signup_url: &str) -> String {
+    let teaser: String = TEASER
+        .iter()
+        .map(|(title, body)| format!("- {title} {body}\n"))
+        .collect();
     format!(
-        "You're invited to Passband.
+        "You're off the Passband waitlist.
 
-Set up your mailbox (your code is already filled in):
+Your inbox is about to get a lot quieter. Set up your mailbox here (your code is already filled in):
 {link}
 
-Or enter this code at {signup_url}:
+What's waiting for you:
+
+{teaser}
+Link not working? Enter this code at {signup_url}:
 
 {code}
 
@@ -225,6 +233,29 @@ Passband is on iPhone too, in alpha on TestFlight:
         testflight = crate::pages::TESTFLIGHT_URL,
     )
 }
+
+/// The teaser: what the recipient is about to get, as (lead, line) pairs. Both
+/// parts render this one list, so the text and HTML cannot drift apart. Every
+/// line is a feature that ships today and reads the way the landing page does;
+/// an invite that oversells is the first thing a new user catches us in.
+const TEASER: [(&str, &str); 4] = [
+    (
+        "A sitrep, not a pile.",
+        "Passband opens on one sentence about your day and the handful of things that actually need you.",
+    ),
+    (
+        "The rest, filed.",
+        "Packages, bills, receipts and invitations gather into their own cards instead of your inbox.",
+    ),
+    (
+        "Unsubscribe that works.",
+        "Passband notices the senders you stopped reading and offers to cut them loose.",
+    ),
+    (
+        "Codes that come to you.",
+        "A sign-in code floats over the app you are in. Copy it without opening your inbox.",
+    ),
+];
 
 /// Where the mark is served from. Hardcoded to the project's own site rather
 /// than derived from the deployment's origin, because that is the only host
@@ -254,6 +285,16 @@ fn html_body(code: &str, signup_url: &str) -> String {
     let link = escape_html(&invite_link(code, signup_url));
     let code = escape_html(code);
     let url = escape_html(signup_url);
+    let teaser: String = TEASER
+        .iter()
+        .map(|(title, body)| {
+            format!(
+                r##"<tr><td style="padding: 0 0 16px;"><span style="color: #E9EEF5; font-weight: 600;">{}</span> {}</td></tr>"##,
+                escape_html(title),
+                escape_html(body),
+            )
+        })
+        .collect();
     format!(
         r##"<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#090D16" style="background: #090D16;"><tr><td align="left" style="padding: 40px 28px 48px;">
 <div style="max-width: 28rem; font: 16px/1.6 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #A8B4C4;">
@@ -261,15 +302,15 @@ fn html_body(code: &str, signup_url: &str) -> String {
 <td style="padding-right: 10px;"><img src="{mark}" alt="" width="45" height="24" style="display: block; border: 0;"></td>
 <td style="font: 500 22px/1 Newsreader, Georgia, 'Times New Roman', serif; color: #E9EEF5; vertical-align: middle;">Passband</td>
 </tr></table>
-<p style="font: 500 34px/1.08 Newsreader, Georgia, 'Times New Roman', serif; letter-spacing: -0.01em; color: #E9EEF5; margin: 0 0 12px;">You're invited to Passband</p>
-<p style="margin: 0 0 28px;">Pick a username and connect Gmail. Your code is already filled in.</p>
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 0 0 36px;"><tr><td bgcolor="#121A26" style="background: #121A26; border: 1px solid #1f3656; border-radius: 14px;">
-<a href="{link}" style="display: inline-block; padding: 15px 30px; color: #DFE8F3; font-weight: 600; font-size: 15px; letter-spacing: 0.015em; text-decoration: none;">Set up your mailbox &rarr;</a>
+<p style="font: 500 34px/1.08 Newsreader, Georgia, 'Times New Roman', serif; letter-spacing: -0.01em; color: #E9EEF5; margin: 0 0 12px;">You're off the waitlist</p>
+<p style="margin: 0 0 28px;">Your inbox is about to get a lot quieter. Pick a username, connect your mail, and let Passband sort the rest.</p>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 0 0 44px;"><tr><td bgcolor="#82BAF5" style="background: #82BAF5; border-radius: 14px;">
+<a href="{link}" style="display: inline-block; padding: 16px 34px; color: #090D16; font-weight: 600; font-size: 16px; letter-spacing: 0.01em; text-decoration: none;">Set up your mailbox &rarr;</a>
 </td></tr></table>
-<p style="font-size: 13px; color: #808E9F; margin: 0 0 8px;">Or enter this code at <a href="{url}" style="color: #82BAF5;">{url}</a></p>
-<p style="font: 17px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0.04em; color: #E9EEF5; background: #121A26; border: 1px solid #1d2633; border-radius: 10px; padding: 12px 16px; display: inline-block; margin: 0 0 16px;">{code}</p>
-<p style="font-size: 13px; color: #62707F; margin: 0;">Works once, expires in {ttl} days.</p>
-<p style="font-size: 13px; color: #808E9F; margin: 36px 0 0; padding: 20px 0 0; border-top: 1px solid #1d2633;">Passband is on iPhone too. <a href="{testflight}" style="color: #82BAF5;">Join the alpha on TestFlight</a></p>
+<p style="font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #62707F; margin: 0 0 16px;">What's waiting for you</p>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 0 0 20px; font-size: 15px; line-height: 1.55; color: #A8B4C4;">{teaser}</table>
+<p style="font-size: 13px; color: #62707F; margin: 0; padding: 20px 0 0; border-top: 1px solid #1d2633;">Button not working? Enter <span style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #A8B4C4; white-space: nowrap;">{code}</span> at <a href="{url}" style="color: #808E9F;">{url}</a>. Works once, expires in {ttl} days.</p>
+<p style="font-size: 13px; color: #808E9F; margin: 16px 0 0;">Passband is on iPhone too. <a href="{testflight}" style="color: #82BAF5;">Join the alpha on TestFlight</a></p>
 </div>
 </td></tr></table>
 "##,
@@ -400,6 +441,10 @@ mod tests {
             );
             // House copy rule.
             assert!(!part.contains('\u{2014}'), "{part}");
+            // The teaser rides in both parts.
+            for (title, _) in TEASER {
+                assert!(part.contains(&escape_html(title)), "{part}");
+            }
             // The iPhone alpha, last and quiet.
             assert!(part.contains(crate::pages::TESTFLIGHT_URL), "{part}");
         }

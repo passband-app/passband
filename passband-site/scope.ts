@@ -51,7 +51,7 @@ const NIGHT = {
   strokes: [[9, "rgba(78, 155, 234, 0.05)"], [3.5, "rgba(78, 155, 234, 0.28)"], [1.2, "rgba(214, 233, 255, 0.85)"]] as Array<[number, string]>,
 };
 const DAY = {
-  bg: "250, 247, 242", additive: false, wash: "46, 107, 214", gateFill: "46, 107, 214", gateLine: "rgba(46, 107, 214, %a)",
+  bg: "255, 255, 255", additive: false, wash: "46, 107, 214", gateFill: "46, 107, 214", gateLine: "rgba(46, 107, 214, %a)",
   strokes: [[7, "rgba(46, 107, 214, 0.06)"], [2.4, "rgba(46, 107, 214, 0.3)"], [1.25, "rgba(30, 52, 98, 0.85)"]] as Array<[number, string]>,
 };
 

@@ -2499,13 +2499,15 @@ const LIGHT_CSS = `
 
 /* HERO: the instrument's furniture goes, the line stays. */
 [data-theme="light"] :is(.pb-mkr, .pb-mkrs, .pb-read-l, .pb-read-r) { display: none; }
+/* The scrim only quiets the line behind the words; a soft lift of light,
+   never a slab of paper over the sky. */
 [data-theme="light"] .pb-scrim { background:
-  linear-gradient(90deg, rgba(250,247,242,0.96) 0%, rgba(250,247,242,0.85) 30%, rgba(250,247,242,0.35) 46%, rgba(250,247,242,0) 62%),
-  linear-gradient(180deg, rgba(250,247,242,0) 74%, rgba(250,247,242,0.9) 100%); }
+  linear-gradient(90deg, rgba(247,244,242,0.9) 0%, rgba(247,244,242,0.8) 28%, rgba(247,244,242,0.3) 44%, rgba(247,244,242,0) 58%); }
+[data-theme="light"] .pb-scrim { -webkit-mask-image: linear-gradient(#000 70%, transparent 90%);
+  mask-image: linear-gradient(#000 70%, transparent 90%); }
 @media (max-width: 820px) {
   [data-theme="light"] .pb-scrim { background:
-    linear-gradient(180deg, rgba(250,247,242,0.94) 0%, rgba(250,247,242,0.6) 26%, rgba(250,247,242,0) 36%),
-    linear-gradient(180deg, rgba(250,247,242,0) 70%, rgba(250,247,242,0.88) 82%); }
+    linear-gradient(180deg, rgba(255,255,255,0.5) 0%, rgba(255,255,255,0.3) 26%, rgba(255,255,255,0) 36%); }
 }
 [data-theme="light"] .pb-brand img { filter: none; }
 
@@ -2638,27 +2640,18 @@ const LIGHT_CSS = `
 [data-theme="light"] .pb-evkeys kbd { background: rgba(30, 50, 70, 0.08); color: var(--dim); }
 [data-theme="light"] .pb-brow.update { background: rgba(43, 127, 212, 0.14); }
 
-/* THE PEEK. The top of the app's window, standing up out of the hero's
-   floor: a promise of what the tour shows, the same window, cut by the fold.
-   It belongs to the page, not to the scope, and steps back down out of
-   sight the moment the page moves. Wide screens only: on a phone the floor
-   is where the button lives. */
-.pb-peek { position: absolute; z-index: 1; left: 50%; bottom: 0; width: min(64rem, 74vw);
-  height: clamp(7.5rem, 17svh, 11rem); overflow: hidden; pointer-events: none;
-  transform: translateX(-38%); transition: transform 0.7s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.5s ease; }
-.pb-peek .pb-shot { width: 100%; }
-.pb-peek .pb-window { border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom: 0;
-  box-shadow: 0 -2px 4px rgba(29,36,48,0.04), 0 -20px 60px -24px rgba(29,36,48,0.35); }
-.pb-stage[data-scrolled] .pb-peek { transform: translate(-38%, 105%); opacity: 0; }
-[data-theme="light"] .pb-stage .pb-cue { display: none; }
-@media (max-width: 820px) { .pb-peek { display: none; } }
-@media (prefers-reduced-motion: reduce) { .pb-peek { transition: none; } }
-
-/* THE HERO'S SKY: the app's own light canvas behind the trace. The
+/* THE DAWN. The hero's ground is a morning sky: pale blue overhead,
+   warming to peach where the line runs like a horizon, and back to paper at
+   the foot so the page below carries on from it. The scope still paints on
+   paper; multiplied onto the sky, its paper vanishes and its ink stays. The
    analyzer's markers and marker table stay off the day page. */
-[data-theme="light"] .pb-grat { display: block; background:
-  radial-gradient(ellipse 70% 60% at 70% 60%, rgba(214, 229, 248, 0.9), rgba(230, 239, 252, 0.5) 45%, rgba(250, 247, 242, 0) 75%);
-  mix-blend-mode: multiply; -webkit-mask-image: none; mask-image: none; }
+[data-theme="light"] .pb-stage { background:
+  linear-gradient(180deg, rgba(250,247,242,0) 84%, #FAF7F2 97%),
+  radial-gradient(ellipse 55% 26% at 68% 72%, rgba(255, 190, 150, 0.5), rgba(255, 190, 150, 0) 70%),
+  linear-gradient(180deg, #D8E5F6 0%, #E7EDF6 32%, #F4EEEA 55%, #FADFCD 72%, #FAEBDF 84%, #FAF7F2 97%); }
+[data-theme="light"] .pb-scene { mix-blend-mode: multiply; }
+[data-theme="light"] .pb-grat { display: none; }
+[data-theme="light"] .pb-stage .pb-cue { color: rgba(29, 36, 48, 0.45); }
 
 /* The footer mark keeps its colour on paper. */
 [data-theme="light"] .pb-foot-mark { filter: none; opacity: 0.55; }
@@ -2837,15 +2830,7 @@ export function App() {
           <span className="pb-read-r" aria-hidden="true">SQUELCH&nbsp;<b ref={readoutRef}>0%</b></span>
 
           <div className="pb-cue" aria-hidden="true">scroll</div>
-          {THEME === "light" && (
-            <div className="pb-peek" aria-hidden="true">
-              <div className="pb-shot">
-                <div className="pb-window">
-                  <AppMock />
-                </div>
-              </div>
-            </div>
-          )}
+
         </div>
 
         <div className="pb-track">

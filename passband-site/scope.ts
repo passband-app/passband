@@ -47,11 +47,11 @@ export const CARRIERS = [
 // Night: phosphor on a dark screen, stroked additively. Day: an ink line on
 // paper, laid down like a pen plotter's, no glow.
 const NIGHT = {
-  bg: "9, 13, 22", additive: true, gateFill: "78, 155, 234", gateLine: "rgba(130, 186, 245, %a)",
+  bg: "9, 13, 22", additive: true, wash: "", gateFill: "78, 155, 234", gateLine: "rgba(130, 186, 245, %a)",
   strokes: [[9, "rgba(78, 155, 234, 0.05)"], [3.5, "rgba(78, 155, 234, 0.28)"], [1.2, "rgba(214, 233, 255, 0.85)"]] as Array<[number, string]>,
 };
 const DAY = {
-  bg: "250, 247, 242", additive: false, gateFill: "46, 107, 214", gateLine: "rgba(46, 107, 214, %a)",
+  bg: "250, 247, 242", additive: false, wash: "46, 107, 214", gateFill: "46, 107, 214", gateLine: "rgba(46, 107, 214, %a)",
   strokes: [[7, "rgba(46, 107, 214, 0.06)"], [2.4, "rgba(46, 107, 214, 0.3)"], [1.25, "rgba(30, 52, 98, 0.85)"]] as Array<[number, string]>,
 };
 
@@ -177,7 +177,8 @@ export function createScope(
 
     // Persistence: fade, never clear. Faster when still so a resize settles.
     ctx.globalCompositeOperation = "source-over";
-    ctx.fillStyle = `rgba(${BG}, ${still ? 1 : Math.min(1, 0.2 * dt * 60)})`;
+    const fade = still ? 1 : Math.min(1, 0.2 * dt * 60);
+    ctx.fillStyle = `rgba(${BG}, ${fade})`;
     ctx.fillRect(0, 0, width, height);
 
     // The filter's response, drawn as the gate: a shaded mask under a thin
@@ -224,6 +225,21 @@ export function createScope(
       else path.lineTo(x, y);
     }
     ctx.lineJoin = "round";
+    // Day: the area under the line in a soft wash of the blue, so the line
+    // sits on something instead of floating on bare paper.
+    if (P.wash) {
+      const area = new Path2D(path);
+      area.lineTo(width, baseY + 2 * dpr);
+      area.lineTo(0, baseY + 2 * dpr);
+      area.closePath();
+      const g = ctx.createLinearGradient(0, baseY - amp, 0, baseY);
+      // Painted every frame into a canvas that only fades, so it is laid
+      // down at the fade's rate and settles at the strength written here.
+      g.addColorStop(0, `rgba(${P.wash}, ${0.08 * fade})`);
+      g.addColorStop(1, `rgba(${P.wash}, ${0.02 * fade})`);
+      ctx.fillStyle = g;
+      ctx.fill(area);
+    }
     for (const [lw, color] of P.strokes) {
       ctx.lineWidth = lw * dpr;
       ctx.strokeStyle = color;

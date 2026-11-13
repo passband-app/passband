@@ -109,6 +109,8 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
   display: flex; flex-direction: column; align-items: center; gap: 3px;
   opacity: 0; transition: opacity 0.5s ease; }
 .pb-mkr::after { content: ""; border: 5px solid transparent; border-top: 6px solid var(--accent); border-bottom: 0; }
+.pb-mkr-n { font-style: normal; }
+.pb-mkr-face, .pb-mkrs-h, .pb-mkrs small { display: none; }
 .pb-stage[data-locked] .pb-mkr { opacity: 1; }
 .pb-mkr:nth-of-type(2) { transition-delay: 0.08s; } .pb-mkr:nth-of-type(3) { transition-delay: 0.16s; }
 .pb-mkrs { position: absolute; z-index: 2; right: var(--gutter); top: 17%; width: 19rem;
@@ -1452,10 +1454,19 @@ function Rail({ on }: { on: "sitrep" | "calendar" }) {
 }
 
 // The app's avatar palette, dark halves (Palette.avatarPalette).
-const AVATAR = {
+// The app's own avatar pairs (Lib/SenderIdentity.swift, avatarHex), night
+// and day. THEME is read off the URL before anything renders.
+const AVATAR_NIGHT = {
   blue: ["#24384F", "#A9CBF0"], green: ["#22392E", "#9AD3B6"], rust: ["#442C26", "#EBA894"],
   violet: ["#2F2A4A", "#B8ACF2"], ochre: ["#3E2E1B", "#E2C078"], rose: ["#3E2839", "#E0A6CD"],
 } as const;
+const AVATAR_DAY = {
+  blue: ["#D8E6F8", "#1C4E82"], green: ["#DCE9E1", "#246148"], rust: ["#F3E2DC", "#8E4231"],
+  violet: ["#E6E1F5", "#4C3E9C"], ochre: ["#F5EBD5", "#7E5A16"], rose: ["#EFDEE9", "#83366A"],
+} as const;
+const AVATAR: Record<keyof typeof AVATAR_NIGHT, readonly [string, string]> =
+  typeof location !== "undefined" && new URLSearchParams(location.search).get("theme") === "dark"
+    ? AVATAR_NIGHT : AVATAR_DAY;
 
 // The mail from the "before" panel's scroll, as the sitrep has it: a name, the
 // model's one-line abstraction of what the thread wants, and a chip only where
@@ -2485,11 +2496,11 @@ const LIGHT_CSS = `
 }
 :root[data-theme="light"] html, html[data-theme="light"] { color-scheme: light; }
 
-/* The app keeps its own night inside its window. */
-[data-theme="light"] .pb-shot { ${NIGHT_TOKENS} color: var(--ink); }
+/* The app's window carries its own day palette (THE APP, IN DAY, below). */
+[data-theme="light"] .pb-shot { color: var(--ink); }
 
 /* HERO: the instrument's furniture goes, the line stays. */
-[data-theme="light"] :is(.pb-grat, .pb-mkr, .pb-mkrs, .pb-read-l, .pb-read-r) { display: none; }
+[data-theme="light"] :is(.pb-read-l, .pb-read-r) { display: none; }
 [data-theme="light"] .pb-scrim { background:
   linear-gradient(90deg, rgba(250,247,242,0.96) 0%, rgba(250,247,242,0.85) 30%, rgba(250,247,242,0.35) 46%, rgba(250,247,242,0) 62%),
   linear-gradient(180deg, rgba(250,247,242,0) 74%, rgba(250,247,242,0.9) 100%); }
@@ -2566,6 +2577,102 @@ const LIGHT_CSS = `
 [data-theme="light"] .pb-tally > div.you[data-arrived] { background: rgba(46,107,214,0.07); }
 [data-theme="light"] .pb-fact a { color: var(--accent); }
 
+
+
+/* THE APP, IN DAY. Every value from the client's own code: Palette.swift's
+   light inks, hairlines and accent; Glass.swift's light canvas (a pale sky,
+   E6EFFC to D5E5F8, under the brand wash); zone panes are the material at a
+   12% tint of the zone's colour; calendar chips are CalendarColor.swift's
+   light tones for each hue (OKLab, L .885 / .43 / .60). */
+[data-theme="light"] .pb-shot {
+  --bg: #EDF3FA; --canvas: #EDF3FA; --card: #FFFFFF;
+  --ink: #141C26; --dim: #455465; --faint: #6B7A8B; --faintest: #94A2B2;
+  --hair: rgba(30, 50, 70, 0.12); --hair-strong: rgba(30, 50, 70, 0.2);
+  --accent: #2B7FD4; --accent-ink: #1C63AE;
+  --warn: #B5761A; --positive: #1F7A4D; --danger: #D6412F; }
+[data-theme="light"] .pb-after .pb-window { background: linear-gradient(#E3EDFA, #D3E3F7); border-color: rgba(30, 50, 70, 0.14); }
+[data-theme="light"] .pb-side { background: rgba(255, 255, 255, 0.45); border-right-color: rgba(30, 50, 70, 0.1); }
+[data-theme="light"] .pb-side span { color: #6B7A8B; }
+[data-theme="light"] .pb-side span.on { background: rgba(43, 127, 212, 0.16); color: #2B7FD4; }
+[data-theme="light"] .pb-me { box-shadow: inset 0 0 0 0.5pt rgba(30, 50, 70, 0.15); }
+[data-theme="light"] .pb-zone { background: rgba(255, 255, 255, 0.72); box-shadow: inset 0 0 0 0.75pt rgba(30, 50, 70, 0.1),
+  0 1pt 2pt rgba(30, 50, 70, 0.05); }
+[data-theme="light"] .pb-zone-h em { background: rgba(30, 50, 70, 0.08); }
+[data-theme="light"] .pb-flow { background: rgba(43, 127, 212, 0.1); }
+[data-theme="light"] .pb-eye.cursor { background: rgba(43, 127, 212, 0.1); }
+[data-theme="light"] .pb-eye.overdue.cursor { background: rgba(214, 65, 47, 0.08); }
+[data-theme="light"] .pb-read { background: rgba(30, 50, 70, 0.05); }
+[data-theme="light"] .pb-read.content { background: rgba(201, 161, 90, 0.32); }
+[data-theme="light"] .pb-rec-cal { --bg-c: #E6EFFA; --edge: rgba(43, 127, 212, 0.3); }
+[data-theme="light"] .pb-rec-ship { --bg-c: #F6EEE3; --edge: rgba(181, 118, 26, 0.32); }
+[data-theme="light"] .pb-rec-bill { --bg-c: #E4ECF6; --edge: rgba(28, 99, 174, 0.28); }
+[data-theme="light"] .pb-rec-rcpt { --bg-c: #E5F0EA; --edge: rgba(31, 122, 77, 0.3); }
+[data-theme="light"] .pb-ship { background: rgba(255, 255, 255, 0.7); }
+[data-theme="light"] .pb-land[data-arrived] > div > *, [data-theme="light"] .pb-read[data-arrived] { animation-name: pb-landed-day; }
+@keyframes pb-landed-day { from { background-color: rgba(43, 127, 212, 0.22); } }
+/* The arriving mail lands as a light row now, so it whitens rather than
+   darkens on the way in. */
+[data-theme="light"] .pb-in { background: color-mix(in srgb, rgba(205, 224, 247, 1) calc(var(--m, 0) * 100%), #ffffff); }
+[data-theme="light"] .pb-in-top b { color: var(--ink); }
+/* Calendar. */
+[data-theme="light"] .pb-calshot .pb-window { background: linear-gradient(#E3EDFA, #D3E3F7); }
+[data-theme="light"] .pb-seg { background: rgba(30, 50, 70, 0.08); }
+[data-theme="light"] .pb-seg span.on { background: #2B7FD4; color: #fff; }
+[data-theme="light"] :is(.pb-caltool .nav, .pb-caltool .today, .pb-caltool .new) { background: rgba(255, 255, 255, 0.7);
+  box-shadow: inset 0 0 0 0.75pt rgba(30, 50, 70, 0.1); }
+[data-theme="light"] .pb-wd { color: #94A2B2; border-bottom-color: rgba(30, 50, 70, 0.1); }
+[data-theme="light"] .pb-day { border-bottom-color: rgba(30, 50, 70, 0.1); }
+[data-theme="light"] .pb-day > header { color: #6B7A8B; }
+[data-theme="light"] .pb-day.out > header { color: #A9B4C1; }
+[data-theme="light"] .pb-day.sel::after { box-shadow: inset 0 0 0 1pt rgba(43, 127, 212, 0.6); }
+[data-theme="light"] .pb-ev { color: var(--ink); }
+[data-theme="light"] .pb-day.out .pb-ev { filter: none; opacity: 0.5; }
+[data-theme="light"] .pb-ev.picked { box-shadow: inset 0 0 0 1.25pt #2B7FD4; }
+[data-theme="light"] .pb-ev.thin span { color: #94A2B2; }
+[data-theme="light"] .pb-ev.red { --fill: #FDC9D6; --ink: #7E314B; --edge: #C1577A; }
+[data-theme="light"] .pb-ev.purple { --fill: #D2D6FE; --ink: #46468A; --edge: #7373D1; }
+[data-theme="light"] .pb-ev.teal { --fill: #A9E6E7; --ink: #035C5E; --edge: #009295; }
+[data-theme="light"] .pb-ev.brown { --fill: #F5D3AD; --ink: #6F4509; --edge: #B07010; }
+[data-theme="light"] .pb-ev.green { --fill: #C3E4BE; --ink: #265E21; --edge: #499441; }
+[data-theme="light"] .pb-ev.gray { --fill: #DCE3EC; --ink: #3F516A; --edge: #6E829D; }
+[data-theme="light"] .pb-evcard { background: rgba(255, 255, 255, 0.78); box-shadow: inset 0 0 0 0.75pt rgba(30, 50, 70, 0.1); }
+[data-theme="light"] .pb-behind { background: rgba(30, 50, 70, 0.05); }
+[data-theme="light"] .pb-evkeys kbd { background: rgba(30, 50, 70, 0.08); color: var(--dim); }
+[data-theme="light"] .pb-brow.update { background: rgba(43, 127, 212, 0.14); }
+
+/* THE HERO'S PEOPLE. The three peaks that matter carry their senders'
+   faces from the start, so the line reads as mail, not as an instrument;
+   once the squelch closes, the three come up as a card. The sky behind is
+   the app's own light canvas. */
+[data-theme="light"] .pb-grat { display: block; background:
+  radial-gradient(ellipse 70% 60% at 70% 60%, rgba(214, 229, 248, 0.9), rgba(230, 239, 252, 0.5) 45%, rgba(250, 247, 242, 0) 75%);
+  mix-blend-mode: multiply; -webkit-mask-image: none; mask-image: none; }
+[data-theme="light"] .pb-mkr { display: flex; opacity: 0; transform: translate(-50%, calc(-100% - 8px));
+  transition: opacity 0.8s ease 0.4s; }
+[data-theme="light"] .pb-scene ~ .pb-mkr, [data-theme="light"] .pb-stage .pb-mkr { opacity: 1; }
+[data-theme="light"] .pb-mkr::after, [data-theme="light"] .pb-mkr-n { display: none; }
+[data-theme="light"] .pb-mkr .pb-mkr-face { display: grid; width: 30px; height: 30px; font-size: 11px;
+  box-shadow: 0 0 0 3px #fff, 0 6px 16px -6px rgba(29, 36, 48, 0.45); }
+[data-theme="light"] .pb-mkr-face { place-items: center; border-radius: 50%; font: 600 10px/1 var(--sans); flex: none; }
+[data-theme="light"] .pb-mkrs { display: block; top: 15%; width: 21rem; font: 400 14px/1.3 var(--sans); color: var(--ink);
+  background: #fff; border: 1px solid var(--hair-strong); border-radius: 18px; padding: 0.4rem;
+  box-shadow: 0 2px 4px rgba(29,36,48,0.05), 0 24px 60px -24px rgba(29,36,48,0.35);
+  -webkit-backdrop-filter: none; backdrop-filter: none; }
+[data-theme="light"] .pb-mkrs-h { display: flex; align-items: baseline; justify-content: space-between; margin: 0;
+  padding: 0.7rem 0.75rem 0.5rem; font: 500 1.1rem/1.2 var(--serif); }
+[data-theme="light"] .pb-mkrs-h small { display: inline; font: 400 0.78rem/1 var(--sans); color: var(--faint); }
+[data-theme="light"] .pb-mkrs div { grid-template-columns: auto 1fr auto; align-items: center; gap: 0.7rem;
+  padding: 0.55rem 0.75rem; border-top: 0; border-radius: 12px; }
+[data-theme="light"] .pb-mkrs div:first-of-type { display: none; }
+[data-theme="light"] .pb-mkrs div b { display: none; }
+[data-theme="light"] .pb-mkrs div .pb-mkr-face { display: grid; width: 30px; height: 30px; }
+[data-theme="light"] .pb-mkrs div span:nth-of-type(2) { display: flex; flex-direction: column; gap: 2px; font-weight: 600; min-width: 0; }
+[data-theme="light"] .pb-mkrs div span:nth-of-type(2) small { display: block; font-weight: 400; font-size: 0.8rem; color: var(--dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+[data-theme="light"] .pb-mkrs span:last-child { font-size: 0.72rem; font-weight: 600; padding: 0.2rem 0.55rem; border-radius: 99px; }
+[data-theme="light"] .pb-mkrs .late { color: var(--danger); background: rgba(214, 65, 47, 0.1); }
+[data-theme="light"] .pb-mkrs .soon { color: var(--warn); background: rgba(181, 118, 26, 0.12); }
+
 /* The footer mark keeps its colour on paper. */
 [data-theme="light"] .pb-foot-mark { filter: none; opacity: 0.55; }
 `;
@@ -2600,10 +2707,10 @@ function scopeLayout(): ScopeLayout {
 }
 
 // The carriers' names in the marker table, in the scope's order.
-const MARKERS: Array<[who: string, status: string, tone: string]> = [
-  ["Parkline Properties", "past due", "late"],
-  ["Dr. Ortiz's Office", "today", "soon"],
-  ["Jamie Chen", "due Fri", "soon"],
+const MARKERS: Array<[who: string, status: string, tone: string, initials: string, face: keyof typeof AVATAR_NIGHT, line: string]> = [
+  ["Parkline Properties", "past due", "late", "PP", "ochre", "Lease renewal needs a signature"],
+  ["Dr. Ortiz's Office", "today", "soon", "DO", "green", "Confirm Thursday at 2:30"],
+  ["Jamie Chen", "due Fri", "soon", "JC", "blue", "Pick a venue for the offsite"],
 ];
 
 export function App() {
@@ -2723,18 +2830,24 @@ export function App() {
           <div className="pb-grat" />
           {CARRIERS.map((_, i) => {
             const { x, y } = markerPoint(i, layout);
+            const [, , , initials, face] = MARKERS[i];
             return (
               <span key={i} className="pb-mkr" style={{ left: `${x * 100}%`, top: `${y * 100}%` }}
-                aria-hidden="true">{i + 1}</span>
+                aria-hidden="true">
+                <em className="pb-mkr-n">{i + 1}</em>
+                <span className="pb-mkr-face" style={{ background: AVATAR[face][0], color: AVATAR[face][1] }}>{initials}</span>
+              </span>
             );
           })}
           <div className="pb-scrim" />
           <div className="pb-mkrs" aria-label="What made it through">
+            <p className="pb-mkrs-h">Three need you today <small>of 4,312</small></p>
             <div><span>MKR</span><span>SENDER</span><span>STATUS</span></div>
-            {MARKERS.map(([who, status, tone], i) => (
+            {MARKERS.map(([who, status, tone, initials, face, line], i) => (
               <div key={who}>
                 <b>{i + 1}</b>
-                <span>{who}</span>
+                <span className="pb-mkr-face" style={{ background: AVATAR[face][0], color: AVATAR[face][1] }}>{initials}</span>
+                <span>{who}<small>{line}</small></span>
                 <span className={tone}>{status}</span>
               </div>
             ))}

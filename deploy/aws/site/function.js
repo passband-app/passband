@@ -2,7 +2,7 @@
 // passband-site/appcast.xml. Do not edit: change server.ts and rebuild.
 // Runtime: cloudfront-js-2.0, viewer-request event. Mirrors server.ts's
 // routing exactly; deploy/aws/site/function.test.ts holds it to that.
-var LATEST = "0.0.19";
+var LATEST = "0.0.20";
 var RELEASES_REPO = "passband-app/passband-releases";
 var ROUTES = {
   "/main.js": "/dist/main.js",
@@ -11,6 +11,10 @@ var ROUTES = {
   "/mark.svg": "/mark.svg",
   "/mark.png": "/mark.png",
   "/mark-light.png": "/mark-light.png",
+  "/email-sitrep.png": "/email-sitrep.png",
+  "/email-box.png": "/email-box.png",
+  "/email-wind.png": "/email-wind.png",
+  "/email-key.png": "/email-key.png",
   "/icon-180.png": "/icon-180.png",
   "/icon-512.png": "/icon-512.png",
   "/og.png": "/og.png",

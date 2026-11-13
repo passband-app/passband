@@ -208,18 +208,16 @@ fn invite_link(code: &str, signup_url: &str) -> String {
 fn text_body(code: &str, signup_url: &str) -> String {
     let teaser: String = TEASER
         .iter()
-        .map(|(title, body)| format!("- {title} {body}\n"))
+        .map(|(_, line)| format!("- {line}\n"))
         .collect();
     format!(
-        "You're off the Passband waitlist.
+        "You're off the Passband waitlist. Your inbox is about to get a lot quieter.
 
-Your inbox is about to get a lot quieter. Set up your mailbox here (your code is already filled in):
+Set up your mailbox:
 {link}
 
-What's waiting for you:
-
 {teaser}
-Link not working? Enter this code at {signup_url}:
+Or enter this code at {signup_url}:
 
 {code}
 
@@ -234,28 +232,24 @@ Passband is on iPhone too, in alpha on TestFlight:
     )
 }
 
-/// The teaser: what the recipient is about to get, as (lead, line) pairs. Both
-/// parts render this one list, so the text and HTML cannot drift apart. Every
-/// line is a feature that ships today and reads the way the landing page does;
-/// an invite that oversells is the first thing a new user catches us in.
+/// The teaser: what the recipient is about to get, as (icon, line). Both parts
+/// render this one list, so the text and HTML cannot drift apart. Every line is
+/// a feature that ships today; an invite that oversells is the first thing a
+/// new user catches us in.
+///
+/// The icons are the app's own SF Symbols, rendered to PNG by
+/// `passband-site/tools/email-icons.swift` and served beside [`MARK_URL`] for
+/// the same reason. Their `alt` is empty: the line beside each says it all, so
+/// a blocked image leaves a short gap rather than a stray word.
 const TEASER: [(&str, &str); 4] = [
-    (
-        "A sitrep, not a pile.",
-        "Passband opens on one sentence about your day and the handful of things that actually need you.",
-    ),
-    (
-        "The rest, filed.",
-        "Packages, bills, receipts and invitations gather into their own cards instead of your inbox.",
-    ),
-    (
-        "Unsubscribe that works.",
-        "Passband notices the senders you stopped reading and offers to cut them loose.",
-    ),
-    (
-        "Codes that come to you.",
-        "A sign-in code floats over the app you are in. Copy it without opening your inbox.",
-    ),
+    ("email-sitrep", "A sitrep, not a pile"),
+    ("email-box", "Packages, bills and receipts, filed"),
+    ("email-wind", "Unsubscribe that actually works"),
+    ("email-key", "Sign-in codes that come to you"),
 ];
+
+/// Where the email's images live. See [`MARK_URL`].
+const ASSET_ORIGIN: &str = "https://passband.app";
 
 /// Where the mark is served from. Hardcoded to the project's own site rather
 /// than derived from the deployment's origin, because that is the only host
@@ -285,13 +279,20 @@ fn html_body(code: &str, signup_url: &str) -> String {
     let link = escape_html(&invite_link(code, signup_url));
     let code = escape_html(code);
     let url = escape_html(signup_url);
+    // Shown without the scheme: the full URL is one unbreakable word that runs
+    // off a phone's screen, and nobody needs "https://" to read where to go.
+    let url_label = escape_html(
+        signup_url
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/'),
+    );
     let teaser: String = TEASER
         .iter()
-        .map(|(title, body)| {
+        .map(|(icon, line)| {
             format!(
-                r##"<tr><td style="padding: 0 0 16px;"><span style="color: #E9EEF5; font-weight: 600;">{}</span> {}</td></tr>"##,
-                escape_html(title),
-                escape_html(body),
+                r##"<tr><td width="24" style="padding: 0 14px 14px 0; vertical-align: middle;"><img src="{ASSET_ORIGIN}/{icon}.png" alt="" width="24" height="24" style="display: block; border: 0;"></td><td style="padding: 0 0 14px; vertical-align: middle; color: #E9EEF5;">{}</td></tr>"##,
+                escape_html(line),
             )
         })
         .collect();
@@ -303,14 +304,13 @@ fn html_body(code: &str, signup_url: &str) -> String {
 <td style="font: 500 22px/1 Newsreader, Georgia, 'Times New Roman', serif; color: #E9EEF5; vertical-align: middle;">Passband</td>
 </tr></table>
 <p style="font: 500 34px/1.08 Newsreader, Georgia, 'Times New Roman', serif; letter-spacing: -0.01em; color: #E9EEF5; margin: 0 0 12px;">You're off the waitlist</p>
-<p style="margin: 0 0 28px;">Your inbox is about to get a lot quieter. Pick a username, connect your mail, and let Passband sort the rest.</p>
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 0 0 44px;"><tr><td bgcolor="#82BAF5" style="background: #82BAF5; border-radius: 14px;">
+<p style="margin: 0 0 28px;">Your inbox is about to get a lot quieter.</p>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 0 0 40px;"><tr><td bgcolor="#82BAF5" style="background: #82BAF5; border-radius: 14px;">
 <a href="{link}" style="display: inline-block; padding: 16px 34px; color: #090D16; font-weight: 600; font-size: 16px; letter-spacing: 0.01em; text-decoration: none;">Set up your mailbox &rarr;</a>
 </td></tr></table>
-<p style="font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #62707F; margin: 0 0 16px;">What's waiting for you</p>
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 0 0 20px; font-size: 15px; line-height: 1.55; color: #A8B4C4;">{teaser}</table>
-<p style="font-size: 13px; color: #62707F; margin: 0; padding: 20px 0 0; border-top: 1px solid #1d2633;">Button not working? Enter <span style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #A8B4C4; white-space: nowrap;">{code}</span> at <a href="{url}" style="color: #808E9F;">{url}</a>. Works once, expires in {ttl} days.</p>
-<p style="font-size: 13px; color: #808E9F; margin: 16px 0 0;">Passband is on iPhone too. <a href="{testflight}" style="color: #82BAF5;">Join the alpha on TestFlight</a></p>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 0 0 22px; font-size: 15px; line-height: 1.4;">{teaser}</table>
+<p style="font-size: 13px; color: #62707F; margin: 0; padding: 20px 0 0; border-top: 1px solid #1d2633;">Or use code <span style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #A8B4C4; white-space: nowrap;">{code}</span> at <a href="{url}" style="color: #808E9F;">{url_label}</a>. Works once, expires in {ttl} days.</p>
+<p style="font-size: 13px; color: #808E9F; margin: 12px 0 0;">On iPhone? <a href="{testflight}" style="color: #82BAF5;">Join the TestFlight alpha</a></p>
 </div>
 </td></tr></table>
 "##,
@@ -442,8 +442,8 @@ mod tests {
             // House copy rule.
             assert!(!part.contains('\u{2014}'), "{part}");
             // The teaser rides in both parts.
-            for (title, _) in TEASER {
-                assert!(part.contains(&escape_html(title)), "{part}");
+            for (_, line) in TEASER {
+                assert!(part.contains(line), "{part}");
             }
             // The iPhone alpha, last and quiet.
             assert!(part.contains(crate::pages::TESTFLIGHT_URL), "{part}");
@@ -453,6 +453,26 @@ mod tests {
         assert!(text.contains(&format!("\n\n{CODE}\n\n")), "{text}");
         assert!(!text.contains(&format!("{SIGNUP_URL}?")), "{text}");
         assert!(!html.contains(&format!("{SIGNUP_URL}?")), "{html}");
+    }
+
+    /// Every image the email points at is one passband.app actually serves.
+    /// A rename on either side otherwise ships as a row of broken images, and
+    /// nothing else would notice: the site deploy is green, the send is green.
+    #[test]
+    fn every_email_image_is_routed_on_the_site() {
+        let server = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../passband-site/server.ts"
+        ))
+        .expect("passband-site/server.ts is in the checkout");
+        let mark = MARK_URL.strip_prefix(ASSET_ORIGIN).unwrap();
+        let icons = TEASER.iter().map(|(icon, _)| format!("/{icon}.png"));
+        for path in std::iter::once(mark.to_string()).chain(icons) {
+            assert!(
+                server.contains(&format!("\"{path}\"")),
+                "{path} is not routed"
+            );
+        }
     }
 
     /// Four outcomes, and every one of them says nothing about the key, the

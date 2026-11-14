@@ -35,11 +35,13 @@
       type="font/woff2"
       crossorigin
     />
+    <script>
+      document.documentElement.dataset.theme =
+        new URLSearchParams(location.search).get("theme") === "dark" ? "dark" : "light";
+    </script>
     <style>
-      body {
-        margin: 0;
-        background: #090D16;
-      }
+      body { margin: 0; background: #FAF7F2; }
+      html[data-theme="dark"] body { background: #090D16; }
       /* Newsreader, subset from the same variable TTF the Swift client
          bundles, so the wordmark is the same letterforms in the app and on
          the web. Declared here rather than in the bundle so the preload above

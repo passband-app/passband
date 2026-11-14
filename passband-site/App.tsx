@@ -466,6 +466,22 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-in-to svg { width: 9pt; height: 9pt; }
 /* The first email is read in full: what it asks, by when, what it is about,
    and the level it reaches against the squelch. */
+/* A thread: bubbles, theirs on the left and yours on the right, each coming
+   up in turn as the card is read (message k shows over the k-th third of
+   the read; the first is there from the start). */
+.pb-in-thread { display: flex; flex-direction: column; gap: 7pt; margin: 6pt 0 4pt; }
+.pb-in-msg { --s: clamp(0, calc(var(--r, 0) * 3 - var(--k) + 1), 1);
+  margin: calc((var(--s) - 1) * 7pt) 0 0; max-width: 74%; padding: calc(var(--s) * 5pt) 10pt;
+  max-height: calc(var(--s) * 40pt); overflow: hidden; opacity: calc(var(--s) * var(--fade, 1));
+  border-radius: 12pt; font-size: 10.5pt; line-height: 1.35; }
+/* The thread's card gets more air than a mail card: a conversation needs
+   room around it to read as one. */
+.pb-in[data-thread] { padding: 14pt 16pt; }
+.pb-in-msg.them { align-self: flex-start; background: rgba(233, 238, 245, 0.09); color: var(--ink);
+  border-bottom-left-radius: 4pt; }
+.pb-in-msg.you { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4pt; }
+[data-theme="light"] .pb-in-msg.them { background: rgba(29, 36, 48, 0.06); }
+.pb-in-to svg { width: 10pt; height: 10pt; }
 .pb-in-read { max-height: calc(var(--r, 0) * 140pt); opacity: var(--r, 0); overflow: hidden;
   margin-top: calc((var(--r, 0) - 1) * 6pt);
   display: flex; flex-direction: column; gap: 9pt; }
@@ -495,21 +511,23 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-inmail { margin-top: 1.4rem; }
 .pb-inrun { display: flex; flex-direction: column; gap: 14px; }
 .pb-inslot { position: relative; }
-/* THE TALLY. A readout in the trust row's instrument voice: one line per
-   zone, dim until its email lands, the one that needed you in blue. */
-.pb-tally { margin: 0; max-width: 22rem; border: 1px solid rgba(130, 186, 245, 0.2); border-radius: 12px;
-  overflow: hidden; font-size: 0.9rem; }
-.pb-tally > div { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem;
-  padding: 0.6rem 0.9rem; border-top: 1px solid rgba(130, 186, 245, 0.1); transition: background 0.4s ease; }
-.pb-tally > div:first-child { border-top: 0; }
-.pb-tally dt { font: 500 10.5px/1.6 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--faintest);
-  transition: color 0.4s ease; }
-.pb-tally dd { margin: 0; color: var(--faintest); transition: color 0.4s ease; }
-.pb-tally .pb-tally-h dd { font: 500 10.5px/1.6 var(--mono); letter-spacing: 0.08em; color: var(--accent-ink); }
-.pb-tally > div[data-arrived] dt { color: var(--faint); }
-.pb-tally > div[data-arrived] dd { color: var(--ink); }
-.pb-tally > div.you[data-arrived] { background: rgba(78, 155, 234, 0.12); }
-.pb-tally > div.you[data-arrived] dt { color: var(--accent-ink); }
+/* THE TALLY. Six dots in a row, empty rings until their email lands; the
+   one that needed you rises above the rest in the accent. Then the sum in
+   two words each. */
+.pb-tally { margin: 0; max-width: 22rem; }
+.pb-tally-dots { display: flex; align-items: flex-end; gap: 0.6rem; height: 4.2rem; }
+.pb-tally-dots span { width: 2.4rem; height: 2.4rem; border-radius: 50%; display: grid; place-items: center;
+  font: 600 0.72rem/1 var(--sans); color: transparent; background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--hair-strong);
+  transition: background 0.45s ease, color 0.45s ease, box-shadow 0.45s ease, transform 0.6s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.pb-tally-dots span[data-arrived] { background: var(--a); color: var(--f); box-shadow: none; opacity: 0.55; }
+.pb-tally-dots span.you[data-arrived] { opacity: 1; transform: translateY(-1.3rem) scale(1.18);
+  box-shadow: 0 0 0 3px var(--bg), 0 0 0 5px var(--accent), 0 10px 24px -8px rgba(46, 107, 214, 0.55); }
+.pb-tally figcaption { display: flex; gap: 2rem; margin-top: 1rem; }
+.pb-tally figcaption span { display: flex; flex-direction: column; gap: 0.2rem; color: var(--faint); font-size: 0.92rem; }
+.pb-tally figcaption b { font: 500 2.6rem/1 var(--serif); color: var(--ink); }
+.pb-tally figcaption .you, .pb-tally figcaption .you b { color: var(--accent-ink); }
+@media (prefers-reduced-motion: reduce) { .pb-tally-dots span { transition: none; } }
 .pb-steps .pb-in { position: relative; left: auto; top: auto; visibility: visible; }
 .pb-steps .pb-in[data-flying] { z-index: 5; }
 @media (max-width: 900px) {
@@ -1452,10 +1470,19 @@ function Rail({ on }: { on: "sitrep" | "calendar" }) {
 }
 
 // The app's avatar palette, dark halves (Palette.avatarPalette).
-const AVATAR = {
+// The app's own avatar pairs (Lib/SenderIdentity.swift, avatarHex), night
+// and day. THEME is read off the URL before anything renders.
+const AVATAR_NIGHT = {
   blue: ["#24384F", "#A9CBF0"], green: ["#22392E", "#9AD3B6"], rust: ["#442C26", "#EBA894"],
   violet: ["#2F2A4A", "#B8ACF2"], ochre: ["#3E2E1B", "#E2C078"], rose: ["#3E2839", "#E0A6CD"],
 } as const;
+const AVATAR_DAY = {
+  blue: ["#D8E6F8", "#1C4E82"], green: ["#DCE9E1", "#246148"], rust: ["#F3E2DC", "#8E4231"],
+  violet: ["#E6E1F5", "#4C3E9C"], ochre: ["#F5EBD5", "#7E5A16"], rose: ["#EFDEE9", "#83366A"],
+} as const;
+const AVATAR: Record<keyof typeof AVATAR_NIGHT, readonly [string, string]> =
+  typeof location !== "undefined" && new URLSearchParams(location.search).get("theme") === "dark"
+    ? AVATAR_NIGHT : AVATAR_DAY;
 
 // The mail from the "before" panel's scroll, as the sitrep has it: a name, the
 // model's one-line abstraction of what the thread wants, and a chip only where
@@ -1884,15 +1911,11 @@ const STEPS: Array<{ title: string; line: ReactNode }> = [
     line: "Six emails came in. One needed you, and it is waiting at the top. The rest is where you would look for it." },
 ];
 
-// The closing tally: where this morning's six went, each line lighting as
-// its email lands.
-const TALLY: Array<[id: string, where: string, what: string]> = [
-  ["jamie", "For your eyes", "Jamie Chen"],
-  ["ship", "Shipments", "Rainforest"],
-  ["cats", "Reading", "Cats Weekly"],
-  ["filed", "Filed", "Marriott Bonvoy"],
-  ["rcpt", "Receipts", "Blue Bottle"],
-  ["cal", "Calendar", "Alex Rivera"],
+// The closing tally, as a picture: one dot per email this morning, filling
+// in as each lands; the one that needed you stands up out of the row.
+const TALLY: Array<[id: string, initials: string, tone: keyof typeof AVATAR_NIGHT]> = [
+  ["ship", "R", "ochre"], ["cats", "CW", "green"], ["jamie", "JC", "blue"],
+  ["filed", "M", "rust"], ["rcpt", "BB", "ochre"], ["cal", "AR", "violet"],
 ];
 
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
@@ -1961,7 +1984,9 @@ function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
         // goes; the run's cards only flash where they are going.
         const full = card.hasAttribute("data-full");
         const a = clamp01((d + (full ? 0.48 : 0.42)) / 0.18);
-        const r = full ? clamp01((d + 0.16) / 0.18) : clamp01((d + 0.2) / 0.14);
+        // A thread reads over longer, one message at a time.
+        const r = card.hasAttribute("data-thread") ? clamp01((d + 0.36) / 0.38)
+          : full ? clamp01((d + 0.16) / 0.18) : clamp01((d + 0.2) / 0.14);
         const f = full ? clamp01((d - 0.08) / 0.26) : clamp01((d + 0.04) / 0.24);
         card.style.setProperty("--r", String(r));
 
@@ -2060,14 +2085,18 @@ function Showcase() {
     <div className="pb-inrun">
       {RUN.map((m) => <div key={m.id} className="pb-inslot"><InCard m={m} /></div>)}
     </div>,
-    <dl className="pb-tally">
-      <div className="pb-tally-h"><dt>This morning</dt><dd>6 in · 1 for you</dd></div>
-      {TALLY.map(([id, where, what]) => (
-        <div key={id} data-tally={id} className={id === "jamie" ? "you" : undefined}>
-          <dt>{where}</dt><dd>{what}</dd>
-        </div>
-      ))}
-    </dl>,
+    <figure className="pb-tally" aria-label="Six emails came in this morning. One needs you.">
+      <div className="pb-tally-dots" aria-hidden="true">
+        {TALLY.map(([id, initials, tone]) => (
+          <span key={id} data-tally={id} className={id === "jamie" ? "you" : undefined}
+            style={{ ["--a" as string]: AVATAR[tone][0], ["--f" as string]: AVATAR[tone][1] }}>{initials}</span>
+        ))}
+      </div>
+      <figcaption>
+        <span><b>6</b>came in</span>
+        <span className="you"><b>1</b>needs you</span>
+      </figcaption>
+    </figure>,
   ];
 
   return (
@@ -2154,6 +2183,15 @@ const CAL_CSS = `
 .pb-day > header { display: flex; align-items: baseline; justify-content: space-between; padding: 0 4pt 2pt;
   font-size: 11.5pt; font-weight: 500; color: #818c9a; white-space: nowrap; gap: 4pt; }
 .pb-day.out > header { color: #46515d; }
+/* A chip that lands in the tour: no gap of its own until it opens. */
+.pb-day .pb-land { margin-top: -3pt; }
+/* The calendar tour keeps the original pacing: its last step is full height
+   and the list ends with it, so the window lets go while that step is still
+   level with it rather than after it has passed (which would fold the
+   summit away again on screen). */
+.pb-pair.pb-cal.pb-mailpair .pb-steps { padding-bottom: 0; }
+.pb-pair.pb-cal.pb-mailpair .pb-step:last-child { min-height: 64svh; }
+.pb-day .pb-land .pb-ev { margin-top: 3pt; }
 .pb-day.out .pb-ev { filter: brightness(0.7) saturate(0.6); }
 .pb-day > header small { font-size: 9.5pt; color: var(--faintest); transition: color 0.4s ease; }
 .pb-day::after { content: ""; position: absolute; inset: 1pt; border-radius: 9pt; pointer-events: none;
@@ -2245,7 +2283,9 @@ const CAL_CSS = `
 `;
 const CAL_CSS_RESOLVED = CAL_CSS.replace(/(-?\d*\.?\d+)pt\b/g, "calc($1 * var(--pt))");
 
-type Chip = { t?: string; name: string; hue: string; kind?: "maybe" | "likely" | "thin" | "fold"; id?: string };
+type Chip = { t?: string; name: string; hue: string; kind?: "maybe" | "likely" | "thin" | "fold"; id?: string;
+  /** Not on the calendar until its thread lands in the tour (see CalShowcase). */
+  land?: string };
 // November 2026, Sunday first, as the app lays it out: five weeks, the last
 // running into December. Index 0 is Sunday November 1.
 // November 2026, Sunday first, as the app lays it out: five weeks, the last
@@ -2269,7 +2309,7 @@ const CAL_DAYS: Array<{ label: string; out?: boolean; unlikely?: number; chips: 
   { label: "15", chips: [] },
   { label: "16", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "2pm", name: "1:1 Jamie", hue: "purple" }] },
   { label: "17", chips: [{ t: "10am", name: "Board", hue: "red" }, { t: "3pm", name: "Hiring", hue: "green" }] },
-  { label: "18", chips: [{ t: "10am", name: "Design crit", hue: "purple" }, { t: "5pm", name: "Demo", hue: "teal" }] },
+  { label: "18", chips: [{ t: "10am", name: "Design crit", hue: "purple" }, { t: "2pm", name: "Hedge Coffee", hue: "green", land: "coffee" }, { t: "5pm", name: "Demo", hue: "teal" }] },
   { label: "19", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "2:30pm", name: "Dr. Ortiz", hue: "teal" }] },
   { label: "20", chips: [{ t: "10am", name: "Roadmap", hue: "purple" }, { t: "10pm", name: "Endzeit x Non Series", hue: "purple", kind: "maybe", id: "night" }] },
   { label: "21", chips: [] },
@@ -2289,9 +2329,11 @@ const CAL_DAYS: Array<{ label: string; out?: boolean; unlikely?: number; chips: 
   { label: "Dec 5", out: true, chips: [] },
 ];
 
-const CAL_TOUR: Array<{ key: string; title: string; line: ReactNode }> = [
-  { key: "plans", title: "Your inbox already knows your plans",
-    line: "Invitations, tickets and bookings show up on your calendar as they arrive, with the flyer, the place, and a line on how likely you are to go." },
+// The first step lights nothing: its thread flies in and becomes the event,
+// which is the picture. The second picks out the folded summit.
+const CAL_TOUR: Array<{ key?: string; title: string; line: ReactNode }> = [
+  { title: "Plans made in a reply",
+    line: "No invite, no event, just two people agreeing on a time. Your calendar app would never see it. Passband puts it there." },
   { key: "unlikely", title: "Not every invite is a plan",
     line: "The summit a vendor sent to everyone on its list folds away as unlikely. It is there if you want it, and out of the way if you don't." },
 ];
@@ -2412,12 +2454,15 @@ function CalMock({ focus }: { focus: string | undefined }) {
             <div key={day.label}
               className={`pb-day${day.out ? " out" : ""}${i === selected ? " sel" : ""}${i === 10 ? " summitday" : ""}`}>
               <header>{day.label}{day.unlikely ? <small>{day.unlikely} unlikely</small> : null}</header>
-              {day.chips.map((c) => (
-                <div key={c.name}
-                  className={`pb-ev ${c.hue}${c.kind === "fold" ? " fold thin" : c.kind ? ` ${c.kind}` : ""}${c.id ? ` ${c.id}` : ""}${c.id === "night" && i === selected && focus !== "unlikely" ? " picked" : ""}`}>
-                  {c.t && <span>{c.t}</span>}{c.name}
-                </div>
-              ))}
+              {day.chips.map((c) => {
+                const chip = (
+                  <div key={c.name}
+                    className={`pb-ev ${c.hue}${c.kind === "fold" ? " fold thin" : c.kind ? ` ${c.kind}` : ""}${c.id ? ` ${c.id}` : ""}${c.id === "night" && i === selected && focus !== "unlikely" ? " picked" : ""}`}>
+                    {c.t && <span>{c.t}</span>}{c.name}
+                  </div>
+                );
+                return c.land ? <Land key={c.name} id={c.land}>{chip}</Land> : chip;
+              })}
             </div>
           ))}
         </div>
@@ -2429,11 +2474,55 @@ function CalMock({ focus }: { focus: string | undefined }) {
 
 // The reminder an hour before doors. The line is the kind the
 // reminder model writes: short, no links, no codes.
+// The thread under the first step: an ordinary back-and-forth that settles
+// on a time. Its reply comes up as it is read, then the card leaves for
+// Wednesday and becomes the event.
+const COFFEE: Inbound = { id: "coffee", who: "Maya Lin", subject: "Could you do 2p on Wednesday?",
+  to: "Wed 18 · 2:00 PM", face: { initials: "ML", tone: "rose" } };
+
+// The back-and-forth, oldest first. The first line is there when the card
+// arrives; the rest come up one by one as it is read.
+const THREAD: Array<["them" | "you", string]> = [
+  ["them", "Coffee next week? It has been forever."],
+  ["you", "Yes please. When works for you?"],
+  ["them", "Could you do 2p on Wednesday?"],
+  ["you", "Yeah! Let’s do Hedge Coffee."],
+];
+
+function ThreadCard({ m }: { m: Inbound }) {
+  const face = "initials" in m.face ? m.face : null;
+  return (
+    <div className="pb-in" data-in={m.id} data-full data-thread>
+      <div className="pb-in-body">
+        <div className="pb-in-top">
+          {face && <span className="pb-avatar" style={{ background: AVATAR[face.tone][0], color: AVATAR[face.tone][1] }}>{face.initials}</span>}
+          <b>{m.who}</b>
+          <small>Re: coffee?</small>
+        </div>
+        <div className="pb-in-thread">
+          {THREAD.map(([who, line], k) => (
+            <div key={k} className={`pb-in-msg ${who}`} style={{ ["--k" as string]: k }}>{line}</div>
+          ))}
+        </div>
+        <span className="pb-in-to">
+          <Glyph name="calendar" />
+          {m.to}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function CalShowcase() {
   const { stepsRef, focus } = useTourFocus();
-  const key = focus < 0 ? undefined : CAL_TOUR[focus].key;
+  const pairRef = useRef<HTMLDivElement>(null);
+  useArrivals(pairRef);
+  // Past the last step the window keeps the last step's picture, so nothing
+  // on it folds back while it scrolls away. Before the first, it is plain.
+  const past = focus < 0 && !!stepsRef.current && stepsRef.current.getBoundingClientRect().bottom < innerHeight / 2;
+  const key = focus >= 0 ? CAL_TOUR[focus].key : past ? CAL_TOUR[CAL_TOUR.length - 1].key : undefined;
   return (
-    <div className="pb-pair pb-cal">
+    <div className="pb-pair pb-cal pb-mailpair" ref={pairRef}>
       <div className="pb-hold">
         <figure className="pb-panel pb-after">
           <figcaption><b>Calendar</b> built from your mail</figcaption>
@@ -2445,17 +2534,208 @@ function CalShowcase() {
         </figure>
       </div>
       <ol className="pb-steps" ref={stepsRef}>
-        {CAL_TOUR.map(({ key, title, line }, i) => (
-          <li key={key} className="pb-step" data-on={i === focus || undefined}>
+        {CAL_TOUR.map(({ title, line }, i) => (
+          <li key={title} className="pb-step" data-on={i === focus || undefined}>
             <i aria-hidden="true">{String(i + 1).padStart(2, "0")}</i>
             <h3>{title}</h3>
             <p>{line}</p>
+            {i === 0 && <div className="pb-inmail" aria-hidden="true"><div className="pb-inslot"><ThreadCard m={COFFEE} /></div></div>}
           </li>
         ))}
       </ol>
     </div>
   );
 }
+
+
+// THE LIGHT PAGE. Warm paper, ink, and one friendly blue: the same page with
+// the instrument taken off it. The analyzer's chrome (graticule, markers,
+// readouts, machined controls) goes; the trace stays as a calm ink line. The
+// app's own window stays dark, because that is the app, and a dark product
+// shot on paper reads as a thing you could have. ?theme=dark shows the night
+// page.
+export const THEME: "light" | "dark" =
+  typeof location !== "undefined" && new URLSearchParams(location.search).get("theme") === "dark" ? "dark" : "light";
+
+const NIGHT_TOKENS = `
+  --bg: #090D16; --canvas: #0E141D; --card: #121A26;
+  --ink: #E9EEF5; --dim: #A8B4C4; --faint: #808E9F; --faintest: #62707F;
+  --hair: rgba(233, 238, 245, 0.08); --hair-strong: rgba(233, 238, 245, 0.14);
+  --accent: #4E9BEA; --accent-ink: #82BAF5;
+  --warn: #E8AC4C; --positive: #4FC08A; --danger: #FF7A68;`;
+
+const LIGHT_CSS = `
+:root[data-theme="light"] {
+  --bg: #FAF7F2; --canvas: #FFFFFF; --card: #FFFFFF;
+  --ink: #1D2430; --dim: #4F5867; --faint: #6F7886; --faintest: #959CA7;
+  --hair: rgba(29, 36, 48, 0.08); --hair-strong: rgba(29, 36, 48, 0.13);
+  --accent: #2E6BD6; --accent-ink: #2A62C4;
+  --warn: #B7791F; --positive: #2F8F5B; --danger: #D24B3A;
+  --shadow: 0 1px 2px rgba(29, 36, 48, 0.06), 0 12px 32px -12px rgba(29, 36, 48, 0.18);
+}
+:root[data-theme="light"] html, html[data-theme="light"] { color-scheme: light; }
+
+/* The app's window carries its own day palette (THE APP, IN DAY, below). */
+[data-theme="light"] .pb-shot { color: var(--ink); }
+
+/* HERO: the instrument's furniture goes, the line stays. */
+[data-theme="light"] :is(.pb-mkr, .pb-mkrs, .pb-read-l, .pb-read-r) { display: none; }
+/* The scrim only quiets the line behind the words; a soft lift of light,
+   never a slab of paper over the sky. */
+[data-theme="light"] .pb-scrim { background:
+  linear-gradient(90deg, rgba(247,244,242,0.9) 0%, rgba(247,244,242,0.8) 28%, rgba(247,244,242,0.3) 44%, rgba(247,244,242,0) 58%); }
+[data-theme="light"] .pb-scrim { -webkit-mask-image: linear-gradient(#000 70%, transparent 90%);
+  mask-image: linear-gradient(#000 70%, transparent 90%); }
+@media (max-width: 820px) {
+  [data-theme="light"] .pb-scrim { background:
+    linear-gradient(180deg, rgba(255,255,255,0.5) 0%, rgba(255,255,255,0.3) 26%, rgba(255,255,255,0) 36%); }
+}
+[data-theme="light"] .pb-brand img { filter: none; }
+
+/* THE BUTTON: one solid, friendly pill. No meter, no filament. */
+[data-theme="light"] .pb-cta { color: #fff; background: var(--ink); border: 0; border-radius: 999px;
+  padding: 0.95rem 1.7rem; box-shadow: 0 1px 2px rgba(29,36,48,0.12), 0 10px 24px -10px rgba(29,36,48,0.45); }
+[data-theme="light"] .pb-cta:hover, [data-theme="light"] .pb-cta:focus-visible { color: #fff; background: #2B3444;
+  box-shadow: 0 1px 2px rgba(29,36,48,0.12), 0 14px 30px -10px rgba(29,36,48,0.5); }
+[data-theme="light"] :is(.pb-cta, .pb-rig)::before, [data-theme="light"] .pb-cta-meter { display: none; }
+[data-theme="light"] .pb-cta[disabled] { color: rgba(255,255,255,0.7); }
+[data-theme="light"] .pb-cta[disabled]:hover { box-shadow: none; }
+/* The form: a white card with two fields and the same button. */
+[data-theme="light"] .pb-rig { background: #fff; border: 1px solid var(--hair-strong); border-radius: 16px;
+  box-shadow: var(--shadow); }
+[data-theme="light"] .pb-rig:hover, [data-theme="light"] .pb-rig:focus-within { border-color: rgba(46,107,214,0.45);
+  box-shadow: 0 0 0 4px rgba(46,107,214,0.1), var(--shadow); }
+[data-theme="light"] .pb-rig-name { border-bottom-color: var(--hair-strong); }
+[data-theme="light"] .pb-rig-field { color: var(--ink); }
+[data-theme="light"] .pb-rig-field::placeholder, [data-theme="light"] .pb-field-cap { color: var(--faintest); }
+[data-theme="light"] .pb-rig-field:is(:not(:placeholder-shown), :-webkit-autofill) + .pb-field-cap { color: var(--faint); }
+[data-theme="light"] .pb-rig-field:focus + .pb-field-cap { color: var(--accent); }
+[data-theme="light"] .pb-rig-field:-webkit-autofill { -webkit-text-fill-color: var(--ink); caret-color: var(--ink);
+  box-shadow: inset 0 0 0 100vw #fff; }
+[data-theme="light"] .pb-cta-in-rig { margin: 0.45rem; padding: 0.8rem 1.3rem; border-radius: 999px; border: 0; }
+[data-theme="light"] .pb-cta-in-rig:hover, [data-theme="light"] .pb-cta-in-rig:focus-visible { box-shadow: none; }
+
+/* THE TOUR. No step numbers; the windows sit on paper like photographs. */
+[data-theme="light"] .pb-step > i { display: none; }
+[data-theme="light"] .pb-window { border-color: rgba(29,36,48,0.1);
+  box-shadow: 0 2px 4px rgba(29,36,48,0.05), 0 30px 70px -28px rgba(29,36,48,0.4); }
+[data-theme="light"] .pb-after .pb-window { border-color: rgba(29,36,48,0.14);
+  box-shadow: 0 2px 4px rgba(29,36,48,0.06), 0 40px 90px -30px rgba(29,36,48,0.5); }
+[data-theme="light"] .pb-before .pb-window { filter: none; background: #fff; }
+[data-theme="light"] .pb-row { border-bottom-color: var(--hair); }
+[data-theme="light"] .pb-row-sender { color: var(--dim); }
+[data-theme="light"] .pb-unread { background: rgba(210, 75, 58, 0.1); color: var(--danger); }
+[data-theme="light"] .pb-panel figcaption b { color: var(--faint); }
+[data-theme="light"] .pb-after figcaption b { color: var(--accent); }
+[data-theme="light"] .pb-gate::before { background: linear-gradient(transparent, rgba(29,36,48,0.18) 25%, rgba(29,36,48,0.18) 75%, transparent);
+  box-shadow: none; }
+[data-theme="light"] .pb-gate span { background: #fff; color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--hair-strong), var(--shadow); }
+@media (max-width: 900px) {
+  [data-theme="light"] .pb-after { background: linear-gradient(var(--bg) 86%, rgba(250,247,242,0)); }
+  [data-theme="light"] .pb-gate::before { background: linear-gradient(90deg, transparent, rgba(29,36,48,0.18) 25%, rgba(29,36,48,0.18) 75%, transparent); }
+}
+/* The arriving mail: white cards, like a notification, darkening into the
+   app's row as they land. */
+[data-theme="light"] .pb-in { color: var(--dim);
+  background: color-mix(in srgb, rgba(52, 96, 150, 0.95) calc(var(--m, 0) * 100%), #ffffff);
+  box-shadow: inset 0 0 0 1px rgba(29,36,48,0.08), 0 1px 2px rgba(29,36,48,0.06), 0 16px 36px -14px rgba(29,36,48,0.28); }
+/* The name stays ink until the ground has darkened enough to carry it, then
+   flips light over the last stretch, so it never goes pale on pale. */
+[data-theme="light"] .pb-in-top b { color: color-mix(in srgb, #F4F7FB calc(clamp(0, (var(--m, 0) - 0.55) * 4, 1) * 100%), var(--ink)); }
+[data-theme="light"] .pb-in-subj, [data-theme="light"] .pb-in-read dd { color: var(--ink); }
+[data-theme="light"] .pb-in-to { box-shadow: inset 0 0 0 1px rgba(46,107,214,0.35); color: var(--accent); }
+[data-theme="light"] .pb-in-meter { background: rgba(29,36,48,0.08); }
+[data-theme="light"] .pb-in-meter > i { box-shadow: none; background: linear-gradient(90deg, rgba(46,107,214,0.35), var(--accent)); }
+[data-theme="light"] :is(.pb-in-read dt, .pb-in-meter > em::before) { font-family: var(--sans); letter-spacing: 0.02em; }
+/* The tally and the trust row: plain cards, sans labels. */
+[data-theme="light"] .pb-facts { background: #fff; border-color: var(--hair-strong); box-shadow: var(--shadow); }
+[data-theme="light"] .pb-facts::before { display: none; }
+[data-theme="light"] .pb-fact { border-color: var(--hair); }
+[data-theme="light"] .pb-fact dt { font-family: var(--sans); font-size: 0.78rem;
+  letter-spacing: 0.01em; text-transform: none; }
+[data-theme="light"] .pb-fact dt b { display: none; }
+[data-theme="light"] .pb-fact a { color: var(--accent); }
+
+
+
+/* THE APP, IN DAY. Every value from the client's own code: Palette.swift's
+   light inks, hairlines and accent; Glass.swift's light canvas (a pale sky,
+   E6EFFC to D5E5F8, under the brand wash); zone panes are the material at a
+   12% tint of the zone's colour; calendar chips are CalendarColor.swift's
+   light tones for each hue (OKLab, L .885 / .43 / .60). */
+[data-theme="light"] .pb-shot {
+  --bg: #EDF3FA; --canvas: #EDF3FA; --card: #FFFFFF;
+  --ink: #141C26; --dim: #455465; --faint: #6B7A8B; --faintest: #94A2B2;
+  --hair: rgba(30, 50, 70, 0.12); --hair-strong: rgba(30, 50, 70, 0.2);
+  --accent: #2B7FD4; --accent-ink: #1C63AE;
+  --warn: #B5761A; --positive: #1F7A4D; --danger: #D6412F; }
+[data-theme="light"] .pb-after .pb-window { background: linear-gradient(#E3EDFA, #D3E3F7); border-color: rgba(30, 50, 70, 0.14); }
+[data-theme="light"] .pb-side { background: rgba(255, 255, 255, 0.45); border-right-color: rgba(30, 50, 70, 0.1); }
+[data-theme="light"] .pb-side span { color: #6B7A8B; }
+[data-theme="light"] .pb-side span.on { background: rgba(43, 127, 212, 0.16); color: #2B7FD4; }
+[data-theme="light"] .pb-me { box-shadow: inset 0 0 0 0.5pt rgba(30, 50, 70, 0.15); }
+[data-theme="light"] .pb-zone { background: rgba(255, 255, 255, 0.72); box-shadow: inset 0 0 0 0.75pt rgba(30, 50, 70, 0.1),
+  0 1pt 2pt rgba(30, 50, 70, 0.05); }
+[data-theme="light"] .pb-zone-h em { background: rgba(30, 50, 70, 0.08); }
+[data-theme="light"] .pb-flow { background: rgba(43, 127, 212, 0.1); }
+[data-theme="light"] .pb-eye.cursor { background: rgba(43, 127, 212, 0.1); }
+[data-theme="light"] .pb-eye.overdue.cursor { background: rgba(214, 65, 47, 0.08); }
+[data-theme="light"] .pb-read { background: rgba(30, 50, 70, 0.05); }
+[data-theme="light"] .pb-read.content { background: rgba(201, 161, 90, 0.32); }
+[data-theme="light"] .pb-rec-cal { --bg-c: #E6EFFA; --edge: rgba(43, 127, 212, 0.3); }
+[data-theme="light"] .pb-rec-ship { --bg-c: #F6EEE3; --edge: rgba(181, 118, 26, 0.32); }
+[data-theme="light"] .pb-rec-bill { --bg-c: #E4ECF6; --edge: rgba(28, 99, 174, 0.28); }
+[data-theme="light"] .pb-rec-rcpt { --bg-c: #E5F0EA; --edge: rgba(31, 122, 77, 0.3); }
+[data-theme="light"] .pb-ship { background: rgba(255, 255, 255, 0.7); }
+[data-theme="light"] .pb-land[data-arrived] > div > *, [data-theme="light"] .pb-read[data-arrived] { animation-name: pb-landed-day; }
+@keyframes pb-landed-day { from { background-color: rgba(43, 127, 212, 0.22); } }
+/* The arriving mail lands as a light row now, so it whitens rather than
+   darkens on the way in. */
+[data-theme="light"] .pb-in { background: color-mix(in srgb, rgba(205, 224, 247, 1) calc(var(--m, 0) * 100%), #ffffff); }
+[data-theme="light"] .pb-in-top b { color: var(--ink); }
+/* Calendar. */
+[data-theme="light"] .pb-calshot .pb-window { background: linear-gradient(#E3EDFA, #D3E3F7); }
+[data-theme="light"] .pb-seg { background: rgba(30, 50, 70, 0.08); }
+[data-theme="light"] .pb-seg span.on { background: #2B7FD4; color: #fff; }
+[data-theme="light"] :is(.pb-caltool .nav, .pb-caltool .today, .pb-caltool .new) { background: rgba(255, 255, 255, 0.7);
+  box-shadow: inset 0 0 0 0.75pt rgba(30, 50, 70, 0.1); }
+[data-theme="light"] .pb-wd { color: #94A2B2; border-bottom-color: rgba(30, 50, 70, 0.1); }
+[data-theme="light"] .pb-day { border-bottom-color: rgba(30, 50, 70, 0.1); }
+[data-theme="light"] .pb-day > header { color: #6B7A8B; }
+[data-theme="light"] .pb-day.out > header { color: #A9B4C1; }
+[data-theme="light"] .pb-day.sel::after { box-shadow: inset 0 0 0 1pt rgba(43, 127, 212, 0.6); }
+[data-theme="light"] .pb-ev { color: var(--ink); }
+[data-theme="light"] .pb-day.out .pb-ev { filter: none; opacity: 0.5; }
+[data-theme="light"] .pb-ev.picked { box-shadow: inset 0 0 0 1.25pt #2B7FD4; }
+[data-theme="light"] .pb-ev.thin span { color: #94A2B2; }
+[data-theme="light"] .pb-ev.red { --fill: #FDC9D6; --ink: #7E314B; --edge: #C1577A; }
+[data-theme="light"] .pb-ev.purple { --fill: #D2D6FE; --ink: #46468A; --edge: #7373D1; }
+[data-theme="light"] .pb-ev.teal { --fill: #A9E6E7; --ink: #035C5E; --edge: #009295; }
+[data-theme="light"] .pb-ev.brown { --fill: #F5D3AD; --ink: #6F4509; --edge: #B07010; }
+[data-theme="light"] .pb-ev.green { --fill: #C3E4BE; --ink: #265E21; --edge: #499441; }
+[data-theme="light"] .pb-ev.gray { --fill: #DCE3EC; --ink: #3F516A; --edge: #6E829D; }
+[data-theme="light"] .pb-evcard { background: rgba(255, 255, 255, 0.78); box-shadow: inset 0 0 0 0.75pt rgba(30, 50, 70, 0.1); }
+[data-theme="light"] .pb-behind { background: rgba(30, 50, 70, 0.05); }
+[data-theme="light"] .pb-evkeys kbd { background: rgba(30, 50, 70, 0.08); color: var(--dim); }
+[data-theme="light"] .pb-brow.update { background: rgba(43, 127, 212, 0.14); }
+
+/* THE DAWN. The hero's ground is a morning sky: pale blue overhead,
+   warming to peach where the line runs like a horizon, and back to paper at
+   the foot so the page below carries on from it. The scope still paints on
+   paper; multiplied onto the sky, its paper vanishes and its ink stays. The
+   analyzer's markers and marker table stay off the day page. */
+[data-theme="light"] .pb-stage { background:
+  linear-gradient(180deg, rgba(250,247,242,0) 84%, #FAF7F2 97%),
+  radial-gradient(ellipse 55% 26% at 68% 72%, rgba(255, 190, 150, 0.5), rgba(255, 190, 150, 0) 70%),
+  linear-gradient(180deg, #D8E5F6 0%, #E7EDF6 32%, #F4EEEA 55%, #FADFCD 72%, #FAEBDF 84%, #FAF7F2 97%); }
+[data-theme="light"] .pb-scene { mix-blend-mode: multiply; }
+[data-theme="light"] .pb-grat { display: none; }
+[data-theme="light"] .pb-stage .pb-cue { color: rgba(29, 36, 48, 0.45); }
+
+/* The footer mark keeps its colour on paper. */
+[data-theme="light"] .pb-foot-mark { filter: none; opacity: 0.55; }
+`;
 
 // MARK: - the page
 
@@ -2509,6 +2789,7 @@ export function App() {
     const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
     const scene = createScope(canvas, {
       reduceMotion,
+      light: THEME === "light",
       layout: scopeLayout,
       // Written straight to the DOM: it changes every frame, and a re-render
       // per frame would buy nothing.
@@ -2596,6 +2877,7 @@ export function App() {
     <main className="pb">
       <style href="pb-page" precedence="default">{PAGE_CSS_RESOLVED}</style>
       <style href="pb-cal" precedence="default">{CAL_CSS_RESOLVED}</style>
+      <style href="pb-light" precedence="default">{LIGHT_CSS}</style>
 
       <section ref={storyRef} className="pb-story">
         <div
@@ -2628,6 +2910,7 @@ export function App() {
           <span className="pb-read-r" aria-hidden="true">SQUELCH&nbsp;<b ref={readoutRef}>0%</b></span>
 
           <div className="pb-cue" aria-hidden="true">scroll</div>
+
         </div>
 
         <div className="pb-track">

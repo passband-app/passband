@@ -466,12 +466,18 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-in-to svg { width: 9pt; height: 9pt; }
 /* The first email is read in full: what it asks, by when, what it is about,
    and the level it reaches against the squelch. */
-/* A thread's reply, coming up as it is read. */
-.pb-in-reply { display: flex; align-items: baseline; gap: 8pt; padding: 7pt 10pt; border-radius: 10pt;
-  background: rgba(78, 155, 234, 0.14); color: var(--ink); align-self: flex-start;
-  max-height: calc(var(--r, 0) * 40pt); opacity: calc(var(--r, 0) * var(--fade, 1)); overflow: hidden;
-  margin-top: calc((var(--r, 0) - 1) * 6pt); padding-block: calc(var(--r, 0) * 7pt); }
-.pb-in-reply b { font-size: 10pt; font-weight: 600; color: var(--accent-ink); }
+/* A thread: bubbles, theirs on the left and yours on the right, each coming
+   up in turn as the card is read (message k shows over the k-th third of
+   the read; the first is there from the start). */
+.pb-in-thread { display: flex; flex-direction: column; gap: 5pt; }
+.pb-in-msg { --s: clamp(0, calc(var(--r, 0) * 3 - var(--k) + 1), 1);
+  margin: calc((var(--s) - 1) * 5pt) 0 0; max-width: 80%; padding: calc(var(--s) * 6pt) 10pt;
+  max-height: calc(var(--s) * 44pt); overflow: hidden; opacity: calc(var(--s) * var(--fade, 1));
+  border-radius: 13pt; font-size: 11.5pt; line-height: 1.3; }
+.pb-in-msg.them { align-self: flex-start; background: rgba(233, 238, 245, 0.09); color: var(--ink);
+  border-bottom-left-radius: 4pt; }
+.pb-in-msg.you { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4pt; }
+[data-theme="light"] .pb-in-msg.them { background: rgba(29, 36, 48, 0.06); }
 .pb-in-to svg { width: 10pt; height: 10pt; }
 .pb-in-read { max-height: calc(var(--r, 0) * 140pt); opacity: var(--r, 0); overflow: hidden;
   margin-top: calc((var(--r, 0) - 1) * 6pt);
@@ -1975,7 +1981,9 @@ function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
         // goes; the run's cards only flash where they are going.
         const full = card.hasAttribute("data-full");
         const a = clamp01((d + (full ? 0.48 : 0.42)) / 0.18);
-        const r = full ? clamp01((d + 0.16) / 0.18) : clamp01((d + 0.2) / 0.14);
+        // A thread reads over longer, one message at a time.
+        const r = card.hasAttribute("data-thread") ? clamp01((d + 0.36) / 0.38)
+          : full ? clamp01((d + 0.16) / 0.18) : clamp01((d + 0.2) / 0.14);
         const f = full ? clamp01((d - 0.08) / 0.26) : clamp01((d + 0.04) / 0.24);
         card.style.setProperty("--r", String(r));
 
@@ -2174,6 +2182,12 @@ const CAL_CSS = `
 .pb-day.out > header { color: #46515d; }
 /* A chip that lands in the tour: no gap of its own until it opens. */
 .pb-day .pb-land { margin-top: -3pt; }
+/* The calendar tour keeps the original pacing: its last step is full height
+   and the list ends with it, so the window lets go while that step is still
+   level with it rather than after it has passed (which would fold the
+   summit away again on screen). */
+.pb-pair.pb-cal.pb-mailpair .pb-steps { padding-bottom: 0; }
+.pb-pair.pb-cal.pb-mailpair .pb-step:last-child { min-height: 64svh; }
 .pb-day .pb-land .pb-ev { margin-top: 3pt; }
 .pb-day.out .pb-ev { filter: brightness(0.7) saturate(0.6); }
 .pb-day > header small { font-size: 9.5pt; color: var(--faintest); transition: color 0.4s ease; }
@@ -2463,18 +2477,30 @@ function CalMock({ focus }: { focus: string | undefined }) {
 const COFFEE: Inbound = { id: "coffee", who: "Maya Lin", subject: "Could you do 2p on Wednesday?",
   to: "Wed 18 · 2:00 PM", face: { initials: "ML", tone: "rose" } };
 
+// The back-and-forth, oldest first. The first line is there when the card
+// arrives; the rest come up one by one as it is read.
+const THREAD: Array<["them" | "you", string]> = [
+  ["them", "Coffee next week? It has been forever."],
+  ["you", "Yes please. When works for you?"],
+  ["them", "Could you do 2p on Wednesday?"],
+  ["you", "Yeah!"],
+];
+
 function ThreadCard({ m }: { m: Inbound }) {
   const face = "initials" in m.face ? m.face : null;
   return (
-    <div className="pb-in" data-in={m.id} data-full>
+    <div className="pb-in" data-in={m.id} data-full data-thread>
       <div className="pb-in-body">
         <div className="pb-in-top">
           {face && <span className="pb-avatar" style={{ background: AVATAR[face.tone][0], color: AVATAR[face.tone][1] }}>{face.initials}</span>}
           <b>{m.who}</b>
-          <small>Re: catching up</small>
+          <small>Re: coffee?</small>
         </div>
-        <div className="pb-in-subj">{m.subject}</div>
-        <div className="pb-in-reply"><b>You</b><span>Yeah!</span></div>
+        <div className="pb-in-thread">
+          {THREAD.map(([who, line], k) => (
+            <p key={k} className={`pb-in-msg ${who}`} style={{ ["--k" as string]: k }}>{line}</p>
+          ))}
+        </div>
         <span className="pb-in-to">
           <Glyph name="calendar" />
           {m.to}
@@ -2488,7 +2514,10 @@ function CalShowcase() {
   const { stepsRef, focus } = useTourFocus();
   const pairRef = useRef<HTMLDivElement>(null);
   useArrivals(pairRef);
-  const key = focus < 0 ? undefined : CAL_TOUR[focus].key;
+  // Past the last step the window keeps the last step's picture, so nothing
+  // on it folds back while it scrolls away. Before the first, it is plain.
+  const past = focus < 0 && !!stepsRef.current && stepsRef.current.getBoundingClientRect().bottom < innerHeight / 2;
+  const key = focus >= 0 ? CAL_TOUR[focus].key : past ? CAL_TOUR[CAL_TOUR.length - 1].key : undefined;
   return (
     <div className="pb-pair pb-cal pb-mailpair" ref={pairRef}>
       <div className="pb-hold">

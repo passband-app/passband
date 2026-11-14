@@ -469,11 +469,11 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 /* A thread: bubbles, theirs on the left and yours on the right, each coming
    up in turn as the card is read (message k shows over the k-th third of
    the read; the first is there from the start). */
-.pb-in-thread { display: flex; flex-direction: column; gap: 5pt; }
+.pb-in-thread { display: flex; flex-direction: column; gap: 4pt; }
 .pb-in-msg { --s: clamp(0, calc(var(--r, 0) * 3 - var(--k) + 1), 1);
-  margin: calc((var(--s) - 1) * 5pt) 0 0; max-width: 80%; padding: calc(var(--s) * 6pt) 10pt;
-  max-height: calc(var(--s) * 44pt); overflow: hidden; opacity: calc(var(--s) * var(--fade, 1));
-  border-radius: 13pt; font-size: 11.5pt; line-height: 1.3; }
+  margin: calc((var(--s) - 1) * 4pt) 0 0; max-width: 76%; padding: calc(var(--s) * 4.5pt) 8pt;
+  max-height: calc(var(--s) * 36pt); overflow: hidden; opacity: calc(var(--s) * var(--fade, 1));
+  border-radius: 11pt; font-size: 9.5pt; line-height: 1.3; }
 .pb-in-msg.them { align-self: flex-start; background: rgba(233, 238, 245, 0.09); color: var(--ink);
   border-bottom-left-radius: 4pt; }
 .pb-in-msg.you { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4pt; }
@@ -2306,7 +2306,7 @@ const CAL_DAYS: Array<{ label: string; out?: boolean; unlikely?: number; chips: 
   { label: "15", chips: [] },
   { label: "16", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "2pm", name: "1:1 Jamie", hue: "purple" }] },
   { label: "17", chips: [{ t: "10am", name: "Board", hue: "red" }, { t: "3pm", name: "Hiring", hue: "green" }] },
-  { label: "18", chips: [{ t: "10am", name: "Design crit", hue: "purple" }, { t: "2pm", name: "Coffee w/ Maya", hue: "green", land: "coffee" }, { t: "5pm", name: "Demo", hue: "teal" }] },
+  { label: "18", chips: [{ t: "10am", name: "Design crit", hue: "purple" }, { t: "2pm", name: "Hedge Coffee", hue: "green", land: "coffee" }, { t: "5pm", name: "Demo", hue: "teal" }] },
   { label: "19", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "2:30pm", name: "Dr. Ortiz", hue: "teal" }] },
   { label: "20", chips: [{ t: "10am", name: "Roadmap", hue: "purple" }, { t: "10pm", name: "Endzeit x Non Series", hue: "purple", kind: "maybe", id: "night" }] },
   { label: "21", chips: [] },
@@ -2483,7 +2483,7 @@ const THREAD: Array<["them" | "you", string]> = [
   ["them", "Coffee next week? It has been forever."],
   ["you", "Yes please. When works for you?"],
   ["them", "Could you do 2p on Wednesday?"],
-  ["you", "Yeah!"],
+  ["you", "Yeah! Let’s do Hedge Coffee."],
 ];
 
 function ThreadCard({ m }: { m: Inbound }) {

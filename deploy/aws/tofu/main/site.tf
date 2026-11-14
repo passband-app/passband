@@ -119,10 +119,41 @@ data "aws_cloudfront_cache_policy" "optimized" {
   name = "Managed-CachingOptimized"
 }
 
+# THE ANALYTICS PROXY. The landing page reports to PostHog through
+# passband.app/ingest/* rather than straight to posthog.com, so the CSP stays
+# connect-src 'self' and ad blockers do not drop the events
+# (passband-site/analytics.ts). This behavior forwards everything (method,
+# query, body, cookies, every header but Host) to PostHog's US ingest host
+# uncached, after a viewer-request function strips the /ingest prefix. Only
+# the ingest host: the site bundles PostHog's extensions instead of loading
+# them from the assets CDN, so nothing needs /ingest/static.
+data "aws_cloudfront_cache_policy" "disabled" {
+  name = "Managed-CachingDisabled"
+}
+
+data "aws_cloudfront_origin_request_policy" "all_but_host" {
+  name = "Managed-AllViewerExceptHostHeader"
+}
+
+resource "aws_cloudfront_function" "ingest" {
+  name    = "passband-site-ingest"
+  runtime = "cloudfront-js-2.0"
+  comment = "strip /ingest before forwarding to PostHog"
+  publish = true
+  code    = <<-JS
+    function handler(event) {
+      var r = event.request;
+      r.uri = r.uri.replace(/^\/ingest/, "") || "/";
+      return r;
+    }
+  JS
+}
+
 # The managed SecurityHeadersPolicy's headers, plus a Content-Security-Policy,
 # which the managed policy does not set and a DAST scan reports as Medium. The site loads nothing but
 # its own files; the one cross-origin call is the waitlist form's fetch to
-# control. Inline styles stay allowed because React's `style` props and the
+# control. Analytics go to /ingest on this same origin (the proxy above), so
+# they need no line here. Inline styles stay allowed because React's `style` props and the
 # static pages' <style> blocks use them. Checked with every page loaded in
 # Chromium under this exact policy, waitlist submit included: no violations.
 # A new third-party script, font or API call on the site needs a line here.
@@ -180,6 +211,33 @@ resource "aws_cloudfront_distribution" "site" {
     origin_id                = "site"
     domain_name              = aws_s3_bucket.site.bucket_regional_domain_name
     origin_access_control_id = aws_cloudfront_origin_access_control.site.id
+  }
+
+  origin {
+    origin_id   = "posthog"
+    domain_name = "us.i.posthog.com"
+    custom_origin_config {
+      http_port              = 80
+      https_port             = 443
+      origin_protocol_policy = "https-only"
+      origin_ssl_protocols   = ["TLSv1.2"]
+    }
+  }
+
+  ordered_cache_behavior {
+    path_pattern             = "/ingest/*"
+    target_origin_id         = "posthog"
+    viewer_protocol_policy   = "redirect-to-https"
+    allowed_methods          = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
+    cached_methods           = ["GET", "HEAD"]
+    compress                 = true
+    cache_policy_id          = data.aws_cloudfront_cache_policy.disabled.id
+    origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_but_host.id
+
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.ingest.arn
+    }
   }
 
   default_cache_behavior {

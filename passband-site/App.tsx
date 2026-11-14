@@ -469,11 +469,14 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 /* A thread: bubbles, theirs on the left and yours on the right, each coming
    up in turn as the card is read (message k shows over the k-th third of
    the read; the first is there from the start). */
-.pb-in-thread { display: flex; flex-direction: column; gap: 4pt; }
+.pb-in-thread { display: flex; flex-direction: column; gap: 7pt; margin: 6pt 0 4pt; }
 .pb-in-msg { --s: clamp(0, calc(var(--r, 0) * 3 - var(--k) + 1), 1);
-  margin: calc((var(--s) - 1) * 4pt) 0 0; max-width: 76%; padding: calc(var(--s) * 4.5pt) 8pt;
-  max-height: calc(var(--s) * 36pt); overflow: hidden; opacity: calc(var(--s) * var(--fade, 1));
-  border-radius: 11pt; font-size: 9.5pt; line-height: 1.3; }
+  margin: calc((var(--s) - 1) * 7pt) 0 0; max-width: 74%; padding: calc(var(--s) * 5pt) 10pt;
+  max-height: calc(var(--s) * 40pt); overflow: hidden; opacity: calc(var(--s) * var(--fade, 1));
+  border-radius: 12pt; font-size: 10.5pt; line-height: 1.35; }
+/* The thread's card gets more air than a mail card: a conversation needs
+   room around it to read as one. */
+.pb-in[data-thread] { padding: 14pt 16pt; }
 .pb-in-msg.them { align-self: flex-start; background: rgba(233, 238, 245, 0.09); color: var(--ink);
   border-bottom-left-radius: 4pt; }
 .pb-in-msg.you { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4pt; }
@@ -2498,7 +2501,7 @@ function ThreadCard({ m }: { m: Inbound }) {
         </div>
         <div className="pb-in-thread">
           {THREAD.map(([who, line], k) => (
-            <p key={k} className={`pb-in-msg ${who}`} style={{ ["--k" as string]: k }}>{line}</p>
+            <div key={k} className={`pb-in-msg ${who}`} style={{ ["--k" as string]: k }}>{line}</div>
           ))}
         </div>
         <span className="pb-in-to">

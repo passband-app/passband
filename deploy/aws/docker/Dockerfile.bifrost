@@ -12,5 +12,5 @@
 # performs every operation as uid 1000 (tofu var.bifrost_uid) anyway, so the
 # process and its files already agree. Root bought nothing here except a
 # root process holding every mail body and the Anthropic key.
-FROM maximhq/bifrost:v1.6.9@sha256:fafe3d2029af07c889404f561839f3ac6ff95c1848f679679d219c0dc7f72de8
+FROM maximhq/bifrost:v2.5.1@sha256:5ec9873acaf1687556b6e4dd854b92b539d9debf87a5a683b66338648b84d3c8
 EXPOSE 8080

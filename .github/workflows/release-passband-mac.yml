@@ -127,12 +127,13 @@ jobs:
             echo "==> no release note for $VERSION in ReleaseNotes.swift" >&2
           fi
           printf '%s\n' \
-            'Existing installs get this via auto-update. New installs: unzip and drag' \
-            'to Applications, or `brew install --cask passband-app/tap/passband`.' \
+            'Existing installs get this via auto-update. New installs: open the dmg and' \
+            'drag Passband to Applications, or `brew install --cask passband-app/tap/passband`.' \
             >> "$NOTES"
           # The dSYM rides on THIS repo's release only, never the public
           # mirror below: it is for symbolicating crashes, not for downloads.
           gh release create "$GITHUB_REF_NAME" "passband/build/Passband-$VERSION.zip" \
+            "passband/build/Passband-$VERSION.dmg" \
             "passband/build/symbols-Passband-$VERSION.dSYM.zip" \
             --title "Passband $VERSION" \
             --notes-file "$NOTES"
@@ -143,8 +144,9 @@ jobs:
       # CloudFront function both point there). BEFORE the appcast on purpose:
       # if the mirror upload fails, the feed never advertises a zip nobody can
       # fetch. Retiring the mirror means pointing those redirects back at this
-      # repo first, then deleting this step.
-      - name: Mirror the zip to the public releases repo
+      # repo first, then deleting this step. The zip is what Sparkle and
+      # Homebrew fetch; the dmg is what the site's /download hands a person.
+      - name: Mirror the zip and dmg to the public releases repo
         env:
           GH_TOKEN: ${{ secrets.RELEASES_PUSH_TOKEN }}
         run: |
@@ -154,9 +156,10 @@ jobs:
             exit 1
           fi
           gh release create "$GITHUB_REF_NAME" "passband/build/Passband-$VERSION.zip" \
+            "passband/build/Passband-$VERSION.dmg" \
             --repo passband-app/passband-releases \
             --title "Passband $VERSION" \
-            --notes "Passband for Mac $VERSION. Existing installs update automatically. New installs: unzip and drag to Applications, or \`brew install --cask passband-app/tap/passband\`."
+            --notes "Passband for Mac $VERSION. Existing installs update automatically. New installs: open the dmg and drag Passband to Applications, or \`brew install --cask passband-app/tap/passband\`."
 
       # The feed lists exactly the zips in releases/, so hydrate it with every
       # previously shipped archive — the workflow is stateless, the releases

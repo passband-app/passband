@@ -62,6 +62,13 @@ export function parseReleasesRepo(serverSrc: string): string {
   return m[1];
 }
 
+/** DMG_SINCE from server.ts: the first version /download serves as a dmg. */
+export function parseDmgSince(serverSrc: string): string {
+  const m = serverSrc.match(/const DMG_SINCE = "(\d+\.\d+\.\d+)";/);
+  if (!m) throw new Error("server.ts: could not find DMG_SINCE");
+  return m[1];
+}
+
 export type ObjectSpec = {
   /** S3 key, no leading slash; also the path the function rewrites to. */
   key: string;
@@ -111,6 +118,7 @@ export function renderFunction(opts: {
   pages: Record<string, string>;
   latest: string | null;
   releasesRepo: string;
+  dmgSince: string;
 }): string {
   const routes: Record<string, string> = {};
   for (const [p, f] of Object.entries(opts.pages)) routes[p] = "/" + f;
@@ -120,8 +128,18 @@ export function renderFunction(opts: {
 // routing exactly; deploy/aws/site/function.test.ts holds it to that.
 var LATEST = ${JSON.stringify(opts.latest)};
 var RELEASES_REPO = ${JSON.stringify(opts.releasesRepo)};
+var DMG_SINCE = ${JSON.stringify(opts.dmgSince)};
 var ROUTES = ${JSON.stringify(routes, null, 2)};
-var DL = /^\\/download\\/(Passband-(\\d+\\.\\d+\\.\\d+)\\.zip)$/;
+var DL = /^\\/download\\/(Passband-(\\d+\\.\\d+\\.\\d+)\\.(?:zip|dmg))$/;
+
+function versionAtLeast(a, b) {
+  var x = a.split(".");
+  var y = b.split(".");
+  for (var i = 0; i < 3; i++) {
+    if (Number(x[i]) !== Number(y[i])) return Number(x[i]) > Number(y[i]);
+  }
+  return true;
+}
 
 function redirect(location) {
   return {
@@ -141,7 +159,7 @@ function handler(event) {
   if (path === "/download" || path === "/download/latest") {
     return redirect(
       LATEST
-        ? "/download/Passband-" + LATEST + ".zip"
+        ? "/download/Passband-" + LATEST + (versionAtLeast(LATEST, DMG_SINCE) ? ".dmg" : ".zip")
         : "https://github.com/" + RELEASES_REPO + "/releases"
     );
   }

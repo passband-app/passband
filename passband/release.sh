@@ -61,9 +61,10 @@ fi
 echo "==> creating GitHub release $TAG"
 # The symbols ride along on this repo's release, as in CI; never the public
 # download mirror.
-gh release create "$TAG" "$ZIP" "build/symbols-Passband-$VERSION.dSYM.zip" \
+gh release create "$TAG" "$ZIP" "build/Passband-$VERSION.dmg" \
+  "build/symbols-Passband-$VERSION.dSYM.zip" \
   --title "Passband $VERSION" \
-  --notes "Passband $VERSION. Auto-update will offer this to existing installs; new installs: unzip and drag to Applications, or \`brew install passband-app/tap/passband\`."
+  --notes "Passband $VERSION. Auto-update will offer this to existing installs; new installs: open the dmg and drag Passband to Applications, or \`brew install passband-app/tap/passband\`."
 
 echo "==> regenerating appcast"
 ./make-appcast.sh

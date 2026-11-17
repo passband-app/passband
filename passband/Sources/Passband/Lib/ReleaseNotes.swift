@@ -1018,9 +1018,9 @@ extension ReleaseNote: VersionedNote {}
 ///
 /// QUIET NOTES DO NOT EXIST HERE. Every rule reads the table through
 /// `ordered`, which drops them, so a quiet release is never owed, never
-/// replayed, and never the "latest release" a newcomer is shown; that is the
-/// newest announced one instead. Somebody who skipped an announced release
-/// and lands on a quiet one is still shown the announced one.
+/// replayed, and never what a newcomer is stamped with; that is the newest
+/// announced one instead. Somebody who skipped an announced release and lands
+/// on a quiet one is still shown the announced one.
 enum ReleaseLedger {
     static func unseen<Note: VersionedNote>(_ all: [Note], lastSeen: String?, running: String) -> [Note] {
         guard let ceiling = ReleaseVersion(running) else { return [] }
@@ -1042,15 +1042,18 @@ enum ReleaseLedger {
         ordered(all).first { $0.version < version }?.version
     }
 
-    /// The stamp a NEWCOMER gets at onboarding: the release just below the
-    /// newest note this build is at or past, so their first arrival on the
-    /// Sitrep shows exactly that one note and nothing older. Nil when that
-    /// note is the oldest on record (no stamp then shows it alone anyway) or
-    /// when no note is at or below the build.
+    /// The stamp a NEWCOMER gets at onboarding: everything they installed is
+    /// already read, so a fresh install shows no changelog at all (owner's
+    /// call, 2026-11-17: one more card to click through before using the app
+    /// is a cost to adoption, and "what's new" means nothing to somebody for
+    /// whom all of it is). That is the newest note at or below the build, so
+    /// a later build carrying a note for an older release they skipped can
+    /// still announce it; on a build below the whole table, the build itself,
+    /// so they meet the first note when they update to it. Nil only for a
+    /// build with no readable version.
     static func newcomerStamp<Note: VersionedNote>(_ all: [Note], running: String) -> String? {
-        guard let current = newest(all, atOrBelow: running), let version = ReleaseVersion(current.version)
-        else { return nil }
-        return previous(all, before: version)?.text
+        guard ReleaseVersion(running) != nil else { return nil }
+        return newest(all, atOrBelow: running)?.version ?? running
     }
 
     static func newest<Note: VersionedNote>(_ all: [Note], atOrBelow running: String) -> Note? {

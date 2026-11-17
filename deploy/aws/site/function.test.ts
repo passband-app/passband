@@ -9,7 +9,14 @@ import { copyFileSync, mkdtempSync, readFileSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { build, FUNCTION_PATH, SITE_DIR, type BuildResult } from "./build";
-import { APPCAST_CACHE_CONTROL, latestVersion, parsePages, parseReleasesRepo, renderFunction } from "./lib";
+import {
+  APPCAST_CACHE_CONTROL,
+  latestVersion,
+  parseDmgSince,
+  parsePages,
+  parseReleasesRepo,
+  renderFunction,
+} from "./lib";
 
 type CfResult =
   | { statusCode: number; headers: Record<string, { value: string }> }
@@ -73,6 +80,10 @@ const EDGE_ROUTES = [
   "/download/passband-1.2.3.zip",
   "/download/Passband-1.2.3.zip/",
   "/download/Passband-1.2.3.dmg",
+  "/download/Passband-0.0.14.dmg",
+  "/download/Passband-1.2.3.dmg/",
+  "/download/Passband-1.2.3.pkg",
+  "/download/Passband-1.2.dmg", // malformed: index.html
   "/download/x/Passband-1.2.3.zip",
   "/downloads",
   "/DOWNLOAD",
@@ -149,7 +160,12 @@ describe("no released version", () => {
     copyFileSync(join(SITE_DIR, "index.html"), join(dir, "index.html"));
     bare = await startServer(dir);
     noVersion = loadHandler(
-      renderFunction({ pages, latest: latestVersion(null), releasesRepo: parseReleasesRepo(serverSrc) }),
+      renderFunction({
+        pages,
+        latest: latestVersion(null),
+        releasesRepo: parseReleasesRepo(serverSrc),
+        dmgSince: parseDmgSince(serverSrc),
+      }),
     );
   });
   afterAll(() => bare?.stop());
@@ -167,6 +183,44 @@ describe("no released version", () => {
     expect(latestVersion("<sparkle:shortVersionString>1.2</sparkle:shortVersionString>")).toBeNull();
     expect(latestVersion("<rss></rss>")).toBeNull();
   });
+});
+
+// /download hands out the dmg from DMG_SINCE on and the zip before it (older
+// releases have no dmg). Both sides of that line, against server.ts itself.
+describe("dmg or zip by version", () => {
+  const dmgSince = parseDmgSince(serverSrc);
+  const [major, minor, patch] = dmgSince.split(".").map(Number);
+  const cases: [string, string][] = [
+    [dmgSince, "dmg"],
+    [`${major}.${minor}.${patch + 1}`, "dmg"],
+    [`${major}.${minor + 1}.0`, "dmg"],
+    [`${major + 1}.0.0`, "dmg"],
+    ...(patch > 0 ? [[`${major}.${minor}.${patch - 1}`, "zip"] as [string, string]] : []),
+    ...(minor > 0 ? [[`${major}.${minor - 1}.99`, "zip"] as [string, string]] : []),
+    ["0.0.14", "zip"],
+  ];
+  for (const [version, ext] of cases) {
+    test(`latest ${version} -> .${ext}`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), "passband-site-ver-"));
+      copyFileSync(join(SITE_DIR, "server.ts"), join(dir, "server.ts"));
+      copyFileSync(join(SITE_DIR, "index.html"), join(dir, "index.html"));
+      const xml = `<rss><item><sparkle:shortVersionString>${version}</sparkle:shortVersionString></item></rss>`;
+      writeFileSync(join(dir, "appcast.xml"), xml);
+      const srv = await startServer(dir);
+      try {
+        const res = await fetch(srv.base + "/download", { redirect: "manual" });
+        const h = loadHandler(
+          renderFunction({ pages, latest: latestVersion(xml), releasesRepo: parseReleasesRepo(serverSrc), dmgSince }),
+        );
+        const cf = cfRequest(h, "/download") as { statusCode: number; headers: Record<string, { value: string }> };
+        expect(res.headers.get("location")).toBe(`/download/Passband-${version}.${ext}`);
+        expect(cf.statusCode).toBe(res.status);
+        expect(cf.headers.location.value).toBe(res.headers.get("location")!);
+      } finally {
+        srv.stop();
+      }
+    });
+  }
 });
 
 test("committed function.js is valid for the runtime shape", () => {

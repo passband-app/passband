@@ -16,6 +16,7 @@ import { dirname, join, resolve } from "path";
 import {
   latestVersion,
   objectSpecs,
+  parseDmgSince,
   parsePages,
   parseReleasesRepo,
   renderFunction,
@@ -66,7 +67,7 @@ export function build(opts: { outDir: string; siteBuild: boolean; writeFunction:
     specs.map((s) => [s.key, s.contentType, s.cacheControl ?? ""].join("\t")).join("\n") + "\n",
   );
 
-  const functionSource = renderFunction({ pages, latest, releasesRepo });
+  const functionSource = renderFunction({ pages, latest, releasesRepo, dmgSince: parseDmgSince(serverSrc) });
   if (opts.writeFunction) writeFileSync(FUNCTION_PATH, functionSource);
   return { outDir: opts.outDir, specs, latest, functionSource };
 }

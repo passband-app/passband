@@ -1639,7 +1639,10 @@ async fn a_signup_with_no_username_is_named_after_its_mailbox() {
         .lock()
         .unwrap()
         .taken
-        .extend(squelch_control::labels::candidates(MAILBOX));
+        .extend(squelch_control::labels::candidates(
+            MAILBOX,
+            &h.state.config().cookie_key,
+        ));
     let (status, body) = h.run_signup("", &invite).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains(r#"id="label""#), "{body}");

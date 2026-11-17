@@ -1440,14 +1440,14 @@ pub async fn oauth_callback(
             //
             // Nothing has been provisioned at this point, so the retry is clean.
             Err(oauth::OAuthError::Scope) => {
-                tracing::info!(label = %label, "consent granted only part of the scope set");
+                tracing::info!("consent granted only part of the scope set");
                 release().await;
                 return done(partial_consent_problem());
             }
             Err(e) => {
                 // The error type only. Its `Display` is written to carry no code,
                 // no secret, and no provider body.
-                tracing::warn!(error = %e, label = %label, "token exchange failed");
+                tracing::warn!(error = %e, "token exchange failed");
                 release().await;
                 return done(pages::problem(
                     StatusCode::BAD_GATEWAY,
@@ -1541,7 +1541,7 @@ pub async fn oauth_callback(
     let candidates = if typed {
         vec![label]
     } else {
-        labels::candidates(&grant.account_email)
+        labels::candidates(&grant.account_email, &config.cookie_key)
     };
     let mut picked = None;
     for candidate in candidates {
@@ -1597,7 +1597,7 @@ pub async fn oauth_callback(
             Some(""),
             "",
             Some(
-                "Pick a username for your mailbox. The ones we tried are taken. Your invite code has not been used.",
+                "Every username we tried for your mailbox is taken. Your invite code has not been used.",
             ),
             config.microsoft.is_some(),
         ));

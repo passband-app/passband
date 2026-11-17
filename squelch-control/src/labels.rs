@@ -154,19 +154,26 @@ pub fn suggestions(email: &str) -> Vec<String> {
 
 /// Every username signup will try for `email`, in order, when the person did
 /// not type one: the [`suggestions`], then the first of them with `-2` to `-4`,
-/// then a stem with six hex digits of the address's hash. The last is the same
-/// for the same address every time, so a half-finished signup retried with the
-/// same account lands on the label it reserved, and it is what keeps the typed
-/// field off the page for nearly everybody.
-pub fn candidates(email: &str) -> Vec<String> {
-    use sha2::{Digest, Sha256};
+/// then a stem with six hex digits of an HMAC of the address under `key`. The
+/// last is the same for the same address every time, so a half-finished signup
+/// retried with the same account lands on the label it reserved, and it is
+/// what keeps the typed field off the page for nearly everybody. KEYED because
+/// the label is public: a bare hash would let anybody holding it test guessed
+/// addresses against it.
+pub fn candidates(email: &str, key: &[u8]) -> Vec<String> {
+    use hmac::{Hmac, KeyInit, Mac};
+    type HmacSha256 = Hmac<sha2::Sha256>;
     let mut out = suggestions(email);
     if let Some(base) = out.first().cloned() {
         for n in 2..=4 {
             out.push(with_suffix(&base, &n.to_string()));
         }
     }
-    let digest = Sha256::digest(email.trim().to_lowercase().as_bytes());
+    let mut mac = HmacSha256::new_from_slice(key).expect("hmac accepts any key length");
+    // Domain-separated from every other use of the same key.
+    mac.update(b"passband label fallback\0");
+    mac.update(email.trim().to_lowercase().as_bytes());
+    let digest = mac.finalize().into_bytes();
     let tag: String = digest[..3].iter().map(|b| format!("{b:02x}")).collect();
     let base = out.first().cloned().unwrap_or_else(|| "inbox".to_string());
     out.push(with_suffix(&base, &tag));
@@ -233,24 +240,26 @@ mod tests {
 
     #[test]
     fn candidates_run_from_the_address_to_a_stable_hashed_fallback() {
-        let c = candidates("ada@acme.example");
+        let key = b"a test key";
+        let c = candidates("ada@acme.example", key);
         assert_eq!(&c[..5], ["ada", "ada-acme", "ada-2", "ada-3", "ada-4"]);
         assert_eq!(c.len(), 6, "{c:?}");
         assert!(c[5].starts_with("ada-") && c[5].len() == 10, "{c:?}");
         assert_eq!(
             c,
-            candidates(" ADA@acme.example"),
+            candidates(" ADA@acme.example", key),
             "same address, same list"
         );
-        assert_ne!(c[5], candidates("ada@other.example")[5]);
+        assert_ne!(c[5], candidates("ada@other.example", key)[5]);
+        assert_ne!(c[5], candidates("ada@acme.example", b"another")[5], "keyed");
 
         // Nothing to suggest still gets a label.
-        let bare = candidates("jürgen@acme.example");
+        let bare = candidates("jürgen@acme.example", key);
         assert_eq!(bare.len(), 1, "{bare:?}");
         assert!(bare[0].starts_with("inbox-"), "{bare:?}");
 
         // Long addresses stay legal with their suffix on.
-        let long = candidates("abcdefghijklmnopqrstuvwxyz-0123456789@acme.example");
+        let long = candidates("abcdefghijklmnopqrstuvwxyz-0123456789@acme.example", key);
         assert!(long.iter().all(|l| validate(l).is_ok()), "{long:?}");
     }
 

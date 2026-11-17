@@ -1929,9 +1929,8 @@ async fn approving_schedules_a_personal_note_with_the_same_link() {
     );
 
     let text = note["text"].as_str().unwrap();
-    assert!(text.starts_with("Hi Grace,"), "{text}");
+    assert!(text.starts_with("hi Grace,"), "{text}");
     assert!(text.contains("reply"), "{text}");
-    assert!(text.trim_end().ends_with("Ada Founder"), "{text}");
     assert!(!text.contains('\u{2014}'), "{text}");
     // The same live code, by the same link.
     let code = code_in(invite);

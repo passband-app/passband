@@ -87,11 +87,11 @@ struct SendRequest<'a> {
 }
 
 /// What the personal note says in its subject line.
-const NOTE_SUBJECT: &str = "Glad you're here";
+const NOTE_SUBJECT: &str = "welcome to passband!";
 
 /// Ceiling on the first name the note greets. A name is a public form's
 /// field, and this one goes out under a person's own address, so anything that
-/// is not plainly a name is dropped for a bare "Hi,".
+/// is not plainly a name is dropped for a bare "hi,".
 const MAX_GREETING_NAME: usize = 32;
 
 /// The client: one reqwest client, one API key, one sender, one base URL.
@@ -168,7 +168,7 @@ impl ResendClient {
     /// Schedule the personal note: the same one-click link, from a person
     /// rather than from `invites@`, sent at `send_at` and replied to by a
     /// human. `from` is the configured note sender, e.g. `Name
-    /// <name@example.com>`; its display name signs the note.
+    /// <name@example.com>`.
     ///
     /// Same guarantees as [`Self::send_invite`]: `Ok(())` is the provider
     /// accepting the message (here, accepting it for later), and nothing in
@@ -189,7 +189,7 @@ impl ResendClient {
             from,
             to: [to],
             subject: NOTE_SUBJECT,
-            text: note_body(from, name, code, signup_url),
+            text: note_body(name, code, signup_url),
             html: None,
             scheduled_at: Some(send_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
         })
@@ -256,25 +256,21 @@ fn invite_link(code: &str, signup_url: &str) -> String {
 
 /// The personal note. Text only, short, and in the first person: it is the
 /// one email that is meant to be answered.
-fn note_body(from: &str, name: Option<&str>, code: &str, signup_url: &str) -> String {
+fn note_body(name: Option<&str>, code: &str, signup_url: &str) -> String {
     let greeting = match name.and_then(greeting_name) {
-        Some(n) => format!("Hi {n},"),
-        None => "Hi,".to_string(),
-    };
-    let sign = match sender_name(from) {
-        Some(s) => format!("\n{s}\n"),
-        None => String::new(),
+        Some(n) => format!("hi {n},"),
+        None => "hi,".to_string(),
     };
     format!(
         "{greeting}
 
-Thanks for joining Passband. I'm really excited to see how you use it.
+thanks for joining Passband! i hope you find it as magical as i do.
 
 Here's your invite link again, in case the first email got buried:
 {link}
 
-If anything feels off, confusing, or great, just reply to this email. It comes straight to me and I read every one.
-{sign}",
+If anything feels off, confusing, or great, just reply to this email. would love to hear what you think!
+",
         link = invite_link(code, signup_url),
     )
 }
@@ -291,13 +287,6 @@ fn greeting_name(name: &str) -> Option<&str> {
             .chars()
             .all(|c| c.is_alphabetic() || c == '\'' || c == '-');
     ok.then_some(first)
-}
-
-/// The display name of a `Name <addr>` sender, or `None` for a bare address.
-fn sender_name(from: &str) -> Option<&str> {
-    let (name, _) = from.split_once('<')?;
-    let name = name.trim().trim_matches('"').trim();
-    (!name.is_empty()).then_some(name)
 }
 
 /// The plain-text part. Same order as the HTML: the hook, the link, the
@@ -602,9 +591,8 @@ mod tests {
         assert_eq!(body["scheduled_at"], "2030-01-02T03:04:05Z");
         assert!(body.get("html").is_none());
         let text = body["text"].as_str().unwrap();
-        assert!(text.starts_with("Hi Grace,"), "{text}");
+        assert!(text.starts_with("hi Grace,"), "{text}");
         assert!(text.contains(&invite_link(CODE, SIGNUP_URL)), "{text}");
-        assert!(text.trim_end().ends_with("Ada Founder"), "{text}");
         assert!(!text.contains('\u{2014}'), "{text}");
     }
 
@@ -623,15 +611,7 @@ mod tests {
         ] {
             assert_eq!(greeting_name(bad), None, "{bad}");
         }
-        assert!(note_body("a@x.test", Some("http://x"), CODE, SIGNUP_URL).starts_with("Hi,\n"));
-    }
-
-    #[test]
-    fn signs_with_the_sender_display_name() {
-        assert_eq!(sender_name("Ada Founder <a@x.test>"), Some("Ada Founder"));
-        assert_eq!(sender_name("\"Ada\" <a@x.test>"), Some("Ada"));
-        assert_eq!(sender_name("a@x.test"), None);
-        assert_eq!(sender_name("<a@x.test>"), None);
+        assert!(note_body(Some("http://x"), CODE, SIGNUP_URL).starts_with("hi,\n"));
     }
 
     /// Four outcomes, and every one of them says nothing about the key, the

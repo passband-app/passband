@@ -339,58 +339,14 @@ pub async fn signup_form(State(state): State<ControlState>, RawQuery(query): Raw
         .map(|code| code.chars().take(MAX_FIELD).collect::<String>())
         .filter(|code| invites::is_plausible(code))
         .unwrap_or_default();
-    let label = if invite.is_empty() {
-        String::new()
-    } else {
-        suggested_label(&state, &invite).await.unwrap_or_default()
-    };
     pages::signup_form_with(
         &state.config().base_domain,
         waitlist_url(&state).as_deref(),
-        &label,
+        None,
         &invite,
         None,
         state.config().microsoft.is_some(),
     )
-}
-
-/// A username to prefill for the person an emailed invite was minted for: the
-/// first of [`labels::suggestions`] this control plane has no tenant under.
-///
-/// A SUGGESTION, NOT A CLAIM. It is an editable value in the field, nothing is
-/// reserved, and `POST /signup` checks it again like anything typed. So every
-/// failure here is quiet and lands on an empty field, the form as it was: a
-/// lookup that errors, a shared code nobody's address is behind, or every
-/// candidate taken.
-///
-/// THE STORE ONLY, NEVER THE WARDEN. A page view must not wait on the cluster
-/// (a hung warden would hold an invite link blank for the client's whole
-/// timeout) or let one forwarded link drive warden calls at the page rate
-/// limit, ten times what the signup POST allows. The POST asks the warden, so
-/// the one case the store misses (live in the cluster, unrecorded here) is
-/// still caught, one submit later. And a PENDING label, which only the warden
-/// knows about, stays suggestible: it is almost always this same person back
-/// to finish, which is exactly the case the POST lets through.
-///
-/// WHAT IT SHOWS: the address's local part, and with the fallback the first
-/// label of its domain. Never the address, but most of one, to whoever holds
-/// the link; the same link already carries a live code, so that holder is the
-/// invitee or somebody they gave it to.
-async fn suggested_label(state: &ControlState, invite: &str) -> Option<String> {
-    let email = state
-        .store()
-        .email_for_available_invite(&invites::hash(invite), chrono::Utc::now())
-        .await
-        .inspect_err(|e| tracing::warn!(error = %e, "invite address lookup failed"))
-        .ok()??;
-    for candidate in labels::suggestions(&email) {
-        match state.store().label_exists(&candidate).await {
-            Ok(false) => return Some(candidate),
-            Ok(true) => continue,
-            Err(_) => return None,
-        }
-    }
-    None
 }
 
 /// Where the form sends somebody who has no invite code, or `None` on a
@@ -401,12 +357,6 @@ async fn suggested_label(state: &ControlState, invite: &str) -> Option<String> {
 /// would put back the oracle it was written to avoid: whether the link is on
 /// the page would start answering something about the code in the URL. It is on
 /// every signup page, prefilled or not, refused or not.
-///
-/// The prefilled USERNAME does answer something, deliberately: an emailed code
-/// that is live fills it, and anything else leaves it empty. That is not an
-/// oracle worth guarding (codes are 80 bits, and `POST /signup` already tells a
-/// live code from a dead one), so it is no argument for making this link
-/// conditional too.
 ///
 /// Read from `config.waitlist` rather than [`ControlState::waitlist`]: that
 /// accessor also requires the Resend client, because the paths that MAIL an
@@ -433,7 +383,9 @@ pub async fn signup(State(state): State<ControlState>, body: Bytes) -> Response 
     // rides along with it, because "that code is not usable" is exactly the
     // moment somebody discovers they do not have a working one.
     let waitlist = waitlist_url(&state);
-    let reject = |error: &str, label: &str| {
+    // A form that showed no username field is re-rendered without one, so a
+    // refused CODE does not suddenly ask for a username too.
+    let reject = |error: &str, label: Option<&str>| {
         pages::signup_form_with(
             &config.base_domain,
             waitlist.as_deref(),
@@ -444,12 +396,21 @@ pub async fn signup(State(state): State<ControlState>, body: Bytes) -> Response 
         )
     };
 
-    let label = match labels::parse(&raw_label) {
-        Ok(l) => l,
-        Err(e) => return reject(&e.message(), &raw_label),
+    // NO USERNAME IS THE ORDINARY CASE: the form does not ask for one, and the
+    // callback makes one from the mailbox address (see `pick_label`). A typed
+    // one only arrives from the form a conflict re-rendered with the field.
+    let typed = if raw_label.trim().is_empty() {
+        None
+    } else {
+        match labels::parse(&raw_label) {
+            Ok(l) => Some(l),
+            Err(e) => return reject(&e.message(), Some(&raw_label)),
+        }
     };
+    let label = typed.clone().unwrap_or_default();
+    let shown = typed.as_deref();
     let Some(provider) = provider_choice(&state, Some(&raw_provider)) else {
-        return reject("Outlook signup is not available yet.", &label);
+        return reject("Outlook signup is not available yet.", shown);
     };
 
     // The invite is GATED here and held below, once the address is known to be
@@ -460,7 +421,7 @@ pub async fn signup(State(state): State<ControlState>, body: Bytes) -> Response 
     // a hold on a perfectly good code; and gate at all, so a nonsense code costs
     // a point lookup rather than a round trip to the warden.
     if !invites::is_plausible(&raw_invite) {
-        return reject(INVITE_REFUSED, &label);
+        return reject(INVITE_REFUSED, shown);
     }
     let code_hash = invites::hash(&raw_invite);
     match state
@@ -469,47 +430,43 @@ pub async fn signup(State(state): State<ControlState>, body: Bytes) -> Response 
         .await
     {
         Ok(Some(_)) => {}
-        Ok(None) => return reject(INVITE_REFUSED, &label),
+        Ok(None) => return reject(INVITE_REFUSED, shown),
         Err(e) => {
             tracing::error!(error = %e, "invite lookup failed");
-            return reject(
-                "Something went wrong on our side. Please try again.",
-                &label,
-            );
+            return reject("Something went wrong on our side. Please try again.", shown);
         }
     }
 
-    // Two authorities on whether a label is free, and both are asked: this
-    // control plane's own record, and the warden, which is the one that knows
-    // what actually exists in the cluster.
-    match state.store().label_exists(&label).await {
-        Ok(true) => return reject(LABEL_TAKEN, ""),
-        Ok(false) => {}
-        Err(e) => {
-            tracing::error!(error = %e, "label lookup failed");
-            return reject(
-                "Something went wrong on our side. Please try again.",
-                &label,
-            );
+    if let Some(label) = shown {
+        // Two authorities on whether a typed label is free, and both are asked: this
+        // control plane's own record, and the warden, which is the one that knows
+        // what actually exists in the cluster.
+        match state.store().label_exists(label).await {
+            Ok(true) => return reject(LABEL_TAKEN, Some("")),
+            Ok(false) => {}
+            Err(e) => {
+                tracing::error!(error = %e, "label lookup failed");
+                return reject("Something went wrong on our side. Please try again.", shown);
+            }
         }
-    }
-    match state.warden().status(&label).await {
-        Ok(None) => {}
-        // A PENDING tenant is a half-finished signup, and this is how its owner
-        // gets to finish it: the label is let through here and the warden
-        // decides at call 1 whether the Google account coming back is the one
-        // that reserved it. A stranger who guesses a pending label spends a
-        // consent and gets "already taken"; they cannot take it, and their
-        // invite is not spent either.
-        Ok(Some(s)) if s.is_pending() => {}
-        Ok(Some(_)) => return reject(LABEL_TAKEN, ""),
-        Err(e) => {
-            // PRIVACY: the warden error type, never the bearer or the URL.
-            tracing::error!(error = %e, "warden availability check failed");
-            return reject(
-                "Signup is temporarily unavailable. Please try again in a few minutes.",
-                &label,
-            );
+        match state.warden().status(label).await {
+            Ok(None) => {}
+            // A PENDING tenant is a half-finished signup, and this is how its owner
+            // gets to finish it: the label is let through here and the warden
+            // decides at call 1 whether the Google account coming back is the one
+            // that reserved it. A stranger who guesses a pending label spends a
+            // consent and gets "already taken"; they cannot take it, and their
+            // invite is not spent either.
+            Ok(Some(s)) if s.is_pending() => {}
+            Ok(Some(_)) => return reject(LABEL_TAKEN, Some("")),
+            Err(e) => {
+                // PRIVACY: the warden error type, never the bearer or the URL.
+                tracing::error!(error = %e, "warden availability check failed");
+                return reject(
+                    "Signup is temporarily unavailable. Please try again in a few minutes.",
+                    shown,
+                );
+            }
         }
     }
 
@@ -517,10 +474,7 @@ pub async fn signup(State(state): State<ControlState>, body: Bytes) -> Response 
         (Ok(a), Ok(b)) => (a, b),
         _ => {
             tracing::error!("the system random source failed");
-            return reject(
-                "Something went wrong on our side. Please try again.",
-                &label,
-            );
+            return reject("Something went wrong on our side. Please try again.", shown);
         }
     };
 
@@ -531,10 +485,7 @@ pub async fn signup(State(state): State<ControlState>, body: Bytes) -> Response 
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "building the consent url failed");
-            return reject(
-                "Something went wrong on our side. Please try again.",
-                &label,
-            );
+            return reject("Something went wrong on our side. Please try again.", shown);
         }
     };
 
@@ -552,13 +503,10 @@ pub async fn signup(State(state): State<ControlState>, body: Bytes) -> Response 
         Ok(Some(id)) => id,
         // Lost the race with another tab, or the code went away between the
         // gate above and here. Same message as every other invite failure.
-        Ok(None) => return reject(INVITE_REFUSED, &label),
+        Ok(None) => return reject(INVITE_REFUSED, shown),
         Err(e) => {
             tracing::error!(error = %e, "reserving the invite failed");
-            return reject(
-                "Something went wrong on our side. Please try again.",
-                &label,
-            );
+            return reject("Something went wrong on our side. Please try again.", shown);
         }
     };
 
@@ -585,7 +533,7 @@ pub async fn signup(State(state): State<ControlState>, body: Bytes) -> Response 
         release_invite(&state, invite_id, &holder).await;
         return reject(
             "Too many signups are in flight right now. Please try again in a few minutes.",
-            &label,
+            shown,
         );
     }
 
@@ -1582,31 +1530,77 @@ pub async fn oauth_callback(
     // back only the public half. Nothing is encrypted yet and no credential
     // exists on the far side: what this creates is a reservation, tied to this
     // mailbox, that only this mailbox can complete.
-    let created = match state
-        .warden()
-        .create_tenant(&label, &grant.account_email, provider.tenant_value())
-        .await
-    {
-        Ok(c) => c,
-        Err(WardenError::LabelTaken) => {
-            release().await;
-            return done(pages::problem(
-                StatusCode::CONFLICT,
-                "That username was just taken",
-                "Someone claimed it while you were signing in. Pick another one. Your invite code has not been used.",
-            ));
+    //
+    // THE LABEL IS SETTLED HERE, not on the form. With nothing typed, each of
+    // `labels::candidates` for this mailbox is tried in turn until the warden
+    // takes one: it is the authority on what is free, and it hands a PENDING
+    // label back to the mailbox that reserved it, so a retried half-finished
+    // signup lands where it left off. Only when every candidate is taken does
+    // the person see a username field, on the form re-rendered for it.
+    let typed = !label.is_empty();
+    let candidates = if typed {
+        vec![label]
+    } else {
+        labels::candidates(&grant.account_email)
+    };
+    let mut picked = None;
+    for candidate in candidates {
+        if !typed {
+            match state.store().label_exists(&candidate).await {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "label lookup failed");
+                    release().await;
+                    return done(internal_problem());
+                }
+            }
         }
-        Err(e) => {
-            // PRIVACY: the error type and the label. Never the recipient, the
-            // bearer, or anything the warden said verbatim.
-            tracing::error!(error = %e, label = %label, "creating the tenant failed");
-            release().await;
-            return done(pages::problem(
-                StatusCode::BAD_GATEWAY,
-                "Your mailbox could not be set up",
-                "Nothing was set up and your invite code has not been used. Try again in a few minutes.",
-            ));
+        match state
+            .warden()
+            .create_tenant(&candidate, &grant.account_email, provider.tenant_value())
+            .await
+        {
+            Ok(c) => {
+                picked = Some((candidate, c));
+                break;
+            }
+            Err(WardenError::LabelTaken) if !typed => continue,
+            Err(WardenError::LabelTaken) => {
+                release().await;
+                return done(pages::problem(
+                    StatusCode::CONFLICT,
+                    "That username was just taken",
+                    "Someone claimed it while you were signing in. Pick another one. Your invite code has not been used.",
+                ));
+            }
+            Err(e) => {
+                // PRIVACY: the error type and the label. Never the recipient, the
+                // bearer, or anything the warden said verbatim.
+                tracing::error!(error = %e, label = %candidate, "creating the tenant failed");
+                release().await;
+                return done(pages::problem(
+                    StatusCode::BAD_GATEWAY,
+                    "Your mailbox could not be set up",
+                    "Nothing was set up and your invite code has not been used. Try again in a few minutes.",
+                ));
+            }
         }
+    }
+    let Some((label, created)) = picked else {
+        // The conflict: every name this address suggests is somebody else's.
+        tracing::info!("signup needs a typed username: every candidate is taken");
+        release().await;
+        return done(pages::signup_form_with(
+            &config.base_domain,
+            waitlist_url(&state).as_deref(),
+            Some(""),
+            "",
+            Some(
+                "Pick a username for your mailbox. The ones we tried are taken. Your invite code has not been used.",
+            ),
+            config.microsoft.is_some(),
+        ));
     };
 
     // The ONE moment a plaintext refresh token exists on this machine ends
@@ -3352,8 +3346,8 @@ fn incomplete_problem() -> Response {
     pages::problem(
         StatusCode::BAD_GATEWAY,
         "Your mailbox is not finished yet",
-        "Your username is reserved and your invite code has not been used. Start again with the \
-         same code, username, and Google account to finish.",
+        "Your mailbox is reserved and your invite code has not been used. Start again with the \
+         same code and the same account to finish.",
     )
 }
 

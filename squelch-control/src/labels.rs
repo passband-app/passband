@@ -152,6 +152,42 @@ pub fn suggestions(email: &str) -> Vec<String> {
     out
 }
 
+/// Every username signup will try for `email`, in order, when the person did
+/// not type one: the [`suggestions`], then the first of them with `-2` to `-4`,
+/// then a stem with six hex digits of the address's hash. The last is the same
+/// for the same address every time, so a half-finished signup retried with the
+/// same account lands on the label it reserved, and it is what keeps the typed
+/// field off the page for nearly everybody.
+pub fn candidates(email: &str) -> Vec<String> {
+    use sha2::{Digest, Sha256};
+    let mut out = suggestions(email);
+    if let Some(base) = out.first().cloned() {
+        for n in 2..=4 {
+            out.push(with_suffix(&base, &n.to_string()));
+        }
+    }
+    let digest = Sha256::digest(email.trim().to_lowercase().as_bytes());
+    let tag: String = digest[..3].iter().map(|b| format!("{b:02x}")).collect();
+    let base = out.first().cloned().unwrap_or_else(|| "inbox".to_string());
+    out.push(with_suffix(&base, &tag));
+    let mut seen = Vec::new();
+    out.retain(|c| {
+        validate(c).is_ok() && !seen.contains(c) && {
+            seen.push(c.clone());
+            true
+        }
+    });
+    out
+}
+
+/// `base-suffix`, with `base` cut short enough that the whole stays a legal
+/// length.
+fn with_suffix(base: &str, suffix: &str) -> String {
+    let room = MAX_LABEL_LEN.saturating_sub(suffix.len() + 1);
+    let cut: String = base.chars().take(room).collect();
+    format!("{}-{suffix}", cut.trim_end_matches('-'))
+}
+
 /// Lowercase, everything outside `[a-z0-9]` to one hyphen, no hyphen at an end.
 fn fold(raw: &str) -> String {
     let mut out = String::new();
@@ -193,6 +229,29 @@ mod tests {
         assert!(suggestions("not an address").is_empty());
         assert!(suggestions("+tag@acme.com").is_empty());
         assert!(suggestions("jürgen@acme.com").is_empty(), "no j-rgen");
+    }
+
+    #[test]
+    fn candidates_run_from_the_address_to_a_stable_hashed_fallback() {
+        let c = candidates("ada@acme.example");
+        assert_eq!(&c[..5], ["ada", "ada-acme", "ada-2", "ada-3", "ada-4"]);
+        assert_eq!(c.len(), 6, "{c:?}");
+        assert!(c[5].starts_with("ada-") && c[5].len() == 10, "{c:?}");
+        assert_eq!(
+            c,
+            candidates(" ADA@acme.example"),
+            "same address, same list"
+        );
+        assert_ne!(c[5], candidates("ada@other.example")[5]);
+
+        // Nothing to suggest still gets a label.
+        let bare = candidates("jürgen@acme.example");
+        assert_eq!(bare.len(), 1, "{bare:?}");
+        assert!(bare[0].starts_with("inbox-"), "{bare:?}");
+
+        // Long addresses stay legal with their suffix on.
+        let long = candidates("abcdefghijklmnopqrstuvwxyz-0123456789@acme.example");
+        assert!(long.iter().all(|l| validate(l).is_ok()), "{long:?}");
     }
 
     #[test]

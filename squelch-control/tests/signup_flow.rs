@@ -1604,74 +1604,47 @@ async fn a_mailed_invite_stamps_the_row_it_was_minted_for() {
     );
 }
 
-/// The emailed link opens a form with a username already in it, made from the
-/// address the invite went to: the part before the `@`, or that part and the
-/// domain when the first is taken. A suggestion only: the address itself is
-/// never on the page, and a shared code (nobody's address) suggests nothing.
+/// NO USERNAME ON THE FORM: a signup that names none is given one made from
+/// the mailbox that came back from Google, the next candidate when that one is
+/// somebody else's (in this store or in the cluster), and the username field
+/// only once every candidate is taken. That last page spends nothing.
 #[tokio::test]
-async fn the_emailed_link_suggests_a_username_from_the_address() {
+async fn a_signup_with_no_username_is_named_after_its_mailbox() {
+    // The plain case: `ada@example.com` becomes `ada`.
     let h = Harness::new().await;
-    let store = h.state.store();
-    let mint_for = |email: &'static str| async move {
-        let user_id = store
-            .invite_directly(email, chrono::Utc::now())
-            .await
-            .unwrap()
-            .unwrap();
-        let minted = invites::mint().unwrap();
-        let invite_id = store
-            .insert_invite(&minted.code_hash, default_expiry(), None)
-            .await
-            .unwrap();
-        assert!(
-            store
-                .set_user_invite(user_id, invite_id, None)
-                .await
-                .unwrap()
-        );
-        minted.code
-    };
-    let username = |page: &str| {
-        let (_, field) = page
-            .split_once(r#"id="label" name="label" value=""#)
-            .expect(page);
-        field.split_once('"').unwrap().0.to_string()
-    };
+    let invite = h.invite_code.clone();
+    let (status, body) = h.run_signup("", &invite).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("ada.passband.test"), "{body}");
+    assert_eq!(h.invite_row().await, (Some("ada".to_string()), false));
 
-    let grace = mint_for("grace.hopper+news@navy.example.com").await;
-    let (status, _, page) = h.get(&format!("/?invite={grace}"), None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(username(&page), "grace-hopper");
-    assert!(
-        !page.contains("navy.example.com"),
-        "the address stays off the page"
-    );
-
-    // Taken: the domain joins it.
-    store
-        .insert_tenant("grace-hopper", "someone@else.example")
+    // `ada` recorded here and `ada-example` live in the cluster: on to `ada-2`.
+    let h = Harness::new().await;
+    let invite = h.invite_code.clone();
+    h.state
+        .store()
+        .insert_tenant("ada", "someone@else.example")
         .await
         .unwrap();
-    let (_, _, page) = h.get(&format!("/?invite={grace}"), None).await;
-    assert_eq!(username(&page), "grace-hopper-navy");
+    h.rec.lock().unwrap().taken.push("ada-example".to_string());
+    let (status, body) = h.run_signup("", &invite).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(h.invite_row().await, (Some("ada-2".to_string()), false));
 
-    // Both taken: an empty field, the form as it always was.
-    store
-        .insert_tenant("grace-hopper-navy", "another@else.example")
-        .await
-        .unwrap();
-    let (_, _, page) = h.get(&format!("/?invite={grace}"), None).await;
-    assert_eq!(username(&page), "");
-
-    // Asked of the store only: a page view never waits on the warden.
-    assert!(
-        h.rec.lock().unwrap().status_lookups.is_empty(),
-        "the form asked the warden nothing"
-    );
-
-    // The harness's own code was minted with no address behind it.
-    let (_, _, page) = h.get(&format!("/?invite={}", h.invite_code), None).await;
-    assert_eq!(username(&page), "");
+    // Every candidate taken: the form comes back WITH the field, and the code
+    // is not spent.
+    let h = Harness::new().await;
+    let invite = h.invite_code.clone();
+    h.rec
+        .lock()
+        .unwrap()
+        .taken
+        .extend(squelch_control::labels::candidates(MAILBOX));
+    let (status, body) = h.run_signup("", &invite).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains(r#"id="label""#), "{body}");
+    assert!(body.contains("Pick a username"), "{body}");
+    assert_eq!(h.invite_row().await, (None, true), "the code is not spent");
 }
 
 /// The alerts, end to end through the real handler: a half-finished signup
@@ -2578,7 +2551,10 @@ async fn the_landing_page_states_the_grant() {
     assert!(body.contains("gmail.modify"), "{body}");
     assert!(!body.contains("gmail.readonly"), "{body}");
     assert!(!body.contains("gmail.send"), "{body}");
-    assert!(body.contains(".passband.test"), "{body}");
+    assert!(
+        !body.contains(r#"id="label""#),
+        "no username asked for up front: {body}"
+    );
 
     let (status, _, body) = h.get("/healthz", None).await;
     assert_eq!(status, StatusCode::OK);

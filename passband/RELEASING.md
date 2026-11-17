@@ -69,7 +69,10 @@ whoever holds it can sign updates for every install).
 
 1. Bump `VERSION` (and its mirror in project.yml), commit.
 2. `./build-release.sh` — signs, notarizes, staples, leaves
-   `build/Passband-$VERSION.zip`, and the binary's symbols beside it as
+   `build/Passband-$VERSION.zip` (what Sparkle and Homebrew fetch),
+   `build/Passband-$VERSION.dmg` (what the site's `/download` hands a person:
+   the app beside an Applications alias, signed, notarized and stapled in its
+   own right), and the binary's symbols beside it as
    `build/symbols-Passband-$VERSION.dSYM.zip`. The shipped binary is stripped,
    so that dSYM (same UUID, `dwarfdump --uuid`) is what symbolicates a crash
    report from this version. It goes on this repo's release only, never the
@@ -80,7 +83,7 @@ whoever holds it can sign updates for every install).
 
    ```sh
    gh release create "passband-mac-$(cat VERSION)" "build/Passband-$(cat VERSION).zip" \
-     "build/symbols-Passband-$(cat VERSION).dSYM.zip" \
+     "build/Passband-$(cat VERSION).dmg" "build/symbols-Passband-$(cat VERSION).dSYM.zip" \
      --title "Passband $(cat VERSION)" --notes "..."
    ```
 

@@ -444,7 +444,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
   background: color-mix(in srgb, rgba(52, 96, 150, 0.95) calc(var(--m, 0) * 100%), rgba(24, 34, 50, 0.97));
   box-shadow: inset 0 0 0 0.75pt rgba(130, 186, 245, 0.4), 0 18pt 44pt -10pt rgba(0, 0, 0, 0.75),
     0 0 40pt -12pt rgba(78, 155, 234, 0.55);
-  opacity: 0; visibility: hidden; transform-origin: 50% 50%; will-change: transform, opacity; }
+  opacity: 0; visibility: hidden; transform-origin: 0 0; }
 /* In flight the shell becomes the row it is about to form (its box, its
    corners, its padding, tinting toward the blue the row flashes as it
    lands). The avatar and sender stay, which is what a row is; the rest of
@@ -453,7 +453,9 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-in-body > :not(.pb-in-top), .pb-in-top small { opacity: var(--fade, 1); }
 .pb-in-body > .pb-in-read { opacity: calc(var(--r, 0) * var(--fade, 1)); }
 .pb-in-body > .pb-in-to { opacity: calc(var(--r, 0) * var(--fade, 1)); }
-.pb-in-top { display: flex; align-items: center; gap: 8pt; }
+.pb-in-top { display: flex; align-items: center; gap: 8pt; transform-origin: 0 0; }
+/* Layers only while moving: a phone has little memory for idle ones. */
+.pb-in[data-flying], .pb-in[data-flying] .pb-in-top { will-change: transform; }
 .pb-in-top .pb-logo { width: 22pt; height: 22pt; }
 .pb-in-top b { flex: 1; min-width: 0; color: var(--ink); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pb-in-top small { font-size: 10pt; color: var(--faintest); }
@@ -510,7 +512,9 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-mailpair .pb-step:last-child { min-height: 0; }
 .pb-inmail { margin-top: 1.4rem; }
 .pb-inrun { display: flex; flex-direction: column; gap: 14px; }
-.pb-inslot { position: relative; }
+/* Sized by the driver to the card fully read, and a layout boundary, so a
+   card opening up inside it never reflows the page around it. */
+.pb-inslot { position: relative; contain: layout style; }
 /* THE TALLY. Six dots in a row, empty rings until their email lands; the
    one that needed you rises above the rest in the accent. Then the sum in
    two words each. */
@@ -1958,118 +1962,182 @@ function InCard({ m, full }: { m: Inbound; full?: boolean }) {
 }
 
 // Drives the cards off where each one is on screen. Every card sits in the
-// page and scrolls with it; only a card in flight is moved, by a transform
-// from its own place to its zone in the window. d is how far past the
-// reading line the card's middle is, in screen heights.
+// page and scrolls with it; only a card in flight is moved. d is how far past
+// the reading line the card's middle is, in screen heights.
+//
+// BUILT FOR A PHONE'S FRAME BUDGET. Each frame reads every position first and
+// then writes, so it never forces a layout between cards. A flight touches
+// nothing but transforms, radius, opacity and colour: the card is scaled
+// (non-uniformly) from its own box to the row's, and its sender line is
+// counter-scaled inside it so the name lands at the row's type size without
+// a single reflow. Each card's slot is sized once to the card fully read, so
+// the read opening up inside it never moves anything around it. Writes are
+// skipped when nothing changed.
+type Flier = {
+  id: string; card: HTMLElement; slot: HTMLElement; top: HTMLElement;
+  target: HTMLElement; inner: HTMLElement | null;
+  counts: HTMLElement[]; tally: HTMLElement | null;
+  full: boolean; thread: boolean;
+  w0: number; h0: number; r0: number; pl: number; pt: number; topH: number; type0: number;
+  last: Record<string, string>;
+};
+
 function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
   useEffect(() => {
     const pair = pairRef.current;
     const shot = pair?.querySelector<HTMLElement>(".pb-shot");
     if (!pair || !shot) return;
     const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const cards = Array.from(pair.querySelectorAll<HTMLElement>(".pb-steps .pb-in"));
-    let raf = 0;
 
+    const fliers: Flier[] = [];
+    for (const card of Array.from(pair.querySelectorAll<HTMLElement>(".pb-steps .pb-in"))) {
+      const id = card.dataset.in!;
+      const target = shot.querySelector<HTMLElement>(`[data-land="${id}"], [data-ping="${id}"]`);
+      if (!target) continue;
+      fliers.push({
+        id, card, slot: card.parentElement as HTMLElement, top: card.querySelector<HTMLElement>(".pb-in-top")!,
+        target, inner: target.classList.contains("pb-land") ? (target.firstElementChild as HTMLElement) : null,
+        counts: Array.from(shot.querySelectorAll<HTMLElement>(`[data-count="${id}"]`)),
+        tally: pair.querySelector<HTMLElement>(`[data-tally="${id}"]`),
+        full: card.hasAttribute("data-full"), thread: card.hasAttribute("data-thread"),
+        w0: 0, h0: 0, r0: 0, pl: 0, pt: 0, topH: 0, type0: 1, last: {},
+      });
+    }
+
+    // Each card's resting metrics and its slot's height, measured with the
+    // card fully read. Batched: every write, then every read, then every
+    // write, so it costs one layout however many cards there are.
+    const measure = () => {
+      for (const f of fliers) {
+        f.slot.style.height = "";
+        f.card.style.setProperty("--r", "1");
+        f.last = {};
+      }
+      for (const f of fliers) {
+        const cs = getComputedStyle(f.card);
+        f.w0 = f.card.offsetWidth;
+        f.h0 = f.card.offsetHeight;
+        f.r0 = parseFloat(cs.borderTopLeftRadius) || 16;
+        f.pl = parseFloat(cs.paddingLeft) || 0;
+        f.pt = parseFloat(cs.paddingTop) || 0;
+        f.topH = f.top.offsetHeight;
+        f.type0 = parseFloat(getComputedStyle(f.slot).getPropertyValue("--pt")) || 1.15;
+      }
+      for (const f of fliers) f.slot.style.height = `${f.h0}px`;
+    };
+
+    const set = (f: Flier, el: HTMLElement, key: string, prop: string, value: string) => {
+      if (f.last[key] === value) return;
+      f.last[key] = value;
+      if (prop.startsWith("--")) el.style.setProperty(prop, value);
+      else (el.style as unknown as Record<string, string>)[prop] = value;
+    };
+
+    let raf = 0;
     const frame = () => {
       raf = 0;
       const vh = innerHeight;
       const line = vh * (innerWidth > 900 ? 0.5 : 0.62);
-      cards.forEach((card) => {
-        const id = card.dataset.in!;
-        // Measured without the flight's transform, so the page position is
-        // the card's own.
-        const home = (card.parentElement as HTMLElement).getBoundingClientRect();
-        const d = (line - (home.top + home.height / 2)) / vh;
-        // Jamie's takes its time over the read, low on the screen, before it
-        // goes; the run's cards only flash where they are going.
-        const full = card.hasAttribute("data-full");
-        const a = clamp01((d + (full ? 0.48 : 0.42)) / 0.18);
-        // A thread reads over longer, one message at a time.
-        const r = card.hasAttribute("data-thread") ? clamp01((d + 0.36) / 0.38)
-          : full ? clamp01((d + 0.16) / 0.18) : clamp01((d + 0.2) / 0.14);
-        const f = full ? clamp01((d - 0.08) / 0.26) : clamp01((d + 0.04) / 0.24);
-        card.style.setProperty("--r", String(r));
+      const typeEnd = shot.offsetWidth / 1040;
 
-        const target = shot.querySelector<HTMLElement>(`[data-land="${id}"], [data-ping="${id}"]`);
-        if (!target) return;
-        const arrived = f >= 1;
-        if (arrived !== target.hasAttribute("data-arrived")) target.toggleAttribute("data-arrived", arrived);
-        shot.querySelectorAll<HTMLElement>(`[data-count="${id}"]`).forEach((el) => {
-          const n = Number(el.dataset.from) + (arrived ? 1 : 0);
-          const text = `${n}${el.dataset.suffix ?? ""}`;
+      // READ everything.
+      const reads = fliers.map((f) => {
+        const home = f.slot.getBoundingClientRect();
+        const d = (line - (home.top + home.height / 2)) / vh;
+        const fl = f.full ? clamp01((d - 0.08) / 0.26) : clamp01((d + 0.04) / 0.24);
+        const flying = !reduce && fl > 0 && fl < 1;
+        return {
+          home, d, fl,
+          t: flying ? f.target.getBoundingClientRect() : null,
+          rowH: f.inner ? f.inner.offsetHeight : 0,
+          rowR: flying && f.inner?.firstElementChild
+            ? parseFloat(getComputedStyle(f.inner.firstElementChild as HTMLElement).borderTopLeftRadius) || 0 : 0,
+        };
+      });
+
+      // WRITE everything.
+      fliers.forEach((f, k) => {
+        const { home, d, fl, t, rowH, rowR } = reads[k];
+        const a = clamp01((d + (f.full ? 0.48 : 0.42)) / 0.18);
+        const r = f.thread ? clamp01((d + 0.36) / 0.38)
+          : f.full ? clamp01((d + 0.16) / 0.18) : clamp01((d + 0.2) / 0.14);
+        set(f, f.card, "r", "--r", r.toFixed(3));
+
+        const arrived = fl >= 1;
+        if (arrived !== f.target.hasAttribute("data-arrived")) f.target.toggleAttribute("data-arrived", arrived);
+        if (f.tally && arrived !== f.tally.hasAttribute("data-arrived")) f.tally.toggleAttribute("data-arrived", arrived);
+        for (const el of f.counts) {
+          const text = `${Number(el.dataset.from) + (arrived ? 1 : 0)}${el.dataset.suffix ?? ""}`;
           if (el.textContent !== text) el.textContent = text;
-          el.style.color = arrived ? "var(--accent-ink)" : "";
-        });
-        pair.querySelector(`[data-tally="${id}"]`)?.toggleAttribute("data-arrived", arrived);
+          const color = arrived ? "var(--accent-ink)" : "";
+          if (el.style.color !== color) el.style.color = color;
+        }
 
         // The row opens through the second half of the flight, so the card
         // and the row it becomes finish together.
-        const land = target.classList.contains("pb-land");
-        const inner = land ? (target.firstElementChild as HTMLElement) : null;
-        const rowH = inner ? inner.offsetHeight : 0;
-        const open = reduce ? (arrived ? 1 : 0) : clamp01((f - 0.45) / 0.55);
-        if (land) {
-          target.style.height = open >= 1 ? "auto" : `${open * rowH}px`;
-          target.style.opacity = String(open);
+        if (f.inner) {
+          const open = reduce ? (arrived ? 1 : 0) : clamp01((fl - 0.45) / 0.55);
+          set(f, f.target, "lh", "height", open >= 1 ? "auto" : `${(open * rowH).toFixed(1)}px`);
+          set(f, f.target, "lo", "opacity", open.toFixed(3));
         }
 
-        const slot = card.parentElement as HTMLElement;
-        const flying = !reduce && f > 0;
-        card.toggleAttribute("data-flying", flying);
-        if (!flying) {
-          slot.style.height = "";
-          card.style.width = card.style.height = card.style.borderRadius = card.style.padding = "";
-          card.style.removeProperty("--pt");
-          card.style.setProperty("--fade", "1");
-          card.style.setProperty("--m", "0");
-          card.dataset.w = String(card.offsetWidth);
-          card.dataset.h = String(card.offsetHeight);
-          const cs = getComputedStyle(card);
-          card.dataset.rad = cs.borderTopLeftRadius;
-          card.dataset.pv = cs.paddingTop;
-          card.dataset.pt = String(parseFloat(getComputedStyle(slot).getPropertyValue("--pt")) || 1.15);
-          card.dataset.ph = cs.paddingLeft;
-          card.style.transform = reduce ? "" : `translateY(${(1 - ease(a)) * 24}px)`;
-          card.style.opacity = String(reduce ? (arrived ? 0 : 1) : a);
+        if (!t) {
+          // At rest, or gone: rising in under its caption, or hidden once landed.
+          f.card.toggleAttribute("data-flying", false);
+          set(f, f.card, "tf", "transform", reduce || a >= 1 ? "" : `translateY(${((1 - ease(a)) * 24).toFixed(1)}px)`);
+          set(f, f.card, "op", "opacity", String(reduce ? (arrived ? 0 : 1) : arrived ? 0 : a));
+          set(f, f.card, "br", "borderRadius", "");
+          set(f, f.top, "tt", "transform", "");
+          set(f, f.card, "fd", "--fade", "1");
+          set(f, f.card, "m", "--m", "0");
           return;
         }
-        // Hold the card's place in the page while it changes shape.
-        if (!slot.style.height) slot.style.height = `${slot.offsetHeight}px`;
-        const w0 = Number(card.dataset.w), h0 = Number(card.dataset.h), r0 = parseFloat(card.dataset.rad ?? "16");
-        const t = target.getBoundingClientRect();
-        const row = (inner?.firstElementChild as HTMLElement | null) ?? target;
-        const r1 = parseFloat(getComputedStyle(row).borderTopLeftRadius) || 0;
-        const end = { l: t.left, t: t.top, w: t.width, h: land ? rowH : t.height };
-        const e = ease(f);
+
+        // IN FLIGHT. The card's box goes from its own to the row's: scaled
+        // from its top left, with the radius written in pre-scale units so
+        // it renders as the row's at the end.
+        f.card.toggleAttribute("data-flying", true);
+        const e = ease(fl);
         const lerp = (x: number, y: number) => x + (y - x) * e;
-        const x = lerp(home.left, end.l);
-        const y = lerp(home.top, end.t) - Math.sin(Math.PI * e) * 40;
-        card.style.width = `${lerp(w0, end.w)}px`;
-        card.style.height = `${lerp(h0, end.h)}px`;
-        card.style.borderRadius = `${lerp(r0, r1)}px`;
-        // The type shrinks to the window's scale (its points are 1/1040 of
-        // its width), so the sender line lands at the row's size.
-        card.style.setProperty("--pt", `${lerp(Number(card.dataset.pt), shot.offsetWidth / 1040)}px`);
-        // Padding closes in so the sender line sits centred in the row.
-        const top = card.querySelector<HTMLElement>(".pb-in-top")!.offsetHeight;
-        const pv1 = Math.max(0, (end.h - top) / 2);
-        card.style.padding = `${lerp(parseFloat(card.dataset.pv!), pv1)}px ${lerp(parseFloat(card.dataset.ph!), 10)}px`;
-        card.style.transform = `translate(${x - home.left}px, ${y - home.top}px)`;
-        card.style.setProperty("--fade", String(1 - clamp01((f - 0.05) / 0.4)));
-        card.style.setProperty("--m", String(clamp01((f - 0.4) / 0.6)));
-        card.style.opacity = String(1 - clamp01((f - 0.86) / 0.14));
+        const endH = f.inner ? rowH : t.height;
+        const sx = lerp(f.w0, t.width) / f.w0;
+        const sy = lerp(f.h0, endH) / f.h0;
+        const x = lerp(home.left, t.left) - home.left;
+        const y = lerp(home.top, t.top) - home.top - Math.sin(Math.PI * e) * 40;
+        const R = lerp(f.r0, rowR);
+        set(f, f.card, "tf", "transform", `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) scale(${sx.toFixed(4)}, ${sy.toFixed(4)})`);
+        set(f, f.card, "br", "borderRadius", `${(R / sx).toFixed(2)}px / ${(R / sy).toFixed(2)}px`);
+
+        // The sender line, counter-scaled so it is never stretched, shrinking
+        // to the window's type size and settling where a row puts its name.
+        const u = lerp(1, typeEnd / f.type0);
+        const vl = lerp(f.pl, 10);
+        const vt = lerp(f.pt, Math.max(0, (endH - f.topH * u) / 2));
+        const tx = vl / sx - f.pl;
+        const ty = vt / sy - f.pt;
+        set(f, f.top, "tt", "transform", `translate(${tx.toFixed(2)}px, ${ty.toFixed(2)}px) scale(${(u / sx).toFixed(4)}, ${(u / sy).toFixed(4)})`);
+
+        set(f, f.card, "fd", "--fade", (1 - clamp01((fl - 0.05) / 0.4)).toFixed(3));
+        set(f, f.card, "m", "--m", clamp01((fl - 0.4) / 0.6).toFixed(3));
+        set(f, f.card, "op", "opacity", (1 - clamp01((fl - 0.86) / 0.14)).toFixed(3));
       });
     };
     const queue = () => {
       if (!raf) raf = requestAnimationFrame(frame);
     };
+    const remeasure = () => {
+      measure();
+      queue();
+    };
+    measure();
     frame();
+    document.fonts?.ready.then(remeasure);
     addEventListener("scroll", queue, { passive: true });
-    addEventListener("resize", queue);
+    addEventListener("resize", remeasure);
     return () => {
       cancelAnimationFrame(raf);
       removeEventListener("scroll", queue);
-      removeEventListener("resize", queue);
+      removeEventListener("resize", remeasure);
     };
   }, [pairRef]);
 }

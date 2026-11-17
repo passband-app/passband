@@ -106,9 +106,21 @@ mkdir -p "$DMG_STAGE"
 ditto "$APP" "$DMG_STAGE/Passband.app"
 ln -s /Applications "$DMG_STAGE/Applications"
 # HFS+ rather than APFS so it mounts on every macOS the app supports; ULFO
-# (lzfse) is the smallest format those versions all read.
-hdiutil create -quiet -volname "Passband" -srcfolder "$DMG_STAGE" \
-  -fs HFS+ -format ULFO -ov "$DMG"
+# (lzfse) is the smallest format those versions all read. hdiutil on hosted
+# CI runners fails now and then with "Resource busy", so it gets a few tries
+# rather than costing a release that is already notarized.
+for attempt in 1 2 3 4 5; do
+  if hdiutil create -quiet -volname "Passband" -srcfolder "$DMG_STAGE" \
+      -fs HFS+ -format ULFO -ov "$DMG"; then
+    break
+  fi
+  if [ "$attempt" -eq 5 ]; then
+    echo "error: hdiutil create failed 5 times" >&2
+    exit 1
+  fi
+  echo "==> hdiutil create failed (attempt $attempt); retrying" >&2
+  sleep $((attempt * 3))
+done
 rm -rf "$DMG_STAGE"
 # A downloaded dmg is itself checked by Gatekeeper, so it is signed and
 # notarized in its own right, not only the app inside it.

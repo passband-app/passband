@@ -29,6 +29,12 @@ ignore = [
     # async-imap 0.12 (IMAP support); leaves when async-imap drops it for
     # core::pin::pin!.
     { id = "RUSTSEC-2026-0441", reason = "unmaintained, no vuln; transitive via async-imap" },
+    # chrono and chrono-tz: declared unmaintained, no vulnerability, no
+    # replacement release. chrono is a direct workspace dependency (189 files)
+    # and also arrives through rusqlite's `chrono` feature and async-imap.
+    # They go when the workspace moves to jiff, a migration of its own.
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained, no vuln; direct dep, leaves with a jiff migration" },
+    { id = "RUSTSEC-2026-0555", reason = "unmaintained, no vuln; chrono-tz, leaves with a jiff migration" },
 ]
 
 [licenses]

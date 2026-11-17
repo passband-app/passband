@@ -66,6 +66,7 @@ locals {
       SQUELCH_CONTROL_BIFROST_URL          = var.control_bifrost_url
       SQUELCH_CONTROL_TRUSTED_PROXY_HOPS   = tostring(var.control_trusted_proxy_hops)
       SQUELCH_CONTROL_INVITE_FROM          = var.control_invite_from
+      SQUELCH_CONTROL_NOTE_FROM            = var.control_note_from
       SQUELCH_CONTROL_WAITLIST_ORIGIN      = var.control_waitlist_origin
       SQUELCH_CONTROL_LLM_BUDGET_USD       = var.control_llm_budget_usd
       SQUELCH_CONTROL_LLM_MODELS           = var.control_llm_models

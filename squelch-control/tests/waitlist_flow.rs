@@ -52,6 +52,7 @@ mod common;
 const ADMIN_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 const RESEND_KEY: &str = "re_test_0123456789";
 const INVITE_FROM: &str = "Passband <invites@passband.test>";
+const NOTE_FROM: &str = "Ada Founder <ada@passband.test>";
 /// The one origin the public form may be posted from.
 const ORIGIN: &str = "https://passband.test";
 const COOKIE_KEY: &[u8] = &[42; 32];
@@ -189,7 +190,16 @@ impl Harness {
         Self::build_with(waitlist, "http://127.0.0.1:1".into()).await
     }
 
+    /// The feature ON with a personal-note sender configured.
+    async fn with_note() -> Self {
+        Self::build_full(true, "http://127.0.0.1:1".into(), Some(NOTE_FROM)).await
+    }
+
     async fn build_with(waitlist: bool, warden_url: String) -> Self {
+        Self::build_full(waitlist, warden_url, None).await
+    }
+
+    async fn build_full(waitlist: bool, warden_url: String, note_from: Option<&str>) -> Self {
         let rec: Shared = Arc::new(Mutex::new(Recorder::default()));
         let resend_url = spawn_resend(rec.clone()).await;
 
@@ -222,6 +232,7 @@ impl Harness {
                 admin_token: ADMIN_TOKEN.into(),
                 resend_api_key: RESEND_KEY.into(),
                 invite_from: INVITE_FROM.into(),
+                note_from: note_from.map(Into::into),
                 allowed_origin: ORIGIN.into(),
                 // The struct is constructed directly, so an http mock URL is
                 // fine here; `from_env` is where the real origin is pinned.
@@ -1875,4 +1886,87 @@ async fn a_warden_without_purge_deletes_nothing() {
     assert_eq!(purged.lock().unwrap().len(), 1);
     assert!(h.state.store().label_exists("ada").await.unwrap());
     assert!(h.state.store().user_entry(id).await.unwrap().is_some());
+}
+
+/// With a note sender configured, an approval sends the invite now and asks
+/// the provider to send the personal note later: from the person, text only,
+/// greeting the applicant by name, carrying the same one-click link.
+#[tokio::test]
+async fn approving_schedules_a_personal_note_with_the_same_link() {
+    let h = Harness::with_note().await;
+    h.join_named("Grace Example", APPLICANT).await;
+    let id = h.only_row_id().await;
+    let cookie = h.sign_in().await;
+
+    let before = chrono::Utc::now();
+    h.post_form(
+        "/admin/approve",
+        format!("id={id}&confirmed=yes"),
+        Some(&cookie),
+    )
+    .await;
+
+    let sends = h.sends();
+    assert_eq!(sends.len(), 2, "the invite and the note");
+    let (_, invite) = &sends[0];
+    let (_, note) = &sends[1];
+    assert_eq!(invite["from"], INVITE_FROM);
+    assert!(invite.get("scheduled_at").is_none(), "the invite goes now");
+
+    assert_eq!(note["from"], NOTE_FROM);
+    assert_eq!(note["to"][0], APPLICANT);
+    assert!(
+        note.get("html").is_none(),
+        "a note from a person is plain text"
+    );
+    let at = chrono::DateTime::parse_from_rfc3339(note["scheduled_at"].as_str().unwrap())
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let delay = at - before;
+    assert!(
+        delay >= chrono::Duration::minutes(4) && delay <= chrono::Duration::minutes(6),
+        "{delay}"
+    );
+
+    let text = note["text"].as_str().unwrap();
+    assert!(text.starts_with("Hi Grace,"), "{text}");
+    assert!(text.contains("reply"), "{text}");
+    assert!(text.trim_end().ends_with("Ada Founder"), "{text}");
+    assert!(!text.contains('\u{2014}'), "{text}");
+    // The same live code, by the same link.
+    let code = code_in(invite);
+    assert!(
+        text.contains(&format!("https://signup.passband.test/?invite={code}")),
+        "{text}"
+    );
+
+    // A re-send repairs delivery; it does not say hello twice.
+    h.post_form(
+        "/admin/send",
+        format!("id={id}&confirmed=yes"),
+        Some(&cookie),
+    )
+    .await;
+    let notes = h
+        .sends()
+        .iter()
+        .filter(|(_, b)| b["from"] == NOTE_FROM)
+        .count();
+    assert_eq!(notes, 1);
+}
+
+/// No note sender configured is no note: the invite alone, as before.
+#[tokio::test]
+async fn without_a_note_sender_only_the_invite_goes() {
+    let h = Harness::new().await;
+    h.join_named("Grace Example", APPLICANT).await;
+    let id = h.only_row_id().await;
+    let cookie = h.sign_in().await;
+    h.post_form(
+        "/admin/approve",
+        format!("id={id}&confirmed=yes"),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(h.sends().len(), 1);
 }

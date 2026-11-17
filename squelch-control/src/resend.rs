@@ -71,12 +71,28 @@ struct SendRequest<'a> {
     /// An array even for one recipient: that is the shape the API takes.
     to: [&'a str; 1],
     subject: &'a str,
-    /// Both parts are sent. A text part is what a client with no HTML shows,
-    /// and it is also what keeps the message out of the folder a lone HTML part
-    /// tends to land in.
+    /// The invite sends both parts. A text part is what a client with no HTML
+    /// shows, and it is also what keeps the message out of the folder a lone
+    /// HTML part tends to land in. The personal note sends text ALONE, because
+    /// a note from a person that arrives as a branded template reads as a
+    /// newsletter wearing a name.
     text: String,
-    html: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    html: Option<String>,
+    /// When Resend should send it, RFC 3339. Unset is now. The delay is held
+    /// by the provider rather than by a timer in this process, so a deploy or
+    /// a restart in the gap cannot drop it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scheduled_at: Option<String>,
 }
+
+/// What the personal note says in its subject line.
+const NOTE_SUBJECT: &str = "Glad you're here";
+
+/// Ceiling on the first name the note greets. A name is a public form's
+/// field, and this one goes out under a person's own address, so anything that
+/// is not plainly a name is dropped for a bare "Hi,".
+const MAX_GREETING_NAME: usize = 32;
 
 /// The client: one reqwest client, one API key, one sender, one base URL.
 ///
@@ -138,17 +154,55 @@ impl ResendClient {
         if !is_recipient(to) {
             return Err(ResendError::Refused);
         }
+        self.post(&SendRequest {
+            from: &self.from,
+            to: [to],
+            subject: SUBJECT,
+            text: text_body(code, signup_url),
+            html: Some(html_body(code, signup_url)),
+            scheduled_at: None,
+        })
+        .await
+    }
+
+    /// Schedule the personal note: the same one-click link, from a person
+    /// rather than from `invites@`, sent at `send_at` and replied to by a
+    /// human. `from` is the configured note sender, e.g. `Name
+    /// <name@example.com>`; its display name signs the note.
+    ///
+    /// Same guarantees as [`Self::send_invite`]: `Ok(())` is the provider
+    /// accepting the message (here, accepting it for later), and nothing in
+    /// here logs.
+    pub async fn send_note(
+        &self,
+        from: &str,
+        to: &str,
+        name: Option<&str>,
+        code: &str,
+        signup_url: &str,
+        send_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), ResendError> {
+        if !is_recipient(to) {
+            return Err(ResendError::Refused);
+        }
+        self.post(&SendRequest {
+            from,
+            to: [to],
+            subject: NOTE_SUBJECT,
+            text: note_body(from, name, code, signup_url),
+            html: None,
+            scheduled_at: Some(send_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        })
+        .await
+    }
+
+    /// The one route: `POST /emails`, and the four outcomes it maps onto.
+    async fn post(&self, req: &SendRequest<'_>) -> Result<(), ResendError> {
         let resp = self
             .http
             .post(format!("{}/emails", self.base_url))
             .header(reqwest::header::AUTHORIZATION, &self.auth_header)
-            .json(&SendRequest {
-                from: &self.from,
-                to: [to],
-                subject: SUBJECT,
-                text: text_body(code, signup_url),
-                html: html_body(code, signup_url),
-            })
+            .json(req)
             .send()
             .await
             .map_err(|_| ResendError::Unreachable)?;
@@ -198,6 +252,52 @@ fn invite_link(code: &str, signup_url: &str) -> String {
         signup_url.trim_end_matches('/'),
         crate::pages::percent_encode(code)
     )
+}
+
+/// The personal note. Text only, short, and in the first person: it is the
+/// one email that is meant to be answered.
+fn note_body(from: &str, name: Option<&str>, code: &str, signup_url: &str) -> String {
+    let greeting = match name.and_then(greeting_name) {
+        Some(n) => format!("Hi {n},"),
+        None => "Hi,".to_string(),
+    };
+    let sign = match sender_name(from) {
+        Some(s) => format!("\n{s}\n"),
+        None => String::new(),
+    };
+    format!(
+        "{greeting}
+
+Thanks for joining Passband. I'm really excited to see how you use it.
+
+Here's your invite link again, in case the first email got buried:
+{link}
+
+If anything feels off, confusing, or great, just reply to this email. It comes straight to me and I read every one.
+{sign}",
+        link = invite_link(code, signup_url),
+    )
+}
+
+/// The first word of what someone called themselves, if it is plainly a name:
+/// letters, apostrophes and hyphens, bounded. Anything else (a URL, a sentence,
+/// an emoji parade) gets a bare greeting rather than going out under a person's
+/// own address.
+fn greeting_name(name: &str) -> Option<&str> {
+    let first = name.split_whitespace().next()?;
+    let ok = first.chars().count() <= MAX_GREETING_NAME
+        && first.chars().any(char::is_alphabetic)
+        && first
+            .chars()
+            .all(|c| c.is_alphabetic() || c == '\'' || c == '-');
+    ok.then_some(first)
+}
+
+/// The display name of a `Name <addr>` sender, or `None` for a bare address.
+fn sender_name(from: &str) -> Option<&str> {
+    let (name, _) = from.split_once('<')?;
+    let name = name.trim().trim_matches('"').trim();
+    (!name.is_empty()).then_some(name)
 }
 
 /// The plain-text part. Same order as the HTML: the hook, the link, the
@@ -473,6 +573,65 @@ mod tests {
                 "{path} is not routed"
             );
         }
+    }
+
+    /// The note: scheduled, from the person, text only, and greeting only a
+    /// name that is plainly a name.
+    #[tokio::test]
+    async fn schedules_a_plain_text_note_from_a_person() {
+        let rec: Shared = Arc::default();
+        let base = spawn_provider(rec.clone()).await;
+        let at = chrono::DateTime::parse_from_rfc3339("2030-01-02T03:04:05Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        client(base)
+            .send_note(
+                "Ada Founder <ada@passband.test>",
+                "grace@example.com",
+                Some("Grace Example"),
+                CODE,
+                SIGNUP_URL,
+                at,
+            )
+            .await
+            .unwrap();
+        let r = rec.lock().unwrap();
+        let body = &r.bodies[0];
+        assert_eq!(body["from"], "Ada Founder <ada@passband.test>");
+        assert_eq!(body["subject"], NOTE_SUBJECT);
+        assert_eq!(body["scheduled_at"], "2030-01-02T03:04:05Z");
+        assert!(body.get("html").is_none());
+        let text = body["text"].as_str().unwrap();
+        assert!(text.starts_with("Hi Grace,"), "{text}");
+        assert!(text.contains(&invite_link(CODE, SIGNUP_URL)), "{text}");
+        assert!(text.trim_end().ends_with("Ada Founder"), "{text}");
+        assert!(!text.contains('\u{2014}'), "{text}");
+    }
+
+    #[test]
+    fn greets_only_what_is_plainly_a_name() {
+        assert_eq!(greeting_name("Grace Example"), Some("Grace"));
+        assert_eq!(greeting_name("  José  "), Some("José"));
+        assert_eq!(greeting_name("Mary-Kate O'Neil"), Some("Mary-Kate"));
+        for bad in [
+            "",
+            "   ",
+            "evil.example",
+            "http://x",
+            "123",
+            &"a".repeat(40),
+        ] {
+            assert_eq!(greeting_name(bad), None, "{bad}");
+        }
+        assert!(note_body("a@x.test", Some("http://x"), CODE, SIGNUP_URL).starts_with("Hi,\n"));
+    }
+
+    #[test]
+    fn signs_with_the_sender_display_name() {
+        assert_eq!(sender_name("Ada Founder <a@x.test>"), Some("Ada Founder"));
+        assert_eq!(sender_name("\"Ada\" <a@x.test>"), Some("Ada"));
+        assert_eq!(sender_name("a@x.test"), None);
+        assert_eq!(sender_name("<a@x.test>"), None);
     }
 
     /// Four outcomes, and every one of them says nothing about the key, the

@@ -217,7 +217,7 @@ private struct ShellWatchers: View {
                 // The first-load veil is over the board; walking off the
                 // board is as good as saying "start now".
                 if view != .sitrep { store.firstLoad.dismiss(store) }
-                // Notes still owed (a newcomer whose first look ended on
+                // Notes still owed (an update whose first sync landed on
                 // another page) wait for the Sitrep. A no-op for everyone
                 // already stamped, and once per session for the rest.
                 if view == .sitrep, store.lastRefresh != nil { store.whatsNew.maybeShow() }

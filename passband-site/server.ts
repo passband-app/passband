@@ -4,6 +4,22 @@
 // undo, set it back to "passband-app/passband" and drop the workflow's mirror step.
 const RELEASES_REPO = "passband-app/passband-releases";
 
+// The first version released as a dmg beside its zip. /download hands a person
+// the dmg (open it, drag Passband to Applications) from this version on, and
+// the zip before it, since older releases have no dmg to redirect to. Sparkle
+// and Homebrew keep fetching the zip either way.
+const DMG_SINCE = "0.0.21";
+
+/** a >= b, for x.y.z version strings. */
+function versionAtLeast(a: string, b: string): boolean {
+  const x = a.split(".").map(Number);
+  const y = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if (x[i] !== y[i]) return x[i] > y[i];
+  }
+  return true;
+}
+
 // Static pages are plain HTML files, not React routes: legal pages must be
 // readable by crawlers and reviewers without executing the bundle.
 // Newest released version, read once from the appcast baked into this image
@@ -91,23 +107,25 @@ const server = Bun.serve({
           : undefined,
       });
     }
-    // The homepage's download button. The appcast in this image is the truth
-    // about what shipped last (newest entry first), so redirect through the
-    // versioned URL below; with no releases yet, fall back to the releases page.
+    // Every download link (the invite email, /self-host). The appcast in this
+    // image is the truth about what shipped last (newest entry first), so
+    // redirect through the versioned URL below; with no releases yet, fall
+    // back to the releases page.
     if (path === "/download" || path === "/download/latest") {
       const version = latestVersion();
+      const ext = version && versionAtLeast(version, DMG_SINCE) ? "dmg" : "zip";
       return Response.redirect(
         version
-          ? `/download/Passband-${version}.zip`
+          ? `/download/Passband-${version}.${ext}`
           : `https://github.com/${RELEASES_REPO}/releases`,
         302,
       );
     }
     // Stable download URLs the appcast can use as its enclosure prefix:
-    // /download/Passband-1.2.3.zip redirects to that version's GitHub release
-    // asset. The archives live on GitHub, not in this image, so the feed URL
-    // outlives any storage choice and the site stays tiny.
-    const dl = path.match(/^\/download\/(Passband-(\d+\.\d+\.\d+)\.zip)$/);
+    // /download/Passband-1.2.3.zip (or .dmg) redirects to that version's
+    // GitHub release asset. The archives live on GitHub, not in this image, so
+    // the feed URL outlives any storage choice and the site stays tiny.
+    const dl = path.match(/^\/download\/(Passband-(\d+\.\d+\.\d+)\.(?:zip|dmg))$/);
     if (dl) {
       return Response.redirect(
         `https://github.com/${RELEASES_REPO}/releases/download/passband-mac-${dl[2]}/${dl[1]}`,

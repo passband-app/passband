@@ -87,11 +87,11 @@ struct SendRequest<'a> {
 }
 
 /// What the personal note says in its subject line.
-const NOTE_SUBJECT: &str = "welcome to passband!";
+const NOTE_SUBJECT: &str = "Welcome to Passband!";
 
 /// Ceiling on the first name the note greets. A name is a public form's
 /// field, and this one goes out under a person's own address, so anything that
-/// is not plainly a name is dropped for a bare "hi,".
+/// is not plainly a name is dropped for a bare "Hi,".
 const MAX_GREETING_NAME: usize = 32;
 
 /// The client: one reqwest client, one API key, one sender, one base URL.
@@ -258,18 +258,18 @@ fn invite_link(code: &str, signup_url: &str) -> String {
 /// one email that is meant to be answered.
 fn note_body(name: Option<&str>, code: &str, signup_url: &str) -> String {
     let greeting = match name.and_then(greeting_name) {
-        Some(n) => format!("hi {n},"),
-        None => "hi,".to_string(),
+        Some(n) => format!("Hi {n},"),
+        None => "Hi,".to_string(),
     };
     format!(
         "{greeting}
 
-thanks for joining Passband! i hope you find it as magical as i do.
+Thanks for joining Passband! I hope you find it as magical as I do.
 
 Here's your invite link again, in case the first email got buried:
 {link}
 
-If anything feels off, confusing, or great, just reply to this email. would love to hear what you think!
+If anything feels off, confusing, or great, just reply to this email. Would love to hear what you think!
 ",
         link = invite_link(code, signup_url),
     )
@@ -591,7 +591,7 @@ mod tests {
         assert_eq!(body["scheduled_at"], "2030-01-02T03:04:05Z");
         assert!(body.get("html").is_none());
         let text = body["text"].as_str().unwrap();
-        assert!(text.starts_with("hi Grace,"), "{text}");
+        assert!(text.starts_with("Hi Grace,"), "{text}");
         assert!(text.contains(&invite_link(CODE, SIGNUP_URL)), "{text}");
         assert!(!text.contains('\u{2014}'), "{text}");
     }
@@ -611,7 +611,7 @@ mod tests {
         ] {
             assert_eq!(greeting_name(bad), None, "{bad}");
         }
-        assert!(note_body(Some("http://x"), CODE, SIGNUP_URL).starts_with("hi,\n"));
+        assert!(note_body(Some("http://x"), CODE, SIGNUP_URL).starts_with("Hi,\n"));
     }
 
     /// Four outcomes, and every one of them says nothing about the key, the

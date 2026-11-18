@@ -194,6 +194,10 @@ pub const MIN_ADMIN_TOKEN_LEN: usize = 32;
 /// at a mock by constructing the struct directly.
 pub const RESEND_URL: &str = "https://api.resend.com";
 
+/// How long after the invite the personal note goes out. Long enough that it
+/// arrives as a second message rather than a twin of the first.
+pub const NOTE_DELAY: Duration = Duration::from_secs(5 * 60);
+
 /// The origin the waitlist form is served from, and so the only one the CORS
 /// answer names. A default rather than a required variable because the product
 /// has exactly one marketing site; an operator running their own points this at
@@ -443,6 +447,12 @@ pub struct WaitlistConfig {
     /// <invites@passband.app>`. Must be an address on a domain verified at
     /// Resend, or every send is refused.
     pub invite_from: String,
+    /// Who the personal note is from, e.g. `Name <name@example.com>`, or
+    /// `None` for no note. Set, every applicant whose invite goes out is also
+    /// sent a short first-person note [`NOTE_DELAY`] later, carrying the same
+    /// link and inviting a reply. Like the invite sender, it must be on a domain
+    /// verified at Resend.
+    pub note_from: Option<String>,
     /// The origin the waitlist form is served from, echoed as
     /// `Access-Control-Allow-Origin` on that route and nowhere else. A canonical
     /// origin: no path, no trailing slash.
@@ -478,6 +488,7 @@ impl std::fmt::Debug for WaitlistConfig {
             .field("admin_token", &"<redacted>")
             .field("resend_api_key", &"<redacted>")
             .field("invite_from", &self.invite_from)
+            .field("note_from", &self.note_from)
             .field("allowed_origin", &self.allowed_origin)
             .field("resend_url", &self.resend_url)
             .finish()
@@ -620,6 +631,7 @@ impl Config {
             var("SQUELCH_CONTROL_INVITE_FROM"),
             var("SQUELCH_CONTROL_WAITLIST_ORIGIN"),
         )?;
+        let waitlist = with_note(waitlist, var("SQUELCH_CONTROL_NOTE_FROM"))?;
 
         let trusted_proxy_hops = match var("SQUELCH_CONTROL_TRUSTED_PROXY_HOPS") {
             None => 0,
@@ -858,12 +870,7 @@ fn waitlist_from(
     // line break is refused rather than passed on, and it must at least be
     // shaped like an address: `invites@passband.app` or
     // `Passband <invites@passband.app>`.
-    let from_ok = (3..=MAX_INVITE_FROM_LEN).contains(&invite_from.len())
-        && invite_from.contains('@')
-        && invite_from
-            .bytes()
-            .all(|b| b == b' ' || b.is_ascii_graphic());
-    if !from_ok {
+    if !sender_ok(&invite_from) {
         return Err(ConfigError::invalid(format!(
             "invalid SQUELCH_CONTROL_INVITE_FROM `{invite_from}`: expected an address on a domain \
              verified at Resend, e.g. `Passband <invites@passband.app>`"
@@ -877,9 +884,46 @@ fn waitlist_from(
         admin_token,
         resend_api_key,
         invite_from,
+        note_from: None,
         allowed_origin,
         resend_url: RESEND_URL.to_string(),
     }))
+}
+
+/// Shaped like a sender: bounded, an address, and nothing that could break a
+/// mail header (no control characters, no line breaks).
+fn sender_ok(from: &str) -> bool {
+    (3..=MAX_INVITE_FROM_LEN).contains(&from.len())
+        && from.contains('@')
+        && from.bytes().all(|b| b == b' ' || b.is_ascii_graphic())
+}
+
+/// Attach the personal-note sender to the waitlist settings. Unset is no note.
+/// Set without the waitlist is a REFUSAL TO BOOT, the same as every other
+/// half-configured feature here: a note with no invite to follow is a setting
+/// that silently does nothing.
+fn with_note(
+    waitlist: Option<WaitlistConfig>,
+    note_from: Option<String>,
+) -> Result<Option<WaitlistConfig>, ConfigError> {
+    let Some(note_from) = note_from else {
+        return Ok(waitlist);
+    };
+    let Some(mut waitlist) = waitlist else {
+        return Err(ConfigError::invalid(
+            "SQUELCH_CONTROL_NOTE_FROM is set without the waitlist; set \
+             SQUELCH_CONTROL_ADMIN_TOKEN, SQUELCH_CONTROL_RESEND_API_KEY and \
+             SQUELCH_CONTROL_INVITE_FROM too, or unset it",
+        ));
+    };
+    if !sender_ok(&note_from) {
+        return Err(ConfigError::invalid(format!(
+            "invalid SQUELCH_CONTROL_NOTE_FROM `{note_from}`: expected an address on a domain \
+             verified at Resend, e.g. `Name <name@example.com>`"
+        )));
+    }
+    waitlist.note_from = Some(note_from);
+    Ok(Some(waitlist))
 }
 
 /// Validate the WorkOS settings: unset is off, and a set key must be one.
@@ -1147,6 +1191,7 @@ mod tests {
                 admin_token: "ADMIN-PAGE-TOKEN-VALUE".into(),
                 resend_api_key: "RESEND-API-KEY-VALUE".into(),
                 invite_from: "Passband <invites@passband.app>".into(),
+                note_from: None,
                 allowed_origin: DEFAULT_WAITLIST_ORIGIN.into(),
                 resend_url: RESEND_URL.into(),
             }),
@@ -1638,6 +1683,30 @@ mod tests {
             waitlist_from(None, None, None, some("https://passband.app")).is_err(),
             "an origin on its own is still a half-configured feature"
         );
+    }
+
+    #[test]
+    fn the_note_sender_needs_the_waitlist_and_an_address() {
+        let some = |v: &str| Some(v.to_string());
+        let token = "t".repeat(MIN_ADMIN_TOKEN_LEN);
+        let base = || {
+            waitlist_from(
+                some(&token),
+                some("re_key"),
+                some("Passband <invites@passband.app>"),
+                None,
+            )
+            .unwrap()
+        };
+        assert_eq!(with_note(base(), None).unwrap().unwrap().note_from, None);
+        let on = with_note(base(), some("Ada <ada@example.com>"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(on.note_from.as_deref(), Some("Ada <ada@example.com>"));
+        assert!(with_note(None, some("Ada <ada@example.com>")).is_err());
+        assert!(with_note(base(), some("not an address")).is_err());
+        assert!(with_note(base(), some("Ada <ada@example.com>\nBcc: x@y")).is_err());
+        assert!(with_note(None, None).unwrap().is_none());
     }
 
     /// The values are held to the same bar as the rest of the config: a token

@@ -860,6 +860,7 @@ impl Harness {
                 admin_token: "0123456789abcdef0123456789abcdef".into(),
                 resend_api_key: "re_test_0123456789".into(),
                 invite_from: "Passband <invites@passband.test>".into(),
+                note_from: None,
                 allowed_origin: "https://passband.test".into(),
                 // Port 1: nothing listens. Nothing on this flow mails anybody,
                 // and a reachable mock would only hide it if something did.

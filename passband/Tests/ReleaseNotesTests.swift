@@ -426,20 +426,29 @@ struct ReleaseNotesTests {
         }
     }
 
-    /// A Mac whose first look just ended is stamped just below the latest
-    /// release, so its first time on the Sitrep shows that release alone.
+    /// A Mac whose first look just ended is stamped with the latest release
+    /// it carries, so a fresh install shows no changelog at all.
     static func theMacsNewcomer() {
         guard announced.count > 1 else { return }
         let newest = announced[0].version, below = announced[1].version
         expect(
-            ReleaseLedger.newcomerStamp(table, running: newest) == below,
-            "a Mac newcomer is stamped just below the latest release")
+            ReleaseLedger.newcomerStamp(table, running: newest) == newest,
+            "a Mac newcomer is stamped with the latest release")
+        expect(
+            ReleaseNotes.unseen(lastSeen: newest, running: newest).isEmpty,
+            "and is shown nothing")
+        expect(
+            ReleaseLedger.newcomerStamp(table, running: below) == below,
+            "a newcomer on an older build is stamped with that build's release")
         expect(
             ReleaseNotes.unseen(lastSeen: below, running: newest).map(\.version) == [newest],
-            "and is shown the latest release alone")
+            "and meets the next release when they update to it")
         expect(
-            ReleaseLedger.newcomerStamp(table, running: "0.0.0") == nil,
-            "a build below the whole table has nothing to stamp")
+            ReleaseLedger.newcomerStamp(table, running: "0.0.0") == "0.0.0",
+            "a build below the whole table is stamped with itself")
+        expect(
+            ReleaseLedger.newcomerStamp(table, running: "") == nil,
+            "a build with no version stamps nothing")
     }
 
     static func thePhonesArrival() {
@@ -455,19 +464,20 @@ struct ReleaseNotesTests {
             shown(arrival(nil, first, false)) == [first],
             "an established phone with no stamp is shown the release it took")
 
-        // A NEWCOMER IS SHOWN THE LATEST RELEASE and nothing older: stamped
-        // with the release just below it, so their first sync raises one.
-        let below = phone[1].version
+        // A NEWCOMER IS SHOWN NOTHING: stamped with the latest release, so
+        // their first sync raises no walk.
         expect(
-            shown(arrival(nil, newest, true)) == ["stamp " + below],
-            "a newcomer is stamped just below the latest release")
+            shown(arrival(nil, newest, true)) == ["stamp " + newest],
+            "a newcomer is stamped with the latest release")
         expect(
-            shown(arrival(below, newest, false)) == [newest],
-            "and their first sync shows the latest release alone")
-        // A build past the table still shows the newest note there is.
+            shown(arrival(newest, newest, false)).isEmpty,
+            "and their first sync shows nothing")
+        // A build past the table is stamped with the newest note there is,
+        // not the build, so a note added later for a release in between
+        // still reaches them.
         expect(
-            shown(arrival(nil, "999.0.0", true)) == ["stamp " + below],
-            "a newcomer on a build past the table meets the newest note")
+            shown(arrival(nil, "999.0.0", true)) == ["stamp " + newest],
+            "a newcomer on a build past the table is stamped with the newest note")
         // A build older than the first phone note, as a newcomer and not.
         expect(shown(arrival(nil, "0.0.0", true)) == ["stamp 0.0.0"], "a newcomer below the table is still stamped")
         expect(shown(arrival(nil, "0.0.0", false)).isEmpty, "a phone below the whole table is shown nothing")
@@ -480,7 +490,7 @@ struct ReleaseNotesTests {
         expect(shown(arrival(newest, newest, true)).isEmpty, "a stamped phone at the gate is left alone")
         // Garbage in the stamp is no stamp.
         expect(
-            shown(arrival("not-a-version", newest, true)) == ["stamp " + below],
+            shown(arrival("not-a-version", newest, true)) == ["stamp " + newest],
             "an unparseable stamp on a newcomer is replaced")
 
         // The same bounds as the Mac's table, asked of the phone's.
@@ -540,11 +550,11 @@ struct ReleaseNotesTests {
             ReleaseLedger.newest(made, atOrBelow: "9.9.9")?.version == "9.9.8",
             "Settings replays the newest announced release")
         expect(
-            ReleaseLedger.newcomerStamp(made, running: "9.9.9") == "9.9.7",
-            "a newcomer is stamped below the newest announced release")
+            ReleaseLedger.newcomerStamp(made, running: "9.9.9") == "9.9.8",
+            "a newcomer is stamped with the newest announced release")
         expect(
-            versions(ReleaseLedger.unseen(made, lastSeen: "9.9.7", running: "9.9.9")) == ["9.9.8"],
-            "so they meet that one")
+            ReleaseLedger.unseen(made, lastSeen: "9.9.8", running: "9.9.9").isEmpty,
+            "so they meet nothing")
 
         // The phone reads the same ledger.
         let phoneQuiet = PhoneReleaseNote(

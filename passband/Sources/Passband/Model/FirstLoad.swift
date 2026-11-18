@@ -225,8 +225,8 @@ final class FirstLoad {
         let firstTime = !Prefs.shared.firstLoadSeen
         Prefs.shared.firstLoadSeen = true
         #if os(macOS)
-            // Somebody new to the app is shown the latest release's notes on
-            // their first time at the board, and nothing older.
+            // Somebody new to the app is never shown release notes: stamp
+            // everything they installed as read.
             if firstTime { store.whatsNew.meetNewcomer() }
             // No veil, so no iPhone ad: the corner card, shortly, instead.
             if firstTime, !veilWasShown { TestFlightNudge.shared.askAfterOnboarding(store) }

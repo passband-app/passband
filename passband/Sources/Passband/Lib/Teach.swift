@@ -14,6 +14,9 @@ enum Teach {
     /// The placeholder when there is no sender to suggest from.
     static let example =
         "e.g. never show me TOS updates from this sender"
+    /// The placeholder with no email behind the card (`t` on the Sitrep, +
+    /// on Rules): a sentence about all mail, so it does not say "this sender".
+    static let generalExample = "e.g. never show me feedback requests"
 
     /// The undo chip after a save, naming who the rule ended up about.
     static func savedLabel(_ result: TeachResult) -> String {

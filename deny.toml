@@ -29,6 +29,11 @@ ignore = [
     # async-imap 0.12 (IMAP support); leaves when async-imap drops it for
     # core::pin::pin!.
     { id = "RUSTSEC-2026-0441", reason = "unmaintained, no vuln; transitive via async-imap" },
+    # chrono and chrono-tz: declared unmaintained, no vulnerability. Every
+    # timestamp in the workspace is chrono; a move to jiff or time is its own
+    # project, not a CI fix.
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained, no vuln; workspace-wide time type, migration is separate work" },
+    { id = "RUSTSEC-2026-0555", reason = "unmaintained, no vuln; follows chrono" },
 ]
 
 [licenses]

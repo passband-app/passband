@@ -839,12 +839,15 @@ pub async fn console_auth(
 /// answered with a page asking "continue as {mailbox}?" (see
 /// [`app_handoff_offer`]). Nothing is minted or spent here: that is
 /// [`app_handoff`], on the page's same-origin POST. The page's other link is
-/// this route with `skip_handoff=1`, which is the ordinary Google sign-in.
+/// this route with `skip_handoff=1`, which is the ordinary Google sign-in for
+/// that one request. It leaves the cookie where it is: this is a GET that any
+/// site can send a browser to, so it must not be a way to wipe a handoff, and
+/// the cookie ends with the browser session or its two hours anyway.
 ///
 /// The handoff wins over `?provider=`, because it names the tenant just made
 /// whichever company that mailbox is at, and the page names the mailbox so a
-/// person who meant another account can take the other link. Every other
-/// cookie state goes on to Google below, unchanged, and the cookie is cleared.
+/// person who meant another account can take the other link. A cookie that
+/// cannot be used goes on to Google below, unchanged, and is cleared.
 pub async fn app_auth(
     State(state): State<ControlState>,
     headers: HeaderMap,
@@ -853,7 +856,7 @@ pub async fn app_auth(
     let secure = !state.config().is_insecure();
     let query = query.as_deref();
     let presented = if param(query, "skip_handoff").as_deref() == Some("1") {
-        handoff_cookie_value(&headers).is_some()
+        false
     } else {
         match usable_handoff(&state, &headers).await {
             Handoff::Usable(claim) => return app_handoff_offer(&state, &claim, query),
@@ -2667,7 +2670,7 @@ async fn app_login(
 
 /// The end both app logins share, once the tenant is known: mint the pairing
 /// code, find the analytics id, and render the page that opens the app.
-/// Reached from [`app_login`] after Google, and from [`app_login_by_handoff`]
+/// Reached from [`app_login`] after Google, and from [`app_handoff`]
 /// after a finished signup's handoff was spent. `done` is the line logged once
 /// the code exists, which is how the two are told apart in the logs.
 async fn finish_app_login(

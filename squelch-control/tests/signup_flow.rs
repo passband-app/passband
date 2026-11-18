@@ -1504,7 +1504,8 @@ async fn a_finished_signup_signs_the_app_in_without_a_second_google_trip() {
     assert!(handoff.contains("Path=/app;"), "{handoff}");
     assert!(handoff.contains("HttpOnly"), "{handoff}");
     assert!(handoff.contains("SameSite=Lax"), "{handoff}");
-    assert!(handoff.contains("Max-Age=7200"), "{handoff}");
+    // A browser-session cookie: the two hours are enforced on the server.
+    assert!(!handoff.contains("Max-Age"), "{handoff}");
     let pair = handoff.split(';').next().unwrap().to_string();
 
     // The app login asks first, naming the mailbox, and mints nothing yet.

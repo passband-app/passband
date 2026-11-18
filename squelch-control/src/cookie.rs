@@ -247,7 +247,8 @@ impl AdminClaim {
 /// that created tenant `tid`, at `label`, for `email`, and when.
 ///
 /// THE MODEL. The cookie is only ever set on the response that completes a
-/// signup. It is `HttpOnly`, bound to this host, scoped to `/app`, good for
+/// signup. It is `HttpOnly`, bound to this host, scoped to `/app`, ends with
+/// the browser session, is refused by the server after
 /// [`HANDOFF_COOKIE_TTL_SECS`], and its nonce is spent server side the first
 /// time it is used. Holding it does not sign anybody in by itself: the app
 /// login shows a page naming the mailbox, and only a same-origin press of its
@@ -497,11 +498,14 @@ pub fn set_reconnect_cookie(value: &str, secure: bool) -> String {
 /// `/app/auth` as a top-level navigation, which `Lax` admits, while a
 /// cross-site POST to `/app/handoff` carries no cookie at all. `Path=/app`, so
 /// it rides on the app login and nothing else.
+///
+/// NO `Max-Age`: a browser-session cookie, so closing the browser ends it. The
+/// two-hour limit is not the browser's to keep; it is enforced on the server
+/// from the signed `iat` ([`verify_handoff`]), however long the browser holds
+/// the value.
 pub fn set_handoff_cookie(value: &str, secure: bool) -> String {
     let secure = if secure { "; Secure" } else { "" };
-    format!(
-        "{HANDOFF_COOKIE_NAME}={value}; Path=/app; Max-Age={HANDOFF_COOKIE_TTL_SECS}; HttpOnly; SameSite=Lax{secure}"
-    )
+    format!("{HANDOFF_COOKIE_NAME}={value}; Path=/app; HttpOnly; SameSite=Lax{secure}")
 }
 
 /// The `Set-Cookie` value that clears the handoff: on the answer that spends
@@ -982,7 +986,8 @@ mod tests {
         );
     }
 
-    /// Scoped to the app login, host-bound, unreadable from script, a day.
+    /// Scoped to the app login, host-bound, unreadable from script, and gone
+    /// with the browser session (the two hours are the server's to enforce).
     #[test]
     fn the_handoff_cookie_carries_the_attributes_that_matter() {
         let v = set_handoff_cookie("abc", true);
@@ -992,10 +997,8 @@ mod tests {
         assert!(v.contains("Secure"), "{v}");
         assert!(v.contains("Path=/app;"), "{v}");
         assert!(!v.contains("Domain"), "{v}");
-        assert!(
-            v.contains(&format!("Max-Age={HANDOFF_COOKIE_TTL_SECS}")),
-            "{v}"
-        );
+        assert!(!v.contains("Max-Age"), "{v}");
+        assert!(!v.contains("Expires"), "{v}");
         assert!(!set_handoff_cookie("abc", false).contains("Secure"));
         let cleared = clear_handoff_cookie(true);
         assert!(cleared.contains("Max-Age=0"), "{cleared}");

@@ -4270,7 +4270,7 @@ SQUELCH_TEST_PG_URL is not set, and these tests run against a real Postgres.
     /// A handoff is spent once, and the second presentation of the same nonce
     /// is told so whichever store handle (one per control task) asks. A spend
     /// from long enough ago to have been pruned is gone, which is safe because
-    /// its cookie stopped verifying a day before.
+    /// its cookie stopped verifying long before (two hours against two days).
     #[tokio::test]
     async fn a_handoff_is_spent_exactly_once_across_handles() {
         let url = fresh_schema().await;

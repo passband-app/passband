@@ -1505,9 +1505,9 @@ async fn an_unusable_handoff_is_only_ever_a_trip_to_google() {
 }
 
 /// BOUND TO THE ROW, NOT THE LABEL. A handoff for tenant A, then A is purged
-/// and somebody else signs up at the same label: the old cookie names a row
-/// that no longer exists, so it is a trip to Google and mints nothing for the
-/// new mailbox.
+/// and a new tenant is set up at the same label FOR THE SAME ADDRESS, so the
+/// row id is the only thing that differs: the old cookie names a row that no
+/// longer exists, so it is a trip to Google and mints nothing.
 #[tokio::test]
 async fn a_handoff_does_not_follow_its_label_to_a_new_tenant() {
     let h = Harness::new().await;
@@ -1516,8 +1516,12 @@ async fn a_handoff_does_not_follow_its_label_to_a_new_tenant() {
     let csrf = csrf_on(&page);
 
     let store = h.state.store();
+    let (old_id, old_email) = store.active_tenant_handle(LABEL).await.unwrap().unwrap();
     store.purge_tenant(LABEL, -1).await.unwrap();
-    store.insert_tenant(LABEL, "bob@example.com").await.unwrap();
+    store.insert_tenant(LABEL, "ada@example.com").await.unwrap();
+    let (new_id, new_email) = store.active_tenant_handle(LABEL).await.unwrap().unwrap();
+    assert_eq!(new_email, old_email, "only the row id may differ");
+    assert_ne!(new_id, old_id);
 
     let (status, headers, body) = h.get("/app/auth", Some(&cookie)).await;
     assert!(is_google(status, &headers), "{status} {body}");
@@ -1526,9 +1530,10 @@ async fn a_handoff_does_not_follow_its_label_to_a_new_tenant() {
     assert!(h.rec.lock().unwrap().pair_calls.is_empty());
 }
 
-/// "Use a different account" is the ordinary sign-in: the route ignores the
-/// handoff, goes to Google, and clears the cookie. The link keeps `provider`
-/// and `theme`, and nothing else.
+/// "Use a different account" is the ordinary sign-in for that request: the
+/// route ignores the handoff and goes to Google, and it does NOT clear the
+/// cookie. It is a GET any site can send a browser to, so it must not be a way
+/// to wipe somebody's handoff; the cookie ends on its own.
 #[tokio::test]
 async fn using_a_different_account_is_the_ordinary_google_sign_in() {
     let h = Harness::new().await;
@@ -1536,11 +1541,10 @@ async fn using_a_different_account_is_the_ordinary_google_sign_in() {
 
     let (status, headers, body) = h.get("/app/auth?skip_handoff=1", Some(&cookie)).await;
     assert!(is_google(status, &headers), "{status} {body}");
-    assert!(clears_handoff(&headers));
+    assert!(!clears_handoff(&headers), "{:?}", set_cookies(&headers));
     assert!(h.rec.lock().unwrap().pair_calls.is_empty());
 
-    // The cookie was only cleared, not spent: a browser that kept it can still
-    // be offered the handoff.
+    // Neither cleared nor spent: the next plain app login still offers it.
     let (status, _, body) = h.get("/app/auth", Some(&cookie)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 }

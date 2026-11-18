@@ -41,6 +41,7 @@ mod unsub_browser;
 mod unsub_cdp;
 mod unsub_fetch;
 // SPIKE (web client): remote mail images fetched on the reader's behalf.
+mod favicon;
 mod image_proxy;
 mod unsub_html;
 mod unsub_job;
@@ -227,6 +228,7 @@ fn client_router(state: ApiState) -> Router {
         )
         .route("/client/attachments/{id}", get(handlers::get_attachment))
         .route("/client/image", get(image_proxy::get_image))
+        .route("/client/favicon", get(favicon::get_favicon))
         .route("/client/session", delete(auth::revoke_self))
         // FILES ON THEIR WAY OUT (see the handlers' header). The upload carries
         // its own body limit: the router's default is 2 MB, sized for JSON, and

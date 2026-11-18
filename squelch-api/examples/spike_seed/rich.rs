@@ -59,6 +59,12 @@ fn day(offset: i64) -> String {
         .to_string()
 }
 
+fn days_to_saturday() -> i64 {
+    let wd = Utc::now().date_naive().weekday().num_days_from_monday() as i64; // Mon=0
+    let d = (5 - wd).rem_euclid(7);
+    if d == 0 { 7 } else { d }
+}
+
 fn days_to_friday() -> i64 {
     let wd = Utc::now().date_naive().weekday().num_days_from_monday() as i64; // Mon=0
     let d = (4 - wd).rem_euclid(7);
@@ -145,14 +151,14 @@ fn seeds() -> Vec<Seed> {
         Seed {
             from: "Keyline Keyboards <orders@keyline.example>",
             subject: "Your Q1 keyboard is out for delivery",
-            body: "Good news: order KL-48211 is out for delivery today with Parcelway.",
+            body: "Good news: order KL-48211 is out for delivery today with UPS.",
             hours_ago: 2,
             verdict: Record {
                 kind: EmailKind::Delivery,
                 summary: "Your keyboard is out for delivery today.",
                 record: |id| RecordProposal::Delivery {
-                    carrier: Some("Parcelway".into()),
-                    tracking_number: Some("PW4821100017".into()),
+                    carrier: Some("ups".into()),
+                    tracking_number: Some("1Z999AA10123456784".into()),
                     status: "out_for_delivery".into(),
                     item_name: Some("Q1 mechanical keyboard".into()),
                     merchant: Some("Keyline".into()),
@@ -170,8 +176,8 @@ fn seeds() -> Vec<Seed> {
                 kind: EmailKind::Delivery,
                 summary: "Your linen notebooks shipped and arrive Saturday.",
                 record: |id| RecordProposal::Delivery {
-                    carrier: Some("Parcelway".into()),
-                    tracking_number: Some("PW2039155508".into()),
+                    carrier: Some("ups".into()),
+                    tracking_number: Some("1Z999AA10123456791".into()),
                     status: "shipped".into(),
                     item_name: Some("Linen notebooks, set of 3".into()),
                     merchant: Some("Paper & Thread".into()),
@@ -428,7 +434,9 @@ fn decision_for(verdict: &Verdict, id: i64) -> MessageDecision {
                     action_need: 0.9,
                     personal_relevance: 0.9,
                     importance: *importance,
-                    attention_at: None,
+                    // When the item needs the user, as real triage states it:
+                    // its due day. The Mac reads the due pill from here.
+                    attention_at: due_in_days.map(|d| time(day(d), id)),
                 },
                 relevant_message_ids: vec![id],
                 evidence: ev(id),
@@ -529,37 +537,34 @@ pub fn seed_rich(store: &SqliteStore, acct: i64) -> anyhow::Result<()> {
             eprintln!("message {}: {outcome:?}", job.message_id);
         }
     }
-    // Shipments are their own table, written by the mail extractor beside
-    // triage (`upsert_shipment`), so the delivery mail is recorded there too.
-    use squelch_core::triage::shipment::{ShipmentInfo, ShipmentStatus};
-    let mut shipments = 0;
-    for (id, verdict) in &verdicts {
-        let Verdict::Record { record, .. } = verdict else {
-            continue;
+    // The delivery records above are projected into shipments by the store
+    // itself when each decision commits (rows, merchant, order links), exactly
+    // as real triage does. What only a carrier knows, the ETA, arrives the way
+    // it does in production: a poll's answer (`apply_carrier_track`).
+    use squelch_core::config::ShipmentListPolicy;
+    use squelch_core::triage::shipment::CarrierTrack;
+    let listed = Store::list_shipments(store, acct, true, ShipmentListPolicy::default())?;
+    let shipments = listed.len();
+    for row in &listed {
+        let (eta_day, raw) = match row.status.as_str() {
+            "out_for_delivery" => (0, "Out for delivery"),
+            _ => (days_to_saturday(), "In transit"),
         };
-        let RecordProposal::Delivery {
-            carrier,
-            tracking_number,
-            status,
-            item_name,
-            ..
-        } = record(*id)
-        else {
-            continue;
-        };
-        let status = match status.as_str() {
-            "out_for_delivery" => ShipmentStatus::OutForDelivery,
-            _ => ShipmentStatus::Shipped,
-        };
-        let info = ShipmentInfo {
-            carrier: carrier.unwrap_or_default(),
-            tracking_number: tracking_number.unwrap_or_default(),
-            item_name: item_name.unwrap_or_default(),
-            status,
-            tracking_url: None,
-        };
-        Store::upsert_shipment(store, acct, *id, &info, Utc::now())?;
-        shipments += 1;
+        let eta = (Utc::now().date_naive() + Duration::days(eta_day))
+            .and_hms_opt(20, 0, 0)
+            .map(|t| t.and_utc());
+        Store::apply_carrier_track(
+            store,
+            acct,
+            row.id,
+            &CarrierTrack {
+                status: None,
+                carrier_status_raw: raw.into(),
+                eta,
+                delivered_at: None,
+            },
+            Utc::now(),
+        )?;
     }
     println!(
         "rich: {} messages, {applied} decisions applied, {shipments} shipments",

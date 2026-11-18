@@ -124,6 +124,54 @@ pub(crate) fn sniff(head: &[u8]) -> Option<&'static str> {
     None
 }
 
+/// What a fetch will accept. A mail image is raster only; a favicon may also
+/// be an ICO, which is what icon services answer with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Accept {
+    Raster,
+    RasterOrIcon,
+}
+
+impl Accept {
+    fn sniff(self, head: &[u8]) -> Option<&'static str> {
+        sniff(head).or_else(|| match self {
+            Accept::RasterOrIcon => sniff_icon(head),
+            Accept::Raster => None,
+        })
+    }
+}
+
+/// `image/x-icon` when these bytes open with an ICO header: reserved 0, type
+/// 1 (icon, not cursor), and at least one image in the directory.
+pub(crate) fn sniff_icon(head: &[u8]) -> Option<&'static str> {
+    if head.len() < 6 || head[0..4] != [0, 0, 1, 0] {
+        return None;
+    }
+    let count = u16::from_le_bytes([head[4], head[5]]);
+    (count > 0).then_some("image/x-icon")
+}
+
+/// Width and height from the header of a PNG, GIF or ICO (its first image),
+/// when the bytes say. None for formats whose size is not in a fixed place.
+pub(crate) fn pixel_size(mime: &str, b: &[u8]) -> Option<(u32, u32)> {
+    match mime {
+        "image/png" if b.len() >= 24 => Some((
+            u32::from_be_bytes([b[16], b[17], b[18], b[19]]),
+            u32::from_be_bytes([b[20], b[21], b[22], b[23]]),
+        )),
+        "image/gif" if b.len() >= 10 => Some((
+            u32::from(u16::from_le_bytes([b[6], b[7]])),
+            u32::from(u16::from_le_bytes([b[8], b[9]])),
+        )),
+        // An ICO directory entry stores 0 for 256.
+        "image/x-icon" if b.len() >= 8 => {
+            let dim = |v: u8| if v == 0 { 256 } else { u32::from(v) };
+            Some((dim(b[6]), dim(b[7])))
+        }
+        _ => None,
+    }
+}
+
 /// One fetcher. The production one is shared (it holds no per-reader state:
 /// no jar); tests build their own.
 pub(crate) struct ImageFetcher {
@@ -155,6 +203,15 @@ impl ImageFetcher {
         })
     }
 
+    /// A fetcher whose one exact `host:port` skips the per-hop address check,
+    /// so a loopback stub can stand in for the first hop.
+    #[cfg(test)]
+    pub(crate) fn trusting(authority: &str) -> Self {
+        let mut f = Self::new(false).unwrap();
+        f.trusted = Some(authority.to_string());
+        f
+    }
+
     fn check_hop(&self, url: &Url) -> Result<(), ProxyError> {
         #[cfg(test)]
         if let Some(t) = &self.trusted {
@@ -184,6 +241,15 @@ impl ImageFetcher {
 
     /// Fetch `raw` and return `(mime, bytes)` for a raster image within the cap.
     pub(crate) async fn fetch(&self, raw: &str) -> Result<(&'static str, Vec<u8>), ProxyError> {
+        self.fetch_as(raw, Accept::Raster).await
+    }
+
+    /// [`Self::fetch`], accepting what `accept` names.
+    pub(crate) async fn fetch_as(
+        &self,
+        raw: &str,
+        accept: Accept,
+    ) -> Result<(&'static str, Vec<u8>), ProxyError> {
         let mut url = Url::parse(raw.trim()).map_err(|_| ProxyError::Refused("not a url"))?;
         for _ in 0..=MAX_REDIRECTS {
             self.check_hop(&url)?;
@@ -222,12 +288,13 @@ impl ImageFetcher {
                 // Decide as soon as the prefix is in: a non-image is dropped
                 // without reading the rest of it.
                 if mime.is_none() && bytes.len() >= SNIFF_LEN {
-                    mime = Some(sniff(&bytes).ok_or(ProxyError::NotImage)?);
+                    mime = Some(accept.sniff(&bytes).ok_or(ProxyError::NotImage)?);
                 }
             }
             return match mime {
                 Some(m) => Ok((m, bytes)),
-                None => sniff(&bytes)
+                None => accept
+                    .sniff(&bytes)
                     .map(|m| (m, bytes))
                     .ok_or(ProxyError::NotImage),
             };
@@ -264,7 +331,7 @@ impl ImageFetcher {
     }
 }
 
-fn shared() -> Result<&'static ImageFetcher, ApiError> {
+pub(crate) fn shared() -> Result<&'static ImageFetcher, ApiError> {
     static FETCHER: OnceLock<Option<ImageFetcher>> = OnceLock::new();
     FETCHER
         .get_or_init(|| ImageFetcher::new(false).ok())
@@ -388,17 +455,17 @@ fn cache_key(raw: &str) -> Option<String> {
     Some(url.into())
 }
 
-fn bucket() -> &'static Mutex<Bucket> {
+pub(crate) fn bucket() -> &'static Mutex<Bucket> {
     static BUCKET: OnceLock<Mutex<Bucket>> = OnceLock::new();
     BUCKET.get_or_init(|| Mutex::new(Bucket::new(Instant::now())))
 }
 
-fn cache() -> &'static Mutex<Cache> {
+pub(crate) fn cache() -> &'static Mutex<Cache> {
     static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(Cache::default()))
 }
 
-fn permits() -> &'static Semaphore {
+pub(crate) fn permits() -> &'static Semaphore {
     static SEM: OnceLock<Semaphore> = OnceLock::new();
     SEM.get_or_init(|| Semaphore::new(CONCURRENCY))
 }
@@ -450,7 +517,7 @@ pub async fn get_image(Query(q): Query<ImageQuery>) -> Result<Response, ApiError
 }
 
 /// 429 with a whole-second `Retry-After`, never zero.
-fn too_many(wait: Duration) -> Response {
+pub(crate) fn too_many(wait: Duration) -> Response {
     let secs = wait.as_secs_f64().ceil().max(1.0) as u64;
     (
         StatusCode::TOO_MANY_REQUESTS,
@@ -506,9 +573,7 @@ mod tests {
     }
 
     fn trusting(authority: &str) -> ImageFetcher {
-        let mut f = ImageFetcher::new(false).unwrap();
-        f.trusted = Some(authority.to_string());
-        f
+        ImageFetcher::trusting(authority)
     }
 
     #[test]

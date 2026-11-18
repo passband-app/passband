@@ -1928,7 +1928,7 @@ const RUN: Inbound[] = [
 
 const STEPS: Array<{ title: string; line: ReactNode }> = [
   { title: "New mail comes in",
-    line: "Passband reads it the way you would: what it asks, by when, and what it is about. Jamie's clears the squelch, so it goes to the top of your day." },
+    line: "Passband reads it the way you would: what it asks, by when, and what it is about. Jamie is waiting on your answer, so it goes to the top of your day." },
   { title: "The rest sorts itself",
     line: "Shipping updates, receipts, newsletters and plan changes come in all day and go where they belong. The noise never reaches you." },
   { title: "What's left is yours",
@@ -3179,7 +3179,7 @@ export function App() {
             ))}
           </div>
           <span className="pb-read-l" aria-hidden="true">SPAN&nbsp;&nbsp;your inbox&nbsp;&nbsp;·&nbsp;&nbsp;4,312 msgs</span>
-          <span className="pb-read-r" aria-hidden="true">SQUELCH&nbsp;<b ref={readoutRef}>0%</b></span>
+          <span className="pb-read-r" aria-hidden="true">FILTER&nbsp;<b ref={readoutRef}>0%</b></span>
 
           <div className="pb-cue" aria-hidden="true">scroll</div>
 
@@ -3229,7 +3229,7 @@ export function App() {
       <section className="pb-section pb-clouded" data-track="sitrep_tour">
         <Clouds kind="mail" />
         <h2 className="pb-h2">
-          Same inbox. <em>Squelched.</em>
+          Same inbox. <em>Quieter.</em>
         </h2>
         <p className="pb-intro">
           Every email still arrives. Passband reads each one, pulls forward the few that

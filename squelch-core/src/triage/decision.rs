@@ -324,6 +324,49 @@ impl EventIdentity {
         self.same_as.filter(|id| self.offered.contains(id))
     }
 }
+/// What dealing with a message takes, in the model's words: the closed half
+/// of [`EffortEstimate`]. `Reply` and `Involved` are never a quick clear,
+/// whatever the seconds say (`crate::quick_clear`).
+decision_enum!(EffortTask {
+    Glance,
+    Skim,
+    QuickAction,
+    Reply,
+    LongRead,
+    Involved
+});
+/// The model's estimate of how long the owner needs to be done with a
+/// message, from opening it to closing it, including any quick step it asks
+/// for. Never a fact: it prices a quick-clear queue, and a dwell history from
+/// the owner's own looks beats it. `seconds` is signed so a nonsense value
+/// deserializes and is laundered ([`EffortEstimate::sanitized`]) instead of
+/// failing the step, the way [`DurationEstimate::minutes`] is.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EffortEstimate {
+    pub seconds: i64,
+    pub task: EffortTask,
+}
+impl EffortEstimate {
+    /// The most one estimate may claim: an hour. Past it the number says
+    /// "long", and nothing reads it more finely than that.
+    pub const MAX_SECONDS: i64 = 3_600;
+
+    /// The estimate with its seconds clamped to `1..=MAX_SECONDS`, or `None`
+    /// for one that claims no time at all (zero or negative): an estimate
+    /// that cannot be true is no estimate.
+    pub fn sanitized(self) -> Option<Self> {
+        (self.seconds > 0).then(|| Self {
+            seconds: self.seconds.min(Self::MAX_SECONDS),
+            task: self.task,
+        })
+    }
+
+    /// The seconds as a reader should take them, clamped again on read: a
+    /// stored row may predate the clamp or have been written by hand.
+    pub fn secs(&self) -> Option<u32> {
+        (self.seconds > 0).then(|| self.seconds.min(Self::MAX_SECONDS) as u32)
+    }
+}
 /// A prior for a non-committed event becoming a commitment.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct EventLikelihood {
@@ -462,6 +505,11 @@ pub struct MessageDecision {
     /// `reading_kind`).
     #[serde(default)]
     pub done: Option<DoneRequest>,
+    /// How long dealing with this message takes, the model's estimate
+    /// (agent-triage-v26). Defaults for the reason `reading_kind` does:
+    /// every decision stored before v18 has none.
+    #[serde(default)]
+    pub effort: Option<EffortEstimate>,
 }
 
 #[cfg(test)]
@@ -559,6 +607,36 @@ mod tests {
         old.as_object_mut().unwrap().remove("done").unwrap();
         let decision: MessageDecision = serde_json::from_value(old).unwrap();
         assert_eq!(decision.done, None);
+    }
+
+    /// Every decision stored before agent-triage-v26 has no `effort`.
+    #[test]
+    fn a_decision_without_effort_still_deserializes() {
+        let mut old = serde_json::to_value(MessageDecision::default()).unwrap();
+        old.as_object_mut().unwrap().remove("effort").unwrap();
+        let decision: MessageDecision = serde_json::from_value(old).unwrap();
+        assert_eq!(decision.effort, None);
+    }
+
+    #[test]
+    fn an_effort_estimate_is_clamped_and_a_timeless_one_is_dropped() {
+        let e = |seconds| EffortEstimate {
+            seconds,
+            task: EffortTask::Glance,
+        };
+        assert_eq!(e(8).sanitized(), Some(e(8)));
+        assert_eq!(e(99_999).sanitized(), Some(e(EffortEstimate::MAX_SECONDS)));
+        assert_eq!(e(0).sanitized(), None);
+        assert_eq!(e(-5).sanitized(), None);
+        // Clamped on read too, for a row that never went through the clamp.
+        assert_eq!(e(99_999).secs(), Some(3_600));
+        assert_eq!(e(-1).secs(), None);
+        let json = serde_json::to_value(e(30)).unwrap();
+        assert_eq!(json, serde_json::json!({"seconds": 30, "task": "glance"}));
+        let quick: EffortEstimate =
+            serde_json::from_value(serde_json::json!({"seconds": 20, "task": "quick_action"}))
+                .unwrap();
+        assert_eq!(quick.task, EffortTask::QuickAction);
     }
 
     #[test]

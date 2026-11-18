@@ -14,10 +14,10 @@ use std::collections::{BTreeMap, BTreeSet};
 /// The version of the prompt with the `understanding` flag ON: the file plus
 /// [`UNDERSTANDING_SEGMENTS`]. A const because a const is what a stored string
 /// is compared against; what a run reports is [`prompt_version`].
-pub const PROMPT_VERSION: &str = "agent-triage-v25";
+pub const PROMPT_VERSION: &str = "agent-triage-v27";
 /// The version of the prompt with the flag OFF: the prompt file alone, byte
 /// for byte main's (a test pins that), so it keeps main's version string.
-pub const PROMPT_VERSION_BASE: &str = "agent-triage-v24";
+pub const PROMPT_VERSION_BASE: &str = "agent-triage-v26";
 
 /// The version a run reports, by the variant it ran: decisions and their
 /// diagnostics carry it, and an eval groups gold runs by it, so two different
@@ -890,6 +890,10 @@ pub fn normalize_decision(decision: &mut MessageDecision) {
             *identity = None;
         }
     }
+    // An effort estimate is a price, never a reason to fail a turn: an
+    // absurd one is clamped to an hour, and one that claims no time at all
+    // is dropped (`EffortEstimate::sanitized`).
+    decision.effort = decision.effort.take().and_then(EffortEstimate::sanitized);
 }
 
 /// A ticket's date is when the event happens, not when anything is due: it
@@ -1366,6 +1370,23 @@ fn decision_schema_body() -> Value {
                 ("evidence", reference("evidence")),
             ])),
         ),
+        (
+            "effort",
+            nullable(object(vec![
+                ("seconds", integer()),
+                (
+                    "task",
+                    enumeration(&[
+                        "glance",
+                        "skim",
+                        "quick_action",
+                        "reply",
+                        "long_read",
+                        "involved",
+                    ]),
+                ),
+            ])),
+        ),
     ])
 }
 /// The step schema the model answers with. `with_review` adds the
@@ -1446,7 +1467,8 @@ mod tests {
     /// doubles it, and this is what notices. Raised from 9,000 when the
     /// calendar event fields (about 860 bytes) and `reading_kind` landed
     /// together at 9,027: a new field should fit under it, a second copy of
-    /// the shared definitions should not.
+    /// the shared definitions should not. Raised from 9,500 when `effort`
+    /// (about 250 bytes, agent-triage-v26) took it to 9,629.
     #[test]
     fn step_schema_stays_compact_and_its_refs_resolve() {
         // The larger shape is the one the size bound is about.
@@ -1454,7 +1476,7 @@ mod tests {
         let encoded = serde_json::to_string(&schema).unwrap();
         eprintln!("step schema: {} bytes", encoded.len());
         assert!(
-            encoded.len() < 9_500,
+            encoded.len() < 9_800,
             "step schema grew to {} bytes",
             encoded.len()
         );
@@ -1901,7 +1923,7 @@ mod tests {
                 PROMPT_VERSION_BASE,
                 PROMPT_VERSION
             ),
-            (2_000, "agent-triage-v24", "agent-triage-v25")
+            (2_000, "agent-triage-v26", "agent-triage-v27")
         );
     }
     /// OFF IS THE PROMPT AS IT WAS. With the `understanding` flag off, both
@@ -2455,6 +2477,61 @@ mod tests {
             &decision.records[0],
             RecordProposal::Event { identity: None, .. }
         ));
+    }
+    /// agent-triage-v26: effort is offered, nullable, a closed task set, and
+    /// clamped rather than failed.
+    #[test]
+    fn effort_is_offered_clamped_and_defaults_on_stored_rows() {
+        assert!(SYSTEM.contains("Effort: estimate how many seconds the owner needs"));
+        assert!(SYSTEM.contains("Set effort to null only for authentication mail."));
+        let schema = decision_schema();
+        let effort = &schema["properties"]["effort"];
+        assert_eq!(effort["anyOf"][1], json!({"type": "null"}));
+        assert_eq!(
+            effort["anyOf"][0]["properties"]["task"]["enum"],
+            json!([
+                "glance",
+                "skim",
+                "quick_action",
+                "reply",
+                "long_read",
+                "involved"
+            ])
+        );
+        assert_eq!(
+            effort["anyOf"][0]["properties"]["seconds"],
+            json!({"type": "integer"})
+        );
+        // A stored decision from before v18 still reads.
+        let mut stored = serde_json::to_value(valid()).unwrap();
+        stored.as_object_mut().unwrap().remove("effort");
+        let old: MessageDecision = serde_json::from_value(stored).unwrap();
+        assert_eq!(old.effort, None);
+        // A model answer is validated as a whole and its effort laundered.
+        let mut decision = valid();
+        decision.effort = Some(EffortEstimate {
+            seconds: 86_400,
+            task: EffortTask::Skim,
+        });
+        let source = decision.attention.relevant_message_ids[0];
+        assert_eq!(
+            validate_decision(
+                &decision,
+                &BTreeSet::from([source]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            ),
+            Ok(())
+        );
+        normalize_decision(&mut decision);
+        assert_eq!(decision.effort.as_ref().unwrap().seconds, 3_600);
+        decision.effort = Some(EffortEstimate {
+            seconds: 0,
+            task: EffortTask::Glance,
+        });
+        normalize_decision(&mut decision);
+        assert_eq!(decision.effort, None);
     }
     #[test]
     fn reading_kind_is_offered_and_defaults_on_stored_rows() {

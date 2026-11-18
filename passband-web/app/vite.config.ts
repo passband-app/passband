@@ -56,11 +56,18 @@ export default defineConfig(({ mode }) => ({
   build: {
     sourcemap: true,
     target: "es2022",
-    // The mail-frame test harness is a second page in e2e builds ONLY. A
+    // The test harnesses (mail frame, sitrep design) are extra pages in e2e
+    // builds ONLY. A
     // production build has the app's one entry and nothing else.
     rollupOptions:
       mode === "e2e"
-        ? { input: { main: "index.html", "mail-harness": "e2e/mail-harness.html" } }
+        ? {
+            input: {
+              main: "index.html",
+              "mail-harness": "e2e/mail-harness.html",
+              "sitrep-harness": "e2e/sitrep-harness.html",
+            },
+          }
         : undefined,
   },
   server: { port: 5190, strictPort: true },

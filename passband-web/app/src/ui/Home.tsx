@@ -4,7 +4,7 @@ import { useInbox, type Inbox } from "../app/inbox";
 import { navigate } from "../app/router";
 import { client } from "../app/services";
 import { relAge } from "../lib/time";
-import { DesktopBanner, DesktopButton, nudgeLedger } from "./DesktopApp";
+import { DesktopBanner, nudgeLedger } from "./DesktopApp";
 import { useKeys } from "./keys";
 
 const POLL_MS = 30_000;
@@ -57,7 +57,6 @@ export function Home({ inbox, onSignedOut }: { inbox: Inbox; onSignedOut: () => 
       <header className="masthead">
         <span className="wordmark small">Passband</span>
         <span className="account">{s.account}</span>
-        <DesktopButton />
         <button
           className="link"
           onClick={() => void client.signOut().then(onSignedOut)}

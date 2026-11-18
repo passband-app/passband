@@ -7,7 +7,8 @@ import { client } from "../app/services";
 import { UNDO_MS, toasts } from "../app/toasts";
 import { relAge } from "../lib/time";
 import { MailFrame, type ImageSource } from "../mail/MailFrame";
-import { DesktopButton, nudgeLedger } from "./DesktopApp";
+import { nudgeLedger } from "./DesktopApp";
+import { ArchiveIcon, BackIcon, CheckIcon, ReplyIcon } from "./icons";
 import { useKeys } from "./keys";
 import { openLink } from "./links";
 
@@ -98,32 +99,35 @@ export function Reader({
   });
 
   return (
-    <div className="page reader">
-      <header className="masthead">
-        <button className="link" onClick={back}>
-          ← Inbox <kbd>esc</kbd>
+    <div className="reader">
+      <div className="reader-bar">
+        <button className="btn quiet" onClick={back}>
+          <BackIcon size={16} /> Back <kbd>esc</kbd>
         </button>
-        <span className="spacer" />
-        <DesktopButton />
-      </header>
-      {error && <p className="notice">{error}</p>}
+        <span className="grow" />
+        {thread && (
+          <>
+            <button className="btn" onClick={() => void act("done")}>
+              <CheckIcon size={15} /> Done <kbd>e</kbd>
+            </button>
+            <button className="btn" onClick={() => void act("archive")}>
+              <ArchiveIcon size={15} /> Archive
+            </button>
+            <button className="btn primary" onClick={() => setReplying(true)}>
+              <ReplyIcon size={15} /> Reply <kbd>r</kbd>
+            </button>
+          </>
+        )}
+      </div>
+      {error && <p className="notice glass">{error}</p>}
       {!thread && !error && (
-        <p className="empty" aria-busy="true">
+        <p className="loading" aria-busy="true">
           Loading…
         </p>
       )}
       {thread && (
         <>
           <h1 className="subject">{thread.subject || "(no subject)"}</h1>
-          <div className="verbs">
-            <button onClick={() => void act("done")}>
-              Done <kbd>e</kbd>
-            </button>
-            <button onClick={() => void act("archive")}>Archive</button>
-            <button onClick={() => setReplying(true)}>
-              Reply <kbd>r</kbd>
-            </button>
-          </div>
           {replying && target && (
             <ReplyBox
               to={target}
@@ -149,14 +153,14 @@ function MessageCard({ m }: { m: ClientMessage }) {
   const [allowRemote, setAllowRemote] = useState(false);
   const [hasRemote, setHasRemote] = useState(false);
   return (
-    <li className="message">
+    <li className="message glass">
       <div className="from">
-        <strong>{m.from_name ?? m.from_addr}</strong>
-        {m.from_name && <span className="addr"> &lt;{m.from_addr}&gt;</span>}
-        <span className="age">{relAge(m.received_at, Date.now())}</span>
+        <span className="name">{m.from_name ?? m.from_addr}</span>
+        {m.from_name && <span className="addr">{m.from_addr}</span>}
+        <span className="when">{relAge(m.received_at, Date.now())}</span>
       </div>
       {hasRemote && !allowRemote && (
-        <button className="link images" onClick={() => setAllowRemote(true)}>
+        <button className="btn images" onClick={() => setAllowRemote(true)}>
           Load images
         </button>
       )}
@@ -207,7 +211,7 @@ function AttachmentLink({ id, name, size }: { id: number; name: string; size: nu
     }
   };
   return (
-    <button className="link" onClick={() => void save()} disabled={busy}>
+    <button className="btn" onClick={() => void save()} disabled={busy}>
       {name} <span className="size">{formatSize(size)}</span>
     </button>
   );
@@ -261,7 +265,7 @@ function ReplyBox({
   };
 
   return (
-    <div className="reply">
+    <div className="reply glass">
       <label htmlFor="reply-body">
         Reply to {to.from_name ?? to.from_addr}
       </label>
@@ -280,10 +284,10 @@ function ReplyBox({
         rows={6}
       />
       <div className="reply-actions">
-        <button className="primary" onClick={send} disabled={held || !text.trim()}>
+        <button className="btn primary" onClick={send} disabled={held || !text.trim()}>
           Send <kbd>⌘↵</kbd>
         </button>
-        <button className="link" onClick={onClose} disabled={held}>
+        <button className="btn quiet" onClick={onClose} disabled={held}>
           Cancel
         </button>
       </div>

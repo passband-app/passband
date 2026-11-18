@@ -1,13 +1,16 @@
-// Three routes, so no routing library: `/`, `/connect`, `/t/<thread id>`.
+// Four routes, so no routing library: `/` (sitrep), `/mail`, `/connect`,
+// `/t/<thread id>`.
 import { useSyncExternalStore } from "react";
 
 export type Route =
   | { name: "home" }
+  | { name: "mail" }
   | { name: "connect" }
   | { name: "thread"; threadId: string };
 
 export function parseRoute(pathname: string): Route {
   if (pathname === "/connect") return { name: "connect" };
+  if (pathname === "/mail") return { name: "mail" };
   const m = /^\/t\/([^/]+)$/.exec(pathname);
   if (m?.[1]) {
     try {
@@ -23,6 +26,8 @@ export function pathFor(r: Route): string {
   switch (r.name) {
     case "home":
       return "/";
+    case "mail":
+      return "/mail";
     case "connect":
       return "/connect";
     case "thread":

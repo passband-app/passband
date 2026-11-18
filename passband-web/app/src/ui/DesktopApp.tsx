@@ -9,6 +9,7 @@ import {
   type NudgeLedger,
 } from "../app/nudge";
 import { DESKTOP_DOWNLOAD_URL } from "../app/services";
+import { DownloadIcon } from "./icons";
 
 const storage = (() => {
   try {
@@ -31,6 +32,11 @@ export const nudgeLedger = {
 
 let countedVisit = false;
 
+/** A click on any way to the app ends the banner for good. */
+export const recordDownloadClick = () => {
+  update((l) => ({ ...l, clickedDownload: true }));
+};
+
 const platform = platformOf(navigator.userAgent, navigator.maxTouchPoints);
 
 function DownloadLink({ className, children }: { className?: string; children?: React.ReactNode }) {
@@ -40,16 +46,11 @@ function DownloadLink({ className, children }: { className?: string; children?: 
       href={DESKTOP_DOWNLOAD_URL}
       target="_blank"
       rel="noopener noreferrer"
-      onClick={() => update((l) => ({ ...l, clickedDownload: true }))}
+      onClick={recordDownloadClick}
     >
       {children ?? downloadLabel(platform)}
     </a>
   );
-}
-
-/** The always-there way to the app, in the header. */
-export function DesktopButton() {
-  return <DownloadLink className="button app-button" />;
 }
 
 /** The case for the app, made at moments the web client has been used. */
@@ -72,25 +73,26 @@ export function DesktopBanner({ ready }: { ready: boolean }) {
 
   if (!show) return null;
   return (
-    <aside className="banner" aria-label="Passband app">
-      <div>
+    <aside className="app-banner glass tint-accent" aria-label="Passband app">
+      <span className="ico" aria-hidden="true">
+        <DownloadIcon size={20} />
+      </span>
+      <div className="copy">
         <strong>Passband is better as an app.</strong>{" "}
         {platform === "ios"
-          ? "Get notified only for the mail that needs you, with login codes on your lock screen."
+          ? "Get notified only for the mail that needs you, with login codes right on your lock screen."
           : "Get notified only for the mail that needs you, see login codes float over any app, and walk your inbox in flow mode."}
       </div>
-      <div className="banner-actions">
-        <DownloadLink className="button primary" />
-        <button
-          className="link"
-          onClick={() => {
-            update((l) => ({ ...l, dismissals: l.dismissals + 1 }));
-            setShow(false);
-          }}
-        >
-          Not now
-        </button>
-      </div>
+      <DownloadLink className="btn primary" />
+      <button
+        className="btn quiet"
+        onClick={() => {
+          update((l) => ({ ...l, dismissals: l.dismissals + 1 }));
+          setShow(false);
+        }}
+      >
+        Not now
+      </button>
     </aside>
   );
 }

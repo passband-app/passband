@@ -37,15 +37,17 @@ export function Connect({ onPaired }: { onPaired: () => void }) {
 
   return (
     <main className="signin">
-      <h1 className="wordmark">Passband</h1>
-      <p className="lede" role="status">
-        {message}
-      </p>
-      {failed && (
-        <button className="primary" onClick={() => navigate({ name: "home" }, true)}>
-          Back to sign in
-        </button>
-      )}
+      <div className="signin-card glass">
+        <h1 className="wordmark">passband</h1>
+        <p className="lede" role="status">
+          {message}
+        </p>
+        {failed && (
+          <button className="btn primary lg" onClick={() => navigate({ name: "home" }, true)}>
+            Back to sign in
+          </button>
+        )}
+      </div>
     </main>
   );
 }

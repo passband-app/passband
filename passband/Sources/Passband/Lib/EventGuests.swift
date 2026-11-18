@@ -509,10 +509,10 @@ enum EventGuests {
         {
             return generic
         }
-        let style: TimeZone.NameStyle = zone.isDaylightSavingTime(for: date) ? .shortDaylightSaving : .shortStandard
-        if let short = zone.localizedName(for: style, locale: locale), !short.isEmpty, !short.contains(" ") {
-            return short
-        }
+        // THE OFFSET IS COMPUTED, not asked of ICU's short standard/daylight
+        // names: those are "GMT+1" on one macOS and something else on the next
+        // (a runner image update changed London's), and a label must not move
+        // with the OS.
         let seconds = zone.secondsFromGMT(for: date)
         let a = abs(seconds)
         let hours = a / 3600

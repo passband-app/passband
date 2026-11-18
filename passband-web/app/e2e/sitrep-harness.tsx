@@ -20,7 +20,7 @@ function Harness() {
         sitrep={sitrep}
         selected={sel}
         onSelect={setSel}
-        handlers={{ open: () => {}, done: () => {}, archive: () => {} }}
+        handlers={{ open: () => {}, openSealed: () => {}, done: () => {}, archive: () => {} }}
       />
     </Shell>
   );

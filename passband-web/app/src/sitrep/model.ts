@@ -25,6 +25,15 @@ export interface EyesItem {
   hasAttachment: boolean;
   /** Overdue rows carry the coral rail on their leading edge. */
   overdue: boolean;
+  /** A "$142.00" the one-liner mentions, shown beside it (the Mac's MoneyScan). */
+  amount?: string;
+  /**
+   * Auth mail (a sign-in code, a reset). The Mac opens these in an audited
+   * one-time reveal, never the reader, and keeps them off the walk.
+   */
+  sealed?: boolean;
+  /** A robot or brand sender's domain, for a favicon. Never a person's. */
+  domain?: string;
 }
 
 /** One sender's tile in "Reading". */
@@ -40,6 +49,8 @@ export interface ReadingGroup {
   domain?: string;
   initials: string;
   avatarHue: number;
+  /** Editorial content (an essay, a post) still inside its week: tinted on the Mac. */
+  content?: boolean;
 }
 
 export interface CalendarRow {
@@ -54,8 +65,8 @@ export interface CalendarRow {
 export interface ShipmentRow {
   key: string;
   title: string;
-  /** "Keychron · order KC-48211" or "Rainforest · 2 items". */
-  detail: string;
+  /** "Keychron · #KC-48211" or "Rainforest · 2 packages"; absent when there is nothing to add. */
+  detail?: string;
   status: Pill;
   /** "arrives Sat", when known. */
   eta?: string;
@@ -67,7 +78,10 @@ export interface ShipmentRow {
 export interface BillingRow {
   key: string;
   payee: string;
+  /** "autopay", "bill", "update". */
   pill?: Pill;
+  /** The due chip, beside the kind: "due Oct 2", "3d PAST DUE". */
+  due?: Pill;
   /** Formatted with its currency, or absent ("statement" rows). */
   amount?: string;
   overdue: boolean;
@@ -77,7 +91,8 @@ export interface BillingRow {
 export interface ReceiptRow {
   key: string;
   merchant: string;
-  amount: string;
+  /** Absent when the receipt named no amount. */
+  amount?: string;
   threadId?: string;
 }
 
@@ -104,3 +119,10 @@ export const EMPTY_SITREP: Sitrep = {
   billing: [],
   receipts: [],
 };
+
+/** For-your-eyes rows before the "{n} more" expander (the Mac's `BoardFold`). */
+export const EYES_FOLD = 10;
+/** Reading cards before that zone's expander. */
+export const READING_FOLD = 24;
+/** Billing rows before its expander. */
+export const BILLING_FOLD = 8;

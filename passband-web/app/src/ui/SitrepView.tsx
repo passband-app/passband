@@ -6,7 +6,8 @@
 // Shipments, Billing and Receipts cards down the right. Every card keeps its
 // empty state, so the right-hand column never disappears.
 import type { ReactNode } from "react";
-import type { EyesItem, Pill, Sitrep } from "../sitrep/model";
+import { useState } from "react";
+import { BILLING_FOLD, EYES_FOLD, READING_FOLD, type EyesItem, type Pill, type Sitrep } from "../sitrep/model";
 import {
   ArchiveIcon,
   BankIcon,
@@ -16,11 +17,14 @@ import {
   EyeIcon,
   PaperclipIcon,
   ReadingIcon,
+  LockIcon,
   ReceiptIcon,
 } from "./icons";
 
 export interface SitrepHandlers {
   open: (threadId: string) => void;
+  /** Sealed mail (a sign-in code): never opened in the web reader. */
+  openSealed: (item: EyesItem) => void;
   done: (item: EyesItem) => void;
   archive: (item: EyesItem) => void;
 }
@@ -56,17 +60,21 @@ export function SitrepView({
             {sitrep.eyes.length === 0 ? (
               <p className="zone-empty">Nothing needs you right now.</p>
             ) : (
-              <ul className="eyes">
-                {sitrep.eyes.map((e, i) => (
-                  <EyeRow
-                    key={e.id}
-                    item={e}
-                    selected={i === selected}
-                    onHover={() => onSelect(i)}
-                    handlers={handlers}
-                  />
-                ))}
-              </ul>
+              <Folded items={sitrep.eyes} fold={EYES_FOLD}>
+                {(shown) => (
+                  <ul className="eyes">
+                    {shown.map((e, i) => (
+                      <EyeRow
+                        key={e.id}
+                        item={e}
+                        selected={i === selected}
+                        onHover={() => onSelect(i)}
+                        handlers={handlers}
+                      />
+                    ))}
+                  </ul>
+                )}
+              </Folded>
             )}
           </Zone>
           <Zone
@@ -78,8 +86,10 @@ export function SitrepView({
             {sitrep.reading.length === 0 ? (
               <p className="zone-empty">Nothing set aside to read.</p>
             ) : (
+              <Folded items={sitrep.reading} fold={READING_FOLD}>
+                {(shown) => (
               <div className="tiles">
-                {sitrep.reading.map((g) => (
+                {shown.map((g) => (
                   <button key={g.key} className="tile" onClick={() => handlers.open(g.threadId)}>
                     <span className={`logo avatar h${g.avatarHue}`} aria-hidden="true">
                       {g.initials}
@@ -96,6 +106,8 @@ export function SitrepView({
                   </button>
                 ))}
               </div>
+                )}
+              </Folded>
             )}
           </Zone>
         </div>
@@ -132,7 +144,7 @@ export function SitrepView({
                   </span>
                   <span style={{ minWidth: 0 }}>
                     <div className="t">{s.title}</div>
-                    <div className="d">{s.detail}</div>
+                    {s.detail && <div className="d">{s.detail}</div>}
                   </span>
                   <PillView pill={s.status} />
                   {s.eta && <span className="eta pill neutral">{s.eta}</span>}
@@ -144,15 +156,22 @@ export function SitrepView({
             {sitrep.billing.length === 0 ? (
               <p className="zone-empty">No bills due.</p>
             ) : (
-              <ul className="rows">
-                {sitrep.billing.map((b) => (
-                  <Row key={b.key} threadId={b.threadId} open={handlers.open}>
-                    <span className="t">{b.payee}</span>
-                    {b.pill && <PillView pill={b.pill} />}
-                    {b.amount && <span className={`amt${b.overdue ? " overdue" : ""}`}>{b.amount}</span>}
-                  </Row>
-                ))}
-              </ul>
+              <Folded items={sitrep.billing} fold={BILLING_FOLD}>
+                {(shown) => (
+                  <ul className="rows">
+                    {shown.map((b) => (
+                      <Row key={b.key} threadId={b.threadId} open={handlers.open}>
+                        <span className="t">{b.payee}</span>
+                        {b.pill && <PillView pill={b.pill} />}
+                        {b.due && <PillView pill={b.due} />}
+                        {b.amount && (
+                          <span className={`amt${b.overdue ? " overdue" : ""}`}>{b.amount}</span>
+                        )}
+                      </Row>
+                    ))}
+                  </ul>
+                )}
+              </Folded>
             )}
           </Zone>
           <Zone icon={<ReceiptIcon />} title="Receipts" count={sitrep.receipts.length} tint="positive">
@@ -163,7 +182,7 @@ export function SitrepView({
                 {sitrep.receipts.map((r) => (
                   <Row key={r.key} threadId={r.threadId} open={handlers.open}>
                     <span className="t">{r.merchant}</span>
-                    <span className="amt">{r.amount}</span>
+                    {r.amount && <span className="amt">{r.amount}</span>}
                   </Row>
                 ))}
               </ul>
@@ -226,7 +245,7 @@ function EyeRow({
     <li
       className={`eye${selected ? " selected" : ""}${item.overdue ? " overdue" : ""}`}
       onMouseEnter={onHover}
-      onClick={() => handlers.open(item.threadId)}
+      onClick={() => (item.sealed ? handlers.openSealed(item) : handlers.open(item.threadId))}
     >
       <span className={`avatar h${item.avatarHue}`} aria-hidden="true">
         {item.initials}
@@ -237,6 +256,12 @@ function EyeRow({
       </span>
       <span className="line">{item.line}</span>
       <span className="end">
+        {item.amount && <span className="amt">{item.amount}</span>}
+        {item.sealed && (
+          <span className="pill lock">
+            <LockIcon size={11} /> sealed
+          </span>
+        )}
         {item.pill && <PillView pill={item.pill} />}
         <span className="verbs">
           <button
@@ -283,6 +308,29 @@ function Row({
     >
       {children}
     </li>
+  );
+}
+
+/** The first `fold` items, then "N more" (the Mac's BoardFold). */
+function Folded<T>({
+  items,
+  fold,
+  children,
+}: {
+  items: T[];
+  fold: number;
+  children: (shown: T[]) => ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const hidden = items.length - fold;
+  if (hidden <= 0 || open) return <>{children(items)}</>;
+  return (
+    <>
+      {children(items.slice(0, fold))}
+      <button className="btn quiet more" onClick={() => setOpen(true)}>
+        {hidden} more
+      </button>
+    </>
   );
 }
 

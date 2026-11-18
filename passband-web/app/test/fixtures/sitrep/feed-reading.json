@@ -1,0 +1,1432 @@
+{
+ "items": [
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "promotional"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "promotion",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A promotional offer."
+   },
+   "decision_source_message_id": 38,
+   "from_addr": "miles@northwind.example",
+   "from_name": "Northwind Air",
+   "message_id": 38,
+   "ranking": null,
+   "received_at": "2026-11-18T16:32:52.689Z",
+   "score": 0.0,
+   "subject": "1,204 miles expire at the end of the month",
+   "thread_id": "rich-t37",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "promotional"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "promotion",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A promotional offer."
+   },
+   "decision_source_message_id": 33,
+   "from_addr": "shop@cedarpine.example",
+   "from_name": "Cedar & Pine",
+   "message_id": 33,
+   "ranking": null,
+   "received_at": "2026-11-18T16:32:52.663Z",
+   "score": 0.0,
+   "subject": "Deals picked for you, based on one search",
+   "thread_id": "rich-t32",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "promotional"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "promotion",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A promotional offer."
+   },
+   "decision_source_message_id": 24,
+   "from_addr": "deals@brightly.example",
+   "from_name": "Brightly",
+   "message_id": 24,
+   "ranking": null,
+   "received_at": "2026-11-18T16:32:52.614Z",
+   "score": 0.0,
+   "subject": "48 hours only: 40% off everything you saved",
+   "thread_id": "rich-t23",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "editorial"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "content",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A newsletter issue."
+   },
+   "decision_source_message_id": 22,
+   "from_addr": "editor@longread.example",
+   "from_name": "The Long Read",
+   "message_id": 22,
+   "ranking": null,
+   "received_at": "2026-11-18T16:32:52.603Z",
+   "score": 0.0,
+   "subject": "This month's programme: three essays on attention",
+   "thread_id": "rich-t21",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "editorial"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "content",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A newsletter issue."
+   },
+   "decision_source_message_id": 19,
+   "from_addr": "news@fieldnotes.example",
+   "from_name": "Field Notes Daily",
+   "message_id": 19,
+   "ranking": null,
+   "received_at": "2026-11-18T16:32:52.586Z",
+   "score": 0.0,
+   "subject": "Markets react calmly to everything. Plus the week ahead",
+   "thread_id": "rich-t18",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "editorial"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "content",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A newsletter issue."
+   },
+   "decision_source_message_id": 15,
+   "from_addr": "hello@whisker.example",
+   "from_name": "The Weekly Whisker",
+   "message_id": 15,
+   "ranking": null,
+   "received_at": "2026-11-18T16:32:52.564Z",
+   "score": 0.0,
+   "subject": "Why your cat stares at the wall, and nine other mysteries",
+   "thread_id": "rich-t14",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "promotional"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "promotion",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A promotional offer."
+   },
+   "decision_source_message_id": 39,
+   "from_addr": "miles@northwind.example",
+   "from_name": "Northwind Air",
+   "message_id": 39,
+   "ranking": null,
+   "received_at": "2026-11-17T21:32:52.694Z",
+   "score": 0.0,
+   "subject": "Fares from 89 to the coast",
+   "thread_id": "rich-t38",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "promotional"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "promotion",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A promotional offer."
+   },
+   "decision_source_message_id": 34,
+   "from_addr": "shop@cedarpine.example",
+   "from_name": "Cedar & Pine",
+   "message_id": 34,
+   "ranking": null,
+   "received_at": "2026-11-17T21:32:52.668Z",
+   "score": 0.0,
+   "subject": "Back in stock: the walnut desk tray",
+   "thread_id": "rich-t33",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "promotional"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "promotion",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A promotional offer."
+   },
+   "decision_source_message_id": 25,
+   "from_addr": "deals@brightly.example",
+   "from_name": "Brightly",
+   "message_id": 25,
+   "ranking": null,
+   "received_at": "2026-11-17T21:32:52.619Z",
+   "score": 0.0,
+   "subject": "Your cart misses you",
+   "thread_id": "rich-t24",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "editorial"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "content",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A newsletter issue."
+   },
+   "decision_source_message_id": 23,
+   "from_addr": "editor@longread.example",
+   "from_name": "The Long Read",
+   "message_id": 23,
+   "ranking": null,
+   "received_at": "2026-11-17T21:32:52.609Z",
+   "score": 0.0,
+   "subject": "Letters: on keeping a notebook",
+   "thread_id": "rich-t22",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "editorial"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "content",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A newsletter issue."
+   },
+   "decision_source_message_id": 20,
+   "from_addr": "news@fieldnotes.example",
+   "from_name": "Field Notes Daily",
+   "message_id": 20,
+   "ranking": null,
+   "received_at": "2026-11-17T21:32:52.592Z",
+   "score": 0.0,
+   "subject": "The morning brief: what changed overnight",
+   "thread_id": "rich-t19",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "editorial"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "content",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A newsletter issue."
+   },
+   "decision_source_message_id": 16,
+   "from_addr": "hello@whisker.example",
+   "from_name": "The Weekly Whisker",
+   "message_id": 16,
+   "ranking": null,
+   "received_at": "2026-11-17T21:32:52.570Z",
+   "score": 0.0,
+   "subject": "The great cardboard box debate",
+   "thread_id": "rich-t15",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "promotional"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "promotion",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A promotional offer."
+   },
+   "decision_source_message_id": 35,
+   "from_addr": "shop@cedarpine.example",
+   "from_name": "Cedar & Pine",
+   "message_id": 35,
+   "ranking": null,
+   "received_at": "2026-11-17T02:32:52.673Z",
+   "score": 0.0,
+   "subject": "Your recently viewed items",
+   "thread_id": "rich-t34",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "promotional"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "promotion",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A promotional offer."
+   },
+   "decision_source_message_id": 26,
+   "from_addr": "deals@brightly.example",
+   "from_name": "Brightly",
+   "message_id": 26,
+   "ranking": null,
+   "received_at": "2026-11-17T02:32:52.625Z",
+   "score": 0.0,
+   "subject": "New arrivals for the season",
+   "thread_id": "rich-t25",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "editorial"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "content",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A newsletter issue."
+   },
+   "decision_source_message_id": 21,
+   "from_addr": "news@fieldnotes.example",
+   "from_name": "Field Notes Daily",
+   "message_id": 21,
+   "ranking": null,
+   "received_at": "2026-11-17T02:32:52.598Z",
+   "score": 0.0,
+   "subject": "Weekend edition: long reads for slow mornings",
+   "thread_id": "rich-t20",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "editorial"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "content",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A newsletter issue."
+   },
+   "decision_source_message_id": 17,
+   "from_addr": "hello@whisker.example",
+   "from_name": "The Weekly Whisker",
+   "message_id": 17,
+   "ranking": null,
+   "received_at": "2026-11-17T02:32:52.575Z",
+   "score": 0.0,
+   "subject": "Ten quiet toys for loud cats",
+   "thread_id": "rich-t16",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "promotional"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "promotion",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A promotional offer."
+   },
+   "decision_source_message_id": 36,
+   "from_addr": "shop@cedarpine.example",
+   "from_name": "Cedar & Pine",
+   "message_id": 36,
+   "ranking": null,
+   "received_at": "2026-11-16T07:32:52.679Z",
+   "score": 0.0,
+   "subject": "Weekend sale: up to 30% off",
+   "thread_id": "rich-t35",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "promotional"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "promotion",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A promotional offer."
+   },
+   "decision_source_message_id": 27,
+   "from_addr": "deals@brightly.example",
+   "from_name": "Brightly",
+   "message_id": 27,
+   "ranking": null,
+   "received_at": "2026-11-16T07:32:52.630Z",
+   "score": 0.0,
+   "subject": "Members get early access",
+   "thread_id": "rich-t26",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "editorial"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "content",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A newsletter issue."
+   },
+   "decision_source_message_id": 18,
+   "from_addr": "hello@whisker.example",
+   "from_name": "The Weekly Whisker",
+   "message_id": 18,
+   "ranking": null,
+   "received_at": "2026-11-16T07:32:52.581Z",
+   "score": 0.0,
+   "subject": "Reader mailbag: the midnight zoomies",
+   "thread_id": "rich-t17",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "promotional"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "promotion",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A promotional offer."
+   },
+   "decision_source_message_id": 37,
+   "from_addr": "shop@cedarpine.example",
+   "from_name": "Cedar & Pine",
+   "message_id": 37,
+   "ranking": null,
+   "received_at": "2026-11-15T12:32:52.684Z",
+   "score": 0.0,
+   "subject": "Something new from the workshop",
+   "thread_id": "rich-t36",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "promotional"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "promotion",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A promotional offer."
+   },
+   "decision_source_message_id": 28,
+   "from_addr": "deals@brightly.example",
+   "from_name": "Brightly",
+   "message_id": 28,
+   "ranking": null,
+   "received_at": "2026-11-15T12:32:52.635Z",
+   "score": 0.0,
+   "subject": "Last chance: free shipping ends tonight",
+   "thread_id": "rich-t27",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "promotional"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "promotion",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A promotional offer."
+   },
+   "decision_source_message_id": 29,
+   "from_addr": "deals@brightly.example",
+   "from_name": "Brightly",
+   "message_id": 29,
+   "ranking": null,
+   "received_at": "2026-11-14T17:32:52.641Z",
+   "score": 0.0,
+   "subject": "A gift guide for everyone on your list",
+   "thread_id": "rich-t28",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "promotional"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "promotion",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A promotional offer."
+   },
+   "decision_source_message_id": 30,
+   "from_addr": "deals@brightly.example",
+   "from_name": "Brightly",
+   "message_id": 30,
+   "ranking": null,
+   "received_at": "2026-11-13T22:32:52.646Z",
+   "score": 0.0,
+   "subject": "Restocked: the bestsellers are back",
+   "thread_id": "rich-t29",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "promotional"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "promotion",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A promotional offer."
+   },
+   "decision_source_message_id": 31,
+   "from_addr": "deals@brightly.example",
+   "from_name": "Brightly",
+   "message_id": 31,
+   "ranking": null,
+   "received_at": "2026-11-13T03:32:52.651Z",
+   "score": 0.0,
+   "subject": "Your weekly picks",
+   "thread_id": "rich-t30",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [
+     "reading"
+    ],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "promotional"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": "promotion",
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "A promotional offer."
+   },
+   "decision_source_message_id": 32,
+   "from_addr": "deals@brightly.example",
+   "from_name": "Brightly",
+   "message_id": 32,
+   "ranking": null,
+   "received_at": "2026-11-12T08:32:52.657Z",
+   "score": 0.0,
+   "subject": "Thanks for being a member",
+   "thread_id": "rich-t31",
+   "unresolved_since": null
+  }
+ ],
+ "ranked_at": "2026-11-18T20:34:18.838950767Z",
+ "total_count": 25,
+ "version": 2
+}

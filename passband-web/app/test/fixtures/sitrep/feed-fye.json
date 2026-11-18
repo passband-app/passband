@@ -1,0 +1,466 @@
+{
+ "items": [
+  {
+   "attention": {
+    "actions": [
+     {
+      "description": "Needs your pick between two offsite venues so they can hold one.",
+      "due": {
+       "interpreted_relative": false,
+       "source_message_id": 3,
+       "timezone": null,
+       "value": "2026-11-20"
+      },
+      "id": "ff20affb436eba840e1bd2a3cf706af3",
+      "kind": "decide",
+      "resolved": false
+     }
+    ],
+    "factors": {
+     "action_need": 0.9,
+     "attention_at": null,
+     "importance": 0.75,
+     "personal_relevance": 0.9,
+     "urgency": 0.75
+    },
+    "show_in_fye": true,
+    "state": "needs_user",
+    "summary": "Needs your pick between two offsite venues so they can hold one."
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "correspondence"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": null,
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "Needs your pick between two offsite venues so they can hold one."
+   },
+   "decision_source_message_id": 3,
+   "from_addr": "jamie@studio.example",
+   "from_name": "Jamie",
+   "message_id": 3,
+   "ranking": {
+    "config": {
+     "action_need_weight": 25.0,
+     "importance_weight": 2.0,
+     "personal_relevance_weight": 20.0,
+     "recency_half_life_hours": 24.0,
+     "recency_weight": 20.0,
+     "urgency_weight": 30.0,
+     "waiting_saturation_days": 7.0,
+     "waiting_weight": 5.0
+    },
+    "contributions": {
+     "action_need": 22.5,
+     "importance": 1.5,
+     "personal_relevance": 18.0,
+     "recency": 15.411471622728172,
+     "urgency": 22.5,
+     "waiting": 0.000710978835978836
+    },
+    "evaluated_at": "2026-11-18T20:34:18.810027133Z",
+    "raw": {
+     "action_need": 0.9,
+     "importance": 0.75,
+     "personal_relevance": 0.9,
+     "recency": 0.7705735811364086,
+     "urgency": 0.75,
+     "waiting": 0.0001421957671957672
+    },
+    "total": 79.91218260156415
+   },
+   "received_at": "2026-11-18T11:32:52.484Z",
+   "score": 79.91218260156415,
+   "subject": "Two venue options for the offsite",
+   "thread_id": "rich-t2",
+   "unresolved_since": "2026-11-18T20:32:52.722360195+00:00"
+  },
+  {
+   "attention": {
+    "actions": [
+     {
+      "description": "Confirm Thursday's 2:30 appointment or call to reschedule.",
+      "due": {
+       "interpreted_relative": false,
+       "source_message_id": 2,
+       "timezone": null,
+       "value": "2026-11-18"
+      },
+      "id": "da12d27754df1f74701e87c8ff92a2aa",
+      "kind": "reply",
+      "resolved": false
+     }
+    ],
+    "factors": {
+     "action_need": 0.9,
+     "attention_at": null,
+     "importance": 0.8,
+     "personal_relevance": 0.9,
+     "urgency": 0.8
+    },
+    "show_in_fye": true,
+    "state": "needs_user",
+    "summary": "Confirm Thursday's 2:30 appointment or call to reschedule."
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "correspondence"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": null,
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "Confirm Thursday's 2:30 appointment or call to reschedule."
+   },
+   "decision_source_message_id": 2,
+   "from_addr": "frontdesk@lakesidedental.example",
+   "from_name": "Lakeside Dental",
+   "message_id": 2,
+   "ranking": {
+    "config": {
+     "action_need_weight": 25.0,
+     "importance_weight": 2.0,
+     "personal_relevance_weight": 20.0,
+     "recency_half_life_hours": 24.0,
+     "recency_weight": 20.0,
+     "urgency_weight": 30.0,
+     "waiting_saturation_days": 7.0,
+     "waiting_weight": 5.0
+    },
+    "contributions": {
+     "action_need": 22.5,
+     "importance": 1.6,
+     "personal_relevance": 18.0,
+     "recency": 11.216878859953159,
+     "urgency": 24.0,
+     "waiting": 0.000710978835978836
+    },
+    "evaluated_at": "2026-11-18T20:34:18.810027133Z",
+    "raw": {
+     "action_need": 0.9,
+     "importance": 0.8,
+     "personal_relevance": 0.9,
+     "recency": 0.5608439429976579,
+     "urgency": 0.8,
+     "waiting": 0.0001421957671957672
+    },
+    "total": 77.31758983878913
+   },
+   "received_at": "2026-11-18T00:32:52.476Z",
+   "score": 77.31758983878913,
+   "subject": "Please confirm your Thursday appointment",
+   "thread_id": "rich-t1",
+   "unresolved_since": "2026-11-18T20:32:52.715957083+00:00"
+  },
+  {
+   "attention": {
+    "actions": [
+     {
+      "description": "Your lease renewal still needs a signature before the new term starts.",
+      "due": {
+       "interpreted_relative": false,
+       "source_message_id": 1,
+       "timezone": null,
+       "value": "2026-11-15"
+      },
+      "id": "511b98c529f248d6b20165d82435ff25",
+      "kind": "other",
+      "resolved": false
+     }
+    ],
+    "factors": {
+     "action_need": 0.9,
+     "attention_at": null,
+     "importance": 0.95,
+     "personal_relevance": 0.9,
+     "urgency": 0.95
+    },
+    "show_in_fye": true,
+    "state": "needs_user",
+    "summary": "Your lease renewal still needs a signature before the new term starts."
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "correspondence"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": null,
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "Your lease renewal still needs a signature before the new term starts."
+   },
+   "decision_source_message_id": 1,
+   "from_addr": "leasing@harborview.example",
+   "from_name": "Harborview Leasing",
+   "message_id": 1,
+   "ranking": {
+    "config": {
+     "action_need_weight": 25.0,
+     "importance_weight": 2.0,
+     "personal_relevance_weight": 20.0,
+     "recency_half_life_hours": 24.0,
+     "recency_weight": 20.0,
+     "urgency_weight": 30.0,
+     "waiting_saturation_days": 7.0,
+     "waiting_weight": 5.0
+    },
+    "contributions": {
+     "action_need": 22.5,
+     "importance": 1.9,
+     "personal_relevance": 18.0,
+     "recency": 1.9828827764052268,
+     "urgency": 28.5,
+     "waiting": 0.000710978835978836
+    },
+    "evaluated_at": "2026-11-18T20:34:18.810027133Z",
+    "raw": {
+     "action_need": 0.9,
+     "importance": 0.95,
+     "personal_relevance": 0.9,
+     "recency": 0.09914413882026134,
+     "urgency": 0.95,
+     "waiting": 0.0001421957671957672
+    },
+    "total": 72.88359375524122
+   },
+   "received_at": "2026-11-15T12:32:52.466Z",
+   "score": 72.88359375524122,
+   "subject": "Lease renewal: signature needed",
+   "thread_id": "rich-t0",
+   "unresolved_since": "2026-11-18T20:32:52.708483239+00:00"
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.2,
+     "attention_at": null,
+     "importance": 0.55,
+     "personal_relevance": 0.9,
+     "urgency": 0.3
+    },
+    "show_in_fye": true,
+    "state": "informational",
+    "summary": "Sent photos from the weekend."
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "correspondence"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": null,
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "Sent photos from the weekend."
+   },
+   "decision_source_message_id": 5,
+   "from_addr": "mom@family.example",
+   "from_name": "Mom",
+   "message_id": 5,
+   "ranking": {
+    "config": {
+     "action_need_weight": 25.0,
+     "importance_weight": 2.0,
+     "personal_relevance_weight": 20.0,
+     "recency_half_life_hours": 24.0,
+     "recency_weight": 20.0,
+     "urgency_weight": 30.0,
+     "waiting_saturation_days": 7.0,
+     "waiting_weight": 5.0
+    },
+    "contributions": {
+     "action_need": 5.0,
+     "importance": 1.1,
+     "personal_relevance": 18.0,
+     "recency": 18.327431706410874,
+     "urgency": 9.0,
+     "waiting": 0.0
+    },
+    "evaluated_at": "2026-11-18T20:34:18.810027133Z",
+    "raw": {
+     "action_need": 0.2,
+     "importance": 0.55,
+     "personal_relevance": 0.9,
+     "recency": 0.9163715853205437,
+     "urgency": 0.3,
+     "waiting": 0.0
+    },
+    "total": 51.42743170641088
+   },
+   "received_at": "2026-11-18T17:32:52.498Z",
+   "score": 51.42743170641088,
+   "subject": "Photos from the weekend",
+   "thread_id": "rich-t4",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.2,
+     "attention_at": null,
+     "importance": 0.6,
+     "personal_relevance": 0.9,
+     "urgency": 0.3
+    },
+    "show_in_fye": true,
+    "state": "informational",
+    "summary": "Replied to your offsite dates: the 14th works for everyone."
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "correspondence"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": null,
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "Replied to your offsite dates: the 14th works for everyone."
+   },
+   "decision_source_message_id": 4,
+   "from_addr": "alex@studio.example",
+   "from_name": "Alex",
+   "message_id": 4,
+   "ranking": {
+    "config": {
+     "action_need_weight": 25.0,
+     "importance_weight": 2.0,
+     "personal_relevance_weight": 20.0,
+     "recency_half_life_hours": 24.0,
+     "recency_weight": 20.0,
+     "urgency_weight": 30.0,
+     "waiting_saturation_days": 7.0,
+     "waiting_weight": 5.0
+    },
+    "contributions": {
+     "action_need": 5.0,
+     "importance": 1.2,
+     "personal_relevance": 18.0,
+     "recency": 17.29879200510924,
+     "urgency": 9.0,
+     "waiting": 0.0
+    },
+    "evaluated_at": "2026-11-18T20:34:18.810027133Z",
+    "raw": {
+     "action_need": 0.2,
+     "importance": 0.6,
+     "personal_relevance": 0.9,
+     "recency": 0.864939600255462,
+     "urgency": 0.3,
+     "waiting": 0.0
+    },
+    "total": 50.498792005109244
+   },
+   "received_at": "2026-11-18T15:32:52.492Z",
+   "score": 50.498792005109244,
+   "subject": "Re: offsite dates",
+   "thread_id": "rich-t3",
+   "unresolved_since": null
+  }
+ ],
+ "ranked_at": "2026-11-18T20:34:18.810027133Z",
+ "total_count": 5,
+ "version": 2
+}

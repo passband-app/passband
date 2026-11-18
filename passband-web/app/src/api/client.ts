@@ -2,6 +2,12 @@
 // transport; nothing here sees a token or a server URL.
 import { ApiError, type Transport } from "./transport";
 import {
+  feed,
+  fyeHeadline,
+  shipments,
+  type Feed,
+  type FyeHeadline,
+  type Shipment,
   attentionUpdate,
   page,
   sendResult,
@@ -58,6 +64,32 @@ export class Client {
   async thread(threadId: string): Promise<ThreadView> {
     const resp = await this.transport.request(`/client/thread/${encodeURIComponent(threadId)}`);
     return decode(resp, threadView);
+  }
+
+  /** One agent feed: `fye` (for your eyes), `records`, or `reading`. */
+  async feed(destination: "fye" | "records" | "reading", limit = 200): Promise<Feed> {
+    const resp = await this.transport.request("/client/v2/feed", { query: { destination, limit } });
+    return decode(resp, feed);
+  }
+
+  /** Packages, delivered ones included (the rail keeps today's deliveries). */
+  async shipments(includeDelivered = true): Promise<Shipment[]> {
+    const resp = await this.transport.request("/client/shipments", {
+      query: { include_delivered: includeDelivered ? "true" : "false" },
+    });
+    return decode(resp, shipments);
+  }
+
+  /**
+   * The sitrep's one-sentence headline. `today` is the owner's local date
+   * (YYYY-MM-DD), because "due tomorrow" is a question about their calendar.
+   */
+  async fyeHeadline(today: string): Promise<FyeHeadline> {
+    const resp = await this.transport.request("/client/v2/fye/headline", {
+      query: { today },
+      timeoutMs: 30_000,
+    });
+    return decode(resp, fyeHeadline);
   }
 
   /** Tell the daemon the thread was opened (read state; read tracking). */

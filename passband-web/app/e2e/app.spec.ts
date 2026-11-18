@@ -1,6 +1,7 @@
-// The v1 path end to end, in a production-shaped build (shipping CSP and
-// Trusted Types), against a real daemon:
+// The web client end to end, in a production-shaped build (shipping CSP and
+// Trusted Types), against a real daemon serving the invented `--rich` inbox:
 //
+//   spike_seed <db> --rich
 //   SPIKE_SEED=<target/debug/examples/spike_seed> SPIKE_DB=<db> npm run e2e
 //
 // with `squelch-api` serving that db on 127.0.0.1:8849 and
@@ -50,11 +51,11 @@ async function signIn(page: Page) {
   });
   await page.goto("/");
   await page.getByRole("button", { name: "Continue with Google" }).click();
-  await expect(page.getByRole("heading", { name: "Needs you" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "For your eyes" })).toBeVisible();
   return code;
 }
 
-test("sign in with nothing typed, read, done and undo, sign out", async ({ page }) => {
+test("sign in with nothing typed: the sitrep, a thread, done and undo, sign out", async ({ page }) => {
   const violations = await watchViolations(page);
   const code = await signIn(page);
   expect(page.url()).toBe("http://localhost:5191/");
@@ -65,21 +66,42 @@ test("sign in with nothing typed, read, done and undo, sign out", async ({ page 
   });
   expect(again.status()).toBe(401);
 
+  // The sitrep: a greeting with the account's name, and every zone drawn.
+  await expect(page.getByText(/^Good (morning|afternoon|evening), Sam$/)).toBeVisible();
+  const eyes = page.getByRole("region", { name: "For your eyes" });
+  await expect(eyes.locator("li.eye")).toHaveCount(5);
+  await expect(eyes.getByText(/past due/i)).toBeVisible();
+  await expect(page.getByRole("region", { name: "Reading" }).locator(".tile")).toHaveCount(6);
+  await expect(page.getByRole("region", { name: "Shipments" }).getByText("out for delivery")).toBeVisible();
+  await expect(page.getByRole("region", { name: "Receipts" }).getByText("$6.50")).toBeVisible();
+  for (const zone of ["Calendar", "Billing"]) {
+    await expect(page.getByRole("region", { name: zone })).toBeVisible();
+  }
+
   // The way to the app is always there, and the first-visit banner makes the case.
   await expect(page.getByRole("link", { name: /Get (Passband for|the Passband app)/ }).first()).toBeVisible();
   await expect(page.getByRole("complementary", { name: "Passband app" })).toBeVisible();
 
-  // Open a thread.
-  await page.getByRole("button", { name: /Your order shipped/ }).click();
-  await expect(page.getByRole("heading", { name: "Your order shipped" })).toBeVisible();
-  expect(new URL(page.url()).pathname).toBe("/t/t-shop");
+  // Open a thread from For your eyes.
+  await eyes.getByText("Harborview Leasing").click();
+  await expect(page.getByRole("heading", { name: "Lease renewal: signature needed" })).toBeVisible();
+  expect(new URL(page.url()).pathname).toBe("/t/rich-t0");
+  await page.keyboard.press("Escape");
+  await expect(eyes).toBeVisible();
 
-  // Done leaves the inbox; undo brings it back.
+  // Done leaves the board; undo brings it back.
+  await eyes.locator("li.eye", { hasText: "Harborview Leasing" }).hover();
   await page.keyboard.press("e");
-  await expect(page.getByRole("heading", { name: "Needs you" })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Your order shipped/ })).toHaveCount(0);
+  await expect(eyes.getByText("Harborview Leasing")).toHaveCount(0);
+  // The undo is offered once the daemon has confirmed the done.
+  await expect(page.getByText("done · Harborview Leasing")).toBeVisible();
   await page.keyboard.press("u");
-  await expect(page.getByRole("button", { name: /Your order shipped/ })).toHaveCount(1);
+  await expect(eyes.getByText("Harborview Leasing")).toHaveCount(1);
+
+  // The full list is one click away.
+  await page.getByRole("button", { name: "Mail", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Mail" })).toBeVisible();
+  await expect(page.getByText("Your keyboard is out for delivery today.")).toBeVisible();
 
   // Sign out goes back to sign-in and keeps nobody signed in on reload.
   await page.getByRole("button", { name: "Sign out" }).click();
@@ -97,13 +119,14 @@ test("a reply undone inside the hold is never sent", async ({ page }) => {
   page.on("request", (r) => {
     if (r.url().includes("/client/actions/send")) sends.push(r.method());
   });
-  await page.getByRole("button", { name: /Lunch on Thursday/ }).click();
+  await page.getByRole("region", { name: "For your eyes" }).getByText("Mom").click();
+  await expect(page.getByRole("heading", { name: "Photos from the weekend" })).toBeVisible();
   await page.keyboard.press("r");
-  await page.getByLabel(/Reply to/).fill("Yes, see you then.");
+  await page.getByLabel(/Reply to/).fill("Lovely, thank you!");
   await page.keyboard.press("Control+Enter");
   await expect(page.getByText("sending…")).toBeVisible();
   await page.getByRole("button", { name: /undo/ }).click();
-  await expect(page.getByLabel(/Reply to/)).toHaveValue("Yes, see you then.");
+  await expect(page.getByLabel(/Reply to/)).toHaveValue("Lovely, thank you!");
   await page.waitForTimeout(5_500);
   expect(sends).toEqual([]);
   expect(violations).toEqual([]);

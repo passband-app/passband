@@ -258,6 +258,9 @@ kbd {
 .eye .who svg { color: var(--ink-faintest); }
 .eye .line { color: var(--ink-dim); font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .eye .end { display: flex; align-items: center; gap: var(--s6); }
+.eye .amt { font-weight: 600; font-size: 13px; color: var(--ink); }
+.pill svg { margin-right: 3px; }
+.more { margin-top: var(--s6); height: 26px; font-size: 12px; }
 .eye .verbs { display: none; gap: 2px; }
 .eye:hover .verbs, .eye.selected .verbs { display: flex; }
 .eye:hover .pill, .eye.selected .pill { display: none; }

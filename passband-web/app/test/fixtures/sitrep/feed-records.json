@@ -1,0 +1,605 @@
+{
+ "items": [
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "delivery"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": null,
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [
+     {
+      "carrier": "Parcelway",
+      "item_name": "Q1 mechanical keyboard",
+      "kind": "delivery",
+      "merchant": "Keyline",
+      "order_refs": [
+       "KL-48211"
+      ],
+      "status": "out_for_delivery",
+      "tracking_number": "PW4821100017"
+     }
+    ],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "Your keyboard is out for delivery today."
+   },
+   "decision_source_message_id": 6,
+   "from_addr": "orders@keyline.example",
+   "from_name": "Keyline Keyboards",
+   "message_id": 6,
+   "ranking": null,
+   "received_at": "2026-11-18T18:32:52.505Z",
+   "score": 0.0,
+   "subject": "Your Q1 keyboard is out for delivery",
+   "thread_id": "rich-t5",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "receipt"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": null,
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [
+     {
+      "amount": 6.5,
+      "currency": "USD",
+      "kind": "receipt",
+      "merchant": "Bluebird Coffee"
+     }
+    ],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "Coffee, $6.50."
+   },
+   "decision_source_message_id": 10,
+   "from_addr": "receipts@bluebird.example",
+   "from_name": "Bluebird Coffee",
+   "message_id": 10,
+   "ranking": null,
+   "received_at": "2026-11-18T14:32:52.536Z",
+   "score": 0.0,
+   "subject": "Your receipt from Bluebird Coffee",
+   "thread_id": "rich-t9",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "event_reservation"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": null,
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [
+     {
+      "change": "updated",
+      "commitment": "committed",
+      "duration_estimate": null,
+      "end": null,
+      "event_kind": "invite",
+      "identity_refs": [],
+      "kind": "event",
+      "likelihood": null,
+      "location": null,
+      "start": {
+       "interpreted_relative": false,
+       "source_message_id": 14,
+       "timezone": null,
+       "value": "2026-11-30"
+      },
+      "title": "Team offsite"
+     }
+    ],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "The team offsite moved to the 14th."
+   },
+   "decision_source_message_id": 14,
+   "from_addr": "jamie@studio.example",
+   "from_name": "Jamie",
+   "message_id": 14,
+   "ranking": null,
+   "received_at": "2026-11-18T13:32:52.558Z",
+   "score": 0.0,
+   "subject": "Offsite moved to the 14th",
+   "thread_id": "rich-t13",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "receipt"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": null,
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [
+     {
+      "amount": 23.18,
+      "currency": "USD",
+      "kind": "receipt",
+      "merchant": "QuickBite"
+     }
+    ],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "Dinner delivery, $23.18."
+   },
+   "decision_source_message_id": 11,
+   "from_addr": "orders@quickbite.example",
+   "from_name": "QuickBite",
+   "message_id": 11,
+   "ranking": null,
+   "received_at": "2026-11-17T22:32:52.542Z",
+   "score": 0.0,
+   "subject": "Your order receipt",
+   "thread_id": "rich-t10",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "bill"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": null,
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [
+     {
+      "amount": 142.08,
+      "autopay": true,
+      "currency": "USD",
+      "due": {
+       "interpreted_relative": false,
+       "source_message_id": 8,
+       "timezone": null,
+       "value": "2026-11-27"
+      },
+      "kind": "bill",
+      "merchant": "Metro Power & Light"
+     }
+    ],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "This month's power bill is $142.08 on autopay."
+   },
+   "decision_source_message_id": 8,
+   "from_addr": "billing@metropower.example",
+   "from_name": "Metro Power & Light",
+   "message_id": 8,
+   "ranking": null,
+   "received_at": "2026-11-17T18:32:52.518Z",
+   "score": 0.0,
+   "subject": "Your bill is ready",
+   "thread_id": "rich-t7",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "delivery"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": null,
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [
+     {
+      "carrier": "Parcelway",
+      "item_name": "Linen notebooks, set of 3",
+      "kind": "delivery",
+      "merchant": "Paper & Thread",
+      "order_refs": [
+       "PT-20391"
+      ],
+      "status": "shipped",
+      "tracking_number": "PW2039155508"
+     }
+    ],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "Your linen notebooks shipped and arrive Saturday."
+   },
+   "decision_source_message_id": 7,
+   "from_addr": "hello@paperthread.example",
+   "from_name": "Paper & Thread",
+   "message_id": 7,
+   "ranking": null,
+   "received_at": "2026-11-17T14:32:52.512Z",
+   "score": 0.0,
+   "subject": "Your order has shipped",
+   "thread_id": "rich-t6",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "financial_update"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": null,
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [
+     {
+      "description": "Statement ready for card ending 4417",
+      "institution": "First Harbor Bank",
+      "kind": "financial_update"
+     }
+    ],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "Your card statement (ending 4417) is ready."
+   },
+   "decision_source_message_id": 9,
+   "from_addr": "alerts@firstharbor.example",
+   "from_name": "First Harbor Bank",
+   "message_id": 9,
+   "ranking": null,
+   "received_at": "2026-11-17T04:32:52.525Z",
+   "score": 0.0,
+   "subject": "Your statement is ready",
+   "thread_id": "rich-t8",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "event_reservation"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": null,
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [
+     {
+      "change": "created",
+      "commitment": "committed",
+      "duration_estimate": null,
+      "end": null,
+      "event_kind": "reservation",
+      "identity_refs": [],
+      "kind": "event",
+      "likelihood": null,
+      "location": "Lakeside Dental",
+      "start": {
+       "interpreted_relative": false,
+       "source_message_id": 13,
+       "timezone": null,
+       "value": "2026-11-20T14:30"
+      },
+      "title": "Dr. Ortiz \u00b7 checkup"
+     }
+    ],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "Checkup booked for Thursday at 2:30 PM."
+   },
+   "decision_source_message_id": 13,
+   "from_addr": "calendar@lakesidedental.example",
+   "from_name": "Lakeside Dental",
+   "message_id": 13,
+   "ranking": null,
+   "received_at": "2026-11-16T20:32:52.553Z",
+   "score": 0.0,
+   "subject": "Appointment: checkup with Dr. Ortiz",
+   "thread_id": "rich-t12",
+   "unresolved_since": null
+  },
+  {
+   "attention": {
+    "actions": [],
+    "factors": {
+     "action_need": 0.0,
+     "attention_at": null,
+     "importance": 0.0,
+     "personal_relevance": 0.0,
+     "urgency": 0.0
+    },
+    "show_in_fye": false,
+    "state": "informational",
+    "summary": ""
+   },
+   "decision": {
+    "auth": {
+     "critical": false,
+     "kinds": []
+    },
+    "destinations": [],
+    "done": null,
+    "ends": null,
+    "external_access": {
+     "reason": "",
+     "restricted": false
+    },
+    "kinds": [
+     "receipt"
+    ],
+    "notification": {
+     "body": "",
+     "importance": 0,
+     "login_code": null,
+     "reason": "",
+     "title": ""
+    },
+    "reading_kind": null,
+    "reason": "Synthetic triage for the spike daemon",
+    "records": [
+     {
+      "amount": 25.0,
+      "currency": "EUR",
+      "kind": "receipt",
+      "merchant": "Klubhaus"
+     }
+    ],
+    "related_updates": [],
+    "revisit": null,
+    "rule_exceptions": [],
+    "summary": "Club entry, 25.00 EUR."
+   },
+   "decision_source_message_id": 12,
+   "from_addr": "tickets@klubhaus.example",
+   "from_name": "Klubhaus Tickets",
+   "message_id": 12,
+   "ranking": null,
+   "received_at": "2026-11-16T18:32:52.548Z",
+   "score": 0.0,
+   "subject": "Your ticket purchase",
+   "thread_id": "rich-t11",
+   "unresolved_since": null
+  }
+ ],
+ "ranked_at": "2026-11-18T20:34:18.824771188Z",
+ "total_count": 9,
+ "version": 2
+}

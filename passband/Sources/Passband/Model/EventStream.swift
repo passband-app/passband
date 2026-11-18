@@ -375,6 +375,15 @@ final class EventStream {
             // the moment) is dropped by the open_draft freshness rule.
             guard renotify.isFresh(now: Int(Date().timeIntervalSince1970)) else { return }
             Notifier.shared.postRenotify(renotify, accountId: accountId)
+        } else if let quick = QuickClearSignal.parse(frame.data) {
+            // A quick clear offer (QuickClearBanner.swift), on renotify's
+            // terms: no id, no cursor, not an event, and a late one dropped.
+            // Mac only: the frame rides the Mac stream, and a phone has no
+            // sprint to open.
+            guard quick.isFresh(now: Int(Date().timeIntervalSince1970)) else { return }
+            #if os(macOS)
+                Notifier.shared.postQuickClear(quick, accountId: accountId)
+            #endif
         } else if let reminder = CalendarReminderSignal.parse(frame.data) {
             // An event reminder (CalendarReminder.swift), on renotify's
             // terms: no id, no cursor, and a late one is dropped.

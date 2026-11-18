@@ -501,6 +501,15 @@ actor APIClient {
         try? await postNoContent("/client/renotify/\(batch)/opened", body: Body(message_id: messageId))
     }
 
+    /// Report a tap on quick clear banner `batch`. The same endpoint as
+    /// re-notify (the daemon keeps both in one ledger), with no message id:
+    /// the tap opened the queue, not one email. Fire and forget; a 404 is the
+    /// feature being off or the daemon predating it.
+    func reportQuickClearOpened(batch: Int) async {
+        struct Body: Encodable {}
+        try? await postNoContent("/client/renotify/\(batch)/opened", body: Body())
+    }
+
     /// Tell the daemon a thread was OPENED. Fire and forget: it is a ledger
     /// write with nothing to show for it, and a failed one costs a rounding
     /// error in a statistic, never anything the user sees.

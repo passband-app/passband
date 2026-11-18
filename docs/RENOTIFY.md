@@ -306,3 +306,83 @@ the other way round. Beyond that, only quick clear's multiplier adapts.
 - **Retrying a held arrival.** A client-online pass held for working hours or
   the budget is not tried again later. One held for a meeting gets its chance
   when that meeting ends.
+
+## Quick clear: the Mac app
+
+A sibling of the re-notify banner: when the owner is likely at their desk the
+daemon offers a short sprint ("5 minutes clears 14 of your 23 emails"), and a
+tap opens a queue holding exactly those items. The tap opens the queue, never
+the inbox; anything else would make the banner clickbait.
+
+| Piece | File |
+|---|---|
+| The frame, its freshness, the banner's copy | `passband/Sources/Passband/Model/QuickClearBanner.swift` |
+| The tap's userInfo keys and route | `EventBanner.swift` (`quickClearTap`) |
+| The queue's rules (next item, handled, end card) | `passband/Sources/Passband/Lib/QuickClearQueue.swift` |
+| The sprint's state and verbs | `passband/Sources/Passband/Model/QuickClearSprint.swift` |
+| The card | `passband/Sources/Passband/Views/QuickClearView.swift` |
+
+**The frame.** One `quick_clear` SSE frame on the Mac stream, no `id:`:
+
+```json
+{"quick_clear": 12, "trigger": "client_online", "at": 1793210000,
+ "budget_secs": 300, "est_secs": 284, "fit_count": 14, "open_count": 23,
+ "smart_clear_count": 6,
+ "items": [{"message_id": 4, "thread_id": "t4", "est_secs": 8,
+            "basis": "dwell", "kind": "receipt",
+            "sender": "alice@example.com", "one_line": "Your order shipped"}]}
+```
+
+Decoded leniently: only `quick_clear` (above 0) is required, plus at least one
+item or a `smart_clear_count` above 0. An item that does not decode is dropped
+alone; an unknown `basis` reads as `unknown` and `kind` is kept as words. A
+budget is clamped to 1..60 minutes, and `open_count` is never read as less than
+`fit_count`. Items are kept in the frame's order. Items carry no account: the
+stream the frame came on is the account, as for every frame. `kind` is one of
+`smart_clear`, `glance`, `receipt`, `delivery`, `account_service`, `review`,
+`attend`, `read` (a newer word is kept as words). The `smart_clear` rows come
+first with `est_secs` 0: they are what the sweep step clears, so the step is
+offered for at least that many even without a `smart_clear_count`, and once
+the sweep has run they are already handled. If the sweep is passed over they
+come up one at a time like the rest, tagged "expired". The SSE event name is
+`quick_clear`; the app decodes by shape, like every frame on this stream. The
+freshness rule is re-notify's (`AgentOpenSignal.freshFor`).
+
+**Copy.** Counts first. The percent is added only at 50% or more ("That is
+61% of what is waiting."), never 100%. When everything fits it reads "6 quick
+ones, about 3 minutes" ("1 quick one, under a minute"). A smart clear count
+adds "First, one press clears 6 expired promos and past events." No chime, no
+sender tile, no dashes.
+
+**Identity and tap.** The request id is `passband.quickclear.<account>.<batch>`,
+with no event or message id in the userInfo. The userInfo carries the frame
+itself as JSON (`passband.quickclear.frame`, each line capped), so a tap after
+a relaunch opens the queue the banner promised. The tap switches to the
+banner's account if needed, opens the sprint, and posts
+`POST /client/renotify/{quick_clear}/opened` with an empty body (no
+`message_id`: it opened the queue, not an email). Errors are ignored.
+
+**The sprint.** A card over the board, one item at a time:
+
+- A gentle count-up against the budget on a thin accent track that never turns
+  red, and "4 of 14".
+- With `smart_clear_count` above 0 the first step is one card, "Clear 6
+  expired promos and past events": Enter runs the board's own smart clear
+  (`AppStore.runSmartClear`, receipt and 30 second undo included), → passes.
+- Then each item: e/d done (`Actions.done`, undo chip and `u`), Enter opens it
+  in the reader (the card hides and is back on Esc), h reminds, → or Space
+  passes, ← goes back to the last passed, u undoes, Esc stops.
+- What is next is derived, never stored: an item is skipped when the store's
+  `resolvedIds` holds it or a cached board row says it is done, resolved or
+  parked. So an undo brings its item back to the front.
+- The end card ("Cleared 12 in 4 minutes") goes up when the queue runs out or
+  the budget is spent, with "Keep going" while anything is left (passed items
+  come back around). No confetti.
+
+**Analytics.** `quick_clear_shown`, `quick_clear_opened` and
+`quick_clear_finished` (docs/ANALYTICS.md). Counts and seconds only.
+
+**Limits.** Mail handled on another device is skipped only once the board's
+poll has brought that row; mail that is in no cached list is not known to be
+handled until it is opened. The Mac has no archive key, so the sprint's verbs
+are the board's: done, remind, open.

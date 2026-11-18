@@ -749,6 +749,24 @@ run_suite renotify-banner \
   Sources/Passband/Model/RenotifyBanner.swift \
   Tests/RenotifyBannerTests.swift
 
+# Quick clear (docs/RENOTIFY.md, "Quick clear"): the `quick_clear` frame on
+# the Mac stream, decoded leniently; the banner's count-first copy and when it
+# may say a percent; a tap that opens the queue and never the reader; and the
+# sprint's rules for what is next, what is already handled, and the end card.
+run_suite quick-clear \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Sources/Passband/Lib/SenderIdentity.swift \
+  Sources/Passband/Lib/AuthLabels.swift \
+  Sources/Passband/Lib/AgentDraftLink.swift \
+  Sources/Passband/Model/EventBanner.swift \
+  Sources/Passband/Model/RenotifyBanner.swift \
+  Sources/Passband/Model/QuickClearBanner.swift \
+  Sources/Passband/Lib/QuickClearQueue.swift \
+  Tests/QuickClearTests.swift
+
 # Event reminders and the Tickets button (docs/CALENDAR.md, "Reminders and
 # tickets"): the `calendar_reminder` frame, the phone's `<tag>:cal:<fire>:<at>`
 # push id (tag-less and malformed ones refused), the banner's words, where a

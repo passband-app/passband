@@ -75,6 +75,13 @@ struct ActionLayer: View {
                 .animation(.smooth(duration: 0.26), value: showsUnsubscribeTray)
             }
 
+            // THE QUICK CLEAR SPRINT, under every other modal here: the remind
+            // palette its `h` raises, a reveal, a rule editor all open OVER
+            // it and hand it back. Not while the reader is up over it.
+            if store.quickClearUp, let sprint = store.quickClear {
+                QuickClearView(sprint: sprint).id(sprint.id)
+            }
+
             // DiscoveryLayer (the found moment) mounted here. Discover is
             // retired (2026-11-05); the layer stays in Views/Discovery, unmounted.
 

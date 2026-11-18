@@ -37,6 +37,8 @@ enum OpenSource: String, Sendable {
     case reply, reader
     /// A ghost's "mail behind it" on the calendar page.
     case calendar
+    /// Enter on an item in the quick clear sprint (QuickClearSprint.swift).
+    case quickClear = "quick_clear"
 }
 
 enum MainView: String, Sendable, Hashable, CaseIterable {
@@ -1531,6 +1533,10 @@ final class AppStore {
     var pendingReplyMessageId: Int?
     var triageFix: TriageFixTarget?
     var remindTarget: RemindTarget?
+    /// The quick clear sprint a banner tap opened (QuickClearSprint.swift).
+    /// Kept while the reader is up over it, so Esc out of an email lands
+    /// back on the queue where it was.
+    var quickClear: QuickClearSprint?
     /// Which composer's time palette is open (the clock, or its chord). The
     /// palette writes `sendAt` into that slot and nothing else. Cleared with
     /// the composer it belongs to.
@@ -3250,6 +3256,8 @@ final class AppStore {
         // account's daemon.
         triageFix = nil
         remindTarget = nil
+        // The sprint's ids are the old daemon's message numbers.
+        closeQuickClear()
         schedulePicker = nil
         discardAsk = nil
         mailtoAsk = nil
@@ -3844,6 +3852,14 @@ final class AppStore {
             || calendarCardUp
             || calendarDeleteAsk != nil
             || firstLoad.active || whatsNew.active
+            || quickClearUp
+    }
+
+    /// The quick clear sprint is drawn: it is this mailbox's, and no reader
+    /// is up over it (Esc out of the reader brings it back).
+    var quickClearUp: Bool {
+        guard let sprint = quickClear else { return false }
+        return sprint.epoch == epoch && threadId == nil
     }
 
     // MARK: - sitrep zones
@@ -7904,6 +7920,20 @@ final class AppStore {
 
     func openTriageFix(_ target: TriageFixTarget) { triageFix = target }
     func closeTriageFix() { triageFix = nil }
+
+    /// Open the sprint a quick clear banner promised, in the mailbox now on
+    /// screen (the tap switched to it first). A sprint already open is
+    /// finished first: one queue at a time.
+    func openQuickClear(_ signal: QuickClearSignal) {
+        quickClear?.finish()
+        quickClear = QuickClearSprint(signal: signal, epoch: epoch)
+    }
+
+    /// Leave the sprint by any route, reporting how it went once.
+    func closeQuickClear() {
+        quickClear?.finish()
+        quickClear = nil
+    }
 
     func openRemind(_ target: RemindTarget) { remindTarget = target }
     func closeRemind() { remindTarget = nil }

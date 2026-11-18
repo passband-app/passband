@@ -1928,11 +1928,11 @@ const RUN: Inbound[] = [
 
 const STEPS: Array<{ title: string; line: ReactNode }> = [
   { title: "New mail comes in",
-    line: "Passband reads it the way you would: what it asks, by when, and what it is about. Jamie's clears the squelch, so it goes to the top of your day." },
+    line: "Passband reads it the way you would. Jamie needs a venue picked by Friday, so the email goes to the top of your day." },
   { title: "The rest sorts itself",
-    line: "Shipping updates, receipts, newsletters and plan changes come in all day and go where they belong. The noise never reaches you." },
+    line: "A shipping update, a newsletter, a points summary and a receipt come in behind it. Each one goes to its own place instead of landing in front of you." },
   { title: "What's left is yours",
-    line: "Six emails came in. One needed you, and it is waiting at the top. The rest is where you would look for it." },
+    line: "Six emails came in and one needed you. That one is at the top, and the rest are where you'd look for them later." },
 ];
 
 // The closing tally, as a picture: one dot per email this morning, filling
@@ -2557,9 +2557,9 @@ const CAL_DAYS: Array<{ label: string; out?: boolean; unlikely?: number; chips: 
 // which is the picture. The second picks out the folded summit.
 const CAL_TOUR: Array<{ key?: string; title: string; line: ReactNode }> = [
   { title: "Plans made in a reply",
-    line: "No invite, no event, just two people agreeing on a time. Your calendar app would never see it. Passband puts it there." },
+    line: "You and Maya settled on 2pm Wednesday at Hedge Coffee in a reply. No invite went out, so your calendar app never saw it. Passband put it on Wednesday." },
   { key: "unlikely", title: "Not every invite is a plan",
-    line: "The summit a vendor sent to everyone on its list folds away as unlikely. It is there if you want it, and out of the way if you don't." },
+    line: "A vendor sent its summit invite to everyone on its list. Passband folds it away as unlikely, and it opens if you're curious." },
 ];
 
 
@@ -3179,7 +3179,7 @@ export function App() {
             ))}
           </div>
           <span className="pb-read-l" aria-hidden="true">SPAN&nbsp;&nbsp;your inbox&nbsp;&nbsp;·&nbsp;&nbsp;4,312 msgs</span>
-          <span className="pb-read-r" aria-hidden="true">SQUELCH&nbsp;<b ref={readoutRef}>0%</b></span>
+          <span className="pb-read-r" aria-hidden="true">FILTER&nbsp;<b ref={readoutRef}>0%</b></span>
 
           <div className="pb-cue" aria-hidden="true">scroll</div>
 
@@ -3203,7 +3203,7 @@ export function App() {
                 <p className="pb-lede">Inbox zero every day was never realistic.</p>
                 <h1 className="pb-hero">You’re only human.</h1>
                 <p className="pb-sub">
-                  Your attention is valuable. You deserve an inbox that treats it that way.
+                  Most email can wait, and some of it never needed you at all.
                 </p>
               </div>
               <div className="pb-slot">
@@ -3217,8 +3217,8 @@ export function App() {
               <div className="pb-beat">
                 <h2 className="pb-hero">Know what needs you.</h2>
                 <p className="pb-sub">
-                  Passband brings the important things forward, so you can give them your
-                  attention and get on with your day.
+                  Passband reads every email as it lands and puts the few that need you at the
+                  top, so you can answer them and get on with your day.
                 </p>
               </div>
             </div>
@@ -3229,11 +3229,10 @@ export function App() {
       <section className="pb-section pb-clouded" data-track="sitrep_tour">
         <Clouds kind="mail" />
         <h2 className="pb-h2">
-          Same inbox. <em>Squelched.</em>
+          Same inbox. <em>Quieter.</em>
         </h2>
         <p className="pb-intro">
-          Every email still arrives. Passband reads each one, pulls forward the few that
-          need you, and files the rest where you can find them when you want to.
+          You still get every email. Here is one morning of it, start to finish.
         </p>
         <Showcase />
       </section>
@@ -3241,38 +3240,37 @@ export function App() {
       <section className="pb-section pb-clouded" data-track="calendar_tour">
         <Clouds kind="events" />
         <h2 className="pb-h2">
-          Plans arrive by email. <em>So does your calendar.</em>
+          Your calendar is already <em>in your email.</em>
         </h2>
         <p className="pb-intro">
-          Passband lays out the invitations, tickets and bookings in your mail and says how
-          likely you are to go.
+          Passband puts the invitations, tickets and bookings from your mail on a calendar
+          and marks how likely you are to go.
         </p>
         <CalShowcase />
       </section>
 
       <section className="pb-section pb-join" data-track="join">
-        <h2 className="pb-h2">That’s an inbox built in the <em>modern era.</em></h2>
-        <p className="pb-intro">Join the waitlist and we will email you when a spot opens.</p>
+        <h2 className="pb-h2">Try it on <em>your own inbox.</em></h2>
+        <p className="pb-intro">Join the waitlist and we'll email you when a spot opens.</p>
         <Waitlist focus={false} where="join" />
         <p className="pb-fine">For Mac and iPhone.</p>
       </section>
 
       <section className="pb-section pb-layer" data-track="intelligence_layer">
-        <h2 className="pb-h2">An intelligence layer, <em>not a wrapper.</em></h2>
+        <h2 className="pb-h2">It reads your mail <em>before you do.</em></h2>
         <div className="pb-layer-body">
           <p>
-            Most AI email is a chat box bolted onto the same inbox. You still do the reading.
-            It just answers questions about the pile.
+            Most AI email is a chat box added to the same inbox. You still read everything
+            yourself, and the chat answers questions about the pile.
           </p>
           <p>
-            Passband puts a capable agentic layer underneath instead. Every message is read
-            as it arrives, revisited as things change, and turned into what it means for you:
-            a deadline, a package, a receipt, a person waiting on a reply.
+            Passband reads each message when it arrives, and again when something changes,
+            like a new reply or a moved date. Each one becomes what it is to you: a deadline,
+            a package, a receipt, someone waiting on an answer.
           </p>
           <p>
-            Everything else draws on that one understanding. The sitrep, the notifications
-            on your phone and the agent you already use all start from mail that has been
-            read, not mail that is waiting to be.
+            The sitrep, the notifications on your phone and the AI agent you already use all
+            work from that same reading.
           </p>
         </div>
       </section>

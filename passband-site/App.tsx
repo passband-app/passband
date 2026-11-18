@@ -11,6 +11,7 @@ import {
 } from "react";
 import { CARRIERS, createScope, markerPoint, type ScopeLayout } from "./scope";
 import { SF_SYMBOLS } from "./sf-symbols";
+import { identify, track } from "./analytics";
 
 // The "before" panel is a procedurally repeated fake inbox: the drudgery
 // Passband exists to kill. Snippets are written long so rows run the full
@@ -1285,7 +1286,7 @@ function JoinButton({
 }
 
 // The waitlist rig, in the slot the button held, under the first headline.
-function Waitlist({ focus = true }: { focus?: boolean }) {
+function Waitlist({ focus = true, where = "hero" }: { focus?: boolean; where?: "hero" | "join" }) {
   const { chrome, handlers } = useMeter();
   const nameRef = useRef<HTMLInputElement>(null);
   // The button that opened this is gone from under the cursor, so the first
@@ -1305,6 +1306,7 @@ function Waitlist({ focus = true }: { focus?: boolean }) {
     event.preventDefault();
     if (state === "busy") return;
     setState("busy");
+    track("site_waitlist_submitted", { location: where });
     try {
       const res = await fetch(WAITLIST_URL, {
         method: "POST",
@@ -1317,8 +1319,15 @@ function Waitlist({ focus = true }: { focus?: boolean }) {
         credentials: "omit",
       });
       setState(res.ok ? "done" : "error");
+      if (res.ok) {
+        identify(email, name);
+        track("site_waitlist_joined", { location: where });
+      } else {
+        track("site_waitlist_failed", { location: where, status: res.status });
+      }
     } catch {
       setState("error");
+      track("site_waitlist_failed", { location: where, status: 0 });
     }
   };
 
@@ -1370,6 +1379,7 @@ function Waitlist({ focus = true }: { focus?: boolean }) {
             value={name}
             disabled={state === "busy"}
             onChange={(event) => setName(event.target.value)}
+            onFocus={() => track("site_waitlist_field_focused", { field: "name", location: where })}
           />
           <span className="pb-field-cap" aria-hidden="true">your name</span>
         </label>
@@ -1382,6 +1392,7 @@ function Waitlist({ focus = true }: { focus?: boolean }) {
               name="email"
               required
               autoComplete="email"
+              onFocus={() => track("site_waitlist_field_focused", { field: "email", location: where })}
               placeholder="you@example.com"
               aria-label="email address"
               value={email}
@@ -1737,9 +1748,15 @@ function AppMock() {
 // the reading line (mid-screen, or lower on a phone where the window holds
 // the top) is the one the window shows. Before the first and after the last
 // the window is just the sitrep.
-function useTourFocus() {
+function useTourFocus(tour: "sitrep" | "calendar", titles: string[]) {
   const stepsRef = useRef<HTMLOListElement>(null);
   const [focus, setFocus] = useState(-1);
+  const reached = useRef(new Set<number>());
+  useEffect(() => {
+    if (focus < 0 || reached.current.has(focus)) return;
+    reached.current.add(focus);
+    track("site_tour_step", { tour, step: focus + 1, title: titles[focus] });
+  }, [focus]);
 
   useEffect(() => {
     const list = stepsRef.current;
@@ -1987,7 +2004,7 @@ type Flier = {
   counts: HTMLElement[]; tally: HTMLElement | null;
   full: boolean; thread: boolean;
   w0: number; h0: number; r0: number; pl: number; pt: number; topH: number; type0: number;
-  last: Record<string, string>;
+  last: Record<string, string>; landed: boolean;
 };
 
 const flightOf = (f: Flier, d: number) =>
@@ -2054,7 +2071,7 @@ function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
         counts: Array.from(shot.querySelectorAll<HTMLElement>(`[data-count="${id}"]`)),
         tally: pair.querySelector<HTMLElement>(`[data-tally="${id}"]`),
         full: card.hasAttribute("data-full"), thread: card.hasAttribute("data-thread"),
-        w0: 0, h0: 0, r0: 0, pl: 0, pt: 0, topH: 0, type0: 1, last: {},
+        w0: 0, h0: 0, r0: 0, pl: 0, pt: 0, topH: 0, type0: 1, last: {}, landed: false,
       });
     }
 
@@ -2185,6 +2202,10 @@ function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
         const arrived = fl >= 1;
         if (arrived !== f.target.hasAttribute("data-arrived")) f.target.toggleAttribute("data-arrived", arrived);
         if (f.tally && arrived !== f.tally.hasAttribute("data-arrived")) f.tally.toggleAttribute("data-arrived", arrived);
+        if (arrived && !f.landed) {
+          f.landed = true;
+          track("site_mail_landed", { id: f.id });
+        }
         for (const el of f.counts) {
           const text = `${Number(el.dataset.from) + (arrived ? 1 : 0)}${el.dataset.suffix ?? ""}`;
           if (el.textContent !== text) el.textContent = text;
@@ -2244,7 +2265,7 @@ function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
 }
 
 function Showcase() {
-  const { stepsRef, focus } = useTourFocus();
+  const { stepsRef, focus } = useTourFocus("sitrep", STEPS.map((x) => x.title));
   const pairRef = useRef<HTMLDivElement>(null);
   useArrivals(pairRef);
 
@@ -2683,7 +2704,7 @@ function ThreadCard({ m }: { m: Inbound }) {
 }
 
 function CalShowcase() {
-  const { stepsRef, focus } = useTourFocus();
+  const { stepsRef, focus } = useTourFocus("calendar", CAL_TOUR.map((x) => x.title));
   const pairRef = useRef<HTMLDivElement>(null);
   useArrivals(pairRef);
   // Past the last step the window keeps the last step's picture, so nothing
@@ -2948,6 +2969,7 @@ export function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [scrolled, setScrolled] = useState(false);
   const [locked, setLocked] = useState(false);
+  const squelchSent = useRef(false);
   const readoutRef = useRef<HTMLElement>(null);
   const [layout, setLayout] = useState<ScopeLayout>(() => scopeLayout());
 
@@ -2987,6 +3009,10 @@ export function App() {
       const p = Math.min(1, t <= 1 ? t * SHUT : SHUT + (t - 1) * 0.3);
       scene?.setProgress(p);
       setLocked(p > 0.46);
+      if (p > 0.46 && !squelchSent.current) {
+        squelchSent.current = true;
+        track("site_squelch_closed");
+      }
       setScrolled(scrolled > innerHeight * 0.03);
     };
     const onResize = () => {
@@ -3023,6 +3049,7 @@ export function App() {
   }, []);
   const open = (next: boolean) => {
     if (next === joining) return;
+    if (next) track("site_waitlist_opened");
     history.pushState(null, "", next ? WAITLIST_PATH : "/");
     setJoining(next);
   };
@@ -3031,16 +3058,58 @@ export function App() {
     // tab, a new window, a saved link. Let the browser have those.
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
     event.preventDefault();
+    if (next) track("site_cta_clicked", { location: "hero" });
     open(next);
   };
 
   // The closing button goes back up to the hero and opens the rig there, so
   // there is only ever one form on the page.
   const backToTop = () => {
+    track("site_cta_clicked", { location: "close" });
     const smooth = !matchMedia("(prefers-reduced-motion: reduce)").matches;
     scrollTo({ top: 0, behavior: smooth ? "smooth" : "auto" });
     open(true);
   };
+
+  // WHAT GETS SEEN: each tagged section once, the first time a third of it
+  // (or a third of the screen, for one taller than that) is on screen; and
+  // how far down the page anyone gets.
+  useEffect(() => {
+    const seen = new Set<string>();
+    const io = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        const name = (e.target as HTMLElement).dataset.track!;
+        const enough = e.intersectionRatio >= 0.33 || e.intersectionRect.height >= innerHeight * 0.33;
+        if (e.isIntersecting && enough && !seen.has(name)) {
+          seen.add(name);
+          track("site_section_viewed", { section: name });
+        }
+      }
+    }, { threshold: [0, 0.1, 0.2, 0.33, 0.5] });
+    document.querySelectorAll<HTMLElement>("[data-track]").forEach((el) => io.observe(el));
+
+    const marks = [25, 50, 75, 90, 100];
+    const hit = new Set<number>();
+    let raf = 0;
+    const depth = () => {
+      raf = 0;
+      const max = document.documentElement.scrollHeight - innerHeight;
+      const pct = max <= 0 ? 100 : ((scrollY + 1) / max) * 100;
+      for (const m of marks) {
+        if (pct >= m && !hit.has(m)) {
+          hit.add(m);
+          track("site_scroll_depth", { percent: m });
+        }
+      }
+    };
+    const queue = () => { if (!raf) raf = requestAnimationFrame(depth); };
+    addEventListener("scroll", queue, { passive: true });
+    return () => {
+      io.disconnect();
+      cancelAnimationFrame(raf);
+      removeEventListener("scroll", queue);
+    };
+  }, []);
 
   return (
     <main className="pb">
@@ -3048,7 +3117,7 @@ export function App() {
       <style href="pb-cal" precedence="default">{CAL_CSS_RESOLVED}</style>
       <style href="pb-light" precedence="default">{LIGHT_CSS}</style>
 
-      <section ref={storyRef} className="pb-story">
+      <section ref={storyRef} className="pb-story" data-track="hero">
         <div
           ref={stageRef}
           className="pb-stage"
@@ -3123,7 +3192,7 @@ export function App() {
         </div>
       </section>
 
-      <section className="pb-section pb-clouded">
+      <section className="pb-section pb-clouded" data-track="sitrep_tour">
         <Clouds kind="mail" />
         <h2 className="pb-h2">
           Same inbox. <em>Squelched.</em>
@@ -3135,7 +3204,7 @@ export function App() {
         <Showcase />
       </section>
 
-      <section className="pb-section pb-clouded">
+      <section className="pb-section pb-clouded" data-track="calendar_tour">
         <Clouds kind="events" />
         <h2 className="pb-h2">
           Plans arrive by email. <em>So does your calendar.</em>
@@ -3147,14 +3216,14 @@ export function App() {
         <CalShowcase />
       </section>
 
-      <section className="pb-section pb-join">
+      <section className="pb-section pb-join" data-track="join">
         <h2 className="pb-h2">That’s an inbox built in the <em>modern era.</em></h2>
         <p className="pb-intro">Join the waitlist and we will email you when a spot opens.</p>
-        <Waitlist focus={false} />
+        <Waitlist focus={false} where="join" />
         <p className="pb-fine">For Mac and iPhone.</p>
       </section>
 
-      <section className="pb-section pb-layer">
+      <section className="pb-section pb-layer" data-track="intelligence_layer">
         <h2 className="pb-h2">An intelligence layer, <em>not a wrapper.</em></h2>
         <div className="pb-layer-body">
           <p>
@@ -3174,7 +3243,7 @@ export function App() {
         </div>
       </section>
 
-      <section className="pb-section" style={{ paddingTop: 0 }}>
+      <section className="pb-section" style={{ paddingTop: 0 }} data-track="trust_facts">
         <dl className="pb-facts">
           <div className="pb-fact">
             <dt><b>01</b> License</dt>
@@ -3209,7 +3278,7 @@ export function App() {
         </dl>
       </section>
 
-      <section className="pb-section pb-close">
+      <section className="pb-section pb-close" data-track="close">
         <h2 className="pb-h2">Find a little breathing room.</h2>
         <button className="pb-cta" type="button" onClick={backToTop}>
           <span className="pb-cta-label">join the waitlist</span>
@@ -3217,7 +3286,7 @@ export function App() {
         </button>
       </section>
 
-      <footer className="pb-foot">
+      <footer className="pb-foot" data-track="footer">
         <div className="pb-foot-grid">
           <a className="pb-foot-mark" href="/" aria-label="Passband home"><img src="/mark.svg" alt="" width={42} height={23} /></a>
           <nav aria-label="Legal">
